@@ -662,3 +662,81 @@ fn custom_dotabase_fixture_is_read_only_after_construction() {
     assert_eq!(before, after);
     assert!(Path::new(&fixture.cache).starts_with(fixture._directory.path()));
 }
+
+#[tokio::test(start_paused = true)]
+async fn paging_a_report_postpones_its_deletion() {
+    // The legacy view measured its timeout from the last interaction, so a
+    // report the owner is still paging through must not be deleted out from
+    // under them. Time is paused so this asserts the timer, not the machine.
+    let timeout = Duration::from_secs(840);
+    let fixture = Fixture::new();
+    fixture.register(USER, "Alice", None);
+    fixture.seed_hero_rows(30);
+    let registry = registry(&fixture.provider(timeout));
+    let responder = Arc::new(CapturingResponder::default());
+    registry
+        .command_handler("scout")
+        .expect("Scout handler")
+        .handle(
+            command("report", vec![players("<@100>")]),
+            responder.clone(),
+        )
+        .await
+        .expect("render Scout report");
+    let next_id = responder.captured.lock().expect("capture").followups[0].components[0].buttons[1]
+        .custom_id
+        .clone();
+
+    for interaction_id in 0..3_u64 {
+        // Cross most of the current deadline, then use the report again.
+        tokio::time::advance(timeout - Duration::from_secs(1)).await;
+        registry
+            .component_handler(&next_id)
+            .expect("Scout component")
+            .handle(
+                InteractionRequest::Component {
+                    interaction_id,
+                    custom_id: next_id.clone(),
+                    user_id: USER as u64,
+                    user_display_name: "Alice".to_owned(),
+                    guild_id: Some(GUILD as u64),
+                    channel_id: Some(9),
+                    member_permissions: None,
+                    values: Vec::new(),
+                },
+                responder.clone(),
+            )
+            .await
+            .expect("page the Scout report");
+        tokio::task::yield_now().await;
+        assert!(
+            responder
+                .captured
+                .lock()
+                .expect("capture")
+                .deletions
+                .is_empty(),
+            "an actively paged report must survive its original timer"
+        );
+    }
+
+    // Idle past the last interaction's deadline: now it is deleted.
+    tokio::time::advance(timeout + Duration::from_secs(1)).await;
+    for _ in 0..64 {
+        if !responder
+            .captured
+            .lock()
+            .expect("capture")
+            .deletions
+            .is_empty()
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        responder.captured.lock().expect("capture").deletions.len(),
+        1,
+        "the report is deleted once it goes idle"
+    );
+}
