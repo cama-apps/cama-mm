@@ -136,6 +136,15 @@ pub struct DigBossRuntimeCommit<'a> {
     /// It is accounted separately from the vanity deduction so each sink keeps
     /// its own `low_priority_tax` ledger row in the same transaction.
     pub low_priority_tax: i64,
+    /// Base Lantern inventory row this settlement claims, folded into the same
+    /// guarded transaction.
+    ///
+    /// The tunnel CAS compares only the tunnel and player snapshot, so a writer
+    /// that already claimed the Lantern does not fail it. Consuming the row
+    /// afterwards in its own transaction would report `Conflict` for a
+    /// settlement that had already committed, and callers read `Conflict` as
+    /// "nothing was applied, reload and retry".
+    pub consume_lantern_id: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -317,6 +326,23 @@ impl DigBossRuntimeRepository {
         if current != *request.expected {
             transaction.rollback()?;
             return Ok(DigBossRuntimeCommitOutcome::Conflict);
+        }
+        if let Some(row_id) = request.consume_lantern_id {
+            let claimed = transaction.execute(
+                "DELETE FROM dig_inventory
+                  WHERE id=?1 AND discord_id=?2 AND guild_id=?3 AND item_type='lantern'",
+                params![
+                    row_id,
+                    request.expected.key.discord_id,
+                    request.expected.key.guild_id,
+                ],
+            )?;
+            if claimed != 1 {
+                // Another writer took the Lantern first. Rolling back keeps
+                // Conflict meaning "nothing was applied".
+                transaction.rollback()?;
+                return Ok(DigBossRuntimeCommitOutcome::Conflict);
+            }
         }
 
         apply_tunnel(&transaction, request.expected, request.proposed)?;

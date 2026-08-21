@@ -1208,6 +1208,7 @@ impl MatchRecordingRepository {
             guild_id,
             match_id,
             request.pending_bet_since,
+            request.pending_match_id,
             request.winning_team,
             &mut jc_changes,
         )?;
@@ -1718,11 +1719,19 @@ fn update_exclusion_counts(
     Ok(())
 }
 
+/// Settle the house bets that belong to the match being recorded.
+///
+/// A guild can hold several pending matches at once and bets carry the pending
+/// match they were placed on, so a sweep of every unsettled bet in the guild
+/// would pay bets placed on one pending match against another's winner. Bets
+/// with no attribution are still swept by time, which is how legacy rows
+/// recorded before the column existed continue to settle.
 fn settle_house_bets(
     connection: &Connection,
     guild_id: i64,
     match_id: i64,
     since: i64,
+    pending_match_id: Option<i64>,
     winner: TeamSide,
     jc_changes: &mut BTreeMap<i64, JcChange>,
 ) -> Result<BetDistributions, MatchRecordingRepositoryError> {
@@ -1730,11 +1739,13 @@ fn settle_house_bets(
         let mut statement = connection.prepare(
             "SELECT bet_id, discord_id, team_bet_on, amount, bet_time
              FROM bets
-             WHERE guild_id = ?1 AND match_id IS NULL AND bet_time >= ?2
+             WHERE guild_id = ?1 AND match_id IS NULL
+               AND ((?3 IS NOT NULL AND pending_match_id = ?3)
+                    OR (pending_match_id IS NULL AND bet_time >= ?2))
              ORDER BY bet_id",
         )?;
         statement
-            .query_map(params![guild_id, since], |row| {
+            .query_map(params![guild_id, since, pending_match_id], |row| {
                 let team_name = row.get::<_, String>(2)?;
                 Ok(PendingBet {
                     bet_id: row.get(0)?,

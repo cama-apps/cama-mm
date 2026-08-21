@@ -72,32 +72,6 @@ pub trait ProtectionGateway {
     ) -> Result<HostileLossSettlement, Self::Error>;
 }
 
-pub trait BalanceTransferPort {
-    type Error;
-
-    fn transfer(
-        &mut self,
-        from_id: i64,
-        to_id: i64,
-        guild_id: i64,
-        amount: i64,
-    ) -> Result<(), Self::Error>;
-}
-
-impl BalanceTransferPort for ManashopRepository {
-    type Error = ManashopRepositoryError;
-
-    fn transfer(
-        &mut self,
-        from_id: i64,
-        to_id: i64,
-        guild_id: i64,
-        amount: i64,
-    ) -> Result<(), Self::Error> {
-        self.transfer_balance_atomic(from_id, to_id, Some(guild_id), amount)
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SiphonOutcome {
     pub target_id: i64,
@@ -450,27 +424,6 @@ impl BuffService {
     ) -> Result<Option<BloodPactClaim>, ManashopRepositoryError> {
         self.repository
             .claim_blood_pact_skim_atomic(target_id, Some(guild_id), earning, self.now)
-    }
-
-    pub fn apply_blood_pact_with_transfer<T: BalanceTransferPort>(
-        &self,
-        target_id: i64,
-        guild_id: i64,
-        earning: i64,
-        transfer: &mut T,
-    ) -> Result<i64, ManashopRepositoryError> {
-        let Some((claim, amount)) = self.reserve_scaled_skim(target_id, guild_id, earning)? else {
-            return Ok(0);
-        };
-        if transfer
-            .transfer(target_id, claim.skimmer_id, guild_id, amount)
-            .is_err()
-        {
-            self.repository
-                .revert_blood_pact_skim(claim.buff_id, amount)?;
-            return Ok(0);
-        }
-        Ok(amount)
     }
 
     pub fn apply_blood_pact_with_protection<G: ProtectionGateway>(

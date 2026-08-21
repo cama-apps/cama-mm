@@ -9469,7 +9469,8 @@ mod tests {
             discord_id INTEGER NOT NULL,
             team_bet_on TEXT NOT NULL,
             amount INTEGER NOT NULL,
-            bet_time INTEGER NOT NULL
+            bet_time INTEGER NOT NULL,
+            pending_match_id INTEGER
         );
         CREATE TABLE player_pairings (
             id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL,

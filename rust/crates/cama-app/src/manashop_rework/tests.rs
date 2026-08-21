@@ -156,22 +156,6 @@ impl ProtectionGateway for RecordingGateway {
     }
 }
 
-struct FailingTransfer;
-
-impl BalanceTransferPort for FailingTransfer {
-    type Error = &'static str;
-
-    fn transfer(
-        &mut self,
-        _from_id: i64,
-        _to_id: i64,
-        _guild_id: i64,
-        _amount: i64,
-    ) -> Result<(), Self::Error> {
-        Err("transfer failed")
-    }
-}
-
 #[test]
 fn test_buff_service_grant_and_active_for() {
     let fixture = Fixture::new();
@@ -354,19 +338,27 @@ fn test_blood_pact_skim_calculation_respects_rate_and_cap() {
 }
 
 #[test]
-fn test_blood_pact_skim_reverts_when_transfer_fails() {
+fn test_blood_pact_skim_reverts_when_the_protection_gateway_fails() {
+    // The skim is reserved before the transfer is attempted, so a settlement
+    // that never lands has to release the reservation or the pact keeps
+    // counting coins it never moved.
     let fixture = Fixture::new();
     let service = fixture.service();
     fixture.register(USER, GUILD, 3);
     fixture.register(TARGET, GUILD, 500);
     service.grant_blood_pact(USER, GUILD, TARGET).unwrap();
-    let mut transfer = FailingTransfer;
+    let mut gateway = RecordingGateway {
+        fail: true,
+        ..RecordingGateway::default()
+    };
+
     assert_eq!(
         service
-            .apply_blood_pact_with_transfer(TARGET, GUILD, 400, &mut transfer)
+            .apply_blood_pact_with_protection(TARGET, GUILD, 400, 8, &mut gateway)
             .unwrap(),
         0
     );
+
     assert_eq!(
         service
             .blood_pact_skimmer(TARGET, GUILD)
@@ -374,35 +366,13 @@ fn test_blood_pact_skim_reverts_when_transfer_fails() {
             .unwrap()
             .data
             .skimmed_total,
-        Some(0)
+        Some(0),
+        "the reserved skim is released"
     );
     assert_eq!(
         fixture.repository.balance(TARGET, Some(GUILD)).unwrap(),
-        Some(500)
-    );
-}
-
-#[test]
-fn test_blood_pact_apply_transfers_balances() {
-    let fixture = Fixture::new();
-    let service = fixture.service();
-    fixture.register(USER, GUILD, 3);
-    fixture.register(TARGET, GUILD, 500);
-    service.grant_blood_pact(USER, GUILD, TARGET).unwrap();
-    let mut transfer = fixture.repository.clone();
-    assert_eq!(
-        service
-            .apply_blood_pact_with_transfer(TARGET, GUILD, 400, &mut transfer)
-            .unwrap(),
-        100
-    );
-    assert_eq!(
-        fixture.repository.balance(TARGET, Some(GUILD)).unwrap(),
-        Some(400)
-    );
-    assert_eq!(
-        fixture.repository.balance(USER, Some(GUILD)).unwrap(),
-        Some(103)
+        Some(500),
+        "no coins moved"
     );
 }
 

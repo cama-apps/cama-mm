@@ -1495,36 +1495,6 @@ impl ManashopRepository {
         transaction.commit()?;
         Ok(buff_id)
     }
-
-    pub fn transfer_balance_atomic(
-        &self,
-        from_id: i64,
-        to_id: i64,
-        guild_id: Option<i64>,
-        amount: i64,
-    ) -> Result<(), ManashopRepositoryError> {
-        let guild_id = Self::normalize_guild_id(guild_id);
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if transaction.execute(
-            "UPDATE players SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?1
-             WHERE discord_id = ?2 AND guild_id = ?3",
-            params![amount, from_id, guild_id],
-        )? != 1
-        {
-            return Err(ManashopRepositoryError::StateChanged("transfer source"));
-        }
-        if transaction.execute(
-            "UPDATE players SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?1
-             WHERE discord_id = ?2 AND guild_id = ?3",
-            params![amount, to_id, guild_id],
-        )? != 1
-        {
-            return Err(ManashopRepositoryError::StateChanged("transfer recipient"));
-        }
-        transaction.commit()?;
-        Ok(())
-    }
 }
 
 fn map_purchase(row: &rusqlite::Row<'_>) -> Result<PurchaseRecord, rusqlite::Error> {

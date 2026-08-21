@@ -149,6 +149,7 @@ impl Fixture {
                      team_bet_on TEXT NOT NULL,
                      amount INTEGER NOT NULL,
                      bet_time INTEGER NOT NULL,
+                     pending_match_id INTEGER,
                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                  );
                  CREATE TABLE loan_state (
@@ -2784,4 +2785,79 @@ fn recovered_receipt_reports_one_application_after_a_compensate_reapply_cycle() 
         )
         .expect("count rollbacks");
     assert_eq!(rollbacks, 1);
+}
+
+#[test]
+fn test_house_settlement_leaves_another_pending_matchs_bets_alone() {
+    // A guild can hold several pending matches at once, and bets record which
+    // one they were placed on. Sweeping every unsettled bet would pay bets
+    // placed on one pending match against another match's winner.
+    let fixture = Fixture::new();
+    let radiant = (5_401..5_406).collect::<Vec<_>>();
+    let dire = (5_406..5_411).collect::<Vec<_>>();
+    fixture.seed(&[radiant.clone(), dire.clone()].concat());
+    let ours = 9_101;
+    let theirs = 9_102;
+    fixture.seed(&[ours, theirs]);
+    for better in [ours, theirs] {
+        fixture
+            .repository
+            .add_balance(better, Some(GUILD), 20)
+            .expect("top up better");
+        fixture
+            .repository
+            .place_bet_atomic(Some(GUILD), better, TeamSide::Radiant, 5, 100)
+            .expect("place bet");
+    }
+    // Attribute each bet to a different pending match.
+    let connection = fixture.connection();
+    connection
+        .execute(
+            "UPDATE bets SET pending_match_id = ?1 WHERE discord_id = ?2",
+            params![77, ours],
+        )
+        .expect("attribute our bet");
+    connection
+        .execute(
+            "UPDATE bets SET pending_match_id = ?1 WHERE discord_id = ?2",
+            params![78, theirs],
+        )
+        .expect("attribute the other bet");
+    drop(connection);
+
+    let untouched_balance = fixture.player(theirs).balance;
+
+    let mut request = standard(&radiant, &dire, TeamSide::Radiant);
+    request.pending_bet_since = 100;
+    request.pending_match_id = Some(77);
+    request.update_ratings = false;
+    let result = fixture
+        .repository
+        .record_match_atomic(request)
+        .expect("record match");
+
+    assert_eq!(
+        result
+            .bet_distributions
+            .winners
+            .iter()
+            .map(|winner| winner.discord_id)
+            .collect::<Vec<_>>(),
+        [ours],
+        "only this pending match's bet settles"
+    );
+    let connection = fixture.connection();
+    let other_still_open: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM bets WHERE discord_id = ?1 AND match_id IS NULL",
+            params![theirs],
+            |row| row.get(0),
+        )
+        .expect("count the other pending match's bet");
+    assert_eq!(other_still_open, 1, "the other match's bet is untouched");
+    assert_eq!(
+        fixture.player(theirs).balance,
+        untouched_balance,
+        "no payout or loss is booked against the other match's better"
+    );
 }

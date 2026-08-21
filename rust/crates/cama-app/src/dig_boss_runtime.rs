@@ -245,6 +245,14 @@ impl BossRepositoryPort for SqliteBossRepository {
             killer_id: echo.killer_id,
             weakened_until: echo.weakened_until,
         });
+        // A settlement that lowers the Lantern count claims the row inside the
+        // guarded transaction. Consuming it afterwards would report Conflict
+        // for a settlement that had already committed, and every retry loop
+        // reads Conflict as "nothing was applied".
+        let consume_lantern_id = (loaded.lantern_ids.len() > commit.next_tunnel.lanterns as usize
+            && !loaded.has_great_lantern)
+            .then(|| loaded.lantern_ids.first().copied())
+            .flatten();
         let outcome = self
             .repository
             .commit(DigBossRuntimeCommit {
@@ -255,6 +263,7 @@ impl BossRepositoryPort for SqliteBossRepository {
                 artifact: None,
                 vanity_tax: commit.vanity_tax,
                 low_priority_tax: commit.low_priority_tax,
+                consume_lantern_id,
             })
             .map_err(|error| self.repository_error(error))?;
         match outcome {
@@ -264,20 +273,6 @@ impl BossRepositoryPort for SqliteBossRepository {
                     self.audits.push(audit);
                 }
                 self.cache.borrow_mut().invalidate(key);
-                if loaded.lantern_ids.len() > commit.next_tunnel.lanterns as usize
-                    && !loaded.has_great_lantern
-                {
-                    let Some(row_id) = loaded.lantern_ids.first().copied() else {
-                        return Err(RepositoryError::Conflict);
-                    };
-                    let consumed = self
-                        .repository
-                        .consume_lantern(database_key(key), row_id)
-                        .map_err(|error| self.repository_error(error))?;
-                    if !consumed {
-                        return Err(RepositoryError::Conflict);
-                    }
-                }
                 Ok(())
             }
             DigBossRuntimeCommitOutcome::Conflict => Err(RepositoryError::Conflict),
@@ -2552,6 +2547,7 @@ impl DigBossRuntimeService {
                     artifact: None,
                     vanity_tax: 0,
                     low_priority_tax: 0,
+                    consume_lantern_id: None,
                 })
                 .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
             {
@@ -3196,6 +3192,7 @@ impl DigBossRuntimeService {
                     artifact: None,
                     vanity_tax: 0,
                     low_priority_tax: 0,
+                    consume_lantern_id: None,
                 })
                 .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
             {
@@ -3414,6 +3411,7 @@ impl DigBossRuntimeService {
                     artifact: None,
                     vanity_tax: 0,
                     low_priority_tax: 0,
+                    consume_lantern_id: None,
                 })
                 .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
             {
@@ -3872,6 +3870,7 @@ impl DigBossRuntimeService {
                     artifact,
                     vanity_tax,
                     low_priority_tax,
+                    consume_lantern_id: None,
                 })
                 .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?;
             match commit {
@@ -4253,6 +4252,7 @@ impl DigBossRuntimeService {
                     artifact: None,
                     vanity_tax: 0,
                     low_priority_tax: 0,
+                    consume_lantern_id: None,
                 })
                 .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
             {
@@ -4422,6 +4422,7 @@ impl DigBossRuntimeService {
                     artifact: None,
                     vanity_tax: 0,
                     low_priority_tax: 0,
+                    consume_lantern_id: None,
                 })
                 .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
             {
