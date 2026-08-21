@@ -132,6 +132,15 @@ pub struct DigRuntimeConfig {
     /// Keeping the decay policy on the runtime config makes the dig aggregate
     /// use the same value as the pet application service without a scheduler.
     pub pet_decay_per_day: i64,
+    /// Server-side secret mixed into every dig seed.
+    ///
+    /// Without it a dig's randomness derives entirely from values the player
+    /// knows or controls -- their ids, the click second, and the paid/forced
+    /// flags -- so the loot pipeline can be simulated for each upcoming second
+    /// and a click timed for no cave-in, maximum JC, or an artifact. Production
+    /// draws an unpredictable value; the default stays zero so tests keep their
+    /// deterministic seeds.
+    pub entropy_secret: u64,
 }
 
 impl Default for DigRuntimeConfig {
@@ -143,6 +152,7 @@ impl Default for DigRuntimeConfig {
             bankruptcy_penalty_keep_basis_points: DIG_REWARD_BASIS_POINTS,
             economy_event: EconomyEventConfig::default(),
             pet_decay_per_day: cama_domain::pet::DEFAULT_HUNGER_DECAY_PER_DAY,
+            entropy_secret: 0,
         }
     }
 }
@@ -150,7 +160,10 @@ impl Default for DigRuntimeConfig {
 impl DigRuntimeConfig {
     #[must_use]
     pub fn production() -> Self {
-        Self::default()
+        Self {
+            entropy_secret: process_dig_secret(),
+            ..Self::default()
+        }
     }
 
     #[must_use]
@@ -161,7 +174,13 @@ impl DigRuntimeConfig {
         }
     }
 
+    /// Set the secret mixed into dig seeds; zero keeps the legacy seed.
     #[must_use]
+    pub const fn with_entropy_secret(mut self, secret: u64) -> Self {
+        self.entropy_secret = secret;
+        self
+    }
+
     pub fn with_runtime_policy(
         mut self,
         minigame_jc_delta_scale: f64,
@@ -611,6 +630,7 @@ pub trait DigRuntimeStore: Send + Sync {
         _guild_id: i64,
         _now: i64,
         _decay_per_day: i64,
+        _entropy_secret: u64,
     ) -> Result<Option<PetDigWork>, DigRuntimeStoreError> {
         Ok(None)
     }
@@ -2350,6 +2370,7 @@ where
                 request.guild_id,
                 now,
                 self.config.pet_decay_per_day,
+                self.config.entropy_secret,
             )?
         } else {
             None
@@ -2357,7 +2378,7 @@ where
         let pet_name = pet_work.as_ref().map(|work| work.pet_name.clone());
 
         if first_dig {
-            let mut entropy = SeededLootEntropy::new(seed_for(request));
+            let mut entropy = SeededLootEntropy::new(seed_for(request, self.config.entropy_secret));
             let advance = entropy.advance(3, 7);
             let jc_roll = entropy.advance(1, 5);
             let scaled_jc = scale_dig_minigame_jc(
@@ -2537,7 +2558,7 @@ where
         // Corruption is the first request-local random policy in Python. It
         // must consume the same entropy stream as the subsequent cave roll,
         // rather than a second seed that would shift only some Dig paths.
-        let mut entropy = SeededLootEntropy::new(seed_for(request));
+        let mut entropy = SeededLootEntropy::new(seed_for(request, self.config.entropy_secret));
         let corruption = roll_corruption(tunnel.prestige_level as i32, &mut entropy);
         let corruption_bonus = corruption
             .as_ref()
@@ -3957,13 +3978,16 @@ where
         }
         let mut loot = DigLootService::new(
             DigRuntimeLootRepository::new(snapshot.clone()),
-            SeededLootEntropy::new(seed_for(DigRuntimeRequest {
-                discord_id,
-                guild_id,
-                now,
-                paid: false,
-                forced_event: false,
-            })),
+            SeededLootEntropy::new(seed_for(
+                DigRuntimeRequest {
+                    discord_id,
+                    guild_id,
+                    now,
+                    paid: false,
+                    forced_event: false,
+                },
+                self.config.entropy_secret,
+            )),
         );
         let result = action(&mut loot);
         if !result.success {
@@ -4048,11 +4072,38 @@ fn dig_progressive_tip(depth: i64, seed: i64) -> String {
     tips[index].to_owned()
 }
 
-fn seed_for(request: DigRuntimeRequest) -> u64 {
+/// Secret drawn once per process and mixed into every dig seed.
+///
+/// Without it a dig's seed is derived entirely from values the player knows or
+/// controls -- their ids, the click second, and the paid/forced flags -- so the
+/// open-source loot pipeline can be simulated for each upcoming second and a
+/// click timed for no cave-in, maximum JC, or an artifact. Keeping the secret
+/// per process preserves same-request determinism for retries.
+fn process_dig_secret() -> u64 {
+    static SECRET: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *SECRET.get_or_init(|| {
+        use std::hash::{BuildHasher, Hasher};
+        // RandomState is seeded by the OS, which is what makes this
+        // unpredictable rather than merely varying.
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u64(std::process::id().into());
+        hasher.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos()),
+        );
+        hasher.finish()
+    })
+}
+
+pub(crate) fn seed_for(request: DigRuntimeRequest, secret: u64) -> u64 {
     let mut value = request.discord_id as u64;
     value = value.rotate_left(17) ^ request.guild_id as u64;
     value = value.rotate_left(23) ^ request.now as u64;
-    value ^ u64::from(request.paid) ^ (u64::from(request.forced_event) << 1)
+    value ^= u64::from(request.paid) ^ (u64::from(request.forced_event) << 1);
+    // A zero secret reproduces the legacy seed exactly, which is what keeps
+    // the deterministic tests meaningful.
+    value ^ secret
 }
 
 fn parked_boss_boundary(tunnel: &DigRuntimeTunnel) -> Option<i64> {

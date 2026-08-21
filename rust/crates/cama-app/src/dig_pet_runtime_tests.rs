@@ -107,9 +107,10 @@ impl DigRuntimeStore for TestStore {
         guild_id: i64,
         now: i64,
         decay_per_day: i64,
+        entropy_secret: u64,
     ) -> Result<Option<cama_domain::pet::PetDigWork>, DigRuntimeStoreError> {
         self.inner
-            .preview_pet_dig_work(discord_id, guild_id, now, decay_per_day)
+            .preview_pet_dig_work(discord_id, guild_id, now, decay_per_day, entropy_secret)
     }
 }
 
@@ -295,7 +296,7 @@ fn sqlite_preview_resolves_ready_egg_before_offering_work() {
 
     let offer = fixture
         .store
-        .preview_pet_dig_work(USER_ID, GUILD_ID, T0, 20)
+        .preview_pet_dig_work(USER_ID, GUILD_ID, T0, 20, 0)
         .expect("ready egg preview")
         .expect("hatched pet work offer");
     let species = fixture
@@ -319,7 +320,7 @@ fn sqlite_preview_rejects_pre_hatch_egg_without_resolving_species() {
     assert!(
         fixture
             .store
-            .preview_pet_dig_work(USER_ID, GUILD_ID, T0, 20)
+            .preview_pet_dig_work(USER_ID, GUILD_ID, T0, 20, 0)
             .expect("pre-hatch preview")
             .is_none()
     );
@@ -353,7 +354,7 @@ fn sqlite_preview_claims_starvation_at_the_historical_moment() {
     assert!(
         fixture
             .store
-            .preview_pet_dig_work(USER_ID, GUILD_ID, T0, 20)
+            .preview_pet_dig_work(USER_ID, GUILD_ID, T0, 20, 0)
             .expect("starved pet preview")
             .is_none()
     );
@@ -395,7 +396,7 @@ fn sqlite_preview_revives_aegis_before_returning_work() {
 
     let offer = fixture
         .store
-        .preview_pet_dig_work(USER_ID, GUILD_ID, starvation_at + 3_600, 20)
+        .preview_pet_dig_work(USER_ID, GUILD_ID, starvation_at + 3_600, 20, 0)
         .expect("Aegis preview")
         .expect("revived Aegis work");
     let state = fixture
@@ -435,7 +436,7 @@ fn sqlite_preview_consumes_aegis_once_then_claims_second_starvation() {
     assert!(
         fixture
             .store
-            .preview_pet_dig_work(USER_ID, GUILD_ID, first_starvation + 3_600, 20)
+            .preview_pet_dig_work(USER_ID, GUILD_ID, first_starvation + 3_600, 20, 0)
             .expect("first Aegis preview")
             .is_some()
     );
@@ -443,7 +444,7 @@ fn sqlite_preview_consumes_aegis_once_then_claims_second_starvation() {
     assert!(
         fixture
             .store
-            .preview_pet_dig_work(USER_ID, GUILD_ID, second_starvation + 3_600, 20)
+            .preview_pet_dig_work(USER_ID, GUILD_ID, second_starvation + 3_600, 20, 0)
             .expect("second Aegis preview")
             .is_none()
     );
@@ -650,7 +651,7 @@ fn applied_outcome_stops_pet_work_at_boss_boundary() {
     let snapshot = fixture.store.snapshot(USER_ID, GUILD_ID).expect("snapshot");
     let work = fixture
         .store
-        .preview_pet_dig_work(USER_ID, GUILD_ID, T0, 20)
+        .preview_pet_dig_work(USER_ID, GUILD_ID, T0, 20, 0)
         .expect("pet preview")
         .expect("work offer");
     let mut next = snapshot.clone();

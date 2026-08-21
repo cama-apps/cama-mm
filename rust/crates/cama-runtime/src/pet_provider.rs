@@ -2182,8 +2182,9 @@ impl PetInteractionHandler {
             .ok_or_else(|| "invalid battle component".to_owned())?
             .parse::<i64>()
             .map_err(|_| "invalid brawl id".to_owned())?;
-        let _round = parts
+        let round = parts
             .next()
+            .and_then(|value| value.parse::<u8>().ok())
             .ok_or_else(|| "invalid battle round".to_owned())?;
         let move_name = parts.next().unwrap_or_default();
         let move_ = PetBrawlMove::ALL
@@ -2198,6 +2199,17 @@ impl PetInteractionHandler {
             .get(&brawl_id)
             .cloned()
             .ok_or_else(|| "This brawl interaction expired.".to_owned())?;
+        // The round is encoded in the button precisely so a late click cannot
+        // be counted against a round the player never saw: a double-click, or a
+        // click racing the timeout that resolved the round, would otherwise
+        // lock in a move for the next round.
+        if view.round_no != round {
+            return respond(
+                &responder,
+                InteractionResponse::message("That round already resolved.").ephemeral(),
+            )
+            .await;
+        }
         let interaction = brawl_interaction(user_id, guild_id, channel_id, true);
         let (outcome, recorder, mut view) = self
             .run_brawl(move |commands| {
@@ -2699,14 +2711,20 @@ impl PetInteractionHandler {
     async fn render_pet(&self, pet: &Pet) -> Result<InteractionAttachment, String> {
         let pet = pet.clone();
         let assets = Arc::clone(&self.state.assets);
+        // The card must age the pet with the configured decay, like every other
+        // surface: a hardcoded rate of 1 keeps derived hunger in the happy band
+        // for about a month, so the hungry and starving art never appeared
+        // beside a status embed already reporting them.
+        let decay_per_day = self.state.decay_per_day;
         tokio::task::spawn_blocking(move || {
+            let now = Utc::now().timestamp();
             let mut assets = assets
                 .lock()
                 .map_err(|_| "pet asset lock poisoned".to_owned())?;
             let file = assets.get_pet_card(&PetRenderRequest {
                 species_id: &pet.species,
-                stage: pet.stage(Utc::now().timestamp()),
-                mood: pet.mood(Utc::now().timestamp(), 1),
+                stage: pet.stage(now),
+                mood: pet.mood(now, decay_per_day),
                 seed: pet.pet_id,
                 accessory: pet.accessory.as_deref(),
                 evolution: evolution_visual(&pet),

@@ -368,6 +368,7 @@ impl DigRegistrationProvider {
             media,
             ai_service,
             Some(vanity_tax),
+            DigRuntimeConfig::production().entropy_secret,
         )?;
         provider.set_bonus_dispatcher(bonus_dispatcher);
         Ok(provider)
@@ -422,9 +423,11 @@ impl DigRegistrationProvider {
             media,
             ai_service,
             None,
+            0,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn with_media_ai_and_vanity(
         database_path: impl AsRef<Path>,
         config: &ApplicationConfig,
@@ -433,6 +436,9 @@ impl DigRegistrationProvider {
         media: Arc<DigMediaRuntime>,
         ai_service: Option<Arc<AIService>>,
         vanity_tax: Option<Arc<PersistentVanityTaxService>>,
+        // Server-side secret mixed into dig seeds. Production draws an
+        // unpredictable value; tests pass zero to keep their seeds fixed.
+        entropy_secret: u64,
     ) -> Result<Self, DigProviderBuildError> {
         let path = database_path.as_ref().to_path_buf();
         let audit = cama_db::schema_manager_contracts::audit_existing_schema(&path)
@@ -442,7 +448,8 @@ impl DigRegistrationProvider {
                 "schema-manager contract is incompatible: {audit:?}"
             )));
         }
-        let dig_config = DigRuntimeConfig::production()
+        let dig_config = DigRuntimeConfig::default()
+            .with_entropy_secret(entropy_secret)
             .with_runtime_policy(
                 config.values.minigame_jc_delta_scale,
                 EconomyEventConfig {

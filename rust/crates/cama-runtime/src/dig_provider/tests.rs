@@ -453,6 +453,7 @@ async fn production_runtime_injects_shared_vanity_tax_into_live_dig() {
         Arc::clone(&base.handler.state.media),
         None,
         Some(vanity_tax),
+        0,
     )
     .expect("provider with shared vanity tax");
     let execution = provider

@@ -1778,13 +1778,16 @@ fn sqlite_pet_work_cave_in_does_not_consume_the_offer() {
 
     let now = (1_800_000_000_i64..1_800_010_000)
         .find(|candidate| {
-            super::SeededLootEntropy::new(super::seed_for(DigRuntimeRequest {
-                discord_id: 7,
-                guild_id: 9,
-                now: *candidate,
-                paid: false,
-                forced_event: false,
-            }))
+            super::SeededLootEntropy::new(super::seed_for(
+                DigRuntimeRequest {
+                    discord_id: 7,
+                    guild_id: 9,
+                    now: *candidate,
+                    paid: false,
+                    forced_event: false,
+                },
+                0,
+            ))
             .unit()
                 < 0.05
         })
@@ -2060,13 +2063,16 @@ fn find_non_cave_dig_time_for_depth(discord_id: i64, guild_id: i64, start: i64, 
     let cave_chance = super::layer_at(depth).cave_in_chance;
     (start..start.saturating_add(100_000))
         .find(|candidate| {
-            let mut entropy = SeededLootEntropy::new(super::seed_for(DigRuntimeRequest {
-                discord_id,
-                guild_id,
-                now: *candidate,
-                paid: false,
-                forced_event: false,
-            }));
+            let mut entropy = SeededLootEntropy::new(super::seed_for(
+                DigRuntimeRequest {
+                    discord_id,
+                    guild_id,
+                    now: *candidate,
+                    paid: false,
+                    forced_event: false,
+                },
+                0,
+            ));
             entropy.unit() >= cave_chance
         })
         .expect("deterministic non-cave prestige drain seed")
@@ -3149,13 +3155,16 @@ fn find_live_cave_roll(
     let (minimum, maximum) = CAVE_IN_BLOCK_LOSS_RANGES[band];
     let catastrophic_probability = CAVE_IN_CATASTROPHIC_PCT_BY_BAND[band];
     for now in start..start.saturating_add(100_000) {
-        let mut entropy = SeededLootEntropy::new(super::seed_for(DigRuntimeRequest {
-            discord_id,
-            guild_id,
-            now,
-            paid: false,
-            forced_event: false,
-        }));
+        let mut entropy = SeededLootEntropy::new(super::seed_for(
+            DigRuntimeRequest {
+                discord_id,
+                guild_id,
+                now,
+                paid: false,
+                forced_event: false,
+            },
+            0,
+        ));
         // The fixture has no hazard modifier and starts at luminosity 0
         // or 100, so a <.05 first draw is safely inside either live cave
         // probability while keeping the search independent of weather.
@@ -3316,13 +3325,16 @@ fn grant_overgrowth(
 fn find_non_cave_dig_time(discord_id: i64, guild_id: i64, start: i64) -> i64 {
     (start..start.saturating_add(10_000))
         .find(|candidate| {
-            super::SeededLootEntropy::new(super::seed_for(super::DigRuntimeRequest {
-                discord_id,
-                guild_id,
-                now: *candidate,
-                paid: false,
-                forced_event: false,
-            }))
+            super::SeededLootEntropy::new(super::seed_for(
+                super::DigRuntimeRequest {
+                    discord_id,
+                    guild_id,
+                    now: *candidate,
+                    paid: false,
+                    forced_event: false,
+                },
+                0,
+            ))
             .unit()
                 > 0.30
         })
@@ -3332,13 +3344,16 @@ fn find_non_cave_dig_time(discord_id: i64, guild_id: i64, start: i64) -> i64 {
 fn find_cave_dig_time(discord_id: i64, guild_id: i64, start: i64) -> i64 {
     (start..start.saturating_add(10_000))
         .find(|candidate| {
-            super::SeededLootEntropy::new(super::seed_for(super::DigRuntimeRequest {
-                discord_id,
-                guild_id,
-                now: *candidate,
-                paid: false,
-                forced_event: false,
-            }))
+            super::SeededLootEntropy::new(super::seed_for(
+                super::DigRuntimeRequest {
+                    discord_id,
+                    guild_id,
+                    now: *candidate,
+                    paid: false,
+                    forced_event: false,
+                },
+                0,
+            ))
             .unit()
                 < 0.05
         })
@@ -3348,13 +3363,16 @@ fn find_cave_dig_time(discord_id: i64, guild_id: i64, start: i64) -> i64 {
 fn find_paid_cave_dig_time(discord_id: i64, guild_id: i64, start: i64) -> i64 {
     (start..start.saturating_add(10_000))
         .find(|candidate| {
-            super::SeededLootEntropy::new(super::seed_for(super::DigRuntimeRequest {
-                discord_id,
-                guild_id,
-                now: *candidate,
-                paid: true,
-                forced_event: false,
-            }))
+            super::SeededLootEntropy::new(super::seed_for(
+                super::DigRuntimeRequest {
+                    discord_id,
+                    guild_id,
+                    now: *candidate,
+                    paid: true,
+                    forced_event: false,
+                },
+                0,
+            ))
             .unit()
                 < 0.04
         })
@@ -3370,13 +3388,16 @@ fn find_dig_time_with_unit_between(
 ) -> i64 {
     (start..start.saturating_add(10_000))
         .find(|candidate| {
-            let unit = super::SeededLootEntropy::new(super::seed_for(super::DigRuntimeRequest {
-                discord_id,
-                guild_id,
-                now: *candidate,
-                paid: false,
-                forced_event: false,
-            }))
+            let unit = super::SeededLootEntropy::new(super::seed_for(
+                super::DigRuntimeRequest {
+                    discord_id,
+                    guild_id,
+                    now: *candidate,
+                    paid: false,
+                    forced_event: false,
+                },
+                0,
+            ))
             .unit();
             unit >= minimum && unit < maximum
         })
@@ -3393,14 +3414,16 @@ fn find_non_cave_dig_time_with_jc(
     let layer = super::layer_at(depth);
     (start..start.saturating_add(10_000))
         .find(|candidate| {
-            let mut entropy =
-                super::SeededLootEntropy::new(super::seed_for(super::DigRuntimeRequest {
+            let mut entropy = super::SeededLootEntropy::new(super::seed_for(
+                super::DigRuntimeRequest {
                     discord_id,
                     guild_id,
                     now: *candidate,
                     paid: false,
                     forced_event: false,
-                }));
+                },
+                0,
+            ));
             let safely_not_cave = entropy.unit() > 0.60;
             let _advance = entropy.advance(layer.advance_range.0, layer.advance_range.1);
             let _event_gate = entropy.unit();
@@ -5923,4 +5946,43 @@ fn sqlite_broken_equipped_pickaxe_does_not_reduce_luminosity_drain() {
         active_luminosity > broken_luminosity,
         "broken equipped pickaxe must not receive tier-6 drain reduction"
     );
+}
+
+#[test]
+fn production_dig_seeds_are_not_derivable_from_public_request_fields() {
+    // Every roll of a dig -- cave-in, advance, JC, event gate, artifact --
+    // comes from this seed. Derived only from the player's ids, the click
+    // second, and the paid/forced flags, it can be simulated ahead of time and
+    // a click timed for a good roll, so production mixes in a secret the
+    // player cannot see.
+    let request = super::DigRuntimeRequest {
+        discord_id: 4_242,
+        guild_id: 99,
+        now: 1_800_000_000,
+        paid: false,
+        forced_event: false,
+    };
+
+    let production = super::DigRuntimeConfig::production();
+    assert_ne!(
+        production.entropy_secret, 0,
+        "production must draw a real secret"
+    );
+    assert_ne!(
+        super::seed_for(request, production.entropy_secret),
+        super::seed_for(request, 0),
+        "the public-field seed must not survive into production"
+    );
+
+    // Deterministic replay inside one process still holds, which is what the
+    // CAS retries rely on.
+    assert_eq!(
+        super::seed_for(request, production.entropy_secret),
+        super::seed_for(
+            request,
+            super::DigRuntimeConfig::production().entropy_secret
+        ),
+    );
+    // The default config keeps the legacy seed so tests stay deterministic.
+    assert_eq!(super::DigRuntimeConfig::default().entropy_secret, 0);
 }
