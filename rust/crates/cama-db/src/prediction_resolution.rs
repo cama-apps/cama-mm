@@ -514,9 +514,13 @@ impl PredictionResolutionRepository {
             .iter()
             .map(|position| (position.discord_id, *position))
             .collect::<BTreeMap<_, _>>();
+        // prediction_trades.jopacoins is already signed -- buys store the cost
+        // and sells store the negated proceeds -- so the signed cash flow is a
+        // plain sum. Negating sells here would count them twice, inflating the
+        // expected gross and failing the settlement audit on any market that
+        // contains a sell, which permanently blocks its rollback.
         let trade_cash: i64 = transaction.query_row(
-            "SELECT COALESCE(SUM(CASE WHEN action IN ('buy_yes','buy_no')
-                 THEN jopacoins ELSE -jopacoins END),0)
+            "SELECT COALESCE(SUM(jopacoins),0)
              FROM prediction_trades WHERE prediction_id=?1",
             [prediction_id],
             |row| row.get(0),

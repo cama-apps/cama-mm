@@ -2016,7 +2016,6 @@ impl AdminHandler {
             guild_id: Some(guild_id),
             now,
             cooldown_seconds: cooldown,
-            rating,
             new_rd,
             new_volatility: self.config.recalibration_initial_volatility,
             new_os_sigma,

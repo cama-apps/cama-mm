@@ -144,7 +144,6 @@ pub struct RecalibrationRequest {
     pub guild_id: Option<i64>,
     pub now: i64,
     pub cooldown_seconds: i64,
-    pub rating: f64,
     pub new_rd: f64,
     pub new_volatility: f64,
     pub new_os_sigma: Option<f64>,
@@ -393,20 +392,24 @@ impl RatingHistoryRepository {
 
         let fingerprint = CamaOpenSkillSystem::default().algorithm_fingerprint();
         let new_rd = request.new_rd.min(MAX_GLICKO_RD);
+        // Recalibration resets deviation, volatility and sigma; it preserves
+        // the rating itself. Leaving glicko_rating out of the SET list keeps a
+        // match settlement that commits between the eligibility read and this
+        // transaction from being silently overwritten with the pre-settlement
+        // rating.
         transaction.execute(
             "UPDATE players
-             SET glicko_rating = ?1, glicko_rd = ?2, glicko_volatility = ?3,
-                 os_sigma = COALESCE(?4, os_sigma),
+             SET glicko_rd = ?1, glicko_volatility = ?2,
+                 os_sigma = COALESCE(?3, os_sigma),
                  os_rating_version = CASE
-                     WHEN ?4 IS NULL THEN os_rating_version ELSE ?5
+                     WHEN ?3 IS NULL THEN os_rating_version ELSE ?4
                  END,
                  os_algorithm_fingerprint = CASE
-                     WHEN ?4 IS NULL THEN os_algorithm_fingerprint ELSE ?6
+                     WHEN ?3 IS NULL THEN os_algorithm_fingerprint ELSE ?5
                  END,
                  updated_at = CURRENT_TIMESTAMP
-             WHERE discord_id = ?7 AND guild_id = ?8",
+             WHERE discord_id = ?6 AND guild_id = ?7",
             params![
-                request.rating,
                 new_rd,
                 request.new_volatility,
                 request.new_os_sigma,
@@ -416,6 +419,17 @@ impl RatingHistoryRepository {
                 guild_id
             ],
         )?;
+        // Record the rating as it stands inside this transaction rather than
+        // the value read during the eligibility check.
+        let rating_at_recalibration = transaction
+            .query_row(
+                "SELECT glicko_rating FROM players
+                 WHERE discord_id = ?1 AND guild_id = ?2",
+                params![request.discord_id, guild_id],
+                |row| row.get::<_, Option<f64>>(0),
+            )
+            .optional()?
+            .flatten();
         let new_total = total.saturating_add(1);
         transaction.execute(
             "INSERT INTO recalibration_state (
@@ -432,7 +446,7 @@ impl RatingHistoryRepository {
                 guild_id,
                 request.now,
                 new_total,
-                request.rating
+                rating_at_recalibration
             ],
         )?;
         if let Some(new_os_sigma) = request.new_os_sigma {
@@ -865,7 +879,6 @@ impl RecalibrationService {
                     guild_id,
                     now,
                     cooldown_seconds: self.config.cooldown_seconds,
-                    rating: current_rating,
                     new_rd,
                     new_volatility: self.config.initial_volatility,
                     new_os_sigma,
@@ -1889,6 +1902,74 @@ mod tests {
     }
 
     #[test]
+    fn recalibration_preserves_a_rating_written_after_the_eligibility_read() {
+        // A match settlement can commit between the eligibility read and the
+        // recalibration transaction. Recalibration resets deviation, volatility
+        // and sigma but must never write a rating back, or it silently erases
+        // that match's rating delta.
+        let fixture = Fixture::new();
+        let connection = Connection::open(fixture._file.path()).unwrap();
+        connection
+            .execute(
+                "INSERT INTO players (
+                     discord_id, guild_id, discord_username,
+                     glicko_rating, glicko_rd, glicko_volatility
+                 ) VALUES (1, ?1, 'u1', 1500.0, 200.0, 0.06)",
+                [TEST_GUILD_ID],
+            )
+            .expect("seed recalibration player");
+        // The settlement lands first, exactly as it would in the race.
+        connection
+            .execute(
+                "UPDATE players SET glicko_rating = 1520.0
+                 WHERE discord_id = 1 AND guild_id = ?1",
+                [TEST_GUILD_ID],
+            )
+            .expect("apply concurrent settlement");
+
+        fixture
+            .repository
+            .execute_recalibration_atomic(RecalibrationRequest {
+                discord_id: 1,
+                guild_id: Some(TEST_GUILD_ID),
+                now: 1_000_000,
+                cooldown_seconds: 3_600,
+                new_rd: 300.0,
+                new_volatility: 0.06,
+                new_os_sigma: None,
+            })
+            .expect("recalibrate");
+
+        let (rating, rd): (f64, f64) = connection
+            .query_row(
+                "SELECT glicko_rating, glicko_rd FROM players
+                 WHERE discord_id = 1 AND guild_id = ?1",
+                [TEST_GUILD_ID],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("player state");
+        assert!(
+            (rating - 1520.0).abs() < f64::EPSILON,
+            "the settled rating survives recalibration, got {rating}"
+        );
+        assert!(
+            (rd - cama_domain::rating::MAX_GLICKO_RD).abs() < f64::EPSILON,
+            "deviation is reset to the cap, got {rd}"
+        );
+
+        let state = fixture
+            .repository
+            .get_recalibration_state(1, Some(TEST_GUILD_ID))
+            .expect("recalibration state")
+            .expect("state row");
+        assert_eq!(
+            state.rating_at_recalibration,
+            Some(1520.0),
+            "the snapshot records the rating as it stood in the transaction"
+        );
+    }
+
+    #[test]
     fn python_truthiness_and_null_filter_interoperate() {
         let fixture = Fixture::new();
         let discord_id = 77;
@@ -1936,7 +2017,6 @@ mod tests {
                         guild_id: Some(TEST_GUILD_ID),
                         now: 1_000_000,
                         cooldown_seconds: 3_600,
-                        rating: 1_500.0,
                         new_rd: 300.0,
                         new_volatility: 0.06,
                         new_os_sigma: Some(7.5),

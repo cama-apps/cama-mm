@@ -471,11 +471,41 @@ fn test_record_blood_pact_skim_preserves_stored_cap_and_rate() {
 fn test_dark_bargain_debt_fetches() {
     let fixture = Fixture::new();
     let service = fixture.service();
-    service.grant_dark_bargain_debt(USER, GUILD, 700).unwrap();
+    fixture.register(USER, GUILD, 100);
+    service.grant_dark_bargain(USER, GUILD, 700, 800).unwrap();
     let debt = service.dark_bargain_debt(USER, GUILD).unwrap().unwrap();
     assert_eq!(debt.data.amount_due, Some(700));
     assert_eq!(debt.data.default_penalty, Some(1_600));
     assert_eq!(debt.data.default_penalty_games, Some(5));
+}
+
+#[test]
+fn dark_bargain_debt_and_principal_commit_together() {
+    // The default penalty is charged off the debt buff alone, so a debt that
+    // outlives a failed credit bills the player for money they never got.
+    let fixture = Fixture::new();
+    let service = fixture.service();
+
+    // No player row: the credit cannot apply, so the debt must not stand.
+    let error = service.grant_dark_bargain(USER, GUILD, 700, 800);
+    assert!(error.is_err(), "an unappliable credit fails the purchase");
+    assert!(
+        service.dark_bargain_debt(USER, GUILD).unwrap().is_none(),
+        "no debt is left behind when the principal could not be paid"
+    );
+
+    fixture.register(USER, GUILD, 100);
+    service.grant_dark_bargain(USER, GUILD, 700, 800).unwrap();
+    assert!(service.dark_bargain_debt(USER, GUILD).unwrap().is_some());
+    let balance: i64 = Connection::open(&fixture.path)
+        .expect("open manashop fixture")
+        .query_row(
+            "SELECT jopacoin_balance FROM players WHERE discord_id=?1 AND guild_id=?2",
+            params![USER, GUILD],
+            |row| row.get(0),
+        )
+        .expect("player balance");
+    assert_eq!(balance, 900, "the principal is credited with the debt");
 }
 
 fn expired_dark_data() -> BuffData {
