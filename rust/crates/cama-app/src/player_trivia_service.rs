@@ -399,7 +399,12 @@ impl PlayerTriviaRandom for SeededTriviaRandom {
             .state
             .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1_442_695_040_888_963_407);
-        (self.state as usize) % upper
+        // The low bits of a power-of-two LCG are highly regular -- this
+        // multiplier and increment make the parity alternate on every call --
+        // so taking `state % upper` would leave the shuffled answer positions
+        // patterned and partly predictable. Scale the high bits instead.
+        let scaled = (u128::from(self.state) * upper as u128) >> 64;
+        scaled as usize
     }
 }
 
