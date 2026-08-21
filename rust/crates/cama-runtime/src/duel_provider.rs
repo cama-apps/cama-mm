@@ -451,7 +451,10 @@ impl DuelInteractionHandler {
             )
             .await;
         }
-        self.respond_choice(context, choice, responder).await
+        // Act on the challenge this button was rendered for, not on whatever
+        // is pending now.
+        self.respond_choice(context, choice, Some(challenge_id), responder)
+            .await
     }
 
     async fn issue(
@@ -623,13 +626,14 @@ impl DuelInteractionHandler {
     ) -> Result<(), String> {
         let choice = string_option(options, "choice")
             .ok_or_else(|| "/duel respond requires choice".to_owned())?;
-        self.respond_choice(context, choice, responder).await
+        self.respond_choice(context, choice, None, responder).await
     }
 
     async fn respond_choice(
         &self,
         context: DuelCommandContext,
         choice: &str,
+        challenge_id: Option<i64>,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
         let Some(guild_id) = context.guild_id else {
@@ -650,7 +654,7 @@ impl DuelInteractionHandler {
                 move || now as f64,
                 RepositoryDuelEvolution(evolution),
             );
-            service.respond(guild_id, recipient_id, &choice)
+            service.respond_to(guild_id, recipient_id, &choice, challenge_id)
         })
         .await
         .map_err(|error| format!("duel response task failed: {error}"))?;
