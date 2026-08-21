@@ -2875,28 +2875,48 @@ impl MatchRepository {
         Ok(())
     }
 
-    /// Replace the durable per-player component breakdown after each
-    /// idempotent post-core phase. Callers first load the existing map so
-    /// referral components written by the core transaction are preserved.
-    pub fn update_match_jc_changes(
+    /// Merge into the durable per-player component breakdown under one
+    /// transaction.
+    ///
+    /// The post-core phases each contribute their own components to the same
+    /// aggregate, and restart recovery can run a phase while the live
+    /// settlement is still finishing. Reading on one connection, merging in the
+    /// caller, and writing on another loses whichever writer read first, so the
+    /// merge runs here between the read and the write instead. `merge` is given
+    /// the map as it stands inside the transaction and must not perform IO.
+    pub fn merge_match_jc_changes<F>(
         &self,
         match_id: i64,
         guild_id: Option<i64>,
-        changes: &BTreeMap<i64, BTreeMap<String, i64>>,
-    ) -> Result<(), CoreRepositoryError> {
-        let encoded = serde_json::to_string(changes)
+        merge: F,
+    ) -> Result<(), CoreRepositoryError>
+    where
+        F: FnOnce(&mut BTreeMap<i64, BTreeMap<String, i64>>),
+    {
+        let guild_id = Self::normalize_guild_id(guild_id);
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let raw = transaction
+            .query_row(
+                "SELECT jc_changes FROM matches WHERE match_id = ?1 AND guild_id = ?2",
+                params![match_id, guild_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                CoreRepositoryError::InvalidInput(format!(
+                    "match {match_id} was not found in guild {guild_id}"
+                ))
+            })?;
+        let mut changes = decode_jc_changes(&transaction, raw.as_deref())?;
+        merge(&mut changes);
+        let encoded = serde_json::to_string(&changes)
             .map_err(|error| CoreRepositoryError::InvalidJson(error.to_string()))?;
-        let connection = self.connection()?;
-        let changed = connection.execute(
+        transaction.execute(
             "UPDATE matches SET jc_changes=?1 WHERE match_id=?2 AND guild_id=?3",
-            params![encoded, match_id, Self::normalize_guild_id(guild_id)],
+            params![encoded, match_id, guild_id],
         )?;
-        if changed != 1 {
-            return Err(CoreRepositoryError::InvalidInput(format!(
-                "match {match_id} was not found in guild {}",
-                Self::normalize_guild_id(guild_id)
-            )));
-        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -8810,6 +8830,57 @@ mod tests {
         let repository = PlayerRepository::new(&path);
         assert!(repository.exists(1, None).is_err());
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn concurrent_jc_change_merges_keep_every_phase_component() {
+        // Post-core phases contribute components to the same aggregate, and a
+        // restart recovery can run one while the live settlement finishes the
+        // next. A read-merge-write split across connections drops whichever
+        // writer read first. A real file is required: the shared-cache memory
+        // fixture reports SQLITE_LOCKED instead of waiting on the busy handler.
+        let fixture = Fixture::new_durable();
+        let record = MatchRecord::new(vec![1], vec![2], 1, Some(TEST_GUILD_ID));
+        let match_id = fixture.matches.record_match(&record).unwrap();
+        fixture
+            .matches
+            .merge_match_jc_changes(match_id, Some(TEST_GUILD_ID), |changes| {
+                changes
+                    .entry(1)
+                    .or_default()
+                    .insert("referral".to_owned(), 100);
+            })
+            .unwrap();
+
+        let path = fixture.file.path().to_path_buf();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let handles = [("bet", 10_i64), ("payout", 20)].map(|(component, amount)| {
+            let path = path.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let repository = MatchRepository::new(&path);
+                barrier.wait();
+                repository.merge_match_jc_changes(match_id, Some(TEST_GUILD_ID), |changes| {
+                    changes
+                        .entry(1)
+                        .or_default()
+                        .insert(component.to_owned(), amount);
+                })
+            })
+        });
+        for handle in handles {
+            handle.join().expect("merge thread").expect("merge");
+        }
+
+        let components = fixture
+            .matches
+            .get_match(match_id, Some(TEST_GUILD_ID))
+            .unwrap()
+            .expect("recorded match")
+            .jc_changes;
+        assert_eq!(components[&1]["referral"], 100, "core component survives");
+        assert_eq!(components[&1]["bet"], 10);
+        assert_eq!(components[&1]["payout"], 20);
     }
 
     #[test]
