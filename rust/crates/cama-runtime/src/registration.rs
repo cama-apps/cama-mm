@@ -549,7 +549,56 @@ impl InteractionEmbed {
         });
         self
     }
+
+    /// Total characters Discord counts against the 6000-character embed cap.
+    #[must_use]
+    pub fn content_len(&self) -> usize {
+        self.title.as_ref().map_or(0, |text| text.chars().count())
+            + self
+                .description
+                .as_ref()
+                .map_or(0, |text| text.chars().count())
+            + self.footer.as_ref().map_or(0, |text| text.chars().count())
+            + self
+                .author_name
+                .as_ref()
+                .map_or(0, |text| text.chars().count())
+            + self
+                .fields
+                .iter()
+                .map(|field| field.name.chars().count() + field.value.chars().count())
+                .sum::<usize>()
+    }
+
+    /// Append a field only while it fits Discord's embed limits.
+    ///
+    /// Discord rejects the whole message once an embed passes 6000 characters
+    /// or 25 fields, so list-style embeds that grow with guild activity must
+    /// stop adding rows and report the remainder in their footer instead.
+    #[must_use]
+    pub fn field_within_budget(
+        self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+        inline: bool,
+    ) -> (Self, bool) {
+        let name = name.into();
+        let value = value.into();
+        let size = name.chars().count() + value.chars().count();
+        if self.fields.len() >= EMBED_FIELD_COUNT_LIMIT
+            || self.content_len() + size > EMBED_CONTENT_BUDGET
+        {
+            return (self, false);
+        }
+        (self.field(name, value, inline), true)
+    }
 }
+
+/// Discord rejects an embed whose parts total more than 6000 characters; the
+/// margin leaves room for a footer appended after the fields.
+pub const EMBED_CONTENT_BUDGET: usize = 5_900;
+/// Discord's hard limit on embed fields.
+pub const EMBED_FIELD_COUNT_LIMIT: usize = 25;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InteractionEmbedField {

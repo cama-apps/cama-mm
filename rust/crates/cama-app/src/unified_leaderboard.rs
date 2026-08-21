@@ -1155,7 +1155,13 @@ where
             })
             .collect::<Vec<_>>()
             .join("\n");
-        embed.add_field("Best Streaks", lines, false);
+        // Long display names can push a full page past Discord's field limit,
+        // which rejects the whole embed; the sibling sections all truncate.
+        embed.add_field(
+            "Best Streaks",
+            truncate_field(&lines, FIELD_VALUE_LIMIT),
+            false,
+        );
         embed.footer = Some(format!(
             "Page {}/{}",
             state.current_page + 1,

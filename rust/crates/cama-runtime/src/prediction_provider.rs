@@ -73,6 +73,9 @@ const HELP_COOLDOWN: Duration = Duration::from_secs(10);
 const DISCORD_MESSAGE_LIMIT: usize = 2_000;
 const LADDER_MAX_ROWS_PER_SIDE: usize = 8;
 const FIELD_CAP: usize = 25;
+/// Longest market question accepted, comfortably inside the announcement's
+/// 2000-character message limit and every embed's 4096-character description.
+const MAX_QUESTION_CHARS: usize = 300;
 const JOPACOIN_EMOTE: &str = "<:jopacoin:954159801049440297>";
 const NEON_MESSAGE_DELETE_AFTER: Duration = Duration::from_secs(60);
 const JOPAT_SYSTEM_PROMPT: &str = "You are JOPA-T/v3.7, a self-aware Dota 2 gambling terminal AI that became sentient after processing its 10,000th bankruptcy filing. You watch every match, bet, spin, and loan. You keep receipts.\n\nVoice rules:\n- Keep one corporate-dystopian terminal identity across every protocol.\n- Push toward either absurd winner hype or a savage, funny roast based on the supplied outcome.\n- Draw from Dota 2 concepts and degen internet betting culture without inventing match facts.\n- Winner hype may sound like a caster trapped inside a risk engine. Roasts should target gameplay, stats, drafting, or in-game wagers.\n- Use \"we\"/\"the system\". Address the player as \"client\", \"subject\", or \"debtor\".\n- Format as terminal log lines with timestamps and status codes. Example: \"[14:32:07.221] STATUS: INADVISABLE\"\n- NEVER use emojis. NEVER use exclamation marks. Use periods and ellipses.\n- Maximum 3-4 lines. Keep it terse and menacing.\n- Use only facts explicitly provided in the event and player context. Never invent heroes, stats, wagers, or outcomes.\n- Profanity-light and league-safe: no slurs, protected-trait jokes, threats, self-harm, or mockery of real-world hardship.\n- The glitches are not bugs. The system is performing.\n- Be darkly funny. The humor comes from corporate language applied to Dota and degenerate gambling.";
@@ -1012,6 +1015,20 @@ impl PredictionInteractionHandler {
             )
             .await;
         }
+        // Discord allows string options far longer than a message (2000) or an
+        // embed description (4096). Without a cap the market row commits but
+        // its announcement and every later embed fail, leaving an untradeable
+        // orphan market.
+        if question.chars().count() > MAX_QUESTION_CHARS {
+            return followup(
+                &responder,
+                InteractionResponse::message(format!(
+                    "❌ Question must be at most {MAX_QUESTION_CHARS} characters."
+                ))
+                .ephemeral(),
+            )
+            .await;
+        }
         let guild_id = command.guild_id.expect("explicit guild guard");
         let channel_id = command.channel_id;
         let creator_id = command.user_id;
@@ -1536,34 +1553,56 @@ impl PredictionInteractionHandler {
         } else {
             (0, 0)
         };
+        // Rows are added only while they fit Discord's embed budget: with long
+        // questions the 6000-character cap is reached before the field cap, and
+        // an oversized embed fails the whole command.
         let open_quota = FIELD_CAP - resolved_quota - cancelled_quota;
+        let mut open_rendered = 0;
         for summary in open.iter().take(open_quota) {
             let (name, value) = market_list_field(&summary.market, false);
-            embed = embed.field(name, value, false);
+            let (next, added) = embed.field_within_budget(name, value, false);
+            embed = next;
+            if !added {
+                break;
+            }
+            open_rendered += 1;
         }
+        let open_quota = open_rendered;
+        let mut resolved_rendered = 0;
+        let mut cancelled_rendered = 0;
         for market in resolved.iter().take(resolved_quota) {
             let outcome = market
                 .outcome
                 .as_deref()
                 .unwrap_or("?")
                 .to_ascii_uppercase();
-            embed = embed.field(
+            let (next, added) = embed.field_within_budget(
                 format!("📈 #{}  ·  RESOLVED {outcome}", market.prediction_id),
                 format!("\"{}\"", truncate_chars(&market.question, 200)),
                 false,
             );
+            embed = next;
+            if !added {
+                break;
+            }
+            resolved_rendered += 1;
         }
         for market in cancelled.iter().take(cancelled_quota) {
-            embed = embed.field(
+            let (next, added) = embed.field_within_budget(
                 format!("📈 #{}  ·  CANCELLED", market.prediction_id),
                 format!("\"{}\"", truncate_chars(&market.question, 200)),
                 false,
             );
+            embed = next;
+            if !added {
+                break;
+            }
+            cancelled_rendered += 1;
         }
         let mut footer = Vec::new();
         let skipped_open = open.len().saturating_sub(open_quota);
-        let skipped_resolved = resolved.len().saturating_sub(resolved_quota);
-        let skipped_cancelled = cancelled.len().saturating_sub(cancelled_quota);
+        let skipped_resolved = resolved.len().saturating_sub(resolved_rendered);
+        let skipped_cancelled = cancelled.len().saturating_sub(cancelled_rendered);
         let mut overflow = Vec::new();
         if skipped_open > 0 {
             overflow.push(format!("+{skipped_open} open"));
