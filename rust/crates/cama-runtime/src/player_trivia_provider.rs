@@ -575,6 +575,27 @@ impl PlayerTriviaRuntimeState {
         let settlement = match settlement {
             Ok(Ok(Some(settlement))) => settlement,
             Ok(Ok(None)) => {
+                // None also covers the benign duplicate-click race: two rapid
+                // clicks both pass the pre-check and the loser lands here while
+                // the winner's settlement stands. Killing a still-active
+                // session there would end a healthy run and burn the daily
+                // cooldown, so only a session that really is finished reports
+                // the interruption.
+                let repository = self.repository.clone();
+                let session_id = session.session_id;
+                let current = tokio::task::spawn_blocking(move || {
+                    repository
+                        .get_session(session_id)
+                        .map_err(|error| error.to_string())
+                })
+                .await
+                .map_err(|error| format!("player-trivia session reload failed: {error}"))??;
+                if current.is_some_and(|current| current.status == "active") {
+                    return responder
+                        .defer(false)
+                        .await
+                        .map_err(|error| error.to_string());
+                }
                 self.finish_interrupted(session.session_id, now).await;
                 return responder
                     .update(summary_response(

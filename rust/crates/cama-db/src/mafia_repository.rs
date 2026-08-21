@@ -737,6 +737,31 @@ impl MafiaRepository {
         Ok(())
     }
 
+    /// Revive one player and clear the twist that resurrected them together.
+    ///
+    /// Splitting these leaves the twist standing if the process dies in
+    /// between, so the next night's resolution revives a second player.
+    pub fn revive_player_and_clear_twist(
+        &self,
+        game_id: i64,
+        discord_id: i64,
+    ) -> Result<(), MafiaRepositoryError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
+            "UPDATE mafia_players
+             SET is_alive=1, eliminated_phase=NULL, eliminated_at=NULL
+             WHERE game_id=?1 AND discord_id=?2",
+            params![game_id, discord_id],
+        )?;
+        transaction.execute(
+            "UPDATE mafia_games SET twist_event=NULL WHERE game_id=?1",
+            params![game_id],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn set_thread_ids(&self, game_id: i64, ids: ThreadIds) -> Result<(), MafiaRepositoryError> {
         self.connection()?.execute(
             "UPDATE mafia_games SET
@@ -874,6 +899,75 @@ impl MafiaRepository {
         )?;
         transaction.commit()?;
         Ok(())
+    }
+
+    /// Record a night investigation unless this detective already has one.
+    ///
+    /// Returns the action that stands. Checking for a prior read on one
+    /// connection and inserting on another lets two racing `/mafia act` calls
+    /// both pass the check, and the upsert then overwrites the first read --
+    /// handing the detective two alignment reads in a night when the rules
+    /// allow one.
+    pub fn record_investigation_atomic(
+        &self,
+        action: &MafiaAction,
+    ) -> Result<MafiaAction, MafiaRepositoryError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let prior = transaction
+            .query_row(
+                "SELECT game_id,guild_id,actor_id,target_id,action_type,phase,
+                        day_number,result
+                 FROM mafia_actions
+                 WHERE game_id=?1 AND actor_id=?2 AND action_type=?3 AND day_number=?4
+                 ORDER BY created_at DESC, action_id DESC LIMIT 1",
+                params![
+                    action.game_id,
+                    action.actor_id,
+                    action.action_type.as_str(),
+                    action.day_number
+                ],
+                |row| {
+                    Ok(MafiaAction {
+                        game_id: row.get(0)?,
+                        guild_id: row.get(1)?,
+                        actor_id: row.get(2)?,
+                        target_id: row.get(3)?,
+                        action_type: row.get(4)?,
+                        phase: row.get(5)?,
+                        day_number: row.get(6)?,
+                        result: row.get(7)?,
+                    })
+                },
+            )
+            .optional()?;
+        if let Some(prior) = prior {
+            transaction.commit()?;
+            return Ok(prior);
+        }
+        transaction.execute(
+            "INSERT INTO mafia_actions (
+                 game_id,guild_id,actor_id,target_id,action_type,phase,
+                 day_number,created_at,result
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![
+                action.game_id,
+                action.guild_id,
+                action.actor_id,
+                action.target_id,
+                action.action_type.as_str(),
+                action.phase.as_str(),
+                action.day_number,
+                now_seconds(),
+                action.result,
+            ],
+        )?;
+        transaction.execute(
+            "UPDATE mafia_players SET acted=1 WHERE game_id=?1 AND discord_id=?2",
+            params![action.game_id, action.actor_id],
+        )?;
+        transaction.commit()?;
+        Ok(action.clone())
     }
 
     pub fn get_actions(

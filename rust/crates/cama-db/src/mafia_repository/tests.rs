@@ -1115,3 +1115,71 @@ CREATE TABLE mafia_bounties (
  PRIMARY KEY(game_id,day_number,target_id,contributor_id)
 );
 "#;
+
+#[test]
+fn investigation_lock_admits_only_the_first_read_of_the_night() {
+    // The detective gets one alignment read per night. Checking for a prior
+    // read and inserting separately lets two racing /mafia act calls both pass
+    // the check, and the upsert then replaces the first read with the second.
+    let fixture = Fixture::new();
+    let game_id = fixture.game(MafiaPhase::Night);
+    fixture
+        .repository
+        .add_players(
+            game_id,
+            &[
+                player(game_id, 1, MafiaRole::Townie),
+                player(game_id, 2, MafiaRole::Mafia),
+                player(game_id, 3, MafiaRole::Townie),
+            ],
+        )
+        .expect("players");
+
+    let first = MafiaAction {
+        result: Some("Mafia".to_owned()),
+        ..action(game_id, 1, 2, MafiaActionType::Investigate)
+    };
+    let second = MafiaAction {
+        result: Some("Town".to_owned()),
+        ..action(game_id, 1, 3, MafiaActionType::Investigate)
+    };
+    let recorded = fixture
+        .repository
+        .record_investigation_atomic(&first)
+        .expect("first read");
+    assert_eq!(recorded.target_id, Some(2));
+
+    // The second read of the night returns the standing one instead of
+    // replacing it, so the caller can reject it.
+    let recorded = fixture
+        .repository
+        .record_investigation_atomic(&second)
+        .expect("second read");
+    assert_eq!(recorded.target_id, Some(2));
+    assert_eq!(recorded.result.as_deref(), Some("Mafia"));
+
+    let actions = fixture
+        .repository
+        .get_actions(
+            game_id,
+            Some(MafiaActionType::Investigate),
+            Some(MafiaPhase::Night),
+        )
+        .expect("actions");
+    assert_eq!(actions.len(), 1, "only one read is recorded for the night");
+    assert_eq!(actions[0].target_id, Some(2));
+
+    // A later night starts fresh.
+    let next_night = MafiaAction {
+        day_number: 2,
+        ..action(game_id, 1, 3, MafiaActionType::Investigate)
+    };
+    assert_eq!(
+        fixture
+            .repository
+            .record_investigation_atomic(&next_night)
+            .expect("next night read")
+            .target_id,
+        Some(3)
+    );
+}

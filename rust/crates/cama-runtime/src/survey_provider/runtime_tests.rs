@@ -906,13 +906,16 @@ async fn migrated_interaction_campaign_runs_create_dm_select_text_and_ready_fina
         )
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while discord.sent.lock().unwrap().is_empty() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    // `send` dispatches in the background. Recovery takes the same delivery
+    // lock, so awaiting one here is a barrier: it cannot start until the
+    // dispatch has finished, and it then finds nothing left to do. Polling for
+    // the first DM instead would let the dispatcher keep mutating the response
+    // session while the assertions below drive it.
+    provider
+        .state
+        .recover(None)
+        .await
+        .expect("await the background survey dispatch");
     {
         let sent = discord.sent.lock().unwrap();
         assert_eq!(sent[0].1, policy::delivery_nonce(1));
