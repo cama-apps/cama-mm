@@ -1550,18 +1550,30 @@ impl DigEventRuntimeService {
         let Some(strategy) = victim_strategy(&splash.strategy) else {
             return Ok(SplashExecution::empty(splash, &resolution.event_name));
         };
-        let repository = DigTunnelEncounterRepository::new(&self.path);
-        let (active_since, limit) = candidate_window(strategy, splash.victim_count, request.now);
-        let candidates = repository
-            .candidate_ids(EncounterCandidateQuery {
-                guild_id: Some(request.guild_id),
-                digger_discord_id: request.discord_id,
-                strategy,
-                active_since,
-                limit,
-            })
+        // A replay must target the victims the first execution picked. Live
+        // selection would choose different ones -- the first burns change the
+        // balance ranking that `richest_n` orders by -- and those fresh victims
+        // have no exact-once key, so they would be debited a second time.
+        let frozen = DigEventRuntimeRepository::new(&self.path)
+            .committed_splash_victims(Some(request.guild_id), request.event_key)
             .map_err(|error| DigEventRuntimeError::Splash(error.to_string()))?;
-        let victim_ids = select_victims(candidates, splash.victim_count, strategy, entropy);
+        let victim_ids = if frozen.is_empty() {
+            let repository = DigTunnelEncounterRepository::new(&self.path);
+            let (active_since, limit) =
+                candidate_window(strategy, splash.victim_count, request.now);
+            let candidates = repository
+                .candidate_ids(EncounterCandidateQuery {
+                    guild_id: Some(request.guild_id),
+                    digger_discord_id: request.discord_id,
+                    strategy,
+                    active_since,
+                    limit,
+                })
+                .map_err(|error| DigEventRuntimeError::Splash(error.to_string()))?;
+            select_victims(candidates, splash.victim_count, strategy, entropy)
+        } else {
+            frozen
+        };
         if splash.mode == "grant" {
             return self.resolve_grant_splash(request, resolution, splash, victim_ids);
         }

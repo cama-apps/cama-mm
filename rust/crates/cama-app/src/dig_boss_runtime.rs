@@ -2985,7 +2985,7 @@ impl DigBossRuntimeService {
             }
         }
         let won = won.unwrap_or(false);
-        let phase = self.pinnacle_phase(request)?;
+        let phase = self.claimed_pinnacle_phase(request)?;
         let gear_wear = self.tick_pinnacle_gear(
             request,
             &paused.gear_snapshot,
@@ -3045,9 +3045,27 @@ impl DigBossRuntimeService {
         Ok(snapshot)
     }
 
-    fn pinnacle_phase(&self, request: DigBossRuntimeRequest) -> Result<u8, DigBossRuntimeError> {
-        let phase = self.pinnacle_snapshot(request)?.pinnacle_phase.clamp(1, 3);
-        u8::try_from(phase)
+    /// The pinnacle phase of an already-claimed duel, read without the
+    /// at-the-boundary gate.
+    ///
+    /// Once `claim_active_duel` has deleted the paused row, the duel is the
+    /// only record of the wagered stake: failing here would drop the fight
+    /// without settling it, letting a player who retreated mid-mechanic void a
+    /// losing wager entirely. The claimed row is the authority, so a player who
+    /// has since left the boundary still settles.
+    fn claimed_pinnacle_phase(
+        &self,
+        request: DigBossRuntimeRequest,
+    ) -> Result<u8, DigBossRuntimeError> {
+        let phase = DigBossRuntimeRepository::new(&self.config.database_path)
+            .snapshot(database_key(request.player_key()))
+            .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
+            .map_or(1, |snapshot| snapshot.pinnacle_phase);
+        Self::clamped_pinnacle_phase(phase)
+    }
+
+    fn clamped_pinnacle_phase(phase: i64) -> Result<u8, DigBossRuntimeError> {
+        u8::try_from(phase.clamp(1, 3))
             .map_err(|_| DigBossRuntimeError::InvalidPinnacle("phase is outside u8".to_owned()))
     }
 

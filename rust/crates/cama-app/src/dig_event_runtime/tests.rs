@@ -1401,3 +1401,66 @@ fn completed_quest_finale_resumes_after_complete_first_failure() {
     assert_eq!(fixture.count_actions(ACTOR, "event"), 1);
     assert_eq!(fixture.count_actions(ACTOR, "quest_finale_jc"), 1);
 }
+
+#[test]
+fn splash_replay_reuses_the_original_victims_instead_of_the_new_richest() {
+    // richest_n victims are chosen by live balance, and the first execution's
+    // own steal reorders that ranking. A replay -- duplicate delivery, the
+    // crash-recovery worker, or a Conflict retry -- must target the victims it
+    // already committed against; re-selecting would debit a fresh player who
+    // has no exact-once key, creating money for the digger.
+    let fixture = Fixture::new();
+    let first_richest = ACTOR + 1;
+    let runner_up = ACTOR + 2;
+    fixture.seed_actor(ACTOR, 100, 50, 0);
+    fixture.seed_actor(first_richest, 200, 50, 0);
+    fixture.seed_actor(runner_up, 195, 50, 0);
+    let key = key_for_outcome(&fixture.snapshot(), "crow_snipe", "risky", true);
+    let event_request = request("crow_snipe", "risky", &key);
+    let service = fixture.service();
+    fixture
+        .connection()
+        .execute_batch(
+            "CREATE TRIGGER reject_event_actor
+             BEFORE INSERT ON dig_actions
+             WHEN NEW.action_type = 'event'
+             BEGIN SELECT RAISE(ABORT, 'forced actor audit failure'); END;",
+        )
+        .expect("install actor failure");
+
+    assert!(matches!(
+        service.resolve_event(event_request),
+        Err(DigEventRuntimeError::EventRepository(_))
+    ));
+    let stolen = 200 - fixture.balance(first_richest);
+    assert!(stolen > 0, "the richest player was robbed first");
+    assert!(
+        fixture.balance(first_richest) < 195,
+        "the steal must leave the runner-up as the new richest, \
+         which is what a replay would re-select"
+    );
+    assert_eq!(fixture.balance(runner_up), 195);
+    fixture
+        .connection()
+        .execute("DROP TRIGGER reject_event_actor", [])
+        .expect("remove actor failure");
+
+    let recovered = service
+        .resolve_event(event_request)
+        .expect("restart recovery");
+    assert!(recovered.success);
+
+    assert_eq!(
+        fixture.balance(runner_up),
+        195,
+        "the replay must not rob a victim the first execution never touched"
+    );
+    assert_eq!(fixture.count_actions(runner_up, "splash_victim"), 0);
+    assert_eq!(fixture.count_actions(first_richest, "splash_victim"), 1);
+    assert_eq!(fixture.count_actions(ACTOR, "splash_thief"), 1);
+    assert_eq!(
+        fixture.balance(ACTOR),
+        100 + stolen + recovered.resolution.as_ref().expect("resolution").jc,
+        "the digger is credited exactly once"
+    );
+}

@@ -1939,3 +1939,32 @@ async fn live_migrated_sqlite_dispatches_all_pet_leaves_and_persistent_paths() {
         &[false]
     );
 }
+
+#[test]
+fn battle_timeout_window_belongs_to_the_round_not_the_battle() {
+    let turn = Duration::from_secs(30);
+    let short = Duration::from_secs(1);
+
+    // A round that only just started is never expired, however long the battle
+    // as a whole has been running.
+    assert_eq!(
+        battle_timeout_step(Some(1), Some(1), short, turn),
+        BattleTimeoutStep::Wait
+    );
+    // Its own full window having passed does expire it.
+    assert_eq!(
+        battle_timeout_step(Some(1), Some(1), turn, turn),
+        BattleTimeoutStep::Fire
+    );
+    // When the players resolve a round themselves, the next one restarts the
+    // window rather than inheriting the remainder of the previous one.
+    assert_eq!(
+        battle_timeout_step(Some(1), Some(2), turn, turn),
+        BattleTimeoutStep::Rearm
+    );
+    // A battle that has ended stops the task.
+    assert_eq!(
+        battle_timeout_step(Some(2), None, turn, turn),
+        BattleTimeoutStep::Stop
+    );
+}

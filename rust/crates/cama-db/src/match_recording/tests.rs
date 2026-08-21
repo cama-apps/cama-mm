@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 use rusqlite::{Connection, params};
@@ -2642,5 +2642,73 @@ fn test_enrichment_leaves_roles_null_when_lanes_are_ambiguous() {
         stored_derived_roles(&fixture, match_id)
             .iter()
             .all(|(_, role)| role.is_none())
+    );
+}
+
+#[test]
+fn reversing_a_win_bonus_reopens_the_exact_once_marker_for_a_later_correction() {
+    // Correcting a match away from its original winner and then back must pay
+    // the win bonus again. The reversal has to be recorded as a compensation of
+    // the original award, or the exact-once marker still stands, the re-award
+    // moves no money, and those players lose the bonus permanently while their
+    // participant row is snapshotted as if it had been paid.
+    const PLAYER: i64 = 70_401;
+    const MATCH_ID: i64 = 941;
+    let database = migrated_award_database();
+    let connection = Connection::open(database.path()).expect("open correction award database");
+    insert_award_player(&connection, PLAYER, 0);
+    connection
+        .execute(
+            "INSERT INTO matches(
+                 match_id,guild_id,winning_team,match_date,win_reward_jc,
+                 team1_players,team2_players
+             ) VALUES (?1,?2,1,'2026-08-01T00:00:00+00:00',25,?3,'[]')",
+            params![MATCH_ID, GUILD, format!("[{PLAYER}]")],
+        )
+        .expect("insert corrected match");
+    connection
+        .execute(
+            "INSERT INTO match_participants(
+                 match_id,guild_id,discord_id,team_number,won,win_bonus_jc
+             ) VALUES (?1,?2,?3,1,1,25)",
+            params![MATCH_ID, GUILD, PLAYER],
+        )
+        .expect("insert corrected participant");
+    drop(connection);
+
+    let award = IncomeAwardRequest {
+        related_type: Some("match_win_bonus"),
+        related_id: Some(MATCH_ID),
+        exact_once: true,
+        ..IncomeAwardRequest::ordinary(PLAYER, 25, "match_win_bonus")
+    };
+    let repository = MatchRecordingRepository::new(database.path());
+    let credited = repository
+        .credit_income_awards_atomic(Some(GUILD), &[award])
+        .expect("credit the original win bonus");
+    assert!(credited[0].applied, "the first award moves money");
+    assert_eq!(credited[0].balance_after, 25);
+
+    // Without a reversal the marker blocks a re-award, which is the intended
+    // exact-once behavior.
+    let duplicate = repository
+        .credit_income_awards_atomic(Some(GUILD), &[award])
+        .expect("retry the award");
+    assert!(!duplicate[0].applied);
+
+    crate::match_correction_repository::MatchCorrectionRepository::new(database.path())
+        .reverse_win_bonuses_atomic(MATCH_ID, Some(GUILD), &BTreeMap::from([(PLAYER, 25)]))
+        .expect("reverse the win bonus");
+
+    let recredited = repository
+        .credit_income_awards_atomic(Some(GUILD), &[award])
+        .expect("re-award after the reversal");
+    assert!(
+        recredited[0].applied,
+        "a reversed award must be creditable again"
+    );
+    assert_eq!(
+        recredited[0].balance_after, 25,
+        "the player ends up back at the awarded balance"
     );
 }
