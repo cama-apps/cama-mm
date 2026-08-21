@@ -1571,7 +1571,9 @@ impl AdminHandler {
         let user = required_user(&context.options, "user")?;
         let steam_id = required_integer(&context.options, "steam_id")?;
         let set_primary = boolean(&context.options, "set_primary").unwrap_or(false);
-        if steam_id <= 0 || steam_id > 1_i64 << 32 {
+        // The bound is exclusive everywhere else (validate_steam_id), so a
+        // greater-than test here would admit exactly 2^32.
+        if cama_app::registration::validate_steam_id(steam_id).is_err() {
             return respond_ephemeral(&responder, "❌ Invalid Steam ID.").await;
         }
         if !self.registered(user.id, context.guild_id).await? {
@@ -2266,7 +2268,14 @@ impl AdminHandler {
                 scope: lobby_scope,
             })
             .await
-            .map_err(|error| format!("suspension lobby ejection failed: {error}"))?;
+            .unwrap_or_else(|error| {
+                // The suspension is already durable and the player has already
+                // been DM'd, so a failed lobby eviction is best effort like the
+                // DM: reporting a generic handler failure here would tell the
+                // admin nothing happened when most of it did.
+                warn!(%error, guild_id, target_id, "suspension lobby ejection failed");
+                AdminLobbyEjectionResult::default()
+            });
         let action = if replaced {
             "Replaced the active suspension for"
         } else {

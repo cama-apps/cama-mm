@@ -2712,3 +2712,76 @@ fn reversing_a_win_bonus_reopens_the_exact_once_marker_for_a_later_correction() 
         "the player ends up back at the awarded balance"
     );
 }
+
+#[test]
+fn recovered_receipt_reports_one_application_after_a_compensate_reapply_cycle() {
+    // The saga can pay an award, compensate it when a later player fails, and
+    // reapply it on retry. Summing every ledger row for the key would then
+    // report twice what the player actually received -- and that figure is
+    // snapshotted as the participant's win bonus, so a later correction would
+    // debit double.
+    const PLAYER: i64 = 70_501;
+    const MATCH_ID: i64 = 953;
+    let database = migrated_award_database();
+    let connection = Connection::open(database.path()).expect("open cycle award database");
+    insert_award_player(&connection, PLAYER, 0);
+    drop(connection);
+
+    let award = IncomeAwardRequest {
+        related_type: Some("match_win_bonus"),
+        related_id: Some(MATCH_ID),
+        exact_once: true,
+        ..IncomeAwardRequest::ordinary(PLAYER, 40, "match_win_bonus")
+    };
+    let repository = MatchRecordingRepository::new(database.path());
+    let credited = repository
+        .credit_income_awards_atomic(Some(GUILD), &[award])
+        .expect("first award");
+    assert!(credited[0].applied);
+    assert_eq!(credited[0].balance_after, 40);
+
+    repository
+        .compensate_income_awards_atomic(
+            Some(GUILD),
+            &[IncomeAwardCompensation {
+                discord_id: PLAYER,
+                source: "match_win_bonus",
+                related_id: MATCH_ID,
+                amount: credited[0].balance_delta,
+            }],
+        )
+        .expect("compensate the partial payout");
+
+    let reapplied = repository
+        .credit_income_awards_atomic(Some(GUILD), &[award])
+        .expect("reapply on retry");
+    assert!(reapplied[0].applied, "the rollback reopened the marker");
+    assert_eq!(reapplied[0].balance_after, 40);
+
+    // A later phase fails and the saga re-enters: the recovered receipt must
+    // describe one application, not the sum of both.
+    let recovered = repository
+        .credit_income_awards_atomic(Some(GUILD), &[award])
+        .expect("recover the standing award");
+    assert!(
+        !recovered[0].applied,
+        "the standing award is not re-credited"
+    );
+    assert_eq!(
+        recovered[0].balance_delta, credited[0].balance_delta,
+        "the recovered movement matches one application"
+    );
+
+    // The compensating row is still in the ledger: it is a real balance
+    // movement and the audit trail has to keep it.
+    let rollbacks: i64 = Connection::open(database.path())
+        .expect("reopen cycle award database")
+        .query_row(
+            "SELECT COUNT(*) FROM economy_ledger_entries
+             WHERE guild_id=?1 AND account_id=?2 AND source='match_bonus_rollback'",
+            params![GUILD, PLAYER],
+            |row| row.get(0),
+        )
+        .expect("count rollbacks");
+    assert_eq!(rollbacks, 1);
+}

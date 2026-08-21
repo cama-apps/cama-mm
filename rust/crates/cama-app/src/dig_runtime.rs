@@ -3400,11 +3400,16 @@ where
                 .jc_earned
                 .saturating_add(outcome.bankruptcy_penalty)
                 .max(0);
+            // Withholding comes out of the reward still in hand, which the
+            // bankruptcy penalty has already reduced. Clamping to the basis
+            // alone would debit the wallet whenever the configured keep rate
+            // leaves less in hand than the tax.
             let vanity_tax = self
                 .vanity_tax
                 .calculate_tax(request.discord_id, request.guild_id, vanity_tax_basis)
                 .max(0)
-                .min(vanity_tax_basis);
+                .min(vanity_tax_basis)
+                .min(outcome.jc_earned.max(0));
             // The low-priority sink reads the same pre-subtraction basis, so
             // the two taxes stack additively instead of compounding. What is
             // actually withheld, though, comes out of the reward still in

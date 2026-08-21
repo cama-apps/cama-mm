@@ -1090,13 +1090,18 @@ impl ShopInteractionHandler {
                 let refund = ((spec.cost as f64) * 0.25).floor() as i64;
                 let refund = refund.max(1);
                 let repository = self.repository.clone();
-                let _ = run_blocking("mana conduit refund", move || {
+                let credited = run_blocking("mana conduit refund", move || {
                     repository.adjust_balance(
                         user_id, guild_id, refund, None, None, None, None, None, None,
                     )
                 })
                 .await;
-                refund
+                // Only report a refund the player actually received: the
+                // reported balance is derived from this figure.
+                if let Err(error) = &credited {
+                    warn!(%error, user_id, guild_id, "mana conduit refund was not credited");
+                }
+                if credited.is_ok() { refund } else { 0 }
             } else {
                 0
             }

@@ -767,7 +767,8 @@ impl BalancedShuffler {
                 .as_ref()
                 .is_some_and(|preferred| preferred.contains(assigned_role));
             // Unclamped: jopacoin balances go negative and must stay ordered.
-            let base_value = base_value * player.role_factor_for(assigned_role);
+            let base_value =
+                crate::player::apply_role_factor(base_value, player.role_factor_for(assigned_role));
             let effective_value = if on_role {
                 base_value
             } else {
