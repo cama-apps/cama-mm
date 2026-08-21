@@ -858,12 +858,32 @@ where
         recipient_id: i64,
         choice: &str,
     ) -> Result<DuelChallenge, CommandError> {
-        let challenge = self
-            .repository
-            .get_pending_for_recipient(recipient_id, guild_id)?
-            .ok_or_else(|| {
-                CommandError::Invalid("You have no pending duel challenge.".to_owned())
-            })?;
+        self.respond_to(guild_id, recipient_id, choice, None)
+    }
+
+    /// Respond to a specific challenge when the caller knows which one.
+    ///
+    /// A button carries the challenge it was rendered for. Resolving "whatever
+    /// is pending" instead would answer a newer challenge when one arrives
+    /// between the render and the click, so the recipient accepts a duel they
+    /// never saw.
+    pub fn respond_to(
+        &mut self,
+        guild_id: i64,
+        recipient_id: i64,
+        choice: &str,
+        challenge_id: Option<i64>,
+    ) -> Result<DuelChallenge, CommandError> {
+        let challenge = match challenge_id {
+            Some(challenge_id) => self
+                .repository
+                .get_challenge(challenge_id, guild_id)?
+                .filter(|challenge| challenge.recipient_id == recipient_id),
+            None => self
+                .repository
+                .get_pending_for_recipient(recipient_id, guild_id)?,
+        }
+        .ok_or_else(|| CommandError::Invalid("You have no pending duel challenge.".to_owned()))?;
         let now = self.integer_now();
         if choice == "decline" {
             return self.repository.decline_atomic(
@@ -5154,6 +5174,45 @@ mod tests {
                 2,
             )]
         );
+    }
+
+    #[test]
+    fn test_service_responds_to_the_clicked_challenge() {
+        // A button carries the challenge it was rendered for. Resolving
+        // "whatever is pending" would answer a newer challenge that arrived
+        // between the render and the click.
+        let mut service = recording_duel_service(SERVICE_NOW as f64);
+        let mut clicked = service_challenge();
+        clicked.challenge_id = 11;
+        service.repository.challenge = Ok(Some(clicked));
+
+        service
+            .respond_to(SERVICE_GUILD_ID, 2, "trial_by_combat", Some(11))
+            .expect("accept the clicked challenge");
+
+        assert_eq!(service.repository.get_calls, [(11, SERVICE_GUILD_ID)]);
+        assert!(
+            service.repository.pending_calls.is_empty(),
+            "the pending lookup must not decide which challenge is answered"
+        );
+        assert_eq!(service.repository.accept_calls[0].0, 11);
+    }
+
+    #[test]
+    fn test_service_rejects_a_clicked_challenge_owned_by_someone_else() {
+        let mut service = recording_duel_service(SERVICE_NOW as f64);
+        let mut clicked = service_challenge();
+        clicked.challenge_id = 11;
+        clicked.recipient_id = 999;
+        service.repository.challenge = Ok(Some(clicked));
+
+        assert_eq!(
+            service.respond_to(SERVICE_GUILD_ID, 2, "decline", Some(11)),
+            Err(CommandError::Invalid(
+                "You have no pending duel challenge.".to_owned()
+            ))
+        );
+        assert!(service.repository.decline_calls.is_empty());
     }
 
     #[test]

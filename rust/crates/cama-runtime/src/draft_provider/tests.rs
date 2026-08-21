@@ -1,7 +1,7 @@
 use super::*;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Semaphore;
 
@@ -111,9 +111,22 @@ struct NullDiscord {
     completion_sends_started: AtomicUsize,
     completion_send_gate: Semaphore,
     fail_edits: AtomicBool,
+    /// Fail edits only for this channel, so one guild's repaint can break
+    /// while another guild's succeeds.
+    fail_edits_for_channel: AtomicU64,
     fail_delivery_sends: AtomicBool,
     accept_delivery_before_failure: AtomicBool,
     fail_delivery_history: AtomicBool,
+    /// A channel Discord itself reports as gone: sends and history probes
+    /// fail, and `destination_status` proves the failure is permanent.
+    undeliverable_channel: AtomicU64,
+}
+
+impl NullDiscord {
+    fn is_undeliverable(&self, channel_id: u64) -> bool {
+        let undeliverable = self.undeliverable_channel.load(Ordering::Acquire);
+        undeliverable != 0 && undeliverable == channel_id
+    }
 }
 
 impl Default for NullDiscord {
@@ -127,9 +140,11 @@ impl Default for NullDiscord {
             completion_sends_started: AtomicUsize::new(0),
             completion_send_gate: Semaphore::new(0),
             fail_edits: AtomicBool::new(false),
+            fail_edits_for_channel: AtomicU64::new(0),
             fail_delivery_sends: AtomicBool::new(false),
             accept_delivery_before_failure: AtomicBool::new(false),
             fail_delivery_history: AtomicBool::new(false),
+            undeliverable_channel: AtomicU64::new(0),
         }
     }
 }
@@ -178,6 +193,9 @@ impl DiscordTransport for NullDiscord {
         delivery_key: &str,
         message: DiscordMessage,
     ) -> Result<DiscordMessageReceipt, String> {
+        if self.is_undeliverable(channel_id) {
+            return Err("Unknown Channel".to_owned());
+        }
         if self.fail_delivery_sends.load(Ordering::Acquire) && channel_id == 700 {
             if self.accept_delivery_before_failure.load(Ordering::Acquire) {
                 let receipt = self.send_message(channel_id, message).await?;
@@ -212,6 +230,9 @@ impl DiscordTransport for NullDiscord {
         _after_unix_seconds: i64,
         _limit: usize,
     ) -> Result<Option<DiscordMessageReceipt>, String> {
+        if self.is_undeliverable(channel_id) {
+            return Err("Unknown Channel".to_owned());
+        }
         if self.fail_delivery_history.load(Ordering::Acquire) {
             return Err(
                 "Discord delivery history search reached its bounded recovery limit".to_owned(),
@@ -232,7 +253,9 @@ impl DiscordTransport for NullDiscord {
         message_id: u64,
         message: DiscordMessage,
     ) -> Result<(), String> {
-        if self.fail_edits.load(Ordering::Acquire) {
+        if self.fail_edits.load(Ordering::Acquire)
+            || self.fail_edits_for_channel.load(Ordering::Acquire) == channel_id
+        {
             return Err("simulated Discord edit failure".to_owned());
         }
         self.edited
@@ -328,6 +351,14 @@ impl DiscordTransport for NullDiscord {
         _user_id: u64,
     ) -> Result<Option<DiscordGuildMemberSnapshot>, String> {
         Ok(None)
+    }
+
+    async fn destination_status(&self, channel_id: u64) -> DiscordDestinationStatus {
+        if self.is_undeliverable(channel_id) {
+            DiscordDestinationStatus::Undeliverable
+        } else {
+            DiscordDestinationStatus::Unknown
+        }
     }
 }
 
@@ -2356,6 +2387,80 @@ async fn required_live_delivery_failure_retains_job_and_envelope() {
             .expect("load retained envelope")
             .len(),
         1
+    );
+}
+
+#[tokio::test]
+async fn a_deleted_announcement_channel_is_skipped_instead_of_wedging_the_guild() {
+    let (database, provider, drafts, persistence, _handle, state, discord) =
+        persistent_completion_fixture().await;
+    let pending_state = db_pending_state(
+        &state,
+        1_700_000_000,
+        provider.handler.config.bet_lock_seconds,
+        false,
+    )
+    .expect("pending state");
+    provider
+        .handler
+        .mark_finalizing(&state, None)
+        .await
+        .expect("fence finalization");
+    let linked = provider
+        .handler
+        .link_finalizing_pending_match(&state, Some(&pending_state), Some(700), Some(701), None)
+        .await
+        .expect("link finalization plan");
+    provider
+        .handler
+        .run_persisted_financial_setup(&state, linked.pending.pending_match_id)
+        .await
+        .expect("run financial setup");
+    // The plan froze channel 700 at link time; Discord now reports it gone, so
+    // no retry can ever deliver there.
+    let delivered_before = discord
+        .sent
+        .lock()
+        .expect("sent")
+        .iter()
+        .filter(|(channel_id, _)| *channel_id == 700)
+        .count();
+    discord.undeliverable_channel.store(700, Ordering::Release);
+
+    assert_eq!(
+        provider
+            .recover_finalizing()
+            .await
+            .expect("an undeliverable destination must not fail recovery"),
+        1
+    );
+
+    assert!(
+        persistence.load_all().expect("load envelopes").is_empty(),
+        "the finalizing envelope must not survive; it blocks every later /draft start"
+    );
+    assert!(!drafts.has_active_draft(Some(42)));
+    assert_eq!(
+        cama_db::draft_finalization::DraftFinalizationRepository::new(database.path())
+            .job(&cama_db::draft_finalization::draft_completion_key(
+                42,
+                state.session_id
+            ))
+            .expect("load terminal job")
+            .expect("terminal job")
+            .stage,
+        cama_db::draft_finalization::DRAFT_FINALIZATION_COMPLETE_STAGE
+    );
+    assert_eq!(
+        discord
+            .sent
+            .lock()
+            .expect("sent")
+            .iter()
+            .filter(|(channel_id, _)| *channel_id == 700)
+            .count(),
+        delivered_before,
+        "nothing new was delivered to the dead channel"
     );
 }
 
@@ -4495,5 +4600,72 @@ async fn drafting_components_reject_nonparticipants_before_mutation() {
             .expect("state lock")
             .side_preferences
             .contains_key(&999)
+    );
+}
+
+#[test]
+fn one_guild_hydration_failure_does_not_block_other_guilds() {
+    // Recovery runs across every persisted draft. A guild whose draft message
+    // was deleted while the bot was down fails its repaint; that must not leave
+    // every other guild unhydrated -- and, because ready recovery gives up on
+    // the first error, unfinalized as well.
+    let database = migrated_database();
+    let config = ApplicationConfig::from_lookup(|name| match name {
+        "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
+        "ADMIN_USER_IDS" => Some("9001".to_owned()),
+        _ => None,
+    })
+    .expect("draft config");
+    let persistence = Arc::new(SqliteDraftStatePersistence::new(database.path()));
+    for (guild_id, channel_id) in [(42_i64, 777_u64), (43, 778)] {
+        let mut state = DraftState::with_session(guild_id, DraftLobbyKind::Open, 9);
+        state.captain1_id = Some(1);
+        state.captain2_id = Some(2);
+        state.radiant_captain_id = Some(1);
+        state.dire_captain_id = Some(2);
+        state.coinflip_winner_id = Some(1);
+        state.phase = DraftPhase::WinnerSideChoice;
+        state.draft_channel_id = Some(i64::try_from(channel_id).expect("channel"));
+        state.draft_message_id = Some(1234);
+        persistence
+            .create_envelope(&state.to_snapshot().envelope(1))
+            .expect("create durable draft");
+    }
+
+    let drafts = Arc::new(DraftStateManager::default());
+    let discord = Arc::new(NullDiscord::default());
+    // Only the first guild's repaint fails.
+    discord.fail_edits_for_channel.store(777, Ordering::Release);
+    let lobby = LobbyRegistrationProvider::new(
+        database.path(),
+        LobbyRuntimeConfig {
+            lobby_channel_id: Some(700),
+            low_skill_lobby_channel_id: Some(701),
+            admin_user_ids: BTreeSet::from([9001]),
+            ready_threshold: 10,
+            max_players: 20,
+            first_game_pool_daily_amount: 0,
+        },
+        Arc::clone(&drafts),
+        discord.clone(),
+    )
+    .expect("lobby provider");
+    let provider = DraftRegistrationProvider::new_with_reminder_scheduler_and_neon_and_persistence(
+        database.path(),
+        &config,
+        lobby.match_lobby_port(),
+        Arc::clone(&drafts),
+        discord.clone(),
+        Arc::new(NoopDraftReminderScheduler),
+        Arc::new(NoopDraftNeonObserver),
+        Some(persistence.clone()),
+    )
+    .expect("draft provider");
+
+    let error = block_on(provider.hydrate()).expect_err("the broken guild is reported");
+    assert!(error.contains("guild 42"), "unexpected report: {error}");
+    assert!(
+        drafts.has_active_draft(Some(43)),
+        "the healthy guild must still hydrate"
     );
 }

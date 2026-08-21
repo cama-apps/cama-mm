@@ -91,9 +91,10 @@ use crate::discord_transport::DiscordTransport;
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
     InteractionActionRow, InteractionAllowedMentions, InteractionButton, InteractionButtonStyle,
-    InteractionEmbed, InteractionHandler, InteractionHandlerError, InteractionMessageReceipt,
-    InteractionOption, InteractionRequest, InteractionResponder, InteractionResponse,
-    InteractionValue, RegistrationError, RegistrationProvider, RegistryBuilder,
+    InteractionEmbed, InteractionHandler, InteractionHandlerError, InteractionMessageDelivery,
+    InteractionMessageReceipt, InteractionOption, InteractionRequest, InteractionResponder,
+    InteractionResponse, InteractionValue, RegistrationError, RegistrationProvider,
+    RegistryBuilder,
 };
 
 #[path = "info_provider/calibration.rs"]
@@ -228,6 +229,20 @@ struct InfoHandler {
 struct LeaderboardSession {
     view: Arc<Mutex<UnifiedLeaderboardView<InfoLeaderboardRepository>>>,
     last_tab_click: Mutex<BTreeMap<u64, Instant>>,
+    /// Bumped on every accepted interaction so the timer armed for an earlier
+    /// one expires nothing. The legacy view measured its timeout from the last
+    /// interaction, not from creation.
+    expiry: Mutex<LeaderboardExpiry>,
+}
+
+#[derive(Default)]
+struct LeaderboardExpiry {
+    generation: u64,
+    receipt: Option<InteractionMessageReceipt>,
+    /// The responder that created the followup. Deleting an interaction
+    /// followup goes through the token that produced it, so a later
+    /// component's responder cannot stand in for it.
+    owner: Option<Arc<dyn InteractionResponder>>,
 }
 
 #[derive(Debug, Default)]
@@ -313,6 +328,13 @@ impl InteractionHandler for InfoHandler {
             InteractionRequest::Modal { .. } => Err("info extension has no modal routes".into()),
         }
     }
+}
+
+/// How a leaderboard's candidate ids were classified: from the guild's member
+/// cache snapshot, or not at all because this transport keeps no cache.
+enum MemberResolution {
+    Snapshot(GuildMemberDirectory),
+    Uncached(Vec<i64>),
 }
 
 impl InfoHandler {
@@ -445,6 +467,7 @@ impl InfoHandler {
         let session = Arc::new(LeaderboardSession {
             view: Arc::clone(&view),
             last_tab_click: Mutex::new(BTreeMap::new()),
+            expiry: Mutex::new(LeaderboardExpiry::default()),
         });
         self.views
             .lock()
@@ -459,26 +482,67 @@ impl InfoHandler {
                 return Err(response_error(error));
             }
         };
-        self.schedule_expiry(view_id, receipt, responder);
+        if let Ok(views) = self.views.lock()
+            && let Some(session) = views.get(&view_id)
+            && let Ok(mut expiry) = session.expiry.lock()
+        {
+            expiry.receipt = receipt;
+            expiry.owner = Some(Arc::clone(&responder));
+        }
+        self.schedule_expiry(view_id, 0, responder);
         Ok(())
     }
 
+    /// Classify every leaderboard candidate against the guild's member cache.
+    ///
+    /// This used to issue one live member request per unresolved candidate,
+    /// sequentially, on every `/leaderboard`: the candidate set is the union of
+    /// players, bettors, tip senders and recipients, and trivia participants,
+    /// so every departed player cost a round trip. Python filters against a
+    /// single `guild.members` snapshot, and so does this.
     async fn member_directory(
         &self,
         guild_id: u64,
         signed_guild_id: Option<i64>,
     ) -> Result<GuildMemberDirectory, InteractionHandlerError> {
         let repository = self.leaderboard.clone();
-        let ids = tokio::task::spawn_blocking(move || {
-            repository
+        let discord = Arc::clone(&self.discord);
+        let resolution = tokio::task::spawn_blocking(move || {
+            let ids = repository
                 .candidate_discord_ids(signed_guild_id)
-                .map_err(|error| error.to_string())
+                .map_err(|error| error.to_string())?;
+            Ok::<_, String>(match discord.cached_guild_member_display_names(guild_id)? {
+                // A candidate absent from the snapshot has left the guild
+                // and is simply not listed.
+                Some(names) => MemberResolution::Snapshot(GuildMemberDirectory::new(
+                    ids.into_iter().filter_map(|discord_id| {
+                        let user_id = u64::try_from(discord_id).ok()?;
+                        Some((discord_id, names.get(&user_id)?.clone()))
+                    }),
+                )),
+                None => MemberResolution::Uncached(ids),
+            })
         })
         .await
         .map_err(|error| {
             InteractionHandlerError::from(format!("leaderboard member-id task failed: {error}"))
         })?
         .map_err(InteractionHandlerError::from)?;
+        match resolution {
+            MemberResolution::Snapshot(directory) => Ok(directory),
+            MemberResolution::Uncached(ids) => {
+                Ok(self.member_directory_by_lookup(guild_id, ids).await)
+            }
+        }
+    }
+
+    /// Fallback for transports without a member cache: resolve each candidate
+    /// on its own, preserving the pre-snapshot behavior exactly.
+    async fn member_directory_by_lookup(
+        &self,
+        guild_id: u64,
+        ids: Vec<i64>,
+    ) -> GuildMemberDirectory {
         let mut members = Vec::with_capacity(ids.len());
         for discord_id in ids {
             let Ok(user_id) = u64::try_from(discord_id) else {
@@ -488,14 +552,13 @@ impl InfoHandler {
                 Ok(Some(member)) => members.push((discord_id, member.display_name)),
                 Ok(None) => {}
                 Err(error) => {
-                    // Python filters against a one-time cache snapshot. A
-                    // candidate that cannot be resolved is therefore absent,
-                    // not fatal to every other leaderboard entry.
+                    // A candidate that cannot be resolved is absent, not fatal
+                    // to every other leaderboard entry.
                     warn!(%error, guild_id, user_id, "unable to resolve leaderboard member");
                 }
             }
         }
-        Ok(GuildMemberDirectory::new(members))
+        GuildMemberDirectory::new(members)
     }
 
     async fn handle_leaderboard_component(
@@ -527,6 +590,10 @@ impl InfoHandler {
                 .await
                 .map_err(response_error);
         };
+        // The view is in use, so its deletion timer restarts from now -- before
+        // any await, so a timer that would otherwise fire during this handler
+        // does not delete a leaderboard the owner is actively using.
+        self.extend_expiry(view_id);
 
         match action {
             LeaderboardAction::Tab(tab) => {
@@ -662,25 +729,70 @@ impl InfoHandler {
         }
     }
 
+    /// Delete the leaderboard `view_timeout` after the last interaction.
     fn schedule_expiry(
         &self,
         view_id: u64,
-        receipt: Option<InteractionMessageReceipt>,
+        expiry_generation: u64,
         responder: Arc<dyn InteractionResponder>,
     ) {
         let views = Arc::clone(&self.views);
         let timeout = self.view_timeout;
         tokio::spawn(async move {
             tokio::time::sleep(timeout).await;
-            if let Ok(mut views) = views.lock() {
+            let session = views
+                .lock()
+                .ok()
+                .and_then(|views| views.get(&view_id).cloned());
+            let Some(session) = session else {
+                return;
+            };
+            let receipt = match session.expiry.lock() {
+                Ok(expiry) if expiry.generation == expiry_generation => expiry.receipt,
+                // A newer interaction re-armed the timer, or the lock is
+                // poisoned; either way this timer no longer owns the view.
+                _ => return,
+            };
+            if let Ok(mut views) = views.lock()
+                && views
+                    .get(&view_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &session))
+            {
                 views.remove(&view_id);
             }
+            // Delete through the channel rather than the interaction followup:
+            // the timer restarts on every interaction, so it can fire after the
+            // interaction token's fifteen-minute life, and a token-scoped
+            // delete would 404 and leave the message behind.
             if let Some(receipt) = receipt
-                && let Err(error) = responder.delete_message(receipt).await
+                && let Err(error) = responder
+                    .delete_message(InteractionMessageReceipt {
+                        delivery: InteractionMessageDelivery::ChannelFallback,
+                        ..receipt
+                    })
+                    .await
             {
                 warn!(%error, view_id, "failed to delete expired leaderboard message");
             }
         });
+    }
+
+    /// Re-arm the expiry after an accepted component interaction.
+    fn extend_expiry(&self, view_id: u64) {
+        let armed = self
+            .views
+            .lock()
+            .ok()
+            .and_then(|views| views.get(&view_id).cloned())
+            .and_then(|session| {
+                session.expiry.lock().ok().and_then(|mut expiry| {
+                    expiry.generation = expiry.generation.wrapping_add(1);
+                    expiry.owner.clone().map(|owner| (expiry.generation, owner))
+                })
+            });
+        if let Some((generation, owner)) = armed {
+            self.schedule_expiry(view_id, generation, owner);
+        }
     }
 }
 

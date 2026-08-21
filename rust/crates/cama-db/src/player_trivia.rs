@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use cama_domain::rating::cap_glicko_rd;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::json;
 use thiserror::Error;
@@ -956,7 +957,7 @@ fn load_snapshot_from_connection(
                 balance: row.get(4)?,
                 lowest_balance_ever: row.get(5)?,
                 glicko_rating: row.get(6)?,
-                glicko_rd: row.get(7)?,
+                glicko_rd: row.get::<_, Option<f64>>(7)?.map(cap_glicko_rd),
                 openskill_mu: row.get(8)?,
                 openskill_sigma: row.get(9)?,
                 last_match_unix: row.get(10)?,

@@ -62,9 +62,10 @@ use cama_db::shop_runtime::{
     HostileDestination as DbHostileDestination, HostileLossRequest as DbHostileLossRequest,
     ShopRuntimeRepository,
 };
+use cama_db::tax_repository::{TaxLedgerEntry, TaxPlayerSnapshot, TaxRepository};
 use cama_db::tip_repository::TipRepository;
 use cama_db::wheel_spin_repository::{NewWheelSpin, WheelSpinRepository};
-use cama_domain::embed_safety::{FIELD_VALUE_LIMIT, truncate_field};
+use cama_domain::embed_safety::{FIELD_VALUE_LIMIT, MAX_FIELDS, TOTAL_LIMIT, truncate_field};
 use cama_domain::formatting::JOPACOIN_EMOTE;
 use cama_domain::mana::{ManaEffects, format_mana_badge};
 use cama_domain::pet_evolution::PetActivity;
@@ -690,6 +691,7 @@ impl NeonEventPort for BettingSqliteNeonEventPort {
 }
 
 const COMPONENT_PREFIX: &str = "betting:";
+const BALANCE_COMPONENT_PREFIX: &str = "betting:balance:";
 const DISBURSE_COMPONENT_PREFIX: &str = "disburse:";
 const TOWN_TRIAL_COMPONENT_PREFIX: &str = "tt_";
 const DISCOVER_COMPONENT_PREFIX: &str = "disc_";
@@ -699,6 +701,9 @@ const MANAGE_GUILD_PERMISSION: u64 = 1 << 5;
 const DEFAULT_RATE_WINDOW: Duration = Duration::from_secs(10);
 const DISBURSE_VOTES_PAGE_SIZE: usize = 15;
 const DISBURSE_VOTES_TTL: Duration = Duration::from_secs(300);
+const BALANCE_MARKET_PAGE_SIZE: usize = 4;
+const BALANCE_LEDGER_PAGE_SIZE: usize = 6;
+const BALANCE_VIEW_TTL: Duration = Duration::from_secs(300);
 const BETTING_NEON_DELETE_DELAY: Duration = Duration::from_secs(60);
 // Python waits for the animation and then gives Discord half a second before
 // adding the result embed to the attachment-only message.
@@ -731,11 +736,15 @@ pub struct BettingRuntimeConfig {
     pub loan_max_amount: i64,
     pub tip_fee_rate: f64,
     pub minigame_jc_delta_scale: f64,
+    pub prediction_contract_value: i64,
+    pub prediction_initial_fair_default: i64,
     /// Admit negative-ID database fixtures to wheel rank mechanics. Real
     /// Discord IDs remain checked against the live guild member snapshot.
     pub synthetic_members_enabled: bool,
     pub disburse_min_fund: i64,
     pub disburse_quorum_percentage: f64,
+    /// Recency window that admits a player to the `lottery` disbursement draw.
+    pub lottery_activity_days: i64,
     /// Daily economy-event policy is read from the same existing-schema
     /// controller used by match/shop settlement.  Keeping the configuration
     /// here makes `/gamba` use the active event without a second event model.
@@ -777,9 +786,12 @@ impl BettingRuntimeConfig {
             loan_max_amount: values.loan_max_amount,
             tip_fee_rate: values.tip_fee_rate,
             minigame_jc_delta_scale: values.minigame_jc_delta_scale,
+            prediction_contract_value: values.prediction_contract_value,
+            prediction_initial_fair_default: values.prediction_initial_fair_default,
             synthetic_members_enabled: values.gamba_synthetic_members_enabled,
             disburse_min_fund: values.disburse_min_fund,
             disburse_quorum_percentage: values.disburse_quorum_percentage,
+            lottery_activity_days: values.lottery_activity_days,
             economy_events_enabled: values.economy_events_enabled,
             economy_normal_annual_rate: values.economy_normal_annual_rate,
             economy_inflation_ceiling: values.economy_inflation_ceiling,
@@ -860,6 +872,11 @@ impl BettingRegistrationProvider {
         let neon_port: Arc<dyn NeonEventPort> = Arc::new(BettingSqliteNeonEventPort {
             repository: NeonEventRepository::new(&database_path),
         });
+        let tax_repository = TaxRepository::new(
+            &database_path,
+            config.prediction_contract_value,
+            config.prediction_initial_fair_default,
+        );
         let mut neon = NeonDegenService::with_event_port(fastrand::u64(..), neon_port);
         neon.set_enabled(config.neon_degen_enabled);
         neon.set_cooldown_seconds(
@@ -874,6 +891,7 @@ impl BettingRegistrationProvider {
         Self {
             handler: Arc::new(BettingInteractionHandler {
                 database_path,
+                tax_repository,
                 config,
                 discord,
                 vanity_tax,
@@ -883,6 +901,7 @@ impl BettingRegistrationProvider {
                 wheel_interactions: Mutex::new(BTreeMap::new()),
                 wheel_in_flight: Mutex::new(BTreeSet::new()),
                 disburse_vote_pages: Mutex::new(BTreeMap::new()),
+                balance_views: Mutex::new(BTreeMap::new()),
             }),
         }
     }
@@ -1034,7 +1053,7 @@ impl RegistrationProvider for BettingRegistrationProvider {
         })?;
         registry.command(CommandSpec {
             name: "balance".to_owned(),
-            description: "Check your jopacoin balance".to_owned(),
+            description: "View your Jopacoin portfolio, exposure, and activity".to_owned(),
             options: Vec::new(),
             handler: self.handler.clone(),
         })?;
@@ -2541,8 +2560,48 @@ struct PendingDisburseVotes {
     created_at: Instant,
 }
 
+#[derive(Clone, Debug)]
+struct PendingBalanceView {
+    user_id: i64,
+    guild_id: i64,
+    display_name: String,
+    current_page: usize,
+    created_at: Instant,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BalancePageDirection {
+    Previous,
+    Next,
+}
+
+impl BalancePageDirection {
+    fn apply(self, current_page: usize) -> usize {
+        match self {
+            Self::Previous => current_page.saturating_sub(1).max(1),
+            Self::Next => current_page.saturating_add(1),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BalancePageSection {
+    Overview,
+    Markets { page: usize, total_pages: usize },
+    Activity { page: usize, total_pages: usize },
+}
+
+#[derive(Clone, Debug)]
+struct BalanceStatement {
+    snapshot: TaxPlayerSnapshot,
+    page: usize,
+    total_pages: usize,
+    section: BalancePageSection,
+}
+
 struct BettingInteractionHandler {
     database_path: PathBuf,
+    tax_repository: TaxRepository,
     config: BettingRuntimeConfig,
     discord: Arc<dyn DiscordTransport>,
     vanity_tax: Arc<dyn BettingVanityTaxPort>,
@@ -2555,6 +2614,7 @@ struct BettingInteractionHandler {
     /// failure to retry without permitting a concurrent double settlement.
     wheel_in_flight: Mutex<BTreeSet<String>>,
     disburse_vote_pages: Mutex<BTreeMap<String, PendingDisburseVotes>>,
+    balance_views: Mutex<BTreeMap<u64, PendingBalanceView>>,
 }
 
 #[async_trait]
@@ -2578,6 +2638,10 @@ impl InteractionHandler for BettingInteractionHandler {
 
 impl BettingInteractionHandler {
     async fn expire_pending_views(&self) -> Result<usize, String> {
+        self.balance_views
+            .lock()
+            .map_err(|_| "balance view state is poisoned".to_owned())?
+            .retain(|_, view| view.created_at.elapsed() <= BALANCE_VIEW_TTL);
         let expired = {
             let interactions = self
                 .wheel_interactions
@@ -2683,6 +2747,7 @@ impl BettingInteractionHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
         let InteractionRequest::Command {
+            interaction_id,
             name,
             user_id,
             user_display_name,
@@ -2717,8 +2782,15 @@ impl BettingInteractionHandler {
                 .await
             }
             "balance" => {
-                self.balance(user_id, user_display_name, guild_id, channel_id, &responder)
-                    .await
+                self.balance(
+                    interaction_id,
+                    user_id,
+                    user_display_name,
+                    guild_id,
+                    channel_id,
+                    &responder,
+                )
+                .await
             }
             "gamba" => {
                 self.gamba(
@@ -2846,6 +2918,17 @@ impl BettingInteractionHandler {
         else {
             return Err("invalid betting component payload".to_owned());
         };
+        if custom_id.starts_with(BALANCE_COMPONENT_PREFIX) {
+            let (session_id, direction) = parse_balance_component(&custom_id)?;
+            let guild_id = guild_id
+                .map(|value| signed_id(value, "guild"))
+                .transpose()?
+                .ok_or_else(|| GUILD_ONLY_MESSAGE.to_owned())?;
+            let user_id = signed_id(user_id, "user")?;
+            return self
+                .balance_component(session_id, direction, user_id, guild_id, &responder)
+                .await;
+        }
         if let Some((page_key, page_action)) = parse_disbursement_page_component(&custom_id) {
             let guild_id = guild_id
                 .map(|value| signed_id(value, "guild"))
@@ -3753,9 +3836,7 @@ impl BettingInteractionHandler {
         if let Some(lock) = lock_until {
             odds_text.push_str(&format!("\nBetting closes <t:{lock}:R>"));
         }
-        let mut embed = InteractionEmbed::titled(overview.title)
-            .color(0xF1_C4_0F)
-            .field("Current Odds", odds_text, false);
+        let mut fields = vec![("Current Odds".to_owned(), odds_text)];
         for (team, label) in [
             (BettingTeam::Radiant, "🟢 Radiant"),
             (BettingTeam::Dire, "🔴 Dire"),
@@ -3767,9 +3848,8 @@ impl BettingInteractionHandler {
             if rows.is_empty() {
                 continue;
             }
-            let mut lines = rows
+            let lines = rows
                 .iter()
-                .take(15)
                 .enumerate()
                 .map(|(index, bet)| {
                     let bettor = if is_admin || !betting_open {
@@ -3793,12 +3873,7 @@ impl BettingInteractionHandler {
                     )
                 })
                 .collect::<Vec<_>>();
-            if rows.len() > 15 {
-                lines.push(format!("... +{} more", rows.len() - 15));
-            }
-            for (name, value) in bounded_bet_team_fields(label, rows.len(), &lines) {
-                embed = embed.field(name, value, false);
-            }
+            fields.extend(bounded_bet_team_fields(label, rows.len(), &lines));
         }
         let summary_name = if mode == BettingMode::Pool {
             "Pool Summary"
@@ -3810,8 +3885,8 @@ impl BettingInteractionHandler {
         } else {
             "Total staked"
         };
-        embed = embed.field(
-            summary_name,
+        fields.push((
+            summary_name.to_owned(),
             format!(
                 "**{summary_total_label}:** {total} {} effective\nRadiant: {} ({:.0}%) | Dire: {} ({:.0}%)",
                 JOPACOIN_EMOTE,
@@ -3820,29 +3895,29 @@ impl BettingInteractionHandler {
                 totals.dire,
                 pct(totals.dire, total)
             ),
-            false,
-        );
-        responder
-            .followup(InteractionResponse::message("").embed(embed).ephemeral())
-            .await
-            .map_err(|error| error.to_string())
+        ));
+        for embed in paginated_bet_embeds(&overview.title, fields) {
+            responder
+                .followup(InteractionResponse::message("").embed(embed).ephemeral())
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     async fn balance(
         &self,
+        interaction_id: u64,
         user_id: i64,
-        _display_name: String,
+        display_name: String,
         guild_id: Option<i64>,
         channel_id: Option<u64>,
         responder: &Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
-        if !self.take_rate(
-            "balance",
-            guild_id.unwrap_or_default(),
-            user_id,
-            5,
-            DEFAULT_RATE_WINDOW,
-        )? {
+        let Some(guild_id) = guild_id else {
+            return respond_ephemeral(responder, GUILD_ONLY_MESSAGE).await;
+        };
+        if !self.take_rate("balance", guild_id, user_id, 5, DEFAULT_RATE_WINDOW)? {
             return respond_ephemeral(responder, "Please wait before using `/balance` again.")
                 .await;
         }
@@ -3850,105 +3925,157 @@ impl BettingInteractionHandler {
             .defer(true)
             .await
             .map_err(|error| error.to_string())?;
+        let tax = self.tax_repository.clone();
         let path = self.database_path.clone();
-        let details = sqlite("betting balance read", move || {
-            let players = PlayerRepository::new(&path);
-            let player = players
-                .get_by_id(user_id, guild_id)
-                .map_err(|error| error.to_string())?;
-            let bankruptcy = BankruptcyRepository::new(&path)
-                .get_state(user_id, guild_id)
-                .map_err(|error| error.to_string())?;
-            let loan = LoanRepository::new(&path)
-                .get_state(user_id, guild_id)
-                .map_err(|error| error.to_string())?;
-            Ok::<_, String>((player, bankruptcy, loan))
+        let loaded = sqlite("betting balance portfolio read", move || {
+            let statement = load_balance_statement(&tax, user_id, guild_id, 1)?;
+            let effects = active_mana_effects(&path, user_id, Some(guild_id), unix_seconds()?)
+                .unwrap_or_default();
+            Ok::<_, String>((statement, effects))
         })
-        .await?;
-        let Some(player) = details.0 else {
+        .await;
+        let (statement, effects) = match loaded {
+            Ok(loaded) => loaded,
+            Err(_) => {
+                return followup_ephemeral(
+                    responder,
+                    "Couldn't load your Jopacoin portfolio right now.",
+                )
+                .await;
+            }
+        };
+        let Some(statement) = statement else {
             return followup_ephemeral(
                 responder,
                 "You need to /player register before checking your balance.",
             )
             .await;
         };
-        let balance = player.jopacoin_balance;
-        let penalty = details
-            .1
-            .filter(|state| state.penalty_games_remaining > 0)
-            .map(|state| {
-                format!(
-                    "\n**Bankruptcy penalty:** {:.0}% win bonus for {} more win(s)",
-                    self.config.bankruptcy_penalty_rate * 100.0,
-                    state.penalty_games_remaining
-                )
-            })
-            .unwrap_or_default();
-        let loan = details.2.map_or_else(String::new, |state| {
-            let mut content = String::new();
-            if state.outstanding_principal > 0 {
-                content.push_str(&format!(
-                    "\n⚠️ **Outstanding loan:** {} {} (repaid after next match)",
-                    state.outstanding_total().unwrap_or_default(),
-                    JOPACOIN_EMOTE
-                ));
-            }
-            if state.total_loans_taken > 0 {
-                content.push_str(&format!(
-                    "\n**Loans taken:** {} (fees paid: {})",
-                    state.total_loans_taken, state.total_fees_paid
-                ));
-            }
-            if let Some(last_loan_at) = state.last_loan_at {
-                let remaining = self.config.loan_cooldown_seconds.saturating_sub(
-                    unix_seconds()
-                        .unwrap_or_default()
-                        .saturating_sub(last_loan_at),
-                );
-                if remaining > 0 {
-                    content.push_str(&format!(
-                        "\n**Loan cooldown:** {}h {}m remaining",
-                        remaining / 3_600,
-                        (remaining % 3_600) / 60
-                    ));
-                }
-            }
-            content
-        });
-        let effects = {
-            let path = self.database_path.clone();
-            active_mana_effects(&path, user_id, guild_id, unix_seconds().unwrap_or_default())
-                .unwrap_or_default()
-        };
         let badge = format_mana_badge(Some(&effects));
-        let prefix = if badge.is_empty() {
-            String::new()
-        } else {
-            format!("{badge} ")
-        };
-        let content = if balance >= 0 {
-            format!(
-                "{prefix}<@{user_id}> has {balance} {}.{penalty}{loan}",
-                JOPACOIN_EMOTE
-            )
-        } else {
-            format!(
-                "{prefix}<@{user_id}> has **{balance}** {} (in debt)\n\
-                 Garnishment: {:.0}% of winnings go to debt repayment{penalty}{loan}\n\n\
-                 Use /economy bankruptcy to clear your debt (with penalties).\n\
-                 Use /economy loan to borrow more jopacoin (with a fee).",
-                JOPACOIN_EMOTE,
-                self.config.garnishment_rate * 100.0,
-            )
-        };
-        let response = followup_ephemeral(responder, &content).await;
-        if response.is_ok()
-            && let Some(guild_id) = guild_id
-        {
-            self.emit_balance_neon(channel_id, user_id, guild_id, balance)
+        let response = balance_statement_response(
+            interaction_id,
+            &display_name,
+            &statement,
+            badge,
+            self.config.bankruptcy_penalty_rate,
+            self.config.garnishment_rate,
+        );
+        let result = responder
+            .followup(response)
+            .await
+            .map_err(|error| error.to_string());
+        if result.is_ok() {
+            self.balance_views
+                .lock()
+                .map_err(|_| "balance view state is poisoned".to_owned())?
+                .insert(
+                    interaction_id,
+                    PendingBalanceView {
+                        user_id,
+                        guild_id,
+                        display_name,
+                        current_page: statement.page,
+                        created_at: Instant::now(),
+                    },
+                );
+            self.emit_balance_neon(channel_id, user_id, guild_id, statement.snapshot.balance)
                 .await;
         }
-        response
+        result
+    }
+
+    async fn balance_component(
+        &self,
+        session_id: u64,
+        direction: BalancePageDirection,
+        user_id: i64,
+        guild_id: i64,
+        responder: &Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        let view = self
+            .balance_views
+            .lock()
+            .map_err(|_| "balance view state is poisoned".to_owned())?
+            .get(&session_id)
+            .cloned();
+        let Some(view) = view else {
+            return respond_ephemeral(
+                responder,
+                "This balance statement expired. Run `/balance` again.",
+            )
+            .await;
+        };
+        if view.created_at.elapsed() > BALANCE_VIEW_TTL {
+            self.balance_views
+                .lock()
+                .map_err(|_| "balance view state is poisoned".to_owned())?
+                .remove(&session_id);
+            return respond_ephemeral(
+                responder,
+                "This balance statement expired. Run `/balance` again.",
+            )
+            .await;
+        }
+        if view.user_id != user_id || view.guild_id != guild_id {
+            return respond_ephemeral(
+                responder,
+                "This private balance statement belongs to another player.",
+            )
+            .await;
+        }
+        responder
+            .defer(false)
+            .await
+            .map_err(|error| error.to_string())?;
+        let requested_page = direction.apply(view.current_page);
+        let tax = self.tax_repository.clone();
+        let path = self.database_path.clone();
+        let loaded = sqlite("betting balance page read", move || {
+            let statement = load_balance_statement(&tax, user_id, guild_id, requested_page)?;
+            let effects = active_mana_effects(&path, user_id, Some(guild_id), unix_seconds()?)
+                .unwrap_or_default();
+            Ok::<_, String>((statement, effects))
+        })
+        .await;
+        let (statement, effects) = match loaded {
+            Ok(loaded) => loaded,
+            Err(_) => {
+                return followup_ephemeral(
+                    responder,
+                    "Couldn't refresh your Jopacoin portfolio right now.",
+                )
+                .await;
+            }
+        };
+        let Some(statement) = statement else {
+            return followup_ephemeral(
+                responder,
+                "Your player registration is no longer available in this server.",
+            )
+            .await;
+        };
+        let badge = format_mana_badge(Some(&effects));
+        responder
+            .edit_original(balance_statement_response(
+                session_id,
+                &view.display_name,
+                &statement,
+                badge,
+                self.config.bankruptcy_penalty_rate,
+                self.config.garnishment_rate,
+            ))
+            .await
+            .map_err(|error| error.to_string())?;
+        if let Some(current) = self
+            .balance_views
+            .lock()
+            .map_err(|_| "balance view state is poisoned".to_owned())?
+            .get_mut(&session_id)
+        {
+            current.current_page = statement.page;
+            current.created_at = Instant::now();
+        }
+        Ok(())
     }
 
     async fn emit_neon_result(&self, channel_id: u64, result: NeonResult) {
@@ -5827,6 +5954,7 @@ impl BettingInteractionHandler {
             .to_owned();
         let path = self.database_path.clone();
         let fund = proposal.fund_amount;
+        let days = self.config.lottery_activity_days;
         sqlite("disbursement execution", move || {
             let repository = DisbursementRepository::new(&path);
             match method.as_str() {
@@ -5865,10 +5993,22 @@ impl BettingInteractionHandler {
                     })
                 }
                 _ => {
-                    let players = PlayerRepository::new(&path)
+                    let player_repository = PlayerRepository::new(&path);
+                    let players = player_repository
                         .get_all(Some(guild_id))
                         .map_err(|error| error.to_string())?;
-                    let distributions = calculate_distributions(&method, fund, &players);
+                    // Only the lottery needs the activity roster, and it is a
+                    // second query, so it stays behind the method check.
+                    let lottery_winner = if method == "lottery" {
+                        let candidates = player_repository
+                            .lottery_candidates(Some(guild_id), &lottery_activity_cutoff(days))
+                            .map_err(|error| error.to_string())?;
+                        draw_lottery_winner(&candidates)
+                    } else {
+                        None
+                    };
+                    let distributions =
+                        calculate_distributions(&method, fund, &players, lottery_winner);
                     let total = repository
                         .complete_and_disburse_atomic(Some(guild_id), &method, &distributions)
                         .map_err(|error| error.to_string())?;
@@ -6021,6 +6161,31 @@ fn bounded_bet_team_fields(
             (name, value)
         })
         .collect()
+}
+
+fn paginated_bet_embeds(title: &str, fields: Vec<(String, String)>) -> Vec<InteractionEmbed> {
+    let title_chars = title.chars().count();
+    let mut embeds = Vec::new();
+    let mut embed = InteractionEmbed::titled(title).color(0xF1_C4_0F);
+    let mut total_chars = title_chars;
+
+    for (name, value) in fields {
+        let field_chars = name.chars().count() + value.chars().count();
+        if !embed.fields.is_empty()
+            && (embed.fields.len() == MAX_FIELDS || total_chars + field_chars > TOTAL_LIMIT)
+        {
+            embeds.push(embed);
+            embed = InteractionEmbed::titled(title).color(0xF1_C4_0F);
+            total_chars = title_chars;
+        }
+        total_chars += field_chars;
+        embed = embed.field(name, value, false);
+    }
+
+    if !embed.fields.is_empty() {
+        embeds.push(embed);
+    }
+    embeds
 }
 
 /// Match Python's `int(retry_after)` response formatting: durations are
@@ -6384,7 +6549,54 @@ fn disbursement_response(execution: &DisbursementExecution, forced: bool) -> Int
     )
 }
 
-fn calculate_distributions(method: &str, fund: i64, players: &[Player]) -> Vec<(i64, i64)> {
+/// Players excluded from the redistribution methods that deliberately skip the
+/// wealthiest accounts (`stimulus`, `social_security`).
+///
+/// Mirrors the legacy `LIMIT 3` sub-select over non-debtors ordered by balance
+/// descending, with a stable discord-id tiebreak so equal balances resolve the
+/// same way on every call.
+fn top_richest_non_debtors(players: &[Player], count: usize) -> BTreeSet<i64> {
+    let mut ranked = players
+        .iter()
+        .filter(|player| player.jopacoin_balance >= 0)
+        .filter_map(|player| player.discord_id.map(|id| (id, player.jopacoin_balance)))
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
+    ranked
+        .into_iter()
+        .take(count)
+        .map(|(discord_id, _)| discord_id)
+        .collect()
+}
+
+/// The number of top balances `stimulus` and `social_security` exclude.
+const DISBURSE_RICHEST_EXCLUSION: usize = 3;
+
+/// ISO-8601 cutoff admitting players whose last match is within `days`.
+///
+/// A non-positive window would admit nobody, so it is clamped to zero, which
+/// keeps only players who played at or after "now".
+fn lottery_activity_cutoff(days: i64) -> String {
+    (Utc::now() - chrono::Duration::days(days.max(0))).to_rfc3339()
+}
+
+/// Uniformly draws one lottery winner, mirroring the legacy `random.choice`.
+fn draw_lottery_winner(candidates: &[i64]) -> Option<i64> {
+    if candidates.is_empty() {
+        return None;
+    }
+    candidates.get(fastrand::usize(..candidates.len())).copied()
+}
+
+/// `lottery_winner` is drawn by the caller from the recently-active roster so
+/// the pure calculation stays deterministic under test; see
+/// `draw_lottery_winner`.
+fn calculate_distributions(
+    method: &str,
+    fund: i64,
+    players: &[Player],
+    lottery_winner: Option<i64>,
+) -> Vec<(i64, i64)> {
     if fund <= 0 {
         return Vec::new();
     }
@@ -6408,35 +6620,29 @@ fn calculate_distributions(method: &str, fund: i64, players: &[Player]) -> Vec<(
             .into_iter()
             .collect(),
         "stimulus" => {
+            // Legacy contract: non-debtors who have actually played, ordered by
+            // balance descending with the top three skipped.
             let mut eligible = players
                 .iter()
                 .filter(|player| player.jopacoin_balance >= 0)
+                .filter(|player| player.wins.saturating_add(player.losses) > 0)
                 .filter_map(|player| player.discord_id.map(|id| (id, player.jopacoin_balance)))
                 .collect::<Vec<_>>();
-            if eligible.len() < 4 {
+            if eligible.len() <= DISBURSE_RICHEST_EXCLUSION {
                 return Vec::new();
             }
             eligible.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
-            let eligible = &eligible[3..];
+            let eligible = &eligible[DISBURSE_RICHEST_EXCLUSION..];
             even_unlimited_distributions(fund, eligible)
         }
-        "lottery" => players
-            .iter()
-            .filter_map(|player| player.discord_id)
-            .collect::<Vec<_>>()
-            .get(
-                usize::try_from(unix_seconds().unwrap_or_default().unsigned_abs())
-                    .unwrap_or_default()
-                    % players
-                        .iter()
-                        .filter(|player| player.discord_id.is_some())
-                        .count()
-                        .max(1),
-            )
-            .copied()
+        // The winner is drawn at random from the recently-active roster before
+        // this call; an empty roster disburses nothing.
+        "lottery" => lottery_winner
             .map(|discord_id| vec![(discord_id, fund)])
             .unwrap_or_default(),
         "social_security" => {
+            // Legacy contract excludes the same top three balances as stimulus.
+            let excluded = top_richest_non_debtors(players, DISBURSE_RICHEST_EXCLUSION);
             let mut eligible = players
                 .iter()
                 .filter_map(|player| {
@@ -6444,6 +6650,7 @@ fn calculate_distributions(method: &str, fund: i64, players: &[Player]) -> Vec<(
                         .discord_id
                         .map(|discord_id| (discord_id, player.wins.saturating_add(player.losses)))
                 })
+                .filter(|(discord_id, _)| !excluded.contains(discord_id))
                 .filter(|(_, games)| *games > 0)
                 .collect::<Vec<_>>();
             if eligible.is_empty() {
@@ -6469,7 +6676,7 @@ fn calculate_distributions(method: &str, fund: i64, players: &[Player]) -> Vec<(
         "richest" => players
             .iter()
             .filter_map(|player| player.discord_id.map(|id| (id, player.jopacoin_balance)))
-            .max_by(|left, right| right.1.cmp(&left.1).then(right.0.cmp(&left.0)))
+            .max_by(|left, right| left.1.cmp(&right.1).then(right.0.cmp(&left.0)))
             .map(|(discord_id, _)| vec![(discord_id, fund)])
             .unwrap_or_default(),
         _ => Vec::new(),
@@ -6651,6 +6858,492 @@ fn qualified_name(name: &str, options: &[InteractionOption]) -> String {
         };
     }
     parts.join(" ")
+}
+
+fn parse_balance_component(custom_id: &str) -> Result<(u64, BalancePageDirection), String> {
+    let mut parts = custom_id.split(':');
+    if parts.next() != Some("betting") || parts.next() != Some("balance") {
+        return Err("invalid balance component prefix".to_owned());
+    }
+    let session_id = parts
+        .next()
+        .ok_or_else(|| "missing balance component session".to_owned())?
+        .parse::<u64>()
+        .map_err(|_| "invalid balance component session".to_owned())?;
+    let direction = match parts.next() {
+        Some("previous") => BalancePageDirection::Previous,
+        Some("next") => BalancePageDirection::Next,
+        _ => return Err("invalid balance component direction".to_owned()),
+    };
+    if parts.next().is_some() {
+        return Err("invalid balance component suffix".to_owned());
+    }
+    Ok((session_id, direction))
+}
+
+fn load_balance_statement(
+    repository: &TaxRepository,
+    user_id: i64,
+    guild_id: i64,
+    requested_page: usize,
+) -> Result<Option<BalanceStatement>, String> {
+    let Some(mut snapshot) = repository
+        .player_snapshot(
+            user_id,
+            guild_id,
+            BALANCE_LEDGER_PAGE_SIZE,
+            0,
+            unix_seconds()?,
+        )
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    let market_pages = snapshot
+        .prediction_exposure
+        .positions
+        .len()
+        .div_ceil(BALANCE_MARKET_PAGE_SIZE);
+    let ledger_entries = usize::try_from(snapshot.recent_ledger_total.max(0)).unwrap_or(usize::MAX);
+    let ledger_pages = ledger_entries.div_ceil(BALANCE_LEDGER_PAGE_SIZE).max(1);
+    let total_pages = 1_usize
+        .saturating_add(market_pages)
+        .saturating_add(ledger_pages);
+    let page = requested_page.clamp(1, total_pages);
+    let section = if page == 1 {
+        BalancePageSection::Overview
+    } else if page <= market_pages.saturating_add(1) {
+        BalancePageSection::Markets {
+            page: page - 1,
+            total_pages: market_pages,
+        }
+    } else {
+        BalancePageSection::Activity {
+            page: page - market_pages - 1,
+            total_pages: ledger_pages,
+        }
+    };
+    if let BalancePageSection::Activity {
+        page: activity_page,
+        ..
+    } = section
+    {
+        let offset = (activity_page - 1).saturating_mul(BALANCE_LEDGER_PAGE_SIZE);
+        if offset > 0 {
+            snapshot.recent_ledger = repository
+                .recent_ledger(guild_id, BALANCE_LEDGER_PAGE_SIZE, offset, Some(user_id))
+                .map_err(|error| error.to_string())?;
+            snapshot.recent_ledger_offset = offset;
+        }
+    }
+    Ok(Some(BalanceStatement {
+        snapshot,
+        page,
+        total_pages,
+        section,
+    }))
+}
+
+fn balance_statement_response(
+    session_id: u64,
+    display_name: &str,
+    statement: &BalanceStatement,
+    mana_badge: &str,
+    bankruptcy_penalty_rate: f64,
+    garnishment_rate: f64,
+) -> InteractionResponse {
+    InteractionResponse::message("")
+        .embed(balance_statement_embed(
+            display_name,
+            statement,
+            mana_badge,
+            bankruptcy_penalty_rate,
+            garnishment_rate,
+        ))
+        .ephemeral()
+        .without_mentions()
+        .action_row(balance_statement_buttons(session_id, statement))
+}
+
+fn balance_statement_embed(
+    display_name: &str,
+    statement: &BalanceStatement,
+    mana_badge: &str,
+    bankruptcy_penalty_rate: f64,
+    garnishment_rate: f64,
+) -> InteractionEmbed {
+    let snapshot = &statement.snapshot;
+    let title = format!("💰 Jopacoin Portfolio — {display_name}");
+    let section_label = match statement.section {
+        BalancePageSection::Overview => "Overview".to_owned(),
+        BalancePageSection::Markets { page, total_pages } => {
+            format!("Markets {page}/{total_pages}")
+        }
+        BalancePageSection::Activity { page, total_pages } => {
+            format!("Activity {page}/{total_pages}")
+        }
+    };
+    let footer = format!(
+        "Private statement • Page {}/{} • {section_label}",
+        statement.page, statement.total_pages
+    );
+    match statement.section {
+        BalancePageSection::Overview => balance_overview_embed(
+            title,
+            footer,
+            snapshot,
+            mana_badge,
+            bankruptcy_penalty_rate,
+            garnishment_rate,
+        ),
+        BalancePageSection::Markets { page, total_pages } => {
+            balance_markets_embed(title, footer, snapshot, page, total_pages)
+        }
+        BalancePageSection::Activity { page, total_pages } => {
+            balance_activity_embed(title, footer, snapshot, page, total_pages)
+        }
+    }
+}
+
+fn balance_overview_embed(
+    title: String,
+    footer: String,
+    snapshot: &TaxPlayerSnapshot,
+    mana_badge: &str,
+    bankruptcy_penalty_rate: f64,
+    garnishment_rate: f64,
+) -> InteractionEmbed {
+    let summary = &snapshot.prediction_exposure.summary;
+    let market_contracts = summary.yes_contracts.saturating_add(summary.no_contracts);
+    let marked_portfolio = snapshot.balance.saturating_add(summary.expected_payout);
+    let best_case_portfolio = snapshot.balance.saturating_add(summary.max_payout);
+    let cash_asset = snapshot.balance.max(0);
+    let market_asset = summary.expected_payout.max(0);
+    let total_assets = cash_asset.saturating_add(market_asset);
+    let cash_share = balance_asset_share(cash_asset, total_assets);
+    let market_share = balance_asset_share(market_asset, total_assets);
+    let badge = if mana_badge.is_empty() {
+        String::new()
+    } else {
+        format!("{mana_badge}\n")
+    };
+    let mut status = format!(
+        "Bankruptcies: **{}** • Penalty games: **{}**\nLoans taken: **{}** • Fees paid: {}",
+        grouped_jc(snapshot.bankruptcy_count),
+        grouped_jc(snapshot.penalty_games_remaining),
+        grouped_jc(snapshot.total_loans_taken),
+        portfolio_jc(snapshot.total_fees_paid),
+    );
+    if snapshot.penalty_games_remaining > 0 {
+        status.push_str(&format!(
+            "\nBankruptcy modifier: **{:.0}% win bonus** for {} more win(s)",
+            bankruptcy_penalty_rate * 100.0,
+            grouped_jc(snapshot.penalty_games_remaining),
+        ));
+    }
+    if snapshot.balance < 0 {
+        status.push_str(&format!(
+            "\nGarnishment: **{:.0}% of winnings** goes to debt repayment.",
+            garnishment_rate * 100.0,
+        ));
+    }
+    InteractionEmbed::titled(title)
+        .description(format!(
+            "{badge}A live, private view of your wallet, obligations, market positions, and ledger activity."
+        ))
+        .color(0xF1C40F)
+        .field(
+            "Estimated Portfolio",
+            format!(
+                "**{}**\nWallet + current market value\nBest case: {}",
+                portfolio_jc(marked_portfolio),
+                portfolio_jc(best_case_portfolio),
+            ),
+            true,
+        )
+        .field(
+            "Wallet",
+            format!(
+                "Cash: {}\nVisible debt: {}",
+                portfolio_jc(snapshot.balance),
+                portfolio_jc(snapshot.visible_debt),
+            ),
+            true,
+        )
+        .field(
+            "Market Exposure",
+            format!(
+                "{} market(s) • {} contracts\nBasis: {}\nValue: {} • P/L: {}",
+                grouped_jc(summary.markets),
+                grouped_jc(market_contracts),
+                portfolio_jc(summary.cost_basis),
+                portfolio_jc(summary.expected_payout),
+                signed_portfolio_jc(summary.ev),
+            ),
+            true,
+        )
+        .field(
+            "Asset Breakdown",
+            format!(
+                "`Wallet  {}` **{:>3}%**  {}\n`Markets {}` **{:>3}%**  {}\n**Tracked assets:** {}",
+                allocation_bar(cash_share),
+                cash_share,
+                portfolio_jc(cash_asset),
+                allocation_bar(market_share),
+                market_share,
+                portfolio_jc(market_asset),
+                portfolio_jc(total_assets),
+            ),
+            false,
+        )
+        .field(
+            "Liabilities & Capital at Risk",
+            format!(
+                "Wallet debt: {} • Loans: {}\nDark Bargains: {} across {} active\nMarket basis at risk: {}\n**Total tax-ledger exposure:** {}",
+                portfolio_jc(snapshot.visible_debt),
+                portfolio_jc(snapshot.loan_total),
+                portfolio_jc(snapshot.dark_bargain_due),
+                grouped_jc(snapshot.dark_bargain_count),
+                portfolio_jc(summary.cost_basis),
+                portfolio_jc(snapshot.effective_obligations),
+            ),
+            false,
+        )
+        .field("Account Status", status, false)
+        .footer(footer)
+}
+
+fn balance_markets_embed(
+    title: String,
+    footer: String,
+    snapshot: &TaxPlayerSnapshot,
+    page: usize,
+    total_pages: usize,
+) -> InteractionEmbed {
+    let summary = &snapshot.prediction_exposure.summary;
+    let mut embed = InteractionEmbed::titled(format!("{title} • Open Markets"))
+        .description(format!(
+            "**{} positions** • Basis {} • Current value {} • P/L {} • Max payout {}",
+            grouped_jc(summary.markets),
+            portfolio_jc(summary.cost_basis),
+            portfolio_jc(summary.expected_payout),
+            signed_portfolio_jc(summary.ev),
+            portfolio_jc(summary.max_payout),
+        ))
+        .color(0x3498DB)
+        .footer(footer);
+    let start = (page - 1).saturating_mul(BALANCE_MARKET_PAGE_SIZE);
+    let end = snapshot
+        .prediction_exposure
+        .positions
+        .len()
+        .min(start.saturating_add(BALANCE_MARKET_PAGE_SIZE));
+    for position in &snapshot.prediction_exposure.positions[start..end] {
+        let contracts = position.yes_contracts.saturating_add(position.no_contracts);
+        let position_status = title_case_token(&position.status);
+        embed = embed.field(
+            format!(
+                "#{} • {}",
+                position.prediction_id,
+                short_balance_text(&position.question, 82),
+            ),
+            format!(
+                "`{position_status}` • YES **{}¢** / NO **{}¢**\nYES: **{}** contracts • basis {}\nNO: **{}** contracts • basis {}\n**{} contracts** • basis {} → value {} ({}) • max {}",
+                position.current_price,
+                100_i64.saturating_sub(position.current_price),
+                grouped_jc(position.yes_contracts),
+                portfolio_jc(position.yes_cost_basis),
+                grouped_jc(position.no_contracts),
+                portfolio_jc(position.no_cost_basis),
+                grouped_jc(contracts),
+                portfolio_jc(position.cost_basis),
+                portfolio_jc(position.expected_payout),
+                signed_portfolio_jc(position.ev),
+                portfolio_jc(position.max_payout),
+            ),
+            false,
+        );
+    }
+    debug_assert!(page <= total_pages);
+    embed
+}
+
+fn balance_activity_embed(
+    title: String,
+    footer: String,
+    snapshot: &TaxPlayerSnapshot,
+    page: usize,
+    total_pages: usize,
+) -> InteractionEmbed {
+    let total_entries = snapshot.recent_ledger_total.max(0);
+    let mut embed = InteractionEmbed::titled(format!("{title} • Recent Activity"))
+        .description(format!(
+            "Every wallet movement in the central economy ledger • **{} entries**",
+            grouped_jc(total_entries),
+        ))
+        .color(0x5865F2)
+        .footer(footer);
+    if snapshot.recent_ledger.is_empty() {
+        embed = embed.field("No activity yet", "Your ledger is clean and quiet.", false);
+    } else {
+        for row in &snapshot.recent_ledger {
+            let direction = if row.delta > 0 {
+                "↗"
+            } else if row.delta < 0 {
+                "↘"
+            } else {
+                "•"
+            };
+            embed = embed.field(
+                format!(
+                    "{direction} {} • <t:{}:R>",
+                    signed_portfolio_jc(row.delta),
+                    row.created_at,
+                ),
+                format!(
+                    "{}\nBalance {} → {}",
+                    balance_ledger_detail(row),
+                    portfolio_jc(row.balance_before),
+                    portfolio_jc(row.balance_after),
+                ),
+                false,
+            );
+        }
+    }
+    debug_assert!(page <= total_pages);
+    embed
+}
+
+fn balance_statement_buttons(
+    session_id: u64,
+    statement: &BalanceStatement,
+) -> InteractionActionRow {
+    InteractionActionRow::buttons(vec![
+        InteractionButton::new(format!("betting:balance:{session_id}:previous"), "Previous")
+            .emoji("◀️")
+            .style(InteractionButtonStyle::Secondary)
+            .disabled(statement.page <= 1),
+        InteractionButton::new(
+            format!("betting:balance:{session_id}:page"),
+            format!("Page {} / {}", statement.page, statement.total_pages),
+        )
+        .style(InteractionButtonStyle::Secondary)
+        .disabled(true),
+        InteractionButton::new(format!("betting:balance:{session_id}:next"), "Next")
+            .emoji("▶️")
+            .style(InteractionButtonStyle::Primary)
+            .disabled(statement.page >= statement.total_pages),
+    ])
+}
+
+fn balance_ledger_detail(row: &TaxLedgerEntry) -> String {
+    if let Some(reason) = row
+        .reason
+        .as_deref()
+        .map(normalize_balance_text)
+        .filter(|reason| !reason.is_empty())
+    {
+        return short_balance_text(&reason, 180);
+    }
+    let label = match row.source.as_str() {
+        "balance_update" => "Balance adjustment".to_owned(),
+        "player_insert" => "Registration starting balance".to_owned(),
+        "ledger_backfill" => "Opening balance".to_owned(),
+        "dig" => "Dig balance change".to_owned(),
+        "gamba" => "Wheel balance change".to_owned(),
+        source => title_case_token(&source.replace('_', " ")),
+    };
+    let related_type = row
+        .related_type
+        .as_deref()
+        .map(normalize_balance_text)
+        .unwrap_or_default();
+    let related_id = row
+        .related_id
+        .as_deref()
+        .map(normalize_balance_text)
+        .unwrap_or_default();
+    match (related_type.is_empty(), related_id.is_empty()) {
+        (false, false) => format!("{label} • {related_type} #{related_id}"),
+        (false, true) => format!("{label} • {related_type}"),
+        _ => label,
+    }
+}
+
+fn balance_asset_share(value: i64, total: i64) -> i64 {
+    if total <= 0 {
+        0
+    } else {
+        value
+            .saturating_mul(100)
+            .saturating_add(total / 2)
+            .checked_div(total)
+            .unwrap_or_default()
+            .clamp(0, 100)
+    }
+}
+
+fn allocation_bar(percentage: i64) -> String {
+    let filled = usize::try_from((percentage.clamp(0, 100) + 5) / 10).unwrap_or_default();
+    format!("{}{}", "█".repeat(filled), "░".repeat(10 - filled))
+}
+
+fn portfolio_jc(amount: i64) -> String {
+    format!("{} {JOPACOIN_EMOTE}", grouped_jc(amount))
+}
+
+fn signed_portfolio_jc(amount: i64) -> String {
+    if amount > 0 {
+        format!("+{} {JOPACOIN_EMOTE}", grouped_jc(amount))
+    } else {
+        portfolio_jc(amount)
+    }
+}
+
+fn grouped_jc(amount: i64) -> String {
+    let negative = amount < 0;
+    let digits = amount.unsigned_abs().to_string();
+    let first = digits.len() % 3;
+    let mut result = String::new();
+    if first != 0 {
+        result.push_str(&digits[..first]);
+    }
+    for chunk in digits.as_bytes()[first..].chunks(3) {
+        if !result.is_empty() {
+            result.push(',');
+        }
+        result.push_str(std::str::from_utf8(chunk).expect("decimal digits are UTF-8"));
+    }
+    if negative {
+        format!("-{result}")
+    } else {
+        result
+    }
+}
+
+fn normalize_balance_text(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn short_balance_text(value: &str, limit: usize) -> String {
+    let value = normalize_balance_text(value);
+    if value.chars().count() <= limit {
+        value
+    } else {
+        let mut result = value
+            .chars()
+            .take(limit.saturating_sub(1))
+            .collect::<String>();
+        result.push('…');
+        result
+    }
+}
+
+fn title_case_token(value: &str) -> String {
+    let mut chars = value.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().collect::<String>() + chars.as_str()
+    })
 }
 
 fn pct(value: i64, total: i64) -> f64 {

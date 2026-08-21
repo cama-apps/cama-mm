@@ -11,7 +11,8 @@ use std::fmt;
 use std::hash::Hash;
 
 pub const CALIBRATION_RD_THRESHOLD: f64 = 100.0;
-pub const INITIAL_GLICKO_RD: f64 = 350.0;
+pub const MAX_GLICKO_RD: f64 = 250.0;
+pub const INITIAL_GLICKO_RD: f64 = MAX_GLICKO_RD;
 pub const MAX_RATING_SWING_PER_GAME: f64 = 400.0;
 pub const BASE_RATING_DELTA_MULTIPLIER: f64 = 0.98;
 pub const MAX_RD_CONTRACTION_PER_GAME: f64 = 0.065;
@@ -27,6 +28,15 @@ pub const LEGACY_STREAK_THRESHOLD: i64 = 3;
 pub const GLICKO2_SCALE: f64 = 173.7178;
 pub const GLICKO2_TAU: f64 = 0.5;
 const VOLATILITY_EPSILON: f64 = 0.000_001;
+
+#[must_use]
+pub const fn cap_glicko_rd(rd: f64) -> f64 {
+    if rd > MAX_GLICKO_RD {
+        MAX_GLICKO_RD
+    } else {
+        rd
+    }
+}
 
 /// SQLite-like values accepted by the historical streak parsers.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -277,7 +287,7 @@ impl CamaRatingSystem {
     #[must_use]
     pub fn new(initial_rd: f64, initial_volatility: f64) -> Self {
         Self {
-            initial_rd,
+            initial_rd: cap_glicko_rd(initial_rd),
             initial_volatility,
             config: RatingConfig::default(),
         }
@@ -290,7 +300,7 @@ impl CamaRatingSystem {
         config: RatingConfig,
     ) -> Self {
         Self {
-            initial_rd,
+            initial_rd: cap_glicko_rd(initial_rd),
             initial_volatility,
             config,
         }
@@ -340,8 +350,9 @@ impl CamaRatingSystem {
 
     #[must_use]
     pub fn apply_rd_decay(&self, rd: f64, days_since_last_match: i32) -> f64 {
-        if rd >= self.config.initial_rd {
-            return self.config.initial_rd;
+        let rd_cap = cap_glicko_rd(self.config.initial_rd);
+        if rd >= rd_cap {
+            return rd_cap;
         }
         if days_since_last_match <= self.config.rd_decay_grace_period_days {
             return rd;
@@ -349,7 +360,7 @@ impl CamaRatingSystem {
         let decay_days = days_since_last_match - self.config.rd_decay_grace_period_days;
         let periods = f64::from(decay_days) / 7.0;
         let decayed = (rd * rd + self.config.rd_decay_constant.powi(2) * periods).sqrt();
-        self.config.initial_rd.min(decayed)
+        rd_cap.min(decayed)
     }
 
     #[must_use]
@@ -393,7 +404,7 @@ impl CamaRatingSystem {
 
     #[must_use]
     pub const fn create_player_from_rating(&self, rating: f64, rd: f64, volatility: f64) -> Player {
-        Player::new_fixed(rating, rd, volatility)
+        Player::new_fixed(rating, cap_glicko_rd(rd), volatility)
     }
 
     #[must_use]
@@ -573,10 +584,7 @@ impl CamaRatingSystem {
 
     #[must_use]
     pub fn rating_uncertainty_percentage(&self, rd: f64) -> f64 {
-        // Python parity: `round(min(rd / 350 * 100, 100), 1)` — CPython
-        // rounds the exact binary value; scaling by 10 first manufactures
-        // false ties (rd 31.325 must display 8.9, not 9.0).
-        crate::formatting::python_round_decimals((rd / 350.0 * 100.0).min(100.0), 1)
+        crate::formatting::python_round_decimals((rd / MAX_GLICKO_RD * 100.0).min(100.0), 1)
     }
 
     #[must_use]
@@ -803,6 +811,26 @@ mod tests {
         250,
         0.0
     );
+
+    #[test]
+    fn test_new_player_seed_confidence_limits_even_match_movement() {
+        let system = CamaRatingSystem::default();
+        let seed = system.create_player_from_mmr(Some(8_000));
+        let team1 = (1..=5)
+            .map(|id| TeamPlayer::new(seed, id))
+            .collect::<Vec<_>>();
+        let team2 = (6..=10)
+            .map(|id| TeamPlayer::new(seed, id))
+            .collect::<Vec<_>>();
+
+        let updates = system
+            .update_ratings_after_match(&team1, &team2, 1)
+            .unwrap();
+
+        assert_close(seed.rd, 250.0, 1e-12);
+        assert_close(updates.team1[0].rating - seed.rating, 104.940_754, 1e-6);
+        assert_close(updates.team2[0].rating - seed.rating, -104.940_754, 1e-6);
+    }
 
     #[test]
     fn test_create_player_from_none_mmr() {
@@ -1119,8 +1147,17 @@ mod tests {
     #[test]
     fn test_rd_decay_never_exceeds_new_player_rd() {
         let system = CamaRatingSystem::default();
-        assert_eq!(system.apply_rd_decay(350.0, 100), 350.0);
-        assert_eq!(system.apply_rd_decay(340.0, 70), 350.0);
+        assert_eq!(system.apply_rd_decay(350.0, 100), 250.0);
+        assert_eq!(system.apply_rd_decay(240.0, 70), 250.0);
+    }
+
+    #[test]
+    fn test_existing_rating_rd_is_limited_by_shared_cap() {
+        let system = CamaRatingSystem::default();
+        assert_eq!(
+            system.create_player_from_rating(1_500.0, 350.0, 0.06).rd,
+            250.0
+        );
     }
 
     #[test]
@@ -1352,8 +1389,9 @@ mod tests {
     #[test]
     fn test_new_player_rd_contraction_is_limited_per_match() {
         let system = CamaRatingSystem::default();
+        let initial_rd = system.initial_rd;
         let team1 = vec![
-            member(1000.0, 350.0, "new"),
+            member(1000.0, initial_rd, "new"),
             member(1200.0, 80.0, "c1"),
             member(1200.0, 80.0, "c2"),
             member(1200.0, 80.0, "c3"),
@@ -1363,19 +1401,23 @@ mod tests {
         let updates = system
             .update_ratings_after_match(&team1, &team2, 1)
             .unwrap();
-        assert_close(updates.team1[0].rd, 350.0 * 0.935, 1e-10);
+        assert_close(updates.team1[0].rd, initial_rd * 0.935, 1e-10);
     }
 
     #[test]
-    fn test_new_player_reaches_calibration_after_about_twenty_matches() {
+    fn test_new_player_reaches_calibration_within_twenty_matches() {
         let system = CamaRatingSystem::default();
-        let mut player = Player::new(1500.0, 350.0, 0.06);
-        for game in 0..20 {
+        let mut player = system.create_player_from_mmr(Some(6_500));
+        let mut games = 0;
+        while player.rd > CALIBRATION_RD_THRESHOLD && games < 20 {
             let updated =
-                system.update_player_rating(player, 1500.0, 1500.0, 100.0, f64::from(game % 2));
-            player = Player::new(updated.rating, updated.rd, updated.volatility);
+                system.update_player_rating(player, 1500.0, 1500.0, 100.0, f64::from(games % 2));
+            player =
+                system.create_player_from_rating(updated.rating, updated.rd, updated.volatility);
+            games += 1;
         }
-        assert!((100.0..=105.0).contains(&player.rd));
+        assert!(player.rd <= CALIBRATION_RD_THRESHOLD);
+        assert!((10..=20).contains(&games));
     }
 
     #[test]

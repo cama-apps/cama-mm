@@ -642,8 +642,19 @@ impl GeneratedRewardOutcome {
             .saturating_sub(self.blood_pact_skim)
     }
 
-    const fn compensatable_net(self) -> i64 {
-        if self.receipt.applied { self.net() } else { 0 }
+    /// The amount a saga rollback must reverse.
+    ///
+    /// Compensation has to undo the movement the credit actually made, which
+    /// is `net + garnished` (garnishment is a bookkeeping split, not a separate
+    /// debit). Reversing only `net` leaves the garnished share behind, and the
+    /// rollback row reopens the exact-once marker so a retry credits the award
+    /// again in full.
+    const fn compensatable_balance_delta(self) -> i64 {
+        if self.receipt.applied {
+            self.balance_delta()
+        } else {
+            0
+        }
     }
 }
 
@@ -677,12 +688,12 @@ impl MatchWinRewardOutcome {
             .saturating_sub(self.blood_pact_skim)
     }
 
-    const fn compensatable_net(self) -> i64 {
+    /// The amount a saga rollback must reverse: the movement the credit made
+    /// (`net + garnished`, plus any communion bonus, less the pact skim), not
+    /// the post-garnishment `net`.
+    const fn compensatable_balance_delta(self) -> i64 {
         if self.receipt.applied {
-            self.receipt
-                .net
-                .saturating_add(self.communion_bonus)
-                .saturating_sub(self.blood_pact_skim)
+            self.snapshot_balance_delta()
         } else {
             0
         }
@@ -3328,37 +3339,36 @@ impl MatchHandler {
         low_priority_taxable_ids: &BTreeSet<i64>,
     ) -> Result<Vec<String>, String> {
         let matches = MatchRepository::new(&self.database_path);
-        let mut jc_changes = matches
-            .get_match(match_id, Some(pending.guild_id))
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| format!("recorded match {match_id} disappeared"))?
-            .jc_changes;
         let bet_skims =
             self.rewards
                 .apply_bet_blood_pacts(pending.guild_id, match_id, settlement)?;
         let has_distribution = !settlement.winners.is_empty() || !settlement.losers.is_empty();
-        if has_distribution {
-            for (discord_id, delta) in bet_jc_deltas(settlement, &bet_skims) {
-                jc_changes
-                    .entry(discord_id)
-                    .or_default()
-                    .insert("bet".to_owned(), delta);
-            }
-        }
-        for (discord_id, skimmed) in bet_skims {
-            let components = jc_changes.entry(discord_id).or_default();
-            if !components.contains_key("bet_blood_pact_skim") {
-                if !has_distribution {
-                    components
-                        .entry("bet".to_owned())
-                        .and_modify(|delta| *delta = delta.saturating_sub(skimmed))
-                        .or_insert(-skimmed);
-                }
-                components.insert("bet_blood_pact_skim".to_owned(), skimmed);
-            }
-        }
+        let bet_deltas = has_distribution.then(|| bet_jc_deltas(settlement, &bet_skims));
+        // Merging inside the write transaction keeps a concurrently recovering
+        // phase from overwriting this one's components.
         matches
-            .update_match_jc_changes(match_id, Some(pending.guild_id), &jc_changes)
+            .merge_match_jc_changes(match_id, Some(pending.guild_id), |jc_changes| {
+                if let Some(deltas) = bet_deltas {
+                    for (discord_id, delta) in deltas {
+                        jc_changes
+                            .entry(discord_id)
+                            .or_default()
+                            .insert("bet".to_owned(), delta);
+                    }
+                }
+                for (discord_id, skimmed) in bet_skims {
+                    let components = jc_changes.entry(discord_id).or_default();
+                    if !components.contains_key("bet_blood_pact_skim") {
+                        if !has_distribution {
+                            components
+                                .entry("bet".to_owned())
+                                .and_modify(|delta| *delta = delta.saturating_sub(skimmed))
+                                .or_insert(-skimmed);
+                        }
+                        components.insert("bet_blood_pact_skim".to_owned(), skimmed);
+                    }
+                }
+            })
             .map_err(|error| error.to_string())?;
 
         let claimed = matches
@@ -3465,13 +3475,13 @@ impl MatchHandler {
                 win_bonus_by_player.insert(*player_id, outcome.snapshot_balance_delta());
                 accumulate_compensatable_net(
                     *player_id,
-                    outcome.compensatable_net(),
+                    outcome.compensatable_balance_delta(),
                     &mut compensatable_net,
                 );
                 accumulate_compensatable_source(
                     *player_id,
                     "match_win_bonus",
-                    outcome.compensatable_net(),
+                    outcome.compensatable_balance_delta(),
                     &mut compensatable_by_source,
                 );
             }
@@ -3511,14 +3521,15 @@ impl MatchHandler {
                 &mut bonus_components,
                 &mut compensatable_net,
             )?;
-            for (discord_id, components) in &bonus_components {
-                let target = jc_changes.entry(*discord_id).or_default();
-                for (component, amount) in components {
-                    target.insert(component.clone(), *amount);
-                }
-            }
             matches
-                .update_match_jc_changes(match_id, Some(pending.guild_id), &jc_changes)
+                .merge_match_jc_changes(match_id, Some(pending.guild_id), |jc_changes| {
+                    for (discord_id, components) in &bonus_components {
+                        let target = jc_changes.entry(*discord_id).or_default();
+                        for (component, amount) in components {
+                            target.insert(component.clone(), *amount);
+                        }
+                    }
+                })
                 .map_err(|error| error.to_string())?;
             MatchCorrectionRepository::new(&self.database_path)
                 .update_participant_bonus_jc(
@@ -3576,6 +3587,13 @@ impl MatchHandler {
             );
             return Err(format!("match bonus payout failed: {error}"));
         }
+        // Render from the durable aggregate so the summary reflects every
+        // phase's components, including any a concurrent recovery contributed.
+        let jc_changes = matches
+            .get_match(match_id, Some(pending.guild_id))
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("recorded match {match_id} disappeared"))?
+            .jc_changes;
         Ok(render_jc_lines(
             winners,
             losers,
@@ -4421,19 +4439,29 @@ impl MatchHandler {
                 .iter()
                 .filter_map(|player_id| i64::try_from(*player_id).ok())
                 .collect::<Vec<_>>();
-            if let Err(error) = self.rewards.award_generated_batch(GeneratedRewardBatch {
-                guild_id: context.guild_id,
-                player_ids: &player_ids,
-                gross: self.config.streaming_bonus,
-                apply_bankruptcy_penalty: true,
-                apply_vanity_tax: true,
-                low_priority_taxable_ids: None,
-                source: "shuffle_streaming_bonus",
-                related_type: "pending_match",
-                related_id: prepared.pending.pending_match_id,
-                reason: "shuffle streaming bonus",
-                event_nonce_tag: 5,
-            }) {
+            // These are SQLite money writes, so they belong on a blocking
+            // thread like the equivalent award at match record time.
+            let rewards = Arc::clone(&self.rewards);
+            let gross = self.config.streaming_bonus;
+            let pending_match_id = prepared.pending.pending_match_id;
+            let awarded = tokio::task::spawn_blocking(move || {
+                rewards.award_generated_batch(GeneratedRewardBatch {
+                    guild_id: guild_id_i64,
+                    player_ids: &player_ids,
+                    gross,
+                    apply_bankruptcy_penalty: true,
+                    apply_vanity_tax: true,
+                    low_priority_taxable_ids: None,
+                    source: "shuffle_streaming_bonus",
+                    related_type: "pending_match",
+                    related_id: pending_match_id,
+                    reason: "shuffle streaming bonus",
+                    event_nonce_tag: 5,
+                })
+            })
+            .await
+            .map_err(|error| format!("shuffle streaming bonus task failed: {error}"))?;
+            if let Err(error) = awarded {
                 warn!(%error, "shuffle streaming bonus failed");
             }
             let persisted_streamers = streaming_ids
@@ -5855,7 +5883,7 @@ fn decayed_glicko_rd(
     now: DateTime<Utc>,
 ) -> f64 {
     let Some(reference) = last_match_at.or(created_at) else {
-        return rd;
+        return cama_domain::rating::cap_glicko_rd(rd);
     };
     let days = (now - reference).num_days().max(0);
     system.apply_rd_decay(rd, i32::try_from(days).unwrap_or(i32::MAX))
@@ -6036,11 +6064,15 @@ fn accumulate_generated_compensation(
     compensatable_by_source: &mut BTreeMap<(i64, String), i64>,
 ) {
     for (discord_id, reward) in rewards {
-        accumulate_compensatable_net(*discord_id, reward.compensatable_net(), compensatable_net);
+        accumulate_compensatable_net(
+            *discord_id,
+            reward.compensatable_balance_delta(),
+            compensatable_net,
+        );
         accumulate_compensatable_source(
             *discord_id,
             source,
-            reward.compensatable_net(),
+            reward.compensatable_balance_delta(),
             compensatable_by_source,
         );
     }

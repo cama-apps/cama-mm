@@ -1699,3 +1699,27 @@ fn every_live_python_candidate_family_is_representable_from_typed_snapshot() {
         );
     }
 }
+
+#[test]
+fn seeded_trivia_random_is_not_patterned_in_its_low_bits() {
+    // A power-of-two LCG's low bits are highly regular: taking state % 2 makes
+    // the parity alternate on every call, which biases the shuffled position of
+    // the correct answer.
+    let mut random = SeededTriviaRandom::new(0x5EED_1234_ABCD_9876);
+    let flips = (0..64).map(|_| random.next_index(2)).collect::<Vec<_>>();
+    assert!(
+        flips.windows(2).any(|pair| pair[0] == pair[1]),
+        "a strictly alternating sequence means the low bits are still in use"
+    );
+
+    // Every index of a four-way shuffle stays reachable and roughly balanced.
+    let mut random = SeededTriviaRandom::new(7);
+    let mut counts = [0_usize; 4];
+    for _ in 0..4_000 {
+        counts[random.next_index(4)] += 1;
+    }
+    assert!(
+        counts.iter().all(|count| *count > 700),
+        "all four positions must be reachable, got {counts:?}"
+    );
+}

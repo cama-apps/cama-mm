@@ -2,7 +2,8 @@
 //!
 //! Python remains the only schema-migration authority during the side-by-side
 //! rewrite. This repository only opens an existing database and uses the
-//! current `low_priority_state` table. Assignment inputs retain Python's
+//! current `low_priority_state` table, plus the paired `moderation_events`
+//! audit row the `*_with_audit` operations append in the same transaction. Assignment inputs retain Python's
 //! dynamic integer distinction so boolean and floating-point values can be
 //! rejected before any database write occurs.
 
@@ -10,9 +11,14 @@ use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use rusqlite::types::{Value, ValueRef};
-use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params, params_from_iter};
+use rusqlite::{
+    Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params, params_from_iter,
+};
 use thiserror::Error;
 
+use crate::moderation::{
+    ModerationEventType, ModerationSource, RecordModerationEventRequest, insert_event_row,
+};
 use crate::open_runtime_connection;
 
 pub const LOW_PRIORITY_REQUIRED_WINS: i64 = 3;
@@ -70,6 +76,16 @@ pub struct LowPriorityState {
     pub removed_reason: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// One assignment as it was written, and whether it replaced an active one.
+///
+/// The caller cannot re-derive `replaced` afterwards: the assignment overwrote
+/// the row it would have to read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LowPriorityAssignment {
+    pub state: LowPriorityState,
+    pub replaced: bool,
 }
 
 /// Inputs for assigning or reassigning one player to low priority.
@@ -163,12 +179,7 @@ impl LowPriorityRepository {
         Ok(self
             .connection()?
             .query_row(
-                "SELECT discord_id, guild_id, wins_required, wins_remaining,
-                        start_pending_match_id, active, reason,
-                        reason_player_visible, set_by,
-                        removed_by, removed_reason, created_at, updated_at
-                 FROM low_priority_state
-                 WHERE discord_id = ?1 AND guild_id = ?2",
+                &format!("{STATE_SELECT} WHERE discord_id = ?1 AND guild_id = ?2"),
                 params![discord_id, guild_id],
                 row_to_state,
             )
@@ -189,49 +200,14 @@ impl LowPriorityRepository {
 
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute(
-            "INSERT INTO low_priority_state (
-                 discord_id, guild_id, wins_required, wins_remaining,
-                 start_pending_match_id, active, reason, reason_player_visible,
-                 set_by, removed_by,
-                 removed_reason, created_at, updated_at
-             )
-             VALUES (?1, ?2, ?3, ?3, ?4, 1, ?5, ?6, ?7, NULL, NULL,
-                     CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-             ON CONFLICT(discord_id, guild_id) DO UPDATE SET
-                 wins_required = excluded.wins_required,
-                 wins_remaining = excluded.wins_remaining,
-                 start_pending_match_id = excluded.start_pending_match_id,
-                 active = 1,
-                 reason = excluded.reason,
-                 reason_player_visible = excluded.reason_player_visible,
-                 set_by = excluded.set_by,
-                 removed_by = NULL,
-                 removed_reason = NULL,
-                 created_at = CURRENT_TIMESTAMP,
-                 updated_at = CURRENT_TIMESTAMP",
-            params![
-                input.discord_id,
-                guild_id,
-                wins_required,
-                start_pending_match_id,
-                input.reason.as_deref(),
-                i64::from(input.reason_player_visible),
-                input.set_by,
-            ],
+        upsert_state(
+            &transaction,
+            input,
+            guild_id,
+            wins_required,
+            start_pending_match_id,
         )?;
-        let state = transaction
-            .query_row(
-                "SELECT discord_id, guild_id, wins_required, wins_remaining,
-                        start_pending_match_id, active, reason,
-                        reason_player_visible, set_by,
-                        removed_by, removed_reason, created_at, updated_at
-                 FROM low_priority_state
-                 WHERE discord_id = ?1 AND guild_id = ?2",
-                params![input.discord_id, guild_id],
-                row_to_state,
-            )
-            .optional()?;
+        let state = query_state(&transaction, input.discord_id, guild_id)?;
         transaction.commit()?;
         state.ok_or(LowPriorityRepositoryError::MissingStateAfterWrite)
     }
@@ -245,16 +221,10 @@ impl LowPriorityRepository {
         reason: Option<&str>,
     ) -> Result<bool, LowPriorityRepositoryError> {
         let guild_id = Self::normalize_guild_id(guild_id);
-        let updated = self.connection()?.execute(
-            "UPDATE low_priority_state
-             SET wins_remaining = 0,
-                 active = 0,
-                 removed_by = ?1,
-                 removed_reason = ?2,
-                 updated_at = CURRENT_TIMESTAMP
-             WHERE discord_id = ?3 AND guild_id = ?4 AND active = 1",
-            params![removed_by, reason, discord_id, guild_id],
-        )?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let updated = clear_state(&transaction, discord_id, guild_id, removed_by, reason)?;
+        transaction.commit()?;
         Ok(updated > 0)
     }
 
@@ -329,6 +299,193 @@ impl LowPriorityRepository {
         let rows = statement.query_map([guild_id], row_to_state)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
+
+    /// Assign or replace a player and append its moderation event in one
+    /// immediate transaction.
+    ///
+    /// The state change and its audit row used to be two transactions, so a
+    /// failed audit left a penalty nobody could account for. The repository
+    /// also decides assign-versus-replace here, inside the transaction that
+    /// overwrites the row the caller would otherwise have to read first.
+    pub fn set_low_priority_with_audit(
+        &self,
+        input: &SetLowPriorityInput,
+        now: i64,
+    ) -> Result<LowPriorityAssignment, LowPriorityRepositoryError> {
+        let wins_required = validate_wins_required(input.wins_required)?;
+        let start_pending_match_id = validate_pending_match_id(input.start_pending_match_id)?;
+        let guild_id = Self::normalize_guild_id(input.guild_id);
+
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let replaced = query_state(&transaction, input.discord_id, guild_id)?
+            .is_some_and(|state| state.active);
+        upsert_state(
+            &transaction,
+            input,
+            guild_id,
+            wins_required,
+            start_pending_match_id,
+        )?;
+        let state = query_state(&transaction, input.discord_id, guild_id)?
+            .ok_or(LowPriorityRepositoryError::MissingStateAfterWrite)?;
+        insert_event_row(
+            &transaction,
+            RecordModerationEventRequest {
+                discord_id: state.discord_id,
+                guild_id: Some(guild_id),
+                event_type: if replaced {
+                    ModerationEventType::LowprioReplace
+                } else {
+                    ModerationEventType::LowprioAssign
+                },
+                source: ModerationSource::Admin,
+                actor_id: Some(input.set_by),
+                reason: input.reason.as_deref(),
+                scope: None,
+                completion: None,
+                expires_at: None,
+                matches_required: None,
+                matches_remaining: None,
+                pending_match_watermark: None,
+                wins_required: Some(state.wins_required),
+                wins_remaining: Some(state.wins_remaining),
+                match_id: state.start_pending_match_id,
+                now,
+            },
+        )?;
+        transaction.commit()?;
+        Ok(LowPriorityAssignment { state, replaced })
+    }
+
+    /// Clear an active assignment and append its `lowprio_clear` event in one
+    /// immediate transaction. Returns the row as it stood before the clear, or
+    /// `None` when nothing was active -- no state change and no event.
+    ///
+    /// The audited numbers come from that row rather than from the caller, and
+    /// `low_priority_state`'s CHECK constraints keep them inside the band
+    /// `cama_app::moderation::validate_low_priority_event` enforces.
+    pub fn clear_low_priority_with_audit(
+        &self,
+        discord_id: i64,
+        guild_id: Option<i64>,
+        removed_by: i64,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<Option<LowPriorityState>, LowPriorityRepositoryError> {
+        let guild_id = Self::normalize_guild_id(guild_id);
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(prior) =
+            query_state(&transaction, discord_id, guild_id)?.filter(|state| state.active)
+        else {
+            transaction.commit()?;
+            return Ok(None);
+        };
+        clear_state(&transaction, discord_id, guild_id, removed_by, reason)?;
+        insert_event_row(
+            &transaction,
+            RecordModerationEventRequest {
+                discord_id,
+                guild_id: Some(guild_id),
+                event_type: ModerationEventType::LowprioClear,
+                source: ModerationSource::Admin,
+                actor_id: Some(removed_by),
+                reason,
+                scope: None,
+                completion: None,
+                expires_at: None,
+                matches_required: None,
+                matches_remaining: None,
+                pending_match_watermark: None,
+                wins_required: Some(prior.wins_required),
+                wins_remaining: Some(0),
+                match_id: prior.start_pending_match_id,
+                now,
+            },
+        )?;
+        transaction.commit()?;
+        Ok(Some(prior))
+    }
+}
+
+const STATE_SELECT: &str = "SELECT discord_id, guild_id, wins_required, wins_remaining,
+            start_pending_match_id, active, reason,
+            reason_player_visible, set_by,
+            removed_by, removed_reason, created_at, updated_at
+     FROM low_priority_state";
+
+fn query_state(
+    transaction: &Transaction<'_>,
+    discord_id: i64,
+    guild_id: i64,
+) -> Result<Option<LowPriorityState>, rusqlite::Error> {
+    transaction
+        .query_row(
+            &format!("{STATE_SELECT} WHERE discord_id = ?1 AND guild_id = ?2"),
+            params![discord_id, guild_id],
+            row_to_state,
+        )
+        .optional()
+}
+
+fn upsert_state(
+    transaction: &Transaction<'_>,
+    input: &SetLowPriorityInput,
+    guild_id: i64,
+    wins_required: i64,
+    start_pending_match_id: Option<i64>,
+) -> Result<usize, rusqlite::Error> {
+    transaction.execute(
+        "INSERT INTO low_priority_state (
+             discord_id, guild_id, wins_required, wins_remaining,
+             start_pending_match_id, active, reason, reason_player_visible,
+             set_by, removed_by,
+             removed_reason, created_at, updated_at
+         )
+         VALUES (?1, ?2, ?3, ?3, ?4, 1, ?5, ?6, ?7, NULL, NULL,
+                 CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+         ON CONFLICT(discord_id, guild_id) DO UPDATE SET
+             wins_required = excluded.wins_required,
+             wins_remaining = excluded.wins_remaining,
+             start_pending_match_id = excluded.start_pending_match_id,
+             active = 1,
+             reason = excluded.reason,
+             reason_player_visible = excluded.reason_player_visible,
+             set_by = excluded.set_by,
+             removed_by = NULL,
+             removed_reason = NULL,
+             created_at = CURRENT_TIMESTAMP,
+             updated_at = CURRENT_TIMESTAMP",
+        params![
+            input.discord_id,
+            guild_id,
+            wins_required,
+            start_pending_match_id,
+            input.reason.as_deref(),
+            i64::from(input.reason_player_visible),
+            input.set_by,
+        ],
+    )
+}
+
+fn clear_state(
+    transaction: &Transaction<'_>,
+    discord_id: i64,
+    guild_id: i64,
+    removed_by: i64,
+    reason: Option<&str>,
+) -> Result<usize, rusqlite::Error> {
+    transaction.execute(
+        "UPDATE low_priority_state
+         SET wins_remaining = 0,
+             active = 0,
+             removed_by = ?1,
+             removed_reason = ?2,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE discord_id = ?3 AND guild_id = ?4 AND active = 1",
+        params![removed_by, reason, discord_id, guild_id],
+    )
 }
 
 fn validate_wins_required(input: PythonIntegerInput) -> Result<i64, LowPriorityRepositoryError> {
@@ -431,7 +588,38 @@ mod tests {
                          CHECK(wins_remaining <= wins_required)
                      );
                      CREATE INDEX idx_low_priority_active_guild
-                         ON low_priority_state(guild_id, active, wins_remaining);",
+                         ON low_priority_state(guild_id, active, wins_remaining);
+                     CREATE TABLE moderation_events (
+                         event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                         guild_id INTEGER NOT NULL DEFAULT 0,
+                         discord_id INTEGER NOT NULL,
+                         event_type TEXT NOT NULL CHECK(event_type IN (
+                             'suspend','replace','lift','complete','kick',
+                             'lowprio_assign','lowprio_replace','lowprio_clear',
+                             'lowprio_complete'
+                         )),
+                         source TEXT NOT NULL CHECK(source IN ('admin','vote','creator','system')),
+                         actor_id INTEGER,
+                         reason TEXT,
+                         scope TEXT CHECK(scope IS NULL OR scope IN ('all','open','lowskill')),
+                         completion TEXT CHECK(completion IS NULL OR completion IN ('time','matches','either','both')),
+                         expires_at INTEGER,
+                         matches_required INTEGER CHECK(matches_required > 0),
+                         matches_remaining INTEGER CHECK(matches_remaining >= 0),
+                         pending_match_watermark INTEGER CHECK(pending_match_watermark >= 0),
+                         wins_required INTEGER CHECK(wins_required >= 0),
+                         wins_remaining INTEGER CHECK(wins_remaining >= 0),
+                         match_id INTEGER,
+                         created_at INTEGER NOT NULL
+                     );
+                     CREATE TRIGGER moderation_events_no_update
+                     BEFORE UPDATE ON moderation_events BEGIN
+                         SELECT RAISE(ABORT,'moderation_events is append-only');
+                     END;
+                     CREATE TRIGGER moderation_events_no_delete
+                     BEFORE DELETE ON moderation_events BEGIN
+                         SELECT RAISE(ABORT,'moderation_events is append-only');
+                     END;",
                 )
                 .expect("create Python-compatible low-priority schema");
             drop(connection);
@@ -442,6 +630,40 @@ mod tests {
             }
         }
 
+        fn connection(&self) -> Connection {
+            Connection::open(self._file.path()).expect("open fixture database")
+        }
+
+        /// Make every `moderation_events` insert fail, standing in for the
+        /// append-only trigger, a disk error, or a constraint violation.
+        fn block_moderation_events(&self) {
+            self.connection()
+                .execute_batch(
+                    "CREATE TRIGGER moderation_events_blocked
+                     BEFORE INSERT ON moderation_events BEGIN
+                         SELECT RAISE(ABORT,'audit unavailable');
+                     END;",
+                )
+                .expect("install audit failure trigger");
+        }
+
+        fn events(&self) -> Vec<(String, i64, Option<i64>, Option<i64>)> {
+            let connection = self.connection();
+            let mut statement = connection
+                .prepare(
+                    "SELECT event_type, discord_id, wins_required, wins_remaining
+                     FROM moderation_events ORDER BY event_id",
+                )
+                .expect("read audit rows");
+            statement
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })
+                .expect("map audit rows")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("collect audit rows")
+        }
+
         fn assignment(&self) -> SetLowPriorityInput {
             SetLowPriorityInput::new(
                 101,
@@ -450,6 +672,113 @@ mod tests {
                 Some("default assignment".to_owned()),
             )
         }
+    }
+
+    #[test]
+    fn test_assignment_and_its_audit_event_commit_together() {
+        let fixture = Fixture::new();
+        let assignment = fixture
+            .repository
+            .set_low_priority_with_audit(&fixture.assignment(), 1_700_000_000)
+            .expect("assign low priority");
+
+        assert!(!assignment.replaced);
+        assert_eq!(
+            fixture.events(),
+            vec![("lowprio_assign".to_owned(), 101, Some(3), Some(3))]
+        );
+
+        let mut replacement = fixture.assignment();
+        replacement.wins_required = PythonIntegerInput::Integer(5);
+        let replaced = fixture
+            .repository
+            .set_low_priority_with_audit(&replacement, 1_700_000_100)
+            .expect("replace low priority");
+
+        assert!(replaced.replaced, "an active row was overwritten");
+        assert_eq!(
+            fixture.events()[1],
+            ("lowprio_replace".to_owned(), 101, Some(5), Some(5))
+        );
+    }
+
+    #[test]
+    fn test_clear_records_the_rows_own_win_requirement() {
+        let fixture = Fixture::new();
+        let mut assignment = fixture.assignment();
+        assignment.wins_required = PythonIntegerInput::Integer(7);
+        fixture
+            .repository
+            .set_low_priority_with_audit(&assignment, 1_700_000_000)
+            .expect("assign low priority");
+
+        let prior = fixture
+            .repository
+            .clear_low_priority_with_audit(101, Some(TEST_GUILD_ID), 902, Some("served"), 1)
+            .expect("clear low priority")
+            .expect("an active assignment was cleared");
+
+        assert_eq!(prior.wins_required, 7);
+        assert_eq!(
+            fixture.events()[1],
+            ("lowprio_clear".to_owned(), 101, Some(7), Some(0))
+        );
+        assert!(
+            fixture
+                .repository
+                .clear_low_priority_with_audit(101, Some(TEST_GUILD_ID), 902, None, 2)
+                .expect("second clear")
+                .is_none(),
+            "nothing active means no state change and no event"
+        );
+        assert_eq!(fixture.events().len(), 2, "the no-op clear logs nothing");
+    }
+
+    #[test]
+    fn test_a_failed_audit_rolls_the_assignment_back() {
+        let fixture = Fixture::new();
+        fixture.block_moderation_events();
+
+        let error = fixture
+            .repository
+            .set_low_priority_with_audit(&fixture.assignment(), 1_700_000_000)
+            .expect_err("the blocked audit fails the assignment");
+
+        assert!(matches!(error, LowPriorityRepositoryError::Sqlite(_)));
+        assert!(
+            fixture
+                .repository
+                .get_state(101, Some(TEST_GUILD_ID))
+                .expect("read state")
+                .is_none(),
+            "a penalty nobody can account for must not survive"
+        );
+    }
+
+    #[test]
+    fn test_a_failed_audit_rolls_the_clear_back() {
+        let fixture = Fixture::new();
+        fixture
+            .repository
+            .set_low_priority_with_audit(&fixture.assignment(), 1_700_000_000)
+            .expect("assign low priority");
+        fixture.block_moderation_events();
+
+        let error = fixture
+            .repository
+            .clear_low_priority_with_audit(101, Some(TEST_GUILD_ID), 902, None, 1)
+            .expect_err("the blocked audit fails the clear");
+
+        assert!(matches!(error, LowPriorityRepositoryError::Sqlite(_)));
+        assert!(
+            fixture
+                .repository
+                .get_state(101, Some(TEST_GUILD_ID))
+                .expect("read state")
+                .expect("the row survives")
+                .active,
+            "an unaudited clear must not release the penalty"
+        );
     }
 
     #[test]

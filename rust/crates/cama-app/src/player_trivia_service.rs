@@ -399,7 +399,12 @@ impl PlayerTriviaRandom for SeededTriviaRandom {
             .state
             .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1_442_695_040_888_963_407);
-        (self.state as usize) % upper
+        // The low bits of a power-of-two LCG are highly regular -- this
+        // multiplier and increment make the parity alternate on every call --
+        // so taking `state % upper` would leave the shuffled answer positions
+        // patterned and partly predictable. Scale the high bits instead.
+        let scaled = (u128::from(self.state) * upper as u128) >> 64;
+        scaled as usize
     }
 }
 
@@ -783,14 +788,11 @@ fn hero_name(hero_id: i64) -> String {
     static HERO_NAMES: std::sync::OnceLock<BTreeMap<i64, String>> = std::sync::OnceLock::new();
     HERO_NAMES
         .get_or_init(|| {
-            serde_json::from_str::<BTreeMap<String, String>>(include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../../utils/heroes.json"
-            )))
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|(id, name)| id.parse().ok().map(|id| (id, name)))
-            .collect()
+            serde_json::from_str::<BTreeMap<String, String>>(include_str!("../data/heroes.json"))
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|(id, name)| id.parse().ok().map(|id| (id, name)))
+                .collect()
         })
         .get(&hero_id)
         .cloned()

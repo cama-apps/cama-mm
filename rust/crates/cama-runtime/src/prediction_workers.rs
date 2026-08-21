@@ -848,14 +848,24 @@ fn prediction_digest_message(
     if !description.is_empty() {
         embed = embed.description(description.join("\n\n"));
     }
+    // Market rows are ~345 characters each, so a busy guild overruns Discord's
+    // 6000-character embed cap well before the 25-field cap. An oversized
+    // digest is rejected by the API, and because its outbox row is only
+    // acknowledged on success it would be retried forever.
+    let mut rendered = 0;
     for market in payload.markets.iter().take(FIELD_CAP) {
         let (name, value) = digest_market_field(market);
-        embed = embed.field(name, value, false);
+        let (next, added) = embed.field_within_budget(name, value, false);
+        embed = next;
+        if !added {
+            break;
+        }
+        rendered += 1;
     }
-    if payload.markets.len() > FIELD_CAP {
+    if payload.markets.len() > rendered {
         embed = embed.footer(format!(
             "+{} more — use /predict list",
-            payload.markets.len() - FIELD_CAP
+            payload.markets.len() - rendered
         ));
     }
     let response = match attachment {

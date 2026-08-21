@@ -539,4 +539,5 @@ where
 }
 
 #[cfg(test)]
+#[path = "pet_sqlite/tests.rs"]
 mod tests;

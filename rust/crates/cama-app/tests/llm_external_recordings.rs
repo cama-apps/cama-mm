@@ -21,7 +21,9 @@ use cama_app::ai_services::{
     ProviderOptions, ProviderRequest, ToolChoice,
 };
 use serde_json::Value;
-use sha2::{Digest, Sha256};
+
+mod support;
+use support::sha256_hex;
 
 const FIXTURE_MANIFEST: &str = include_str!("fixtures/llm/manifest.json");
 const MALFORMED: &[u8] = include_bytes!("fixtures/llm/malformed.txt");
@@ -229,7 +231,7 @@ fn llm_fixture_manifest_is_hashed_and_redacted() {
             let name = response["body"].as_str().expect("LLM fixture body name");
             let expected = response["sha256"].as_str().expect("LLM fixture body hash");
             assert_eq!(
-                format!("{:x}", Sha256::digest(fixture_body(name))),
+                sha256_hex(fixture_body(name)),
                 expected,
                 "LLM fixture hash mismatch for {name}"
             );

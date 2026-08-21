@@ -1,8 +1,10 @@
 //! Production `/setreminder` provider and startup reminder recovery.
 //!
 //! Preferences and authoritative cooldown anchors live in the existing SQLite
-//! schema. All such calls are offloaded with `spawn_blocking`; Tokio owns only
-//! generation-checked sleeps and Discord delivery. A scheduled DM is consumed
+//! schema. All such calls are offloaded with `spawn_blocking`, including the
+//! in-memory service and timer locks a startup recovery pass can hold for the
+//! length of a bulk rescan; Tokio async workers own only generation-checked
+//! sleeps and Discord delivery. A scheduled DM is consumed
 //! after exactly one attempt, including a Discord failure, matching Python.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -178,7 +180,13 @@ impl ReminderRuntimeState {
         Ok(self.lock_service()?.task(key).cloned())
     }
 
-    fn sync_task(self: &Arc<Self>, key: ReminderTaskKey) -> Result<(), String> {
+    /// Reconcile one timer generation with the durable service.
+    ///
+    /// This takes the service and timer locks, so it must only run in a
+    /// blocking context (`spawn_blocking`), never on a Tokio async worker: the
+    /// startup recovery pass holds the same service lock across a bulk
+    /// per-guild rescan.
+    fn sync_task_blocking(self: &Arc<Self>, key: ReminderTaskKey) -> Result<(), String> {
         let task = self.task_snapshot(key)?;
         let mut timers = self.lock_timers()?;
         if let (Some(existing), Some(task)) = (timers.get(&key), task.as_ref())
@@ -213,28 +221,44 @@ impl ReminderRuntimeState {
         Ok(())
     }
 
-    fn sync_all_tasks(self: &Arc<Self>) -> Result<(), String> {
+    /// Reconcile every timer generation with the durable service. Blocking:
+    /// see [`Self::sync_task_blocking`].
+    fn sync_all_tasks_blocking(self: &Arc<Self>) -> Result<(), String> {
         let service_keys: BTreeSet<_> = self.lock_service()?.tasks().keys().copied().collect();
         let timer_keys: BTreeSet<_> = self.lock_timers()?.keys().copied().collect();
         for key in service_keys.union(&timer_keys).copied() {
-            self.sync_task(key)?;
+            self.sync_task_blocking(key)?;
         }
         Ok(())
     }
 
     async fn fire_task(self: Arc<Self>, key: ReminderTaskKey, task_id: TaskId) {
-        let claimed = match self.lock_service() {
-            Ok(mut service) => service.claim_task(key, task_id),
+        let state = Arc::clone(&self);
+        // The claim takes the service lock, which a startup recovery pass can
+        // hold across a bulk rescan, so it never runs on this async worker.
+        let claimed = tokio::task::spawn_blocking(move || {
+            let claimed = match state.lock_service() {
+                Ok(mut service) => service.claim_task(key, task_id),
+                Err(error) => {
+                    warn!(%error, ?key, "reminder timer could not claim service state");
+                    None
+                }
+            };
+            if let Ok(mut timers) = state.lock_timers()
+                && timers.get(&key).map(|timer| timer.task_id) == Some(task_id)
+            {
+                timers.remove(&key);
+            }
+            claimed
+        })
+        .await;
+        let claimed = match claimed {
+            Ok(claimed) => claimed,
             Err(error) => {
-                warn!(%error, ?key, "reminder timer could not claim service state");
-                None
+                warn!(%error, ?key, "reminder claim task failed");
+                return;
             }
         };
-        if let Ok(mut timers) = self.lock_timers()
-            && timers.get(&key).map(|timer| timer.task_id) == Some(task_id)
-        {
-            timers.remove(&key);
-        }
         let Some(task) = claimed else {
             return;
         };
@@ -282,16 +306,16 @@ impl ReminderRuntimeState {
         kind: ReminderKind,
     ) -> Result<bool, String> {
         let state = Arc::clone(self);
-        let enabled = tokio::task::spawn_blocking(move || {
-            state
+        tokio::task::spawn_blocking(move || {
+            let enabled = state
                 .lock_service()?
                 .toggle_preference(user_id, Some(guild_id), kind)
-                .map_err(|error| error.to_string())
+                .map_err(|error| error.to_string())?;
+            state.sync_task_blocking(ReminderTaskKey::new(user_id, guild_id, kind))?;
+            Ok::<bool, String>(enabled)
         })
         .await
-        .map_err(|error| format!("reminder toggle task failed: {error}"))??;
-        self.sync_task(ReminderTaskKey::new(user_id, guild_id, kind))?;
-        Ok(enabled)
+        .map_err(|error| format!("reminder toggle task failed: {error}"))?
     }
 
     async fn arm(
@@ -305,11 +329,11 @@ impl ReminderRuntimeState {
             state
                 .lock_service()?
                 .arm_preference(user_id, Some(guild_id), kind)
-                .map_err(|error| error.to_string())
+                .map_err(|error| error.to_string())?;
+            state.sync_task_blocking(ReminderTaskKey::new(user_id, guild_id, kind))
         })
         .await
-        .map_err(|error| format!("reminder arm task failed: {error}"))??;
-        self.sync_task(ReminderTaskKey::new(user_id, guild_id, kind))
+        .map_err(|error| format!("reminder arm task failed: {error}"))?
     }
 
     async fn send_delivery(&self, delivery: ReminderDelivery) -> ReminderDeliveryReport {
@@ -360,9 +384,17 @@ impl InteractionHandler for ReminderHandler {
                     return Err(format!("reminder handler received command {name:?}").into());
                 }
                 let (user_id, guild_id) = signed_ids(user_id, guild_id)?;
+                // Slash commands have no automatic acknowledgement, and the
+                // preferences read can wait out SQLite's five-second busy
+                // timeout, so the interaction is acknowledged first. The
+                // settings UI is ephemeral either way.
+                responder
+                    .defer(true)
+                    .await
+                    .map_err(|error| error.to_string())?;
                 let preferences = self.state.preferences(user_id, guild_id).await?;
                 responder
-                    .respond(reminder_response(preferences))
+                    .followup(reminder_response(preferences))
                     .await
                     .map_err(|error| error.to_string().into())
             }
@@ -461,7 +493,14 @@ impl GatewayEventObserver for ReminderRecoveryObserver {
                             .is_ok_and(|guild_id| !failed_guilds.contains(&guild_id))
                     })
                     .count();
-                if let Err(error) = self.state.sync_all_tasks() {
+                let sync_state = Arc::clone(&self.state);
+                let synced =
+                    tokio::task::spawn_blocking(move || sync_state.sync_all_tasks_blocking())
+                        .await
+                        .unwrap_or_else(|error| {
+                            Err(format!("reminder timer sync task failed: {error}"))
+                        });
+                if let Err(error) = synced {
                     for &guild_id in context.guild_ids() {
                         report.failures.push(ReadyRecoveryFailure {
                             guild_id,
@@ -557,23 +596,27 @@ impl ReminderHooks {
         let user_id = UserId::new(user_id);
         let guild_id = GuildId::new(guild_id);
         let state = Arc::clone(&self.state);
+        let key = ReminderTaskKey::new(user_id, guild_id, kind);
         tokio::task::spawn_blocking(move || {
-            let mut service = state.lock_service()?;
-            match kind {
-                ReminderKind::Wheel => {
-                    service.schedule_wheel_reminder(user_id, Some(guild_id), ready_at, None)
+            {
+                // The named guard has to die before the sync re-locks: the
+                // service mutex is not reentrant.
+                let mut service = state.lock_service()?;
+                match kind {
+                    ReminderKind::Wheel => {
+                        service.schedule_wheel_reminder(user_id, Some(guild_id), ready_at, None)
+                    }
+                    ReminderKind::Trivia => {
+                        service.schedule_trivia_reminder(user_id, Some(guild_id), ready_at, None)
+                    }
+                    _ => unreachable!("typed cooldown hook has a closed kind"),
                 }
-                ReminderKind::Trivia => {
-                    service.schedule_trivia_reminder(user_id, Some(guild_id), ready_at, None)
-                }
-                _ => unreachable!("typed cooldown hook has a closed kind"),
+                .map_err(|error| error.to_string())?;
             }
-            .map_err(|error| error.to_string())
+            state.sync_task_blocking(key)
         })
         .await
-        .map_err(|error| format!("reminder schedule task failed: {error}"))??;
-        self.state
-            .sync_task(ReminderTaskKey::new(user_id, guild_id, kind))
+        .map_err(|error| format!("reminder schedule task failed: {error}"))?
     }
 
     pub async fn reconcile_dig(
@@ -585,18 +628,20 @@ impl ReminderHooks {
         let user_id = UserId::new(user_id);
         let guild_id = GuildId::new(guild_id);
         let state = Arc::clone(&self.state);
+        let key = ReminderTaskKey::new(user_id, guild_id, ReminderKind::Dig);
         tokio::task::spawn_blocking(move || {
             state
                 .lock_service()?
                 .reconcile_dig_reminder(user_id, Some(guild_id), reference_now, None)
-                .map_err(|error| error.to_string())
+                .map_err(|error| error.to_string())?;
+            state.sync_task_blocking(key)
         })
         .await
-        .map_err(|error| format!("dig reminder reconcile task failed: {error}"))??;
-        self.state
-            .sync_task(ReminderTaskKey::new(user_id, guild_id, ReminderKind::Dig))
+        .map_err(|error| format!("dig reminder reconcile task failed: {error}"))?
     }
 
+    /// Blocking: takes the service and timer locks, so it must be called from
+    /// a blocking context, never from a Tokio async worker.
     pub fn cancel_dig(&self, user_id: i64, guild_id: i64) -> Result<(), String> {
         let key = ReminderTaskKey::new(
             UserId::new(user_id),
@@ -606,7 +651,7 @@ impl ReminderHooks {
         self.state
             .lock_service()?
             .cancel_dig_reminder(key.user_id, Some(key.guild_id));
-        self.state.sync_task(key)
+        self.state.sync_task_blocking(key)
     }
 
     pub async fn rearm_pet(&self, user_id: i64, guild_id: i64) -> Result<(), String> {
@@ -619,6 +664,8 @@ impl ReminderHooks {
             .await
     }
 
+    /// Blocking: takes the service and timer locks. Async callers go through
+    /// [`Self::cancel_pet_async`].
     pub fn cancel_pet(&self, user_id: i64, guild_id: i64) -> Result<(), String> {
         let key = ReminderTaskKey::new(
             UserId::new(user_id),
@@ -628,7 +675,7 @@ impl ReminderHooks {
         self.state
             .lock_service()?
             .cancel_pet_reminder(key.user_id, Some(key.guild_id));
-        self.state.sync_task(key)
+        self.state.sync_task_blocking(key)
     }
 
     /// Cancel the durable pet reminder and its in-memory timer off Tokio's

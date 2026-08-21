@@ -132,6 +132,15 @@ pub struct DigRuntimeConfig {
     /// Keeping the decay policy on the runtime config makes the dig aggregate
     /// use the same value as the pet application service without a scheduler.
     pub pet_decay_per_day: i64,
+    /// Server-side secret mixed into dig and dig-event seeds.
+    ///
+    /// Without it a dig's randomness derives entirely from values the player
+    /// knows or controls -- their ids, the click second, and the paid/forced
+    /// flags -- so the loot pipeline can be simulated for each upcoming second
+    /// and a click timed for no cave-in, maximum JC, or an artifact. Production
+    /// draws an unpredictable value; the default stays zero so tests keep their
+    /// deterministic seeds.
+    pub entropy_secret: u64,
 }
 
 impl Default for DigRuntimeConfig {
@@ -143,6 +152,7 @@ impl Default for DigRuntimeConfig {
             bankruptcy_penalty_keep_basis_points: DIG_REWARD_BASIS_POINTS,
             economy_event: EconomyEventConfig::default(),
             pet_decay_per_day: cama_domain::pet::DEFAULT_HUNGER_DECAY_PER_DAY,
+            entropy_secret: 0,
         }
     }
 }
@@ -150,7 +160,10 @@ impl Default for DigRuntimeConfig {
 impl DigRuntimeConfig {
     #[must_use]
     pub fn production() -> Self {
-        Self::default()
+        Self {
+            entropy_secret: process_dig_secret(),
+            ..Self::default()
+        }
     }
 
     #[must_use]
@@ -161,7 +174,13 @@ impl DigRuntimeConfig {
         }
     }
 
+    /// Set the secret mixed into dig seeds; zero keeps the legacy seed.
     #[must_use]
+    pub const fn with_entropy_secret(mut self, secret: u64) -> Self {
+        self.entropy_secret = secret;
+        self
+    }
+
     pub fn with_runtime_policy(
         mut self,
         minigame_jc_delta_scale: f64,
@@ -611,6 +630,7 @@ pub trait DigRuntimeStore: Send + Sync {
         _guild_id: i64,
         _now: i64,
         _decay_per_day: i64,
+        _entropy_secret: u64,
     ) -> Result<Option<PetDigWork>, DigRuntimeStoreError> {
         Ok(None)
     }
@@ -1523,91 +1543,6 @@ impl DigRuntimeService<SqliteDigRuntimeStore> {
         ))
     }
 
-    /// Return the provider-facing sabotage preview from a read-only snapshot.
-    pub fn sabotage_preview(
-        &self,
-        target_id: i64,
-        guild_id: i64,
-    ) -> Result<(i64, String), DigRuntimeStoreError> {
-        let snapshot = self.store.snapshot(target_id, guild_id)?;
-        let Some(tunnel) = snapshot.tunnel else {
-            return Err(DigRuntimeStoreError::MissingTunnel);
-        };
-        Ok((5_i64.max(tunnel.depth / 5), "3–8 blocks".to_owned()))
-    }
-
-    /// Apply sabotage through one immediate transaction.  The player-facing
-    /// provider only renders this result; it does not debit or mutate either
-    /// tunnel itself.
-    pub fn sabotage(
-        &self,
-        actor_id: i64,
-        target_id: i64,
-        guild_id: i64,
-        now: i64,
-    ) -> Result<String, DigRuntimeStoreError> {
-        if actor_id == target_id {
-            return Ok("You can't sabotage yourself.".to_owned());
-        }
-        let snapshot = self.store.snapshot(target_id, guild_id)?;
-        let Some(tunnel) = snapshot.tunnel else {
-            return Ok("That miner has not started a tunnel yet.".to_owned());
-        };
-        let cost = 5_i64.max(tunnel.depth / 5);
-        let mut connection = self.store.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let balance = transaction
-            .query_row(
-                "SELECT COALESCE(jopacoin_balance,0) FROM players
-                 WHERE discord_id=?1 AND guild_id=?2",
-                params![actor_id, guild_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?;
-        let Some(balance) = balance else {
-            transaction.commit()?;
-            return Ok("You must be registered first.".to_owned());
-        };
-        if balance < cost {
-            transaction.commit()?;
-            return Ok(format!(
-                "Sabotage costs {cost} {JOPACOIN_EMOTE}; your balance is {balance}."
-            ));
-        }
-        transaction.execute(
-            "UPDATE players SET jopacoin_balance=jopacoin_balance-?1,
-                    updated_at=CURRENT_TIMESTAMP
-             WHERE discord_id=?2 AND guild_id=?3",
-            params![cost, actor_id, guild_id],
-        )?;
-        let depth_after = tunnel.depth.saturating_sub(3).max(0);
-        transaction.execute(
-            "UPDATE tunnels SET depth=?1 WHERE discord_id=?2 AND guild_id=?3",
-            params![depth_after, target_id, guild_id],
-        )?;
-        transaction.execute(
-            "INSERT INTO dig_actions
-                (guild_id, actor_id, target_id, action_type, depth_before,
-                 depth_after, jc_delta, detail, created_at)
-             VALUES (?1, ?2, ?3, 'sabotage', ?4, ?5, ?6, '{}', ?7)",
-            params![
-                guild_id,
-                actor_id,
-                target_id,
-                tunnel.depth,
-                depth_after,
-                -cost,
-                now
-            ],
-        )?;
-        transaction.commit()?;
-        Ok(format!(
-            "Sabotage complete. The target lost **{}** blocks; you spent **{cost}** {JOPACOIN_EMOTE}.",
-            tunnel.depth.saturating_sub(depth_after)
-        ))
-    }
-
-    /// Transfer one owned relic to another registered miner atomically.
     pub fn gift_relic(
         &self,
         owner_id: i64,
@@ -1682,66 +1617,6 @@ impl DigRuntimeService<SqliteDigRuntimeStore> {
         } else {
             DigAdminMutationOutcome::MissingTunnel
         })
-    }
-
-    pub fn set_about(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-        about: &str,
-    ) -> Result<(), DigRuntimeStoreError> {
-        let connection = self.store.connection()?;
-        let existing = connection
-            .query_row(
-                "SELECT COALESCE(miner_about,'') FROM tunnels
-                 WHERE discord_id=?1 AND guild_id=?2",
-                params![discord_id, guild_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
-        let Some(existing) = existing else {
-            return Err(DigRuntimeStoreError::MissingTunnel);
-        };
-        if !existing.is_empty() {
-            return Err(DigRuntimeStoreError::StateConflict);
-        }
-        connection.execute(
-            "UPDATE tunnels SET miner_about=?1
-             WHERE discord_id=?2 AND guild_id=?3",
-            params![about.trim(), discord_id, guild_id],
-        )?;
-        Ok(())
-    }
-
-    pub fn spend_stats(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-        strength: i64,
-        smarts: i64,
-        stamina: i64,
-    ) -> Result<String, DigRuntimeStoreError> {
-        let strength = strength.max(0);
-        let smarts = smarts.max(0);
-        let stamina = stamina.max(0);
-        let requested = strength.saturating_add(smarts).saturating_add(stamina);
-        if requested == 0 {
-            return Ok("Choose at least one point to spend.".to_owned());
-        }
-        let connection = self.store.connection()?;
-        let changed = connection.execute(
-            "UPDATE tunnels SET stat_strength=stat_strength+?1,
-                    stat_smarts=stat_smarts+?2, stat_stamina=stat_stamina+?3,
-                    stat_points=stat_points-?4
-             WHERE discord_id=?5 AND guild_id=?6 AND stat_points>=?4",
-            params![strength, smarts, stamina, requested, discord_id, guild_id],
-        )?;
-        if changed == 0 {
-            return Ok("Not enough unspent S points for that build.".to_owned());
-        }
-        Ok(format!(
-            "Build updated: +{strength} Strength, +{smarts} Smarts, +{stamina} Stamina."
-        ))
     }
 
     pub fn respec(
@@ -2350,6 +2225,7 @@ where
                 request.guild_id,
                 now,
                 self.config.pet_decay_per_day,
+                self.config.entropy_secret,
             )?
         } else {
             None
@@ -2357,7 +2233,7 @@ where
         let pet_name = pet_work.as_ref().map(|work| work.pet_name.clone());
 
         if first_dig {
-            let mut entropy = SeededLootEntropy::new(seed_for(request));
+            let mut entropy = SeededLootEntropy::new(seed_for(request, self.config.entropy_secret));
             let advance = entropy.advance(3, 7);
             let jc_roll = entropy.advance(1, 5);
             let scaled_jc = scale_dig_minigame_jc(
@@ -2537,7 +2413,7 @@ where
         // Corruption is the first request-local random policy in Python. It
         // must consume the same entropy stream as the subsequent cave roll,
         // rather than a second seed that would shift only some Dig paths.
-        let mut entropy = SeededLootEntropy::new(seed_for(request));
+        let mut entropy = SeededLootEntropy::new(seed_for(request, self.config.entropy_secret));
         let corruption = roll_corruption(tunnel.prestige_level as i32, &mut entropy);
         let corruption_bonus = corruption
             .as_ref()
@@ -3379,11 +3255,16 @@ where
                 .jc_earned
                 .saturating_add(outcome.bankruptcy_penalty)
                 .max(0);
+            // Withholding comes out of the reward still in hand, which the
+            // bankruptcy penalty has already reduced. Clamping to the basis
+            // alone would debit the wallet whenever the configured keep rate
+            // leaves less in hand than the tax.
             let vanity_tax = self
                 .vanity_tax
                 .calculate_tax(request.discord_id, request.guild_id, vanity_tax_basis)
                 .max(0)
-                .min(vanity_tax_basis);
+                .min(vanity_tax_basis)
+                .min(outcome.jc_earned.max(0));
             // The low-priority sink reads the same pre-subtraction basis, so
             // the two taxes stack additively instead of compounding. What is
             // actually withheld, though, comes out of the reward still in
@@ -3957,13 +3838,16 @@ where
         }
         let mut loot = DigLootService::new(
             DigRuntimeLootRepository::new(snapshot.clone()),
-            SeededLootEntropy::new(seed_for(DigRuntimeRequest {
-                discord_id,
-                guild_id,
-                now,
-                paid: false,
-                forced_event: false,
-            })),
+            SeededLootEntropy::new(seed_for(
+                DigRuntimeRequest {
+                    discord_id,
+                    guild_id,
+                    now,
+                    paid: false,
+                    forced_event: false,
+                },
+                self.config.entropy_secret,
+            )),
         );
         let result = action(&mut loot);
         if !result.success {
@@ -4048,11 +3932,38 @@ fn dig_progressive_tip(depth: i64, seed: i64) -> String {
     tips[index].to_owned()
 }
 
-fn seed_for(request: DigRuntimeRequest) -> u64 {
+/// Secret drawn once per process and mixed into every dig seed.
+///
+/// Without it a dig's seed is derived entirely from values the player knows or
+/// controls -- their ids, the click second, and the paid/forced flags -- so the
+/// open-source loot pipeline can be simulated for each upcoming second and a
+/// click timed for no cave-in, maximum JC, or an artifact. Keeping the secret
+/// per process preserves same-request determinism for retries.
+fn process_dig_secret() -> u64 {
+    static SECRET: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *SECRET.get_or_init(|| {
+        use std::hash::{BuildHasher, Hasher};
+        // RandomState is seeded by the OS, which is what makes this
+        // unpredictable rather than merely varying.
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u64(std::process::id().into());
+        hasher.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos()),
+        );
+        hasher.finish()
+    })
+}
+
+pub(crate) fn seed_for(request: DigRuntimeRequest, secret: u64) -> u64 {
     let mut value = request.discord_id as u64;
     value = value.rotate_left(17) ^ request.guild_id as u64;
     value = value.rotate_left(23) ^ request.now as u64;
-    value ^ u64::from(request.paid) ^ (u64::from(request.forced_event) << 1)
+    value ^= u64::from(request.paid) ^ (u64::from(request.forced_event) << 1);
+    // A zero secret reproduces the legacy seed exactly, which is what keeps
+    // the deterministic tests meaningful.
+    value ^ secret
 }
 
 fn parked_boss_boundary(tunnel: &DigRuntimeTunnel) -> Option<i64> {

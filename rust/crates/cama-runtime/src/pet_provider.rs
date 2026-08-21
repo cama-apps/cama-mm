@@ -59,6 +59,7 @@ use cama_domain::service_result::ServiceResult;
 use chrono::Utc;
 use tokio::task::JoinError;
 use tokio::time::Instant;
+use tracing::warn;
 
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::DiscordTransport;
@@ -1414,8 +1415,14 @@ impl PetInteractionHandler {
         guild_id: i64,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
-        // Python performs this preview before deferring; failures are an
-        // immediate ephemeral response and never leave a public placeholder.
+        // The preview runs two SQLite reads on a connection with a five-second
+        // busy timeout, which can outlast Discord's three-second window, so the
+        // interaction is acknowledged first -- the same order command_altar
+        // uses for its preview.
+        responder
+            .defer(false)
+            .await
+            .map_err(|error| error.to_string())?;
         let preview = self
             .run_eating(
                 move |service| match service.eat_preview(user_id, Some(guild_id)) {
@@ -1426,18 +1433,16 @@ impl PetInteractionHandler {
             .await;
         let pet = match preview {
             Ok(pet) => pet,
+            // The deferred response is public, so the failure resolves it
+            // rather than leaving a "thinking..." placeholder standing beside
+            // an ephemeral error.
             Err(error) => {
-                return respond(
-                    &responder,
-                    InteractionResponse::message(format!("❌ {error}")).ephemeral(),
-                )
-                .await;
+                return responder
+                    .edit_original(InteractionResponse::message(format!("❌ {error}")))
+                    .await
+                    .map_err(|response_error| response_error.to_string());
             }
         };
-        responder
-            .defer(false)
-            .await
-            .map_err(|error| error.to_string())?;
         let token = self.next_token("eat");
         let embed = eating_warning_embed(&pet);
         let response = confirmation_response(
@@ -2122,7 +2127,10 @@ impl PetInteractionHandler {
         if let Some(message) = last_edited_message(&recorder) {
             let response = outbound_response(message, false);
             return match responder.update(response.clone()).await {
-                Ok(()) => Ok(()),
+                Ok(()) => {
+                    deliver_recorded_followups(&responder, &recorder).await;
+                    Ok(())
+                }
                 Err(error) => {
                     if let Some((receipt, retained)) = challenge_delivery {
                         retained
@@ -2186,8 +2194,9 @@ impl PetInteractionHandler {
             .ok_or_else(|| "invalid battle component".to_owned())?
             .parse::<i64>()
             .map_err(|_| "invalid brawl id".to_owned())?;
-        let _round = parts
+        let round = parts
             .next()
+            .and_then(|value| value.parse::<u8>().ok())
             .ok_or_else(|| "invalid battle round".to_owned())?;
         let move_name = parts.next().unwrap_or_default();
         let move_ = PetBrawlMove::ALL
@@ -2202,6 +2211,17 @@ impl PetInteractionHandler {
             .get(&brawl_id)
             .cloned()
             .ok_or_else(|| "This brawl interaction expired.".to_owned())?;
+        // The round is encoded in the button precisely so a late click cannot
+        // be counted against a round the player never saw: a double-click, or a
+        // click racing the timeout that resolved the round, would otherwise
+        // lock in a move for the next round.
+        if view.round_no != round {
+            return respond(
+                &responder,
+                InteractionResponse::message("That round already resolved.").ephemeral(),
+            )
+            .await;
+        }
         let interaction = brawl_interaction(user_id, guild_id, channel_id, true);
         let (outcome, recorder, mut view) = self
             .run_brawl(move |commands| {
@@ -2276,6 +2296,7 @@ impl PetInteractionHandler {
                             .map_err(|_| "pet battle receipt lock poisoned".to_owned())?
                             .remove(&brawl_id);
                     }
+                    deliver_recorded_followups(&responder, &recorder).await;
                     Ok(())
                 }
                 Err(error) => {
@@ -2537,17 +2558,59 @@ impl PetInteractionHandler {
         Ok(finished)
     }
 
+    /// Give every round its own full picking window.
+    ///
+    /// The embed promises `PET_BRAWL_TURN_SECONDS` per move and the legacy
+    /// views built a fresh timer per round. A fixed cadence started at accept
+    /// would instead force-pick the safe move a fraction of a second into any
+    /// round that began late in the cycle, changing combat outcomes and who
+    /// wins the wager.
     fn spawn_battle_timeout(&self, brawl_id: i64) {
         let state = Arc::clone(&self.state);
         tokio::spawn(async move {
+            let turn = Duration::from_secs(
+                u64::try_from(cama_domain::pet::PET_BRAWL_TURN_SECONDS).unwrap_or(30),
+            );
+            // Polling keeps the window anchored to when each round actually
+            // started, which a single fixed-cadence sleep cannot observe.
+            let tick = Duration::from_secs(1);
+            let mut armed_for = Self::battle_round(&state, brawl_id);
+            let mut round_started = tokio::time::Instant::now();
             loop {
-                tokio::time::sleep(Duration::from_secs(30)).await;
-                match Self::advance_battle_timeout_once(Arc::clone(&state), brawl_id).await {
-                    Ok(true) | Err(_) => return,
-                    Ok(false) => {}
+                tokio::time::sleep(tick).await;
+                let current = Self::battle_round(&state, brawl_id);
+                match battle_timeout_step(armed_for, current, round_started.elapsed(), turn) {
+                    BattleTimeoutStep::Stop => return,
+                    BattleTimeoutStep::Wait => continue,
+                    BattleTimeoutStep::Rearm => {
+                        // The players resolved this round themselves; the next
+                        // one gets its own full window.
+                        armed_for = current;
+                        round_started = tokio::time::Instant::now();
+                    }
+                    BattleTimeoutStep::Fire => {
+                        match Self::advance_battle_timeout_once(Arc::clone(&state), brawl_id).await
+                        {
+                            Ok(true) | Err(_) => return,
+                            Ok(false) => {
+                                armed_for = Self::battle_round(&state, brawl_id);
+                                round_started = tokio::time::Instant::now();
+                            }
+                        }
+                    }
                 }
             }
         });
+    }
+
+    /// The round a live battle is currently on, or `None` once it is gone.
+    fn battle_round(state: &Arc<PetRuntimeState>, brawl_id: i64) -> Option<u8> {
+        state
+            .battle_views
+            .lock()
+            .ok()?
+            .get(&brawl_id)
+            .map(|handle| handle.round_no)
     }
 
     fn spawn_confirmation_timeout(&self, token: String) {
@@ -2661,14 +2724,20 @@ impl PetInteractionHandler {
     async fn render_pet(&self, pet: &Pet) -> Result<InteractionAttachment, String> {
         let pet = pet.clone();
         let assets = Arc::clone(&self.state.assets);
+        // The card must age the pet with the configured decay, like every other
+        // surface: a hardcoded rate of 1 keeps derived hunger in the happy band
+        // for about a month, so the hungry and starving art never appeared
+        // beside a status embed already reporting them.
+        let decay_per_day = self.state.decay_per_day;
         tokio::task::spawn_blocking(move || {
+            let now = Utc::now().timestamp();
             let mut assets = assets
                 .lock()
                 .map_err(|_| "pet asset lock poisoned".to_owned())?;
             let file = assets.get_pet_card(&PetRenderRequest {
                 species_id: &pet.species,
-                stage: pet.stage(Utc::now().timestamp()),
-                mood: pet.mood(Utc::now().timestamp(), 1),
+                stage: pet.stage(now),
+                mood: pet.mood(now, decay_per_day),
                 seed: pet.pet_id,
                 accessory: pet.accessory.as_deref(),
                 evolution: evolution_visual(&pet),
@@ -3134,6 +3203,38 @@ fn last_edited_message(
         | DiscordEvent::FollowupAttempt(_)
         | DiscordEvent::WaitingForSessionLock { .. } => None,
     })
+}
+
+/// Replay the private acknowledgements the command layer recorded alongside a
+/// message edit.
+///
+/// `PetBrawlCommands` records the pick confirmation -- and the `pet_dead`
+/// accept error -- as a follow-up *before* it edits the shared brawl message.
+/// The component routes deliver only that edit, because the edit is this
+/// interaction's one initial callback, so those private messages were dropped:
+/// picks are secret and the board embed shows only a lock icon, so a picker
+/// could not see which move they locked in. Discord accepts a follow-up only
+/// once the interaction is acknowledged, so they are replayed after the update
+/// lands. A failed acknowledgement never fails the click; the pick is already
+/// recorded.
+async fn deliver_recorded_followups(
+    responder: &Arc<dyn InteractionResponder>,
+    recorder: &InMemoryDiscord,
+) {
+    for message in recorder.events.iter().filter_map(|event| match event {
+        DiscordEvent::FollowupAttempt(message) => Some(message),
+        DiscordEvent::Initial(_)
+        | DiscordEvent::Deferred { .. }
+        | DiscordEvent::Edited { .. }
+        | DiscordEvent::WaitingForSessionLock { .. } => None,
+    }) {
+        if let Err(error) = responder
+            .followup(outbound_response(message, message.ephemeral))
+            .await
+        {
+            warn!("pet brawl acknowledgement follow-up failed: {error}");
+        }
+    }
 }
 
 fn outbound_response(
@@ -3727,3 +3828,44 @@ impl PetEatingRandomPort for RuntimeEatingRng {
 #[cfg(all(test, feature = "runtime-test-dig"))]
 #[path = "pet_provider/tests.rs"]
 mod tests;
+
+/// What the battle timeout task should do on one tick.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BattleTimeoutStep {
+    /// The battle is gone; the task is finished.
+    Stop,
+    /// A new round started; restart its window.
+    Rearm,
+    /// The current round still has time left.
+    Wait,
+    /// The current round's window has expired.
+    Fire,
+}
+
+/// Decide one tick of the battle timeout.
+///
+/// The window belongs to a round, not to the battle: a round that starts late
+/// still gets the full `turn` the embed promises, and a round is never expired
+/// on the strength of time that elapsed during an earlier one.
+const fn battle_timeout_step(
+    armed_for: Option<u8>,
+    current: Option<u8>,
+    round_elapsed: Duration,
+    turn: Duration,
+) -> BattleTimeoutStep {
+    if current.is_none() {
+        return BattleTimeoutStep::Stop;
+    }
+    // Option<u8> has no const PartialEq, so compare the discriminants directly.
+    match (armed_for, current) {
+        (Some(armed), Some(now)) if armed != now => BattleTimeoutStep::Rearm,
+        (None, Some(_)) => BattleTimeoutStep::Rearm,
+        _ => {
+            if round_elapsed.as_secs() < turn.as_secs() {
+                BattleTimeoutStep::Wait
+            } else {
+                BattleTimeoutStep::Fire
+            }
+        }
+    }
+}

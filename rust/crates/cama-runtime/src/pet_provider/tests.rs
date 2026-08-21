@@ -34,6 +34,7 @@ struct TestResponder {
     updates: StdMutex<Vec<InteractionResponse>>,
     edits: StdMutex<Vec<(InteractionMessageReceipt, InteractionResponse)>>,
     autocompletes: StdMutex<Vec<Vec<CommandOptionChoice>>>,
+    calls: StdMutex<Vec<&'static str>>,
 }
 
 impl TestResponder {
@@ -47,6 +48,7 @@ impl TestResponder {
             updates: StdMutex::new(Vec::new()),
             edits: StdMutex::new(Vec::new()),
             autocompletes: StdMutex::new(Vec::new()),
+            calls: StdMutex::new(Vec::new()),
         }
     }
 
@@ -77,6 +79,14 @@ impl TestResponder {
             .expect("matching button")
     }
 
+    fn call_log(&self) -> Vec<&'static str> {
+        self.calls.lock().expect("calls").clone()
+    }
+
+    fn record(&self, call: &'static str) {
+        self.calls.lock().expect("calls").push(call);
+    }
+
     fn fail_receipt(&self) {
         self.fail_receipt.store(true, Ordering::Relaxed);
     }
@@ -85,11 +95,13 @@ impl TestResponder {
 #[async_trait]
 impl InteractionResponder for TestResponder {
     async fn respond(&self, response: InteractionResponse) -> Result<(), InteractionResponseError> {
+        self.record("respond");
         self.responses.lock().expect("responses").push(response);
         Ok(())
     }
 
     async fn defer(&self, _ephemeral: bool) -> Result<(), InteractionResponseError> {
+        self.record("defer");
         self.defers.lock().expect("defers").push(_ephemeral);
         Ok(())
     }
@@ -109,6 +121,7 @@ impl InteractionResponder for TestResponder {
         &self,
         response: InteractionResponse,
     ) -> Result<(), InteractionResponseError> {
+        self.record("followup");
         self.followups.lock().expect("followups").push(response);
         Ok(())
     }
@@ -120,6 +133,7 @@ impl InteractionResponder for TestResponder {
         if self.fail_receipt.load(Ordering::Relaxed) {
             return Err(InteractionResponseError::new("simulated follow-up failure"));
         }
+        self.record("followup");
         self.followups.lock().expect("followups").push(response);
         Ok(Some(InteractionMessageReceipt {
             message_id: 1,
@@ -132,6 +146,7 @@ impl InteractionResponder for TestResponder {
         if self.fail_update.load(Ordering::Relaxed) {
             return Err(InteractionResponseError::new("simulated edit failure"));
         }
+        self.record("update");
         self.updates.lock().expect("updates").push(response);
         Ok(())
     }
@@ -544,10 +559,79 @@ async fn battle_click_failure_uses_retained_interaction_followup_receipt() {
         .await
         .expect("retained battle edit");
     assert!(click.updates.lock().expect("click updates").is_empty());
+    assert!(
+        click.followups.lock().expect("click followups").is_empty(),
+        "a rejected initial callback leaves the interaction unacknowledged, so no follow-up may be attempted"
+    );
     let edits = initial.edits.lock().expect("initial edits");
     assert!(edits.iter().any(|(receipt, _)| {
         receipt.delivery == InteractionMessageDelivery::InteractionFollowup
     }));
+}
+
+#[tokio::test]
+async fn battle_click_confirms_the_locked_in_move_privately() {
+    let (_database, provider, _challenger_pet, _recipient_pet) = brawl_fixture();
+    let initial = Arc::new(TestResponder::new(false));
+    provider
+        .handler
+        .handle(brawl_command(RECIPIENT, 0), initial.clone())
+        .await
+        .expect("challenge delivery");
+    let accept = initial.first_button_id();
+    let accept_click = Arc::new(TestResponder::new(false));
+    provider
+        .handler
+        .handle(
+            component_as(accept.clone(), RECIPIENT),
+            accept_click.clone(),
+        )
+        .await
+        .expect("battle start");
+    let battle_id = initial
+        .followups
+        .lock()
+        .expect("followups")
+        .first()
+        .map(|response| brawl_id_from_button(&response.components[0].buttons[0].custom_id))
+        .expect("challenge id");
+    let button = provider
+        .handler
+        .state
+        .battle_views
+        .lock()
+        .expect("battle views")
+        .get(&battle_id)
+        .expect("battle state")
+        .view_model()
+        .buttons[0]
+        .clone();
+    let move_id = button.custom_id.clone().expect("move id");
+    let click = Arc::new(TestResponder::new(false));
+    provider
+        .handler
+        .handle(component_as(move_id, OWNER), click.clone())
+        .await
+        .expect("battle pick");
+
+    let followups = click.followups.lock().expect("click followups");
+    let confirmation = followups
+        .first()
+        .expect("the picker is told privately which move locked in");
+    assert!(
+        confirmation.content.contains("You picked"),
+        "unexpected confirmation: {:?}",
+        confirmation.content
+    );
+    assert!(
+        confirmation.ephemeral,
+        "a pick confirmation is private: picks are secret until the round resolves"
+    );
+    assert_eq!(
+        click.call_log(),
+        vec!["update", "followup"],
+        "the board edit is this interaction's one initial callback, so the private confirmation follows it"
+    );
 }
 
 #[tokio::test]
@@ -1938,4 +2022,74 @@ async fn live_migrated_sqlite_dispatches_all_pet_leaves_and_persistent_paths() {
         click.defers.lock().expect("component defers").as_slice(),
         &[false]
     );
+}
+
+#[test]
+fn battle_timeout_window_belongs_to_the_round_not_the_battle() {
+    let turn = Duration::from_secs(30);
+    let short = Duration::from_secs(1);
+
+    // A round that only just started is never expired, however long the battle
+    // as a whole has been running.
+    assert_eq!(
+        battle_timeout_step(Some(1), Some(1), short, turn),
+        BattleTimeoutStep::Wait
+    );
+    // Its own full window having passed does expire it.
+    assert_eq!(
+        battle_timeout_step(Some(1), Some(1), turn, turn),
+        BattleTimeoutStep::Fire
+    );
+    // When the players resolve a round themselves, the next one restarts the
+    // window rather than inheriting the remainder of the previous one.
+    assert_eq!(
+        battle_timeout_step(Some(1), Some(2), turn, turn),
+        BattleTimeoutStep::Rearm
+    );
+    // A battle that has ended stops the task.
+    assert_eq!(
+        battle_timeout_step(Some(2), None, turn, turn),
+        BattleTimeoutStep::Stop
+    );
+}
+#[tokio::test]
+async fn a_void_tombstone_still_tells_the_clicker_why_the_brawl_died() {
+    let (database, provider, challenger_pet, _recipient_pet) = brawl_fixture();
+    let initial = Arc::new(TestResponder::new(false));
+    provider
+        .handler
+        .handle(brawl_command(RECIPIENT, 0), initial.clone())
+        .await
+        .expect("challenge delivery");
+    rusqlite::Connection::open(database.path())
+        .expect("open brawl fixture")
+        .execute(
+            "UPDATE pets SET died_at=?1 WHERE pet_id=?2",
+            rusqlite::params![SystemPetClock.now(), challenger_pet],
+        )
+        .expect("bury the challenger's pet");
+    let accept = initial.first_button_id();
+    let click = Arc::new(TestResponder::new(false));
+    provider
+        .handler
+        .handle(component_as(accept, RECIPIENT), click.clone())
+        .await
+        .expect("accept a dead pet's challenge");
+
+    assert_eq!(
+        click.updates.lock().expect("click updates").len(),
+        1,
+        "the challenge message is replaced by the void tombstone"
+    );
+    let followups = click.followups.lock().expect("click followups");
+    let reason = followups
+        .first()
+        .expect("the clicker is told why the challenge voided");
+    assert!(
+        reason.content.contains("no longer with us"),
+        "unexpected failure notice: {:?}",
+        reason.content
+    );
+    assert!(reason.ephemeral, "the failure notice is private");
+    assert_eq!(click.call_log(), vec!["update", "followup"]);
 }

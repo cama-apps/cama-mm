@@ -8,3 +8,12 @@ target-dir = "rust/target-native"
 # machines, saturating every CPU makes those tests contend heavily on storage;
 # four workers is materially faster and remains overridable per invocation.
 RUST_TEST_THREADS = { value = "4", force = false }
+
+# Cargo's native publication-age quarantine is nightly-only today. Cargo 1.94
+# safely ignores these forward-compatible keys; cargo-vet remains the enforced
+# stable-toolchain gate.
+[registry]
+global-min-publish-age = "7 days"
+
+[unstable]
+min-publish-age = true

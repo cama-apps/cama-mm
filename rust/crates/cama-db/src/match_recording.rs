@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use cama_domain::rating::{MAX_GLICKO_RD, cap_glicko_rd};
 use cama_domain::role_derivation::{LaneStats, derive_positions};
 use rusqlite::{
     Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter,
@@ -402,8 +403,14 @@ impl MatchRecordingRepository {
                  discord_id, guild_id, discord_username, wins, losses,
                  glicko_rating, glicko_rd, glicko_volatility,
                  jopacoin_balance, lowest_balance_ever, updated_at
-             ) VALUES (?1, ?2, ?3, 0, 0, ?4, 350.0, 0.06, 3, 3, CURRENT_TIMESTAMP)",
-            params![discord_id, Self::normalize_guild_id(guild_id), name, rating],
+             ) VALUES (?1, ?2, ?3, 0, 0, ?4, ?5, 0.06, 3, 3, CURRENT_TIMESTAMP)",
+            params![
+                discord_id,
+                Self::normalize_guild_id(guild_id),
+                name,
+                rating,
+                MAX_GLICKO_RD
+            ],
         )?;
         Ok(())
     }
@@ -419,10 +426,14 @@ impl MatchRecordingRepository {
                 "SELECT discord_id, discord_username,
                         COALESCE(jopacoin_balance, 0), COALESCE(wins, 0),
                         COALESCE(losses, 0), COALESCE(glicko_rating, 1500.0),
-                        COALESCE(glicko_rd, 350.0),
+                        COALESCE(glicko_rd, ?3),
                         COALESCE(glicko_volatility, 0.06)
                  FROM players WHERE discord_id = ?1 AND guild_id = ?2",
-                params![discord_id, Self::normalize_guild_id(guild_id)],
+                params![
+                    discord_id,
+                    Self::normalize_guild_id(guild_id),
+                    MAX_GLICKO_RD
+                ],
                 player_from_row,
             )
             .optional()
@@ -447,7 +458,7 @@ impl MatchRecordingRepository {
             "SELECT discord_id, discord_username,
                     COALESCE(jopacoin_balance, 0), COALESCE(wins, 0),
                     COALESCE(losses, 0), COALESCE(glicko_rating, 1500.0),
-                    COALESCE(glicko_rd, 350.0),
+                    COALESCE(glicko_rd, {MAX_GLICKO_RD}),
                     COALESCE(glicko_volatility, 0.06)
              FROM players WHERE guild_id = ? AND discord_id IN ({placeholders})"
         );
@@ -720,7 +731,6 @@ impl MatchRecordingRepository {
                 .saturating_sub(bankruptcy_penalty)
                 .saturating_sub(vanity_tax)
                 .saturating_sub(low_priority_tax);
-            clear_income_award_compensation_marker(&transaction, guild_id, *award)?;
             receipts.push(IncomeAwardReceipt {
                 discord_id: award.discord_id,
                 gross,
@@ -1198,6 +1208,7 @@ impl MatchRecordingRepository {
             guild_id,
             match_id,
             request.pending_bet_since,
+            request.pending_match_id,
             request.winning_team,
             &mut jc_changes,
         )?;
@@ -1557,7 +1568,7 @@ fn player_from_row(row: &rusqlite::Row<'_>) -> Result<PlayerRecord, rusqlite::Er
         wins: row.get(3)?,
         losses: row.get(4)?,
         glicko_rating: row.get(5)?,
-        glicko_rd: row.get(6)?,
+        glicko_rd: cap_glicko_rd(row.get(6)?),
         glicko_volatility: row.get(7)?,
     })
 }
@@ -1572,10 +1583,10 @@ fn player_for_update(
             "SELECT discord_id, discord_username,
                     COALESCE(jopacoin_balance, 0), COALESCE(wins, 0),
                     COALESCE(losses, 0), COALESCE(glicko_rating, 1500.0),
-                    COALESCE(glicko_rd, 350.0),
+                    COALESCE(glicko_rd, ?3),
                     COALESCE(glicko_volatility, 0.06)
              FROM players WHERE discord_id = ?1 AND guild_id = ?2",
-            params![discord_id, guild_id],
+            params![discord_id, guild_id, MAX_GLICKO_RD],
             player_from_row,
         )
         .optional()?
@@ -1708,11 +1719,19 @@ fn update_exclusion_counts(
     Ok(())
 }
 
+/// Settle the house bets that belong to the match being recorded.
+///
+/// A guild can hold several pending matches at once and bets carry the pending
+/// match they were placed on, so a sweep of every unsettled bet in the guild
+/// would pay bets placed on one pending match against another's winner. Bets
+/// with no attribution are still swept by time, which is how legacy rows
+/// recorded before the column existed continue to settle.
 fn settle_house_bets(
     connection: &Connection,
     guild_id: i64,
     match_id: i64,
     since: i64,
+    pending_match_id: Option<i64>,
     winner: TeamSide,
     jc_changes: &mut BTreeMap<i64, JcChange>,
 ) -> Result<BetDistributions, MatchRecordingRepositoryError> {
@@ -1720,11 +1739,13 @@ fn settle_house_bets(
         let mut statement = connection.prepare(
             "SELECT bet_id, discord_id, team_bet_on, amount, bet_time
              FROM bets
-             WHERE guild_id = ?1 AND match_id IS NULL AND bet_time >= ?2
+             WHERE guild_id = ?1 AND match_id IS NULL
+               AND ((?3 IS NOT NULL AND pending_match_id = ?3)
+                    OR (pending_match_id IS NULL AND bet_time >= ?2))
              ORDER BY bet_id",
         )?;
         statement
-            .query_map(params![guild_id, since], |row| {
+            .query_map(params![guild_id, since, pending_match_id], |row| {
                 let team_name = row.get::<_, String>(2)?;
                 Ok(PendingBet {
                     bet_id: row.get(0)?,
@@ -1927,18 +1948,24 @@ fn income_award_marker_exists(
 ) -> Result<bool, rusqlite::Error> {
     transaction
         .query_row(
+            // A credit only still stands if it is newer than the most recent
+            // rollback for the same key. Comparing on ledger_id keeps the
+            // ledger append-only: deleting the rollback rows instead would
+            // erase real balance movements from the audit trail and let a
+            // later recovery sum two applications of the same award.
             "SELECT 1 FROM economy_ledger_entries
              WHERE guild_id=?1 AND account_type='player' AND account_id=?2
                AND source=?3 AND related_type=?4 AND related_id=?5
-               AND NOT EXISTS (
-                   SELECT 1 FROM economy_ledger_entries compensation
+               AND ledger_id > COALESCE((
+                   SELECT MAX(compensation.ledger_id)
+                   FROM economy_ledger_entries compensation
                    WHERE compensation.guild_id=?1
                      AND compensation.account_type='player'
                      AND compensation.account_id=?2
                      AND compensation.source='match_bonus_rollback'
                      AND compensation.related_type=?3
                      AND compensation.related_id=?5
-               )
+               ), 0)
              LIMIT 1",
             params![
                 guild_id,
@@ -1953,29 +1980,6 @@ fn income_award_marker_exists(
         .map(|row| row.is_some())
 }
 
-fn clear_income_award_compensation_marker(
-    transaction: &rusqlite::Transaction<'_>,
-    guild_id: i64,
-    award: IncomeAwardRequest<'_>,
-) -> Result<(), rusqlite::Error> {
-    let Some(related_id) = award.related_id else {
-        return Ok(());
-    };
-    transaction.execute(
-        "DELETE FROM economy_ledger_entries
-         WHERE guild_id=?1 AND account_type='player' AND account_id=?2
-           AND source='match_bonus_rollback'
-           AND related_type=?3 AND related_id=?4",
-        params![
-            guild_id,
-            award.discord_id,
-            award.source,
-            related_id.to_string()
-        ],
-    )?;
-    Ok(())
-}
-
 fn recover_income_award_receipt(
     transaction: &rusqlite::Transaction<'_>,
     guild_id: i64,
@@ -1987,13 +1991,27 @@ fn recover_income_award_receipt(
     let related_id = award.related_id.expect("exact-once award has a related ID");
     // Communion and protection-aware Blood Pact rows may share the durable
     // match relation, but are recovered independently by the runtime.
+    // Only the application after the most recent rollback counts: a
+    // compensate-then-reapply cycle leaves two credits for this key, and
+    // summing both would report -- and later reverse -- twice what the player
+    // actually received.
     let (source_delta, metadata) = transaction.query_row(
         "SELECT COALESCE(SUM(delta),0),
                 MAX(CASE WHEN source=?5 THEN metadata END)
          FROM economy_ledger_entries
          WHERE guild_id=?1 AND account_type='player' AND account_id=?2
            AND related_type=?3 AND related_id=?4
-           AND source=?5",
+           AND source=?5
+           AND ledger_id > COALESCE((
+               SELECT MAX(compensation.ledger_id)
+               FROM economy_ledger_entries compensation
+               WHERE compensation.guild_id=?1
+                 AND compensation.account_type='player'
+                 AND compensation.account_id=?2
+                 AND compensation.source='match_bonus_rollback'
+                 AND compensation.related_type=?5
+                 AND compensation.related_id=?4
+           ), 0)",
         params![
             guild_id,
             award.discord_id,

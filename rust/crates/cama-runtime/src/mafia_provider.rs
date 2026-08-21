@@ -3048,10 +3048,9 @@ fn assign_roles(guild_id: i64, ids: &[i64], rng: &mut fastrand::Rng) -> Vec<Mafi
 fn hero_names(count: usize, rng: &mut fastrand::Rng) -> Vec<String> {
     static HERO_CATALOG: OnceLock<Vec<String>> = OnceLock::new();
     let catalog = HERO_CATALOG.get_or_init(|| {
-        serde_json::from_str::<BTreeMap<String, String>>(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../utils/heroes.json"
-        )))
+        serde_json::from_str::<BTreeMap<String, String>>(include_str!(
+            "../../cama-app/data/heroes.json"
+        ))
         .unwrap_or_default()
         .into_values()
         .collect()
@@ -3144,28 +3143,6 @@ fn submit_night_action(
     if action_type == MafiaActionType::Investigate && actor_id == target_id {
         return Ok(reject("You can't investigate yourself."));
     }
-    if action_type == MafiaActionType::Investigate
-        && let Some(prior) = repository
-            .get_action_for_actor(
-                game.game_id,
-                actor_id,
-                MafiaActionType::Investigate,
-                Some(game.day_number),
-            )
-            .map_err(to_string)?
-    {
-        if prior.target_id == Some(target_id) {
-            return Ok(ActionReply {
-                ok: true,
-                result: prior.result,
-                action_type: Some(MafiaActionType::Investigate),
-                ..ActionReply::default()
-            });
-        }
-        return Ok(reject(
-            "You've already used your read tonight — it's locked on your first target.",
-        ));
-    }
     if action_type == MafiaActionType::VigilanteKill
         && repository
             .get_action_for_actor(game.game_id, actor_id, MafiaActionType::VigilanteKill, None)
@@ -3185,18 +3162,36 @@ fn submit_night_action(
     } else {
         None
     };
-    repository
-        .record_action(&MafiaAction {
-            game_id: game.game_id,
-            guild_id,
-            actor_id,
-            target_id: Some(target_id),
-            action_type,
-            phase: MafiaPhase::Night,
-            day_number: game.day_number,
-            result: result.clone(),
-        })
-        .map_err(to_string)?;
+    let action = MafiaAction {
+        game_id: game.game_id,
+        guild_id,
+        actor_id,
+        target_id: Some(target_id),
+        action_type,
+        phase: MafiaPhase::Night,
+        day_number: game.day_number,
+        result: result.clone(),
+    };
+    if action_type == MafiaActionType::Investigate {
+        // The one-read-per-night lock is decided inside the write: checking for
+        // a prior read separately lets two racing calls both pass and the
+        // second overwrite the first, giving the detective two reads.
+        let recorded = repository
+            .record_investigation_atomic(&action)
+            .map_err(to_string)?;
+        if recorded.target_id != Some(target_id) {
+            return Ok(reject(
+                "You've already used your read tonight — it's locked on your first target.",
+            ));
+        }
+        return Ok(ActionReply {
+            ok: true,
+            result: recorded.result,
+            action_type: Some(MafiaActionType::Investigate),
+            ..ActionReply::default()
+        });
+    }
+    repository.record_action(&action).map_err(to_string)?;
     Ok(ActionReply {
         ok: true,
         result,
@@ -3734,11 +3729,10 @@ fn maybe_resurrect(
     let mut rng = fastrand::Rng::with_seed(seed_for(game, 0x5245_5355_5252));
     rng.shuffle(&mut candidates);
     let revived = candidates[0];
+    // One transaction: a crash between the revive and clearing the twist would
+    // resurrect a second player on the next night.
     repository
-        .revive_player(game.game_id, revived)
-        .map_err(to_string)?;
-    repository
-        .set_twist_event(game.game_id, None)
+        .revive_player_and_clear_twist(game.game_id, revived)
         .map_err(to_string)?;
     Ok(Some(revived))
 }

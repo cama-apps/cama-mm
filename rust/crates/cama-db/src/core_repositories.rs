@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cama_domain::player::{OPENSKILL_DISPLAY_SCALE, Player};
+use cama_domain::rating::cap_glicko_rd;
 use cama_domain::role_derivation::{
     DerivationFailure, FARM_PRIORITY_MINUTE, LaneStats, derive_positions,
 };
@@ -284,6 +285,7 @@ impl PlayerRepository {
             .as_deref()
             .filter(|roles| !roles.is_empty())
             .map(encode_string_array);
+        let glicko_rd = player.glicko_rd.map(cap_glicko_rd);
         match connection.execute(
             "INSERT INTO players (
                 discord_id, guild_id, discord_username, dotabuff_url, steam_id,
@@ -305,7 +307,7 @@ impl PlayerRepository {
                 roles,
                 player.main_role,
                 player.glicko_rating,
-                player.glicko_rd,
+                glicko_rd,
                 player.glicko_volatility,
                 player.os_mu,
                 player.os_sigma,
@@ -385,6 +387,37 @@ impl PlayerRepository {
             .map_err(Into::into)
     }
 
+    /// Discord IDs eligible for the `lottery` disbursement: players who have
+    /// played a match at or after `cutoff` (an ISO-8601 timestamp).
+    ///
+    /// `last_match_date` holds a mix of RFC-3339 (`...T12:00:00+00:00`) and
+    /// SQLite (`... 12:00:00`) text, so both sides are normalised through
+    /// `datetime()` rather than compared lexicographically -- a raw string
+    /// compare would rank every space-separated row below every RFC-3339 one.
+    /// Rows with no recorded or unparseable match date are excluded rather
+    /// than treated as active.
+    pub fn lottery_candidates(
+        &self,
+        guild_id: Option<i64>,
+        cutoff: &str,
+    ) -> Result<Vec<i64>, CoreRepositoryError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT discord_id FROM players
+             WHERE guild_id = ?1
+               AND discord_id IS NOT NULL
+               AND last_match_date IS NOT NULL
+               AND datetime(last_match_date) >= datetime(?2)
+             ORDER BY discord_id",
+        )?;
+        statement
+            .query_map(params![Self::normalize_guild_id(guild_id), cutoff], |row| {
+                row.get::<_, i64>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn exists(
         &self,
         discord_id: i64,
@@ -437,7 +470,7 @@ impl PlayerRepository {
              WHERE discord_id = ?4 AND guild_id = ?5",
             params![
                 rating,
-                rd,
+                cap_glicko_rd(rd),
                 volatility,
                 discord_id,
                 Self::normalize_guild_id(guild_id)
@@ -466,7 +499,9 @@ impl PlayerRepository {
                 },
             )
             .optional()?;
-        Ok(row.and_then(|(rating, rd, volatility)| rating.map(|rating| (rating, rd, volatility))))
+        Ok(row.and_then(|(rating, rd, volatility)| {
+            rating.map(|rating| (rating, rd.map(cap_glicko_rd), volatility))
+        }))
     }
 
     pub fn get_match_rating_inputs(
@@ -1508,7 +1543,7 @@ fn player_from_row(row: &rusqlite::Row<'_>) -> Result<Player, rusqlite::Error> {
             .and_then(|json| decode_string_array(json).ok()),
         main_role: row.get(6)?,
         glicko_rating: row.get(7)?,
-        glicko_rd: row.get(8)?,
+        glicko_rd: row.get::<_, Option<f64>>(8)?.map(cap_glicko_rd),
         glicko_volatility: row.get(9)?,
         os_mu: row.get(10)?,
         os_sigma: row.get(11)?,
@@ -2840,28 +2875,48 @@ impl MatchRepository {
         Ok(())
     }
 
-    /// Replace the durable per-player component breakdown after each
-    /// idempotent post-core phase. Callers first load the existing map so
-    /// referral components written by the core transaction are preserved.
-    pub fn update_match_jc_changes(
+    /// Merge into the durable per-player component breakdown under one
+    /// transaction.
+    ///
+    /// The post-core phases each contribute their own components to the same
+    /// aggregate, and restart recovery can run a phase while the live
+    /// settlement is still finishing. Reading on one connection, merging in the
+    /// caller, and writing on another loses whichever writer read first, so the
+    /// merge runs here between the read and the write instead. `merge` is given
+    /// the map as it stands inside the transaction and must not perform IO.
+    pub fn merge_match_jc_changes<F>(
         &self,
         match_id: i64,
         guild_id: Option<i64>,
-        changes: &BTreeMap<i64, BTreeMap<String, i64>>,
-    ) -> Result<(), CoreRepositoryError> {
-        let encoded = serde_json::to_string(changes)
+        merge: F,
+    ) -> Result<(), CoreRepositoryError>
+    where
+        F: FnOnce(&mut BTreeMap<i64, BTreeMap<String, i64>>),
+    {
+        let guild_id = Self::normalize_guild_id(guild_id);
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let raw = transaction
+            .query_row(
+                "SELECT jc_changes FROM matches WHERE match_id = ?1 AND guild_id = ?2",
+                params![match_id, guild_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                CoreRepositoryError::InvalidInput(format!(
+                    "match {match_id} was not found in guild {guild_id}"
+                ))
+            })?;
+        let mut changes = decode_jc_changes(&transaction, raw.as_deref())?;
+        merge(&mut changes);
+        let encoded = serde_json::to_string(&changes)
             .map_err(|error| CoreRepositoryError::InvalidJson(error.to_string()))?;
-        let connection = self.connection()?;
-        let changed = connection.execute(
+        transaction.execute(
             "UPDATE matches SET jc_changes=?1 WHERE match_id=?2 AND guild_id=?3",
-            params![encoded, match_id, Self::normalize_guild_id(guild_id)],
+            params![encoded, match_id, guild_id],
         )?;
-        if changed != 1 {
-            return Err(CoreRepositoryError::InvalidInput(format!(
-                "match {match_id} was not found in guild {}",
-                Self::normalize_guild_id(guild_id)
-            )));
-        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -3933,7 +3988,7 @@ impl MatchRepository {
                  WHERE discord_id = ?4 AND guild_id = ?5",
                 params![
                     update.rating,
-                    update.rd,
+                    cap_glicko_rd(update.rd),
                     update.volatility,
                     update.discord_id,
                     guild_id
@@ -5056,6 +5111,24 @@ mod tests {
             .players
             .add(&configured_player(12_345, "TestPlayer", TEST_GUILD_ID))
             .unwrap();
+        assert_eq!(
+            fixture
+                .connection()
+                .query_row(
+                    "SELECT glicko_rd FROM players WHERE discord_id=12345 AND guild_id=?1",
+                    [TEST_GUILD_ID],
+                    |row| row.get::<_, f64>(0),
+                )
+                .expect("read stored RD"),
+            250.0
+        );
+        fixture
+            .connection()
+            .execute(
+                "UPDATE players SET glicko_rd=350.0 WHERE discord_id=12345 AND guild_id=?1",
+                [TEST_GUILD_ID],
+            )
+            .expect("seed legacy over-cap RD");
         let player = fixture
             .players
             .get_by_id(12_345, Some(TEST_GUILD_ID))
@@ -5067,6 +5140,7 @@ mod tests {
             player.preferred_roles,
             Some(vec!["1".to_owned(), "2".to_owned()])
         );
+        assert_eq!(player.glicko_rd, Some(250.0));
     }
 
     #[test]
@@ -5163,7 +5237,7 @@ mod tests {
                 .players
                 .get_glicko_rating(12_345, Some(TEST_GUILD_ID))
                 .unwrap(),
-            Some((1_600.0, Some(300.0), Some(0.05)))
+            Some((1_600.0, Some(250.0), Some(0.05)))
         );
     }
 
@@ -5373,6 +5447,59 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["Player3", "Player1", "Player4", "Player0", "Player2"]
         );
+    }
+
+    #[test]
+    fn lottery_candidates_admit_recent_players_across_both_date_formats() {
+        let fixture = Fixture::new();
+        for discord_id in [10_201, 10_202, 10_203, 10_204] {
+            fixture.add_player(discord_id, TEST_GUILD_ID);
+        }
+        fixture.add_player(10_201, TEST_GUILD_ID_SECONDARY);
+        let connection = fixture.connection();
+        // RFC-3339 inside the window.
+        connection
+            .execute(
+                "UPDATE players SET last_match_date=?1 WHERE discord_id=10201 AND guild_id=?2",
+                params!["2026-08-15T12:00:00+00:00", TEST_GUILD_ID],
+            )
+            .unwrap();
+        // SQLite-formatted text inside the window: a lexicographic compare
+        // against an RFC-3339 cutoff would wrongly drop this row.
+        connection
+            .execute(
+                "UPDATE players SET last_match_date=?1 WHERE discord_id=10202 AND guild_id=?2",
+                params!["2026-08-16 09:30:00", TEST_GUILD_ID],
+            )
+            .unwrap();
+        // Outside the window.
+        connection
+            .execute(
+                "UPDATE players SET last_match_date=?1 WHERE discord_id=10203 AND guild_id=?2",
+                params!["2026-07-01T12:00:00+00:00", TEST_GUILD_ID],
+            )
+            .unwrap();
+        // Never played.
+        connection
+            .execute(
+                "UPDATE players SET last_match_date=NULL WHERE discord_id=10204 AND guild_id=?1",
+                [TEST_GUILD_ID],
+            )
+            .unwrap();
+        // Recent, but in another guild.
+        connection
+            .execute(
+                "UPDATE players SET last_match_date=?1 WHERE discord_id=10201 AND guild_id=?2",
+                params!["2026-08-15T12:00:00+00:00", TEST_GUILD_ID_SECONDARY],
+            )
+            .unwrap();
+
+        let candidates = fixture
+            .players
+            .lottery_candidates(Some(TEST_GUILD_ID), "2026-08-07T00:00:00+00:00")
+            .unwrap();
+
+        assert_eq!(candidates, vec![10_201, 10_202]);
     }
 
     #[test]
@@ -8706,6 +8833,57 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_jc_change_merges_keep_every_phase_component() {
+        // Post-core phases contribute components to the same aggregate, and a
+        // restart recovery can run one while the live settlement finishes the
+        // next. A read-merge-write split across connections drops whichever
+        // writer read first. A real file is required: the shared-cache memory
+        // fixture reports SQLITE_LOCKED instead of waiting on the busy handler.
+        let fixture = Fixture::new_durable();
+        let record = MatchRecord::new(vec![1], vec![2], 1, Some(TEST_GUILD_ID));
+        let match_id = fixture.matches.record_match(&record).unwrap();
+        fixture
+            .matches
+            .merge_match_jc_changes(match_id, Some(TEST_GUILD_ID), |changes| {
+                changes
+                    .entry(1)
+                    .or_default()
+                    .insert("referral".to_owned(), 100);
+            })
+            .unwrap();
+
+        let path = fixture.file.path().to_path_buf();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let handles = [("bet", 10_i64), ("payout", 20)].map(|(component, amount)| {
+            let path = path.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let repository = MatchRepository::new(&path);
+                barrier.wait();
+                repository.merge_match_jc_changes(match_id, Some(TEST_GUILD_ID), |changes| {
+                    changes
+                        .entry(1)
+                        .or_default()
+                        .insert(component.to_owned(), amount);
+                })
+            })
+        });
+        for handle in handles {
+            handle.join().expect("merge thread").expect("merge");
+        }
+
+        let components = fixture
+            .matches
+            .get_match(match_id, Some(TEST_GUILD_ID))
+            .unwrap()
+            .expect("recorded match")
+            .jc_changes;
+        assert_eq!(components[&1]["referral"], 100, "core component survives");
+        assert_eq!(components[&1]["bet"], 10);
+        assert_eq!(components[&1]["payout"], 20);
+    }
+
+    #[test]
     fn record_match_rolls_back_match_and_participants_on_duplicate_signed_id() {
         let fixture = Fixture::new();
         let record = MatchRecord::new(vec![-42], vec![-42], 1, Some(TEST_GUILD_ID));
@@ -9291,7 +9469,8 @@ mod tests {
             discord_id INTEGER NOT NULL,
             team_bet_on TEXT NOT NULL,
             amount INTEGER NOT NULL,
-            bet_time INTEGER NOT NULL
+            bet_time INTEGER NOT NULL,
+            pending_match_id INTEGER
         );
         CREATE TABLE player_pairings (
             id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL,

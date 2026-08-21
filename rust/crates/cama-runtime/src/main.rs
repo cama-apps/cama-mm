@@ -50,7 +50,7 @@ use cama_runtime::{
 };
 use rusqlite::Connection;
 use tokio::sync::oneshot;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -1023,8 +1023,17 @@ async fn run_serve() -> ExitCode {
     });
     let mut lifecycle = runtime.events().subscribe();
     tokio::spawn(async move {
-        while let Ok(event) = lifecycle.recv().await {
-            info!(?event, "runtime lifecycle");
+        loop {
+            match lifecycle.recv().await {
+                Ok(event) => info!(?event, "runtime lifecycle"),
+                // Lagging only means this receiver fell behind the broadcast
+                // buffer; it stays usable, so treating it as terminal would
+                // silence lifecycle logging for the rest of the process.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    warn!(skipped, "runtime lifecycle log fell behind");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
         }
     });
 
@@ -1113,18 +1122,13 @@ fn run_db_check(path: PathBuf) -> ExitCode {
     };
 
     println!(
-        "schema_compatible={} migrations={}/{} historical_extras={} journal_mode={} quick_check={} foreign_keys={} user_version={}",
+        "schema_compatible={} migrations={}/{} historical_extras={} journal_mode={} quick_check={} user_version={}",
         audit.is_compatible(),
         audit.applied_migration_count,
         audit.required_migration_count,
         audit.extra_historical_migrations.len(),
         audit.journal_mode,
         audit.quick_check,
-        if audit.foreign_keys_enabled {
-            "on"
-        } else {
-            "off"
-        },
         audit.user_version,
     );
 
@@ -1159,7 +1163,7 @@ fn run_db_admit(path: PathBuf, source: PathBuf) -> ExitCode {
         }
     };
     println!(
-        "schema_compatible={} migrations={}/{} newly_applied={} created_tables={} rebuilt_tables={} historical_extras={} journal_mode={} quick_check={} foreign_keys={}",
+        "schema_compatible={} migrations={}/{} newly_applied={} created_tables={} rebuilt_tables={} historical_extras={} journal_mode={} quick_check={}",
         audit.is_compatible(),
         audit.applied_migration_count,
         audit.required_migration_count,
@@ -1169,11 +1173,6 @@ fn run_db_admit(path: PathBuf, source: PathBuf) -> ExitCode {
         migration.historical_extra_migrations.len(),
         audit.journal_mode,
         audit.quick_check,
-        if audit.foreign_keys_enabled {
-            "on"
-        } else {
-            "off"
-        },
     );
     if audit.is_compatible() {
         ExitCode::SUCCESS

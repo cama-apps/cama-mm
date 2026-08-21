@@ -2086,10 +2086,9 @@ fn hero_name(hero_id: i64) -> String {
     static HERO_NAMES: std::sync::OnceLock<BTreeMap<i64, String>> = std::sync::OnceLock::new();
     HERO_NAMES
         .get_or_init(|| {
-            serde_json::from_str::<BTreeMap<String, String>>(include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../../utils/heroes.json"
-            )))
+            serde_json::from_str::<BTreeMap<String, String>>(include_str!(
+                "../../cama-app/data/heroes.json"
+            ))
             .unwrap_or_default()
             .into_iter()
             .filter_map(|(id, name)| id.parse().ok().map(|id| (id, name)))

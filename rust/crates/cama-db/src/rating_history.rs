@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use cama_domain::openskill::CamaOpenSkillSystem;
+use cama_domain::rating::{MAX_GLICKO_RD, cap_glicko_rd};
 use chrono::Utc;
 use rusqlite::types::{Value, ValueRef};
 use rusqlite::{
@@ -143,7 +144,6 @@ pub struct RecalibrationRequest {
     pub guild_id: Option<i64>,
     pub now: i64,
     pub cooldown_seconds: i64,
-    pub rating: f64,
     pub new_rd: f64,
     pub new_volatility: f64,
     pub new_os_sigma: Option<f64>,
@@ -351,7 +351,7 @@ impl RatingHistoryRepository {
                 |row| {
                     Ok(RecalibrationPlayer {
                         rating: row.get(0)?,
-                        rd: row.get(1)?,
+                        rd: row.get::<_, Option<f64>>(1)?.map(cap_glicko_rd),
                         volatility: row.get(2)?,
                         os_sigma: row.get(3)?,
                         games_played: row.get(4)?,
@@ -364,10 +364,13 @@ impl RatingHistoryRepository {
 
     /// Re-check cooldown, reset both rating systems' uncertainty, and advance
     /// the durable recalibration counter in one `BEGIN IMMEDIATE` transaction.
+    /// Returns the new recalibration count and the rating as it stood inside
+    /// the transaction, so callers report the value that was actually
+    /// preserved rather than the one read during the eligibility check.
     pub fn execute_recalibration_atomic(
         &self,
         request: RecalibrationRequest,
-    ) -> Result<i64, RecalibrationRepositoryError> {
+    ) -> Result<(i64, Option<f64>), RecalibrationRepositoryError> {
         let guild_id = Self::normalize_guild_id(request.guild_id);
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -391,21 +394,26 @@ impl RatingHistoryRepository {
         }
 
         let fingerprint = CamaOpenSkillSystem::default().algorithm_fingerprint();
+        let new_rd = request.new_rd.min(MAX_GLICKO_RD);
+        // Recalibration resets deviation, volatility and sigma; it preserves
+        // the rating itself. Leaving glicko_rating out of the SET list keeps a
+        // match settlement that commits between the eligibility read and this
+        // transaction from being silently overwritten with the pre-settlement
+        // rating.
         transaction.execute(
             "UPDATE players
-             SET glicko_rating = ?1, glicko_rd = ?2, glicko_volatility = ?3,
-                 os_sigma = COALESCE(?4, os_sigma),
+             SET glicko_rd = ?1, glicko_volatility = ?2,
+                 os_sigma = COALESCE(?3, os_sigma),
                  os_rating_version = CASE
-                     WHEN ?4 IS NULL THEN os_rating_version ELSE ?5
+                     WHEN ?3 IS NULL THEN os_rating_version ELSE ?4
                  END,
                  os_algorithm_fingerprint = CASE
-                     WHEN ?4 IS NULL THEN os_algorithm_fingerprint ELSE ?6
+                     WHEN ?3 IS NULL THEN os_algorithm_fingerprint ELSE ?5
                  END,
                  updated_at = CURRENT_TIMESTAMP
-             WHERE discord_id = ?7 AND guild_id = ?8",
+             WHERE discord_id = ?6 AND guild_id = ?7",
             params![
-                request.rating,
-                request.new_rd,
+                new_rd,
                 request.new_volatility,
                 request.new_os_sigma,
                 OPENSKILL_ALGORITHM_VERSION,
@@ -414,6 +422,17 @@ impl RatingHistoryRepository {
                 guild_id
             ],
         )?;
+        // Record the rating as it stands inside this transaction rather than
+        // the value read during the eligibility check.
+        let rating_at_recalibration = transaction
+            .query_row(
+                "SELECT glicko_rating FROM players
+                 WHERE discord_id = ?1 AND guild_id = ?2",
+                params![request.discord_id, guild_id],
+                |row| row.get::<_, Option<f64>>(0),
+            )
+            .optional()?
+            .flatten();
         let new_total = total.saturating_add(1);
         transaction.execute(
             "INSERT INTO recalibration_state (
@@ -430,7 +449,7 @@ impl RatingHistoryRepository {
                 guild_id,
                 request.now,
                 new_total,
-                request.rating
+                rating_at_recalibration
             ],
         )?;
         if let Some(new_os_sigma) = request.new_os_sigma {
@@ -451,7 +470,7 @@ impl RatingHistoryRepository {
             increment_openskill_revision(&transaction, guild_id)?;
         }
         transaction.commit()?;
-        Ok(new_total)
+        Ok((new_total, rating_at_recalibration))
     }
 
     /// Insert one row using the same column set as Python's history writer.
@@ -853,33 +872,33 @@ impl RecalibrationService {
         else {
             return Ok(RecalibrationExecution::Rejected(eligibility));
         };
-        let new_rd = current_rd.max(self.config.initial_rd);
+        let new_rd = current_rd.max(self.config.initial_rd).min(MAX_GLICKO_RD);
         let new_os_sigma = current_os_sigma.map(|_| CamaOpenSkillSystem::DEFAULT_SIGMA);
-        let total_recalibrations =
-            match self
-                .repository
-                .execute_recalibration_atomic(RecalibrationRequest {
-                    discord_id,
-                    guild_id,
-                    now,
-                    cooldown_seconds: self.config.cooldown_seconds,
-                    rating: current_rating,
-                    new_rd,
-                    new_volatility: self.config.initial_volatility,
-                    new_os_sigma,
-                }) {
-                Ok(total) => total,
-                Err(RecalibrationRepositoryError::OnCooldown { remaining_seconds }) => {
-                    return Ok(RecalibrationExecution::Rejected(
-                        RecalibrationEligibility::OnCooldown {
-                            cooldown_ends_at: now.saturating_add(remaining_seconds),
-                        },
-                    ));
-                }
-                Err(error) => return Err(error),
-            };
+        let (total_recalibrations, settled_rating) = match self
+            .repository
+            .execute_recalibration_atomic(RecalibrationRequest {
+                discord_id,
+                guild_id,
+                now,
+                cooldown_seconds: self.config.cooldown_seconds,
+                new_rd,
+                new_volatility: self.config.initial_volatility,
+                new_os_sigma,
+            }) {
+            Ok(settled) => settled,
+            Err(RecalibrationRepositoryError::OnCooldown { remaining_seconds }) => {
+                return Ok(RecalibrationExecution::Rejected(
+                    RecalibrationEligibility::OnCooldown {
+                        cooldown_ends_at: now.saturating_add(remaining_seconds),
+                    },
+                ));
+            }
+            Err(error) => return Err(error),
+        };
         Ok(RecalibrationExecution::Success(RecalibrationSuccess {
-            old_rating: current_rating,
+            // The rating the transaction preserved, which is what the player
+            // row now holds; the eligibility read may predate a settlement.
+            old_rating: settled_rating.unwrap_or(current_rating),
             old_rd: current_rd,
             old_volatility: current_volatility,
             new_rd,
@@ -1422,6 +1441,41 @@ mod tests {
     }
 
     #[test]
+    fn test_recalibrate_caps_legacy_rd_before_display_and_persistence() {
+        let fixture = Fixture::new();
+        fixture.seed_recalibration_player(12_345, Some(1_500.0), Some(350.0), Some(0.06), None, 5);
+        assert_eq!(
+            recalibration_service(&fixture)
+                .can_recalibrate_at(12_345, Some(TEST_GUILD_ID), 10_000)
+                .expect("check legacy player"),
+            RecalibrationEligibility::Allowed {
+                current_rating: 1_500.0,
+                current_rd: 250.0,
+                current_volatility: 0.06,
+                games_played: 5,
+                current_os_sigma: None,
+            }
+        );
+
+        let RecalibrationExecution::Success(success) = recalibration_service(&fixture)
+            .recalibrate_at(12_345, Some(TEST_GUILD_ID), 10_000)
+            .expect("recalibrate legacy player")
+        else {
+            panic!("legacy player should recalibrate");
+        };
+        assert_eq!((success.old_rd, success.new_rd), (250.0, 250.0));
+        let stored_rd: f64 = Connection::open(fixture._file.path())
+            .expect("open recalibrated player")
+            .query_row(
+                "SELECT glicko_rd FROM players WHERE discord_id=12345 AND guild_id=?1",
+                [TEST_GUILD_ID],
+                |row| row.get(0),
+            )
+            .expect("read capped RD");
+        assert_eq!(stored_rd, 250.0);
+    }
+
+    #[test]
     fn test_can_recalibrate_on_cooldown() {
         let fixture = Fixture::new();
         fixture.seed_recalibration_player(12_345, Some(1_500.0), Some(80.0), Some(0.06), None, 5);
@@ -1464,7 +1518,7 @@ mod tests {
         };
         assert_eq!(success.old_rating, 1_500.0);
         assert_eq!(success.old_rd, 80.0);
-        assert_eq!(success.new_rd, 350.0);
+        assert_eq!(success.new_rd, 250.0);
         assert_eq!(success.new_volatility, 0.06);
         assert_eq!(success.total_recalibrations, 1);
         assert_eq!(success.cooldown_ends_at, 13_600);
@@ -1479,7 +1533,7 @@ mod tests {
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )
                 .expect("read recalibrated player");
-        assert_eq!((rating, rd, volatility), (1_500.0, 350.0, 0.06));
+        assert_eq!((rating, rd, volatility), (1_500.0, 250.0, 0.06));
         assert!((sigma - (25.0 / 3.0)).abs() < 1e-12);
     }
 
@@ -1852,6 +1906,74 @@ mod tests {
     }
 
     #[test]
+    fn recalibration_preserves_a_rating_written_after_the_eligibility_read() {
+        // A match settlement can commit between the eligibility read and the
+        // recalibration transaction. Recalibration resets deviation, volatility
+        // and sigma but must never write a rating back, or it silently erases
+        // that match's rating delta.
+        let fixture = Fixture::new();
+        let connection = Connection::open(fixture._file.path()).unwrap();
+        connection
+            .execute(
+                "INSERT INTO players (
+                     discord_id, guild_id, discord_username,
+                     glicko_rating, glicko_rd, glicko_volatility
+                 ) VALUES (1, ?1, 'u1', 1500.0, 200.0, 0.06)",
+                [TEST_GUILD_ID],
+            )
+            .expect("seed recalibration player");
+        // The settlement lands first, exactly as it would in the race.
+        connection
+            .execute(
+                "UPDATE players SET glicko_rating = 1520.0
+                 WHERE discord_id = 1 AND guild_id = ?1",
+                [TEST_GUILD_ID],
+            )
+            .expect("apply concurrent settlement");
+
+        fixture
+            .repository
+            .execute_recalibration_atomic(RecalibrationRequest {
+                discord_id: 1,
+                guild_id: Some(TEST_GUILD_ID),
+                now: 1_000_000,
+                cooldown_seconds: 3_600,
+                new_rd: 300.0,
+                new_volatility: 0.06,
+                new_os_sigma: None,
+            })
+            .expect("recalibrate");
+
+        let (rating, rd): (f64, f64) = connection
+            .query_row(
+                "SELECT glicko_rating, glicko_rd FROM players
+                 WHERE discord_id = 1 AND guild_id = ?1",
+                [TEST_GUILD_ID],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("player state");
+        assert!(
+            (rating - 1520.0).abs() < f64::EPSILON,
+            "the settled rating survives recalibration, got {rating}"
+        );
+        assert!(
+            (rd - cama_domain::rating::MAX_GLICKO_RD).abs() < f64::EPSILON,
+            "deviation is reset to the cap, got {rd}"
+        );
+
+        let state = fixture
+            .repository
+            .get_recalibration_state(1, Some(TEST_GUILD_ID))
+            .expect("recalibration state")
+            .expect("state row");
+        assert_eq!(
+            state.rating_at_recalibration,
+            Some(1520.0),
+            "the snapshot records the rating as it stood in the transaction"
+        );
+    }
+
+    #[test]
     fn python_truthiness_and_null_filter_interoperate() {
         let fixture = Fixture::new();
         let discord_id = 77;
@@ -1899,7 +2021,6 @@ mod tests {
                         guild_id: Some(TEST_GUILD_ID),
                         now: 1_000_000,
                         cooldown_seconds: 3_600,
-                        rating: 1_500.0,
                         new_rd: 300.0,
                         new_volatility: 0.06,
                         new_os_sigma: Some(7.5),
@@ -1935,7 +2056,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("Glicko RD");
-        assert_eq!(rd, 300.0);
+        assert_eq!(rd, 250.0);
         let connection = Connection::open(fixture._file.path()).expect("open fixture");
         let sigma: f64 = connection
             .query_row(

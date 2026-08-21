@@ -72,32 +72,6 @@ pub trait ProtectionGateway {
     ) -> Result<HostileLossSettlement, Self::Error>;
 }
 
-pub trait BalanceTransferPort {
-    type Error;
-
-    fn transfer(
-        &mut self,
-        from_id: i64,
-        to_id: i64,
-        guild_id: i64,
-        amount: i64,
-    ) -> Result<(), Self::Error>;
-}
-
-impl BalanceTransferPort for ManashopRepository {
-    type Error = ManashopRepositoryError;
-
-    fn transfer(
-        &mut self,
-        from_id: i64,
-        to_id: i64,
-        guild_id: i64,
-        amount: i64,
-    ) -> Result<(), Self::Error> {
-        self.transfer_balance_atomic(from_id, to_id, Some(guild_id), amount)
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SiphonOutcome {
     pub target_id: i64,
@@ -271,11 +245,17 @@ impl BuffService {
         )
     }
 
-    pub fn grant_dark_bargain_debt(
+    /// Book the debt and credit the principal in one transaction.
+    ///
+    /// A player must never end up owing the bargain without having been paid
+    /// it: the default penalty (-1600 JC plus five bankruptcy games) is charged
+    /// off the debt buff alone.
+    pub fn grant_dark_bargain(
         &self,
         discord_id: i64,
         guild_id: i64,
         amount_due: i64,
+        principal: i64,
     ) -> Result<i64, ManashopRepositoryError> {
         let data = BuffData {
             amount_due: Some(amount_due),
@@ -284,13 +264,17 @@ impl BuffService {
             default_penalty_games: Some(5),
             ..BuffData::default()
         };
-        self.grant(
-            discord_id,
-            guild_id,
-            BuffType::DarkBargain,
-            24 * 7,
-            None,
-            Some(&data),
+        self.repository.grant_dark_bargain_atomic(
+            GrantBuffRequest {
+                discord_id,
+                guild_id: Some(guild_id),
+                buff_type: BuffType::DarkBargain.as_str(),
+                target_id: None,
+                granted_at: self.now,
+                expires_at: self.now + 24 * 7 * HOURS,
+                data: Some(&data),
+            },
+            principal,
         )
     }
 
@@ -440,27 +424,6 @@ impl BuffService {
     ) -> Result<Option<BloodPactClaim>, ManashopRepositoryError> {
         self.repository
             .claim_blood_pact_skim_atomic(target_id, Some(guild_id), earning, self.now)
-    }
-
-    pub fn apply_blood_pact_with_transfer<T: BalanceTransferPort>(
-        &self,
-        target_id: i64,
-        guild_id: i64,
-        earning: i64,
-        transfer: &mut T,
-    ) -> Result<i64, ManashopRepositoryError> {
-        let Some((claim, amount)) = self.reserve_scaled_skim(target_id, guild_id, earning)? else {
-            return Ok(0);
-        };
-        if transfer
-            .transfer(target_id, claim.skimmer_id, guild_id, amount)
-            .is_err()
-        {
-            self.repository
-                .revert_blood_pact_skim(claim.buff_id, amount)?;
-            return Ok(0);
-        }
-        Ok(amount)
     }
 
     pub fn apply_blood_pact_with_protection<G: ProtectionGateway>(

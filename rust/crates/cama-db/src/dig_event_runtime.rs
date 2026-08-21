@@ -1409,6 +1409,53 @@ impl DigEventRuntimeRepository {
         })
     }
 
+    /// Victim IDs already committed for one event's splash, in commit order.
+    ///
+    /// Splash victims are chosen from live state (for `richest_n`, an ORDER BY
+    /// balance query), and the first execution's own burns change that ranking.
+    /// A replay -- a duplicate component delivery, the crash-recovery worker,
+    /// or a Conflict retry -- would therefore select *different* victims, whose
+    /// per-victim exact-once keys do not exist yet, and debit them too. Freezing
+    /// the original selection keeps a replay a no-op.
+    ///
+    /// Both sources are read because the two splash modes commit differently:
+    /// a hostile splash moves money and writes `hostile_loss_events` in one
+    /// transaction and only afterwards appends its `dig_actions` audit row, so
+    /// reading the audit alone would miss victims already debited by a run that
+    /// stopped in between. A grant splash commits its credit and audit row
+    /// together.
+    pub fn committed_splash_victims(
+        &self,
+        guild_id: Option<i64>,
+        event_key: &str,
+    ) -> Result<Vec<i64>, DigEventRuntimeRepositoryError> {
+        let guild_id = Self::normalize_guild_id(guild_id);
+        let prefix = format!("{event_key}:splash:");
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT victim_id AS actor_id, event_id AS ordinal
+               FROM hostile_loss_events
+              WHERE guild_id = ?1 AND event_key LIKE ?2 || '%'
+             UNION ALL
+             SELECT actor_id, id AS ordinal
+               FROM dig_actions
+              WHERE guild_id = ?1
+                AND action_type = 'splash_victim'
+                AND json_valid(detail)
+                AND json_extract(detail, '$.event_key') LIKE ?2 || '%'
+             ORDER BY ordinal",
+        )?;
+        let mut victims = Vec::new();
+        let rows = statement.query_map(params![guild_id, prefix], |row| row.get::<_, i64>(0))?;
+        for row in rows {
+            let victim = row?;
+            if !victims.contains(&victim) {
+                victims.push(victim);
+            }
+        }
+        Ok(victims)
+    }
+
     /// Append the canonical Dig action history after a separately committed
     /// protected hostile loss. Burn creates a victim row; steal creates the
     /// victim debit and digger credit together. Replays are idempotent.

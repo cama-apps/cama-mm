@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use cama_domain::openskill::CamaOpenSkillSystem;
 use cama_domain::player::{OPENSKILL_DISPLAY_SCALE, OPENSKILL_MIN_MU};
+use cama_domain::rating::{MAX_GLICKO_RD, cap_glicko_rd};
 use chrono::Utc;
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::Value;
@@ -124,7 +125,7 @@ impl AdminRepository {
                         losses: row.get(4)?,
                         balance: row.get(5)?,
                         glicko_rating: row.get(6)?,
-                        glicko_rd: row.get(7)?,
+                        glicko_rd: row.get::<_, Option<f64>>(7)?.map(cap_glicko_rd),
                         glicko_volatility: row.get(8)?,
                         os_mu: row.get(9)?,
                         os_sigma: row.get(10)?,
@@ -154,7 +155,7 @@ impl AdminRepository {
               WHERE discord_id=?8 AND guild_id=?9",
             params![
                 request.display_rating,
-                request.rd,
+                cap_glicko_rd(request.rd),
                 request.volatility,
                 os_mu,
                 CamaOpenSkillSystem::DEFAULT_SIGMA,
@@ -202,7 +203,7 @@ impl AdminRepository {
                 SET glicko_rating=?1,glicko_rd=?2,glicko_volatility=?3,
                     updated_at=CURRENT_TIMESTAMP
               WHERE discord_id=?4 AND guild_id=?5",
-            params![rating, rd, volatility, discord_id, guild_id],
+            params![rating, cap_glicko_rd(rd), volatility, discord_id, guild_id],
         )?;
         if changed != 1 {
             return Err(AdminRepositoryError::PlayerNotFound);
@@ -249,7 +250,8 @@ impl AdminRepository {
         let mut sigma_after = 0.0;
         let mut openskill_count = 0_usize;
         for (discord_id, old_rd, old_sigma) in &rows {
-            let new_rd = (old_rd + rd_amount).min(350.0);
+            let old_rd = cap_glicko_rd(*old_rd);
+            let new_rd = (old_rd + rd_amount).min(MAX_GLICKO_RD);
             rd_before += old_rd;
             rd_after += new_rd;
             transaction.execute(

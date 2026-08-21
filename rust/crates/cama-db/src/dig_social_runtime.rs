@@ -156,6 +156,30 @@ pub enum DigSabotageSettlementOutcome {
     MissingTargetTunnel,
 }
 
+/// One vendetta reflect: the attacker's reflected damage, the defender's
+/// bonus, and the audit row, settled together.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DigVendettaReflectSettlement<'a> {
+    pub actor_id: i64,
+    pub target_id: i64,
+    pub guild_id: i64,
+    pub reflect: i64,
+    pub bonus: i64,
+    pub reflect_detail_json: &'a str,
+    pub bonus_detail_json: &'a str,
+    pub created_at: i64,
+}
+
+/// What a vendetta reflect actually moved. Both amounts are the credited
+/// figures, not the requested ones, so the caller cannot report a bonus that
+/// never landed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DigVendettaReflectReceipt {
+    pub reflected: i64,
+    pub bonus_credited: i64,
+    pub action_id: i64,
+}
+
 struct SocialCredit<'a> {
     recipient_id: i64,
     actor_id: i64,
@@ -283,7 +307,9 @@ impl DigSocialRuntimeRepository {
             ],
         )?;
         if target_changed != 1 {
-            transaction.commit()?;
+            // Nothing has been written yet, but every guard below this point
+            // has: rolling back keeps the whole settlement all-or-nothing.
+            transaction.rollback()?;
             return Ok(DigHelpSettlementOutcome::Conflict);
         }
         if fail_after_target_update {
@@ -309,7 +335,9 @@ impl DigSocialRuntimeRepository {
                 ],
             )?;
             if inserted != 1 {
-                transaction.commit()?;
+                // The target's depth update already applied; committing here
+                // would advance the target without ever crediting the helper.
+                transaction.rollback()?;
                 return Ok(DigHelpSettlementOutcome::Conflict);
             }
         }
@@ -328,7 +356,7 @@ impl DigSocialRuntimeRepository {
             ],
         )?;
         if helper_changed != 1 {
-            transaction.commit()?;
+            transaction.rollback()?;
             return Ok(DigHelpSettlementOutcome::Conflict);
         }
 
@@ -354,7 +382,7 @@ impl DigSocialRuntimeRepository {
             );
             clear_ledger_context(&transaction)?;
             if updated? != 1 {
-                transaction.commit()?;
+                transaction.rollback()?;
                 return Ok(DigHelpSettlementOutcome::MissingHelperPlayer);
             }
         }
@@ -658,59 +686,110 @@ impl DigSocialRuntimeRepository {
         })
     }
 
-    pub fn try_debit_vendetta_reflect(
+    /// Settle a vendetta reflect in one guarded transaction.
+    ///
+    /// The attacker's reflect debit, the defender's bonus credit, and the
+    /// `vendetta_reflect` audit row used to be three separate commits, so a
+    /// failure between them could leave the attacker debited with the defender
+    /// uncredited and no audit trail -- and the caller still reported the full
+    /// bonus as paid. The receipt now carries what actually moved.
+    pub fn atomic_vendetta_reflect(
         &self,
-        actor_id: i64,
-        target_id: i64,
-        guild_id: i64,
-        amount: i64,
-        detail_json: &str,
-    ) -> Result<bool, DigSocialRuntimeRepositoryError> {
-        if amount <= 0 {
+        settlement: DigVendettaReflectSettlement<'_>,
+    ) -> Result<DigVendettaReflectReceipt, DigSocialRuntimeRepositoryError> {
+        self.atomic_vendetta_reflect_inner(settlement, false)
+    }
+
+    fn atomic_vendetta_reflect_inner(
+        &self,
+        settlement: DigVendettaReflectSettlement<'_>,
+        fail_after_reflect_debit: bool,
+    ) -> Result<DigVendettaReflectReceipt, DigSocialRuntimeRepositoryError> {
+        if settlement.reflect <= 0 {
             return Err(DigSocialRuntimeRepositoryError::NegativeSabotageValue);
         }
-        serde_json::from_str::<serde_json::Value>(detail_json)
-            .map_err(|_| DigSocialRuntimeRepositoryError::InvalidDetail)?;
+        if settlement.bonus < 0 {
+            return Err(DigSocialRuntimeRepositoryError::NegativeReward);
+        }
+        for detail in [settlement.reflect_detail_json, settlement.bonus_detail_json] {
+            serde_json::from_str::<serde_json::Value>(detail)
+                .map_err(|_| DigSocialRuntimeRepositoryError::InvalidDetail)?;
+        }
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         set_ledger_context(
             &transaction,
-            target_id,
+            settlement.target_id,
             "vendetta_reflect",
-            target_id,
+            settlement.target_id,
             "dig vendetta reflect debit",
-            detail_json,
+            settlement.reflect_detail_json,
         )?;
-        let result = transaction.execute(
+        // The balance floor is what makes a broke attacker reflect nothing
+        // instead of going negative.
+        let debited = transaction.execute(
             "UPDATE players
              SET jopacoin_balance=COALESCE(jopacoin_balance,0)-?1,
                  updated_at=CURRENT_TIMESTAMP
              WHERE discord_id=?2 AND guild_id=?3
                AND COALESCE(jopacoin_balance,0)>=?1",
-            params![amount, actor_id, guild_id],
+            params![settlement.reflect, settlement.actor_id, settlement.guild_id],
         );
         clear_ledger_context(&transaction)?;
-        let debited = result? == 1;
+        let reflected = if debited? == 1 { settlement.reflect } else { 0 };
+        if fail_after_reflect_debit {
+            // Dropping the transaction unread rolls the debit back.
+            return Err(DigSocialRuntimeRepositoryError::InjectedFailure);
+        }
+        let target_key = DigSocialKey {
+            discord_id: settlement.target_id,
+            guild_id: settlement.guild_id,
+        };
+        let bonus_credited = if settlement.bonus > 0 && player_exists(&transaction, target_key)? {
+            set_ledger_context(
+                &transaction,
+                settlement.actor_id,
+                "vendetta_reflect",
+                settlement.actor_id,
+                "dig vendetta reflect bonus",
+                settlement.bonus_detail_json,
+            )?;
+            let credited = transaction.execute(
+                "UPDATE players
+                 SET jopacoin_balance=COALESCE(jopacoin_balance,0)+?1,
+                     updated_at=CURRENT_TIMESTAMP
+                 WHERE discord_id=?2 AND guild_id=?3",
+                params![settlement.bonus, settlement.target_id, settlement.guild_id],
+            );
+            clear_ledger_context(&transaction)?;
+            if credited? == 1 { settlement.bonus } else { 0 }
+        } else {
+            0
+        };
+        let audit = serde_json::json!({
+            "attacker_id": settlement.actor_id,
+            "reflected": reflected,
+            "target_bonus": bonus_credited,
+        })
+        .to_string();
+        transaction.execute(
+            "INSERT INTO dig_actions
+                (guild_id,actor_id,target_id,action_type,depth_before,depth_after,
+                 jc_delta,detail,created_at)
+             VALUES (?1,?2,NULL,'vendetta_reflect',0,0,0,?3,?4)",
+            params![
+                settlement.guild_id,
+                settlement.target_id,
+                audit,
+                settlement.created_at
+            ],
+        )?;
+        let action_id = transaction.last_insert_rowid();
         transaction.commit()?;
-        Ok(debited)
-    }
-
-    pub fn credit_vendetta_bonus(
-        &self,
-        target_id: i64,
-        actor_id: i64,
-        guild_id: i64,
-        amount: i64,
-        detail_json: &str,
-    ) -> Result<Option<i64>, DigSocialRuntimeRepositoryError> {
-        self.credit_social_side_effect(SocialCredit {
-            recipient_id: target_id,
-            actor_id,
-            guild_id,
-            amount,
-            related_type: "vendetta_reflect",
-            reason: "dig vendetta reflect bonus",
-            detail_json,
+        Ok(DigVendettaReflectReceipt {
+            reflected,
+            bonus_credited,
+            action_id,
         })
     }
 
@@ -755,26 +834,6 @@ impl DigSocialRuntimeRepository {
         let balance = player_balance(&transaction, key)?;
         transaction.commit()?;
         Ok(balance)
-    }
-
-    pub fn log_vendetta_reflect(
-        &self,
-        target_id: i64,
-        guild_id: i64,
-        detail_json: &str,
-        created_at: i64,
-    ) -> Result<i64, DigSocialRuntimeRepositoryError> {
-        serde_json::from_str::<serde_json::Value>(detail_json)
-            .map_err(|_| DigSocialRuntimeRepositoryError::InvalidDetail)?;
-        let connection = self.connection()?;
-        connection.execute(
-            "INSERT INTO dig_actions
-                (guild_id,actor_id,target_id,action_type,depth_before,depth_after,
-                 jc_delta,detail,created_at)
-             VALUES (?1,?2,NULL,'vendetta_reflect',0,0,0,?3,?4)",
-            params![guild_id, target_id, detail_json, created_at],
-        )?;
-        Ok(connection.last_insert_rowid())
     }
 
     pub fn gift_relic(

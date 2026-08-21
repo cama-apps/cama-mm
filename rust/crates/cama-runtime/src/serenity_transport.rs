@@ -4,7 +4,7 @@
 //! limits, and automatic reconnects. The outer runtime supervisor still
 //! restarts a fully failed client session with bounded backoff.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
@@ -15,19 +15,18 @@ use cama_app::predictions::resolve_and_neutralize_discord_mentions;
 use serenity::Client;
 use serenity::all::ShardStageUpdateEvent;
 use serenity::all::{
-    ActionRowComponent, ActivityType, AutoArchiveDuration, ButtonStyle, Channel, ChannelId,
-    ChannelType, Command, CommandDataOption, CommandDataOptionValue, CommandInteraction,
-    CommandOptionType, ComponentInteraction, ComponentInteractionDataKind, Context,
-    CreateActionRow, CreateAllowedMentions, CreateAttachment, CreateAutocompleteResponse,
-    CreateButton, CreateCommand, CreateCommandOption, CreateEmbed, CreateEmbedAuthor,
-    CreateEmbedFooter, CreateInputText, CreateInteractionResponse,
-    CreateInteractionResponseFollowup, CreateInteractionResponseMessage, CreateMessage,
-    CreateModal, CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, CreateThread,
-    EditAttachments, EditInteractionResponse, EditMessage, EditThread, EventHandler,
-    GatewayIntents, GetMessages, Guild, GuildChannel, GuildId, GuildMemberUpdateEvent,
-    InputTextStyle, Interaction, Member, MessageId, MessageInteractionMetadata, ModalInteraction,
-    Nonce, OnlineStatus, Permissions, Reaction, ReactionType, Ready, UnavailableGuild, User,
-    UserId,
+    ActionRowComponent, AutoArchiveDuration, ButtonStyle, Channel, ChannelId, ChannelType, Command,
+    CommandDataOption, CommandDataOptionValue, CommandInteraction, CommandOptionType,
+    ComponentInteraction, ComponentInteractionDataKind, Context, CreateActionRow,
+    CreateAllowedMentions, CreateAttachment, CreateAutocompleteResponse, CreateButton,
+    CreateCommand, CreateCommandOption, CreateEmbed, CreateEmbedAuthor, CreateEmbedFooter,
+    CreateInputText, CreateInteractionResponse, CreateInteractionResponseFollowup,
+    CreateInteractionResponseMessage, CreateMessage, CreateModal, CreateSelectMenu,
+    CreateSelectMenuKind, CreateSelectMenuOption, CreateThread, EditAttachments,
+    EditInteractionResponse, EditMessage, EditThread, EventHandler, GatewayIntents, GetMessages,
+    Guild, GuildChannel, GuildId, GuildMemberUpdateEvent, InputTextStyle, Interaction, Member,
+    MessageId, MessageInteractionMetadata, ModalInteraction, Nonce, OnlineStatus, Permissions,
+    Reaction, ReactionType, Ready, UnavailableGuild, User, UserId,
 };
 use serenity::cache::Cache;
 use serenity::gateway::{ConnectionStage, ShardManager};
@@ -42,9 +41,9 @@ use crate::dig_provider::{
     DigPublicSendFailure, DigPublicSendFailureKind,
 };
 use crate::discord_transport::{
-    DiscordDirectMessageError, DiscordDirectMessageErrorKind, DiscordEmoji,
-    DiscordGuildMemberSnapshot, DiscordMessage, DiscordMessageReceipt, DiscordMessageSnapshot,
-    DiscordPresence, DiscordTransport, DiscordUserSnapshot,
+    DiscordDestinationStatus, DiscordDirectMessageError, DiscordDirectMessageErrorKind,
+    DiscordEmoji, DiscordGuildMemberSnapshot, DiscordMessage, DiscordMessageReceipt,
+    DiscordMessageSnapshot, DiscordPresence, DiscordTransport, DiscordUserSnapshot,
 };
 use crate::duel_challenges_worker::{
     DuelChannelKind, DuelChannelSnapshot, DuelDiscordPort, DuelGuildSnapshot,
@@ -233,12 +232,16 @@ impl AdminDiscordControl for SerenityDiscordTransport {
         guild_ids.sort_unstable_by_key(|guild_id| guild_id.get());
         let guild_count = guild_ids.len();
         let mut command_count = 0usize;
+        // Every command in this registry is global. Uploading the full tree
+        // per guild as well would give each guild a duplicate guild-scoped copy
+        // of every command, which Discord shows alongside the global ones. The
+        // legacy contract's per-guild sync uploaded nothing and merely cleared
+        // stale guild-scoped commands, so that is what happens here.
         for guild_id in guild_ids {
-            let synchronized = guild_id
-                .set_commands(&context.http, builders())
+            guild_id
+                .set_commands(&context.http, Vec::new())
                 .await
                 .map_err(|error| error.to_string())?;
-            command_count = command_count.saturating_add(synchronized.len());
         }
         let synchronized = Command::set_global_commands(&context.http, builders())
             .await
@@ -4173,6 +4176,16 @@ impl DiscordTransport for SerenityDiscordTransport {
             || guild.threads.iter().any(|thread| thread.id == channel_id))
     }
 
+    async fn destination_status(&self, channel_id: u64) -> DiscordDestinationStatus {
+        let Ok(context) = self.context() else {
+            return DiscordDestinationStatus::Unknown;
+        };
+        match context.http.get_channel(ChannelId::new(channel_id)).await {
+            Ok(_) => DiscordDestinationStatus::Unknown,
+            Err(error) => discord_destination_status(&error),
+        }
+    }
+
     async fn mafia_gamba_channel_id(&self, guild_id: u64) -> Result<Option<u64>, String> {
         let context = self.context()?;
         let guild_id = GuildId::new(guild_id);
@@ -4556,6 +4569,23 @@ impl DiscordTransport for SerenityDiscordTransport {
         }))
     }
 
+    fn cached_guild_member_display_names(
+        &self,
+        guild_id: u64,
+    ) -> Result<Option<BTreeMap<u64, String>>, String> {
+        if guild_id == 0 {
+            return Ok(None);
+        }
+        let context = self.context()?;
+        Ok(context.cache.guild(GuildId::new(guild_id)).map(|guild| {
+            guild
+                .members
+                .iter()
+                .map(|(user_id, member)| (user_id.get(), member.display_name().to_owned()))
+                .collect()
+        }))
+    }
+
     async fn channel_parent_id(
         &self,
         guild_id: u64,
@@ -4597,25 +4627,22 @@ impl DiscordTransport for SerenityDiscordTransport {
         guild_id: u64,
         user_ids: &[u64],
     ) -> Result<BTreeSet<u64>, String> {
+        // Go Live is a voice-state flag, not a presence activity: a Twitch
+        // "Streaming" rich presence is a different thing and must not be paid
+        // the bonus. The projection is decided by the domain module so the
+        // transport only supplies data.
         let context = self.context()?;
         let guild_id = GuildId::new(guild_id);
-        let requested = user_ids.iter().copied().collect::<BTreeSet<_>>();
         Ok(context
             .cache
             .guild(guild_id)
             .map_or_else(BTreeSet::new, |guild| {
-                guild
-                    .presences
-                    .iter()
-                    .filter(|(user_id, presence)| {
-                        requested.contains(&user_id.get())
-                            && presence
-                                .activities
-                                .iter()
-                                .any(|activity| is_streaming_activity(activity.kind))
-                    })
-                    .map(|(user_id, _)| user_id.get())
-                    .collect()
+                go_live_member_ids(user_ids, |user_id| {
+                    guild
+                        .voice_states
+                        .get(&UserId::new(user_id))
+                        .map(|state| state.self_stream.unwrap_or(false))
+                })
             }))
     }
 }
@@ -4740,8 +4767,38 @@ fn thread_lifecycle_edit(name: &str, archived: bool, locked: bool) -> EditThread
         .locked(locked)
 }
 
-const fn is_streaming_activity(kind: ActivityType) -> bool {
-    matches!(kind, ActivityType::Streaming)
+/// Project cached voice states into the domain Go Live decision.
+///
+/// `self_stream_of` returns `None` when the member is not connected to voice at
+/// all. Discord signals Go Live with the voice state's `self_stream` flag; a
+/// Twitch/YouTube "Streaming" presence activity is a different feature and does
+/// not earn the bonus.
+fn go_live_member_ids(
+    user_ids: &[u64],
+    self_stream_of: impl Fn(u64) -> Option<bool>,
+) -> BTreeSet<u64> {
+    let members = user_ids
+        .iter()
+        .filter_map(|user_id| {
+            let key = i64::try_from(*user_id).ok()?;
+            let self_stream = self_stream_of(*user_id)?;
+            Some((
+                key,
+                cama_domain::streaming::MemberPresence {
+                    voice: Some(cama_domain::streaming::VoiceState { self_stream }),
+                    activities: Vec::new(),
+                },
+            ))
+        })
+        .collect::<HashMap<_, _>>();
+    let requested = user_ids
+        .iter()
+        .filter_map(|user_id| i64::try_from(*user_id).ok())
+        .collect::<Vec<_>>();
+    cama_domain::streaming::get_streaming_player_ids(&members, &requested)
+        .into_iter()
+        .filter_map(|player_id| u64::try_from(player_id).ok())
+        .collect()
 }
 
 fn response_error(error: serenity::Error) -> InteractionResponseError {
@@ -4772,6 +4829,26 @@ const fn dig_public_send_failure_kind(status: Option<u16>) -> DigPublicSendFailu
         // boundary.
         Some(400..=499) if !matches!(status, Some(408 | 429)) => DigPublicSendFailureKind::Rejected,
         _ => DigPublicSendFailureKind::Ambiguous,
+    }
+}
+
+fn discord_destination_status(error: &serenity::Error) -> DiscordDestinationStatus {
+    let status = match error {
+        serenity::Error::Http(error) => error.status_code().map(|status| status.as_u16()),
+        _ => None,
+    };
+    discord_destination_status_kind(status)
+}
+
+/// Only a destination-scoped response proves permanence. 404 is Unknown
+/// Channel and 403 is Missing Access/Missing Permissions; both name the
+/// destination itself. Every other outcome -- no status at all, 408, 429, any
+/// 5xx, or a 400 about this particular request body -- may resolve on the next
+/// attempt and must never be allowed to drop an announcement.
+const fn discord_destination_status_kind(status: Option<u16>) -> DiscordDestinationStatus {
+    match status {
+        Some(403 | 404) => DiscordDestinationStatus::Undeliverable,
+        _ => DiscordDestinationStatus::Unknown,
     }
 }
 

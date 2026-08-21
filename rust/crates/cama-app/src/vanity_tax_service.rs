@@ -509,4 +509,5 @@ fn chunk_lines(lines: &[String], limit: usize) -> Vec<String> {
 }
 
 #[cfg(test)]
+#[path = "vanity_tax_service/tests.rs"]
 mod tests;

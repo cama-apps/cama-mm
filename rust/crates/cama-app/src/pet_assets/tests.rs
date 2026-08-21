@@ -1543,3 +1543,23 @@ mod hybrid_component_pack {
         assert_ground_floor("prismwool_cama");
     }
 }
+
+#[test]
+fn byte_cache_stays_inside_its_budget() {
+    // Several cache keys include a pet's name, so the key space is unbounded in
+    // a long-lived worker: without a cap the loader grows by roughly a megabyte
+    // per distinct name for the life of the process.
+    let mut loader = PetAssetLoader::new(NoAuthoredPetAssets, ProceduralPetRenderer);
+    for index in 0..400 {
+        loader.get_tombstone_card(&format!("Departed {index}"), index);
+        assert!(
+            loader.byte_cache_size <= PET_BYTE_CACHE_BUDGET,
+            "cache grew to {} bytes at entry {index}",
+            loader.byte_cache_size
+        );
+    }
+    assert!(
+        loader.byte_cache_size > 0,
+        "the cache is still doing its job"
+    );
+}

@@ -564,3 +564,52 @@ async fn test_get_player_roles_returns_none_on_oversized_body() {
 
     assert_eq!(client.get_player_roles(12_345).await, None);
 }
+fn limiter_for(base_url: &str, requests_per_minute: u32) -> Arc<TokenBucket> {
+    let mut config = OpenDotaHttpConfig::new(base_url, Some("test".to_owned()));
+    config.requests_per_minute = requests_per_minute;
+    OpenDotaHttpClient::with_config(config)
+        .expect("test client")
+        .limiter
+}
+
+#[test]
+fn test_rate_limiter_is_shared_per_endpoint_and_rate() {
+    let anonymous = limiter_for("http://limiter.invalid/api", 60);
+    let authenticated = limiter_for("http://limiter.invalid/api", 1_200);
+    let second_anonymous = limiter_for("http://limiter.invalid/api", 60);
+    let other_endpoint = limiter_for("http://other-limiter.invalid/api", 60);
+
+    assert!(
+        Arc::ptr_eq(&anonymous, &second_anonymous),
+        "clients sharing an endpoint and a rate share one bucket"
+    );
+    assert!(
+        !Arc::ptr_eq(&anonymous, &authenticated),
+        "an authenticated client must not inherit the anonymous 60/min bucket"
+    );
+    assert!(
+        !Arc::ptr_eq(&anonymous, &other_endpoint),
+        "a different endpoint gets its own bucket"
+    );
+    assert!(
+        (authenticated.capacity - 1_200.0).abs() < f64::EPSILON,
+        "the authenticated bucket carries its own configured rate, got {}",
+        authenticated.capacity
+    );
+    assert!(
+        (anonymous.capacity - 60.0).abs() < f64::EPSILON,
+        "the anonymous bucket keeps 60/min, got {}",
+        anonymous.capacity
+    );
+}
+
+#[test]
+fn test_rate_limiter_key_normalizes_the_trailing_slash() {
+    let plain = limiter_for("http://limiter-slash.invalid/api", 60);
+    let trailing = limiter_for("http://limiter-slash.invalid/api/", 60);
+
+    assert!(
+        Arc::ptr_eq(&plain, &trailing),
+        "with_config trims the trailing slash before keying the bucket"
+    );
+}

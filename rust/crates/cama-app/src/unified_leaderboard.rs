@@ -13,7 +13,7 @@ use cama_domain::embed_safety::{EmbedModel, FIELD_VALUE_LIMIT, truncate_field};
 use cama_domain::formatting::JOPACOIN_EMOTE;
 use cama_domain::openskill::CamaOpenSkillSystem;
 use cama_domain::player::Player;
-use cama_domain::rating::CamaRatingSystem;
+use cama_domain::rating::{CamaRatingSystem, MAX_GLICKO_RD};
 use cama_domain::rating_insights::rd_to_certainty;
 use cama_domain::tip_service::{TipLeaderboardEntry, TipVolume};
 
@@ -594,7 +594,7 @@ where
                                 .glicko_rating
                                 .expect("retained Glicko players have ratings"),
                         ),
-                        rd_to_certainty(player.glicko_rd.unwrap_or(350.0)),
+                        rd_to_certainty(player.glicko_rd.unwrap_or(MAX_GLICKO_RD)),
                     ),
                     RatingKind::OpenSkill => (
                         i64::from(
@@ -1155,7 +1155,13 @@ where
             })
             .collect::<Vec<_>>()
             .join("\n");
-        embed.add_field("Best Streaks", lines, false);
+        // Long display names can push a full page past Discord's field limit,
+        // which rejects the whole embed; the sibling sections all truncate.
+        embed.add_field(
+            "Best Streaks",
+            truncate_field(&lines, FIELD_VALUE_LIMIT),
+            false,
+        );
         embed.footer = Some(format!(
             "Page {}/{}",
             state.current_page + 1,
@@ -1269,4 +1275,5 @@ fn page_footer(state: &TabState, count: Option<(usize, usize, &'static str)>) ->
 }
 
 #[cfg(test)]
+#[path = "unified_leaderboard/tests.rs"]
 mod tests;

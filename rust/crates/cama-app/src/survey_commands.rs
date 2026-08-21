@@ -670,38 +670,67 @@ pub fn results_pages(results: &SurveyResults) -> Vec<Embed> {
                         footer: None,
                     });
                 } else {
-                    for chunk in question.text_responses.chunks(4) {
-                        let mut fields = Vec::new();
-                        for response in chunk {
-                            let response_number = question
-                                .text_responses
-                                .iter()
-                                .position(|candidate| std::ptr::eq(candidate, response))
-                                .map_or(1, |index| index + 1);
-                            for (index, value) in escaped_field_chunks(response, 1_024)
-                                .into_iter()
-                                .enumerate()
-                            {
-                                fields.push(EmbedField {
-                                    name: if index == 0 {
-                                        format!("Anonymous response {response_number}")
-                                    } else {
-                                        "\u{200b}".to_owned()
-                                    },
-                                    value,
-                                    inline: false,
-                                });
-                            }
+                    // Responses can each be up to 1000 characters and escaping
+                    // roughly doubles them, so a fixed four-per-page split can
+                    // exceed Discord's embed budget and fail the whole
+                    // followup. Fill pages by size, as preview_pages does.
+                    let title = format!("Question {} — Written responses", question.position);
+                    let footer = format!(
+                        "{} answered • {} skipped",
+                        question.response_count, question.skipped_count
+                    );
+                    let mut fields: Vec<EmbedField> = Vec::new();
+                    let flush = |fields: &mut Vec<EmbedField>| {
+                        if fields.is_empty() {
+                            return None;
                         }
-                        pages.push(Embed {
-                            title: format!("Question {} — Written responses", question.position),
+                        Some(Embed {
+                            title: title.clone(),
                             description: prompt.clone(),
-                            fields,
-                            footer: Some(format!(
-                                "{} answered • {} skipped",
-                                question.response_count, question.skipped_count
-                            )),
-                        });
+                            fields: std::mem::take(fields),
+                            footer: Some(footer.clone()),
+                        })
+                    };
+                    for (response_index, response) in question.text_responses.iter().enumerate() {
+                        let response_number = response_index + 1;
+                        let chunks = escaped_field_chunks(response, 1_024);
+                        let names = chunks
+                            .iter()
+                            .enumerate()
+                            .map(|(index, _)| {
+                                if index == 0 {
+                                    format!("Anonymous response {response_number}")
+                                } else {
+                                    "\u{200b}".to_owned()
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        let size = names.iter().map(String::len).sum::<usize>()
+                            + chunks.iter().map(String::len).sum::<usize>();
+                        let used = title.len()
+                            + prompt.len()
+                            + footer.len()
+                            + fields
+                                .iter()
+                                .map(|field| field.name.len() + field.value.len())
+                                .sum::<usize>();
+                        if !fields.is_empty()
+                            && (used + size > EMBED_CONTENT_BUDGET
+                                || fields.len() + chunks.len() > 25)
+                            && let Some(page) = flush(&mut fields)
+                        {
+                            pages.push(page);
+                        }
+                        for (name, value) in names.into_iter().zip(chunks) {
+                            fields.push(EmbedField {
+                                name,
+                                value,
+                                inline: false,
+                            });
+                        }
+                    }
+                    if let Some(page) = flush(&mut fields) {
+                        pages.push(page);
                     }
                 }
             }

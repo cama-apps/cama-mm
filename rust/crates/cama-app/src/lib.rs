@@ -5,7 +5,26 @@
 //! outside the crate so behavior can be tested without a live gateway or a
 //! second migration authority.
 
-pub mod admin_low_priority;
+pub use cama_app_dig::{
+    dig_bosses, dig_command_views, dig_event_threats, dig_service, dig_splash_runtime,
+    dig_sweep_fixes, dig_tunnel_naming, dig_view_supplements,
+};
+pub use cama_app_gameplay::{
+    duel, mafia_service, mana_effects_service, mana_service, manashop_rework, pet, pet_assets,
+    pet_brawl, pet_commands, pet_eating, pet_evolution_app, pet_flavor, pet_sqlite, shop_commands,
+};
+pub use cama_app_match::{
+    betting_validation, disburse_actions, disburse_service, dota_info, draft, economy_actions,
+    loan, match_recording, match_voting_service, prediction_resolution, predictions,
+    rating_comparison_service, tax_commands, vanity_tax_service,
+};
+pub use cama_app_platform::{
+    admin_low_priority, blame_luke_media, bugfix_regressions, channel_checks, embeds, font_assets,
+    moderation, player_mmr_fallback, player_trivia_service, playtime_service, python_random,
+    referrals, registration, reminders, survey_commands, timezone_service, trivia_questions,
+    unified_leaderboard, wrapped_story,
+};
+
 pub mod admin_moderation_commands;
 pub mod ai_http;
 pub mod ai_query_sqlite;
@@ -16,14 +35,10 @@ pub mod bankruptcy;
 pub mod bankruptcy_buffs;
 pub mod betting_reminder_messaging;
 pub mod betting_service;
-pub mod betting_validation;
-pub mod blame_luke_media;
 pub mod boss_duel;
 pub mod boss_encounter_view_guard;
 pub mod boss_multi_tier;
 pub mod bot_tasks;
-pub mod bugfix_regressions;
-pub mod channel_checks;
 pub mod curfew_service;
 pub mod dedicated_lobby_channel;
 pub mod dig_abandon_runtime;
@@ -31,11 +46,8 @@ pub mod dig_artifact_catalog_runtime;
 pub mod dig_assets;
 pub mod dig_bonus_events;
 pub mod dig_boss_runtime;
-pub mod dig_bosses;
 pub mod dig_carry_wager;
-pub mod dig_command_views;
 pub mod dig_event_runtime;
-pub mod dig_event_threats;
 pub mod dig_flavor;
 pub mod dig_gear_runtime;
 pub mod dig_inventory;
@@ -54,91 +66,44 @@ pub mod dig_relic_recycling;
 pub mod dig_relic_rework;
 pub mod dig_routes;
 pub mod dig_runtime;
-pub mod dig_service;
 pub mod dig_social_runtime;
-pub mod dig_splash_runtime;
-pub mod dig_sweep_fixes;
 pub mod dig_tunnel_encounters;
-pub mod dig_tunnel_naming;
 pub mod dig_tunnels;
-pub mod dig_view_supplements;
-pub mod disburse_actions;
-pub mod disburse_service;
 pub mod dota_bet_seed;
-pub mod dota_info;
 pub mod dota_streak;
 pub mod dotabase_sqlite;
-pub mod draft;
 pub mod drawing;
-pub mod duel;
 pub mod duel_flavor;
-pub mod economy_actions;
 pub mod economy_event_service;
 pub mod economy_event_sqlite;
-pub mod embeds;
-pub mod font_assets;
 pub mod golden_wheel;
 pub mod hero_lookup;
 pub mod herogrid;
 pub mod interaction_safety;
 pub mod jopat_match_routing;
 pub mod jopat_post_match;
-pub mod loan;
 pub mod lobby_commands_guild_id;
 pub mod lobby_manager;
 pub mod lobby_runtime;
 pub mod lobby_service;
 pub mod mafia_flavor;
-pub mod mafia_service;
-pub mod mana_effects_service;
-pub mod mana_service;
-pub mod manashop_rework;
 pub mod match_discovery;
-pub mod match_recording;
-pub mod match_voting_service;
-pub mod moderation;
 pub mod neon_bigwin_media;
 pub mod neon_degen;
 pub mod opendota_http;
 pub mod opendota_player_service;
-pub mod pet;
-pub mod pet_assets;
-pub mod pet_brawl;
 pub mod pet_brawl_commands;
-pub mod pet_commands;
-pub mod pet_eating;
-pub mod pet_evolution_app;
-pub mod pet_flavor;
-pub mod pet_sqlite;
-pub mod player_mmr_fallback;
-pub mod player_trivia_service;
-pub mod playtime_service;
 pub mod post_match_gif_media;
-pub mod prediction_resolution;
-pub mod predictions;
-pub mod python_random;
 pub mod rating_analysis_command;
 pub mod rating_analysis_media;
-pub mod rating_comparison_service;
 pub mod readycheck;
-pub mod referrals;
-pub mod registration;
 pub mod reminder_sqlite;
-pub mod reminders;
 pub mod scout;
 pub mod service_container;
-pub mod shop_commands;
-pub mod survey_commands;
-pub mod tax_commands;
 #[cfg(test)]
 mod test_support;
-pub mod timezone_service;
 pub mod trivia_commands;
 pub mod trivia_data;
 pub mod trivia_image_cache;
-pub mod trivia_questions;
-pub mod unified_leaderboard;
-pub mod vanity_tax_service;
 pub mod wheel;
 pub mod wrapped_media;
-pub mod wrapped_story;

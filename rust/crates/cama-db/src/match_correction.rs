@@ -20,7 +20,7 @@ use cama_domain::openskill::{
 };
 use cama_domain::rating::{
     CamaRatingSystem, MatchUpdateOptions, NEW_PLAYER_MMR_DISCOUNT, RecordedValue, TeamPlayer,
-    recorded_streak_rate, recorded_streak_threshold,
+    cap_glicko_rd, recorded_streak_rate, recorded_streak_threshold,
 };
 
 use crate::open_runtime_connection;
@@ -1133,6 +1133,15 @@ impl MatchCorrectionRepository {
             .map_err(Into::into)
     }
 
+    /// Debit win bonuses back off the previous winners during a correction.
+    ///
+    /// Each debit is recorded as a `match_bonus_rollback` compensation of the
+    /// original `match_win_bonus` award. That row shape is what
+    /// `income_award_marker_exists` looks for when deciding whether the
+    /// exact-once award marker still stands: without it a later correction back
+    /// to the original winner sees a live marker, skips the credit, and yet
+    /// snapshots the historical amount as paid -- so the players lose the bonus
+    /// permanently and a further correction debits it a second time.
     pub fn reverse_win_bonuses_atomic(
         &self,
         match_id: i64,
@@ -1146,6 +1155,15 @@ impl MatchCorrectionRepository {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for (&discord_id, &amount) in debits_by_player {
+            transaction.execute("DELETE FROM economy_ledger_context", [])?;
+            transaction.execute(
+                "INSERT INTO economy_ledger_context (
+                     id,source,related_type,related_id,reason,metadata
+                 ) VALUES (1,'match_bonus_rollback','match_win_bonus',?1,
+                           'match bonus rollback',
+                           '{\"compensates_source\":\"match_win_bonus\"}')",
+                params![match_id.to_string()],
+            )?;
             let changed = transaction.execute(
                 "UPDATE players
                  SET jopacoin_balance=COALESCE(jopacoin_balance,0)-?1,
@@ -1178,6 +1196,7 @@ impl MatchCorrectionRepository {
                 });
             }
         }
+        transaction.execute("DELETE FROM economy_ledger_context", [])?;
         transaction.commit()?;
         Ok(())
     }
@@ -1272,7 +1291,7 @@ impl MatchCorrectionRepository {
                    )",
                 params![
                     update.rating,
-                    update.rd,
+                    cap_glicko_rd(update.rd),
                     update.volatility,
                     update.discord_id,
                     guild_id,

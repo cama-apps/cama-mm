@@ -611,15 +611,15 @@ mod tests {
                 "round({value}, 4)"
             );
         }
-        // Rating uncertainty vectors: round(min(rd / 350 * 100, 100), 1).
+        // Rating uncertainty vectors: round(min(rd / 250 * 100, 100), 1).
         let cases1 = [
-            (31.325_f64, 8.9_f64),
-            (45.675, 13.1),
-            (350.0, 100.0),
-            (123.456, 35.3),
+            (31.325_f64, 12.5_f64),
+            (45.675, 18.3),
+            (250.0, 100.0),
+            (123.456, 49.4),
         ];
         for (rd, expected) in cases1 {
-            let raw = (rd / 350.0 * 100.0_f64).min(100.0);
+            let raw = (rd / 250.0 * 100.0_f64).min(100.0);
             assert_eq!(python_round_decimals(raw, 1), expected, "uncertainty({rd})");
         }
         assert_eq!(python_round_decimals(0.123_456_5, 6), 0.123_456);

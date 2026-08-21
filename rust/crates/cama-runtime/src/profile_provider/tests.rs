@@ -567,6 +567,35 @@ fn rating_tab_renders_openskill_only_history_as_a_discord_attachment() {
     );
 }
 
+#[test]
+fn profile_caps_legacy_glicko_rd_at_shared_limit() {
+    let database = migrated_player_fixture();
+    Connection::open(database.path())
+        .expect("open profile fixture")
+        .execute(
+            "UPDATE players SET glicko_rd = 350.0 WHERE discord_id = 100 AND guild_id = 42",
+            [],
+        )
+        .expect("seed legacy over-cap RD");
+
+    let overview = profile_page(&database, ProfileTab::Overview);
+    let overview_rating = overview
+        .fields
+        .iter()
+        .find(|field| field.name == "Rating")
+        .expect("overview rating field");
+    assert!(overview_rating.value.contains("(0% certain)"));
+
+    let rating = profile_page(&database, ProfileTab::Rating);
+    let glicko = rating
+        .fields
+        .iter()
+        .find(|field| field.name == "Glicko")
+        .expect("Glicko rating field");
+    assert!(glicko.value.contains("**RD:** 250"));
+    assert!(!glicko.value.contains("350"));
+}
+
 fn registry_for(provider: &ProfileRegistrationProvider) -> Registry {
     let mut builder = RegistryBuilder::default();
     provider.register(&mut builder).expect("register profile");

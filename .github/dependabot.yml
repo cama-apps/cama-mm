@@ -1,0 +1,20 @@
+version: 2
+
+updates:
+  - package-ecosystem: cargo
+    directory: /rust
+    schedule:
+      interval: weekly
+      day: monday
+      time: "10:00"
+      timezone: America/Los_Angeles
+    cooldown:
+      default-days: 7
+      semver-major-days: 7
+      semver-minor-days: 7
+      semver-patch-days: 7
+    # Cargo Vet deliberately blocks every dependency version that has not been
+    # audited. Do not create routine version-update PRs that cannot pass that
+    # gate unattended. Dependabot security updates remain enabled and must be
+    # paired with a reviewed cargo-vet audit before they can merge.
+    open-pull-requests-limit: 0

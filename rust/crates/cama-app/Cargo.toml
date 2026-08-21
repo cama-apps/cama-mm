@@ -7,6 +7,10 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+cama-app-dig = { path = "../cama-app-dig" }
+cama-app-gameplay = { path = "../cama-app-gameplay" }
+cama-app-match = { path = "../cama-app-match" }
+cama-app-platform = { path = "../cama-app-platform" }
 cama-db = { path = "../cama-db" }
 cama-domain = { path = "../cama-domain" }
 chrono.workspace = true

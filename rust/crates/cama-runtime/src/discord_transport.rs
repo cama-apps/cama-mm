@@ -4,7 +4,7 @@
 //! production adapter is attached to the live Serenity context before ready
 //! recovery or interaction dispatch; tests use a deterministic recording port.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use async_trait::async_trait;
 
@@ -172,6 +172,23 @@ impl DiscordDirectMessageError {
     }
 }
 
+/// Whether a frozen Discord destination can still receive a message.
+///
+/// A durable finalization plan freezes its channel ids at link time, so a
+/// destination Discord itself reports as gone or inaccessible can never be
+/// retried into success. Only that proof may turn a required delivery into a
+/// recorded skip; every other failure stays ambiguous and retryable.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DiscordDestinationStatus {
+    /// Discord answered that the channel does not exist, or that this bot has
+    /// no access to it.
+    Undeliverable,
+    /// Deliverable, or not provable either way -- a transport error, a rate
+    /// limit, or a transport with no probe. Callers must keep retrying.
+    #[default]
+    Unknown,
+}
+
 #[async_trait]
 pub trait DiscordTransport: Send + Sync {
     async fn fetch_message(
@@ -215,6 +232,14 @@ pub trait DiscordTransport: Send + Sync {
         _limit: usize,
     ) -> Result<Option<DiscordMessageReceipt>, String> {
         Ok(None)
+    }
+
+    /// Ask Discord whether `channel_id` is permanently undeliverable for this
+    /// bot. This is consulted only after a delivery has already failed, so it
+    /// costs nothing on the success path. The default proves nothing, which
+    /// keeps every alternate transport on the retry contract.
+    async fn destination_status(&self, _channel_id: u64) -> DiscordDestinationStatus {
+        DiscordDestinationStatus::Unknown
     }
 
     /// Send a message as an inline reply to an existing message in a thread.
@@ -450,6 +475,23 @@ pub trait DiscordTransport: Send + Sync {
         Ok(None)
     }
 
+    /// One-shot snapshot of a guild's cached member display names, keyed by
+    /// Discord user id. Callers that must classify many stored ids at once --
+    /// the unified leaderboard -- read the member cache once instead of
+    /// issuing one member request per id, matching Python's single
+    /// `guild.members` snapshot.
+    ///
+    /// `Ok(None)` means this transport has no member cache for the guild.
+    /// Callers must not read that as "every candidate has left"; they fall
+    /// back to per-member resolution. A cached guild returns `Ok(Some(..))`
+    /// even when the map is empty.
+    fn cached_guild_member_display_names(
+        &self,
+        _guild_id: u64,
+    ) -> Result<Option<BTreeMap<u64, String>>, String> {
+        Ok(None)
+    }
+
     /// Resolve a channel's thread parent when the interaction happened in a
     /// thread. Older transports return `None`, preserving source compatibility.
     async fn channel_parent_id(
@@ -460,10 +502,12 @@ pub trait DiscordTransport: Send + Sync {
         Ok(None)
     }
 
-    /// Return the requested members whose Discord presence contains a Go Live
-    /// streaming activity. Activity names alone cannot distinguish this from
-    /// Playing/Listening, so production inspects Discord's typed activity and
-    /// older transports deliberately return an empty set.
+    /// Return the requested members who are actively using Discord Go Live.
+    ///
+    /// Go Live is a voice-state flag (`self_stream`), not a presence activity:
+    /// a Twitch/YouTube "Streaming" rich presence is a different feature and
+    /// must not qualify. Transports without a voice-state cache deliberately
+    /// return an empty set.
     async fn streaming_member_ids(
         &self,
         _guild_id: u64,

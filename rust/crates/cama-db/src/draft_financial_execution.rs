@@ -83,6 +83,9 @@ struct JobRow {
     lease_until: Option<i64>,
 }
 
+/// What a linked plan must contain to be executable. Every field here is
+/// mandatory, so `crate::draft_finalization`'s link boundary validates the same
+/// shape: a plan this refuses could only pin its job at `linked` forever.
 #[derive(Debug, Deserialize)]
 struct RawFinalizationPlan {
     schema_version: u64,
@@ -1479,11 +1482,15 @@ fn read_fund(
                FROM nonprofit_fund WHERE guild_id=?1",
             [guild_id],
             |row| {
+                // Clamped exactly as the planner's fund_snapshot does: a
+                // negative column judged raw here would never equal the
+                // clamped value the plan was frozen against, so finalization
+                // would report a conflict on every retry.
                 Ok(FundState {
-                    total: row.get(0)?,
-                    queued: row.get(1)?,
-                    open: row.get(2)?,
-                    low_skill: row.get(3)?,
+                    total: row.get::<_, i64>(0)?.max(0),
+                    queued: row.get::<_, i64>(1)?.max(0),
+                    open: row.get::<_, i64>(2)?.max(0),
+                    low_skill: row.get::<_, i64>(3)?.max(0),
                 })
             },
         )

@@ -1760,4 +1760,5 @@ impl<R: MafiaRepositoryPort> MafiaService<R> {
 }
 
 #[cfg(test)]
+#[path = "mafia_service/tests.rs"]
 mod tests;

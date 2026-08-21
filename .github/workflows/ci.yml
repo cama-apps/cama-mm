@@ -12,8 +12,36 @@ permissions:
   contents: read
 
 jobs:
+  dependency-policy:
+    name: Dependency policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+
+      - name: Install checksum-verified cargo-vet
+        run: .github/scripts/install-cargo-vet
+
+      - name: Forbid new unaudited exemptions
+        run: .github/scripts/check-cargo-vet-exemptions "${{ github.event.pull_request.base.sha }}"
+
+      # Fetching reads package manifests but does not compile build scripts.
+      # Vetting must succeed before any job is allowed to build third-party code.
+      - name: Fetch the locked dependency graph
+        run: cargo fetch --locked --manifest-path rust/Cargo.toml
+
+      - name: Require an approved dependency graph
+        run: cargo vet check --locked --manifest-path rust/Cargo.toml
+
   rust-tests:
     name: Rust tests (${{ matrix.name }})
+    needs: dependency-policy
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -27,6 +55,18 @@ jobs:
             arguments: --all-targets --all-features
           - name: cama-app
             package: cama-app
+            arguments: --all-targets --all-features
+          - name: cama-app-dig
+            package: cama-app-dig
+            arguments: --all-targets --all-features
+          - name: cama-app-gameplay
+            package: cama-app-gameplay
+            arguments: --all-targets --all-features
+          - name: cama-app-match
+            package: cama-app-match
+            arguments: --all-targets --all-features
+          - name: cama-app-platform
+            package: cama-app-platform
             arguments: --all-targets --all-features
           - name: cama-runtime-core
             package: cama-runtime
@@ -69,9 +109,13 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: "./rust -> target"
-          shared-key: rust-ci-tests-${{ matrix.name }}
-          cache-workspace-crates: true
-          cache-on-failure: true
+          # Pull requests can restore trusted default-branch caches, while
+          # caches they create are isolated to this PR's merge ref. Restore the
+          # shared dependency cache warmed on main and avoid disposable uploads.
+          shared-key: rust-ci-tests
+          cache-workspace-crates: false
+          cache-on-failure: false
+          save-if: "false"
 
       - name: Test ${{ matrix.name }}
         run: >-
@@ -79,6 +123,7 @@ jobs:
           --package ${{ matrix.package }} ${{ matrix.arguments }}
 
   rust-lint:
+    needs: dependency-policy
     runs-on: ubuntu-latest
     env:
       CARGO_TARGET_DIR: rust/target
@@ -98,8 +143,9 @@ jobs:
         with:
           workspaces: "./rust -> target"
           shared-key: rust-ci-lint
-          cache-workspace-crates: true
-          cache-on-failure: true
+          cache-workspace-crates: false
+          cache-on-failure: false
+          save-if: "false"
 
       - name: Check Rust formatting
         run: cargo fmt --manifest-path rust/Cargo.toml --all -- --check
@@ -124,9 +170,9 @@ jobs:
 
   # Retain the existing required status context without rebuilding the release
   # artifact on every PR. The main-only Release workflow owns compilation,
-  # publication, and the deploy handoff.
+  # publication, and the deploy handoff. This static contract runs immediately
+  # so it does not add a second runner startup after Rust validation completes.
   runtime-images:
-    needs: [rust, rust-lint]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -141,6 +187,7 @@ jobs:
           grep -Fq 'ENV GIT_SHA=${GIT_SHA}' Dockerfile.rust
           ! grep -E 'setup-uv|uv (run|sync)|(^|[[:space:]])python3?([[:space:]]|$)' \
             .github/workflows/ci.yml \
+            .github/workflows/rust-cache-warm.yml \
             .github/workflows/release.yml \
             .github/workflows/deploy.yml \
             scripts/deploy-runtime \

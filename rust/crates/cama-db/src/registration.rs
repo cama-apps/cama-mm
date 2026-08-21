@@ -9,6 +9,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use cama_domain::rating::cap_glicko_rd;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use thiserror::Error;
 
@@ -206,7 +207,7 @@ impl RegistrationRepository {
                 request.dotabuff_url,
                 request.initial_mmr,
                 request.glicko_rating,
-                request.glicko_rd,
+                cap_glicko_rd(request.glicko_rd),
                 request.glicko_volatility,
                 request.os_mu,
                 request.os_sigma,

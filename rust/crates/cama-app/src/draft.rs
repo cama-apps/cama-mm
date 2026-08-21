@@ -653,6 +653,11 @@ impl DraftFinalizationPlan {
             extensions: BTreeMap::new(),
         };
         let plan = Self {
+            // Still the legacy version: this constructor is the structural
+            // template `DraftFinalizationPlanSeed::new` reuses, and the seed
+            // stamps the current version on the way out. A legacy plan can no
+            // longer be linked -- cama-db's link boundary refuses it, because
+            // the financial executor would refuse it too.
             schema_version: cama_db::draft_finalization::DRAFT_FINALIZATION_LEGACY_PLAN_VERSION,
             completion_key: completion_key.clone(),
             guild_id,
@@ -2130,6 +2135,25 @@ pub trait DraftCoinPort: Send {
     fn choose(&mut self, captain1_id: i64, captain2_id: i64) -> i64;
 }
 
+/// Production coin: an unbiased random flip, matching the legacy
+/// `random.choice([captain1_id, captain2_id])` contract.
+///
+/// The flip decides first pick, so it must not be predictable from earlier
+/// drafts in this or any other guild.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RandomDraftCoin;
+
+impl DraftCoinPort for RandomDraftCoin {
+    fn choose(&mut self, captain1_id: i64, captain2_id: i64) -> i64 {
+        if fastrand::bool() {
+            captain2_id
+        } else {
+            captain1_id
+        }
+    }
+}
+
+/// Deterministic strict alternation, for tests that need a fixed flip.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AlternatingDraftCoin {
     choose_second: bool,
@@ -2161,7 +2185,7 @@ impl DraftService {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            coin: Box::new(AlternatingDraftCoin::default()),
+            coin: Box::new(RandomDraftCoin),
         }
     }
 
@@ -4401,8 +4425,32 @@ mod tests {
         ));
     }
 
+    /// A policy that passes `DraftFinancialSetupPolicy::validate`, for tests
+    /// that only need a seed the link boundary will accept.
+    fn linkable_financial_policy() -> DraftFinancialSetupPolicy {
+        DraftFinancialSetupPolicy {
+            schema_version: cama_db::draft_financial_setup::DRAFT_FINANCIAL_SETUP_PLAN_VERSION,
+            game_date: "2026-08-14".to_owned(),
+            betting_mode: "pool".to_owned(),
+            seed_max_amount: 0,
+            first_game_daily_amount: 0,
+            auto_blind_enabled: true,
+            normal_blind_threshold: 0,
+            normal_blind_percentage_bits: format!("{:016x}", 0.1_f64.to_bits()),
+            bomb_blind_percentage_bits: format!("{:016x}", 0.15_f64.to_bits()),
+            bomb_ante: 10,
+            max_debt: 100,
+            spectator_enabled: false,
+            spectator_total_count: 0,
+            spectator_top_count: 0,
+            spectator_base_percentage_bits: format!("{:016x}", 0.01_f64.to_bits()),
+            spectator_top_percentage_bits: format!("{:016x}", 0.02_f64.to_bits()),
+            extensions: BTreeMap::new(),
+        }
+    }
+
     #[test]
-    fn sqlite_adapter_atomically_links_and_recovers_the_exact_typed_plan() {
+    fn a_legacy_typed_plan_is_refused_at_the_link_boundary() {
         let fixture = NamedTempFile::new().expect("create typed-link fixture");
         crate::test_support::copy_migrated_database(fixture.path())
             .expect("copy typed-link fixture");
@@ -4415,14 +4463,19 @@ mod tests {
         let created = persistence
             .create_envelope(&envelope)
             .expect("create fenced envelope");
-        let pending_payload = "{\"future_pending\":{\"keep\":true}}";
+        let pending_payload = json!({
+            "shuffle_timestamp": 1_700_000_000_i64,
+            "is_bomb_pot": false,
+            "future_pending": {"keep": true}
+        })
+        .to_string();
         let plan = DraftFinalizationPlan::new(
             TEST_GUILD_ID,
             created.session_id,
-            pending_payload,
-            100,
-            100,
-            200,
+            &pending_payload,
+            1_700_000_000,
+            1_700_000_000,
+            1_700_000_600,
             false,
             LobbyKind::Open,
             Some(10),
@@ -4432,61 +4485,44 @@ mod tests {
             Some(50),
         )
         .expect("build typed plan")
-        .to_json(pending_payload)
+        .to_json(&pending_payload)
         .expect("encode typed plan");
-        let linked = persistence
+
+        // A legacy plan carries no financial setup, so `run_leased_financial_setup`
+        // would refuse it and the job would pin itself at `linked` forever,
+        // reappearing in every recovery pass. The link boundary refuses it first.
+        let error = persistence
             .link_finalizing_pending_match(
                 TEST_GUILD_ID,
                 created.session_id,
                 created.revision,
-                pending_payload,
+                &pending_payload,
                 &plan,
             )
-            .expect("link typed plan");
-        assert!(linked.pending_created);
-        assert!(linked.job_created);
-        assert_eq!(linked.plan_json, plan);
+            .expect_err("a legacy plan is not linkable");
+        assert!(matches!(error, DraftPersistenceError::Serialization { .. }));
+        let connection = Connection::open(fixture.path()).expect("reopen typed-link fixture");
         assert_eq!(
-            persistence
-                .linked_finalization_plan(
-                    TEST_GUILD_ID,
-                    created.session_id,
-                    linked.pending_match_id,
-                )
-                .expect("reload exact typed plan"),
-            plan
-        );
-        let error = persistence
-            .complete_finalization_job(
-                TEST_GUILD_ID,
-                created.session_id,
-                linked.pending_match_id,
-                linked.envelope.revision,
-                300,
-            )
-            .expect_err("legacy linked job must not skip financial setup");
-        assert!(matches!(error, DraftPersistenceError::Conflict { .. }));
-        let finalization =
-            cama_db::draft_finalization::DraftFinalizationRepository::new(fixture.path());
-        let job = finalization
-            .job(&linked.completion_key)
-            .expect("load retained legacy job")
-            .expect("retained legacy job");
-        assert_eq!(
-            job.stage,
-            cama_db::draft_finalization::DRAFT_FINALIZATION_INITIAL_STAGE
+            connection
+                .query_row("SELECT COUNT(*) FROM pending_matches", [], |row| row
+                    .get::<_, i64>(0))
+                .expect("count pending matches"),
+            0
         );
         assert_eq!(
-            finalization
-                .load_incomplete_jobs()
-                .expect("load retained incomplete jobs"),
-            vec![job]
+            connection
+                .query_row("SELECT COUNT(*) FROM draft_finalization_jobs", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("count finalization jobs"),
+            0
         );
         assert_eq!(
             persistence
                 .load_all()
-                .expect("load retained legacy envelope"),
-            vec![linked.envelope]
+                .expect("reload untouched envelope")
+                .len(),
+            1
         );
     }
 
@@ -4748,13 +4784,16 @@ mod tests {
         drop(connection);
 
         let persistence = SqliteDraftStatePersistence::new(fixture.path());
-        let plan = DraftFinalizationPlan::new(
+        // A linkable seed, so the malformed envelope is what rejects the link.
+        let pending_payload =
+            json!({"shuffle_timestamp": 1_700_000_000_i64, "is_bomb_pot": false}).to_string();
+        let seed = DraftFinalizationPlanSeed::new(
             TEST_GUILD_ID,
             9,
-            "{}",
-            100,
-            100,
-            200,
+            &pending_payload,
+            1_700_000_000,
+            1_700_000_000,
+            1_700_000_600,
             false,
             LobbyKind::Open,
             Some(10),
@@ -4762,12 +4801,19 @@ mod tests {
             Some(30),
             Some(40),
             Some(50),
+            linkable_financial_policy(),
         )
-        .expect("build finalization plan")
-        .to_json("{}")
-        .expect("encode finalization plan");
+        .expect("build finalization plan seed")
+        .to_json(&pending_payload)
+        .expect("encode finalization plan seed");
         assert!(matches!(
-            persistence.link_finalizing_pending_match(TEST_GUILD_ID, 9, 1, "{}", &plan),
+            persistence.link_finalizing_pending_match_v2(
+                TEST_GUILD_ID,
+                9,
+                1,
+                &pending_payload,
+                &seed,
+            ),
             Err(DraftPersistenceError::InvalidEnvelope { .. })
         ));
         let connection = Connection::open(fixture.path()).expect("reopen malformed-link fixture");
@@ -5076,6 +5122,34 @@ mod tests {
             .map(|_| service.coinflip(100, 200))
             .collect::<BTreeSet<_>>();
         assert_eq!(results, BTreeSet::from([100, 200]));
+    }
+
+    #[test]
+    fn production_coinflip_is_random_rather_than_alternating() {
+        // The default service is what the runtime composes, so its flips must
+        // not be predictable from the previous flip.
+        let mut service = DraftService::new();
+        let flips = (0..200)
+            .map(|_| service.coinflip(100, 200))
+            .collect::<Vec<_>>();
+
+        assert!(flips.contains(&100) && flips.contains(&200));
+        assert!(
+            flips.windows(2).any(|pair| pair[0] == pair[1]),
+            "a strictly alternating coin never repeats a winner"
+        );
+    }
+
+    #[test]
+    fn alternating_coin_remains_available_for_deterministic_tests() {
+        let mut service = DraftService::with_coin(AlternatingDraftCoin::default());
+
+        assert_eq!(
+            (0..4)
+                .map(|_| service.coinflip(100, 200))
+                .collect::<Vec<_>>(),
+            vec![100, 200, 100, 200]
+        );
     }
 
     #[test]

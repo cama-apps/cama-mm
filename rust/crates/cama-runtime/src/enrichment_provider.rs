@@ -1865,16 +1865,21 @@ impl EnrichmentHandler {
             .await;
         }
         if route.page == 1 {
+            // Rasterizing the graph is CPU work, so it renders on the same
+            // blocking thread that loads the data rather than on the async
+            // worker driving this component.
             let matches = self.matches.clone();
-            let data = run_blocking(move || {
-                matches.get_enrichment_data(route.match_id, Some(route.guild_id))
+            let rendered = run_blocking(move || {
+                let data = matches.get_enrichment_data(route.match_id, Some(route.guild_id))?;
+                let advantage = data.as_ref().map(advantage_data).unwrap_or_default();
+                Ok::<_, cama_db::core_repositories::CoreRepositoryError>(
+                    draw_advantage_graph(&advantage, Some(route.match_id))
+                        .map(|image| image.into_inner()),
+                )
             })
             .await
             .map_err(InteractionHandlerError::from)?;
-            let advantage = data.as_ref().map(advantage_data).unwrap_or_default();
-            let Some(image) = draw_advantage_graph(&advantage, Some(route.match_id))
-                .map(|image| image.into_inner())
-            else {
+            let Some(image) = rendered else {
                 if let Err(response_error) = responder.defer(false).await {
                     warn!(%response_error, "unable to acknowledge empty match graph");
                 }

@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 
 use cama_app::opendota_http::{OpenDotaHttpClient, OpenDotaHttpConfig};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
+
+mod support;
+use support::sha256_hex;
 
 const FIXTURE_MANIFEST: &str = include_str!("fixtures/opendota/manifest.json");
 const FORBIDDEN: &[u8] = include_bytes!("fixtures/opendota/forbidden.json");
@@ -156,7 +158,7 @@ fn external_opendota_fixture_manifest_is_hashed_and_redacted() {
         for response in contract["responses"].as_array().expect("fixture responses") {
             let name = response["body"].as_str().expect("fixture body name");
             let expected = response["sha256"].as_str().expect("fixture body hash");
-            let actual = format!("{:x}", Sha256::digest(fixture_body(name)));
+            let actual = sha256_hex(fixture_body(name));
             assert_eq!(actual, expected, "fixture hash mismatch for {name}");
             referenced.insert(name);
         }

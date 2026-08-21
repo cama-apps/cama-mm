@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 use rusqlite::{Connection, params};
@@ -149,6 +149,7 @@ impl Fixture {
                      team_bet_on TEXT NOT NULL,
                      amount INTEGER NOT NULL,
                      bet_time INTEGER NOT NULL,
+                     pending_match_id INTEGER,
                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                  );
                  CREATE TABLE loan_state (
@@ -2642,5 +2643,221 @@ fn test_enrichment_leaves_roles_null_when_lanes_are_ambiguous() {
         stored_derived_roles(&fixture, match_id)
             .iter()
             .all(|(_, role)| role.is_none())
+    );
+}
+
+#[test]
+fn reversing_a_win_bonus_reopens_the_exact_once_marker_for_a_later_correction() {
+    // Correcting a match away from its original winner and then back must pay
+    // the win bonus again. The reversal has to be recorded as a compensation of
+    // the original award, or the exact-once marker still stands, the re-award
+    // moves no money, and those players lose the bonus permanently while their
+    // participant row is snapshotted as if it had been paid.
+    const PLAYER: i64 = 70_401;
+    const MATCH_ID: i64 = 941;
+    let database = migrated_award_database();
+    let connection = Connection::open(database.path()).expect("open correction award database");
+    insert_award_player(&connection, PLAYER, 0);
+    connection
+        .execute(
+            "INSERT INTO matches(
+                 match_id,guild_id,winning_team,match_date,win_reward_jc,
+                 team1_players,team2_players
+             ) VALUES (?1,?2,1,'2026-08-01T00:00:00+00:00',25,?3,'[]')",
+            params![MATCH_ID, GUILD, format!("[{PLAYER}]")],
+        )
+        .expect("insert corrected match");
+    connection
+        .execute(
+            "INSERT INTO match_participants(
+                 match_id,guild_id,discord_id,team_number,won,win_bonus_jc
+             ) VALUES (?1,?2,?3,1,1,25)",
+            params![MATCH_ID, GUILD, PLAYER],
+        )
+        .expect("insert corrected participant");
+    drop(connection);
+
+    let award = IncomeAwardRequest {
+        related_type: Some("match_win_bonus"),
+        related_id: Some(MATCH_ID),
+        exact_once: true,
+        ..IncomeAwardRequest::ordinary(PLAYER, 25, "match_win_bonus")
+    };
+    let repository = MatchRecordingRepository::new(database.path());
+    let credited = repository
+        .credit_income_awards_atomic(Some(GUILD), &[award])
+        .expect("credit the original win bonus");
+    assert!(credited[0].applied, "the first award moves money");
+    assert_eq!(credited[0].balance_after, 25);
+
+    // Without a reversal the marker blocks a re-award, which is the intended
+    // exact-once behavior.
+    let duplicate = repository
+        .credit_income_awards_atomic(Some(GUILD), &[award])
+        .expect("retry the award");
+    assert!(!duplicate[0].applied);
+
+    crate::match_correction_repository::MatchCorrectionRepository::new(database.path())
+        .reverse_win_bonuses_atomic(MATCH_ID, Some(GUILD), &BTreeMap::from([(PLAYER, 25)]))
+        .expect("reverse the win bonus");
+
+    let recredited = repository
+        .credit_income_awards_atomic(Some(GUILD), &[award])
+        .expect("re-award after the reversal");
+    assert!(
+        recredited[0].applied,
+        "a reversed award must be creditable again"
+    );
+    assert_eq!(
+        recredited[0].balance_after, 25,
+        "the player ends up back at the awarded balance"
+    );
+}
+
+#[test]
+fn recovered_receipt_reports_one_application_after_a_compensate_reapply_cycle() {
+    // The saga can pay an award, compensate it when a later player fails, and
+    // reapply it on retry. Summing every ledger row for the key would then
+    // report twice what the player actually received -- and that figure is
+    // snapshotted as the participant's win bonus, so a later correction would
+    // debit double.
+    const PLAYER: i64 = 70_501;
+    const MATCH_ID: i64 = 953;
+    let database = migrated_award_database();
+    let connection = Connection::open(database.path()).expect("open cycle award database");
+    insert_award_player(&connection, PLAYER, 0);
+    drop(connection);
+
+    let award = IncomeAwardRequest {
+        related_type: Some("match_win_bonus"),
+        related_id: Some(MATCH_ID),
+        exact_once: true,
+        ..IncomeAwardRequest::ordinary(PLAYER, 40, "match_win_bonus")
+    };
+    let repository = MatchRecordingRepository::new(database.path());
+    let credited = repository
+        .credit_income_awards_atomic(Some(GUILD), &[award])
+        .expect("first award");
+    assert!(credited[0].applied);
+    assert_eq!(credited[0].balance_after, 40);
+
+    repository
+        .compensate_income_awards_atomic(
+            Some(GUILD),
+            &[IncomeAwardCompensation {
+                discord_id: PLAYER,
+                source: "match_win_bonus",
+                related_id: MATCH_ID,
+                amount: credited[0].balance_delta,
+            }],
+        )
+        .expect("compensate the partial payout");
+
+    let reapplied = repository
+        .credit_income_awards_atomic(Some(GUILD), &[award])
+        .expect("reapply on retry");
+    assert!(reapplied[0].applied, "the rollback reopened the marker");
+    assert_eq!(reapplied[0].balance_after, 40);
+
+    // A later phase fails and the saga re-enters: the recovered receipt must
+    // describe one application, not the sum of both.
+    let recovered = repository
+        .credit_income_awards_atomic(Some(GUILD), &[award])
+        .expect("recover the standing award");
+    assert!(
+        !recovered[0].applied,
+        "the standing award is not re-credited"
+    );
+    assert_eq!(
+        recovered[0].balance_delta, credited[0].balance_delta,
+        "the recovered movement matches one application"
+    );
+
+    // The compensating row is still in the ledger: it is a real balance
+    // movement and the audit trail has to keep it.
+    let rollbacks: i64 = Connection::open(database.path())
+        .expect("reopen cycle award database")
+        .query_row(
+            "SELECT COUNT(*) FROM economy_ledger_entries
+             WHERE guild_id=?1 AND account_id=?2 AND source='match_bonus_rollback'",
+            params![GUILD, PLAYER],
+            |row| row.get(0),
+        )
+        .expect("count rollbacks");
+    assert_eq!(rollbacks, 1);
+}
+
+#[test]
+fn test_house_settlement_leaves_another_pending_matchs_bets_alone() {
+    // A guild can hold several pending matches at once, and bets record which
+    // one they were placed on. Sweeping every unsettled bet would pay bets
+    // placed on one pending match against another match's winner.
+    let fixture = Fixture::new();
+    let radiant = (5_401..5_406).collect::<Vec<_>>();
+    let dire = (5_406..5_411).collect::<Vec<_>>();
+    fixture.seed(&[radiant.clone(), dire.clone()].concat());
+    let ours = 9_101;
+    let theirs = 9_102;
+    fixture.seed(&[ours, theirs]);
+    for better in [ours, theirs] {
+        fixture
+            .repository
+            .add_balance(better, Some(GUILD), 20)
+            .expect("top up better");
+        fixture
+            .repository
+            .place_bet_atomic(Some(GUILD), better, TeamSide::Radiant, 5, 100)
+            .expect("place bet");
+    }
+    // Attribute each bet to a different pending match.
+    let connection = fixture.connection();
+    connection
+        .execute(
+            "UPDATE bets SET pending_match_id = ?1 WHERE discord_id = ?2",
+            params![77, ours],
+        )
+        .expect("attribute our bet");
+    connection
+        .execute(
+            "UPDATE bets SET pending_match_id = ?1 WHERE discord_id = ?2",
+            params![78, theirs],
+        )
+        .expect("attribute the other bet");
+    drop(connection);
+
+    let untouched_balance = fixture.player(theirs).balance;
+
+    let mut request = standard(&radiant, &dire, TeamSide::Radiant);
+    request.pending_bet_since = 100;
+    request.pending_match_id = Some(77);
+    request.update_ratings = false;
+    let result = fixture
+        .repository
+        .record_match_atomic(request)
+        .expect("record match");
+
+    assert_eq!(
+        result
+            .bet_distributions
+            .winners
+            .iter()
+            .map(|winner| winner.discord_id)
+            .collect::<Vec<_>>(),
+        [ours],
+        "only this pending match's bet settles"
+    );
+    let connection = fixture.connection();
+    let other_still_open: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM bets WHERE discord_id = ?1 AND match_id IS NULL",
+            params![theirs],
+            |row| row.get(0),
+        )
+        .expect("count the other pending match's bet");
+    assert_eq!(other_still_open, 1, "the other match's bet is untouched");
+    assert_eq!(
+        fixture.player(theirs).balance,
+        untouched_balance,
+        "no payout or loss is booked against the other match's better"
     );
 }

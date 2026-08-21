@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use cama_db::autobet_investments::AutobetInvestmentRepository;
@@ -160,8 +161,31 @@ fn crate_dependency_dag_has_only_inward_edges() {
             BTreeSet::from(["cama-domain".to_owned()]),
         ),
         (
-            "rust/crates/cama-app/Cargo.toml",
+            "rust/crates/cama-app-dig/Cargo.toml",
             BTreeSet::from(["cama-db".to_owned(), "cama-domain".to_owned()]),
+        ),
+        (
+            "rust/crates/cama-app-gameplay/Cargo.toml",
+            BTreeSet::from(["cama-db".to_owned(), "cama-domain".to_owned()]),
+        ),
+        (
+            "rust/crates/cama-app-match/Cargo.toml",
+            BTreeSet::from(["cama-db".to_owned(), "cama-domain".to_owned()]),
+        ),
+        (
+            "rust/crates/cama-app-platform/Cargo.toml",
+            BTreeSet::from(["cama-db".to_owned(), "cama-domain".to_owned()]),
+        ),
+        (
+            "rust/crates/cama-app/Cargo.toml",
+            BTreeSet::from([
+                "cama-app-dig".to_owned(),
+                "cama-app-gameplay".to_owned(),
+                "cama-app-match".to_owned(),
+                "cama-app-platform".to_owned(),
+                "cama-db".to_owned(),
+                "cama-domain".to_owned(),
+            ]),
         ),
         (
             "rust/crates/cama-runtime/Cargo.toml",
@@ -186,6 +210,16 @@ fn crate_roots_resolve_every_public_module_export() {
     for (crate_name, root_file) in [
         ("cama-domain", "rust/crates/cama-domain/src/lib.rs"),
         ("cama-db", "rust/crates/cama-db/src/lib.rs"),
+        ("cama-app-dig", "rust/crates/cama-app-dig/src/lib.rs"),
+        (
+            "cama-app-gameplay",
+            "rust/crates/cama-app-gameplay/src/lib.rs",
+        ),
+        ("cama-app-match", "rust/crates/cama-app-match/src/lib.rs"),
+        (
+            "cama-app-platform",
+            "rust/crates/cama-app-platform/src/lib.rs",
+        ),
         ("cama-app", "rust/crates/cama-app/src/lib.rs"),
         ("cama-runtime", "rust/crates/cama-runtime/src/lib.rs"),
     ] {
@@ -203,22 +237,38 @@ fn crate_roots_resolve_every_public_module_export() {
 
 #[test]
 fn application_crate_has_no_runtime_or_discord_transport_dependency() {
-    let dependencies = read("rust/crates/cama-app/Cargo.toml");
-    assert!(!dependencies.contains("cama-runtime"));
-    assert!(!dependencies.contains("serenity"));
-    assert!(!dependencies.contains("discord_transport"));
-    for file in rust_source_files("rust/crates/cama-app/src") {
-        let source = fs::read_to_string(&file).expect("application source");
-        assert!(
-            !source.contains("cama_runtime"),
-            "{} imports runtime",
-            file.display()
-        );
-        assert!(
-            !source.contains("discord_transport"),
-            "{} imports transport",
-            file.display()
-        );
+    for manifest in [
+        "rust/crates/cama-app/Cargo.toml",
+        "rust/crates/cama-app-dig/Cargo.toml",
+        "rust/crates/cama-app-gameplay/Cargo.toml",
+        "rust/crates/cama-app-match/Cargo.toml",
+        "rust/crates/cama-app-platform/Cargo.toml",
+    ] {
+        let dependencies = read(manifest);
+        assert!(!dependencies.contains("cama-runtime"));
+        assert!(!dependencies.contains("serenity"));
+        assert!(!dependencies.contains("discord_transport"));
+    }
+    for source_root in [
+        "rust/crates/cama-app/src",
+        "rust/crates/cama-app-dig/src",
+        "rust/crates/cama-app-gameplay/src",
+        "rust/crates/cama-app-match/src",
+        "rust/crates/cama-app-platform/src",
+    ] {
+        for file in rust_source_files(source_root) {
+            let source = fs::read_to_string(&file).expect("application source");
+            assert!(
+                !source.contains("cama_runtime"),
+                "{} imports runtime",
+                file.display()
+            );
+            assert!(
+                !source.contains("discord_transport"),
+                "{} imports transport",
+                file.display()
+            );
+        }
     }
 }
 
@@ -266,6 +316,118 @@ fn runtime_sqlite_providers_cross_a_blocking_boundary() {
             source.contains("spawn_blocking") || source.contains("ids::blocking"),
             "{file} has async SQLite-facing code without spawn_blocking"
         );
+    }
+}
+
+/// Byte range of the parenthesised call that opens at `open`.
+fn call_region(source: &str, open: usize) -> Range<usize> {
+    let bytes = source.as_bytes();
+    assert_eq!(bytes[open], b'(', "call_region expects an opening paren");
+    let mut depth = 0usize;
+    let mut index = open;
+    let mut in_string = false;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' if in_string => index += 1,
+            b'"' => in_string = !in_string,
+            b'(' if !in_string => depth += 1,
+            b')' if !in_string => {
+                depth -= 1;
+                if depth == 0 {
+                    return open..index;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    panic!("unbalanced call opened at {open}");
+}
+
+/// Byte range of the braced block that opens at or after `from`.
+fn block_region(source: &str, from: usize) -> Range<usize> {
+    let bytes = source.as_bytes();
+    let open = from
+        + source[from..]
+            .find('{')
+            .expect("block has an opening brace");
+    let mut depth = 0usize;
+    let mut index = open;
+    let mut in_string = false;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' if in_string => index += 1,
+            b'"' => in_string = !in_string,
+            b'{' if !in_string => depth += 1,
+            b'}' if !in_string => {
+                depth -= 1;
+                if depth == 0 {
+                    return open..index;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    panic!("unbalanced block opened at {open}");
+}
+
+fn function_body(source: &str, name: &str) -> Range<usize> {
+    let needle = format!("fn {name}(");
+    let declaration = source
+        .find(&needle)
+        .unwrap_or_else(|| panic!("{name} is declared"));
+    let signature = call_region(source, declaration + needle.len() - 1);
+    block_region(source, signature.end)
+}
+
+/// The reminder runtime guards its durable service and its timer registry with
+/// `std::sync::Mutex`, and startup recovery holds the service lock across a
+/// bulk per-guild rescan. Taking either lock on a Tokio async worker therefore
+/// stalls every other task on that worker, so every acquisition must sit
+/// inside a `spawn_blocking` closure or inside a helper documented as
+/// blocking-only.
+#[test]
+fn reminder_runtime_locks_stay_off_async_workers() {
+    let source = read("rust/crates/cama-runtime/src/reminder_provider.rs");
+    let mut allowed: Vec<Range<usize>> = ["task_snapshot", "cancel_dig", "cancel_pet"]
+        .into_iter()
+        .chain(
+            source
+                .match_indices("fn ")
+                .filter_map(|(index, _)| {
+                    let rest = &source[index + 3..];
+                    let name = rest.split('(').next()?;
+                    name.ends_with("_blocking").then_some(name)
+                })
+                .collect::<BTreeSet<_>>(),
+        )
+        .map(|name| function_body(&source, name))
+        .collect();
+    allowed.extend(
+        source
+            .match_indices("spawn_blocking(")
+            .map(|(index, needle)| call_region(&source, index + needle.len() - 1)),
+    );
+
+    for pattern in [
+        ".lock_service()",
+        ".lock_timers()",
+        "sync_task_blocking(",
+        "sync_all_tasks_blocking(",
+    ] {
+        for (index, _) in source.match_indices(pattern) {
+            if source[..index].ends_with("fn ") {
+                // The declaration itself, not a call.
+                continue;
+            }
+            assert!(
+                allowed.iter().any(|region| region.contains(&index)),
+                "reminder_provider.rs takes a reminder lock outside a blocking \
+                 context at byte {index}: {}",
+                source[index..].lines().next().unwrap_or_default().trim()
+            );
+        }
     }
 }
 

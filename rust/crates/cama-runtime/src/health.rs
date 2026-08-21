@@ -329,7 +329,8 @@ impl HealthReporter {
             path: health_path(&database_path),
             snapshot: HealthSnapshot::starting(database_path)?,
         };
-        reporter.persist()?;
+        // Startup runs before the runtime is serving, so the write is direct.
+        persist_snapshot(&reporter.path, &reporter.snapshot)?;
         Ok(reporter)
     }
 
@@ -353,14 +354,14 @@ impl HealthReporter {
                     Ok(event) => {
                         let stopped = event == LifecycleEvent::Stopped;
                         self.snapshot.apply(event)?;
-                        self.persist()?;
+                        self.persist().await?;
                         if stopped {
                             return Ok(());
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
                         self.snapshot.mark_lifecycle_gap(skipped)?;
-                        self.persist()?;
+                        self.persist().await?;
                     }
                     Err(broadcast::error::RecvError::Closed) => {
                         self.snapshot.status = HealthStatus::Stopped;
@@ -369,20 +370,32 @@ impl HealthReporter {
                             "runtime lifecycle stream closed before a stopped event".to_owned(),
                         );
                         self.snapshot.touch()?;
-                        self.persist()?;
+                        self.persist().await?;
                         return Ok(());
                     }
                 },
                 _ = heartbeat.tick() => {
                     self.snapshot.touch()?;
-                    self.persist()?;
+                    self.persist().await?;
                 }
             }
         }
     }
 
-    fn persist(&self) -> Result<(), HealthError> {
-        persist_snapshot(&self.path, &self.snapshot)
+    /// Write the snapshot without blocking the async worker.
+    ///
+    /// The write is followed by an fsync and a rename, which can stall for as
+    /// long as the filesystem takes; the reporter runs as a Tokio task beside
+    /// the gateway, so it must not do that inline.
+    async fn persist(&self) -> Result<(), HealthError> {
+        let path = self.path.clone();
+        let snapshot = self.snapshot.clone();
+        tokio::task::spawn_blocking(move || persist_snapshot(&path, &snapshot))
+            .await
+            .map_err(|error| HealthError::Write {
+                path: self.path.clone(),
+                source: std::io::Error::other(error),
+            })?
     }
 }
 

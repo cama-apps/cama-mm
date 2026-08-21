@@ -17,8 +17,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use cama_app::admin_low_priority::{REASON_DISPLAY_LIMIT, assignment_direct_message};
 use cama_app::moderation::{
-    CreateSuspension, ModerationService, ModerationServiceError, RecordLowPriorityEvent,
-    parse_expiry,
+    CreateSuspension, ModerationService, ModerationServiceError, parse_expiry,
+    validate_low_priority_event,
 };
 use cama_app::opendota_http::OpenDotaRuntimeServices;
 use cama_app::player_mmr_fallback::{RegisterPlayerError, RegisterPlayerInput, register_player};
@@ -38,7 +38,7 @@ use cama_db::rating_history_repository::{RatingHistoryRepository, RecalibrationR
 use cama_db::registration_repository::RegistrationRepository;
 use cama_domain::openskill::CamaOpenSkillSystem;
 use cama_domain::permissions::{DiscordPermissions, PermissionContext, has_admin_permission};
-use cama_domain::rating::CamaRatingSystem;
+use cama_domain::rating::{CamaRatingSystem, MAX_GLICKO_RD, cap_glicko_rd};
 use cama_domain::region::{
     CountsPayload, GameCountValue, RegionCountEntry, infer_region_from_counts,
 };
@@ -602,6 +602,16 @@ impl AdminHandler {
         let user = required_user(&context.options, "user")?;
         let reason = string(&context.options, "reason");
         let wins = integer(&context.options, "wins").unwrap_or(LOW_PRIORITY_REQUIRED_WINS);
+        // The audit row is written inside the assignment's own transaction now,
+        // so policy has to clear the numbers before that transaction opens. An
+        // assignment records wins_remaining == wins_required, and the
+        // assign-or-replace choice the repository makes inside the transaction
+        // validates identically.
+        if let Err(error) =
+            validate_low_priority_event(ModerationEventType::LowprioAssign, wins, wins)
+        {
+            return respond_ephemeral(&responder, format!("⚠️ {error}")).await;
+        }
         let target_id = signed_id(user.id, "user")?;
         let guild_id = context.guild_id;
         let players = self.players.clone();
@@ -616,48 +626,24 @@ impl AdminHandler {
         let low_priority = self.low_priority.clone();
         let moderation = self.moderation.clone();
         let actor_id = signed_id(context.actor_id, "actor")?;
-        let reason_for_write = reason.clone();
+        let now = now_seconds();
         let state = tokio::task::spawn_blocking(move || {
-            let previous = low_priority
-                .get_state(target_id, Some(guild_id))
-                .map_err(|error| error.to_string())?;
             let watermark = moderation
                 .port()
                 .pending_match_watermark(Some(guild_id))
                 .map_err(|error| error.to_string())?;
-            let mut input = SetLowPriorityInput::new(
-                target_id,
-                Some(guild_id),
-                actor_id,
-                reason_for_write.clone(),
-            );
+            let mut input = SetLowPriorityInput::new(target_id, Some(guild_id), actor_id, reason);
             input.wins_required = PythonIntegerInput::Integer(wins);
             input.start_pending_match_id = Some(PythonIntegerInput::Integer(watermark));
             // The option description this admin just read says the placed player
             // sees the reason, so this row's reason is theirs to read.
             input.reason_player_visible = true;
-            let state = low_priority
-                .set_low_priority(&input)
-                .map_err(|error| error.to_string())?;
-            let event_type = if previous.is_some_and(|state| state.active) {
-                ModerationEventType::LowprioReplace
-            } else {
-                ModerationEventType::LowprioAssign
-            };
-            if let Err(error) = moderation.record_low_priority_event(RecordLowPriorityEvent {
-                discord_id: target_id,
-                guild_id: Some(guild_id),
-                event_type,
-                wins_required: state.wins_required,
-                wins_remaining: state.wins_remaining,
-                actor_id: Some(actor_id),
-                reason: reason_for_write.as_deref(),
-                match_id: state.start_pending_match_id,
-                now: now_seconds(),
-            }) {
-                warn!(?error, "failed to audit low-priority assignment");
-            }
-            Ok::<_, String>(state)
+            // State and audit row commit together: a lost audit row used to
+            // leave a penalty nobody could account for.
+            low_priority
+                .set_low_priority_with_audit(&input, now)
+                .map(|assignment| assignment.state)
+                .map_err(|error| error.to_string())
         })
         .await
         .map_err(|error| format!("low-priority write task failed: {error}"))??;
@@ -709,38 +695,33 @@ impl AdminHandler {
         let guild_id = context.guild_id;
         let actor_id = signed_id(context.actor_id, "actor")?;
         let low_priority = self.low_priority.clone();
-        let moderation = self.moderation.clone();
-        let reason_for_write = reason.clone();
+        let now = now_seconds();
         let removed = tokio::task::spawn_blocking(move || {
-            let removed = low_priority
-                .clear_low_priority(
+            // The clear audits the row's own win requirement, so policy runs
+            // against that row before the transaction opens; the table's CHECK
+            // constraints keep the value the transaction re-reads in band.
+            if let Some(prior) = low_priority
+                .get_state(target_id, Some(guild_id))
+                .map_err(|error| error.to_string())?
+                .filter(|state| state.active)
+            {
+                validate_low_priority_event(
+                    ModerationEventType::LowprioClear,
+                    prior.wins_required,
+                    0,
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            low_priority
+                .clear_low_priority_with_audit(
                     target_id,
                     Some(guild_id),
                     actor_id,
-                    reason_for_write.as_deref(),
+                    reason.as_deref(),
+                    now,
                 )
-                .map_err(|error| error.to_string())?;
-            if removed {
-                let prior = low_priority
-                    .get_state(target_id, Some(guild_id))
-                    .map_err(|error| error.to_string())?;
-                if let Err(error) = moderation.record_low_priority_event(RecordLowPriorityEvent {
-                    discord_id: target_id,
-                    guild_id: Some(guild_id),
-                    event_type: ModerationEventType::LowprioClear,
-                    wins_required: prior
-                        .as_ref()
-                        .map_or(LOW_PRIORITY_REQUIRED_WINS, |state| state.wins_required),
-                    wins_remaining: 0,
-                    actor_id: Some(actor_id),
-                    reason: reason_for_write.as_deref(),
-                    match_id: prior.and_then(|state| state.start_pending_match_id),
-                    now: now_seconds(),
-                }) {
-                    warn!(?error, "failed to audit low-priority removal");
-                }
-            }
-            Ok::<_, String>(removed)
+                .map(|prior| prior.is_some())
+                .map_err(|error| error.to_string())
         })
         .await
         .map_err(|error| format!("low-priority clear task failed: {error}"))??;
@@ -1571,7 +1552,9 @@ impl AdminHandler {
         let user = required_user(&context.options, "user")?;
         let steam_id = required_integer(&context.options, "steam_id")?;
         let set_primary = boolean(&context.options, "set_primary").unwrap_or(false);
-        if steam_id <= 0 || steam_id > 1_i64 << 32 {
+        // The bound is exclusive everywhere else (validate_steam_id), so a
+        // greater-than test here would admit exactly 2^32.
+        if cama_app::registration::validate_steam_id(steam_id).is_err() {
             return respond_ephemeral(&responder, "❌ Invalid Steam ID.").await;
         }
         if !self.registered(user.id, context.guild_id).await? {
@@ -1769,6 +1752,7 @@ impl AdminHandler {
         let Some(rd) = snapshot.glicko_rd else {
             return Err("rated player has no Glicko RD".into());
         };
+        let rd = cap_glicko_rd(rd);
         let Some(volatility) = snapshot.glicko_volatility else {
             return Err("rated player has no Glicko volatility".into());
         };
@@ -1808,8 +1792,12 @@ impl AdminHandler {
         }
         let user = required_user(&context.options, "user")?;
         let rd = required_number(&context.options, "rd")?;
-        if !(0.0..=350.0).contains(&rd) {
-            return respond_ephemeral(&responder, "❌ RD must be between 0 and 350.").await;
+        if !(0.0..=MAX_GLICKO_RD).contains(&rd) {
+            return respond_ephemeral(
+                &responder,
+                format!("❌ RD must be between 0 and {MAX_GLICKO_RD:.0}."),
+            )
+            .await;
         }
         let target_id = signed_id(user.id, "user")?;
         let guild_id = context.guild_id;
@@ -1890,7 +1878,7 @@ impl AdminHandler {
             )
             .await;
         }
-        let rd = snapshot.glicko_rd.unwrap_or(self.config.initial_glicko_rd);
+        let rd = cap_glicko_rd(snapshot.glicko_rd.unwrap_or(self.config.initial_glicko_rd));
         let volatility = snapshot.glicko_volatility.unwrap_or(0.06);
         let actor_id = signed_id(context.actor_id, "actor")?;
         let repository = self.admin.clone();
@@ -1927,8 +1915,8 @@ impl AdminHandler {
             return Ok(());
         }
         let amount = integer(&context.options, "amount").unwrap_or(100);
-        if !(1..=350).contains(&amount) {
-            return respond_ephemeral(&responder, "❌ Amount must be between 1 and 350.").await;
+        if !(1..=MAX_GLICKO_RD as i64).contains(&amount) {
+            return respond_ephemeral(&responder, "❌ Amount must be between 1 and 250.").await;
         }
         defer(&responder, true).await?;
         let repository = self.admin.clone();
@@ -1944,7 +1932,7 @@ impl AdminHandler {
             return respond_ephemeral(&responder, "❌ No rated players found.").await;
         };
         let mut content = format!(
-            "✅ Bumped RD for **{}** players by **+{amount}** (capped at 350)\n• Avg RD: {:.0} → **{:.0}**",
+            "✅ Bumped RD for **{}** players by **+{amount}** (capped at {MAX_GLICKO_RD:.0})\n• Avg RD: {:.0} → **{:.0}**",
             result.count, result.average_rd_before, result.average_rd_after
         );
         if let (Some(before), Some(after)) =
@@ -1996,7 +1984,11 @@ impl AdminHandler {
             .await;
         }
         let old_rd = snapshot.glicko_rd.ok_or("rated player has no Glicko RD")?;
-        let new_rd = self.config.recalibration_initial_rd.max(old_rd);
+        let new_rd = self
+            .config
+            .recalibration_initial_rd
+            .max(old_rd)
+            .min(MAX_GLICKO_RD);
         let old_os_sigma = snapshot.os_sigma;
         let new_os_sigma = old_os_sigma.map(|_| CamaOpenSkillSystem::DEFAULT_SIGMA);
         let now = now_seconds();
@@ -2007,18 +1999,17 @@ impl AdminHandler {
             guild_id: Some(guild_id),
             now,
             cooldown_seconds: cooldown,
-            rating,
             new_rd,
             new_volatility: self.config.recalibration_initial_volatility,
             new_os_sigma,
         };
-        let total = match tokio::task::spawn_blocking(move || {
+        let (total, settled_rating) = match tokio::task::spawn_blocking(move || {
             repository.execute_recalibration_atomic(request)
         })
         .await
         .map_err(|error| format!("recalibration task failed: {error}"))?
         {
-            Ok(total) => total,
+            Ok(settled) => settled,
             Err(cama_db::rating_history_repository::RecalibrationRepositoryError::OnCooldown {
                 remaining_seconds,
             }) => {
@@ -2034,6 +2025,9 @@ impl AdminHandler {
             }
             Err(error) => return Err(error.to_string().into()),
         };
+        // Report the rating the transaction preserved: the snapshot read
+        // before it may predate a match settlement that has since committed.
+        let rating = settled_rating.unwrap_or(rating);
         let mut os_line = String::new();
         if let (Some(old), Some(new)) = (old_os_sigma, new_os_sigma) {
             os_line = format!("• OpenSkill σ: {old:.2} → **{new:.2}**\n");
@@ -2258,7 +2252,14 @@ impl AdminHandler {
                 scope: lobby_scope,
             })
             .await
-            .map_err(|error| format!("suspension lobby ejection failed: {error}"))?;
+            .unwrap_or_else(|error| {
+                // The suspension is already durable and the player has already
+                // been DM'd, so a failed lobby eviction is best effort like the
+                // DM: reporting a generic handler failure here would tell the
+                // admin nothing happened when most of it did.
+                warn!(%error, guild_id, target_id, "suspension lobby ejection failed");
+                AdminLobbyEjectionResult::default()
+            });
         let action = if replaced {
             "Replaced the active suspension for"
         } else {
@@ -3161,7 +3162,7 @@ fn admin_options(admin_rating_max: f64) -> Vec<CommandOptionSpec> {
                         required("user", "Player to adjust", CommandOptionKind::User),
                         required(
                             "rd",
-                            "New rating deviation / uncertainty (0-350)",
+                            "New rating deviation / uncertainty (0-250)",
                             CommandOptionKind::Number,
                         ),
                     ],
@@ -3286,7 +3287,7 @@ fn admin_options(admin_rating_max: f64) -> Vec<CommandOptionSpec> {
             "Increase rating uncertainty after a major patch (Admin only)",
             vec![option(
                 "amount",
-                "RD increase amount (default 100, max 350)",
+                "RD increase amount (default 100, max 250)",
                 CommandOptionKind::Integer,
             )],
         ),

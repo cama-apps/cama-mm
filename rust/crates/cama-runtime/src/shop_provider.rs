@@ -1090,13 +1090,18 @@ impl ShopInteractionHandler {
                 let refund = ((spec.cost as f64) * 0.25).floor() as i64;
                 let refund = refund.max(1);
                 let repository = self.repository.clone();
-                let _ = run_blocking("mana conduit refund", move || {
+                let credited = run_blocking("mana conduit refund", move || {
                     repository.adjust_balance(
                         user_id, guild_id, refund, None, None, None, None, None, None,
                     )
                 })
                 .await;
-                refund
+                // Only report a refund the player actually received: the
+                // reported balance is derived from this figure.
+                if let Err(error) = &credited {
+                    warn!(%error, user_id, guild_id, "mana conduit refund was not credited");
+                }
+                if credited.is_ok() { refund } else { 0 }
             } else {
                 0
             }
@@ -1646,32 +1651,15 @@ impl ShopInteractionHandler {
                 ))
             }
             "dark_bargain" => {
+                // The debt and its principal commit together: a player must
+                // never owe the bargain without having been paid it.
                 let repository = self.manashop.clone();
-                run_blocking("Dark Bargain debt grant", move || {
+                run_blocking("Dark Bargain", move || {
                     BuffService::new(repository, now)
-                        .grant_dark_bargain_debt(user_id, guild_id, 700)
+                        .grant_dark_bargain(user_id, guild_id, 700, 800)
                 })
                 .await
                 .map_err(|_| "Could not strike the bargain; refunded.".to_owned())?;
-                let repository = self.repository.clone();
-                run_blocking("Dark Bargain credit", move || {
-                    repository.adjust_balance(
-                        user_id,
-                        guild_id,
-                        800,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                    )
-                })
-                .await
-                .map_err(|_| {
-                    "Could not credit the bargain; refunded. Debt note has been recorded — contact an admin if it doesn't clear."
-                        .to_owned()
-                })?;
                 Ok(format!(
                     "🌿💀 **DARK BARGAIN** — <@{user_id}> signs in red ink.\n+800 {JOPACOIN_EMOTE} now. 700 due in 7 days. Default: -1600 + bankruptcy +5 matches.\n(cost: {} {JOPACOIN_EMOTE}, mana spent, balance: {})",
                     spec.cost,

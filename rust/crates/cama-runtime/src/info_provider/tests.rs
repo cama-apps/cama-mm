@@ -26,11 +26,29 @@ const CAROL: u64 = 303;
 #[derive(Default)]
 struct RecordingDiscord {
     members: BTreeMap<(u64, u64), DiscordGuildMemberSnapshot>,
+    snapshot: Option<BTreeMap<u64, String>>,
     member_lookups: Mutex<Vec<(u64, u64)>>,
+    snapshots: Mutex<Vec<u64>>,
 }
 
 impl RecordingDiscord {
     fn with_members(members: impl IntoIterator<Item = (u64, &'static str)>) -> Self {
+        let cached = Self::with_uncached_members(members);
+        Self {
+            snapshot: Some(
+                cached
+                    .members
+                    .values()
+                    .map(|member| (member.user_id, member.display_name.clone()))
+                    .collect(),
+            ),
+            ..cached
+        }
+    }
+
+    /// A transport with no member cache: `/leaderboard` must fall back to
+    /// resolving each candidate on its own.
+    fn with_uncached_members(members: impl IntoIterator<Item = (u64, &'static str)>) -> Self {
         Self {
             members: members
                 .into_iter()
@@ -48,7 +66,9 @@ impl RecordingDiscord {
                     )
                 })
                 .collect(),
+            snapshot: None,
             member_lookups: Mutex::new(Vec::new()),
+            snapshots: Mutex::new(Vec::new()),
         }
     }
 }
@@ -160,6 +180,14 @@ impl DiscordTransport for RecordingDiscord {
             .expect("member lookups")
             .push((guild_id, user_id));
         Ok(self.members.get(&(guild_id, user_id)).cloned())
+    }
+
+    fn cached_guild_member_display_names(
+        &self,
+        guild_id: u64,
+    ) -> Result<Option<BTreeMap<u64, String>>, String> {
+        self.snapshots.lock().expect("snapshots").push(guild_id);
+        Ok(self.snapshot.clone())
     }
 }
 
@@ -964,6 +992,50 @@ async fn migrated_sqlite_and_live_members_drive_all_six_lazy_tabs() {
         updates_before + 1
     );
 
+    assert_eq!(
+        *discord.snapshots.lock().expect("snapshots"),
+        vec![GUILD],
+        "the candidate set is classified against one member-cache snapshot"
+    );
+    assert!(
+        discord
+            .member_lookups
+            .lock()
+            .expect("member lookups")
+            .is_empty(),
+        "a cached guild costs no per-candidate member requests"
+    );
+}
+
+#[tokio::test]
+async fn a_transport_without_a_member_cache_still_resolves_every_candidate() {
+    let (_directory, path) = migrated_database();
+    seed_leaderboard_data(&path);
+    let discord = Arc::new(RecordingDiscord::with_uncached_members([
+        (ALICE, "AliceLive"),
+        (CAROL, "CarolLive"),
+    ]));
+    let provider = InfoRegistrationProvider::new(path, &config(), discord.clone());
+    let responder = Arc::new(RecordingResponder::default());
+    registry(&provider)
+        .command_handler("leaderboard")
+        .expect("leaderboard handler")
+        .handle(
+            command_request("leaderboard", ALICE, Some(GUILD), None, Vec::new()),
+            responder.clone(),
+        )
+        .await
+        .expect("render balance leaderboard");
+
+    let description = responder.followups.lock().expect("followups")[0].embeds[0]
+        .description
+        .clone()
+        .expect("balance description");
+    assert!(description.contains("<@303>"), "cached members still list");
+    assert!(
+        !description.contains("<@202>"),
+        "a departed candidate is still filtered out"
+    );
     let queried = discord.member_lookups.lock().expect("member lookups");
     assert!(queried.contains(&(GUILD, ALICE)));
     assert!(queried.contains(&(GUILD, BOB_DEPARTED)));
@@ -1280,12 +1352,14 @@ async fn view_timeout_drops_session_and_deletes_followup_receipt() {
         .await
         .expect("leaderboard with expiring view");
     tokio::time::sleep(Duration::from_millis(30)).await;
+    // Deleted through the channel, not the interaction followup: the timer can
+    // outlive the interaction token once an interaction re-arms it.
     assert_eq!(
         *responder.deletions.lock().expect("deletions"),
         [InteractionMessageReceipt {
             message_id: 4_242,
             channel_id: CHANNEL,
-            delivery: InteractionMessageDelivery::InteractionFollowup,
+            delivery: InteractionMessageDelivery::ChannelFallback,
         }]
     );
 
@@ -1299,4 +1373,66 @@ async fn view_timeout_drops_session_and_deletes_followup_receipt() {
     let response = expired.responses.lock().expect("responses")[0].clone();
     assert!(response.ephemeral);
     assert!(response.content.contains("leaderboard has expired"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn paging_a_leaderboard_postpones_its_deletion() {
+    // discord.py measured a View's timeout from the last interaction, so a
+    // leaderboard being actively tabbed must not be deleted mid-use. Time is
+    // paused so the assertions are about the timer, not the machine's speed.
+    let timeout = Duration::from_secs(840);
+    let (_directory, path) = migrated_database();
+    let provider = InfoRegistrationProvider::with_timeout(
+        path,
+        &config(),
+        Arc::new(RecordingDiscord::default()),
+        timeout,
+    );
+    let registry = registry(&provider);
+    let created = Arc::new(RecordingResponder::with_receipt(4_242));
+    registry
+        .command_handler("leaderboard")
+        .expect("leaderboard handler")
+        .handle(
+            command_request("leaderboard", 999, None, None, Vec::new()),
+            created.clone(),
+        )
+        .await
+        .expect("leaderboard view");
+
+    let component = registry
+        .component_handler("info:1:tab:glicko")
+        .expect("info component route");
+    let responder = Arc::new(RecordingResponder::default());
+    for tab in [
+        "info:1:tab:glicko",
+        "info:1:tab:gambling",
+        "info:1:tab:tips",
+    ] {
+        // Cross most of the current deadline, then use the view again.
+        tokio::time::advance(timeout - Duration::from_secs(1)).await;
+        component
+            .handle(component_request(tab, 999), responder.clone())
+            .await
+            .expect("switch leaderboard tab");
+        tokio::task::yield_now().await;
+        assert!(
+            created.deletions.lock().expect("deletions").is_empty(),
+            "an actively used leaderboard must survive its original timer"
+        );
+    }
+
+    // Idle past the last interaction's deadline: now it is deleted.
+    tokio::time::advance(timeout + Duration::from_secs(1)).await;
+    for _ in 0..64 {
+        if !created.deletions.lock().expect("deletions").is_empty() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        created.deletions.lock().expect("deletions").len(),
+        1,
+        "the leaderboard is deleted once it goes idle"
+    );
 }

@@ -453,6 +453,7 @@ async fn production_runtime_injects_shared_vanity_tax_into_live_dig() {
         Arc::clone(&base.handler.state.media),
         None,
         Some(vanity_tax),
+        0,
     )
     .expect("provider with shared vanity tax");
     let execution = provider
@@ -1133,6 +1134,7 @@ fn failed_event_uses_python_error_embed() {
         guild_modifier: None,
         chain_event: None,
         quest_finale: None,
+        retryable: false,
     };
 
     let response = super::event_resolution_response(&outcome);
@@ -1205,6 +1207,7 @@ fn event_result_embed_surfaces_exact_unique_gear_drop_details() {
         guild_modifier: None,
         chain_event: None,
         quest_finale: None,
+        retryable: false,
     };
 
     let response = super::event_resolution_response(&outcome);

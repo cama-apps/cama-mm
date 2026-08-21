@@ -192,6 +192,15 @@ fn test_register_populates_junction_table() {
         )
         .expect("legacy Steam column");
     assert_eq!(legacy, 222_333);
+    let rd: f64 = fixture
+        .connection()
+        .query_row(
+            "SELECT glicko_rd FROM players WHERE discord_id = 7 AND guild_id = ?1",
+            [GUILD],
+            |row| row.get(0),
+        )
+        .expect("registered RD");
+    assert_eq!(rd, 250.0);
 }
 
 #[test]

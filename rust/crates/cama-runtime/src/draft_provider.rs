@@ -44,7 +44,9 @@ use tokio::task::{JoinHandle, spawn_blocking};
 use tracing::{debug, warn};
 
 use crate::application_config::ApplicationConfig;
-use crate::discord_transport::{DiscordMessage, DiscordMessageReceipt, DiscordTransport};
+use crate::discord_transport::{
+    DiscordDestinationStatus, DiscordMessage, DiscordMessageReceipt, DiscordTransport,
+};
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
@@ -540,20 +542,68 @@ impl DraftRegistrationProvider {
             .map_err(|error| format!("draft state load task failed: {error}"))?
             .map_err(|error| error.to_string())?;
         let mut restored = 0usize;
+        let mut failures = Vec::new();
         for envelope in envelopes {
             if guild_ids.is_some_and(|guild_ids| !guild_ids.contains(&envelope.guild_id)) {
                 continue;
             }
-            let guild_id = envelope.guild_id;
-            let session_id = envelope.session_id;
-            let initial_kind = to_runtime_kind(envelope.state.as_state().lobby_kind);
-            let operation_lock = self.handler.draft_operation_lock(guild_id, session_id);
-            let _operation_guard = operation_lock.lock().await;
-            let lobby_operation_lock = self.handler.lobbies.operation_lock(guild_id, initial_kind);
-            let _lobby_operation_guard = lobby_operation_lock.lock().await;
-            let envelope = match self.handler.reload_durable_envelope(guild_id).await {
-                Ok(Some(envelope)) => envelope,
-                Ok(None) => {
+            // One guild's durable row must not abort recovery for every other
+            // guild: a deleted draft message here would leave every later guild
+            // unhydrated and, because ready_recovery aborts, unfinalized too.
+            let envelope_guild_id = envelope.guild_id;
+            let hydrated: Result<bool, String> = async {
+                let guild_id = envelope.guild_id;
+                let session_id = envelope.session_id;
+                let initial_kind = to_runtime_kind(envelope.state.as_state().lobby_kind);
+                let operation_lock = self.handler.draft_operation_lock(guild_id, session_id);
+                let _operation_guard = operation_lock.lock().await;
+                let lobby_operation_lock = self.handler.lobbies.operation_lock(guild_id, initial_kind);
+                let _lobby_operation_guard = lobby_operation_lock.lock().await;
+                let envelope = match self.handler.reload_durable_envelope(guild_id).await {
+                    Ok(Some(envelope)) => envelope,
+                    Ok(None) => {
+                        let live_same_session = self
+                            .handler
+                            .drafts
+                            .get_state(Some(guild_id))
+                            .is_some_and(|state| lock_state(&state).session_id == session_id);
+                        self.handler.cleanup_unused_draft_operation_lock(
+                            guild_id,
+                            session_id,
+                            &operation_lock,
+                        );
+                        if live_same_session {
+                            return Err(format!(
+                                "live draft session {session_id} has no durable recovery row"
+                            ));
+                        }
+                        return Ok(false);
+                    }
+                    Err(error) => {
+                        self.handler.cleanup_unused_draft_operation_lock(
+                            guild_id,
+                            session_id,
+                            &operation_lock,
+                        );
+                        return Err(error);
+                    }
+                };
+                if envelope.session_id != session_id {
+                    self.handler.cleanup_unused_draft_operation_lock(
+                        guild_id,
+                        session_id,
+                        &operation_lock,
+                    );
+                    return Err(format!(
+                        "draft guild {guild_id} changed sessions during hydration: loaded {session_id}, current {}",
+                        envelope.session_id
+                    ));
+                }
+                if !envelope.active
+                    || envelope.finalizing
+                    || envelope.pending_match_id.is_some()
+                    || envelope.state.as_state().phase == DraftPhase::Complete
+                {
                     let live_same_session = self
                         .handler
                         .drafts
@@ -564,158 +614,130 @@ impl DraftRegistrationProvider {
                         session_id,
                         &operation_lock,
                     );
+                    if live_same_session && (envelope.finalizing || envelope.pending_match_id.is_some())
+                    {
+                        // A same-process completion may still own the live
+                        // Draft while READY fires. Leave that state intact; the
+                        // READY observer invokes the durable recovery worker
+                        // immediately after hydration and its terminal CAS owns
+                        // the eventual local cleanup.
+                        warn!(
+                            guild_id,
+                            session_id, "live finalizing Draft retained for READY recovery"
+                        );
+                        return Ok(false);
+                    }
                     if live_same_session {
                         return Err(format!(
-                            "live draft session {session_id} has no durable recovery row"
+                            "live draft session {session_id} now requires finalization recovery"
                         ));
                     }
-                    continue;
-                }
-                Err(error) => {
-                    self.handler.cleanup_unused_draft_operation_lock(
-                        guild_id,
-                        session_id,
-                        &operation_lock,
-                    );
-                    return Err(error);
-                }
-            };
-            if envelope.session_id != session_id {
-                self.handler.cleanup_unused_draft_operation_lock(
-                    guild_id,
-                    session_id,
-                    &operation_lock,
-                );
-                return Err(format!(
-                    "draft guild {guild_id} changed sessions during hydration: loaded {session_id}, current {}",
-                    envelope.session_id
-                ));
-            }
-            if !envelope.active
-                || envelope.finalizing
-                || envelope.pending_match_id.is_some()
-                || envelope.state.as_state().phase == DraftPhase::Complete
-            {
-                let live_same_session = self
-                    .handler
-                    .drafts
-                    .get_state(Some(guild_id))
-                    .is_some_and(|state| lock_state(&state).session_id == session_id);
-                self.handler.cleanup_unused_draft_operation_lock(
-                    guild_id,
-                    session_id,
-                    &operation_lock,
-                );
-                if live_same_session && (envelope.finalizing || envelope.pending_match_id.is_some())
-                {
-                    // A same-process completion may still own the live
-                    // Draft while READY fires. Leave that state intact; the
-                    // READY observer invokes the durable recovery worker
-                    // immediately after hydration and its terminal CAS owns
-                    // the eventual local cleanup.
+                    // TODO(draft-persistence): implement idempotent pending-match
+                    // finalization recovery before hydrating these rows.
                     warn!(
                         guild_id,
-                        session_id, "live finalizing Draft retained for READY recovery"
+                        session_id,
+                        finalizing = envelope.finalizing,
+                        pending_match_id = ?envelope.pending_match_id,
+                        "skipping draft row that requires finalization recovery"
                     );
-                    continue;
+                    return Ok(false);
                 }
-                if live_same_session {
-                    return Err(format!(
-                        "live draft session {session_id} now requires finalization recovery"
-                    ));
-                }
-                // TODO(draft-persistence): implement idempotent pending-match
-                // finalization recovery before hydrating these rows.
-                warn!(
-                    guild_id,
-                    session_id,
-                    finalizing = envelope.finalizing,
-                    pending_match_id = ?envelope.pending_match_id,
-                    "skipping draft row that requires finalization recovery"
-                );
-                continue;
-            }
-            let state = envelope.state.clone().into_state();
-            let kind = to_runtime_kind(state.lobby_kind);
-            if kind != initial_kind {
-                self.handler.cleanup_unused_draft_operation_lock(
-                    guild_id,
-                    session_id,
-                    &operation_lock,
-                );
-                return Err(format!(
-                    "draft guild {guild_id} changed lobby scope during hydration"
-                ));
-            }
-            let existing = self.handler.drafts.get_state(Some(guild_id));
-            let (handle, live_state, active_envelope, freshly_restored) = if let Some(existing) =
-                existing
-            {
-                let existing_session = lock_state(&existing).session_id;
-                if existing_session != session_id {
+                let state = envelope.state.clone().into_state();
+                let kind = to_runtime_kind(state.lobby_kind);
+                if kind != initial_kind {
                     self.handler.cleanup_unused_draft_operation_lock(
                         guild_id,
                         session_id,
                         &operation_lock,
                     );
                     return Err(format!(
-                        "draft guild {guild_id} already has session {existing_session}, refusing to hydrate stale session {session_id}"
+                        "draft guild {guild_id} changed lobby scope during hydration"
                     ));
                 }
-                let Some(cached) = lock_recover(&self.handler.persisted_envelopes)
-                    .get(&(guild_id, session_id))
-                    .cloned()
-                else {
-                    return Err(format!(
-                        "draft session {session_id} is live without a hydrated CAS envelope"
-                    ));
-                };
-                if envelope != cached {
-                    return Err(format!(
-                        "draft session {session_id} durable envelope does not match the live CAS cache: cached revision {}, durable revision {}",
-                        cached.revision, envelope.revision
-                    ));
-                }
-                // Repeated READY is strictly idempotent from the already-live
-                // state. Never overwrite an in-flight or freshly committed
-                // mutation with the load snapshot.
-                let live_state = lock_state(&existing).clone();
-                if live_state.to_snapshot() != cached.state {
-                    return Err(format!(
-                        "draft session {session_id} live state does not match its CAS cache"
-                    ));
-                }
-                (existing, live_state, cached, false)
-            } else {
-                let handle = self
-                    .handler
-                    .reserve_and_restore_hydrated_state(&state, &operation_lock)?;
-                lock_recover(&self.handler.persisted_envelopes)
-                    .insert((guild_id, session_id), envelope.clone());
-                (handle, state.clone(), envelope, true)
-            };
-            self.handler.restore_hydrated_receipt(&live_state);
-            if let Err(error) = self.handler.republish_hydrated_view(&live_state).await {
-                if freshly_restored {
-                    self.handler
-                        .unwind_fresh_hydration(&handle, &live_state, &operation_lock);
-                }
-                return Err(format!(
-                    "draft recovery repaint failed for guild {guild_id}, session {session_id}: {error}"
-                ));
-            }
-            let seconds = active_envelope
-                .deadline_at
-                .map(|deadline| deadline.saturating_sub(unix_now()).max(1) as u64)
-                .unwrap_or_else(|| {
-                    if lock_state(&handle).phase == DraftPhase::Drafting {
-                        DRAFTING_TIMEOUT_SECONDS
-                    } else {
-                        PRE_DRAFT_TIMEOUT_SECONDS
+                let existing = self.handler.drafts.get_state(Some(guild_id));
+                let (handle, live_state, active_envelope, freshly_restored) = if let Some(existing) =
+                    existing
+                {
+                    let existing_session = lock_state(&existing).session_id;
+                    if existing_session != session_id {
+                        self.handler.cleanup_unused_draft_operation_lock(
+                            guild_id,
+                            session_id,
+                            &operation_lock,
+                        );
+                        return Err(format!(
+                            "draft guild {guild_id} already has session {existing_session}, refusing to hydrate stale session {session_id}"
+                        ));
                     }
-                });
-            self.handler.schedule_timeout(guild_id, session_id, seconds);
-            restored += 1;
+                    let Some(cached) = lock_recover(&self.handler.persisted_envelopes)
+                        .get(&(guild_id, session_id))
+                        .cloned()
+                    else {
+                        return Err(format!(
+                            "draft session {session_id} is live without a hydrated CAS envelope"
+                        ));
+                    };
+                    if envelope != cached {
+                        return Err(format!(
+                            "draft session {session_id} durable envelope does not match the live CAS cache: cached revision {}, durable revision {}",
+                            cached.revision, envelope.revision
+                        ));
+                    }
+                    // Repeated READY is strictly idempotent from the already-live
+                    // state. Never overwrite an in-flight or freshly committed
+                    // mutation with the load snapshot.
+                    let live_state = lock_state(&existing).clone();
+                    if live_state.to_snapshot() != cached.state {
+                        return Err(format!(
+                            "draft session {session_id} live state does not match its CAS cache"
+                        ));
+                    }
+                    (existing, live_state, cached, false)
+                } else {
+                    let handle = self
+                        .handler
+                        .reserve_and_restore_hydrated_state(&state, &operation_lock)?;
+                    lock_recover(&self.handler.persisted_envelopes)
+                        .insert((guild_id, session_id), envelope.clone());
+                    (handle, state.clone(), envelope, true)
+                };
+                self.handler.restore_hydrated_receipt(&live_state);
+                if let Err(error) = self.handler.republish_hydrated_view(&live_state).await {
+                    if freshly_restored {
+                        self.handler
+                            .unwind_fresh_hydration(&handle, &live_state, &operation_lock);
+                    }
+                    return Err(format!(
+                        "draft recovery repaint failed for guild {guild_id}, session {session_id}: {error}"
+                    ));
+                }
+                let seconds = active_envelope
+                    .deadline_at
+                    .map(|deadline| deadline.saturating_sub(unix_now()).max(1) as u64)
+                    .unwrap_or_else(|| {
+                        if lock_state(&handle).phase == DraftPhase::Drafting {
+                            DRAFTING_TIMEOUT_SECONDS
+                        } else {
+                            PRE_DRAFT_TIMEOUT_SECONDS
+                        }
+                    });
+                self.handler.schedule_timeout(guild_id, session_id, seconds);
+                Ok(true)
+            }
+            .await;
+            match hydrated {
+                Ok(true) => restored += 1,
+                Ok(false) => {}
+                Err(error) => failures.push(format!("guild {}: {error}", envelope_guild_id)),
+            }
+        }
+        if !failures.is_empty() {
+            return Err(format!(
+                "Draft hydration failed for {} row(s): {}",
+                failures.len(),
+                failures.join("; ")
+            ));
         }
         Ok(restored)
     }
@@ -1770,21 +1792,21 @@ impl DraftHandler {
             .reconcile_source_delivery(&mut job, &owner, &plan, &state, &embed)
             .await?;
         let lobby_receipt = self
-            .reconcile_channel_delivery(
+            .reconcile_delivery(
                 &mut job,
                 &owner,
                 &plan.lobby,
-                &embed,
+                Self::embed_message(&embed),
                 "lobby",
                 plan.started_at,
             )
             .await?;
         let origin_receipt = self
-            .reconcile_channel_delivery(
+            .reconcile_delivery(
                 &mut job,
                 &owner,
                 &plan.origin,
-                &embed,
+                Self::embed_message(&embed),
                 "origin",
                 plan.started_at,
             )
@@ -1984,21 +2006,21 @@ impl DraftHandler {
             .reconcile_source_delivery(&mut job, &owner, plan, state, &embed)
             .await?;
         let lobby_receipt = self
-            .reconcile_channel_delivery(
+            .reconcile_delivery(
                 &mut job,
                 &owner,
                 &plan.lobby,
-                &embed,
+                Self::embed_message(&embed),
                 "lobby",
                 plan.started_at,
             )
             .await?;
         let origin_receipt = self
-            .reconcile_channel_delivery(
+            .reconcile_delivery(
                 &mut job,
                 &owner,
                 &plan.origin,
-                &embed,
+                Self::embed_message(&embed),
                 "origin",
                 plan.started_at,
             )
@@ -2141,28 +2163,42 @@ impl DraftHandler {
             plan.source.message_id.and_then(|id| u64::try_from(id).ok()),
         ) {
             (Some(channel_id), Some(message_id)) => {
-                self.discord
-                    .fetch_message(channel_id, message_id)
-                    .await?
-                    .ok_or_else(|| {
-                        format!(
-                            "Discord source message {channel_id}/{message_id} disappeared before recovery"
+                let edited = async {
+                    if self
+                        .discord
+                        .fetch_message(channel_id, message_id)
+                        .await?
+                        .is_none()
+                    {
+                        // The plan's message id is immutable, so a deleted
+                        // source message can never be edited into success.
+                        return Ok(false);
+                    }
+                    self.discord
+                        .edit_message(
+                            channel_id,
+                            message_id,
+                            DiscordMessage::default_mentions(
+                                InteractionResponse::message("").embed(embed.clone()),
+                            ),
                         )
-                    })?;
-                self.discord
-                    .edit_message(
+                        .await?;
+                    Ok::<bool, String>(true)
+                }
+                .await;
+                match edited {
+                    Ok(true) => Some(DiscordMessageReceipt {
                         channel_id,
                         message_id,
-                        DiscordMessage::default_mentions(
-                            InteractionResponse::message("").embed(embed.clone()),
-                        ),
-                    )
-                    .await?;
-                Some(DiscordMessageReceipt {
-                    channel_id,
-                    message_id,
-                    jump_url: discord_jump_url(state.guild_id, channel_id, message_id),
-                })
+                        jump_url: discord_jump_url(state.guild_id, channel_id, message_id),
+                    }),
+                    Ok(false) => None,
+                    Err(error) => {
+                        self.skip_or_fail(channel_id, "source", job.guild_id, &error)
+                            .await?;
+                        None
+                    }
+                }
             }
             _ => None,
         };
@@ -2171,27 +2207,48 @@ impl DraftHandler {
         Ok(receipt)
     }
 
-    async fn reconcile_channel_delivery(
+    /// Whether a failed delivery to `channel_id` may be recorded as a
+    /// permanent skip.
+    ///
+    /// A finalization plan freezes its channel ids at link time, so a
+    /// destination Discord reports as gone or inaccessible can never be
+    /// retried into success -- and because the publication CAS and the
+    /// terminal job/envelope delete both sit behind these deliveries, a
+    /// permanent failure leaves the guild's `finalizing` envelope in place and
+    /// blocks every later `/draft start`. Anything Discord does not prove
+    /// permanent stays retryable.
+    async fn skip_or_fail(
         &self,
-        job: &mut DraftFinalizationJobSnapshot,
-        owner: &str,
+        channel_id: u64,
+        name: &str,
+        guild_id: i64,
+        error: &str,
+    ) -> Result<(), String> {
+        if self.discord.destination_status(channel_id).await
+            == DiscordDestinationStatus::Undeliverable
+        {
+            warn!(
+                %error,
+                channel_id,
+                delivery = name,
+                guild_id,
+                "draft finalization destination is permanently undeliverable; recording a skip"
+            );
+            return Ok(());
+        }
+        Err(error.to_owned())
+    }
+
+    /// Perform one plan-frozen delivery, without deciding what a failure means.
+    async fn attempt_delivery(
+        &self,
+        channel_id: u64,
         delivery: &cama_app::draft::DraftFinalizationDeliveryPlan,
-        embed: &InteractionEmbed,
+        message: DiscordMessage,
         name: &str,
         after_unix_seconds: i64,
-    ) -> Result<Option<DiscordMessageReceipt>, String> {
-        if let Some(receipt) = persisted_delivery(&job.progress_json, name) {
-            return Ok(receipt);
-        }
-        let Some(channel_id) = delivery.channel_id.and_then(|id| u64::try_from(id).ok()) else {
-            self.persist_delivery(job, owner, name, None).await?;
-            return Ok(None);
-        };
-        let message =
-            DiscordMessage::default_mentions(InteractionResponse::message("").embed(embed.clone()));
-        let receipt = if let Some(message_id) =
-            delivery.message_id.and_then(|id| u64::try_from(id).ok())
-        {
+    ) -> Result<DiscordMessageReceipt, String> {
+        if let Some(message_id) = delivery.message_id.and_then(|id| u64::try_from(id).ok()) {
             self.discord
                 .fetch_message(channel_id, message_id)
                 .await?
@@ -2203,12 +2260,13 @@ impl DraftHandler {
             self.discord
                 .edit_message(channel_id, message_id, message)
                 .await?;
-            DiscordMessageReceipt {
+            return Ok(DiscordMessageReceipt {
                 channel_id,
                 message_id,
                 jump_url: discord_jump_url(0, channel_id, message_id),
-            }
-        } else if let Some(receipt) = self
+            });
+        }
+        if let Some(receipt) = self
             .discord
             .find_message_by_delivery_key(
                 channel_id,
@@ -2218,29 +2276,64 @@ impl DraftHandler {
             )
             .await?
         {
-            receipt
-        } else {
-            match self
+            return Ok(receipt);
+        }
+        match self
+            .discord
+            .send_message_with_delivery_key(channel_id, &delivery.delivery_key, message)
+            .await
+        {
+            Ok(receipt) => Ok(receipt),
+            // Discord may have accepted a nonce-bearing request whose response
+            // was lost, so history is checked before the failure is reported.
+            Err(send_error) => self
                 .discord
-                .send_message_with_delivery_key(channel_id, &delivery.delivery_key, message)
-                .await
-            {
-                Ok(receipt) => receipt,
-                Err(send_error) => self
-                    .discord
-                    .find_message_by_delivery_key(
-                        channel_id,
-                        &delivery.delivery_key,
-                        after_unix_seconds,
-                        500,
-                    )
-                    .await?
-                    .ok_or(send_error)?,
+                .find_message_by_delivery_key(
+                    channel_id,
+                    &delivery.delivery_key,
+                    after_unix_seconds,
+                    500,
+                )
+                .await?
+                .ok_or(send_error),
+        }
+    }
+
+    async fn reconcile_delivery(
+        &self,
+        job: &mut DraftFinalizationJobSnapshot,
+        owner: &str,
+        delivery: &cama_app::draft::DraftFinalizationDeliveryPlan,
+        message: DiscordMessage,
+        name: &str,
+        after_unix_seconds: i64,
+    ) -> Result<Option<DiscordMessageReceipt>, String> {
+        if let Some(receipt) = persisted_delivery(&job.progress_json, name) {
+            return Ok(receipt);
+        }
+        let Some(channel_id) = delivery.channel_id.and_then(|id| u64::try_from(id).ok()) else {
+            self.persist_delivery(job, owner, name, None).await?;
+            return Ok(None);
+        };
+        let receipt = match self
+            .attempt_delivery(channel_id, delivery, message, name, after_unix_seconds)
+            .await
+        {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                self.skip_or_fail(channel_id, name, job.guild_id, &error)
+                    .await?;
+                self.persist_delivery(job, owner, name, None).await?;
+                return Ok(None);
             }
         };
         self.persist_delivery(job, owner, name, Some(receipt.clone()))
             .await?;
         Ok(Some(receipt))
+    }
+
+    fn embed_message(embed: &InteractionEmbed) -> DiscordMessage {
+        DiscordMessage::default_mentions(InteractionResponse::message("").embed(embed.clone()))
     }
 
     async fn reconcile_thread_deliveries(
@@ -2266,15 +2359,27 @@ impl DraftHandler {
             "🔒 {} Draft Complete - Awaiting Results",
             to_runtime_kind(state.lobby_kind).label()
         );
-        self.discord
+        if let Err(error) = self
+            .discord
             .edit_thread(thread_id, &name, false, false)
-            .await?;
+            .await
+        {
+            // An unreachable thread cannot host either delivery, and stranding
+            // them would keep the guild's envelope finalizing forever.
+            self.skip_or_fail(thread_id, "thread-embed", job.guild_id, &error)
+                .await?;
+            self.persist_delivery(job, owner, "thread-embed", None)
+                .await?;
+            self.persist_delivery(job, owner, "thread-ping", None)
+                .await?;
+            return Ok((None, None));
+        }
         let embed_receipt = self
-            .reconcile_channel_delivery(
+            .reconcile_delivery(
                 job,
                 owner,
                 &plan.thread_embed,
-                embed,
+                Self::embed_message(embed),
                 "thread-embed",
                 plan.started_at,
             )
@@ -2297,78 +2402,36 @@ impl DraftHandler {
                 .await?;
             None
         } else {
-            if let Some(receipt) = persisted_delivery(&job.progress_json, "thread-ping") {
-                receipt
-            } else {
-                let message = DiscordMessage::mentioning(
-                    InteractionResponse::message(format!(
-                        "{content}\nPlayers, please take your starting positions!"
-                    )),
-                    mentions.iter().copied().collect(),
-                );
-                let receipt = if let Some(message_id) = plan
-                    .thread_ping
-                    .message_id
-                    .and_then(|id| u64::try_from(id).ok())
-                {
-                    self.discord
-                    .fetch_message(thread_id, message_id)
-                    .await?
-                    .ok_or_else(|| {
-                        format!(
-                            "Discord thread-ping message {thread_id}/{message_id} disappeared before recovery"
-                        )
-                    })?;
-                    self.discord
-                        .edit_message(thread_id, message_id, message)
-                        .await?;
-                    DiscordMessageReceipt {
-                        channel_id: thread_id,
-                        message_id,
-                        jump_url: discord_jump_url(0, thread_id, message_id),
-                    }
-                } else if let Some(receipt) = self
-                    .discord
-                    .find_message_by_delivery_key(
-                        thread_id,
-                        &plan.thread_ping.delivery_key,
-                        plan.started_at,
-                        500,
-                    )
-                    .await?
-                {
-                    receipt
-                } else {
-                    match self
-                        .discord
-                        .send_message_with_delivery_key(
-                            thread_id,
-                            &plan.thread_ping.delivery_key,
-                            message,
-                        )
-                        .await
-                    {
-                        Ok(receipt) => receipt,
-                        Err(send_error) => self
-                            .discord
-                            .find_message_by_delivery_key(
-                                thread_id,
-                                &plan.thread_ping.delivery_key,
-                                plan.started_at,
-                                500,
-                            )
-                            .await?
-                            .ok_or(send_error)?,
-                    }
-                };
-                self.persist_delivery(job, owner, "thread-ping", Some(receipt.clone()))
-                    .await?;
-                Some(receipt)
-            }
+            let message = DiscordMessage::mentioning(
+                InteractionResponse::message(format!(
+                    "{content}\nPlayers, please take your starting positions!"
+                )),
+                mentions.iter().copied().collect(),
+            );
+            self.reconcile_delivery(
+                job,
+                owner,
+                &plan.thread_ping,
+                message,
+                "thread-ping",
+                plan.started_at,
+            )
+            .await?
         };
-        self.discord
+        if let Err(error) = self
+            .discord
             .edit_thread(thread_id, &name, false, true)
-            .await?;
+            .await
+        {
+            // Publication already succeeded; a cosmetic re-lock must never
+            // wedge the terminal CAS.
+            warn!(
+                %error,
+                thread_id,
+                guild_id = job.guild_id,
+                "draft finalization could not re-lock its thread"
+            );
+        }
         Ok((embed_receipt, ping_receipt))
     }
 
@@ -2549,9 +2612,12 @@ impl DraftHandler {
         };
         let lock = self.lobbies.operation_lock(context.guild_id, kind);
         let Ok(_guard) = tokio::time::timeout(OPERATION_LOCK_TIMEOUT, lock.lock()).await else {
-            return followup_ephemeral(
+            // Nothing has acknowledged this interaction yet, so the reply has
+            // to be the initial response; a followup on an unacknowledged
+            // interaction is rejected and the user sees nothing.
+            return respond_ephemeral(
                 &responder,
-                &format!(
+                format!(
                     "A {} shuffle or draft is already being processed. Please wait.",
                     kind.label()
                 ),
@@ -2951,8 +3017,15 @@ impl DraftHandler {
         admin: bool,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
+        // Lock waits and the persistence delete can outlast Discord's
+        // three-second initial-response window, so the interaction is
+        // acknowledged before any of that work begins.
+        responder
+            .defer(false)
+            .await
+            .map_err(|error| error.to_string())?;
         let Some(handle) = self.drafts.get_state(Some(guild_id)) else {
-            return respond_ephemeral(&responder, "❌ No active draft to restart.").await;
+            return followup_ephemeral(&responder, "❌ No active draft to restart.").await;
         };
         let initial = lock_state(&handle).clone();
         let kind = to_runtime_kind(initial.lobby_kind);
@@ -2960,7 +3033,7 @@ impl DraftHandler {
         let Ok(_draft_operation_guard) =
             tokio::time::timeout(OPERATION_LOCK_TIMEOUT, draft_operation_lock.lock()).await
         else {
-            return respond_ephemeral(
+            return followup_ephemeral(
                 &responder,
                 "A draft is already being processed. Please wait.",
             )
@@ -2969,17 +3042,17 @@ impl DraftHandler {
         let kind_lock = self.lobbies.operation_lock(guild_id, kind);
         let Ok(_guard) = tokio::time::timeout(OPERATION_LOCK_TIMEOUT, kind_lock.lock()).await
         else {
-            return respond_ephemeral(
+            return followup_ephemeral(
                 &responder,
                 "A draft is already being processed. Please wait.",
             )
             .await;
         };
         let Some(current) = self.drafts.get_state(Some(guild_id)) else {
-            return respond_ephemeral(&responder, "❌ No active draft to restart.").await;
+            return followup_ephemeral(&responder, "❌ No active draft to restart.").await;
         };
         if !Arc::ptr_eq(&current, &handle) {
-            return respond_ephemeral(
+            return followup_ephemeral(
                 &responder,
                 "❌ This draft is no longer active — use the controls on the current draft.",
             )
@@ -2987,7 +3060,7 @@ impl DraftHandler {
         }
         let snapshot = lock_state(&current).clone();
         if snapshot.session_id != initial.session_id {
-            return respond_ephemeral(
+            return followup_ephemeral(
                 &responder,
                 "❌ This draft is no longer active — use the controls on the current draft.",
             )
@@ -2998,14 +3071,14 @@ impl DraftHandler {
             .flatten()
             .any(|captain| captain == user_id);
         if !admin && !is_captain {
-            return respond_ephemeral(
+            return followup_ephemeral(
                 &responder,
                 "❌ Only captains or server admins can restart the draft.",
             )
             .await;
         }
         if snapshot.phase == DraftPhase::Complete {
-            return respond_ephemeral(
+            return followup_ephemeral(
                 &responder,
                 "⏳ Draft results are still being finalized. Please wait.",
             )
@@ -3015,7 +3088,7 @@ impl DraftHandler {
             match self.delete_persisted(&snapshot).await {
                 Ok(true) => {}
                 Ok(false) => {
-                    return respond_ephemeral(
+                    return followup_ephemeral(
                         &responder,
                         "❌ This draft is no longer active — use the controls on the current draft.",
                     )
@@ -3023,7 +3096,7 @@ impl DraftHandler {
                 }
                 Err(error) => {
                     warn!(%error, guild_id, session_id = snapshot.session_id, "draft restart persistence cleanup failed");
-                    return respond_ephemeral(
+                    return followup_ephemeral(
                         &responder,
                         "⚠️ Draft restart could not be saved. Please try again.",
                     )
@@ -3367,16 +3440,24 @@ impl DraftHandler {
             false,
         )
         .await?;
-        if let Some(session) = drafting_session {
+        // The update below is this interaction's initial callback, so it has to
+        // land before any followup: the component auto-ack only fires after a
+        // 1.5s deadline, and on the fast path Discord rejects a followup sent
+        // while the interaction is still unacknowledged.
+        let symmetry_session = drafting_session;
+        if let Some(session) = symmetry_session {
             self.cancel_timeout(guild_id);
             self.schedule_timeout(guild_id, session, DRAFTING_TIMEOUT_SECONDS);
-            self.emit_captain_symmetry(guild_id, &handle, responder)
-                .await;
         }
         responder
             .update(response)
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        if symmetry_session.is_some() {
+            self.emit_captain_symmetry(guild_id, &handle, responder)
+                .await;
+        }
+        Ok(())
     }
 
     async fn choose_hero(
@@ -3452,16 +3533,24 @@ impl DraftHandler {
             false,
         )
         .await?;
-        if let Some(session) = drafting_session {
+        // The update below is this interaction's initial callback, so it has to
+        // land before any followup: the component auto-ack only fires after a
+        // 1.5s deadline, and on the fast path Discord rejects a followup sent
+        // while the interaction is still unacknowledged.
+        let symmetry_session = drafting_session;
+        if let Some(session) = symmetry_session {
             self.cancel_timeout(guild_id);
             self.schedule_timeout(guild_id, session, DRAFTING_TIMEOUT_SECONDS);
-            self.emit_captain_symmetry(guild_id, &handle, responder)
-                .await;
         }
         responder
             .update(response)
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        if symmetry_session.is_some() {
+            self.emit_captain_symmetry(guild_id, &handle, responder)
+                .await;
+        }
+        Ok(())
     }
 
     async fn pick_player(

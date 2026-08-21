@@ -549,7 +549,61 @@ impl InteractionEmbed {
         });
         self
     }
+
+    /// Total characters Discord counts against the 6000-character embed cap.
+    #[must_use]
+    pub fn content_len(&self) -> usize {
+        self.title.as_ref().map_or(0, |text| text.chars().count())
+            + self
+                .description
+                .as_ref()
+                .map_or(0, |text| text.chars().count())
+            + self.footer.as_ref().map_or(0, |text| text.chars().count())
+            + self
+                .author_name
+                .as_ref()
+                .map_or(0, |text| text.chars().count())
+            + self
+                .fields
+                .iter()
+                .map(|field| field.name.chars().count() + field.value.chars().count())
+                .sum::<usize>()
+    }
+
+    /// Append a field only while it fits Discord's embed limits.
+    ///
+    /// Discord rejects the whole message once an embed passes 6000 characters
+    /// or 25 fields, so list-style embeds that grow with guild activity must
+    /// stop adding rows and report the remainder in their footer instead.
+    #[must_use]
+    pub fn field_within_budget(
+        self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+        inline: bool,
+    ) -> (Self, bool) {
+        let name = name.into();
+        let value = value.into();
+        let size = name.chars().count() + value.chars().count();
+        if self.fields.len() >= EMBED_FIELD_COUNT_LIMIT
+            || self.content_len() + size > EMBED_CONTENT_BUDGET
+        {
+            return (self, false);
+        }
+        (self.field(name, value, inline), true)
+    }
 }
+
+/// Discord rejects an embed whose parts total more than 6000 characters.
+///
+/// The margin leaves room for a footer appended *after* the fields, which is
+/// exactly what the callers that overflow do: a "more not shown" footer is only
+/// emitted when the budget cut fired, and with several skipped categories it
+/// runs past 130 characters. The margin is sized for the longest such footer
+/// rather than a round number.
+pub const EMBED_CONTENT_BUDGET: usize = 5_700;
+/// Discord's hard limit on embed fields.
+pub const EMBED_FIELD_COUNT_LIMIT: usize = 25;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InteractionEmbedField {
@@ -1257,6 +1311,44 @@ mod tests {
         assert_eq!(
             error,
             RegistrationError::InvalidAutocompleteOption("hero".to_owned())
+        );
+    }
+}
+
+#[cfg(test)]
+mod embed_budget_tests {
+    use super::{EMBED_CONTENT_BUDGET, InteractionEmbed};
+
+    #[test]
+    fn a_filled_embed_still_fits_after_its_overflow_footer() {
+        // The footer is assembled after the fields, and it is only long when
+        // the budget cut fired -- the two conditions always co-occur -- so the
+        // margin has to cover the longest footer a caller appends.
+        let longest_footer = "more not shown: +9 open, +9 resolved, +9 cancelled  ·  \
+             /predict view <id> for the full ladder  ·  /predict help for how it works";
+        let mut embed =
+            InteractionEmbed::titled("📈 Prediction markets").description("x".repeat(200));
+        let mut added = 0;
+        loop {
+            let (next, accepted) = embed.field_within_budget(
+                format!("📈 #{added}  ·  YES 55%  ·  vol 1234"),
+                format!("\"{}\"", "w".repeat(200)),
+                false,
+            );
+            embed = next;
+            if !accepted {
+                break;
+            }
+            added += 1;
+        }
+
+        assert!(added > 0, "the budget must admit some rows");
+        assert!(embed.content_len() <= EMBED_CONTENT_BUDGET);
+        let with_footer = embed.footer(longest_footer);
+        assert!(
+            with_footer.content_len() <= 6_000,
+            "embed is {} characters once the footer is attached",
+            with_footer.content_len()
         );
     }
 }

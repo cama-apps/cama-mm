@@ -648,10 +648,32 @@ impl TriviaRuntimeState {
             return Ok(());
         };
 
+        // The session is now Settling and its timeout is cancelled, so nothing
+        // else will ever clear it. Any failure below has to end the session or
+        // the player's trivia is wedged until the process restarts.
+        let settled = self
+            .settle_answer(parsed, guild_id, interaction_id, snapshot, &responder)
+            .await;
+        if settled.is_err() {
+            self.end_session(parsed.user_id, guild_id).await;
+        }
+        settled
+    }
+
+    async fn settle_answer(
+        self: &Arc<Self>,
+        parsed: ParsedComponentId,
+        guild_id: i64,
+        interaction_id: u64,
+        snapshot: SessionSnapshot,
+        responder: &Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
         let pets = self.pets.clone();
         let source_key = format!("trivia-answer:{interaction_id}");
         let occurred_at = unix_timestamp()?;
-        tokio::task::spawn_blocking(move || {
+        // Pet credit is a side benefit of answering; losing it must not cost
+        // the player their run.
+        if let Err(error) = tokio::task::spawn_blocking(move || {
             pets.record_activity(
                 parsed.user_id,
                 Some(guild_id),
@@ -662,12 +684,19 @@ impl TriviaRuntimeState {
             .map_err(|error| error.to_string())
         })
         .await
-        .map_err(|error| format!("trivia pet-activity task failed: {error}"))??;
+        .map_err(|error| format!("trivia pet-activity task failed: {error}"))
+        .and_then(|result| result)
+        {
+            warn!(
+                user_id = parsed.user_id,
+                guild_id, %error, "trivia pet activity was not recorded"
+            );
+        }
 
         if parsed.choice == snapshot.current.question.correct_index {
-            self.settle_correct(snapshot, responder).await
+            self.settle_correct(snapshot, Arc::clone(responder)).await
         } else {
-            self.settle_wrong(snapshot, responder).await
+            self.settle_wrong(snapshot, Arc::clone(responder)).await
         }
     }
 
@@ -1163,6 +1192,7 @@ impl TriviaRandom for FastrandTriviaRandom {
     }
 }
 
+#[derive(Clone, Copy)]
 struct ParsedComponentId {
     user_id: i64,
     question_number: i64,

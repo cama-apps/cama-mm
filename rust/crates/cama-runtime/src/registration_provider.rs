@@ -2037,7 +2037,14 @@ impl PlayerRegistrationHandler {
             }
         };
 
-        let general_timezone = self.curfew.general_timezone(user_id, guild).unwrap_or(None);
+        // general_timezone reads SQLite, so it runs on a blocking thread like
+        // the window query beside it.
+        let curfew = self.curfew.clone();
+        let general_timezone =
+            tokio::task::spawn_blocking(move || curfew.general_timezone(user_id, guild))
+                .await
+                .map_err(|error| format!("curfew timezone task failed: {error}"))?
+                .unwrap_or(None);
         followup_ephemeral(
             &responder,
             format!(
@@ -2101,7 +2108,14 @@ impl PlayerRegistrationHandler {
             )
             .await;
         }
-        let general_timezone = self.curfew.general_timezone(user_id, guild).unwrap_or(None);
+        // general_timezone reads SQLite, so it runs on a blocking thread like
+        // the window query beside it.
+        let curfew = self.curfew.clone();
+        let general_timezone =
+            tokio::task::spawn_blocking(move || curfew.general_timezone(user_id, guild))
+                .await
+                .map_err(|error| format!("curfew timezone task failed: {error}"))?
+                .unwrap_or(None);
         let lines: Vec<String> = windows
             .iter()
             .map(|window| cama_domain::curfew::format_window(window, general_timezone.as_deref()))

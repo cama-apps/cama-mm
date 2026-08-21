@@ -794,17 +794,21 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
         guild_id: i64,
         now: i64,
         decay_per_day: i64,
+        entropy_secret: u64,
     ) -> Result<Option<PetDigWork>, DigRuntimeStoreError> {
         if decay_per_day <= 0 {
             return Ok(None);
         }
-        let entropy_seed = seed_for(DigRuntimeRequest {
-            discord_id,
-            guild_id,
-            now,
-            paid: false,
-            forced_event: false,
-        });
+        let entropy_seed = seed_for(
+            DigRuntimeRequest {
+                discord_id,
+                guild_id,
+                now,
+                paid: false,
+                forced_event: false,
+            },
+            entropy_secret,
+        );
         SqlitePetCommandService::new(
             &self.path,
             SeededPetRandom::new(entropy_seed),

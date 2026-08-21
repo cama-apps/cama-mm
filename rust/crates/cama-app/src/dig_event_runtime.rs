@@ -122,9 +122,20 @@ pub struct DigEventRuntimeOutcome {
     pub guild_modifier: Option<DigEventGuildModifierOutcome>,
     pub chain_event: Option<CanonicalEventPresentation>,
     pub quest_finale: Option<DigEventQuestFinale>,
+    /// The attempt lost a race but the pending event is still open, so the
+    /// caller should leave its controls usable instead of ending the event.
+    pub retryable: bool,
 }
 
 impl DigEventRuntimeOutcome {
+    /// A blocked attempt whose event is still open for another try.
+    fn retryable(message: impl Into<String>) -> Self {
+        Self {
+            retryable: true,
+            ..Self::blocked(message)
+        }
+    }
+
     fn blocked(message: impl Into<String>) -> Self {
         Self {
             success: false,
@@ -140,6 +151,7 @@ impl DigEventRuntimeOutcome {
             guild_modifier: None,
             chain_event: None,
             quest_finale: None,
+            retryable: false,
         }
     }
 }
@@ -1072,7 +1084,7 @@ impl DigEventRuntimeService {
             return Ok(DigEventRuntimeOutcome::blocked("You don't have a tunnel."));
         };
         let quest_snapshot = repository.quest_snapshot(key, request.now)?;
-        let mut entropy = SeededLootEntropy::new(event_seed(request));
+        let mut entropy = SeededLootEntropy::new(event_seed(request, self.config.entropy_secret));
         let policy = event_policy(
             &snapshot,
             request.chained,
@@ -1218,6 +1230,7 @@ impl DigEventRuntimeService {
                     guild_modifier: guild_modifier.clone(),
                     chain_event: chain_event.clone(),
                     quest_finale: None,
+                    retryable: false,
                 })
             })
             .transpose()
@@ -1259,7 +1272,7 @@ impl DigEventRuntimeService {
         let receipt = match settlement {
             DigEventSettlementOutcome::Applied(receipt) => receipt,
             DigEventSettlementOutcome::Conflict => {
-                return Ok(DigEventRuntimeOutcome::blocked(
+                return Ok(DigEventRuntimeOutcome::retryable(
                     "Your tunnel changed while this event was resolving. Try the choice again.",
                 ));
             }
@@ -1298,6 +1311,7 @@ impl DigEventRuntimeService {
             guild_modifier,
             chain_event,
             quest_finale,
+            retryable: false,
         };
         if let Some(context) = delivery_context.as_ref()
             && outcome.action_id.is_some()
@@ -1361,7 +1375,8 @@ impl DigEventRuntimeService {
         let outcome = event.outcomes.get(request.choice).ok_or_else(|| {
             DigEventRuntimeError::Policy(format!("Invalid choice: {}", request.choice))
         })?;
-        let mut entropy = SeededLootEntropy::new(legacy_event_seed(request));
+        let mut entropy =
+            SeededLootEntropy::new(legacy_event_seed(request, self.config.entropy_secret));
         let jc = outcome.jc.sample(&mut entropy);
         let advance = outcome.advance.sample(&mut entropy);
         self.resolve_legacy_event(DigLegacyEventRequest {
@@ -1474,7 +1489,7 @@ impl DigEventRuntimeService {
         let receipt = match settlement {
             DigEventSettlementOutcome::Applied(receipt) => receipt,
             DigEventSettlementOutcome::Conflict => {
-                return Ok(DigEventRuntimeOutcome::blocked(
+                return Ok(DigEventRuntimeOutcome::retryable(
                     "Your tunnel changed while this event was resolving. Try the choice again.",
                 ));
             }
@@ -1501,6 +1516,7 @@ impl DigEventRuntimeService {
             guild_modifier: None,
             chain_event: None,
             quest_finale: None,
+            retryable: false,
         })
     }
 
@@ -1550,18 +1566,30 @@ impl DigEventRuntimeService {
         let Some(strategy) = victim_strategy(&splash.strategy) else {
             return Ok(SplashExecution::empty(splash, &resolution.event_name));
         };
-        let repository = DigTunnelEncounterRepository::new(&self.path);
-        let (active_since, limit) = candidate_window(strategy, splash.victim_count, request.now);
-        let candidates = repository
-            .candidate_ids(EncounterCandidateQuery {
-                guild_id: Some(request.guild_id),
-                digger_discord_id: request.discord_id,
-                strategy,
-                active_since,
-                limit,
-            })
+        // A replay must target the victims the first execution picked. Live
+        // selection would choose different ones -- the first burns change the
+        // balance ranking that `richest_n` orders by -- and those fresh victims
+        // have no exact-once key, so they would be debited a second time.
+        let frozen = DigEventRuntimeRepository::new(&self.path)
+            .committed_splash_victims(Some(request.guild_id), request.event_key)
             .map_err(|error| DigEventRuntimeError::Splash(error.to_string()))?;
-        let victim_ids = select_victims(candidates, splash.victim_count, strategy, entropy);
+        let victim_ids = if frozen.is_empty() {
+            let repository = DigTunnelEncounterRepository::new(&self.path);
+            let (active_since, limit) =
+                candidate_window(strategy, splash.victim_count, request.now);
+            let candidates = repository
+                .candidate_ids(EncounterCandidateQuery {
+                    guild_id: Some(request.guild_id),
+                    digger_discord_id: request.discord_id,
+                    strategy,
+                    active_since,
+                    limit,
+                })
+                .map_err(|error| DigEventRuntimeError::Splash(error.to_string()))?;
+            select_victims(candidates, splash.victim_count, strategy, entropy)
+        } else {
+            frozen
+        };
         if splash.mode == "grant" {
             return self.resolve_grant_splash(request, resolution, splash, victim_ids);
         }
@@ -2237,7 +2265,14 @@ fn resolution_as_outcome(
     }
 }
 
-fn event_seed(request: DigRuntimeEventRequest<'_>) -> u64 {
+/// Seed one event resolution.
+///
+/// `secret` is the server-side value from `DigRuntimeConfig`. Without it the
+/// seed is derived entirely from public inputs -- the event key carries the
+/// action id that is printed verbatim in the button the player clicks, and the
+/// choice is one of the hashed fields -- so a player could compute the outcome
+/// of both branches offline and always take the winning one.
+fn event_seed(request: DigRuntimeEventRequest<'_>, secret: u64) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for byte in request
         .event_key
@@ -2249,10 +2284,14 @@ fn event_seed(request: DigRuntimeEventRequest<'_>) -> u64 {
     {
         hash = (hash ^ u64::from(byte)).wrapping_mul(0x1000_0000_01b3);
     }
-    hash
+    // A zero secret reproduces the legacy seed exactly, which is what keeps the
+    // deterministic tests meaningful; hashing the zero bytes would not.
+    hash ^ secret
 }
 
-fn legacy_event_seed(request: DigLegacyCatalogRequest<'_>) -> u64 {
+/// Seed one legacy-catalog resolution; see [`event_seed`] for why the secret
+/// has to be mixed in.
+fn legacy_event_seed(request: DigLegacyCatalogRequest<'_>, secret: u64) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for byte in request
         .event_key
@@ -2264,7 +2303,9 @@ fn legacy_event_seed(request: DigLegacyCatalogRequest<'_>) -> u64 {
     {
         hash = (hash ^ u64::from(byte)).wrapping_mul(0x1000_0000_01b3);
     }
-    hash
+    // A zero secret reproduces the legacy seed exactly, which is what keeps the
+    // deterministic tests meaningful; hashing the zero bytes would not.
+    hash ^ secret
 }
 
 fn authored_modifier(value: &Value) -> Option<AuthoredModifier> {
