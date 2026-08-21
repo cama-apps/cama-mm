@@ -249,7 +249,6 @@ pub struct DatabaseAudit {
     pub path: PathBuf,
     pub quick_check: String,
     pub journal_mode: String,
-    pub foreign_keys_enabled: bool,
     pub user_version: i64,
     pub applied_migration_count: usize,
     pub required_migration_count: usize,
@@ -258,13 +257,15 @@ pub struct DatabaseAudit {
     pub missing_tables: Vec<String>,
 }
 
+// Foreign-key enforcement is deliberately not audited: it is a per-connection
+// pragma that `open_runtime_connection` sets, not a property of the database
+// file, so any value read here would describe the audit's own connection.
 impl DatabaseAudit {
     /// Whether the database satisfies the Rust runtime's storage contract.
     #[must_use]
     pub fn is_compatible(&self) -> bool {
         self.quick_check.eq_ignore_ascii_case("ok")
             && self.journal_mode.eq_ignore_ascii_case("wal")
-            && !self.foreign_keys_enabled
             && self.user_version == 0
             && self.missing_migrations.is_empty()
             && self.missing_tables.is_empty()
@@ -285,9 +286,6 @@ impl DatabaseAudit {
                 "journal_mode is {:?}, expected WAL",
                 self.journal_mode
             ));
-        }
-        if self.foreign_keys_enabled {
-            issues.push("foreign key enforcement is enabled, expected disabled".to_owned());
         }
         if self.user_version != 0 {
             issues.push(format!(
@@ -373,8 +371,6 @@ pub fn audit_database(path: impl AsRef<Path>) -> Result<DatabaseAudit, AuditErro
 fn audit_connection(path: &Path, connection: &Connection) -> Result<DatabaseAudit, AuditError> {
     let quick_check = connection.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
     let journal_mode = connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
-    let foreign_keys_enabled =
-        connection.query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))? != 0;
     let user_version = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
 
     let applied_migrations = query_string_set(
@@ -408,7 +404,6 @@ fn audit_connection(path: &Path, connection: &Connection) -> Result<DatabaseAudi
         path: path.to_path_buf(),
         quick_check,
         journal_mode,
-        foreign_keys_enabled,
         user_version,
         applied_migration_count: applied_migrations.len(),
         required_migration_count: required_migrations.len(),
