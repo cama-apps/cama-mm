@@ -10,7 +10,7 @@ use cama_db::dig_event_threats::ThreatCurseEffects;
 use cama_db::dig_social_runtime::{
     AtomicDigHelpSettlement, AtomicDigSabotageSettlement, DigGiftOutcome, DigHelpSettlementOutcome,
     DigHelpSnapshot, DigSabotageRevenge, DigSabotageSettlementOutcome, DigSabotageTunnelSnapshot,
-    DigSocialRuntimeRepository, DigSocialRuntimeRepositoryError,
+    DigSocialRuntimeRepository, DigSocialRuntimeRepositoryError, DigVendettaReflectSettlement,
 };
 use cama_db::mana_service_repository::ManaRepository;
 use cama_db::predictions_repository::{ContractSide, PredictionRepository};
@@ -800,40 +800,23 @@ impl DigSocialRuntimeService {
             "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
         })
         .to_string();
-        let outcome = (|| -> Result<(i64, i64), DigSocialRuntimeRepositoryError> {
-            let reflected = if self.repository.try_debit_vendetta_reflect(
-                request.actor_id,
-                request.target_id,
-                request.guild_id,
-                request.reflect,
-                &debit_detail,
-            )? {
-                request.reflect
-            } else {
-                0
-            };
-            self.repository.credit_vendetta_bonus(
-                request.target_id,
-                request.actor_id,
-                request.guild_id,
-                request.bonus,
-                &bonus_detail,
-            )?;
-            let audit = serde_json::json!({
-                "attacker_id": request.actor_id,
-                "reflected": reflected,
-                "target_bonus": request.bonus,
+        // One transaction: a failure must not leave the attacker debited with
+        // the defender uncredited, and the reported figures are the ones the
+        // settlement actually moved.
+        self.repository
+            .atomic_vendetta_reflect(DigVendettaReflectSettlement {
+                actor_id: request.actor_id,
+                target_id: request.target_id,
+                guild_id: request.guild_id,
+                reflect: request.reflect,
+                bonus: request.bonus,
+                reflect_detail_json: &debit_detail,
+                bonus_detail_json: &bonus_detail,
+                created_at: request.now,
             })
-            .to_string();
-            self.repository.log_vendetta_reflect(
-                request.target_id,
-                request.guild_id,
-                &audit,
-                request.now,
-            )?;
-            Ok((reflected, request.bonus))
-        })();
-        outcome.unwrap_or((0, 0))
+            .map_or((0, 0), |receipt| {
+                (receipt.reflected, receipt.bonus_credited)
+            })
     }
 
     pub fn gift_relic(
