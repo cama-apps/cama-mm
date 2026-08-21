@@ -83,6 +83,9 @@ struct JobRow {
     lease_until: Option<i64>,
 }
 
+/// What a linked plan must contain to be executable. Every field here is
+/// mandatory, so `crate::draft_finalization`'s link boundary validates the same
+/// shape: a plan this refuses could only pin its job at `linked` forever.
 #[derive(Debug, Deserialize)]
 struct RawFinalizationPlan {
     schema_version: u64,

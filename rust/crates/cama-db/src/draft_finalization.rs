@@ -18,8 +18,10 @@ use crate::open_runtime_connection;
 
 /// Current immutable Draft-finalization plan schema.
 pub const DRAFT_FINALIZATION_PLAN_VERSION: u64 = 2;
-/// Legacy delivery-only plan schema. It remains readable but cannot execute
-/// durable financial setup.
+/// Legacy delivery-only plan schema. Rows written before schema v2 stay
+/// readable, but no write path accepts it: `run_leased_financial_setup`
+/// refuses anything but the current version, so a legacy job could only ever
+/// pin itself at `linked` and reappear in every recovery pass.
 pub const DRAFT_FINALIZATION_LEGACY_PLAN_VERSION: u64 = 1;
 /// First recovery stage installed atomically with the pending-match link.
 pub const DRAFT_FINALIZATION_INITIAL_STAGE: &str = "linked";
@@ -147,6 +149,14 @@ pub struct DraftFinalizationRepository {
 enum PlanRequest<'a> {
     Frozen(&'a str),
     FinancialSeed(&'a str),
+}
+
+impl<'a> PlanRequest<'a> {
+    const fn raw(self) -> &'a str {
+        match self {
+            Self::Frozen(raw) | Self::FinancialSeed(raw) => raw,
+        }
+    }
 }
 
 impl DraftFinalizationRepository {
@@ -280,6 +290,10 @@ impl DraftFinalizationRepository {
                 &completion_key,
             )?,
         }
+        // Fail fast, before the writer lock, the pending row, or any freeze
+        // work: a plan whose shuffle context disagrees with the payload it was
+        // frozen from can never execute.
+        ensure_plan_pending_context(plan_request.raw(), pending_payload_json)?;
         let mut connection = open_runtime_connection(&self.path)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current_json = transaction
@@ -1121,12 +1135,10 @@ fn validate_plan_json(
     let value = parse_json_object(raw, DraftFinalizationError::InvalidPlan)?;
     let object = value.as_object().expect("object parser returns an object");
     let schema_version = object.get("schema_version").and_then(Value::as_u64);
-    if !matches!(
-        schema_version,
-        Some(DRAFT_FINALIZATION_LEGACY_PLAN_VERSION) | Some(DRAFT_FINALIZATION_PLAN_VERSION)
-    ) {
+    if schema_version != Some(DRAFT_FINALIZATION_PLAN_VERSION) {
         return Err(DraftFinalizationError::InvalidPlan(format!(
-            "unsupported schema_version {schema_version:?}"
+            "unsupported schema_version {schema_version:?}; only schema version \
+             {DRAFT_FINALIZATION_PLAN_VERSION} may be linked"
         )));
     }
     if object.get("completion_key").and_then(Value::as_str) != Some(completion_key) {
@@ -1157,28 +1169,17 @@ fn validate_plan_json(
             "pending_payload_sha256 must be a lowercase SHA-256 digest".to_owned(),
         ));
     }
-    match schema_version {
-        Some(DRAFT_FINALIZATION_LEGACY_PLAN_VERSION) => {
-            if object.contains_key("financial_setup") {
-                return Err(DraftFinalizationError::InvalidPlan(
-                    "legacy plan must not contain financial_setup".to_owned(),
-                ));
-            }
-        }
-        Some(DRAFT_FINALIZATION_PLAN_VERSION) => {
-            let financial = object.get("financial_setup").cloned().ok_or_else(|| {
-                DraftFinalizationError::InvalidPlan(
-                    "schema-v2 plan is missing financial_setup".to_owned(),
-                )
-            })?;
-            let plan: crate::draft_financial_setup::DraftFinancialSetupPlan =
-                serde_json::from_value(financial)
-                    .map_err(|error| DraftFinalizationError::InvalidPlan(error.to_string()))?;
-            plan.validate()
-                .map_err(|error| DraftFinalizationError::InvalidPlan(error.to_string()))?;
-        }
-        _ => unreachable!("validated plan version"),
-    }
+    // The executor's RawFinalizationPlan declares both mandatory, so a plan
+    // without them links durably and can never be executed.
+    plan_shuffle_context(object, "plan")?;
+    let financial = object.get("financial_setup").cloned().ok_or_else(|| {
+        DraftFinalizationError::InvalidPlan("schema-v2 plan is missing financial_setup".to_owned())
+    })?;
+    let plan: crate::draft_financial_setup::DraftFinancialSetupPlan =
+        serde_json::from_value(financial)
+            .map_err(|error| DraftFinalizationError::InvalidPlan(error.to_string()))?;
+    plan.validate()
+        .map_err(|error| DraftFinalizationError::InvalidPlan(error.to_string()))?;
     Ok(())
 }
 
@@ -1204,6 +1205,9 @@ fn validate_plan_seed_json(
             "financial plan seed identity does not match the Draft".to_owned(),
         ));
     }
+    // freeze_finalization_plan_json copies every top-level seed field verbatim,
+    // so a seed missing its shuffle context freezes into an unexecutable plan.
+    plan_shuffle_context(object, "financial plan seed")?;
     let policy: crate::draft_financial_setup::DraftFinancialSetupPolicy =
         serde_json::from_value(object.get("financial_setup").cloned().ok_or_else(|| {
             DraftFinalizationError::InvalidPlan(
@@ -1274,6 +1278,7 @@ fn ensure_finalization_job(
     let session_id_sql = job_integer(guild_id, "session_id", session_id)?;
     validate_plan_json(plan_json, guild_id, session_id, completion_key)?;
     ensure_plan_pending_hash(plan_json, pending_payload_json)?;
+    ensure_plan_pending_context(plan_json, pending_payload_json)?;
     ensure_plan_financial_identity(plan_json, guild_id, session_id, pending_match_id)?;
     if let Some(job) = job_by_completion_key(transaction, completion_key)? {
         if job.guild_id != guild_id
@@ -1385,6 +1390,73 @@ fn frozen_plan_matches_seed(
             .map_err(|error| DraftFinalizationError::InvalidPlan(error.to_string()))?,
     );
     Ok(frozen == seed)
+}
+
+/// The shuffle context every executable plan must carry.
+///
+/// `RawFinalizationPlan` (see `draft_financial_execution`) declares both fields
+/// mandatory; validating them here keeps the link boundary refusing exactly
+/// what the executor refuses.
+fn plan_shuffle_context(
+    object: &serde_json::Map<String, Value>,
+    label: &str,
+) -> Result<(i64, bool), DraftFinalizationError> {
+    let shuffle_timestamp = object
+        .get("shuffle_timestamp")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| {
+            DraftFinalizationError::InvalidPlan(format!(
+                "{label} shuffle_timestamp must be an integer"
+            ))
+        })?;
+    let is_bomb_pot = object
+        .get("is_bomb_pot")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            DraftFinalizationError::InvalidPlan(format!("{label} is_bomb_pot must be a boolean"))
+        })?;
+    Ok((shuffle_timestamp, is_bomb_pot))
+}
+
+/// Cross-check a plan's shuffle context against the pending payload it was
+/// frozen from. A mismatch means the executor's frozen-odds validation and the
+/// summary's blind percentage would disagree with the frozen effects.
+fn ensure_plan_pending_context(
+    plan_json: &str,
+    pending_payload_json: &str,
+) -> Result<(), DraftFinalizationError> {
+    let plan = parse_json_object(plan_json, DraftFinalizationError::InvalidPlan)?;
+    let (plan_shuffle, plan_bomb) = plan_shuffle_context(
+        plan.as_object().expect("object parser returns an object"),
+        "plan",
+    )?;
+    let pending = parse_json_object(
+        pending_payload_json,
+        DraftFinalizationError::InvalidPendingPayload,
+    )?;
+    let pending = pending
+        .as_object()
+        .expect("object parser returns an object");
+    // Mirror freeze_financial_setup_plan exactly: the payload must carry an
+    // integer shuffle_timestamp, and a missing is_bomb_pot means false.
+    let pending_shuffle = pending
+        .get("shuffle_timestamp")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| {
+            DraftFinalizationError::InvalidPendingPayload(
+                "shuffle_timestamp must be an integer".to_owned(),
+            )
+        })?;
+    let pending_bomb = pending
+        .get("is_bomb_pot")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if plan_shuffle != pending_shuffle || plan_bomb != pending_bomb {
+        return Err(DraftFinalizationError::InvalidPlan(
+            "plan shuffle_timestamp/is_bomb_pot do not match the pending payload".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn ensure_plan_pending_hash(
@@ -1622,16 +1694,68 @@ mod tests {
             .expect("create fenced draft")
     }
 
-    fn plan(guild_id: i64, session_id: u64, payload: &str) -> String {
+    /// Minimal linkable pending payload: the shuffle context every plan must
+    /// agree with, and nothing else.
+    const LINK_PAYLOAD: &str = r#"{"shuffle_timestamp":1700000000,"is_bomb_pot":false}"#;
+    const LINK_SHUFFLE_TIMESTAMP: i64 = 1_700_000_000;
+
+    /// The next `pending_matches` row id this fixture will allocate. A frozen
+    /// plan embeds the id its financial setup targets, and an aborted link
+    /// rolls the AUTOINCREMENT sequence back, so a retry reuses the same id.
+    fn next_pending_match_id(path: &std::path::Path) -> i64 {
+        Connection::open(path)
+            .expect("open pending sequence fixture")
+            .query_row(
+                "SELECT COALESCE(
+                     (SELECT seq FROM sqlite_sequence WHERE name='pending_matches'), 0
+                 ) + 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read next pending_match_id")
+    }
+
+    fn financial_setup_plan(guild_id: i64, session_id: u64, pending_match_id: i64) -> Value {
         json!({
-            "schema_version": DRAFT_FINALIZATION_LEGACY_PLAN_VERSION,
+            "schema_version": crate::draft_financial_setup::DRAFT_FINANCIAL_SETUP_PLAN_VERSION,
+            "pending_match_id": pending_match_id,
+            "policy": financial_policy(),
+            "radiant_player_ids": [],
+            "dire_player_ids": [],
+            "investment_positions": [],
+            "wealth_snapshot": [],
+            "effects": [{
+                "effect_key": format!("draft:{guild_id}:{session_id}:seed:{pending_match_id}"),
+                "effect_kind": "seed",
+                "ordinal": 0,
+                "intended_status": "applied",
+                "intended": {
+                    "guild_id": guild_id,
+                    "session_id": session_id,
+                    "pending_match_id": pending_match_id
+                }
+            }]
+        })
+    }
+
+    fn frozen_plan(guild_id: i64, session_id: u64, payload: &str, pending_match_id: i64) -> String {
+        json!({
+            "schema_version": DRAFT_FINALIZATION_PLAN_VERSION,
             "completion_key": draft_completion_key(guild_id, session_id),
             "guild_id": guild_id,
             "session_id": session_id,
             "pending_payload_sha256": pending_payload_sha256(payload),
+            "shuffle_timestamp": LINK_SHUFFLE_TIMESTAMP,
+            "is_bomb_pot": false,
+            "financial_setup": financial_setup_plan(guild_id, session_id, pending_match_id),
             "future_plan": {"preserved": true}
         })
         .to_string()
+    }
+
+    /// A frozen plan targeting the id this fixture is about to allocate.
+    fn plan(path: &std::path::Path, guild_id: i64, session_id: u64, payload: &str) -> String {
+        frozen_plan(guild_id, session_id, payload, next_pending_match_id(path))
     }
 
     fn financial_policy() -> crate::draft_financial_setup::DraftFinancialSetupPolicy {
@@ -1924,16 +2048,12 @@ mod tests {
         let drafts = DraftStateRepository::new(file.path());
         let repository = DraftFinalizationRepository::new(file.path());
         let draft = fenced(&drafts, 42);
-        let payload = "{\"radiant_team_ids\":[1,2],\"future_pending\":{\"raw\":true}}";
+        let payload = "{\"radiant_team_ids\":[1,2],\"future_pending\":{\"raw\":true},\"shuffle_timestamp\":1700000000,\"is_bomb_pot\":false}";
+        // The retry must present the exact same plan bytes, so freeze them once.
+        let frozen = plan(file.path(), 42, draft.session_id, payload);
 
         let linked = repository
-            .link_pending_match(
-                42,
-                draft.session_id,
-                draft.revision,
-                payload,
-                &plan(42, draft.session_id, payload),
-            )
+            .link_pending_match(42, draft.session_id, draft.revision, payload, &frozen)
             .expect("link pending match");
         assert!(linked.pending_created);
         assert_eq!(
@@ -1947,7 +2067,7 @@ mod tests {
         assert_eq!(linked.job.stage, DRAFT_FINALIZATION_INITIAL_STAGE);
         assert_eq!(linked.job.revision, 1);
         assert_eq!(linked.job.progress_json, "{}");
-        assert_eq!(linked.job.plan_json, plan(42, draft.session_id, payload));
+        assert_eq!(linked.job.plan_json, frozen);
         assert_eq!(linked.draft.revision, 2);
         let envelope: Value =
             serde_json::from_str(linked.draft.raw_json()).expect("decode linked envelope");
@@ -1959,13 +2079,7 @@ mod tests {
         // retry the exact operation. No second row or revision is consumed.
         let reloaded = drafts.load(42).expect("reload draft").expect("draft row");
         let retried = repository
-            .link_pending_match(
-                42,
-                draft.session_id,
-                reloaded.revision,
-                payload,
-                &plan(42, draft.session_id, payload),
-            )
+            .link_pending_match(42, draft.session_id, reloaded.revision, payload, &frozen)
             .expect("retry linked pending match");
         assert!(!retried.pending_created);
         assert!(!retried.job_created);
@@ -1977,8 +2091,8 @@ mod tests {
                 42,
                 draft.session_id,
                 reloaded.revision,
-                "{\"different_retry_payload\":true}",
-                &plan(42, draft.session_id, "{\"different_retry_payload\":true}",),
+                "{\"different_retry_payload\":true,\"shuffle_timestamp\":1700000000,\"is_bomb_pot\":false}",
+                &plan(file.path(), 42, draft.session_id, "{\"different_retry_payload\":true,\"shuffle_timestamp\":1700000000,\"is_bomb_pot\":false}",),
             ),
             Err(DraftFinalizationError::Conflict { .. })
         ));
@@ -2007,19 +2121,28 @@ mod tests {
         let draft = fenced(&drafts, 42);
         let repository = Arc::new(DraftFinalizationRepository::new(file.path()));
         let barrier = Arc::new(Barrier::new(3));
+        // Both racers submit the exact same frozen plan: the loser recovers the
+        // committed job rather than conflicting on different bytes.
+        let frozen = plan(
+            file.path(),
+            42,
+            draft.session_id,
+            "{\"same_concurrent_payload\":true,\"shuffle_timestamp\":1700000000,\"is_bomb_pot\":false}",
+        );
         let handles = (0..2)
             .map(|_| {
                 let repository = Arc::clone(&repository);
                 let barrier = Arc::clone(&barrier);
                 let draft = draft.clone();
+                let frozen = frozen.clone();
                 thread::spawn(move || {
                     barrier.wait();
                     repository.link_pending_match(
                         42,
                         draft.session_id,
                         draft.revision,
-                        "{\"same_concurrent_payload\":true}",
-                        &plan(42, draft.session_id, "{\"same_concurrent_payload\":true}"),
+                        "{\"same_concurrent_payload\":true,\"shuffle_timestamp\":1700000000,\"is_bomb_pot\":false}",
+                        &frozen,
                     )
                 })
             })
@@ -2064,8 +2187,8 @@ mod tests {
                 42,
                 draft.session_id,
                 draft.revision + 1,
-                "{}",
-                &plan(42, draft.session_id, "{}"),
+                LINK_PAYLOAD,
+                &plan(file.path(), 42, draft.session_id, LINK_PAYLOAD),
             )
             .expect_err("reject stale revision");
         assert!(matches!(
@@ -2077,8 +2200,8 @@ mod tests {
                 42,
                 draft.session_id + 1,
                 draft.revision,
-                "{}",
-                &plan(42, draft.session_id + 1, "{}"),
+                LINK_PAYLOAD,
+                &plan(file.path(), 42, draft.session_id + 1, LINK_PAYLOAD),
             )
             .expect_err("reject stale session");
         assert!(matches!(
@@ -2135,8 +2258,8 @@ mod tests {
                     42,
                     draft.session_id,
                     draft.revision,
-                    "{}",
-                    &plan(42, draft.session_id, "{}"),
+                    LINK_PAYLOAD,
+                    &plan(file.path(), 42, draft.session_id, LINK_PAYLOAD),
                 ),
                 Err(DraftFinalizationError::InvalidDraftEnvelope(_))
             ));
@@ -2157,7 +2280,7 @@ mod tests {
         let drafts = DraftStateRepository::new(file.path());
         let repository = DraftFinalizationRepository::new(file.path());
         let draft = fenced(&drafts, 42);
-        let legacy_payload = "{\"legacy_pending\":true,\"future\":7}";
+        let legacy_payload = "{\"legacy_pending\":true,\"future\":7,\"shuffle_timestamp\":1700000000,\"is_bomb_pot\":false}";
         let connection = Connection::open(file.path()).expect("open migrated fixture");
         connection
             .execute(
@@ -2186,7 +2309,7 @@ mod tests {
                 draft.session_id,
                 linked_draft.revision,
                 legacy_payload,
-                &plan(42, draft.session_id, legacy_payload),
+                &plan(file.path(), 42, draft.session_id, legacy_payload),
             ),
             Err(DraftFinalizationError::JobNotFound { .. })
         ));
@@ -2223,7 +2346,7 @@ mod tests {
                 draft.session_id,
                 linked_draft.revision,
                 legacy_payload,
-                &plan(42, draft.session_id, legacy_payload),
+                &plan(file.path(), 42, draft.session_id, legacy_payload),
             ),
             Err(DraftFinalizationError::JobNotFound { .. })
         ));
@@ -2263,8 +2386,13 @@ mod tests {
                 42,
                 draft.session_id,
                 draft.revision,
-                "{\"x\":1}",
-                &plan(42, draft.session_id, "{\"x\":1}"),
+                "{\"x\":1,\"shuffle_timestamp\":1700000000,\"is_bomb_pot\":false}",
+                &plan(
+                    file.path(),
+                    42,
+                    draft.session_id,
+                    "{\"x\":1,\"shuffle_timestamp\":1700000000,\"is_bomb_pot\":false}"
+                ),
             ),
             Err(DraftFinalizationError::Sqlite(_))
         ));
@@ -2287,11 +2415,86 @@ mod tests {
                     42,
                     draft.session_id,
                     draft.revision,
-                    "{\"x\":1}",
-                    &plan(42, draft.session_id, "{\"x\":1}"),
+                    "{\"x\":1,\"shuffle_timestamp\":1700000000,\"is_bomb_pot\":false}",
+                    &plan(
+                        file.path(),
+                        42,
+                        draft.session_id,
+                        "{\"x\":1,\"shuffle_timestamp\":1700000000,\"is_bomb_pot\":false}"
+                    ),
                 )
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn a_seed_without_the_executable_shuffle_context_never_reaches_a_write() {
+        let file = fixture();
+        let drafts = DraftStateRepository::new(file.path());
+        let repository = DraftFinalizationRepository::new(file.path());
+        let draft = fenced(&drafts, 42);
+        let payload = LINK_PAYLOAD;
+        let valid: Value = serde_json::from_str(&plan_seed(42, draft.session_id, payload))
+            .expect("decode plan seed");
+
+        // freeze_finalization_plan_json copies every top-level seed field
+        // verbatim, so a seed missing either field freezes into a plan the
+        // financial executor refuses -- and the job pins itself at `linked`.
+        for malformed in [
+            {
+                let mut value = valid.clone();
+                value
+                    .as_object_mut()
+                    .expect("seed object")
+                    .remove("shuffle_timestamp");
+                value
+            },
+            {
+                let mut value = valid.clone();
+                value
+                    .as_object_mut()
+                    .expect("seed object")
+                    .remove("is_bomb_pot");
+                value
+            },
+            {
+                let mut value = valid;
+                value["shuffle_timestamp"] = json!(LINK_SHUFFLE_TIMESTAMP + 1);
+                value
+            },
+        ] {
+            assert!(matches!(
+                repository.link_pending_match_with_financial_plan_validated(
+                    42,
+                    draft.session_id,
+                    draft.revision,
+                    payload,
+                    &malformed.to_string(),
+                    |_| Ok(()),
+                ),
+                Err(DraftFinalizationError::InvalidPlan(_))
+            ));
+            let connection = Connection::open(file.path()).expect("open rejected-seed fixture");
+            assert_eq!(
+                connection
+                    .query_row("SELECT COUNT(*) FROM pending_matches", [], |row| row
+                        .get::<_, i64>(0))
+                    .expect("count pending rows"),
+                0
+            );
+            assert_eq!(
+                connection
+                    .query_row("SELECT COUNT(*) FROM draft_finalization_jobs", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .expect("count finalization jobs"),
+                0
+            );
+            assert_eq!(
+                drafts.load(42).expect("reload rejected draft"),
+                Some(draft.clone())
+            );
+        }
     }
 
     #[test]
@@ -2300,9 +2503,9 @@ mod tests {
         let drafts = DraftStateRepository::new(file.path());
         let repository = DraftFinalizationRepository::new(file.path());
         let draft = fenced(&drafts, 42);
-        let payload = "{\"pending\":true}";
-        let valid: Value =
-            serde_json::from_str(&plan(42, draft.session_id, payload)).expect("decode plan");
+        let payload = "{\"pending\":true,\"shuffle_timestamp\":1700000000,\"is_bomb_pot\":false}";
+        let valid: Value = serde_json::from_str(&plan(file.path(), 42, draft.session_id, payload))
+            .expect("decode plan");
         let malformed = [
             {
                 let mut value = valid.clone();
@@ -2325,8 +2528,45 @@ mod tests {
                 value
             },
             {
-                let mut value = valid;
+                let mut value = valid.clone();
                 value["pending_payload_sha256"] = json!("0".repeat(64));
+                value
+            },
+            {
+                // The financial executor refuses anything but the current
+                // version, so a legacy plan could only pin its job at `linked`.
+                let mut value = valid.clone();
+                value["schema_version"] = json!(DRAFT_FINALIZATION_LEGACY_PLAN_VERSION);
+                value
+                    .as_object_mut()
+                    .expect("plan object")
+                    .remove("financial_setup");
+                value
+            },
+            {
+                let mut value = valid.clone();
+                value
+                    .as_object_mut()
+                    .expect("plan object")
+                    .remove("shuffle_timestamp");
+                value
+            },
+            {
+                let mut value = valid.clone();
+                value
+                    .as_object_mut()
+                    .expect("plan object")
+                    .remove("is_bomb_pot");
+                value
+            },
+            {
+                let mut value = valid.clone();
+                value["shuffle_timestamp"] = json!(LINK_SHUFFLE_TIMESTAMP + 1);
+                value
+            },
+            {
+                let mut value = valid;
+                value["is_bomb_pot"] = json!(true);
                 value
             },
         ];
@@ -2371,8 +2611,8 @@ mod tests {
         let drafts = DraftStateRepository::new(file.path());
         let repository = DraftFinalizationRepository::new(file.path());
         let draft = fenced(&drafts, 42);
-        let payload = "{\"pending\":true}";
-        let original_plan = plan(42, draft.session_id, payload);
+        let payload = "{\"pending\":true,\"shuffle_timestamp\":1700000000,\"is_bomb_pot\":false}";
+        let original_plan = plan(file.path(), 42, draft.session_id, payload);
         let linked = repository
             .link_pending_match(
                 42,
@@ -2417,8 +2657,8 @@ mod tests {
                 42,
                 draft.session_id,
                 draft.revision,
-                "{}",
-                &plan(42, draft.session_id, "{}"),
+                LINK_PAYLOAD,
+                &plan(file.path(), 42, draft.session_id, LINK_PAYLOAD),
             )
             .expect("link terminal job");
         let _claimed = repository
@@ -2484,8 +2724,8 @@ mod tests {
                 42,
                 draft.session_id,
                 draft.revision,
-                "{}",
-                &plan(42, draft.session_id, "{}"),
+                LINK_PAYLOAD,
+                &plan(file.path(), 42, draft.session_id, LINK_PAYLOAD),
             )
             .expect("link rollback job");
         let _claimed = repository
@@ -2563,8 +2803,8 @@ mod tests {
                 42,
                 draft.session_id,
                 draft.revision,
-                "{}",
-                &plan(42, draft.session_id, "{}"),
+                LINK_PAYLOAD,
+                &plan(file.path(), 42, draft.session_id, LINK_PAYLOAD),
             )
             .expect("link stale-owner job");
         let _claimed = repository
@@ -2628,14 +2868,14 @@ mod tests {
         let drafts = DraftStateRepository::new(file.path());
         let repository = DraftFinalizationRepository::new(file.path());
         let draft = fenced(&drafts, 42);
-        let payload = "{}";
+        let payload = LINK_PAYLOAD;
         let linked = repository
             .link_pending_match(
                 42,
                 draft.session_id,
                 draft.revision,
                 payload,
-                &plan(42, draft.session_id, payload),
+                &plan(file.path(), 42, draft.session_id, payload),
             )
             .expect("link job");
         Connection::open(file.path())
@@ -2804,8 +3044,8 @@ mod tests {
                 42,
                 draft.session_id,
                 draft.revision,
-                "{}",
-                &plan(42, draft.session_id, "{}"),
+                LINK_PAYLOAD,
+                &plan(file.path(), 42, draft.session_id, LINK_PAYLOAD),
             )
             .expect("link leased job");
         let first = repository
@@ -2876,8 +3116,8 @@ mod tests {
                 42,
                 draft.session_id,
                 draft.revision,
-                "{}",
-                &plan(42, draft.session_id, "{}"),
+                LINK_PAYLOAD,
+                &plan(file.path(), 42, draft.session_id, LINK_PAYLOAD),
             )
             .expect("link identity fixture");
         assert!(matches!(
@@ -2913,8 +3153,8 @@ mod tests {
                 42,
                 draft.session_id,
                 draft.revision,
-                "{}",
-                &plan(42, draft.session_id, "{}"),
+                LINK_PAYLOAD,
+                &plan(file.path(), 42, draft.session_id, LINK_PAYLOAD),
             )
             .expect("link concurrent lease job");
         let barrier = Arc::new(Barrier::new(3));
@@ -2965,8 +3205,8 @@ mod tests {
                 42,
                 draft.session_id,
                 draft.revision,
-                "{}",
-                &plan(42, draft.session_id, "{}"),
+                LINK_PAYLOAD,
+                &plan(file.path(), 42, draft.session_id, LINK_PAYLOAD),
             ),
             Err(DraftFinalizationError::Sqlite(_))
         ));
@@ -3000,8 +3240,8 @@ mod tests {
                     42,
                     draft.session_id,
                     draft.revision,
-                    "{}",
-                    &plan(42, draft.session_id, "{}"),
+                    LINK_PAYLOAD,
+                    &plan(file.path(), 42, draft.session_id, LINK_PAYLOAD),
                 )
                 .is_ok()
         );
