@@ -232,12 +232,16 @@ impl AdminDiscordControl for SerenityDiscordTransport {
         guild_ids.sort_unstable_by_key(|guild_id| guild_id.get());
         let guild_count = guild_ids.len();
         let mut command_count = 0usize;
+        // Every command in this registry is global. Uploading the full tree
+        // per guild as well would give each guild a duplicate guild-scoped copy
+        // of every command, which Discord shows alongside the global ones. The
+        // legacy contract's per-guild sync uploaded nothing and merely cleared
+        // stale guild-scoped commands, so that is what happens here.
         for guild_id in guild_ids {
-            let synchronized = guild_id
-                .set_commands(&context.http, builders())
+            guild_id
+                .set_commands(&context.http, Vec::new())
                 .await
                 .map_err(|error| error.to_string())?;
-            command_count = command_count.saturating_add(synchronized.len());
         }
         let synchronized = Command::set_global_commands(&context.http, builders())
             .await

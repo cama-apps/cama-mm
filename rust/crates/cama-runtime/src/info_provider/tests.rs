@@ -1300,3 +1300,65 @@ async fn view_timeout_drops_session_and_deletes_followup_receipt() {
     assert!(response.ephemeral);
     assert!(response.content.contains("leaderboard has expired"));
 }
+
+#[tokio::test(start_paused = true)]
+async fn paging_a_leaderboard_postpones_its_deletion() {
+    // discord.py measured a View's timeout from the last interaction, so a
+    // leaderboard being actively tabbed must not be deleted mid-use. Time is
+    // paused so the assertions are about the timer, not the machine's speed.
+    let timeout = Duration::from_secs(840);
+    let (_directory, path) = migrated_database();
+    let provider = InfoRegistrationProvider::with_timeout(
+        path,
+        &config(),
+        Arc::new(RecordingDiscord::default()),
+        timeout,
+    );
+    let registry = registry(&provider);
+    let created = Arc::new(RecordingResponder::with_receipt(4_242));
+    registry
+        .command_handler("leaderboard")
+        .expect("leaderboard handler")
+        .handle(
+            command_request("leaderboard", 999, None, None, Vec::new()),
+            created.clone(),
+        )
+        .await
+        .expect("leaderboard view");
+
+    let component = registry
+        .component_handler("info:1:tab:glicko")
+        .expect("info component route");
+    let responder = Arc::new(RecordingResponder::default());
+    for tab in [
+        "info:1:tab:glicko",
+        "info:1:tab:gambling",
+        "info:1:tab:tips",
+    ] {
+        // Cross most of the current deadline, then use the view again.
+        tokio::time::advance(timeout - Duration::from_secs(1)).await;
+        component
+            .handle(component_request(tab, 999), responder.clone())
+            .await
+            .expect("switch leaderboard tab");
+        tokio::task::yield_now().await;
+        assert!(
+            created.deletions.lock().expect("deletions").is_empty(),
+            "an actively used leaderboard must survive its original timer"
+        );
+    }
+
+    // Idle past the last interaction's deadline: now it is deleted.
+    tokio::time::advance(timeout + Duration::from_secs(1)).await;
+    for _ in 0..64 {
+        if !created.deletions.lock().expect("deletions").is_empty() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        created.deletions.lock().expect("deletions").len(),
+        1,
+        "the leaderboard is deleted once it goes idle"
+    );
+}

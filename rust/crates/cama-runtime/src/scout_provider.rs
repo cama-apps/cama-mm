@@ -176,13 +176,21 @@ struct ScoutHandler {
     view_timeout: Duration,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct ScoutViewState {
     owner_id: u64,
     page: usize,
     scout_data: ScoutData,
     player_names: Vec<String>,
     title: String,
+    /// Bumped on every accepted page, so the timer armed for an earlier one
+    /// finds a newer generation and expires nothing.
+    expiry_generation: u64,
+    receipt: Option<InteractionMessageReceipt>,
+    /// The responder that created the followup. Deleting an interaction
+    /// followup goes through the token that produced it, so a later
+    /// component's responder cannot stand in for it.
+    owner: Option<Arc<dyn InteractionResponder>>,
 }
 
 #[async_trait]
@@ -355,6 +363,9 @@ impl ScoutHandler {
             scout_data: loaded.0,
             player_names: loaded.1,
             title: plan.title,
+            expiry_generation: 0,
+            receipt: None,
+            owner: None,
         };
         let response = match self.render_page(view_id, state.clone()).await {
             Ok(response) => response,
@@ -379,7 +390,17 @@ impl ScoutHandler {
                 return Err(error.to_string().into());
             }
         };
-        self.schedule_expiry(view_id, receipt, responder);
+        let view = self
+            .views
+            .lock()
+            .ok()
+            .and_then(|views| views.get(&view_id).cloned());
+        if let Some(view) = view {
+            let mut state = view.lock().await;
+            state.receipt = receipt;
+            state.owner = Some(Arc::clone(&responder));
+        }
+        self.schedule_expiry(view_id, 0, responder);
         Ok(())
     }
 
@@ -520,6 +541,13 @@ impl ScoutHandler {
                     .map_err(|error| error.to_string().into());
             }
             state.page = next;
+            state.expiry_generation = state.expiry_generation.wrapping_add(1);
+            // Restart the deletion timer from this interaction, before any
+            // await, so a timer that would otherwise fire mid-handler does not
+            // delete a report the owner is actively paging.
+            if let Some(owner) = state.owner.clone() {
+                self.schedule_expiry(view_id, state.expiry_generation, owner);
+            }
             state.clone()
         };
         let response = self
@@ -591,17 +619,40 @@ impl ScoutHandler {
         .map_err(|error| format!("Scout render task failed: {error}"))?
     }
 
+    /// Delete the report `view_timeout` after the last interaction with it.
+    ///
+    /// A single timer armed at creation would delete a report the owner is
+    /// still paging through; the legacy view measured its timeout from the last
+    /// interaction, so each accepted page re-arms this.
     fn schedule_expiry(
         &self,
         view_id: u64,
-        receipt: Option<InteractionMessageReceipt>,
+        expiry_generation: u64,
         responder: Arc<dyn InteractionResponder>,
     ) {
         let views = Arc::clone(&self.views);
         let timeout = self.view_timeout;
         tokio::spawn(async move {
             tokio::time::sleep(timeout).await;
-            if let Ok(mut views) = views.lock() {
+            let view = views
+                .lock()
+                .ok()
+                .and_then(|views| views.get(&view_id).cloned());
+            let Some(view) = view else {
+                return;
+            };
+            let receipt = {
+                let state = view.lock().await;
+                if state.expiry_generation != expiry_generation {
+                    return;
+                }
+                state.receipt
+            };
+            if let Ok(mut views) = views.lock()
+                && views
+                    .get(&view_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &view))
+            {
                 views.remove(&view_id);
             }
             if let Some(receipt) = receipt

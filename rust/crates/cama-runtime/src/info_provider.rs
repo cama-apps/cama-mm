@@ -228,6 +228,20 @@ struct InfoHandler {
 struct LeaderboardSession {
     view: Arc<Mutex<UnifiedLeaderboardView<InfoLeaderboardRepository>>>,
     last_tab_click: Mutex<BTreeMap<u64, Instant>>,
+    /// Bumped on every accepted interaction so the timer armed for an earlier
+    /// one expires nothing. The legacy view measured its timeout from the last
+    /// interaction, not from creation.
+    expiry: Mutex<LeaderboardExpiry>,
+}
+
+#[derive(Default)]
+struct LeaderboardExpiry {
+    generation: u64,
+    receipt: Option<InteractionMessageReceipt>,
+    /// The responder that created the followup. Deleting an interaction
+    /// followup goes through the token that produced it, so a later
+    /// component's responder cannot stand in for it.
+    owner: Option<Arc<dyn InteractionResponder>>,
 }
 
 #[derive(Debug, Default)]
@@ -445,6 +459,7 @@ impl InfoHandler {
         let session = Arc::new(LeaderboardSession {
             view: Arc::clone(&view),
             last_tab_click: Mutex::new(BTreeMap::new()),
+            expiry: Mutex::new(LeaderboardExpiry::default()),
         });
         self.views
             .lock()
@@ -459,7 +474,14 @@ impl InfoHandler {
                 return Err(response_error(error));
             }
         };
-        self.schedule_expiry(view_id, receipt, responder);
+        if let Ok(views) = self.views.lock()
+            && let Some(session) = views.get(&view_id)
+            && let Ok(mut expiry) = session.expiry.lock()
+        {
+            expiry.receipt = receipt;
+            expiry.owner = Some(Arc::clone(&responder));
+        }
+        self.schedule_expiry(view_id, 0, responder);
         Ok(())
     }
 
@@ -527,6 +549,10 @@ impl InfoHandler {
                 .await
                 .map_err(response_error);
         };
+        // The view is in use, so its deletion timer restarts from now -- before
+        // any await, so a timer that would otherwise fire during this handler
+        // does not delete a leaderboard the owner is actively using.
+        self.extend_expiry(view_id);
 
         match action {
             LeaderboardAction::Tab(tab) => {
@@ -662,17 +688,35 @@ impl InfoHandler {
         }
     }
 
+    /// Delete the leaderboard `view_timeout` after the last interaction.
     fn schedule_expiry(
         &self,
         view_id: u64,
-        receipt: Option<InteractionMessageReceipt>,
+        expiry_generation: u64,
         responder: Arc<dyn InteractionResponder>,
     ) {
         let views = Arc::clone(&self.views);
         let timeout = self.view_timeout;
         tokio::spawn(async move {
             tokio::time::sleep(timeout).await;
-            if let Ok(mut views) = views.lock() {
+            let session = views
+                .lock()
+                .ok()
+                .and_then(|views| views.get(&view_id).cloned());
+            let Some(session) = session else {
+                return;
+            };
+            let receipt = match session.expiry.lock() {
+                Ok(expiry) if expiry.generation == expiry_generation => expiry.receipt,
+                // A newer interaction re-armed the timer, or the lock is
+                // poisoned; either way this timer no longer owns the view.
+                _ => return,
+            };
+            if let Ok(mut views) = views.lock()
+                && views
+                    .get(&view_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &session))
+            {
                 views.remove(&view_id);
             }
             if let Some(receipt) = receipt
@@ -681,6 +725,24 @@ impl InfoHandler {
                 warn!(%error, view_id, "failed to delete expired leaderboard message");
             }
         });
+    }
+
+    /// Re-arm the expiry after an accepted component interaction.
+    fn extend_expiry(&self, view_id: u64) {
+        let armed = self
+            .views
+            .lock()
+            .ok()
+            .and_then(|views| views.get(&view_id).cloned())
+            .and_then(|session| {
+                session.expiry.lock().ok().and_then(|mut expiry| {
+                    expiry.generation = expiry.generation.wrapping_add(1);
+                    expiry.owner.clone().map(|owner| (expiry.generation, owner))
+                })
+            });
+        if let Some((generation, owner)) = armed {
+            self.schedule_expiry(view_id, generation, owner);
+        }
     }
 }
 
