@@ -193,9 +193,17 @@ impl Default for RecordingState {
 #[derive(Default)]
 struct RecordingTransport {
     state: Mutex<RecordingState>,
+    /// When set, message edits fail, standing in for a deleted lobby message or
+    /// a transient Discord error during a repaint.
+    fail_edits: std::sync::atomic::AtomicBool,
 }
 
 impl RecordingTransport {
+    fn fail_edits(&self) {
+        self.fail_edits
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     fn thread_count(&self) -> usize {
         self.state.lock().expect("transport state").threads.len()
     }
@@ -285,6 +293,9 @@ impl DiscordTransport for RecordingTransport {
         message_id: u64,
         message: DiscordMessage,
     ) -> Result<(), String> {
+        if self.fail_edits.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("message edit refused".to_owned());
+        }
         self.state
             .lock()
             .expect("transport state")
@@ -735,6 +746,36 @@ async fn dispatch_command(
         )
         .await
         .expect("dispatch lobby command");
+    responder
+}
+
+/// Dispatch that tolerates a handler error, for failure paths whose recovery
+/// behavior is the thing under test.
+async fn dispatch_command_allowing_failure(
+    provider: &LobbyRegistrationProvider,
+    name: &str,
+    user_id: u64,
+    display_name: &str,
+    options: Vec<InteractionOption>,
+) -> Arc<CapturingResponder> {
+    let responder = Arc::new(CapturingResponder::default());
+    let _ = registry_for(provider)
+        .command_handler(name)
+        .expect("registered lobby handler")
+        .handle(
+            InteractionRequest::Command {
+                interaction_id: user_id,
+                name: name.to_owned(),
+                user_id,
+                user_display_name: display_name.to_owned(),
+                guild_id: Some(42),
+                channel_id: Some(9),
+                member_permissions: None,
+                options,
+            },
+            responder.clone(),
+        )
+        .await;
     responder
 }
 
@@ -2488,4 +2529,101 @@ async fn test_sword_reaction_join_blocked_during_active_curfew_window() {
         direct.response.content
     );
     assert!(direct.response.content.contains("/player curfew remove"));
+}
+
+#[tokio::test]
+async fn failed_readycheck_publication_releases_the_permit_for_the_next_attempt() {
+    // A stale ready check prunes AFK players and then must repaint the lobby
+    // display. That repaint is Required, so a Discord failure aborts the run --
+    // but the publication permit was already reserved, and leaking it makes
+    // every later /readycheck for the scope report "already being published"
+    // until a lobby reset or a restart.
+    let database = database_with_players(&[(10, "Creator"), (20, "Afk")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
+    let long_ago = unix_time_now() - 3_600.0;
+    {
+        let provider = provider_for(&database, transport.clone());
+        create_lobby_and_join_player(&provider, LobbyKind::Open, 10, "Creator", 20, "Afk").await;
+    }
+    // Age both join times past the recent-join grace window, then hydrate a
+    // fresh provider from that persisted state.
+    rusqlite::Connection::open(database.path())
+        .expect("open lobby database")
+        .execute(
+            "UPDATE lobby_state SET player_join_times = ?1",
+            rusqlite::params![format!("{{\"10\":{long_ago},\"20\":{long_ago}}}")],
+        )
+        .expect("age persisted join times");
+    let provider = provider_for(&database, transport.clone());
+    for (user_id, display_name, presence) in [
+        (10, "Creator", DiscordPresence::Online),
+        (20, "Afk", DiscordPresence::Offline),
+    ] {
+        transport.set_member(
+            42,
+            DiscordGuildMemberSnapshot {
+                user_id,
+                display_name: display_name.to_owned(),
+                presence,
+                in_voice: false,
+                deafened: false,
+                activities: Vec::new(),
+            },
+        );
+    }
+    // A generation old enough to be stale, which is what enables pruning.
+    provider.handler.state.readychecks.set_readycheck_state(
+        scope,
+        cama_app::readycheck::ReadycheckStateInput {
+            message_id: AppMessageId(5_000),
+            channel_id: AppChannelId(9),
+            lobby_ids: BTreeSet::from([AppUserId(10), AppUserId(20)]),
+            player_data: BTreeMap::new(),
+            created_at: Some(long_ago),
+            initial_reacted: BTreeMap::new(),
+        },
+    );
+    transport.fail_edits();
+
+    let first = dispatch_command_allowing_failure(
+        &provider,
+        "readycheck",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let second = dispatch_command_allowing_failure(
+        &provider,
+        "readycheck",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    let replies = |responder: &Arc<CapturingResponder>| {
+        responder
+            .captured
+            .lock()
+            .expect("responses")
+            .followups
+            .iter()
+            .map(|response| response.content.clone())
+            .collect::<Vec<_>>()
+    };
+    let first_replies = replies(&first);
+    assert!(
+        first_replies
+            .iter()
+            .all(|content| !content.starts_with("✅")),
+        "the failing lobby repaint must not report success, got {first_replies:?}"
+    );
+    let in_flight = "⏳ A ready check is already being published. Please try again in a moment.";
+    let second_replies = replies(&second);
+    assert!(
+        !second_replies.iter().any(|content| content == in_flight),
+        "the permit must be released after the failed run, got {second_replies:?}"
+    );
 }

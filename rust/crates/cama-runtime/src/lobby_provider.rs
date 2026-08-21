@@ -1876,7 +1876,41 @@ impl LobbyInteractionHandler {
             .await;
     }
 
+    /// Runs the plan and guarantees the publication permit is released.
+    ///
+    /// `prepare_command` reserves the permit before any transport work, and
+    /// every later `/readycheck` for the scope fails with `PublicationInFlight`
+    /// until it is cleared. Any error escaping the plan -- a failed lobby
+    /// display sync, a missing thread, an ID conversion -- would otherwise
+    /// wedge the scope until a lobby reset or a bot restart, so the abort is
+    /// applied here rather than at individual failure sites.
     async fn execute_readycheck_plan(
+        &self,
+        plan: ReadycheckCommandPlan,
+        player_data: BTreeMap<AppUserId, ReadycheckPlayerData>,
+        mentionable: BTreeSet<AppUserId>,
+        invocation_channel_id: AppChannelId,
+        mirror_invocation: bool,
+    ) -> Result<ReadycheckRunResult, ReadycheckRunError> {
+        let permit = plan.permit.clone();
+        let result = self
+            .run_readycheck_plan(
+                plan,
+                player_data,
+                mentionable,
+                invocation_channel_id,
+                mirror_invocation,
+            )
+            .await;
+        if let (Err(_), Some(permit)) = (&result, &permit) {
+            // A committed permit no longer matches the pending token, so this
+            // is a no-op once publication has succeeded.
+            self.state.readychecks.abort_publication(permit);
+        }
+        result
+    }
+
+    async fn run_readycheck_plan(
         &self,
         plan: ReadycheckCommandPlan,
         player_data: BTreeMap<AppUserId, ReadycheckPlayerData>,
@@ -2029,10 +2063,7 @@ impl LobbyInteractionHandler {
             .await
         {
             Ok(receipt) => receipt,
-            Err(error) => {
-                self.state.readychecks.abort_publication(&permit);
-                return Err(ReadycheckRunError::Transport(error));
-            }
+            Err(error) => return Err(ReadycheckRunError::Transport(error)),
         };
         let message_id = AppMessageId(i64::try_from(receipt.message_id).map_err(|_| {
             ReadycheckRunError::Transport("readycheck message id overflow".to_owned())

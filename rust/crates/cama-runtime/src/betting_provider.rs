@@ -743,6 +743,8 @@ pub struct BettingRuntimeConfig {
     pub synthetic_members_enabled: bool,
     pub disburse_min_fund: i64,
     pub disburse_quorum_percentage: f64,
+    /// Recency window that admits a player to the `lottery` disbursement draw.
+    pub lottery_activity_days: i64,
     /// Daily economy-event policy is read from the same existing-schema
     /// controller used by match/shop settlement.  Keeping the configuration
     /// here makes `/gamba` use the active event without a second event model.
@@ -789,6 +791,7 @@ impl BettingRuntimeConfig {
             synthetic_members_enabled: values.gamba_synthetic_members_enabled,
             disburse_min_fund: values.disburse_min_fund,
             disburse_quorum_percentage: values.disburse_quorum_percentage,
+            lottery_activity_days: values.lottery_activity_days,
             economy_events_enabled: values.economy_events_enabled,
             economy_normal_annual_rate: values.economy_normal_annual_rate,
             economy_inflation_ceiling: values.economy_inflation_ceiling,
@@ -5951,6 +5954,7 @@ impl BettingInteractionHandler {
             .to_owned();
         let path = self.database_path.clone();
         let fund = proposal.fund_amount;
+        let days = self.config.lottery_activity_days;
         sqlite("disbursement execution", move || {
             let repository = DisbursementRepository::new(&path);
             match method.as_str() {
@@ -5989,10 +5993,22 @@ impl BettingInteractionHandler {
                     })
                 }
                 _ => {
-                    let players = PlayerRepository::new(&path)
+                    let player_repository = PlayerRepository::new(&path);
+                    let players = player_repository
                         .get_all(Some(guild_id))
                         .map_err(|error| error.to_string())?;
-                    let distributions = calculate_distributions(&method, fund, &players);
+                    // Only the lottery needs the activity roster, and it is a
+                    // second query, so it stays behind the method check.
+                    let lottery_winner = if method == "lottery" {
+                        let candidates = player_repository
+                            .lottery_candidates(Some(guild_id), &lottery_activity_cutoff(days))
+                            .map_err(|error| error.to_string())?;
+                        draw_lottery_winner(&candidates)
+                    } else {
+                        None
+                    };
+                    let distributions =
+                        calculate_distributions(&method, fund, &players, lottery_winner);
                     let total = repository
                         .complete_and_disburse_atomic(Some(guild_id), &method, &distributions)
                         .map_err(|error| error.to_string())?;
@@ -6533,7 +6549,54 @@ fn disbursement_response(execution: &DisbursementExecution, forced: bool) -> Int
     )
 }
 
-fn calculate_distributions(method: &str, fund: i64, players: &[Player]) -> Vec<(i64, i64)> {
+/// Players excluded from the redistribution methods that deliberately skip the
+/// wealthiest accounts (`stimulus`, `social_security`).
+///
+/// Mirrors the legacy `LIMIT 3` sub-select over non-debtors ordered by balance
+/// descending, with a stable discord-id tiebreak so equal balances resolve the
+/// same way on every call.
+fn top_richest_non_debtors(players: &[Player], count: usize) -> BTreeSet<i64> {
+    let mut ranked = players
+        .iter()
+        .filter(|player| player.jopacoin_balance >= 0)
+        .filter_map(|player| player.discord_id.map(|id| (id, player.jopacoin_balance)))
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
+    ranked
+        .into_iter()
+        .take(count)
+        .map(|(discord_id, _)| discord_id)
+        .collect()
+}
+
+/// The number of top balances `stimulus` and `social_security` exclude.
+const DISBURSE_RICHEST_EXCLUSION: usize = 3;
+
+/// ISO-8601 cutoff admitting players whose last match is within `days`.
+///
+/// A non-positive window would admit nobody, so it is clamped to zero, which
+/// keeps only players who played at or after "now".
+fn lottery_activity_cutoff(days: i64) -> String {
+    (Utc::now() - chrono::Duration::days(days.max(0))).to_rfc3339()
+}
+
+/// Uniformly draws one lottery winner, mirroring the legacy `random.choice`.
+fn draw_lottery_winner(candidates: &[i64]) -> Option<i64> {
+    if candidates.is_empty() {
+        return None;
+    }
+    candidates.get(fastrand::usize(..candidates.len())).copied()
+}
+
+/// `lottery_winner` is drawn by the caller from the recently-active roster so
+/// the pure calculation stays deterministic under test; see
+/// `draw_lottery_winner`.
+fn calculate_distributions(
+    method: &str,
+    fund: i64,
+    players: &[Player],
+    lottery_winner: Option<i64>,
+) -> Vec<(i64, i64)> {
     if fund <= 0 {
         return Vec::new();
     }
@@ -6557,35 +6620,29 @@ fn calculate_distributions(method: &str, fund: i64, players: &[Player]) -> Vec<(
             .into_iter()
             .collect(),
         "stimulus" => {
+            // Legacy contract: non-debtors who have actually played, ordered by
+            // balance descending with the top three skipped.
             let mut eligible = players
                 .iter()
                 .filter(|player| player.jopacoin_balance >= 0)
+                .filter(|player| player.wins.saturating_add(player.losses) > 0)
                 .filter_map(|player| player.discord_id.map(|id| (id, player.jopacoin_balance)))
                 .collect::<Vec<_>>();
-            if eligible.len() < 4 {
+            if eligible.len() <= DISBURSE_RICHEST_EXCLUSION {
                 return Vec::new();
             }
             eligible.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
-            let eligible = &eligible[3..];
+            let eligible = &eligible[DISBURSE_RICHEST_EXCLUSION..];
             even_unlimited_distributions(fund, eligible)
         }
-        "lottery" => players
-            .iter()
-            .filter_map(|player| player.discord_id)
-            .collect::<Vec<_>>()
-            .get(
-                usize::try_from(unix_seconds().unwrap_or_default().unsigned_abs())
-                    .unwrap_or_default()
-                    % players
-                        .iter()
-                        .filter(|player| player.discord_id.is_some())
-                        .count()
-                        .max(1),
-            )
-            .copied()
+        // The winner is drawn at random from the recently-active roster before
+        // this call; an empty roster disburses nothing.
+        "lottery" => lottery_winner
             .map(|discord_id| vec![(discord_id, fund)])
             .unwrap_or_default(),
         "social_security" => {
+            // Legacy contract excludes the same top three balances as stimulus.
+            let excluded = top_richest_non_debtors(players, DISBURSE_RICHEST_EXCLUSION);
             let mut eligible = players
                 .iter()
                 .filter_map(|player| {
@@ -6593,6 +6650,7 @@ fn calculate_distributions(method: &str, fund: i64, players: &[Player]) -> Vec<(
                         .discord_id
                         .map(|discord_id| (discord_id, player.wins.saturating_add(player.losses)))
                 })
+                .filter(|(discord_id, _)| !excluded.contains(discord_id))
                 .filter(|(_, games)| *games > 0)
                 .collect::<Vec<_>>();
             if eligible.is_empty() {
@@ -6618,7 +6676,7 @@ fn calculate_distributions(method: &str, fund: i64, players: &[Player]) -> Vec<(
         "richest" => players
             .iter()
             .filter_map(|player| player.discord_id.map(|id| (id, player.jopacoin_balance)))
-            .max_by(|left, right| right.1.cmp(&left.1).then(right.0.cmp(&left.0)))
+            .max_by(|left, right| left.1.cmp(&right.1).then(right.0.cmp(&left.0)))
             .map(|(discord_id, _)| vec![(discord_id, fund)])
             .unwrap_or_default(),
         _ => Vec::new(),
