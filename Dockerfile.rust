@@ -43,7 +43,6 @@ FROM rust:1.94.0-bookworm AS builder
 WORKDIR /build/rust
 
 COPY .cama-build/fonts/ /app/assets/fonts/
-COPY utils/heroes.json /build/utils/heroes.json
 COPY rust/ ./
 RUN cargo build --locked --release --package cama-runtime --bin cama-rust
 
