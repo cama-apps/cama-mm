@@ -7,6 +7,7 @@ use rusqlite::{Connection, params};
 use std::io::Cursor;
 use tempfile::NamedTempFile;
 
+use crate::registration::InteractionAllowedMentions;
 use crate::test_support::initialize_test_database as initialize_or_migrate;
 
 #[derive(Default)]
@@ -1102,6 +1103,11 @@ async fn provider_composes_live_surface_and_dispatches_a_command() {
     assert_eq!(registry.component_routes().len(), 4);
     assert!(registry.command_handler("bet").is_some());
     assert!(registry.component_handler("betting:wheel:0").is_some());
+    assert!(
+        registry
+            .component_handler("betting:balance:1:next")
+            .is_some()
+    );
     assert!(registry.component_handler("tt_0").is_some());
     assert!(registry.component_handler("disc_0").is_some());
     assert!(registry.component_handler("disburse:approve").is_some());
@@ -1127,6 +1133,174 @@ async fn provider_composes_live_surface_and_dispatches_a_command() {
         provider.expire_pending_views().await.expect("view sweep"),
         0
     );
+}
+
+#[tokio::test]
+async fn balance_is_a_private_paginated_portfolio_with_tax_ledger_exposure() {
+    let database = NamedTempFile::new().expect("balance portfolio database");
+    initialize_or_migrate(database.path()).expect("balance portfolio schema");
+    let players = PlayerRepository::new(database.path());
+    players
+        .add(&NewPlayer::new(7, "portfolio-player", Some(42)))
+        .expect("portfolio player");
+    for balance in 101..=114 {
+        players
+            .update_balance(7, Some(42), balance)
+            .expect("portfolio ledger movement");
+    }
+    let connection = Connection::open(database.path()).expect("portfolio seed connection");
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .expect("disable legacy mismatched prediction foreign key for fixture seeding");
+    for prediction_id in 1..=5_i64 {
+        connection
+            .execute(
+                "INSERT INTO predictions(
+                     prediction_id,guild_id,creator_id,question,status,created_at,closes_at,
+                     current_price,initial_fair
+                 ) VALUES (?1,42,7,?2,'open',100,9999999999,60,50)",
+                params![
+                    prediction_id,
+                    format!("Will market {prediction_id} resolve YES?")
+                ],
+            )
+            .expect("portfolio prediction");
+        connection
+            .execute(
+                "INSERT INTO prediction_positions(
+                     prediction_id,discord_id,yes_contracts,yes_cost_basis_total,
+                     no_contracts,no_cost_basis_total
+                 ) VALUES (?1,7,2,9,1,3)",
+                [prediction_id],
+            )
+            .expect("portfolio position");
+    }
+    let config = ApplicationConfig::from_lookup(|name| {
+        (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
+    })
+    .expect("balance portfolio configuration");
+    let provider = BettingRegistrationProvider::new(
+        database.path(),
+        &config,
+        Arc::new(crate::serenity_transport::SerenityDiscordTransport::new()),
+    );
+    let recording = RecordingResponder::default();
+    provider
+        .handler
+        .handle(
+            InteractionRequest::Command {
+                interaction_id: 700,
+                name: "balance".to_owned(),
+                user_id: 7,
+                user_display_name: "Portfolio Player".to_owned(),
+                guild_id: Some(42),
+                channel_id: Some(99),
+                member_permissions: None,
+                options: Vec::new(),
+            },
+            Arc::new(recording.clone()),
+        )
+        .await
+        .expect("portfolio command");
+
+    assert_eq!(recording.defers.lock().unwrap().as_slice(), &[true]);
+    {
+        let responses = recording.responses.lock().unwrap();
+        assert_eq!(responses.len(), 1);
+        let response = &responses[0];
+        assert!(response.ephemeral);
+        assert_eq!(response.allowed_mentions, InteractionAllowedMentions::None);
+        assert_eq!(response.components.len(), 1);
+        assert!(response.components[0].buttons[0].disabled);
+        assert!(!response.components[0].buttons[2].disabled);
+        let overview = &response.embeds[0];
+        assert_eq!(
+            overview.title.as_deref(),
+            Some("💰 Jopacoin Portfolio — Portfolio Player")
+        );
+        assert!(overview.fields.iter().any(|field| {
+            field.name == "Asset Breakdown"
+                && field.value.contains("Wallet")
+                && field.value.contains("Markets")
+        }));
+        assert!(overview.fields.iter().any(|field| {
+            field.name == "Market Exposure"
+                && field.value.contains("5 market(s)")
+                && field.value.contains("15 contracts")
+        }));
+        assert!(overview.fields.iter().any(|field| {
+            field.name == "Liabilities & Capital at Risk"
+                && field.value.contains("Total tax-ledger exposure")
+        }));
+        assert!(overview.footer.as_deref().unwrap().contains("Page 1/6"));
+    }
+
+    let intruder = RecordingResponder::default();
+    provider
+        .handler
+        .handle(
+            balance_component_request("betting:balance:700:next", 8),
+            Arc::new(intruder.clone()),
+        )
+        .await
+        .expect("reject portfolio intruder");
+    assert_eq!(
+        intruder.responses.lock().unwrap()[0].content,
+        "This private balance statement belongs to another player."
+    );
+
+    for _ in 0..5 {
+        provider
+            .handler
+            .handle(
+                balance_component_request("betting:balance:700:next", 7),
+                Arc::new(recording.clone()),
+            )
+            .await
+            .expect("portfolio next page");
+    }
+    let edits = recording.edits.lock().unwrap();
+    assert_eq!(edits.len(), 5);
+    assert_eq!(edits[0].embeds[0].fields.len(), 4);
+    assert_eq!(edits[1].embeds[0].fields.len(), 1);
+    assert!(
+        edits[0].embeds[0]
+            .title
+            .as_deref()
+            .unwrap()
+            .contains("Open Markets")
+    );
+    assert!(
+        edits[2].embeds[0]
+            .title
+            .as_deref()
+            .unwrap()
+            .contains("Recent Activity")
+    );
+    assert_eq!(edits[2].embeds[0].fields.len(), 6);
+    assert_eq!(edits[3].embeds[0].fields.len(), 6);
+    assert_eq!(edits[4].embeds[0].fields.len(), 3);
+    assert!(
+        edits[4].embeds[0]
+            .footer
+            .as_deref()
+            .unwrap()
+            .contains("Page 6/6")
+    );
+    assert!(edits[4].components[0].buttons[2].disabled);
+}
+
+fn balance_component_request(custom_id: &str, user_id: u64) -> InteractionRequest {
+    InteractionRequest::Component {
+        interaction_id: 701,
+        custom_id: custom_id.to_owned(),
+        user_id,
+        user_display_name: "portfolio player".to_owned(),
+        guild_id: Some(42),
+        channel_id: Some(99),
+        member_permissions: None,
+        values: Vec::new(),
+    }
 }
 
 #[tokio::test]
@@ -2760,6 +2934,8 @@ fn wheel_interaction_timeout_policy_matches_python_views() {
             loan_max_amount: 0,
             tip_fee_rate: 0.0,
             minigame_jc_delta_scale: 1.0,
+            prediction_contract_value: 10,
+            prediction_initial_fair_default: 50,
             synthetic_members_enabled: false,
             disburse_min_fund: 0,
             disburse_quorum_percentage: 0.0,
