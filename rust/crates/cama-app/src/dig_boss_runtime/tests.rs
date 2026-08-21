@@ -3050,3 +3050,66 @@ fn quiet_phase_event_does_not_change_pinnacle_hp() {
         .expect("control");
     assert_eq!(event.boss_hp_max, control.boss_hp_max);
 }
+
+#[test]
+fn retreating_mid_mechanic_still_settles_the_claimed_pinnacle_wager() {
+    // The retreat button does not claim or clear a paused duel, so a player can
+    // start a wagered pinnacle fight, retreat off the boundary while the
+    // mechanic prompt is still live, and then answer it. The resume has already
+    // deleted the duel row by the time the boundary is re-checked, so failing
+    // there would drop the fight with no settlement at all -- the losing wager
+    // is never debited and no later start can forfeit it.
+    let database = fixture();
+    set_pinnacle(&database, 1, "active", None);
+    let connection = Connection::open(database.path()).expect("pinnacle DB");
+    connection
+        .execute(
+            "UPDATE players SET jopacoin_balance=500 WHERE discord_id=?1 AND guild_id=?2",
+            params![PLAYER, GUILD],
+        )
+        .expect("fund the player");
+
+    let started = pinnacle_runtime(&database)
+        .start_pinnacle(
+            pinnacle_request(1_700_000_000),
+            RiskTier::Reckless,
+            25,
+            SequenceEntropy::constant(0.99),
+        )
+        .expect("start pinnacle");
+    let DigPinnacleStartOutcome::Paused(paused) = started.outcome else {
+        panic!("expected durable pinnacle prompt")
+    };
+    assert_eq!(paused.wager, 25);
+
+    // Retreat: the player is no longer at the pinnacle boundary, while the
+    // paused duel row survives untouched.
+    connection
+        .execute(
+            "UPDATE tunnels SET depth=?1 WHERE discord_id=?2 AND guild_id=?3",
+            params![i64::from(PINNACLE_DEPTH) - 3, PLAYER, GUILD],
+        )
+        .expect("retreat below the boundary");
+
+    let resolved = pinnacle_runtime(&database)
+        .resume_pinnacle(
+            pinnacle_request(1_700_000_001),
+            paused.pending_prompt.safe_option_index,
+            SequenceEntropy::constant(0.99),
+        )
+        .expect("a claimed duel settles even away from the boundary");
+    assert!(!resolved.outcome.won, "the fight is lost");
+    assert!(
+        resolved.outcome.jc_delta < 0,
+        "the wagered stake is debited rather than escaping settlement, got {}",
+        resolved.outcome.jc_delta
+    );
+    let balance = connection
+        .query_row(
+            "SELECT jopacoin_balance FROM players WHERE discord_id=?1 AND guild_id=?2",
+            params![PLAYER, GUILD],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("balance");
+    assert_eq!(balance, 500 + resolved.outcome.jc_delta);
+}

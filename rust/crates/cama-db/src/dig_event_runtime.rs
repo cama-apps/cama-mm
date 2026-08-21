@@ -1412,6 +1412,41 @@ impl DigEventRuntimeRepository {
     /// Append the canonical Dig action history after a separately committed
     /// protected hostile loss. Burn creates a victim row; steal creates the
     /// victim debit and digger credit together. Replays are idempotent.
+    /// Victim IDs already committed for one event's splash, in commit order.
+    ///
+    /// Splash victims are chosen from live state (for `richest_n`, an ORDER BY
+    /// balance query), and the first execution's own burns change that ranking.
+    /// A replay -- a duplicate component delivery, the crash-recovery worker,
+    /// or a Conflict retry -- would therefore select *different* victims, whose
+    /// per-victim exact-once keys do not exist yet, and debit them too. Freezing
+    /// the original selection keeps a replay a no-op.
+    pub fn committed_splash_victims(
+        &self,
+        guild_id: Option<i64>,
+        event_key: &str,
+    ) -> Result<Vec<i64>, DigEventRuntimeRepositoryError> {
+        let guild_id = Self::normalize_guild_id(guild_id);
+        let prefix = format!("{event_key}:splash:");
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT actor_id FROM dig_actions
+              WHERE guild_id = ?1
+                AND action_type = 'splash_victim'
+                AND json_valid(detail)
+                AND json_extract(detail, '$.event_key') LIKE ?2 || '%'
+              ORDER BY id",
+        )?;
+        let mut victims = Vec::new();
+        let rows = statement.query_map(params![guild_id, prefix], |row| row.get::<_, i64>(0))?;
+        for row in rows {
+            let victim = row?;
+            if !victims.contains(&victim) {
+                victims.push(victim);
+            }
+        }
+        Ok(victims)
+    }
+
     pub fn record_hostile_splash_audit(
         &self,
         request: DigHostileSplashAuditRequest<'_>,

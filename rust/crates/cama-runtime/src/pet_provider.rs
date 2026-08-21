@@ -2537,17 +2537,59 @@ impl PetInteractionHandler {
         Ok(finished)
     }
 
+    /// Give every round its own full picking window.
+    ///
+    /// The embed promises `PET_BRAWL_TURN_SECONDS` per move and the legacy
+    /// views built a fresh timer per round. A fixed cadence started at accept
+    /// would instead force-pick the safe move a fraction of a second into any
+    /// round that began late in the cycle, changing combat outcomes and who
+    /// wins the wager.
     fn spawn_battle_timeout(&self, brawl_id: i64) {
         let state = Arc::clone(&self.state);
         tokio::spawn(async move {
+            let turn = Duration::from_secs(
+                u64::try_from(cama_domain::pet::PET_BRAWL_TURN_SECONDS).unwrap_or(30),
+            );
+            // Polling keeps the window anchored to when each round actually
+            // started, which a single fixed-cadence sleep cannot observe.
+            let tick = Duration::from_secs(1);
+            let mut armed_for = Self::battle_round(&state, brawl_id);
+            let mut round_started = tokio::time::Instant::now();
             loop {
-                tokio::time::sleep(Duration::from_secs(30)).await;
-                match Self::advance_battle_timeout_once(Arc::clone(&state), brawl_id).await {
-                    Ok(true) | Err(_) => return,
-                    Ok(false) => {}
+                tokio::time::sleep(tick).await;
+                let current = Self::battle_round(&state, brawl_id);
+                match battle_timeout_step(armed_for, current, round_started.elapsed(), turn) {
+                    BattleTimeoutStep::Stop => return,
+                    BattleTimeoutStep::Wait => continue,
+                    BattleTimeoutStep::Rearm => {
+                        // The players resolved this round themselves; the next
+                        // one gets its own full window.
+                        armed_for = current;
+                        round_started = tokio::time::Instant::now();
+                    }
+                    BattleTimeoutStep::Fire => {
+                        match Self::advance_battle_timeout_once(Arc::clone(&state), brawl_id).await
+                        {
+                            Ok(true) | Err(_) => return,
+                            Ok(false) => {
+                                armed_for = Self::battle_round(&state, brawl_id);
+                                round_started = tokio::time::Instant::now();
+                            }
+                        }
+                    }
                 }
             }
         });
+    }
+
+    /// The round a live battle is currently on, or `None` once it is gone.
+    fn battle_round(state: &Arc<PetRuntimeState>, brawl_id: i64) -> Option<u8> {
+        state
+            .battle_views
+            .lock()
+            .ok()?
+            .get(&brawl_id)
+            .map(|handle| handle.round_no)
     }
 
     fn spawn_confirmation_timeout(&self, token: String) {
@@ -3727,3 +3769,44 @@ impl PetEatingRandomPort for RuntimeEatingRng {
 #[cfg(all(test, feature = "runtime-test-dig"))]
 #[path = "pet_provider/tests.rs"]
 mod tests;
+
+/// What the battle timeout task should do on one tick.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BattleTimeoutStep {
+    /// The battle is gone; the task is finished.
+    Stop,
+    /// A new round started; restart its window.
+    Rearm,
+    /// The current round still has time left.
+    Wait,
+    /// The current round's window has expired.
+    Fire,
+}
+
+/// Decide one tick of the battle timeout.
+///
+/// The window belongs to a round, not to the battle: a round that starts late
+/// still gets the full `turn` the embed promises, and a round is never expired
+/// on the strength of time that elapsed during an earlier one.
+const fn battle_timeout_step(
+    armed_for: Option<u8>,
+    current: Option<u8>,
+    round_elapsed: Duration,
+    turn: Duration,
+) -> BattleTimeoutStep {
+    if current.is_none() {
+        return BattleTimeoutStep::Stop;
+    }
+    // Option<u8> has no const PartialEq, so compare the discriminants directly.
+    match (armed_for, current) {
+        (Some(armed), Some(now)) if armed != now => BattleTimeoutStep::Rearm,
+        (None, Some(_)) => BattleTimeoutStep::Rearm,
+        _ => {
+            if round_elapsed.as_secs() < turn.as_secs() {
+                BattleTimeoutStep::Wait
+            } else {
+                BattleTimeoutStep::Fire
+            }
+        }
+    }
+}
