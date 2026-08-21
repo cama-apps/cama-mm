@@ -122,6 +122,10 @@ plans/
 
 # Testing artifacts
 .pytest_cache/
+# Scratch databases and rendered fixtures left behind by ad-hoc test runs
+.pytest-*/
+# Local render/export scratch (art packs, preview snapshots)
+output/
 .coverage
 .coverage.*
 htmlcov/
