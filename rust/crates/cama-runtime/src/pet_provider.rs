@@ -1432,7 +1432,15 @@ impl PetInteractionHandler {
             .await;
         let pet = match preview {
             Ok(pet) => pet,
-            Err(error) => return followup_error(&responder, error).await,
+            // The deferred response is public, so the failure resolves it
+            // rather than leaving a "thinking..." placeholder standing beside
+            // an ephemeral error.
+            Err(error) => {
+                return responder
+                    .edit_original(InteractionResponse::message(format!("❌ {error}")))
+                    .await
+                    .map_err(|response_error| response_error.to_string());
+            }
         };
         let token = self.next_token("eat");
         let embed = eating_warning_embed(&pet);

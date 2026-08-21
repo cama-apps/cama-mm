@@ -364,10 +364,13 @@ impl RatingHistoryRepository {
 
     /// Re-check cooldown, reset both rating systems' uncertainty, and advance
     /// the durable recalibration counter in one `BEGIN IMMEDIATE` transaction.
+    /// Returns the new recalibration count and the rating as it stood inside
+    /// the transaction, so callers report the value that was actually
+    /// preserved rather than the one read during the eligibility check.
     pub fn execute_recalibration_atomic(
         &self,
         request: RecalibrationRequest,
-    ) -> Result<i64, RecalibrationRepositoryError> {
+    ) -> Result<(i64, Option<f64>), RecalibrationRepositoryError> {
         let guild_id = Self::normalize_guild_id(request.guild_id);
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -467,7 +470,7 @@ impl RatingHistoryRepository {
             increment_openskill_revision(&transaction, guild_id)?;
         }
         transaction.commit()?;
-        Ok(new_total)
+        Ok((new_total, rating_at_recalibration))
     }
 
     /// Insert one row using the same column set as Python's history writer.
@@ -871,30 +874,31 @@ impl RecalibrationService {
         };
         let new_rd = current_rd.max(self.config.initial_rd).min(MAX_GLICKO_RD);
         let new_os_sigma = current_os_sigma.map(|_| CamaOpenSkillSystem::DEFAULT_SIGMA);
-        let total_recalibrations =
-            match self
-                .repository
-                .execute_recalibration_atomic(RecalibrationRequest {
-                    discord_id,
-                    guild_id,
-                    now,
-                    cooldown_seconds: self.config.cooldown_seconds,
-                    new_rd,
-                    new_volatility: self.config.initial_volatility,
-                    new_os_sigma,
-                }) {
-                Ok(total) => total,
-                Err(RecalibrationRepositoryError::OnCooldown { remaining_seconds }) => {
-                    return Ok(RecalibrationExecution::Rejected(
-                        RecalibrationEligibility::OnCooldown {
-                            cooldown_ends_at: now.saturating_add(remaining_seconds),
-                        },
-                    ));
-                }
-                Err(error) => return Err(error),
-            };
+        let (total_recalibrations, settled_rating) = match self
+            .repository
+            .execute_recalibration_atomic(RecalibrationRequest {
+                discord_id,
+                guild_id,
+                now,
+                cooldown_seconds: self.config.cooldown_seconds,
+                new_rd,
+                new_volatility: self.config.initial_volatility,
+                new_os_sigma,
+            }) {
+            Ok(settled) => settled,
+            Err(RecalibrationRepositoryError::OnCooldown { remaining_seconds }) => {
+                return Ok(RecalibrationExecution::Rejected(
+                    RecalibrationEligibility::OnCooldown {
+                        cooldown_ends_at: now.saturating_add(remaining_seconds),
+                    },
+                ));
+            }
+            Err(error) => return Err(error),
+        };
         Ok(RecalibrationExecution::Success(RecalibrationSuccess {
-            old_rating: current_rating,
+            // The rating the transaction preserved, which is what the player
+            // row now holds; the eligibility read may predate a settlement.
+            old_rating: settled_rating.unwrap_or(current_rating),
             old_rd: current_rd,
             old_volatility: current_volatility,
             new_rd,

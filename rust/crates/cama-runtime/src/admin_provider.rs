@@ -2022,13 +2022,13 @@ impl AdminHandler {
             new_volatility: self.config.recalibration_initial_volatility,
             new_os_sigma,
         };
-        let total = match tokio::task::spawn_blocking(move || {
+        let (total, settled_rating) = match tokio::task::spawn_blocking(move || {
             repository.execute_recalibration_atomic(request)
         })
         .await
         .map_err(|error| format!("recalibration task failed: {error}"))?
         {
-            Ok(total) => total,
+            Ok(settled) => settled,
             Err(cama_db::rating_history_repository::RecalibrationRepositoryError::OnCooldown {
                 remaining_seconds,
             }) => {
@@ -2044,6 +2044,9 @@ impl AdminHandler {
             }
             Err(error) => return Err(error.to_string().into()),
         };
+        // Report the rating the transaction preserved: the snapshot read
+        // before it may predate a match settlement that has since committed.
+        let rating = settled_rating.unwrap_or(rating);
         let mut os_line = String::new();
         if let (Some(old), Some(new)) = (old_os_sigma, new_os_sigma) {
             os_line = format!("• OpenSkill σ: {old:.2} → **{new:.2}**\n");

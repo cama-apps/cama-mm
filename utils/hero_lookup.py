@@ -16,7 +16,17 @@ def _load_heroes():
     if _HEROES_LOADED:
         return
 
-    hero_file = os.path.join(os.path.dirname(__file__), "heroes.json")
+    # The catalog moved into the Rust tree, which now owns it; this legacy
+    # reader is reference material and follows it rather than going stale.
+    hero_file = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "rust",
+        "crates",
+        "cama-app",
+        "data",
+        "heroes.json",
+    )
     try:
         with open(hero_file) as f:
             _HEROES = json.load(f)

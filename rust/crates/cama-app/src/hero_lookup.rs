@@ -1,7 +1,7 @@
 //! Cached Dota hero names and read-only Dotabase metadata.
 //!
-//! Names are compiled from the checked-in `data/heroes.json` snapshot used by the
-//! Python bot. Rich metadata is loaded once from the immutable Dotabase SQLite
+//! Names are compiled from the checked-in `data/heroes.json` snapshot this
+//! crate owns. Rich metadata is loaded once from the immutable Dotabase SQLite
 //! artifact and detached before the connection closes.
 
 use std::{

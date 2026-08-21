@@ -91,9 +91,10 @@ use crate::discord_transport::DiscordTransport;
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
     InteractionActionRow, InteractionAllowedMentions, InteractionButton, InteractionButtonStyle,
-    InteractionEmbed, InteractionHandler, InteractionHandlerError, InteractionMessageReceipt,
-    InteractionOption, InteractionRequest, InteractionResponder, InteractionResponse,
-    InteractionValue, RegistrationError, RegistrationProvider, RegistryBuilder,
+    InteractionEmbed, InteractionHandler, InteractionHandlerError, InteractionMessageDelivery,
+    InteractionMessageReceipt, InteractionOption, InteractionRequest, InteractionResponder,
+    InteractionResponse, InteractionValue, RegistrationError, RegistrationProvider,
+    RegistryBuilder,
 };
 
 #[path = "info_provider/calibration.rs"]
@@ -719,8 +720,17 @@ impl InfoHandler {
             {
                 views.remove(&view_id);
             }
+            // Delete through the channel rather than the interaction followup:
+            // the timer restarts on every interaction, so it can fire after the
+            // interaction token's fifteen-minute life, and a token-scoped
+            // delete would 404 and leave the message behind.
             if let Some(receipt) = receipt
-                && let Err(error) = responder.delete_message(receipt).await
+                && let Err(error) = responder
+                    .delete_message(InteractionMessageReceipt {
+                        delivery: InteractionMessageDelivery::ChannelFallback,
+                        ..receipt
+                    })
+                    .await
             {
                 warn!(%error, view_id, "failed to delete expired leaderboard message");
             }

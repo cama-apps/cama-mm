@@ -998,3 +998,65 @@ fn wrong_answer_response_continues_with_exact_previous_result_copy() {
     assert!(previous.starts_with("❌ Not this time. The answer was **B. Bravo**."));
     assert!(previous.contains("Computed from recorded inhouse matches."));
 }
+
+#[tokio::test]
+async fn a_repeated_click_on_a_settled_question_leaves_the_session_running() {
+    // A second click on an already-settled question must not end a healthy run
+    // or burn the daily cooldown. This pins the sequential case, which the
+    // stale-question guard handles; the concurrent case, where both clicks pass
+    // that guard and the loser's settle returns None, needs an interleaving
+    // seam the provider does not expose.
+    let fixture = Fixture::migrated();
+    let session_id = start_manual(&fixture, 3);
+    let config = config(fixture.database.path(), &[]);
+    let provider = provider(&fixture, &config, discord());
+    let handler = registry(&provider)
+        .component_handler("player_trivia:")
+        .expect("component handler");
+
+    handler
+        .handle(
+            component(format!("player_trivia:{session_id}:1:1"), USER),
+            Arc::new(RecordingResponder::default()),
+        )
+        .await
+        .expect("winning click settles question 1");
+
+    // The loser of the race answers the same question number afterwards.
+    let loser = Arc::new(RecordingResponder::default());
+    handler
+        .handle(
+            component(format!("player_trivia:{session_id}:1:0"), USER),
+            loser.clone(),
+        )
+        .await
+        .expect("losing click is tolerated");
+
+    let session = fixture
+        .repository()
+        .get_session(session_id)
+        .expect("session read")
+        .expect("session");
+    assert_eq!(
+        session.status, "active",
+        "the healthy session must keep running"
+    );
+    assert_eq!(
+        session.next_question().map(|row| row.question_number),
+        Some(2),
+        "the winning settlement stands"
+    );
+    let captured = loser.captured.lock().expect("responses");
+    assert!(
+        !captured
+            .updates
+            .iter()
+            .any(|update| update.embeds.iter().any(|embed| {
+                embed
+                    .title
+                    .as_deref()
+                    .is_some_and(|title| title.contains("Interrupted"))
+            })),
+        "the loser must not report the run as interrupted"
+    );
+}
