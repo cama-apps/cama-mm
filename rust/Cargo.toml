@@ -42,15 +42,17 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 all = "warn"
 
-# The runtime has a broad all-target test surface. Full debuginfo plus Cargo's
+# The runtime has a broad all-target test surface. Debug information and Cargo's
 # per-crate incremental caches can exceed the storage available on development
-# and CI hosts without affecting test behavior. Keep line tables for useful
-# backtraces, disable duplicate incremental object caches, and leave release
-# builds (including benchmarks) untouched.
+# and CI hosts without affecting test behavior. Keep line tables for normal
+# development, omit them from test harnesses (assertions still report source
+# locations), disable duplicate incremental object caches, and leave release
+# builds (including benchmarks) untouched. Override CARGO_PROFILE_TEST_DEBUG
+# when a test needs a symbolic backtrace.
 [profile.dev]
 debug = "line-tables-only"
 incremental = false
 
 [profile.test]
-debug = "line-tables-only"
+debug = false
 incremental = false
