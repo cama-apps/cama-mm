@@ -1906,6 +1906,14 @@ impl LobbyInteractionHandler {
                 ));
             }
             self.state.sync_ready_lobby(scope);
+            // Pruned players are durably out of the lobby, so their sword
+            // reactions have to go too -- the kick, leave and suspension paths
+            // all clean up the same way, and a stale reaction re-joins them.
+            for player_id in &plan.pruned_players {
+                if let Err(error) = self.state.remove_lobby_reaction(scope, *player_id).await {
+                    debug!(%error, ?scope, player = player_id.0, "stale-prune reaction cleanup failed");
+                }
+            }
         }
         self.execute_readycheck_plan(
             plan,

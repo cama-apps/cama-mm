@@ -4120,7 +4120,12 @@ impl DigBossRuntimeService {
                 pinnacle_base_combat(risk_tier),
             )
         };
-        let cautious = make_risk(RiskTier::Cautious, preparation(RiskTier::Cautious))?;
+        // Capture the cautious preparation once: re-invoking it below for
+        // pet_assist would run a fourth full preparation pass whose errors land
+        // in the adapter after warnings have already been harvested.
+        let cautious_preparation = preparation(RiskTier::Cautious);
+        let cautious_pet_assist = cautious_preparation.pet_assist.clone();
+        let cautious = make_risk(RiskTier::Cautious, cautious_preparation)?;
         let bold = make_risk(RiskTier::Bold, preparation(RiskTier::Bold))?;
         let reckless = make_risk(RiskTier::Reckless, preparation(RiskTier::Reckless))?;
         if !has_great_lantern {
@@ -4143,7 +4148,7 @@ impl DigBossRuntimeService {
                 boss_id,
                 boss_name: phase_definition.title.to_owned(),
                 phase,
-                pet_assist: preparation(RiskTier::Cautious).pet_assist,
+                pet_assist: cautious_pet_assist,
                 enhanced_mechanic_ids: if enhanced {
                     phase_definition
                         .mechanic_pool
