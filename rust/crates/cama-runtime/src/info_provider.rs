@@ -330,6 +330,13 @@ impl InteractionHandler for InfoHandler {
     }
 }
 
+/// How a leaderboard's candidate ids were classified: from the guild's member
+/// cache snapshot, or not at all because this transport keeps no cache.
+enum MemberResolution {
+    Snapshot(GuildMemberDirectory),
+    Uncached(Vec<i64>),
+}
+
 impl InfoHandler {
     async fn handle_help(
         &self,
@@ -486,22 +493,56 @@ impl InfoHandler {
         Ok(())
     }
 
+    /// Classify every leaderboard candidate against the guild's member cache.
+    ///
+    /// This used to issue one live member request per unresolved candidate,
+    /// sequentially, on every `/leaderboard`: the candidate set is the union of
+    /// players, bettors, tip senders and recipients, and trivia participants,
+    /// so every departed player cost a round trip. Python filters against a
+    /// single `guild.members` snapshot, and so does this.
     async fn member_directory(
         &self,
         guild_id: u64,
         signed_guild_id: Option<i64>,
     ) -> Result<GuildMemberDirectory, InteractionHandlerError> {
         let repository = self.leaderboard.clone();
-        let ids = tokio::task::spawn_blocking(move || {
-            repository
+        let discord = Arc::clone(&self.discord);
+        let resolution = tokio::task::spawn_blocking(move || {
+            let ids = repository
                 .candidate_discord_ids(signed_guild_id)
-                .map_err(|error| error.to_string())
+                .map_err(|error| error.to_string())?;
+            Ok::<_, String>(match discord.cached_guild_member_display_names(guild_id)? {
+                // A candidate absent from the snapshot has left the guild
+                // and is simply not listed.
+                Some(names) => MemberResolution::Snapshot(GuildMemberDirectory::new(
+                    ids.into_iter().filter_map(|discord_id| {
+                        let user_id = u64::try_from(discord_id).ok()?;
+                        Some((discord_id, names.get(&user_id)?.clone()))
+                    }),
+                )),
+                None => MemberResolution::Uncached(ids),
+            })
         })
         .await
         .map_err(|error| {
             InteractionHandlerError::from(format!("leaderboard member-id task failed: {error}"))
         })?
         .map_err(InteractionHandlerError::from)?;
+        match resolution {
+            MemberResolution::Snapshot(directory) => Ok(directory),
+            MemberResolution::Uncached(ids) => {
+                Ok(self.member_directory_by_lookup(guild_id, ids).await)
+            }
+        }
+    }
+
+    /// Fallback for transports without a member cache: resolve each candidate
+    /// on its own, preserving the pre-snapshot behavior exactly.
+    async fn member_directory_by_lookup(
+        &self,
+        guild_id: u64,
+        ids: Vec<i64>,
+    ) -> GuildMemberDirectory {
         let mut members = Vec::with_capacity(ids.len());
         for discord_id in ids {
             let Ok(user_id) = u64::try_from(discord_id) else {
@@ -511,14 +552,13 @@ impl InfoHandler {
                 Ok(Some(member)) => members.push((discord_id, member.display_name)),
                 Ok(None) => {}
                 Err(error) => {
-                    // Python filters against a one-time cache snapshot. A
-                    // candidate that cannot be resolved is therefore absent,
-                    // not fatal to every other leaderboard entry.
+                    // A candidate that cannot be resolved is absent, not fatal
+                    // to every other leaderboard entry.
                     warn!(%error, guild_id, user_id, "unable to resolve leaderboard member");
                 }
             }
         }
-        Ok(GuildMemberDirectory::new(members))
+        GuildMemberDirectory::new(members)
     }
 
     async fn handle_leaderboard_component(

@@ -4,7 +4,7 @@
 //! production adapter is attached to the live Serenity context before ready
 //! recovery or interaction dispatch; tests use a deterministic recording port.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use async_trait::async_trait;
 
@@ -447,6 +447,23 @@ pub trait DiscordTransport: Send + Sync {
         _guild_id: u64,
         _user_id: u64,
     ) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+
+    /// One-shot snapshot of a guild's cached member display names, keyed by
+    /// Discord user id. Callers that must classify many stored ids at once --
+    /// the unified leaderboard -- read the member cache once instead of
+    /// issuing one member request per id, matching Python's single
+    /// `guild.members` snapshot.
+    ///
+    /// `Ok(None)` means this transport has no member cache for the guild.
+    /// Callers must not read that as "every candidate has left"; they fall
+    /// back to per-member resolution. A cached guild returns `Ok(Some(..))`
+    /// even when the map is empty.
+    fn cached_guild_member_display_names(
+        &self,
+        _guild_id: u64,
+    ) -> Result<Option<BTreeMap<u64, String>>, String> {
         Ok(None)
     }
 

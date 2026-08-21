@@ -4,7 +4,7 @@
 //! limits, and automatic reconnects. The outer runtime supervisor still
 //! restarts a fully failed client session with bounded backoff.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
@@ -4556,6 +4556,23 @@ impl DiscordTransport for SerenityDiscordTransport {
                 .members
                 .get(&user_id)
                 .map(|member| member.display_name().to_owned())
+        }))
+    }
+
+    fn cached_guild_member_display_names(
+        &self,
+        guild_id: u64,
+    ) -> Result<Option<BTreeMap<u64, String>>, String> {
+        if guild_id == 0 {
+            return Ok(None);
+        }
+        let context = self.context()?;
+        Ok(context.cache.guild(GuildId::new(guild_id)).map(|guild| {
+            guild
+                .members
+                .iter()
+                .map(|(user_id, member)| (user_id.get(), member.display_name().to_owned()))
+                .collect()
         }))
     }
 
