@@ -460,10 +460,12 @@ pub trait DiscordTransport: Send + Sync {
         Ok(None)
     }
 
-    /// Return the requested members whose Discord presence contains a Go Live
-    /// streaming activity. Activity names alone cannot distinguish this from
-    /// Playing/Listening, so production inspects Discord's typed activity and
-    /// older transports deliberately return an empty set.
+    /// Return the requested members who are actively using Discord Go Live.
+    ///
+    /// Go Live is a voice-state flag (`self_stream`), not a presence activity:
+    /// a Twitch/YouTube "Streaming" rich presence is a different feature and
+    /// must not qualify. Transports without a voice-state cache deliberately
+    /// return an empty set.
     async fn streaming_member_ids(
         &self,
         _guild_id: u64,

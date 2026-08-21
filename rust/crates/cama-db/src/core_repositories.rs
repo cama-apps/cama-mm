@@ -387,6 +387,37 @@ impl PlayerRepository {
             .map_err(Into::into)
     }
 
+    /// Discord IDs eligible for the `lottery` disbursement: players who have
+    /// played a match at or after `cutoff` (an ISO-8601 timestamp).
+    ///
+    /// `last_match_date` holds a mix of RFC-3339 (`...T12:00:00+00:00`) and
+    /// SQLite (`... 12:00:00`) text, so both sides are normalised through
+    /// `datetime()` rather than compared lexicographically -- a raw string
+    /// compare would rank every space-separated row below every RFC-3339 one.
+    /// Rows with no recorded or unparseable match date are excluded rather
+    /// than treated as active.
+    pub fn lottery_candidates(
+        &self,
+        guild_id: Option<i64>,
+        cutoff: &str,
+    ) -> Result<Vec<i64>, CoreRepositoryError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT discord_id FROM players
+             WHERE guild_id = ?1
+               AND discord_id IS NOT NULL
+               AND last_match_date IS NOT NULL
+               AND datetime(last_match_date) >= datetime(?2)
+             ORDER BY discord_id",
+        )?;
+        statement
+            .query_map(params![Self::normalize_guild_id(guild_id), cutoff], |row| {
+                row.get::<_, i64>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn exists(
         &self,
         discord_id: i64,
@@ -5396,6 +5427,59 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["Player3", "Player1", "Player4", "Player0", "Player2"]
         );
+    }
+
+    #[test]
+    fn lottery_candidates_admit_recent_players_across_both_date_formats() {
+        let fixture = Fixture::new();
+        for discord_id in [10_201, 10_202, 10_203, 10_204] {
+            fixture.add_player(discord_id, TEST_GUILD_ID);
+        }
+        fixture.add_player(10_201, TEST_GUILD_ID_SECONDARY);
+        let connection = fixture.connection();
+        // RFC-3339 inside the window.
+        connection
+            .execute(
+                "UPDATE players SET last_match_date=?1 WHERE discord_id=10201 AND guild_id=?2",
+                params!["2026-08-15T12:00:00+00:00", TEST_GUILD_ID],
+            )
+            .unwrap();
+        // SQLite-formatted text inside the window: a lexicographic compare
+        // against an RFC-3339 cutoff would wrongly drop this row.
+        connection
+            .execute(
+                "UPDATE players SET last_match_date=?1 WHERE discord_id=10202 AND guild_id=?2",
+                params!["2026-08-16 09:30:00", TEST_GUILD_ID],
+            )
+            .unwrap();
+        // Outside the window.
+        connection
+            .execute(
+                "UPDATE players SET last_match_date=?1 WHERE discord_id=10203 AND guild_id=?2",
+                params!["2026-07-01T12:00:00+00:00", TEST_GUILD_ID],
+            )
+            .unwrap();
+        // Never played.
+        connection
+            .execute(
+                "UPDATE players SET last_match_date=NULL WHERE discord_id=10204 AND guild_id=?1",
+                [TEST_GUILD_ID],
+            )
+            .unwrap();
+        // Recent, but in another guild.
+        connection
+            .execute(
+                "UPDATE players SET last_match_date=?1 WHERE discord_id=10201 AND guild_id=?2",
+                params!["2026-08-15T12:00:00+00:00", TEST_GUILD_ID_SECONDARY],
+            )
+            .unwrap();
+
+        let candidates = fixture
+            .players
+            .lottery_candidates(Some(TEST_GUILD_ID), "2026-08-07T00:00:00+00:00")
+            .unwrap();
+
+        assert_eq!(candidates, vec![10_201, 10_202]);
     }
 
     #[test]

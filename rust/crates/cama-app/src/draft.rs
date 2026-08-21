@@ -2130,6 +2130,25 @@ pub trait DraftCoinPort: Send {
     fn choose(&mut self, captain1_id: i64, captain2_id: i64) -> i64;
 }
 
+/// Production coin: an unbiased random flip, matching the legacy
+/// `random.choice([captain1_id, captain2_id])` contract.
+///
+/// The flip decides first pick, so it must not be predictable from earlier
+/// drafts in this or any other guild.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RandomDraftCoin;
+
+impl DraftCoinPort for RandomDraftCoin {
+    fn choose(&mut self, captain1_id: i64, captain2_id: i64) -> i64 {
+        if fastrand::bool() {
+            captain2_id
+        } else {
+            captain1_id
+        }
+    }
+}
+
+/// Deterministic strict alternation, for tests that need a fixed flip.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AlternatingDraftCoin {
     choose_second: bool,
@@ -2161,7 +2180,7 @@ impl DraftService {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            coin: Box::new(AlternatingDraftCoin::default()),
+            coin: Box::new(RandomDraftCoin),
         }
     }
 
@@ -5076,6 +5095,34 @@ mod tests {
             .map(|_| service.coinflip(100, 200))
             .collect::<BTreeSet<_>>();
         assert_eq!(results, BTreeSet::from([100, 200]));
+    }
+
+    #[test]
+    fn production_coinflip_is_random_rather_than_alternating() {
+        // The default service is what the runtime composes, so its flips must
+        // not be predictable from the previous flip.
+        let mut service = DraftService::new();
+        let flips = (0..200)
+            .map(|_| service.coinflip(100, 200))
+            .collect::<Vec<_>>();
+
+        assert!(flips.contains(&100) && flips.contains(&200));
+        assert!(
+            flips.windows(2).any(|pair| pair[0] == pair[1]),
+            "a strictly alternating coin never repeats a winner"
+        );
+    }
+
+    #[test]
+    fn alternating_coin_remains_available_for_deterministic_tests() {
+        let mut service = DraftService::with_coin(AlternatingDraftCoin::default());
+
+        assert_eq!(
+            (0..4)
+                .map(|_| service.coinflip(100, 200))
+                .collect::<Vec<_>>(),
+            vec![100, 200, 100, 200]
+        );
     }
 
     #[test]

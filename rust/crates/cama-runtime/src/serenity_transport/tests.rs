@@ -1124,10 +1124,21 @@ fn active_match_thread_edit_locks_without_archiving() {
 }
 
 #[test]
-fn streaming_bonus_uses_typed_go_live_activity() {
-    assert!(is_streaming_activity(ActivityType::Streaming));
-    assert!(!is_streaming_activity(ActivityType::Playing));
-    assert!(!is_streaming_activity(ActivityType::Listening));
+fn streaming_bonus_follows_voice_go_live_not_twitch_presence() {
+    // 10 is screen-sharing, 20 is in voice without Go Live, 30 is not in voice
+    // at all (a Twitch "Streaming" rich presence looks exactly like this).
+    let self_stream = |user_id: u64| match user_id {
+        10 => Some(true),
+        20 => Some(false),
+        _ => None,
+    };
+
+    assert_eq!(
+        go_live_member_ids(&[10, 20, 30], self_stream),
+        BTreeSet::from([10])
+    );
+    // Members outside the requested set never earn the bonus.
+    assert!(go_live_member_ids(&[20, 30], self_stream).is_empty());
 }
 
 /// Serve one canned HTTP reply and return the proxy base URL plus the server
