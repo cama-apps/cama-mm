@@ -759,10 +759,14 @@ fn suspension_from_row(row: &rusqlite::Row<'_>) -> Result<LobbySuspension, rusql
     })
 }
 
-fn insert_event(
+/// Append one audit row inside an existing transaction and return its id.
+///
+/// Shared with [`crate::low_priority`] so a low-priority state change and its
+/// audit event commit together instead of in two transactions.
+pub(crate) fn insert_event_row(
     transaction: &Transaction<'_>,
     request: RecordModerationEventRequest<'_>,
-) -> Result<ModerationEvent, ModerationRepositoryError> {
+) -> Result<i64, rusqlite::Error> {
     let guild_id = ModerationRepository::normalize_guild_id(request.guild_id);
     transaction.execute(
         "INSERT INTO moderation_events (
@@ -789,7 +793,14 @@ fn insert_event(
             request.now,
         ],
     )?;
-    let event_id = transaction.last_insert_rowid();
+    Ok(transaction.last_insert_rowid())
+}
+
+fn insert_event(
+    transaction: &Transaction<'_>,
+    request: RecordModerationEventRequest<'_>,
+) -> Result<ModerationEvent, ModerationRepositoryError> {
+    let event_id = insert_event_row(transaction, request)?;
     transaction
         .query_row(
             &format!("{EVENT_SELECT} WHERE event_id=?1"),
