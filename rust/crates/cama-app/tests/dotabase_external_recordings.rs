@@ -14,8 +14,10 @@ use cama_app::hero_lookup::{HeroImageSize, HeroLookup, HeroRoleClass};
 use cama_app::trivia_data::{TriviaDataRegistry, TriviaDataSource};
 use rusqlite::Connection;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+
+mod support;
+use support::sha256_hex;
 
 const FIXTURE_MANIFEST: &str = include_str!("fixtures/dotabase/manifest.json");
 const CATALOG_SQL: &str = include_str!("fixtures/dotabase/sanitized_catalog.sql");
@@ -49,10 +51,7 @@ fn dotabase_fixture_manifest_is_hashed_and_redacted() {
     let expected = manifest["contracts"][0]["sha256"]
         .as_str()
         .expect("catalog body hash");
-    assert_eq!(
-        format!("{:x}", Sha256::digest(CATALOG_SQL.as_bytes())),
-        expected
-    );
+    assert_eq!(sha256_hex(CATALOG_SQL.as_bytes()), expected);
 
     let contracts = manifest["contracts"]
         .as_array()

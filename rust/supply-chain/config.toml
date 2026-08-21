@@ -4,6 +4,14 @@
 [cargo-vet]
 version = "0.10"
 
+[imports.nautech]
+url = "https://raw.githubusercontent.com/nautechsystems/nautilus_trader/2114cf6f761429e0adb5ca9596fcd7b895b16011/.supply-chain/audits.toml"
+exclude = ["data-encoding"]
+
+[imports.toolkit]
+url = "https://raw.githubusercontent.com/koundinyagoparaju/toolkit/ecd84cb808885f89fd0509d90701671553063726/supply-chain/audits.toml"
+exclude = ["data-encoding", "getrandom", "gif", "r-efi", "typenum", "weezl"]
+
 [[exemptions.adler2]]
 version = "2.0.1"
 criteria = "safe-to-deploy"

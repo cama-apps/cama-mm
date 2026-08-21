@@ -1,2 +1,44 @@
 
 # cargo-vet imports lock
+
+[[audits.nautech.audits.hybrid-array]]
+who = "Nautech Systems <info@nautechsystems.io>"
+criteria = "safe-to-deploy"
+delta = "0.4.13 -> 0.4.14"
+notes = "Adds type-level sizes for Streamlined NTRU Prime. No new unsafe, dependencies, build script, or ambient capabilities."
+
+[[audits.toolkit.audits.block-buffer]]
+who = "Koundinya Goparaju <koundinya.goparaju@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "0.10.4 -> 0.12.1"
+notes = "Rework onto hybrid-array. 22 unsafe sites, all documented invariant-based buffer ops: cursor position bounded by sealed BufferKind invariants before copy_nonoverlapping into remaining space, MaybeUninit assume_init after full writes, panic safety via ResetGuard Drop, ptr::read self-clone of a non-Drop type. No fs/net/process/env, no build script."
+
+[[audits.toolkit.audits.const-oid]]
+who = "Koundinya Goparaju <koundinya.goparaju@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.10.2"
+notes = "Const OID parsing. deny(unsafe_code) with one allowed site: repr(transparent) &[u8] -> &ObjectIdentifierRef reference cast. No fs/net/process/env, no build script."
+
+[[audits.toolkit.audits.crypto-common]]
+who = "Koundinya Goparaju <koundinya.goparaju@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "0.1.7 -> 0.2.2"
+notes = "Rework onto hybrid-array. forbid(unsafe_code); no fs/net/process/env; no build script."
+
+[[audits.toolkit.audits.digest]]
+who = "Koundinya Goparaju <koundinya.goparaju@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "0.10.7 -> 0.11.3"
+notes = "Trait-only rework for the 0.11 API. forbid(unsafe_code); no fs/net/process/env; no build script. Pure trait definitions and blanket impls."
+
+[[audits.toolkit.audits.hybrid-array]]
+who = "Koundinya Goparaju <koundinya.goparaju@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.4.13"
+notes = "generic-array successor. 37 unsafe sites, same idioms audited sound in generic-array: repr(transparent) slice<->array casts with length equality from typenum, MaybeUninit assume_init after position-tracked initialization with a panic guard that drops the initialized prefix, flatten/unflatten via ManuallyDrop + ptr::read at checked_mul offsets. No fs/net/process/env, no build script."
+
+[[audits.toolkit.audits.sha2]]
+who = "Koundinya Goparaju <koundinya.goparaju@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "0.10.9 -> 0.11.0"
+notes = "digest-0.11 migration. 59 unsafe sites, all in per-arch kernels (x86 SHA-NI/AVX2, aarch64, wasm32 simd128, riscv zknh, loongarch asm) reached only through guarded dispatch: compile_error! for compile-time backends, cpuid gating at runtime. riscv load_block branches on a runtime is_aligned() check before the aligned deref; fixed-size block/state arrays throughout; repr-transparent schedule casts. No fs/net/process/env, no build script."

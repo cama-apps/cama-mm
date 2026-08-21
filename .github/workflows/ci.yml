@@ -109,9 +109,13 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: "./rust -> target"
-          shared-key: rust-ci-tests-${{ matrix.name }}
-          cache-workspace-crates: true
-          cache-on-failure: true
+          # Pull requests can restore trusted default-branch caches, while
+          # caches they create are isolated to this PR's merge ref. Restore the
+          # shared dependency cache warmed on main and avoid disposable uploads.
+          shared-key: rust-ci-tests
+          cache-workspace-crates: false
+          cache-on-failure: false
+          save-if: "false"
 
       - name: Test ${{ matrix.name }}
         run: >-
@@ -139,8 +143,9 @@ jobs:
         with:
           workspaces: "./rust -> target"
           shared-key: rust-ci-lint
-          cache-workspace-crates: true
-          cache-on-failure: true
+          cache-workspace-crates: false
+          cache-on-failure: false
+          save-if: "false"
 
       - name: Check Rust formatting
         run: cargo fmt --manifest-path rust/Cargo.toml --all -- --check
@@ -165,9 +170,9 @@ jobs:
 
   # Retain the existing required status context without rebuilding the release
   # artifact on every PR. The main-only Release workflow owns compilation,
-  # publication, and the deploy handoff.
+  # publication, and the deploy handoff. This static contract runs immediately
+  # so it does not add a second runner startup after Rust validation completes.
   runtime-images:
-    needs: [dependency-policy, rust, rust-lint]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -182,6 +187,7 @@ jobs:
           grep -Fq 'ENV GIT_SHA=${GIT_SHA}' Dockerfile.rust
           ! grep -E 'setup-uv|uv (run|sync)|(^|[[:space:]])python3?([[:space:]]|$)' \
             .github/workflows/ci.yml \
+            .github/workflows/rust-cache-warm.yml \
             .github/workflows/release.yml \
             .github/workflows/deploy.yml \
             scripts/deploy-runtime \

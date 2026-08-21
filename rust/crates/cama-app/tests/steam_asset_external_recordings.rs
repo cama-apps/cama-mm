@@ -14,8 +14,10 @@ use std::time::{Duration, Instant};
 
 use cama_app::trivia_image_cache::TriviaImageCache;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use tempfile::tempdir;
+
+mod support;
+use support::sha256_hex;
 
 const FIXTURE_MANIFEST: &str = include_str!("fixtures/steam/manifest.json");
 const HERO_SUCCESS: &[u8] = include_bytes!("fixtures/steam/hero_success.txt");
@@ -164,7 +166,7 @@ fn steam_fixture_manifest_is_hashed_and_redacted() {
             let expected = response["sha256"]
                 .as_str()
                 .expect("Steam fixture body hash");
-            let actual = format!("{:x}", Sha256::digest(fixture_body(name)));
+            let actual = sha256_hex(fixture_body(name));
             assert_eq!(actual, expected, "Steam fixture hash mismatch for {name}");
             referenced.insert(name);
         }
