@@ -1275,4 +1275,5 @@ fn page_footer(state: &TabState, count: Option<(usize, usize, &'static str)>) ->
 }
 
 #[cfg(test)]
+#[path = "unified_leaderboard/tests.rs"]
 mod tests;

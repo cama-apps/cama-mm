@@ -1022,4 +1022,5 @@ where
 }
 
 #[cfg(test)]
+#[path = "mana_service/tests.rs"]
 mod tests;

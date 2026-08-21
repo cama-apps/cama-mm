@@ -46,7 +46,7 @@ impl PythonRandom {
     /// `init_by_array` (e.g. the version-2 string-seed path, whose integer can
     /// exceed 64 bits).
     #[must_use]
-    pub(crate) fn from_u32_key(key: &[u32]) -> Self {
+    pub fn from_u32_key(key: &[u32]) -> Self {
         Self::init_by_array(key)
     }
 

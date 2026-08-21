@@ -591,4 +591,5 @@ fn validate_create(request: CreateSuspension<'_>) -> Result<(), ModerationPolicy
 }
 
 #[cfg(test)]
+#[path = "moderation/tests.rs"]
 mod tests;

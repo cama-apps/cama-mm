@@ -422,4 +422,5 @@ fn lobby_members(snapshot: &PendingVoteSnapshot) -> BTreeSet<i64> {
 }
 
 #[cfg(test)]
+#[path = "match_voting_service/tests.rs"]
 mod tests;

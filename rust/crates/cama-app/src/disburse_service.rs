@@ -1648,4 +1648,5 @@ pub fn calculate_richest_distribution(
 }
 
 #[cfg(test)]
+#[path = "disburse_service/tests.rs"]
 mod tests;

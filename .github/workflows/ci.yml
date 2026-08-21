@@ -56,6 +56,18 @@ jobs:
           - name: cama-app
             package: cama-app
             arguments: --all-targets --all-features
+          - name: cama-app-dig
+            package: cama-app-dig
+            arguments: --all-targets --all-features
+          - name: cama-app-gameplay
+            package: cama-app-gameplay
+            arguments: --all-targets --all-features
+          - name: cama-app-match
+            package: cama-app-match
+            arguments: --all-targets --all-features
+          - name: cama-app-platform
+            package: cama-app-platform
+            arguments: --all-targets --all-features
           - name: cama-runtime-core
             package: cama-runtime
             arguments: >-

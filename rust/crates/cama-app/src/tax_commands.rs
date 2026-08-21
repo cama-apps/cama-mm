@@ -1983,4 +1983,5 @@ impl VanityTaxPort for InMemoryVanityTax {
 }
 
 #[cfg(test)]
+#[path = "tax_commands/tests.rs"]
 mod tests;

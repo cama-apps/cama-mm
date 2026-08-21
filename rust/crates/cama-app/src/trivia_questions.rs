@@ -1761,4 +1761,5 @@ pub fn generate_question(
 }
 
 #[cfg(test)]
+#[path = "trivia_questions/tests.rs"]
 mod tests;

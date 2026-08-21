@@ -336,4 +336,5 @@ const BUCKET_KEYS: [&str; 10] = [
 ];
 
 #[cfg(test)]
+#[path = "rating_comparison_service/tests.rs"]
 mod tests;

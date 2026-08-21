@@ -1,6 +1,10 @@
 [workspace]
 members = [
     "crates/cama-app",
+    "crates/cama-app-dig",
+    "crates/cama-app-gameplay",
+    "crates/cama-app-match",
+    "crates/cama-app-platform",
     "crates/cama-db",
     "crates/cama-domain",
     "crates/cama-runtime",

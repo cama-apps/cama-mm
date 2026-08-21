@@ -1152,4 +1152,5 @@ pub fn player_wrapped_for_registration(player_name: Option<&str>) -> Option<Stri
 }
 
 #[cfg(test)]
+#[path = "wrapped_story/tests.rs"]
 mod tests;

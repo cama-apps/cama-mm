@@ -108,6 +108,10 @@ name = "cama-app"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "cama-app-dig",
+ "cama-app-gameplay",
+ "cama-app-match",
+ "cama-app-platform",
  "cama-db",
  "cama-domain",
  "chrono",
@@ -124,6 +128,63 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+]
+
+[[package]]
+name = "cama-app-dig"
+version = "0.1.0"
+dependencies = [
+ "cama-db",
+ "cama-domain",
+ "fastrand",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "cama-app-gameplay"
+version = "0.1.0"
+dependencies = [
+ "cama-db",
+ "cama-domain",
+ "chrono",
+ "flate2",
+ "gif",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "cama-app-match"
+version = "0.1.0"
+dependencies = [
+ "cama-db",
+ "cama-domain",
+ "fastrand",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "cama-app-platform"
+version = "0.1.0"
+dependencies = [
+ "cama-db",
+ "cama-domain",
+ "gif",
+ "rusqlite",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
