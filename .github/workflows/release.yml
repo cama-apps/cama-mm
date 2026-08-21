@@ -21,7 +21,6 @@ jobs:
       CARGO_TARGET_DIR: rust/target
       RUST_RUNTIME_IMAGE: ghcr.io/${{ github.repository }}-rust:${{ github.sha }}
       SCCACHE_GHA_ENABLED: "true"
-      RUSTC_WRAPPER: sccache
     steps:
       - uses: actions/checkout@v7
         with:
@@ -57,6 +56,10 @@ jobs:
           cache-on-failure: true
 
       - name: Build release runtime
+        # The dependency gate runs before sccache is installed, so the wrapper
+        # must stay scoped to compilation rather than the whole job.
+        env:
+          RUSTC_WRAPPER: sccache
         run: >-
           cargo build --locked --manifest-path rust/Cargo.toml
           --release --package cama-runtime --bin cama-rust
