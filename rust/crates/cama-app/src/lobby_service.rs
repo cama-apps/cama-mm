@@ -2,9 +2,14 @@
 //!
 //! The live Python application still owns persistence and Discord callbacks.
 //! This module ports the concurrency-sensitive lobby policy behind typed
-//! player, pending-match, clock, and bonus-pool ports. All mutations and
-//! ready-check snapshots for a guild/lobby kind share one mutex, matching the
-//! canonical manager's atomic membership boundary.
+//! player, pending-match, clock, and bonus-pool ports.
+//!
+//! Two locks, always taken in this order. `writes` serializes durable
+//! mutations and is held across SQLite, so a read-modify-persist-commit
+//! sequence stays atomic and no writer can lose another's update. `state`
+//! guards the in-memory maps and is only ever held for short, allocation-only
+//! sections -- never across persistence or moderation I/O -- so the many
+//! readers that run on Tokio async workers never wait on the database.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -74,7 +79,8 @@ pub trait PendingMatchPort {
 /// Existing-schema moderation boundary used by lobby membership mutations.
 ///
 /// Reads may close a completed suspension, so callers must never hold the
-/// lobby-state mutex while invoking this port.
+/// lobby-state mutex -- or the durable-write mutex -- while invoking this
+/// port.
 pub trait LobbyModerationPort: Send + Sync {
     fn active_suspension(
         &self,
@@ -287,6 +293,20 @@ impl LobbyRecord {
         }
     }
 
+    /// Replace only the fields a durable write republishes.
+    ///
+    /// `readycheck` is in-memory only and is never carried by a durable write,
+    /// so a ready-check mutation that landed while the persist was running is
+    /// preserved instead of being rolled back by the publish.
+    fn adopt_durable(&mut self, persisted: Self) {
+        self.scope = persisted.scope;
+        self.created_by = persisted.created_by;
+        self.created_at_ns = persisted.created_at_ns;
+        self.players = persisted.players;
+        self.player_join_times = persisted.player_join_times;
+        self.message_ids = persisted.message_ids;
+    }
+
     fn from_persisted(state: PersistedLobbyState) -> Option<Self> {
         if !state.status.eq_ignore_ascii_case("open") {
             return None;
@@ -381,6 +401,10 @@ pub struct LobbyService<P, M, C> {
     max_players: usize,
     persistence: Option<Arc<dyn LobbyPersistencePort>>,
     moderation: Option<Arc<dyn LobbyModerationPort>>,
+    /// Serializes durable mutations. Held across persistence I/O so no two
+    /// writers interleave a read-modify-persist-commit sequence, while `state`
+    /// stays free for readers running on async workers.
+    writes: Mutex<()>,
     state: Mutex<LobbyState>,
 }
 
@@ -406,6 +430,7 @@ where
             max_players,
             persistence: None,
             moderation: None,
+            writes: Mutex::new(()),
             state: Mutex::new(LobbyState::default()),
         }
     }
@@ -439,8 +464,32 @@ where
         Ok(self)
     }
 
+    /// The in-memory lock. Never held across persistence or moderation I/O:
+    /// most readers run on Tokio async workers.
     fn lock_state(&self) -> MutexGuard<'_, LobbyState> {
         self.state.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    /// The durable-mutation lock. Every method that reaches `persistence`
+    /// takes this first and holds it across the write, so the read its
+    /// candidate was built from cannot be superseded before the commit. Never
+    /// taken while `state` is held, and never held across a moderation read.
+    fn lock_writes(&self) -> MutexGuard<'_, ()> {
+        self.writes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
+    /// Publish a record whose durable write already succeeded. Callers hold
+    /// [`Self::lock_writes`].
+    fn publish_record(&self, state: &mut LobbyState, record: LobbyRecord) {
+        let scope = record.scope;
+        match state.lobbies.get_mut(&scope) {
+            Some(live) => live.adopt_durable(record),
+            None => {
+                state.lobbies.insert(scope, record);
+            }
+        }
     }
 
     fn is_low_skill_eligible(&self, player_id: UserId, guild_id: GuildId) -> bool {
@@ -449,6 +498,8 @@ where
             .is_some_and(|rating| rating < LOWSKILL_RATING_CUTOFF)
     }
 
+    /// Commit one lobby to durable storage. Callers hold
+    /// [`Self::lock_writes`] and must not hold `state`.
     fn persist_record(&self, record: &LobbyRecord) -> Result<(), LobbyPersistenceError> {
         self.persistence.as_ref().map_or(Ok(()), |persistence| {
             persistence
@@ -471,14 +522,14 @@ where
         })
     }
 
-    fn rollback_provisional_join(
-        &self,
-        state: &mut LobbyState,
-        scope: LobbyScope,
-        player_id: UserId,
-        created_shell: bool,
-    ) {
-        let Some(mut candidate) = state.lobbies.get(&scope).cloned() else {
+    /// Undo a provisional join. Callers must hold [`Self::lock_writes`]; the
+    /// state lock is taken only around the in-memory read and the publish, so
+    /// the durable cleanup never blocks readers.
+    fn rollback_provisional_join(&self, scope: LobbyScope, player_id: UserId, created_shell: bool) {
+        let Some(mut candidate) = ({
+            let state = self.lock_state();
+            state.lobbies.get(&scope).cloned()
+        }) else {
             return;
         };
         candidate.players.remove(&player_id);
@@ -489,14 +540,15 @@ where
                 .as_ref()
                 .map_or(Ok(false), |persistence| persistence.clear_lobby(scope));
             if cleared.is_ok() {
-                state.lobbies.remove(&scope);
+                self.lock_state().lobbies.remove(&scope);
                 return;
             }
         }
         // Preserve the in-memory rollback even if cleanup persistence is
         // temporarily unavailable. A later mutation/reconciliation can retry.
         let _ = self.persist_record(&candidate);
-        state.lobbies.insert(scope, candidate);
+        let mut state = self.lock_state();
+        self.publish_record(&mut state, candidate);
     }
 
     pub fn get_or_create_lobby(
@@ -523,17 +575,20 @@ where
         {
             return Err(LobbyCreationError::Suspended(Box::new(suspension)));
         }
-        let mut state = self.lock_state();
+        let _writes = self.lock_writes();
         // A concurrent creator may have published this scope while the
         // moderation read ran. Existing lobbies remain viewable to suspended
         // users, matching Python's get-or-create contract.
-        if let Some(lobby) = state.lobbies.get(&scope) {
-            return Ok(lobby.snapshot());
+        {
+            let state = self.lock_state();
+            if let Some(lobby) = state.lobbies.get(&scope) {
+                return Ok(lobby.snapshot());
+            }
         }
         let record = LobbyRecord::new(scope, creator_id, self.clock.now_ns());
         let snapshot = record.snapshot();
         self.persist_record(&record)?;
-        state.lobbies.insert(scope, record);
+        self.lock_state().lobbies.insert(scope, record);
         Ok(snapshot)
     }
 
@@ -643,20 +698,27 @@ where
             Ok(suspension) => suspension,
             Err(_) => self.active_suspension(player_id, scope).unwrap_or(None),
         };
-        let mut state = self.lock_state();
+        let _writes = self.lock_writes();
         if let Some(suspension) = post_add_suspension {
-            let reserved_by_target =
-                state.in_flight.get(&(scope.guild_id, player_id)) == Some(&scope.kind);
+            let reserved_by_target = {
+                let state = self.lock_state();
+                state.in_flight.get(&(scope.guild_id, player_id)) == Some(&scope.kind)
+            };
             if !reserved_by_target {
-                self.rollback_provisional_join(&mut state, scope, player_id, created_shell);
+                self.rollback_provisional_join(scope, player_id, created_shell);
                 return JoinOutcome::suspended(suspension);
             }
         }
-        let Some(candidate) = state.lobbies.get(&scope).cloned() else {
+        // The provisional add already mutated the live record; this clone only
+        // feeds the durable write, so there is nothing to publish afterwards.
+        let Some(candidate) = ({
+            let state = self.lock_state();
+            state.lobbies.get(&scope).cloned()
+        }) else {
             return JoinOutcome::failed(JoinFailure::Persistence);
         };
         if self.persist_record(&candidate).is_err() {
-            self.rollback_provisional_join(&mut state, scope, player_id, created_shell);
+            self.rollback_provisional_join(scope, player_id, created_shell);
             return JoinOutcome::failed(JoinFailure::Persistence);
         }
         JoinOutcome::joined(joined_at_ns)
@@ -690,6 +752,10 @@ where
         {
             return false;
         }
+        // Reset removes the lobby and retains in_flight as one durable step;
+        // holding the writer lock keeps this check-plus-insert on the same side
+        // of that boundary.
+        let _writes = self.lock_writes();
         let mut state = self.lock_state();
         let can_reserve = state
             .lobbies
@@ -709,6 +775,8 @@ where
         true
     }
 
+    /// No writer lock: removing in-flight keys is idempotent with the retain
+    /// a reset performs, and it reaches no durable storage.
     pub fn release_lobby_players(&self, player_ids: &BTreeSet<UserId>, scope: LobbyScope) {
         let mut state = self.lock_state();
         for player_id in player_ids {
@@ -736,18 +804,22 @@ where
         player_id: UserId,
         scope: LobbyScope,
     ) -> Result<bool, LobbyPersistenceError> {
-        let mut state = self.lock_state();
-        if state.in_flight.get(&(scope.guild_id, player_id)) == Some(&scope.kind) {
-            return Ok(false);
-        }
-        let Some(mut candidate) = state.lobbies.get(&scope).cloned() else {
+        let _writes = self.lock_writes();
+        let Some(mut candidate) = ({
+            let state = self.lock_state();
+            if state.in_flight.get(&(scope.guild_id, player_id)) == Some(&scope.kind) {
+                return Ok(false);
+            }
+            state.lobbies.get(&scope).cloned()
+        }) else {
             return Ok(false);
         };
         let removed = candidate.players.remove(&player_id);
         if removed {
             candidate.player_join_times.remove(&player_id);
             self.persist_record(&candidate)?;
-            state.lobbies.insert(scope, candidate);
+            let mut state = self.lock_state();
+            self.publish_record(&mut state, candidate);
         }
         Ok(removed)
     }
@@ -761,8 +833,11 @@ where
         scope: LobbyScope,
         joined_at_seconds: &BTreeMap<UserId, f64>,
     ) -> Result<usize, LobbyPersistenceError> {
-        let mut state = self.lock_state();
-        let Some(mut candidate) = state.lobbies.get(&scope).cloned() else {
+        let _writes = self.lock_writes();
+        let Some(mut candidate) = ({
+            let state = self.lock_state();
+            state.lobbies.get(&scope).cloned()
+        }) else {
             return Ok(0);
         };
         let mut updated = 0;
@@ -778,7 +853,8 @@ where
             return Ok(0);
         }
         self.persist_record(&candidate)?;
-        state.lobbies.insert(scope, candidate);
+        let mut state = self.lock_state();
+        self.publish_record(&mut state, candidate);
         Ok(updated)
     }
 
@@ -796,16 +872,20 @@ where
         player_ids: &BTreeSet<UserId>,
         scope: LobbyScope,
     ) -> Result<BTreeSet<UserId>, LobbyPersistenceError> {
-        let mut state = self.lock_state();
-        let pinned = player_ids
-            .iter()
-            .filter(|player_id| {
-                state.in_flight.get(&(scope.guild_id, **player_id)) == Some(&scope.kind)
-            })
-            .copied()
-            .collect::<BTreeSet<_>>();
-        let Some(mut candidate) = state.lobbies.get(&scope).cloned() else {
-            return Ok(BTreeSet::new());
+        let _writes = self.lock_writes();
+        let (pinned, mut candidate) = {
+            let state = self.lock_state();
+            let pinned = player_ids
+                .iter()
+                .filter(|player_id| {
+                    state.in_flight.get(&(scope.guild_id, **player_id)) == Some(&scope.kind)
+                })
+                .copied()
+                .collect::<BTreeSet<_>>();
+            let Some(candidate) = state.lobbies.get(&scope).cloned() else {
+                return Ok(BTreeSet::new());
+            };
+            (pinned, candidate)
         };
         let removed = player_ids
             .iter()
@@ -817,7 +897,8 @@ where
         }
         if !removed.is_empty() {
             self.persist_record(&candidate)?;
-            state.lobbies.insert(scope, candidate);
+            let mut state = self.lock_state();
+            self.publish_record(&mut state, candidate);
         }
         Ok(removed)
     }
@@ -867,13 +948,17 @@ where
         scope: LobbyScope,
         ids: LobbyMessageIds,
     ) -> Result<bool, LobbyPersistenceError> {
-        let mut state = self.lock_state();
-        let Some(mut candidate) = state.lobbies.get(&scope).cloned() else {
+        let _writes = self.lock_writes();
+        let Some(mut candidate) = ({
+            let state = self.lock_state();
+            state.lobbies.get(&scope).cloned()
+        }) else {
             return Ok(false);
         };
         candidate.message_ids = ids;
         self.persist_record(&candidate)?;
-        state.lobbies.insert(scope, candidate);
+        let mut state = self.lock_state();
+        self.publish_record(&mut state, candidate);
         Ok(true)
     }
 
@@ -982,8 +1067,8 @@ where
     }
 
     pub fn try_reset_lobby(&self, scope: LobbyScope) -> Result<bool, LobbyPersistenceError> {
-        let mut state = self.lock_state();
-        if !state.lobbies.contains_key(&scope) {
+        let _writes = self.lock_writes();
+        if !self.lock_state().lobbies.contains_key(&scope) {
             return Ok(false);
         }
         if let Some(persistence) = &self.persistence {
@@ -991,6 +1076,7 @@ where
                 .clear_lobby(scope)
                 .map_err(LobbyPersistenceError::Storage)?;
         }
+        let mut state = self.lock_state();
         let removed = state.lobbies.remove(&scope).is_some();
         state
             .in_flight

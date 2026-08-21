@@ -297,6 +297,49 @@ impl LobbyPersistencePort for RecordingPersistence {
     }
 }
 
+type PersistHook = dyn Fn() + Send + Sync;
+
+/// Persistence that runs a hook inside `save_lobby`/`clear_lobby`, standing in
+/// for a slow SQLite commit.
+#[derive(Default)]
+struct HookPersistence {
+    inner: RecordingPersistence,
+    hook: Mutex<Option<Arc<PersistHook>>>,
+}
+
+impl HookPersistence {
+    fn set_hook(&self, hook: impl Fn() + Send + Sync + 'static) {
+        *self.hook.lock().unwrap_or_else(|error| error.into_inner()) = Some(Arc::new(hook));
+    }
+
+    fn run_hook(&self) {
+        let hook = self
+            .hook
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+}
+
+impl LobbyPersistencePort for HookPersistence {
+    fn load_all_lobbies(&self) -> Result<Vec<PersistedLobbyState>, String> {
+        self.inner.load_all_lobbies()
+    }
+
+    fn save_lobby(&self, lobby: &PersistedLobbyState) -> Result<(), String> {
+        self.run_hook();
+        self.inner.save_lobby(lobby)
+    }
+
+    fn clear_lobby(&self, lobby_scope: LobbyScope) -> Result<bool, String> {
+        self.run_hook();
+        self.inner.clear_lobby(lobby_scope)
+    }
+}
+
 type ModerationHook = dyn Fn(usize, UserId, LobbyScope) + Send + Sync;
 
 #[derive(Default)]
@@ -1292,6 +1335,108 @@ fn test_join_rollback_ignores_the_other_lobbys_reservation() {
 }
 
 #[test]
+fn test_durable_writes_never_hold_the_reader_lock() {
+    let persistence = Arc::new(HookPersistence::default());
+    let service = Arc::new(
+        service(FakePlayers::default(), 12)
+            .with_persistence(persistence.clone())
+            .expect("hydrate hook persistence"),
+    );
+    let weak_service = Arc::downgrade(&service);
+    persistence.set_hook(move || {
+        let service = weak_service.upgrade().expect("service remains alive");
+        assert!(
+            service.state.try_lock().is_ok(),
+            "a durable write ran while the lobby-state lock was held: every \
+             reader on an async worker would wait on SQLite"
+        );
+        assert!(
+            service.writes.try_lock().is_err(),
+            "a durable write must hold the writer lock so no update is lost"
+        );
+    });
+
+    assert_joined(&service.join_lobby(UserId(10), scope(LobbyKind::Open)));
+    assert_joined(&service.join_lobby(UserId(11), scope(LobbyKind::Open)));
+    assert!(
+        service
+            .try_set_lobby_message_ids(scope(LobbyKind::Open), LobbyMessageIds::default())
+            .expect("set message ids")
+    );
+    assert_eq!(
+        service
+            .try_set_player_join_times(scope(LobbyKind::Open), &BTreeMap::from([(UserId(10), 5.0)]))
+            .expect("set join times"),
+        1
+    );
+    assert_eq!(
+        service
+            .try_remove_players_from_lobby(&users(&[11]), scope(LobbyKind::Open))
+            .expect("remove players"),
+        users(&[11])
+    );
+    assert!(
+        service
+            .try_leave_lobby(UserId(10), scope(LobbyKind::Open))
+            .expect("leave lobby")
+    );
+    assert!(
+        service
+            .try_reset_lobby(scope(LobbyKind::Open))
+            .expect("reset lobby")
+    );
+}
+
+#[test]
+fn test_a_concurrent_readycheck_survives_a_durable_write() {
+    let persistence = Arc::new(HookPersistence::default());
+    let service = Arc::new(
+        service(FakePlayers::default(), 12)
+            .with_persistence(persistence.clone())
+            .expect("hydrate hook persistence"),
+    );
+    assert_joined(&service.join_lobby(UserId(10), scope(LobbyKind::Open)));
+    let weak_service = Arc::downgrade(&service);
+    persistence.set_hook(move || {
+        // Stand in for a ready-check mutation landing while the durable write
+        // is in flight: it touches only in-memory state, so publishing the
+        // persisted record must not roll it back.
+        let service = weak_service.upgrade().expect("service remains alive");
+        // try_lock, not lock: a durable write that still held the state lock
+        // would deadlock here instead of failing the assertion.
+        let mut state = service
+            .state
+            .try_lock()
+            .expect("the state lock is free during a durable write");
+        if let Some(lobby) = state.lobbies.get_mut(&scope(LobbyKind::Open)) {
+            lobby
+                .readycheck
+                .reacted
+                .insert(UserId(10), "yes".to_owned());
+        }
+    });
+
+    assert!(
+        service
+            .try_set_lobby_message_ids(scope(LobbyKind::Open), LobbyMessageIds::default())
+            .expect("set message ids")
+    );
+
+    assert_eq!(
+        service
+            .lock_state()
+            .lobbies
+            .get(&scope(LobbyKind::Open))
+            .expect("lobby remains")
+            .readycheck
+            .reacted
+            .len(),
+        1,
+        "the publish preserved the in-memory ready-check reaction"
+    );
+}
+
+#[test]
 fn test_moderation_queries_run_outside_manager_state_lock() {
     let moderation = Arc::new(HookModeration::default());
     let service = Arc::new(service(FakePlayers::default(), 12).with_moderation(moderation.clone()));
@@ -1301,6 +1446,10 @@ fn test_moderation_queries_run_outside_manager_state_lock() {
         assert!(
             service.state.try_lock().is_ok(),
             "moderation I/O ran while the lobby-state lock was held"
+        );
+        assert!(
+            service.writes.try_lock().is_ok(),
+            "moderation I/O ran while the durable-write lock was held"
         );
     });
 
