@@ -24,11 +24,26 @@ jobs:
       RUSTC_WRAPPER: sccache
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.94.0
+
+      - name: Install checksum-verified cargo-vet
+        run: .github/scripts/install-cargo-vet
+
+      - name: Forbid new unaudited exemptions
+        run: .github/scripts/check-cargo-vet-exemptions "${{ github.event.before }}"
+
+      # Validate third-party code before any dependency build script executes.
+      - name: Fetch the locked dependency graph
+        run: cargo fetch --locked --manifest-path rust/Cargo.toml
+
+      - name: Require an approved dependency graph
+        run: cargo vet check --locked --manifest-path rust/Cargo.toml
 
       - name: Cache compiler objects
         uses: mozilla-actions/sccache-action@v0.0.10
