@@ -1620,4 +1620,5 @@ pub const fn dark_bargain_terms() -> DarkBargainTerms {
 }
 
 #[cfg(test)]
+#[path = "shop_commands/tests.rs"]
 mod tests;

@@ -1,0 +1,109 @@
+name: Rust cache warm
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .cargo/config.toml
+      - rust-toolchain.toml
+      - rust/Cargo.lock
+      - rust/Cargo.toml
+      - rust/crates/**/Cargo.toml
+      - .github/workflows/ci.yml
+      - .github/workflows/rust-cache-warm.yml
+  workflow_dispatch:
+
+concurrency:
+  group: rust-cache-warm-main
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-policy:
+    name: Dependency policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+
+      - name: Install checksum-verified cargo-vet
+        run: .github/scripts/install-cargo-vet
+
+      - name: Forbid new unaudited exemptions
+        run: .github/scripts/check-cargo-vet-exemptions "${{ github.event.before || github.sha }}"
+
+      # Keep cache population behind the same dependency gate as PR and release
+      # compilation so only an approved graph can become a trusted main cache.
+      - name: Fetch the locked dependency graph
+        run: cargo fetch --locked --manifest-path rust/Cargo.toml
+
+      - name: Require an approved dependency graph
+        run: cargo vet check --locked --manifest-path rust/Cargo.toml
+
+  test-cache:
+    name: Warm Rust test cache
+    needs: dependency-policy
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_DIR: rust/target
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      RUSTC_BOOTSTRAP: "1"
+      RUSTFLAGS: "-Zthreads=4"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+
+      - name: Restore and update Rust test dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: "./rust -> target"
+          shared-key: rust-ci-tests
+          cache-workspace-crates: false
+          cache-on-failure: false
+
+      - name: Compile the complete Rust test surface
+        run: >-
+          cargo test --locked --manifest-path rust/Cargo.toml
+          --workspace --all-targets --all-features --no-run
+
+  lint-cache:
+    name: Warm Rust lint cache
+    needs: dependency-policy
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_DIR: rust/target
+      RUSTC_BOOTSTRAP: "1"
+      RUSTFLAGS: "-Zthreads=4"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+          components: clippy
+
+      - name: Restore and update Rust lint dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: "./rust -> target"
+          shared-key: rust-ci-lint
+          cache-workspace-crates: false
+          cache-on-failure: false
+
+      - name: Compile the complete Rust lint surface
+        run: >-
+          cargo clippy --locked --manifest-path rust/Cargo.toml
+          --workspace --all-targets --all-features -- -D warnings

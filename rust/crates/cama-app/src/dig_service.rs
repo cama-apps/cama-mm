@@ -142,7 +142,7 @@ fn effective_yield_multiplier(explicit: Option<i64>, legacy_percent: i64) -> i64
     explicit.unwrap_or_else(|| percent_to_yield_millionths(legacy_percent))
 }
 
-pub(crate) fn scale_dig_minigame_jc(amount: i64, scale_millionths: i64) -> i64 {
+pub fn scale_dig_minigame_jc(amount: i64, scale_millionths: i64) -> i64 {
     if amount == 0 {
         return 0;
     }
@@ -1447,4 +1447,5 @@ impl CheerBook {
 }
 
 #[cfg(test)]
+#[path = "dig_service/tests.rs"]
 mod tests;
