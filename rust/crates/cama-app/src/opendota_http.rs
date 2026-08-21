@@ -186,14 +186,11 @@ static BUNDLED_HERO_NAMES: OnceLock<BTreeMap<i64, String>> = OnceLock::new();
 fn bundled_hero_names() -> BTreeMap<i64, String> {
     BUNDLED_HERO_NAMES
         .get_or_init(|| {
-            serde_json::from_str::<BTreeMap<String, String>>(include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../../utils/heroes.json"
-            )))
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|(id, name)| id.parse().ok().map(|id| (id, name)))
-            .collect()
+            serde_json::from_str::<BTreeMap<String, String>>(include_str!("../data/heroes.json"))
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|(id, name)| id.parse().ok().map(|id| (id, name)))
+                .collect()
         })
         .clone()
 }

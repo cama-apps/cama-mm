@@ -42,13 +42,13 @@ The bot uses a **Glicko-2 rating system** for team balancing. Players are matche
 
 ## Installation
 
-**Prerequisites:** Python 3.12+ and [uv](https://docs.astral.sh/uv/).
+**Prerequisites:** Rust 1.94 (via [rustup](https://rustup.rs/)).
 
 1. **Clone the repository or navigate to the project directory**
 
-2. **Install dependencies:**
+2. **Build the runtime:**
    ```bash
-   uv sync --frozen
+   cargo build --locked --manifest-path rust/Cargo.toml -p cama-runtime
    ```
 
 3. **Configure Discord:**
@@ -57,7 +57,7 @@ The bot uses a **Glicko-2 rating system** for team balancing. Players are matche
    - Open the generated URL to invite the bot.
 
 4. **Set up environment variables:**
-   - Create a file named `.env` in the project root (same folder as `bot.py`)
+   - Create a file named `.env` in the project root
    - Add your Discord bot token and admin allowlist (comma-separated Discord user IDs):
      ```
      DISCORD_BOT_TOKEN=your_bot_token_here
@@ -89,24 +89,24 @@ The bot uses a **Glicko-2 rating system** for team balancing. Players are matche
 ## Running the Bot
 
 ```bash
-uv run python bot.py
+cargo run --locked --manifest-path rust/Cargo.toml -p cama-runtime -- serve
 ```
 
 The bot will connect to Discord and sync slash commands automatically.
+`DB_PATH` defaults to `cama_shuffle.db`. See [`rust/README.md`](rust/README.md)
+for deployment, health, and operational commands.
 
-## Rust lift-and-shift
+## Implementation
 
-The replacement implementation lives in [`rust/`](rust/README.md). Python
-remains the production runtime only while the migration is incomplete; the
-terminal deployment stops the Python container and runs `cama-rust` as the sole
-Discord gateway, SQLite migration authority, worker host, and database writer.
-The Rust workspace has an exact test-parity ledger, production gateway and
-migration foundations, CI gates, and a mechanical inventory that prevents a
-partially wired bot from being called cutover-ready. The linked guide defines
-the shared process lock, safe database-snapshot flow, Python-off rehearsal,
-rollback criteria, and current measured status. Deployment now has one
-fail-closed selector, `BOT_RUNTIME=python|rust`; unset still means Python, and
-the Rust choice remains blocked until every cutover-readiness gate is complete.
+The production implementation lives in [`rust/`](rust/README.md): `cama-rust`
+is the sole Discord gateway, SQLite migration authority, worker host, and
+database writer. Deployment is Rust-only and fails closed --
+`scripts/deploy-runtime` rejects any `BOT_RUNTIME` other than `rust` -- and CI
+runs the Rust gates only.
+
+The historical Python application is retained as reference material for
+recovering legacy contracts. It is not installed, started, linted, or tested by
+any active path, and no new behavior belongs there.
 
 ## Discord Commands
 
@@ -349,7 +349,7 @@ Set these in your `.env` file:
 
 ### Advanced Configuration
 
-Additional settings can be configured in `.env` (see `config.py` for all 200+ options):
+Additional settings can be configured in `.env` (see the Rust application configuration module, `rust/crates/cama-runtime/src/application_config.rs`, for all options):
 
 **Lobby:**
 - `LOBBY_READY_THRESHOLD`, `LOBBY_MAX_PLAYERS` - Lobby size settings
@@ -398,15 +398,17 @@ Without an `AI_MODEL` override, startup selects `groq/qwen/qwen3.6-27b` when a G
 
 ## Testing
 
-Run the test suite:
+Run the gates CI runs:
 
 ```bash
-uv run --locked pytest
+cargo fmt --manifest-path rust/Cargo.toml --all -- --check
+cargo clippy --locked --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --manifest-path rust/Cargo.toml --workspace --all-targets --all-features
 ```
 
 ## Troubleshooting
 
-**Bot won't start:** Check `.env` file exists with `DISCORD_BOT_TOKEN` and run `uv sync --frozen`
+**Bot won't start:** Check `.env` file exists with `DISCORD_BOT_TOKEN`, then rebuild with `cargo build --locked --manifest-path rust/Cargo.toml -p cama-runtime`
 
 **Commands not showing:** Wait a few minutes for Discord to sync, or use `/admin sync` (admin only)
 

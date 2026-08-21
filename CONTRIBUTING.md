@@ -11,10 +11,11 @@ For prerequisites, installation, and `.env` setup, see the [README](README.md).
 
 2. Make your changes and add tests for new functionality
 
-3. Run lint checks and tests (same commands CI runs):
+3. Run the format, lint, and test gates (the same commands CI runs):
    ```bash
-   uv run --locked ruff check .
-   uv run --locked pytest
+   cargo fmt --manifest-path rust/Cargo.toml --all -- --check
+   cargo clippy --locked --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+   cargo test --locked --manifest-path rust/Cargo.toml --workspace --all-targets --all-features
    ```
 
 4. Commit with a descriptive message:
@@ -29,13 +30,19 @@ For prerequisites, installation, and `.env` setup, see the [README](README.md).
 
 ## Testing
 
-All new functionality must include tests:
+All new functionality must include Rust tests:
 
-- **Unit tests** for domain logic (shuffler, rating, lobby)
-- **Integration tests** for services and repositories
-- **E2E tests** for complete workflows (see `tests/test_e2e_*.py`)
+- **Domain unit tests** beside the relevant `cama-domain` or `cama-app` module
+- **Repository and migration tests** against temporary SQLite databases
+  initialized by Rust
+- **Provider tests** exercising typed interaction requests and responders
+  without a live Discord gateway
+- **Runtime/transport tests** for acknowledgement ordering, recovery, message
+  delivery, and Serenity payload semantics
 
-Repository tests use `repo_db_path`, which provides an initialized schema. Use `temp_db_path` only for tests that deliberately require a database without an initialized schema. Follow existing patterns.
+Use deterministic clocks, seeded entropy, fixtures, and fake ports; mock
+external Discord, OpenDota, AI, and HTTP behavior. Do not add skipped or
+timing-flaky tests. Follow existing patterns.
 
 ## Pull Request Process
 

@@ -1,6 +1,6 @@
 //! Cached Dota hero names and read-only Dotabase metadata.
 //!
-//! Names are compiled from the same `utils/heroes.json` snapshot used by the
+//! Names are compiled from the checked-in `data/heroes.json` snapshot used by the
 //! Python bot. Rich metadata is loaded once from the immutable Dotabase SQLite
 //! artifact and detached before the connection closes.
 
@@ -145,11 +145,7 @@ pub fn all_heroes() -> BTreeMap<String, String> {
 
 fn hero_names() -> &'static BTreeMap<String, String> {
     HERO_NAMES.get_or_init(|| {
-        serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../utils/heroes.json"
-        )))
-        .unwrap_or_default()
+        serde_json::from_str(include_str!("../data/heroes.json")).unwrap_or_default()
     })
 }
 

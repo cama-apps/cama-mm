@@ -37,7 +37,7 @@ use cama_domain::pet::{PetMood, PetStage};
 use gif::{ColorOutput, DecodeOptions};
 use serde::Deserialize;
 
-const FIXTURE_JSON: &str = include_str!("../../../../scripts/visual_equivalence_fixture.json");
+const FIXTURE_JSON: &str = include_str!("fixtures/visual_equivalence.json");
 const FOREGROUND_THRESHOLD: u8 = 80;
 
 #[derive(Debug, Deserialize)]

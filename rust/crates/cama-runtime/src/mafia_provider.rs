@@ -3048,10 +3048,9 @@ fn assign_roles(guild_id: i64, ids: &[i64], rng: &mut fastrand::Rng) -> Vec<Mafi
 fn hero_names(count: usize, rng: &mut fastrand::Rng) -> Vec<String> {
     static HERO_CATALOG: OnceLock<Vec<String>> = OnceLock::new();
     let catalog = HERO_CATALOG.get_or_init(|| {
-        serde_json::from_str::<BTreeMap<String, String>>(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../utils/heroes.json"
-        )))
+        serde_json::from_str::<BTreeMap<String, String>>(include_str!(
+            "../../cama-app/data/heroes.json"
+        ))
         .unwrap_or_default()
         .into_values()
         .collect()
