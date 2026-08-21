@@ -860,7 +860,11 @@ pub fn run_neon_match_hooks<N, B, H, D, C>(
         }
     }
     for loser in &active_losers {
-        let new_balance = balances_by_id.get(&loser.discord_id).copied().unwrap_or(0);
+        // Zero is itself a callout trigger, so an unknown balance must not
+        // default to it -- that would announce a broke player who may not be.
+        let Some(new_balance) = balances_by_id.get(&loser.discord_id).copied() else {
+            continue;
+        };
         let amount = loser.effective_bet.unwrap_or(loser.amount);
         if loser.leverage >= 5
             && new_balance < 0

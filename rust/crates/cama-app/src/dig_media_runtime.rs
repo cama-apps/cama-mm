@@ -315,7 +315,12 @@ fn scene(palette: &LayerPalette, identity: &str, won: Option<bool>) -> RgbaImage
         Some(false) => [255, 70, 70, 255],
         None => [255, 230, 100, 255],
     };
-    let center_x = width / 2 + (usize::try_from(seed % 41).unwrap_or(0)).saturating_sub(20);
+    // The jitter is meant to span -20..=20 around the centre. Saturating the
+    // subtraction on unsigned values clamps the whole negative half to zero, so
+    // the offset is computed as a signed value first.
+    let jitter = i64::try_from(seed % 41).unwrap_or(0) - 20;
+    let center_x =
+        usize::try_from(i64::try_from(width / 2).unwrap_or(i64::MAX) + jitter).unwrap_or(width / 2);
     image.fill_rect(center_x.saturating_sub(18), 72, 36, 52, accent);
     image.fill_rect(35, 112, 14, 28, [255, 255, 100, 255]);
     image

@@ -731,7 +731,6 @@ impl MatchRecordingRepository {
                 .saturating_sub(bankruptcy_penalty)
                 .saturating_sub(vanity_tax)
                 .saturating_sub(low_priority_tax);
-            clear_income_award_compensation_marker(&transaction, guild_id, *award)?;
             receipts.push(IncomeAwardReceipt {
                 discord_id: award.discord_id,
                 gross,
@@ -1938,18 +1937,24 @@ fn income_award_marker_exists(
 ) -> Result<bool, rusqlite::Error> {
     transaction
         .query_row(
+            // A credit only still stands if it is newer than the most recent
+            // rollback for the same key. Comparing on ledger_id keeps the
+            // ledger append-only: deleting the rollback rows instead would
+            // erase real balance movements from the audit trail and let a
+            // later recovery sum two applications of the same award.
             "SELECT 1 FROM economy_ledger_entries
              WHERE guild_id=?1 AND account_type='player' AND account_id=?2
                AND source=?3 AND related_type=?4 AND related_id=?5
-               AND NOT EXISTS (
-                   SELECT 1 FROM economy_ledger_entries compensation
+               AND ledger_id > COALESCE((
+                   SELECT MAX(compensation.ledger_id)
+                   FROM economy_ledger_entries compensation
                    WHERE compensation.guild_id=?1
                      AND compensation.account_type='player'
                      AND compensation.account_id=?2
                      AND compensation.source='match_bonus_rollback'
                      AND compensation.related_type=?3
                      AND compensation.related_id=?5
-               )
+               ), 0)
              LIMIT 1",
             params![
                 guild_id,
@@ -1964,29 +1969,6 @@ fn income_award_marker_exists(
         .map(|row| row.is_some())
 }
 
-fn clear_income_award_compensation_marker(
-    transaction: &rusqlite::Transaction<'_>,
-    guild_id: i64,
-    award: IncomeAwardRequest<'_>,
-) -> Result<(), rusqlite::Error> {
-    let Some(related_id) = award.related_id else {
-        return Ok(());
-    };
-    transaction.execute(
-        "DELETE FROM economy_ledger_entries
-         WHERE guild_id=?1 AND account_type='player' AND account_id=?2
-           AND source='match_bonus_rollback'
-           AND related_type=?3 AND related_id=?4",
-        params![
-            guild_id,
-            award.discord_id,
-            award.source,
-            related_id.to_string()
-        ],
-    )?;
-    Ok(())
-}
-
 fn recover_income_award_receipt(
     transaction: &rusqlite::Transaction<'_>,
     guild_id: i64,
@@ -1998,13 +1980,27 @@ fn recover_income_award_receipt(
     let related_id = award.related_id.expect("exact-once award has a related ID");
     // Communion and protection-aware Blood Pact rows may share the durable
     // match relation, but are recovered independently by the runtime.
+    // Only the application after the most recent rollback counts: a
+    // compensate-then-reapply cycle leaves two credits for this key, and
+    // summing both would report -- and later reverse -- twice what the player
+    // actually received.
     let (source_delta, metadata) = transaction.query_row(
         "SELECT COALESCE(SUM(delta),0),
                 MAX(CASE WHEN source=?5 THEN metadata END)
          FROM economy_ledger_entries
          WHERE guild_id=?1 AND account_type='player' AND account_id=?2
            AND related_type=?3 AND related_id=?4
-           AND source=?5",
+           AND source=?5
+           AND ledger_id > COALESCE((
+               SELECT MAX(compensation.ledger_id)
+               FROM economy_ledger_entries compensation
+               WHERE compensation.guild_id=?1
+                 AND compensation.account_type='player'
+                 AND compensation.account_id=?2
+                 AND compensation.source='match_bonus_rollback'
+                 AND compensation.related_type=?5
+                 AND compensation.related_id=?4
+           ), 0)",
         params![
             guild_id,
             award.discord_id,

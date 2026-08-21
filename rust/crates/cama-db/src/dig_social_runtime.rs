@@ -283,7 +283,9 @@ impl DigSocialRuntimeRepository {
             ],
         )?;
         if target_changed != 1 {
-            transaction.commit()?;
+            // Nothing has been written yet, but every guard below this point
+            // has: rolling back keeps the whole settlement all-or-nothing.
+            transaction.rollback()?;
             return Ok(DigHelpSettlementOutcome::Conflict);
         }
         if fail_after_target_update {
@@ -309,7 +311,9 @@ impl DigSocialRuntimeRepository {
                 ],
             )?;
             if inserted != 1 {
-                transaction.commit()?;
+                // The target's depth update already applied; committing here
+                // would advance the target without ever crediting the helper.
+                transaction.rollback()?;
                 return Ok(DigHelpSettlementOutcome::Conflict);
             }
         }
@@ -328,7 +332,7 @@ impl DigSocialRuntimeRepository {
             ],
         )?;
         if helper_changed != 1 {
-            transaction.commit()?;
+            transaction.rollback()?;
             return Ok(DigHelpSettlementOutcome::Conflict);
         }
 
@@ -354,7 +358,7 @@ impl DigSocialRuntimeRepository {
             );
             clear_ledger_context(&transaction)?;
             if updated? != 1 {
-                transaction.commit()?;
+                transaction.rollback()?;
                 return Ok(DigHelpSettlementOutcome::MissingHelperPlayer);
             }
         }

@@ -136,7 +136,28 @@ impl Player {
         use_openskill: bool,
         use_jopacoin: bool,
     ) -> f64 {
-        self.get_value(use_glicko, use_openskill, use_jopacoin) * self.role_factor_for(role)
+        apply_role_factor(
+            self.get_value(use_glicko, use_openskill, use_jopacoin),
+            self.role_factor_for(role),
+        )
+    }
+}
+
+/// Apply a role-performance multiplier so it always reads in the same
+/// direction.
+///
+/// In jopacoin mode the base value is a signed balance. Multiplying a debtor's
+/// negative balance by a proven-specialist factor above 1.0 would make them
+/// look *weaker*, and by an unproven factor below 1.0 *stronger* -- the exact
+/// inversion the shuffle path already avoids for the matchmaking multiplier.
+/// Dividing below zero keeps "proven raises, unproven lowers" true on both
+/// sides of zero.
+#[must_use]
+pub fn apply_role_factor(value: f64, factor: f64) -> f64 {
+    if value < 0.0 && factor > 0.0 {
+        value / factor
+    } else {
+        value * factor
     }
 }
 
@@ -345,5 +366,25 @@ mod tests {
 
         assert!((scaled - -220.0).abs() < 1e-9);
         assert!(scaled < -200.0);
+    }
+}
+
+#[cfg(test)]
+mod role_factor_direction_tests {
+    use super::apply_role_factor;
+
+    #[test]
+    fn proven_role_records_read_as_stronger_on_both_sides_of_zero() {
+        // In jopacoin mode the base value is a signed balance. A plain
+        // multiplication would rank a debtor with a proven record below the
+        // same debtor unproven, inverting the adjustment for everyone in debt.
+        let proven = 1.05;
+        let unproven = 0.95;
+
+        assert!(apply_role_factor(1_000.0, proven) > apply_role_factor(1_000.0, unproven));
+        assert!(apply_role_factor(-5_000.0, proven) > apply_role_factor(-5_000.0, unproven));
+        // A neutral factor never moves the value.
+        assert!((apply_role_factor(-5_000.0, 1.0) + 5_000.0).abs() < f64::EPSILON);
+        assert!((apply_role_factor(0.0, proven)).abs() < f64::EPSILON);
     }
 }
