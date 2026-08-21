@@ -21,6 +21,31 @@ use crate::ai_services::{
     AIQueryRepository, ColumnSchema, ForeignKey, QueryRepositoryError, QueryRow, SchemaSnapshot,
     TableSchema, Value,
 };
+/// SQLite virtual-machine steps between progress callbacks.
+const GENERATED_QUERY_PROGRESS_INTERVAL: std::ffi::c_int = 10_000;
+/// Callbacks a generated query may take before it is aborted, so roughly a
+/// hundred million virtual-machine steps -- far beyond any legitimate `/ask`
+/// over this schema, and short of hanging a blocking thread indefinitely.
+const GENERATED_QUERY_PROGRESS_BUDGET: u64 = 10_000;
+
+/// Abort a generated query that runs away.
+///
+/// The SQL executed on these connections is model-generated, so a cross join
+/// with an ORDER BY can run effectively forever and pin the blocking thread it
+/// runs on. Bounding virtual-machine steps rather than wall-clock time keeps
+/// the limit independent of machine speed.
+fn bound_generated_query_cost(connection: &Connection) -> Result<(), QueryRepositoryError> {
+    let mut callbacks = 0_u64;
+    connection
+        .progress_handler(
+            GENERATED_QUERY_PROGRESS_INTERVAL,
+            Some(move || {
+                callbacks = callbacks.saturating_add(1);
+                callbacks > GENERATED_QUERY_PROGRESS_BUDGET
+            }),
+        )
+        .map_err(storage)
+}
 
 #[derive(Debug)]
 pub struct SqliteAIQueryRepository {
@@ -56,6 +81,7 @@ impl SqliteAIQueryRepository {
         connection
             .pragma_update(None, "query_only", true)
             .map_err(storage)?;
+        bound_generated_query_cost(&connection)?;
         Ok(connection)
     }
 
@@ -73,6 +99,7 @@ impl SqliteAIQueryRepository {
         connection
             .pragma_update(None, "query_only", true)
             .map_err(storage)?;
+        bound_generated_query_cost(&connection)?;
         Ok(connection)
     }
 
