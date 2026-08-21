@@ -1122,18 +1122,13 @@ fn run_db_check(path: PathBuf) -> ExitCode {
     };
 
     println!(
-        "schema_compatible={} migrations={}/{} historical_extras={} journal_mode={} quick_check={} foreign_keys={} user_version={}",
+        "schema_compatible={} migrations={}/{} historical_extras={} journal_mode={} quick_check={} user_version={}",
         audit.is_compatible(),
         audit.applied_migration_count,
         audit.required_migration_count,
         audit.extra_historical_migrations.len(),
         audit.journal_mode,
         audit.quick_check,
-        if audit.foreign_keys_enabled {
-            "on"
-        } else {
-            "off"
-        },
         audit.user_version,
     );
 
@@ -1168,7 +1163,7 @@ fn run_db_admit(path: PathBuf, source: PathBuf) -> ExitCode {
         }
     };
     println!(
-        "schema_compatible={} migrations={}/{} newly_applied={} created_tables={} rebuilt_tables={} historical_extras={} journal_mode={} quick_check={} foreign_keys={}",
+        "schema_compatible={} migrations={}/{} newly_applied={} created_tables={} rebuilt_tables={} historical_extras={} journal_mode={} quick_check={}",
         audit.is_compatible(),
         audit.applied_migration_count,
         audit.required_migration_count,
@@ -1178,11 +1173,6 @@ fn run_db_admit(path: PathBuf, source: PathBuf) -> ExitCode {
         migration.historical_extra_migrations.len(),
         audit.journal_mode,
         audit.quick_check,
-        if audit.foreign_keys_enabled {
-            "on"
-        } else {
-            "off"
-        },
     );
     if audit.is_compatible() {
         ExitCode::SUCCESS
