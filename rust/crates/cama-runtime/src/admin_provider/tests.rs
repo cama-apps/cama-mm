@@ -1631,6 +1631,66 @@ async fn test_lowprio_remove_stays_silent_toward_the_player() {
     );
 }
 
+#[tokio::test]
+async fn test_lowprio_writes_its_audit_trail_with_the_state_change() {
+    let fixture = ProviderFixture::new();
+    fixture.player(TARGET, 5, 5, Some(1_500.0), Some(120.0), Some(0.06));
+
+    fixture
+        .dispatch_request(admin_lowprio_command(
+            "add",
+            vec![
+                user_option("user", TARGET, "Target"),
+                string_option("reason", "repeated abandons"),
+                integer_option("wins", 4),
+            ],
+            1,
+            ADMIN,
+            Some(MANAGE_GUILD),
+        ))
+        .await;
+    fixture
+        .dispatch_request(admin_lowprio_command(
+            "remove",
+            vec![user_option("user", TARGET, "Target")],
+            1,
+            ADMIN,
+            Some(MANAGE_GUILD),
+        ))
+        .await;
+
+    let connection =
+        rusqlite::Connection::open(fixture.database.path()).expect("open admin database");
+    let mut statement = connection
+        .prepare(
+            "SELECT event_type, wins_required, wins_remaining, actor_id
+             FROM moderation_events WHERE discord_id=?1 ORDER BY event_id",
+        )
+        .expect("read moderation events");
+    let events = statement
+        .query_map([i64::try_from(TARGET).expect("target id")], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .expect("map moderation events")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect moderation events");
+
+    let admin = i64::try_from(ADMIN).expect("admin id");
+    assert_eq!(
+        events,
+        vec![
+            ("lowprio_assign".to_owned(), 4, 4, admin),
+            ("lowprio_clear".to_owned(), 4, 0, admin),
+        ],
+        "both state changes are audited from inside their own transaction"
+    );
+}
+
 #[test]
 fn lowprio_add_option_bounds_are_pinned() {
     // These bounds moved here when the unwired cama-app policy module (which

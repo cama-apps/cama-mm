@@ -17,8 +17,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use cama_app::admin_low_priority::{REASON_DISPLAY_LIMIT, assignment_direct_message};
 use cama_app::moderation::{
-    CreateSuspension, ModerationService, ModerationServiceError, RecordLowPriorityEvent,
-    parse_expiry,
+    CreateSuspension, ModerationService, ModerationServiceError, parse_expiry,
+    validate_low_priority_event,
 };
 use cama_app::opendota_http::OpenDotaRuntimeServices;
 use cama_app::player_mmr_fallback::{RegisterPlayerError, RegisterPlayerInput, register_player};
@@ -602,6 +602,16 @@ impl AdminHandler {
         let user = required_user(&context.options, "user")?;
         let reason = string(&context.options, "reason");
         let wins = integer(&context.options, "wins").unwrap_or(LOW_PRIORITY_REQUIRED_WINS);
+        // The audit row is written inside the assignment's own transaction now,
+        // so policy has to clear the numbers before that transaction opens. An
+        // assignment records wins_remaining == wins_required, and the
+        // assign-or-replace choice the repository makes inside the transaction
+        // validates identically.
+        if let Err(error) =
+            validate_low_priority_event(ModerationEventType::LowprioAssign, wins, wins)
+        {
+            return respond_ephemeral(&responder, format!("⚠️ {error}")).await;
+        }
         let target_id = signed_id(user.id, "user")?;
         let guild_id = context.guild_id;
         let players = self.players.clone();
@@ -616,48 +626,24 @@ impl AdminHandler {
         let low_priority = self.low_priority.clone();
         let moderation = self.moderation.clone();
         let actor_id = signed_id(context.actor_id, "actor")?;
-        let reason_for_write = reason.clone();
+        let now = now_seconds();
         let state = tokio::task::spawn_blocking(move || {
-            let previous = low_priority
-                .get_state(target_id, Some(guild_id))
-                .map_err(|error| error.to_string())?;
             let watermark = moderation
                 .port()
                 .pending_match_watermark(Some(guild_id))
                 .map_err(|error| error.to_string())?;
-            let mut input = SetLowPriorityInput::new(
-                target_id,
-                Some(guild_id),
-                actor_id,
-                reason_for_write.clone(),
-            );
+            let mut input = SetLowPriorityInput::new(target_id, Some(guild_id), actor_id, reason);
             input.wins_required = PythonIntegerInput::Integer(wins);
             input.start_pending_match_id = Some(PythonIntegerInput::Integer(watermark));
             // The option description this admin just read says the placed player
             // sees the reason, so this row's reason is theirs to read.
             input.reason_player_visible = true;
-            let state = low_priority
-                .set_low_priority(&input)
-                .map_err(|error| error.to_string())?;
-            let event_type = if previous.is_some_and(|state| state.active) {
-                ModerationEventType::LowprioReplace
-            } else {
-                ModerationEventType::LowprioAssign
-            };
-            if let Err(error) = moderation.record_low_priority_event(RecordLowPriorityEvent {
-                discord_id: target_id,
-                guild_id: Some(guild_id),
-                event_type,
-                wins_required: state.wins_required,
-                wins_remaining: state.wins_remaining,
-                actor_id: Some(actor_id),
-                reason: reason_for_write.as_deref(),
-                match_id: state.start_pending_match_id,
-                now: now_seconds(),
-            }) {
-                warn!(?error, "failed to audit low-priority assignment");
-            }
-            Ok::<_, String>(state)
+            // State and audit row commit together: a lost audit row used to
+            // leave a penalty nobody could account for.
+            low_priority
+                .set_low_priority_with_audit(&input, now)
+                .map(|assignment| assignment.state)
+                .map_err(|error| error.to_string())
         })
         .await
         .map_err(|error| format!("low-priority write task failed: {error}"))??;
@@ -709,38 +695,33 @@ impl AdminHandler {
         let guild_id = context.guild_id;
         let actor_id = signed_id(context.actor_id, "actor")?;
         let low_priority = self.low_priority.clone();
-        let moderation = self.moderation.clone();
-        let reason_for_write = reason.clone();
+        let now = now_seconds();
         let removed = tokio::task::spawn_blocking(move || {
-            let removed = low_priority
-                .clear_low_priority(
+            // The clear audits the row's own win requirement, so policy runs
+            // against that row before the transaction opens; the table's CHECK
+            // constraints keep the value the transaction re-reads in band.
+            if let Some(prior) = low_priority
+                .get_state(target_id, Some(guild_id))
+                .map_err(|error| error.to_string())?
+                .filter(|state| state.active)
+            {
+                validate_low_priority_event(
+                    ModerationEventType::LowprioClear,
+                    prior.wins_required,
+                    0,
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            low_priority
+                .clear_low_priority_with_audit(
                     target_id,
                     Some(guild_id),
                     actor_id,
-                    reason_for_write.as_deref(),
+                    reason.as_deref(),
+                    now,
                 )
-                .map_err(|error| error.to_string())?;
-            if removed {
-                let prior = low_priority
-                    .get_state(target_id, Some(guild_id))
-                    .map_err(|error| error.to_string())?;
-                if let Err(error) = moderation.record_low_priority_event(RecordLowPriorityEvent {
-                    discord_id: target_id,
-                    guild_id: Some(guild_id),
-                    event_type: ModerationEventType::LowprioClear,
-                    wins_required: prior
-                        .as_ref()
-                        .map_or(LOW_PRIORITY_REQUIRED_WINS, |state| state.wins_required),
-                    wins_remaining: 0,
-                    actor_id: Some(actor_id),
-                    reason: reason_for_write.as_deref(),
-                    match_id: prior.and_then(|state| state.start_pending_match_id),
-                    now: now_seconds(),
-                }) {
-                    warn!(?error, "failed to audit low-priority removal");
-                }
-            }
-            Ok::<_, String>(removed)
+                .map(|prior| prior.is_some())
+                .map_err(|error| error.to_string())
         })
         .await
         .map_err(|error| format!("low-priority clear task failed: {error}"))??;

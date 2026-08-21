@@ -402,24 +402,12 @@ impl<P: ModerationPort> ModerationService<P> {
         &self,
         request: RecordLowPriorityEvent<'_>,
     ) -> Result<ModerationEvent, ModerationServiceError<P::Error>> {
-        if !matches!(
+        validate_low_priority_event(
             request.event_type,
-            ModerationEventType::LowprioAssign
-                | ModerationEventType::LowprioReplace
-                | ModerationEventType::LowprioClear
-                | ModerationEventType::LowprioComplete
-        ) || !(1..=20).contains(&request.wins_required)
-            || !(0..=20).contains(&request.wins_remaining)
-        {
-            return Err(ModerationServiceError::Policy(
-                ModerationPolicyError::InvalidLowPriorityEvent,
-            ));
-        }
-        if request.wins_remaining > request.wins_required {
-            return Err(ModerationServiceError::Policy(
-                ModerationPolicyError::InvalidWinProgress,
-            ));
-        }
+            request.wins_required,
+            request.wins_remaining,
+        )
+        .map_err(ModerationServiceError::Policy)?;
         self.port
             .record_event(RecordModerationEventRequest {
                 discord_id: request.discord_id,
@@ -445,6 +433,31 @@ impl<P: ModerationPort> ModerationService<P> {
             })
             .map_err(ModerationServiceError::Port)
     }
+}
+
+/// Policy every low-priority moderation event must satisfy before it is
+/// written, whether it is written on its own or inside the
+/// `low_priority_state` transaction that now records it atomically.
+pub fn validate_low_priority_event(
+    event_type: ModerationEventType,
+    wins_required: i64,
+    wins_remaining: i64,
+) -> Result<(), ModerationPolicyError> {
+    if !matches!(
+        event_type,
+        ModerationEventType::LowprioAssign
+            | ModerationEventType::LowprioReplace
+            | ModerationEventType::LowprioClear
+            | ModerationEventType::LowprioComplete
+    ) || !(1..=20).contains(&wins_required)
+        || !(0..=20).contains(&wins_remaining)
+    {
+        return Err(ModerationPolicyError::InvalidLowPriorityEvent);
+    }
+    if wins_remaining > wins_required {
+        return Err(ModerationPolicyError::InvalidWinProgress);
+    }
+    Ok(())
 }
 
 pub fn parse_duration_seconds(value: &str) -> Result<i64, ModerationPolicyError> {
