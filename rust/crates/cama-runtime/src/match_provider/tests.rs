@@ -3133,7 +3133,10 @@ fn bonus_failure_compensates_partial_participation_and_releases_claim() {
             },
         )
         .expect("read recovered reward");
-    assert_eq!(recovered_state, (1, 15, 120, 0, 1, 2));
+    // The five compensating rows stay in the ledger: they are real balance
+    // movements, and the retry is admitted by reading only the application
+    // after the latest rollback rather than by deleting the audit trail.
+    assert_eq!(recovered_state, (1, 15, 120, 5, 1, 2));
 
     let bettors_after_retry = Connection::open(fixture.database.path())
         .expect("inspect retry bettor balances")
