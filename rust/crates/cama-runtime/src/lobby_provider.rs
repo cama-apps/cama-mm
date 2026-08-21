@@ -547,6 +547,212 @@ impl FirstGamePoolPreviewPort for LoadedFirstGamePoolPreviews {
 }
 
 impl LobbyRuntimeState {
+    async fn classify_readycheck_players(
+        &self,
+        lobby: &LobbySnapshot,
+    ) -> (
+        BTreeMap<AppUserId, ReadycheckPlayerData>,
+        BTreeSet<AppUserId>,
+    ) {
+        let now = unix_time_now();
+        let mut data = BTreeMap::new();
+        let mut mentionable = BTreeSet::new();
+        for player_id in &lobby.players {
+            let member = match (to_u64(lobby.scope.guild_id.0), to_u64(player_id.0)) {
+                (Ok(guild_id), Ok(player_id)) => self
+                    .transport
+                    .guild_member(guild_id, player_id)
+                    .await
+                    .ok()
+                    .flatten(),
+                _ => None,
+            };
+            let recent = lobby
+                .player_join_times
+                .get(player_id)
+                .is_some_and(|joined_at| now - joined_at < 10.0 * 60.0);
+            let (name, group) = member.map_or_else(
+                || {
+                    (
+                        self.players.fallback_name(*player_id, lobby.scope.guild_id),
+                        if recent {
+                            ReadinessGroup::Recent
+                        } else {
+                            ReadinessGroup::Afk
+                        },
+                    )
+                },
+                |member| {
+                    mentionable.insert(*player_id);
+                    let playing_dota = member
+                        .activities
+                        .iter()
+                        .any(|activity| activity.to_lowercase().contains("dota"));
+                    let group = if recent {
+                        ReadinessGroup::Recent
+                    } else if playing_dota {
+                        ReadinessGroup::PlayingDota
+                    } else if member.in_voice
+                        || matches!(
+                            member.presence,
+                            DiscordPresence::Online | DiscordPresence::DoNotDisturb
+                        )
+                    {
+                        ReadinessGroup::Ready
+                    } else {
+                        ReadinessGroup::Afk
+                    };
+                    (member.display_name, group)
+                },
+            );
+            data.insert(*player_id, ReadycheckPlayerData { name, group });
+        }
+        (data, mentionable)
+    }
+
+    /// Mirror Python's `sync_readycheck_with_lobby`: an active generation is
+    /// reconciled against the post-mutation roster, recent signups are
+    /// state-auto-confirmed unless they explicitly withdrew, stale physical
+    /// reactions are removed best effort, and the generation is repainted.
+    async fn sync_readycheck_with_lobby(&self, scope: LobbyScope) {
+        self.sync_ready_lobby(scope);
+        let Some(previous) = self.readychecks.readycheck_generation(scope) else {
+            return;
+        };
+        let Some(lobby) = self.service.get_lobby(scope) else {
+            return;
+        };
+        let (player_data, _) = self.classify_readycheck_players(&lobby).await;
+        let lobby_ids = player_data.keys().copied().collect::<BTreeSet<_>>();
+        let declined = previous.declined;
+        let auto_confirm = player_data
+            .iter()
+            .filter_map(|(player_id, data)| {
+                (data.group == ReadinessGroup::Recent && !declined.contains(player_id))
+                    .then_some(*player_id)
+            })
+            .collect::<BTreeSet<_>>();
+        let departed_confirmations = previous
+            .reacted
+            .keys()
+            .copied()
+            .filter(|player_id| !lobby_ids.contains(player_id));
+        let new_unconfirmed = lobby_ids
+            .difference(&previous.lobby_ids)
+            .copied()
+            .filter(|player_id| !previous.reacted.contains_key(player_id))
+            .filter(|player_id| !auto_confirm.contains(player_id));
+        for player_id in departed_confirmations.chain(new_unconfirmed) {
+            let (Ok(channel_id), Ok(message_id), Ok(user_id)) = (
+                to_u64(previous.channel_id.0),
+                to_u64(previous.message_id.0),
+                to_u64(player_id.0),
+            ) else {
+                continue;
+            };
+            if let Err(error) = self
+                .transport
+                .remove_reaction(
+                    channel_id,
+                    message_id,
+                    &DiscordEmoji::unicode(READY_EMOJI),
+                    user_id,
+                )
+                .await
+            {
+                debug!(%error, ?scope, user_id, "readycheck roster reaction cleanup failed");
+            }
+        }
+        if self
+            .readychecks
+            .update_readycheck_data(scope, lobby_ids, player_data, previous.message_id)
+            .is_none()
+        {
+            return;
+        }
+        for player_id in auto_confirm {
+            self.readychecks.add_readycheck_reaction(
+                scope,
+                player_id,
+                format!("<@{}>", player_id.0),
+                Some(previous.message_id),
+            );
+        }
+        let Some(generation) = self.readychecks.readycheck_generation(scope) else {
+            return;
+        };
+        let embed = readycheck_embed(
+            scope.kind,
+            &generation.player_data,
+            &generation.reacted,
+            self.config.ready_threshold,
+        );
+        match (
+            to_u64(generation.channel_id.0),
+            to_u64(generation.message_id.0),
+        ) {
+            (Ok(channel_id), Ok(message_id)) => {
+                if let Err(error) = self
+                    .transport
+                    .edit_message(
+                        channel_id,
+                        message_id,
+                        DiscordMessage::silent(InteractionResponse::message("").embed(embed))
+                            .preserving_content(),
+                    )
+                    .await
+                {
+                    warn!(%error, ?scope, "readycheck roster repaint failed");
+                }
+            }
+            _ => warn!(?scope, "readycheck roster repaint has invalid Discord IDs"),
+        }
+        self.notify_readycheck_completion(scope, generation.message_id)
+            .await;
+    }
+
+    async fn notify_readycheck_completion(&self, scope: LobbyScope, message_id: AppMessageId) {
+        if !self.readychecks.take_completion_notification_at_threshold(
+            scope,
+            message_id,
+            self.config.ready_threshold,
+        ) {
+            return;
+        }
+        let Some(generation) = self.readychecks.readycheck_generation(scope) else {
+            return;
+        };
+        let target_channel_id = self
+            .service
+            .get_lobby(scope)
+            .and_then(|lobby| lobby.message_ids.origin_channel_id)
+            .unwrap_or(generation.channel_id);
+        let Ok(channel_id) = to_u64(target_channel_id.0) else {
+            warn!(
+                ?scope,
+                "readycheck completion has invalid origin/fallback channel id"
+            );
+            self.readychecks
+                .release_completion_notification(scope, message_id);
+            return;
+        };
+        let result = self
+            .transport
+            .send_message(
+                channel_id,
+                DiscordMessage::silent(InteractionResponse::message(ready_announcement(
+                    scope.kind,
+                    self.config.ready_threshold,
+                ))),
+            )
+            .await;
+        if let Err(error) = result {
+            warn!(%error, ?scope, "readycheck completion notification failed");
+            self.readychecks
+                .release_completion_notification(scope, message_id);
+        }
+    }
+
     fn sync_ready_lobby(&self, scope: LobbyScope) {
         if let Some(lobby) = self.service.get_lobby(scope) {
             self.readychecks.put_lobby(to_ready_lobby(&lobby));
@@ -758,7 +964,7 @@ impl AdminLobbyControl for LobbyAdminControl {
                 continue;
             }
             result.evicted_lobbies.push(kind.label().to_owned());
-            self.state.sync_ready_lobby(scope);
+            self.state.sync_readycheck_with_lobby(scope).await;
             self.best_effort_display_refresh(scope, "suspension").await;
             if let Err(error) = self.state.remove_lobby_reaction(scope, player_id).await {
                 debug!(%error, ?scope, "suspension lobby reaction cleanup failed");
@@ -1075,7 +1281,10 @@ impl MatchLobbyPort {
         if removed.is_empty() {
             return Ok(BTreeSet::new());
         }
-        self.state.sync_ready_lobby(scope);
+        // Evicted players must leave the live ready check too, exactly as the
+        // kick and leave paths do; otherwise the generation keeps counting
+        // people who are no longer in the lobby.
+        self.state.sync_readycheck_with_lobby(scope).await;
         if let Err(error) = self.state.sync_lobby_display(scope).await {
             warn!(%error, ?scope, "sibling lobby display sync after shuffle failed");
         }
@@ -1224,7 +1433,9 @@ impl CurfewLobbyDisplayPort for CurfewLobbyDisplay {
         lobby_kind: LobbyKind,
     ) -> Result<(), String> {
         let scope = LobbyScope::new(AppGuildId(guild_id), lobby_kind);
-        self.handler.sync_readycheck_with_lobby(scope).await;
+        // A curfew removal takes the player out of the lobby, so the live ready
+        // check has to drop them too rather than keep counting them.
+        self.handler.state.sync_readycheck_with_lobby(scope).await;
         self.handler.state.sync_lobby_display(scope).await
     }
 
@@ -1626,7 +1837,7 @@ impl LobbyInteractionHandler {
             .ok_or(ReadycheckRunError::Policy(
                 ReadycheckCommandFailure::NoLobby,
             ))?;
-        let (player_data, mentionable) = self.classify_readycheck_players(&lobby).await;
+        let (player_data, mentionable) = self.state.classify_readycheck_players(&lobby).await;
         let existing_generation = self.state.readychecks.readycheck_generation(scope);
         let existing_message = if let Some(generation) = &existing_generation {
             match self
@@ -1704,176 +1915,6 @@ impl LobbyInteractionHandler {
             mirror_invocation,
         )
         .await
-    }
-
-    async fn classify_readycheck_players(
-        &self,
-        lobby: &LobbySnapshot,
-    ) -> (
-        BTreeMap<AppUserId, ReadycheckPlayerData>,
-        BTreeSet<AppUserId>,
-    ) {
-        let now = unix_time_now();
-        let mut data = BTreeMap::new();
-        let mut mentionable = BTreeSet::new();
-        for player_id in &lobby.players {
-            let member = match (to_u64(lobby.scope.guild_id.0), to_u64(player_id.0)) {
-                (Ok(guild_id), Ok(player_id)) => self
-                    .state
-                    .transport
-                    .guild_member(guild_id, player_id)
-                    .await
-                    .ok()
-                    .flatten(),
-                _ => None,
-            };
-            let recent = lobby
-                .player_join_times
-                .get(player_id)
-                .is_some_and(|joined_at| now - joined_at < 10.0 * 60.0);
-            let (name, group) = member.map_or_else(
-                || {
-                    (
-                        self.state
-                            .players
-                            .fallback_name(*player_id, lobby.scope.guild_id),
-                        if recent {
-                            ReadinessGroup::Recent
-                        } else {
-                            ReadinessGroup::Afk
-                        },
-                    )
-                },
-                |member| {
-                    mentionable.insert(*player_id);
-                    let playing_dota = member
-                        .activities
-                        .iter()
-                        .any(|activity| activity.to_lowercase().contains("dota"));
-                    let group = if recent {
-                        ReadinessGroup::Recent
-                    } else if playing_dota {
-                        ReadinessGroup::PlayingDota
-                    } else if member.in_voice
-                        || matches!(
-                            member.presence,
-                            DiscordPresence::Online | DiscordPresence::DoNotDisturb
-                        )
-                    {
-                        ReadinessGroup::Ready
-                    } else {
-                        ReadinessGroup::Afk
-                    };
-                    (member.display_name, group)
-                },
-            );
-            data.insert(*player_id, ReadycheckPlayerData { name, group });
-        }
-        (data, mentionable)
-    }
-
-    /// Mirror Python's `sync_readycheck_with_lobby`: an active generation is
-    /// reconciled against the post-mutation roster, recent signups are
-    /// state-auto-confirmed unless they explicitly withdrew, stale physical
-    /// reactions are removed best effort, and the generation is repainted.
-    async fn sync_readycheck_with_lobby(&self, scope: LobbyScope) {
-        self.state.sync_ready_lobby(scope);
-        let Some(previous) = self.state.readychecks.readycheck_generation(scope) else {
-            return;
-        };
-        let Some(lobby) = self.state.service.get_lobby(scope) else {
-            return;
-        };
-        let (player_data, _) = self.classify_readycheck_players(&lobby).await;
-        let lobby_ids = player_data.keys().copied().collect::<BTreeSet<_>>();
-        let declined = previous.declined;
-        let auto_confirm = player_data
-            .iter()
-            .filter_map(|(player_id, data)| {
-                (data.group == ReadinessGroup::Recent && !declined.contains(player_id))
-                    .then_some(*player_id)
-            })
-            .collect::<BTreeSet<_>>();
-        let departed_confirmations = previous
-            .reacted
-            .keys()
-            .copied()
-            .filter(|player_id| !lobby_ids.contains(player_id));
-        let new_unconfirmed = lobby_ids
-            .difference(&previous.lobby_ids)
-            .copied()
-            .filter(|player_id| !previous.reacted.contains_key(player_id))
-            .filter(|player_id| !auto_confirm.contains(player_id));
-        for player_id in departed_confirmations.chain(new_unconfirmed) {
-            let (Ok(channel_id), Ok(message_id), Ok(user_id)) = (
-                to_u64(previous.channel_id.0),
-                to_u64(previous.message_id.0),
-                to_u64(player_id.0),
-            ) else {
-                continue;
-            };
-            if let Err(error) = self
-                .state
-                .transport
-                .remove_reaction(
-                    channel_id,
-                    message_id,
-                    &DiscordEmoji::unicode(READY_EMOJI),
-                    user_id,
-                )
-                .await
-            {
-                debug!(%error, ?scope, user_id, "readycheck roster reaction cleanup failed");
-            }
-        }
-        if self
-            .state
-            .readychecks
-            .update_readycheck_data(scope, lobby_ids, player_data, previous.message_id)
-            .is_none()
-        {
-            return;
-        }
-        for player_id in auto_confirm {
-            self.state.readychecks.add_readycheck_reaction(
-                scope,
-                player_id,
-                format!("<@{}>", player_id.0),
-                Some(previous.message_id),
-            );
-        }
-        let Some(generation) = self.state.readychecks.readycheck_generation(scope) else {
-            return;
-        };
-        let embed = readycheck_embed(
-            scope.kind,
-            &generation.player_data,
-            &generation.reacted,
-            self.state.config.ready_threshold,
-        );
-        match (
-            to_u64(generation.channel_id.0),
-            to_u64(generation.message_id.0),
-        ) {
-            (Ok(channel_id), Ok(message_id)) => {
-                if let Err(error) = self
-                    .state
-                    .transport
-                    .edit_message(
-                        channel_id,
-                        message_id,
-                        DiscordMessage::silent(InteractionResponse::message("").embed(embed))
-                            .preserving_content(),
-                    )
-                    .await
-                {
-                    warn!(%error, ?scope, "readycheck roster repaint failed");
-                }
-            }
-            _ => warn!(?scope, "readycheck roster repaint has invalid Discord IDs"),
-        }
-        self.notify_readycheck_completion(scope, generation.message_id)
-            .await;
     }
 
     /// Runs the plan and guarantees the publication permit is released.
@@ -2012,7 +2053,8 @@ impl LobbyInteractionHandler {
                 )
                 .await?;
             }
-            self.notify_readycheck_completion(plan.scope, generation.message_id)
+            self.state
+                .notify_readycheck_completion(plan.scope, generation.message_id)
                 .await;
             return Ok(ReadycheckRunResult {
                 jump_url,
@@ -2116,7 +2158,8 @@ impl LobbyInteractionHandler {
             )
             .await?;
         }
-        self.notify_readycheck_completion(plan.scope, message_id)
+        self.state
+            .notify_readycheck_completion(plan.scope, message_id)
             .await;
         Ok(ReadycheckRunResult {
             jump_url: receipt.jump_url,
@@ -2168,56 +2211,6 @@ impl LobbyInteractionHandler {
             .await
             .map(|_| ())
             .map_err(ReadycheckRunError::Transport)
-    }
-
-    async fn notify_readycheck_completion(&self, scope: LobbyScope, message_id: AppMessageId) {
-        if !self
-            .state
-            .readychecks
-            .take_completion_notification_at_threshold(
-                scope,
-                message_id,
-                self.state.config.ready_threshold,
-            )
-        {
-            return;
-        }
-        let Some(generation) = self.state.readychecks.readycheck_generation(scope) else {
-            return;
-        };
-        let target_channel_id = self
-            .state
-            .service
-            .get_lobby(scope)
-            .and_then(|lobby| lobby.message_ids.origin_channel_id)
-            .unwrap_or(generation.channel_id);
-        let Ok(channel_id) = to_u64(target_channel_id.0) else {
-            warn!(
-                ?scope,
-                "readycheck completion has invalid origin/fallback channel id"
-            );
-            self.state
-                .readychecks
-                .release_completion_notification(scope, message_id);
-            return;
-        };
-        let result = self
-            .state
-            .transport
-            .send_message(
-                channel_id,
-                DiscordMessage::silent(InteractionResponse::message(ready_announcement(
-                    scope.kind,
-                    self.state.config.ready_threshold,
-                ))),
-            )
-            .await;
-        if let Err(error) = result {
-            warn!(%error, ?scope, "readycheck completion notification failed");
-            self.state
-                .readychecks
-                .release_completion_notification(scope, message_id);
-        }
     }
 
     async fn handle_kick(
@@ -2295,7 +2288,7 @@ impl LobbyInteractionHandler {
                 continue;
             }
             kicked.push(kind);
-            self.sync_readycheck_with_lobby(scope).await;
+            self.state.sync_readycheck_with_lobby(scope).await;
             if let Err(error) = self.state.sync_lobby_display(scope).await {
                 warn!(%error, ?scope, "lobby display sync after kick failed");
             }
@@ -3066,7 +3059,7 @@ impl LobbyInteractionHandler {
         if let Err(error) = self.state.sync_lobby_display(scope).await {
             warn!(%error, ?scope, "lobby display sync after join failed");
         }
-        self.sync_readycheck_with_lobby(scope).await;
+        self.state.sync_readycheck_with_lobby(scope).await;
         let lobby = self.state.service.get_lobby(scope)?;
         if let Some(thread_id) = lobby.message_ids.thread_id
             && let Some(content) = match thread_activity {
@@ -3191,7 +3184,7 @@ impl LobbyInteractionHandler {
         if let Err(error) = self.state.sync_lobby_display(scope).await {
             warn!(%error, ?scope, "lobby display sync after leave failed");
         }
-        self.sync_readycheck_with_lobby(scope).await;
+        self.state.sync_readycheck_with_lobby(scope).await;
         if let Err(error) = self.state.remove_lobby_reaction(scope, player_id).await {
             debug!(%error, ?scope, "lobby reaction cleanup after leave failed");
         }
@@ -3722,6 +3715,7 @@ impl RawReactionObserver for LobbyRawReactionObserver {
                     warn!(%error, ?scope, "readycheck reaction display refresh failed");
                 }
                 handler
+                    .state
                     .notify_readycheck_completion(scope, message_id)
                     .await;
             }

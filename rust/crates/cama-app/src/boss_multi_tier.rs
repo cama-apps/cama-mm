@@ -2410,7 +2410,28 @@ where
         Ok(())
     }
 
+    /// Settle a finished fight, retrying the guarded commit on a conflict.
+    ///
+    /// A resume has already claimed (deleted) the paused duel row, so a
+    /// concurrent write that loses the revision race must not abandon the
+    /// settlement: the wager would escape and no later start could forfeit it.
+    /// The fight outcome, round log, and gear snapshot are fixed inputs, and
+    /// nothing is committed before the guarded commit, so replaying the
+    /// settlement against the fresh tunnel is safe.
     fn resolve_fight(
+        &mut self,
+        input: ResolveFightInput,
+    ) -> Result<ResolvedFight, BossServiceError> {
+        for _ in 0..RESOLVE_FIGHT_COMMIT_ATTEMPTS {
+            match self.resolve_fight_once(input.clone()) {
+                Err(BossServiceError::Repository(RepositoryError::Conflict)) => {}
+                settled => return settled,
+            }
+        }
+        Err(BossServiceError::Repository(RepositoryError::Conflict))
+    }
+
+    fn resolve_fight_once(
         &mut self,
         input: ResolveFightInput,
     ) -> Result<ResolvedFight, BossServiceError> {
@@ -3230,6 +3251,10 @@ struct VictoryEconomyInput {
     echo_applied: bool,
     drain_next_reward: bool,
 }
+
+/// Bounded retries for the settlement commit, so a pathological writer cannot
+/// spin here forever.
+const RESOLVE_FIGHT_COMMIT_ATTEMPTS: usize = 8;
 
 #[derive(Clone, Debug, PartialEq)]
 struct ResolveFightInput {

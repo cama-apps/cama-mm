@@ -1785,10 +1785,18 @@ impl PreparedPetFile {
     }
 }
 
+/// Byte budget for rendered pet images.
+///
+/// Cards are stored as uncompressed PNG, so each entry is roughly 0.6-1.2 MB.
+/// Several keys include a pet's name or a duel pairing, so the key space is
+/// unbounded in a long-lived worker and the cache has to be capped.
+const PET_BYTE_CACHE_BUDGET: usize = 32 * 1024 * 1024;
+
 pub struct PetAssetLoader<A, R> {
     authored: A,
     renderer: R,
     byte_cache: BTreeMap<String, Vec<u8>>,
+    byte_cache_size: usize,
 }
 
 impl<A: AuthoredPetAssets, R: PetCardRenderer> PetAssetLoader<A, R> {
@@ -1798,6 +1806,7 @@ impl<A: AuthoredPetAssets, R: PetCardRenderer> PetAssetLoader<A, R> {
             authored,
             renderer,
             byte_cache: BTreeMap::new(),
+            byte_cache_size: 0,
         }
     }
 
@@ -1818,10 +1827,33 @@ impl<A: AuthoredPetAssets, R: PetCardRenderer> PetAssetLoader<A, R> {
             bytes.clone()
         } else {
             let bytes = self.renderer.render(request).encode_png();
-            self.byte_cache.insert(key, bytes.clone());
+            self.store_bytes(key, &bytes);
             bytes
         };
         prepared(bytes, format!("pet_{base_name}.png"))
+    }
+
+    /// Return the cached bytes for `key`, rendering them if absent.
+    fn cached_bytes(&mut self, key: String, render: impl FnOnce() -> Vec<u8>) -> Vec<u8> {
+        if let Some(bytes) = self.byte_cache.get(&key) {
+            return bytes.clone();
+        }
+        let bytes = render();
+        self.store_bytes(key, &bytes);
+        bytes
+    }
+
+    /// Cache `bytes` under `key`, keeping the cache inside its byte budget.
+    ///
+    /// Renders are cheap relative to the memory they occupy, so exceeding the
+    /// budget simply drops the cache rather than growing without bound.
+    fn store_bytes(&mut self, key: String, bytes: &[u8]) {
+        if self.byte_cache_size.saturating_add(bytes.len()) > PET_BYTE_CACHE_BUDGET {
+            self.byte_cache.clear();
+            self.byte_cache_size = 0;
+        }
+        self.byte_cache_size = self.byte_cache_size.saturating_add(bytes.len());
+        self.byte_cache.insert(key, bytes.to_vec());
     }
 
     pub fn get_egg_card(&mut self, seed: i64) -> PreparedPetFile {
@@ -1830,11 +1862,7 @@ impl<A: AuthoredPetAssets, R: PetCardRenderer> PetAssetLoader<A, R> {
             return prepared(asset.bytes, format!("pet_egg.{extension}"));
         }
         let key = format!("render_egg_{seed}");
-        let bytes = self
-            .byte_cache
-            .entry(key)
-            .or_insert_with(|| render_egg_card(seed).encode_png())
-            .clone();
+        let bytes = self.cached_bytes(key, || render_egg_card(seed).encode_png());
         prepared(bytes, "pet_egg.png".to_owned())
     }
 
@@ -1846,22 +1874,14 @@ impl<A: AuthoredPetAssets, R: PetCardRenderer> PetAssetLoader<A, R> {
                 "engraved_tombstone_{}_{name}",
                 stable_signature(&asset.extension)
             );
-            let bytes = self
-                .byte_cache
-                .entry(key)
-                .or_insert_with(|| {
-                    engrave(&mut decoded, name);
-                    decoded.encode_png()
-                })
-                .clone();
+            let bytes = self.cached_bytes(key, || {
+                engrave(&mut decoded, name);
+                decoded.encode_png()
+            });
             return prepared(bytes, format!("pet_tombstone.{}", asset.extension));
         }
         let key = format!("render_tombstone_{name}");
-        let bytes = self
-            .byte_cache
-            .entry(key)
-            .or_insert_with(|| render_tombstone_card(name).encode_png())
-            .clone();
+        let bytes = self.cached_bytes(key, || render_tombstone_card(name).encode_png());
         prepared(bytes, "pet_tombstone.png".to_owned())
     }
 
@@ -1926,7 +1946,7 @@ impl<A: AuthoredPetAssets, R: PetCardRenderer> PetAssetLoader<A, R> {
                 canvas.text(478, 116, "VS", Rgba(255, 242, 154, 255), 4);
             }
             let bytes = canvas.encode_png();
-            self.byte_cache.insert(key, bytes.clone());
+            self.store_bytes(key, &bytes);
             bytes
         };
         prepared(bytes, "pet_versus.png".to_owned())
