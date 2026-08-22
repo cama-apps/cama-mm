@@ -804,11 +804,11 @@ impl TaxEnforcementPort for FakeEnforcement {
 }
 
 #[test]
-fn test_tax_fine_calls_service_and_reports_capped_amount() {
+fn test_tax_fine_calls_service_and_reports_exact_deduction() {
     let mut port = FakeEnforcement::new();
     port.fine_result = FineResult::Ok {
         requested_amount: 10,
-        applied_amount: 7,
+        applied_amount: 10,
         balance_before: 7,
         balance_after: -3,
         next_fine_at: Some(1_702_592_000),
@@ -836,9 +836,8 @@ fn test_tax_fine_calls_service_and_reports_capped_amount() {
     );
     let message = response.content.unwrap();
     for phrase in [
-        "Levied a 7",
+        "Levied a 10",
         "Jopacoin Reserve",
-        "capped to audited obligations",
         "Balance: 7",
         "-3",
         "<t:1702592000:R>",

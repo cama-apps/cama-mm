@@ -171,8 +171,6 @@ pub struct TaxFineRequest {
     pub discord_id: i64,
     pub guild_id: i64,
     pub amount: i64,
-    /// Caller-audited cap, re-clamped against obligations under the write lock.
-    pub max_amount: i64,
     pub actor_id: i64,
     pub reason: Option<String>,
     pub cooldown_seconds: i64,
@@ -184,7 +182,6 @@ pub enum TaxFineOutcome {
     Ok {
         requested_amount: i64,
         applied_amount: i64,
-        outstanding_obligations: i64,
         balance_before: i64,
         balance_after: i64,
         next_fine_at: i64,
@@ -192,7 +189,6 @@ pub enum TaxFineOutcome {
     Cooldown {
         next_fine_at: i64,
     },
-    NoOutstandingObligations,
     TargetNotRegistered,
     InvalidAmount,
 }
@@ -510,9 +506,6 @@ impl TaxRepository {
         if request.amount <= 0 {
             return Ok(TaxFineOutcome::InvalidAmount);
         }
-        if request.max_amount <= 0 {
-            return Ok(TaxFineOutcome::NoOutstandingObligations);
-        }
         let cooldown_seconds = request.cooldown_seconds.max(0);
         let reason = request
             .reason
@@ -550,19 +543,7 @@ impl TaxRepository {
                 return Ok(TaxFineOutcome::Cooldown { next_fine_at });
             }
         }
-        let fresh_obligations = obligations_in_transaction(
-            &transaction,
-            request.discord_id,
-            request.guild_id,
-            balance_before,
-            request.now,
-        )?;
-        let obligations = request.max_amount.min(fresh_obligations);
-        if obligations <= 0 {
-            transaction.commit()?;
-            return Ok(TaxFineOutcome::NoOutstandingObligations);
-        }
-        let applied_amount = request.amount.min(obligations);
+        let applied_amount = request.amount;
         let balance_after = balance_before
             .checked_sub(applied_amount)
             .ok_or(TaxRepositoryError::ArithmeticOverflow)?;
@@ -573,8 +554,8 @@ impl TaxRepository {
         // Match Python's insertion-ordered `json.dumps` representation because
         // the trigger persists this byte-for-byte into both ledger rows.
         let metadata = format!(
-            "{{\"requested_amount\": {}, \"applied_amount\": {}, \"outstanding_obligations\": {}, \"cooldown_seconds\": {cooldown_seconds}}}",
-            request.amount, applied_amount, obligations,
+            "{{\"requested_amount\": {}, \"applied_amount\": {}, \"cooldown_seconds\": {cooldown_seconds}}}",
+            request.amount, applied_amount,
         );
         set_ledger_context(
             &transaction,
@@ -632,7 +613,6 @@ impl TaxRepository {
         Ok(TaxFineOutcome::Ok {
             requested_amount: request.amount,
             applied_amount,
-            outstanding_obligations: obligations,
             balance_before,
             balance_after,
             next_fine_at: request.now.saturating_add(cooldown_seconds),
@@ -977,41 +957,6 @@ fn active_dark_bargains(
         total.saturating_add(amount)
     });
     Ok((i64::try_from(data.len()).unwrap_or(i64::MAX), due))
-}
-
-fn obligations_in_transaction(
-    transaction: &Transaction<'_>,
-    discord_id: i64,
-    guild_id: i64,
-    balance: i64,
-    now: i64,
-) -> Result<i64, rusqlite::Error> {
-    let visible_debt = balance.saturating_neg().max(0);
-    let loan = transaction
-        .query_row(
-            "SELECT COALESCE(outstanding_principal,0)+COALESCE(outstanding_fee,0)
-             FROM loan_state WHERE discord_id=?1 AND guild_id=?2",
-            params![discord_id, guild_id],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()?
-        .unwrap_or(0);
-    let (_, dark_bargain_due) = active_dark_bargains(transaction, guild_id, Some(discord_id), now)?;
-    let prediction = transaction.query_row(
-        "SELECT COALESCE(SUM(COALESCE(pp.yes_cost_basis_total,0)
-                                  +COALESCE(pp.no_cost_basis_total,0)),0)
-         FROM prediction_positions pp
-         JOIN predictions p ON p.prediction_id=pp.prediction_id
-         WHERE pp.discord_id=?1 AND p.guild_id=?2
-           AND p.status IN ('open','locked')
-           AND (pp.yes_contracts>0 OR pp.no_contracts>0)",
-        params![discord_id, guild_id],
-        |row| row.get::<_, i64>(0),
-    )?;
-    Ok(visible_debt
-        .saturating_add(loan)
-        .saturating_add(dark_bargain_due)
-        .saturating_add(prediction))
 }
 
 fn expected_payout(yes: i64, no: i64, contract_value: i64, price: i64) -> i64 {
