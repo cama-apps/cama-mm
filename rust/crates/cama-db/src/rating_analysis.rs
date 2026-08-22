@@ -267,4 +267,5 @@ fn sqlite_text(value: rusqlite::types::Value) -> String {
 }
 
 #[cfg(test)]
+#[path = "rating_analysis/tests.rs"]
 mod tests;

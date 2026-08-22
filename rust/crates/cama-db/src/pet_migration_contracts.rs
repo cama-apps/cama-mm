@@ -301,4 +301,5 @@ pub const fn model_dig_work_backfill(dig_work_at: i64, migration_time: i64) -> i
 }
 
 #[cfg(test)]
+#[path = "pet_migration_contracts/tests.rs"]
 mod tests;

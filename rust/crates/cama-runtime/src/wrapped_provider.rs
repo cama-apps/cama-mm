@@ -2152,4 +2152,5 @@ where
 }
 
 #[cfg(all(test, feature = "runtime-test-core"))]
+#[path = "wrapped_provider/tests.rs"]
 mod tests;

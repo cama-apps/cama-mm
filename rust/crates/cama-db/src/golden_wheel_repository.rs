@@ -191,4 +191,5 @@ impl GoldenWheelRepository {
 }
 
 #[cfg(test)]
+#[path = "golden_wheel_repository/tests.rs"]
 mod tests;

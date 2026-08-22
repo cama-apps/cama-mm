@@ -200,6 +200,112 @@ dependencies = [
 name = "cama-db"
 version = "0.1.0"
 dependencies = [
+ "cama-db-core",
+ "cama-db-dig",
+ "cama-db-economy",
+ "cama-db-gameplay",
+ "cama-db-match",
+ "cama-db-platform",
+ "cama-domain",
+ "chrono",
+ "fastrand",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "cama-db-core"
+version = "0.1.0"
+dependencies = [
+ "cama-db-match",
+ "cama-db-platform",
+ "cama-domain",
+ "chrono",
+ "fastrand",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "cama-db-dig"
+version = "0.1.0"
+dependencies = [
+ "cama-db-core",
+ "cama-db-match",
+ "cama-domain",
+ "chrono",
+ "fastrand",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "cama-db-economy"
+version = "0.1.0"
+dependencies = [
+ "cama-db-core",
+ "cama-db-match",
+ "cama-domain",
+ "chrono",
+ "fastrand",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "cama-db-gameplay"
+version = "0.1.0"
+dependencies = [
+ "cama-db-core",
+ "cama-db-match",
+ "cama-domain",
+ "chrono",
+ "fastrand",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "cama-db-match"
+version = "0.1.0"
+dependencies = [
+ "cama-db-core",
+ "cama-domain",
+ "chrono",
+ "fastrand",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "cama-db-platform"
+version = "0.1.0"
+dependencies = [
+ "cama-db-core",
  "cama-domain",
  "chrono",
  "fastrand",
@@ -229,6 +335,71 @@ dependencies = [
  "cama-app",
  "cama-db",
  "cama-domain",
+ "cama-runtime-commands",
+ "cama-runtime-engine",
+ "chrono",
+ "fastrand",
+ "fontdue",
+ "fs2",
+ "getrandom 0.4.3",
+ "gif",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "serenity",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "cama-runtime-commands"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cama-app",
+ "cama-db",
+ "cama-domain",
+ "cama-runtime-core",
+ "chrono",
+ "fastrand",
+ "fontdue",
+ "gif",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "cama-runtime-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cama-app",
+ "cama-db",
+ "cama-domain",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "cama-runtime-engine"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cama-app",
+ "cama-db",
+ "cama-domain",
+ "cama-runtime-core",
  "chrono",
  "fastrand",
  "fontdue",

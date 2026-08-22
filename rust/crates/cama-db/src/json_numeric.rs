@@ -12,7 +12,7 @@ use serde_json::Value;
 ///
 /// Values outside SQLite's signed-integer range are rejected instead of being
 /// silently saturated by Rust's float-to-integer cast.
-pub(crate) fn coerce_i64_like_python(value: &Value) -> Option<i64> {
+pub fn coerce_i64_like_python(value: &Value) -> Option<i64> {
     match value {
         Value::Number(number) => number
             .as_i64()
@@ -28,7 +28,7 @@ pub(crate) fn coerce_i64_like_python(value: &Value) -> Option<i64> {
 ///
 /// This matches Python equality between an integer Steam ID and a JSON number:
 /// `12345.0 == 12345`, while `12345.9 != 12345`.
-pub(crate) fn coerce_integral_i64(value: &Value) -> Option<i64> {
+pub fn coerce_integral_i64(value: &Value) -> Option<i64> {
     match value {
         Value::Number(number) => number
             .as_i64()
@@ -45,7 +45,7 @@ pub(crate) fn coerce_integral_i64(value: &Value) -> Option<i64> {
 }
 
 /// Read a JSON number as `f64` without accepting strings or booleans.
-pub(crate) fn number_f64(value: Option<&Value>) -> Option<f64> {
+pub fn number_f64(value: Option<&Value>) -> Option<f64> {
     value
         .and_then(Value::as_f64)
         .filter(|value| value.is_finite())

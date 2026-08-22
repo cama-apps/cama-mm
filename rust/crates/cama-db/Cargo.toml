@@ -5,7 +5,25 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[lib]
+path = "src/facade.rs"
+
+[features]
+default = ["full"]
+full = ["dig", "economy", "gameplay", "match", "platform"]
+dig = ["dep:cama-db-dig"]
+economy = ["dep:cama-db-economy"]
+gameplay = ["dep:cama-db-gameplay"]
+match = ["dep:cama-db-match"]
+platform = ["dep:cama-db-platform"]
+
 [dependencies]
+cama-db-core = { path = "../cama-db-core" }
+cama-db-dig = { path = "../cama-db-dig", optional = true }
+cama-db-economy = { path = "../cama-db-economy", optional = true }
+cama-db-gameplay = { path = "../cama-db-gameplay", optional = true }
+cama-db-match = { path = "../cama-db-match", optional = true }
+cama-db-platform = { path = "../cama-db-platform", optional = true }
 cama-domain = { path = "../cama-domain" }
 chrono.workspace = true
 fastrand.workspace = true

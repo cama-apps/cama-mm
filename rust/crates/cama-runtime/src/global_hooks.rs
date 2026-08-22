@@ -216,4 +216,5 @@ fn is_survey_command(root_name: &str, qualified_name: Option<&str>) -> bool {
 }
 
 #[cfg(all(test, feature = "runtime-test-match"))]
+#[path = "global_hooks/tests.rs"]
 mod tests;

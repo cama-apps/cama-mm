@@ -1,11 +1,8 @@
-//! SQLite schema initialization, integrity checks, and repositories for the
-//! Rust runtime.
+//! Shared SQLite connection, schema, migration, and audit foundation.
 //!
 //! The startup schema manager owns creation and migration before repository
-//! construction. Repository connections use the canonical SQLite configuration,
-//! and the audit verifies database integrity plus the schema contract embedded
-//! in the running build. Historical ledger rows that are no longer declared
-//! remain tolerated.
+//! construction. Repository slices depend on this crate so Cargo can compile
+//! them independently while retaining one schema authority.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -14,147 +11,17 @@ use std::time::Duration;
 use rusqlite::{Connection, OpenFlags};
 use thiserror::Error;
 
-pub mod admin;
-pub mod autobet_investments;
-#[path = "bankruptcy.rs"]
-pub mod bankruptcy_repository;
-#[path = "betting_service.rs"]
-pub mod betting_service_repository;
-pub mod blame_luke;
-#[path = "core_repositories.rs"]
-pub mod core_repositories;
-pub mod curfew;
-pub mod dig_abandon_runtime;
-pub mod dig_action_history;
-pub mod dig_blood_pact;
-#[path = "dig_bonus_events.rs"]
-pub mod dig_bonus_events_repository;
-pub mod dig_boss_runtime;
-pub mod dig_carry_wager;
-pub mod dig_event_runtime;
-pub mod dig_event_threats;
-pub mod dig_flavor_repository;
-pub mod dig_gear_runtime;
-pub mod dig_guild_modifiers;
-#[path = "dig_inventory.rs"]
-pub mod dig_inventory_repository;
-pub mod dig_migration_contracts;
-pub mod dig_miner_runtime;
-#[path = "dig_new_events_repository.rs"]
-pub mod dig_new_events_repository;
-pub mod dig_prestige4_content;
-pub mod dig_prestige_runtime;
-pub mod dig_quest_repository;
-pub mod dig_relic_recycling;
-pub mod dig_relic_rework;
-#[path = "dig_routes.rs"]
-pub mod dig_routes_repository;
-pub mod dig_social_runtime;
-pub mod dig_splash_runtime;
-#[path = "dig_sweep_fixes.rs"]
-pub mod dig_sweep_fixes_repository;
-#[path = "dig_tunnel_encounters.rs"]
-pub mod dig_tunnel_encounters_repository;
-pub mod dig_weather;
-pub mod disbursement;
-#[path = "dota_bet_seed.rs"]
-pub mod dota_bet_seed_repository;
-#[path = "dota_streak.rs"]
-pub mod dota_streak_repository;
-pub mod draft_finalization;
-pub mod draft_financial_execution;
-pub mod draft_financial_setup;
-pub mod draft_state;
-#[path = "duel.rs"]
-pub mod duel_repository;
-#[path = "economy_events.rs"]
-pub mod economy_event_repository;
-#[path = "gambling_stats.rs"]
-pub mod gambling_stats_repository;
-pub mod golden_wheel_repository;
-#[path = "guild_config.rs"]
-pub mod guild_config_repository;
-#[path = "herogrid.rs"]
-pub mod herogrid_repository;
-mod json_numeric;
-pub mod llm_request;
-#[path = "loan.rs"]
-pub mod loan_repository;
-#[path = "low_priority.rs"]
-pub mod low_priority_repository;
-#[path = "mafia_repository.rs"]
-pub mod mafia_repository;
-pub mod mana_protection;
-#[path = "mana_service.rs"]
-pub mod mana_service_repository;
-#[path = "manashop_rework.rs"]
-pub mod manashop_rework_repository;
-#[path = "match_correction.rs"]
-pub mod match_correction_repository;
-#[path = "match_discovery.rs"]
-pub mod match_discovery_repository;
-#[path = "match_recording.rs"]
-pub mod match_recording_repository;
-pub mod match_runtime;
-pub mod match_voting;
-pub mod moderation;
-pub mod neon_events;
-pub mod notifications;
-pub mod opendota_player;
-#[path = "package_deal.rs"]
-pub mod package_deal_repository;
-#[path = "pairings.rs"]
-pub mod pairings_repository;
-pub mod pending_lobby;
-#[path = "pet_brawl.rs"]
-pub mod pet_brawl_repository;
-#[path = "pet_eating.rs"]
-pub mod pet_eating_repository;
-#[path = "pet_evolution.rs"]
-pub mod pet_evolution_repository;
-pub mod pet_migration_contracts;
-#[path = "pet.rs"]
-pub mod pet_repository;
-pub mod player_trivia;
-#[path = "prediction_resolution.rs"]
-pub mod prediction_resolution_repository;
-#[path = "prediction_workers.rs"]
-pub mod prediction_worker_repository;
-#[path = "predictions.rs"]
-pub mod predictions_repository;
-pub mod rating_analysis;
-#[path = "rating_history.rs"]
-pub mod rating_history_repository;
-#[path = "readycheck.rs"]
-pub mod readycheck_repository;
-pub mod referrals;
-#[path = "registration.rs"]
-pub mod registration_repository;
-#[path = "reminders.rs"]
-pub mod reminder_repository;
+#[doc(hidden)]
+pub mod json_numeric;
 pub mod schema_manager;
 pub mod schema_manager_contracts;
-#[path = "scout.rs"]
-pub mod scout_repository;
-pub mod shop_runtime;
-#[path = "soft_avoid.rs"]
-pub mod soft_avoid_repository;
-pub mod survey;
-#[path = "tax.rs"]
-pub mod tax_repository;
 #[cfg(test)]
+pub(crate) use cama_db_match::core_repositories;
+#[cfg(test)]
+pub(crate) use cama_db_platform::low_priority_repository;
+#[cfg(test)]
+#[allow(dead_code)]
 mod test_support;
-#[path = "tip.rs"]
-pub mod tip_repository;
-#[path = "trivia_commands.rs"]
-pub mod trivia_commands_repository;
-#[path = "vanity_tax.rs"]
-pub mod vanity_tax_repository;
-#[path = "wheel_spins.rs"]
-pub mod wheel_spin_repository;
-pub mod wrapped_live;
-#[path = "wrapped.rs"]
-pub mod wrapped_repository;
 
 /// The ordered migration contract embedded in the Rust runtime.
 ///
@@ -322,7 +189,8 @@ pub enum AuditError {
 /// Schema creation and migration are handled by the startup schema manager,
 /// never by repository construction. The explicit foreign-key pragma enforces
 /// the canonical runtime setting (`OFF`) regardless of bundled SQLite defaults.
-pub(crate) fn open_runtime_connection(path: &Path) -> Result<Connection, rusqlite::Error> {
+#[doc(hidden)]
+pub fn open_runtime_connection(path: &Path) -> Result<Connection, rusqlite::Error> {
     let connection = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_WRITE

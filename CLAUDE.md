@@ -17,12 +17,18 @@ Production behavior lives in `rust/`. Do not add new production behavior to the 
 The Rust workspace uses edition 2024 and Rust 1.94:
 
 - `rust/crates/cama-domain`: transport- and storage-independent domain policies and models.
-- `rust/crates/cama-db`: Rust-owned SQLite initialization, migrations, integrity checks, and repositories.
+- `rust/crates/cama-db-core`: Rust-owned SQLite initialization, migrations, integrity checks, and shared connection policy.
+- `rust/crates/cama-db-{dig,economy,gameplay,match,platform}`: independently compiled repository slices.
+- `rust/crates/cama-db`: compatibility facade over the database foundation and repository slices.
 - `rust/crates/cama-app`: application services and orchestration behind typed persistence, clock, randomness, AI, and Discord ports.
-- `rust/crates/cama-runtime`: production Tokio/Serenity runtime, command and component providers, workers, gateway recovery, health, and composition root.
+- `rust/crates/cama-app-{dig,gameplay,match,platform}`: independent application slices re-exported by `cama-app`.
+- `rust/crates/cama-runtime-core`: Serenity-independent runtime contracts and configuration shared by provider crates.
+- `rust/crates/cama-runtime-commands`: independent leaf command providers compiled outside the runtime monolith.
+- `rust/crates/cama-runtime-engine`: production Tokio/Serenity adapters, coupled providers and workers, gateway recovery, and health.
+- `rust/crates/cama-runtime`: compatibility facade and production composition root over the independently compiled runtime crates.
 
-Repository-wide architecture audits run as `cama-runtime` tests; there is no
-separate `xtask` crate or cross-language parity gate.
+Repository-wide architecture audits run in the `cama-runtime-engine` match
+test shard; there is no separate `xtask` crate or cross-language parity gate.
 
 Dependency direction is Domain → Database/Application → Runtime. Keep domain logic independent of Serenity and concrete storage. Keep SQLite access in `cama-db` and compose production adapters in `cama-runtime`.
 
@@ -40,8 +46,8 @@ cargo clippy --locked --manifest-path rust/Cargo.toml --workspace --all-targets 
 # Test the complete Rust workspace
 cargo test --locked --manifest-path rust/Cargo.toml --workspace --all-targets --all-features
 
-# Test one crate or one contract
-cargo test --locked --manifest-path rust/Cargo.toml -p cama-runtime
+# Test one implementation crate or one contract
+cargo test --locked --manifest-path rust/Cargo.toml -p cama-runtime-engine
 
 # Compile without running tests
 cargo test --locked --manifest-path rust/Cargo.toml --workspace --all-targets --all-features --no-run

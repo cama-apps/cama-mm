@@ -590,4 +590,5 @@ fn update_balance_with_context(
 }
 
 #[cfg(test)]
+#[path = "dig_carry_wager/tests.rs"]
 mod tests;

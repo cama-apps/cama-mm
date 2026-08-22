@@ -1,0 +1,27 @@
+[package]
+name = "cama-db-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "../cama-db/src/lib.rs"
+
+[dependencies]
+cama-domain = { path = "../cama-domain" }
+chrono.workspace = true
+fastrand.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json = { version = "1.0.151", features = ["raw_value"] }
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+cama-db-match = { path = "../cama-db-match" }
+cama-db-platform = { path = "../cama-db-platform" }
+tempfile.workspace = true
+
+[lints]
+workspace = true

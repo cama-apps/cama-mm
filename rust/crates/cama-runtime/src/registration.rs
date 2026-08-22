@@ -693,7 +693,8 @@ impl InteractionResponseError {
         self.status_code == Some(404)
     }
 
-    pub(crate) fn with_status_code(message: impl Into<String>, status_code: Option<u16>) -> Self {
+    #[doc(hidden)]
+    pub fn with_status_code(message: impl Into<String>, status_code: Option<u16>) -> Self {
         Self {
             message: message.into(),
             status_code,

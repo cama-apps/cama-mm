@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-cama-db = { path = "../cama-db" }
+cama-db = { path = "../cama-db", default-features = false, features = ["gameplay", "match"] }
 cama-domain = { path = "../cama-domain" }
 chrono.workspace = true
 flate2.workspace = true

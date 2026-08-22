@@ -1,12 +1,12 @@
 //! Small helpers shared across the runtime providers.
 
 /// Convert a Discord snowflake into the signed form SQLite stores.
-pub(crate) fn signed_id(value: u64, label: &str) -> Result<i64, String> {
+pub fn signed_id(value: u64, label: &str) -> Result<i64, String> {
     i64::try_from(value).map_err(|_| format!("Discord {label} ID exceeds SQLite INTEGER"))
 }
 
 /// Run a synchronous job on the blocking pool, labelling join failures.
-pub(crate) async fn blocking<T, F>(label: &'static str, job: F) -> Result<T, String>
+pub async fn blocking<T, F>(label: &'static str, job: F) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T, String> + Send + 'static,

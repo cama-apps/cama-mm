@@ -917,4 +917,5 @@ fn table_columns(
 }
 
 #[cfg(test)]
+#[path = "moderation/tests.rs"]
 mod tests;

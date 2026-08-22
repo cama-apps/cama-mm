@@ -609,4 +609,5 @@ fn signed_id(value: u64, kind: &str) -> Result<i64, InteractionHandlerError> {
 }
 
 #[cfg(all(test, feature = "runtime-test-core"))]
+#[path = "blame_luke_provider/tests.rs"]
 mod tests;

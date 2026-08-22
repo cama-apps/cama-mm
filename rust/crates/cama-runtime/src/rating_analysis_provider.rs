@@ -643,4 +643,5 @@ fn response_error(error: crate::registration::InteractionResponseError) -> Inter
 }
 
 #[cfg(all(test, feature = "runtime-test-draft"))]
+#[path = "rating_analysis_provider/tests.rs"]
 mod tests;

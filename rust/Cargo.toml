@@ -6,8 +6,17 @@ members = [
     "crates/cama-app-match",
     "crates/cama-app-platform",
     "crates/cama-db",
+    "crates/cama-db-core",
+    "crates/cama-db-dig",
+    "crates/cama-db-economy",
+    "crates/cama-db-gameplay",
+    "crates/cama-db-match",
+    "crates/cama-db-platform",
     "crates/cama-domain",
     "crates/cama-runtime",
+    "crates/cama-runtime-commands",
+    "crates/cama-runtime-core",
+    "crates/cama-runtime-engine",
 ]
 resolver = "3"
 

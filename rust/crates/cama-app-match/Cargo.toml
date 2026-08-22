@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-cama-db = { path = "../cama-db" }
+cama-db = { path = "../cama-db", default-features = false, features = ["economy", "match"] }
 cama-domain = { path = "../cama-domain" }
 fastrand.workspace = true
 rusqlite.workspace = true

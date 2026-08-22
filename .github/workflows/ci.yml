@@ -53,6 +53,24 @@ jobs:
           - name: cama-db
             package: cama-db
             arguments: --all-targets --all-features
+          - name: cama-db-core
+            package: cama-db-core
+            arguments: --all-targets --all-features
+          - name: cama-db-dig
+            package: cama-db-dig
+            arguments: --all-targets --all-features
+          - name: cama-db-economy
+            package: cama-db-economy
+            arguments: --all-targets --all-features
+          - name: cama-db-gameplay
+            package: cama-db-gameplay
+            arguments: --all-targets --all-features
+          - name: cama-db-match
+            package: cama-db-match
+            arguments: --all-targets --all-features
+          - name: cama-db-platform
+            package: cama-db-platform
+            arguments: --all-targets --all-features
           - name: cama-app
             package: cama-app
             arguments: --all-targets --all-features
@@ -69,22 +87,31 @@ jobs:
             package: cama-app-platform
             arguments: --all-targets --all-features
           - name: cama-runtime-core
+            package: cama-runtime-core
+            arguments: --all-targets --all-features
+          - name: cama-runtime-commands
+            package: cama-runtime-commands
+            arguments: --all-targets --all-features
+          - name: cama-runtime
             package: cama-runtime
+            arguments: --all-targets --all-features
+          - name: cama-runtime-shard-core
+            package: cama-runtime-engine
             arguments: >-
               --lib --no-default-features
               --features runtime-test-core
-          - name: cama-runtime-dig
-            package: cama-runtime
+          - name: cama-runtime-shard-dig
+            package: cama-runtime-engine
             arguments: >-
               --lib --no-default-features
               --features runtime-test-dig
-          - name: cama-runtime-draft
-            package: cama-runtime
+          - name: cama-runtime-shard-draft
+            package: cama-runtime-engine
             arguments: >-
               --lib --no-default-features
               --features runtime-test-draft
-          - name: cama-runtime-match
-            package: cama-runtime
+          - name: cama-runtime-shard-match
+            package: cama-runtime-engine
             arguments: >-
               --lib --no-default-features
               --features runtime-test-match

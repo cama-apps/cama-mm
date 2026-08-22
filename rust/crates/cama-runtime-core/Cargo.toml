@@ -1,0 +1,31 @@
+[package]
+name = "cama-runtime-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = ["runtime-test-all"]
+runtime-test-all = [
+    "runtime-test-core",
+    "runtime-test-dig",
+    "runtime-test-draft",
+    "runtime-test-match",
+]
+runtime-test-core = []
+runtime-test-dig = []
+runtime-test-draft = []
+runtime-test-match = []
+
+[dependencies]
+async-trait.workspace = true
+cama-app = { path = "../cama-app" }
+cama-db = { path = "../cama-db" }
+cama-domain = { path = "../cama-domain" }
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

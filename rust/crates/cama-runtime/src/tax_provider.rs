@@ -35,7 +35,6 @@ use cama_db::economy_event_repository::{EconomyEventRepository, EventDirection, 
 use cama_db::tax_repository::{
     TaxBankruptcyAction, TaxBankruptcyOutcome, TaxBankruptcyRequest, TaxFineOutcome,
     TaxFineRequest, TaxGuildSnapshot, TaxLedgerEntry, TaxLedgerSourceTotal, TaxRepository,
-    TaxRepositoryError,
 };
 use cama_domain::formatting::JOPACOIN_EMOTE;
 use cama_domain::permissions::{
@@ -1909,12 +1908,6 @@ async fn edit_original(
         .edit_original(response)
         .await
         .map_err(|error| InteractionHandlerError::from(error.to_string()))
-}
-
-impl From<TaxRepositoryError> for InteractionHandlerError {
-    fn from(error: TaxRepositoryError) -> Self {
-        Self::from(error.to_string())
-    }
 }
 
 #[cfg(all(test, feature = "runtime-test-core"))]
