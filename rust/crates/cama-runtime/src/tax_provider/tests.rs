@@ -613,7 +613,7 @@ async fn vanity_admin_override_persists_and_clears_through_live_service() {
 }
 
 #[tokio::test]
-async fn fine_is_atomic_and_reports_cap_from_migrated_sqlite() {
+async fn fine_is_atomic_and_deducts_exact_amount_from_negative_balance() {
     let fixture = Fixture::migrated();
     fixture.player(1, -25);
     fixture
@@ -649,8 +649,7 @@ async fn fine_is_atomic_and_reports_cap_from_migrated_sqlite() {
         .expect("fine command");
     let response = responder.followups.lock().expect("followups")[0].clone();
     assert!(response.ephemeral);
-    assert!(response.content.contains("Levied a 25"));
-    assert!(response.content.contains("capped to audited obligations"));
+    assert!(response.content.contains("Levied a 100"));
     let connection = fixture.connection();
     assert_eq!(
         connection
@@ -660,7 +659,7 @@ async fn fine_is_atomic_and_reports_cap_from_migrated_sqlite() {
                 |row| row.get::<_, i64>(0),
             )
             .expect("fine balance"),
-        -50
+        -125
     );
     assert_eq!(
         connection
@@ -670,7 +669,7 @@ async fn fine_is_atomic_and_reports_cap_from_migrated_sqlite() {
                 |row| row.get::<_, i64>(0),
             )
             .expect("fine reserve"),
-        25
+        100
     );
     assert_eq!(
         connection

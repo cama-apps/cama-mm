@@ -1104,29 +1104,12 @@ impl TaxEnforcementPort for SqliteTaxPort {
         }
         let discord_id = signed_id(request.user_id, "user").map_err(|error| error.to_string())?;
         let guild_id = signed_id(request.guild_id, "guild").map_err(|error| error.to_string())?;
-        let snapshot = self
-            .repository
-            .player_snapshot(
-                discord_id,
-                guild_id,
-                PLAYER_LEDGER_DEFAULT_LIMIT,
-                0,
-                Utc::now().timestamp(),
-            )
-            .map_err(|error| error.to_string())?;
-        let Some(snapshot) = snapshot else {
-            return Ok(FineResult::TargetNotRegistered);
-        };
-        if snapshot.effective_obligations <= 0 {
-            return Ok(FineResult::NoOutstandingObligations);
-        }
         let outcome = self
             .repository
             .levy_fine_atomic(&TaxFineRequest {
                 discord_id,
                 guild_id,
                 amount: request.amount,
-                max_amount: snapshot.effective_obligations,
                 actor_id: signed_id(request.actor_id, "actor")
                     .map_err(|error| error.to_string())?,
                 reason: request.reason,
@@ -1150,7 +1133,6 @@ impl TaxEnforcementPort for SqliteTaxPort {
                 next_fine_at: Some(next_fine_at),
             },
             TaxFineOutcome::Cooldown { next_fine_at } => FineResult::Cooldown { next_fine_at },
-            TaxFineOutcome::NoOutstandingObligations => FineResult::NoOutstandingObligations,
             TaxFineOutcome::TargetNotRegistered => FineResult::TargetNotRegistered,
             TaxFineOutcome::InvalidAmount => FineResult::InvalidAmount,
         })

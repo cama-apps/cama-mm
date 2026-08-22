@@ -1431,7 +1431,6 @@ pub enum FineResult {
     Cooldown {
         next_fine_at: i64,
     },
-    NoOutstandingObligations,
     TargetNotRegistered,
     InvalidAmount,
     Rejected,
@@ -1553,12 +1552,7 @@ pub fn format_fine_result(user: &UserRef, result: &FineResult) -> String {
                 format_jc(*balance_after),
                 format_jc(*applied_amount),
             );
-            if applied_amount < requested_amount {
-                line.push_str(&format!(
-                    " Requested {}, capped to audited obligations.",
-                    format_jc(*requested_amount)
-                ));
-            }
+            debug_assert_eq!(applied_amount, requested_amount);
             if let Some(next_fine_at) = next_fine_at {
                 line.push_str(&format!(" Next fine available <t:{next_fine_at}:R>."));
             }
@@ -1566,10 +1560,6 @@ pub fn format_fine_result(user: &UserRef, result: &FineResult) -> String {
         }
         FineResult::Cooldown { next_fine_at } => format!(
             "{} is still on Tax Man fine cooldown until <t:{next_fine_at}:f> (<t:{next_fine_at}:R>).",
-            user.display_name
-        ),
-        FineResult::NoOutstandingObligations => format!(
-            "{} has no audited outstanding obligations to fine.",
             user.display_name
         ),
         FineResult::TargetNotRegistered => "That user is not registered in this guild.".to_owned(),

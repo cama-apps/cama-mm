@@ -50,18 +50,13 @@ impl Fixture {
     }
 
     fn fine(&self, id: i64, amount: i64, now: i64) -> TaxFineOutcome {
-        self.fine_with_cap(id, amount, i64::MAX, now)
-    }
-
-    fn fine_with_cap(&self, id: i64, amount: i64, max_amount: i64, now: i64) -> TaxFineOutcome {
         self.repository
             .levy_fine_atomic(&TaxFineRequest {
                 discord_id: id,
                 guild_id: GUILD,
                 amount,
-                max_amount,
                 actor_id: 99,
-                reason: Some("  overdue   obligations ".to_owned()),
+                reason: Some("  being   a badmin ".to_owned()),
                 cooldown_seconds: 100,
                 now,
             })
@@ -156,18 +151,17 @@ fn test_player_snapshot_includes_loans_and_dark_bargains() {
 }
 
 #[test]
-fn test_levy_fine_caps_at_obligations_and_can_make_balance_negative() {
+fn test_levy_fine_deducts_exact_amount_from_negative_balance() {
     let fixture = Fixture::migrated();
     fixture.player(1, -40);
     fixture.clear_ledger();
     assert_eq!(
-        fixture.fine_with_cap(1, 100, 100, NOW),
+        fixture.fine(1, 100, NOW),
         TaxFineOutcome::Ok {
             requested_amount: 100,
-            applied_amount: 40,
-            outstanding_obligations: 40,
+            applied_amount: 100,
             balance_before: -40,
-            balance_after: -80,
+            balance_after: -140,
             next_fine_at: NOW + 100,
         }
     );
@@ -180,7 +174,7 @@ fn test_levy_fine_caps_at_obligations_and_can_make_balance_negative() {
                 |row| row.get::<_, i64>(0),
             )
             .expect("balance"),
-        -80
+        -140
     );
     assert_eq!(
         connection
@@ -190,7 +184,7 @@ fn test_levy_fine_caps_at_obligations_and_can_make_balance_negative() {
                 |row| row.get::<_, i64>(0),
             )
             .expect("reserve"),
-        40
+        100
     );
     let rows = fixture
         .repository
@@ -201,10 +195,14 @@ fn test_levy_fine_caps_at_obligations_and_can_make_balance_negative() {
     assert_eq!(
         rows.iter()
             .find(|row| row.account_type == "player")
+            .map(|row| row.delta),
+        Some(-100)
+    );
+    assert_eq!(
+        rows.iter()
+            .find(|row| row.account_type == "player")
             .and_then(|row| row.metadata.as_deref()),
-        Some(
-            "{\"requested_amount\": 100, \"applied_amount\": 40, \"outstanding_obligations\": 40, \"cooldown_seconds\": 100}"
-        )
+        Some("{\"requested_amount\": 100, \"applied_amount\": 100, \"cooldown_seconds\": 100}")
     );
     assert_eq!(
         connection
@@ -296,83 +294,49 @@ fn test_levy_fine_allows_different_players_during_cooldown() {
 }
 
 #[test]
-fn test_levy_fine_rejects_player_without_outstanding_obligations() {
+fn test_levy_fine_deducts_exact_amount_from_positive_balance() {
     let fixture = Fixture::migrated();
     fixture.player(1, 20);
     assert_eq!(
         fixture.fine(1, 10, NOW),
-        TaxFineOutcome::NoOutstandingObligations
+        TaxFineOutcome::Ok {
+            requested_amount: 10,
+            applied_amount: 10,
+            balance_before: 20,
+            balance_after: 10,
+            next_fine_at: NOW + 100,
+        }
+    );
+}
+
+#[test]
+fn test_levy_fine_rejects_non_positive_amounts_without_mutation() {
+    let fixture = Fixture::migrated();
+    fixture.player(1, 20);
+    fixture.clear_ledger();
+    assert_eq!(fixture.fine(1, 0, NOW), TaxFineOutcome::InvalidAmount);
+    assert_eq!(fixture.fine(1, -10, NOW), TaxFineOutcome::InvalidAmount);
+    assert_eq!(
+        fixture
+            .connection()
+            .query_row(
+                "SELECT jopacoin_balance FROM players WHERE discord_id=1 AND guild_id=?1",
+                [GUILD],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("unchanged balance"),
+        20
+    );
+    assert_eq!(
+        fixture
+            .repository
+            .count_ledger_entries(GUILD, None)
+            .expect("unchanged ledger"),
+        0
     );
     assert_eq!(
         fixture.fine(999, 10, NOW),
         TaxFineOutcome::TargetNotRegistered
-    );
-    assert_eq!(fixture.fine(1, 0, NOW), TaxFineOutcome::InvalidAmount);
-}
-
-#[test]
-fn test_levy_fine_atomic_reclamps_stale_cap_in_lock() {
-    let fixture = Fixture::migrated();
-    fixture.player(1, 20);
-    let connection = fixture.connection();
-    connection
-        .execute(
-            "INSERT INTO loan_state(discord_id,guild_id,outstanding_principal,outstanding_fee)
-             VALUES (1,?1,100,0)",
-            [GUILD],
-        )
-        .expect("seed original obligation");
-    connection
-        .execute(
-            "UPDATE loan_state SET outstanding_principal=10 WHERE discord_id=1 AND guild_id=?1",
-            [GUILD],
-        )
-        .expect("reduce obligation before lock");
-    assert!(matches!(
-        fixture.fine_with_cap(1, 100, 100, NOW),
-        TaxFineOutcome::Ok {
-            applied_amount: 10,
-            outstanding_obligations: 10,
-            ..
-        }
-    ));
-}
-
-#[test]
-fn test_levy_fine_never_exceeds_caller_audited_cap() {
-    let fixture = Fixture::migrated();
-    fixture.player(1, -40);
-    assert!(matches!(
-        fixture.fine_with_cap(1, 100, 15, NOW),
-        TaxFineOutcome::Ok {
-            applied_amount: 15,
-            outstanding_obligations: 15,
-            ..
-        }
-    ));
-}
-
-#[test]
-fn test_levy_fine_atomic_rejects_when_obligations_vanish_in_lock() {
-    let fixture = Fixture::migrated();
-    fixture.player(1, 20);
-    let connection = fixture.connection();
-    connection
-        .execute(
-            "INSERT INTO loan_state(discord_id,guild_id,outstanding_principal,outstanding_fee)
-             VALUES (1,?1,100,0)",
-            [GUILD],
-        )
-        .expect("seed original obligation");
-    connection
-        .execute(
-            "UPDATE loan_state SET outstanding_principal=0 WHERE discord_id=1 AND guild_id=?1",
-            [GUILD],
-        )
-        .expect("clear obligation before lock");
-    assert_eq!(
-        fixture.fine_with_cap(1, 100, 100, NOW),
-        TaxFineOutcome::NoOutstandingObligations
     );
 }
 
@@ -456,7 +420,7 @@ fn test_player_prediction_expected_payout_floors_each_side_like_python() {
 }
 
 #[test]
-fn test_levy_fine_can_use_prediction_cost_basis_as_obligation() {
+fn test_levy_fine_is_not_capped_by_prediction_cost_basis() {
     let fixture = Fixture::migrated();
     fixture.player(1, 20);
     let connection = fixture.connection();
@@ -479,7 +443,9 @@ fn test_levy_fine_can_use_prediction_cost_basis_as_obligation() {
     assert!(matches!(
         fixture.fine(1, 99, NOW),
         TaxFineOutcome::Ok {
-            applied_amount: 17,
+            applied_amount: 99,
+            balance_before: 20,
+            balance_after: -79,
             ..
         }
     ));
