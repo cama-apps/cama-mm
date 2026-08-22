@@ -1,0 +1,44 @@
+[package]
+name = "cama-runtime-commands"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = ["runtime-test-all"]
+runtime-test-all = [
+    "runtime-test-core",
+    "runtime-test-dig",
+    "runtime-test-draft",
+    "runtime-test-match",
+]
+runtime-test-core = ["cama-runtime-core/runtime-test-core"]
+runtime-test-dig = ["cama-runtime-core/runtime-test-dig"]
+runtime-test-draft = ["cama-runtime-core/runtime-test-draft"]
+runtime-test-match = ["cama-runtime-core/runtime-test-match"]
+
+[dependencies]
+async-trait.workspace = true
+cama-app = { path = "../cama-app" }
+cama-db = { path = "../cama-db" }
+cama-domain = { path = "../cama-domain" }
+cama-runtime-core = { path = "../cama-runtime-core", default-features = false }
+chrono.workspace = true
+fastrand.workspace = true
+fontdue.workspace = true
+gif.workspace = true
+reqwest.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

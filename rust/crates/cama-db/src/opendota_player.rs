@@ -861,4 +861,5 @@ fn player_from_row(row: &rusqlite::Row<'_>) -> Result<SteamLinkedPlayer, rusqlit
 }
 
 #[cfg(test)]
+#[path = "opendota_player/tests.rs"]
 mod tests;

@@ -507,4 +507,5 @@ fn gear_row(tunnel: &TunnelGearSeed, now: i64) -> GearBackfillRow {
 }
 
 #[cfg(test)]
+#[path = "dig_migration_contracts/tests.rs"]
 mod tests;

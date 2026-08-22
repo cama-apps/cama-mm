@@ -157,8 +157,40 @@ fn crate_dependency_dag_has_only_inward_edges() {
     let expected = [
         ("rust/crates/cama-domain/Cargo.toml", BTreeSet::new()),
         (
-            "rust/crates/cama-db/Cargo.toml",
+            "rust/crates/cama-db-core/Cargo.toml",
             BTreeSet::from(["cama-domain".to_owned()]),
+        ),
+        (
+            "rust/crates/cama-db-dig/Cargo.toml",
+            BTreeSet::from(["cama-db-core".to_owned(), "cama-domain".to_owned()]),
+        ),
+        (
+            "rust/crates/cama-db-economy/Cargo.toml",
+            BTreeSet::from(["cama-db-core".to_owned(), "cama-domain".to_owned()]),
+        ),
+        (
+            "rust/crates/cama-db-gameplay/Cargo.toml",
+            BTreeSet::from(["cama-db-core".to_owned(), "cama-domain".to_owned()]),
+        ),
+        (
+            "rust/crates/cama-db-match/Cargo.toml",
+            BTreeSet::from(["cama-db-core".to_owned(), "cama-domain".to_owned()]),
+        ),
+        (
+            "rust/crates/cama-db-platform/Cargo.toml",
+            BTreeSet::from(["cama-db-core".to_owned(), "cama-domain".to_owned()]),
+        ),
+        (
+            "rust/crates/cama-db/Cargo.toml",
+            BTreeSet::from([
+                "cama-db-core".to_owned(),
+                "cama-db-dig".to_owned(),
+                "cama-db-economy".to_owned(),
+                "cama-db-gameplay".to_owned(),
+                "cama-db-match".to_owned(),
+                "cama-db-platform".to_owned(),
+                "cama-domain".to_owned(),
+            ]),
         ),
         (
             "rust/crates/cama-app-dig/Cargo.toml",
@@ -188,11 +220,39 @@ fn crate_dependency_dag_has_only_inward_edges() {
             ]),
         ),
         (
+            "rust/crates/cama-runtime-core/Cargo.toml",
+            BTreeSet::from([
+                "cama-app".to_owned(),
+                "cama-db".to_owned(),
+                "cama-domain".to_owned(),
+            ]),
+        ),
+        (
+            "rust/crates/cama-runtime-commands/Cargo.toml",
+            BTreeSet::from([
+                "cama-app".to_owned(),
+                "cama-db".to_owned(),
+                "cama-domain".to_owned(),
+                "cama-runtime-core".to_owned(),
+            ]),
+        ),
+        (
+            "rust/crates/cama-runtime-engine/Cargo.toml",
+            BTreeSet::from([
+                "cama-app".to_owned(),
+                "cama-db".to_owned(),
+                "cama-domain".to_owned(),
+                "cama-runtime-core".to_owned(),
+            ]),
+        ),
+        (
             "rust/crates/cama-runtime/Cargo.toml",
             BTreeSet::from([
                 "cama-app".to_owned(),
                 "cama-db".to_owned(),
                 "cama-domain".to_owned(),
+                "cama-runtime-commands".to_owned(),
+                "cama-runtime-engine".to_owned(),
             ]),
         ),
     ];
@@ -209,7 +269,18 @@ fn crate_dependency_dag_has_only_inward_edges() {
 fn crate_roots_resolve_every_public_module_export() {
     for (crate_name, root_file) in [
         ("cama-domain", "rust/crates/cama-domain/src/lib.rs"),
-        ("cama-db", "rust/crates/cama-db/src/lib.rs"),
+        ("cama-db-core", "rust/crates/cama-db/src/lib.rs"),
+        ("cama-db-dig", "rust/crates/cama-db-dig/src/lib.rs"),
+        ("cama-db-economy", "rust/crates/cama-db-economy/src/lib.rs"),
+        (
+            "cama-db-gameplay",
+            "rust/crates/cama-db-gameplay/src/lib.rs",
+        ),
+        ("cama-db-match", "rust/crates/cama-db-match/src/lib.rs"),
+        (
+            "cama-db-platform",
+            "rust/crates/cama-db-platform/src/lib.rs",
+        ),
         ("cama-app-dig", "rust/crates/cama-app-dig/src/lib.rs"),
         (
             "cama-app-gameplay",
@@ -221,7 +292,18 @@ fn crate_roots_resolve_every_public_module_export() {
             "rust/crates/cama-app-platform/src/lib.rs",
         ),
         ("cama-app", "rust/crates/cama-app/src/lib.rs"),
-        ("cama-runtime", "rust/crates/cama-runtime/src/lib.rs"),
+        (
+            "cama-runtime-core",
+            "rust/crates/cama-runtime-core/src/lib.rs",
+        ),
+        (
+            "cama-runtime-commands",
+            "rust/crates/cama-runtime-commands/src/lib.rs",
+        ),
+        (
+            "cama-runtime-engine",
+            "rust/crates/cama-runtime/src/engine_lib.rs",
+        ),
     ] {
         let modules = root_module_paths(root_file);
         assert!(!modules.is_empty(), "{crate_name} exports no modules");

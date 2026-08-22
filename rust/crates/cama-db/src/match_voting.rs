@@ -315,4 +315,5 @@ fn payload_with_submission(
 }
 
 #[cfg(test)]
+#[path = "match_voting/tests.rs"]
 mod tests;

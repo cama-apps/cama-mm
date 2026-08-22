@@ -28,7 +28,8 @@ impl DiscordToken {
 
     /// Access is crate-private so credentials cannot accidentally escape
     /// through application adapters.
-    pub(crate) fn expose(&self) -> &str {
+    #[doc(hidden)]
+    pub fn expose(&self) -> &str {
         &self.0
     }
 }

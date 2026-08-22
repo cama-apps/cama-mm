@@ -16,10 +16,22 @@ runtime-test-all = [
     "runtime-test-draft",
     "runtime-test-match",
 ]
-runtime-test-core = []
-runtime-test-dig = []
-runtime-test-draft = []
-runtime-test-match = []
+runtime-test-core = [
+    "cama-runtime-commands/runtime-test-core",
+    "cama-runtime-engine/runtime-test-core",
+]
+runtime-test-dig = [
+    "cama-runtime-commands/runtime-test-dig",
+    "cama-runtime-engine/runtime-test-dig",
+]
+runtime-test-draft = [
+    "cama-runtime-commands/runtime-test-draft",
+    "cama-runtime-engine/runtime-test-draft",
+]
+runtime-test-match = [
+    "cama-runtime-commands/runtime-test-match",
+    "cama-runtime-engine/runtime-test-match",
+]
 
 [[bin]]
 name = "cama-rust"
@@ -35,7 +47,7 @@ path = "src/bin/draft_provider_check.rs"
 test = false
 
 # These targets remain production build/clippy targets. Their tests are
-# source-included in the library's core test shard so CI only has to compile
+# source-included in the engine's core test shard so CI only has to compile
 # one runtime test harness.
 [[test]]
 name = "runtime_lifecycle"
@@ -51,6 +63,8 @@ test = false
 cama-app = { path = "../cama-app" }
 cama-db = { path = "../cama-db" }
 cama-domain = { path = "../cama-domain" }
+cama-runtime-commands = { path = "../cama-runtime-commands", default-features = false }
+cama-runtime-engine = { path = "../cama-runtime-engine", default-features = false }
 async-trait.workspace = true
 chrono.workspace = true
 fastrand.workspace = true
