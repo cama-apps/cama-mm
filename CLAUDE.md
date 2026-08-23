@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Rust is the primary implementation language; Python is retained only as a legacy correctness reference.
+Rust is the sole implementation language.
 
 ## Git
 
@@ -10,7 +10,7 @@ Rust is the primary implementation language; Python is retained only as a legacy
 
 Cama Balanced Shuffle is a Discord bot for Dota 2 inhouse leagues. It provides balanced shuffling, captain drafts, rating systems, registration and OpenDota integration, match recording and enrichment, betting and prediction markets, the Jopacoin economy, Dig, pets, Mafia, duels, mana, trivia, Wrapped, image rendering, reminders, moderation, and optional AI flavor/SQL features.
 
-Production behavior lives in `rust/`. Do not add new production behavior to the Python tree. Consult Python only to recover legacy contracts such as exact user-facing copy, edge cases, database semantics, or historical behavior, then encode those contracts in Rust implementation and Rust tests.
+Production behavior lives in `rust/`. Historical implementations and contracts can be recovered from Git history when needed; keep all current behavior and tests in Rust.
 
 ## Workspace
 
@@ -60,7 +60,7 @@ cargo run --locked --manifest-path rust/Cargo.toml -p cama-runtime -- db-check -
 cargo run --locked --manifest-path rust/Cargo.toml -p cama-runtime -- inventory
 ```
 
-Rust tests are the default and required validation. Do not run Ruff, pytest, or other Python gates unless the task explicitly changes Python or explicitly requests a legacy differential/parity audit.
+Rust tests are the default and required validation.
 
 ## Architecture and conventions
 
@@ -112,7 +112,7 @@ All new behavior and regressions require Rust tests.
 - Mock external Discord, OpenDota, AI, and HTTP behavior. Tests that intentionally use loopback fixture servers may require an environment that permits local binds.
 - When fixing an interaction timeout, assert acknowledgement occurs before database, network, lock, or render work.
 
-Python tests are not part of routine validation. If legacy Python behavior reveals a missing contract, reproduce it as a Rust regression test and keep the fix in Rust.
+If Git history reveals a missing legacy contract, reproduce it as a Rust regression test and keep the fix in Rust.
 
 ## Common changes
 
