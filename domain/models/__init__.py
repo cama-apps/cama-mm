@@ -1,6 +1,0 @@
-"""
-Domain models - pure data structures representing business entities.
-
-Note: LobbyManager was moved to services/lobby_manager_service.py.
-Import it from there: from services.lobby_manager_service import LobbyManagerService
-"""

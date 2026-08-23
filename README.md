@@ -104,9 +104,8 @@ database writer. Deployment is Rust-only and fails closed --
 `scripts/deploy-runtime` rejects any `BOT_RUNTIME` other than `rust` -- and CI
 runs the Rust gates only.
 
-The historical Python application is retained as reference material for
-recovering legacy contracts. It is not installed, started, linted, or tested by
-any active path, and no new behavior belongs there.
+Historical implementations can be recovered from Git history when a legacy
+contract needs to be investigated; the current repository is Rust-only.
 
 ## Discord Commands
 

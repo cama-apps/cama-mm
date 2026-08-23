@@ -1,8 +1,8 @@
 # Rust runtime
 
-`cama-rust` is the sole production runtime. The historical Python application
-is retained in the repository as reference material, but it is not installed,
-started, linted, or tested by the active CI, release, or deployment paths.
+`cama-rust` is the sole production runtime and the repository's only
+implementation. Historical behavior can be recovered from Git history when
+needed.
 
 ## Workspace
 
@@ -13,7 +13,7 @@ started, linted, or tested by the active CI, release, or deployment paths.
 
 Repository-wide architecture contracts are compiled into the
 `cama-runtime` test target. The retired cross-language parity `xtask` and its
-Python/database conversion probes have been removed.
+database conversion probes have been removed.
 
 ## Local checks
 
@@ -28,8 +28,7 @@ cargo test --locked --manifest-path rust/Cargo.toml \
 ```
 
 The full suite includes loopback HTTP fixture servers. Run it in an environment
-that permits binding localhost ports. No Python interpreter or Python package
-environment is required.
+that permits binding localhost ports.
 
 ## Database ownership
 
@@ -39,8 +38,8 @@ Repositories never create or migrate databases themselves.
 
 Tests that need the current schema restore isolated in-memory databases from a
 single Rust-created template. Tests that exercise migration behavior create
-their own temporary legacy shapes explicitly; they do not invoke the retired
-runtime or rebuild a Python-migrated database for each case.
+their own temporary legacy shapes explicitly; they do not invoke a retired
+runtime or rebuild an externally migrated database for each case.
 
 Never mutate `cama_shuffle.db` merely to validate it. Use a disposable copy for
 manual checks:
@@ -55,7 +54,7 @@ used by deployment before a candidate container starts.
 
 ## Runtime data and container image
 
-Release resolves the latest published Dotabase version from PyPI metadata,
+Release resolves the latest published Dotabase version from package metadata,
 downloads its source archive, verifies the publisher SHA-256, and extracts only
 `dotabase.db`. Renderer fonts are also downloaded as verified data files. The
 staging step uses shell tooling only; it does not install a Python package or
@@ -122,5 +121,5 @@ The revision is carried end to end:
 - The admin status command reads `GIT_SHA` and displays its short form.
 
 Deployment is triggered only after the Release workflow succeeds on `main`.
-The active workflows and runtime scripts contain no Python setup, Python
-commands, legacy-runtime selector, or Python rollback path.
+The active workflows and runtime scripts are Rust-only and contain no
+legacy-runtime selector or rollback path.
