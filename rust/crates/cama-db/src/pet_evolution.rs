@@ -206,7 +206,7 @@ impl PetEvolutionRepository {
         let mut statement = connection.prepare(
             "SELECT pet_id, guild_id
              FROM pets
-             WHERE died_at IS NULL AND evolved_at IS NULL
+             WHERE died_at IS NULL AND is_active=1 AND evolved_at IS NULL
                AND evolution_due_at IS NOT NULL
                AND evolution_due_at <= ?1
              ORDER BY evolution_due_at, pet_id
@@ -237,7 +237,7 @@ impl PetEvolutionRepository {
                 "SELECT pet_id
                  FROM pets
                  WHERE pet_id = ?1 AND guild_id = ?2
-                   AND evolved_at IS NULL
+                   AND is_active=1 AND evolved_at IS NULL
                    AND evolution_due_at = ?3
                    AND (died_at IS NULL OR died_at > evolution_due_at)",
                 params![pet_id, guild_id, expected_due_at],
@@ -257,7 +257,7 @@ impl PetEvolutionRepository {
                  evolution_primary = ?2,
                  evolution_secondary = ?3
              WHERE pet_id = ?4 AND guild_id = ?5
-               AND evolved_at IS NULL
+               AND is_active=1 AND evolved_at IS NULL
                AND evolution_due_at = ?6
                AND (died_at IS NULL OR died_at > evolution_due_at)",
             params![
@@ -282,7 +282,7 @@ impl PetEvolutionRepository {
         let mut statement = connection.prepare(
             "SELECT pet_id, guild_id
              FROM pets
-             WHERE evolved_at IS NOT NULL
+             WHERE evolved_at IS NOT NULL AND is_active=1
                AND evolution_announced_at IS NULL
              ORDER BY evolved_at, pet_id
              LIMIT ?1",
@@ -381,7 +381,7 @@ fn eligible_pet(
             "SELECT pet_id, evolution_started_at
              FROM pets
              WHERE discord_id = ?1 AND guild_id = ?2
-               AND died_at IS NULL AND evolved_at IS NULL
+               AND died_at IS NULL AND is_active=1 AND evolved_at IS NULL
                AND evolution_started_at IS NOT NULL
                AND evolution_due_at IS NOT NULL
                AND evolution_started_at <= ?3
@@ -608,10 +608,13 @@ mod tests {
                          evolution_calling      TEXT,
                          evolution_primary      TEXT,
                          evolution_secondary    TEXT,
-                         evolution_announced_at INTEGER
+                         evolution_announced_at INTEGER,
+                         is_active              INTEGER NOT NULL DEFAULT 1,
+                         stabled_at             INTEGER
                      );
-                     CREATE UNIQUE INDEX idx_pets_one_living
-                         ON pets(discord_id, guild_id) WHERE died_at IS NULL;
+                     CREATE UNIQUE INDEX idx_pets_one_active
+                         ON pets(discord_id, guild_id)
+                         WHERE died_at IS NULL AND is_active=1;
                      CREATE TABLE pet_evolution_daily (
                          pet_id            INTEGER NOT NULL,
                          guild_id          INTEGER NOT NULL,
@@ -627,7 +630,7 @@ mod tests {
                      );
                      CREATE INDEX idx_pets_evolution_due
                          ON pets(evolution_due_at, pet_id)
-                         WHERE died_at IS NULL AND evolved_at IS NULL
+                         WHERE died_at IS NULL AND is_active=1 AND evolved_at IS NULL
                            AND evolution_due_at IS NOT NULL;
                      CREATE INDEX idx_pets_evolution_unannounced
                          ON pets(evolved_at, pet_id)

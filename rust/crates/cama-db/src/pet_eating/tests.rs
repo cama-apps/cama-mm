@@ -134,10 +134,19 @@ impl Fixture {
                     evolution_calling TEXT,
                     evolution_primary TEXT,
                     evolution_secondary TEXT,
-                    evolution_announced_at INTEGER
+                    evolution_announced_at INTEGER,
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    stabled_at INTEGER
                 );
-                CREATE UNIQUE INDEX idx_pets_one_alive
-                    ON pets(discord_id, guild_id) WHERE died_at IS NULL;
+                CREATE UNIQUE INDEX idx_pets_one_active
+                    ON pets(discord_id, guild_id)
+                    WHERE died_at IS NULL AND is_active=1;
+                CREATE TABLE pet_stable_state (
+                    discord_id INTEGER NOT NULL,
+                    guild_id INTEGER NOT NULL,
+                    last_voluntary_switch_at INTEGER,
+                    PRIMARY KEY(discord_id,guild_id)
+                );
                 CREATE TABLE pet_brawls (
                     brawl_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     guild_id INTEGER NOT NULL,
@@ -221,6 +230,34 @@ impl Fixture {
 
     fn adult_pet(&self, owner_id: i64, name: &str) -> Pet {
         self.insert_pet(owner_id, name, ADULT_AGE_SECONDS)
+    }
+
+    fn stabled_pet(&self, owner_id: i64, name: &str, stabled_at: i64) -> Pet {
+        let hatched_at = stabled_at - ADULT_AGE_SECONDS;
+        let connection = self.connection();
+        connection
+            .execute(
+                "INSERT INTO pets (
+                     discord_id,guild_id,name,species,adopted_at,hatched_at,
+                     adopt_fee,last_fed_at,hunger_at_last_fed,dig_work_units,dig_work_at,
+                     is_active,stabled_at
+                 ) VALUES (?1,?2,?3,'common_cama',?4,?5,20,?6,100,0,?6,0,?6)",
+                params![
+                    owner_id,
+                    GUILD_ID,
+                    name,
+                    hatched_at - 86_400,
+                    hatched_at,
+                    stabled_at,
+                ],
+            )
+            .expect("seed stabled pet");
+        let pet_id = connection.last_insert_rowid();
+        drop(connection);
+        self.repository
+            .get_pet_by_id(pet_id, Some(GUILD_ID))
+            .expect("load stabled pet")
+            .expect("stabled pet exists")
     }
 
     fn request(&self, pet: &Pet) -> EatAdultPetRequest {
@@ -342,6 +379,26 @@ fn test_consumption_is_atomic_and_adds_existing_penalty() {
             new_balance: 1_777,
         })
     );
+}
+
+#[test]
+fn test_consumption_automatically_activates_the_oldest_stabled_pet() {
+    let fixture = Fixture::new();
+    fixture.seed_player(100, 1_000);
+    let eaten = fixture.adult_pet(100, "Dinner");
+    let stabled = fixture.stabled_pet(100, "Backup", T0 - 600);
+
+    let outcome = fixture
+        .repository
+        .eat_adult_pet_atomic(fixture.request(&eaten))
+        .expect("eat active pet and promote its stable mate");
+
+    let activated = outcome.activated_pet.expect("automatic activation outcome");
+    assert_eq!(activated.pet_id, stabled.pet_id);
+    assert!(activated.is_active);
+    assert_eq!(activated.stabled_at, None);
+    assert_eq!(activated.hatched_at, stabled.hatched_at + 600);
+    assert_eq!(activated.last_fed_at, stabled.last_fed_at + 600);
 }
 
 #[test]

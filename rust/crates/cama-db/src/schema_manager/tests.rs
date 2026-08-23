@@ -385,6 +385,65 @@ fn initialize_is_idempotent_and_keeps_historical_ledger_rows() {
 }
 
 #[test]
+fn pet_stable_migration_activates_the_legacy_living_pet_and_preserves_dead_rows() {
+    let file = empty_database();
+    let connection = Connection::open(file.path()).expect("open legacy pet fixture");
+    connection
+        .execute_batch(
+            "CREATE TABLE pets (
+                 pet_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 discord_id INTEGER NOT NULL,
+                 guild_id INTEGER NOT NULL,
+                 name TEXT NOT NULL,
+                 species TEXT NOT NULL,
+                 adopted_at INTEGER NOT NULL,
+                 hatched_at INTEGER NOT NULL,
+                 adopt_fee INTEGER NOT NULL,
+                 last_fed_at INTEGER NOT NULL,
+                 hunger_at_last_fed INTEGER NOT NULL,
+                 died_at INTEGER
+             );
+             CREATE UNIQUE INDEX idx_pets_one_alive
+                 ON pets(discord_id,guild_id) WHERE died_at IS NULL;
+             INSERT INTO pets
+                 (pet_id,discord_id,guild_id,name,species,adopted_at,hatched_at,
+                  adopt_fee,last_fed_at,hunger_at_last_fed,died_at)
+             VALUES
+                 (1,101,202,'Living','common_cama',100,200,20,200,100,NULL),
+                 (2,101,202,'Memorial','common_cama',10,20,20,20,0,90);",
+        )
+        .expect("seed legacy pet rows");
+    drop(connection);
+
+    initialize_or_migrate(file.path()).expect("migrate legacy pets into the stable model");
+
+    let connection = Connection::open(file.path()).expect("inspect migrated pets");
+    let states = connection
+        .prepare("SELECT pet_id,is_active,stabled_at FROM pets ORDER BY pet_id")
+        .expect("prepare migrated pet states")
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+            ))
+        })
+        .expect("read migrated pet states")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect migrated pet states");
+    assert_eq!(states, vec![(1, 1, None), (2, 0, None)]);
+    assert!(table_exists(&connection, "pet_stable_state").expect("stable state table exists"));
+    let active_index: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_pets_one_active'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("active-pet uniqueness index");
+    assert!(active_index.contains("is_active = 1"));
+}
+
+#[test]
 fn base_schema_snapshot_reaches_head_and_preserves_rows_and_extra_columns() {
     let file = empty_database();
     let connection = Connection::open(file.path()).expect("open legacy fixture");

@@ -300,7 +300,7 @@ impl PetBrawlRepository {
             .query_row(
                 "SELECT 1 FROM pets
                  WHERE pet_id = ?1 AND discord_id = ?2 AND guild_id = ?3
-                   AND died_at IS NULL AND hatched_at <= ?4",
+                   AND died_at IS NULL AND is_active=1 AND hatched_at <= ?4",
                 params![challenger_pet_id, challenger_id, guild_id, now],
                 |_| Ok(()),
             )
@@ -313,7 +313,7 @@ impl PetBrawlRepository {
             .query_row(
                 "SELECT 1 FROM pets
                  WHERE discord_id = ?1 AND guild_id = ?2
-                   AND died_at IS NULL AND hatched_at <= ?3 LIMIT 1",
+                   AND died_at IS NULL AND is_active=1 AND hatched_at <= ?3 LIMIT 1",
                 params![recipient_id, guild_id, now],
                 |_| Ok(()),
             )
@@ -1100,7 +1100,7 @@ fn read_living_hunger(
     let pet = transaction
         .query_row(
             "SELECT species, last_fed_at, hunger_at_last_fed, died_at
-             FROM pets WHERE pet_id = ?1 AND guild_id = ?2",
+             FROM pets WHERE pet_id = ?1 AND guild_id = ?2 AND is_active=1",
             params![pet_id, guild_id],
             |row| {
                 Ok((
@@ -1193,7 +1193,7 @@ fn write_hunger_anchor(
 ) -> Result<(), rusqlite::Error> {
     transaction.execute(
         "UPDATE pets SET last_fed_at = ?1, hunger_at_last_fed = ?2
-         WHERE pet_id = ?3 AND died_at IS NULL",
+         WHERE pet_id = ?3 AND died_at IS NULL AND is_active=1",
         params![now, hunger, pet_id],
     )?;
     Ok(())
@@ -1293,6 +1293,7 @@ mod tests {
                          hunger_at_last_fed INTEGER NOT NULL,
                          died_at INTEGER,
                          death_cause TEXT,
+                         is_active INTEGER NOT NULL DEFAULT 1,
                          training_xp INTEGER NOT NULL DEFAULT 0,
                          training_str INTEGER NOT NULL DEFAULT 0,
                          training_int INTEGER NOT NULL DEFAULT 0,
@@ -2216,7 +2217,8 @@ mod tests {
         fixture
             .connection()
             .execute(
-                "UPDATE pets SET died_at = ?1, death_cause = 'starvation' WHERE pet_id = ?2",
+                "UPDATE pets SET died_at = ?1, death_cause = 'starvation', is_active = 0
+                 WHERE pet_id = ?2",
                 params![NOW + 30, pet_b],
             )
             .unwrap();

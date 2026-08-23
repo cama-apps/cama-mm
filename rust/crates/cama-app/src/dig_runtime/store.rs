@@ -922,7 +922,7 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
                 "UPDATE pets
                     SET dig_work_units=?1, dig_work_at=?2
                   WHERE pet_id=?3 AND discord_id=?4 AND guild_id=?5
-                    AND died_at IS NULL
+                    AND died_at IS NULL AND is_active=1
                     AND dig_work_units=?6 AND dig_work_at=?7",
                 params![
                     claim.new_units,

@@ -14,7 +14,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use thiserror::Error;
 
 use crate::open_runtime_connection;
-use crate::pet_repository::{PetRepository, PetRepositoryError};
+use crate::pet_repository::{PetRepository, PetRepositoryError, activate_oldest_stabled};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PetEatingFailure {
@@ -87,6 +87,7 @@ pub struct EatAdultPetRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EatAdultPetOutcome {
     pub pet: Pet,
+    pub activated_pet: Option<Pet>,
     pub new_balance: i64,
     pub penalty_games_remaining: i64,
 }
@@ -197,6 +198,8 @@ impl PetEatingRepository {
             "UPDATE pets
                 SET died_at = ?1,
                     death_cause = 'eaten',
+                    is_active = 0,
+                    stabled_at = NULL,
                     evolved_at = CASE WHEN evolution_due_at < ?1 THEN evolved_at ELSE NULL END,
                     evolution_calling = CASE
                         WHEN evolution_due_at < ?1 THEN evolution_calling ELSE NULL END,
@@ -210,7 +213,7 @@ impl PetEatingRepository {
                         ELSE NULL
                     END
               WHERE pet_id = ?2 AND guild_id = ?3 AND discord_id = ?4
-                AND died_at IS NULL
+                AND died_at IS NULL AND is_active=1
                 AND hatched_at <= ?5
                 AND last_fed_at = ?6 AND hunger_at_last_fed = ?7",
             params![
@@ -240,6 +243,9 @@ impl PetEatingRepository {
             };
             return Err(failure.into());
         }
+
+        let activated_pet =
+            activate_oldest_stabled(&transaction, request.discord_id, guild_id, request.now)?;
 
         let (pet_name, species) = transaction.query_row(
             "SELECT name, species FROM pets WHERE pet_id = ?1 AND guild_id = ?2",
@@ -326,6 +332,7 @@ impl PetEatingRepository {
             ))?;
         Ok(EatAdultPetOutcome {
             pet,
+            activated_pet,
             new_balance,
             penalty_games_remaining,
         })

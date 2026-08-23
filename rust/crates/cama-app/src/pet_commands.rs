@@ -431,6 +431,19 @@ pub trait PetCommandService {
         name: &str,
         egg_tier: &str,
     ) -> ServiceResult<AdoptOutcome>;
+    fn stable(&mut self, discord_id: i64, guild_id: Option<i64>) -> ServiceResult<Vec<Pet>>;
+    fn activate(
+        &mut self,
+        discord_id: i64,
+        guild_id: Option<i64>,
+        pet_id: i64,
+    ) -> ServiceResult<cama_db::pet_repository::ActivatePetOutcome>;
+    fn upgrade(
+        &mut self,
+        discord_id: i64,
+        guild_id: Option<i64>,
+        pet_id: i64,
+    ) -> ServiceResult<Pet>;
     fn sacrifice_preview(
         &mut self,
         discord_id: i64,
@@ -1028,7 +1041,12 @@ where
             {
                 continue;
             }
-            let _ = self.deliver_death(discord, &notice.pet, notice.eating_outcome.as_ref());
+            let _ = self.deliver_death(
+                discord,
+                &notice.pet,
+                notice.eating_outcome.as_ref(),
+                notice.activated_pet.as_ref(),
+            );
         }
         for notice in outcome.refunds {
             let _ = self.deliver_refund(discord, &notice);
@@ -1210,6 +1228,7 @@ where
         discord: &mut D,
         pet: &Pet,
         eating_outcome: Option<&BTreeMap<String, i64>>,
+        activated_pet: Option<&Pet>,
     ) -> Result<(), DeliveryError> {
         let channel_id = self.channel_for(discord, pet.guild_id);
         let dm_enabled = self
@@ -1228,6 +1247,16 @@ where
             && let Some(flavor) = flavor
         {
             embed.field("💬 Cama chatter", flavor, false);
+        }
+        if let Some(activated_pet) = activated_pet {
+            embed.field(
+                "🏡 New active cama",
+                format!(
+                    "**{}** was automatically activated from the stable.",
+                    activated_pet.name
+                ),
+                false,
+            );
         }
         if let Some(channel_id) = channel_id {
             let payload = ResponsePayload::embed(embed.clone(), Visibility::Public);
@@ -1405,9 +1434,14 @@ pub fn build_adoption_embed(outcome: &AdoptOutcome, owner_name: &str) -> Embed {
         } else {
             ""
         };
+        let hatch = if outcome.pet.is_active {
+            format!("It hatches <t:{}:R>.", outcome.pet.hatched_at)
+        } else {
+            "It is waiting safely in the stable; its hatch clock resumes when activated.".to_owned()
+        };
         format!(
-            "**{owner_name}** adopted {flair} and named it **{}** for {} {JOPACOIN_EMOTE}.\nIt hatches <t:{}:R>. What's inside? Nobody knows. Not even the egg.{pity}",
-            outcome.pet.name, outcome.pet.adopt_fee, outcome.pet.hatched_at
+            "**{owner_name}** adopted {flair} and named it **{}** for {} {JOPACOIN_EMOTE}.\n{hatch} What's inside? Nobody knows. Not even the egg.{pity}",
+            outcome.pet.name, outcome.pet.adopt_fee
         )
     };
     let mut embed = Embed::new(title, description, EmbedColor::Gold);
@@ -2213,7 +2247,8 @@ mod tests {
     use std::rc::Rc;
 
     use cama_domain::pet::{
-        DeathNotice, EGG_HATCH_SECONDS, EvolutionNotice, HatchNotice, PetBase, RefundPayout,
+        DeathNotice, EGG_HATCH_SECONDS, EvolutionNotice, HatchNotice, MAX_LIVING_PETS,
+        PET_SWITCH_COOLDOWN_SECONDS, PET_SWITCH_COST, PetBase, RefundPayout,
     };
 
     use super::*;
@@ -2268,6 +2303,7 @@ mod tests {
         registered: BTreeSet<(i64, i64)>,
         balances: BTreeMap<(i64, i64), i64>,
         active: BTreeMap<(i64, i64), Pet>,
+        stabled: BTreeMap<(i64, i64), Vec<Pet>>,
         supplies: BTreeMap<(i64, i64), BTreeMap<String, i64>>,
         accessories: BTreeMap<(i64, i64), BTreeSet<String>>,
         graveyard: Vec<Pet>,
@@ -2292,6 +2328,7 @@ mod tests {
                 registered,
                 balances,
                 active: BTreeMap::new(),
+                stabled: BTreeMap::new(),
                 supplies: BTreeMap::new(),
                 accessories: BTreeMap::new(),
                 graveyard: Vec::new(),
@@ -2363,27 +2400,10 @@ mod tests {
             if !self.registered.contains(&key) {
                 return ServiceResult::fail("Register with the league before adopting a pet.");
             }
-            if let Some(existing) = self.active.get_mut(&key) {
-                if egg_tier == "gilded"
-                    && existing.species == UNHATCHED_SPECIES
-                    && existing.egg_tier == "standard"
-                {
-                    let balance = self.balances.entry(key).or_default();
-                    if *balance < GILDED_EGG_PREMIUM {
-                        return ServiceResult::fail("Insufficient funds.");
-                    }
-                    *balance -= GILDED_EGG_PREMIUM;
-                    existing.name = name.to_owned();
-                    existing.egg_tier = "gilded".to_owned();
-                    existing.adopt_fee += GILDED_EGG_PREMIUM;
-                    return ServiceResult::ok(AdoptOutcome {
-                        pet: existing.clone(),
-                        egg_tier: "gilded".to_owned(),
-                        pity_active: false,
-                        upgraded: true,
-                    });
-                }
-                return ServiceResult::fail("You already have a living pet.");
+            let living_count = usize::from(self.active.contains_key(&key))
+                + self.stabled.get(&key).map_or(0, Vec::len);
+            if living_count >= usize::try_from(MAX_LIVING_PETS).unwrap_or(5) {
+                return ServiceResult::fail("Your stable is full.");
             }
             let fee = if egg_tier == "gilded" {
                 20 + GILDED_EGG_PREMIUM
@@ -2425,14 +2445,108 @@ mod tests {
             });
             let mut pet = pet;
             pet.egg_tier = egg_tier.to_owned();
+            pet.is_active = living_count == 0;
+            pet.stabled_at = (living_count > 0).then_some(self.now);
             self.next_pet_id += 1;
-            self.active.insert(key, pet.clone());
+            if pet.is_active {
+                self.active.insert(key, pet.clone());
+            } else {
+                self.stabled.entry(key).or_default().push(pet.clone());
+            }
             ServiceResult::ok(AdoptOutcome {
                 pet,
                 egg_tier: egg_tier.to_owned(),
                 pity_active: false,
                 upgraded: false,
             })
+        }
+
+        fn stable(&mut self, discord_id: i64, guild_id: Option<i64>) -> ServiceResult<Vec<Pet>> {
+            let key = Self::key(discord_id, guild_id);
+            let mut pets = self
+                .active
+                .get(&key)
+                .cloned()
+                .into_iter()
+                .collect::<Vec<_>>();
+            pets.extend(self.stabled.get(&key).cloned().unwrap_or_default());
+            ServiceResult::ok(pets)
+        }
+
+        fn activate(
+            &mut self,
+            discord_id: i64,
+            guild_id: Option<i64>,
+            pet_id: i64,
+        ) -> ServiceResult<cama_db::pet_repository::ActivatePetOutcome> {
+            let key = Self::key(discord_id, guild_id);
+            let Some(position) = self
+                .stabled
+                .get(&key)
+                .and_then(|pets| pets.iter().position(|pet| pet.pet_id == pet_id))
+            else {
+                return ServiceResult::fail("That pet is not in your stable.");
+            };
+            let balance = self.balances.entry(key).or_default();
+            if *balance < PET_SWITCH_COST {
+                return ServiceResult::fail("Insufficient funds.");
+            }
+            let Some(mut previous_pet) = self.active.remove(&key) else {
+                return ServiceResult::fail("You have no active pet.");
+            };
+            *balance -= PET_SWITCH_COST;
+            let mut active_pet = self
+                .stabled
+                .get_mut(&key)
+                .expect("stable entry")
+                .remove(position);
+            previous_pet.is_active = false;
+            previous_pet.stabled_at = Some(self.now);
+            active_pet.is_active = true;
+            active_pet.stabled_at = None;
+            self.stabled
+                .entry(key)
+                .or_default()
+                .push(previous_pet.clone());
+            self.active.insert(key, active_pet.clone());
+            ServiceResult::ok(cama_db::pet_repository::ActivatePetOutcome {
+                previous_pet,
+                active_pet,
+                cost: PET_SWITCH_COST,
+                next_switch_at: self.now + PET_SWITCH_COOLDOWN_SECONDS,
+            })
+        }
+
+        fn upgrade(
+            &mut self,
+            discord_id: i64,
+            guild_id: Option<i64>,
+            pet_id: i64,
+        ) -> ServiceResult<Pet> {
+            let key = Self::key(discord_id, guild_id);
+            let pet = self
+                .active
+                .get_mut(&key)
+                .filter(|pet| pet.pet_id == pet_id)
+                .or_else(|| {
+                    self.stabled
+                        .get_mut(&key)
+                        .and_then(|pets| pets.iter_mut().find(|pet| pet.pet_id == pet_id))
+                });
+            let Some(pet) = pet else {
+                return ServiceResult::fail("You have no living pet.");
+            };
+            if pet.species != UNHATCHED_SPECIES || pet.egg_tier != "standard" {
+                return ServiceResult::fail("Only an unhatched egg can be upgraded.");
+            }
+            let balance = self.balances.entry(key).or_default();
+            if *balance < GILDED_EGG_PREMIUM {
+                return ServiceResult::fail("Insufficient funds.");
+            }
+            *balance -= GILDED_EGG_PREMIUM;
+            pet.egg_tier = "gilded".to_owned();
+            pet.adopt_fee += GILDED_EGG_PREMIUM;
+            ServiceResult::ok(pet.clone())
         }
 
         fn sacrifice_preview(
@@ -2949,11 +3063,15 @@ mod tests {
             ("penalty_games_remaining".to_owned(), 7),
             ("new_balance".to_owned(), 1_888),
         ]);
+        let mut activated = make_pet();
+        activated.pet_id = 2;
+        activated.name = "Backup".to_owned();
         let mut service = FakeService::default();
         service.sweep_result = Ok(SweepOutcome {
             deaths: vec![DeathNotice {
                 pet: pet.clone(),
                 eating_outcome: Some(eating_outcome),
+                activated_pet: Some(activated),
             }],
             ..SweepOutcome::default()
         });
@@ -2972,6 +3090,10 @@ mod tests {
         assert!(copy.contains('4'));
         assert!(copy.contains("7 remaining"));
         assert!(copy.contains("1,888"));
+        assert_eq!(
+            embed.field_value("🏡 New active cama"),
+            Some("**Backup** was automatically activated from the stable.")
+        );
         assert_eq!(app.service().marked_deaths, vec![pet.pet_id]);
     }
 
@@ -2985,6 +3107,7 @@ mod tests {
             deaths: vec![DeathNotice {
                 pet: pet.clone(),
                 eating_outcome: None,
+                activated_pet: None,
             }],
             ..SweepOutcome::default()
         });
@@ -3017,6 +3140,7 @@ mod tests {
             deaths: vec![DeathNotice {
                 pet: dead.clone(),
                 eating_outcome: None,
+                activated_pet: None,
             }],
             ..SweepOutcome::default()
         });
@@ -3177,6 +3301,7 @@ mod tests {
             deaths: vec![DeathNotice {
                 pet: pet.clone(),
                 eating_outcome: None,
+                activated_pet: None,
             }],
             ..SweepOutcome::default()
         });
@@ -3198,6 +3323,7 @@ mod tests {
             deaths: vec![DeathNotice {
                 pet: pet.clone(),
                 eating_outcome: None,
+                activated_pet: None,
             }],
             ..SweepOutcome::default()
         });
@@ -3224,6 +3350,7 @@ mod tests {
             deaths: vec![DeathNotice {
                 pet,
                 eating_outcome: None,
+                activated_pet: None,
             }],
             ..SweepOutcome::default()
         });
@@ -3256,6 +3383,7 @@ mod tests {
             deaths: vec![DeathNotice {
                 pet: pet.clone(),
                 eating_outcome: None,
+                activated_pet: None,
             }],
             ..SweepOutcome::default()
         });
@@ -3280,6 +3408,7 @@ mod tests {
             deaths: vec![DeathNotice {
                 pet,
                 eating_outcome: None,
+                activated_pet: None,
             }],
             ..SweepOutcome::default()
         });
@@ -3308,10 +3437,12 @@ mod tests {
                 DeathNotice {
                     pet: bad,
                     eating_outcome: None,
+                    activated_pet: None,
                 },
                 DeathNotice {
                     pet: good.clone(),
                     eating_outcome: None,
+                    activated_pet: None,
                 },
             ],
             ..SweepOutcome::default()
@@ -3463,7 +3594,7 @@ mod tests {
     }
 
     #[test]
-    fn test_second_gilded_adoption_upgrades_and_renames_existing_egg() {
+    fn test_second_gilded_adoption_creates_a_stabled_egg() {
         let mut app = make_app(FakeService::default());
         let _ = adopt_via_handler(&mut app, "Blep", "standard");
 
@@ -3471,29 +3602,32 @@ mod tests {
 
         let embed = payload_embed(&interaction);
         assert!(embed.title.to_lowercase().contains("gilded"));
-        assert!(embed.description.contains("upgraded"));
-        assert!(embed.description.contains("230"));
-        let pet = app
+        assert!(embed.description.contains("waiting safely in the stable"));
+        let active = app
             .service()
             .active_pet(OWNER, GUILD)
-            .expect("upgraded pet");
-        assert_eq!(pet.name, "Goldie");
-        assert_eq!(pet.egg_tier, "gilded");
-        assert_eq!(pet.species, UNHATCHED_SPECIES);
-        assert_eq!(pet.adopt_fee, 250);
-        assert_eq!(app.service().balances[&(OWNER, GUILD)], 750);
+            .expect("original active pet");
+        assert_eq!(active.name, "Blep");
+        let stabled = &app.service().stabled[&(OWNER, GUILD)][0];
+        assert_eq!(stabled.name, "Goldie");
+        assert_eq!(stabled.egg_tier, "gilded");
+        assert!(!stabled.is_active);
+        assert_eq!(stabled.adopt_fee, 250);
+        assert_eq!(app.service().balances[&(OWNER, GUILD)], 730);
     }
 
     #[test]
-    fn test_third_adoption_reports_error_without_second_upgrade_charge() {
+    fn test_sixth_adoption_reports_a_full_stable_without_a_charge() {
         let mut app = make_app(FakeService::default());
-        let _ = adopt_via_handler(&mut app, "Blep", "standard");
-        let _ = adopt_via_handler(&mut app, "Goldie", "gilded");
+        for name in ["One", "Two", "Three", "Four", "Five"] {
+            let _interaction = adopt_via_handler(&mut app, name, "standard");
+        }
 
-        let interaction = adopt_via_handler(&mut app, "Again", "gilded");
+        let interaction = adopt_via_handler(&mut app, "Six", "standard");
 
         assert!(payload_content(&interaction).starts_with("❌"));
-        assert_eq!(app.service().balances[&(OWNER, GUILD)], 750);
+        assert_eq!(app.service().balances[&(OWNER, GUILD)], 900);
+        assert_eq!(app.service().stabled[&(OWNER, GUILD)].len(), 4);
     }
 
     #[test]

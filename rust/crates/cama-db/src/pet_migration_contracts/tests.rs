@@ -41,18 +41,21 @@ fn apply_python_final_shape(connection: &Connection) {
                 evolution_primary TEXT,
                 evolution_secondary TEXT,
                 evolution_announced_at INTEGER,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                stabled_at INTEGER,
                 CHECK (hatched_at >= adopted_at),
                 CHECK (died_at IS NULL OR died_at >= adopted_at),
                 CHECK (death_announced_at IS NULL OR died_at IS NOT NULL)
             );
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_pets_one_alive
-                ON pets(discord_id, guild_id) WHERE died_at IS NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_pets_one_active
+                ON pets(discord_id, guild_id)
+                WHERE died_at IS NULL AND is_active = 1;
             CREATE INDEX IF NOT EXISTS idx_pets_unannounced_deaths
                 ON pets(guild_id, died_at)
                 WHERE died_at IS NOT NULL AND death_announced_at IS NULL;
             CREATE INDEX IF NOT EXISTS idx_pets_evolution_due
                 ON pets(evolution_due_at, pet_id)
-                WHERE died_at IS NULL AND evolved_at IS NULL
+                WHERE died_at IS NULL AND is_active = 1 AND evolved_at IS NULL
                 AND evolution_due_at IS NOT NULL;
             CREATE INDEX IF NOT EXISTS idx_pets_evolution_unannounced
                 ON pets(evolved_at, pet_id)
@@ -65,6 +68,12 @@ fn apply_python_final_shape(connection: &Connection) {
                 qty INTEGER NOT NULL DEFAULT 0 CHECK (qty >= 0),
                 updated_at INTEGER NOT NULL,
                 PRIMARY KEY (discord_id, guild_id, item_id)
+            );
+            CREATE TABLE IF NOT EXISTS pet_stable_state (
+                discord_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL,
+                last_voluntary_switch_at INTEGER,
+                PRIMARY KEY(discord_id,guild_id)
             );
             CREATE TABLE IF NOT EXISTS pet_refund_windows (
                 guild_id INTEGER NOT NULL,
@@ -158,6 +167,7 @@ struct PetSeed<'a> {
     hunger: i64,
     died_at: Option<i64>,
     death_announced_at: Option<i64>,
+    is_active: bool,
 }
 
 fn pet_seed(discord_id: i64, guild_id: i64) -> PetSeed<'static> {
@@ -169,6 +179,7 @@ fn pet_seed(discord_id: i64, guild_id: i64) -> PetSeed<'static> {
         hunger: 100,
         died_at: None,
         death_announced_at: None,
+        is_active: true,
     }
 }
 
@@ -177,9 +188,9 @@ fn insert_pet(connection: &Connection, seed: PetSeed<'_>) -> rusqlite::Result<us
         "INSERT INTO pets (
             discord_id, guild_id, name, species, adopted_at, hatched_at,
             adopt_fee, last_fed_at, hunger_at_last_fed, died_at,
-            death_cause, death_announced_at
+            death_cause, death_announced_at, is_active
          ) VALUES (?1, ?2, ?3, 'common_cama', 1000, ?4, 20, ?4, ?5, ?6,
-                   CASE WHEN ?6 IS NULL THEN NULL ELSE 'starvation' END, ?7)",
+                   CASE WHEN ?6 IS NULL THEN NULL ELSE 'starvation' END, ?7, ?8)",
         params![
             seed.discord_id,
             seed.guild_id,
@@ -187,7 +198,8 @@ fn insert_pet(connection: &Connection, seed: PetSeed<'_>) -> rusqlite::Result<us
             seed.hatched_at,
             seed.hunger,
             seed.died_at,
-            seed.death_announced_at
+            seed.death_announced_at,
+            i64::from(seed.is_active),
         ],
     )
 }
@@ -214,15 +226,24 @@ fn test_migration_is_idempotent() {
 }
 
 #[test]
-fn test_one_living_pet_per_player_per_guild() {
+fn test_one_active_pet_per_player_per_guild() {
     let file = fixture();
     let connection = Connection::open(file.path()).expect("open fixture");
-    insert_pet(&connection, pet_seed(1, 100)).expect("first living pet");
+    insert_pet(&connection, pet_seed(1, 100)).expect("active pet");
+    insert_pet(
+        &connection,
+        PetSeed {
+            name: "Stabled",
+            is_active: false,
+            ..pet_seed(1, 100)
+        },
+    )
+    .expect("additional stabled pet");
     assert!(
         insert_pet(
             &connection,
             PetSeed {
-                name: "Second",
+                name: "Second active",
                 ..pet_seed(1, 100)
             }
         )
@@ -239,6 +260,7 @@ fn test_dead_pet_does_not_block_re_adoption() {
         PetSeed {
             name: "Old",
             died_at: Some(90_000),
+            is_active: false,
             ..pet_seed(1, 100)
         },
     )

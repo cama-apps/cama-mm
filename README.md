@@ -280,7 +280,7 @@ View leaderboard with multiple ranking types.
 ### Minigames & Extras
 
 - `/dig` — Tunnel digging minigame: 25 player subcommands (`go`, `gear`, `shop`, `buy`, `use`, `inventory`, `artifacts`, `insure`, `trap`, `sabotage`, `gift`, `flex`, `prestige`, `weather`, `abandon`, `leaderboard`, `halloffame`, `guide`, `help`, `info`, and the `/dig miner` build system: `about`, `autobuy`, `build`, `profile`, `respec`) plus `/dig admin resetcooldown|forceevent|setdepth`. Gated to the configured dig channel.
-- `/pet` — Cama pet care: `adopt`, `status`, `feed`, `shop`, `buy`, `rename`, `trinket`, `brawl` (challenge someone to a pet brawl), `altar` (sacrifice your cama for a better egg), `graveyard`, `leaderboard`. Requires `PET_CHANNEL_ID`.
+- `/pet` — Cama pet care: `adopt`, `status`, `stable`, `activate`, `upgrade`, `feed`, `shop`, `buy`, `rename`, `trinket`, `brawl` (challenge someone to a pet brawl), `altar` (sacrifice your active cama for a better egg), `graveyard`, `leaderboard`. Each player can keep up to five living camas per server with one active at a time; stabled camas are fully frozen. Voluntary activation costs 25 JC and has a rolling 24-hour cooldown. Requires `PET_CHANNEL_ID`.
 - `/mafia` — Daily Mafia: `join`, `role`, `act`, `vote`, `remind`, `status`, `bounty`, `history`, `leaderboard`, `info`, `optin`, `optout`, plus `/mafia admin start|stop|abort`. Runs in the dedicated mafia channel.
 - `/duel` — Challenges of honor: `issue`, `respond`, `list`, `resolve`. Pending,
   unresolved, and expiry announcements prefer the guild's unique `#dota-mm`

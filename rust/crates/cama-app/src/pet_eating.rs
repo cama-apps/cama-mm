@@ -44,6 +44,7 @@ pub struct EatAdultPetRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EatAdultPetCommit {
     pub pet: Pet,
+    pub activated_pet: Option<Pet>,
     pub new_balance: i64,
     pub penalty_games_remaining: i64,
 }
@@ -103,6 +104,7 @@ pub trait PetEatingRandomPort {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PetEatingOutcome {
     pub pet: Pet,
+    pub activated_pet: Option<Pet>,
     pub reward: i64,
     pub penalty_games_added: i64,
     pub penalty_games_remaining: i64,
@@ -180,6 +182,7 @@ where
                 Ok(commit) => {
                     return ServiceResult::ok(PetEatingOutcome {
                         pet: commit.pet,
+                        activated_pet: commit.activated_pet,
                         reward,
                         penalty_games_added: penalty_games,
                         penalty_games_remaining: commit.penalty_games_remaining,
@@ -511,10 +514,19 @@ pub fn build_spared_embed(pet: &Pet) -> EatingEmbed {
 
 #[must_use]
 pub fn build_eating_outcome_embed(outcome: &PetEatingOutcome) -> EatingEmbed {
+    let activation = outcome
+        .activated_pet
+        .as_ref()
+        .map_or_else(String::new, |pet| {
+            format!(
+                "\n\n🏡 **{}** was automatically activated from your stable.",
+                pet.name
+            )
+        });
     EatingEmbed {
         title: format!("🍖 {} was delicious", outcome.pet.name),
         description: format!(
-            "You received **{}** JC.\n\nBad karma adds **{}** game(s) to your sentence (**{} remaining**). Your future earnings are taxed until you win your way free.\n\nBalance: **{}** JC.",
+            "You received **{}** JC.\n\nBad karma adds **{}** game(s) to your sentence (**{} remaining**). Your future earnings are taxed until you win your way free.\n\nBalance: **{}** JC.{activation}",
             grouped(outcome.reward),
             outcome.penalty_games_added,
             outcome.penalty_games_remaining,

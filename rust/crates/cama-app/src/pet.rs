@@ -8,10 +8,10 @@
 use std::collections::BTreeMap;
 
 use cama_db::pet_repository::{
-    AdoptPetRequest, AegisReviveRequest, AnchorGuard, BuySuppliesRequest, DeathClaimRequest,
-    FeedPetRequest, HungerTopUpRequest, PetRepositoryError, PetRepositoryFailure,
-    SacrificePetOutcome as RepositorySacrificeOutcome, SacrificePetRequest, SaltLickRequest,
-    TrinketPurchaseOutcome, TrinketPurchaseRequest, UpgradeEggRequest,
+    ActivatePetOutcome, ActivatePetRequest, AdoptPetRequest, AegisReviveRequest, AnchorGuard,
+    BuySuppliesRequest, DeathClaimRequest, FeedPetRequest, HungerTopUpRequest, PetRepositoryError,
+    PetRepositoryFailure, SacrificePetOutcome as RepositorySacrificeOutcome, SacrificePetRequest,
+    SaltLickRequest, TrinketPurchaseOutcome, TrinketPurchaseRequest, UpgradeEggRequest,
 };
 use cama_domain::game_date::{GameDateError, game_date_for_timestamp};
 use cama_domain::pet::{
@@ -19,9 +19,10 @@ use cama_domain::pet::{
     DIG_WORK_RATE_HAPPY, DIG_WORK_RATE_HUNGRY, DIG_WORK_UNITS_PER_BLOCK, DeathNotice,
     EGG_HATCH_SECONDS, EvolutionNotice, FEED_CAP_PER_DAY, FOOD_ITEMS, FeedOutcome,
     GILDED_EGG_PREMIUM, GILDED_TIER_WEIGHTS, HatchNotice, MATCH_WIN_HUNGER, MAX_BUY_QTY,
-    MAX_HUNGER, PET_NAME_MAX_LEN, PITY_THRESHOLD, PITY_TIER_WEIGHTS, Pet, PetDigWork, PetError,
-    PetMood, PetStage, PetStatus, REFUND_MULT_MAX, REFUND_MULT_MIN, RefundNotice, RefundPayout,
-    SALT_LICK, SALT_LICK_DURATION_SECONDS, SPECIES, SUPPLY_STACK_CAP, SpeciesTier, TRINKET_COST,
+    MAX_HUNGER, MAX_LIVING_PETS, PET_NAME_MAX_LEN, PET_SWITCH_COOLDOWN_SECONDS, PET_SWITCH_COST,
+    PITY_THRESHOLD, PITY_TIER_WEIGHTS, Pet, PetDigWork, PetError, PetMood, PetStage, PetStatus,
+    REFUND_MULT_MAX, REFUND_MULT_MIN, RefundNotice, RefundPayout, SALT_LICK,
+    SALT_LICK_DURATION_SECONDS, SPECIES, SUPPLY_STACK_CAP, SpeciesTier, TRINKET_COST,
     TRINKET_DUPE_REFUND, TierWeights, TrinketOutcome, UNHATCHED_SPECIES, WARNING_HUNGER,
     adoption_fee, food_cost, get_species, sacrifice_tier_weights, species_ids_by_tier,
 };
@@ -45,6 +46,8 @@ pub const FEED_CAP: &str = "feed_cap";
 pub const ALREADY_PAMPERED: &str = "already_pampered";
 pub const STACK_CAP: &str = "stack_cap";
 pub const BRAWL_BUSY: &str = "brawl_busy";
+pub const STABLE_FULL: &str = "stable_full";
+pub const SWITCH_COOLDOWN: &str = "switch_cooldown";
 
 const FORBIDDEN_NAME_FRAGMENTS: [&str; 4] = ["@", "http://", "https://", "discord.gg"];
 const DAY_SECONDS: i64 = 86_400;
@@ -163,6 +166,17 @@ pub trait PetStore {
     fn adopt_pet(&mut self, request: &AdoptPetRequest<'_>) -> Result<Pet, PetRepositoryError>;
 
     fn upgrade_egg(&mut self, request: &UpgradeEggRequest<'_>) -> Result<Pet, PetRepositoryError>;
+
+    fn list_living_pets(
+        &mut self,
+        discord_id: i64,
+        guild_id: Option<i64>,
+    ) -> Result<Vec<Pet>, PetRepositoryError>;
+
+    fn activate_pet_atomic(
+        &mut self,
+        request: ActivatePetRequest,
+    ) -> Result<ActivatePetOutcome, PetRepositoryError>;
 
     fn sacrifice_and_adopt_atomic(
         &mut self,
@@ -665,27 +679,7 @@ where
         egg_tier: &str,
     ) -> Result<AdoptOutcome, PetApplicationError> {
         let now = self.clock.now();
-        if let Some(existing) = self.living_pet(discord_id, guild_id, now)? {
-            if egg_tier == "gilded" && now < existing.hatched_at && existing.egg_tier == "standard"
-            {
-                let pet = self.store.upgrade_egg(&UpgradeEggRequest {
-                    discord_id,
-                    guild_id,
-                    name,
-                    premium: GILDED_EGG_PREMIUM,
-                    now,
-                })?;
-                return Ok(AdoptOutcome {
-                    pet,
-                    egg_tier: "gilded".to_owned(),
-                    pity_active: false,
-                    upgraded: true,
-                });
-            }
-            return Err(PetApplicationError::Repository(
-                PetRepositoryError::Rejected(PetRepositoryFailure::AlreadyHasPet),
-            ));
-        }
+        let _active = self.living_pet(discord_id, guild_id, now)?;
         let prior_deaths = self.store.count_dead_pets(discord_id, guild_id)?;
         let mut fee = adoption_fee(prior_deaths);
         let pity_active = egg_tier == "standard" && self.pity_active(discord_id, guild_id)?;
@@ -707,6 +701,69 @@ where
             pity_active,
             upgraded: false,
         })
+    }
+
+    pub fn stable(&mut self, discord_id: i64, guild_id: Option<i64>) -> ServiceResult<Vec<Pet>> {
+        match self.store.list_living_pets(discord_id, guild_id) {
+            Ok(pets) => ServiceResult::ok(pets),
+            Err(error) => map_repo_error(error, None),
+        }
+    }
+
+    pub fn activate(
+        &mut self,
+        discord_id: i64,
+        guild_id: Option<i64>,
+        pet_id: i64,
+    ) -> ServiceResult<ActivatePetOutcome> {
+        let now = self.clock.now();
+        if let Err(error) = self.living_pet(discord_id, guild_id, now) {
+            return internal_failure(error);
+        }
+        match self.store.activate_pet_atomic(ActivatePetRequest {
+            discord_id,
+            guild_id,
+            pet_id,
+            cost: PET_SWITCH_COST,
+            cooldown_seconds: PET_SWITCH_COOLDOWN_SECONDS,
+            now,
+        }) {
+            Ok(outcome) => ServiceResult::ok(outcome),
+            Err(error) => map_repo_error(error, Some(PET_SWITCH_COST)),
+        }
+    }
+
+    pub fn upgrade(
+        &mut self,
+        discord_id: i64,
+        guild_id: Option<i64>,
+        pet_id: i64,
+    ) -> ServiceResult<Pet> {
+        let now = self.clock.now();
+        if let Err(error) = self.living_pet(discord_id, guild_id, now) {
+            return internal_failure(error);
+        }
+        let name = match self.store.list_living_pets(discord_id, guild_id) {
+            Ok(pets) => pets
+                .into_iter()
+                .find(|pet| pet.pet_id == pet_id)
+                .map(|pet| pet.name),
+            Err(error) => return map_repo_error(error, None),
+        };
+        let Some(name) = name else {
+            return map_repo_error(PetRepositoryFailure::NotOwned.into(), None);
+        };
+        match self.store.upgrade_egg(&UpgradeEggRequest {
+            discord_id,
+            guild_id,
+            pet_id,
+            name: &name,
+            premium: GILDED_EGG_PREMIUM,
+            now,
+        }) {
+            Ok(pet) => ServiceResult::ok(pet),
+            Err(error) => map_repo_error(error, Some(GILDED_EGG_PREMIUM)),
+        }
     }
 
     pub fn pity_active(
@@ -1238,15 +1295,17 @@ where
         {
             let _resolved = self.resolve_starvation(pet, now)?;
         }
-        let deaths = self
-            .store
-            .get_unannounced_deaths(announcement_limit)?
-            .into_iter()
-            .map(|pet| DeathNotice {
+        let mut deaths = Vec::new();
+        for pet in self.store.get_unannounced_deaths(announcement_limit)? {
+            let activated_pet = self
+                .store
+                .get_active_pet(pet.discord_id, Some(pet.guild_id))?;
+            deaths.push(DeathNotice {
                 pet,
                 eating_outcome: None,
-            })
-            .collect();
+                activated_pet,
+            });
+        }
         let mut hatches = Vec::new();
         for pet in self
             .store
@@ -1451,6 +1510,21 @@ pub(crate) fn map_repo_error<T>(error: PetRepositoryError, fee: Option<i64>) -> 
         PetRepositoryFailure::InBrawl => (
             "Your cama has an open brawl—settle that first.".to_owned(),
             BRAWL_BUSY,
+        ),
+        PetRepositoryFailure::StableFull => (
+            format!("Your stable is full ({MAX_LIVING_PETS} living pets)."),
+            STABLE_FULL,
+        ),
+        PetRepositoryFailure::SwitchCooldown => (
+            "You can only activate a different pet once every 24 hours.".to_owned(),
+            SWITCH_COOLDOWN,
+        ),
+        PetRepositoryFailure::AlreadyActive => {
+            ("That pet is already active.".to_owned(), VALIDATION_ERROR)
+        }
+        PetRepositoryFailure::SwitchRequiresMultiplePets => (
+            "You need another living pet before you can switch.".to_owned(),
+            VALIDATION_ERROR,
         ),
         PetRepositoryFailure::StalePet
         | PetRepositoryFailure::EggNotReady
@@ -1723,6 +1797,7 @@ mod tests {
         fail_active_lookup: bool,
         in_brawl: bool,
         stale_feed_attempts: i64,
+        last_switches: BTreeMap<(i64, i64), i64>,
     }
 
     impl FakeStore {
@@ -1777,6 +1852,7 @@ mod tests {
                     pet.discord_id == discord_id
                         && pet.guild_id == guild_id
                         && pet.died_at.is_none()
+                        && pet.is_active
                 })
                 .max_by_key(|pet| pet.pet_id)
         }
@@ -1854,8 +1930,17 @@ mod tests {
 
         fn adopt_pet(&mut self, request: &AdoptPetRequest<'_>) -> Result<Pet, PetRepositoryError> {
             let guild_id = normalized_guild(request.guild_id);
-            if self.active(request.discord_id, request.guild_id).is_some() {
-                return Err(rejected(PetRepositoryFailure::AlreadyHasPet));
+            let living_count = self
+                .pets
+                .iter()
+                .filter(|pet| {
+                    pet.discord_id == request.discord_id
+                        && pet.guild_id == guild_id
+                        && pet.died_at.is_none()
+                })
+                .count();
+            if living_count >= usize::try_from(cama_domain::pet::MAX_LIVING_PETS).unwrap_or(5) {
+                return Err(rejected(PetRepositoryFailure::StableFull));
             }
             self.charge(request.discord_id, guild_id, request.fee)?;
             let mut pet = Pet::new(PetBase {
@@ -1887,6 +1972,8 @@ mod tests {
                 death_announced_at: None,
             });
             pet.egg_tier = request.egg_tier.to_owned();
+            pet.is_active = living_count == 0;
+            pet.stabled_at = (living_count > 0).then_some(request.now);
             Ok(self.insert_pet(pet))
         }
 
@@ -1899,11 +1986,13 @@ mod tests {
                 pet.discord_id == request.discord_id
                     && pet.guild_id == guild_id
                     && pet.died_at.is_none()
+                    && pet.pet_id == request.pet_id
             }) else {
                 return Err(rejected(PetRepositoryFailure::NoPet));
             };
             let pet = &self.pets[index];
-            if request.now >= pet.hatched_at || pet.species != UNHATCHED_SPECIES {
+            if pet.species != UNHATCHED_SPECIES || (pet.is_active && request.now >= pet.hatched_at)
+            {
                 return Err(rejected(PetRepositoryFailure::PetHatched));
             }
             if pet.egg_tier == "gilded" {
@@ -1915,6 +2004,89 @@ mod tests {
             pet.egg_tier = "gilded".to_owned();
             pet.adopt_fee += request.premium;
             Ok(pet.clone())
+        }
+
+        fn list_living_pets(
+            &mut self,
+            discord_id: i64,
+            guild_id: Option<i64>,
+        ) -> Result<Vec<Pet>, PetRepositoryError> {
+            let guild_id = normalized_guild(guild_id);
+            let mut pets = self
+                .pets
+                .iter()
+                .filter(|pet| {
+                    pet.discord_id == discord_id
+                        && pet.guild_id == guild_id
+                        && pet.died_at.is_none()
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            pets.sort_by_key(|pet| (!pet.is_active, pet.pet_id));
+            Ok(pets)
+        }
+
+        fn activate_pet_atomic(
+            &mut self,
+            request: ActivatePetRequest,
+        ) -> Result<ActivatePetOutcome, PetRepositoryError> {
+            let guild_id = normalized_guild(request.guild_id);
+            let target_index = self
+                .pets
+                .iter()
+                .position(|pet| {
+                    pet.pet_id == request.pet_id
+                        && pet.discord_id == request.discord_id
+                        && pet.guild_id == guild_id
+                        && pet.died_at.is_none()
+                })
+                .ok_or_else(|| rejected(PetRepositoryFailure::NotOwned))?;
+            if self.pets[target_index].is_active {
+                return Err(rejected(PetRepositoryFailure::AlreadyActive));
+            }
+            let active_index = self
+                .pets
+                .iter()
+                .position(|pet| {
+                    pet.discord_id == request.discord_id
+                        && pet.guild_id == guild_id
+                        && pet.died_at.is_none()
+                        && pet.is_active
+                })
+                .ok_or_else(|| rejected(PetRepositoryFailure::NoPet))?;
+            if self
+                .last_switches
+                .get(&(request.discord_id, guild_id))
+                .is_some_and(|last| request.now < last.saturating_add(request.cooldown_seconds))
+            {
+                return Err(rejected(PetRepositoryFailure::SwitchCooldown));
+            }
+            self.charge(request.discord_id, guild_id, request.cost)?;
+            let previous_pet = self.pets[active_index].clone();
+            self.pets[active_index].is_active = false;
+            self.pets[active_index].stabled_at = Some(request.now);
+            let duration = request.now - self.pets[target_index].stabled_at.unwrap_or(request.now);
+            let target = &mut self.pets[target_index];
+            target.hatched_at += duration;
+            target.last_fed_at += duration;
+            target.dig_work_at += duration;
+            target.pampered_until = target.pampered_until.map(|value| value + duration);
+            target.solo_training_recharged_at = target
+                .solo_training_recharged_at
+                .map(|value| value + duration);
+            target.evolution_started_at = target.evolution_started_at.map(|value| value + duration);
+            target.evolution_due_at = target.evolution_due_at.map(|value| value + duration);
+            target.is_active = true;
+            target.stabled_at = None;
+            let active_pet = target.clone();
+            self.last_switches
+                .insert((request.discord_id, guild_id), request.now);
+            Ok(ActivatePetOutcome {
+                previous_pet,
+                active_pet,
+                cost: request.cost,
+                next_switch_at: request.now + request.cooldown_seconds,
+            })
         }
 
         fn sacrifice_and_adopt_atomic(
@@ -2262,6 +2434,7 @@ mod tests {
                     discord_ids.contains(&pet.discord_id)
                         && pet.guild_id == guild_id
                         && pet.died_at.is_none()
+                        && pet.is_active
                 })
                 .cloned()
                 .collect())
@@ -2275,7 +2448,7 @@ mod tests {
                 return Ok(false);
             };
             let pet = &mut self.pets[index];
-            if pet.died_at.is_some() || !anchor_matches(pet, request.anchor) {
+            if pet.died_at.is_some() || !pet.is_active || !anchor_matches(pet, request.anchor) {
                 return Ok(false);
             }
             pet.last_fed_at = request.new_last_fed_at;
@@ -2292,12 +2465,43 @@ mod tests {
                 return Ok(false);
             };
             let pet = &mut self.pets[index];
-            if pet.died_at.is_some() || !anchor_matches(pet, request.anchor) {
+            if pet.died_at.is_some() || !pet.is_active || !anchor_matches(pet, request.anchor) {
                 return Ok(false);
             }
+            let discord_id = pet.discord_id;
+            let guild_id = pet.guild_id;
             pet.died_at = Some(request.died_at);
             pet.death_cause = Some(request.cause.to_owned());
+            pet.is_active = false;
+            pet.stabled_at = None;
             apply_work_anchor(pet, request.anchor);
+            if let Some(next_index) = self
+                .pets
+                .iter()
+                .enumerate()
+                .filter(|(_, candidate)| {
+                    candidate.discord_id == discord_id
+                        && candidate.guild_id == guild_id
+                        && candidate.died_at.is_none()
+                        && !candidate.is_active
+                })
+                .min_by_key(|(_, candidate)| candidate.pet_id)
+                .map(|(index, _)| index)
+            {
+                let next = &mut self.pets[next_index];
+                let duration = request.died_at - next.stabled_at.unwrap_or(request.died_at);
+                next.hatched_at += duration;
+                next.last_fed_at += duration;
+                next.dig_work_at += duration;
+                next.pampered_until = next.pampered_until.map(|value| value + duration);
+                next.solo_training_recharged_at = next
+                    .solo_training_recharged_at
+                    .map(|value| value + duration);
+                next.evolution_started_at = next.evolution_started_at.map(|value| value + duration);
+                next.evolution_due_at = next.evolution_due_at.map(|value| value + duration);
+                next.is_active = true;
+                next.stabled_at = None;
+            }
             Ok(true)
         }
 
@@ -2331,6 +2535,7 @@ mod tests {
                 .iter()
                 .filter(|pet| {
                     pet.died_at.is_none()
+                        && pet.is_active
                         && pet.hatched_at <= now
                         && pet.is_starved(now, decay_per_day).unwrap_or(false)
                 })
@@ -2852,7 +3057,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn second_gilded_adoption_upgrades_and_renames_existing_egg() {
+        fn second_gilded_adoption_creates_a_stabled_egg() {
             let (mut service, _clock) = fixture();
             let egg = service
                 .adopt(OWNER, Some(GUILD), "Blep", "standard")
@@ -2863,84 +3068,45 @@ mod tests {
                 .adopt(OWNER, Some(GUILD), "Goldie", "gilded")
                 .unwrap();
 
-            assert!(result.upgraded);
-            let upgraded = result.pet;
-            assert_eq!(upgraded.pet_id, egg.pet_id);
-            assert_eq!(upgraded.name, "Goldie");
-            assert_eq!(upgraded.hatched_at, egg.hatched_at);
-            assert_eq!(upgraded.species, UNHATCHED_SPECIES);
-            assert_eq!(upgraded.egg_tier, "gilded");
-            assert_eq!(upgraded.adopt_fee, 250);
-            assert_eq!(service.store().balance(OWNER, GUILD), 750);
-            assert_eq!(service.store().pets.len(), 1);
+            assert!(!result.upgraded);
+            let second = result.pet;
+            assert_ne!(second.pet_id, egg.pet_id);
+            assert_eq!(second.name, "Goldie");
+            assert!(!second.is_active);
+            assert_eq!(second.stabled_at, Some(egg.adopted_at));
+            assert_eq!(second.egg_tier, "gilded");
+            assert_eq!(service.store().balance(OWNER, GUILD), 730);
+            assert_eq!(service.store().pets.len(), 2);
         }
 
         #[test]
-        fn second_gilded_adoption_rejects_repeat_hatched_and_unaffordable_requests() {
-            let (mut service, clock) = fixture();
+        fn explicit_upgrade_preserves_the_selected_eggs_name() {
+            let (mut service, _clock) = fixture();
             let egg = service
                 .adopt(OWNER, Some(GUILD), "Blep", "standard")
                 .unwrap()
                 .pet;
-            assert!(
-                service
-                    .adopt(OWNER, Some(GUILD), "Goldie", "gilded")
-                    .success()
-            );
-            assert_eq!(
-                error_code(&service.adopt(OWNER, Some(GUILD), "Again", "gilded")),
-                Some(ALREADY_HAS_PET)
-            );
-
-            clock.set(egg.hatched_at);
-            service.random_mut().push_tiered("rama");
-            assert_eq!(
-                error_code(&service.adopt(OWNER, Some(GUILD), "Too Late", "gilded")),
-                Some(ALREADY_HAS_PET)
-            );
-            let current = stored(&mut service, egg.pet_id);
-            let claimed = service
-                .store_mut()
-                .claim_death(&DeathClaimRequest {
-                    pet_id: egg.pet_id,
-                    guild_id: Some(GUILD),
-                    died_at: clock.now(),
-                    cause: "test",
-                    anchor: AnchorGuard::new(current.last_fed_at, current.hunger_at_last_fed),
-                })
-                .unwrap();
-            assert!(claimed);
-            clock.set(clock.now() + 1);
-            service.store_mut().set_balance(OWNER, GUILD, 100);
-            assert!(
-                service
-                    .adopt(OWNER, Some(GUILD), "Second", "standard")
-                    .success()
-            );
-
-            let failed = service.adopt(OWNER, Some(GUILD), "Pricier", "gilded");
-
-            assert_eq!(error_code(&failed), Some(INSUFFICIENT_FUNDS));
-            let unchanged = service
-                .store_mut()
-                .get_active_pet(OWNER, Some(GUILD))
-                .unwrap()
-                .unwrap();
-            assert_eq!(unchanged.egg_tier, "standard");
-            assert_eq!(unchanged.name, "Second");
+            let upgraded = service.upgrade(OWNER, Some(GUILD), egg.pet_id).unwrap();
+            assert_eq!(upgraded.pet_id, egg.pet_id);
+            assert_eq!(upgraded.name, "Blep");
+            assert_eq!(upgraded.egg_tier, "gilded");
+            assert_eq!(service.store().balance(OWNER, GUILD), 750);
         }
 
         #[test]
-        fn second_standard_adoption_remains_rejected() {
+        fn sixth_living_pet_is_rejected_without_a_charge() {
             let (mut service, _clock) = fixture();
-            assert!(
-                service
-                    .adopt(OWNER, Some(GUILD), "Blep", "standard")
-                    .success()
-            );
-            let result = service.adopt(OWNER, Some(GUILD), "Replacement", "standard");
-            assert_eq!(error_code(&result), Some(ALREADY_HAS_PET));
-            assert_eq!(service.store().pets.len(), 1);
+            for index in 0..5 {
+                assert!(
+                    service
+                        .adopt(OWNER, Some(GUILD), &format!("Pet {index}"), "standard")
+                        .success()
+                );
+            }
+            let result = service.adopt(OWNER, Some(GUILD), "Too Many", "standard");
+            assert_eq!(error_code(&result), Some(STABLE_FULL));
+            assert_eq!(service.store().pets.len(), 5);
+            assert_eq!(service.store().balance(OWNER, GUILD), 900);
         }
 
         #[test]
