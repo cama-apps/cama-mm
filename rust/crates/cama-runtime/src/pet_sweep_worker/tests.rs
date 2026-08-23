@@ -856,7 +856,7 @@ async fn no_channel_death_marks_and_cancels_after_best_effort_native_tombstone_d
     Connection::open(database.path())
         .expect("open pet fixture")
         .execute(
-            "UPDATE pets SET died_at=?1,death_cause='starvation',hatch_announced_at=?1
+            "UPDATE pets SET died_at=?1,death_cause='starvation',hatch_announced_at=?1,is_active=0
              WHERE pet_id=?2",
             params![now - 1, pet.pet_id],
         )

@@ -14,11 +14,12 @@ use thiserror::Error;
 
 pub const ADULT_AGE_SECONDS: i64 = 7 * 86_400;
 
-const TABLES: [&str; 6] = [
+const TABLES: [&str; 7] = [
     "pet_brawls",
     "pet_evolution_daily",
     "pet_refund_windows",
     "pet_supplies",
+    "pet_stable_state",
     "pets",
     "reminder_preferences",
 ];
@@ -29,12 +30,12 @@ const INDEXES: [&str; 8] = [
     "idx_pet_brawls_record_win",
     "idx_pets_evolution_due",
     "idx_pets_evolution_unannounced",
-    "idx_pets_one_alive",
+    "idx_pets_one_active",
     "idx_pets_unannounced_deaths",
     "idx_reminder_prefs_pet",
 ];
 
-const PET_COLUMNS: [&str; 22] = [
+const PET_COLUMNS: [&str; 24] = [
     "dig_work_at",
     "dig_work_units",
     "egg_tier",
@@ -57,6 +58,8 @@ const PET_COLUMNS: [&str; 22] = [
     "hunger_at_last_fed",
     "name",
     "species",
+    "is_active",
+    "stabled_at",
 ];
 
 const BRAWL_COLUMNS: [&str; 24] = [
@@ -189,18 +192,18 @@ fn audit_connection(connection: &Connection) -> Result<PetMigrationAudit, rusqli
                 .map(|column| format!("{table}.{column}")),
         );
     }
-    if indexes.contains("idx_pets_one_alive")
-        && !index_sql(connection, "idx_pets_one_alive")?
+    if indexes.contains("idx_pets_one_active")
+        && !index_sql(connection, "idx_pets_one_active")?
             .to_ascii_lowercase()
-            .contains("where died_at is null")
+            .contains("where died_at is null and is_active = 1")
     {
         audit
             .malformed_indexes
-            .push("idx_pets_one_alive".to_owned());
+            .push("idx_pets_one_active".to_owned());
     }
     let due_plan = query_plan(
         connection,
-        "EXPLAIN QUERY PLAN SELECT pet_id FROM pets WHERE died_at IS NULL AND evolved_at IS NULL AND evolution_due_at <= 2000000000",
+        "EXPLAIN QUERY PLAN SELECT pet_id FROM pets WHERE died_at IS NULL AND is_active=1 AND evolved_at IS NULL AND evolution_due_at <= 2000000000",
     )?;
     audit.evolution_due_query_uses_index = due_plan
         .iter()

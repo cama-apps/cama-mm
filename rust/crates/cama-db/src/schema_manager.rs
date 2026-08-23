@@ -779,6 +779,18 @@ fn prepare_legacy_required_values(
             )?;
         }
     }
+    if pending(pending_migrations, "add_pet_stable") && table_exists(transaction, "pets")? {
+        let columns = table_columns(transaction, "pets")?;
+        if !columns.iter().any(|column| column.name == "is_active") {
+            transaction.execute_batch(
+                "ALTER TABLE pets ADD COLUMN is_active INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE pets ADD COLUMN stabled_at INTEGER;
+                 UPDATE pets
+                 SET is_active=CASE WHEN died_at IS NULL THEN 1 ELSE 0 END,
+                     stabled_at=NULL;",
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -1108,6 +1120,13 @@ fn run_consolidated_backfills(
                  )
              WHERE died_at IS NULL
                AND (evolution_started_at IS NULL OR evolution_due_at IS NULL);",
+        )?;
+    }
+    if pending(pending_migrations, "add_pet_stable") {
+        transaction.execute_batch(
+            "UPDATE pets
+             SET is_active=CASE WHEN died_at IS NULL THEN 1 ELSE 0 END,
+                 stabled_at=NULL;",
         )?;
     }
     if pending(

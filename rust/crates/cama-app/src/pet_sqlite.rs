@@ -11,10 +11,10 @@ use cama_db::core_repositories::PlayerRepository;
 use cama_db::pet_eating_repository::PetEatingRepository;
 use cama_db::pet_evolution_repository::PetEvolutionRepository;
 use cama_db::pet_repository::{
-    AdoptPetRequest, AegisReviveRequest, BuySuppliesRequest, DeathClaimRequest, FeedPetRequest,
-    HungerTopUpRequest, PetRepository, PetRepositoryError, SacrificePetOutcome,
-    SacrificePetRequest, SaltLickRequest, TrinketPurchaseOutcome, TrinketPurchaseRequest,
-    UpgradeEggRequest,
+    ActivatePetOutcome, ActivatePetRequest, AdoptPetRequest, AegisReviveRequest,
+    BuySuppliesRequest, DeathClaimRequest, FeedPetRequest, HungerTopUpRequest, PetRepository,
+    PetRepositoryError, SacrificePetOutcome, SacrificePetRequest, SaltLickRequest,
+    TrinketPurchaseOutcome, TrinketPurchaseRequest, UpgradeEggRequest,
 };
 use cama_domain::pet::{Pet, PetStatus, RENAME_COST, RefundNotice, adoption_fee};
 use cama_domain::service_result::ServiceResult;
@@ -74,6 +74,21 @@ impl PetStore for PetRepository {
 
     fn upgrade_egg(&mut self, request: &UpgradeEggRequest<'_>) -> Result<Pet, PetRepositoryError> {
         PetRepository::upgrade_egg(self, request)
+    }
+
+    fn list_living_pets(
+        &mut self,
+        discord_id: i64,
+        guild_id: Option<i64>,
+    ) -> Result<Vec<Pet>, PetRepositoryError> {
+        PetRepository::list_living_pets(self, discord_id, guild_id)
+    }
+
+    fn activate_pet_atomic(
+        &mut self,
+        request: ActivatePetRequest,
+    ) -> Result<ActivatePetOutcome, PetRepositoryError> {
+        PetRepository::activate_pet_atomic(self, request)
     }
 
     fn sacrifice_and_adopt_atomic(
@@ -414,6 +429,28 @@ where
         egg_tier: &str,
     ) -> ServiceResult<AdoptOutcome> {
         self.service.adopt(discord_id, guild_id, name, egg_tier)
+    }
+
+    fn stable(&mut self, discord_id: i64, guild_id: Option<i64>) -> ServiceResult<Vec<Pet>> {
+        self.service.stable(discord_id, guild_id)
+    }
+
+    fn activate(
+        &mut self,
+        discord_id: i64,
+        guild_id: Option<i64>,
+        pet_id: i64,
+    ) -> ServiceResult<ActivatePetOutcome> {
+        self.service.activate(discord_id, guild_id, pet_id)
+    }
+
+    fn upgrade(
+        &mut self,
+        discord_id: i64,
+        guild_id: Option<i64>,
+        pet_id: i64,
+    ) -> ServiceResult<Pet> {
+        self.service.upgrade(discord_id, guild_id, pet_id)
     }
 
     fn sacrifice_preview(

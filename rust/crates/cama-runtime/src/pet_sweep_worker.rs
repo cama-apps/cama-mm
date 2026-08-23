@@ -459,7 +459,7 @@ impl PetSweepWorker {
             .unwrap_or(false);
         let eating = notice.eating_outcome.as_ref();
         let needs_payload = channel_id.is_some() || dm_enabled;
-        let (embed, media) = if let Some(outcome) = eating {
+        let (mut embed, media) = if let Some(outcome) = eating {
             (build_eating_outcome_embed(&pet, outcome), None)
         } else {
             let flavor = if needs_payload {
@@ -478,6 +478,16 @@ impl PetSweepWorker {
             };
             (embed, media)
         };
+        if let Some(activated_pet) = notice.activated_pet.as_ref() {
+            embed.field(
+                "🏡 New active cama",
+                format!(
+                    "**{}** was automatically activated from the stable.",
+                    activated_pet.name
+                ),
+                false,
+            );
+        }
         if let Some(channel_id) = channel_id {
             self.deliver_channel(
                 context,

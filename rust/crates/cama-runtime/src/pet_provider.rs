@@ -50,8 +50,8 @@ use cama_db::pet_evolution_repository::PetEvolutionRepository;
 use cama_db::pet_repository::{PetRepository, PetTrainingError};
 use cama_domain::formatting::JOPACOIN_EMOTE;
 use cama_domain::pet::{
-    FOOD_ITEMS, GILDED_EGG_PREMIUM, MAX_BUY_QTY, Pet, PetMood, PetStage, SALT_LICK, TRINKET_COST,
-    UNHATCHED_SPECIES,
+    FOOD_ITEMS, GILDED_EGG_PREMIUM, MAX_BUY_QTY, MAX_LIVING_PETS, PET_SWITCH_COST, Pet, PetMood,
+    PetStage, SALT_LICK, TRINKET_COST, UNHATCHED_SPECIES, get_species,
 };
 use cama_domain::pet_brawl::{PetBrawl, PetBrawlMove};
 use cama_domain::pet_evolution::PetActivity;
@@ -331,6 +331,40 @@ fn pet_options() -> Vec<CommandOptionSpec> {
             ],
         ),
         subcommand(
+            "stable",
+            "View your living camas and their active or stabled state",
+            Vec::new(),
+        ),
+        subcommand(
+            "activate",
+            &format!(
+                "Activate a stabled cama ({} JC, once every 24 hours)",
+                PET_SWITCH_COST
+            ),
+            vec![
+                CommandOptionSpec::new(
+                    "pet",
+                    "The stabled cama to activate",
+                    CommandOptionKind::String,
+                )
+                .required(true)
+                .autocomplete(),
+            ],
+        ),
+        subcommand(
+            "upgrade",
+            &format!("Gild an unhatched standard egg (+{GILDED_EGG_PREMIUM} JC)"),
+            vec![
+                CommandOptionSpec::new(
+                    "pet",
+                    "The standard egg to gild",
+                    CommandOptionKind::String,
+                )
+                .required(true)
+                .autocomplete(),
+            ],
+        ),
+        subcommand(
             "train",
             "Cash in up to three banked solo training sessions",
             Vec::new(),
@@ -557,6 +591,15 @@ impl PetInteractionHandler {
                 )
                 .await
             }
+            "stable" => self.command_stable(user_id, guild_id, responder).await,
+            "activate" => {
+                self.command_activate(user_id, guild_id, sub_options, responder)
+                    .await
+            }
+            "upgrade" => {
+                self.command_upgrade(user_id, guild_id, sub_options, responder)
+                    .await
+            }
             "train" => self.command_train(user_id, guild_id, responder).await,
             "feed" => {
                 self.command_feed(user_id, guild_id, sub_options, responder)
@@ -622,7 +665,7 @@ impl PetInteractionHandler {
         else {
             return Err("invalid pet autocomplete payload".to_owned());
         };
-        if name != "pet" || focused_option != "wear" {
+        if name != "pet" || !matches!(focused_option.as_str(), "wear" | "pet") {
             return responder
                 .autocomplete(Vec::new())
                 .await
@@ -636,10 +679,42 @@ impl PetInteractionHandler {
                 .map_err(|error| error.to_string());
         };
         let guild_id = signed_id(guild_id, "guild")?;
-        let _ = options;
+        let subcommand = command_path(&options).map(|(name, _)| name.to_owned()).ok();
         let current = focused_value.to_ascii_lowercase();
         let choices = self
             .run_service(move |service| {
+                if focused_option == "pet" {
+                    let pets = match service.stable(user_id, Some(guild_id)) {
+                        ServiceResult::Success(pets) => pets,
+                        ServiceResult::Failure { .. } => Vec::new(),
+                    };
+                    let choices = pets
+                        .into_iter()
+                        .filter(|pet| match subcommand.as_deref() {
+                            Some("activate") => !pet.is_active,
+                            Some("upgrade") => {
+                                pet.species == UNHATCHED_SPECIES && pet.egg_tier == "standard"
+                            }
+                            _ => false,
+                        })
+                        .filter_map(|pet| {
+                            let kind = if pet.species == UNHATCHED_SPECIES {
+                                format!("{} egg", pet.egg_tier)
+                            } else {
+                                get_species(&pet.species).display_name.to_owned()
+                            };
+                            let label = format!("{} — {} (#{})", pet.name, kind, pet.pet_id);
+                            label.to_ascii_lowercase().contains(&current).then(|| {
+                                CommandOptionChoice::String {
+                                    name: label,
+                                    value: pet.pet_id.to_string(),
+                                }
+                            })
+                        })
+                        .take(25)
+                        .collect::<Vec<_>>();
+                    return Ok(choices);
+                }
                 Ok(service
                     .owned_trinkets(user_id, Some(guild_id))
                     .into_iter()
@@ -905,6 +980,139 @@ impl PetInteractionHandler {
             self.spawn_status_timeout(token, 0);
         }
         Ok(())
+    }
+
+    async fn command_stable(
+        &self,
+        user_id: i64,
+        guild_id: i64,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        responder
+            .defer(true)
+            .await
+            .map_err(|error| error.to_string())?;
+        let result = self
+            .run_service(
+                move |service| match service.stable(user_id, Some(guild_id)) {
+                    ServiceResult::Success(pets) => Ok(pets),
+                    ServiceResult::Failure { error, .. } => Err(error),
+                },
+            )
+            .await;
+        let pets = match result {
+            Ok(pets) => pets,
+            Err(error) => return followup_error(&responder, error).await,
+        };
+        let content = if pets.is_empty() {
+            "🏚️ Your stable is empty. Use `/pet adopt` to buy an egg.".to_owned()
+        } else {
+            let entries = pets
+                .iter()
+                .map(|pet| {
+                    let state = if pet.is_active {
+                        "🟢 active"
+                    } else {
+                        "❄️ stabled"
+                    };
+                    let kind = if pet.species == UNHATCHED_SPECIES {
+                        format!("{} egg", pet.egg_tier)
+                    } else {
+                        get_species(&pet.species).display_name.to_owned()
+                    };
+                    format!(
+                        "- **{}** — {} · {} · `#{}`",
+                        pet.name, kind, state, pet.pet_id
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!(
+                "## 🏡 Your cama stable ({}/{MAX_LIVING_PETS})\n{}\n\nStabled pets are fully frozen. Use `/pet activate` to switch for {PET_SWITCH_COST} JC.",
+                pets.len(),
+                entries
+            )
+        };
+        responder
+            .followup(InteractionResponse::message(content).ephemeral())
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn command_activate(
+        &self,
+        user_id: i64,
+        guild_id: i64,
+        options: &[InteractionOption],
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        let pet_id = required_string(options, "pet")?
+            .parse::<i64>()
+            .map_err(|_| "invalid pet selection".to_owned())?;
+        responder
+            .defer(true)
+            .await
+            .map_err(|error| error.to_string())?;
+        let result = self
+            .run_service(
+                move |service| match service.activate(user_id, Some(guild_id), pet_id) {
+                    ServiceResult::Success(outcome) => Ok(outcome),
+                    ServiceResult::Failure { error, .. } => Err(error),
+                },
+            )
+            .await;
+        let outcome = match result {
+            Ok(outcome) => outcome,
+            Err(error) => return followup_error(&responder, error).await,
+        };
+        responder
+            .followup(
+                InteractionResponse::message(format!(
+                    "🏡 **{}** settles into the stable. **{}** is now active! (-{} {JOPACOIN_EMOTE})",
+                    outcome.previous_pet.name, outcome.active_pet.name, outcome.cost
+                ))
+                .ephemeral(),
+            )
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn command_upgrade(
+        &self,
+        user_id: i64,
+        guild_id: i64,
+        options: &[InteractionOption],
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        let pet_id = required_string(options, "pet")?
+            .parse::<i64>()
+            .map_err(|_| "invalid pet selection".to_owned())?;
+        responder
+            .defer(true)
+            .await
+            .map_err(|error| error.to_string())?;
+        let result = self
+            .run_service(
+                move |service| match service.upgrade(user_id, Some(guild_id), pet_id) {
+                    ServiceResult::Success(pet) => Ok(pet),
+                    ServiceResult::Failure { error, .. } => Err(error),
+                },
+            )
+            .await;
+        let pet = match result {
+            Ok(pet) => pet,
+            Err(error) => return followup_error(&responder, error).await,
+        };
+        responder
+            .followup(
+                InteractionResponse::message(format!(
+                    "✨ **{}** is now a gilded egg! (-{GILDED_EGG_PREMIUM} {JOPACOIN_EMOTE})",
+                    pet.name
+                ))
+                .ephemeral(),
+            )
+            .await
+            .map_err(|error| error.to_string())
     }
 
     async fn command_train(
@@ -1969,12 +2177,18 @@ impl PetInteractionHandler {
             ),
             ("new_balance".to_owned(), outcome.new_balance),
         ]);
-        let response = response_embed(
-            build_eating_outcome_embed(&outcome.pet, &map),
-            None,
-            Vec::new(),
-            false,
-        );
+        let mut embed = build_eating_outcome_embed(&outcome.pet, &map);
+        if let Some(activated_pet) = outcome.activated_pet.as_ref() {
+            embed.field(
+                "🏡 New active cama",
+                format!(
+                    "**{}** was automatically activated from your stable.",
+                    activated_pet.name
+                ),
+                false,
+            );
+        }
+        let response = response_embed(embed, None, Vec::new(), false);
         let updated = responder.update(response.clone()).await;
         let posted = if updated.is_ok() {
             true
@@ -3755,6 +3969,7 @@ impl PetEatingRepositoryPort for RuntimeEatingRepository {
         })?;
         Ok(EatAdultPetCommit {
             pet: outcome.pet,
+            activated_pet: outcome.activated_pet,
             new_balance: outcome.new_balance,
             penalty_games_remaining: outcome.penalty_games_remaining,
         })

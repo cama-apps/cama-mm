@@ -1097,6 +1097,9 @@ fn command_schema_matches_python_pet_group() {
         vec![
             "adopt",
             "status",
+            "stable",
+            "activate",
+            "upgrade",
             "train",
             "feed",
             "shop",
@@ -1121,6 +1124,21 @@ fn command_schema_matches_python_pet_group() {
             (
                 "status".to_owned(),
                 "Check on your cama (art, fullness, mood)".to_owned(),
+            ),
+            (
+                "stable".to_owned(),
+                "View your living camas and their active or stabled state".to_owned(),
+            ),
+            (
+                "activate".to_owned(),
+                format!(
+                    "Activate a stabled cama ({} JC, once every 24 hours)",
+                    cama_domain::pet::PET_SWITCH_COST
+                ),
+            ),
+            (
+                "upgrade".to_owned(),
+                format!("Gild an unhatched standard egg (+{GILDED_EGG_PREMIUM} JC)"),
             ),
             (
                 "train".to_owned(),
@@ -1199,7 +1217,18 @@ fn command_schema_matches_python_pet_group() {
         vec!["user", "public"]
     );
     assert!(!status.options[0].required && !status.options[1].required);
-    let feed = &options[3];
+    let option = |name: &str| {
+        options
+            .iter()
+            .find(|option| option.name == name)
+            .expect("pet subcommand")
+    };
+    assert!(option("stable").options.is_empty());
+    assert!(option("activate").options[0].required);
+    assert!(option("activate").options[0].autocomplete);
+    assert!(option("upgrade").options[0].required);
+    assert!(option("upgrade").options[0].autocomplete);
+    let feed = option("feed");
     assert!(feed.options[0].required);
     assert_eq!(
         feed.options[0].choices,
@@ -1214,7 +1243,7 @@ fn command_schema_matches_python_pet_group() {
             })
             .collect::<Vec<_>>()
     );
-    let buy = &options[5];
+    let buy = option("buy");
     assert_eq!(buy.options[1].min_integer, Some(1));
     assert_eq!(buy.options[1].max_integer, Some(MAX_BUY_QTY));
     assert_eq!(
@@ -1227,13 +1256,13 @@ fn command_schema_matches_python_pet_group() {
             value: SALT_LICK.item_id.to_owned(),
         })
     );
-    assert!(options[6].options[0].required);
-    assert!(options[7].options[0].autocomplete);
-    assert!(options[8].options[0].required);
-    assert_eq!(options[8].options[1].min_integer, Some(0));
-    assert_eq!(options[8].options[1].max_integer, Some(100));
-    assert!(options[9].options[0].required);
-    assert!(!options[11].options[0].required);
+    assert!(option("rename").options[0].required);
+    assert!(option("trinket").options[0].autocomplete);
+    assert!(option("brawl").options[0].required);
+    assert_eq!(option("brawl").options[1].min_integer, Some(0));
+    assert_eq!(option("brawl").options[1].max_integer, Some(100));
+    assert!(option("altar").options[0].required);
+    assert!(!option("graveyard").options[0].required);
 }
 
 #[test]
@@ -1894,6 +1923,23 @@ async fn live_migrated_sqlite_dispatches_all_pet_leaves_and_persistent_paths() {
             false,
         ),
         ("status", Vec::new(), true),
+        ("stable", Vec::new(), true),
+        (
+            "activate",
+            vec![InteractionOption {
+                name: "pet".to_owned(),
+                value: InteractionValue::String("0".to_owned()),
+            }],
+            true,
+        ),
+        (
+            "upgrade",
+            vec![InteractionOption {
+                name: "pet".to_owned(),
+                value: InteractionValue::String("0".to_owned()),
+            }],
+            true,
+        ),
         ("train", Vec::new(), true),
         ("shop", Vec::new(), true),
         (
@@ -2064,7 +2110,7 @@ async fn a_void_tombstone_still_tells_the_clicker_why_the_brawl_died() {
     rusqlite::Connection::open(database.path())
         .expect("open brawl fixture")
         .execute(
-            "UPDATE pets SET died_at=?1 WHERE pet_id=?2",
+            "UPDATE pets SET died_at=?1,is_active=0 WHERE pet_id=?2",
             rusqlite::params![SystemPetClock.now(), challenger_pet],
         )
         .expect("bury the challenger's pet");

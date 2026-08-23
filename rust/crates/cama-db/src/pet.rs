@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use cama_domain::game_date::game_day_start_ts;
 use cama_domain::pet::{
     ADULT_AGE_SECONDS, BRAWL_TRAINING_LEVEL_CAP, BRAWL_TRAINING_STAT_CAP, BRAWL_TRAINING_XP_CAP,
-    BRAWL_XP_PER_LEVEL, Pet, PetRow, PetRowError, RefundNotice, RefundPayout,
+    BRAWL_XP_PER_LEVEL, MAX_LIVING_PETS, Pet, PetRow, PetRowError, RefundNotice, RefundPayout,
     SOLO_TRAINING_SESSION_CAP, SOLO_TRAINING_XP_PER_SESSION, SqliteValue, UNHATCHED_SPECIES,
 };
 use rusqlite::types::{Type, Value, ValueRef};
@@ -34,9 +34,9 @@ const PET_COLUMNS: &str = "pet_id, discord_id, guild_id, name, species, adopted_
      egg_tier, training_xp, training_str, training_int, training_dex, \
      solo_training_sessions, solo_training_recharged_at, evolution_started_at, \
      evolution_due_at, evolved_at, evolution_calling, evolution_primary, \
-     evolution_secondary, evolution_announced_at";
+     evolution_secondary, evolution_announced_at, is_active, stabled_at";
 
-const PET_COLUMN_NAMES: [&str; 40] = [
+const PET_COLUMN_NAMES: [&str; 42] = [
     "pet_id",
     "discord_id",
     "guild_id",
@@ -77,6 +77,8 @@ const PET_COLUMN_NAMES: [&str; 40] = [
     "evolution_primary",
     "evolution_secondary",
     "evolution_announced_at",
+    "is_active",
+    "stabled_at",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,6 +98,10 @@ pub enum PetRepositoryFailure {
     NotOwned,
     FundShort,
     InBrawl,
+    StableFull,
+    SwitchCooldown,
+    AlreadyActive,
+    SwitchRequiresMultiplePets,
 }
 
 #[derive(Debug, Error)]
@@ -138,6 +144,10 @@ impl fmt::Display for PetRepositoryFailure {
             Self::NotOwned => "not_owned",
             Self::FundShort => "fund_short",
             Self::InBrawl => "in_brawl",
+            Self::StableFull => "stable_full",
+            Self::SwitchCooldown => "switch_cooldown",
+            Self::AlreadyActive => "already_active",
+            Self::SwitchRequiresMultiplePets => "switch_requires_multiple_pets",
         })
     }
 }
@@ -185,9 +195,28 @@ pub struct AdoptPetRequest<'a> {
 pub struct UpgradeEggRequest<'a> {
     pub discord_id: i64,
     pub guild_id: Option<i64>,
+    pub pet_id: i64,
     pub name: &'a str,
     pub premium: i64,
     pub now: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ActivatePetRequest {
+    pub discord_id: i64,
+    pub guild_id: Option<i64>,
+    pub pet_id: i64,
+    pub cost: i64,
+    pub cooldown_seconds: i64,
+    pub now: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActivatePetOutcome {
+    pub previous_pet: Pet,
+    pub active_pet: Pet,
+    pub cost: i64,
+    pub next_switch_at: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -363,7 +392,8 @@ impl PetRepository {
             &connection,
             &format!(
                 "SELECT {PET_COLUMNS} FROM pets \
-                 WHERE discord_id = ?1 AND guild_id = ?2 AND died_at IS NULL"
+                 WHERE discord_id = ?1 AND guild_id = ?2
+                   AND died_at IS NULL AND is_active = 1"
             ),
             params![discord_id, Self::normalize_guild_id(guild_id)],
         )
@@ -407,7 +437,10 @@ impl PetRepository {
             .map_err(crate::pet_repository::PetTrainingError::Sqlite)?;
         let pet_row = transaction
             .query_row(
-                &format!("SELECT {PET_COLUMNS} FROM pets WHERE pet_id = ?1 AND guild_id = ?2"),
+                &format!(
+                    "SELECT {PET_COLUMNS} FROM pets
+                     WHERE pet_id=?1 AND guild_id=?2 AND died_at IS NULL AND is_active=1"
+                ),
                 params![pet_id, guild_id],
                 pet_row,
             )
@@ -488,7 +521,8 @@ impl PetRepository {
                 "UPDATE pets SET training_xp = ?1, training_str = ?2,
                     training_int = ?3, training_dex = ?4,
                     solo_training_sessions = ?5, solo_training_recharged_at = ?6
-                 WHERE pet_id = ?7 AND guild_id = ?8 AND died_at IS NULL",
+                 WHERE pet_id = ?7 AND guild_id = ?8
+                   AND died_at IS NULL AND is_active=1",
                 params![
                     new_xp,
                     strength,
@@ -593,7 +627,7 @@ impl PetRepository {
             &self.connection()?,
             &format!(
                 "SELECT {PET_COLUMNS} FROM pets
-                 WHERE guild_id=?1 AND died_at IS NULL
+                 WHERE guild_id=?1 AND died_at IS NULL AND is_active = 1
                  ORDER BY hatched_at ASC LIMIT ?2"
             ),
             params![Self::normalize_guild_id(guild_id), limit],
@@ -615,7 +649,7 @@ impl PetRepository {
             .join(",");
         let sql = format!(
             "SELECT {PET_COLUMNS} FROM pets
-             WHERE guild_id = ? AND died_at IS NULL
+             WHERE guild_id = ? AND died_at IS NULL AND is_active = 1
                AND discord_id IN ({placeholders})
              ORDER BY pet_id"
         );
@@ -653,6 +687,17 @@ impl PetRepository {
             .ok_or(PetRepositoryError::ArithmeticOutOfRange)?;
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let living_count = transaction.query_row(
+            "SELECT COUNT(*) FROM pets
+             WHERE discord_id=?1 AND guild_id=?2 AND died_at IS NULL",
+            params![request.discord_id, guild_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if living_count >= MAX_LIVING_PETS {
+            return Err(PetRepositoryFailure::StableFull.into());
+        }
+        let is_active = living_count == 0;
+        let stabled_at = (!is_active).then_some(request.now);
         debit_player(
             &transaction,
             request.discord_id,
@@ -674,8 +719,8 @@ impl PetRepository {
                  discord_id, guild_id, name, species, egg_tier, adopted_at,
                  hatched_at, adopt_fee, last_fed_at, hunger_at_last_fed,
                  dig_work_units, dig_work_at, evolution_started_at,
-                 evolution_due_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?7, 100, 0, ?7, ?7, ?9)",
+                 evolution_due_at, is_active, stabled_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?7, 100, 0, ?7, ?7, ?9, ?10, ?11)",
             params![
                 request.discord_id,
                 guild_id,
@@ -686,11 +731,13 @@ impl PetRepository {
                 hatched_at,
                 request.fee,
                 evolution_due_at,
+                i64::from(is_active),
+                stabled_at,
             ],
         );
         if let Err(error) = inserted {
             if is_constraint_violation(&error) {
-                return Err(PetRepositoryFailure::AlreadyHasPet.into());
+                return Err(PetRepositoryFailure::StableFull.into());
             }
             return Err(error.into());
         }
@@ -712,12 +759,13 @@ impl PetRepository {
             &transaction,
             &format!(
                 "SELECT {PET_COLUMNS} FROM pets
-                 WHERE discord_id = ?1 AND guild_id = ?2 AND died_at IS NULL"
+                 WHERE pet_id = ?1 AND discord_id = ?2 AND guild_id = ?3
+                   AND died_at IS NULL"
             ),
-            params![request.discord_id, guild_id],
+            params![request.pet_id, request.discord_id, guild_id],
         )?
         .ok_or(PetRepositoryFailure::NoPet)?;
-        if request.now >= pet.hatched_at || pet.species != UNHATCHED_SPECIES {
+        if pet.species != UNHATCHED_SPECIES || (pet.is_active && request.now >= pet.hatched_at) {
             return Err(PetRepositoryFailure::PetHatched.into());
         }
         if pet.egg_tier == "gilded" {
@@ -736,8 +784,8 @@ impl PetRepository {
             },
         )?;
         transaction.execute(
-            "UPDATE pets SET name = ?1, egg_tier = 'gilded', adopt_fee = adopt_fee + ?2
-             WHERE pet_id = ?3 AND guild_id = ?4",
+            "UPDATE pets SET name=?1, egg_tier='gilded', adopt_fee=adopt_fee+?2
+             WHERE pet_id=?3 AND guild_id=?4",
             params![request.name, request.premium, pet.pet_id, guild_id],
         )?;
         let upgraded = required_pet(
@@ -747,6 +795,177 @@ impl PetRepository {
         )?;
         transaction.commit()?;
         Ok(upgraded)
+    }
+
+    pub fn list_living_pets(
+        &self,
+        discord_id: i64,
+        guild_id: Option<i64>,
+    ) -> Result<Vec<Pet>, PetRepositoryError> {
+        query_pets(
+            &self.connection()?,
+            &format!(
+                "SELECT {PET_COLUMNS} FROM pets
+                 WHERE discord_id=?1 AND guild_id=?2 AND died_at IS NULL
+                 ORDER BY is_active DESC, pet_id"
+            ),
+            params![discord_id, Self::normalize_guild_id(guild_id)],
+        )
+    }
+
+    pub fn activate_pet_atomic(
+        &self,
+        request: ActivatePetRequest,
+    ) -> Result<ActivatePetOutcome, PetRepositoryError> {
+        let guild_id = Self::normalize_guild_id(request.guild_id);
+        let next_switch_at = request
+            .now
+            .checked_add(request.cooldown_seconds)
+            .ok_or(PetRepositoryError::ArithmeticOutOfRange)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let living_count = transaction.query_row(
+            "SELECT COUNT(*) FROM pets
+             WHERE discord_id=?1 AND guild_id=?2 AND died_at IS NULL",
+            params![request.discord_id, guild_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if living_count < 2 {
+            return Err(PetRepositoryFailure::SwitchRequiresMultiplePets.into());
+        }
+        let target = optional_pet(
+            &transaction,
+            &format!(
+                "SELECT {PET_COLUMNS} FROM pets
+                 WHERE pet_id=?1 AND discord_id=?2 AND guild_id=?3 AND died_at IS NULL"
+            ),
+            params![request.pet_id, request.discord_id, guild_id],
+        )?
+        .ok_or(PetRepositoryFailure::NotOwned)?;
+        if target.is_active {
+            return Err(PetRepositoryFailure::AlreadyActive.into());
+        }
+        let previous = optional_pet(
+            &transaction,
+            &format!(
+                "SELECT {PET_COLUMNS} FROM pets
+                 WHERE discord_id=?1 AND guild_id=?2 AND died_at IS NULL AND is_active=1"
+            ),
+            params![request.discord_id, guild_id],
+        )?
+        .ok_or(PetRepositoryFailure::NoPet)?;
+        let in_brawl = transaction
+            .query_row(
+                "SELECT 1 FROM pet_brawls
+                 WHERE guild_id=?1
+                   AND status IN ('pending', 'active')
+                   AND (challenger_id=?2 OR recipient_id=?2) LIMIT 1",
+                params![guild_id, request.discord_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if in_brawl {
+            return Err(PetRepositoryFailure::InBrawl.into());
+        }
+        let last_switch = transaction
+            .query_row(
+                "SELECT last_voluntary_switch_at FROM pet_stable_state
+                 WHERE discord_id=?1 AND guild_id=?2",
+                params![request.discord_id, guild_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten();
+        if last_switch.is_some_and(|last| {
+            last.checked_add(request.cooldown_seconds)
+                .is_none_or(|ready| request.now < ready)
+        }) {
+            return Err(PetRepositoryFailure::SwitchCooldown.into());
+        }
+        let stabled_at = target.stabled_at.ok_or(PetRepositoryFailure::StalePet)?;
+        let duration = request
+            .now
+            .checked_sub(stabled_at)
+            .filter(|duration| *duration >= 0)
+            .ok_or(PetRepositoryError::ArithmeticOutOfRange)?;
+        let shifted_hatched_at = shift_timestamp(target.hatched_at, duration)?;
+        let shifted_last_fed_at = shift_timestamp(target.last_fed_at, duration)?;
+        let shifted_dig_work_at = shift_timestamp(target.dig_work_at, duration)?;
+        let shifted_pampered_until = shift_optional_timestamp(target.pampered_until, duration)?;
+        let shifted_recharged_at =
+            shift_optional_timestamp(target.solo_training_recharged_at, duration)?;
+        let shifted_evolution_started_at =
+            shift_optional_timestamp(target.evolution_started_at, duration)?;
+        let shifted_evolution_due_at = shift_optional_timestamp(target.evolution_due_at, duration)?;
+
+        debit_player(
+            &transaction,
+            request.discord_id,
+            guild_id,
+            request.cost,
+            DebitContext {
+                related_type: "pet_activate",
+                related_id: request.pet_id.to_string(),
+                reason: format!("activated pet {}", target.name),
+                metadata: Some(format!(
+                    "{{\"previous_pet_id\": {}, \"cost\": {}}}",
+                    previous.pet_id, request.cost
+                )),
+            },
+        )?;
+        let deactivated = transaction.execute(
+            "UPDATE pets SET is_active=0, stabled_at=?1
+             WHERE pet_id=?2 AND guild_id=?3 AND discord_id=?4
+               AND died_at IS NULL AND is_active=1",
+            params![request.now, previous.pet_id, guild_id, request.discord_id],
+        )?;
+        if deactivated != 1 {
+            return Err(PetRepositoryFailure::StalePet.into());
+        }
+        let activated = transaction.execute(
+            "UPDATE pets SET is_active=1, stabled_at=NULL,
+                 hatched_at=?1, last_fed_at=?2, dig_work_at=?3,
+                 pampered_until=?4, solo_training_recharged_at=?5,
+                 evolution_started_at=?6, evolution_due_at=?7
+             WHERE pet_id=?8 AND guild_id=?9 AND discord_id=?10
+               AND died_at IS NULL AND is_active=0 AND stabled_at=?11",
+            params![
+                shifted_hatched_at,
+                shifted_last_fed_at,
+                shifted_dig_work_at,
+                shifted_pampered_until,
+                shifted_recharged_at,
+                shifted_evolution_started_at,
+                shifted_evolution_due_at,
+                target.pet_id,
+                guild_id,
+                request.discord_id,
+                stabled_at,
+            ],
+        )?;
+        if activated != 1 {
+            return Err(PetRepositoryFailure::StalePet.into());
+        }
+        transaction.execute(
+            "INSERT INTO pet_stable_state(discord_id,guild_id,last_voluntary_switch_at)
+             VALUES (?1,?2,?3)
+             ON CONFLICT(discord_id,guild_id) DO UPDATE
+             SET last_voluntary_switch_at=excluded.last_voluntary_switch_at",
+            params![request.discord_id, guild_id, request.now],
+        )?;
+        let active_pet = required_pet(
+            &transaction,
+            &format!("SELECT {PET_COLUMNS} FROM pets WHERE pet_id=?1 AND guild_id=?2"),
+            params![target.pet_id, guild_id],
+        )?;
+        transaction.commit()?;
+        Ok(ActivatePetOutcome {
+            previous_pet: previous,
+            active_pet,
+            cost: request.cost,
+            next_switch_at,
+        })
     }
 
     /// Atomically give one living pet to the altar, debit the escalating fee,
@@ -788,6 +1007,8 @@ impl PetRepository {
             "UPDATE pets
                 SET died_at = ?1,
                     death_cause = 'sacrifice',
+                    is_active = 0,
+                    stabled_at = NULL,
                     evolved_at = CASE WHEN evolution_due_at < ?1 THEN evolved_at ELSE NULL END,
                     evolution_calling = CASE
                         WHEN evolution_due_at < ?1 THEN evolution_calling ELSE NULL END,
@@ -798,7 +1019,7 @@ impl PetRepository {
                     evolution_announced_at = CASE
                         WHEN evolution_due_at < ?1 THEN evolution_announced_at ELSE NULL END
               WHERE pet_id = ?2 AND guild_id = ?3 AND discord_id = ?4
-                AND died_at IS NULL
+                AND died_at IS NULL AND is_active = 1
                 AND last_fed_at = ?5 AND hunger_at_last_fed = ?6",
             params![
                 request.now,
@@ -847,8 +1068,8 @@ impl PetRepository {
             "INSERT INTO pets (
                  discord_id, guild_id, name, species, adopted_at, hatched_at,
                  adopt_fee, last_fed_at, hunger_at_last_fed, dig_work_units,
-                 dig_work_at, evolution_started_at, evolution_due_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?6, 100, 0, ?6, ?6, ?8)",
+                 dig_work_at, evolution_started_at, evolution_due_at, is_active
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?6, 100, 0, ?6, ?6, ?8, 1)",
             params![
                 request.discord_id,
                 guild_id,
@@ -895,7 +1116,8 @@ impl PetRepository {
             &transaction,
             &format!(
                 "SELECT {PET_COLUMNS} FROM pets
-                 WHERE pet_id = ?1 AND guild_id = ?2 AND died_at IS NULL"
+                 WHERE pet_id = ?1 AND guild_id = ?2
+                   AND died_at IS NULL AND is_active=1"
             ),
             params![pet_id, guild_id],
         )?
@@ -909,7 +1131,8 @@ impl PetRepository {
         }
         transaction.execute(
             "UPDATE pets SET species = ?1
-             WHERE pet_id = ?2 AND guild_id = ?3 AND died_at IS NULL AND species = ?4",
+             WHERE pet_id = ?2 AND guild_id = ?3 AND died_at IS NULL
+               AND is_active=1 AND species = ?4",
             params![species, pet_id, guild_id, UNHATCHED_SPECIES],
         )?;
         let resolved = required_pet(
@@ -979,19 +1202,20 @@ impl PetRepository {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let state = transaction
             .query_row(
-                "SELECT died_at, last_fed_at, hunger_at_last_fed, feeds_today,
+                "SELECT died_at, is_active, last_fed_at, hunger_at_last_fed, feeds_today,
                         feed_date, dig_work_units, dig_work_at
                  FROM pets WHERE pet_id = ?1 AND guild_id = ?2",
                 params![request.pet_id, guild_id],
                 |row| {
                     Ok(FeedState {
                         died_at: row.get(0)?,
-                        last_fed_at: row.get(1)?,
-                        hunger: row.get(2)?,
-                        feeds_today: row.get(3)?,
-                        feed_date: row.get(4)?,
-                        dig_work_units: row.get(5)?,
-                        dig_work_at: row.get(6)?,
+                        is_active: row.get::<_, i64>(1)? != 0,
+                        last_fed_at: row.get(2)?,
+                        hunger: row.get(3)?,
+                        feeds_today: row.get(4)?,
+                        feed_date: row.get(5)?,
+                        dig_work_units: row.get(6)?,
+                        dig_work_at: row.get(7)?,
                     })
                 },
             )
@@ -999,6 +1223,9 @@ impl PetRepository {
             .ok_or(PetRepositoryFailure::NoPet)?;
         if state.died_at.is_some() {
             return Err(PetRepositoryFailure::PetDead.into());
+        }
+        if !state.is_active {
+            return Err(PetRepositoryFailure::StalePet.into());
         }
         if !anchor_matches(
             state.last_fed_at,
@@ -1047,7 +1274,7 @@ impl PetRepository {
                  week_consumed_jc = CASE
                      WHEN week_key = ?8 THEN week_consumed_jc + ?9 ELSE ?9 END,
                  week_key = ?8
-             WHERE pet_id = ?10 AND guild_id = ?11",
+             WHERE pet_id = ?10 AND guild_id = ?11 AND is_active=1",
             params![
                 request.spat,
                 request.new_last_fed_at,
@@ -1107,6 +1334,7 @@ impl PetRepository {
         let guild_id = Self::normalize_guild_id(request.guild_id);
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        require_living_pet(&transaction, request.pet_id, guild_id)?;
         let state = transaction
             .query_row(
                 "SELECT died_at, pampered_until FROM pets WHERE pet_id = ?1 AND guild_id = ?2",
@@ -1147,7 +1375,7 @@ impl PetRepository {
                  week_consumed_jc = CASE
                      WHEN week_key = ?4 THEN week_consumed_jc + ?5 ELSE ?5 END,
                  week_key = ?4
-             WHERE pet_id = ?6 AND guild_id = ?7
+             WHERE pet_id = ?6 AND guild_id = ?7 AND is_active=1
                AND (?8 IS NULL OR last_fed_at = ?8)
                AND (?9 IS NULL OR hunger_at_last_fed = ?9)
                AND (?10 IS NULL OR dig_work_units = ?10)
@@ -1226,7 +1454,8 @@ impl PetRepository {
             )?;
             transaction.execute(
                 "UPDATE pets SET accessory = ?1
-                 WHERE pet_id = ?2 AND guild_id = ?3 AND died_at IS NULL",
+                 WHERE pet_id = ?2 AND guild_id = ?3
+                   AND died_at IS NULL AND is_active=1",
                 params![request.accessory_id, request.pet_id, guild_id],
             )?;
         }
@@ -1338,13 +1567,27 @@ impl PetRepository {
     }
 
     pub fn claim_death(&self, request: &DeathClaimRequest<'_>) -> Result<bool, PetRepositoryError> {
-        let connection = self.connection()?;
+        let mut connection = self.connection()?;
         let guild_id = Self::normalize_guild_id(request.guild_id);
-        let changed = connection.execute(
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let owner = transaction
+            .query_row(
+                "SELECT discord_id FROM pets
+                 WHERE pet_id=?1 AND guild_id=?2 AND died_at IS NULL AND is_active=1",
+                params![request.pet_id, guild_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        let Some(discord_id) = owner else {
+            transaction.commit()?;
+            return Ok(false);
+        };
+        let changed = transaction.execute(
             "UPDATE pets SET died_at = ?1, death_cause = ?2,
+                 is_active = 0, stabled_at = NULL,
                  dig_work_units = COALESCE(?3, dig_work_units),
                  dig_work_at = COALESCE(?4, dig_work_at)
-             WHERE pet_id = ?5 AND guild_id = ?6 AND died_at IS NULL
+             WHERE pet_id = ?5 AND guild_id = ?6 AND died_at IS NULL AND is_active=1
                AND last_fed_at = ?7 AND hunger_at_last_fed = ?8
                AND (?9 IS NULL OR dig_work_units = ?9)
                AND (?10 IS NULL OR dig_work_at = ?10)",
@@ -1361,6 +1604,11 @@ impl PetRepository {
                 request.anchor.expected_dig_work_at,
             ],
         )?;
+        if changed == 1 {
+            let _activated =
+                activate_oldest_stabled(&transaction, discord_id, guild_id, request.died_at)?;
+        }
+        transaction.commit()?;
         Ok(changed == 1)
     }
 
@@ -1378,7 +1626,7 @@ impl PetRepository {
                  hunger_at_last_fed=?2,
                  dig_work_units=COALESCE(?3,dig_work_units),
                  dig_work_at=COALESCE(?4,dig_work_at)
-             WHERE pet_id=?5 AND guild_id=?6 AND died_at IS NULL
+             WHERE pet_id=?5 AND guild_id=?6 AND died_at IS NULL AND is_active=1
                AND last_fed_at=?7 AND hunger_at_last_fed=?8
                AND (?9 IS NULL OR dig_work_units=?9)
                AND (?10 IS NULL OR dig_work_at=?10)",
@@ -1410,7 +1658,8 @@ impl PetRepository {
                  hunger_at_last_fed = ?2,
                  dig_work_units = COALESCE(?3, dig_work_units),
                  dig_work_at = COALESCE(?4, dig_work_at)
-             WHERE pet_id = ?5 AND guild_id = ?6 AND died_at IS NULL AND aegis_used = 0
+             WHERE pet_id = ?5 AND guild_id = ?6 AND died_at IS NULL
+               AND is_active=1 AND aegis_used = 0
                AND last_fed_at = ?7 AND hunger_at_last_fed = ?8
                AND (?9 IS NULL OR dig_work_units = ?9)
                AND (?10 IS NULL OR dig_work_at = ?10)",
@@ -1446,7 +1695,7 @@ impl PetRepository {
             &connection,
             &format!(
                 "SELECT {PET_COLUMNS} FROM pets
-                 WHERE died_at IS NULL
+                 WHERE died_at IS NULL AND is_active=1
                    AND last_fed_at + (hunger_at_last_fed * ?1 / 100) <= ?2"
             ),
             params![seconds, now],
@@ -1466,7 +1715,8 @@ impl PetRepository {
             &connection,
             &format!(
                 "SELECT {PET_COLUMNS} FROM pets
-                 WHERE died_at IS NULL AND hatch_announced_at IS NULL AND hatched_at <= ?1
+                 WHERE died_at IS NULL AND is_active=1
+                   AND hatch_announced_at IS NULL AND hatched_at <= ?1
                  ORDER BY hatched_at, pet_id LIMIT ?2"
             ),
             params![now, limit],
@@ -1753,6 +2003,7 @@ impl PetRepository {
 #[derive(Debug)]
 struct FeedState {
     died_at: Option<i64>,
+    is_active: bool,
     last_fed_at: i64,
     hunger: i64,
     feeds_today: i64,
@@ -1767,6 +2018,77 @@ struct RefundRow {
     week_key: String,
     total_paid: i64,
     payload: String,
+}
+
+fn shift_timestamp(value: i64, duration: i64) -> Result<i64, PetRepositoryError> {
+    value
+        .checked_add(duration)
+        .ok_or(PetRepositoryError::ArithmeticOutOfRange)
+}
+
+fn shift_optional_timestamp(
+    value: Option<i64>,
+    duration: i64,
+) -> Result<Option<i64>, PetRepositoryError> {
+    value
+        .map(|value| shift_timestamp(value, duration))
+        .transpose()
+}
+
+pub(crate) fn activate_oldest_stabled(
+    transaction: &Transaction<'_>,
+    discord_id: i64,
+    guild_id: i64,
+    now: i64,
+) -> Result<Option<Pet>, PetRepositoryError> {
+    let target = optional_pet(
+        transaction,
+        &format!(
+            "SELECT {PET_COLUMNS} FROM pets
+             WHERE discord_id=?1 AND guild_id=?2
+               AND died_at IS NULL AND is_active=0
+             ORDER BY pet_id LIMIT 1"
+        ),
+        params![discord_id, guild_id],
+    )?;
+    let Some(target) = target else {
+        return Ok(None);
+    };
+    let stabled_at = target.stabled_at.ok_or(PetRepositoryFailure::StalePet)?;
+    let duration = now
+        .checked_sub(stabled_at)
+        .filter(|duration| *duration >= 0)
+        .ok_or(PetRepositoryError::ArithmeticOutOfRange)?;
+    let changed = transaction.execute(
+        "UPDATE pets SET is_active=1, stabled_at=NULL,
+             hatched_at=?1, last_fed_at=?2, dig_work_at=?3,
+             pampered_until=?4, solo_training_recharged_at=?5,
+             evolution_started_at=?6, evolution_due_at=?7
+         WHERE pet_id=?8 AND guild_id=?9 AND discord_id=?10
+           AND died_at IS NULL AND is_active=0 AND stabled_at=?11",
+        params![
+            shift_timestamp(target.hatched_at, duration)?,
+            shift_timestamp(target.last_fed_at, duration)?,
+            shift_timestamp(target.dig_work_at, duration)?,
+            shift_optional_timestamp(target.pampered_until, duration)?,
+            shift_optional_timestamp(target.solo_training_recharged_at, duration)?,
+            shift_optional_timestamp(target.evolution_started_at, duration)?,
+            shift_optional_timestamp(target.evolution_due_at, duration)?,
+            target.pet_id,
+            guild_id,
+            discord_id,
+            stabled_at,
+        ],
+    )?;
+    if changed != 1 {
+        return Err(PetRepositoryFailure::StalePet.into());
+    }
+    required_pet(
+        transaction,
+        &format!("SELECT {PET_COLUMNS} FROM pets WHERE pet_id=?1 AND guild_id=?2"),
+        params![target.pet_id, guild_id],
+    )
+    .map(Some)
 }
 
 fn anchor_matches(
@@ -1791,16 +2113,19 @@ fn require_living_pet(
     pet_id: i64,
     guild_id: i64,
 ) -> Result<(), PetRepositoryError> {
-    let died_at = transaction
+    let state = transaction
         .query_row(
-            "SELECT died_at FROM pets WHERE pet_id = ?1 AND guild_id = ?2",
+            "SELECT died_at, is_active FROM pets WHERE pet_id = ?1 AND guild_id = ?2",
             params![pet_id, guild_id],
-            |row| row.get::<_, Option<i64>>(0),
+            |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)? != 0)),
         )
         .optional()?
         .ok_or(PetRepositoryFailure::NoPet)?;
-    if died_at.is_some() {
+    if state.0.is_some() {
         return Err(PetRepositoryFailure::PetDead.into());
+    }
+    if !state.1 {
+        return Err(PetRepositoryFailure::StalePet.into());
     }
     Ok(())
 }
@@ -2068,12 +2393,12 @@ mod tests {
     use std::thread;
 
     use cama_domain::pet::{Pet, RefundNotice, RefundPayout};
-    use rusqlite::{Connection, params};
+    use rusqlite::{Connection, OptionalExtension, params};
     use tempfile::NamedTempFile;
 
     use super::{
-        AdoptPetRequest, AegisReviveRequest, AnchorGuard, BuySuppliesRequest, DeathClaimRequest,
-        FeedPetRequest, HungerTopUpRequest, PetRepository, PetRepositoryError,
+        ActivatePetRequest, AdoptPetRequest, AegisReviveRequest, AnchorGuard, BuySuppliesRequest,
+        DeathClaimRequest, FeedPetRequest, HungerTopUpRequest, PetRepository, PetRepositoryError,
         PetRepositoryFailure, SacrificePetRequest, SaltLickRequest, TrinketPurchaseOutcome,
         TrinketPurchaseRequest, UpgradeEggRequest,
     };
@@ -2289,11 +2614,21 @@ mod tests {
                          evolution_primary      TEXT,
                          evolution_secondary    TEXT,
                          evolution_announced_at INTEGER,
+                         is_active              INTEGER NOT NULL DEFAULT 0,
+                         stabled_at             INTEGER,
                          CHECK(hatched_at >= adopted_at),
-                         CHECK(died_at IS NULL OR died_at >= adopted_at)
+                         CHECK(died_at IS NULL OR died_at >= adopted_at),
+                         CHECK(is_active=0 OR died_at IS NULL)
                      );
-                     CREATE UNIQUE INDEX idx_pets_one_alive
-                         ON pets(discord_id, guild_id) WHERE died_at IS NULL;
+                     CREATE UNIQUE INDEX idx_pets_one_active
+                         ON pets(discord_id, guild_id)
+                         WHERE died_at IS NULL AND is_active=1;
+                     CREATE TABLE pet_stable_state (
+                         discord_id INTEGER NOT NULL,
+                         guild_id INTEGER NOT NULL,
+                         last_voluntary_switch_at INTEGER,
+                         PRIMARY KEY(discord_id,guild_id)
+                     );
                      CREATE TABLE pet_supplies (
                          discord_id INTEGER NOT NULL,
                          guild_id   INTEGER NOT NULL,
@@ -2548,15 +2883,18 @@ mod tests {
         }
 
         #[test]
-        fn test_adopt_with_living_pet_rejected_and_not_charged() {
+        fn test_additional_adoption_enters_stable_and_is_charged() {
             let fixture = rich_fixture();
-            fixture.adopt_standard();
-            assert_failure(
-                fixture.adopt_result(AdoptOptions::default()),
-                PetRepositoryFailure::AlreadyHasPet,
-            );
-            assert_eq!(fixture.balance(100, TEST_GUILD_ID), 980);
-            assert_eq!(fixture.ledger_count("pet"), 1);
+            let active = fixture.adopt_standard();
+            let stabled = fixture.adopt(AdoptOptions {
+                name: "Second",
+                ..AdoptOptions::default()
+            });
+            assert!(active.is_active);
+            assert!(!stabled.is_active);
+            assert_eq!(stabled.stabled_at, Some(NOW));
+            assert_eq!(fixture.balance(100, TEST_GUILD_ID), 960);
+            assert_eq!(fixture.ledger_count("pet"), 2);
         }
 
         #[test]
@@ -2743,6 +3081,7 @@ mod tests {
                 fixture.repository.upgrade_egg(&UpgradeEggRequest {
                     discord_id: 100,
                     guild_id: Some(TEST_GUILD_ID),
+                    pet_id: outcome.new_pet.pet_id,
                     name: "Shiny",
                     premium: 230,
                     now: outcome.new_pet.adopted_at,
@@ -2785,6 +3124,7 @@ mod tests {
                 .upgrade_egg(&UpgradeEggRequest {
                     discord_id: 100,
                     guild_id: Some(TEST_GUILD_ID),
+                    pet_id: egg.pet_id,
                     name: "Goldie",
                     premium: 230,
                     now: NOW + 1,
@@ -2809,6 +3149,7 @@ mod tests {
                 fixture.repository.upgrade_egg(&UpgradeEggRequest {
                     discord_id: 100,
                     guild_id: Some(TEST_GUILD_ID),
+                    pet_id: egg.pet_id,
                     name: "Too Expensive",
                     premium: 230,
                     now: NOW + 1,
@@ -2838,6 +3179,7 @@ mod tests {
                 fixture.repository.upgrade_egg(&UpgradeEggRequest {
                     discord_id: 100,
                     guild_id: Some(TEST_GUILD_ID),
+                    pet_id: gilded.pet_id,
                     name: "Again",
                     premium: 230,
                     now: NOW + 1,
@@ -2853,6 +3195,7 @@ mod tests {
                 fixture.repository.upgrade_egg(&UpgradeEggRequest {
                     discord_id: 100,
                     guild_id: Some(TEST_GUILD_ID),
+                    pet_id: standard.pet_id,
                     name: "Too Late",
                     premium: 230,
                     now: standard.hatched_at,
@@ -2959,6 +3302,189 @@ mod tests {
                     .get_supplies(102, Some(TEST_GUILD_ID))
                     .unwrap()
                     .is_empty()
+            );
+        }
+    }
+
+    mod stable {
+        use super::*;
+
+        #[test]
+        fn activation_charges_once_rebases_clocks_and_enforces_cooldown() {
+            let fixture = rich_fixture();
+            let first = fixture.adopt_standard();
+            let second = fixture.adopt(AdoptOptions {
+                name: "Second",
+                ..AdoptOptions::default()
+            });
+            let switched_at = NOW + 3_600;
+            let outcome = fixture
+                .repository
+                .activate_pet_atomic(ActivatePetRequest {
+                    discord_id: 100,
+                    guild_id: Some(TEST_GUILD_ID),
+                    pet_id: second.pet_id,
+                    cost: 25,
+                    cooldown_seconds: DAY,
+                    now: switched_at,
+                })
+                .expect("activate stabled pet");
+            assert_eq!(outcome.previous_pet.pet_id, first.pet_id);
+            assert_eq!(outcome.active_pet.pet_id, second.pet_id);
+            assert_eq!(outcome.active_pet.hatched_at, second.hatched_at + 3_600);
+            assert_eq!(outcome.active_pet.last_fed_at, second.last_fed_at + 3_600);
+            assert_eq!(outcome.active_pet.dig_work_at, second.dig_work_at + 3_600);
+            assert_eq!(
+                outcome.active_pet.evolution_started_at,
+                second.evolution_started_at.map(|value| value + 3_600)
+            );
+            assert_eq!(
+                outcome.active_pet.evolution_due_at,
+                second.evolution_due_at.map(|value| value + 3_600)
+            );
+            assert_eq!(fixture.balance(100, TEST_GUILD_ID), 935);
+            let stabled_first = fixture
+                .repository
+                .get_pet_by_id(first.pet_id, Some(TEST_GUILD_ID))
+                .unwrap()
+                .unwrap();
+            assert!(!stabled_first.is_active);
+            assert_eq!(stabled_first.stabled_at, Some(switched_at));
+
+            assert_failure(
+                fixture.repository.activate_pet_atomic(ActivatePetRequest {
+                    discord_id: 100,
+                    guild_id: Some(TEST_GUILD_ID),
+                    pet_id: first.pet_id,
+                    cost: 25,
+                    cooldown_seconds: DAY,
+                    now: switched_at + DAY - 1,
+                }),
+                PetRepositoryFailure::SwitchCooldown,
+            );
+            assert_eq!(fixture.balance(100, TEST_GUILD_ID), 935);
+
+            let returned = fixture
+                .repository
+                .activate_pet_atomic(ActivatePetRequest {
+                    discord_id: 100,
+                    guild_id: Some(TEST_GUILD_ID),
+                    pet_id: first.pet_id,
+                    cost: 25,
+                    cooldown_seconds: DAY,
+                    now: switched_at + DAY,
+                })
+                .expect("switch at cooldown boundary");
+            assert_eq!(returned.active_pet.hatched_at, first.hatched_at + DAY);
+            assert_eq!(fixture.balance(100, TEST_GUILD_ID), 910);
+        }
+
+        #[test]
+        fn active_death_promotes_oldest_stabled_pet_without_touching_switch_state() {
+            let fixture = rich_fixture();
+            let first = fixture.adopt_standard();
+            let second = fixture.adopt(AdoptOptions {
+                name: "Second",
+                ..AdoptOptions::default()
+            });
+            let third = fixture.adopt(AdoptOptions {
+                name: "Third",
+                ..AdoptOptions::default()
+            });
+            assert!(fixture.claim_death(&first, NOW + 600));
+            let active = fixture
+                .repository
+                .get_active_pet(100, Some(TEST_GUILD_ID))
+                .unwrap()
+                .unwrap();
+            assert_eq!(active.pet_id, second.pet_id);
+            assert_eq!(active.hatched_at, second.hatched_at + 600);
+            let third = fixture
+                .repository
+                .get_pet_by_id(third.pet_id, Some(TEST_GUILD_ID))
+                .unwrap()
+                .unwrap();
+            assert!(!third.is_active);
+            assert_eq!(third.stabled_at, Some(NOW));
+            let last_switch: Option<i64> = fixture
+                .connection()
+                .query_row(
+                    "SELECT last_voluntary_switch_at FROM pet_stable_state
+                     WHERE discord_id=100 AND guild_id=?1",
+                    [TEST_GUILD_ID],
+                    |row| row.get(0),
+                )
+                .optional()
+                .unwrap()
+                .flatten();
+            assert_eq!(last_switch, None);
+        }
+
+        #[test]
+        fn activation_is_blocked_during_pending_brawls_without_a_charge() {
+            let fixture = rich_fixture();
+            let active = fixture.adopt_standard();
+            let stabled = fixture.adopt(AdoptOptions {
+                name: "Second",
+                ..AdoptOptions::default()
+            });
+            fixture
+                .connection()
+                .execute(
+                    "INSERT INTO pet_brawls
+                         (guild_id,challenger_id,recipient_id,status,expires_at)
+                     VALUES (?1,100,200,'pending',?2)",
+                    params![TEST_GUILD_ID, NOW - 1],
+                )
+                .expect("seed pending brawl");
+
+            assert_failure(
+                fixture.repository.activate_pet_atomic(ActivatePetRequest {
+                    discord_id: 100,
+                    guild_id: Some(TEST_GUILD_ID),
+                    pet_id: stabled.pet_id,
+                    cost: 25,
+                    cooldown_seconds: DAY,
+                    now: NOW,
+                }),
+                PetRepositoryFailure::InBrawl,
+            );
+            assert_eq!(fixture.balance(100, TEST_GUILD_ID), 960);
+            assert_eq!(
+                fixture
+                    .repository
+                    .get_active_pet(100, Some(TEST_GUILD_ID))
+                    .unwrap()
+                    .unwrap()
+                    .pet_id,
+                active.pet_id
+            );
+        }
+
+        #[test]
+        fn living_pet_capacity_is_five_and_failure_does_not_debit() {
+            let fixture = rich_fixture();
+            for name in ["One", "Two", "Three", "Four", "Five"] {
+                fixture.adopt(AdoptOptions {
+                    name,
+                    ..AdoptOptions::default()
+                });
+            }
+            assert_failure(
+                fixture.adopt_result(AdoptOptions {
+                    name: "Sixth",
+                    ..AdoptOptions::default()
+                }),
+                PetRepositoryFailure::StableFull,
+            );
+            assert_eq!(fixture.balance(100, TEST_GUILD_ID), 900);
+            assert_eq!(
+                fixture
+                    .repository
+                    .list_living_pets(100, Some(TEST_GUILD_ID))
+                    .unwrap()
+                    .len(),
+                5
             );
         }
     }
@@ -3881,7 +4407,7 @@ mod tests {
             fixture
                 .connection()
                 .execute(
-                    "UPDATE pets SET died_at=?1,death_cause='sacrifice'
+                    "UPDATE pets SET died_at=?1,death_cause='sacrifice',is_active=0
                  WHERE pet_id=?2",
                     params![NOW + 30, second.pet_id],
                 )
@@ -3961,7 +4487,7 @@ mod tests {
     }
 
     #[test]
-    fn stronger_concurrent_adoptions_charge_exactly_once() {
+    fn concurrent_adoptions_both_succeed_with_one_active() {
         let fixture = Arc::new(rich_fixture());
         let barrier = Arc::new(Barrier::new(2));
         let handles = (0..2)
@@ -3978,18 +4504,16 @@ mod tests {
             .into_iter()
             .map(|handle| handle.join().expect("adoption thread joins"))
             .collect::<Vec<_>>();
-        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 2);
         assert_eq!(
             results
                 .iter()
-                .filter(|result| {
-                    result.as_ref().err().and_then(PetRepositoryError::failure)
-                        == Some(PetRepositoryFailure::AlreadyHasPet)
-                })
+                .filter_map(|result| result.as_ref().ok())
+                .filter(|pet| pet.is_active)
                 .count(),
             1
         );
-        assert_eq!(fixture.balance(100, TEST_GUILD_ID), 980);
-        assert_eq!(fixture.ledger_count("pet"), 1);
+        assert_eq!(fixture.balance(100, TEST_GUILD_ID), 960);
+        assert_eq!(fixture.ledger_count("pet"), 2);
     }
 }

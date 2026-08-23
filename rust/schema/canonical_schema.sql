@@ -1057,6 +1057,14 @@ CREATE TABLE pet_supplies (
                 PRIMARY KEY (discord_id, guild_id, item_id)
             );
 
+-- table: pet_stable_state
+CREATE TABLE pet_stable_state (
+                discord_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL,
+                last_voluntary_switch_at INTEGER,
+                PRIMARY KEY (discord_id, guild_id)
+            );
+
 -- table: pets
 CREATE TABLE pets (
                 pet_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1092,9 +1100,13 @@ CREATE TABLE pets (
                 died_at INTEGER,
                 death_cause TEXT,
                 death_announced_at INTEGER, training_xp INTEGER NOT NULL DEFAULT 0 CHECK (training_xp BETWEEN 0 AND 20), training_str INTEGER NOT NULL DEFAULT 0 CHECK (training_str BETWEEN 0 AND 2), training_int INTEGER NOT NULL DEFAULT 0 CHECK (training_int BETWEEN 0 AND 2), training_dex INTEGER NOT NULL DEFAULT 0 CHECK (training_dex BETWEEN 0 AND 2), solo_training_sessions INTEGER NOT NULL DEFAULT 3 CHECK (solo_training_sessions BETWEEN 0 AND 3), solo_training_recharged_at INTEGER, evolution_started_at INTEGER, evolution_due_at INTEGER, evolved_at INTEGER, evolution_calling TEXT, evolution_primary TEXT, evolution_secondary TEXT, evolution_announced_at INTEGER,
+                is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+                stabled_at INTEGER,
                 CHECK (hatched_at >= adopted_at),
                 CHECK (died_at IS NULL OR died_at >= adopted_at),
-                CHECK (death_announced_at IS NULL OR died_at IS NOT NULL)
+                CHECK (death_announced_at IS NULL OR died_at IS NOT NULL),
+                CHECK (is_active = 0 OR died_at IS NULL),
+                CHECK ((is_active = 1 AND stabled_at IS NULL) OR is_active = 0)
             );
 
 -- table: player_curfew_windows
@@ -1940,10 +1952,10 @@ CREATE INDEX idx_pet_brawls_record_win ON pet_brawls(winner_pet_id) WHERE status
 CREATE INDEX idx_pet_refunds_unannounced ON pet_refund_windows(paid_at) WHERE announcement_payload IS NOT NULL AND announced_at IS NULL;
 
 -- index: idx_pets_alive_starve_scan
-CREATE INDEX idx_pets_alive_starve_scan ON pets(last_fed_at) WHERE died_at IS NULL;
+CREATE INDEX idx_pets_alive_starve_scan ON pets(last_fed_at) WHERE died_at IS NULL AND is_active = 1;
 
 -- index: idx_pets_evolution_due
-CREATE INDEX idx_pets_evolution_due ON pets(evolution_due_at, pet_id) WHERE died_at IS NULL AND evolved_at IS NULL AND evolution_due_at IS NOT NULL;
+CREATE INDEX idx_pets_evolution_due ON pets(evolution_due_at, pet_id) WHERE died_at IS NULL AND is_active = 1 AND evolved_at IS NULL AND evolution_due_at IS NOT NULL;
 
 -- index: idx_pets_evolution_unannounced
 CREATE INDEX idx_pets_evolution_unannounced ON pets(evolved_at, pet_id) WHERE evolved_at IS NOT NULL AND evolution_announced_at IS NULL;
@@ -1951,14 +1963,14 @@ CREATE INDEX idx_pets_evolution_unannounced ON pets(evolved_at, pet_id) WHERE ev
 -- index: idx_pets_graveyard
 CREATE INDEX idx_pets_graveyard ON pets(guild_id, discord_id, died_at DESC);
 
--- index: idx_pets_one_alive
-CREATE UNIQUE INDEX idx_pets_one_alive ON pets(discord_id, guild_id) WHERE died_at IS NULL;
+-- index: idx_pets_one_active
+CREATE UNIQUE INDEX idx_pets_one_active ON pets(discord_id, guild_id) WHERE died_at IS NULL AND is_active = 1;
 
 -- index: idx_pets_unannounced_deaths
 CREATE INDEX idx_pets_unannounced_deaths ON pets(guild_id, died_at) WHERE died_at IS NOT NULL AND death_announced_at IS NULL;
 
 -- index: idx_pets_unannounced_hatches
-CREATE INDEX idx_pets_unannounced_hatches ON pets(guild_id, hatched_at) WHERE died_at IS NULL AND hatch_announced_at IS NULL;
+CREATE INDEX idx_pets_unannounced_hatches ON pets(guild_id, hatched_at) WHERE died_at IS NULL AND is_active = 1 AND hatch_announced_at IS NULL;
 
 -- index: idx_player_pairings_guild
 CREATE INDEX idx_player_pairings_guild ON player_pairings(guild_id);

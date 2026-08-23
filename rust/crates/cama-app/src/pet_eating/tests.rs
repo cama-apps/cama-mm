@@ -107,6 +107,7 @@ impl PetEatingRepositoryPort for FakeRepository {
         pet.death_cause = Some("eaten".to_owned());
         Ok(EatAdultPetCommit {
             pet,
+            activated_pet: None,
             new_balance: 1_000 + request.reward,
             penalty_games_remaining: request.penalty_games,
         })
@@ -352,6 +353,7 @@ impl PetEatingReminderPort for FakeReminders {
 fn command_outcome(pet: Pet, reward: i64, penalty_games: i64) -> PetEatingOutcome {
     PetEatingOutcome {
         pet,
+        activated_pet: None,
         reward,
         penalty_games_added: penalty_games,
         penalty_games_remaining: penalty_games,

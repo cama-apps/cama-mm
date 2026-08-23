@@ -48,6 +48,9 @@ pub const DIG_WORK_PER_DIG_CAP_BLOCKS: i64 = 12;
 
 pub const SPECIES_WEIGHT_TOTAL: i64 = 10_000;
 pub const GILDED_EGG_PREMIUM: i64 = 230;
+pub const MAX_LIVING_PETS: i64 = 5;
+pub const PET_SWITCH_COST: i64 = 25;
+pub const PET_SWITCH_COOLDOWN_SECONDS: i64 = 24 * 3_600;
 pub const PITY_THRESHOLD: i64 = 3;
 pub const TRINKET_COST: i64 = 25;
 pub const TRINKET_DUPE_REFUND: i64 = 10;
@@ -777,6 +780,8 @@ pub struct Pet {
     pub evolution_primary: Option<String>,
     pub evolution_secondary: Option<String>,
     pub evolution_announced_at: Option<i64>,
+    pub is_active: bool,
+    pub stabled_at: Option<i64>,
 }
 
 impl Pet {
@@ -825,6 +830,8 @@ impl Pet {
             evolution_primary: None,
             evolution_secondary: None,
             evolution_announced_at: None,
+            is_active: true,
+            stabled_at: None,
         }
     }
 
@@ -873,6 +880,8 @@ impl Pet {
         pet.evolution_primary = nullable_text_or_missing(row, "evolution_primary")?;
         pet.evolution_secondary = nullable_text_or_missing(row, "evolution_secondary")?;
         pet.evolution_announced_at = nullable_integer_or_missing(row, "evolution_announced_at")?;
+        pet.is_active = default_integer(row, "is_active", 1)? != 0;
+        pet.stabled_at = nullable_integer_or_missing(row, "stabled_at")?;
         Ok(pet)
     }
 
@@ -1279,6 +1288,7 @@ pub struct TrinketOutcome {
 pub struct DeathNotice {
     pub pet: Pet,
     pub eating_outcome: Option<BTreeMap<String, i64>>,
+    pub activated_pet: Option<Pet>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
