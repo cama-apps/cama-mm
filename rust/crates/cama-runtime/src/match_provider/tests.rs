@@ -658,39 +658,6 @@ impl MatchRuntimeFixture {
         transaction.commit().expect("commit fixture ratings");
     }
 
-    fn set_record(&self, player_ids: &[i64], wins: i64, losses: i64) {
-        let mut connection = Connection::open(self.database.path()).expect("open games fixture");
-        let transaction = connection.transaction().expect("start games fixture");
-        for player_id in player_ids {
-            transaction
-                .execute(
-                    "UPDATE players SET wins=?1, losses=?2 WHERE guild_id=?3 AND discord_id=?4",
-                    params![wins, losses, GUILD, player_id],
-                )
-                .expect("update fixture games");
-        }
-        transaction.commit().expect("commit fixture games");
-    }
-
-    fn set_exclusion_count(&self, player_ids: &[i64], exclusion_count: i64) {
-        let mut connection =
-            Connection::open(self.database.path()).expect("open exclusion-count fixture");
-        let transaction = connection
-            .transaction()
-            .expect("start exclusion-count fixture");
-        for player_id in player_ids {
-            transaction
-                .execute(
-                    "UPDATE players SET exclusion_count=?1 WHERE guild_id=?2 AND discord_id=?3",
-                    params![exclusion_count, GUILD, player_id],
-                )
-                .expect("update fixture exclusion count");
-        }
-        transaction
-            .commit()
-            .expect("commit fixture exclusion counts");
-    }
-
     fn prepare_shuffle(
         &self,
         player_ids: Vec<i64>,
@@ -706,7 +673,6 @@ impl MatchRuntimeFixture {
                 excluded_conditional_ids,
                 lobby_wait_minutes: HashMap::new(),
                 rating_system: rating_system.to_owned(),
-                automatic_rating_system: false,
                 shuffle_mode: "balanced".to_owned(),
                 shuffle_timestamp: unix_seconds(),
                 is_bomb_pot: false,
@@ -3910,68 +3876,32 @@ fn test_explicit_openskill_used_when_all_players_have_os_mu() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_automatic_openskill_requires_ten_games_from_every_lobby_player() {
-    for (last_player_losses, expected_rating_system) in [(1, "openskill"), (0, "glicko")] {
-        let mut config = production_test_config();
-        config.values.openskill_shuffle_chance = 1.0;
-        let fixture = MatchRuntimeFixture::new_with_config_and_discord(
-            config,
-            Arc::new(PublicationDiscord::default()),
-        );
-        let player_ids = fixture.add_shuffle_pool(11, true);
-        fixture.set_record(&player_ids, 9, 1);
-        fixture.set_record(&player_ids[10..], 9, last_player_losses);
-        fixture.set_exclusion_count(&player_ids, 5);
-        fixture.set_exclusion_count(&player_ids[10..], 0);
-        fixture.populate_lobby(&player_ids, LobbyKind::Open).await;
-
-        fixture
-            .provider
-            .handler
-            .handle_shuffle(
-                shuffle_command_context(player_ids[0], LobbyKind::Open),
-                Arc::new(RecordingMatchResponder::default()),
-            )
-            .await
-            .expect("automatic rating shuffle succeeds");
-
-        let pending = PendingMatchRepository::new(fixture.database.path())
-            .single_pending_match(GUILD)
-            .expect("read automatic rating shuffle")
-            .expect("automatic rating shuffle persists");
-        assert_eq!(
-            pending.state.balancing_rating_system, expected_rating_system,
-            "last candidate had 9 wins and {last_player_losses} losses"
-        );
-        assert_eq!(pending.state.excluded_player_ids, [player_ids[10]]);
-        abort_betting_tasks(&fixture, pending.pending_match_id);
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_explicit_openskill_ignores_automatic_calibration_gate() {
-    let fixture = MatchRuntimeFixture::new();
+async fn test_automatic_openskill_uses_available_ratings_without_game_gate() {
+    let mut config = production_test_config();
+    config.values.openskill_shuffle_chance = 1.0;
+    let fixture = MatchRuntimeFixture::new_with_config_and_discord(
+        config,
+        Arc::new(PublicationDiscord::default()),
+    );
     let player_ids = fixture.add_shuffle_pool(10, true);
-    fixture.set_record(&player_ids, 9, 0);
     fixture.populate_lobby(&player_ids, LobbyKind::Open).await;
-    let mut context = shuffle_command_context(player_ids[0], LobbyKind::Open);
-    context.options.push(InteractionOption {
-        name: "rating_system".to_owned(),
-        value: InteractionValue::String("openskill".to_owned()),
-    });
 
     fixture
         .provider
         .handler
-        .handle_shuffle(context, Arc::new(RecordingMatchResponder::default()))
+        .handle_shuffle(
+            shuffle_command_context(player_ids[0], LobbyKind::Open),
+            Arc::new(RecordingMatchResponder::default()),
+        )
         .await
-        .expect("explicit OpenSkill shuffle succeeds");
+        .expect("automatic OpenSkill shuffle succeeds");
 
     let pending = PendingMatchRepository::new(fixture.database.path())
         .single_pending_match(GUILD)
-        .expect("read explicit OpenSkill shuffle")
-        .expect("explicit OpenSkill shuffle persists");
+        .expect("read automatic OpenSkill shuffle")
+        .expect("automatic OpenSkill shuffle persists");
     assert_eq!(pending.state.balancing_rating_system, "openskill");
+    assert!(pending.state.is_openskill_shuffle);
     abort_betting_tasks(&fixture, pending.pending_match_id);
 }
 
@@ -6100,6 +6030,37 @@ async fn shuffle_embed_labels_adjusted_value_difference() {
 
     assert!(balance.value.contains("**Adjusted value diff:**"));
     assert!(!balance.value.contains("\n**Value diff:**"));
+}
+
+#[tokio::test]
+async fn shuffle_embed_footer_labels_rating_win_chances() {
+    let fixture = MatchRuntimeFixture::new();
+    let player_ids = fixture.add_shuffle_pool(10, true);
+    let mut prepared = fixture.prepare_shuffle(player_ids, "openskill", Vec::new());
+    prepared.pending.state.extra.insert(
+        "glicko_radiant_win_prob".to_owned(),
+        serde_json::json!(0.612),
+    );
+    prepared.pending.state.extra.insert(
+        "openskill_radiant_win_prob".to_owned(),
+        serde_json::json!(0.488),
+    );
+
+    let embed = fixture
+        .provider
+        .handler
+        .render_shuffle_embed(&prepared.pending)
+        .await
+        .expect("render shuffle embed");
+    let footer = embed.footer.as_deref().expect("shuffle footer");
+
+    assert_eq!(
+        footer,
+        format!(
+            "Match #{} | Radiant win chance: Glicko 61.2% | OpenSkill 48.8%",
+            prepared.pending.pending_match_id
+        )
+    );
 }
 
 #[tokio::test]
