@@ -136,6 +136,7 @@ const SHUFFLE_RATE_LIMIT: usize = 2;
 const RECORD_RATE_LIMIT: usize = 3;
 const RATE_LIMIT_WINDOW: u64 = 30;
 const SHUFFLE_LOCK_TIMEOUT: Duration = Duration::from_millis(500);
+const AUTOMATIC_OPENSKILL_MIN_GAMES: i64 = 10;
 const DISCORD_BLUE: u32 = 0x34_98_db;
 const DISCORD_ORANGE: u32 = 0xe6_7e_22;
 const PENDING_MATCH_EASTER_STREAKS_KEY: &str = "_rust_match_easter_streaks";
@@ -1424,6 +1425,7 @@ struct PrepareShuffleRequest {
     excluded_conditional_ids: Vec<i64>,
     lobby_wait_minutes: HashMap<i64, i64>,
     rating_system: String,
+    automatic_rating_system: bool,
     shuffle_mode: String,
     shuffle_timestamp: i64,
     is_bomb_pot: bool,
@@ -1746,14 +1748,15 @@ impl MatchHandler {
             .await;
         }
 
-        let requested_rating_system = string_option(&context.options, "rating_system")
-            .unwrap_or_else(|| {
-                if fastrand::f64() < self.config.openskill_shuffle_chance {
-                    "openskill".to_owned()
-                } else {
-                    "glicko".to_owned()
-                }
-            });
+        let requested_rating_system = string_option(&context.options, "rating_system");
+        let automatic_rating_system = requested_rating_system.is_none();
+        let requested_rating_system = requested_rating_system.unwrap_or_else(|| {
+            if fastrand::f64() < self.config.openskill_shuffle_chance {
+                "openskill".to_owned()
+            } else {
+                "glicko".to_owned()
+            }
+        });
         let shuffle_timestamp = unix_seconds();
         let lobby_wait_minutes = lobby_wait_minutes(&snapshot, &player_ids, shuffle_timestamp);
         let request = PrepareShuffleRequest {
@@ -1763,6 +1766,7 @@ impl MatchHandler {
             excluded_conditional_ids,
             lobby_wait_minutes,
             rating_system: requested_rating_system,
+            automatic_rating_system,
             shuffle_mode: string_option(&context.options, "mode")
                 .unwrap_or_else(|| "balanced".to_owned()),
             shuffle_timestamp,
@@ -3769,7 +3773,14 @@ impl MatchHandler {
         }
 
         let mut rating_system = request.rating_system.clone();
-        if rating_system == "openskill" && players.iter().any(|player| player.os_mu.is_none()) {
+        let automatic_openskill_is_uncalibrated = request.automatic_rating_system
+            && players.iter().any(|player| {
+                player.wins.saturating_add(player.losses) < AUTOMATIC_OPENSKILL_MIN_GAMES
+            });
+        if rating_system == "openskill"
+            && (players.iter().any(|player| player.os_mu.is_none())
+                || automatic_openskill_is_uncalibrated)
+        {
             rating_system = "glicko".to_owned();
         }
         let use_openskill = rating_system == "openskill";

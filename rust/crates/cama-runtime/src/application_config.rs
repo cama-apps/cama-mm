@@ -507,7 +507,7 @@ impl ApplicationConfig {
                 off_role_multiplier: p.f64("OFF_ROLE_MULTIPLIER", 0.95),
                 openskill_calibration_sigma_threshold: migration.openskill.calibration_threshold,
                 openskill_performance_strength: migration.openskill.performance_strength,
-                openskill_shuffle_chance: p.f64("OPENSKILL_SHUFFLE_CHANCE", 0.02),
+                openskill_shuffle_chance: p.f64("OPENSKILL_SHUFFLE_CHANCE", 0.05),
                 openskill_sigma_decay_grace_period_days: migration
                     .openskill
                     .sigma_decay_grace_period_days,
@@ -845,7 +845,7 @@ mod tests {
         assert_eq!(config.values.initial_glicko_rd, 250.0);
         assert_eq!(config.values.recalibration_initial_rd, 250.0);
         assert_eq!(config.values.bet_lock_seconds, 1_200);
-        assert_eq!(config.values.openskill_shuffle_chance, 0.02);
+        assert_eq!(config.values.openskill_shuffle_chance, 0.05);
         assert_eq!(config.values.auto_spectator_bet_count, 10);
         assert_eq!(config.values.auto_spectator_bet_top_count, 5);
         assert_eq!(config.values.auto_spectator_bet_percentage, 0.01);
