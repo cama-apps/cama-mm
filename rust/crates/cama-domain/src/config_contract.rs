@@ -10,7 +10,7 @@ use std::{borrow::Cow, collections::HashMap};
 /// Default time between match creation and the Dota betting lock, in seconds.
 pub const DEFAULT_BET_LOCK_SECONDS: i64 = 20 * 60;
 /// Default probability of choosing the OpenSkill shuffler for a shuffle.
-pub const DEFAULT_OPENSKILL_SHUFFLE_CHANCE: f64 = 0.02;
+pub const DEFAULT_OPENSKILL_SHUFFLE_CHANCE: f64 = 0.05;
 /// Default total number of automatic spectator bets.
 pub const DEFAULT_AUTO_SPECTATOR_BET_COUNT: i64 = 10;
 /// Default number of richest spectators placed in the higher-percentage tier.
@@ -186,10 +186,10 @@ mod tests {
     }
 
     #[test]
-    fn test_openskill_shuffle_chance_defaults_to_two_percent() {
+    fn test_openskill_shuffle_chance_defaults_to_five_percent() {
         let config = ConfigContract::default();
 
-        assert_eq!(config.openskill_shuffle_chance, 0.02);
+        assert_eq!(config.openskill_shuffle_chance, 0.05);
     }
 
     #[test]
