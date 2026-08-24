@@ -20,7 +20,7 @@ pub const RECOVERY_EDIT_CONCURRENCY: usize = 5;
 pub const CONFIGURED_RESCUE_RETRY_SECONDS: i64 = 600;
 pub const CONFIGURED_RESCUE_CACHE_SECONDS: i64 = 300;
 pub const RESPONSE_SECONDS: i64 = 7 * 86_400;
-pub const CHALLENGER_COOLDOWN_SECONDS: i64 = 30 * 86_400;
+pub const CHALLENGER_COOLDOWN_SECONDS: i64 = 15 * 86_400;
 pub const RECIPIENT_COOLDOWN_SECONDS: i64 = 7 * 86_400;
 pub const REMINDER_RETRY_BACKOFF_SECONDS: i64 = 600;
 
@@ -5134,7 +5134,7 @@ mod tests {
                 2,
                 500,
                 SERVICE_NOW,
-                CHALLENGER_COOLDOWN_SECONDS,
+                15 * SERVICE_DAY,
                 RECIPIENT_COOLDOWN_SECONDS,
                 RESPONSE_SECONDS,
                 1,
