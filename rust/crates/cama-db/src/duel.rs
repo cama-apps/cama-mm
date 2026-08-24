@@ -345,7 +345,7 @@ impl DuelChallengeRepository {
             .optional()?;
         if challenger_history.is_some() {
             return Err(DuelRepositoryError::Invalid(
-                "Your monthly duel challenge cooldown has not elapsed.",
+                "Your duel challenge cooldown has not elapsed.",
             ));
         }
         let recipient_history = transaction
@@ -1549,7 +1549,7 @@ mod tests {
                 recipient_id,
                 500_i64,
                 now,
-                30 * DAY,
+                15 * DAY,
                 7 * DAY,
                 7 * DAY,
                 challenger_id,
@@ -2045,15 +2045,15 @@ mod tests {
                 1,
                 2,
                 500_i64,
-                NOW + 30 * DAY - 1,
-                30 * DAY,
+                NOW + 15 * DAY - 1,
+                15 * DAY,
                 7 * DAY,
                 7 * DAY,
                 1,
             ),
-            "cooldown",
+            "Your duel challenge cooldown has not elapsed.",
         );
-        let second = create_challenge(&repository, 1, 2, Some(GUILD_ID), NOW + 30 * DAY);
+        let second = create_challenge(&repository, 1, 2, Some(GUILD_ID), NOW + 15 * DAY);
         assert_eq!(second.status, DuelStatus::Pending);
     }
 
