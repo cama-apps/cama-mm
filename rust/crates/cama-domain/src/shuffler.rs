@@ -17,7 +17,9 @@ use crate::player::{OPENSKILL_DISPLAY_SCALE, Player};
 use crate::team::{
     ROLES, Team, TeamError, calculate_off_role_value, compute_optimal_role_assignments,
 };
-use crate::team_balancing::{role_matchup_delta_from_values, role_parity_delta_from_values};
+use crate::team_balancing::{
+    ADJUSTED_VALUE_DIFF_WEIGHT, role_matchup_delta_from_values, role_parity_delta_from_values,
+};
 
 /// Low-priority shoppers contribute half-strength penalties as actors.
 pub const LOW_PRIORITY_EFFECTIVENESS: f64 = 0.5;
@@ -399,7 +401,7 @@ impl Default for BalancedShuffler {
             use_jopacoin: false,
             off_role_multiplier: 0.95,
             off_role_flat_value_penalty: 100.0,
-            off_role_flat_penalty: 610.0,
+            off_role_flat_penalty: 670.0,
             role_matchup_delta_weight: 0.18,
             exclusion_penalty_weight: 80.0,
             rd_priority_weight: 0.2,
@@ -454,6 +456,12 @@ struct ScoredTeams {
     score: f64,
     team1_metrics: RoleAssignmentMetrics,
     team2_metrics: RoleAssignmentMetrics,
+}
+
+#[derive(Clone, Copy)]
+struct RoleScorePolicy {
+    rd_priority: Option<f64>,
+    value_diff_weight: f64,
 }
 
 struct PoolSelection<'a> {
@@ -907,6 +915,7 @@ impl BalancedShuffler {
         team1_metrics: &[RoleAssignmentMetrics],
         team2_metrics: &[RoleAssignmentMetrics],
         rd_priority: f64,
+        value_diff_weight: f64,
     ) -> (Option<RoleAssignment>, Option<RoleAssignment>, f64) {
         self.diagnostics
             .unconstrained_score_calls
@@ -923,7 +932,7 @@ impl BalancedShuffler {
                     role_matchup_delta_from_values(&metric1.role_values, &metric2.role_values);
                 let parity =
                     role_parity_delta_from_values(&metric1.role_values, &metric2.role_values);
-                let score = value_diff
+                let score = value_diff * value_diff_weight
                     + off_role_penalty
                     + (matchup + parity) * self.role_matchup_delta_weight
                     - rd_priority;
@@ -944,9 +953,9 @@ impl BalancedShuffler {
         max_assignments: usize,
         constraints: ShuffleConstraints<'_>,
         context: &mut ScoringContext,
-        rd_priority: Option<f64>,
+        policy: RoleScorePolicy,
     ) -> (Option<RoleAssignment>, Option<RoleAssignment>, f64) {
-        let rd_priority = rd_priority.unwrap_or_else(|| {
+        let rd_priority = policy.rd_priority.unwrap_or_else(|| {
             let mut selected = team1_players.to_vec();
             selected.extend_from_slice(team2_players);
             self.calculate_rd_priority(&selected)
@@ -964,8 +973,12 @@ impl BalancedShuffler {
             constraints.low_priority_ids,
         );
         if !constrained {
-            let (roles1, roles2, score) =
-                self.score_unconstrained_metrics(&team1_metrics, &team2_metrics, rd_priority);
+            let (roles1, roles2, score) = self.score_unconstrained_metrics(
+                &team1_metrics,
+                &team2_metrics,
+                rd_priority,
+                policy.value_diff_weight,
+            );
             return (roles1, roles2, score + low_priority_team_adjustment);
         }
 
@@ -1001,7 +1014,7 @@ impl BalancedShuffler {
                     role_matchup_delta_from_values(&metric1.role_values, &metric2.role_values);
                 let parity =
                     role_parity_delta_from_values(&metric1.role_values, &metric2.role_values);
-                let score = value_diff
+                let score = value_diff * policy.value_diff_weight
                     + off_role_penalty
                     + (matchup + parity) * self.role_matchup_delta_weight
                     - rd_priority
@@ -1037,7 +1050,10 @@ impl BalancedShuffler {
             max_assignments,
             constraints,
             &mut ScoringContext::default(),
-            None,
+            RoleScorePolicy {
+                rd_priority: None,
+                value_diff_weight: ADJUSTED_VALUE_DIFF_WEIGHT,
+            },
         ))
     }
 
@@ -1056,7 +1072,10 @@ impl BalancedShuffler {
             max_assignments,
             constraints,
             context,
-            rd_priority,
+            RoleScorePolicy {
+                rd_priority,
+                value_diff_weight: ADJUSTED_VALUE_DIFF_WEIGHT,
+            },
         );
         let mut team1 = Team::new(
             team1_players
@@ -1457,7 +1476,11 @@ impl BalancedShuffler {
                 3,
                 ShuffleConstraints::default(),
                 context,
-                Some(rd_priority),
+                RoleScorePolicy {
+                    rd_priority: Some(rd_priority),
+                    // Draft keeps its historical unweighted value-difference score.
+                    value_diff_weight: 1.0,
+                },
             );
             if score < best_score {
                 best_score = score;
@@ -1905,7 +1928,7 @@ impl BalancedShuffler {
             combo_penalty,
             rd_priority,
             preselection_score: combo_penalty + recent_penalty - rd_priority
-                + split_value_diff
+                + split_value_diff * ADJUSTED_VALUE_DIFF_WEIGHT
                 + low_priority_team_lower_bound,
         }
     }
@@ -2162,7 +2185,9 @@ impl BalancedShuffler {
                         let min_off_role_penalty =
                             (summary1.min_off_role_count + summary2.min_off_role_count) as f64
                                 * self.off_role_flat_penalty;
-                        let split_lower_bound = min_value_diff + min_off_role_penalty - rd_priority
+                        let split_lower_bound = min_value_diff * ADJUSTED_VALUE_DIFF_WEIGHT
+                            + min_off_role_penalty
+                            - rd_priority
                             + recent_penalty
                             + combo_penalty
                             + low_priority_team_adjustment;
@@ -2177,6 +2202,7 @@ impl BalancedShuffler {
                         &summary1.metrics,
                         &summary2.metrics,
                         rd_priority,
+                        ADJUSTED_VALUE_DIFF_WEIGHT,
                     );
                     (roles1, roles2, base_score + low_priority_team_adjustment)
                 } else {
@@ -2186,7 +2212,10 @@ impl BalancedShuffler {
                         3,
                         options.constraints,
                         &mut context,
-                        Some(rd_priority),
+                        RoleScorePolicy {
+                            rd_priority: Some(rd_priority),
+                            value_diff_weight: ADJUSTED_VALUE_DIFF_WEIGHT,
+                        },
                     )
                 };
                 self.diagnostics
@@ -2697,7 +2726,7 @@ mod tests {
     }
 
     #[test]
-    fn test_default_off_role_goodness_adds_610_per_player() {
+    fn test_default_off_role_goodness_adds_670_per_player() {
         let team1_players = (0..5)
             .map(|index| {
                 player(
@@ -2730,10 +2759,14 @@ mod tests {
             &assignment,
             &[1_000.0; 5],
         );
-        let (_, _, score) =
-            shuffler.score_unconstrained_metrics(&[team1_metrics], &[team2_metrics], 0.0);
+        let (_, _, score) = shuffler.score_unconstrained_metrics(
+            &[team1_metrics],
+            &[team2_metrics],
+            0.0,
+            super::ADJUSTED_VALUE_DIFF_WEIGHT,
+        );
 
-        assert_eq!(score, 1_220.0);
+        assert_eq!(score, 1_340.0);
     }
 
     #[test]
@@ -3377,6 +3410,116 @@ mod tests {
     }
 
     #[test]
+    fn goodness_weights_adjusted_team_value_difference() {
+        let team1 = vec![
+            player("RadiantCarry", 1_100, &["1"]),
+            player("RadiantMid", 1_000, &["2"]),
+            player("RadiantOfflane", 1_000, &["3"]),
+            player("RadiantSoft", 1_000, &["4"]),
+            player("RadiantHard", 1_000, &["5"]),
+        ];
+        let team2 = vec![
+            player("DireCarry", 1_000, &["1"]),
+            player("DireMid", 1_000, &["2"]),
+            player("DireOfflane", 1_000, &["3"]),
+            player("DireSoft", 1_000, &["4"]),
+            player("DireHard", 1_000, &["5"]),
+        ];
+        let shuffler = BalancedShuffler {
+            use_glicko: false,
+            off_role_multiplier: 1.0,
+            off_role_flat_value_penalty: 0.0,
+            off_role_flat_penalty: 0.0,
+            role_matchup_delta_weight: 0.0,
+            rd_priority_weight: 0.0,
+            ..BalancedShuffler::default()
+        };
+
+        let (_, _, score) = shuffler
+            .score_role_assignments_for_matchup(&team1, &team2, 1, ShuffleConstraints::default())
+            .expect("fixed matchup scores");
+
+        approx(score, 110.0);
+    }
+
+    #[test]
+    fn adjusted_value_weight_changes_borderline_pool_selection() {
+        let ratings = [
+            1_832, 1_604, 1_380, 392, 2_072, 1_847, 432, 1_273, 865, 1_006, 678,
+        ];
+        let exclusion_factors = [6, 4, 1, 3, 0, 0, 6, 5, 1, 2, 1];
+        let players = ratings
+            .into_iter()
+            .enumerate()
+            .map(|(index, rating)| {
+                full_flex_player(
+                    format!("Player{index}"),
+                    rating,
+                    1_000 + i64::try_from(index).expect("small fixture index"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let exclusion_counts = players
+            .iter()
+            .zip(exclusion_factors)
+            .map(|(player, factor)| (player.name.clone(), factor))
+            .collect::<HashMap<_, _>>();
+        let shuffler = BalancedShuffler {
+            use_glicko: false,
+            off_role_multiplier: 1.0,
+            off_role_flat_value_penalty: 0.0,
+            off_role_flat_penalty: 0.0,
+            role_matchup_delta_weight: 0.0,
+            rd_priority_weight: 0.0,
+            rating_spread_divisor: f64::INFINITY,
+            ..BalancedShuffler::default()
+        };
+
+        let result = shuffler
+            .shuffle_from_pool(
+                &players,
+                PoolOptions {
+                    exclusion_counts: Some(&exclusion_counts),
+                    ..PoolOptions::default()
+                },
+            )
+            .expect("borderline pool shuffles");
+
+        assert_eq!(
+            result
+                .excluded
+                .iter()
+                .map(|player| player.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Player4"]
+        );
+    }
+
+    #[test]
+    fn large_pool_preselection_weights_adjusted_value_difference() {
+        let mut players = (0..15)
+            .map(|index| full_flex_player(format!("Player{index}"), 1_000, index + 1))
+            .collect::<Vec<_>>();
+        players[0].mmr = Some(1_100);
+        let refs = players.iter().collect::<Vec<_>>();
+        let shuffler = BalancedShuffler {
+            use_glicko: false,
+            rd_priority_weight: 0.0,
+            rating_spread_divisor: f64::INFINITY,
+            ..BalancedShuffler::default()
+        };
+
+        let selection = shuffler.build_pool_selection(
+            &refs,
+            (0..10).collect(),
+            PoolOptions::default(),
+            &mut super::ScoringContext::default(),
+        );
+
+        approx(selection.preselection_score, -395.0);
+    }
+
+    #[test]
     fn test_goodness_score_respects_role_matchup_weight() {
         let team1 = vec![
             player("RadiantCarry", 2_000, &["1"]),
@@ -3420,7 +3563,7 @@ mod tests {
                 ShuffleConstraints::default(),
             )
             .expect("fixed role matchup evaluates");
-        approx(matchup.total_score, 75.0);
+        approx(matchup.total_score, 105.0);
     }
 
     #[test]
@@ -4890,7 +5033,7 @@ mod tests {
     }
 
     #[test]
-    fn test_default_610_off_role_goodness_prefers_lower_off_role_roster() {
+    fn test_default_670_off_role_goodness_prefers_lower_off_role_roster() {
         let configured_shuffler = |off_role_flat_penalty| {
             let mut shuffler = BalancedShuffler {
                 use_glicko: false,
@@ -4953,7 +5096,7 @@ mod tests {
         assert_eq!(
             off_roles(&actual),
             0,
-            "the 610-point default should prefer the lower-off-role roster"
+            "the 670-point default should prefer the lower-off-role roster"
         );
     }
 
@@ -5369,8 +5512,8 @@ mod tests {
             .expect("optimization succeeds")
             .2
         };
-        approx(score(1.0), 2_300.0);
-        approx(score(0.5), 1_300.0);
+        approx(score(1.0), 2_330.0);
+        approx(score(0.5), 1_330.0);
     }
 
     #[test]
@@ -5409,7 +5552,7 @@ mod tests {
         )
         .expect("matchup evaluates");
         approx(matchup.log_entry.parity_penalty, 1_200.0);
-        approx(matchup.total_score, 1_300.0);
+        approx(matchup.total_score, 1_310.0);
     }
 
     #[test]
@@ -5519,7 +5662,7 @@ mod tests {
                 },
             )
             .expect("fallback scoring succeeds");
-        approx(common.2, 1_550.0);
+        approx(common.2, 1_590.0);
         assert_eq!(common, fallback);
     }
 
@@ -6331,6 +6474,26 @@ mod tests {
             .score_draft_pool(&captain_a, &captain_b, &pool)
             .expect("draft pool score");
         assert!(score.is_finite());
+    }
+
+    #[test]
+    fn test_draft_score_keeps_unweighted_value_difference() {
+        let (captain_a, captain_b) = draft_captains(1_100.0, 1_000.0);
+        let pool = draft_candidates(8, 1_000.0, 0.0);
+        let shuffler = BalancedShuffler {
+            off_role_multiplier: 1.0,
+            off_role_flat_value_penalty: 0.0,
+            off_role_flat_penalty: 0.0,
+            role_matchup_delta_weight: 0.0,
+            rd_priority_weight: 0.0,
+            ..BalancedShuffler::default()
+        };
+
+        let score = shuffler
+            .score_draft_pool(&captain_a, &captain_b, &pool)
+            .expect("draft pool score");
+
+        approx(score, 95.0);
     }
 
     #[test]

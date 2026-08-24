@@ -4055,6 +4055,26 @@ fn soft_avoid_decrements_once_only_after_recording_opposite_teams() {
 }
 
 #[test]
+fn production_goodness_weights_adjusted_value_difference() {
+    let mut config = production_test_config();
+    config.values.role_matchup_delta_weight = 0.0;
+    config.values.rating_spread_divisor = f64::INFINITY;
+    config.values.rd_priority_weight = 0.0;
+    let fixture = MatchRuntimeFixture::new_with_config_and_discord(
+        config,
+        Arc::new(PublicationDiscord::default()),
+    );
+    let player_ids = fixture.add_shuffle_pool(10, false);
+    fixture.set_glicko_rating(&[player_ids[0]], 1_600.0);
+
+    let prepared = fixture.prepare_shuffle(player_ids, "glicko", Vec::new());
+    let goodness =
+        extra_f64(&prepared.pending.state, "goodness_score").expect("stored goodness score");
+
+    assert!((goodness - (-650.5)).abs() < 1e-9, "{goodness}");
+}
+
+#[test]
 fn production_goodness_score_includes_configured_soft_avoid_penalty() {
     let fixture = MatchRuntimeFixture::new();
     let radiant = [1_i64, 2, 3, 4, 5].into_iter().collect::<HashSet<_>>();
@@ -6058,6 +6078,28 @@ fn test_clean_shuffle_excluded_set_disjoint_from_teams() {
             .collect::<BTreeSet<_>>(),
         player_ids.into_iter().collect()
     );
+}
+
+#[tokio::test]
+async fn shuffle_embed_labels_adjusted_value_difference() {
+    let fixture = MatchRuntimeFixture::new();
+    let player_ids = fixture.add_shuffle_pool(10, false);
+    let prepared = fixture.prepare_shuffle(player_ids, "glicko", Vec::new());
+
+    let embed = fixture
+        .provider
+        .handler
+        .render_shuffle_embed(&prepared.pending)
+        .await
+        .expect("render shuffle embed");
+    let balance = embed
+        .fields
+        .iter()
+        .find(|field| field.name == "📊 Balance")
+        .expect("balance field");
+
+    assert!(balance.value.contains("**Adjusted value diff:**"));
+    assert!(!balance.value.contains("\n**Value diff:**"));
 }
 
 #[tokio::test]
