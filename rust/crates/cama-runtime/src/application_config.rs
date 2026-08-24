@@ -503,7 +503,7 @@ impl ApplicationConfig {
                 new_player_exclusion_boost: p.i64("NEW_PLAYER_EXCLUSION_BOOST", 5),
                 new_player_mmr_discount: i64::from(migration.new_player_mmr_discount),
                 off_role_flat_value_penalty: p.f64("OFF_ROLE_FLAT_VALUE_PENALTY", 100.0),
-                off_role_flat_penalty: p.f64("OFF_ROLE_FLAT_PENALTY", 610.0),
+                off_role_flat_penalty: p.f64("OFF_ROLE_FLAT_PENALTY", 670.0),
                 off_role_multiplier: p.f64("OFF_ROLE_MULTIPLIER", 0.95),
                 openskill_calibration_sigma_threshold: migration.openskill.calibration_threshold,
                 openskill_performance_strength: migration.openskill.performance_strength,
@@ -900,7 +900,7 @@ mod tests {
         let config = parse(&[("DISCORD_BOT_TOKEN", "token")]);
         assert_eq!(config.values.new_player_exclusion_boost, 5);
         assert_eq!(config.values.off_role_flat_value_penalty, 100.0);
-        assert_eq!(config.values.off_role_flat_penalty, 610.0);
+        assert_eq!(config.values.off_role_flat_penalty, 670.0);
         assert_eq!(config.values.soft_avoid_penalty, 160.0);
         assert_eq!(config.values.package_deal_penalty, 90.0);
         assert_eq!(config.values.package_deal_split_penalty, 90.0);

@@ -2,6 +2,9 @@
 
 use crate::team::{ROLES, Team, TeamError};
 
+/// Weight applied to the role-adjusted absolute difference between team values.
+pub const ADJUSTED_VALUE_DIFF_WEIGHT: f64 = 1.1;
+
 /// Sum the five critical lane matchups from role-ordered effective values.
 ///
 /// Values are ordered by position 1 through 5. Carry is compared against the
@@ -42,7 +45,7 @@ impl Default for TeamBalancingService {
             use_glicko: true,
             off_role_multiplier: 0.95,
             off_role_flat_value_penalty: 100.0,
-            off_role_flat_penalty: 610.0,
+            off_role_flat_penalty: 670.0,
             role_matchup_delta_weight: 0.18,
         }
     }
@@ -148,7 +151,7 @@ impl TeamBalancingService {
         let role_parity_delta =
             self.calculate_role_parity_delta(team1, team2, use_openskill, use_jopacoin)?;
 
-        Ok(value_difference
+        Ok(value_difference * ADJUSTED_VALUE_DIFF_WEIGHT
             + off_role_penalty
             + (role_matchup_delta + role_parity_delta) * self.role_matchup_delta_weight)
     }
@@ -261,7 +264,7 @@ mod tests {
             service
                 .calculate_matchup_score(&team1, &team2, false, false)
                 .expect("roles are assigned"),
-            2_700.0
+            2_740.0
         );
 
         let weighted_service =
@@ -276,7 +279,7 @@ mod tests {
             weighted_service
                 .calculate_matchup_score(&team1, &team2, false, false)
                 .expect("roles are assigned"),
-            1_550.0
+            1_590.0
         );
 
         let mut swapped_team1 = team1.clone();
@@ -293,7 +296,45 @@ mod tests {
     }
 
     #[test]
-    fn test_default_off_role_goodness_adds_610_per_player() {
+    fn default_matchup_score_weights_value_difference() {
+        let team1 = Team::new(
+            vec![
+                player("Carry1", 1_100, "1"),
+                player("Mid1", 1_000, "2"),
+                player("Offlane1", 1_000, "3"),
+                player("Soft1", 1_000, "4"),
+                player("Hard1", 1_000, "5"),
+            ],
+            Some(role_strings()),
+        )
+        .expect("five players form a team");
+        let team2 = Team::new(
+            vec![
+                player("Carry2", 1_000, "1"),
+                player("Mid2", 1_000, "2"),
+                player("Offlane2", 1_000, "3"),
+                player("Soft2", 1_000, "4"),
+                player("Hard2", 1_000, "5"),
+            ],
+            Some(role_strings()),
+        )
+        .expect("five players form a team");
+        let service = TeamBalancingService {
+            use_glicko: false,
+            off_role_multiplier: 1.0,
+            off_role_flat_value_penalty: 0.0,
+            off_role_flat_penalty: 0.0,
+            role_matchup_delta_weight: 0.0,
+        };
+
+        let score = service
+            .calculate_matchup_score(&team1, &team2, false, false)
+            .expect("roles are assigned");
+        assert!((score - 110.0).abs() < 1e-9, "{score}");
+    }
+
+    #[test]
+    fn test_default_off_role_goodness_adds_670_per_player() {
         let (team1, _) = fixture_teams();
         let mut team1_with_swapped_cores = team1.clone();
         team1_with_swapped_cores.role_assignments =
@@ -310,7 +351,7 @@ mod tests {
             service
                 .calculate_matchup_score(&team1_with_swapped_cores, &team1, false, false)
                 .expect("roles are assigned"),
-            1_220.0
+            1_340.0
         );
     }
 
@@ -343,7 +384,7 @@ mod tests {
             service
                 .calculate_matchup_score(&team1, &team2, false, true)
                 .expect("roles are assigned"),
-            100.0
+            105.0
         );
     }
 

@@ -98,7 +98,7 @@ use cama_domain::shuffler::{
     BalancedShuffler, PackageDeal, PoolOptions, ShuffleConstraints, SoftAvoid,
 };
 use cama_domain::team::Team;
-use cama_domain::team_balancing::TeamBalancingService;
+use cama_domain::team_balancing::{ADJUSTED_VALUE_DIFF_WEIGHT, TeamBalancingService};
 use chrono::{
     DateTime, Datelike, Duration as ChronoDuration, NaiveDate, NaiveDateTime, Timelike, Utc,
     Weekday,
@@ -4019,7 +4019,7 @@ impl MatchHandler {
             .iter()
             .map(|player| player.get_value(true, use_openskill, use_jopacoin))
             .collect::<Vec<_>>();
-        let goodness_score = value_diff
+        let goodness_score = value_diff * ADJUSTED_VALUE_DIFF_WEIGHT
             + off_role_penalty
             + weighted_parity_delta
             + excluded_penalty
@@ -4813,7 +4813,7 @@ impl MatchHandler {
             &players_by_id,
         );
         let mut balance_info = format!(
-            "**Shuffle mode:** {}\n**Balanced with:** {rating_display}\n**Goodness score:** {:.1} (lower = better)\n**Value diff:** {:.0}\n**Off-role players:** Radiant: {radiant_off}, Dire: {dire_off} (Total: {})",
+            "**Shuffle mode:** {}\n**Balanced with:** {rating_display}\n**Goodness score:** {:.1} (lower = better)\n**Adjusted value diff:** {:.0}\n**Off-role players:** Radiant: {radiant_off}, Dire: {dire_off} (Total: {})",
             if shuffle_mode == "region" {
                 "Region Split"
             } else {
