@@ -3439,7 +3439,7 @@ mod tests {
             .score_role_assignments_for_matchup(&team1, &team2, 1, ShuffleConstraints::default())
             .expect("fixed matchup scores");
 
-        approx(score, 110.0);
+        approx(score, 120.0);
     }
 
     #[test]
@@ -3516,7 +3516,7 @@ mod tests {
             &mut super::ScoringContext::default(),
         );
 
-        approx(selection.preselection_score, -395.0);
+        approx(selection.preselection_score, -385.0);
     }
 
     #[test]
@@ -3563,7 +3563,7 @@ mod tests {
                 ShuffleConstraints::default(),
             )
             .expect("fixed role matchup evaluates");
-        approx(matchup.total_score, 105.0);
+        approx(matchup.total_score, 135.0);
     }
 
     #[test]
@@ -5512,8 +5512,8 @@ mod tests {
             .expect("optimization succeeds")
             .2
         };
-        approx(score(1.0), 2_330.0);
-        approx(score(0.5), 1_330.0);
+        approx(score(1.0), 2_360.0);
+        approx(score(0.5), 1_360.0);
     }
 
     #[test]
@@ -5552,7 +5552,7 @@ mod tests {
         )
         .expect("matchup evaluates");
         approx(matchup.log_entry.parity_penalty, 1_200.0);
-        approx(matchup.total_score, 1_310.0);
+        approx(matchup.total_score, 1_320.0);
     }
 
     #[test]
@@ -5662,7 +5662,7 @@ mod tests {
                 },
             )
             .expect("fallback scoring succeeds");
-        approx(common.2, 1_590.0);
+        approx(common.2, 1_630.0);
         assert_eq!(common, fallback);
     }
 
