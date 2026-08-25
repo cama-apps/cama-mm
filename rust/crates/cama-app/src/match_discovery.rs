@@ -11,7 +11,10 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use cama_db::core_repositories::MatchRepository as CoreMatchRepository;
+use cama_db::core_repositories::{
+    MatchDiscoveryAttemptRecord as DbMatchDiscoveryAttemptRecord,
+    MatchRepository as CoreMatchRepository,
+};
 use cama_db::match_recording_repository::{
     EnrichmentParticipantUpdate as DbEnrichmentParticipantUpdate,
     MatchEnrichmentRequest as DbMatchEnrichmentRequest, MatchRecordingRepository,
@@ -20,8 +23,13 @@ use cama_db::match_recording_repository::{
 use cama_db::opendota_player::OpenDotaPlayerRepository;
 use chrono::{DateTime, NaiveDateTime};
 use rusqlite::types::Value as SqlValue;
+use serde::Serialize;
 
 use crate::dedicated_lobby_channel::{GuildId, UserId};
+
+/// Identity discovery is intentionally all-or-nothing: a Dota match must
+/// contain every player from the recorded 5v5 lobby.
+pub const REQUIRED_DISCOVERY_ROSTER_MATCHES: usize = 10;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct InternalMatchId(pub i64);
@@ -175,8 +183,14 @@ impl OpenDotaMatchDetails {
             raw_payload: None,
             players: account_ids
                 .into_iter()
-                .map(|account_id| OpenDotaPlayer {
+                .enumerate()
+                .map(|(index, account_id)| OpenDotaPlayer {
                     account_id: Some(account_id),
+                    player_slot: Some(if index < 5 {
+                        index as u16
+                    } else {
+                        128 + (index - 5) as u16
+                    }),
                     ..OpenDotaPlayer::default()
                 })
                 .collect(),
@@ -223,6 +237,34 @@ pub trait MatchDiscoveryReadPort: Send + Sync {
         match_ids: &[InternalMatchId],
         guild_id: GuildId,
     ) -> Result<BTreeMap<InternalMatchId, Vec<InternalParticipant>>, DiscoveryPortError>;
+
+    fn match_id_for_valve_match(
+        &self,
+        _valve_match_id: ValveMatchId,
+        _guild_id: GuildId,
+    ) -> Result<Option<InternalMatchId>, DiscoveryPortError> {
+        Ok(None)
+    }
+
+    fn record_discovery_attempt(
+        &self,
+        _record: &DiscoveryAttemptRecord,
+    ) -> Result<(), DiscoveryPortError> {
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiscoveryAttemptRecord {
+    pub guild_id: GuildId,
+    pub internal_match_id: InternalMatchId,
+    pub dry_run: bool,
+    pub status: DiscoveryStatus,
+    pub selected_valve_match_id: Option<ValveMatchId>,
+    pub players_with_steam_id: usize,
+    pub candidate_count: usize,
+    pub diagnostics_json: String,
+    pub attempted_at: i64,
 }
 
 pub trait PlayerSteamIdPort: Send + Sync {
@@ -306,6 +348,38 @@ impl MatchDiscoveryReadPort for CoreMatchRepository {
                     .collect()
             })
             .map_err(|error| DiscoveryPortError::new(error.to_string()))
+    }
+
+    fn match_id_for_valve_match(
+        &self,
+        valve_match_id: ValveMatchId,
+        guild_id: GuildId,
+    ) -> Result<Option<InternalMatchId>, DiscoveryPortError> {
+        CoreMatchRepository::match_id_for_valve_match(self, valve_match_id.0, Some(guild_id.0))
+            .map(|match_id| match_id.map(InternalMatchId))
+            .map_err(|error| DiscoveryPortError::new(error.to_string()))
+    }
+
+    fn record_discovery_attempt(
+        &self,
+        record: &DiscoveryAttemptRecord,
+    ) -> Result<(), DiscoveryPortError> {
+        CoreMatchRepository::record_match_discovery_attempt(
+            self,
+            &DbMatchDiscoveryAttemptRecord {
+                guild_id: record.guild_id.0,
+                internal_match_id: record.internal_match_id.0,
+                dry_run: record.dry_run,
+                status: record.status.as_str().to_owned(),
+                selected_valve_match_id: record.selected_valve_match_id.map(|id| id.0),
+                players_with_steam_id: record.players_with_steam_id,
+                candidate_count: record.candidate_count,
+                diagnostics_json: record.diagnostics_json.clone(),
+                attempted_at: record.attempted_at,
+            },
+        )
+        .map(|_| ())
+        .map_err(|error| DiscoveryPortError::new(error.to_string()))
     }
 }
 
@@ -473,7 +547,7 @@ impl Default for DiscoveryConfig {
     fn default() -> Self {
         Self {
             minimum_players_with_steam_id: 5,
-            minimum_roster_matches: 10,
+            minimum_roster_matches: REQUIRED_DISCOVERY_ROSTER_MATCHES,
             time_window_seconds: 3 * 60 * 60,
             history_limit: 100,
             batch_limit: 1_000,
@@ -492,8 +566,29 @@ pub enum DiscoveryStatus {
     NoTimestamp,
     NotFound,
     ValidationFailed,
+    UpstreamUnavailable,
+    Deferred,
     InProgress,
     Error,
+}
+
+impl DiscoveryStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Discovered => "discovered",
+            Self::LowConfidence => "low_confidence",
+            Self::NoSteamIds => "no_steam_ids",
+            Self::NoCandidates => "no_candidates",
+            Self::NoTimestamp => "no_timestamp",
+            Self::NotFound => "not_found",
+            Self::ValidationFailed => "validation_failed",
+            Self::UpstreamUnavailable => "upstream_unavailable",
+            Self::Deferred => "deferred",
+            Self::InProgress => "in_progress",
+            Self::Error => "error",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -530,6 +625,10 @@ pub struct BatchDiscoveryResult {
     pub skipped_low_confidence: usize,
     pub skipped_no_steam_ids: usize,
     pub skipped_validation_failed: usize,
+    pub skipped_no_candidates: usize,
+    pub skipped_no_timestamp: usize,
+    pub upstream_unavailable: usize,
+    pub deferred: usize,
     pub errors: usize,
     pub details: Vec<DiscoveryResult>,
 }
@@ -553,24 +652,13 @@ enum RunState {
 struct BatchCache {
     histories: BTreeMap<SteamId, Vec<PlayerHistoryMatch>>,
     history_attempts: BTreeMap<SteamId, usize>,
-    unavailable_histories: BTreeSet<SteamId>,
     details: BTreeMap<ValveMatchId, OpenDotaMatchDetails>,
-    unavailable_details: BTreeSet<ValveMatchId>,
     detail_order: VecDeque<ValveMatchId>,
-    cache_unavailable: bool,
 }
 
 impl BatchCache {
-    /// A batch may contain many backlog entries sharing the same players and
-    /// candidate matches. Do not retry an unavailable upstream resource for
-    /// every entry in that batch. This cache is intentionally constructed per
-    /// `discover_all_matches` invocation, so a later single-match invocation
-    /// can retry a transient failure.
     fn for_batch() -> Self {
-        Self {
-            cache_unavailable: true,
-            ..Self::default()
-        }
+        Self::default()
     }
 
     fn history<A: OpenDotaDiscoveryPort, C: DiscoveryClock>(
@@ -579,12 +667,9 @@ impl BatchCache {
         clock: &C,
         steam_id: SteamId,
         config: &DiscoveryConfig,
-    ) -> Option<Vec<PlayerHistoryMatch>> {
+    ) -> Result<Vec<PlayerHistoryMatch>, DiscoveryPortError> {
         if let Some(cached) = self.histories.get(&steam_id) {
-            return Some(cached.clone());
-        }
-        if self.cache_unavailable && self.unavailable_histories.contains(&steam_id) {
-            return None;
+            return Ok(cached.clone());
         }
         let attempts = self.history_attempts.entry(steam_id).or_default();
         if *attempts > 0 {
@@ -595,14 +680,13 @@ impl BatchCache {
             Ok(Some(history)) => {
                 // Successful emptiness is meaningful and must be cached.
                 self.histories.insert(steam_id, history.clone());
-                Some(history)
+                Ok(history)
             }
-            Ok(None) | Err(_) => {
-                if self.cache_unavailable {
-                    self.unavailable_histories.insert(steam_id);
-                }
-                None
-            }
+            Ok(None) => Err(DiscoveryPortError::new(format!(
+                "OpenDota player history unavailable for Steam ID {}",
+                steam_id.0
+            ))),
+            Err(error) => Err(error),
         }
     }
 
@@ -611,21 +695,19 @@ impl BatchCache {
         api: &A,
         match_id: ValveMatchId,
         config: &DiscoveryConfig,
-    ) -> Option<OpenDotaMatchDetails> {
+    ) -> Result<OpenDotaMatchDetails, DiscoveryPortError> {
         if let Some(cached) = self.details.get(&match_id) {
-            return Some(cached.clone());
+            return Ok(cached.clone());
         }
-        if self.cache_unavailable && self.unavailable_details.contains(&match_id) {
-            return None;
-        }
-        let details = match api.match_details(match_id).ok().flatten() {
-            Some(details) => details,
-            None => {
-                if self.cache_unavailable {
-                    self.unavailable_details.insert(match_id);
-                }
-                return None;
+        let details = match api.match_details(match_id) {
+            Ok(Some(details)) => details,
+            Ok(None) => {
+                return Err(DiscoveryPortError::new(format!(
+                    "OpenDota match details unavailable for Valve match {}",
+                    match_id.0
+                )));
             }
+            Err(error) => return Err(error),
         };
         if config.match_details_cache_size > 0 {
             while self.details.len() >= config.match_details_cache_size {
@@ -637,8 +719,31 @@ impl BatchCache {
             self.detail_order.push_back(match_id);
             self.details.insert(match_id, details.clone());
         }
-        Some(details)
+        Ok(details)
     }
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct CandidateDiagnostic {
+    valve_match_id: i64,
+    start_time: i64,
+    correlated_players: usize,
+    roster_matches: Option<usize>,
+    duration_seconds: Option<i64>,
+    completion_delta_seconds: Option<i64>,
+    outcome: String,
+    reason: Option<String>,
+    existing_internal_match_id: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+struct DiscoveryDiagnostics {
+    match_time: Option<i64>,
+    minimum_roster_matches: usize,
+    history_steam_ids_requested: Vec<i64>,
+    upstream_error: Option<String>,
+    candidates: Vec<CandidateDiagnostic>,
+    final_reason: Option<String>,
 }
 
 #[derive(Default)]
@@ -679,7 +784,8 @@ where
     }
 
     #[must_use]
-    pub fn with_config(mut self, config: DiscoveryConfig) -> Self {
+    pub fn with_config(mut self, mut config: DiscoveryConfig) -> Self {
+        config.minimum_roster_matches = REQUIRED_DISCOVERY_ROSTER_MATCHES;
         self.config = config;
         self
     }
@@ -858,13 +964,13 @@ where
         };
 
         let mut cache = BatchCache::for_batch();
-        for internal_match in matches {
+        for (match_index, internal_match) in matches.iter().enumerate() {
             let participants = participants_by_match
                 .get(&internal_match.match_id)
                 .map(Vec::as_slice)
                 .unwrap_or_default();
             let result = self.discover_loaded(
-                &internal_match,
+                internal_match,
                 participants,
                 &steam_ids,
                 guild_id,
@@ -876,13 +982,39 @@ where
                 DiscoveryStatus::LowConfidence => summary.skipped_low_confidence += 1,
                 DiscoveryStatus::NoSteamIds => summary.skipped_no_steam_ids += 1,
                 DiscoveryStatus::ValidationFailed => summary.skipped_validation_failed += 1,
+                DiscoveryStatus::NoCandidates => summary.skipped_no_candidates += 1,
+                DiscoveryStatus::NoTimestamp => summary.skipped_no_timestamp += 1,
+                DiscoveryStatus::UpstreamUnavailable => summary.upstream_unavailable += 1,
+                DiscoveryStatus::Deferred => summary.deferred += 1,
                 DiscoveryStatus::Error => summary.errors += 1,
-                DiscoveryStatus::NoCandidates
-                | DiscoveryStatus::NoTimestamp
-                | DiscoveryStatus::NotFound
-                | DiscoveryStatus::InProgress => {}
+                DiscoveryStatus::NotFound | DiscoveryStatus::InProgress => {}
             }
+            let upstream_unavailable = result.status == DiscoveryStatus::UpstreamUnavailable;
             summary.details.push(result);
+            if upstream_unavailable {
+                for deferred_match in &matches[match_index + 1..] {
+                    let deferred = self.finish_discovery(
+                        guild_id,
+                        dry_run,
+                        DiscoveryResult::status(
+                            deferred_match.match_id,
+                            DiscoveryStatus::Deferred,
+                        ),
+                        0,
+                        DiscoveryDiagnostics {
+                            minimum_roster_matches: self.config.minimum_roster_matches,
+                            final_reason: Some(
+                                "not attempted after an inconclusive OpenDota response; queued for the next run"
+                                    .to_owned(),
+                            ),
+                            ..DiscoveryDiagnostics::default()
+                        },
+                    );
+                    summary.deferred += 1;
+                    summary.details.push(deferred);
+                }
+                break;
+            }
         }
         summary
     }
@@ -897,6 +1029,12 @@ where
         dry_run: bool,
         cache: &mut BatchCache,
     ) -> DiscoveryResult {
+        const COMPLETION_CLOCK_SKEW_SECONDS: i64 = 5 * 60;
+
+        let mut diagnostics = DiscoveryDiagnostics {
+            minimum_roster_matches: self.config.minimum_roster_matches,
+            ..DiscoveryDiagnostics::default()
+        };
         let mut steam_ids = Vec::new();
         let mut steam_to_discord = BTreeMap::new();
         for participant in participants {
@@ -925,22 +1063,55 @@ where
             let mut result =
                 DiscoveryResult::status(internal_match.match_id, DiscoveryStatus::NoSteamIds);
             result.players_with_steam_id = players_with_steam_id;
-            return result;
+            diagnostics.final_reason = Some(format!(
+                "only {players_with_steam_id} players have linked Steam IDs; need at least {} to search",
+                self.config.minimum_players_with_steam_id
+            ));
+            return self.finish_discovery(guild_id, dry_run, result, 0, diagnostics);
         }
         let Some(match_time) = parse_match_time(&internal_match.match_date) else {
-            return DiscoveryResult::status(internal_match.match_id, DiscoveryStatus::NoTimestamp);
+            diagnostics.final_reason =
+                Some("internal match timestamp is missing or invalid".to_owned());
+            return self.finish_discovery(
+                guild_id,
+                dry_run,
+                DiscoveryResult::status(internal_match.match_id, DiscoveryStatus::NoTimestamp),
+                0,
+                diagnostics,
+            );
         };
+        diagnostics.match_time = Some(match_time);
 
         let mut candidates: BTreeMap<ValveMatchId, Candidate> = BTreeMap::new();
         let mut rejected_details = BTreeSet::new();
-        let mut unavailable_details = BTreeSet::new();
-        let mut selected: Option<(ValveMatchId, OpenDotaMatchDetails, usize)> = None;
+        let mut selected: Option<(ValveMatchId, OpenDotaMatchDetails, usize, (bool, u64))> = None;
         let mut best_detail: Option<(ValveMatchId, usize)> = None;
+        let mut best_validation_failure: Option<(ValveMatchId, usize, String)> = None;
 
         for steam_id in steam_ids {
-            let Some(history) = cache.history(&self.api, &self.clock, steam_id, &self.config)
-            else {
-                continue;
+            diagnostics.history_steam_ids_requested.push(steam_id.0);
+            let history = match cache.history(&self.api, &self.clock, steam_id, &self.config) {
+                Ok(history) => history,
+                Err(error) => {
+                    let message = error.to_string();
+                    diagnostics.upstream_error = Some(message.clone());
+                    diagnostics.final_reason =
+                        Some("OpenDota history request was inconclusive".to_owned());
+                    let mut result = DiscoveryResult::status(
+                        internal_match.match_id,
+                        DiscoveryStatus::UpstreamUnavailable,
+                    );
+                    result.players_with_steam_id = players_with_steam_id;
+                    result.total_players = participants.len();
+                    result.validation_error = Some(message);
+                    return self.finish_discovery(
+                        guild_id,
+                        dry_run,
+                        result,
+                        candidates.len(),
+                        diagnostics,
+                    );
+                }
             };
             for history_match in history {
                 if (history_match.start_time - match_time).abs() > self.config.time_window_seconds {
@@ -961,34 +1132,187 @@ where
 
             let mut unchecked = candidates
                 .iter()
-                .filter(|(match_id, _)| {
-                    !rejected_details.contains(*match_id)
-                        && !unavailable_details.contains(*match_id)
-                })
+                .filter(|(match_id, _)| !rejected_details.contains(*match_id))
                 .map(|(match_id, candidate)| (*match_id, candidate))
                 .collect::<Vec<_>>();
             unchecked.sort_by(|(left_id, left), (right_id, right)| {
-                (left.start_time - match_time)
-                    .abs()
-                    .cmp(&(right.start_time - match_time).abs())
-                    .then_with(|| right.discord_ids.len().cmp(&left.discord_ids.len()))
+                right
+                    .discord_ids
+                    .len()
+                    .cmp(&left.discord_ids.len())
+                    .then_with(|| {
+                        (left.start_time - match_time)
+                            .abs()
+                            .cmp(&(right.start_time - match_time).abs())
+                    })
                     .then_with(|| left_id.cmp(right_id))
             });
-            for (candidate_id, _) in unchecked {
-                let Some(details) = cache.details(&self.api, candidate_id, &self.config) else {
-                    unavailable_details.insert(candidate_id);
-                    continue;
+            for (candidate_id, candidate) in unchecked {
+                let details = match cache.details(&self.api, candidate_id, &self.config) {
+                    Ok(details) => details,
+                    Err(error) => {
+                        let message = error.to_string();
+                        diagnostics.candidates.push(CandidateDiagnostic {
+                            valve_match_id: candidate_id.0,
+                            start_time: candidate.start_time,
+                            correlated_players: candidate.discord_ids.len(),
+                            roster_matches: None,
+                            duration_seconds: None,
+                            completion_delta_seconds: None,
+                            outcome: "upstream_unavailable".to_owned(),
+                            reason: Some(message.clone()),
+                            existing_internal_match_id: None,
+                        });
+                        diagnostics.upstream_error = Some(message.clone());
+                        diagnostics.final_reason =
+                            Some("OpenDota match-details request was inconclusive".to_owned());
+                        let mut result = DiscoveryResult::status(
+                            internal_match.match_id,
+                            DiscoveryStatus::UpstreamUnavailable,
+                        );
+                        result.players_with_steam_id = players_with_steam_id;
+                        result.total_players = participants.len();
+                        result.validation_error = Some(message);
+                        return self.finish_discovery(
+                            guild_id,
+                            dry_run,
+                            result,
+                            candidates.len(),
+                            diagnostics,
+                        );
+                    }
                 };
                 let matched_count =
                     count_roster_matches(&details, participants, discord_to_steam_ids);
                 if best_detail.is_none_or(|(_, best_count)| matched_count > best_count) {
                     best_detail = Some((candidate_id, matched_count));
                 }
-                if matched_count >= self.config.minimum_roster_matches {
-                    selected = Some((candidate_id, details, matched_count));
-                    break;
+                let completion_delta = match_time.saturating_sub(
+                    candidate
+                        .start_time
+                        .saturating_add(details.duration_seconds),
+                );
+                let mut diagnostic = CandidateDiagnostic {
+                    valve_match_id: candidate_id.0,
+                    start_time: candidate.start_time,
+                    correlated_players: candidate.discord_ids.len(),
+                    roster_matches: Some(matched_count),
+                    duration_seconds: Some(details.duration_seconds),
+                    completion_delta_seconds: Some(completion_delta),
+                    outcome: String::new(),
+                    reason: None,
+                    existing_internal_match_id: None,
+                };
+
+                if matched_count < self.config.minimum_roster_matches {
+                    diagnostic.outcome = "roster_rejected".to_owned();
+                    diagnostic.reason = Some(format!(
+                        "only {matched_count}/{} recorded players matched; require {}",
+                        participants.len(),
+                        self.config.minimum_roster_matches
+                    ));
+                    diagnostics.candidates.push(diagnostic);
+                    rejected_details.insert(candidate_id);
+                    continue;
                 }
-                rejected_details.insert(candidate_id);
+
+                let existing = match self
+                    .match_repository
+                    .match_id_for_valve_match(candidate_id, guild_id)
+                {
+                    Ok(existing) => existing,
+                    Err(error) => {
+                        let message = error.to_string();
+                        diagnostic.outcome = "database_error".to_owned();
+                        diagnostic.reason = Some(message.clone());
+                        diagnostics.candidates.push(diagnostic);
+                        diagnostics.final_reason =
+                            Some("could not verify Valve-ID ownership".to_owned());
+                        let mut result = DiscoveryResult::status(
+                            internal_match.match_id,
+                            DiscoveryStatus::Error,
+                        );
+                        result.validation_error = Some(message);
+                        result.players_with_steam_id = players_with_steam_id;
+                        result.total_players = participants.len();
+                        return self.finish_discovery(
+                            guild_id,
+                            dry_run,
+                            result,
+                            candidates.len(),
+                            diagnostics,
+                        );
+                    }
+                };
+                if let Some(existing_match_id) = existing
+                    && existing_match_id != internal_match.match_id
+                {
+                    let reason = format!(
+                        "Valve match {} is already linked to internal match #{}",
+                        candidate_id.0, existing_match_id.0
+                    );
+                    diagnostic.outcome = "duplicate_rejected".to_owned();
+                    diagnostic.reason = Some(reason.clone());
+                    diagnostic.existing_internal_match_id = Some(existing_match_id.0);
+                    diagnostics.candidates.push(diagnostic);
+                    if best_validation_failure
+                        .as_ref()
+                        .is_none_or(|(_, best_count, _)| matched_count > *best_count)
+                    {
+                        best_validation_failure = Some((candidate_id, matched_count, reason));
+                    }
+                    rejected_details.insert(candidate_id);
+                    continue;
+                }
+
+                if completion_delta < -COMPLETION_CLOCK_SKEW_SECONDS {
+                    let reason = format!(
+                        "candidate completed {} seconds after the internal result was recorded",
+                        completion_delta.saturating_abs()
+                    );
+                    diagnostic.outcome = "timing_rejected".to_owned();
+                    diagnostic.reason = Some(reason.clone());
+                    diagnostics.candidates.push(diagnostic);
+                    if best_validation_failure
+                        .as_ref()
+                        .is_none_or(|(_, best_count, _)| matched_count > *best_count)
+                    {
+                        best_validation_failure = Some((candidate_id, matched_count, reason));
+                    }
+                    rejected_details.insert(candidate_id);
+                    continue;
+                }
+
+                if let Err(error) = validate_enrichment(
+                    internal_match,
+                    &details,
+                    participants,
+                    discord_to_steam_ids,
+                    self.config.minimum_roster_matches,
+                ) {
+                    let reason = error.to_string();
+                    diagnostic.outcome = "validation_rejected".to_owned();
+                    diagnostic.reason = Some(reason.clone());
+                    diagnostics.candidates.push(diagnostic);
+                    if best_validation_failure
+                        .as_ref()
+                        .is_none_or(|(_, best_count, _)| matched_count > *best_count)
+                    {
+                        best_validation_failure = Some((candidate_id, matched_count, reason));
+                    }
+                    rejected_details.insert(candidate_id);
+                    continue;
+                }
+
+                diagnostic.outcome = "validated".to_owned();
+                diagnostics.candidates.push(diagnostic);
+                let score = (completion_delta < 0, completion_delta.unsigned_abs());
+                if selected
+                    .as_ref()
+                    .is_none_or(|(_, _, _, best_score)| score < *best_score)
+                {
+                    selected = Some((candidate_id, details, matched_count, score));
+                }
             }
             if selected.is_some() {
                 break;
@@ -996,56 +1320,73 @@ where
         }
 
         if candidates.is_empty() {
-            return DiscoveryResult::status(internal_match.match_id, DiscoveryStatus::NoCandidates);
+            diagnostics.final_reason = Some(
+                "no player history contained a match inside the configured time window".to_owned(),
+            );
+            return self.finish_discovery(
+                guild_id,
+                dry_run,
+                DiscoveryResult::status(internal_match.match_id, DiscoveryStatus::NoCandidates),
+                0,
+                diagnostics,
+            );
         }
 
-        let (best_match_id, best_player_count, selected_details) =
-            if let Some((match_id, details, count)) = selected {
-                (Some(match_id), count, Some(details))
-            } else {
-                let naive = candidates
-                    .iter()
-                    .filter(|(match_id, _)| !rejected_details.contains(*match_id))
-                    .max_by(|(left_id, left), (right_id, right)| {
-                        left.discord_ids
-                            .len()
-                            .cmp(&right.discord_ids.len())
-                            .then_with(|| right_id.cmp(left_id))
-                    })
-                    .map(|(match_id, candidate)| (*match_id, candidate.discord_ids.len()));
-                match naive.or(best_detail) {
-                    Some((match_id, count)) => (Some(match_id), count, None),
-                    None => (None, 0, None),
-                }
+        let Some((best_match_id, selected_details, best_player_count, _)) = selected else {
+            let (status, valve_match_id, player_count, reason) =
+                if let Some((match_id, count, reason)) = best_validation_failure {
+                    (
+                        DiscoveryStatus::ValidationFailed,
+                        Some(match_id),
+                        count,
+                        Some(reason),
+                    )
+                } else if let Some((match_id, count)) = best_detail {
+                    (DiscoveryStatus::LowConfidence, Some(match_id), count, None)
+                } else {
+                    (DiscoveryStatus::NoCandidates, None, 0, None)
+                };
+            diagnostics.final_reason = reason.clone().or_else(|| {
+                Some(format!(
+                    "no candidate matched all {} required players",
+                    self.config.minimum_roster_matches
+                ))
+            });
+            let mut result = DiscoveryResult {
+                match_id: internal_match.match_id,
+                status,
+                valve_match_id,
+                confidence: Some(player_count as f64 / REQUIRED_DISCOVERY_ROSTER_MATCHES as f64),
+                player_count,
+                total_players: participants.len(),
+                players_with_steam_id,
+                validation_error: reason,
             };
-        let confidence = best_player_count as f64 / players_with_steam_id as f64;
-        let status =
-            if best_match_id.is_some() && best_player_count >= self.config.minimum_roster_matches {
-                DiscoveryStatus::Discovered
-            } else {
-                DiscoveryStatus::LowConfidence
-            };
+            if result.valve_match_id.is_none() {
+                result.confidence = None;
+            }
+            return self.finish_discovery(guild_id, dry_run, result, candidates.len(), diagnostics);
+        };
+
+        let confidence = best_player_count as f64 / REQUIRED_DISCOVERY_ROSTER_MATCHES as f64;
         let mut result = DiscoveryResult {
             match_id: internal_match.match_id,
-            status,
-            valve_match_id: best_match_id,
+            status: DiscoveryStatus::Discovered,
+            valve_match_id: Some(best_match_id),
             confidence: Some(confidence),
             player_count: best_player_count,
-            total_players: players_with_steam_id,
+            total_players: participants.len(),
             players_with_steam_id,
             validation_error: None,
         };
-        if status == DiscoveryStatus::Discovered
-            && !dry_run
-            && let Some(valve_match_id) = best_match_id
-        {
+        if !dry_run {
             match self.enrichment.enrich_match(DiscoveryEnrichmentRequest {
                 internal_match_id: internal_match.match_id,
-                valve_match_id,
+                valve_match_id: best_match_id,
                 guild_id,
                 source: EnrichmentSource::Auto,
                 confidence: Some(confidence),
-                validated_details: selected_details,
+                validated_details: Some(selected_details),
             }) {
                 Ok(outcome) if outcome.success => {}
                 Ok(outcome) => {
@@ -1057,6 +1398,46 @@ where
                     result.validation_error = Some(error.to_string());
                 }
             }
+        }
+        diagnostics.final_reason = Some(if result.status == DiscoveryStatus::Discovered {
+            "candidate passed roster, timing, ownership, winner, and side validation".to_owned()
+        } else {
+            result
+                .validation_error
+                .clone()
+                .unwrap_or_else(|| "enrichment write failed".to_owned())
+        });
+        self.finish_discovery(guild_id, dry_run, result, candidates.len(), diagnostics)
+    }
+
+    fn finish_discovery(
+        &self,
+        guild_id: GuildId,
+        dry_run: bool,
+        mut result: DiscoveryResult,
+        candidate_count: usize,
+        diagnostics: DiscoveryDiagnostics,
+    ) -> DiscoveryResult {
+        let diagnostics_json = serde_json::to_string(&diagnostics)
+            .unwrap_or_else(|error| format!(r#"{{"serialization_error":"{error}"}}"#));
+        if let Err(error) =
+            self.match_repository
+                .record_discovery_attempt(&DiscoveryAttemptRecord {
+                    guild_id,
+                    internal_match_id: result.match_id,
+                    dry_run,
+                    status: result.status,
+                    selected_valve_match_id: result.valve_match_id,
+                    players_with_steam_id: result.players_with_steam_id,
+                    candidate_count,
+                    diagnostics_json,
+                    attempted_at: self.clock.now_epoch_seconds(),
+                })
+            && result.validation_error.is_none()
+        {
+            result.validation_error = Some(format!(
+                "discovery completed, but its database diagnostic could not be stored: {error}"
+            ));
         }
         result
     }
@@ -1765,13 +2146,13 @@ impl<M, P, A, W, O> MatchEnrichmentService<M, P, A, W, O> {
             opendota,
             writer,
             openskill,
-            minimum_roster_matches: 10,
+            minimum_roster_matches: REQUIRED_DISCOVERY_ROSTER_MATCHES,
         }
     }
 
     #[must_use]
-    pub const fn with_minimum_roster_matches(mut self, minimum: usize) -> Self {
-        self.minimum_roster_matches = minimum;
+    pub const fn with_minimum_roster_matches(mut self, _minimum: usize) -> Self {
+        self.minimum_roster_matches = REQUIRED_DISCOVERY_ROSTER_MATCHES;
         self
     }
 }
@@ -1786,6 +2167,19 @@ where
 {
     pub fn enrich_match(&self, request: EnrichMatchRequest) -> MatchEnrichmentServiceResult {
         let normalized_guild = request.guild_id.unwrap_or(GuildId(0));
+        match self
+            .match_repository
+            .match_id_for_valve_match(request.valve_match_id, normalized_guild)
+        {
+            Ok(Some(existing_match_id)) if existing_match_id != request.internal_match_id => {
+                return MatchEnrichmentServiceResult::failed(format!(
+                    "Valve match {} is already linked to internal match #{}",
+                    request.valve_match_id.0, existing_match_id.0
+                ));
+            }
+            Ok(_) => {}
+            Err(error) => return MatchEnrichmentServiceResult::failed(error.to_string()),
+        }
         let internal_match = match self
             .match_repository
             .get_match(request.internal_match_id, normalized_guild)

@@ -233,3 +233,4 @@ create_curfew_windows_table
 add_curfew_window_days_column
 add_low_priority_reason_player_visibility
 add_pet_stable
+create_match_discovery_attempts_and_unique_valve_ids

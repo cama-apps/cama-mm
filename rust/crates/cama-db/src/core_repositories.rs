@@ -1973,6 +1973,20 @@ pub struct ParsedStatsCoverage {
     pub with_derived_role: i64,
 }
 
+/// Append-only diagnostics for one internal-match discovery attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MatchDiscoveryAttemptRecord {
+    pub guild_id: i64,
+    pub internal_match_id: i64,
+    pub dry_run: bool,
+    pub status: String,
+    pub selected_valve_match_id: Option<i64>,
+    pub players_with_steam_id: usize,
+    pub candidate_count: usize,
+    pub diagnostics_json: String,
+    pub attempted_at: i64,
+}
+
 /// Outcome of a derived-role backfill, reported so skipped rows stay visible
 /// rather than silently absent.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -2577,6 +2591,52 @@ pub struct MatchRepository {
 }
 
 impl MatchRepository {
+    /// Return the internal match currently owning a Valve match ID in a guild.
+    pub fn match_id_for_valve_match(
+        &self,
+        valve_match_id: i64,
+        guild_id: Option<i64>,
+    ) -> Result<Option<i64>, CoreRepositoryError> {
+        let connection = self.connection()?;
+        connection
+            .query_row(
+                "SELECT match_id FROM matches
+                  WHERE guild_id = ?1 AND valve_match_id = ?2
+                  LIMIT 1",
+                params![Self::normalize_guild_id(guild_id), valve_match_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Persist one append-only discovery diagnostic row.
+    pub fn record_match_discovery_attempt(
+        &self,
+        record: &MatchDiscoveryAttemptRecord,
+    ) -> Result<i64, CoreRepositoryError> {
+        let connection = self.connection()?;
+        connection.execute(
+            "INSERT INTO match_discovery_attempts(
+                 guild_id, internal_match_id, dry_run, status,
+                 selected_valve_match_id, players_with_steam_id,
+                 candidate_count, diagnostics_json, attempted_at
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![
+                record.guild_id,
+                record.internal_match_id,
+                i64::from(record.dry_run),
+                record.status,
+                record.selected_valve_match_id,
+                i64::try_from(record.players_with_steam_id).unwrap_or(i64::MAX),
+                i64::try_from(record.candidate_count).unwrap_or(i64::MAX),
+                record.diagnostics_json,
+                record.attempted_at,
+            ],
+        )?;
+        Ok(connection.last_insert_rowid())
+    }
+
     #[must_use]
     pub fn new(path: impl AsRef<Path>) -> Self {
         Self {

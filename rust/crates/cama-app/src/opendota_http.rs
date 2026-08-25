@@ -984,6 +984,16 @@ impl OpenDotaHttpClient {
     /// This lets production safely inspect a deeper history without adding
     /// requests or risking oversized responses.
     pub async fn get_player_matches(&self, steam_id: i64, limit: usize) -> Option<Vec<Value>> {
+        self.get_player_matches_diagnostic(steam_id, limit)
+            .await
+            .ok()
+    }
+
+    async fn get_player_matches_diagnostic(
+        &self,
+        steam_id: i64,
+        limit: usize,
+    ) -> Result<Vec<Value>, String> {
         let params = vec![
             ("limit".to_owned(), limit.to_string()),
             // OpenDota defaults this endpoint to significant matches only.
@@ -993,9 +1003,13 @@ impl OpenDotaHttpClient {
             ("project".to_owned(), "match_id".to_owned()),
             ("project".to_owned(), "start_time".to_owned()),
         ];
-        self.get_json(&format!("/players/{steam_id}/matches"), &params)
+        self.get_json_diagnostic(&format!("/players/{steam_id}/matches"), &params)
             .await
-            .and_then(|value| value.as_array().cloned())
+            .and_then(|value| {
+                value.as_array().cloned().ok_or_else(|| {
+                    format!("OpenDota player history for {steam_id} was not a JSON array")
+                })
+            })
     }
 
     /// Fetch aggregate player counts (including the region breakdown).
@@ -1007,12 +1021,22 @@ impl OpenDotaHttpClient {
     /// Fetch raw match details. Empty/error objects are treated as missing,
     /// just as the Python integration does after JSON decoding.
     pub async fn get_match_details(&self, match_id: i64) -> Option<Value> {
-        let value = self.get_json(&format!("/matches/{match_id}"), &[]).await?;
-        let object = value.as_object()?;
+        self.get_match_details_diagnostic(match_id).await.ok()
+    }
+
+    async fn get_match_details_diagnostic(&self, match_id: i64) -> Result<Value, String> {
+        let value = self
+            .get_json_diagnostic(&format!("/matches/{match_id}"), &[])
+            .await?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| format!("OpenDota match {match_id} details were not a JSON object"))?;
         if object.is_empty() || object.contains_key("error") {
-            None
+            Err(format!(
+                "OpenDota match {match_id} returned an empty or error payload"
+            ))
         } else {
-            Some(value)
+            Ok(value)
         }
     }
 
@@ -1038,12 +1062,30 @@ impl OpenDotaHttpClient {
     }
 
     async fn get_json(&self, path: &str, params: &[(String, String)]) -> Option<Value> {
-        let response = self.make_request(path, params).await?;
+        self.get_json_diagnostic(path, params).await.ok()
+    }
+
+    async fn get_json_diagnostic(
+        &self,
+        path: &str,
+        params: &[(String, String)],
+    ) -> Result<Value, String> {
+        let response = self.make_request(path, params).await.ok_or_else(|| {
+            format!(
+                "OpenDota {path} produced no response (request deadline, local quota, or network failure)"
+            )
+        })?;
         if !response.status().is_success() {
-            return None;
+            return Err(format!(
+                "OpenDota {path} returned HTTP {}",
+                response.status().as_u16()
+            ));
         }
-        let body = read_bounded(response, self.config.max_response_bytes).await?;
-        serde_json::from_slice(&body).ok()
+        let body = read_bounded(response, self.config.max_response_bytes)
+            .await
+            .ok_or_else(|| format!("OpenDota {path} returned an unreadable or oversized body"))?;
+        serde_json::from_slice(&body)
+            .map_err(|error| format!("OpenDota {path} returned invalid JSON: {error}"))
     }
 
     async fn make_request(&self, path: &str, params: &[(String, String)]) -> Option<Response> {
@@ -1671,9 +1713,14 @@ impl OpenDotaDiscoveryPort for OpenDotaHttpClient {
         limit: usize,
     ) -> Result<Option<Vec<PlayerHistoryMatch>>, DiscoveryPortError> {
         let client = self.clone();
-        self.run_on_dedicated(async move { client.get_player_matches(steam_id.0, limit).await })
-            .map(|value| value.map(project_history_matches))
-            .map_err(|error| DiscoveryPortError::new(error.to_string()))
+        self.run_on_dedicated(async move {
+            client
+                .get_player_matches_diagnostic(steam_id.0, limit)
+                .await
+        })
+        .map_err(|error| DiscoveryPortError::new(error.to_string()))?
+        .map(|value| Some(project_history_matches(value)))
+        .map_err(DiscoveryPortError::new)
     }
 
     fn match_details(
@@ -1681,9 +1728,14 @@ impl OpenDotaDiscoveryPort for OpenDotaHttpClient {
         match_id: ValveMatchId,
     ) -> Result<Option<OpenDotaMatchDetails>, DiscoveryPortError> {
         let client = self.clone();
-        self.run_on_dedicated(async move { client.get_match_details(match_id.0).await })
-            .map(|value| value.and_then(|value| project_match_details(value, match_id.0)))
-            .map_err(|error| DiscoveryPortError::new(error.to_string()))
+        self.run_on_dedicated(async move { client.get_match_details_diagnostic(match_id.0).await })
+            .map_err(|error| DiscoveryPortError::new(error.to_string()))?
+            .and_then(|value| {
+                project_match_details(value, match_id.0)
+                    .ok_or_else(|| format!("OpenDota match {} payload was incomplete", match_id.0))
+            })
+            .map(Some)
+            .map_err(DiscoveryPortError::new)
     }
 }
 

@@ -847,6 +847,20 @@ CREATE TABLE match_participants (
                 PRIMARY KEY (match_id, discord_id)
             );
 
+-- table: match_discovery_attempts
+CREATE TABLE match_discovery_attempts (
+                attempt_id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id                INTEGER NOT NULL DEFAULT 0,
+                internal_match_id       INTEGER NOT NULL,
+                dry_run                 INTEGER NOT NULL CHECK(dry_run IN (0, 1)),
+                status                  TEXT NOT NULL,
+                selected_valve_match_id INTEGER,
+                players_with_steam_id   INTEGER NOT NULL DEFAULT 0,
+                candidate_count         INTEGER NOT NULL DEFAULT 0,
+                diagnostics_json        TEXT NOT NULL,
+                attempted_at            INTEGER NOT NULL
+            );
+
 -- table: match_predictions
 CREATE TABLE match_predictions (
                 match_id INTEGER PRIMARY KEY,
@@ -2191,6 +2205,31 @@ CREATE UNIQUE INDEX uq_matches_guild_pending_match
             ON matches(guild_id, pending_match_id)
             WHERE pending_match_id IS NOT NULL
             ;
+
+-- index: idx_match_discovery_attempts_match_time
+CREATE INDEX idx_match_discovery_attempts_match_time
+            ON match_discovery_attempts(guild_id, internal_match_id, attempted_at DESC)
+            ;
+
+-- index: uq_matches_guild_valve_match
+CREATE UNIQUE INDEX uq_matches_guild_valve_match
+            ON matches(guild_id, valve_match_id)
+            WHERE valve_match_id IS NOT NULL
+            ;
+
+-- trigger: match_discovery_attempts_no_delete
+CREATE TRIGGER match_discovery_attempts_no_delete
+            BEFORE DELETE ON match_discovery_attempts
+            BEGIN
+                SELECT RAISE(ABORT, 'match_discovery_attempts is append-only');
+            END;
+
+-- trigger: match_discovery_attempts_no_update
+CREATE TRIGGER match_discovery_attempts_no_update
+            BEFORE UPDATE ON match_discovery_attempts
+            BEGIN
+                SELECT RAISE(ABORT, 'match_discovery_attempts is append-only');
+            END;
 
 -- trigger: moderation_events_no_delete
 CREATE TRIGGER moderation_events_no_delete

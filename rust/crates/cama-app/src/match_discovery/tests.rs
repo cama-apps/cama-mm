@@ -22,6 +22,8 @@ struct FakeMatchRepository {
     point_match_calls: Arc<AtomicUsize>,
     point_participant_calls: Arc<AtomicUsize>,
     bulk_participant_calls: Arc<AtomicUsize>,
+    valve_owners: Arc<Mutex<BTreeMap<(GuildId, ValveMatchId), InternalMatchId>>>,
+    discovery_attempts: Arc<Mutex<Vec<DiscoveryAttemptRecord>>>,
 }
 
 impl FakeMatchRepository {
@@ -40,6 +42,18 @@ impl FakeMatchRepository {
             .lock()
             .expect("participants lock")
             .insert((guild_id, match_id), participants);
+    }
+
+    fn claim_valve_match(
+        &self,
+        guild_id: GuildId,
+        valve_match_id: ValveMatchId,
+        internal_match_id: InternalMatchId,
+    ) {
+        self.valve_owners
+            .lock()
+            .expect("valve owners lock")
+            .insert((guild_id, valve_match_id), internal_match_id);
     }
 }
 
@@ -107,6 +121,30 @@ impl MatchDiscoveryReadPort for FakeMatchRepository {
                 )
             })
             .collect())
+    }
+
+    fn match_id_for_valve_match(
+        &self,
+        valve_match_id: ValveMatchId,
+        guild_id: GuildId,
+    ) -> Result<Option<InternalMatchId>, DiscoveryPortError> {
+        Ok(self
+            .valve_owners
+            .lock()
+            .expect("valve owners lock")
+            .get(&(guild_id, valve_match_id))
+            .copied())
+    }
+
+    fn record_discovery_attempt(
+        &self,
+        record: &DiscoveryAttemptRecord,
+    ) -> Result<(), DiscoveryPortError> {
+        self.discovery_attempts
+            .lock()
+            .expect("discovery attempts lock")
+            .push(record.clone());
+        Ok(())
     }
 }
 
@@ -269,7 +307,12 @@ impl OpenDotaDiscoveryPort for FakeOpenDota {
             .expect("details lock")
             .get_mut(&match_id)
             .and_then(VecDeque::pop_front)
-            .unwrap_or(Ok(None))
+            .unwrap_or_else(|| {
+                Ok(Some(OpenDotaMatchDetails::roster(
+                    match_id,
+                    (1..=10).map(|id| SteamId(id + 1_000)),
+                )))
+            })
     }
 }
 
@@ -466,51 +509,113 @@ fn test_discovery_reuses_validated_details_during_enrichment() {
 #[test]
 fn test_validated_candidate_not_replaced_by_unvalidated_naive_count() {
     let (service, _, _, api, _, _) = setup_single();
-    for id in 1..=5 {
-        api.set_history(
-            SteamId(id + 1_000),
-            vec![Ok(Some(history(99_999, MATCH_TIME + 10)))],
-        );
-    }
-    api.set_history(
-        SteamId(1_006),
-        vec![Ok(Some(history(88_888, MATCH_TIME + 60)))],
-    );
-    api.set_details(
-        ValveMatchId(88_888),
-        vec![Ok(Some(OpenDotaMatchDetails::roster(
-            ValveMatchId(88_888),
-            [SteamId(1_001), SteamId(1_006)],
-        )))],
-    );
-    let config = DiscoveryConfig {
-        minimum_roster_matches: 2,
-        ..DiscoveryConfig::default()
-    };
-    let service = service.with_config(config);
+    api.set_default_history(Ok(Some(vec![
+        PlayerHistoryMatch {
+            match_id: ValveMatchId(99_999),
+            start_time: MATCH_TIME,
+        },
+        PlayerHistoryMatch {
+            match_id: ValveMatchId(88_888),
+            start_time: MATCH_TIME - 1_800,
+        },
+    ])));
+    let mut wrong_winner =
+        OpenDotaMatchDetails::roster(ValveMatchId(99_999), (1..=10).map(|id| SteamId(id + 1_000)));
+    wrong_winner.radiant_win = false;
+    api.set_details(ValveMatchId(99_999), vec![Ok(Some(wrong_winner))]);
+    let mut correct =
+        OpenDotaMatchDetails::roster(ValveMatchId(88_888), (1..=10).map(|id| SteamId(id + 1_000)));
+    correct.duration_seconds = 1_800;
+    api.set_details(ValveMatchId(88_888), vec![Ok(Some(correct))]);
 
     let result = service.discover_match(InternalMatchId(1), Some(GUILD), true);
 
     assert_eq!(result.status, DiscoveryStatus::Discovered);
     assert_eq!(result.valve_match_id, Some(ValveMatchId(88_888)));
-    assert_eq!(result.player_count, 2);
+    assert_eq!(result.player_count, 10);
 }
 
 #[test]
 fn test_discover_match_low_confidence_skipped() {
-    let (service, _, _, api, _, _) = setup_single();
+    let (service, matches, _, api, _, _) = setup_single();
     for id in 1..=5 {
         api.set_history(
             SteamId(id + 1_000),
             vec![Ok(Some(history(99_999, MATCH_TIME)))],
         );
     }
+    api.set_details(
+        ValveMatchId(99_999),
+        vec![Ok(Some(OpenDotaMatchDetails::roster(
+            ValveMatchId(99_999),
+            (1..=5).map(|id| SteamId(id + 1_000)),
+        )))],
+    );
 
     let result = service.discover_match(InternalMatchId(1), Some(GUILD), true);
 
     assert_eq!(result.status, DiscoveryStatus::LowConfidence);
     assert_eq!(result.confidence, Some(0.5));
     assert_eq!(result.player_count, 5);
+    let attempts = matches
+        .discovery_attempts
+        .lock()
+        .expect("discovery attempts lock");
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].status, DiscoveryStatus::LowConfidence);
+    assert!(attempts[0].diagnostics_json.contains("roster_rejected"));
+    assert!(attempts[0].diagnostics_json.contains("99999"));
+}
+
+#[test]
+fn discovery_rejects_nine_of_ten_players() {
+    let (service, _, _, api, enrichment, _) = setup_single();
+    api.set_default_history(Ok(Some(history(99_999, MATCH_TIME))));
+    api.set_details(
+        ValveMatchId(99_999),
+        vec![Ok(Some(OpenDotaMatchDetails::roster(
+            ValveMatchId(99_999),
+            (1..=9).map(|id| SteamId(id + 1_000)),
+        )))],
+    );
+
+    let result = service.discover_match(InternalMatchId(1), Some(GUILD), false);
+
+    assert_eq!(result.status, DiscoveryStatus::LowConfidence);
+    assert_eq!(result.player_count, 9);
+    assert!(
+        enrichment
+            .requests
+            .lock()
+            .expect("requests lock")
+            .is_empty()
+    );
+}
+
+#[test]
+fn discovery_skips_a_valve_id_owned_by_another_internal_match() {
+    let (service, matches, _, api, _, _) = setup_single();
+    matches.claim_valve_match(GUILD, ValveMatchId(99_999), InternalMatchId(2));
+    api.set_default_history(Ok(Some(vec![
+        PlayerHistoryMatch {
+            match_id: ValveMatchId(99_999),
+            start_time: MATCH_TIME,
+        },
+        PlayerHistoryMatch {
+            match_id: ValveMatchId(88_888),
+            start_time: MATCH_TIME - 60,
+        },
+    ])));
+
+    let result = service.discover_match(InternalMatchId(1), Some(GUILD), true);
+
+    assert_eq!(result.status, DiscoveryStatus::Discovered);
+    assert_eq!(result.valve_match_id, Some(ValveMatchId(88_888)));
+    let attempts = matches
+        .discovery_attempts
+        .lock()
+        .expect("discovery attempts lock");
+    assert!(attempts[0].diagnostics_json.contains("duplicate_rejected"));
 }
 
 #[test]
@@ -580,7 +685,7 @@ fn test_discover_all_matches_reuses_shared_player_histories() {
     let result = service.discover_all_matches(Some(GUILD), true);
 
     assert_eq!(result.discovered, 2);
-    assert_eq!(api.history_call_count(), 10);
+    assert_eq!(api.history_call_count(), 1);
     assert_eq!(matches.bulk_participant_calls.load(Ordering::SeqCst), 1);
     assert_eq!(matches.point_match_calls.load(Ordering::SeqCst), 0);
     assert_eq!(matches.point_participant_calls.load(Ordering::SeqCst), 0);
@@ -604,8 +709,8 @@ fn test_discover_all_matches_does_not_throttle_without_history_requests() {
     assert!(clock.sleeps.lock().expect("sleeps lock").is_empty());
 }
 
-fn assert_batch_caches_transient_history_failures(first: HistoryResponse) {
-    let (service, _, _, api, _, clock) = shared_batch();
+fn assert_batch_defers_after_transient_history_failure(first: HistoryResponse) {
+    let (service, matches, _, api, _, clock) = shared_batch();
     let histories = vec![
         PlayerHistoryMatch {
             match_id: ValveMatchId(9_001),
@@ -620,20 +725,29 @@ fn assert_batch_caches_transient_history_failures(first: HistoryResponse) {
 
     let result = service.discover_all_matches(Some(GUILD), true);
 
-    assert_eq!(result.skipped_low_confidence, 2);
+    assert_eq!(result.upstream_unavailable, 1);
+    assert_eq!(result.deferred, 1);
     assert_eq!(result.discovered, 0);
-    assert_eq!(api.history_call_count(), 10);
+    assert_eq!(api.history_call_count(), 1);
     assert!(clock.sleeps.lock().expect("sleeps lock").is_empty());
+    let attempts = matches
+        .discovery_attempts
+        .lock()
+        .expect("discovery attempts lock");
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0].status, DiscoveryStatus::UpstreamUnavailable);
+    assert_eq!(attempts[1].status, DiscoveryStatus::Deferred);
+    assert!(attempts[0].diagnostics_json.contains("upstream_error"));
 }
 
 #[test]
 fn test_discover_all_matches_caches_transient_history_failures_none() {
-    assert_batch_caches_transient_history_failures(Ok(None));
+    assert_batch_defers_after_transient_history_failure(Ok(None));
 }
 
 #[test]
 fn test_discover_all_matches_caches_transient_history_failures_failure1() {
-    assert_batch_caches_transient_history_failures(Err(DiscoveryPortError::new(
+    assert_batch_defers_after_transient_history_failure(Err(DiscoveryPortError::new(
         "temporary failure",
     )));
 }
@@ -651,11 +765,10 @@ fn test_discover_all_matches_caches_failed_history_for_one_batch_only() {
     let first = service.discover_all_matches(Some(GUILD), true);
     let second = service.discover_all_matches(Some(GUILD), true);
 
-    assert_eq!(first.skipped_low_confidence, 2);
+    assert_eq!(first.upstream_unavailable, 1);
+    assert_eq!(first.deferred, 1);
     assert_eq!(second.discovered, 2);
-    // The negative result is scoped to the first batch; a new batch retries
-    // the same Steam ID and observes the fake API's fallback success.
-    assert_eq!(api.history_call_count(), 20);
+    assert_eq!(api.history_call_count(), 2);
 }
 
 #[test]
@@ -665,8 +778,8 @@ fn test_discover_all_matches_caches_successful_empty_histories() {
 
     let result = service.discover_all_matches(Some(GUILD), true);
 
-    assert_eq!(result.skipped_low_confidence, 2);
-    assert_eq!(api.history_call_count(), 10);
+    assert_eq!(result.discovered, 2);
+    assert_eq!(api.history_call_count(), 2);
     assert!(clock.sleeps.lock().expect("sleeps lock").is_empty());
 }
 
@@ -680,8 +793,9 @@ fn test_discover_all_matches_caches_unavailable_details_for_one_batch() {
     let result = service.discover_all_matches(Some(GUILD), true);
 
     assert_eq!(result.details.len(), 2);
-    assert_eq!(result.discovered, 2);
-    assert_eq!(api.history_call_count(), 10);
+    assert_eq!(result.upstream_unavailable, 1);
+    assert_eq!(result.deferred, 1);
+    assert_eq!(api.history_call_count(), 1);
     assert_eq!(api.detail_call_count(), 1);
 }
 
@@ -1304,6 +1418,7 @@ fn test_enrich_match_projects_wrapped_facts_for_every_participant() {
 #[test]
 fn test_enrich_match_api_failure() {
     let (matches, players, api, writer, _) = one_player_enrichment_fixture();
+    api.set_details(ValveMatchId(8_181_518_332), vec![Ok(None)]);
     let service = MatchEnrichmentService::new(matches, players, api, writer, None::<FakeOpenSkill>);
 
     let result = service.enrich_match(service_request());
@@ -1537,6 +1652,31 @@ fn test_enrich_match_forwards_guild_id_to_openskill_update() {
 }
 
 #[test]
+fn manual_enrichment_cannot_reuse_a_valve_id_owned_by_another_match() {
+    let (matches, players, api, writer, _) = one_player_enrichment_fixture();
+    matches.claim_valve_match(GUILD, ValveMatchId(8_181_518_332), InternalMatchId(99));
+    let service = MatchEnrichmentService::new(
+        matches,
+        players,
+        api.clone(),
+        writer.clone(),
+        None::<FakeOpenSkill>,
+    );
+
+    let result = service.enrich_match(service_request());
+
+    assert!(!result.success);
+    assert!(
+        result
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("already linked to internal match #99"))
+    );
+    assert_eq!(api.detail_call_count(), 0);
+    assert!(writer.writes.lock().expect("writes lock").is_empty());
+}
+
+#[test]
 fn stronger_concurrent_live_discovery_is_single_flight_and_idempotent() {
     let (service, _, _, api, enrichment, _) = setup_single();
     api.set_default_history(Ok(Some(history(99_999, MATCH_TIME))));
@@ -1569,6 +1709,19 @@ fn stronger_completed_runs_are_isolated_by_signed_guild() {
         players.link(signed_guild, UserId(id), vec![SteamId(id + 2_000)]);
     }
     api.set_default_history(Ok(Some(history(-99_999, MATCH_TIME))));
+    api.set_details(
+        ValveMatchId(-99_999),
+        vec![
+            Ok(Some(OpenDotaMatchDetails::roster(
+                ValveMatchId(-99_999),
+                (1..=10).map(|id| SteamId(id + 1_000)),
+            ))),
+            Ok(Some(OpenDotaMatchDetails::roster(
+                ValveMatchId(-99_999),
+                (1..=10).map(|id| SteamId(id + 2_000)),
+            ))),
+        ],
+    );
 
     let first = service.discover_match(InternalMatchId(1), Some(GUILD), false);
     let second = service.discover_match(InternalMatchId(1), Some(signed_guild), false);
@@ -1596,7 +1749,7 @@ fn stronger_transient_failures_are_retryable_but_successes_are_cached() {
     let first = service.discover_match(InternalMatchId(1), Some(GUILD), true);
     let second = service.discover_match(InternalMatchId(1), Some(GUILD), true);
 
-    assert_eq!(first.status, DiscoveryStatus::LowConfidence);
+    assert_eq!(first.status, DiscoveryStatus::UpstreamUnavailable);
     assert_eq!(second.status, DiscoveryStatus::Discovered);
 }
 

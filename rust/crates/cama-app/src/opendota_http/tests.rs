@@ -538,6 +538,17 @@ async fn test_get_player_matches_rejects_oversized_content_length() {
     assert_eq!(client.get_player_matches(12_345, 20).await, None);
 }
 
+#[test]
+fn discovery_port_preserves_http_status_in_its_error() {
+    let server = ScriptedServer::start(vec![ScriptedResponse::status(522)]);
+    let client = client_for(&server);
+
+    let error = OpenDotaDiscoveryPort::player_matches(&client, SteamId(12_345), 20)
+        .expect_err("HTTP 522 must be an inconclusive discovery result");
+
+    assert!(error.to_string().contains("HTTP 522"), "{error}");
+}
+
 #[tokio::test]
 async fn test_get_player_matches_passes_limit_param() {
     let server = ScriptedServer::start(vec![ScriptedResponse::json(
