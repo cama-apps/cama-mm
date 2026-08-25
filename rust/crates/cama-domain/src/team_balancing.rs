@@ -3,7 +3,7 @@
 use crate::team::{ROLES, Team, TeamError};
 
 /// Weight applied to the role-adjusted absolute difference between team values.
-pub const ADJUSTED_VALUE_DIFF_WEIGHT: f64 = 1.1;
+pub const ADJUSTED_VALUE_DIFF_WEIGHT: f64 = 1.2;
 
 /// Sum the five critical lane matchups from role-ordered effective values.
 ///
@@ -264,7 +264,7 @@ mod tests {
             service
                 .calculate_matchup_score(&team1, &team2, false, false)
                 .expect("roles are assigned"),
-            2_740.0
+            2_780.0
         );
 
         let weighted_service =
@@ -279,7 +279,7 @@ mod tests {
             weighted_service
                 .calculate_matchup_score(&team1, &team2, false, false)
                 .expect("roles are assigned"),
-            1_590.0
+            1_630.0
         );
 
         let mut swapped_team1 = team1.clone();
@@ -330,7 +330,7 @@ mod tests {
         let score = service
             .calculate_matchup_score(&team1, &team2, false, false)
             .expect("roles are assigned");
-        assert!((score - 110.0).abs() < 1e-9, "{score}");
+        assert!((score - 120.0).abs() < 1e-9, "{score}");
     }
 
     #[test]
@@ -384,7 +384,7 @@ mod tests {
             service
                 .calculate_matchup_score(&team1, &team2, false, true)
                 .expect("roles are assigned"),
-            105.0
+            110.0
         );
     }
 
