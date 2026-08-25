@@ -187,6 +187,8 @@ pub enum SchemaMigrationError {
     InjectedFailure(usize),
     #[error("OpenSkill replay failed: {0}")]
     OpenSkillReplay(String),
+    #[error("cannot enforce unique Valve match IDs: {0}")]
+    DuplicateValveMatchIds(String),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -759,6 +761,44 @@ fn prepare_legacy_required_values(
     transaction: &Transaction<'_>,
     pending_migrations: &[String],
 ) -> Result<(), SchemaMigrationError> {
+    if pending(
+        pending_migrations,
+        "create_match_discovery_attempts_and_unique_valve_ids",
+    ) && table_exists(transaction, "matches")?
+    {
+        let columns = table_columns(transaction, "matches")?;
+        if columns.iter().any(|column| column.name == "valve_match_id") {
+            let guild_expression = if columns.iter().any(|column| column.name == "guild_id") {
+                "guild_id"
+            } else {
+                "0"
+            };
+            let duplicate_sql = format!(
+                "SELECT {guild_expression}, valve_match_id, GROUP_CONCAT(match_id), COUNT(*)
+                   FROM matches
+                  WHERE valve_match_id IS NOT NULL
+                  GROUP BY {guild_expression}, valve_match_id
+                 HAVING COUNT(*) > 1
+                  ORDER BY {guild_expression}, valve_match_id
+                  LIMIT 1"
+            );
+            let duplicate = transaction
+                .query_row(&duplicate_sql, [], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                })
+                .optional()?;
+            if let Some((guild_id, valve_match_id, match_ids, count)) = duplicate {
+                return Err(SchemaMigrationError::DuplicateValveMatchIds(format!(
+                    "guild {guild_id} has Valve match {valve_match_id} assigned to {count} internal matches ({match_ids})"
+                )));
+            }
+        }
+    }
     if pending(pending_migrations, "rekey_dig_boss_echoes_by_boss_id")
         && table_exists(transaction, "dig_boss_echoes")?
     {

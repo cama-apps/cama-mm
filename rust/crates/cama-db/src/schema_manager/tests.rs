@@ -1132,6 +1132,84 @@ fn migration_report_records_manifest_order() {
 }
 
 #[test]
+fn discovery_diagnostics_are_append_only_and_valve_ids_are_unique_per_guild() {
+    let file = empty_database();
+    initialize_or_migrate(file.path()).expect("initialize discovery schema fixture");
+    let connection = Connection::open(file.path()).expect("open discovery schema fixture");
+    connection
+        .execute_batch(
+            "INSERT INTO matches(match_id,team1_players,team2_players,guild_id,valve_match_id)
+                 VALUES (1,'[]','[]',7,9001);
+             INSERT INTO matches(match_id,team1_players,team2_players,guild_id,valve_match_id)
+                 VALUES (2,'[]','[]',8,9001);
+             INSERT INTO match_discovery_attempts(
+                 guild_id,internal_match_id,dry_run,status,selected_valve_match_id,
+                 players_with_steam_id,candidate_count,diagnostics_json,attempted_at
+             ) VALUES (7,1,0,'discovered',9001,10,2,'{\"final_reason\":\"validated\"}',1234);",
+        )
+        .expect("seed discovery diagnostics");
+
+    assert!(
+        connection
+            .execute(
+                "INSERT INTO matches(match_id,team1_players,team2_players,guild_id,valve_match_id)
+                 VALUES (3,'[]','[]',7,9001)",
+                [],
+            )
+            .is_err(),
+        "one Valve match must not own two internal matches in the same guild"
+    );
+    assert!(
+        connection
+            .execute(
+                "UPDATE match_discovery_attempts SET status='changed' WHERE attempt_id=1",
+                [],
+            )
+            .is_err(),
+        "diagnostic rows must not be mutable"
+    );
+    assert!(
+        connection
+            .execute(
+                "DELETE FROM match_discovery_attempts WHERE attempt_id=1",
+                [],
+            )
+            .is_err(),
+        "diagnostic rows must not be deletable"
+    );
+}
+
+#[test]
+fn discovery_unique_valve_migration_reports_legacy_duplicates() {
+    let file = empty_database();
+    initialize_or_migrate(file.path()).expect("initialize duplicate fixture");
+    let final_migration = expected_migrations()
+        .last()
+        .copied()
+        .expect("final migration");
+    let connection = Connection::open(file.path()).expect("open duplicate fixture");
+    connection
+        .execute_batch(
+            "DROP INDEX uq_matches_guild_valve_match;
+             INSERT INTO matches(match_id,team1_players,team2_players,guild_id,valve_match_id)
+                 VALUES (11,'[]','[]',7,9001),(12,'[]','[]',7,9001);",
+        )
+        .expect("simulate legacy duplicate Valve ownership");
+    connection
+        .execute(
+            "DELETE FROM schema_migrations WHERE name=?1",
+            [final_migration],
+        )
+        .expect("mark discovery migration pending");
+    drop(connection);
+
+    let error = initialize_or_migrate(file.path()).expect_err("duplicate migration must stop");
+    let message = error.to_string();
+    assert!(message.contains("Valve match 9001"), "{message}");
+    assert!(message.contains("11,12"), "{message}");
+}
+
+#[test]
 fn match_ban_migration_uses_python_numeric_projection() {
     assert!(json_false_or_zero(&serde_json::json!(false)));
     assert!(json_false_or_zero(&serde_json::json!(0.0)));

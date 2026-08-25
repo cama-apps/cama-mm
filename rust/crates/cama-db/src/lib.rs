@@ -70,6 +70,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "match_bans",
     "match_correction_claims",
     "match_corrections",
+    "match_discovery_attempts",
     "match_participants",
     "match_predictions",
     "matches",
@@ -345,6 +346,7 @@ mod tests {
                 CREATE TABLE match_bans (id INTEGER PRIMARY KEY);
                 CREATE TABLE match_correction_claims (id INTEGER PRIMARY KEY);
                 CREATE TABLE match_corrections (id INTEGER PRIMARY KEY);
+                CREATE TABLE match_discovery_attempts (attempt_id INTEGER PRIMARY KEY);
                 CREATE TABLE match_participants (match_id INTEGER, discord_id INTEGER);
                 CREATE TABLE match_predictions (id INTEGER PRIMARY KEY);
                 CREATE TABLE rating_history (id INTEGER PRIMARY KEY);

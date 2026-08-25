@@ -370,6 +370,26 @@ fn manual_match_payload() -> String {
     .to_owned()
 }
 
+fn strict_manual_match_payload() -> String {
+    let mut payload: serde_json::Value =
+        serde_json::from_str(&manual_match_payload()).expect("manual match fixture is JSON");
+    let players = payload
+        .get_mut("players")
+        .and_then(serde_json::Value::as_array_mut)
+        .expect("manual match players");
+    let template = players[0].clone();
+    for offset in 1_i64..10 {
+        let mut player = template.clone();
+        player["account_id"] = serde_json::json!(12_345 + offset);
+        player["player_slot"] =
+            serde_json::json!(if offset < 5 { offset } else { 128 + offset - 5 });
+        player["kills"] = serde_json::json!(0);
+        player["assists"] = serde_json::json!(0);
+        players.push(player);
+    }
+    serde_json::to_string(&payload).expect("serialize strict manual match fixture")
+}
+
 fn parsed_match_payload() -> String {
     let mut payload: serde_json::Value =
         serde_json::from_str(&manual_match_payload()).expect("manual match fixture is JSON");
@@ -420,6 +440,62 @@ fn seed_manual_match(path: &std::path::Path) {
         .expect("insert participant");
 }
 
+fn complete_manual_roster(path: &std::path::Path) {
+    let mut connection = Connection::open(path).expect("open strict manual fixture");
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .expect("strict manual foreign-key mode");
+    let transaction = connection.transaction().expect("strict manual transaction");
+    for offset in 1_i64..10 {
+        let discord_id = 100 + offset;
+        let steam_id = 12_345 + offset;
+        transaction
+            .execute(
+                "INSERT INTO players(discord_id,guild_id,discord_username,steam_id)
+                 VALUES (?1,?2,?3,?4)",
+                params![
+                    discord_id,
+                    GUILD as i64,
+                    format!("Roster {offset}"),
+                    steam_id
+                ],
+            )
+            .expect("insert strict roster player");
+        transaction
+            .execute(
+                "INSERT INTO player_steam_ids(discord_id,steam_id,is_primary,added_at)
+                 VALUES (?1,?2,1,1700000000)",
+                params![discord_id, steam_id],
+            )
+            .expect("insert strict roster Steam link");
+        let radiant = offset < 5;
+        transaction
+            .execute(
+                "INSERT INTO match_participants(
+                     match_id,discord_id,guild_id,team_number,won,side
+                 ) VALUES (7,?1,?2,?3,?4,?5)",
+                params![
+                    discord_id,
+                    GUILD as i64,
+                    if radiant { 1 } else { 2 },
+                    i64::from(radiant),
+                    if radiant { "radiant" } else { "dire" }
+                ],
+            )
+            .expect("insert strict roster participant");
+    }
+    transaction
+        .execute(
+            "UPDATE matches
+             SET team1_players='[100,101,102,103,104]',
+                 team2_players='[105,106,107,108,109]'
+             WHERE match_id=7",
+            [],
+        )
+        .expect("complete strict roster arrays");
+    transaction.commit().expect("commit strict manual roster");
+}
+
 fn seed_enriched_view_match(path: &std::path::Path) {
     seed_manual_match(path);
     let connection = Connection::open(path).expect("open enriched view fixture");
@@ -468,7 +544,7 @@ fn seed_discovery_match(path: &std::path::Path) {
     connection
         .pragma_update(None, "foreign_keys", false)
         .expect("production foreign-key mode");
-    for offset in 0_i64..5 {
+    for offset in 0_i64..10 {
         let discord_id = 300 + offset;
         let steam_id = 20_000 + offset;
         connection
@@ -496,13 +572,13 @@ fn seed_discovery_match(path: &std::path::Path) {
             "INSERT INTO matches(
                  match_id,guild_id,team1_players,team2_players,winning_team,match_date
              ) VALUES (
-                 8,?1,'[300,301,302]','[303,304]',1,'2024-01-15 12:00:00'
+                 8,?1,'[300,301,302,303,304]','[305,306,307,308,309]',1,'2024-01-15 12:00:00'
              )",
             [GUILD as i64],
         )
         .expect("insert discovery match");
-    for offset in 0_i64..5 {
-        let side = if offset < 3 { "radiant" } else { "dire" };
+    for offset in 0_i64..10 {
+        let side = if offset < 5 { "radiant" } else { "dire" };
         connection
             .execute(
                 "INSERT INTO match_participants(
@@ -511,8 +587,8 @@ fn seed_discovery_match(path: &std::path::Path) {
                 params![
                     300 + offset,
                     GUILD as i64,
-                    i64::from(offset >= 3) + 1,
-                    i64::from(offset < 3),
+                    i64::from(offset >= 5) + 1,
+                    i64::from(offset < 5),
                     side
                 ],
             )
@@ -521,11 +597,11 @@ fn seed_discovery_match(path: &std::path::Path) {
 }
 
 fn discovery_match_payload() -> String {
-    let players = (0_i64..5)
+    let players = (0_i64..10)
         .map(|offset| {
             serde_json::json!({
                 "account_id": 20_000 + offset,
-                "player_slot": if offset < 3 { offset } else { 128 + offset - 3 },
+                "player_slot": if offset < 5 { offset } else { 128 + offset - 5 },
                 "hero_id": offset + 1,
                 "kills": 5 + offset,
                 "deaths": 2,
@@ -910,7 +986,8 @@ async fn assert_production_manual_enrichment_is_atomic_and_match_view_survives_r
     let (_directory, path) = migrated();
     let catalog = dotabase();
     seed_manual_match(&path);
-    let server = RouteServer::start(vec![manual_match_payload()]);
+    complete_manual_roster(&path);
+    let server = RouteServer::start(vec![strict_manual_match_payload()]);
     let shared_services = services(&server);
     let provider = EnrichmentRegistrationProvider::with_dotabase_path(
         &path,
@@ -943,7 +1020,7 @@ async fn assert_production_manual_enrichment_is_atomic_and_match_view_survives_r
         assert_eq!(captured.deferred, [true]);
         let response = captured.followups.last().expect("enrichment followup");
         assert!(response.ephemeral);
-        assert_eq!(response.content, "Enriched 1/10 players");
+        assert_eq!(response.content, "Enriched 10/10 players");
         assert_eq!(response.embeds.len(), 1);
         assert_eq!(response.embeds[0].color, Some(DISCORD_GREEN));
         assert_eq!(
@@ -1170,7 +1247,7 @@ async fn production_discovery_reuses_one_detail_fetch_and_persists_auto_provenan
     seed_discovery_match(&path);
     let history = serde_json::json!([{
         "match_id": 9_002,
-        "start_time": 1_705_320_000_i64
+        "start_time": 1_705_317_900_i64
     }])
     .to_string();
     let server = RouteServer::start(vec![history, discovery_match_payload()]);
@@ -1210,7 +1287,7 @@ async fn production_discovery_reuses_one_detail_fetch_and_persists_auto_provenan
     assert!(
         captured.original_edits[0]
             .content
-            .contains("#8 → 9002 (100% - 5/5 players)")
+            .contains("#8 → 9002 (100% - 10/10 players)")
     );
     drop(captured);
 
@@ -1241,7 +1318,7 @@ async fn production_discovery_reuses_one_detail_fetch_and_persists_auto_provenan
             |row| row.get(0),
         )
         .expect("count discovered participants");
-    assert_eq!(enriched, 5);
+    assert_eq!(enriched, 10);
     let wrapped: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM wrapped_enrichment_facts
@@ -1250,7 +1327,7 @@ async fn production_discovery_reuses_one_detail_fetch_and_persists_auto_provenan
             |row| row.get(0),
         )
         .expect("count discovered Wrapped facts");
-    assert_eq!(wrapped, 5);
+    assert_eq!(wrapped, 10);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1453,6 +1530,7 @@ fn production_constructor_leaves_match_correction_replay_for_admin_recovery() {
 async fn live_permissions_visibility_backfill_recent_and_atomic_wipe_match_python() {
     let (_directory, path) = migrated();
     seed_manual_match(&path);
+    complete_manual_roster(&path);
     let connection = Connection::open(&path).expect("open enrichment fixture");
     connection
         .pragma_update(None, "foreign_keys", false)
@@ -1470,7 +1548,7 @@ async fn live_permissions_visibility_backfill_recent_and_atomic_wipe_match_pytho
         "kills":7,"deaths":3,"assists":11,"duration":1800
     }]"#
     .to_owned();
-    let server = RouteServer::start(vec![manual_match_payload(), recent_payload]);
+    let server = RouteServer::start(vec![strict_manual_match_payload(), recent_payload]);
     let provider =
         EnrichmentRegistrationProvider::new(&path, &application_config(), services(&server))
             .expect("compose enrichment provider");
@@ -1642,6 +1720,8 @@ fn recorded_match_discovery_status_policy_matches_python_retry_contract() {
     for status in [
         DiscoveryStatus::LowConfidence,
         DiscoveryStatus::NoCandidates,
+        DiscoveryStatus::UpstreamUnavailable,
+        DiscoveryStatus::Deferred,
         DiscoveryStatus::InProgress,
     ] {
         assert_eq!(
@@ -1673,7 +1753,7 @@ async fn recorded_match_discovery_retries_not_ready_then_returns_live_enriched_p
     seed_discovery_match(&path);
     let history = serde_json::json!([{
         "match_id": 9_002,
-        "start_time": 1_705_320_000_i64
+        "start_time": 1_705_317_900_i64
     }])
     .to_string();
     let mut bodies = vec!["[]".to_owned(); 5];
@@ -1731,6 +1811,19 @@ async fn recorded_match_discovery_retries_not_ready_then_returns_live_enriched_p
         )
         .expect("persisted post-record enrichment");
     assert_eq!(persisted, (9_002, "auto".to_owned()));
+    let diagnostic: (String, String) = Connection::open(&path)
+        .expect("inspect discovery diagnostic")
+        .query_row(
+            "SELECT status,diagnostics_json
+             FROM match_discovery_attempts
+             WHERE guild_id=?1 AND internal_match_id=8
+             ORDER BY attempt_id DESC LIMIT 1",
+            [GUILD as i64],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("persisted discovery diagnostic");
+    assert_eq!(diagnostic.0, "discovered");
+    assert!(diagnostic.1.contains("validated"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

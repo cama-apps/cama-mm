@@ -22,7 +22,8 @@ use cama_app::embeds::{
 use cama_app::match_discovery::{
     BatchDiscoveryResult, DiscoveryConfig, DiscoveryResult, DiscoveryStatus, EnrichMatchRequest,
     EnrichmentSource, InternalMatchId, MatchDiscoveryService, MatchEnrichmentService,
-    OpenSkillEnrichmentPort, OpenSkillEnrichmentResult, SteamId, SystemDiscoveryClock,
+    OpenSkillEnrichmentPort, OpenSkillEnrichmentResult, REQUIRED_DISCOVERY_ROSTER_MATCHES, SteamId,
+    SystemDiscoveryClock,
 };
 use cama_app::opendota_http::{OpenDotaHttpClient, OpenDotaQuotaSnapshot, OpenDotaRuntimeServices};
 use cama_app::opendota_player_service::{OpenDotaPlayerApiPort, did_win};
@@ -232,9 +233,7 @@ impl EnrichmentRegistrationProvider {
                 MatchRecordingRepository::new(path),
                 Some(replay.clone()),
             )
-            .with_minimum_roster_matches(nonnegative_usize(
-                config.values.enrichment_min_player_match,
-            ))
+            .with_minimum_roster_matches(REQUIRED_DISCOVERY_ROSTER_MATCHES)
         };
         let discovery = MatchDiscoveryService::new(
             MatchRepository::new(path),
@@ -245,7 +244,8 @@ impl EnrichmentRegistrationProvider {
         )
         .with_config(DiscoveryConfig {
             minimum_players_with_steam_id: 5,
-            minimum_roster_matches: nonnegative_usize(config.values.enrichment_min_player_match),
+            // Match identity is never configurable below a complete 5v5 roster.
+            minimum_roster_matches: REQUIRED_DISCOVERY_ROSTER_MATCHES,
             time_window_seconds: config.values.enrichment_discovery_time_window,
             // OpenDota accepts a bounded `limit` on this endpoint. The
             // transport projects only match_id/start_time, so looking farther
@@ -591,6 +591,8 @@ fn recorded_discovery_disposition(status: DiscoveryStatus) -> RecordedDiscoveryD
         DiscoveryStatus::Discovered => RecordedDiscoveryDisposition::Publish,
         DiscoveryStatus::LowConfidence
         | DiscoveryStatus::NoCandidates
+        | DiscoveryStatus::UpstreamUnavailable
+        | DiscoveryStatus::Deferred
         | DiscoveryStatus::InProgress => RecordedDiscoveryDisposition::Retry,
         DiscoveryStatus::NoSteamIds
         | DiscoveryStatus::NoTimestamp
@@ -1133,7 +1135,7 @@ impl EnrichmentHandler {
                 guild_id: Some(cama_app::dedicated_lobby_channel::GuildId(guild_id)),
                 source: EnrichmentSource::Manual,
                 confidence: None,
-                skip_validation: true,
+                skip_validation: false,
                 opendota_match_data: None,
             });
             if !result.success {
@@ -1325,7 +1327,7 @@ impl EnrichmentHandler {
 
         if dry_run {
             let mut lines = vec![
-                "**Parsed Stats Refresh (DRY RUN)**".to_owned(),
+                "**Parsed Stats Refresh — Already Linked Matches (DRY RUN)**".to_owned(),
                 String::new(),
                 format!(
                     "{} match(es) would be refreshed; no API requests or writes were made.",
@@ -1489,7 +1491,7 @@ impl EnrichmentHandler {
         }
 
         let mut lines = vec![
-            "**Parsed Stats Refresh Complete**".to_owned(),
+            "**Parsed Stats Refresh — Already Linked Matches Complete**".to_owned(),
             String::new(),
             format!("Matches processed: {processed}"),
             format!("Position inputs complete: {refreshed}"),
@@ -2312,7 +2314,7 @@ fn format_discovery(result: &BatchDiscoveryResult, dry_run: bool) -> String {
         format!("Total unenriched: {}", result.total_unenriched),
         format!("Discovered: {}", result.discovered),
         format!(
-            "Skipped (low confidence): {}",
+            "Rejected (fewer than 10 roster matches): {}",
             result.skipped_low_confidence
         ),
         format!(
@@ -2320,6 +2322,10 @@ fn format_discovery(result: &BatchDiscoveryResult, dry_run: bool) -> String {
             result.skipped_validation_failed
         ),
         format!("Skipped (no steam IDs): {}", result.skipped_no_steam_ids),
+        format!("Skipped (no candidates): {}", result.skipped_no_candidates),
+        format!("Skipped (no timestamp): {}", result.skipped_no_timestamp),
+        format!("OpenDota unavailable: {}", result.upstream_unavailable),
+        format!("Deferred for next run: {}", result.deferred),
         format!("Errors: {}", result.errors),
     ];
     let discovered = result
@@ -2353,7 +2359,7 @@ fn format_discovery(result: &BatchDiscoveryResult, dry_run: bool) -> String {
     if !low_confidence.is_empty() {
         lines.extend([
             String::new(),
-            "**⚠️ Low Confidence (needs manual review):**".to_owned(),
+            "**Rejected — incomplete roster match:**".to_owned(),
         ]);
         lines.extend(low_confidence.iter().take(5).filter_map(|detail| {
             Some(format!(
@@ -2368,7 +2374,6 @@ fn format_discovery(result: &BatchDiscoveryResult, dry_run: bool) -> String {
         if low_confidence.len() > 5 {
             lines.push(format!("  ... and {} more", low_confidence.len() - 5));
         }
-        lines.push("*Use `/enrich match` to manually enrich these matches*".to_owned());
     }
     let validation_failed = result
         .details
@@ -2390,6 +2395,30 @@ fn format_discovery(result: &BatchDiscoveryResult, dry_run: bool) -> String {
         if validation_failed.len() > 5 {
             lines.push(format!("  ... and {} more", validation_failed.len() - 5));
         }
+    }
+    let upstream = result
+        .details
+        .iter()
+        .filter(|detail| detail.status == DiscoveryStatus::UpstreamUnavailable)
+        .collect::<Vec<_>>();
+    if !upstream.is_empty() {
+        lines.extend([String::new(), "**OpenDota unavailable:**".to_owned()]);
+        lines.extend(upstream.iter().take(3).map(|detail| {
+            format!(
+                "  #{}: {}",
+                detail.match_id.0,
+                detail
+                    .validation_error
+                    .as_deref()
+                    .unwrap_or("request was inconclusive")
+            )
+        }));
+        if upstream.len() > 3 {
+            lines.push(format!("  ... and {} more", upstream.len() - 3));
+        }
+        lines.push(
+            "The remaining matches were left unenriched and queued for the next run.".to_owned(),
+        );
     }
     lines.join("\n")
 }
