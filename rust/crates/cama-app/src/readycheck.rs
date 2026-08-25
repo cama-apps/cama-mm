@@ -313,6 +313,8 @@ pub enum ReadinessGroup {
 pub struct ReadycheckPlayerData {
     pub name: String,
     pub group: ReadinessGroup,
+    pub signals: String,
+    pub joined_at: Option<i64>,
 }
 
 impl ReadycheckPlayerData {
@@ -321,6 +323,8 @@ impl ReadycheckPlayerData {
         Self {
             name: name.into(),
             group: ReadinessGroup::Afk,
+            signals: String::new(),
+            joined_at: None,
         }
     }
 }

@@ -853,6 +853,8 @@ fn grouped_data(entries: &[(i64, ReadinessGroup)]) -> BTreeMap<UserId, Readychec
                 ReadycheckPlayerData {
                     name: format!("Player {id}"),
                     group: *group,
+                    signals: String::new(),
+                    joined_at: None,
                 },
             )
         })
