@@ -783,6 +783,7 @@ async fn production_health_and_sync_use_live_discord_control() {
     assert!(health.content.contains("**Status:** OK"));
     assert!(health.content.contains("**Discord latency:** 17 ms"));
     assert!(health.content.contains("**Guilds:** 3"));
+    assert!(health.content.contains("**OpenDota quota:**"));
     assert_eq!(fixture.discord.health_calls.load(Ordering::SeqCst), 1);
 
     let sync = fixture.dispatch("sync", Vec::new(), 2).await.last();
@@ -909,18 +910,27 @@ fn test_format_health_snapshot_includes_requested_fields() {
     let usage = UsageMonitor::default();
     usage.record_command(Some("admin health"));
     usage.record_api_request("opendota");
-    let text = format_health_snapshot(
-        &AdminMonitoring {
-            database_path: database.path().to_path_buf(),
-            usage,
-            started_at: Utc::now(),
-            git_sha: "abc123".to_owned(),
-        }
-        .snapshot(AdminDiscordHealth {
-            guild_count: 0,
-            latency_ms: None,
-        }),
-    );
+    let mut snapshot = AdminMonitoring {
+        database_path: database.path().to_path_buf(),
+        usage,
+        started_at: Utc::now(),
+        git_sha: "abc123".to_owned(),
+    }
+    .snapshot(AdminDiscordHealth {
+        guild_count: 0,
+        latency_ms: None,
+    });
+    snapshot.opendota_quota = Some(OpenDotaQuotaSnapshot {
+        local_daily_limit: Some(3_000),
+        local_daily_used: 17,
+        upstream_remaining_minute: Some(42),
+        upstream_remaining_day: Some(2_983),
+        rate_limited_responses: 2,
+        local_rejections: 4,
+        cooldown_remaining_seconds: Some(7),
+        persistence_healthy: true,
+    });
+    let text = format_health_snapshot(&snapshot);
     assert!(text.contains("**Status:** OK"));
     assert!(text.contains("**Uptime:**"));
     assert!(text.contains("**Started:**"));
@@ -929,6 +939,54 @@ fn test_format_health_snapshot_includes_requested_fields() {
     assert!(text.contains("**DB:** ok"));
     assert!(text.contains("**Commands:** 1 total"));
     assert!(text.contains("**API requests:** opendota: 1"));
+    assert!(text.contains(
+        "**OpenDota quota:** local day 17/3000; upstream minute 42; day 2983; 429 2; local rejects 4; cooldown 7s; ledger healthy"
+    ));
+}
+
+#[test]
+fn test_opendota_quota_boundary_degrades_health() {
+    let database = NamedTempFile::new().expect("temporary monitoring database");
+    initialize_or_migrate(database.path()).expect("migrate monitoring database");
+    let mut snapshot = AdminMonitoring {
+        database_path: database.path().to_path_buf(),
+        usage: UsageMonitor::default(),
+        started_at: Utc::now(),
+        git_sha: "abc123".to_owned(),
+    }
+    .snapshot(AdminDiscordHealth {
+        guild_count: 0,
+        latency_ms: None,
+    });
+
+    attach_opendota_quota(
+        &mut snapshot,
+        OpenDotaQuotaSnapshot {
+            local_daily_limit: Some(3_000),
+            local_daily_used: 3_000,
+            persistence_healthy: true,
+            ..OpenDotaQuotaSnapshot::default()
+        },
+    );
+
+    assert_eq!(snapshot.status, "degraded");
+    assert!(
+        snapshot
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("daily quota is exhausted"))
+    );
+}
+
+#[test]
+fn test_premium_quota_format_does_not_claim_a_persistent_ledger() {
+    let text = format_opendota_quota(Some(&OpenDotaQuotaSnapshot {
+        persistence_healthy: true,
+        ..OpenDotaQuotaSnapshot::default()
+    }));
+
+    assert!(text.contains("local day 0/unlimited"));
+    assert!(text.contains("ledger not required"));
 }
 
 #[test]

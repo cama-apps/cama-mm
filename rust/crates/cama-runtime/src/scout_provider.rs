@@ -16,6 +16,7 @@ use cama_app::scout::{
     Teams, plan_links, plan_report,
 };
 use cama_app::trivia_data::{TriviaDataSource, hero_image_url};
+use cama_app::trivia_image_cache::production_steam_image_cache_root;
 use cama_db::core_repositories::PlayerRepository;
 use cama_db::herogrid_repository::{HeroGridRepository, HeroGridTeams, PersistedHeroGridSources};
 use cama_db::scout_repository::ScoutRepository;
@@ -59,7 +60,7 @@ impl ScoutRegistrationProvider {
             database_path,
             draft_states,
             PRODUCTION_DOTABASE_PATH,
-            ".cache/scout",
+            production_steam_image_cache_root().join("scout"),
             VIEW_TIMEOUT,
         )
     }

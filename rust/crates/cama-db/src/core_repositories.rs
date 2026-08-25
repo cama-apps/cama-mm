@@ -1958,6 +1958,21 @@ pub struct RoleCoverage {
     pub player_roles_above_minimum_sample: i64,
 }
 
+/// Snapshot of parsed OpenDota fields for one stored match.
+///
+/// This is intentionally per-participant coverage rather than a boolean
+/// "parsed" flag.  A response can contain some parsed players while leaving
+/// others unresolved. Lane role plus last hits at ten are the required
+/// position inputs; gold at ten remains useful diagnostic telemetry.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ParsedStatsCoverage {
+    pub participants: i64,
+    pub with_lane_role: i64,
+    pub with_gold_at_10: i64,
+    pub with_last_hits_at_10: i64,
+    pub with_derived_role: i64,
+}
+
 /// Outcome of a derived-role backfill, reported so skipped rows stay visible
 /// rather than silently absent.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -2633,15 +2648,15 @@ impl MatchRepository {
             .collect())
     }
 
-    /// Backfill `gold_at_10` and `derived_role` from archived OpenDota
+    /// Backfill farm-at-ten-minute fields and `derived_role` from archived OpenDota
     /// payloads, for matches enriched before those columns existed.
     ///
     /// OpenDota's `players[]` is keyed by Steam account. We deliberately do
     /// *not* resolve it through `player_steam_ids`, even though that mapping
     /// exists and is unambiguous, because `hero_id` and `lane_role` are written
     /// by a single enrichment statement from one OpenDota player object. The
-    /// derivation consumes `lane_role` and `gold_at_10` together, so pairing a
-    /// row's frozen `lane_role` with gold resolved through *today's* Steam
+    /// derivation consumes `lane_role` and `last_hits_at_10` together, so
+    /// pairing a row's frozen `lane_role` with farm data resolved through *today's* Steam
     /// links would silently mismatch the two halves if a link ever moved -
     /// producing a confident, wrong position. Joining on `hero_id`, which is
     /// unique within a match, reuses the same mapping that produced
@@ -2656,48 +2671,43 @@ impl MatchRepository {
     /// at once would be gigabytes on a busy league, and one long
     /// `BEGIN IMMEDIATE` would lock every other writer out past the five-second
     /// busy timeout.
-    /// Matches that were enriched before OpenDota finished parsing the replay.
+    /// Matches that were enriched before OpenDota finished parsing the replay
+    /// are eligible for a later refresh.
     ///
     /// OpenDota serves basic match data immediately but fills `lane_role` and
     /// the per-minute series only once the replay is parsed, minutes to hours
     /// later. Enrichment runs soon after a match is recorded, so it routinely
     /// stores a pre-parse snapshot and never looks again.
     ///
-    /// `max_attempts` bounds how often a match is retried. Some matches can
-    /// never be completed - a participant with no linked Steam account is
-    /// never matched by OpenDota, and a replay OpenDota never parses has
-    /// nothing to fetch - so selecting purely on "still missing data" would
-    /// hand back the same oldest rows forever. Counting attempts lets a sweep
-    /// make real progress and lets a caller retry later by raising the bound.
+    /// The result is one repeatable snapshot: attempt counts are retained for
+    /// observability and ordering, but never suppress a still-incomplete row.
+    /// A caller should take one snapshot per command, then mark each selected
+    /// row as it attempts the refresh. This keeps transient failures and
+    /// delayed OpenDota parsing eligible for a later command without allowing
+    /// one command to spin forever on the same row.
     ///
     /// Ordered by attempts then id, so untried matches come first.
     pub fn matches_missing_parsed_stats(
         &self,
         guild_id: Option<i64>,
         limit: usize,
-        max_attempts: i64,
     ) -> Result<Vec<(i64, i64)>, CoreRepositoryError> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
             "SELECT m.match_id, m.valve_match_id
                FROM matches AS m
               WHERE m.guild_id = ?1 AND m.valve_match_id IS NOT NULL
-                AND m.parsed_refresh_attempts < ?3
                 AND EXISTS (
                     SELECT 1 FROM match_participants AS mp
                      WHERE mp.match_id = m.match_id AND mp.guild_id = m.guild_id
-                       AND (mp.lane_role IS NULL OR mp.gold_at_10 IS NULL)
+                       AND (mp.lane_role IS NULL OR mp.last_hits_at_10 IS NULL)
                 )
               ORDER BY m.parsed_refresh_attempts ASC, m.match_id ASC
               LIMIT ?2",
         )?;
         let rows = statement
             .query_map(
-                params![
-                    Self::normalize_guild_id(guild_id),
-                    limit as i64,
-                    max_attempts
-                ],
+                params![Self::normalize_guild_id(guild_id), limit as i64],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )?
             .collect::<Result<Vec<_>, _>>()?;
@@ -2721,6 +2731,36 @@ impl MatchRepository {
             params![match_id, Self::normalize_guild_id(guild_id)],
         )?;
         Ok(())
+    }
+
+    /// Return parsed-field coverage for one match in one guild.
+    pub fn parsed_stats_coverage(
+        &self,
+        match_id: i64,
+        guild_id: Option<i64>,
+    ) -> Result<ParsedStatsCoverage, CoreRepositoryError> {
+        let connection = self.connection()?;
+        connection
+            .query_row(
+                "SELECT COUNT(*),
+                        SUM(CASE WHEN lane_role IS NOT NULL THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN gold_at_10 IS NOT NULL THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN last_hits_at_10 IS NOT NULL THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN derived_role IS NOT NULL THEN 1 ELSE 0 END)
+                   FROM match_participants
+                  WHERE match_id = ?1 AND guild_id = ?2",
+                params![match_id, Self::normalize_guild_id(guild_id)],
+                |row| {
+                    Ok(ParsedStatsCoverage {
+                        participants: row.get(0)?,
+                        with_lane_role: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                        with_gold_at_10: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                        with_last_hits_at_10: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                        with_derived_role: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                    })
+                },
+            )
+            .map_err(Into::into)
     }
 
     /// The stored enrichment provenance for a match, so a refresh can put it
@@ -5990,7 +6030,9 @@ mod tests {
         }
         connection
             .execute(
-                "UPDATE match_participants SET gold_at_10 = 3000 WHERE match_id = ?1",
+                "UPDATE match_participants
+                    SET gold_at_10 = 3000, last_hits_at_10 = 100
+                  WHERE match_id = ?1",
                 params![parsed],
             )
             .expect("parsed has farm data");
@@ -6005,9 +6047,70 @@ mod tests {
 
         let candidates = fixture
             .matches
-            .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 100, 1)
+            .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 100)
             .expect("query");
         assert_eq!(candidates, vec![(stale, 222)]);
+    }
+
+    #[test]
+    fn test_matches_missing_parsed_stats_includes_missing_last_hits_with_lane_and_gold() {
+        let fixture = Fixture::new();
+        let partial = seed_enriched_match(&fixture, STANDARD_LANES);
+        let connection = fixture.connection();
+        connection
+            .execute(
+                "UPDATE matches SET valve_match_id = 333 WHERE match_id = ?1",
+                params![partial],
+            )
+            .expect("link valve id");
+        connection
+            .execute(
+                "UPDATE match_participants
+                    SET lane_role = 1, gold_at_10 = 3000, last_hits_at_10 = NULL
+                  WHERE match_id = ?1",
+                params![partial],
+            )
+            .expect("leave last hits unparsed");
+        drop(connection);
+
+        assert_eq!(
+            fixture
+                .matches
+                .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 100)
+                .expect("query"),
+            vec![(partial, 333)]
+        );
+    }
+
+    #[test]
+    fn test_matches_missing_parsed_stats_does_not_require_legacy_gold_series() {
+        let fixture = Fixture::new();
+        let position_complete = seed_enriched_match(&fixture, STANDARD_LANES);
+        let connection = fixture.connection();
+        connection
+            .execute(
+                "UPDATE matches SET valve_match_id = 334 WHERE match_id = ?1",
+                params![position_complete],
+            )
+            .expect("link valve id");
+        connection
+            .execute(
+                "UPDATE match_participants
+                    SET last_hits_at_10 = 100, gold_at_10 = NULL
+                  WHERE match_id = ?1",
+                params![position_complete],
+            )
+            .expect("seed required position inputs without legacy gold");
+        drop(connection);
+
+        assert!(
+            fixture
+                .matches
+                .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 100)
+                .expect("query")
+                .is_empty(),
+            "gold_t is telemetry, not an input to position derivation"
+        );
     }
 
     #[test]
@@ -6028,14 +6131,14 @@ mod tests {
         assert!(
             fixture
                 .matches
-                .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 100, 1)
+                .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 100)
                 .expect("query")
                 .is_empty()
         );
     }
 
     #[test]
-    fn test_matches_missing_parsed_stats_stops_returning_an_exhausted_match() {
+    fn test_matches_missing_parsed_stats_keeps_attempted_rows_eligible() {
         let fixture = Fixture::new();
         let stale = seed_enriched_match(&fixture, STANDARD_LANES);
         let connection = fixture.connection();
@@ -6057,33 +6160,25 @@ mod tests {
         assert_eq!(
             fixture
                 .matches
-                .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 100, 1)
+                .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 100)
                 .expect("first sweep")
                 .len(),
             1
         );
-        // A re-enrich that leaves an unmatched participant NULL must not pin
-        // the sweep on the same row forever.
+        // A re-enrich that leaves an unmatched participant NULL remains
+        // eligible for a later command. The attempt count is observability,
+        // not a permanent suppression switch.
         fixture
             .matches
             .mark_parsed_refresh_attempt(stale, Some(TEST_GUILD_ID))
             .expect("mark");
-        assert!(
-            fixture
-                .matches
-                .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 100, 1)
-                .expect("second sweep")
-                .is_empty()
-        );
-        // Raising the bound retries it, which is how a later sweep picks up
-        // replays OpenDota has parsed since.
         assert_eq!(
             fixture
                 .matches
-                .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 100, 2)
-                .expect("retry sweep")
-                .len(),
-            1
+                .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 100)
+                .expect("second sweep")
+                .as_slice(),
+            &[(stale, 777)]
         );
     }
 
@@ -6108,12 +6203,52 @@ mod tests {
         }
         let capped = fixture
             .matches
-            .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 2, 1)
+            .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 2)
             .expect("query");
         assert_eq!(capped.len(), 2);
         // Oldest first, so a repeated sweep works through the backlog rather
         // than revisiting the same recent matches.
         assert!(capped[0].0 < capped[1].0);
+    }
+
+    #[test]
+    fn test_parsed_stats_coverage_is_scoped_to_match_and_guild() {
+        let fixture = Fixture::new();
+        let match_id = seed_enriched_match(&fixture, STANDARD_LANES);
+        let connection = fixture.connection();
+        connection
+            .execute(
+                "UPDATE match_participants
+                    SET lane_role = CASE WHEN discord_id = 7100 THEN NULL ELSE 1 END,
+                        gold_at_10 = CASE WHEN discord_id IN (7100, 7101) THEN NULL ELSE 3000 END,
+                        last_hits_at_10 = CASE WHEN discord_id IN (7100, 7101, 7102) THEN NULL ELSE 100 END,
+                        derived_role = CASE WHEN discord_id IN (7100, 7101, 7102, 7103) THEN NULL ELSE '1' END
+                  WHERE match_id = ?1",
+                params![match_id],
+            )
+            .expect("seed partial parsed coverage");
+        drop(connection);
+
+        assert_eq!(
+            fixture
+                .matches
+                .parsed_stats_coverage(match_id, Some(TEST_GUILD_ID))
+                .expect("coverage"),
+            ParsedStatsCoverage {
+                participants: 10,
+                with_lane_role: 9,
+                with_gold_at_10: 8,
+                with_last_hits_at_10: 7,
+                with_derived_role: 6,
+            }
+        );
+        assert_eq!(
+            fixture
+                .matches
+                .parsed_stats_coverage(match_id, Some(TEST_GUILD_ID + 1))
+                .expect("other guild coverage"),
+            ParsedStatsCoverage::default()
+        );
     }
 
     #[test]

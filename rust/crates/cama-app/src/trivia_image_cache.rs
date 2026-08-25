@@ -5,6 +5,7 @@
 //! blocking operations on a worker thread.
 
 use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -16,6 +17,29 @@ use thiserror::Error;
 use crate::trivia_questions::TriviaCatalog;
 
 pub const PRODUCTION_TRIVIA_CACHE_PATH: &str = ".cache/trivia";
+pub const STEAM_IMAGE_CACHE_ROOT_ENV: &str = "STEAM_IMAGE_CACHE_ROOT";
+pub const DEFAULT_STEAM_IMAGE_CACHE_ROOT: &str = ".cache";
+
+/// Resolve the shared root for Steam-hosted static images. Deployments can
+/// point this at a durable volume while local runs retain the historical
+/// `.cache` location.
+#[must_use]
+pub fn steam_image_cache_root_from(value: Option<OsString>) -> PathBuf {
+    value
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_STEAM_IMAGE_CACHE_ROOT))
+}
+
+#[must_use]
+pub fn production_steam_image_cache_root() -> PathBuf {
+    steam_image_cache_root_from(std::env::var_os(STEAM_IMAGE_CACHE_ROOT_ENV))
+}
+
+#[must_use]
+pub fn production_trivia_cache_path() -> PathBuf {
+    production_steam_image_cache_root().join("trivia")
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CachedTriviaImage {
@@ -59,7 +83,7 @@ pub struct TriviaImageCache {
 
 impl TriviaImageCache {
     pub fn production() -> Result<Self, TriviaImageCacheError> {
-        Self::new(PRODUCTION_TRIVIA_CACHE_PATH)
+        Self::new(production_trivia_cache_path())
     }
 
     pub fn new(root: impl AsRef<Path>) -> Result<Self, TriviaImageCacheError> {

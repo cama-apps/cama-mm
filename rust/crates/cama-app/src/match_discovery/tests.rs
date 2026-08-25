@@ -604,7 +604,7 @@ fn test_discover_all_matches_does_not_throttle_without_history_requests() {
     assert!(clock.sleeps.lock().expect("sleeps lock").is_empty());
 }
 
-fn assert_transient_history_retry(first: HistoryResponse) {
+fn assert_batch_caches_transient_history_failures(first: HistoryResponse) {
     let (service, _, _, api, _, clock) = shared_batch();
     let histories = vec![
         PlayerHistoryMatch {
@@ -620,20 +620,42 @@ fn assert_transient_history_retry(first: HistoryResponse) {
 
     let result = service.discover_all_matches(Some(GUILD), true);
 
-    assert_eq!(result.skipped_low_confidence, 1);
-    assert_eq!(result.discovered, 1);
-    assert_eq!(api.history_call_count(), 11);
-    assert_eq!(clock.sleeps.lock().expect("sleeps lock").len(), 1);
+    assert_eq!(result.skipped_low_confidence, 2);
+    assert_eq!(result.discovered, 0);
+    assert_eq!(api.history_call_count(), 10);
+    assert!(clock.sleeps.lock().expect("sleeps lock").is_empty());
 }
 
 #[test]
-fn test_discover_all_matches_retries_transient_history_failures_none() {
-    assert_transient_history_retry(Ok(None));
+fn test_discover_all_matches_caches_transient_history_failures_none() {
+    assert_batch_caches_transient_history_failures(Ok(None));
 }
 
 #[test]
-fn test_discover_all_matches_retries_transient_history_failures_failure1() {
-    assert_transient_history_retry(Err(DiscoveryPortError::new("temporary failure")));
+fn test_discover_all_matches_caches_transient_history_failures_failure1() {
+    assert_batch_caches_transient_history_failures(Err(DiscoveryPortError::new(
+        "temporary failure",
+    )));
+}
+
+#[test]
+fn test_discover_all_matches_caches_failed_history_for_one_batch_only() {
+    let (service, matches, _, api, _, _) = setup_single();
+    matches.insert(GUILD, internal_match(2, MATCH_TIME), participants());
+    api.set_history(
+        SteamId(1_001),
+        vec![Err(DiscoveryPortError::new("temporary failure"))],
+    );
+    api.set_default_history(Ok(Some(history(99_999, MATCH_TIME))));
+
+    let first = service.discover_all_matches(Some(GUILD), true);
+    let second = service.discover_all_matches(Some(GUILD), true);
+
+    assert_eq!(first.skipped_low_confidence, 2);
+    assert_eq!(second.discovered, 2);
+    // The negative result is scoped to the first batch; a new batch retries
+    // the same Steam ID and observes the fake API's fallback success.
+    assert_eq!(api.history_call_count(), 20);
 }
 
 #[test]
@@ -646,6 +668,21 @@ fn test_discover_all_matches_caches_successful_empty_histories() {
     assert_eq!(result.skipped_low_confidence, 2);
     assert_eq!(api.history_call_count(), 10);
     assert!(clock.sleeps.lock().expect("sleeps lock").is_empty());
+}
+
+#[test]
+fn test_discover_all_matches_caches_unavailable_details_for_one_batch() {
+    let (service, matches, _, api, _, _) = setup_single();
+    matches.insert(GUILD, internal_match(2, MATCH_TIME), participants());
+    api.set_default_history(Ok(Some(history(99_999, MATCH_TIME))));
+    api.set_details(ValveMatchId(99_999), vec![Ok(None)]);
+
+    let result = service.discover_all_matches(Some(GUILD), true);
+
+    assert_eq!(result.details.len(), 2);
+    assert_eq!(result.discovered, 2);
+    assert_eq!(api.history_call_count(), 10);
+    assert_eq!(api.detail_call_count(), 1);
 }
 
 #[test]

@@ -964,6 +964,372 @@ async fn slash_join_uses_only_the_private_confirmation_message() {
 }
 
 #[tokio::test]
+async fn slash_and_raw_membership_changes_share_one_churn_cooldown() {
+    let database = database_with_players(&[(10, "Creator"), (20, "Churner")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport);
+    dispatch_command(
+        &provider,
+        "lobby",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let message_id = to_u64(
+        lobby_snapshot(&provider, LobbyKind::Open)
+            .message_ids
+            .message_id
+            .expect("lobby message")
+            .0,
+    )
+    .expect("Discord message id");
+    let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
+    assert!(
+        provider
+            .handler
+            .state
+            .service
+            .join_lobby(AppUserId(20), scope)
+            .success
+    );
+
+    provider
+        .raw_reaction_observer()
+        .observe(raw_sword(
+            RawReactionKind::Remove,
+            message_id,
+            20,
+            "Churner",
+        ))
+        .await
+        .expect("raw sword leave");
+    let joined = dispatch_command(
+        &provider,
+        "join",
+        20,
+        "Churner",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    assert_eq!(
+        joined.captured.lock().expect("responses").followups[0].content,
+        "✅ Joined 🍽️ All You Can Feed!"
+    );
+    provider
+        .raw_reaction_observer()
+        .observe(raw_sword(
+            RawReactionKind::Remove,
+            message_id,
+            20,
+            "Churner",
+        ))
+        .await
+        .expect("raw sword leave");
+
+    let blocked = dispatch_command(
+        &provider,
+        "join",
+        20,
+        "Churner",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let blocked_content = &blocked.captured.lock().expect("responses").followups[0].content;
+    assert!(blocked_content.starts_with("Slow down!"));
+    assert!(blocked_content.contains("joining or leaving again in"));
+    assert!(
+        !lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(20)),
+        "a blocked join must not change lobby membership"
+    );
+}
+
+#[tokio::test]
+async fn churn_cooldown_is_shared_across_lobby_kinds_and_preserves_blocked_leave() {
+    let database = database_with_players(&[(10, "Creator"), (20, "Churner")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport);
+    for kind in [LobbyKind::Open, LobbyKind::LowSkill] {
+        dispatch_command(&provider, "lobby", 10, "Creator", vec![lobby_option(kind)]).await;
+    }
+    let open_scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
+    assert!(
+        provider
+            .handler
+            .state
+            .service
+            .join_lobby(AppUserId(20), open_scope)
+            .success
+    );
+    let open_message_id = to_u64(
+        lobby_snapshot(&provider, LobbyKind::Open)
+            .message_ids
+            .message_id
+            .expect("open lobby message")
+            .0,
+    )
+    .expect("Discord message id");
+
+    dispatch_command(
+        &provider,
+        "join",
+        20,
+        "Churner",
+        vec![lobby_option(LobbyKind::LowSkill)],
+    )
+    .await;
+    for kind in [RawReactionKind::Remove, RawReactionKind::Add] {
+        provider
+            .raw_reaction_observer()
+            .observe(raw_sword(kind, open_message_id, 20, "Churner"))
+            .await
+            .expect("raw sword membership change");
+    }
+
+    let blocked = dispatch_command(&provider, "leave", 20, "Churner", Vec::new()).await;
+    assert!(
+        blocked.captured.lock().expect("responses").followups[0]
+            .content
+            .starts_with("Slow down!")
+    );
+    for kind in [LobbyKind::Open, LobbyKind::LowSkill] {
+        assert!(
+            lobby_snapshot(&provider, kind)
+                .players
+                .contains(&AppUserId(20)),
+            "a blocked leave must preserve every queued lobby"
+        );
+    }
+}
+
+#[tokio::test]
+async fn raw_sword_churn_rejection_is_visible_and_does_not_rejoin() {
+    let database = database_with_players(&[(10, "Creator"), (20, "Churner")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let message_id = to_u64(
+        lobby_snapshot(&provider, LobbyKind::Open)
+            .message_ids
+            .message_id
+            .expect("lobby message")
+            .0,
+    )
+    .expect("Discord message id");
+    let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
+    assert!(
+        provider
+            .handler
+            .state
+            .service
+            .join_lobby(AppUserId(20), scope)
+            .success
+    );
+
+    for kind in [
+        RawReactionKind::Remove,
+        RawReactionKind::Add,
+        RawReactionKind::Remove,
+    ] {
+        provider
+            .raw_reaction_observer()
+            .observe(raw_sword(kind, message_id, 20, "Churner"))
+            .await
+            .expect("raw sword membership change");
+    }
+    provider
+        .raw_reaction_observer()
+        .observe(raw_sword(RawReactionKind::Add, message_id, 20, "Churner"))
+        .await
+        .expect("rate-limited raw sword join");
+
+    assert!(
+        !lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(20))
+    );
+    assert!(transport.sent_messages().iter().any(|sent| {
+        sent.message
+            .response
+            .content
+            .starts_with("<@20> ❌ Slow down!")
+    }));
+}
+
+#[tokio::test]
+async fn rate_limited_missing_lobby_does_not_create_an_empty_lobby() {
+    let database = database_with_players(&[(10, "Creator"), (20, "Churner")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    dispatch_command(
+        &provider,
+        "join",
+        20,
+        "Churner",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    dispatch_command(&provider, "leave", 20, "Churner", Vec::new()).await;
+    dispatch_command(
+        &provider,
+        "join",
+        20,
+        "Churner",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    let threads_before = transport.thread_count();
+    let blocked = dispatch_command(
+        &provider,
+        "lobby",
+        20,
+        "Churner",
+        vec![lobby_option(LobbyKind::LowSkill)],
+    )
+    .await;
+    let response = blocked.captured.lock().expect("responses");
+    assert!(response.followups[0].content.starts_with("Slow down!"));
+    assert!(!response.followups[0].content.contains("created"));
+    assert!(
+        provider
+            .handler
+            .state
+            .service
+            .get_lobby(LobbyScope::new(AppGuildId(42), LobbyKind::LowSkill))
+            .is_none()
+    );
+    assert_eq!(transport.thread_count(), threads_before);
+}
+
+#[tokio::test]
+async fn blocked_raw_leave_keeps_membership_and_duplicate_add_repairs_the_retry_path() {
+    let database = database_with_players(&[(10, "Creator"), (20, "Churner")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    for kind in [LobbyKind::Open, LobbyKind::LowSkill] {
+        dispatch_command(&provider, "lobby", 10, "Creator", vec![lobby_option(kind)]).await;
+    }
+    let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
+    let message_id = to_u64(
+        lobby_snapshot(&provider, LobbyKind::Open)
+            .message_ids
+            .message_id
+            .expect("lobby message")
+            .0,
+    )
+    .expect("Discord message id");
+    assert!(
+        provider
+            .handler
+            .state
+            .service
+            .join_lobby(AppUserId(20), scope)
+            .success
+    );
+
+    for kind in [RawReactionKind::Remove, RawReactionKind::Add] {
+        provider
+            .raw_reaction_observer()
+            .observe(raw_sword(kind, message_id, 20, "Churner"))
+            .await
+            .expect("raw sword membership change");
+    }
+    dispatch_command(
+        &provider,
+        "join",
+        20,
+        "Churner",
+        vec![lobby_option(LobbyKind::LowSkill)],
+    )
+    .await;
+    let removed_reactions_before = transport
+        .state
+        .lock()
+        .expect("transport state")
+        .removed_reactions
+        .len();
+    provider
+        .raw_reaction_observer()
+        .observe(raw_sword(
+            RawReactionKind::Remove,
+            message_id,
+            20,
+            "Churner",
+        ))
+        .await
+        .expect("rate-limited raw sword leave");
+
+    assert!(
+        lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(20)),
+        "a blocked raw leave must preserve membership"
+    );
+    assert!(transport.sent_messages().iter().any(|sent| {
+        sent.message
+            .response
+            .content
+            .starts_with("<@20> ❌ Slow down!")
+    }));
+    assert_eq!(
+        transport
+            .state
+            .lock()
+            .expect("transport state")
+            .removed_reactions
+            .len(),
+        removed_reactions_before,
+        "a blocked remove must not remove a reaction that may have been re-added"
+    );
+
+    *provider
+        .handler
+        .state
+        .membership_rate_limiter
+        .lock()
+        .expect("membership limiter") = RateLimiter::new();
+    provider
+        .raw_reaction_observer()
+        .observe(raw_sword(RawReactionKind::Add, message_id, 20, "Churner"))
+        .await
+        .expect("idempotent raw sword repair");
+    provider
+        .raw_reaction_observer()
+        .observe(raw_sword(
+            RawReactionKind::Remove,
+            message_id,
+            20,
+            "Churner",
+        ))
+        .await
+        .expect("raw sword leave after cooldown");
+    assert!(
+        !lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(20))
+    );
+}
+
+#[tokio::test]
 async fn test_lobby_state_restored_after_restart() {
     let database = database_with_players(&[
         (10, "Creator"),

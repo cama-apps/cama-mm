@@ -1,8 +1,29 @@
 use super::*;
+use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
 use tempfile::tempdir;
+
+#[test]
+fn shared_steam_image_root_keeps_trivia_and_scout_under_one_configured_parent() {
+    let root = steam_image_cache_root_from(Some(OsString::from("/app/data/cache")));
+    assert_eq!(root, PathBuf::from("/app/data/cache"));
+    assert_eq!(root.join("trivia"), PathBuf::from("/app/data/cache/trivia"));
+    assert_eq!(root.join("scout"), PathBuf::from("/app/data/cache/scout"));
+}
+
+#[test]
+fn shared_steam_image_root_preserves_local_default_for_empty_configuration() {
+    assert_eq!(
+        steam_image_cache_root_from(None),
+        PathBuf::from(DEFAULT_STEAM_IMAGE_CACHE_ROOT)
+    );
+    assert_eq!(
+        steam_image_cache_root_from(Some(OsString::new())),
+        PathBuf::from(DEFAULT_STEAM_IMAGE_CACHE_ROOT)
+    );
+}
 
 fn one_shot_image_server(body: &'static [u8]) -> (String, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind image server");
