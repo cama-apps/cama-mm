@@ -20,7 +20,7 @@ use cama_app::moderation::{
     CreateSuspension, ModerationService, ModerationServiceError, parse_expiry,
     validate_low_priority_event,
 };
-use cama_app::opendota_http::OpenDotaRuntimeServices;
+use cama_app::opendota_http::{OpenDotaQuotaSnapshot, OpenDotaRuntimeServices};
 use cama_app::player_mmr_fallback::{RegisterPlayerError, RegisterPlayerInput, register_player};
 use cama_db::admin::{AdminRepository, SetBothDisplayRatingsRequest};
 use cama_db::bankruptcy_repository::BankruptcyRepository;
@@ -353,6 +353,7 @@ struct AdminHealthSnapshot {
     discord_latency_ms: Option<u64>,
     guild_count: usize,
     usage: UsageSnapshot,
+    opendota_quota: Option<OpenDotaQuotaSnapshot>,
 }
 
 impl AdminMonitoring {
@@ -401,6 +402,7 @@ impl AdminMonitoring {
             discord_latency_ms: discord.latency_ms,
             guild_count: discord.guild_count,
             usage: self.usage.snapshot(),
+            opendota_quota: None,
         }
     }
 }
@@ -969,10 +971,12 @@ impl AdminHandler {
         }
         let can_respond = try_defer(&responder, true).await;
         let discord = self.ports.discord_control.health().await;
+        let opendota_quota = self.opendota.quota_snapshot().await;
         let monitoring = self.monitoring.clone();
-        let snapshot = tokio::task::spawn_blocking(move || monitoring.snapshot(discord))
+        let mut snapshot = tokio::task::spawn_blocking(move || monitoring.snapshot(discord))
             .await
             .map_err(|error| format!("health snapshot task failed: {error}"))?;
+        attach_opendota_quota(&mut snapshot, opendota_quota);
         if can_respond {
             respond_ephemeral(&responder, format_health_snapshot(&snapshot)).await
         } else {
@@ -2953,6 +2957,7 @@ fn format_health_snapshot(snapshot: &AdminHealthSnapshot) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     };
+    let opendota_quota = format_opendota_quota(snapshot.opendota_quota.as_ref());
     let reasons = if snapshot.reasons.is_empty() {
         "- none".to_owned()
     } else {
@@ -2978,6 +2983,7 @@ fn format_health_snapshot(snapshot: &AdminHealthSnapshot) -> String {
          **Commands:** {} total, {} failed\n\
          **Top commands:** {}\n\
          **API requests:** {}\n\
+         **OpenDota quota:** {}\n\
          **Degraded reasons:**\n{}",
         if snapshot.status == "ok" {
             "OK"
@@ -3000,8 +3006,63 @@ fn format_health_snapshot(snapshot: &AdminHealthSnapshot) -> String {
         snapshot.usage.command_failures,
         top_commands,
         api_requests,
+        opendota_quota,
         reasons
     )
+}
+
+fn format_opendota_quota(quota: Option<&OpenDotaQuotaSnapshot>) -> String {
+    let Some(quota) = quota else {
+        return "unavailable".to_owned();
+    };
+    let daily_limit = quota
+        .local_daily_limit
+        .map_or_else(|| "unlimited".to_owned(), |limit| limit.to_string());
+    let upstream_minute = quota
+        .upstream_remaining_minute
+        .map_or_else(|| "unknown".to_owned(), |remaining| remaining.to_string());
+    let upstream_day = quota
+        .upstream_remaining_day
+        .map_or_else(|| "unknown".to_owned(), |remaining| remaining.to_string());
+    let cooldown = quota
+        .cooldown_remaining_seconds
+        .map_or_else(|| "none".to_owned(), |seconds| format!("{seconds}s"));
+    let ledger = if quota.local_daily_limit.is_none() {
+        "not required"
+    } else if quota.persistence_healthy {
+        "healthy"
+    } else {
+        "unhealthy"
+    };
+    format!(
+        "local day {}/{}; upstream minute {}; day {}; 429 {}; local rejects {}; cooldown {}; ledger {}",
+        quota.local_daily_used,
+        daily_limit,
+        upstream_minute,
+        upstream_day,
+        quota.rate_limited_responses,
+        quota.local_rejections,
+        cooldown,
+        ledger,
+    )
+}
+
+fn attach_opendota_quota(snapshot: &mut AdminHealthSnapshot, quota: OpenDotaQuotaSnapshot) {
+    if quota.request_is_blocked() {
+        snapshot.status = "degraded";
+        let reason = if !quota.persistence_healthy {
+            "OpenDota quota ledger is unhealthy"
+        } else if quota
+            .local_daily_limit
+            .is_some_and(|limit| quota.local_daily_used >= limit)
+        {
+            "OpenDota daily quota is exhausted"
+        } else {
+            "OpenDota upstream quota or cooldown is blocking requests"
+        };
+        snapshot.reasons.push(reason.to_owned());
+    }
+    snapshot.opendota_quota = Some(quota);
 }
 
 fn short_git_sha() -> String {

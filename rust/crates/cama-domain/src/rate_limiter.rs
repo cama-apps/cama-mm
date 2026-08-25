@@ -76,6 +76,38 @@ impl RateLimiter {
         }
     }
 
+    /// Remove a previously-recorded hit at the exact injected timestamp.
+    ///
+    /// Callers can use this to claim capacity before a fallible operation and
+    /// refund the claim when the operation does not ultimately consume the
+    /// rate-limited action. Hits at the same timestamp are interchangeable,
+    /// so removing the newest match also handles deterministic/concurrent
+    /// callers that share an injected clock value.
+    pub fn refund_at(
+        &mut self,
+        now: f64,
+        scope: impl Into<String>,
+        guild_id: i64,
+        user_id: i64,
+    ) -> bool {
+        let key = RateLimitKey {
+            scope: scope.into(),
+            guild_id,
+            user_id,
+        };
+        let Some(hits) = self.hits.get_mut(&key) else {
+            return false;
+        };
+        let Some(index) = hits.iter().rposition(|timestamp| *timestamp == now) else {
+            return false;
+        };
+        hits.remove(index);
+        if hits.is_empty() {
+            self.hits.remove(&key);
+        }
+        true
+    }
+
     fn maybe_purge(&mut self, now: f64) {
         if now < self.next_purge_at {
             return;
@@ -123,5 +155,30 @@ mod tests {
         limiter.check_at(1.0, "test", 1, 2, 2, 10);
         let allowed = limiter.check_at(11.0, "test", 1, 2, 2, 10);
         assert!(allowed.allowed);
+    }
+
+    #[test]
+    fn test_rate_limiter_refund_restores_capacity_for_only_the_claimed_key() {
+        let mut limiter = RateLimiter::new();
+        assert!(limiter.check_at(1.0, "test", 1, 2, 1, 10).allowed);
+        assert!(!limiter.check_at(2.0, "test", 1, 2, 1, 10).allowed);
+
+        assert!(!limiter.refund_at(9.0, "test", 1, 2));
+        assert!(!limiter.refund_at(1.0, "other", 1, 2));
+        assert!(limiter.refund_at(1.0, "test", 1, 2));
+        assert!(limiter.check_at(2.0, "test", 1, 2, 1, 10).allowed);
+    }
+
+    #[test]
+    fn test_three_event_window_is_isolated_by_user_and_guild() {
+        let mut limiter = RateLimiter::new();
+        for now in [0.0, 1.0, 2.0] {
+            assert!(limiter.check_at(now, "lobby", 10, 20, 3, 30).allowed);
+        }
+        assert!(!limiter.check_at(3.0, "lobby", 10, 20, 3, 30).allowed);
+
+        assert!(limiter.check_at(3.0, "lobby", 10, 21, 3, 30).allowed);
+        assert!(limiter.check_at(3.0, "lobby", 11, 20, 3, 30).allowed);
+        assert!(limiter.check_at(31.0, "lobby", 10, 20, 3, 30).allowed);
     }
 }

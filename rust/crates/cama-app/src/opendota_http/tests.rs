@@ -270,6 +270,82 @@ fn test_shared_i64_projection_truncates_safely() {
     assert_eq!(value_i64(&serde_json::json!(1e100)), None);
 }
 
+fn production_dotabuff_extractor() -> OpenDotaHttpClient {
+    OpenDotaHttpClient::with_config(OpenDotaHttpConfig::new(DEFAULT_BASE_URL, None))
+        .expect("production Dotabuff extractor client")
+}
+
+#[test]
+fn production_dotabuff_extractor_accepts_canonical_and_registration_urls() {
+    const STEAM_ID64_OFFSET: i64 = 76_561_197_960_265_728;
+    let extractor = production_dotabuff_extractor();
+    let steam32 = 140_506_451;
+    let registration_url = format!(
+        "https://www.dotabuff.com/players/{}",
+        steam32 + STEAM_ID64_OFFSET
+    );
+
+    assert_eq!(
+        extractor.extract_player_id_from_dotabuff(&registration_url),
+        Some(SteamId(steam32))
+    );
+    assert_eq!(
+        extractor.extract_player_id_from_dotabuff(&format!(
+            "https://www.dotabuff.com/players/{steam32}"
+        )),
+        Some(SteamId(steam32))
+    );
+    assert_eq!(
+        extractor.extract_player_id_from_dotabuff(&format!(
+            "https://dotabuff.com/players/{steam32}?utm_source=discord#profile"
+        )),
+        Some(SteamId(steam32))
+    );
+    assert_eq!(
+        extractor.extract_player_id_from_dotabuff(&format!(
+            "https://www.dotabuff.com/players/{steam32}/matches?limit=20"
+        )),
+        Some(SteamId(steam32))
+    );
+}
+
+#[test]
+fn production_dotabuff_extractor_rejects_malformed_and_out_of_range_urls() {
+    const STEAM_ID64_OFFSET: i64 = 76_561_197_960_265_728;
+    const STEAM_ACCOUNT_ID_UPPER_BOUND: i64 = 1_i64 << 32;
+    let extractor = production_dotabuff_extractor();
+    let invalid_urls = [
+        "",
+        "not-a-url",
+        "https://www.dotabuff.com/profile/123",
+        "https://www.dotabuff.com/players/",
+        "https://www.dotabuff.com/players/0",
+        "https://www.dotabuff.com/players/-1",
+        "https://www.dotabuff.com/players/123abc",
+        "https://www.dotabuff.com/players/4294967296",
+        "https://example.com/players/123",
+    ];
+    for url in invalid_urls {
+        assert_eq!(
+            extractor.extract_player_id_from_dotabuff(url),
+            None,
+            "unexpected Dotabuff ID extracted from {url:?}"
+        );
+    }
+
+    for out_of_range in [
+        STEAM_ID64_OFFSET,
+        STEAM_ID64_OFFSET + STEAM_ACCOUNT_ID_UPPER_BOUND,
+    ] {
+        let url = format!("https://www.dotabuff.com/players/{out_of_range}");
+        assert_eq!(
+            extractor.extract_player_id_from_dotabuff(&url),
+            None,
+            "unexpected out-of-range Steam ID extracted from {url}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn test_get_player_data_passes_timeout() {
     let server = ScriptedServer::start(vec![
@@ -280,6 +356,9 @@ async fn test_get_player_data_passes_timeout() {
     config.request_timeout = Duration::from_millis(20);
     config.request_deadline = Duration::from_millis(80);
     config.retry_delays = vec![Duration::ZERO];
+    // This test isolates HTTP timeouts; production pacing is covered by the
+    // token-bucket tests and would intentionally outlive this tiny deadline.
+    config.requests_per_minute = 60_000;
     let client = OpenDotaHttpClient::with_config(config).expect("test client");
 
     let started_at = Instant::now();
@@ -358,6 +437,7 @@ async fn test_get_match_details_passes_timeout() {
     config.request_timeout = Duration::from_millis(20);
     config.request_deadline = Duration::from_millis(80);
     config.retry_delays = vec![Duration::ZERO];
+    config.requests_per_minute = 60_000;
     let client = OpenDotaHttpClient::with_config(config).expect("test client");
 
     let started_at = Instant::now();
@@ -367,27 +447,25 @@ async fn test_get_match_details_passes_timeout() {
 }
 
 #[tokio::test]
-async fn test_retries_on_429_then_succeeds() {
+async fn test_429_opens_shared_circuit_without_retrying() {
     let server = ScriptedServer::start(vec![
-        ScriptedResponse::status(429),
-        ScriptedResponse::status(429),
+        ScriptedResponse::status(429).with_header("Retry-After", "60"),
         ScriptedResponse::json(200, r#"{"profile":{"personaname":"pf"}}"#),
     ]);
-    let client = client_for(&server);
+    let sleeper = Arc::new(RecordingSleeper::default());
+    let client = client_for(&server).with_test_sleeper(sleeper.clone());
 
-    let value = client.get_player_data(12_345).await;
-    assert_eq!(
-        value,
-        serde_json::from_str(r#"{"profile":{"personaname":"pf"}}"#).ok()
+    assert_eq!(client.get_player_data(12_345).await, None);
+    assert!(sleeper.durations().is_empty());
+    assert_eq!(server.request_lines().len(), 1);
+    let snapshot = client.quota_snapshot().await;
+    assert_eq!(snapshot.rate_limited_responses, 1);
+    assert_eq!(snapshot.upstream_remaining_minute, Some(0));
+    assert!(
+        snapshot
+            .cooldown_remaining_seconds
+            .is_some_and(|value| value >= 59)
     );
-    assert_eq!(
-        value.and_then(project_player_identity),
-        Some(PlayerIdentity {
-            persona_name: Some("pf".to_owned()),
-            ..PlayerIdentity::default()
-        })
-    );
-    assert_eq!(server.request_lines().len(), 3);
 }
 
 #[tokio::test]
@@ -420,12 +498,12 @@ async fn test_no_retry_on_403() {
 }
 
 #[tokio::test]
-async fn test_retry_exhausted_returns_none() {
+async fn test_retryable_server_error_exhaustion_returns_none() {
     let server = ScriptedServer::start(vec![
-        ScriptedResponse::status(429),
-        ScriptedResponse::status(429),
-        ScriptedResponse::status(429),
-        ScriptedResponse::status(429),
+        ScriptedResponse::status(503),
+        ScriptedResponse::status(503),
+        ScriptedResponse::status(503),
+        ScriptedResponse::status(503),
     ]);
     let client = client_for(&server);
 
@@ -480,67 +558,60 @@ async fn test_get_player_matches_passes_limit_param() {
     let requests = server.request_lines();
     assert_eq!(requests.len(), 1);
     assert!(requests[0].contains("limit=20"));
+    assert!(requests[0].contains("significant=0"));
+    assert!(requests[0].contains("project=match_id"));
+    assert!(requests[0].contains("project=start_time"));
     assert!(requests[0].contains("api_key=test"));
 }
 
 #[tokio::test]
-async fn test_opendota_honors_retry_after_larger_than_delay() {
+async fn test_429_circuit_blocks_followup_without_another_wire_call() {
     let server = ScriptedServer::start(vec![
         ScriptedResponse::status(429).with_header("Retry-After", "60"),
         ScriptedResponse::json(200, r#"{"profile":{"personaname":"pf"}}"#),
     ]);
-    let sleeper = Arc::new(RecordingSleeper::default());
-    let client = client_for(&server).with_test_sleeper(sleeper.clone());
+    let mut config = OpenDotaHttpConfig::new(&server.base_url, None);
+    config.requests_per_minute = 60_000;
+    config.rate_limit_wait = Duration::from_millis(5);
+    config.request_deadline = Duration::from_millis(50);
+    let client = OpenDotaHttpClient::with_config(config).expect("circuit test client");
 
-    assert!(client.get_player_data(12_345).await.is_some());
-    assert_eq!(sleeper.durations(), vec![Duration::from_secs(60)]);
+    assert_eq!(client.get_player_data(12_345).await, None);
+    assert_eq!(client.get_player_data(12_345).await, None);
+    assert_eq!(server.request_lines().len(), 1);
+    assert_eq!(client.quota_snapshot().await.local_rejections, 1);
 }
 
 #[tokio::test]
-async fn test_opendota_ignores_retry_after_smaller_than_delay() {
-    let server = ScriptedServer::start(vec![
-        ScriptedResponse::status(429).with_header("Retry-After", "1"),
-        ScriptedResponse::json(200, r#"{"profile":{}}"#),
-    ]);
-    let sleeper = Arc::new(RecordingSleeper::default());
-    let client = client_with(
-        &server,
-        vec![Duration::from_secs(30); 3],
-        Duration::from_secs(90),
-    )
-    .with_test_sleeper(sleeper.clone());
-
-    assert!(client.get_player_data(12_345).await.is_some());
-    assert_eq!(sleeper.durations(), vec![Duration::from_secs(30)]);
-}
-
-#[tokio::test]
-async fn test_opendota_tolerates_malformed_retry_after() {
+async fn test_malformed_retry_after_uses_safe_minute_cooldown() {
     let server = ScriptedServer::start(vec![
         ScriptedResponse::status(429).with_header("Retry-After", "not-a-number"),
-        ScriptedResponse::json(200, r#"{"profile":{}}"#),
     ]);
-    let sleeper = Arc::new(RecordingSleeper::default());
-    let client = client_for(&server).with_test_sleeper(sleeper.clone());
+    let client = client_for(&server);
 
-    assert!(client.get_player_data(12_345).await.is_some());
-    assert_eq!(sleeper.durations(), vec![Duration::ZERO]);
+    assert_eq!(client.get_player_data(12_345).await, None);
+    assert!(
+        client
+            .quota_snapshot()
+            .await
+            .cooldown_remaining_seconds
+            .is_some_and(|value| value >= 59)
+    );
 }
 
 #[tokio::test]
-async fn test_retry_after_is_capped_by_total_request_deadline() {
-    let server = ScriptedServer::start(vec![
-        ScriptedResponse::status(429).with_header("Retry-After", "600"),
-        ScriptedResponse::json(200, r#"{"profile":{}}"#),
-    ]);
-    let sleeper = Arc::new(RecordingSleeper::default());
-    let client = client_for(&server).with_test_sleeper(sleeper.clone());
+async fn test_later_longer_cooldown_extends_the_shared_circuit() {
+    let limiter = TokenBucket::new(60);
+    limiter.observe_remaining(0, Duration::from_secs(10)).await;
+    limiter.observe_remaining(0, Duration::from_secs(60)).await;
 
-    assert!(client.get_player_data(12_345).await.is_some());
-    let sleeps = sleeper.durations();
-    assert_eq!(sleeps.len(), 1);
-    assert!(sleeps[0] > Duration::ZERO);
-    assert!(sleeps[0] <= DEFAULT_REQUEST_DEADLINE);
+    assert!(
+        limiter
+            .cooldown_remaining()
+            .await
+            .is_some_and(|remaining| remaining >= Duration::from_secs(59)),
+        "the later 60-second reset must not be shortened to the earlier 10-second window"
+    );
 }
 
 #[tokio::test]
@@ -592,13 +663,13 @@ fn test_rate_limiter_is_shared_per_endpoint_and_rate() {
         "a different endpoint gets its own bucket"
     );
     assert!(
-        (authenticated.capacity - 1_200.0).abs() < f64::EPSILON,
-        "the authenticated bucket carries its own configured rate, got {}",
+        (authenticated.capacity - 1.0).abs() < f64::EPSILON,
+        "the authenticated bucket has no startup burst, got {}",
         authenticated.capacity
     );
     assert!(
-        (anonymous.capacity - 60.0).abs() < f64::EPSILON,
-        "the anonymous bucket keeps 60/min, got {}",
+        (anonymous.capacity - 1.0).abs() < f64::EPSILON,
+        "the anonymous bucket has no startup burst, got {}",
         anonymous.capacity
     );
 }
@@ -612,4 +683,168 @@ fn test_rate_limiter_key_normalizes_the_trailing_slash() {
         Arc::ptr_eq(&plain, &trailing),
         "with_config trims the trailing slash before keying the bucket"
     );
+}
+
+#[test]
+fn test_production_quota_defaults_match_current_server_limits() {
+    assert_eq!(PUBLISHED_ANONYMOUS_REQUESTS_PER_MINUTE, 60);
+    assert_eq!(PUBLISHED_AUTHENTICATED_REQUESTS_PER_MINUTE, 300);
+    let anonymous = OpenDotaHttpConfig::new("http://anonymous.invalid/api", None);
+    assert_eq!(anonymous.requests_per_minute, ANONYMOUS_REQUESTS_PER_MINUTE);
+    assert_eq!(anonymous.requests_per_day, Some(REQUESTS_PER_DAY));
+
+    let authenticated =
+        OpenDotaHttpConfig::new("http://authenticated.invalid/api", Some("key".to_owned()));
+    assert_eq!(
+        authenticated.requests_per_minute,
+        AUTHENTICATED_REQUESTS_PER_MINUTE
+    );
+    assert_eq!(authenticated.requests_per_day, None);
+    assert_eq!(authenticated.requests_per_minute, 250);
+    assert!(authenticated.requests_per_minute < PUBLISHED_AUTHENTICATED_REQUESTS_PER_MINUTE);
+    assert!(anonymous.requests_per_minute < PUBLISHED_ANONYMOUS_REQUESTS_PER_MINUTE);
+
+    let production = OpenDotaHttpConfig::production(None);
+    assert_eq!(
+        production.daily_quota_state_path.as_deref(),
+        Some(std::path::Path::new(DEFAULT_DAILY_QUOTA_STATE_PATH))
+    );
+}
+
+#[tokio::test]
+async fn test_rate_limiter_rejects_startup_burst() {
+    let limiter = TokenBucket::new(60);
+
+    assert!(limiter.acquire(Duration::ZERO).await);
+    assert!(
+        !limiter.acquire(Duration::ZERO).await,
+        "a full startup burst must not be possible"
+    );
+}
+
+#[tokio::test]
+async fn test_daily_quota_enforces_cap() {
+    let quota = DailyQuota::new(Some(2), None).expect("in-memory quota");
+
+    assert!(quota.acquire(Duration::ZERO).await);
+    assert!(quota.acquire(Duration::ZERO).await);
+    assert!(!quota.acquire(Duration::ZERO).await);
+    let snapshot = quota.snapshot().await;
+    assert_eq!(snapshot.upstream_remaining, None);
+    assert_eq!(snapshot.used, 2);
+    assert_eq!(snapshot.local_rejections, 1);
+}
+
+#[tokio::test]
+async fn test_daily_quota_survives_restart() {
+    let directory = tempfile::tempdir().expect("quota tempdir");
+    let path = directory.path().join("opendota-quota");
+    let first = DailyQuota::new(Some(2), Some(path.clone())).expect("first durable quota");
+    assert!(first.acquire(Duration::ZERO).await);
+    drop(first);
+
+    let restarted = DailyQuota::new(Some(2), Some(path)).expect("restarted durable quota");
+    assert_eq!(restarted.snapshot().await.used, 1);
+    assert!(restarted.acquire(Duration::ZERO).await);
+    assert!(!restarted.acquire(Duration::ZERO).await);
+}
+
+#[test]
+fn test_corrupt_daily_quota_state_fails_closed_at_build() {
+    let directory = tempfile::tempdir().expect("quota tempdir");
+    let path = directory.path().join("opendota-quota");
+    fs::write(&path, "not quota state").expect("write corrupt quota state");
+    let mut config = OpenDotaHttpConfig::new("http://corrupt-quota.invalid/api", None);
+    config.daily_quota_state_path = Some(path.clone());
+
+    let error = OpenDotaHttpClient::with_config(config).expect_err("corrupt quota must fail");
+    assert!(matches!(error, OpenDotaHttpBuildError::QuotaState { .. }));
+    assert!(error.to_string().contains(path.to_string_lossy().as_ref()));
+}
+
+#[tokio::test]
+async fn test_retries_consume_request_observer_quota_attempts() {
+    let server = ScriptedServer::start(vec![
+        ScriptedResponse::status(503),
+        ScriptedResponse::json(200, r#"{"profile":{}}"#),
+    ]);
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&attempts);
+    let mut config = OpenDotaHttpConfig::new(&server.base_url, Some("test".to_owned()));
+    config.requests_per_minute = 60_000;
+    config.requests_per_day = Some(10);
+    config.retry_delays = vec![Duration::ZERO];
+    config = config.with_request_observer(move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+    });
+    let client = OpenDotaHttpClient::with_config(config)
+        .expect("retry quota test client")
+        .with_test_sleeper(Arc::new(RecordingSleeper::default()));
+
+    assert!(client.get_player_data(12_345).await.is_some());
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(server.wait_for_requests(2).len(), 2);
+}
+
+#[tokio::test]
+async fn test_response_remaining_headers_tighten_minute_and_day() {
+    let server = ScriptedServer::start(vec![
+        ScriptedResponse::json(200, r#"{"profile":{}}"#)
+            .with_header("X-RateLimit-Remaining-Minute", "0")
+            .with_header("X-RateLimit-Remaining-Day", "0"),
+    ]);
+    let mut config = OpenDotaHttpConfig::new(&server.base_url, None);
+    config.requests_per_minute = 60_000;
+    config.requests_per_day = Some(10);
+    config.rate_limit_wait = Duration::from_millis(20);
+    config.request_deadline = Duration::from_millis(100);
+    config.retry_delays = Vec::new();
+    let client = OpenDotaHttpClient::with_config(config).expect("header quota test client");
+
+    assert!(client.get_player_data(12_345).await.is_some());
+    let snapshot = client.quota_snapshot().await;
+    assert_eq!(snapshot.upstream_remaining_minute, Some(0));
+    assert_eq!(snapshot.upstream_remaining_day, Some(0));
+    assert_eq!(client.get_player_data(12_345).await, None);
+    assert_eq!(server.request_lines().len(), 1);
+}
+
+#[tokio::test]
+async fn test_premium_ignores_free_daily_balance_header() {
+    let server = ScriptedServer::start(vec![
+        ScriptedResponse::json(200, r#"{"profile":{}}"#)
+            .with_header("X-RateLimit-Remaining-Day", "0"),
+        ScriptedResponse::json(200, r#"{"profile":{}}"#),
+    ]);
+    let mut config = OpenDotaHttpConfig::new(&server.base_url, Some("premium".to_owned()));
+    config.requests_per_minute = 60_000;
+    config.retry_delays = vec![Duration::ZERO];
+    let client = OpenDotaHttpClient::with_config(config).expect("premium quota test client");
+
+    assert!(client.get_player_data(12_345).await.is_some());
+    assert!(client.get_player_data(12_346).await.is_some());
+    let snapshot = client.quota_snapshot().await;
+    assert_eq!(snapshot.local_daily_limit, None);
+    assert_eq!(snapshot.upstream_remaining_day, None);
+    assert_eq!(server.wait_for_requests(2).len(), 2);
+}
+
+#[tokio::test]
+async fn test_daily_cap_prevents_retry_from_crossing_boundary() {
+    let server = ScriptedServer::start(vec![
+        ScriptedResponse::status(503),
+        ScriptedResponse::json(200, r#"{"profile":{}}"#),
+    ]);
+    let mut config = OpenDotaHttpConfig::new(&server.base_url, None);
+    config.requests_per_minute = 60_000;
+    config.requests_per_day = Some(1);
+    config.rate_limit_wait = Duration::from_millis(20);
+    config.retry_delays = vec![Duration::ZERO];
+    let client = OpenDotaHttpClient::with_config(config)
+        .expect("daily retry-boundary client")
+        .with_test_sleeper(Arc::new(RecordingSleeper::default()));
+
+    assert_eq!(client.get_player_data(12_345).await, None);
+    assert_eq!(server.wait_for_requests(1).len(), 1);
+    assert_eq!(client.quota_snapshot().await.local_daily_used, 1);
 }

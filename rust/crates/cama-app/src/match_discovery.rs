@@ -553,11 +553,26 @@ enum RunState {
 struct BatchCache {
     histories: BTreeMap<SteamId, Vec<PlayerHistoryMatch>>,
     history_attempts: BTreeMap<SteamId, usize>,
+    unavailable_histories: BTreeSet<SteamId>,
     details: BTreeMap<ValveMatchId, OpenDotaMatchDetails>,
+    unavailable_details: BTreeSet<ValveMatchId>,
     detail_order: VecDeque<ValveMatchId>,
+    cache_unavailable: bool,
 }
 
 impl BatchCache {
+    /// A batch may contain many backlog entries sharing the same players and
+    /// candidate matches. Do not retry an unavailable upstream resource for
+    /// every entry in that batch. This cache is intentionally constructed per
+    /// `discover_all_matches` invocation, so a later single-match invocation
+    /// can retry a transient failure.
+    fn for_batch() -> Self {
+        Self {
+            cache_unavailable: true,
+            ..Self::default()
+        }
+    }
+
     fn history<A: OpenDotaDiscoveryPort, C: DiscoveryClock>(
         &mut self,
         api: &A,
@@ -567,6 +582,9 @@ impl BatchCache {
     ) -> Option<Vec<PlayerHistoryMatch>> {
         if let Some(cached) = self.histories.get(&steam_id) {
             return Some(cached.clone());
+        }
+        if self.cache_unavailable && self.unavailable_histories.contains(&steam_id) {
+            return None;
         }
         let attempts = self.history_attempts.entry(steam_id).or_default();
         if *attempts > 0 {
@@ -579,7 +597,12 @@ impl BatchCache {
                 self.histories.insert(steam_id, history.clone());
                 Some(history)
             }
-            Ok(None) | Err(_) => None,
+            Ok(None) | Err(_) => {
+                if self.cache_unavailable {
+                    self.unavailable_histories.insert(steam_id);
+                }
+                None
+            }
         }
     }
 
@@ -592,7 +615,18 @@ impl BatchCache {
         if let Some(cached) = self.details.get(&match_id) {
             return Some(cached.clone());
         }
-        let details = api.match_details(match_id).ok().flatten()?;
+        if self.cache_unavailable && self.unavailable_details.contains(&match_id) {
+            return None;
+        }
+        let details = match api.match_details(match_id).ok().flatten() {
+            Some(details) => details,
+            None => {
+                if self.cache_unavailable {
+                    self.unavailable_details.insert(match_id);
+                }
+                return None;
+            }
+        };
         if config.match_details_cache_size > 0 {
             while self.details.len() >= config.match_details_cache_size {
                 let Some(oldest) = self.detail_order.pop_front() else {
@@ -823,7 +857,7 @@ where
             }
         };
 
-        let mut cache = BatchCache::default();
+        let mut cache = BatchCache::for_batch();
         for internal_match in matches {
             let participants = participants_by_match
                 .get(&internal_match.match_id)

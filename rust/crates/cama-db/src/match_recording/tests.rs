@@ -60,6 +60,7 @@ impl Fixture {
                      enrichment_data TEXT,
                      enrichment_source TEXT,
                      enrichment_confidence REAL,
+                     parsed_refresh_attempts INTEGER NOT NULL DEFAULT 0,
                      match_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                  );
                  CREATE UNIQUE INDEX idx_matches_guild_pending

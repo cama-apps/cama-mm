@@ -383,7 +383,8 @@ fn clear_match_enrichment_sql() -> &'static str {
             game_mode = NULL,
             enrichment_data = NULL,
             enrichment_source = NULL,
-            enrichment_confidence = NULL"
+            enrichment_confidence = NULL,
+            parsed_refresh_attempts = 0"
 }
 
 fn clear_dependent_enrichment(
@@ -419,7 +420,10 @@ fn clear_dependent_enrichment(
                 rune_pickups = NULL,
                 firstblood_claimed = NULL,
                 stuns = NULL,
-                fantasy_points = NULL
+                fantasy_points = NULL,
+                gold_at_10 = NULL,
+                last_hits_at_10 = NULL,
+                derived_role = NULL
           WHERE match_id IN ({placeholders})"
     );
     transaction.execute(
@@ -507,7 +511,8 @@ mod tests {
                      game_mode INTEGER,
                      enrichment_data TEXT,
                      enrichment_source TEXT,
-                     enrichment_confidence REAL
+                     enrichment_confidence REAL,
+                     parsed_refresh_attempts INTEGER NOT NULL DEFAULT 0
                  );
                  CREATE TABLE match_participants (
                      match_id INTEGER NOT NULL,
@@ -535,7 +540,10 @@ mod tests {
                      rune_pickups INTEGER,
                      firstblood_claimed INTEGER,
                      stuns REAL,
-                     fantasy_points REAL
+                     fantasy_points REAL,
+                     gold_at_10 INTEGER,
+                     last_hits_at_10 INTEGER,
+                     derived_role TEXT
                  );
                  CREATE TABLE match_bans (match_id INTEGER NOT NULL, discord_id INTEGER);
                  CREATE TABLE wrapped_enrichment_facts (
@@ -1002,6 +1010,21 @@ mod tests {
         let connection = Connection::open(file.path()).expect("open fixture");
         connection
             .execute(
+                "UPDATE matches SET parsed_refresh_attempts = 7 WHERE match_id = 1",
+                [],
+            )
+            .expect("seed refresh attempts");
+        connection
+            .execute(
+                "UPDATE match_participants
+                    SET lane_role = 2, gold_at_10 = 3200,
+                        last_hits_at_10 = 180, derived_role = '2'
+                  WHERE match_id = 1",
+                [],
+            )
+            .expect("seed parsed fields");
+        connection
+            .execute(
                 "INSERT INTO match_bans (match_id, discord_id) VALUES (1, 10)",
                 [],
             )
@@ -1030,6 +1053,21 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("participant");
+        let parsed_fields: (Option<i64>, Option<i64>, Option<String>) = connection
+            .query_row(
+                "SELECT gold_at_10, last_hits_at_10, derived_role
+                   FROM match_participants WHERE match_id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("parsed fields");
+        let refresh_attempts: i64 = connection
+            .query_row(
+                "SELECT parsed_refresh_attempts FROM matches WHERE match_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("refresh attempts");
         let bans: i64 = connection
             .query_row("SELECT COUNT(*) FROM match_bans", [], |row| row.get(0))
             .expect("ban count");
@@ -1039,6 +1077,8 @@ mod tests {
             })
             .expect("fact count");
         assert_eq!(hero_id, None);
+        assert_eq!(parsed_fields, (None, None, None));
+        assert_eq!(refresh_attempts, 0);
         assert_eq!(bans, 0);
         assert_eq!(facts, 0);
     }

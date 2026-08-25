@@ -19,6 +19,15 @@ use crate::registration::{
 const ADMIN: u64 = 42;
 const GUILD: u64 = 4_242;
 
+#[test]
+fn parsed_refresh_run_guard_excludes_overlap_and_releases_on_drop() {
+    let running = AtomicBool::new(false);
+    let first = try_claim_parsed_refresh(&running).expect("first refresh claims the guard");
+    assert!(try_claim_parsed_refresh(&running).is_none());
+    drop(first);
+    assert!(try_claim_parsed_refresh(&running).is_some());
+}
+
 #[derive(Default)]
 struct CapturedResponses {
     immediate: Vec<InteractionResponse>,
@@ -243,7 +252,11 @@ fn application_config() -> ApplicationConfig {
     ApplicationConfig::from_lookup(|name| match name {
         "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
         "ADMIN_USER_IDS" => Some(ADMIN.to_string()),
+        "ENRICHMENT_HISTORY_LIMIT" => Some("500".to_owned()),
         "ENRICHMENT_MIN_PLAYER_MATCH" => Some("5".to_owned()),
+        // Production deliberately paces repair traffic. Tests exercise the
+        // same orchestration without waiting between loopback requests.
+        "ENRICHMENT_REFRESH_INTERVAL_MS" => Some("0".to_owned()),
         "ENRICHMENT_RETRY_DELAYS" => Some("0".to_owned()),
         _ => None,
     })
@@ -355,6 +368,19 @@ fn manual_match_payload() -> String {
         }]
     }"#
     .to_owned()
+}
+
+fn parsed_match_payload() -> String {
+    let mut payload: serde_json::Value =
+        serde_json::from_str(&manual_match_payload()).expect("manual match fixture is JSON");
+    let player = payload
+        .get_mut("players")
+        .and_then(serde_json::Value::as_array_mut)
+        .and_then(|players| players.first_mut())
+        .expect("manual match fixture has a player");
+    player["gold_t"] = serde_json::json!([0, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000]);
+    player["lh_t"] = serde_json::json!([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    serde_json::to_string(&payload).expect("serialize parsed match fixture")
 }
 
 fn seed_manual_match(path: &std::path::Path) {
@@ -1191,7 +1217,10 @@ async fn production_discovery_reuses_one_detail_fetch_and_persists_auto_provenan
     let requests = server.requests(2);
     assert_eq!(requests.len(), 2);
     assert!(requests[0].starts_with("GET /players/20000/matches?"));
-    assert!(requests[0].contains("limit=100"));
+    assert!(requests[0].contains("limit=500"));
+    assert!(requests[0].contains("significant=0"));
+    assert!(requests[0].contains("project=match_id"));
+    assert!(requests[0].contains("project=start_time"));
     assert_eq!(requests[1], "GET /matches/9002 HTTP/1.1");
 
     let connection = Connection::open(&path).expect("inspect discovery database");
@@ -1222,6 +1251,47 @@ async fn production_discovery_reuses_one_detail_fetch_and_persists_auto_provenan
         )
         .expect("count discovered Wrapped facts");
     assert_eq!(wrapped, 5);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn discovery_stops_at_local_daily_quota_before_http_or_database_work() {
+    let (_directory, path) = migrated();
+    let server = RouteServer::start(Vec::new());
+    let mut quota_config = OpenDotaHttpConfig::new(&server.base_url, None);
+    quota_config.requests_per_day = Some(0);
+    quota_config.rate_limit_wait = Duration::from_millis(1);
+    let quota_services = Arc::new(
+        OpenDotaRuntimeServices::with_config(quota_config).expect("quota-limited services"),
+    );
+    let provider =
+        EnrichmentRegistrationProvider::new(&path, &application_config(), quota_services)
+            .expect("compose quota-limited provider");
+    let responder = Arc::new(CapturingResponder::default());
+
+    registry(&provider)
+        .command_handler("enrich")
+        .expect("enrich command handler")
+        .handle(
+            command(
+                "enrich",
+                "discover",
+                vec![option("dry_run", InteractionValue::Boolean(false))],
+                ADMIN,
+                Some(GUILD),
+                None,
+            ),
+            responder.clone(),
+        )
+        .await
+        .expect("quota stop response");
+
+    let captured = responder.captured.lock().expect("response capture");
+    assert_eq!(captured.deferred, [true]);
+    assert_eq!(captured.followups.len(), 1);
+    assert!(captured.followups[0].content.contains("quota protection"));
+    assert!(captured.followups[0].content.contains("Daily: 0/0"));
+    assert!(captured.original_edits.is_empty());
+    assert!(server.requests(0).is_empty());
 }
 
 #[test]
@@ -1778,15 +1848,15 @@ fn seed_stale_parsed_matches(path: &std::path::Path, count: i64) {
 
 #[tokio::test]
 async fn refresh_parsed_drains_a_backlog_larger_than_one_chunk() {
-    // The sweep processes 25 matches per chunk. A backlog of 30 therefore only
-    // completes if the handler loops, which is the whole point of the command
-    // reporting "runs until the backlog is clear" rather than a fixed batch.
+    // The fixed snapshot is reported in 25-match chunks. A backlog of 30
+    // therefore verifies that every candidate from the initial snapshot is
+    // processed, not just the first progress chunk.
     const BACKLOG: i64 = 30;
     let (_directory, path) = migrated();
     let catalog = dotabase();
     seed_stale_parsed_matches(&path, BACKLOG);
     let bodies = (0..BACKLOG)
-        .map(|_| manual_match_payload())
+        .map(|_| parsed_match_payload())
         .collect::<Vec<_>>();
     let server = RouteServer::start(bodies);
     let shared_services = services(&server);
@@ -1822,17 +1892,116 @@ async fn refresh_parsed_drains_a_backlog_larger_than_one_chunk() {
         summary
             .content
             .contains(&format!("Matches processed: {BACKLOG}")),
-        "the sweep must drain past a single chunk, got: {}",
+        "the sweep must process past a single chunk, got: {}",
+        summary.content
+    );
+    assert!(
+        summary
+            .content
+            .contains(&format!("Position inputs complete: {BACKLOG}")),
+        "complete parsed responses should be verified, got: {}",
         summary.content
     );
 
-    // And the queue is genuinely empty afterwards, not merely attempted.
+    // The queue is genuinely empty because all required parsed fields landed,
+    // not merely because an attempt counter hid the rows.
     let remaining = MatchRepository::new(&path)
-        .matches_missing_parsed_stats(Some(GUILD as i64), 100, 1)
+        .matches_missing_parsed_stats(Some(GUILD as i64), 100)
         .expect("remaining candidates");
     assert!(
         remaining.is_empty(),
         "every match should be accounted for, {} left",
         remaining.len()
+    );
+}
+
+#[tokio::test]
+async fn refresh_parsed_keeps_partial_responses_eligible_for_a_later_run() {
+    let (_directory, path) = migrated();
+    let catalog = dotabase();
+    seed_stale_parsed_matches(&path, 1);
+    let server = RouteServer::start(vec![manual_match_payload(), parsed_match_payload()]);
+    let shared_services = services(&server);
+    let provider = EnrichmentRegistrationProvider::with_dotabase_path(
+        &path,
+        &application_config(),
+        Arc::clone(&shared_services),
+        catalog.path(),
+    )
+    .expect("compose enrichment provider");
+    let responder = Arc::new(CapturingResponder::default());
+    let handler = registry(&provider)
+        .command_handler("enrich")
+        .expect("enrich command handler");
+
+    handler
+        .handle(
+            command(
+                "enrich",
+                "discover",
+                vec![option("refresh_parsed", InteractionValue::Boolean(true))],
+                ADMIN,
+                Some(GUILD),
+                None,
+            ),
+            responder.clone(),
+        )
+        .await
+        .expect("first parsed refresh");
+
+    {
+        let captured = responder.captured.lock().expect("response capture");
+        let summary = captured.followups.last().expect("first refresh summary");
+        assert!(
+            summary.content.contains("Still incomplete: 1"),
+            "a successful but unparsed response must stay visible: {}",
+            summary.content
+        );
+    }
+    let repository = MatchRepository::new(&path);
+    assert_eq!(
+        repository
+            .matches_missing_parsed_stats(Some(GUILD as i64), 100)
+            .expect("partial candidates"),
+        vec![(1_000, 9_000)],
+        "an attempted partial response must remain eligible"
+    );
+    let attempts: i64 = Connection::open(&path)
+        .expect("inspect attempts")
+        .query_row(
+            "SELECT parsed_refresh_attempts FROM matches WHERE guild_id=?1 AND match_id=1000",
+            [GUILD as i64],
+            |row| row.get(0),
+        )
+        .expect("attempt count");
+    assert_eq!(attempts, 1);
+
+    handler
+        .handle(
+            command(
+                "enrich",
+                "discover",
+                vec![option("refresh_parsed", InteractionValue::Boolean(true))],
+                ADMIN,
+                Some(GUILD),
+                None,
+            ),
+            responder.clone(),
+        )
+        .await
+        .expect("second parsed refresh");
+
+    let captured = responder.captured.lock().expect("response capture");
+    let summary = captured.followups.last().expect("second refresh summary");
+    assert!(
+        summary.content.contains("Position inputs complete: 1"),
+        "a later parsed response should clear the candidate: {}",
+        summary.content
+    );
+    assert!(
+        repository
+            .matches_missing_parsed_stats(Some(GUILD as i64), 100)
+            .expect("completed candidates")
+            .is_empty()
     );
 }

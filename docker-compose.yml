@@ -16,6 +16,9 @@ services:
     environment:
       DB_PATH: /app/data/cama_shuffle.db
       BOT_RUNTIME: rust
+      # Steam static image caches live on the persisted data mount. Override
+      # STEAM_IMAGE_CACHE_ROOT when deploying to another durable volume.
+      STEAM_IMAGE_CACHE_ROOT: ${STEAM_IMAGE_CACHE_ROOT:-/app/data/image-cache}
     command: ["serve"]
     user: "1001:1001"
     cap_add:

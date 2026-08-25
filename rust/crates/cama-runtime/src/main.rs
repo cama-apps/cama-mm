@@ -1,7 +1,7 @@
 //! Cama Rust process entrypoint.
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -438,7 +438,13 @@ async fn run_serve() -> ExitCode {
     // serving without this production dependency would silently regress the
     // Python lift-and-shift contract.
     let usage_monitor = UsageMonitor::default();
-    let opendota = match application_config.opendota_services() {
+    let quota_state_path = config
+        .db_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .join("cache/opendota/daily-quota-v1");
+    let opendota = match application_config.opendota_services_with_quota_path(quota_state_path) {
         Ok(services) => Arc::new(services.with_request_observer({
             let usage_monitor = usage_monitor.clone();
             move |provider| usage_monitor.record_api_request(provider)

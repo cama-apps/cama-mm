@@ -67,7 +67,8 @@ The bot uses a **Glicko-2 rating system** for team balancing. Players are matche
    - Optional variables you can include:
      ```
      DB_PATH=/path/to/cama_shuffle.db   # overrides the default sqlite file
-     OPENDOTA_API_KEY=your_opendota_key  # unlocks the 1200 req/min rate limit
+     OPENDOTA_API_KEY=your_opendota_key  # optional paid OpenDota premium key
+     STEAM_IMAGE_CACHE_ROOT=/path/to/cache # persists downloaded Steam CDN images
      DIG_CHANNEL_ID=123456789012345678   # gates /dig commands and routes output to this channel
      LOBBY_CHANNEL_ID=123456789012345678 # regular lobby embeds post here instead of the command channel
      LOWSKILL_LOBBY_CHANNEL_ID=234567890123456789 # optional Whine & Cheese channel; defaults to LOBBY_CHANNEL_ID
@@ -198,7 +199,7 @@ Record a match result or abort the match.
 
 **Options:**
 - `result`: Choose "Radiant Won", "Dire Won", or "Abort Match"
-- `dotabuff_match_id` (optional): Dotabuff match ID for automatic data fetching
+- `dotabuff_match_id` (optional): Valve/Dotabuff match ID; statistics are fetched through OpenDota
 
 ### Betting
 
@@ -340,11 +341,26 @@ Set these in your `.env` file:
 |----------|---------|-------------|
 | `ADMIN_USER_IDS` | [] | Comma-separated Discord user IDs for admin access |
 | `DB_PATH` | cama_shuffle.db | Database file path |
-| `OPENDOTA_API_KEY` | None | OpenDota API key for higher rate limits (60→1200 req/min) |
+| `OPENDOTA_API_KEY` | None | Paid OpenDota premium key. OpenDota currently publishes 60/min and 3,000/day anonymously, and 300/min keyed; the bot keeps headroom with local 50/min and 250/min caps. |
+| `ENRICHMENT_HISTORY_LIMIT` | `500` | Recent OpenDota matches inspected per linked account during match discovery. The request includes insignificant/non-standard matches and projects the requested identity/time fields (plus OpenDota's small mandatory columns). |
+| `ENRICHMENT_REFRESH_INTERVAL_MS` | `1250` | Minimum delay between parsed-stat repair candidates (at most 48/min per run, with the shared aggregate limiter still enforced). |
+| `STEAM_IMAGE_CACHE_ROOT` | `.cache` | Writable directory for persistent Trivia and Scout Steam CDN image caches. Docker defaults this to `/app/data/image-cache`. |
 | `DIG_CHANNEL_ID` | None | Gates `/dig` commands to this channel and routes public dig output there |
 | `LOBBY_CHANNEL_ID` | None | If set, lobby embeds post here instead of the command channel |
 | `LOWSKILL_LOBBY_CHANNEL_ID` | None | Optional Whine & Cheese lobby channel; falls back to `LOBBY_CHANNEL_ID` |
 | `PET_CHANNEL_ID` | None | Gates the entire pets feature: without it the `/pet` cog is not loaded and pet hooks no-op |
+
+OpenDota is the bot's Dota statistics API. Dotabuff URLs and match links are
+parsed or displayed locally; the bot does not poll or scrape Dotabuff. Every
+OpenDota wire attempt, including a retry after a server error, is metered by one
+shared limiter. Anonymous daily use is recorded beside the SQLite database at
+`cache/opendota/daily-quota-v1`, so restarting the process cannot reset the
+3,000-call UTC-day budget. A 429 opens a shared cooldown instead of being
+retried. `/admin health` reports the live counters and ledger state.
+
+Trivia and Scout image files under `STEAM_IMAGE_CACHE_ROOT` are reused across
+requests and process restarts. The Docker default places them on the existing
+`/app/data` persistent volume under the dedicated `image-cache/` directory.
 
 ### Advanced Configuration
 

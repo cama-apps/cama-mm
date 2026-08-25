@@ -27,7 +27,7 @@
       ]
     },
     {
-      "id": "rate-limit-then-success",
+      "id": "rate-limit-opens-circuit",
       "request": {"method": "GET", "path": "/players/12345"},
       "responses": [
         {
@@ -36,12 +36,6 @@
           "content_type": "application/json",
           "body": "rate_limited.json",
           "sha256": "894e8f11bf936a78f6de32f7798b5c99c9d35f36d746fdce3a498154e0fd6ce2"
-        },
-        {
-          "status": 200,
-          "content_type": "application/json",
-          "body": "player_success.json",
-          "sha256": "5ff18685a3a19c702264b307a0a381dc483c7ea353f22422582b7e7c1837b457"
         }
       ]
     },

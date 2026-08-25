@@ -196,25 +196,24 @@ async fn external_opendota_success_recording_replays_through_public_client() {
 }
 
 #[tokio::test]
-async fn external_opendota_retry_after_recording_replays_then_succeeds() {
+async fn external_opendota_retry_after_recording_opens_circuit_without_replay() {
     let server = FixtureServer::start(vec![
         RecordedResponse::json(429, RATE_LIMITED).with_header("Retry-After", "1"),
-        RecordedResponse::json(200, PLAYER_SUCCESS),
     ]);
     let client = client_for(&server, vec![Duration::ZERO]);
     let started = Instant::now();
 
-    let value = client
-        .get_player_data(12_345)
-        .await
-        .expect("recorded retry response");
-    assert_eq!(value["profile"]["personaname"], "fixture-player");
+    assert!(client.get_player_data(12_345).await.is_none());
     assert!(
-        started.elapsed() >= Duration::from_millis(900),
-        "Retry-After was not honored: {:?}",
+        started.elapsed() < Duration::from_millis(900),
+        "429 should open the shared circuit without sleeping and replaying: {:?}",
         started.elapsed()
     );
-    assert_eq!(server.wait_for_requests(2).len(), 2);
+    assert_eq!(server.wait_for_requests(1).len(), 1);
+    let quota = client.quota_snapshot().await;
+    assert_eq!(quota.rate_limited_responses, 1);
+    assert_eq!(quota.upstream_remaining_minute, Some(0));
+    assert!(quota.cooldown_remaining_seconds.is_some());
 }
 
 #[tokio::test]

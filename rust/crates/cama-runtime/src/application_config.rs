@@ -113,7 +113,9 @@ pub struct Values {
     pub economy_inflation_ceiling: f64,
     pub economy_normal_annual_rate: f64,
     pub enrichment_discovery_time_window: i64,
+    pub enrichment_history_limit: i64,
     pub enrichment_min_player_match: i64,
+    pub enrichment_refresh_interval_ms: i64,
     pub enrichment_retry_delays: Vec<i64>,
     pub exclusion_penalty_weight: f64,
     pub first_game_pool_daily_amount: i64,
@@ -452,7 +454,12 @@ impl ApplicationConfig {
                 economy_inflation_ceiling: p.f64("ECONOMY_INFLATION_CEILING", 0.02),
                 economy_normal_annual_rate: p.f64("ECONOMY_NORMAL_ANNUAL_RATE", 0.02),
                 enrichment_discovery_time_window: p.i64("ENRICHMENT_DISCOVERY_TIME_WINDOW", 7200),
+                enrichment_history_limit: p.i64("ENRICHMENT_HISTORY_LIMIT", 500),
                 enrichment_min_player_match: p.i64("ENRICHMENT_MIN_PLAYER_MATCH", 10),
+                // Parsed-stat repair is intentionally slower than the anonymous
+                // OpenDota ceiling. The shared transport limiter still meters
+                // every retry and all other consumers across the process.
+                enrichment_refresh_interval_ms: p.i64("ENRICHMENT_REFRESH_INTERVAL_MS", 1250),
                 enrichment_retry_delays: p
                     .i64_list("ENRICHMENT_RETRY_DELAYS", &[1, 5, 20, 60, 180]),
                 exclusion_penalty_weight: p.f64("EXCLUSION_PENALTY_WEIGHT", 80.0),
@@ -668,6 +675,22 @@ impl ApplicationConfig {
         )
     }
 
+    /// Construct OpenDota services with a durable anonymous daily-quota
+    /// ledger. Production places this beside the database on its persistent
+    /// data volume so restarts cannot reset the 3,000-call allowance.
+    pub fn opendota_services_with_quota_path(
+        &self,
+        daily_quota_state_path: impl Into<std::path::PathBuf>,
+    ) -> Result<OpenDotaRuntimeServices, OpenDotaHttpBuildError> {
+        OpenDotaRuntimeServices::from_production_settings_with_quota_path(
+            self.opendota_api_key
+                .as_ref()
+                .map(|secret| secret.expose().to_owned()),
+            &self.values.enrichment_retry_delays,
+            Some(daily_quota_state_path.into()),
+        )
+    }
+
     /// Map the Python composition-root inputs into Rust's concrete service
     /// graph without raw string retention or any additional environment read.
     #[must_use]
@@ -852,6 +875,9 @@ mod tests {
         assert_eq!(config.values.auto_spectator_bet_top_percentage, 0.02);
         assert_eq!(config.values.pingedash_cost, 10);
         assert_eq!(config.values.recent_match_penalty_weight, 230.0);
+        assert_eq!(config.values.enrichment_history_limit, 500);
+        assert_eq!(config.values.enrichment_refresh_interval_ms, 1_250);
+        assert_eq!(60_000 / config.values.enrichment_refresh_interval_ms, 48);
         assert!(!config.values.gamba_synthetic_members_enabled);
         assert_eq!(config.channels.gamba, None);
         assert_eq!(config.channels.mafia, MAFIA_CHANNEL_ID);
@@ -1110,6 +1136,6 @@ mod tests {
     #[test]
     fn configuration_catalog_entries_are_unique() {
         let catalog = config_py_env_keys().collect::<BTreeSet<_>>();
-        assert_eq!(catalog.len(), 216, "catalog entries must remain unique");
+        assert_eq!(catalog.len(), 218, "catalog entries must remain unique");
     }
 }

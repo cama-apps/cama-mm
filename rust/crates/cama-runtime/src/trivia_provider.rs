@@ -18,7 +18,7 @@ use cama_app::mana_effects_service::{ManaRecord, effects_from_record};
 use cama_app::service_container::PersistentVanityTaxService;
 use cama_app::trivia_data::TriviaDataRegistry;
 use cama_app::trivia_image_cache::{
-    CachedTriviaImage, PRODUCTION_TRIVIA_CACHE_PATH, TriviaImageCache,
+    CachedTriviaImage, TriviaImageCache, production_trivia_cache_path,
 };
 use cama_app::trivia_questions::{TriviaCatalog, TriviaQuestion, TriviaRandom, generate_question};
 use cama_db::bankruptcy_repository::BankruptcyRepository;
@@ -97,7 +97,7 @@ impl TriviaRegistrationProvider {
         Self::from_paths(
             database_path,
             PRODUCTION_DOTABASE_PATH,
-            PRODUCTION_TRIVIA_CACHE_PATH,
+            production_trivia_cache_path(),
             config,
             vanity_tax,
             discord,

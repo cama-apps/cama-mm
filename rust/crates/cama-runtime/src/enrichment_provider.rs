@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -23,13 +24,13 @@ use cama_app::match_discovery::{
     EnrichmentSource, InternalMatchId, MatchDiscoveryService, MatchEnrichmentService,
     OpenSkillEnrichmentPort, OpenSkillEnrichmentResult, SteamId, SystemDiscoveryClock,
 };
-use cama_app::opendota_http::{OpenDotaHttpClient, OpenDotaRuntimeServices};
+use cama_app::opendota_http::{OpenDotaHttpClient, OpenDotaQuotaSnapshot, OpenDotaRuntimeServices};
 use cama_app::opendota_player_service::{OpenDotaPlayerApiPort, did_win};
 use cama_app::trivia_data::TriviaDataRegistry;
 use cama_db::bankruptcy_repository::BankruptcyRepository;
 use cama_db::core_repositories::{
-    EnrichmentJsonValue, MatchParticipant, MatchRepository, MatchSummary, PlayerMatch,
-    PlayerMatchParticipant, PlayerRepository,
+    EnrichmentJsonValue, MatchParticipant, MatchRepository, MatchSummary, ParsedStatsCoverage,
+    PlayerMatch, PlayerMatchParticipant, PlayerRepository,
 };
 use cama_db::guild_config_repository::GuildConfigRepository;
 use cama_db::match_correction_repository::MatchCorrectionRepository;
@@ -246,7 +247,10 @@ impl EnrichmentRegistrationProvider {
             minimum_players_with_steam_id: 5,
             minimum_roster_matches: nonnegative_usize(config.values.enrichment_min_player_match),
             time_window_seconds: config.values.enrichment_discovery_time_window,
-            history_limit: 100,
+            // OpenDota accepts a bounded `limit` on this endpoint. The
+            // transport projects only match_id/start_time, so looking farther
+            // back does not add requests or pull full historical stat rows.
+            history_limit: nonnegative_usize(config.values.enrichment_history_limit).clamp(1, 500),
             batch_limit: 1_000,
             match_details_cache_size: 32,
             transient_retry_delay: Duration::ZERO,
@@ -267,6 +271,11 @@ impl EnrichmentRegistrationProvider {
                     dotabase_path,
                 ))),
                 match_view_timeout,
+                parsed_refresh_running: AtomicBool::new(false),
+                parsed_refresh_interval: Duration::from_millis(
+                    u64::try_from(config.values.enrichment_refresh_interval_ms.max(0))
+                        .unwrap_or(u64::MAX),
+                ),
                 enrichment_retry_delays: config
                     .values
                     .enrichment_retry_delays
@@ -539,8 +548,35 @@ struct EnrichmentHandler {
     opendota: Arc<OpenDotaRuntimeServices>,
     hero_catalog: Arc<HeroCatalog>,
     match_view_timeout: Duration,
+    /// Prevent two administrators from refreshing the same fixed snapshot at
+    /// once. The transport limiter would still protect the aggregate rate,
+    /// but duplicate calls would waste the daily quota.
+    parsed_refresh_running: AtomicBool,
+    /// Extra maintenance pacing below the shared process-wide OpenDota
+    /// limiter. Retries and concurrent consumers are still metered globally.
+    parsed_refresh_interval: Duration,
     enrichment_retry_delays: Vec<Duration>,
     admin_user_ids: BTreeSet<i64>,
+}
+
+struct ParsedRefreshRunGuard<'a>(&'a AtomicBool);
+
+impl Drop for ParsedRefreshRunGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+fn try_claim_parsed_refresh(flag: &AtomicBool) -> Option<ParsedRefreshRunGuard<'_>> {
+    flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .ok()
+        .map(|_| ParsedRefreshRunGuard(flag))
+}
+
+fn parsed_stats_complete(coverage: ParsedStatsCoverage) -> bool {
+    coverage.participants > 0
+        && coverage.with_lane_role == coverage.participants
+        && coverage.with_last_hits_at_10 == coverage.participants
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -790,6 +826,21 @@ impl EnrichmentHandler {
         }
     }
 
+    async fn reject_when_opendota_blocked(
+        &self,
+        responder: &Arc<dyn InteractionResponder>,
+    ) -> Result<bool, InteractionHandlerError> {
+        let quota = self.opendota.quota_snapshot().await;
+        if !quota.request_is_blocked() {
+            return Ok(false);
+        }
+        responder
+            .followup(InteractionResponse::message(opendota_quota_stop_message(&quota)).ephemeral())
+            .await
+            .map_err(response_error)?;
+        Ok(true)
+    }
+
     async fn handle_set_league(
         &self,
         context: CommandContext,
@@ -992,6 +1043,32 @@ impl EnrichmentHandler {
     }
 }
 
+fn opendota_quota_stop_message(quota: &OpenDotaQuotaSnapshot) -> String {
+    let daily = quota.local_daily_limit.map_or_else(
+        || "premium (no local daily cap)".to_owned(),
+        |limit| format!("{}/{limit}", quota.local_daily_used),
+    );
+    let minute = quota
+        .upstream_remaining_minute
+        .map_or_else(|| "unknown".to_owned(), |remaining| remaining.to_string());
+    let upstream_day = quota
+        .upstream_remaining_day
+        .map_or_else(|| "unknown".to_owned(), |remaining| remaining.to_string());
+    let cooldown = quota
+        .cooldown_remaining_seconds
+        .map_or_else(|| "none".to_owned(), |seconds| format!("{seconds}s"));
+    let ledger = if quota.local_daily_limit.is_none() {
+        "not required"
+    } else if quota.persistence_healthy {
+        "healthy"
+    } else {
+        "unavailable"
+    };
+    format!(
+        "OpenDota quota protection stopped this operation. No additional API requests will be sent. Daily: {daily}; upstream remaining: minute {minute}, day {upstream_day}; cooldown: {cooldown}; ledger: {ledger}. Try again after the limit resets."
+    )
+}
+
 impl EnrichmentHandler {
     async fn handle_enrich_match(
         &self,
@@ -1140,6 +1217,14 @@ impl EnrichmentHandler {
         if !defer(&responder, true).await {
             return Ok(());
         }
+        // The two preview-only maintenance modes do not touch OpenDota. Every
+        // other discovery mode is rejected before scanning or mutating rows
+        // when the shared transport has reached a published upstream limit.
+        if !(dry_run && (refresh_parsed || refill))
+            && self.reject_when_opendota_blocked(&responder).await?
+        {
+            return Ok(());
+        }
         if refresh_parsed {
             return self
                 .handle_refresh_parsed(guild_id, dry_run, responder)
@@ -1177,76 +1262,131 @@ impl EnrichmentHandler {
             .map_err(response_error)
     }
 
-    /// Re-enrich every match whose stored payload predates OpenDota parsing
-    /// the replay, draining the queue rather than stopping at a fixed batch.
+    /// Re-enrich matches whose stored payload predates OpenDota parsing the
+    /// replay.
     ///
-    /// Work proceeds in chunks so progress stays visible and each chunk's
-    /// writes commit as they go. The attempt counter makes the sweep
-    /// resumable: a run cut short by a restart or an expired interaction token
-    /// leaves the processed matches marked, so re-running continues rather
-    /// than repeating. That also bounds the loop - every iteration either
-    /// marks progress or finds the queue empty.
+    /// Each invocation processes one fixed snapshot. A response that is still
+    /// unparsed remains eligible for a later invocation, without being picked
+    /// repeatedly by this one. Maintenance requests are deliberately paced
+    /// below the anonymous OpenDota minute ceiling in addition to the shared
+    /// process-wide limiter, which also accounts for retries and other callers.
     async fn handle_refresh_parsed(
         &self,
         guild_id: i64,
         dry_run: bool,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
-        /// Matches per chunk. Small enough that a cancelled run loses little,
-        /// large enough that per-chunk overhead is irrelevant beside the
-        /// network calls.
+        /// Matches per progress update. Small enough that a cancelled run
+        /// loses little visibility, while writes still commit one match at a
+        /// time inside the enrichment service.
         const CHUNK: usize = 25;
-        const MAX_ATTEMPTS: i64 = 1;
-        /// Backstop against a pathological loop; far above any real backlog.
+        /// Backstop against an unexpectedly large maintenance run.
         const MAX_TOTAL: usize = 5_000;
 
-        let mut processed = 0_usize;
-        let mut refreshed = 0_usize;
-        let mut errors: Vec<(i64, String)> = Vec::new();
-        let mut previewed = 0_usize;
-
-        loop {
-            let matches = self.matches.clone();
-            let candidates = run_blocking(move || {
-                matches
-                    .matches_missing_parsed_stats(Some(guild_id), CHUNK, MAX_ATTEMPTS)
-                    .map_err(|error| error.to_string())
-            })
-            .await
-            .map_err(InteractionHandlerError::from)?;
-            if candidates.is_empty() || processed >= MAX_TOTAL {
-                break;
-            }
-
-            if dry_run {
-                // A preview writes nothing, so the queue would never drain.
-                // Report the first chunk and stop.
-                previewed = candidates.len();
-                processed += previewed;
-                break;
-            }
-
-            if processed == 0 {
-                responder
+        let _run_guard = if dry_run {
+            None
+        } else {
+            let Some(guard) = try_claim_parsed_refresh(&self.parsed_refresh_running) else {
+                return responder
                     .followup(
                         InteractionResponse::message(
-                            "Re-enriching matches missing parsed stats. This runs until the backlog is clear.",
+                            "A parsed-stats refresh is already running. Let it finish before starting another one.",
                         )
                         .ephemeral(),
                     )
                     .await
-                    .map_err(response_error)?;
-            }
+                    .map_err(response_error);
+            };
+            Some(guard)
+        };
 
+        let matches = self.matches.clone();
+        let mut candidates = run_blocking(move || {
+            matches
+                .matches_missing_parsed_stats(Some(guild_id), MAX_TOTAL + 1)
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(InteractionHandlerError::from)?;
+        let has_more = candidates.len() > MAX_TOTAL;
+        candidates.truncate(MAX_TOTAL);
+
+        if candidates.is_empty() {
+            return responder
+                .followup(
+                    InteractionResponse::message(
+                        "No matches are missing parsed stats. Every enriched match already has lane and farm data.",
+                    )
+                    .ephemeral(),
+                )
+                .await
+                .map_err(response_error);
+        }
+
+        if dry_run {
+            let mut lines = vec![
+                "**Parsed Stats Refresh (DRY RUN)**".to_owned(),
+                String::new(),
+                format!(
+                    "{} match(es) would be refreshed; no API requests or writes were made.",
+                    candidates.len()
+                ),
+            ];
+            if has_more {
+                lines.push(format!(
+                    "At least one additional match is queued beyond the {MAX_TOTAL} match safety limit."
+                ));
+            }
+            return responder
+                .followup(InteractionResponse::message(lines.join("\n")).ephemeral())
+                .await
+                .map_err(response_error);
+        }
+
+        responder
+            .followup(
+                InteractionResponse::message(format!(
+                    "Re-enriching {} match(es) missing parsed stats from a fixed snapshot. Requests are paced at least {} ms apart.",
+                    candidates.len(),
+                    self.parsed_refresh_interval.as_millis()
+                ))
+                .ephemeral(),
+            )
+            .await
+            .map_err(response_error)?;
+
+        let mut processed = 0_usize;
+        let mut refreshed = 0_usize;
+        let mut partials: Vec<(i64, usize, usize, ParsedStatsCoverage)> = Vec::new();
+        let mut errors: Vec<(i64, String)> = Vec::new();
+        let mut quota_stopped = false;
+
+        for candidates in candidates.chunks(CHUNK) {
             let enrichment = Arc::clone(&self.enrichment);
             let matches = self.matches.clone();
-            let chunk_size = candidates.len();
-            let chunk_errors = run_blocking(move || {
+            let opendota = Arc::clone(&self.opendota);
+            let candidates = candidates.to_vec();
+            let refresh_interval = self.parsed_refresh_interval;
+            let (
+                chunk_refreshed,
+                chunk_partials,
+                chunk_errors,
+                chunk_processed,
+                chunk_quota_stopped,
+            ) = run_blocking(move || {
+                let mut chunk_refreshed = 0_usize;
+                let mut chunk_partials = Vec::new();
                 let mut chunk_errors = Vec::new();
+                let mut chunk_processed = 0_usize;
+                let mut quota_stopped = false;
                 for (match_id, valve_match_id) in candidates {
-                    // Counted before the attempt so a panic or error cannot
-                    // leave the match pinned at the head of every future sweep.
-                    let _ = matches.mark_parsed_refresh_attempt(match_id, Some(guild_id));
+                    let quota = opendota
+                        .quota_snapshot_blocking()
+                        .map_err(|error| error.to_string())?;
+                    if quota.request_is_blocked() {
+                        quota_stopped = true;
+                        break;
+                    }
                     // Keep whatever provenance the match already carries: this
                     // is a data refresh, not a re-identification, and
                     // relabelling an auto-discovered match as manual would
@@ -1268,66 +1408,124 @@ impl EnrichmentHandler {
                         skip_validation: true,
                         opendota_match_data: None,
                     });
-                    if !result.success {
+                    chunk_processed += 1;
+
+                    if let Err(error) =
+                        matches.mark_parsed_refresh_attempt(match_id, Some(guild_id))
+                    {
+                        chunk_errors.push((
+                            match_id,
+                            format!("refreshed, but could not record the attempt: {error}"),
+                        ));
+                    } else if !result.success {
                         chunk_errors.push((
                             match_id,
                             result.error.unwrap_or_else(|| "Unknown".to_owned()),
                         ));
+                    } else {
+                        match matches.parsed_stats_coverage(match_id, Some(guild_id)) {
+                            Ok(coverage) if parsed_stats_complete(coverage) => {
+                                chunk_refreshed += 1;
+                            }
+                            Ok(coverage) => chunk_partials.push((
+                                match_id,
+                                result.players_enriched,
+                                result.players_not_found.len(),
+                                coverage,
+                            )),
+                            Err(error) => chunk_errors.push((
+                                match_id,
+                                format!("could not verify parsed-field coverage: {error}"),
+                            )),
+                        }
+                    }
+
+                    if !refresh_interval.is_zero() {
+                        std::thread::sleep(refresh_interval);
                     }
                 }
-                Ok::<_, String>(chunk_errors)
+                Ok::<_, String>((
+                    chunk_refreshed,
+                    chunk_partials,
+                    chunk_errors,
+                    chunk_processed,
+                    quota_stopped,
+                ))
             })
             .await
             .map_err(InteractionHandlerError::from)?;
 
-            processed += chunk_size;
-            refreshed += chunk_size - chunk_errors.len();
+            processed += chunk_processed;
+            refreshed += chunk_refreshed;
+            partials.extend(chunk_partials);
             errors.extend(chunk_errors);
+            quota_stopped |= chunk_quota_stopped;
 
             // Progress is best-effort: once the interaction token expires this
             // edit fails, but the sweep keeps going and its writes still land.
             let _ = responder
                 .edit_original(
                     InteractionResponse::message(format!(
-                        "Refreshing parsed stats... {refreshed} refreshed, {} error(s), {processed} processed so far.",
+                        "Refreshing parsed stats... {refreshed} complete, {} still incomplete, {} error(s), {processed} processed so far.",
+                        partials.len(),
                         errors.len()
                     ))
                     .ephemeral(),
                 )
                 .await;
+            if quota_stopped {
+                break;
+            }
         }
 
-        if processed == 0 {
+        if processed == 0 && quota_stopped {
+            let quota = self.opendota.quota_snapshot().await;
             return responder
                 .followup(
-                    InteractionResponse::message(
-                        "No matches are missing parsed stats. Every enriched match already has lane and farm data.",
-                    )
-                    .ephemeral(),
+                    InteractionResponse::message(opendota_quota_stop_message(&quota)).ephemeral(),
                 )
                 .await
                 .map_err(response_error);
         }
 
-        let mut lines = if dry_run {
-            vec![
-                "**Parsed Stats Refresh (DRY RUN)**".to_owned(),
-                String::new(),
-                format!("{previewed} match(es) would be refreshed in the first chunk."),
-                "A preview writes nothing, so the full backlog is not counted here.".to_owned(),
-            ]
-        } else {
-            vec![
-                "**Parsed Stats Refresh Complete**".to_owned(),
-                String::new(),
-                format!("Matches processed: {processed}"),
-                format!("Successfully refreshed: {refreshed}"),
-                format!("Errors: {}", errors.len()),
-            ]
-        };
-        if processed >= MAX_TOTAL {
+        let mut lines = vec![
+            "**Parsed Stats Refresh Complete**".to_owned(),
+            String::new(),
+            format!("Matches processed: {processed}"),
+            format!("Position inputs complete: {refreshed}"),
+            format!("Still incomplete: {}", partials.len()),
+            format!("Errors: {}", errors.len()),
+        ];
+        if has_more {
             lines.push(format!(
                 "Stopped at the {MAX_TOTAL} match safety limit - re-run to continue."
+            ));
+        }
+        if quota_stopped {
+            lines.push(
+                "Stopped at the OpenDota quota boundary; unattempted matches remain queued for the next run."
+                    .to_owned(),
+            );
+        }
+        if !partials.is_empty() {
+            lines.extend([
+                String::new(),
+                "**Still incomplete (eligible next run):**".to_owned(),
+            ]);
+            lines.extend(partials.iter().take(5).map(
+                |(match_id, players_enriched, players_not_found, coverage)| {
+                    format!(
+                        "  #{match_id}: {players_enriched} player(s) updated, {players_not_found} unmatched; lane {}/{}, gold@10 {}/{}, last hits@10 {}/{}, roles {}/{}",
+                        coverage.with_lane_role,
+                        coverage.participants,
+                        coverage.with_gold_at_10,
+                        coverage.participants,
+                        coverage.with_last_hits_at_10,
+                        coverage.participants,
+                        coverage.with_derived_role,
+                        coverage.participants,
+                    )
+                },
             ));
         }
         if !errors.is_empty() {
@@ -1338,13 +1536,6 @@ impl EnrichmentHandler {
                     .take(5)
                     .map(|(match_id, error)| format!("  #{match_id}: {error}")),
             );
-        }
-        if !dry_run {
-            lines.extend([
-                String::new(),
-                "Run `/admin backfillroles` afterwards to derive positions from the refreshed data."
-                    .to_owned(),
-            ]);
         }
         responder
             .followup(InteractionResponse::message(lines.join("\n")).ephemeral())
@@ -1392,14 +1583,25 @@ impl EnrichmentHandler {
             .map_err(response_error)?;
 
         let enrichment = Arc::clone(&self.enrichment);
-        let processed = candidates.len();
-        let (refilled, errors) = run_blocking(move || {
+        let opendota = Arc::clone(&self.opendota);
+        let candidate_count = candidates.len();
+        let (refilled, errors, processed, quota_stopped) = run_blocking(move || {
             let mut refilled = Vec::new();
             let mut errors = Vec::new();
+            let mut processed = 0_usize;
+            let mut quota_stopped = false;
             for candidate in candidates {
                 if dry_run {
                     refilled.push((candidate.match_id, candidate.valve_match_id));
+                    processed += 1;
                     continue;
+                }
+                let quota = opendota
+                    .quota_snapshot_blocking()
+                    .map_err(|error| error.to_string())?;
+                if quota.request_is_blocked() {
+                    quota_stopped = true;
+                    break;
                 }
                 let result = enrichment.enrich_match(EnrichMatchRequest {
                     internal_match_id: cama_app::match_discovery::InternalMatchId(
@@ -1414,6 +1616,7 @@ impl EnrichmentHandler {
                     skip_validation: true,
                     opendota_match_data: None,
                 });
+                processed += 1;
                 if result.success {
                     refilled.push((candidate.match_id, candidate.valve_match_id));
                 } else {
@@ -1423,7 +1626,7 @@ impl EnrichmentHandler {
                     ));
                 }
             }
-            Ok::<_, String>((refilled, errors))
+            Ok::<_, String>((refilled, errors, processed, quota_stopped))
         })
         .await
         .map_err(InteractionHandlerError::from)?;
@@ -1437,6 +1640,12 @@ impl EnrichmentHandler {
             format!("Successfully refilled: {}", refilled.len()),
             format!("Errors: {}", errors.len()),
         ];
+        if quota_stopped {
+            lines.push(format!(
+                "Stopped at the OpenDota quota boundary; {} match(es) remain unattempted.",
+                candidate_count.saturating_sub(processed)
+            ));
+        }
         if !refilled.is_empty() && !dry_run {
             lines.extend([String::new(), "**Refilled:**".to_owned()]);
             lines.extend(

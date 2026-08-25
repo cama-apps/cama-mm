@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex as StdMutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -47,6 +47,7 @@ use cama_db::readycheck_repository::{
 };
 use cama_domain::embed_safety::EmbedModel;
 use cama_domain::formatting::{JOPACOIN_EMOJI_ID, JOPACOIN_EMOTE, format_duration_short};
+use cama_domain::rate_limiter::RateLimiter;
 use thiserror::Error;
 use tracing::{debug, warn};
 
@@ -81,6 +82,9 @@ const MANAGE_GUILD_PERMISSION: u64 = 1 << 5;
 const RECONCILE_ATTEMPTS: usize = 3;
 const RAW_REJECTION_TTL: Duration = Duration::from_secs(10);
 const RAW_LONG_REJECTION_TTL: Duration = Duration::from_secs(15);
+const LOBBY_MEMBERSHIP_RATE_LIMIT: usize = 3;
+const LOBBY_MEMBERSHIP_RATE_LIMIT_WINDOW: u64 = 30;
+const LOBBY_MEMBERSHIP_RATE_LIMIT_SCOPE: &str = "lobby-membership";
 
 pub type LiveLobbyService =
     LobbyService<SqliteLobbyPlayers, SqlitePendingMatches, SystemLobbyClock>;
@@ -501,6 +505,103 @@ struct LobbyRuntimeState {
     moderation: ModerationRepository,
     curfew: CurfewService,
     join_observer: RwLock<Option<Arc<dyn LobbyJoinObserver>>>,
+    membership_rate_limiter: StdMutex<RateLimiter>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LobbyMembershipRateLimitClaim {
+    at: f64,
+    guild_id: i64,
+    user_id: i64,
+}
+
+struct LobbyMembershipRateLimitLease {
+    state: Arc<LobbyRuntimeState>,
+    claim: Option<LobbyMembershipRateLimitClaim>,
+}
+
+impl LobbyMembershipRateLimitLease {
+    fn new(state: Arc<LobbyRuntimeState>, claim: LobbyMembershipRateLimitClaim) -> Self {
+        Self {
+            state,
+            claim: Some(claim),
+        }
+    }
+
+    fn take_claim(&mut self) -> Option<LobbyMembershipRateLimitClaim> {
+        self.claim.take()
+    }
+}
+
+impl Drop for LobbyMembershipRateLimitLease {
+    fn drop(&mut self) {
+        if let Some(claim) = self.claim.take() {
+            self.state.refund_membership_change(claim);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum LobbyMembershipRateLimitDecision {
+    Allowed(LobbyMembershipRateLimitClaim),
+    RetryAfter(u64),
+}
+
+impl LobbyRuntimeState {
+    fn claim_membership_change(
+        &self,
+        guild_id: AppGuildId,
+        user_id: AppUserId,
+    ) -> Result<LobbyMembershipRateLimitDecision, String> {
+        let at = unix_time_now();
+        let decision = self
+            .membership_rate_limiter
+            .lock()
+            .map_err(|_| "lobby membership rate-limit lock was poisoned".to_owned())?
+            .check_at(
+                at,
+                LOBBY_MEMBERSHIP_RATE_LIMIT_SCOPE,
+                guild_id.0,
+                user_id.0,
+                LOBBY_MEMBERSHIP_RATE_LIMIT,
+                LOBBY_MEMBERSHIP_RATE_LIMIT_WINDOW,
+            );
+        if decision.allowed {
+            Ok(LobbyMembershipRateLimitDecision::Allowed(
+                LobbyMembershipRateLimitClaim {
+                    at,
+                    guild_id: guild_id.0,
+                    user_id: user_id.0,
+                },
+            ))
+        } else {
+            Ok(LobbyMembershipRateLimitDecision::RetryAfter(
+                decision.retry_after_seconds,
+            ))
+        }
+    }
+
+    fn refund_membership_change(&self, claim: LobbyMembershipRateLimitClaim) {
+        match self.membership_rate_limiter.lock() {
+            Ok(mut limiter) => {
+                if !limiter.refund_at(
+                    claim.at,
+                    LOBBY_MEMBERSHIP_RATE_LIMIT_SCOPE,
+                    claim.guild_id,
+                    claim.user_id,
+                ) {
+                    debug!(
+                        guild_id = claim.guild_id,
+                        user_id = claim.user_id,
+                        "lobby membership rate-limit claim already expired"
+                    );
+                }
+            }
+            Err(error) => {
+                warn!(%error, "could not refund lobby membership rate-limit claim");
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1614,6 +1715,7 @@ impl LobbyRegistrationProvider {
             moderation: ModerationRepository::new(database_path),
             curfew: CurfewService::new(CurfewRepository::new(database_path)),
             join_observer: RwLock::new(None),
+            membership_rate_limiter: StdMutex::new(RateLimiter::new()),
         });
         Ok(Self {
             handler: Arc::new(LobbyInteractionHandler {
@@ -2647,7 +2749,8 @@ impl LobbyInteractionHandler {
         // contract that keeps existing lobbies visible to suspended users; the
         // join itself is refused downstream either way. The operation lock is
         // already held, so no concurrent creator can slip in between.
-        if self.state.service.get_lobby(scope).is_none()
+        let lobby_was_missing = self.state.service.get_lobby(scope).is_none();
+        if lobby_was_missing
             && let Some(window_description) =
                 self.active_curfew_window(scope, command.user_id).await?
         {
@@ -2659,6 +2762,29 @@ impl LobbyInteractionHandler {
             )
             .await;
         }
+        // Reserve the membership-change slot before creating a new lobby. The
+        // lease refunds automatically if lobby creation, Discord setup, or
+        // the eventual join fails, so a rate-limited `/lobby` cannot leave an
+        // empty durable lobby behind.
+        let mut rate_limit_lease = if lobby_was_missing {
+            match self
+                .state
+                .claim_membership_change(scope.guild_id, command.user_id)?
+            {
+                LobbyMembershipRateLimitDecision::Allowed(claim) => Some(
+                    LobbyMembershipRateLimitLease::new(Arc::clone(&self.state), claim),
+                ),
+                LobbyMembershipRateLimitDecision::RetryAfter(retry_after) => {
+                    return followup_ephemeral(
+                        &responder,
+                        &membership_rate_limit_message(retry_after),
+                    )
+                    .await;
+                }
+            }
+        } else {
+            None
+        };
         let state = Arc::clone(&self.state);
         let lobby = tokio::task::spawn_blocking(move || {
             state
@@ -2702,7 +2828,12 @@ impl LobbyInteractionHandler {
             .await
         {
             let join = self
-                .join_registered_player(scope, command.user_id, &player)
+                .join_registered_player_with_rate_limit_lease(
+                    scope,
+                    command.user_id,
+                    &player,
+                    rate_limit_lease.as_mut(),
+                )
                 .await?;
             if join.joined {
                 self.best_effort_join_publication(
@@ -2873,7 +3004,12 @@ impl LobbyInteractionHandler {
         }
 
         let join = self
-            .join_registered_player(scope, command.user_id, &player)
+            .join_registered_player_with_rate_limit_lease(
+                scope,
+                command.user_id,
+                &player,
+                rate_limit_lease.as_mut(),
+            )
             .await?;
         if join.joined {
             self.best_effort_join_publication(
@@ -2998,6 +3134,16 @@ impl LobbyInteractionHandler {
         if memberships.is_empty() {
             return followup_ephemeral(&responder, "⚠️ You're not in a lobby.").await;
         }
+        let rate_limit_claim = match self
+            .state
+            .claim_membership_change(guild_id, command.user_id)?
+        {
+            LobbyMembershipRateLimitDecision::Allowed(claim) => claim,
+            LobbyMembershipRateLimitDecision::RetryAfter(retry_after) => {
+                return followup_ephemeral(&responder, &membership_rate_limit_message(retry_after))
+                    .await;
+            }
+        };
         let mut left = Vec::new();
         let mut pinned = Vec::new();
         for kind in memberships {
@@ -3005,12 +3151,25 @@ impl LobbyInteractionHandler {
             let operation_lock = self.state.commands.scope_operation_lock(scope);
             let _guard = operation_lock.lock().await;
             let state = Arc::clone(&self.state);
-            let removed = tokio::task::spawn_blocking(move || {
+            let removal = tokio::task::spawn_blocking(move || {
                 state.service.try_leave_lobby(command.user_id, scope)
             })
-            .await
-            .map_err(|error| error.to_string())?
-            .map_err(|error| error.to_string())?;
+            .await;
+            let removed = match removal {
+                Ok(Ok(removed)) => removed,
+                Ok(Err(error)) => {
+                    if left.is_empty() {
+                        self.state.refund_membership_change(rate_limit_claim);
+                    }
+                    return Err(error.to_string().into());
+                }
+                Err(error) => {
+                    if left.is_empty() {
+                        self.state.refund_membership_change(rate_limit_claim);
+                    }
+                    return Err(error.to_string().into());
+                }
+            };
             if removed {
                 left.push(kind);
                 self.best_effort_leave_publication(
@@ -3028,6 +3187,9 @@ impl LobbyInteractionHandler {
             {
                 pinned.push(kind);
             }
+        }
+        if left.is_empty() {
+            self.state.refund_membership_change(rate_limit_claim);
         }
         let content = if left.is_empty() {
             if pinned.is_empty() {
@@ -3108,6 +3270,17 @@ impl LobbyInteractionHandler {
         player_id: AppUserId,
         player: &cama_domain::player::Player,
     ) -> Result<JoinPresentation, InteractionHandlerError> {
+        self.join_registered_player_with_rate_limit_lease(scope, player_id, player, None)
+            .await
+    }
+
+    async fn join_registered_player_with_rate_limit_lease(
+        &self,
+        scope: LobbyScope,
+        player_id: AppUserId,
+        player: &cama_domain::player::Player,
+        rate_limit_lease: Option<&mut LobbyMembershipRateLimitLease>,
+    ) -> Result<JoinPresentation, InteractionHandlerError> {
         if player.preferred_roles.as_ref().is_none_or(Vec::is_empty) {
             return Ok(JoinPresentation {
                 joined: false,
@@ -3136,11 +3309,40 @@ impl LobbyInteractionHandler {
                 joined_at_ns: None,
             });
         }
+        let rate_limit_claim = if let Some(lease) = rate_limit_lease {
+            let Some(claim) = lease.take_claim() else {
+                return Err("lobby membership rate-limit claim was already consumed".into());
+            };
+            claim
+        } else {
+            match self
+                .state
+                .claim_membership_change(scope.guild_id, player_id)?
+            {
+                LobbyMembershipRateLimitDecision::Allowed(claim) => claim,
+                LobbyMembershipRateLimitDecision::RetryAfter(retry_after) => {
+                    return Ok(JoinPresentation {
+                        joined: false,
+                        warning: Some(membership_rate_limit_message(retry_after)),
+                        rejection: Some(JoinRejection::RateLimited {
+                            retry_after_seconds: retry_after,
+                        }),
+                        joined_at_ns: None,
+                    });
+                }
+            }
+        };
         let state = Arc::clone(&self.state);
         let outcome =
-            tokio::task::spawn_blocking(move || state.service.join_lobby(player_id, scope))
+            match tokio::task::spawn_blocking(move || state.service.join_lobby(player_id, scope))
                 .await
-                .map_err(|error| error.to_string())?;
+            {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    self.state.refund_membership_change(rate_limit_claim);
+                    return Err(error.to_string().into());
+                }
+            };
         if outcome.success {
             let joined_at_ns = outcome
                 .join_commit()
@@ -3154,6 +3356,7 @@ impl LobbyInteractionHandler {
                 joined_at_ns: Some(joined_at_ns),
             });
         }
+        self.state.refund_membership_change(rate_limit_claim);
         let (warning, rejection) = match (outcome.failure, outcome.context) {
             (Some(JoinFailure::InPendingMatch), Some(JoinContext::PendingMatch(pending))) => {
                 let mut message = format!(
@@ -3402,7 +3605,12 @@ enum JoinRejection {
     InFlight,
     Suspended(LobbySuspension),
     Curfew(String),
+    RateLimited { retry_after_seconds: u64 },
     Storage,
+}
+
+fn membership_rate_limit_message(retry_after_seconds: u64) -> String {
+    format!("Slow down! Try joining or leaving again in {retry_after_seconds}s.")
 }
 
 fn lobby_command_auto_join_warning(
@@ -3418,9 +3626,11 @@ fn lobby_command_auto_join_warning(
             "ℹ️ You can’t switch lobbies while your current shuffle or draft is in progress."
                 .to_owned(),
         ),
-        Some(JoinRejection::Suspended(_) | JoinRejection::Curfew(_)) => {
-            presentation.warning.clone()
-        }
+        Some(
+            JoinRejection::Suspended(_)
+            | JoinRejection::Curfew(_)
+            | JoinRejection::RateLimited { .. },
+        ) => presentation.warning.clone(),
         None => presentation.warning.clone(),
         Some(
             JoinRejection::PendingMatch(_)
@@ -4104,6 +4314,18 @@ impl RawReactionObserver for LobbyRawReactionObserver {
         let _guard = operation_lock.lock().await;
         match event.kind {
             RawReactionKind::Add => {
+                // A blocked raw-reaction leave keeps the durable membership,
+                // but Discord has already removed that user's sword reaction.
+                // Let an already-seated player re-add it as an idempotent UI
+                // repair so they can retry the removal after the cooldown.
+                if self
+                    .state
+                    .service
+                    .get_lobby(scope)
+                    .is_some_and(|lobby| lobby.players.contains(&user_id))
+                {
+                    return Ok(());
+                }
                 let Some(player) = handler
                     .load_player(user_id, scope.guild_id)
                     .await
@@ -4167,13 +4389,43 @@ impl RawReactionObserver for LobbyRawReactionObserver {
                     .await;
             }
             RawReactionKind::Remove => {
+                let rate_limit_claim = match self
+                    .state
+                    .claim_membership_change(scope.guild_id, user_id)?
+                {
+                    LobbyMembershipRateLimitDecision::Allowed(claim) => claim,
+                    LobbyMembershipRateLimitDecision::RetryAfter(retry_after) => {
+                        // Discord emits a remove event after the user's
+                        // reaction is already gone. Do not issue another
+                        // removal here: the user may have re-added the sword
+                        // while this event was in flight, and the Add path
+                        // deliberately treats an existing member as a UI
+                        // repair.
+                        self.notify_sword_reaction_rejection(
+                            &event,
+                            &membership_rate_limit_message(retry_after),
+                            RAW_REJECTION_TTL,
+                        )
+                        .await;
+                        return Ok(());
+                    }
+                };
                 let state = Arc::clone(&self.state);
-                let left = tokio::task::spawn_blocking(move || {
+                let removal = tokio::task::spawn_blocking(move || {
                     state.service.try_leave_lobby(user_id, scope)
                 })
-                .await
-                .map_err(|error| error.to_string())?
-                .map_err(|error| error.to_string())?;
+                .await;
+                let left = match removal {
+                    Ok(Ok(left)) => left,
+                    Ok(Err(error)) => {
+                        self.state.refund_membership_change(rate_limit_claim);
+                        return Err(error.to_string());
+                    }
+                    Err(error) => {
+                        self.state.refund_membership_change(rate_limit_claim);
+                        return Err(error.to_string());
+                    }
+                };
                 if left {
                     let display_name = resolved_display_name.unwrap_or_else(|| {
                         self.state.players.fallback_name(user_id, scope.guild_id)
@@ -4181,6 +4433,8 @@ impl RawReactionObserver for LobbyRawReactionObserver {
                     handler
                         .best_effort_leave_publication(scope, user_id, &display_name, true)
                         .await;
+                } else {
+                    self.state.refund_membership_change(rate_limit_claim);
                 }
             }
         }
@@ -4224,6 +4478,16 @@ impl LobbyRawReactionObserver {
                 event.user_id,
             )
             .await;
+        self.notify_sword_reaction_rejection(event, reason, ttl)
+            .await;
+    }
+
+    async fn notify_sword_reaction_rejection(
+        &self,
+        event: &RawReactionEvent,
+        reason: &str,
+        ttl: Duration,
+    ) {
         let users = BTreeSet::from([event.user_id]);
         let receipt = self
             .state
@@ -4337,6 +4601,9 @@ fn raw_rejection_message(kind: LobbyKind, rejection: &JoinRejection) -> String {
             "You're inside one of your curfew windows. Check your DMs, or use `/player curfew list`."
                 .to_owned()
         }
+        JoinRejection::RateLimited {
+            retry_after_seconds,
+        } => membership_rate_limit_message(*retry_after_seconds),
         JoinRejection::Storage => {
             let _ = kind;
             "Could not join lobby.".to_owned()
