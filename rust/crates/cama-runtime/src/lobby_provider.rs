@@ -42,9 +42,11 @@ use cama_db::moderation::{
     LobbySuspension, ModerationRepository, ModerationSource, SuspensionCompletion, SuspensionScope,
 };
 use cama_db::pending_lobby::PendingLobbyRepository;
-use cama_db::readycheck_repository::{PersistedLobbyState, ReadycheckRepository};
+use cama_db::readycheck_repository::{
+    PersistedLobbyState, ReadycheckPrunedNotice, ReadycheckRepository,
+};
 use cama_domain::embed_safety::EmbedModel;
-use cama_domain::formatting::{JOPACOIN_EMOJI_ID, JOPACOIN_EMOTE};
+use cama_domain::formatting::{JOPACOIN_EMOJI_ID, JOPACOIN_EMOTE, format_duration_short};
 use thiserror::Error;
 use tracing::{debug, warn};
 
@@ -224,6 +226,21 @@ impl LobbyPersistencePort for SqliteLobbyPersistence {
     fn save_lobby(&self, lobby: &PersistedLobbyState) -> Result<(), String> {
         self.repository
             .save(lobby)
+            .map_err(|error| error.to_string())
+    }
+
+    fn save_lobby_with_readycheck_pruned_notice(
+        &self,
+        lobby: &PersistedLobbyState,
+        channel_id: AppChannelId,
+        player_ids: &BTreeSet<AppUserId>,
+    ) -> Result<(), String> {
+        self.repository
+            .save_with_pruned_notice(
+                lobby,
+                channel_id.0,
+                &player_ids.iter().map(|player_id| player_id.0).collect(),
+            )
             .map_err(|error| error.to_string())
     }
 
@@ -474,6 +491,7 @@ struct LobbyRuntimeState {
     players: SqliteLobbyPlayers,
     pending_matches: SqlitePendingMatches,
     service: Arc<LiveLobbyService>,
+    readycheck_persistence: Arc<SqliteLobbyPersistence>,
     commands: Arc<LiveLobbyRuntime>,
     readychecks: ReadycheckService,
     drafts: Arc<DraftStateManager>,
@@ -567,11 +585,9 @@ impl LobbyRuntimeState {
                     .flatten(),
                 _ => None,
             };
-            let recent = lobby
-                .player_join_times
-                .get(player_id)
-                .is_some_and(|joined_at| now - joined_at < 10.0 * 60.0);
-            let (name, group) = member.map_or_else(
+            let joined_at = lobby.player_join_times.get(player_id).copied();
+            let recent = joined_at.is_some_and(|joined_at| now - joined_at < 10.0 * 60.0);
+            let (name, group, signals) = member.map_or_else(
                 || {
                     (
                         self.players.fallback_name(*player_id, lobby.scope.guild_id),
@@ -580,6 +596,7 @@ impl LobbyRuntimeState {
                         } else {
                             ReadinessGroup::Afk
                         },
+                        if recent { "🆕" } else { "🔴" }.to_owned(),
                     )
                 },
                 |member| {
@@ -602,12 +619,108 @@ impl LobbyRuntimeState {
                     } else {
                         ReadinessGroup::Afk
                     };
-                    (member.display_name, group)
+                    let mut signals = String::new();
+                    if recent {
+                        signals.push('🆕');
+                    }
+                    if member.in_voice {
+                        signals.push_str(if member.deafened { "🔇" } else { "🔊" });
+                    }
+                    if playing_dota {
+                        signals.push('🎮');
+                    }
+                    signals.push_str(match member.presence {
+                        DiscordPresence::Online | DiscordPresence::DoNotDisturb => "🟢",
+                        DiscordPresence::Idle => "🟡",
+                        DiscordPresence::Offline | DiscordPresence::Unknown => "🔴",
+                    });
+                    (member.display_name, group, signals)
                 },
             );
-            data.insert(*player_id, ReadycheckPlayerData { name, group });
+            data.insert(
+                *player_id,
+                ReadycheckPlayerData {
+                    name,
+                    group,
+                    signals,
+                    joined_at: joined_at.map(|joined_at| joined_at as i64),
+                },
+            );
         }
         (data, mentionable)
+    }
+
+    async fn pending_readycheck_pruned_notices(
+        &self,
+    ) -> Result<Vec<ReadycheckPrunedNotice>, String> {
+        let persistence = Arc::clone(&self.readycheck_persistence);
+        tokio::task::spawn_blocking(move || {
+            persistence
+                .repository
+                .pending_pruned_notices()
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
+    async fn publish_readycheck_pruned_notice(
+        &self,
+        notice: ReadycheckPrunedNotice,
+    ) -> Result<(), String> {
+        let scope = readycheck_notice_scope(&notice).ok_or_else(|| {
+            format!(
+                "invalid ready-check removal notice lobby id {}",
+                notice.lobby_id
+            )
+        })?;
+        let users = notice
+            .player_ids
+            .iter()
+            .map(|player_id| to_u64(*player_id))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        self.transport
+            .send_message_with_delivery_key(
+                to_u64(notice.channel_id)?,
+                notice.delivery_key(),
+                readycheck_pruned_players_message(scope.kind, &users),
+            )
+            .await?;
+        let persistence = Arc::clone(&self.readycheck_persistence);
+        let acknowledged = tokio::task::spawn_blocking(move || {
+            persistence
+                .repository
+                .acknowledge_pruned_notice(&notice)
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())??;
+        if !acknowledged {
+            debug!(
+                ?scope,
+                "ready-check removal notice was already acknowledged"
+            );
+        }
+        Ok(())
+    }
+
+    async fn publish_pending_readycheck_pruned_notices_for_scope(
+        &self,
+        scope: LobbyScope,
+    ) -> Result<(), String> {
+        let persistence = Arc::clone(&self.readycheck_persistence);
+        let notices = tokio::task::spawn_blocking(move || {
+            persistence
+                .repository
+                .pending_pruned_notices_for(scope.lobby_id(), scope.guild_id.0)
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())??;
+        for notice in notices {
+            self.publish_readycheck_pruned_notice(notice).await?;
+        }
+        Ok(())
     }
 
     /// Mirror Python's `sync_readycheck_with_lobby`: an active generation is
@@ -1466,8 +1579,7 @@ impl LobbyRegistrationProvider {
         }
         let players = SqliteLobbyPlayers::new(database_path);
         let pending_matches = SqlitePendingMatches::new(database_path);
-        let persistence: Arc<dyn LobbyPersistencePort> =
-            Arc::new(SqliteLobbyPersistence::new(database_path));
+        let persistence = Arc::new(SqliteLobbyPersistence::new(database_path));
         let service = LobbyService::new(
             players.clone(),
             Some(pending_matches.clone()),
@@ -1476,7 +1588,7 @@ impl LobbyRegistrationProvider {
             config.max_players,
         )
         .with_moderation(Arc::new(SqliteLobbyModeration::new(database_path)))
-        .with_persistence(persistence)
+        .with_persistence(persistence.clone())
         .map_err(|error| LobbyProviderBuildError::Persistence(error.to_string()))?;
         let service = Arc::new(service);
         let commands = Arc::new(LobbyCommandRuntime::new(Arc::clone(&service)));
@@ -1492,6 +1604,7 @@ impl LobbyRegistrationProvider {
             players,
             pending_matches,
             service,
+            readycheck_persistence: persistence,
             commands,
             readychecks,
             drafts,
@@ -1829,6 +1942,10 @@ impl LobbyInteractionHandler {
     ) -> Result<ReadycheckRunResult, ReadycheckRunError> {
         let operation_lock = self.state.commands.scope_operation_lock(scope);
         let _guard = operation_lock.lock().await;
+        self.state
+            .publish_pending_readycheck_pruned_notices_for_scope(scope)
+            .await
+            .map_err(ReadycheckRunError::Transport)?;
         self.state.sync_ready_lobby(scope);
         let lobby = self
             .state
@@ -1837,7 +1954,8 @@ impl LobbyInteractionHandler {
             .ok_or(ReadycheckRunError::Policy(
                 ReadycheckCommandFailure::NoLobby,
             ))?;
-        let (player_data, mentionable) = self.state.classify_readycheck_players(&lobby).await;
+        let (mut player_data, mut mentionable) =
+            self.state.classify_readycheck_players(&lobby).await;
         let existing_generation = self.state.readychecks.readycheck_generation(scope);
         let existing_message = if let Some(generation) = &existing_generation {
             match self
@@ -1890,12 +2008,35 @@ impl LobbyInteractionHandler {
         if !plan.pruned_players.is_empty() {
             let state = Arc::clone(&self.state);
             let pruned = plan.pruned_players.clone();
-            let persisted = tokio::task::spawn_blocking(move || {
-                state.service.try_remove_players_from_lobby(&pruned, scope)
+            let Some(thread_id) = lobby.message_ids.thread_id else {
+                if let Some(permit) = &plan.permit {
+                    self.state.readychecks.abort_publication(permit);
+                }
+                return Err(ReadycheckRunError::Policy(
+                    ReadycheckCommandFailure::NoThread,
+                ));
+            };
+            let persist_result = tokio::task::spawn_blocking(move || {
+                state
+                    .service
+                    .try_remove_players_from_lobby_with_readycheck_notice(&pruned, scope, thread_id)
             })
-            .await
-            .map_err(|error| ReadycheckRunError::Transport(error.to_string()))?
-            .map_err(|error| ReadycheckRunError::Transport(error.to_string()))?;
+            .await;
+            let persisted = match persist_result {
+                Ok(Ok(persisted)) => persisted,
+                Ok(Err(error)) => {
+                    if let Some(permit) = &plan.permit {
+                        self.state.readychecks.abort_publication(permit);
+                    }
+                    return Err(ReadycheckRunError::Transport(error.to_string()));
+                }
+                Err(error) => {
+                    if let Some(permit) = &plan.permit {
+                        self.state.readychecks.abort_publication(permit);
+                    }
+                    return Err(ReadycheckRunError::Transport(error.to_string()));
+                }
+            };
             if persisted != plan.pruned_players {
                 if let Some(permit) = &plan.permit {
                     self.state.readychecks.abort_publication(permit);
@@ -1905,7 +2046,24 @@ impl LobbyInteractionHandler {
                     "readycheck stale-prune persistence raced with lobby membership".to_owned(),
                 ));
             }
+            if let Err(error) = self
+                .state
+                .publish_pending_readycheck_pruned_notices_for_scope(scope)
+                .await
+            {
+                if let Some(permit) = &plan.permit {
+                    self.state.readychecks.abort_publication(permit);
+                }
+                return Err(ReadycheckRunError::Transport(error));
+            }
             self.state.sync_ready_lobby(scope);
+            let retained_players = self
+                .state
+                .service
+                .get_lobby(scope)
+                .map_or_else(BTreeSet::new, |lobby| lobby.players);
+            player_data.retain(|player_id, _| retained_players.contains(player_id));
+            mentionable.retain(|player_id| retained_players.contains(player_id));
             // Pruned players are durably out of the lobby, so their sword
             // reactions have to go too -- the kick, leave and suspension paths
             // all clean up the same way, and a stale reaction re-joins them.
@@ -3305,12 +3463,38 @@ fn readycheck_failure_message(failure: ReadycheckCommandFailure) -> &'static str
     }
 }
 
+fn readycheck_notice_scope(notice: &ReadycheckPrunedNotice) -> Option<LobbyScope> {
+    let kind = match notice.lobby_id {
+        1 => LobbyKind::Open,
+        2 => LobbyKind::LowSkill,
+        _ => return None,
+    };
+    Some(LobbyScope::new(AppGuildId(notice.guild_id), kind))
+}
+
+fn readycheck_pruned_players_message(kind: LobbyKind, users: &BTreeSet<u64>) -> DiscordMessage {
+    let tags = users
+        .iter()
+        .map(|user_id| format!("<@{user_id}>"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let content = format!(
+        "🧹 Removed (away during ready check): {tags} — rejoin {} with `/join` if you're back.",
+        kind.display_name()
+    );
+    DiscordMessage::mentioning(
+        InteractionResponse::message(content).with_user_mentions(users.iter().copied().collect()),
+        users.clone(),
+    )
+}
+
 fn readycheck_embed(
     kind: LobbyKind,
     player_data: &BTreeMap<AppUserId, ReadycheckPlayerData>,
     reacted: &BTreeMap<AppUserId, String>,
     ready_threshold: usize,
 ) -> InteractionEmbed {
+    let now = unix_time_now();
     let mut active = Vec::new();
     let mut afk = Vec::new();
     for (player_id, player) in player_data {
@@ -3318,10 +3502,14 @@ fn readycheck_embed(
             continue;
         }
         match player.group {
-            ReadinessGroup::Ready => active.push(format!("{} 🟢", player.name)),
-            ReadinessGroup::PlayingDota => active.push(format!("{} 🎮", player.name)),
-            ReadinessGroup::Recent => active.push(format!("{} 🆕", player.name)),
-            ReadinessGroup::Afk => afk.push(format!("<@{}> 🔴", player_id.0)),
+            ReadinessGroup::Ready | ReadinessGroup::PlayingDota | ReadinessGroup::Recent => {
+                active.push(readycheck_player_line(&player.name, player, now));
+            }
+            ReadinessGroup::Afk => afk.push(readycheck_player_line(
+                &format!("<@{}>", player_id.0),
+                player,
+                now,
+            )),
         }
     }
     let mut embed = InteractionEmbed::titled(format!("{} Ready Check", kind.label()))
@@ -3343,13 +3531,40 @@ fn readycheck_embed(
         );
     }
     if !reacted.is_empty() {
+        let confirmed = reacted
+            .iter()
+            .map(|(player_id, mention)| {
+                player_data.get(player_id).map_or_else(
+                    || mention.clone(),
+                    |player| readycheck_player_line(mention, player, now),
+                )
+            })
+            .collect::<Vec<_>>();
         embed = embed.field(
-            format!("✅ Reacted to Ready Check ({})", reacted.len()),
-            reacted.values().cloned().collect::<Vec<_>>().join("\n"),
+            format!("✅ Confirmed Ready ({})", confirmed.len()),
+            confirmed.join("\n"),
             false,
         );
     }
     embed
+}
+
+fn readycheck_player_line(identity: &str, player: &ReadycheckPlayerData, now: f64) -> String {
+    let mut line = identity.to_owned();
+    if !player.signals.is_empty() {
+        line.push(' ');
+        line.push_str(&player.signals);
+    }
+    line.push_str(&player.joined_at.map_or_else(
+        || " (join time unknown)".to_owned(),
+        |joined_at| {
+            format!(
+                " (joined {} ago)",
+                format_duration_short(now - joined_at as f64)
+            )
+        },
+    ));
+    line
 }
 
 fn discord_jump_url(
@@ -3568,6 +3783,38 @@ impl GatewayEventObserver for LobbyGatewayObserver {
 
     async fn ready_recovery(&self, context: ReadyRecoveryContext) -> ReadyRecoveryReport {
         let guilds = context.guild_ids().iter().copied().collect::<BTreeSet<_>>();
+        let mut attempted_guilds = BTreeSet::new();
+        let mut notice_failures = Vec::new();
+        match self.state.pending_readycheck_pruned_notices().await {
+            Ok(notices) => {
+                for notice in notices {
+                    let Ok(guild_id) = u64::try_from(notice.guild_id) else {
+                        notice_failures.push(ReadyRecoveryFailure {
+                            guild_id: 0,
+                            message: format!(
+                                "ready-check removal notice has invalid guild id {}",
+                                notice.guild_id
+                            ),
+                        });
+                        continue;
+                    };
+                    if !guilds.contains(&guild_id) {
+                        continue;
+                    }
+                    attempted_guilds.insert(guild_id);
+                    if let Err(error) = self.state.publish_readycheck_pruned_notice(notice).await {
+                        notice_failures.push(ReadyRecoveryFailure {
+                            guild_id,
+                            message: format!("ready-check removal notice: {error}"),
+                        });
+                    }
+                }
+            }
+            Err(error) => notice_failures.push(ReadyRecoveryFailure {
+                guild_id: 0,
+                message: format!("ready-check removal notice recovery: {error}"),
+            }),
+        }
         let mut pending = self
             .state
             .service
@@ -3581,10 +3828,11 @@ impl GatewayEventObserver for LobbyGatewayObserver {
                     && lobby.message_ids.message_id.is_some()
             })
             .collect::<Vec<_>>();
-        let attempted_guilds = pending
-            .iter()
-            .filter_map(|lobby| u64::try_from(lobby.scope.guild_id.0).ok())
-            .collect::<BTreeSet<_>>();
+        attempted_guilds.extend(
+            pending
+                .iter()
+                .filter_map(|lobby| u64::try_from(lobby.scope.guild_id.0).ok()),
+        );
         let mut refreshed_guilds = BTreeSet::new();
         let mut final_errors = BTreeMap::new();
         for attempt in 0..RECONCILE_ATTEMPTS {
@@ -3641,13 +3889,14 @@ impl GatewayEventObserver for LobbyGatewayObserver {
                 tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
             }
         }
-        let failures = final_errors
+        let mut failures = final_errors
             .into_iter()
             .map(|(scope, message)| ReadyRecoveryFailure {
                 guild_id: u64::try_from(scope.guild_id.0).unwrap_or_default(),
                 message: format!("{}: {message}", lobby_kind_value(scope.kind)),
             })
-            .collect();
+            .collect::<Vec<_>>();
+        failures.extend(notice_failures);
         ReadyRecoveryReport {
             observer: self.name(),
             guilds_attempted: attempted_guilds.len(),

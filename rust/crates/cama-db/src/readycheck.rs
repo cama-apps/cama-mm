@@ -5,13 +5,16 @@
 //! and never creates or alters production schema. Test-only fixtures create a
 //! disposable `lobby_state` table with the Python-owned shape.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use rusqlite::{OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::open_runtime_connection;
+
+const PRUNED_NOTICE_PREFIX: &str = "readycheck:pruned_notice:";
 
 /// Service-facing representation of one row in Python's `lobby_state` table.
 #[derive(Clone, Debug, PartialEq)]
@@ -75,6 +78,34 @@ pub enum ReadycheckRepositoryError {
     Sqlite(#[from] rusqlite::Error),
     #[error("player_join_times contains a non-finite timestamp for player {0}")]
     NonFiniteTimestamp(i64),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    #[error("invalid ready-check removal notice: {0}")]
+    InvalidPrunedNotice(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReadycheckPrunedNotice {
+    pub guild_id: i64,
+    pub lobby_id: i64,
+    pub channel_id: i64,
+    pub player_ids: BTreeSet<i64>,
+    key: String,
+    value: String,
+}
+
+impl ReadycheckPrunedNotice {
+    #[must_use]
+    pub fn delivery_key(&self) -> &str {
+        &self.key
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ReadycheckPrunedNoticePayload {
+    lobby_id: i64,
+    channel_id: i64,
+    player_ids: BTreeSet<i64>,
 }
 
 /// Narrow port used by the ready-check application model.
@@ -117,48 +148,105 @@ impl ReadycheckRepository {
     /// Upsert the complete Python lobby row so a timestamp-only change cannot
     /// accidentally discard message routing or legacy compatibility fields.
     pub fn save(&self, state: &PersistedLobbyState) -> Result<(), ReadycheckRepositoryError> {
-        let players = encode_i64_array(&state.players);
-        let conditional_players = encode_i64_array(&state.conditional_players);
-        let player_join_times = encode_join_times(&state.player_join_times)?;
         let connection = open_runtime_connection(&self.path)?;
-        connection.execute(
-            "INSERT INTO lobby_state (
-                 lobby_id, guild_id, players, conditional_players, status,
-                 created_by, created_at, message_id, channel_id, thread_id,
-                 embed_message_id, origin_channel_id, player_join_times
-             ) VALUES (
-                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
-             )
-             ON CONFLICT(lobby_id, guild_id) DO UPDATE SET
-                 players = excluded.players,
-                 conditional_players = excluded.conditional_players,
-                 status = excluded.status,
-                 created_by = excluded.created_by,
-                 created_at = excluded.created_at,
-                 message_id = excluded.message_id,
-                 channel_id = excluded.channel_id,
-                 thread_id = excluded.thread_id,
-                 embed_message_id = excluded.embed_message_id,
-                 origin_channel_id = excluded.origin_channel_id,
-                 player_join_times = excluded.player_join_times,
-                 updated_at = CURRENT_TIMESTAMP",
-            params![
-                state.lobby_id,
-                state.guild_id,
-                players,
-                conditional_players,
-                state.status,
-                state.created_by,
-                state.created_at,
-                state.message_id,
-                state.channel_id,
-                state.thread_id,
-                state.embed_message_id,
-                state.origin_channel_id,
-                player_join_times,
-            ],
+        save_lobby_state(&connection, state)
+    }
+
+    /// Commit a stale ready-check sweep and its public notice as one durable
+    /// mutation. If either table write fails, neither change is visible.
+    pub fn save_with_pruned_notice(
+        &self,
+        state: &PersistedLobbyState,
+        channel_id: i64,
+        player_ids: &BTreeSet<i64>,
+    ) -> Result<(), ReadycheckRepositoryError> {
+        if player_ids.is_empty() {
+            return Err(ReadycheckRepositoryError::InvalidPrunedNotice(
+                "player list is empty".to_owned(),
+            ));
+        }
+        let payload = ReadycheckPrunedNoticePayload {
+            lobby_id: state.lobby_id,
+            channel_id,
+            player_ids: player_ids.clone(),
+        };
+        let key = format!(
+            "{PRUNED_NOTICE_PREFIX}{}:{:016x}",
+            state.lobby_id,
+            fastrand::u64(..)
+        );
+        let value = serde_json::to_string(&payload)?;
+        let mut connection = open_runtime_connection(&self.path)?;
+        let transaction = connection.transaction()?;
+        save_lobby_state(&transaction, state)?;
+        transaction.execute(
+            "INSERT INTO app_kv(guild_id,key,value) VALUES (?1,?2,?3)",
+            params![state.guild_id, key, value],
         )?;
+        transaction.commit()?;
         Ok(())
+    }
+
+    pub fn pending_pruned_notices(
+        &self,
+    ) -> Result<Vec<ReadycheckPrunedNotice>, ReadycheckRepositoryError> {
+        let connection = open_runtime_connection(&self.path)?;
+        let mut statement = connection.prepare(
+            "SELECT guild_id,key,value FROM app_kv
+             WHERE key GLOB 'readycheck:pruned_notice:*'
+             ORDER BY guild_id,key",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut notices = Vec::new();
+        for row in rows {
+            let (guild_id, key, value) = row?;
+            notices.push(decode_pruned_notice(guild_id, key, value)?);
+        }
+        Ok(notices)
+    }
+
+    pub fn pending_pruned_notices_for(
+        &self,
+        lobby_id: i64,
+        guild_id: i64,
+    ) -> Result<Vec<ReadycheckPrunedNotice>, ReadycheckRepositoryError> {
+        let connection = open_runtime_connection(&self.path)?;
+        let key_pattern = format!("{PRUNED_NOTICE_PREFIX}{lobby_id}:*");
+        let mut statement = connection.prepare(
+            "SELECT guild_id,key,value FROM app_kv
+             WHERE guild_id=?1 AND key GLOB ?2
+             ORDER BY key",
+        )?;
+        let rows = statement.query_map(params![guild_id, key_pattern], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut notices = Vec::new();
+        for row in rows {
+            let (guild_id, key, value) = row?;
+            notices.push(decode_pruned_notice(guild_id, key, value)?);
+        }
+        Ok(notices)
+    }
+
+    pub fn acknowledge_pruned_notice(
+        &self,
+        notice: &ReadycheckPrunedNotice,
+    ) -> Result<bool, ReadycheckRepositoryError> {
+        let connection = open_runtime_connection(&self.path)?;
+        Ok(connection.execute(
+            "DELETE FROM app_kv WHERE guild_id=?1 AND key=?2 AND value=?3",
+            params![notice.guild_id, notice.key, notice.value],
+        )? == 1)
     }
 
     pub fn load(
@@ -211,6 +299,79 @@ impl ReadycheckRepository {
             params![lobby_id, guild_id],
         )? != 0)
     }
+}
+
+fn decode_pruned_notice(
+    guild_id: i64,
+    key: String,
+    value: String,
+) -> Result<ReadycheckPrunedNotice, ReadycheckRepositoryError> {
+    let payload: ReadycheckPrunedNoticePayload = serde_json::from_str(&value)?;
+    let key_lobby_id = key
+        .strip_prefix(PRUNED_NOTICE_PREFIX)
+        .and_then(|suffix| suffix.split(':').next())
+        .and_then(|lobby_id| lobby_id.parse::<i64>().ok());
+    if payload.player_ids.is_empty()
+        || !matches!(payload.lobby_id, 1 | 2)
+        || key_lobby_id != Some(payload.lobby_id)
+    {
+        return Err(ReadycheckRepositoryError::InvalidPrunedNotice(key));
+    }
+    Ok(ReadycheckPrunedNotice {
+        guild_id,
+        lobby_id: payload.lobby_id,
+        channel_id: payload.channel_id,
+        player_ids: payload.player_ids,
+        key,
+        value,
+    })
+}
+
+fn save_lobby_state(
+    connection: &rusqlite::Connection,
+    state: &PersistedLobbyState,
+) -> Result<(), ReadycheckRepositoryError> {
+    let players = encode_i64_array(&state.players);
+    let conditional_players = encode_i64_array(&state.conditional_players);
+    let player_join_times = encode_join_times(&state.player_join_times)?;
+    connection.execute(
+        "INSERT INTO lobby_state (
+             lobby_id, guild_id, players, conditional_players, status,
+             created_by, created_at, message_id, channel_id, thread_id,
+             embed_message_id, origin_channel_id, player_join_times
+         ) VALUES (
+             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
+         )
+         ON CONFLICT(lobby_id, guild_id) DO UPDATE SET
+             players = excluded.players,
+             conditional_players = excluded.conditional_players,
+             status = excluded.status,
+             created_by = excluded.created_by,
+             created_at = excluded.created_at,
+             message_id = excluded.message_id,
+             channel_id = excluded.channel_id,
+             thread_id = excluded.thread_id,
+             embed_message_id = excluded.embed_message_id,
+             origin_channel_id = excluded.origin_channel_id,
+             player_join_times = excluded.player_join_times,
+             updated_at = CURRENT_TIMESTAMP",
+        params![
+            state.lobby_id,
+            state.guild_id,
+            players,
+            conditional_players,
+            state.status,
+            state.created_by,
+            state.created_at,
+            state.message_id,
+            state.channel_id,
+            state.thread_id,
+            state.embed_message_id,
+            state.origin_channel_id,
+            player_join_times,
+        ],
+    )?;
+    Ok(())
 }
 
 impl ReadycheckLobbyStore for ReadycheckRepository {
@@ -412,6 +573,70 @@ mod tests {
             .expect("saved row");
 
         assert!(loaded.player_join_times.is_empty());
+    }
+
+    #[test]
+    fn pruned_notice_commit_rolls_back_the_lobby_without_an_outbox() {
+        let (_file, repository) = repository();
+        let original = state();
+        repository.save(&original).expect("save original lobby");
+        let mut pruned = original.clone();
+        pruned.players = vec![100];
+
+        let error = repository
+            .save_with_pruned_notice(&pruned, 333, &BTreeSet::from([200]))
+            .expect_err("missing app_kv must reject the atomic sweep");
+
+        assert!(error.to_string().contains("app_kv"));
+        assert_eq!(
+            repository
+                .load(1, None)
+                .expect("load lobby after rollback")
+                .expect("original lobby"),
+            original
+        );
+    }
+
+    #[test]
+    fn pruned_notice_roundtrips_and_acknowledges_by_exact_value() {
+        let (file, repository) = repository();
+        Connection::open(file.path())
+            .expect("open fixture")
+            .execute_batch(
+                "CREATE TABLE app_kv (
+                     guild_id INTEGER NOT NULL,
+                     key TEXT NOT NULL,
+                     value TEXT NOT NULL,
+                     PRIMARY KEY (guild_id, key)
+                 );",
+            )
+            .expect("create existing-schema outbox");
+        let mut pruned = guild_state(42, 100, &[100]);
+        pruned.thread_id = Some(333);
+
+        repository
+            .save_with_pruned_notice(&pruned, 333, &BTreeSet::from([200, 300]))
+            .expect("commit lobby and removal notice");
+        let notices = repository
+            .pending_pruned_notices()
+            .expect("load pending notices");
+
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].guild_id, 42);
+        assert_eq!(notices[0].lobby_id, 1);
+        assert_eq!(notices[0].channel_id, 333);
+        assert_eq!(notices[0].player_ids, BTreeSet::from([200, 300]));
+        assert!(
+            repository
+                .acknowledge_pruned_notice(&notices[0])
+                .expect("acknowledge exact notice")
+        );
+        assert!(
+            repository
+                .pending_pruned_notices()
+                .expect("reload notices")
+                .is_empty()
+        );
     }
 
     #[test]

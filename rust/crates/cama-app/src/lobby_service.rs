@@ -36,6 +36,12 @@ pub const DOTA_BET_SEED_AMOUNT: i64 = 50;
 pub trait LobbyPersistencePort: Send + Sync {
     fn load_all_lobbies(&self) -> Result<Vec<PersistedLobbyState>, String>;
     fn save_lobby(&self, lobby: &PersistedLobbyState) -> Result<(), String>;
+    fn save_lobby_with_readycheck_pruned_notice(
+        &self,
+        lobby: &PersistedLobbyState,
+        channel_id: ChannelId,
+        player_ids: &BTreeSet<UserId>,
+    ) -> Result<(), String>;
     fn clear_lobby(&self, scope: LobbyScope) -> Result<bool, String>;
 }
 
@@ -872,6 +878,24 @@ where
         player_ids: &BTreeSet<UserId>,
         scope: LobbyScope,
     ) -> Result<BTreeSet<UserId>, LobbyPersistenceError> {
+        self.try_remove_players_from_lobby_with_notice(player_ids, scope, None)
+    }
+
+    pub fn try_remove_players_from_lobby_with_readycheck_notice(
+        &self,
+        player_ids: &BTreeSet<UserId>,
+        scope: LobbyScope,
+        channel_id: ChannelId,
+    ) -> Result<BTreeSet<UserId>, LobbyPersistenceError> {
+        self.try_remove_players_from_lobby_with_notice(player_ids, scope, Some(channel_id))
+    }
+
+    fn try_remove_players_from_lobby_with_notice(
+        &self,
+        player_ids: &BTreeSet<UserId>,
+        scope: LobbyScope,
+        notice_channel_id: Option<ChannelId>,
+    ) -> Result<BTreeSet<UserId>, LobbyPersistenceError> {
         let _writes = self.lock_writes();
         let (pinned, mut candidate) = {
             let state = self.lock_state();
@@ -896,7 +920,22 @@ where
             candidate.player_join_times.remove(player_id);
         }
         if !removed.is_empty() {
-            self.persist_record(&candidate)?;
+            if let Some(channel_id) = notice_channel_id {
+                let persistence = self.persistence.as_ref().ok_or_else(|| {
+                    LobbyPersistenceError::Storage(
+                        "ready-check notice persistence is not configured".to_owned(),
+                    )
+                })?;
+                persistence
+                    .save_lobby_with_readycheck_pruned_notice(
+                        &candidate.to_persisted(),
+                        channel_id,
+                        &removed,
+                    )
+                    .map_err(LobbyPersistenceError::Storage)?;
+            } else {
+                self.persist_record(&candidate)?;
+            }
             let mut state = self.lock_state();
             self.publish_record(&mut state, candidate);
         }

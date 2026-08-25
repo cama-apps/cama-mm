@@ -196,11 +196,17 @@ struct RecordingTransport {
     /// When set, message edits fail, standing in for a deleted lobby message or
     /// a transient Discord error during a repaint.
     fail_edits: std::sync::atomic::AtomicBool,
+    fail_next_pruned_notice: std::sync::atomic::AtomicBool,
 }
 
 impl RecordingTransport {
     fn fail_edits(&self) {
         self.fail_edits
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn fail_next_pruned_notice(&self) {
+        self.fail_next_pruned_notice
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -265,6 +271,16 @@ impl DiscordTransport for RecordingTransport {
         channel_id: u64,
         message: DiscordMessage,
     ) -> Result<DiscordMessageReceipt, String> {
+        if message
+            .response
+            .content
+            .starts_with("🧹 Removed (away during ready check):")
+            && self
+                .fail_next_pruned_notice
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err("ready-check removal notice refused".to_owned());
+        }
         let mut state = self.state.lock().expect("transport state");
         let message_id = state.next_message_id;
         state.next_message_id += 1;
@@ -1753,6 +1769,498 @@ async fn live_readycheck_reaches_quorum_once_with_explicit_user_allowlists() {
     assert!(sent.iter().filter(|sent| sent.message.response.content.contains("<@")) .all(
         |sent| matches!(sent.message.allowed_mentions, DiscordAllowedMentions::Users(ref users) if !users.is_empty())
     ));
+}
+
+#[tokio::test]
+async fn readycheck_explains_status_join_age_and_automatic_confirmations() {
+    let database = database_with_players(&[
+        (10, "Creator"),
+        (20, "Voice"),
+        (30, "Dota"),
+        (40, "Away"),
+        (50, "Recent"),
+        (60, "Legacy"),
+    ]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
+    let lobby_message_id = to_u64(
+        lobby_snapshot(&provider, LobbyKind::Open)
+            .message_ids
+            .message_id
+            .expect("lobby message")
+            .0,
+    )
+    .expect("Discord lobby message");
+    for (player_id, name) in [
+        (20, "Voice"),
+        (30, "Dota"),
+        (40, "Away"),
+        (50, "Recent"),
+        (60, "Legacy"),
+    ] {
+        provider
+            .raw_reaction_observer()
+            .observe(raw_sword(
+                RawReactionKind::Add,
+                lobby_message_id,
+                player_id,
+                name,
+            ))
+            .await
+            .expect("player joins lobby");
+    }
+
+    let repository = ReadycheckRepository::new(database.path());
+    let mut persisted = repository
+        .load(scope.lobby_id(), Some(42))
+        .expect("load lobby row")
+        .expect("persisted lobby");
+    let now = unix_time_now();
+    persisted.player_join_times = BTreeMap::from([
+        (10, now - 3_605.0),
+        (20, now - 1_205.0),
+        (30, now - 1_205.0),
+        (40, now - 1_205.0),
+        (50, now - 305.0),
+    ]);
+    repository.save(&persisted).expect("age lobby signups");
+
+    let restarted = provider_for(&database, transport.clone());
+    for member in [
+        DiscordGuildMemberSnapshot {
+            user_id: 10,
+            display_name: "Creator".to_owned(),
+            presence: DiscordPresence::Online,
+            in_voice: false,
+            deafened: false,
+            activities: Vec::new(),
+        },
+        DiscordGuildMemberSnapshot {
+            user_id: 20,
+            display_name: "Voice".to_owned(),
+            presence: DiscordPresence::Offline,
+            in_voice: true,
+            deafened: true,
+            activities: Vec::new(),
+        },
+        DiscordGuildMemberSnapshot {
+            user_id: 30,
+            display_name: "Dota".to_owned(),
+            presence: DiscordPresence::Idle,
+            in_voice: false,
+            deafened: false,
+            activities: vec!["Dota 2".to_owned()],
+        },
+        DiscordGuildMemberSnapshot {
+            user_id: 40,
+            display_name: "Away".to_owned(),
+            presence: DiscordPresence::Offline,
+            in_voice: false,
+            deafened: false,
+            activities: Vec::new(),
+        },
+        DiscordGuildMemberSnapshot {
+            user_id: 50,
+            display_name: "Recent".to_owned(),
+            presence: DiscordPresence::Offline,
+            in_voice: false,
+            deafened: false,
+            activities: Vec::new(),
+        },
+        DiscordGuildMemberSnapshot {
+            user_id: 60,
+            display_name: "Legacy".to_owned(),
+            presence: DiscordPresence::Online,
+            in_voice: false,
+            deafened: false,
+            activities: Vec::new(),
+        },
+    ] {
+        transport.set_member(42, member);
+    }
+    let sent_before = transport.sent_messages().len();
+
+    dispatch_command(
+        &restarted,
+        "readycheck",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    let sent = transport.sent_messages();
+    let observed = sent[sent_before..]
+        .iter()
+        .map(|sent| {
+            (
+                sent.channel_id,
+                sent.message.response.content.clone(),
+                sent.message
+                    .response
+                    .embeds
+                    .iter()
+                    .filter_map(|embed| embed.title.clone())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let embed = sent[sent_before..]
+        .iter()
+        .flat_map(|sent| &sent.message.response.embeds)
+        .find(|embed| {
+            embed
+                .title
+                .as_deref()
+                .is_some_and(|title| title.ends_with("All You Can Feed Ready Check"))
+        })
+        .unwrap_or_else(|| panic!("missing readycheck embed in: {observed:?}"));
+    let field = |name: &str| {
+        embed
+            .fields
+            .iter()
+            .find(|field| field.name == name)
+            .unwrap_or_else(|| panic!("missing readycheck field {name:?}: {:?}", embed.fields))
+    };
+    assert_eq!(
+        field("✅ Likely Active (3)").value,
+        "Voice 🔇🔴 (joined 20m ago)\nDota 🎮🟡 (joined 20m ago)\nLegacy 🟢 (join time unknown)"
+    );
+    assert_eq!(
+        field("⚠️ Possibly AFK (1)").value,
+        "<@40> 🔴 (joined 20m ago)"
+    );
+    assert_eq!(
+        field("✅ Confirmed Ready (2)").value,
+        "<@10> 🟢 (joined 1h ago)\n<@50> 🆕🔴 (joined 5m ago)"
+    );
+}
+
+#[tokio::test]
+async fn stale_readycheck_publicly_names_pruned_players_in_the_lobby_thread() {
+    let database = database_with_players(&[(10, "Creator"), (20, "Away One"), (30, "Away Two")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
+    let lobby_message_id = to_u64(
+        lobby_snapshot(&provider, LobbyKind::Open)
+            .message_ids
+            .message_id
+            .expect("lobby message")
+            .0,
+    )
+    .expect("Discord lobby message");
+    for (player_id, name) in [(20, "Away One"), (30, "Away Two")] {
+        provider
+            .raw_reaction_observer()
+            .observe(raw_sword(
+                RawReactionKind::Add,
+                lobby_message_id,
+                player_id,
+                name,
+            ))
+            .await
+            .expect("player joins lobby");
+    }
+
+    let repository = ReadycheckRepository::new(database.path());
+    let mut persisted = repository
+        .load(scope.lobby_id(), Some(42))
+        .expect("load lobby row")
+        .expect("persisted lobby");
+    let long_ago = unix_time_now() - 3_605.0;
+    persisted.player_join_times = BTreeMap::from([(10, long_ago), (20, long_ago), (30, long_ago)]);
+    repository.save(&persisted).expect("age lobby signups");
+
+    let restarted = provider_for(&database, transport.clone());
+    for (user_id, display_name, presence) in [
+        (10, "Creator", DiscordPresence::Online),
+        (20, "Away One", DiscordPresence::Offline),
+        (30, "Away Two", DiscordPresence::Offline),
+    ] {
+        transport.set_member(
+            42,
+            DiscordGuildMemberSnapshot {
+                user_id,
+                display_name: display_name.to_owned(),
+                presence,
+                in_voice: false,
+                deafened: false,
+                activities: Vec::new(),
+            },
+        );
+    }
+    restarted.handler.state.readychecks.set_readycheck_state(
+        scope,
+        cama_app::readycheck::ReadycheckStateInput {
+            message_id: AppMessageId(5_000),
+            channel_id: AppChannelId(9),
+            lobby_ids: BTreeSet::from([AppUserId(10), AppUserId(20), AppUserId(30)]),
+            player_data: BTreeMap::new(),
+            created_at: Some(long_ago),
+            initial_reacted: BTreeMap::new(),
+        },
+    );
+    let thread_id = to_u64(
+        lobby_snapshot(&restarted, LobbyKind::Open)
+            .message_ids
+            .thread_id
+            .expect("lobby thread")
+            .0,
+    )
+    .expect("Discord lobby thread");
+    let sent_before = transport.sent_messages().len();
+
+    dispatch_command(
+        &restarted,
+        "readycheck",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    let sent = transport.sent_messages();
+    let notice = sent[sent_before..]
+        .iter()
+        .find(|sent| {
+            sent.message
+                .response
+                .content
+                .starts_with("🧹 Removed (away during ready check):")
+        })
+        .expect("public stale-sweep notice");
+    assert_eq!(notice.channel_id, thread_id);
+    assert_eq!(
+        notice.message.response.content,
+        "🧹 Removed (away during ready check): <@20> <@30> — rejoin All You Can Feed with `/join` if you're back."
+    );
+    assert_eq!(
+        notice.message.allowed_mentions,
+        DiscordAllowedMentions::Users(BTreeSet::from([20, 30]))
+    );
+    let replacement_embed = sent[sent_before..]
+        .iter()
+        .flat_map(|sent| &sent.message.response.embeds)
+        .find(|embed| {
+            embed
+                .title
+                .as_deref()
+                .is_some_and(|title| title.ends_with("All You Can Feed Ready Check"))
+        })
+        .expect("replacement ready-check embed");
+    assert!(
+        replacement_embed
+            .fields
+            .iter()
+            .all(|field| !field.value.contains("<@20>") && !field.value.contains("<@30>")),
+        "players removed by the sweep must not remain in the replacement embed: {:?}",
+        replacement_embed.fields
+    );
+    assert!(
+        transport
+            .state
+            .lock()
+            .expect("transport state")
+            .direct_messages
+            .is_empty(),
+        "stale-sweep restoration is public-only"
+    );
+}
+
+async fn stale_readycheck_fixture(
+    database: &NamedTempFile,
+    transport: Arc<RecordingTransport>,
+) -> LobbyRegistrationProvider {
+    let provider = provider_for(database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
+    let lobby_message_id = to_u64(
+        lobby_snapshot(&provider, LobbyKind::Open)
+            .message_ids
+            .message_id
+            .expect("lobby message")
+            .0,
+    )
+    .expect("Discord lobby message");
+    for (player_id, name) in [(20, "Away One"), (30, "Away Two")] {
+        provider
+            .raw_reaction_observer()
+            .observe(raw_sword(
+                RawReactionKind::Add,
+                lobby_message_id,
+                player_id,
+                name,
+            ))
+            .await
+            .expect("player joins lobby");
+    }
+
+    let repository = ReadycheckRepository::new(database.path());
+    let mut persisted = repository
+        .load(scope.lobby_id(), Some(42))
+        .expect("load lobby row")
+        .expect("persisted lobby");
+    let long_ago = unix_time_now() - 3_605.0;
+    persisted.player_join_times = BTreeMap::from([(10, long_ago), (20, long_ago), (30, long_ago)]);
+    repository.save(&persisted).expect("age lobby signups");
+
+    let restarted = provider_for(database, transport.clone());
+    for (user_id, display_name, presence) in [
+        (10, "Creator", DiscordPresence::Online),
+        (20, "Away One", DiscordPresence::Offline),
+        (30, "Away Two", DiscordPresence::Offline),
+    ] {
+        transport.set_member(
+            42,
+            DiscordGuildMemberSnapshot {
+                user_id,
+                display_name: display_name.to_owned(),
+                presence,
+                in_voice: false,
+                deafened: false,
+                activities: Vec::new(),
+            },
+        );
+    }
+    restarted.handler.state.readychecks.set_readycheck_state(
+        scope,
+        cama_app::readycheck::ReadycheckStateInput {
+            message_id: AppMessageId(5_000),
+            channel_id: AppChannelId(9),
+            lobby_ids: BTreeSet::from([AppUserId(10), AppUserId(20), AppUserId(30)]),
+            player_data: BTreeMap::new(),
+            created_at: Some(long_ago),
+            initial_reacted: BTreeMap::new(),
+        },
+    );
+    restarted
+}
+
+#[tokio::test]
+async fn stale_readycheck_notice_recovers_once_after_provider_restart() {
+    let database = database_with_players(&[(10, "Creator"), (20, "Away One"), (30, "Away Two")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = stale_readycheck_fixture(&database, transport.clone()).await;
+    transport.fail_next_pruned_notice();
+    let sent_before = transport.sent_messages().len();
+
+    dispatch_command_allowing_failure(
+        &provider,
+        "readycheck",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    assert_eq!(
+        lobby_snapshot(&provider, LobbyKind::Open).players,
+        BTreeSet::from([AppUserId(10)]),
+        "the failed Discord notice happens after the durable sweep"
+    );
+    let notice_count = || {
+        transport.sent_messages()[sent_before..]
+            .iter()
+            .filter(|sent| {
+                sent.message
+                    .response
+                    .content
+                    .starts_with("🧹 Removed (away during ready check):")
+            })
+            .count()
+    };
+    assert_eq!(notice_count(), 0, "the injected notice send should fail");
+
+    drop(provider);
+    let restarted = provider_for(&database, transport.clone());
+    let report = restarted
+        .gateway_observer()
+        .ready_recovery(ReadyRecoveryContext::new(
+            Arc::<[u64]>::from([42]),
+            Arc::new(NoMembers),
+        ))
+        .await;
+    assert!(report.failures.is_empty(), "recovery failed: {report:?}");
+    assert_eq!(
+        notice_count(),
+        1,
+        "restart recovery should deliver the notice"
+    );
+
+    let second_report = restarted
+        .gateway_observer()
+        .ready_recovery(ReadyRecoveryContext::new(
+            Arc::<[u64]>::from([42]),
+            Arc::new(NoMembers),
+        ))
+        .await;
+    assert!(
+        second_report.failures.is_empty(),
+        "second recovery failed: {second_report:?}"
+    );
+    assert_eq!(notice_count(), 1, "acknowledged notice must not repeat");
+}
+
+#[tokio::test]
+async fn stale_readycheck_does_not_prune_without_the_durable_notice_outbox() {
+    let database = database_with_players(&[(10, "Creator"), (20, "Away One"), (30, "Away Two")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = stale_readycheck_fixture(&database, transport).await;
+    rusqlite::Connection::open(database.path())
+        .expect("open lobby database")
+        .execute("DROP TABLE app_kv", [])
+        .expect("remove ready-check notice outbox");
+
+    dispatch_command_allowing_failure(
+        &provider,
+        "readycheck",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    let expected = BTreeSet::from([AppUserId(10), AppUserId(20), AppUserId(30)]);
+    assert_eq!(
+        lobby_snapshot(&provider, LobbyKind::Open).players,
+        expected,
+        "the in-memory lobby must not publish a sweep that cannot queue its notice"
+    );
+    drop(provider);
+    assert_eq!(
+        lobby_snapshot(
+            &provider_for(&database, Arc::new(RecordingTransport::default())),
+            LobbyKind::Open
+        )
+        .players,
+        expected,
+        "the durable lobby must remain unchanged when notice persistence fails"
+    );
 }
 
 #[tokio::test]

@@ -287,6 +287,15 @@ impl LobbyPersistencePort for RecordingPersistence {
         Ok(())
     }
 
+    fn save_lobby_with_readycheck_pruned_notice(
+        &self,
+        lobby: &PersistedLobbyState,
+        _channel_id: ChannelId,
+        _player_ids: &BTreeSet<UserId>,
+    ) -> Result<(), String> {
+        self.save_lobby(lobby)
+    }
+
     fn clear_lobby(&self, lobby_scope: LobbyScope) -> Result<bool, String> {
         Ok(self
             .rows
@@ -332,6 +341,17 @@ impl LobbyPersistencePort for HookPersistence {
     fn save_lobby(&self, lobby: &PersistedLobbyState) -> Result<(), String> {
         self.run_hook();
         self.inner.save_lobby(lobby)
+    }
+
+    fn save_lobby_with_readycheck_pruned_notice(
+        &self,
+        lobby: &PersistedLobbyState,
+        channel_id: ChannelId,
+        player_ids: &BTreeSet<UserId>,
+    ) -> Result<(), String> {
+        self.run_hook();
+        self.inner
+            .save_lobby_with_readycheck_pruned_notice(lobby, channel_id, player_ids)
     }
 
     fn clear_lobby(&self, lobby_scope: LobbyScope) -> Result<bool, String> {
