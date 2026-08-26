@@ -7,13 +7,14 @@
 //! not create schema; startup migration authority remains outside this module.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use cama_app::economy_event_sqlite::SqliteEconomyEventService;
 use cama_app::player_trivia_service as app;
+use cama_db::core_repositories::PlayerRepository;
 use cama_db::pet_evolution_repository::PetEvolutionRepository;
 use cama_db::player_trivia as db;
 use cama_db::predictions_repository::PredictionRepository;
@@ -23,6 +24,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use crate::ApplicationConfig;
+use crate::discord_transport::{GuildPlayerNameResolver, StoredUsernamePlayerNameResolver};
 use crate::economy_events_worker::EconomyEventsWorkerConfig;
 use crate::ids::signed_id;
 use crate::registration::{
@@ -89,6 +91,8 @@ impl PlayerTriviaRegistrationProvider {
         Self {
             handler: Arc::new(PlayerTriviaInteractionHandler {
                 state: Arc::new(PlayerTriviaRuntimeState {
+                    database_path: database_path.as_ref().to_path_buf(),
+                    player_names: Arc::new(StoredUsernamePlayerNameResolver),
                     repository,
                     service,
                     penalties: PredictionRepository::new(database_path.as_ref()),
@@ -104,6 +108,16 @@ impl PlayerTriviaRegistrationProvider {
                 }),
             }),
         }
+    }
+
+    #[must_use]
+    pub fn with_player_names(mut self, player_names: Arc<dyn GuildPlayerNameResolver>) -> Self {
+        let handler =
+            Arc::get_mut(&mut self.handler).expect("new player-trivia provider owns its handler");
+        Arc::get_mut(&mut handler.state)
+            .expect("new player-trivia provider owns its runtime state")
+            .player_names = player_names;
+        self
     }
 }
 
@@ -158,6 +172,8 @@ struct PlayerTriviaInteractionHandler {
 }
 
 struct PlayerTriviaRuntimeState {
+    database_path: PathBuf,
+    player_names: Arc<dyn GuildPlayerNameResolver>,
     repository: RuntimePlayerTriviaRepository,
     service: Arc<app::PlayerTriviaService<RuntimePlayerTriviaRepository>>,
     penalties: PredictionRepository,
@@ -193,6 +209,25 @@ impl InteractionHandler for PlayerTriviaInteractionHandler {
 }
 
 impl PlayerTriviaRuntimeState {
+    async fn render_player_name(&self, user_id: i64, guild_id: i64) -> String {
+        let path = self.database_path.clone();
+        let stored_name = tokio::task::spawn_blocking(move || {
+            PlayerRepository::new(path)
+                .get_by_id(user_id, Some(guild_id))
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten()
+        .map_or_else(|| format!("User {user_id}"), |player| player.name);
+        self.player_names
+            .names_for_guild(guild_id, &[user_id])
+            .unwrap_or_default()
+            .resolve(user_id, &stored_name)
+            .to_owned()
+    }
+
     async fn command(
         self: &Arc<Self>,
         request: InteractionRequest,
@@ -200,7 +235,7 @@ impl PlayerTriviaRuntimeState {
     ) -> Result<(), String> {
         let InteractionRequest::Command {
             user_id,
-            user_display_name,
+            user_display_name: _,
             guild_id,
             channel_id,
             member_permissions,
@@ -318,6 +353,7 @@ impl PlayerTriviaRuntimeState {
         if responder.defer_thinking(false).await.is_err() {
             return Ok(());
         }
+        let user_display_name = self.render_player_name(user_id, guild_id).await;
         let member_ids = self
             .discord
             .player_trivia_non_bot_member_ids(guild_id)
@@ -460,7 +496,7 @@ impl PlayerTriviaRuntimeState {
         let InteractionRequest::Component {
             custom_id,
             user_id,
-            user_display_name,
+            user_display_name: _,
             guild_id,
             ..
         } = request
@@ -501,6 +537,11 @@ impl PlayerTriviaRuntimeState {
                 .map_err(|error| error.to_string());
         }
         let question = next.expect("checked player-trivia next question");
+        responder
+            .defer(false)
+            .await
+            .map_err(|error| error.to_string())?;
+        let user_display_name = self.render_player_name(user_id, guild_id).await;
         let question_for_display = convert_stored_question(&question.question);
         let now = unix_timestamp()?;
         let deadline = session
@@ -523,10 +564,7 @@ impl PlayerTriviaRuntimeState {
             .await
             .map_err(|error| format!("player-trivia timeout task failed: {error}"))??;
             if !changed {
-                return responder
-                    .defer(false)
-                    .await
-                    .map_err(|error| error.to_string());
+                return Ok(());
             }
             return responder
                 .update(summary_response(
@@ -591,10 +629,7 @@ impl PlayerTriviaRuntimeState {
                 .await
                 .map_err(|error| format!("player-trivia session reload failed: {error}"))??;
                 if current.is_some_and(|current| current.status == "active") {
-                    return responder
-                        .defer(false)
-                        .await
-                        .map_err(|error| error.to_string());
+                    return Ok(());
                 }
                 self.finish_interrupted(session.session_id, now).await;
                 return responder

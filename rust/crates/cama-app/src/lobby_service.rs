@@ -1129,10 +1129,27 @@ where
         lobby: &LobbySnapshot,
         preview_port: Option<&dyn FirstGamePoolPreviewPort>,
     ) -> EmbedModel {
+        self.build_lobby_embed_with_name_overrides(lobby, preview_port, None)
+    }
+
+    #[must_use]
+    pub fn build_lobby_embed_with_name_overrides(
+        &self,
+        lobby: &LobbySnapshot,
+        preview_port: Option<&dyn FirstGamePoolPreviewPort>,
+        name_overrides: Option<&BTreeMap<i64, String>>,
+    ) -> EmbedModel {
         let player_ids = lobby.players.iter().copied().collect::<Vec<_>>();
-        let players = self
+        let mut players = self
             .player_port
             .get_by_ids(&player_ids, lobby.scope.guild_id);
+        if let Some(name_overrides) = name_overrides {
+            for player in &mut players {
+                if let Some(name) = name_overrides.get(&player.discord_id) {
+                    player.name.clone_from(name);
+                }
+            }
+        }
         let bonus_pool_preview = preview_port.map(|port| {
             port.first_game_pool_previews(lobby.scope.guild_id, DOTA_BET_SEED_AMOUNT)
                 .for_kind(lobby.scope.kind)

@@ -37,7 +37,10 @@ use serde_json::Value as JsonValue;
 use tracing::{debug, warn};
 
 use crate::ApplicationConfig;
-use crate::discord_transport::{DiscordAllowedMentions, DiscordMessage, DiscordTransport};
+use crate::discord_transport::{
+    DiscordAllowedMentions, DiscordMessage, DiscordTransport, GuildPlayerNameResolver,
+    StoredUsernamePlayerNameResolver,
+};
 use crate::gamba_guild_source::GambaGuildSource;
 use crate::ids::signed_id;
 use crate::prediction_workers::PredictionDiscordPort;
@@ -484,9 +487,6 @@ pub trait PredictionCommandDiscordPort: Send + Sync {
     /// Resolve cached/HTTP Discord mentions into non-notifying display names.
     async fn prediction_display_text(&self, guild_id: i64, text: &str) -> Result<String, String>;
 
-    /// Cached display name for the trade tape, falling back to a user mention.
-    fn prediction_display_name(&self, guild_id: i64, user_id: i64) -> String;
-
     /// Ordered announcement -> one-week public thread -> market message -> pin.
     async fn create_prediction_market_surface(
         &self,
@@ -641,9 +641,19 @@ impl PredictionRegistrationProvider {
                 gamba_guilds: ports.gamba_guilds,
                 discord: ports.discord,
                 neon,
+                players: PlayerRepository::new(&path),
+                player_names: Arc::new(StoredUsernamePlayerNameResolver),
                 help_cooldowns: Mutex::new(BTreeMap::new()),
             }),
         }
+    }
+
+    #[must_use]
+    pub fn with_player_names(mut self, player_names: Arc<dyn GuildPlayerNameResolver>) -> Self {
+        Arc::get_mut(&mut self.handler)
+            .expect("new prediction provider owns its handler")
+            .player_names = player_names;
+        self
     }
 }
 
@@ -674,6 +684,8 @@ struct PredictionInteractionHandler {
     gamba_guilds: Arc<dyn GambaGuildSource>,
     discord: Arc<dyn DiscordTransport>,
     neon: Arc<dyn PredictionNeonPort>,
+    players: PlayerRepository,
+    player_names: Arc<dyn GuildPlayerNameResolver>,
     help_cooldowns: Mutex<BTreeMap<u64, Instant>>,
 }
 
@@ -1200,6 +1212,9 @@ impl PredictionInteractionHandler {
             "resolved" => response = response.embed(resolved_embed(&snapshot.market)),
             "cancelled" => response = response.embed(cancelled_embed(&snapshot.market)),
             _ => {
+                let recent_trade_names = self
+                    .render_trade_names(snapshot.market.guild_id, &snapshot.recent_trades)
+                    .await;
                 let chart_title = self
                     .command_discord
                     .prediction_display_text(snapshot.market.guild_id, &snapshot.market.question)
@@ -1215,7 +1230,7 @@ impl PredictionInteractionHandler {
                 .into_inner();
                 let filename = format!("predict_{prediction_id}.png");
                 response = response
-                    .embed(self.open_market_embed(&snapshot, Some(&filename)))
+                    .embed(self.open_market_embed(&snapshot, Some(&filename), &recent_trade_names))
                     .attachment(InteractionAttachment::bytes(filename, chart));
                 if persistent_buttons {
                     response = response.action_row(persistent_market_buttons());
@@ -1233,6 +1248,7 @@ impl PredictionInteractionHandler {
         &self,
         snapshot: &MarketSnapshot,
         chart_filename: Option<&str>,
+        recent_trade_names: &BTreeMap<i64, String>,
     ) -> InteractionEmbed {
         let market = &snapshot.market;
         let price = market
@@ -1252,11 +1268,7 @@ impl PredictionInteractionHandler {
             .field("Order book", ladder_body(&snapshot.book), false)
             .field(
                 "Recent",
-                recent_trade_text(
-                    &snapshot.recent_trades,
-                    market.guild_id,
-                    self.command_discord.as_ref(),
-                ),
+                recent_trade_text(&snapshot.recent_trades, recent_trade_names),
                 false,
             );
         if let Some(position) = snapshot.viewer_position
@@ -1272,6 +1284,47 @@ impl PredictionInteractionHandler {
             "{} jopa per winning contract",
             self.config.contract_value
         ))
+    }
+
+    async fn render_trade_names(&self, guild_id: i64, trades: &[Trade]) -> BTreeMap<i64, String> {
+        let player_ids = trades
+            .iter()
+            .map(|trade| trade.discord_id)
+            .collect::<Vec<_>>();
+        let query_ids = player_ids.clone();
+        let players = self.players.clone();
+        let stored_names = spawn_sqlite("load prediction trade names", move || {
+            players
+                .get_by_ids(&query_ids, Some(guild_id))
+                .map(|players| {
+                    players
+                        .into_iter()
+                        .filter_map(|player| {
+                            player
+                                .discord_id
+                                .map(|discord_id| (discord_id, player.name))
+                        })
+                        .collect::<BTreeMap<_, _>>()
+                })
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .unwrap_or_default();
+        let names = self
+            .player_names
+            .names_for_guild(guild_id, &player_ids)
+            .unwrap_or_default();
+        trades
+            .iter()
+            .map(|trade| {
+                let fallback = format!("User {}", trade.discord_id);
+                let stored_name = stored_names.get(&trade.discord_id).unwrap_or(&fallback);
+                (
+                    trade.discord_id,
+                    names.resolve(trade.discord_id, stored_name).to_owned(),
+                )
+            })
+            .collect()
     }
 
     async fn market_for_component(
@@ -2756,18 +2809,17 @@ fn ladder_body(book: &Book) -> String {
     format!("```ansi\n{}\n```", lines.join("\n"))
 }
 
-fn recent_trade_text(
-    trades: &[Trade],
-    guild_id: i64,
-    discord: &dyn PredictionCommandDiscordPort,
-) -> String {
+fn recent_trade_text(trades: &[Trade], display_names: &BTreeMap<i64, String>) -> String {
     if trades.is_empty() {
         return "_no trades yet_".to_owned();
     }
     trades
         .iter()
         .map(|trade| {
-            let name = discord.prediction_display_name(guild_id, trade.discord_id);
+            let name = display_names
+                .get(&trade.discord_id)
+                .cloned()
+                .unwrap_or_else(|| format!("User {}", trade.discord_id));
             let verb = if trade.action.starts_with("buy") {
                 "bought"
             } else {

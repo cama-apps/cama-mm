@@ -40,6 +40,7 @@ use cama_app::pet_eating::{
 use cama_app::pet_evolution_app::{PetEvolutionService, SystemEvolutionClock};
 use cama_app::pet_flavor::{PetFlavorEvent as FlavorEvent, PetFlavorService};
 use cama_app::pet_sqlite::SqlitePetCommandService;
+use cama_db::core_repositories::PlayerRepository;
 use cama_db::pet_brawl_repository::{
     BrawlSettlement, BrawlSettlementResult, DrawSettlementResult, PetBrawlRepository, SweepResult,
 };
@@ -62,7 +63,9 @@ use tokio::time::Instant;
 use tracing::warn;
 
 use crate::application_config::ApplicationConfig;
-use crate::discord_transport::DiscordTransport;
+use crate::discord_transport::{
+    DiscordTransport, GuildPlayerNameResolver, StoredUsernamePlayerNameResolver,
+};
 use crate::pet_death_delivery::DirectDeathDeliveryGuard;
 #[cfg(all(test, feature = "runtime-test-dig"))]
 use crate::pet_death_delivery::is_active as shared_direct_death_delivery_active;
@@ -139,6 +142,7 @@ impl PetRegistrationProvider {
         );
         let state = Arc::new(PetRuntimeState {
             database_path,
+            player_names: Arc::new(StoredUsernamePlayerNameResolver),
             decay_per_day: config.values.pet_hunger_decay_per_day,
             pet_channel_id: config.channels.pet,
             discord,
@@ -177,6 +181,15 @@ impl PetRegistrationProvider {
     ) -> Self {
         Self::new(database_path, config, discord, reminders, None)
     }
+
+    #[must_use]
+    pub fn with_player_names(mut self, player_names: Arc<dyn GuildPlayerNameResolver>) -> Self {
+        let handler = Arc::get_mut(&mut self.handler).expect("new pet provider owns its handler");
+        Arc::get_mut(&mut handler.state)
+            .expect("new pet provider owns its runtime state")
+            .player_names = player_names;
+        self
+    }
 }
 
 impl RegistrationProvider for PetRegistrationProvider {
@@ -199,6 +212,7 @@ impl RegistrationProvider for PetRegistrationProvider {
 
 struct PetRuntimeState {
     database_path: PathBuf,
+    player_names: Arc<dyn GuildPlayerNameResolver>,
     decay_per_day: i64,
     pet_channel_id: Option<i64>,
     discord: Arc<dyn DiscordTransport>,
@@ -521,6 +535,26 @@ impl IntegerRangeOption for CommandOptionSpec {
 }
 
 impl PetInteractionHandler {
+    async fn render_player_name(&self, user_id: i64, guild_id: i64) -> String {
+        let path = self.state.database_path.clone();
+        let stored_name = tokio::task::spawn_blocking(move || {
+            PlayerRepository::new(path)
+                .get_by_id(user_id, Some(guild_id))
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten()
+        .map_or_else(|| format!("User {user_id}"), |player| player.name);
+        self.state
+            .player_names
+            .names_for_guild(guild_id, &[user_id])
+            .unwrap_or_default()
+            .resolve(user_id, &stored_name)
+            .to_owned()
+    }
+
     async fn handle_command(
         &self,
         request: InteractionRequest,
@@ -751,7 +785,7 @@ impl PetInteractionHandler {
         let InteractionRequest::Component {
             custom_id,
             user_id,
-            user_display_name,
+            user_display_name: _,
             guild_id,
             channel_id,
             values,
@@ -776,7 +810,7 @@ impl PetInteractionHandler {
         let action = custom_id.strip_prefix("pet:").unwrap_or_default();
         if let Some(action) = action.strip_prefix("status:") {
             return self
-                .component_status(action, user_id, guild_id, &user_display_name, responder)
+                .component_status(action, user_id, guild_id, responder)
                 .await;
         }
         if let Some(action) = action.strip_prefix("altar:") {
@@ -889,7 +923,7 @@ impl PetInteractionHandler {
         &self,
         user_id: i64,
         guild_id: i64,
-        display_name: &str,
+        _display_name: &str,
         options: &[InteractionOption],
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
@@ -899,7 +933,7 @@ impl PetInteractionHandler {
             .defer(false)
             .await
             .map_err(|error| error.to_string())?;
-        let display_name = display_name.to_owned();
+        let display_name = self.render_player_name(user_id, guild_id).await;
         let flavor = Arc::clone(&self.state.flavor);
         let result = self
             .run_service(move |service| {
@@ -944,7 +978,7 @@ impl PetInteractionHandler {
             .defer(!public)
             .await
             .map_err(|error| error.to_string())?;
-        let target_name = target.1.clone();
+        let target_name = self.render_player_name(target.0, guild_id).await;
         let built = self
             .build_status(target.0, guild_id, &target_name, target.0 == user_id)
             .await?;
@@ -1366,7 +1400,7 @@ impl PetInteractionHandler {
             .defer(false)
             .await
             .map_err(|error| error.to_string())?;
-        let name = target.1;
+        let name = self.render_player_name(target.0, guild_id).await;
         let database_path = self.state.database_path.clone();
         let now = Utc::now().timestamp();
         let (pets, camadex) = self
@@ -1794,7 +1828,6 @@ impl PetInteractionHandler {
         action: &str,
         user_id: i64,
         guild_id: i64,
-        display_name: &str,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
         let mut pieces = action.splitn(3, ':');
@@ -1843,6 +1876,7 @@ impl PetInteractionHandler {
             .defer(false)
             .await
             .map_err(|error| error.to_string())?;
+        let display_name = self.render_player_name(user_id, guild_id).await;
         let owner = state.owner_id;
         let result = self
             .run_service(move |service| match operation.as_str() {
@@ -1866,7 +1900,7 @@ impl PetInteractionHandler {
         }
         let _ = self.state.reminders.rearm_pet(owner, guild_id).await;
         let built = self
-            .build_status(owner, guild_id, display_name, true)
+            .build_status(owner, guild_id, &display_name, true)
             .await?;
         let public = state.public;
         let response = status_response(built, Some(token), public);

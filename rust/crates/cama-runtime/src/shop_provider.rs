@@ -57,6 +57,7 @@ use thiserror::Error;
 use tracing::{debug, error, warn};
 
 use crate::ApplicationConfig;
+use crate::discord_transport::{GuildPlayerNameResolver, StoredUsernamePlayerNameResolver};
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, InteractionAttachment,
     InteractionEmbed, InteractionHandler, InteractionHandlerError, InteractionOption,
@@ -213,6 +214,7 @@ impl ShopRegistrationProvider {
                 gambling: GamblingStatsRepository::new(&path),
                 economy_events: Arc::new(SqliteEconomyEventService::new(&path, economy_config)),
                 discord,
+                player_names: Arc::new(StoredUsernamePlayerNameResolver),
                 flavor,
                 config: runtime_config,
                 clock: Arc::new(SystemShopClock),
@@ -223,6 +225,14 @@ impl ShopRegistrationProvider {
                 neon: Mutex::new(neon),
             }),
         })
+    }
+
+    #[must_use]
+    pub fn with_player_names(mut self, player_names: Arc<dyn GuildPlayerNameResolver>) -> Self {
+        Arc::get_mut(&mut self.handler)
+            .expect("new shop provider owns its handler")
+            .player_names = player_names;
+        self
     }
 }
 
@@ -306,6 +316,7 @@ struct ShopInteractionHandler {
     gambling: GamblingStatsRepository,
     economy_events: Arc<SqliteEconomyEventService>,
     discord: Arc<dyn ShopDiscordPort>,
+    player_names: Arc<dyn GuildPlayerNameResolver>,
     flavor: Option<Arc<FlavorTextService>>,
     config: ShopRuntimeConfig,
     clock: Arc<dyn ShopClock>,
@@ -369,6 +380,7 @@ struct CommandContext {
     member_permissions: Option<u64>,
     subcommand: String,
     options: Vec<InteractionOption>,
+    rendered_user_names: BTreeMap<i64, String>,
 }
 
 #[derive(Clone, Debug)]
@@ -376,6 +388,7 @@ struct UserOption {
     id: i64,
     unsigned_id: u64,
     display_name: String,
+    ai_display_name: String,
 }
 
 #[derive(Clone, Debug)]
@@ -481,6 +494,7 @@ impl InteractionHandler for ShopInteractionHandler {
                         member_permissions,
                         subcommand,
                         options,
+                        rendered_user_names: BTreeMap::new(),
                     },
                     responder,
                 )
@@ -532,13 +546,74 @@ impl ShopInteractionHandler {
             "avoids" => self.avoids(context, responder).await,
             "deals" => self.deals(context, responder).await,
             "cancel-deal" => {
-                let target = user_option(&context.options, "target")?
+                let target = user_option(&context, "target")?
                     .ok_or("missing required user option \"target\"")?;
                 self.cancel_package_deal(context, responder, target).await
             }
             "mana" => self.mana_shop(context, responder).await,
             value => Err(format!("unsupported /shop subcommand {value:?}").into()),
         }
+    }
+
+    async fn with_rendered_player_names(
+        &self,
+        mut context: CommandContext,
+    ) -> Result<CommandContext, InteractionHandlerError> {
+        let targets = context
+            .options
+            .iter()
+            .enumerate()
+            .filter_map(|(index, option)| match option.value {
+                InteractionValue::User { id, .. } => Some((index, id)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut stored_names = BTreeMap::new();
+        for (index, id) in &targets {
+            let target_id = signed_id(*id, "target user")?;
+            let fallback = match &context.options[*index].value {
+                InteractionValue::User { display_name, .. } => {
+                    display_name.clone().unwrap_or_else(|| format!("User {id}"))
+                }
+                _ => format!("User {id}"),
+            };
+            let stored_name = self
+                .load_player(target_id, context.guild_id)
+                .await?
+                .map(|player| player.name)
+                .unwrap_or(fallback);
+            stored_names.insert(target_id, stored_name);
+        }
+        let rendered_names = self.project_stored_player_names(context.guild_id, stored_names);
+        for (_index, id) in targets {
+            let target_id = signed_id(id, "target user")?;
+            context.rendered_user_names.insert(
+                target_id,
+                rendered_names
+                    .get(&target_id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("User {id}")),
+            );
+        }
+        Ok(context)
+    }
+
+    fn project_stored_player_names(
+        &self,
+        guild_id: i64,
+        stored_names: BTreeMap<i64, String>,
+    ) -> BTreeMap<i64, String> {
+        let player_ids = stored_names.keys().copied().collect::<Vec<_>>();
+        let names = self
+            .player_names
+            .names_for_guild(guild_id, &player_ids)
+            .unwrap_or_default();
+        stored_names
+            .into_iter()
+            .map(|(player_id, stored_name)| {
+                (player_id, names.resolve(player_id, &stored_name).to_owned())
+            })
+            .collect()
     }
 
     async fn autocomplete(
@@ -641,7 +716,8 @@ impl ShopInteractionHandler {
             .await;
         }
         let item = required_string(&context.options, "item")?;
-        let target = user_option(&context.options, "target")?;
+        let context = self.with_rendered_player_names(context).await?;
+        let target = user_option(&context, "target")?;
         match item.as_str() {
             "announce" => {
                 self.simple_purchase(context, responder, None, SimpleProduct::Announce)
@@ -948,7 +1024,8 @@ impl ShopInteractionHandler {
         let Some(spec) = mana_item(&item_key) else {
             return respond_ephemeral(&responder, "Unknown item.").await;
         };
-        let target = user_option(&context.options, "target")?;
+        let context = self.with_rendered_player_names(context).await?;
+        let target = user_option(&context, "target")?;
         let now = self.clock.now()?;
         let today = pacific_mana_day(now)?;
         let mana = self.mana.clone();
@@ -1239,10 +1316,11 @@ impl ShopInteractionHandler {
                     .map(|request| request.victim_id)
                     .collect::<Vec<_>>();
                 let outcomes = self.apply_hostile_batch(requests).await?;
-                let names = selected
+                let stored_names = selected
                     .iter()
                     .map(|player| (player.discord_id, player.name.clone()))
                     .collect::<BTreeMap<_, _>>();
+                let names = self.project_stored_player_names(guild_id, stored_names);
                 let mut total_destroyed = 0;
                 let mut total_absorbed = 0;
                 let mut lines = Vec::new();
@@ -1996,7 +2074,7 @@ impl ShopInteractionHandler {
                 {
                     details.insert(
                         "target_name".to_owned(),
-                        AiValue::Text(target.display_name.clone()),
+                        AiValue::Text(target.ai_display_name.clone()),
                     );
                     details.insert("target_stats".to_owned(), target_stats.ai_value());
                     details.insert("comparison".to_owned(), comparison.ai_value());
@@ -3091,19 +3169,29 @@ fn required_string(options: &[InteractionOption], name: &str) -> Result<String, 
         .ok_or_else(|| format!("missing required string option {name:?}"))
 }
 
-fn user_option(options: &[InteractionOption], name: &str) -> Result<Option<UserOption>, String> {
-    let value = options
+fn user_option(context: &CommandContext, name: &str) -> Result<Option<UserOption>, String> {
+    let value = context
+        .options
         .iter()
         .find(|option| option.name == name)
         .map(|option| &option.value);
     match value {
         Some(InteractionValue::User {
             id, display_name, ..
-        }) => Ok(Some(UserOption {
-            id: signed_id(*id, "target user")?,
-            unsigned_id: *id,
-            display_name: display_name.clone().unwrap_or_else(|| format!("User {id}")),
-        })),
+        }) => {
+            let display_name = display_name.clone().unwrap_or_else(|| format!("User {id}"));
+            let signed_id = signed_id(*id, "target user")?;
+            Ok(Some(UserOption {
+                id: signed_id,
+                unsigned_id: *id,
+                ai_display_name: display_name.clone(),
+                display_name: context
+                    .rendered_user_names
+                    .get(&signed_id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("User {id}")),
+            }))
+        }
         None => Ok(None),
         Some(_) => Err(format!("option {name:?} is not a user")),
     }

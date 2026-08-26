@@ -775,6 +775,21 @@ fn state_for_draft() -> DraftState {
     state
 }
 
+#[test]
+fn draft_render_state_overrides_only_cached_server_nicknames() {
+    let state = state_for_draft();
+    let names = GuildPlayerNameDirectory::new(Some(BTreeMap::from([
+        (1_u64, Some("Server Captain".to_owned())),
+        (2_u64, None),
+    ])));
+
+    let rendered = draft_render_state(&state, &names);
+
+    assert_eq!(rendered.player_pool_data[&1].name, "Server Captain");
+    assert_eq!(rendered.player_pool_data[&2].name, "P2");
+    assert_eq!(state.player_pool_data[&1].name, "P1");
+}
+
 async fn persistent_completion_fixture() -> (
     FastTestDatabase,
     DraftRegistrationProvider,
@@ -3458,7 +3473,6 @@ async fn neon_coinflip_and_captain_symmetry_hooks_follow_draft_lifecycle() {
         .finish_start(
             &StartContext {
                 user_id: 1,
-                user_display_name: "Captain".to_owned(),
                 guild_id: 42,
                 channel_id: 777,
                 explicit_kind: None,

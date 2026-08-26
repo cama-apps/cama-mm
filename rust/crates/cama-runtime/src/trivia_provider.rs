@@ -6,7 +6,7 @@
 //! for every generated Python-compatible `trivia_...` custom ID.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -22,6 +22,7 @@ use cama_app::trivia_image_cache::{
 };
 use cama_app::trivia_questions::{TriviaCatalog, TriviaQuestion, TriviaRandom, generate_question};
 use cama_db::bankruptcy_repository::BankruptcyRepository;
+use cama_db::core_repositories::PlayerRepository;
 use cama_db::loan_repository::{LedgerContext, LoanRepository};
 use cama_db::low_priority_repository::LowPriorityRepository;
 use cama_db::mana_service_repository::ManaRepository;
@@ -34,6 +35,7 @@ use chrono::{Datelike, Duration as ChronoDuration, NaiveDate, Timelike, Weekday}
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
+use crate::discord_transport::{GuildPlayerNameResolver, StoredUsernamePlayerNameResolver};
 use crate::economy_events_worker::EconomyEventsWorkerConfig;
 use crate::gateway_events::{GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryReport};
 use crate::ids::signed_id;
@@ -150,6 +152,8 @@ impl TriviaRegistrationProvider {
         .map_err(|error| error.to_string())?;
         let economy_config = EconomyEventsWorkerConfig::from_application_config(config).event;
         let state = Arc::new(TriviaRuntimeState {
+            database_path: database_path.clone(),
+            player_names: Arc::new(StoredUsernamePlayerNameResolver),
             trivia: TriviaCommandsRepository::new(&database_path),
             mana: ManaRepository::new(&database_path),
             bankruptcy,
@@ -189,6 +193,16 @@ impl TriviaRegistrationProvider {
     #[must_use]
     pub fn catalog(&self) -> Arc<TriviaCatalog> {
         Arc::clone(&self.handler.state.catalog)
+    }
+
+    #[must_use]
+    pub fn with_player_names(mut self, player_names: Arc<dyn GuildPlayerNameResolver>) -> Self {
+        let handler =
+            Arc::get_mut(&mut self.handler).expect("new trivia provider owns its handler");
+        Arc::get_mut(&mut handler.state)
+            .expect("new trivia provider owns its runtime state")
+            .player_names = player_names;
+        self
     }
 }
 
@@ -250,6 +264,8 @@ impl TriviaRuntimeConfig {
 }
 
 struct TriviaRuntimeState {
+    database_path: PathBuf,
+    player_names: Arc<dyn GuildPlayerNameResolver>,
     trivia: TriviaCommandsRepository,
     mana: ManaRepository,
     bankruptcy: BankruptcyService<BankruptcyRepository>,
@@ -361,6 +377,25 @@ impl InteractionHandler for TriviaInteractionHandler {
 }
 
 impl TriviaRuntimeState {
+    async fn render_player_name(&self, user_id: i64, guild_id: i64) -> String {
+        let path = self.database_path.clone();
+        let stored_name = tokio::task::spawn_blocking(move || {
+            PlayerRepository::new(path)
+                .get_by_id(user_id, Some(guild_id))
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten()
+        .map_or_else(|| format!("User {user_id}"), |player| player.name);
+        self.player_names
+            .names_for_guild(guild_id, &[user_id])
+            .unwrap_or_default()
+            .resolve(user_id, &stored_name)
+            .to_owned()
+    }
+
     async fn start_command(
         self: &Arc<Self>,
         request: InteractionRequest,
@@ -368,7 +403,7 @@ impl TriviaRuntimeState {
     ) -> Result<(), String> {
         let InteractionRequest::Command {
             user_id,
-            user_display_name,
+            user_display_name: _,
             guild_id,
             channel_id,
             member_permissions,
@@ -472,6 +507,7 @@ impl TriviaRuntimeState {
             }
             return Ok(());
         }
+        let user_display_name = self.render_player_name(user_id, guild_id).await;
 
         let placeholder = TriviaQuestion {
             text: String::new(),
@@ -578,7 +614,7 @@ impl TriviaRuntimeState {
             )
             .await;
         }
-        let (target_id, target_name) = user_option(&options)?;
+        let (target_id, _target_name) = user_option(&options)?;
         let guild_id = guild_id.map_or(Ok(0), |value| signed_id(value, "guild"))?;
         let trivia = self.trivia.clone();
         let reset = tokio::task::spawn_blocking(move || {
@@ -588,6 +624,7 @@ impl TriviaRuntimeState {
         })
         .await
         .map_err(|error| format!("trivia cooldown reset task failed: {error}"))??;
+        let target_name = self.render_player_name(target_id, guild_id).await;
         let message = if reset {
             format!("Trivia cooldown reset for **{target_name}**.")
         } else {

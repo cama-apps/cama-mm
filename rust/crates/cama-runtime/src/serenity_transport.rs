@@ -42,8 +42,9 @@ use crate::dig_provider::{
 };
 use crate::discord_transport::{
     DiscordDestinationStatus, DiscordDirectMessageError, DiscordDirectMessageErrorKind,
-    DiscordEmoji, DiscordGuildMemberSnapshot, DiscordMessage, DiscordMessageReceipt,
-    DiscordMessageSnapshot, DiscordPresence, DiscordTransport, DiscordUserSnapshot,
+    DiscordEmoji, DiscordGuildMemberServerNicknames, DiscordGuildMemberSnapshot, DiscordMessage,
+    DiscordMessageReceipt, DiscordMessageSnapshot, DiscordPresence, DiscordTransport,
+    DiscordUserSnapshot,
 };
 use crate::duel_challenges_worker::{
     DuelChannelKind, DuelChannelSnapshot, DuelDiscordPort, DuelGuildSnapshot,
@@ -551,7 +552,7 @@ impl DigBonusDiscordPort for SerenityDiscordTransport {
                 Ok(DigBonusGuildMember {
                     id: i64::try_from(member.user.id.get())
                         .map_err(|_| "Dig bonus member id exceeds SQLite INTEGER".to_owned())?,
-                    display_name: member.display_name().to_owned(),
+                    display_name: member.user.name.clone(),
                     bot: member.user.bot,
                 })
             })
@@ -1275,10 +1276,12 @@ impl SerenityHandler {
             return;
         }
         let actor_is_bot = reaction.member.as_ref().map(|member| member.user.bot);
-        let actor_display_name = reaction
-            .member
-            .as_ref()
-            .map(|member| member.display_name().to_owned());
+        let actor_display_name = reaction.member.as_ref().map(|member| {
+            member
+                .nick
+                .clone()
+                .unwrap_or_else(|| member.user.name.clone())
+        });
         let event = RawReactionEvent {
             kind,
             guild_id: reaction.guild_id.map(|id| id.get()),
@@ -1352,11 +1355,7 @@ impl SerenityHandler {
             interaction_id: command.id.get(),
             name: command.data.name.clone(),
             user_id: command.user.id.get(),
-            user_display_name: command
-                .member
-                .as_deref()
-                .map_or_else(|| command.user.display_name(), Member::display_name)
-                .to_owned(),
+            user_display_name: command.user.name.clone(),
             guild_id: command.guild_id.map(|id| id.get()),
             channel_id: Some(command.channel_id.get()),
             member_permissions: command
@@ -1438,11 +1437,7 @@ impl SerenityHandler {
             interaction_id: component.id.get(),
             custom_id: custom_id.clone(),
             user_id: component.user.id.get(),
-            user_display_name: component
-                .member
-                .as_ref()
-                .map_or_else(|| component.user.display_name(), Member::display_name)
-                .to_owned(),
+            user_display_name: component.user.name.clone(),
             guild_id: component.guild_id.map(|id| id.get()),
             channel_id: Some(component.channel_id.get()),
             member_permissions: component
@@ -1523,11 +1518,30 @@ fn gateway_reaction_emoji(emoji: &ReactionType) -> RawReactionEmoji {
     }
 }
 
+fn member_server_nickname(member: &Member) -> Option<String> {
+    member.nick.clone()
+}
+
+fn requested_member_server_nicknames(
+    members: &HashMap<UserId, Member>,
+    user_ids: &[u64],
+) -> DiscordGuildMemberServerNicknames {
+    user_ids
+        .iter()
+        .filter_map(|user_id| {
+            let user_id = UserId::new(*user_id);
+            members
+                .get(&user_id)
+                .map(|member| (user_id.get(), member_server_nickname(member)))
+        })
+        .collect::<BTreeMap<_, _>>()
+}
+
 fn gateway_member(member: &Member) -> GatewayMember {
     GatewayMember::new(
         member.guild_id.get(),
         member.user.id.get(),
-        member.nick.clone(),
+        member_server_nickname(member),
     )
 }
 
@@ -1735,26 +1749,12 @@ fn interaction_option(
         CommandDataOptionValue::User(value) => InteractionValue::User {
             id: value.get(),
             is_bot: command.data.resolved.users.get(value).map(|user| user.bot),
-            display_name: command.data.resolved.members.get(value).map_or_else(
-                || {
-                    command
-                        .data
-                        .resolved
-                        .users
-                        .get(value)
-                        .map(|user| user.display_name().to_owned())
-                },
-                |member| {
-                    member.nick.clone().or_else(|| {
-                        command
-                            .data
-                            .resolved
-                            .users
-                            .get(value)
-                            .map(|user| user.display_name().to_owned())
-                    })
-                },
-            ),
+            display_name: command
+                .data
+                .resolved
+                .users
+                .get(value)
+                .map(|user| user.name.clone()),
         },
         CommandDataOptionValue::Channel(value) => InteractionValue::Channel(value.get()),
         CommandDataOptionValue::Role(value) => InteractionValue::Role(value.get()),
@@ -3286,17 +3286,14 @@ impl PredictionCommandDiscordPort for SerenityDiscordTransport {
                     .cache
                     .guild(guild_id)
                     .and_then(|guild| {
-                        guild
-                            .members
-                            .get(&user_id)
-                            .map(|member| member.display_name().to_owned())
+                        guild.members.get(&user_id).map(|member| {
+                            member
+                                .nick
+                                .clone()
+                                .unwrap_or_else(|| member.user.name.clone())
+                        })
                     })
-                    .or_else(|| {
-                        context
-                            .cache
-                            .user(user_id)
-                            .map(|user| user.display_name().to_owned())
-                    })
+                    .or_else(|| context.cache.user(user_id).map(|user| user.name.clone()))
                     .or_else(|| Some("unknown".to_owned()))
             },
             |role_id| {
@@ -3308,35 +3305,6 @@ impl PredictionCommandDiscordPort for SerenityDiscordTransport {
                     .or_else(|| Some("unknown-role".to_owned()))
             },
         ))
-    }
-
-    fn prediction_display_name(&self, guild_id: i64, user_id: i64) -> String {
-        let fallback = format!("<@{user_id}>");
-        let (Ok(context), Ok(guild_id), Ok(user_id)) = (
-            self.context(),
-            u64::try_from(guild_id),
-            u64::try_from(user_id),
-        ) else {
-            return fallback;
-        };
-        let guild_id = GuildId::new(guild_id);
-        let user_id = UserId::new(user_id);
-        context
-            .cache
-            .guild(guild_id)
-            .and_then(|guild| {
-                guild
-                    .members
-                    .get(&user_id)
-                    .map(|member| member.display_name().to_owned())
-            })
-            .or_else(|| {
-                context
-                    .cache
-                    .user(user_id)
-                    .map(|user| user.display_name().to_owned())
-            })
-            .unwrap_or(fallback)
     }
 
     async fn create_prediction_market_surface(
@@ -3704,7 +3672,7 @@ impl ManaDiscordPort for SerenityDiscordTransport {
         Ok(Some(ManaGuildMember {
             user_id: i64::try_from(member.user.id.get())
                 .map_err(|_| "Discord mana user ID exceeds SQLite INTEGER")?,
-            display_name: member.display_name().to_owned(),
+            display_name: member.user.name.clone(),
             avatar_url: Some(member.face()),
             role_names: member
                 .roles
@@ -3719,7 +3687,7 @@ fn serenity_mana_member(guild: &Guild, member: &Member) -> Result<ManaGuildMembe
     Ok(ManaGuildMember {
         user_id: i64::try_from(member.user.id.get())
             .map_err(|_| "Discord mana user ID exceeds SQLite INTEGER")?,
-        display_name: member.display_name().to_owned(),
+        display_name: member.user.name.clone(),
         avatar_url: Some(member.face()),
         role_names: member
             .roles
@@ -4437,7 +4405,7 @@ impl DiscordTransport for SerenityDiscordTransport {
                     .into_iter()
                     .map(|user| DiscordUserSnapshot {
                         user_id: user.id.get(),
-                        display_name: user.display_name().to_owned(),
+                        display_name: user.name.clone(),
                         is_bot: user.bot,
                     })
                     .collect()
@@ -4472,14 +4440,14 @@ impl DiscordTransport for SerenityDiscordTransport {
         if let Some(user) = context.cache.user(user_id) {
             return Ok(Some(DiscordUserSnapshot {
                 user_id: user.id.get(),
-                display_name: user.display_name().to_owned(),
+                display_name: user.name.clone(),
                 is_bot: user.bot,
             }));
         }
         match user_id.to_user(&context.http).await {
             Ok(user) => Ok(Some(DiscordUserSnapshot {
                 user_id: user.id.get(),
-                display_name: user.display_name().to_owned(),
+                display_name: user.name.clone(),
                 is_bot: user.bot,
             })),
             Err(serenity::Error::Http(error))
@@ -4542,7 +4510,7 @@ impl DiscordTransport for SerenityDiscordTransport {
         );
         Ok(Some(DiscordGuildMemberSnapshot {
             user_id: user_id.get(),
-            display_name: member.display_name().to_owned(),
+            display_name: member.user.name.clone(),
             presence,
             in_voice,
             deafened,
@@ -4550,40 +4518,19 @@ impl DiscordTransport for SerenityDiscordTransport {
         }))
     }
 
-    fn cached_guild_member_display_name(
+    fn cached_guild_member_server_nicknames(
         &self,
         guild_id: u64,
-        user_id: u64,
-    ) -> Result<Option<String>, String> {
-        if guild_id == 0 || user_id == 0 {
-            return Ok(None);
-        }
-        let context = self.context()?;
-        let guild_id = GuildId::new(guild_id);
-        let user_id = UserId::new(user_id);
-        Ok(context.cache.guild(guild_id).and_then(|guild| {
-            guild
-                .members
-                .get(&user_id)
-                .map(|member| member.display_name().to_owned())
-        }))
-    }
-
-    fn cached_guild_member_display_names(
-        &self,
-        guild_id: u64,
-    ) -> Result<Option<BTreeMap<u64, String>>, String> {
+        user_ids: &[u64],
+    ) -> Result<Option<DiscordGuildMemberServerNicknames>, String> {
         if guild_id == 0 {
             return Ok(None);
         }
         let context = self.context()?;
-        Ok(context.cache.guild(GuildId::new(guild_id)).map(|guild| {
-            guild
-                .members
-                .iter()
-                .map(|(user_id, member)| (user_id.get(), member.display_name().to_owned()))
-                .collect()
-        }))
+        Ok(context
+            .cache
+            .guild(GuildId::new(guild_id))
+            .map(|guild| requested_member_server_nicknames(&guild.members, user_ids)))
     }
 
     async fn channel_parent_id(
@@ -4658,6 +4605,17 @@ impl WrappedDiscordPort for SerenityDiscordTransport {
         let context = self.context()?;
         let guild_id = GuildId::new(guild_id);
         let user_id = UserId::new(user_id);
+        let mut display_name = context
+            .cache
+            .guild(guild_id)
+            .and_then(|guild| guild.members.get(&user_id).and_then(member_server_nickname))
+            .unwrap_or_default();
+        if !include_avatar {
+            return Ok(Some(WrappedDiscordProfile {
+                display_name,
+                avatar_png: None,
+            }));
+        }
         let member = match guild_id
             .member((&context.cache, context.http.as_ref()), user_id)
             .await
@@ -4672,23 +4630,21 @@ impl WrappedDiscordPort for SerenityDiscordTransport {
             }
             Err(error) => return Err(error.to_string()),
         };
-        let display_name = member.display_name().to_owned();
-        let avatar_png = if include_avatar {
-            if let Some(avatar) = member.avatar {
-                let url = format!(
-                    "https://cdn.discordapp.com/guilds/{}/users/{}/avatars/{avatar}.png?size=64",
-                    guild_id.get(),
-                    user_id.get(),
-                );
-                match download_wrapped_avatar(&url).await {
-                    Ok(bytes) => Some(bytes),
-                    Err(error) => {
-                        warn!(%error, user_id = user_id.get(), "wrapped avatar download failed");
-                        None
-                    }
+        if display_name.is_empty() {
+            display_name = member_server_nickname(&member).unwrap_or_default();
+        }
+        let avatar_png = if let Some(avatar) = member.avatar {
+            let url = format!(
+                "https://cdn.discordapp.com/guilds/{}/users/{}/avatars/{avatar}.png?size=64",
+                guild_id.get(),
+                user_id.get(),
+            );
+            match download_wrapped_avatar(&url).await {
+                Ok(bytes) => Some(bytes),
+                Err(error) => {
+                    warn!(%error, user_id = user_id.get(), "wrapped avatar download failed");
+                    None
                 }
-            } else {
-                None
             }
         } else {
             None

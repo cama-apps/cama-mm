@@ -1,5 +1,7 @@
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, mpsc};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use cama_app::blame_luke_media::{
     BLAME_LUKE_FINAL_HOLD_MS, BLAME_LUKE_FRAME_COUNT, BLAME_LUKE_HEIGHT, BLAME_LUKE_WIDTH,
@@ -294,6 +296,44 @@ fn component_request(user_id: i64, display_name: &str) -> InteractionRequest {
     }
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn player_name_lookup_yields_while_sqlite_is_busy() {
+    let fixture = Fixture::migrated();
+    fixture.register(USER, BLAME_LUKE_COST);
+    let mut provider = provider_with(&fixture, 0, Arc::new(FixedRenderer::bytes(b"gif")));
+    Arc::get_mut(&mut provider.handler)
+        .expect("provider owns handler")
+        .players = Some(PlayerRepository::new(&fixture.path));
+
+    let path = fixture.path.clone();
+    let (locked_tx, locked_rx) = mpsc::channel();
+    let lock_thread = thread::spawn(move || {
+        let connection = Connection::open(path).expect("open lock connection");
+        connection
+            .execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE;")
+            .expect("hold exclusive database lock");
+        locked_tx.send(()).expect("announce database lock");
+        thread::sleep(Duration::from_millis(250));
+        connection.execute_batch("COMMIT;").expect("release lock");
+    });
+    locked_rx.recv().expect("database lock acquired");
+
+    let started = Instant::now();
+    let timer = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        started.elapsed()
+    });
+    let rendered_name = provider.handler.render_player_name(USER, GUILD).await;
+    let timer_elapsed = timer.await.expect("runtime timer task");
+    lock_thread.join().expect("database lock thread");
+
+    assert_eq!(rendered_name, "blame-luke-player");
+    assert!(
+        timer_elapsed < Duration::from_millis(150),
+        "SQLite lookup blocked the runtime worker for {timer_elapsed:?}"
+    );
+}
+
 #[test]
 fn registration_matches_command_and_restart_safe_component_contract() {
     let fixture = Fixture::migrated();
@@ -355,7 +395,10 @@ async fn test_command_posts_public_button_anyone_can_use() {
 async fn test_button_charges_clicker_and_posts_public_result_on_migrated_sqlite() {
     let fixture = Fixture::migrated();
     fixture.register(USER, 100);
-    let provider = provider_with(&fixture, 3, Arc::new(NativeBlameLukeRenderer));
+    let mut provider = provider_with(&fixture, 3, Arc::new(NativeBlameLukeRenderer));
+    Arc::get_mut(&mut provider.handler)
+        .expect("provider owns handler")
+        .players = Some(PlayerRepository::new(&fixture.path));
     let handler = registry(&provider)
         .component_handler(BLAME_LUKE_COMPONENT_ID)
         .expect("persistent Blame Luke handler");
@@ -388,7 +431,7 @@ async fn test_button_charges_clicker_and_posts_public_result_on_migrated_sqlite(
     );
     assert_eq!(
         result.embeds[0].footer.as_deref(),
-        Some("Filed by Not the launcher")
+        Some("Filed by blame-luke-player")
     );
     assert_eq!(
         result.embeds[0].image_url.as_deref(),

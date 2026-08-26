@@ -10,8 +10,10 @@ use cama_db::blame_luke::{
     BlameLukeChargeOutcome, BlameLukeExistingOperation, BlameLukeOperationIdentity,
     BlameLukeOperationOutcome, BlameLukeRecoverySummary, BlameLukeRepository,
 };
+use cama_db::core_repositories::PlayerRepository;
 use tracing::{error, warn};
 
+use crate::discord_transport::{GuildPlayerNameResolver, StoredUsernamePlayerNameResolver};
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
@@ -41,11 +43,16 @@ impl BlameLukeRegistrationProvider {
     /// database, native GIF renderer, and production random source.
     #[must_use]
     pub fn new(database_path: impl AsRef<Path>) -> Self {
-        Self::with_ports(
+        let database_path = database_path.as_ref();
+        let mut provider = Self::with_ports(
             Arc::new(BlameLukeRepository::new(database_path)),
             Arc::new(RandomReasonSelector),
             Arc::new(NativeBlameLukeRenderer),
-        )
+        );
+        Arc::get_mut(&mut provider.handler)
+            .expect("new Blame Luke provider owns its handler")
+            .players = Some(PlayerRepository::new(database_path));
+        provider
     }
 
     fn with_ports(
@@ -58,6 +65,8 @@ impl BlameLukeRegistrationProvider {
                 wallet,
                 selector,
                 renderer,
+                players: None,
+                player_names: Arc::new(StoredUsernamePlayerNameResolver),
             }),
         }
     }
@@ -67,6 +76,14 @@ impl BlameLukeRegistrationProvider {
         Arc::new(BlameLukeReadyRecoveryObserver {
             wallet: Arc::clone(&self.handler.wallet),
         })
+    }
+
+    #[must_use]
+    pub fn with_player_names(mut self, player_names: Arc<dyn GuildPlayerNameResolver>) -> Self {
+        Arc::get_mut(&mut self.handler)
+            .expect("new Blame Luke provider owns its handler")
+            .player_names = player_names;
+        self
     }
 }
 
@@ -236,6 +253,8 @@ struct BlameLukeHandler {
     wallet: Arc<dyn BlameLukeWalletPort>,
     selector: Arc<dyn BlameLukeReasonSelector>,
     renderer: Arc<dyn BlameLukeRenderPort>,
+    players: Option<PlayerRepository>,
+    player_names: Arc<dyn GuildPlayerNameResolver>,
 }
 
 struct BlameLukeReadyRecoveryObserver {
@@ -334,6 +353,27 @@ impl InteractionHandler for BlameLukeHandler {
 }
 
 impl BlameLukeHandler {
+    async fn render_player_name(&self, user_id: i64, guild_id: i64) -> String {
+        let stored_name = if let Some(players) = self.players.clone() {
+            tokio::task::spawn_blocking(move || {
+                players
+                    .get_by_id(user_id, Some(guild_id))
+                    .ok()
+                    .flatten()
+                    .map_or_else(|| format!("User {user_id}"), |player| player.name)
+            })
+            .await
+            .unwrap_or_else(|_| format!("User {user_id}"))
+        } else {
+            format!("User {user_id}")
+        };
+        self.player_names
+            .names_for_guild(guild_id, &[user_id])
+            .unwrap_or_default()
+            .resolve(user_id, &stored_name)
+            .to_owned()
+    }
+
     async fn launcher(
         &self,
         guild_id: Option<u64>,
@@ -533,6 +573,7 @@ impl BlameLukeHandler {
             | BlameLukeOperationOutcome::AlreadyRefunded => return Ok(()),
         }
 
+        let rendered_name = self.render_player_name(user_id, guild_id).await;
         let response = InteractionResponse::message("")
             .without_mentions()
             .embed(
@@ -540,7 +581,7 @@ impl BlameLukeHandler {
                     .description(format!("**{reason}**"))
                     .color(0xc4_30_36)
                     .image("attachment://blame_luke.gif")
-                    .footer(format!("Filed by {}", identity.user_display_name)),
+                    .footer(format!("Filed by {rendered_name}")),
             )
             .attachment(InteractionAttachment::bytes("blame_luke.gif", bytes));
         if let Err(response_error) = responder.followup(response).await {

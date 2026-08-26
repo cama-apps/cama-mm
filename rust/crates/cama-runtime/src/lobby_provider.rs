@@ -59,6 +59,7 @@ use crate::application_config::ApplicationConfig;
 use crate::curfew_sweep_worker::CurfewLobbyDisplayPort;
 use crate::discord_transport::{
     DiscordAllowedMentions, DiscordEmoji, DiscordMessage, DiscordPresence, DiscordTransport,
+    GuildPlayerNameDirectory,
 };
 use crate::first_game_pool_worker::FirstGamePoolDisplayPort;
 use crate::gateway_events::{
@@ -277,11 +278,17 @@ impl SqliteLobbyPlayers {
             .map_err(|error| error.to_string())
     }
 
-    fn fallback_name(&self, player_id: AppUserId, guild_id: AppGuildId) -> String {
-        self.player(player_id, guild_id)
-            .ok()
-            .flatten()
-            .map_or_else(|| format!("User {}", player_id.0), |player| player.name)
+    async fn fallback_name(&self, player_id: AppUserId, guild_id: AppGuildId) -> String {
+        let players = self.clone();
+        tokio::task::spawn_blocking(move || {
+            players
+                .player(player_id, guild_id)
+                .ok()
+                .flatten()
+                .map_or_else(|| format!("User {}", player_id.0), |player| player.name)
+        })
+        .await
+        .unwrap_or_else(|_| format!("User {}", player_id.0))
     }
 }
 
@@ -666,6 +673,56 @@ impl FirstGamePoolPreviewPort for LoadedFirstGamePoolPreviews {
 }
 
 impl LobbyRuntimeState {
+    async fn resolve_player_name(&self, guild_id: AppGuildId, player_id: AppUserId) -> String {
+        let stored_name = self.players.fallback_name(player_id, guild_id).await;
+        self.render_player_name(guild_id, player_id, &stored_name)
+    }
+
+    fn render_player_name(
+        &self,
+        guild_id: AppGuildId,
+        player_id: AppUserId,
+        stored_name: &str,
+    ) -> String {
+        let user_ids = u64::try_from(player_id.0).into_iter().collect::<Vec<_>>();
+        let names = u64::try_from(guild_id.0)
+            .ok()
+            .filter(|guild_id| *guild_id != 0)
+            .and_then(|guild_id| {
+                self.transport
+                    .cached_guild_member_server_nicknames(guild_id, &user_ids)
+                    .ok()
+            })
+            .flatten();
+        GuildPlayerNameDirectory::new(names)
+            .resolve(player_id.0, stored_name)
+            .to_owned()
+    }
+
+    fn player_name_overrides(
+        &self,
+        guild_id: AppGuildId,
+        player_ids: &BTreeSet<AppUserId>,
+    ) -> BTreeMap<i64, String> {
+        let user_ids = player_ids
+            .iter()
+            .filter_map(|player_id| u64::try_from(player_id.0).ok())
+            .collect::<Vec<_>>();
+        u64::try_from(guild_id.0)
+            .ok()
+            .filter(|guild_id| *guild_id != 0)
+            .and_then(|guild_id| {
+                self.transport
+                    .cached_guild_member_server_nicknames(guild_id, &user_ids)
+                    .ok()
+            })
+            .flatten()
+            .map(|nicknames| {
+                GuildPlayerNameDirectory::new(Some(nicknames)).server_nickname_overrides()
+            })
+            .unwrap_or_default()
+    }
+
     async fn classify_readycheck_players(
         &self,
         lobby: &LobbySnapshot,
@@ -674,9 +731,40 @@ impl LobbyRuntimeState {
         BTreeSet<AppUserId>,
     ) {
         let now = unix_time_now();
+        let discord_player_ids = lobby
+            .players
+            .iter()
+            .filter_map(|player_id| u64::try_from(player_id.0).ok())
+            .collect::<Vec<_>>();
+        let guild_names = u64::try_from(lobby.scope.guild_id.0)
+            .ok()
+            .filter(|guild_id| *guild_id != 0)
+            .and_then(|guild_id| {
+                self.transport
+                    .cached_guild_member_server_nicknames(guild_id, &discord_player_ids)
+                    .ok()
+            })
+            .flatten();
+        let guild_names = GuildPlayerNameDirectory::new(guild_names);
+        let players = self.players.clone();
+        let player_ids = lobby.players.iter().copied().collect::<Vec<_>>();
+        let guild_id = lobby.scope.guild_id;
+        let stored_names = tokio::task::spawn_blocking(move || {
+            players
+                .get_by_ids(&player_ids, guild_id)
+                .into_iter()
+                .map(|player| (AppUserId(player.discord_id), player.name))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .await
+        .unwrap_or_default();
         let mut data = BTreeMap::new();
         let mut mentionable = BTreeSet::new();
         for player_id in &lobby.players {
+            let stored_name = stored_names
+                .get(player_id)
+                .cloned()
+                .unwrap_or_else(|| format!("User {}", player_id.0));
             let member = match (to_u64(lobby.scope.guild_id.0), to_u64(player_id.0)) {
                 (Ok(guild_id), Ok(player_id)) => self
                     .transport
@@ -691,7 +779,7 @@ impl LobbyRuntimeState {
             let (name, group, signals) = member.map_or_else(
                 || {
                     (
-                        self.players.fallback_name(*player_id, lobby.scope.guild_id),
+                        stored_name.clone(),
                         if recent {
                             ReadinessGroup::Recent
                         } else {
@@ -735,7 +823,11 @@ impl LobbyRuntimeState {
                         DiscordPresence::Idle => "🟡",
                         DiscordPresence::Offline | DiscordPresence::Unknown => "🔴",
                     });
-                    (member.display_name, group, signals)
+                    (
+                        guild_names.resolve(player_id.0, &stored_name).to_owned(),
+                        group,
+                        signals,
+                    )
                 },
             );
             data.insert(
@@ -1021,8 +1113,13 @@ impl LobbyRuntimeState {
             .ok_or_else(|| "lobby has no message id".to_owned())?;
         let service = Arc::clone(&self.service);
         let previews = self.first_game_previews.clone();
+        let name_overrides = self.player_name_overrides(scope.guild_id, &lobby.players);
         let embed = tokio::task::spawn_blocking(move || {
-            interaction_embed(service.build_lobby_embed(&lobby, Some(&previews)))
+            interaction_embed(service.build_lobby_embed_with_name_overrides(
+                &lobby,
+                Some(&previews),
+                Some(&name_overrides),
+            ))
         })
         .await
         .map_err(|error| format!("lobby display render task failed: {error}"))?;
@@ -1580,6 +1677,13 @@ impl FirstGamePoolDisplayPort for FirstGamePoolLobbyDisplay {
             let scope = LobbyScope::new(guild_id, kind);
             let operation_lock = self.state.commands.scope_operation_lock(scope);
             let _guard = operation_lock.lock().await;
+            let player_ids = self
+                .state
+                .service
+                .get_lobby(scope)
+                .map(|lobby| lobby.players)
+                .unwrap_or_default();
+            let name_overrides = self.state.player_name_overrides(guild_id, &player_ids);
             let state = Arc::clone(&self.state);
             let prepared = tokio::task::spawn_blocking(move || {
                 let Some(lobby) = state.service.get_lobby(scope) else {
@@ -1595,8 +1699,11 @@ impl FirstGamePoolDisplayPort for FirstGamePoolLobbyDisplay {
                     DOTA_BET_SEED_AMOUNT,
                     &cama_domain::game_date::get_game_date(),
                 )?);
-                let embed =
-                    interaction_embed(state.service.build_lobby_embed(&lobby, Some(&previews)));
+                let embed = interaction_embed(state.service.build_lobby_embed_with_name_overrides(
+                    &lobby,
+                    Some(&previews),
+                    Some(&name_overrides),
+                ));
                 Ok::<_, String>(Some((
                     to_u64(channel_id.0)?,
                     to_u64(message_id.0)?,
@@ -1878,7 +1985,6 @@ struct LobbyInteractionHandler {
 struct CommandContext {
     name: String,
     user_id: AppUserId,
-    user_display_name: String,
     guild_id: Option<AppGuildId>,
     channel_id: Option<AppChannelId>,
     member_permissions: Option<u64>,
@@ -1892,7 +1998,7 @@ impl TryFrom<InteractionRequest> for CommandContext {
         let InteractionRequest::Command {
             name,
             user_id,
-            user_display_name,
+            user_display_name: _,
             guild_id,
             channel_id,
             member_permissions,
@@ -1909,7 +2015,6 @@ impl TryFrom<InteractionRequest> for CommandContext {
                     value: user_id.to_string(),
                 }
             })?),
-            user_display_name,
             guild_id: guild_id
                 .map(|guild_id| i64::try_from(guild_id).map(AppGuildId))
                 .transpose()
@@ -2494,7 +2599,7 @@ impl LobbyInteractionHandler {
             return followup_ephemeral(&responder, "This command can only be used in a server.")
                 .await;
         };
-        let Some((target_id, target_name)) = selected_user(&command.options, "player")? else {
+        let Some((target_id, _)) = selected_user(&command.options, "player")? else {
             return Err(InteractionHandlerError::Transformer {
                 value: "missing player".to_owned(),
             });
@@ -2540,6 +2645,22 @@ impl LobbyInteractionHandler {
             )
             .await;
         }
+        let target_stored = self
+            .load_player(target_id, guild_id)
+            .await?
+            .map(|player| player.name)
+            .unwrap_or_else(|| format!("User {}", target_id.0));
+        let target_name = self
+            .state
+            .render_player_name(guild_id, target_id, &target_stored);
+        let actor_stored = self
+            .load_player(command.user_id, guild_id)
+            .await?
+            .map(|player| player.name)
+            .unwrap_or_else(|| format!("User {}", command.user_id.0));
+        let actor_name = self
+            .state
+            .render_player_name(guild_id, command.user_id, &actor_stored);
         let mut kicked = Vec::new();
         for kind in kickable {
             let scope = LobbyScope::new(guild_id, kind);
@@ -2575,7 +2696,7 @@ impl LobbyInteractionHandler {
                         thread_id,
                         DiscordMessage::silent(InteractionResponse::message(format!(
                             "👢 **{target_name}** was kicked by {}.",
-                            command.user_display_name
+                            actor_name
                         ))),
                     )
                     .await;
@@ -2840,7 +2961,6 @@ impl LobbyInteractionHandler {
                     scope,
                     command.user_id,
                     &player.name,
-                    &command.user_display_name,
                     JoinThreadActivity::Command,
                     join.joined_at_ns.expect("successful join has commit time"),
                 )
@@ -2870,12 +2990,13 @@ impl LobbyInteractionHandler {
 
         let state = Arc::clone(&self.state);
         let lobby_for_embed = lobby.clone();
+        let name_overrides = state.player_name_overrides(scope.guild_id, &lobby.players);
         let embed = tokio::task::spawn_blocking(move || {
-            interaction_embed(
-                state
-                    .service
-                    .build_lobby_embed(&lobby_for_embed, Some(&state.first_game_previews)),
-            )
+            interaction_embed(state.service.build_lobby_embed_with_name_overrides(
+                &lobby_for_embed,
+                Some(&state.first_game_previews),
+                Some(&name_overrides),
+            ))
         })
         .await
         .map_err(|error| error.to_string())?;
@@ -3016,7 +3137,6 @@ impl LobbyInteractionHandler {
                 scope,
                 command.user_id,
                 &player.name,
-                &command.user_display_name,
                 JoinThreadActivity::Command,
                 join.joined_at_ns.expect("successful join has commit time"),
             )
@@ -3100,7 +3220,6 @@ impl LobbyInteractionHandler {
                 scope,
                 command.user_id,
                 &player.name,
-                &command.user_display_name,
                 JoinThreadActivity::Silent,
                 result
                     .joined_at_ns
@@ -3144,6 +3263,10 @@ impl LobbyInteractionHandler {
                     .await;
             }
         };
+        let display_name = self
+            .state
+            .resolve_player_name(guild_id, command.user_id)
+            .await;
         let mut left = Vec::new();
         let mut pinned = Vec::new();
         for kind in memberships {
@@ -3172,13 +3295,8 @@ impl LobbyInteractionHandler {
             };
             if removed {
                 left.push(kind);
-                self.best_effort_leave_publication(
-                    scope,
-                    command.user_id,
-                    &command.user_display_name,
-                    false,
-                )
-                .await;
+                self.best_effort_leave_publication(scope, command.user_id, &display_name, false)
+                    .await;
             } else if self
                 .state
                 .service
@@ -3421,7 +3539,6 @@ impl LobbyInteractionHandler {
         scope: LobbyScope,
         player_id: AppUserId,
         player_name: &str,
-        display_name: &str,
         thread_activity: JoinThreadActivity,
         joined_at_ns: i64,
     ) -> Option<ConfirmedLobbyJoin> {
@@ -3486,11 +3603,14 @@ impl LobbyInteractionHandler {
             warn!(?scope, "lobby observer projection has invalid Discord IDs");
             return None;
         };
+        let player_display_name =
+            self.state
+                .render_player_name(scope.guild_id, player_id, player_name);
         let event = ConfirmedLobbyJoin {
             guild_id,
             player_id: player_snowflake,
             player_name: player_name.to_owned(),
-            player_display_name: display_name.to_owned(),
+            player_display_name,
             lobby_kind: scope.kind,
             joined_at_ns,
             player_ids: lobby
@@ -4380,7 +4500,6 @@ impl RawReactionObserver for LobbyRawReactionObserver {
                         scope,
                         user_id,
                         &player.name,
-                        resolved_display_name.as_deref().unwrap_or(&player.name),
                         JoinThreadActivity::RawReaction,
                         outcome
                             .joined_at_ns
@@ -4427,9 +4546,14 @@ impl RawReactionObserver for LobbyRawReactionObserver {
                     }
                 };
                 if left {
-                    let display_name = resolved_display_name.unwrap_or_else(|| {
-                        self.state.players.fallback_name(user_id, scope.guild_id)
-                    });
+                    let display_name = match resolved_display_name {
+                        Some(display_name) => display_name,
+                        None => {
+                            self.state
+                                .resolve_player_name(scope.guild_id, user_id)
+                                .await
+                        }
+                    };
                     handler
                         .best_effort_leave_publication(scope, user_id, &display_name, true)
                         .await;
@@ -4444,27 +4568,9 @@ impl RawReactionObserver for LobbyRawReactionObserver {
 
 impl LobbyRawReactionObserver {
     async fn resolve_actor_display_name(&self, event: &RawReactionEvent) -> Option<String> {
-        if let Some(display_name) = &event.actor_display_name {
-            return Some(display_name.clone());
-        }
-        let guild_id = event.guild_id?;
-        if let Some(member) = self
-            .state
-            .transport
-            .guild_member(guild_id, event.user_id)
-            .await
-            .ok()
-            .flatten()
-        {
-            return Some(member.display_name);
-        }
-        self.state
-            .transport
-            .user(event.user_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|user| user.display_name)
+        let guild_id = AppGuildId(i64::try_from(event.guild_id?).ok()?);
+        let player_id = AppUserId(i64::try_from(event.user_id).ok()?);
+        Some(self.state.resolve_player_name(guild_id, player_id).await)
     }
 
     async fn reject_sword_reaction(&self, event: &RawReactionEvent, reason: &str, ttl: Duration) {

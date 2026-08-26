@@ -1,5 +1,6 @@
 //! Live `/matchup` head-to-head statistics command.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -7,6 +8,7 @@ use async_trait::async_trait;
 use cama_db::core_repositories::PlayerRepository;
 use cama_db::pairings_repository::{Pairing, PairingsRepository};
 
+use crate::discord_transport::{GuildPlayerNameResolver, StoredUsernamePlayerNameResolver};
 use crate::registration::{
     CommandOptionKind, CommandOptionSpec, CommandSpec, InteractionEmbed, InteractionHandler,
     InteractionHandlerError, InteractionOption, InteractionRequest, InteractionResponder,
@@ -26,8 +28,17 @@ impl AdvancedStatsRegistrationProvider {
             handler: Arc::new(AdvancedStatsHandler {
                 players: PlayerRepository::new(database_path.as_ref()),
                 pairings: PairingsRepository::new(database_path),
+                player_names: Arc::new(StoredUsernamePlayerNameResolver),
             }),
         }
+    }
+
+    #[must_use]
+    pub fn with_player_names(mut self, player_names: Arc<dyn GuildPlayerNameResolver>) -> Self {
+        Arc::get_mut(&mut self.handler)
+            .expect("new advanced-stats provider owns its handler")
+            .player_names = player_names;
+        self
     }
 }
 
@@ -50,6 +61,7 @@ impl RegistrationProvider for AdvancedStatsRegistrationProvider {
 struct AdvancedStatsHandler {
     players: PlayerRepository,
     pairings: PairingsRepository,
+    player_names: Arc<dyn GuildPlayerNameResolver>,
 }
 
 #[derive(Clone)]
@@ -87,8 +99,8 @@ impl InteractionHandler for AdvancedStatsHandler {
         };
         let guild_id = i64::try_from(guild_id)
             .map_err(|_| InteractionHandlerError::from("Discord guild ID exceeds SQLite range"))?;
-        let first = matchup_user(&options, "player1")?;
-        let second = matchup_user(&options, "player2")?;
+        let mut first = matchup_user(&options, "player1")?;
+        let mut second = matchup_user(&options, "player2")?;
         responder.defer(false).await.map_err(|error| {
             InteractionHandlerError::from(format!("matchup defer failed: {error}"))
         })?;
@@ -110,8 +122,12 @@ impl InteractionHandler for AdvancedStatsHandler {
                 .map(|players| {
                     players
                         .into_iter()
-                        .filter_map(|player| player.discord_id)
-                        .collect::<std::collections::BTreeSet<_>>()
+                        .filter_map(|player| {
+                            player
+                                .discord_id
+                                .map(|discord_id| (discord_id, player.name))
+                        })
+                        .collect::<BTreeMap<_, _>>()
                 })
                 .map_err(|error| error.to_string())
         })
@@ -120,7 +136,21 @@ impl InteractionHandler for AdvancedStatsHandler {
             InteractionHandlerError::from(format!("matchup player task failed: {error}"))
         })?
         .map_err(InteractionHandlerError::from)?;
-        if !registered.contains(&first.id) {
+        let names = self
+            .player_names
+            .names_for_guild(guild_id, &[first.id, second.id])
+            .unwrap_or_default();
+        if let Some(stored_name) = registered.get(&first.id) {
+            first.display_name = names.resolve(first.id, stored_name).to_owned();
+        } else {
+            first.display_name = names.resolve(first.id, &first.display_name).to_owned();
+        }
+        if let Some(stored_name) = registered.get(&second.id) {
+            second.display_name = names.resolve(second.id, stored_name).to_owned();
+        } else {
+            second.display_name = names.resolve(second.id, &second.display_name).to_owned();
+        }
+        if !registered.contains_key(&first.id) {
             return followup(
                 &responder,
                 InteractionResponse::message(format!("{} is not registered.", first.display_name))
@@ -128,7 +158,7 @@ impl InteractionHandler for AdvancedStatsHandler {
             )
             .await;
         }
-        if !registered.contains(&second.id) {
+        if !registered.contains_key(&second.id) {
             return followup(
                 &responder,
                 InteractionResponse::message(format!("{} is not registered.", second.display_name))
@@ -166,19 +196,17 @@ fn matchup_user(
             (option.name == name)
                 .then_some(&option.value)
                 .and_then(|value| match value {
-                    InteractionValue::User {
-                        id, display_name, ..
-                    } => Some((*id, display_name.clone())),
+                    InteractionValue::User { id, .. } => Some(*id),
                     _ => None,
                 })
         })
         .ok_or_else(|| InteractionHandlerError::from(format!("/matchup requires {name}")))
-        .and_then(|(id, display_name)| {
+        .and_then(|id| {
             Ok(MatchupUser {
                 id: i64::try_from(id).map_err(|_| {
                     InteractionHandlerError::from("Discord user ID exceeds SQLite range")
                 })?,
-                display_name: display_name.unwrap_or_else(|| format!("User {id}")),
+                display_name: format!("User {id}"),
             })
         })
 }

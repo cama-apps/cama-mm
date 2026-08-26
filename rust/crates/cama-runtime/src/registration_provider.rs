@@ -44,7 +44,9 @@ use serde_json::Value as JsonValue;
 use tracing::{debug, error, warn};
 
 use crate::application_config::ApplicationConfig;
-use crate::discord_transport::{DiscordDirectMessageErrorKind, DiscordMessage, DiscordTransport};
+use crate::discord_transport::{
+    DiscordDirectMessageErrorKind, DiscordMessage, DiscordTransport, GuildPlayerNameDirectory,
+};
 use crate::draft_provider::{DraftNeonObserver, DraftNeonResult};
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
@@ -792,6 +794,18 @@ impl LobbyJoinObserver for PlayerRegistrationHandler {
 }
 
 impl PlayerRegistrationHandler {
+    fn render_player_name(&self, guild_id: u64, user_id: u64, stored_name: &str) -> String {
+        let names = self
+            .discord
+            .cached_guild_member_server_nicknames(guild_id, &[user_id])
+            .map(GuildPlayerNameDirectory::new)
+            .unwrap_or_default();
+        i64::try_from(user_id).map_or_else(
+            |_| stored_name.to_owned(),
+            |user_id| names.resolve(user_id, stored_name).to_owned(),
+        )
+    }
+
     async fn deliver_lobby_ready(&self, event: &ConfirmedLobbyJoin) -> Result<(), String> {
         let kind = match event.lobby_kind {
             cama_app::embeds::LobbyKind::Open => LobbyKindKey::Open,
@@ -1452,10 +1466,10 @@ impl PlayerRegistrationHandler {
     }
 
     async fn best_effort_neon(&self, context: &CommandContext, guild_id: u64) {
+        let rendered_name =
+            self.render_player_name(guild_id, context.user_id, &context.user_display_name);
         let result = match self.neon.lock() {
-            Ok(mut neon) => {
-                neon.on_registration(context.user_id, Some(guild_id), &context.user_display_name)
-            }
+            Ok(mut neon) => neon.on_registration(context.user_id, Some(guild_id), &rendered_name),
             Err(_) => {
                 warn!("registration Neon service lock was poisoned");
                 None
@@ -2444,11 +2458,9 @@ impl PlayerRegistrationHandler {
             )
             .await;
         }
-        let target_name = escape_discord_text(
-            target_name
-                .as_deref()
-                .unwrap_or(&format!("User {target_id}")),
-        );
+        let stored_name = target_name.unwrap_or_else(|| format!("User {target_id}"));
+        let target_name =
+            escape_discord_text(&self.render_player_name(guild_id, target_id, &stored_name));
         let target = signed_id(target_id, "target")?;
         let notifications = self.notifications.clone();
         let duplicate = tokio::task::spawn_blocking(move || {

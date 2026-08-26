@@ -436,7 +436,7 @@ impl WrappedHandler {
             warn!(%error, "unable to defer /wrapped interaction");
             return Ok(());
         }
-        let (target_id, target_name) =
+        let (target_id, _target_name) =
             user_option(&options).unwrap_or((user_id, user_display_name));
         let (signed_guild, signed_target) =
             (signed_id(guild_id, "guild")?, signed_id(target_id, "user")?);
@@ -467,13 +467,21 @@ impl WrappedHandler {
                 .map_err(response_error);
         };
 
-        let (profile_ids, avatar_ids) = prefetch_ids(&raw, self.minimum_games, self.minimum_bets);
+        let (mut profile_ids, avatar_ids) =
+            prefetch_ids(&raw, self.minimum_games, self.minimum_bets);
+        profile_ids.insert(signed_target);
         let profiles = self
             .prefetch_profiles(guild_id, profile_ids, avatar_ids)
             .await;
         let minimum_games = self.minimum_games;
         let minimum_bets = self.minimum_bets;
-        let slide_target_name = target_name.clone();
+        let slide_target_name = profiles
+            .get(&signed_target)
+            .map(|profile| profile.display_name.as_str())
+            .filter(|name| !name.is_empty())
+            .or(raw.player_name.as_deref())
+            .map_or_else(|| format!("User {signed_target}"), str::to_owned);
+        let response_target_name = slide_target_name.clone();
         let slides = match tokio::task::spawn_blocking(move || {
             build_slides(
                 raw,
@@ -531,7 +539,7 @@ impl WrappedHandler {
             .map_err(|_| InteractionHandlerError::from("wrapped session lock poisoned"))?
             .insert(session_id, Arc::clone(&session));
         let response = story_response(
-            format!("**Cama Wrapped {year}** for {target_name}"),
+            format!("**Cama Wrapped {year}** for {response_target_name}"),
             first,
             session_id,
             0,
@@ -874,7 +882,9 @@ fn build_slides(
     let display_name = |id: i64, fallback: &str| {
         profiles
             .get(&id)
-            .map(|profile| profile.display_name.clone())
+            .map(|profile| profile.display_name.as_str())
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
             .unwrap_or_else(|| fallback.to_owned())
     };
 
@@ -898,7 +908,7 @@ fn build_slides(
     {
         server.lines.push(format!(
             "TOP PERFORMER - {} - {}W {}L ({:.0}% WR)",
-            player.discord_username,
+            display_name(player.discord_id, &player.discord_username),
             player.wins,
             player.games_played - player.wins,
             if player.games_played == 0 {
@@ -1042,12 +1052,7 @@ fn build_slides(
         } else {
             "games_played_low"
         });
-        push_personal_slides(
-            &mut slides,
-            personal,
-            &personal.discord_username,
-            &year_label,
-        );
+        push_personal_slides(&mut slides, personal, target_display_name, &year_label);
     }
 
     if raw.player_name.is_some() && raw.matches.len() >= minimum_games {
@@ -1055,12 +1060,7 @@ fn build_slides(
             if lines.is_empty() {
                 continue;
             }
-            let mut slide = base_slide(
-                kind,
-                title,
-                raw.player_name.as_deref().unwrap_or(target_display_name),
-                &year_label,
-            );
+            let mut slide = base_slide(kind, title, target_display_name, &year_label);
             slide.headline = format!("{title} RECORDS").to_ascii_uppercase();
             slide.lines = lines;
             slide.accent = accent;
@@ -1397,7 +1397,11 @@ fn add_pairwise_entries(
             "{}{} - {}W {}L ({:.0}% WR) - {} games",
             item.section
                 .map_or(String::new(), |section| format!("{section} | ")),
-            entry.username,
+            profiles
+                .get(&entry.discord_id)
+                .map(|profile| profile.display_name.as_str())
+                .filter(|name| !name.is_empty())
+                .unwrap_or(&entry.username),
             entry.wins,
             losses,
             entry.win_rate * 100.0,

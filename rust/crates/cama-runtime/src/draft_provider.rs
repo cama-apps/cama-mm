@@ -46,6 +46,7 @@ use tracing::{debug, warn};
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{
     DiscordDestinationStatus, DiscordMessage, DiscordMessageReceipt, DiscordTransport,
+    GuildPlayerNameDirectory,
 };
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
@@ -960,6 +961,52 @@ impl InteractionHandler for DraftHandler {
 }
 
 impl DraftHandler {
+    fn player_names(&self, guild_id: i64, player_ids: &[i64]) -> GuildPlayerNameDirectory {
+        let discord_player_ids = player_ids
+            .iter()
+            .filter_map(|player_id| u64::try_from(*player_id).ok())
+            .collect::<Vec<_>>();
+        let nicknames = u64::try_from(guild_id)
+            .ok()
+            .filter(|guild_id| *guild_id != 0)
+            .and_then(|guild_id| {
+                self.discord
+                    .cached_guild_member_server_nicknames(guild_id, &discord_player_ids)
+                    .ok()
+            })
+            .flatten();
+        GuildPlayerNameDirectory::new(nicknames)
+    }
+
+    fn render_state(&self, state: &DraftState) -> DraftState {
+        draft_render_state(
+            state,
+            &self.player_names(state.guild_id, &state.player_pool_ids),
+        )
+    }
+
+    fn render_choice(
+        &self,
+        state: &DraftState,
+        title: &str,
+        description: &str,
+    ) -> InteractionResponse {
+        choice_embed(&self.render_state(state), title, description)
+    }
+
+    fn render_live(&self, state: &DraftState) -> (InteractionEmbed, Vec<InteractionActionRow>) {
+        let state = self.render_state(state);
+        (live_embed(&state), drafting_view(&state))
+    }
+
+    fn render_completion(
+        &self,
+        state: &DraftState,
+        pending: &PendingMatchRecord,
+    ) -> InteractionEmbed {
+        completion_embed(&self.render_state(state), pending)
+    }
+
     fn draft_operation_lock(&self, guild_id: i64, session_id: u64) -> Arc<tokio::sync::Mutex<()>> {
         lock_recover(&self.draft_operation_locks)
             .entry((guild_id, session_id))
@@ -1108,6 +1155,8 @@ impl DraftHandler {
         let (Ok(channel_id), Ok(message_id)) = (to_u64(channel_id), to_u64(message_id)) else {
             return Err("durable draft has an invalid Discord message identity".to_owned());
         };
+        let rendered_state = self.render_state(state);
+        let state = &rendered_state;
         let response = match state.phase {
             DraftPhase::WinnerChoice => InteractionResponse::message("")
                 .embed(opening_embed(state, "Recovered after restart"))
@@ -1787,7 +1836,7 @@ impl DraftHandler {
             return Ok(());
         }
 
-        let embed = completion_embed(&state, &pending);
+        let embed = self.render_completion(&state, &pending);
         let source_receipt = self
             .reconcile_source_delivery(&mut job, &owner, &plan, &state, &embed)
             .await?;
@@ -2001,7 +2050,7 @@ impl DraftHandler {
             .map_err(|error| format!("Draft publication lease task failed: {error}"))?
             .map_err(|error| error.to_string())?;
         }
-        let embed = completion_embed(state, pending);
+        let embed = self.render_completion(state, pending);
         let source_receipt = self
             .reconcile_source_delivery(&mut job, &owner, plan, state, &embed)
             .await?;
@@ -2565,7 +2614,6 @@ impl DraftHandler {
                 self.start(
                     StartContext {
                         user_id,
-                        user_display_name,
                         guild_id,
                         channel_id: channel_id.unwrap_or_default(),
                         explicit_kind,
@@ -2889,7 +2937,19 @@ impl DraftHandler {
                 .collect();
             current.coinflip_winner_id = Some(coinflip_winner);
             current.phase = DraftPhase::WinnerChoice;
-            opening_embed(&current, &context.user_display_name)
+            let rendered = self.render_state(&current);
+            let starter_stored = players
+                .iter()
+                .find(|player| player.discord_id == Some(context.user_id))
+                .map_or_else(
+                    || format!("User {}", context.user_id),
+                    |player| player.name.clone(),
+                );
+            let starter = self
+                .player_names(context.guild_id, &[context.user_id])
+                .resolve(context.user_id, &starter_stored)
+                .to_owned();
+            opening_embed(&rendered, &starter)
         };
 
         // Persist the complete setup before deleting the progress response or
@@ -3013,7 +3073,7 @@ impl DraftHandler {
         &self,
         guild_id: i64,
         user_id: i64,
-        user_name: String,
+        _user_name: String,
         admin: bool,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
@@ -3121,6 +3181,21 @@ impl DraftHandler {
                 .delete_message(to_u64(channel_id)?, to_u64(message_id)?)
                 .await;
         }
+        let players = self.players.clone();
+        let stored_name = spawn_blocking(move || {
+            players
+                .get_by_id(user_id, Some(guild_id))
+                .map_err(|error| error.to_string())
+                .map(|player| {
+                    player.map_or_else(|| format!("User {user_id}"), |player| player.name)
+                })
+        })
+        .await
+        .map_err(|error| format!("draft restart player-name task failed: {error}"))??;
+        let user_name = self
+            .player_names(guild_id, &[user_id])
+            .resolve(user_id, &stored_name)
+            .to_owned();
         responder
             .respond(InteractionResponse::message(format!(
                 "🔄 **Draft Restarted** by {user_name}\n\nThe lobby has been preserved. Use `/draft start` to start a new draft."
@@ -3271,7 +3346,7 @@ impl DraftHandler {
             state.phase = DraftPhase::WinnerSideChoice;
             (
                 state.session_id,
-                choice_embed(&state, "Choose Your Side", "Pick Radiant or Dire."),
+                self.render_choice(&state, "Choose Your Side", "Pick Radiant or Dire."),
                 ping,
             )
         };
@@ -3329,7 +3404,7 @@ impl DraftHandler {
             (
                 state.session_id,
                 loser,
-                choice_embed(
+                self.render_choice(
                     &state,
                     "Choose Hero Pick Order",
                     "Pick First or Second hero pick (in-game).",
@@ -3397,7 +3472,7 @@ impl DraftHandler {
                 assign_captains(&mut state, user_id, loser, side);
                 state.phase = DraftPhase::LoserChoice;
                 let session = state.session_id;
-                let embed = choice_embed(
+                let embed = self.render_choice(
                     &state,
                     "Choose Hero Pick Order",
                     "The other captain picks First or Second hero pick (in-game).",
@@ -3412,8 +3487,7 @@ impl DraftHandler {
                 assign_captains(&mut state, user_id, winner, side);
                 let session = state.session_id;
                 complete_pre_draft(&mut state);
-                let embed = live_embed(&state);
-                let view = drafting_view(&state);
+                let (embed, view) = self.render_live(&state);
                 Ok((
                     InteractionResponse::message("")
                         .embed(embed)
@@ -3496,7 +3570,7 @@ impl DraftHandler {
                 state.phase = DraftPhase::LoserChoice;
                 let loser = other_captain(&state, user_id).unwrap_or_default();
                 let session = state.session_id;
-                let embed = choice_embed(&state, "Choose Your Side", "Pick Radiant or Dire.");
+                let embed = self.render_choice(&state, "Choose Your Side", "Pick Radiant or Dire.");
                 Ok((
                     embed.action_rows(pre_choice_view(session, loser, true, false)),
                     None,
@@ -3505,8 +3579,7 @@ impl DraftHandler {
                 state.loser_choice_value = Some(order.as_str().to_owned());
                 let session = state.session_id;
                 complete_pre_draft(&mut state);
-                let embed = live_embed(&state);
-                let view = drafting_view(&state);
+                let (embed, view) = self.render_live(&state);
                 Ok((
                     InteractionResponse::message("")
                         .embed(embed)
@@ -3610,11 +3683,12 @@ impl DraftHandler {
                 .await
         } else {
             self.schedule_timeout(guild_id, session, DRAFTING_TIMEOUT_SECONDS);
+            let (embed, view) = self.render_live(&state_snapshot);
             responder
                 .update(
                     InteractionResponse::message("")
-                        .embed(live_embed(&state_snapshot))
-                        .action_rows(drafting_view(&state_snapshot)),
+                        .embed(embed)
+                        .action_rows(view),
                 )
                 .await
                 .map_err(|error| error.to_string())
@@ -3666,6 +3740,7 @@ impl DraftHandler {
         if let (Some(channel_id), Some(message_id)) =
             (snapshot.draft_channel_id, snapshot.draft_message_id)
         {
+            let (embed, view) = self.render_live(&snapshot);
             let _ = self
                 .discord
                 .edit_message(
@@ -3673,8 +3748,8 @@ impl DraftHandler {
                     to_u64(message_id)?,
                     DiscordMessage::silent(
                         InteractionResponse::message("")
-                            .embed(live_embed(&snapshot))
-                            .action_rows(drafting_view(&snapshot)),
+                            .embed(embed)
+                            .action_rows(view),
                     )
                     .preserving_content(),
                 )
@@ -3922,7 +3997,7 @@ impl DraftHandler {
             &state.player_pool_ids.iter().copied().collect(),
         );
 
-        let embed = completion_embed(&state, &pending);
+        let embed = self.render_completion(&state, &pending);
         let completion_message = InteractionResponse::message("").embed(embed.clone());
         let edit_result = if deferred {
             responder.edit_original(completion_message).await
@@ -4953,7 +5028,6 @@ impl DraftHandler {
 #[derive(Clone)]
 struct StartContext {
     user_id: i64,
-    user_display_name: String,
     guild_id: i64,
     channel_id: i64,
     explicit_kind: Option<AppLobbyKind>,
@@ -5300,6 +5374,14 @@ fn drafting_view_with_session(
         .emoji("❌"),
     ]));
     rows
+}
+
+fn draft_render_state(state: &DraftState, player_names: &GuildPlayerNameDirectory) -> DraftState {
+    let mut rendered = state.clone();
+    for (discord_id, player) in &mut rendered.player_pool_data {
+        player.name = player_names.resolve(*discord_id, &player.name).to_owned();
+    }
+    rendered
 }
 
 fn opening_embed(state: &DraftState, starter: &str) -> InteractionEmbed {

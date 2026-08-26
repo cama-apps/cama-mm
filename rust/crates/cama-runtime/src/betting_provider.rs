@@ -78,7 +78,7 @@ use serde_json::json;
 use tracing::warn;
 
 use crate::application_config::ApplicationConfig;
-use crate::discord_transport::{DiscordMessage, DiscordTransport};
+use crate::discord_transport::{DiscordMessage, DiscordTransport, GuildPlayerNameDirectory};
 use crate::gateway_events::{GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryReport};
 use crate::ids::blocking as sqlite;
 use crate::match_provider::{
@@ -536,32 +536,19 @@ impl MatchPostMatchDebriefPort for MatchBettingPostMatchDebriefPort {
         let Some(channel_id) = request.channel_id else {
             return Ok(());
         };
-        let path = self.handler.database_path.clone();
         let guild_id = request.guild_id;
         let winner_id = request.winner_id;
         let loser_id = request.loser_id;
-        let (winner_name, loser_name) = sqlite("match Neon player names", move || {
-            let players = PlayerRepository::new(path);
-            let winner_name = if let Some(id) = winner_id {
-                players
-                    .get_by_id(id, Some(guild_id))
-                    .map_err(|error| error.to_string())?
-                    .map(|player| player.name)
-            } else {
-                None
-            };
-            let loser_name = if let Some(id) = loser_id {
-                players
-                    .get_by_id(id, Some(guild_id))
-                    .map_err(|error| error.to_string())?
-                    .map(|player| player.name)
-            } else {
-                None
-            };
-            Ok::<_, String>((winner_name, loser_name))
-        })
-        .await
-        .unwrap_or((None, None));
+        let player_ids = [winner_id, loser_id]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let player_names = self
+            .handler
+            .render_player_names(&player_ids, Some(guild_id))
+            .await;
+        let winner_name = winner_id.and_then(|id| player_names.get(&id).cloned());
+        let loser_name = loser_id.and_then(|id| player_names.get(&id).cloned());
         let repository = NeonEventRepository::new(&self.handler.database_path);
         let event_type = format!("match_debrief:{}", request.match_id);
         for fired_event_type in [
@@ -981,15 +968,7 @@ impl BettingRegistrationProvider {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
         self.handler
-            .gamba(
-                user_id,
-                "digger",
-                Some(guild_id),
-                channel_id,
-                0,
-                &responder,
-                true,
-            )
+            .gamba(user_id, Some(guild_id), channel_id, 0, &responder, true)
             .await
     }
 }
@@ -2637,6 +2616,64 @@ impl InteractionHandler for BettingInteractionHandler {
 }
 
 impl BettingInteractionHandler {
+    async fn render_player_name(&self, user_id: i64, guild_id: Option<i64>) -> String {
+        self.render_player_names(&[user_id], guild_id)
+            .await
+            .remove(&user_id)
+            .unwrap_or_else(|| format!("User {user_id}"))
+    }
+
+    async fn render_player_names(
+        &self,
+        user_ids: &[i64],
+        guild_id: Option<i64>,
+    ) -> BTreeMap<i64, String> {
+        let path = self.database_path.clone();
+        let user_ids = user_ids.to_vec();
+        let query_ids = user_ids.clone();
+        let stored_names = sqlite("betting player-name lookup", move || {
+            PlayerRepository::new(path)
+                .get_by_ids(&query_ids, guild_id)
+                .map_err(|error| error.to_string())
+                .map(|players| {
+                    players
+                        .into_iter()
+                        .filter_map(|player| {
+                            player
+                                .discord_id
+                                .map(|discord_id| (discord_id, player.name))
+                        })
+                        .collect::<BTreeMap<_, _>>()
+                })
+        })
+        .await
+        .unwrap_or_default();
+        let discord_user_ids = user_ids
+            .iter()
+            .filter_map(|user_id| u64::try_from(*user_id).ok())
+            .collect::<Vec<_>>();
+        let nicknames = guild_id
+            .and_then(|guild_id| u64::try_from(guild_id).ok())
+            .filter(|guild_id| *guild_id != 0)
+            .and_then(|guild_id| {
+                self.discord
+                    .cached_guild_member_server_nicknames(guild_id, &discord_user_ids)
+                    .ok()
+            })
+            .flatten();
+        let names = GuildPlayerNameDirectory::new(nicknames);
+        user_ids
+            .into_iter()
+            .map(|user_id| {
+                let stored_name = stored_names
+                    .get(&user_id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("User {user_id}"));
+                (user_id, names.resolve(user_id, &stored_name).to_owned())
+            })
+            .collect()
+    }
+
     async fn expire_pending_views(&self) -> Result<usize, String> {
         self.balance_views
             .lock()
@@ -2750,7 +2787,7 @@ impl BettingInteractionHandler {
             interaction_id,
             name,
             user_id,
-            user_display_name,
+            user_display_name: _,
             guild_id,
             channel_id,
             member_permissions,
@@ -2782,20 +2819,12 @@ impl BettingInteractionHandler {
                 .await
             }
             "balance" => {
-                self.balance(
-                    interaction_id,
-                    user_id,
-                    user_display_name,
-                    guild_id,
-                    channel_id,
-                    &responder,
-                )
-                .await
+                self.balance(interaction_id, user_id, guild_id, channel_id, &responder)
+                    .await
             }
             "gamba" => {
                 self.gamba(
                     user_id,
-                    &user_display_name,
                     guild_id,
                     channel_id,
                     member_permissions.unwrap_or_default(),
@@ -2805,27 +2834,14 @@ impl BettingInteractionHandler {
                 .await
             }
             "economy tip" => {
-                self.tip(
-                    user_id,
-                    user_display_name,
-                    guild_id,
-                    channel_id,
-                    &options,
-                    &responder,
-                )
-                .await
+                self.tip(user_id, guild_id, channel_id, &options, &responder)
+                    .await
             }
             "economy invest" => self.invest(user_id, guild_id, &options, &responder).await,
             "economy paydebt" => self.paydebt(user_id, guild_id, &options, &responder).await,
             "economy bankruptcy" => {
-                self.bankruptcy(
-                    user_id,
-                    &user_display_name,
-                    guild_id,
-                    channel_id,
-                    &responder,
-                )
-                .await
+                self.bankruptcy(user_id, guild_id, channel_id, &responder)
+                    .await
             }
             "economy loan" => {
                 self.loan(user_id, guild_id, channel_id, &options, &responder)
@@ -3909,7 +3925,6 @@ impl BettingInteractionHandler {
         &self,
         interaction_id: u64,
         user_id: i64,
-        display_name: String,
         guild_id: Option<i64>,
         channel_id: Option<u64>,
         responder: &Arc<dyn InteractionResponder>,
@@ -3925,6 +3940,7 @@ impl BettingInteractionHandler {
             .defer(true)
             .await
             .map_err(|error| error.to_string())?;
+        let display_name = self.render_player_name(user_id, Some(guild_id)).await;
         let tax = self.tax_repository.clone();
         let path = self.database_path.clone();
         let loaded = sqlite("betting balance portfolio read", move || {
@@ -4502,7 +4518,6 @@ impl BettingInteractionHandler {
     async fn gamba(
         &self,
         user_id: i64,
-        user_display_name: &str,
         guild_id: Option<i64>,
         channel_id: Option<u64>,
         member_permissions: u64,
@@ -4571,13 +4586,14 @@ impl BettingInteractionHandler {
             }
         }
         let response_route = begin_gamba_response(responder, bonus_spin).await?;
+        let user_display_name = self.render_player_name(user_id, Some(guild_id)).await;
         let member_snapshot = self.guild_member_snapshot(guild_id).await;
         let config = self.config.clone();
         let path = self.database_path.clone();
         let event_config = economy_event_config(&config);
         let event_path = self.database_path.clone();
         let vanity_taxable_ids = self.vanity_tax.taxable_ids(guild_id);
-        let wheel_display_name = user_display_name.to_owned();
+        let wheel_display_name = user_display_name.clone();
         let (event_win_multiplier, event_loss_multiplier) =
             sqlite("gamba economy-event effects", move || {
                 let service = SqliteEconomyEventService::new(event_path, event_config);
@@ -4760,7 +4776,6 @@ impl BettingInteractionHandler {
     async fn tip(
         &self,
         user_id: i64,
-        user_display_name: String,
         guild_id: Option<i64>,
         channel_id: Option<u64>,
         options: &[InteractionOption],
@@ -5002,20 +5017,17 @@ impl BettingInteractionHandler {
                     .await
                     .map_err(|error| error.to_string());
                 if response.is_ok() {
-                    let target_name = {
-                        let path = self.database_path.clone();
-                        sqlite("tip Neon recipient lookup", move || {
-                            Ok::<_, String>(
-                                PlayerRepository::new(path)
-                                    .get_by_id(target, Some(guild_id))
-                                    .map_err(|error| error.to_string())?
-                                    .map(|player| player.name)
-                                    .unwrap_or_else(|| format!("<@{target}>")),
-                            )
-                        })
-                        .await
-                        .unwrap_or_else(|_| format!("<@{target}>"))
-                    };
+                    let rendered_names = self
+                        .render_player_names(&[user_id, target], Some(guild_id))
+                        .await;
+                    let user_display_name = rendered_names
+                        .get(&user_id)
+                        .cloned()
+                        .unwrap_or_else(|| format!("User {user_id}"));
+                    let target_name = rendered_names
+                        .get(&target)
+                        .cloned()
+                        .unwrap_or_else(|| format!("User {target}"));
                     self.emit_tip_neon(
                         channel_id,
                         user_id,
@@ -5092,7 +5104,6 @@ impl BettingInteractionHandler {
     async fn bankruptcy(
         &self,
         user_id: i64,
-        user_display_name: &str,
         guild_id: Option<i64>,
         channel_id: Option<u64>,
         responder: &Arc<dyn InteractionResponder>,
@@ -5114,6 +5125,7 @@ impl BettingInteractionHandler {
             .defer(false)
             .await
             .map_err(|error| error.to_string())?;
+        let user_display_name = self.render_player_name(user_id, guild_id).await;
         let path = self.database_path.clone();
         let effects_path = self.database_path.clone();
         let effects = sqlite("bankruptcy mana effects", move || {
@@ -5193,7 +5205,7 @@ impl BettingInteractionHandler {
                 .emit_bankruptcy_neon(
                     channel_id,
                     user_id,
-                    user_display_name,
+                    &user_display_name,
                     guild_id,
                     debt_cleared,
                     filing_number,

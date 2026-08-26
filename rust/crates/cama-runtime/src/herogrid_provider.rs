@@ -1,6 +1,8 @@
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::discord_transport::{GuildPlayerNameResolver, StoredUsernamePlayerNameResolver};
 use crate::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, InteractionAttachment,
     InteractionEmbed, InteractionHandler, InteractionHandlerError, InteractionOption,
@@ -14,7 +16,9 @@ use cama_app::herogrid::{
     HeroGridAttachment, HeroGridCommandError, HeroGridCommandOutcome, HeroGridCommandRequest,
     HeroGridCommandService, HeroGridSource, HeroGridSources, Teams,
 };
-use cama_db::herogrid_repository::{HeroGridRepository, PersistedHeroGridSources};
+use cama_db::herogrid_repository::{
+    HeroGridDataPort, HeroGridRepository, PersistedHeroGridSources,
+};
 use tracing::{error, warn};
 
 // `discord.Color.blue()` in discord.py is the named blue 0x3498DB.
@@ -36,8 +40,17 @@ impl HeroGridRegistrationProvider {
                 service: HeroGridCommandService::new(repository.clone()),
                 repository,
                 draft_states,
+                player_names: Arc::new(StoredUsernamePlayerNameResolver),
             }),
         }
+    }
+
+    #[must_use]
+    pub fn with_player_names(mut self, player_names: Arc<dyn GuildPlayerNameResolver>) -> Self {
+        Arc::get_mut(&mut self.handler)
+            .expect("Hero Grid handler is unique during composition")
+            .player_names = player_names;
+        self
     }
 }
 
@@ -98,6 +111,7 @@ struct HeroGridHandler {
     service: HeroGridCommandService<HeroGridRepository>,
     repository: HeroGridRepository,
     draft_states: Arc<DraftStateManager>,
+    player_names: Arc<dyn GuildPlayerNameResolver>,
 }
 
 #[async_trait]
@@ -141,19 +155,42 @@ impl InteractionHandler for HeroGridHandler {
         let min_games = integer_option(&options, "min_games").unwrap_or(2);
         let limit = integer_option(&options, "limit");
         let repository = self.repository.clone();
-        let service = self.service.clone();
         let draft_states = Arc::clone(&self.draft_states);
-        let outcome = tokio::task::spawn_blocking(move || {
-            // Python's explicit `all` source returns before consulting any
-            // lobby, pending-match, draft, or recent-match state.
+        let (sources, player_ids) = tokio::task::spawn_blocking(move || {
             let persisted = if source == HeroGridSource::All {
                 PersistedHeroGridSources::default()
             } else {
                 repository
                     .get_persisted_sources(Some(guild_id), Some(user_id))
-                    .map_err(|error| HeroGridFailure::Data(error.to_string()))?
+                    .map_err(|error| error.to_string())?
             };
             let sources = runtime_sources(persisted, &draft_states, guild_id);
+            let mut player_ids = possible_hero_grid_player_ids(&sources);
+            if source == HeroGridSource::All
+                || (source == HeroGridSource::Auto && player_ids.is_empty())
+            {
+                player_ids.extend(
+                    repository
+                        .players_with_enriched_data(Some(guild_id))
+                        .map_err(|error| error.to_string())?
+                        .into_iter()
+                        .map(|player| player.discord_id),
+                );
+            }
+            Ok::<_, String>((sources, player_ids.into_iter().collect::<Vec<_>>()))
+        })
+        .await
+        .map_err(|error| format!("Hero Grid source task failed: {error}"))??;
+        let player_name_overrides = self
+            .player_names
+            .names_for_guild(guild_id, &player_ids)
+            .map(|names| names.server_nickname_overrides())
+            .unwrap_or_else(|error| {
+                warn!(%error, guild_id, "Hero Grid player-name snapshot failed");
+                Default::default()
+            });
+        let service = self.service.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
             service
                 .execute(&HeroGridCommandRequest {
                     source,
@@ -163,6 +200,7 @@ impl InteractionHandler for HeroGridHandler {
                     min_games,
                     limit,
                     sources: &sources,
+                    player_name_overrides: Some(&player_name_overrides),
                 })
                 .map_err(|error| match error {
                     HeroGridCommandError::Data(error) => HeroGridFailure::Data(error.to_string()),
@@ -190,6 +228,29 @@ impl InteractionHandler for HeroGridHandler {
             .await
             .map_err(|error| error.to_string().into())
     }
+}
+
+fn possible_hero_grid_player_ids(sources: &HeroGridSources) -> BTreeSet<i64> {
+    let mut player_ids = sources
+        .open_lobby
+        .iter()
+        .chain(&sources.low_skill_lobby)
+        .chain(&sources.last_match_ids)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if let Some(draft_pool_ids) = &sources.draft_pool_ids {
+        player_ids.extend(draft_pool_ids);
+    }
+    for teams in [
+        sources.invoking_pending_match.as_ref(),
+        sources.guild_pending_match.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        player_ids.extend(teams.radiant.iter().chain(&teams.dire).copied());
+    }
+    player_ids
 }
 
 enum HeroGridFailure {

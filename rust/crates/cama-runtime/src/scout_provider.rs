@@ -23,6 +23,7 @@ use cama_db::scout_repository::ScoutRepository;
 use thiserror::Error;
 use tracing::{error, warn};
 
+use crate::discord_transport::{GuildPlayerNameDirectory, GuildPlayerNameResolver};
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
     InteractionActionRow, InteractionAttachment, InteractionButton, InteractionButtonStyle,
@@ -55,10 +56,12 @@ impl ScoutRegistrationProvider {
     pub fn new(
         database_path: impl AsRef<Path>,
         draft_states: Arc<DraftStateManager>,
+        player_names: Arc<dyn GuildPlayerNameResolver>,
     ) -> Result<Self, ScoutProviderBuildError> {
         Self::with_assets(
             database_path,
             draft_states,
+            player_names,
             PRODUCTION_DOTABASE_PATH,
             production_steam_image_cache_root().join("scout"),
             VIEW_TIMEOUT,
@@ -68,6 +71,7 @@ impl ScoutRegistrationProvider {
     fn with_assets(
         database_path: impl AsRef<Path>,
         draft_states: Arc<DraftStateManager>,
+        player_names: Arc<dyn GuildPlayerNameResolver>,
         dotabase_path: impl AsRef<Path>,
         cache_path: impl AsRef<Path>,
         view_timeout: Duration,
@@ -89,6 +93,7 @@ impl ScoutRegistrationProvider {
                 scout_repository: ScoutRepository::new(&database_path),
                 context_repository: HeroGridRepository::new(&database_path),
                 player_repository: PlayerRepository::new(&database_path),
+                player_names,
                 draft_states,
                 hero_urls: Arc::new(hero_urls),
                 portrait_cache_root: cache_path.as_ref().to_path_buf(),
@@ -169,6 +174,7 @@ struct ScoutHandler {
     scout_repository: ScoutRepository,
     context_repository: HeroGridRepository,
     player_repository: PlayerRepository,
+    player_names: Arc<dyn GuildPlayerNameResolver>,
     draft_states: Arc<DraftStateManager>,
     hero_urls: Arc<BTreeMap<i64, String>>,
     portrait_cache_root: std::path::PathBuf,
@@ -326,17 +332,17 @@ impl ScoutHandler {
             ReportOutcome::Render(plan) => plan,
         };
         let ids = plan.player_ids.clone();
+        let query_ids = ids.clone();
         let repository = self.scout_repository.clone();
         let player_repository = self.player_repository.clone();
         let loaded = tokio::task::spawn_blocking(move || {
             let scout_data = ScoutService::new(repository)
-                .get_scout_data(&ids, Some(guild_id), REPORT_LIMIT)
+                .get_scout_data(&query_ids, Some(guild_id), REPORT_LIMIT)
                 .map_err(|error| error.to_string())?;
             let players = player_repository
-                .get_by_ids(&ids, Some(guild_id))
+                .get_by_ids(&query_ids, Some(guild_id))
                 .map_err(|error| error.to_string())?;
-            let names = players.into_iter().map(|player| player.name).collect();
-            Ok::<_, String>((scout_data, names))
+            Ok::<_, String>((scout_data, players))
         })
         .await
         .map_err(|error| format!("Scout report task failed: {error}"))?
@@ -358,12 +364,27 @@ impl ScoutHandler {
                 .await
                 .map_err(|error| error.to_string().into());
         }
+        let player_names = match self.player_names.names_for_guild(guild_id, &ids) {
+            Ok(names) => names,
+            Err(error) => {
+                warn!(%error, guild_id, "Scout report player-name snapshot failed");
+                GuildPlayerNameDirectory::default()
+            }
+        };
+        let player_names = loaded
+            .1
+            .into_iter()
+            .filter_map(|player| {
+                let discord_id = player.discord_id?;
+                Some(player_names.resolve(discord_id, &player.name).to_owned())
+            })
+            .collect();
         let view_id = self.next_view_id.fetch_add(1, Ordering::Relaxed);
         let state = ScoutViewState {
             owner_id,
             page: 0,
             scout_data: loaded.0,
-            player_names: loaded.1,
+            player_names,
             title: plan.title,
             expiry_generation: 0,
             receipt: None,
@@ -444,6 +465,13 @@ impl ScoutHandler {
                 .await
                 .map_err(|error| error.to_string().into());
         }
+        let player_names = match self.player_names.names_for_guild(guild_id, &ids) {
+            Ok(names) => names,
+            Err(error) => {
+                warn!(%error, guild_id, "Scout server nickname lookup failed");
+                Default::default()
+            }
+        };
         let player_repository = self.player_repository.clone();
         let scout_repository = self.scout_repository.clone();
         let loaded = tokio::task::spawn_blocking(move || {
@@ -471,14 +499,20 @@ impl ScoutHandler {
         .await
         .map_err(|error| format!("Scout links task failed: {error}"))?
         .map_err(InteractionHandlerError::from)?;
+        let (mut profiles, steam_ids) = loaded;
+        for profile in &mut profiles {
+            profile.name = player_names
+                .resolve(profile.discord_id, &profile.name)
+                .to_owned();
+        }
         match plan_links(&LinksRequest {
             sources: &sources,
             has_invoking_user: true,
             mentions: mentions.as_deref(),
             team_filter,
             explicit_lobby,
-            profiles: &loaded.0,
-            steam_ids: &loaded.1,
+            profiles: &profiles,
+            steam_ids: &steam_ids,
         }) {
             LinksOutcome::Message(message) => responder
                 .followup(InteractionResponse::message(message))

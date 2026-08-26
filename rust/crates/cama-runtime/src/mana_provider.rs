@@ -32,6 +32,7 @@ use cama_db::tip_repository::TipRepository;
 use chrono::{DateTime, FixedOffset, Utc};
 
 use crate::ApplicationConfig;
+use crate::discord_transport::{GuildPlayerNameResolver, StoredUsernamePlayerNameResolver};
 use crate::registration::{
     CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute, InteractionActionRow,
     InteractionButton, InteractionButtonStyle, InteractionEmbed, InteractionHandler,
@@ -115,11 +116,20 @@ impl ManaRegistrationProvider {
                 wheel_cooldown_seconds,
                 white_stipend,
                 discord,
+                player_names: Arc::new(StoredUsernamePlayerNameResolver),
                 clock,
                 command_cooldowns: Mutex::new(BTreeMap::new()),
                 board_expirations: Mutex::new(BTreeMap::new()),
             }),
         }
+    }
+
+    #[must_use]
+    pub fn with_player_names(mut self, player_names: Arc<dyn GuildPlayerNameResolver>) -> Self {
+        Arc::get_mut(&mut self.handler)
+            .expect("new mana provider owns its handler")
+            .player_names = player_names;
+        self
     }
 }
 
@@ -195,6 +205,7 @@ struct ManaInteractionHandler {
     wheel_cooldown_seconds: i64,
     white_stipend: i64,
     discord: Arc<dyn ManaDiscordPort>,
+    player_names: Arc<dyn GuildPlayerNameResolver>,
     clock: Arc<dyn ManaClock>,
     command_cooldowns: Mutex<BTreeMap<i64, Vec<Instant>>>,
     board_expirations: Mutex<BTreeMap<(i64, i64), Instant>>,
@@ -272,7 +283,7 @@ impl ManaInteractionHandler {
             || user_display_name.clone(),
             |target| target.display_name.clone(),
         );
-        let member = self
+        let mut member = self
             .discord
             .mana_guild_member(guild_id, target_id)
             .await?
@@ -282,8 +293,51 @@ impl ManaInteractionHandler {
                 avatar_url: None,
                 role_names: Vec::new(),
             });
+        self.render_member_names(guild_id, std::slice::from_mut(&mut member))
+            .await?;
         self.single_command(user_id, guild_id, member, responder)
             .await
+    }
+
+    async fn render_member_names(
+        &self,
+        guild_id: i64,
+        members: &mut [ManaGuildMember],
+    ) -> Result<(), String> {
+        let player_ids = members
+            .iter()
+            .map(|member| member.user_id)
+            .collect::<Vec<_>>();
+        let names = self
+            .player_names
+            .names_for_guild(guild_id, &player_ids)
+            .unwrap_or_default();
+        let path = self.database_path.clone();
+        let query_ids = player_ids;
+        let stored_names = spawn_sqlite("mana player-name lookup", move || {
+            PlayerRepository::new(path)
+                .get_by_ids(&query_ids, Some(guild_id))
+                .map(|players| {
+                    players
+                        .into_iter()
+                        .filter_map(|player| {
+                            player
+                                .discord_id
+                                .map(|discord_id| (discord_id, player.name))
+                        })
+                        .collect::<BTreeMap<_, _>>()
+                })
+                .map_err(|error| error.to_string())
+        })
+        .await?;
+        for member in members {
+            let stored_name = stored_names
+                .get(&member.user_id)
+                .cloned()
+                .unwrap_or_else(|| format!("User {}", member.user_id));
+            member.display_name = names.resolve(member.user_id, &stored_name).to_owned();
+        }
+        Ok(())
     }
 
     async fn single_command(
@@ -376,7 +430,8 @@ impl ManaInteractionHandler {
     ) -> Result<(), String> {
         let moment = self.clock.moment()?;
         let today = moment.today()?;
-        let members = self.discord.mana_guild_members(guild_id)?;
+        let mut members = self.discord.mana_guild_members(guild_id)?;
+        self.render_member_names(guild_id, &mut members).await?;
         let ash_fan_ids = members
             .iter()
             .filter(|member| member.is_ash_fan())
@@ -453,7 +508,8 @@ impl ManaInteractionHandler {
 
         let moment = self.clock.moment()?;
         let today = moment.today()?;
-        let members = self.discord.mana_guild_members(guild_id)?;
+        let mut members = self.discord.mana_guild_members(guild_id)?;
+        self.render_member_names(guild_id, &mut members).await?;
         let path = self.database_path.clone();
         let rows = spawn_sqlite("mana board refresh", move || {
             ManaRepository::new(path)

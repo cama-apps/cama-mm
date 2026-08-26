@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
+use crate::discord_transport::{GuildPlayerNameDirectory, GuildPlayerNameResolver};
 use crate::test_support::initialize_test_database as initialize_or_migrate;
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
@@ -105,6 +106,20 @@ struct Fixture {
     cache: PathBuf,
 }
 
+struct StaticPlayerNames {
+    directory: GuildPlayerNameDirectory,
+}
+
+impl GuildPlayerNameResolver for StaticPlayerNames {
+    fn names_for_guild(
+        &self,
+        _guild_id: i64,
+        _player_ids: &[i64],
+    ) -> Result<GuildPlayerNameDirectory, String> {
+        Ok(self.directory.clone())
+    }
+}
+
 impl Fixture {
     fn new() -> Self {
         let directory = tempfile::tempdir().expect("temporary Scout fixture");
@@ -200,9 +215,20 @@ impl Fixture {
     }
 
     fn provider(&self, timeout: Duration) -> ScoutRegistrationProvider {
+        self.provider_with_nicknames(timeout, None)
+    }
+
+    fn provider_with_nicknames(
+        &self,
+        timeout: Duration,
+        nicknames: Option<BTreeMap<u64, Option<String>>>,
+    ) -> ScoutRegistrationProvider {
         ScoutRegistrationProvider::with_assets(
             &self.database,
             Arc::new(DraftStateManager::default()),
+            Arc::new(StaticPlayerNames {
+                directory: GuildPlayerNameDirectory::new(nicknames),
+            }),
             &self.dotabase,
             &self.cache,
             timeout,
@@ -554,7 +580,13 @@ fn test_batch_deduplicates_and_bounds_parallel_missing_fetches() {
 async fn links_disclose_only_guild_registered_players_and_preserve_mentions() {
     let fixture = Fixture::new();
     fixture.register(USER, "Alice", Some(1234));
-    let registry = registry(&fixture.provider(VIEW_TIMEOUT));
+    let registry = registry(&fixture.provider_with_nicknames(
+        VIEW_TIMEOUT,
+        Some(BTreeMap::from([(
+            USER as u64,
+            Some("Server Alice".to_owned()),
+        )])),
+    ));
     let responder = Arc::new(CapturingResponder::default());
     registry
         .command_handler("scout")
@@ -573,8 +605,9 @@ async fn links_disclose_only_guild_registered_players_and_preserve_mentions() {
     assert!(
         embed.fields[0]
             .value
-            .contains("**Alice** — [Dotabuff](https://www.dotabuff.com/players/1234)")
+            .contains("**Server Alice** — [Dotabuff](https://www.dotabuff.com/players/1234)")
     );
+    assert!(!embed.fields[0].value.contains("**Alice** —"));
     assert!(
         embed.fields[0]
             .value

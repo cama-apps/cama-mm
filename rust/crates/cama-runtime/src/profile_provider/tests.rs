@@ -655,7 +655,7 @@ async fn rating_component_uploads_chart_on_original_edit() {
         .edits
         .iter()
         .find(|response| {
-            response.embeds[0].title.as_deref() == Some("Profile: Discord Display > Rating")
+            response.embeds[0].title.as_deref() == Some("Profile: Database Name > Rating")
         })
         .expect("rating edit");
     assert_eq!(response.attachments.len(), 1);
@@ -697,7 +697,7 @@ async fn gambling_component_uploads_chart_on_original_edit() {
         .edits
         .iter()
         .find(|response| {
-            response.embeds[0].title.as_deref() == Some("Profile: Discord Display > Gambling")
+            response.embeds[0].title.as_deref() == Some("Profile: Database Name > Gambling")
         })
         .expect("gambling edit");
     assert_eq!(response.attachments.len(), 1);
@@ -751,7 +751,7 @@ async fn economy_component_uploads_chart_on_original_edit() {
         .edits
         .iter()
         .find(|response| {
-            response.embeds[0].title.as_deref() == Some("Profile: Discord Display > Economy")
+            response.embeds[0].title.as_deref() == Some("Profile: Database Name > Economy")
         })
         .expect("economy edit");
     assert_eq!(response.attachments.len(), 1);
@@ -800,7 +800,7 @@ async fn dota_component_uploads_lane_chart_on_original_edit() {
         .edits
         .iter()
         .find(|response| {
-            response.embeds[0].title.as_deref() == Some("Profile: Discord Display > Dota Stats")
+            response.embeds[0].title.as_deref() == Some("Profile: Database Name > Dota Stats")
         })
         .expect("Dota edit");
     assert_eq!(response.attachments.len(), 1);
@@ -932,7 +932,7 @@ async fn heroes_component_uploads_chart_on_original_edit() {
         .edits
         .iter()
         .find(|response| {
-            response.embeds[0].title.as_deref() == Some("Profile: Discord Display > Heroes")
+            response.embeds[0].title.as_deref() == Some("Profile: Database Name > Heroes")
         })
         .expect("Heroes edit");
     assert_eq!(response.attachments.len(), 1);
@@ -989,7 +989,7 @@ async fn production_profile_route_uses_real_sqlite_and_loopback_opendota_for_eve
         assert!(!response.ephemeral);
         assert_eq!(
             response.embeds[0].title.as_deref(),
-            Some("Profile: Discord Display")
+            Some("Profile: Database Name")
         );
         assert_eq!(response.components.len(), 2);
         assert_eq!(
@@ -1085,7 +1085,7 @@ async fn production_profile_route_uses_real_sqlite_and_loopback_opendota_for_eve
         assert!(
             pages
                 .iter()
-                .any(|title| title == &format!("Profile: Discord Display > {suffix}")),
+                .any(|title| title == &format!("Profile: Database Name > {suffix}")),
             "missing {suffix} live page from {pages:?}"
         );
     }
@@ -1093,7 +1093,7 @@ async fn production_profile_route_uses_real_sqlite_and_loopback_opendota_for_eve
         .edits
         .iter()
         .find(|response| {
-            response.embeds[0].title.as_deref() == Some("Profile: Discord Display > Dota Stats")
+            response.embeds[0].title.as_deref() == Some("Profile: Database Name > Dota Stats")
         })
         .expect("Dota edit");
     assert_eq!(
@@ -1148,7 +1148,7 @@ async fn selected_unregistered_profile_is_public_and_preserves_resolved_display_
     );
     assert_eq!(
         captured.followups[0].embeds[0].description.as_deref(),
-        Some("Selected Name is not registered.\nUse `/player register` to get started.")
+        Some("User 999 is not registered.\nUse `/player register` to get started.")
     );
     assert_eq!(captured.followups[0].embeds[0].color, Some(0xE7_4C_3C));
     assert!(captured.immediate.is_empty());

@@ -607,7 +607,7 @@ async fn migrated_sqlite_builds_all_sixteen_native_pages_and_live_navigation() {
         assert!(!followups[0].ephemeral);
         assert_eq!(
             followups[0].content,
-            "**Cama Wrapped 2026** for Command Owner"
+            "**Cama Wrapped 2026** for Guild Owner"
         );
         assert_native_png(&followups[0]);
         assert_eq!(followups[0].components[0].buttons.len(), 2);
@@ -626,6 +626,18 @@ async fn migrated_sqlite_builds_all_sixteen_native_pages_and_live_navigation() {
         .cloned()
         .expect("active Wrapped session");
     let locked = session.lock().await;
+    assert!(
+        locked
+            .slides
+            .iter()
+            .all(|slide| slide.username == "Guild Owner")
+    );
+    assert!(
+        locked.slides[0]
+            .lines
+            .iter()
+            .any(|line| line.starts_with("TOP PERFORMER - Guild "))
+    );
     assert_eq!(
         locked
             .slides
@@ -659,13 +671,13 @@ async fn migrated_sqlite_builds_all_sixteen_native_pages_and_live_navigation() {
         locked.slides[11]
             .lines
             .iter()
-            .any(|line| line.contains("Database Ally"))
+            .any(|line| line.contains("Guild Ally"))
     );
     assert!(
         locked.slides[11]
             .lines
             .iter()
-            .all(|line| !line.contains("Guild Ally"))
+            .all(|line| !line.contains("Database Ally"))
     );
     assert!(!locked.slides[11].avatars.is_empty());
     let wrapped_gamba = locked
