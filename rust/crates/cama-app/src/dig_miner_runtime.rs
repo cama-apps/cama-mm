@@ -41,6 +41,7 @@ pub struct DigMinerEffects {
 pub struct DigMinerAutoBuy {
     pub torch: bool,
     pub hard_hat: bool,
+    pub grappling_hook: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -353,6 +354,7 @@ fn profile_from_snapshot(
         auto_buy: DigMinerAutoBuy {
             torch: tunnel.auto_buy_torch,
             hard_hat: tunnel.auto_buy_hard_hat,
+            grappling_hook: tunnel.auto_buy_grappling_hook,
         },
     })
 }
