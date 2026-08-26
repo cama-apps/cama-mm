@@ -6052,3 +6052,151 @@ fn boss_progress_flat_vs_nested_shapes_both_parse_correctly() {
         "flat and nested boss_progress shapes should parse to identical state"
     );
 }
+
+#[test]
+fn strength_stats_increase_minimum_blocks_dug() {
+    use cama_db::core_repositories::{NewPlayer, PlayerRepository};
+
+    let database = fast_migrated_database();
+    PlayerRepository::new(database.path())
+        .add(&NewPlayer::new(100, "strength-test-1", Some(101)))
+        .expect("seed player");
+
+    let connection = Connection::open(database.path()).expect("open database");
+    connection
+        .execute(
+            "INSERT INTO tunnels (
+                 discord_id, guild_id, tunnel_name, depth, max_depth, total_digs,
+                 stat_points, stat_strength, stat_smarts, stat_stamina, prestige_level,
+                 prestige_perks, boss_progress, streak_days, created_at
+             ) VALUES (100, 101, 'test', 5, 5, 0, 20, 10, 0, 0, 0, '[]', '{}', 0, 1_700_000_000)",
+            [],
+        )
+        .expect("seed tunnel with 10 strength");
+    drop(connection);
+
+    let service = DigRuntimeService::sqlite(database.path());
+
+    let request = DigRuntimeRequest {
+        discord_id: 100,
+        guild_id: 101,
+        now: 1_700_000_100,
+        paid: false,
+        forced_event: false,
+    };
+
+    let outcome = service.dig(request).expect("dig with 10 strength");
+
+    // If no cave-in, advance should show the strength bonus effect.
+    // With 10 strength:
+    // - advance_min_bonus = 10 / 5 = 2
+    // - advance_max_bonus = 10 / 2 = 5
+    // Layer 0 (depth 0-25) has default range (1, 3)
+    // So with bonuses: (1+2, 3+5) = (3, 8)
+    if !outcome.cave_in {
+        let depth_before = 5;
+        let advance = outcome.depth_after - depth_before;
+        assert!(
+            (3..=8).contains(&advance),
+            "with 10 strength (no cave-in), advance should be 3-8 but got {}",
+            advance
+        );
+    }
+}
+
+#[test]
+fn strength_stats_do_not_apply_without_allocation() {
+    use cama_db::core_repositories::{NewPlayer, PlayerRepository};
+
+    let database = fast_migrated_database();
+    PlayerRepository::new(database.path())
+        .add(&NewPlayer::new(110, "strength-test-2", Some(111)))
+        .expect("seed player");
+
+    let connection = Connection::open(database.path()).expect("open database");
+    connection
+        .execute(
+            "INSERT INTO tunnels (
+                 discord_id, guild_id, tunnel_name, depth, max_depth, total_digs,
+                 stat_points, stat_strength, stat_smarts, stat_stamina, prestige_level,
+                 prestige_perks, boss_progress, streak_days, created_at
+             ) VALUES (110, 111, 'test', 5, 5, 0, 20, 0, 0, 0, 0, '[]', '{}', 0, 1_700_000_000)",
+            [],
+        )
+        .expect("seed tunnel with 0 strength");
+    drop(connection);
+
+    let service = DigRuntimeService::sqlite(database.path());
+
+    let request = DigRuntimeRequest {
+        discord_id: 110,
+        guild_id: 111,
+        now: 1_700_000_100,
+        paid: false,
+        forced_event: false,
+    };
+
+    let outcome = service.dig(request).expect("dig with 0 strength");
+    let depth_before = 5;
+    let advance = outcome.depth_after - depth_before;
+
+    // With 0 strength, no bonuses
+    // Layer 0 default range: (1, 3)
+    // So advance should be between 1 and 3
+    assert!(
+        (1..=3).contains(&advance),
+        "with 0 strength, advance should be 1-3 but got {}",
+        advance
+    );
+}
+
+#[test]
+fn higher_strength_increases_max_blocks() {
+    use cama_db::core_repositories::{NewPlayer, PlayerRepository};
+
+    let database = fast_migrated_database();
+    PlayerRepository::new(database.path())
+        .add(&NewPlayer::new(120, "strength-test-3", Some(121)))
+        .expect("seed player");
+
+    let connection = Connection::open(database.path()).expect("open database");
+    connection
+        .execute(
+            "INSERT INTO tunnels (
+                 discord_id, guild_id, tunnel_name, depth, max_depth, total_digs,
+                 stat_points, stat_strength, stat_smarts, stat_stamina, prestige_level,
+                 prestige_perks, boss_progress, streak_days, created_at
+             ) VALUES (120, 121, 'test', 5, 5, 0, 20, 20, 0, 0, 0, '[]', '{}', 0, 1_700_000_000)",
+            [],
+        )
+        .expect("seed tunnel with 20 strength");
+    drop(connection);
+
+    let service = DigRuntimeService::sqlite(database.path());
+
+    let request = DigRuntimeRequest {
+        discord_id: 120,
+        guild_id: 121,
+        now: 1_700_000_100,
+        paid: false,
+        forced_event: false,
+    };
+
+    let outcome = service.dig(request).expect("dig with 20 strength");
+
+    // If no cave-in, advance should show the strength bonus effect.
+    // With 20 strength:
+    // - advance_min_bonus = 20 / 5 = 4
+    // - advance_max_bonus = 20 / 2 = 10
+    // Layer 0 default range: (1, 3)
+    // So with bonuses: (1+4, 3+10) = (5, 13)
+    if !outcome.cave_in {
+        let depth_before = 5;
+        let advance = outcome.depth_after - depth_before;
+        assert!(
+            (5..=13).contains(&advance),
+            "with 20 strength (no cave-in), advance should be 5-13 but got {}",
+            advance
+        );
+    }
+}
