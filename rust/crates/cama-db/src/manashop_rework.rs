@@ -940,14 +940,19 @@ impl ManashopRepository {
             return Ok(None);
         };
         let mut data = buff_data_from_json(raw_data.as_deref().unwrap_or("{}"));
-        let cap = data.cap.unwrap_or(0);
         let current = data.skimmed_total.unwrap_or(0);
-        let remaining = cap.saturating_sub(current);
-        if remaining <= 0 {
-            return Ok(None);
-        }
         let rate = data.skim_rate.unwrap_or(0.0);
-        let amount = remaining.min(((earning as f64 * rate) as i64).max(1));
+        let skim_amount = ((earning as f64 * rate) as i64).max(1);
+        let amount = match data.cap {
+            Some(cap) => {
+                let remaining = cap.saturating_sub(current);
+                if remaining <= 0 {
+                    return Ok(None);
+                }
+                remaining.min(skim_amount)
+            }
+            None => skim_amount,
+        };
         if amount <= 0 {
             return Ok(None);
         }
