@@ -481,7 +481,7 @@ fn queue_outcome_action(outcome: QueueItemOutcome, known_name: Option<&str>) -> 
 pub const fn consumable_description(item_type: &str) -> &'static str {
     match item_type.as_bytes() {
         b"dynamite" => "+5 bonus blocks on next dig.",
-        b"hard_hat" => "Absorbs the next 3 cave-ins. Each absorb costs a little light.",
+        b"hard_hat" => "Prevents cave-ins entirely for the next 3 digs. Costs luminosity per dig.",
         b"lantern" => "-50% cave-in next dig. Reveals what's stirring nearby.",
         b"reinforcement" => "48h: half damage from sabotage, big cave-ins are capped.",
         b"torch" => "+50 luminosity. Light the way.",
