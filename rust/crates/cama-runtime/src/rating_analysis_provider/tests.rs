@@ -356,7 +356,7 @@ async fn migrated_sqlite_player_action_uses_configured_calibration_and_real_hist
     assert_eq!(followups.len(), 1);
     assert!(!followups[0].ephemeral);
     let embed = &followups[0].embeds[0];
-    assert_eq!(embed.title.as_deref(), Some("OpenSkill Rating: Newbie"));
+    assert_eq!(embed.title.as_deref(), Some("OpenSkill Rating: 9"));
     let fields = embed
         .fields
         .iter()

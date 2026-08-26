@@ -729,7 +729,7 @@ async fn player_reports_registered_audit_and_exact_missing_target_copy() {
     assert!(found_response.ephemeral);
     assert_eq!(
         found_response.embeds[0].title.as_deref(),
-        Some("Tax Man Player Audit - Player 1")
+        Some("Tax Man Player Audit - 1")
     );
     assert!(found_response.embeds[0].fields[0].value.contains("-12"));
 
@@ -783,7 +783,7 @@ async fn resetcooldown_and_bankruptcy_mutate_the_live_database() {
     assert_eq!(reset.defers.lock().expect("defers").as_slice(), [true]);
     assert_eq!(
         reset.followups.lock().expect("followups")[0].content,
-        "Reset Tax Man fine cooldown for Player 1."
+        "Reset Tax Man fine cooldown for 1."
     );
     assert_eq!(
         fixture
@@ -821,7 +821,7 @@ async fn resetcooldown_and_bankruptcy_mutate_the_live_database() {
     assert!(
         add.followups.lock().expect("followups")[0]
             .content
-            .contains("Added 3 bankruptcy modifier game(s) to Player 1")
+            .contains("Added 3 bankruptcy modifier game(s) to 1")
     );
     assert_eq!(
         fixture
@@ -859,7 +859,7 @@ async fn resetcooldown_and_bankruptcy_mutate_the_live_database() {
     assert!(
         remove.followups.lock().expect("followups")[0]
             .content
-            .contains("Removed bankruptcy modifier from Player 1")
+            .contains("Removed bankruptcy modifier from 1")
     );
     assert_eq!(
         fixture

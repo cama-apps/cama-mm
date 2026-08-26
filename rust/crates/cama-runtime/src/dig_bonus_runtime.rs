@@ -22,7 +22,6 @@ use cama_app::dig_loot::{LootEntropy, SeededLootEntropy};
 use cama_app::economy_event_service::EconomyEventConfig;
 use cama_app::economy_event_sqlite::SqliteEconomyEventService;
 use cama_app::trivia_questions::{TriviaCatalog, TriviaRandom, generate_question};
-use cama_db::core_repositories::PlayerRepository;
 use cama_db::dig_bonus_events_repository::DigBonusRepository;
 use cama_db::package_deal_repository::PackageDealRepository;
 use chrono::Utc;
@@ -32,7 +31,7 @@ use thiserror::Error;
 use crate::application_config::ApplicationConfig;
 use crate::betting_provider::BettingRegistrationProvider;
 use crate::dig_provider::DigBonusDispatchPort;
-use crate::discord_transport::{GuildPlayerNameResolver, StoredUsernamePlayerNameResolver};
+use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
 use crate::economy_events_worker::EconomyEventsWorkerConfig;
 use crate::registration::{
     ComponentRoute, InteractionActionRow, InteractionButton, InteractionButtonStyle,
@@ -377,7 +376,6 @@ impl LiveBonusSession {
 struct DigBonusRuntimeState {
     economy: DigBonusRepository,
     packages: PackageDealRepository,
-    players: PlayerRepository,
     catalog: Arc<TriviaCatalog>,
     wheel: Arc<dyn DigBonusWheelPort>,
     reward_source: Arc<dyn DigBonusRewardSource>,
@@ -475,12 +473,11 @@ impl DigBonusRuntime {
             state: Arc::new(DigBonusRuntimeState {
                 economy: DigBonusRepository::new(&database_path),
                 packages: PackageDealRepository::new(&database_path),
-                players: PlayerRepository::new(&database_path),
                 catalog,
                 wheel,
                 reward_source,
                 discord,
-                player_names: Arc::new(StoredUsernamePlayerNameResolver),
+                player_names: Arc::new(DiscordIdPlayerNameResolver),
                 config,
                 sessions: Mutex::new(BTreeMap::new()),
             }),
@@ -768,34 +765,13 @@ impl DigBonusRuntime {
     ) -> Result<(), String> {
         let mut members = self.state.discord.guild_members(guild_id).await?;
         let player_ids = members.iter().map(|member| member.id).collect::<Vec<_>>();
-        let query_ids = player_ids.clone();
-        let players = self.state.players.clone();
-        let stored_names = tokio::task::spawn_blocking(move || {
-            players
-                .get_by_ids(&query_ids, Some(guild_id))
-                .map(|players| {
-                    players
-                        .into_iter()
-                        .filter_map(|player| {
-                            player
-                                .discord_id
-                                .map(|discord_id| (discord_id, player.name))
-                        })
-                        .collect::<BTreeMap<_, _>>()
-                })
-                .map_err(|error| error.to_string())
-        })
-        .await
-        .map_err(|error| format!("Dig package player-name task failed: {error}"))??;
         let names = self
             .state
             .player_names
             .names_for_guild(guild_id, &player_ids)
             .unwrap_or_default();
         for member in &mut members {
-            let fallback = format!("User {}", member.id);
-            let stored_name = stored_names.get(&member.id).unwrap_or(&fallback);
-            member.display_name = names.resolve(member.id, stored_name).to_owned();
+            member.display_name = names.resolve(member.id);
         }
         let economy = self.state.economy.clone();
         let config = self.state.config;
@@ -1604,7 +1580,7 @@ mod tests {
             ..FakeDiscord::default()
         });
         let nicknames = (USER..(USER + 6))
-            .map(|id| (id as u64, Some(format!("Server {id}"))))
+            .map(|id| (id as u64, format!("Server {id}")))
             .collect();
         let runtime = runtime(&database, Arc::clone(&discord)).with_player_names(Arc::new(
             FixedPlayerNames(GuildPlayerNameDirectory::new(Some(nicknames))),
@@ -1696,7 +1672,7 @@ mod tests {
             members: (USER..(USER + 6))
                 .map(|id| GuildMember {
                     id,
-                    display_name: format!("Player {id}"),
+                    display_name: id.to_string(),
                     bot: false,
                 })
                 .collect(),

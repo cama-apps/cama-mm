@@ -971,7 +971,7 @@ impl DraftHandler {
             .filter(|guild_id| *guild_id != 0)
             .and_then(|guild_id| {
                 self.discord
-                    .cached_guild_member_server_nicknames(guild_id, &discord_player_ids)
+                    .cached_guild_member_render_names(guild_id, &discord_player_ids)
                     .ok()
             })
             .flatten();
@@ -2938,17 +2938,9 @@ impl DraftHandler {
             current.coinflip_winner_id = Some(coinflip_winner);
             current.phase = DraftPhase::WinnerChoice;
             let rendered = self.render_state(&current);
-            let starter_stored = players
-                .iter()
-                .find(|player| player.discord_id == Some(context.user_id))
-                .map_or_else(
-                    || format!("User {}", context.user_id),
-                    |player| player.name.clone(),
-                );
             let starter = self
                 .player_names(context.guild_id, &[context.user_id])
-                .resolve(context.user_id, &starter_stored)
-                .to_owned();
+                .resolve(context.user_id);
             opening_embed(&rendered, &starter)
         };
 
@@ -3181,21 +3173,7 @@ impl DraftHandler {
                 .delete_message(to_u64(channel_id)?, to_u64(message_id)?)
                 .await;
         }
-        let players = self.players.clone();
-        let stored_name = spawn_blocking(move || {
-            players
-                .get_by_id(user_id, Some(guild_id))
-                .map_err(|error| error.to_string())
-                .map(|player| {
-                    player.map_or_else(|| format!("User {user_id}"), |player| player.name)
-                })
-        })
-        .await
-        .map_err(|error| format!("draft restart player-name task failed: {error}"))??;
-        let user_name = self
-            .player_names(guild_id, &[user_id])
-            .resolve(user_id, &stored_name)
-            .to_owned();
+        let user_name = self.player_names(guild_id, &[user_id]).resolve(user_id);
         responder
             .respond(InteractionResponse::message(format!(
                 "🔄 **Draft Restarted** by {user_name}\n\nThe lobby has been preserved. Use `/draft start` to start a new draft."
@@ -5379,7 +5357,7 @@ fn drafting_view_with_session(
 fn draft_render_state(state: &DraftState, player_names: &GuildPlayerNameDirectory) -> DraftState {
     let mut rendered = state.clone();
     for (discord_id, player) in &mut rendered.player_pool_data {
-        player.name = player_names.resolve(*discord_id, &player.name).to_owned();
+        player.name = player_names.resolve(*discord_id);
     }
     rendered
 }
@@ -5709,7 +5687,7 @@ fn team_field(state: &DraftState, ids: &[i64]) -> String {
             let captain =
                 Some(*id) == state.radiant_captain_id || Some(*id) == state.dire_captain_id;
             let player = state.player_pool_data.get(id);
-            let name = player.map_or_else(|| format!("Player {id}"), |player| player.name.clone());
+            let name = player.map_or_else(|| id.to_string(), |player| player.name.clone());
             let rating = player.map_or(1500.0, |player| player.rating);
             format!(
                 "{} {} ({rating:.0})",

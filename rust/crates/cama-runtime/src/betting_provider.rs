@@ -2596,6 +2596,53 @@ struct BettingInteractionHandler {
     balance_views: Mutex<BTreeMap<u64, PendingBalanceView>>,
 }
 
+trait WheelPlayerNameSource: Send + Sync {
+    fn names_for(&self, player_ids: &[i64]) -> BTreeMap<i64, String>;
+}
+
+impl WheelPlayerNameSource for BTreeMap<i64, String> {
+    fn names_for(&self, player_ids: &[i64]) -> BTreeMap<i64, String> {
+        player_ids
+            .iter()
+            .filter_map(|player_id| self.get(player_id).map(|name| (*player_id, name.clone())))
+            .collect()
+    }
+}
+
+struct CachedDiscordWheelPlayerNames {
+    discord: Arc<dyn DiscordTransport>,
+    guild_id: i64,
+}
+
+impl CachedDiscordWheelPlayerNames {
+    fn new(discord: Arc<dyn DiscordTransport>, guild_id: i64) -> Self {
+        Self { discord, guild_id }
+    }
+}
+
+impl WheelPlayerNameSource for CachedDiscordWheelPlayerNames {
+    fn names_for(&self, player_ids: &[i64]) -> BTreeMap<i64, String> {
+        let discord_ids = player_ids
+            .iter()
+            .filter_map(|player_id| u64::try_from(*player_id).ok())
+            .collect::<Vec<_>>();
+        let render_names = u64::try_from(self.guild_id)
+            .ok()
+            .filter(|guild_id| *guild_id != 0)
+            .and_then(|guild_id| {
+                self.discord
+                    .cached_guild_member_render_names(guild_id, &discord_ids)
+                    .ok()
+            })
+            .flatten();
+        let names = GuildPlayerNameDirectory::new(render_names);
+        player_ids
+            .iter()
+            .map(|player_id| (*player_id, names.resolve(*player_id)))
+            .collect()
+    }
+}
+
 #[async_trait]
 impl InteractionHandler for BettingInteractionHandler {
     async fn handle(
@@ -2620,7 +2667,7 @@ impl BettingInteractionHandler {
         self.render_player_names(&[user_id], guild_id)
             .await
             .remove(&user_id)
-            .unwrap_or_else(|| format!("User {user_id}"))
+            .unwrap_or_else(|| user_id.to_string())
     }
 
     async fn render_player_names(
@@ -2628,26 +2675,7 @@ impl BettingInteractionHandler {
         user_ids: &[i64],
         guild_id: Option<i64>,
     ) -> BTreeMap<i64, String> {
-        let path = self.database_path.clone();
         let user_ids = user_ids.to_vec();
-        let query_ids = user_ids.clone();
-        let stored_names = sqlite("betting player-name lookup", move || {
-            PlayerRepository::new(path)
-                .get_by_ids(&query_ids, guild_id)
-                .map_err(|error| error.to_string())
-                .map(|players| {
-                    players
-                        .into_iter()
-                        .filter_map(|player| {
-                            player
-                                .discord_id
-                                .map(|discord_id| (discord_id, player.name))
-                        })
-                        .collect::<BTreeMap<_, _>>()
-                })
-        })
-        .await
-        .unwrap_or_default();
         let discord_user_ids = user_ids
             .iter()
             .filter_map(|user_id| u64::try_from(*user_id).ok())
@@ -2657,20 +2685,14 @@ impl BettingInteractionHandler {
             .filter(|guild_id| *guild_id != 0)
             .and_then(|guild_id| {
                 self.discord
-                    .cached_guild_member_server_nicknames(guild_id, &discord_user_ids)
+                    .cached_guild_member_render_names(guild_id, &discord_user_ids)
                     .ok()
             })
             .flatten();
         let names = GuildPlayerNameDirectory::new(nicknames);
         user_ids
             .into_iter()
-            .map(|user_id| {
-                let stored_name = stored_names
-                    .get(&user_id)
-                    .cloned()
-                    .unwrap_or_else(|| format!("User {user_id}"));
-                (user_id, names.resolve(user_id, &stored_name).to_owned())
-            })
+            .map(|user_id| (user_id, names.resolve(user_id)))
             .collect()
     }
 
@@ -2716,6 +2738,8 @@ impl BettingInteractionHandler {
             let option = timeout_wheel_option(&pending);
             let option_for_settlement = option.clone();
             let member_snapshot = self.guild_member_snapshot(pending.guild_id).await;
+            let player_names =
+                CachedDiscordWheelPlayerNames::new(Arc::clone(&self.discord), pending.guild_id);
             let result = sqlite("expired wheel interaction sweep", move || {
                 // Low-priority eligibility is a SQLite read, so it resolves on
                 // the blocking side with the rest of the settlement.
@@ -2741,6 +2765,7 @@ impl BettingInteractionHandler {
                     &vanity_taxable_ids,
                     &low_priority_taxable_ids,
                     member_snapshot.as_ref(),
+                    &player_names,
                 )
             })
             .await;
@@ -3167,6 +3192,8 @@ impl BettingInteractionHandler {
                 let vanity_taxable_ids = self.vanity_tax.taxable_ids(guild_id);
                 let option_for_settlement = option.clone();
                 let member_snapshot = self.guild_member_snapshot(guild_id).await;
+                let player_names =
+                    CachedDiscordWheelPlayerNames::new(Arc::clone(&self.discord), guild_id);
                 let result = sqlite("expired wheel interaction resolution", move || {
                     // Low-priority eligibility is a SQLite read, so it resolves
                     // on the blocking side with the rest of the settlement.
@@ -3192,6 +3219,7 @@ impl BettingInteractionHandler {
                         &vanity_taxable_ids,
                         &low_priority_taxable_ids,
                         member_snapshot.as_ref(),
+                        &player_names,
                     )
                 })
                 .await;
@@ -3274,6 +3302,7 @@ impl BettingInteractionHandler {
         let event_loss_multiplier = pending.event_loss_multiplier;
         let vanity_taxable_ids = self.vanity_tax.taxable_ids(guild_id);
         let member_snapshot = self.guild_member_snapshot(guild_id).await;
+        let player_names = CachedDiscordWheelPlayerNames::new(Arc::clone(&self.discord), guild_id);
         let result = sqlite("wheel interaction resolution", move || {
             // Low-priority eligibility is a SQLite read, so it resolves on the
             // blocking side with the rest of the settlement.
@@ -3299,6 +3328,7 @@ impl BettingInteractionHandler {
                 &vanity_taxable_ids,
                 &low_priority_taxable_ids,
                 member_snapshot.as_ref(),
+                &player_names,
             )
         })
         .await;
@@ -4588,6 +4618,7 @@ impl BettingInteractionHandler {
         let response_route = begin_gamba_response(responder, bonus_spin).await?;
         let user_display_name = self.render_player_name(user_id, Some(guild_id)).await;
         let member_snapshot = self.guild_member_snapshot(guild_id).await;
+        let player_names = CachedDiscordWheelPlayerNames::new(Arc::clone(&self.discord), guild_id);
         let config = self.config.clone();
         let path = self.database_path.clone();
         let event_config = economy_event_config(&config);
@@ -4624,6 +4655,7 @@ impl BettingInteractionHandler {
                 bonus_spin,
                 member_snapshot.as_ref(),
                 Some(&wheel_display_name),
+                &player_names,
             )
         })
         .await?;
@@ -5023,11 +5055,11 @@ impl BettingInteractionHandler {
                     let user_display_name = rendered_names
                         .get(&user_id)
                         .cloned()
-                        .unwrap_or_else(|| format!("User {user_id}"));
+                        .unwrap_or_else(|| user_id.to_string());
                     let target_name = rendered_names
                         .get(&target)
                         .cloned()
-                        .unwrap_or_else(|| format!("User {target}"));
+                        .unwrap_or_else(|| target.to_string());
                     self.emit_tip_neon(
                         channel_id,
                         user_id,
@@ -8211,6 +8243,7 @@ fn resolve_wheel_value(
     bonus_spin: bool,
     visible_positive_balance: Option<i64>,
     visible_member_ids: Option<&BTreeSet<i64>>,
+    player_names: &dyn WheelPlayerNameSource,
 ) -> Result<WheelResolution, String> {
     let mechanic = match landed.value {
         WheelValue::Numeric(value) => {
@@ -8522,11 +8555,19 @@ fn resolve_wheel_value(
                 event_win_multiplier,
                 visible_member_ids,
             )?;
+            let player_ids = hostile
+                .victim_id
+                .into_iter()
+                .chain(hostile.victims.iter().map(|(player_id, _)| *player_id))
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let rendered_names = player_names.names_for(&player_ids);
             let resolution = WheelResolution::new(
                 WheelValue::Mechanic(mechanic),
                 hostile.log_result,
                 CooldownOutcome::Other,
-                hostile_result_note(mechanic, &hostile, config),
+                hostile_result_note(mechanic, &hostile, config, &rendered_names),
             );
             if hostile.lightning_total > 0 {
                 Ok(resolution.with_lightning(hostile.lightning_total, hostile.lightning_count))
@@ -8756,9 +8797,9 @@ struct HostileResolution {
     count: usize,
     missed: bool,
     self_hit: bool,
-    victim_name: Option<String>,
+    victim_id: Option<i64>,
     victim_new_balance: Option<i64>,
-    victims: Vec<(String, i64)>,
+    victims: Vec<(i64, i64)>,
     shield_absorbed_total: i64,
     shielded_count: usize,
 }
@@ -8852,7 +8893,7 @@ fn resolve_hostile_mechanic(
         }
         Ok(())
     };
-    let mut victim_name = None;
+    let mut primary_victim_id = None;
     let mut victim_new_balance = None;
     let mut victims = Vec::new();
     let mut self_hit = false;
@@ -8881,7 +8922,7 @@ fn resolve_hostile_mechanic(
                 )?;
                 log_result = total.get().saturating_sub(before);
                 if log_result > 0 {
-                    victim_name = Some(victim.name.clone());
+                    primary_victim_id = Some(victim_id);
                     victim_new_balance = players
                         .get_by_id(victim_id, Some(guild_id))
                         .map_err(|error| error.to_string())?
@@ -8928,7 +8969,7 @@ fn resolve_hostile_mechanic(
                     applied
                 };
                 if applied > 0 && !self_hit {
-                    victim_name = Some(victim.name.clone());
+                    primary_victim_id = Some(victim_id);
                     victim_new_balance = players
                         .get_by_id(victim_id, Some(guild_id))
                         .map_err(|error| error.to_string())?
@@ -8956,7 +8997,7 @@ fn resolve_hostile_mechanic(
                 )?;
                 let applied = total.get();
                 if applied > 0 {
-                    victim_name = Some(victim.name.clone());
+                    primary_victim_id = Some(victim_id);
                 }
             }
         }
@@ -8979,7 +9020,7 @@ fn resolve_hostile_mechanic(
                 )?;
                 log_result = total.get().saturating_sub(before);
                 if log_result > 0 {
-                    victim_name = Some(victim.name.clone());
+                    primary_victim_id = Some(victim_id);
                 }
             }
         }
@@ -9005,7 +9046,7 @@ fn resolve_hostile_mechanic(
                     )?;
                     let applied = total.get().saturating_sub(before);
                     if applied > 0 {
-                        victims.push((victim.name.clone(), applied));
+                        victims.push((victim_id, applied));
                     }
                 }
             }
@@ -9033,7 +9074,7 @@ fn resolve_hostile_mechanic(
                     )?;
                     let applied = total.get().saturating_sub(before);
                     if applied > 0 && victims.len() < 3 {
-                        victims.push((victim.name.clone(), applied));
+                        victims.push((victim_id, applied));
                     }
                 }
             }
@@ -9060,7 +9101,7 @@ fn resolve_hostile_mechanic(
                     )?;
                     let applied = total.get().saturating_sub(before);
                     if applied > 0 && victims.len() < 3 {
-                        victims.push((victim.name.clone(), applied));
+                        victims.push((victim_id, applied));
                     }
                 }
             }
@@ -9101,7 +9142,7 @@ fn resolve_hostile_mechanic(
                     )?;
                     let applied = total.get().saturating_sub(before);
                     if applied > 0 && victims.len() < 3 {
-                        victims.push((victim.name.clone(), applied));
+                        victims.push((victim_id, applied));
                     }
                 }
             }
@@ -9154,7 +9195,7 @@ fn resolve_hostile_mechanic(
                     )?;
                     let applied = total.get().saturating_sub(before);
                     if applied > 0 && victims.len() < 3 {
-                        victims.push((victim.name.clone(), applied));
+                        victims.push((victim_id, applied));
                     }
                 }
             }
@@ -9206,7 +9247,7 @@ fn resolve_hostile_mechanic(
                 )?;
                 let applied = total.get().saturating_sub(before);
                 if applied > 0 {
-                    victim_name = Some(victim.name.clone());
+                    primary_victim_id = Some(victim_id);
                     victim_new_balance = players
                         .get_by_id(victim_id, Some(guild_id))
                         .map_err(|error| error.to_string())?
@@ -9308,7 +9349,7 @@ fn resolve_hostile_mechanic(
         count: applied_count.get(),
         missed,
         self_hit,
-        victim_name,
+        victim_id: primary_victim_id,
         victim_new_balance,
         victims,
         shield_absorbed_total: shield_absorbed_total.get(),
@@ -9320,14 +9361,22 @@ fn hostile_result_note(
     mechanic: WheelMechanic,
     outcome: &HostileResolution,
     config: &BettingRuntimeConfig,
+    player_names: &BTreeMap<i64, String>,
 ) -> String {
+    let player_name = |player_id: i64| {
+        player_names
+            .get(&player_id)
+            .cloned()
+            .unwrap_or_else(|| player_id.to_string())
+    };
+    let victim_name = outcome.victim_id.map(player_name);
     let note = match mechanic {
         WheelMechanic::RedShell if outcome.missed => {
             "The Red Shell circles the track but finds no eligible target!".to_owned()
         }
         WheelMechanic::RedShell => format!(
             "💥 Red Shell locked onto **{}**! You stole **{}** {}.\n\n*Victim's new balance: **{}** {}*",
-            outcome.victim_name.as_deref().unwrap_or("the player above"),
+            victim_name.as_deref().unwrap_or("the player above"),
             outcome.total,
             JOPACOIN_EMOTE,
             outcome.victim_new_balance.unwrap_or_default(),
@@ -9342,10 +9391,7 @@ fn hostile_result_note(
         ),
         WheelMechanic::BlueShell => format!(
             "💥 Blue Shell targets the leader: **{}**! You stole **{}** {}.\n\n*Victim's new balance: **{}** {}*",
-            outcome
-                .victim_name
-                .as_deref()
-                .unwrap_or("the richest player"),
+            victim_name.as_deref().unwrap_or("the richest player"),
             outcome.total,
             JOPACOIN_EMOTE,
             outcome.victim_new_balance.unwrap_or_default(),
@@ -9355,7 +9401,9 @@ fn hostile_result_note(
             let victims = outcome
                 .victims
                 .iter()
-                .map(|(name, amount)| format!("⚡ **{name}** lost **{amount}** JC\n"))
+                .map(|(player_id, amount)| {
+                    format!("⚡ **{}** lost **{amount}** JC\n", player_name(*player_id))
+                })
                 .collect::<String>();
             format!(
                 "Lightning struck **{}** player(s) for a total of **{}** {}. All funds went to the Jopacoin Reserve.\n{}",
@@ -9419,7 +9467,7 @@ fn hostile_result_note(
         ),
         WheelMechanic::HostileTakeover => format!(
             "Corporate raid on **{}** (rank #4)! Seized **{}** {}.",
-            outcome.victim_name.as_deref().unwrap_or("rank #4"),
+            victim_name.as_deref().unwrap_or("rank #4"),
             outcome.total,
             JOPACOIN_EMOTE,
         ),
@@ -9428,10 +9476,7 @@ fn hostile_result_note(
         }
         WheelMechanic::BananaPeel => format!(
             "**{}** (ranked just below you) slipped on your peel and lost **{}** {} — burned into the void.",
-            outcome
-                .victim_name
-                .as_deref()
-                .unwrap_or("the player behind you"),
+            victim_name.as_deref().unwrap_or("the player behind you"),
             outcome.total,
             JOPACOIN_EMOTE,
         ),
@@ -9440,7 +9485,7 @@ fn hostile_result_note(
         }
         WheelMechanic::GreenShell => format!(
             "You launched a green shell at **{}** and stole **{}** {}.",
-            outcome.victim_name.as_deref().unwrap_or("someone"),
+            victim_name.as_deref().unwrap_or("someone"),
             outcome.total,
             JOPACOIN_EMOTE,
         ),
@@ -9451,8 +9496,12 @@ fn hostile_result_note(
             let victims = outcome
                 .victims
                 .iter()
-                .map(|(name, amount)| {
-                    format!("💥 **{name}** lost **{amount}** {}\n", JOPACOIN_EMOTE)
+                .map(|(player_id, amount)| {
+                    format!(
+                        "💥 **{}** lost **{amount}** {}\n",
+                        player_name(*player_id),
+                        JOPACOIN_EMOTE
+                    )
                 })
                 .collect::<String>();
             format!(
@@ -9500,6 +9549,7 @@ fn spin_once(
     bonus_spin: bool,
     visible_member_ids: Option<&BTreeSet<i64>>,
     display_name: Option<&str>,
+    player_names: &dyn WheelPlayerNameSource,
 ) -> Result<SpinResult, String> {
     let players = PlayerRepository::new(path);
     let Some(player) = players
@@ -9822,6 +9872,7 @@ fn spin_once(
         bonus_spin,
         visible_positive_balance,
         visible_member_ids,
+        player_names,
     )?;
     let next = cooldown_after_resolution(now, bonus_spin, last_regular_spin, cooldown_outcome);
     if let Some(replacement) = next.replacement_last_spin {
@@ -10807,6 +10858,7 @@ fn resolve_pending_wheel(
     vanity_taxable_ids: &BTreeSet<i64>,
     low_priority_taxable_ids: &BTreeSet<i64>,
     visible_member_ids: Option<&BTreeSet<i64>>,
+    player_names: &dyn WheelPlayerNameSource,
 ) -> Result<PendingWheelResolution, String> {
     if use_reroll
         && !ManaRepository::new(path)
@@ -10851,6 +10903,7 @@ fn resolve_pending_wheel(
         bonus_spin,
         None,
         visible_member_ids,
+        player_names,
     )?;
     let next = cooldown_after_resolution(now, bonus_spin, last_regular_spin, cooldown_outcome);
     if let Some(replacement) = next.replacement_last_spin {

@@ -277,19 +277,6 @@ impl SqliteLobbyPlayers {
             .get_by_id(player_id.0, Some(guild_id.0))
             .map_err(|error| error.to_string())
     }
-
-    async fn fallback_name(&self, player_id: AppUserId, guild_id: AppGuildId) -> String {
-        let players = self.clone();
-        tokio::task::spawn_blocking(move || {
-            players
-                .player(player_id, guild_id)
-                .ok()
-                .flatten()
-                .map_or_else(|| format!("User {}", player_id.0), |player| player.name)
-        })
-        .await
-        .unwrap_or_else(|_| format!("User {}", player_id.0))
-    }
 }
 
 impl LobbyPlayerPort for SqliteLobbyPlayers {
@@ -674,29 +661,27 @@ impl FirstGamePoolPreviewPort for LoadedFirstGamePoolPreviews {
 
 impl LobbyRuntimeState {
     async fn resolve_player_name(&self, guild_id: AppGuildId, player_id: AppUserId) -> String {
-        let stored_name = self.players.fallback_name(player_id, guild_id).await;
-        self.render_player_name(guild_id, player_id, &stored_name)
+        self.render_player_name(guild_id, player_id)
     }
 
-    fn render_player_name(
-        &self,
-        guild_id: AppGuildId,
-        player_id: AppUserId,
-        stored_name: &str,
-    ) -> String {
-        let user_ids = u64::try_from(player_id.0).into_iter().collect::<Vec<_>>();
-        let names = u64::try_from(guild_id.0)
+    fn cached_player_name(&self, guild_id: AppGuildId, player_id: AppUserId) -> Option<String> {
+        let user_id = u64::try_from(player_id.0).ok()?;
+        let guild_id = u64::try_from(guild_id.0)
             .ok()
-            .filter(|guild_id| *guild_id != 0)
-            .and_then(|guild_id| {
-                self.transport
-                    .cached_guild_member_server_nicknames(guild_id, &user_ids)
-                    .ok()
-            })
-            .flatten();
-        GuildPlayerNameDirectory::new(names)
-            .resolve(player_id.0, stored_name)
-            .to_owned()
+            .filter(|guild_id| *guild_id != 0)?;
+        let render_names = self
+            .transport
+            .cached_guild_member_render_names(guild_id, &[user_id])
+            .ok()??;
+        let names = GuildPlayerNameDirectory::new(Some(render_names));
+        names
+            .contains(player_id.0)
+            .then(|| names.resolve(player_id.0))
+    }
+
+    fn render_player_name(&self, guild_id: AppGuildId, player_id: AppUserId) -> String {
+        self.cached_player_name(guild_id, player_id)
+            .unwrap_or_else(|| player_id.0.to_string())
     }
 
     fn player_name_overrides(
@@ -708,19 +693,20 @@ impl LobbyRuntimeState {
             .iter()
             .filter_map(|player_id| u64::try_from(player_id.0).ok())
             .collect::<Vec<_>>();
-        u64::try_from(guild_id.0)
+        let names = u64::try_from(guild_id.0)
             .ok()
             .filter(|guild_id| *guild_id != 0)
             .and_then(|guild_id| {
                 self.transport
-                    .cached_guild_member_server_nicknames(guild_id, &user_ids)
+                    .cached_guild_member_render_names(guild_id, &user_ids)
                     .ok()
             })
-            .flatten()
-            .map(|nicknames| {
-                GuildPlayerNameDirectory::new(Some(nicknames)).server_nickname_overrides()
-            })
-            .unwrap_or_default()
+            .flatten();
+        let names = GuildPlayerNameDirectory::new(names);
+        player_ids
+            .iter()
+            .map(|player_id| (player_id.0, names.resolve(player_id.0)))
+            .collect()
     }
 
     async fn classify_readycheck_players(
@@ -741,30 +727,14 @@ impl LobbyRuntimeState {
             .filter(|guild_id| *guild_id != 0)
             .and_then(|guild_id| {
                 self.transport
-                    .cached_guild_member_server_nicknames(guild_id, &discord_player_ids)
+                    .cached_guild_member_render_names(guild_id, &discord_player_ids)
                     .ok()
             })
             .flatten();
         let guild_names = GuildPlayerNameDirectory::new(guild_names);
-        let players = self.players.clone();
-        let player_ids = lobby.players.iter().copied().collect::<Vec<_>>();
-        let guild_id = lobby.scope.guild_id;
-        let stored_names = tokio::task::spawn_blocking(move || {
-            players
-                .get_by_ids(&player_ids, guild_id)
-                .into_iter()
-                .map(|player| (AppUserId(player.discord_id), player.name))
-                .collect::<BTreeMap<_, _>>()
-        })
-        .await
-        .unwrap_or_default();
         let mut data = BTreeMap::new();
         let mut mentionable = BTreeSet::new();
         for player_id in &lobby.players {
-            let stored_name = stored_names
-                .get(player_id)
-                .cloned()
-                .unwrap_or_else(|| format!("User {}", player_id.0));
             let member = match (to_u64(lobby.scope.guild_id.0), to_u64(player_id.0)) {
                 (Ok(guild_id), Ok(player_id)) => self
                     .transport
@@ -779,7 +749,7 @@ impl LobbyRuntimeState {
             let (name, group, signals) = member.map_or_else(
                 || {
                     (
-                        stored_name.clone(),
+                        player_id.0.to_string(),
                         if recent {
                             ReadinessGroup::Recent
                         } else {
@@ -823,11 +793,12 @@ impl LobbyRuntimeState {
                         DiscordPresence::Idle => "🟡",
                         DiscordPresence::Offline | DiscordPresence::Unknown => "🔴",
                     });
-                    (
-                        guild_names.resolve(player_id.0, &stored_name).to_owned(),
-                        group,
-                        signals,
-                    )
+                    let name = if guild_names.contains(player_id.0) {
+                        guild_names.resolve(player_id.0)
+                    } else {
+                        member.display_name
+                    };
+                    (name, group, signals)
                 },
             );
             data.insert(
@@ -2645,22 +2616,8 @@ impl LobbyInteractionHandler {
             )
             .await;
         }
-        let target_stored = self
-            .load_player(target_id, guild_id)
-            .await?
-            .map(|player| player.name)
-            .unwrap_or_else(|| format!("User {}", target_id.0));
-        let target_name = self
-            .state
-            .render_player_name(guild_id, target_id, &target_stored);
-        let actor_stored = self
-            .load_player(command.user_id, guild_id)
-            .await?
-            .map(|player| player.name)
-            .unwrap_or_else(|| format!("User {}", command.user_id.0));
-        let actor_name = self
-            .state
-            .render_player_name(guild_id, command.user_id, &actor_stored);
+        let target_name = self.state.render_player_name(guild_id, target_id);
+        let actor_name = self.state.render_player_name(guild_id, command.user_id);
         let mut kicked = Vec::new();
         for kind in kickable {
             let scope = LobbyScope::new(guild_id, kind);
@@ -3603,9 +3560,7 @@ impl LobbyInteractionHandler {
             warn!(?scope, "lobby observer projection has invalid Discord IDs");
             return None;
         };
-        let player_display_name =
-            self.state
-                .render_player_name(scope.guild_id, player_id, player_name);
+        let player_display_name = self.state.render_player_name(scope.guild_id, player_id);
         let event = ConfirmedLobbyJoin {
             guild_id,
             player_id: player_snowflake,
@@ -3958,7 +3913,7 @@ fn selected_user(
                         value: id.to_string(),
                     }
                 })?),
-                display_name.clone().unwrap_or_else(|| format!("User {id}")),
+                display_name.clone().unwrap_or_else(|| id.to_string()),
             )),
             _ => Err(InteractionHandlerError::Transformer {
                 value: format!("{value:?}"),
@@ -4570,7 +4525,21 @@ impl LobbyRawReactionObserver {
     async fn resolve_actor_display_name(&self, event: &RawReactionEvent) -> Option<String> {
         let guild_id = AppGuildId(i64::try_from(event.guild_id?).ok()?);
         let player_id = AppUserId(i64::try_from(event.user_id).ok()?);
-        Some(self.state.resolve_player_name(guild_id, player_id).await)
+        if let Some(name) = self.state.cached_player_name(guild_id, player_id) {
+            return Some(name);
+        }
+        if let Some(name) = event.actor_display_name.clone() {
+            return Some(name);
+        }
+        Some(
+            self.state
+                .transport
+                .user(event.user_id)
+                .await
+                .ok()
+                .flatten()
+                .map_or_else(|| player_id.0.to_string(), |user| user.display_name),
+        )
     }
 
     async fn reject_sword_reaction(&self, event: &RawReactionEvent, reason: &str, ttl: Duration) {

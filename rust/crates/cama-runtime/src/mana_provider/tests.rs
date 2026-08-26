@@ -317,7 +317,7 @@ async fn existing_single_assignment_preserves_embed_thumbnail_and_wheel_unlock_b
     assert_eq!(captured.defers, vec![false]);
     assert_eq!(captured.followups.len(), 1);
     let embed = &captured.followups[0].embeds[0];
-    assert_eq!(embed.title.as_deref(), Some("🔮 Daily Mana — Player 01"));
+    assert_eq!(embed.title.as_deref(), Some("🔮 Daily Mana — 42"));
     assert_eq!(
         embed.thumbnail_url.as_deref(),
         Some("https://cdn.test/avatar.png")
@@ -364,7 +364,7 @@ async fn selected_unassigned_player_is_read_only_and_uses_no_mana_embed() {
     assert_eq!(fixture.assigned_count(), 0);
     let captured = responder.captured.lock().expect("response capture");
     let embed = &captured.followups[0].embeds[0];
-    assert_eq!(embed.title.as_deref(), Some("🔮 Daily Mana — Player 02"));
+    assert_eq!(embed.title.as_deref(), Some("🔮 Daily Mana — 43"));
     assert_eq!(
         embed.description.as_deref(),
         Some("This player hasn't been assigned any mana yet.")

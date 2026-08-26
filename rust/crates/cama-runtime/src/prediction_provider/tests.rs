@@ -10,8 +10,8 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::discord_transport::{
-    DiscordEmoji, DiscordGuildMemberSnapshot, DiscordMessageReceipt, DiscordMessageSnapshot,
-    GuildPlayerNameDirectory, GuildPlayerNameResolver, StoredUsernamePlayerNameResolver,
+    DiscordEmoji, DiscordGuildMemberSnapshot, DiscordIdPlayerNameResolver, DiscordMessageReceipt,
+    DiscordMessageSnapshot, GuildPlayerNameDirectory, GuildPlayerNameResolver,
 };
 use crate::gamba_guild_source::GambaDestination;
 use crate::registration::{InteractionResponseError, Registry};
@@ -513,8 +513,7 @@ impl Fixture {
                 gamba_guilds: Arc::new(FakeGambaGuilds::default()),
                 discord: self.discord.clone(),
                 neon: self.neon.clone(),
-                players: PlayerRepository::new(&self.path),
-                player_names: Arc::new(StoredUsernamePlayerNameResolver),
+                player_names: Arc::new(DiscordIdPlayerNameResolver),
                 help_cooldowns: Mutex::new(BTreeMap::new()),
             }),
         }
@@ -542,7 +541,7 @@ async fn recent_trades_prefer_server_nickname_over_transport_display_name() {
         .with_player_names(Arc::new(FixedPlayerNames(GuildPlayerNameDirectory::new(
             Some(BTreeMap::from([(
                 TRADER as u64,
-                Some("Server Trader".to_owned()),
+                "Server Trader".to_owned(),
             )])),
         ))));
     let mut builder = RegistryBuilder::default();

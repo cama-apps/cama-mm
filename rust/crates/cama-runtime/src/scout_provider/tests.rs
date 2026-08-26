@@ -221,7 +221,7 @@ impl Fixture {
     fn provider_with_nicknames(
         &self,
         timeout: Duration,
-        nicknames: Option<BTreeMap<u64, Option<String>>>,
+        nicknames: Option<BTreeMap<u64, String>>,
     ) -> ScoutRegistrationProvider {
         ScoutRegistrationProvider::with_assets(
             &self.database,
@@ -582,10 +582,7 @@ async fn links_disclose_only_guild_registered_players_and_preserve_mentions() {
     fixture.register(USER, "Alice", Some(1234));
     let registry = registry(&fixture.provider_with_nicknames(
         VIEW_TIMEOUT,
-        Some(BTreeMap::from([(
-            USER as u64,
-            Some("Server Alice".to_owned()),
-        )])),
+        Some(BTreeMap::from([(USER as u64, "Server Alice".to_owned())])),
     ));
     let responder = Arc::new(CapturingResponder::default());
     registry

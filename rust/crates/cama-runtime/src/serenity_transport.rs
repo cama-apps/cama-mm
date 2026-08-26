@@ -42,7 +42,7 @@ use crate::dig_provider::{
 };
 use crate::discord_transport::{
     DiscordDestinationStatus, DiscordDirectMessageError, DiscordDirectMessageErrorKind,
-    DiscordEmoji, DiscordGuildMemberServerNicknames, DiscordGuildMemberSnapshot, DiscordMessage,
+    DiscordEmoji, DiscordGuildMemberRenderNames, DiscordGuildMemberSnapshot, DiscordMessage,
     DiscordMessageReceipt, DiscordMessageSnapshot, DiscordPresence, DiscordTransport,
     DiscordUserSnapshot,
 };
@@ -1276,12 +1276,7 @@ impl SerenityHandler {
             return;
         }
         let actor_is_bot = reaction.member.as_ref().map(|member| member.user.bot);
-        let actor_display_name = reaction.member.as_ref().map(|member| {
-            member
-                .nick
-                .clone()
-                .unwrap_or_else(|| member.user.name.clone())
-        });
+        let actor_display_name = reaction.member.as_ref().map(member_render_name);
         let event = RawReactionEvent {
             kind,
             guild_id: reaction.guild_id.map(|id| id.get()),
@@ -1522,17 +1517,24 @@ fn member_server_nickname(member: &Member) -> Option<String> {
     member.nick.clone()
 }
 
-fn requested_member_server_nicknames(
+fn member_render_name(member: &Member) -> String {
+    member
+        .nick
+        .clone()
+        .unwrap_or_else(|| member.user.display_name().to_owned())
+}
+
+fn requested_member_render_names(
     members: &HashMap<UserId, Member>,
     user_ids: &[u64],
-) -> DiscordGuildMemberServerNicknames {
+) -> DiscordGuildMemberRenderNames {
     user_ids
         .iter()
         .filter_map(|user_id| {
             let user_id = UserId::new(*user_id);
             members
                 .get(&user_id)
-                .map(|member| (user_id.get(), member_server_nickname(member)))
+                .map(|member| (user_id.get(), member_render_name(member)))
         })
         .collect::<BTreeMap<_, _>>()
 }
@@ -3281,20 +3283,19 @@ impl PredictionCommandDiscordPort for SerenityDiscordTransport {
         Ok(resolve_and_neutralize_discord_mentions(
             text,
             |user_id| {
-                let user_id = UserId::new(u64::try_from(user_id).ok()?);
+                let signed_user_id = user_id;
+                let user_id = UserId::new(u64::try_from(signed_user_id).ok()?);
                 context
                     .cache
                     .guild(guild_id)
-                    .and_then(|guild| {
-                        guild.members.get(&user_id).map(|member| {
-                            member
-                                .nick
-                                .clone()
-                                .unwrap_or_else(|| member.user.name.clone())
-                        })
+                    .and_then(|guild| guild.members.get(&user_id).map(member_render_name))
+                    .or_else(|| {
+                        context
+                            .cache
+                            .user(user_id)
+                            .map(|user| user.display_name().to_owned())
                     })
-                    .or_else(|| context.cache.user(user_id).map(|user| user.name.clone()))
-                    .or_else(|| Some("unknown".to_owned()))
+                    .or_else(|| Some(signed_user_id.to_string()))
             },
             |role_id| {
                 let role_id = serenity::all::RoleId::new(u64::try_from(role_id).ok()?);
@@ -4405,7 +4406,8 @@ impl DiscordTransport for SerenityDiscordTransport {
                     .into_iter()
                     .map(|user| DiscordUserSnapshot {
                         user_id: user.id.get(),
-                        display_name: user.name.clone(),
+                        display_name: user.display_name().to_owned(),
+                        account_username: user.name.clone(),
                         is_bot: user.bot,
                     })
                     .collect()
@@ -4440,14 +4442,16 @@ impl DiscordTransport for SerenityDiscordTransport {
         if let Some(user) = context.cache.user(user_id) {
             return Ok(Some(DiscordUserSnapshot {
                 user_id: user.id.get(),
-                display_name: user.name.clone(),
+                display_name: user.display_name().to_owned(),
+                account_username: user.name.clone(),
                 is_bot: user.bot,
             }));
         }
         match user_id.to_user(&context.http).await {
             Ok(user) => Ok(Some(DiscordUserSnapshot {
                 user_id: user.id.get(),
-                display_name: user.name.clone(),
+                display_name: user.display_name().to_owned(),
+                account_username: user.name.clone(),
                 is_bot: user.bot,
             })),
             Err(serenity::Error::Http(error))
@@ -4510,7 +4514,7 @@ impl DiscordTransport for SerenityDiscordTransport {
         );
         Ok(Some(DiscordGuildMemberSnapshot {
             user_id: user_id.get(),
-            display_name: member.user.name.clone(),
+            display_name: member_render_name(&member),
             presence,
             in_voice,
             deafened,
@@ -4518,11 +4522,11 @@ impl DiscordTransport for SerenityDiscordTransport {
         }))
     }
 
-    fn cached_guild_member_server_nicknames(
+    fn cached_guild_member_render_names(
         &self,
         guild_id: u64,
         user_ids: &[u64],
-    ) -> Result<Option<DiscordGuildMemberServerNicknames>, String> {
+    ) -> Result<Option<DiscordGuildMemberRenderNames>, String> {
         if guild_id == 0 {
             return Ok(None);
         }
@@ -4530,7 +4534,7 @@ impl DiscordTransport for SerenityDiscordTransport {
         Ok(context
             .cache
             .guild(GuildId::new(guild_id))
-            .map(|guild| requested_member_server_nicknames(&guild.members, user_ids)))
+            .map(|guild| requested_member_render_names(&guild.members, user_ids)))
     }
 
     async fn channel_parent_id(
@@ -4608,7 +4612,7 @@ impl WrappedDiscordPort for SerenityDiscordTransport {
         let mut display_name = context
             .cache
             .guild(guild_id)
-            .and_then(|guild| guild.members.get(&user_id).and_then(member_server_nickname))
+            .and_then(|guild| guild.members.get(&user_id).map(member_render_name))
             .unwrap_or_default();
         if !include_avatar {
             return Ok(Some(WrappedDiscordProfile {
@@ -4631,7 +4635,7 @@ impl WrappedDiscordPort for SerenityDiscordTransport {
             Err(error) => return Err(error.to_string()),
         };
         if display_name.is_empty() {
-            display_name = member_server_nickname(&member).unwrap_or_default();
+            display_name = member_render_name(&member);
         }
         let avatar_png = if let Some(avatar) = member.avatar {
             let url = format!(

@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use cama_db::core_repositories::PlayerRepository;
 use cama_db::pairings_repository::{Pairing, PairingsRepository};
 
-use crate::discord_transport::{GuildPlayerNameResolver, StoredUsernamePlayerNameResolver};
+use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
 use crate::registration::{
     CommandOptionKind, CommandOptionSpec, CommandSpec, InteractionEmbed, InteractionHandler,
     InteractionHandlerError, InteractionOption, InteractionRequest, InteractionResponder,
@@ -28,7 +28,7 @@ impl AdvancedStatsRegistrationProvider {
             handler: Arc::new(AdvancedStatsHandler {
                 players: PlayerRepository::new(database_path.as_ref()),
                 pairings: PairingsRepository::new(database_path),
-                player_names: Arc::new(StoredUsernamePlayerNameResolver),
+                player_names: Arc::new(DiscordIdPlayerNameResolver),
             }),
         }
     }
@@ -140,16 +140,8 @@ impl InteractionHandler for AdvancedStatsHandler {
             .player_names
             .names_for_guild(guild_id, &[first.id, second.id])
             .unwrap_or_default();
-        if let Some(stored_name) = registered.get(&first.id) {
-            first.display_name = names.resolve(first.id, stored_name).to_owned();
-        } else {
-            first.display_name = names.resolve(first.id, &first.display_name).to_owned();
-        }
-        if let Some(stored_name) = registered.get(&second.id) {
-            second.display_name = names.resolve(second.id, stored_name).to_owned();
-        } else {
-            second.display_name = names.resolve(second.id, &second.display_name).to_owned();
-        }
+        first.display_name = names.resolve(first.id);
+        second.display_name = names.resolve(second.id);
         if !registered.contains_key(&first.id) {
             return followup(
                 &responder,
@@ -206,7 +198,7 @@ fn matchup_user(
                 id: i64::try_from(id).map_err(|_| {
                     InteractionHandlerError::from("Discord user ID exceeds SQLite range")
                 })?,
-                display_name: format!("User {id}"),
+                display_name: id.to_string(),
             })
         })
 }

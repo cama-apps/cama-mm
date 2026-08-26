@@ -479,8 +479,7 @@ impl WrappedHandler {
             .get(&signed_target)
             .map(|profile| profile.display_name.as_str())
             .filter(|name| !name.is_empty())
-            .or(raw.player_name.as_deref())
-            .map_or_else(|| format!("User {signed_target}"), str::to_owned);
+            .map_or_else(|| signed_target.to_string(), str::to_owned);
         let response_target_name = slide_target_name.clone();
         let slides = match tokio::task::spawn_blocking(move || {
             build_slides(
@@ -879,13 +878,13 @@ fn build_slides(
 ) -> Vec<WrappedSlideData> {
     let year_label = format!("Cama Wrapped {year}");
     let mut slides = Vec::new();
-    let display_name = |id: i64, fallback: &str| {
+    let display_name = |id: i64, _fallback: &str| {
         profiles
             .get(&id)
             .map(|profile| profile.display_name.as_str())
             .filter(|name| !name.is_empty())
             .map(str::to_owned)
-            .unwrap_or_else(|| fallback.to_owned())
+            .unwrap_or_else(|| id.to_string())
     };
 
     let mut server = base_slide(
@@ -1401,7 +1400,7 @@ fn add_pairwise_entries(
                 .get(&entry.discord_id)
                 .map(|profile| profile.display_name.as_str())
                 .filter(|name| !name.is_empty())
-                .unwrap_or(&entry.username),
+                .map_or_else(|| entry.discord_id.to_string(), str::to_owned),
             entry.wins,
             losses,
             entry.win_rate * 100.0,

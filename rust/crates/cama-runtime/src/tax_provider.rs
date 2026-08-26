@@ -31,7 +31,6 @@ use cama_app::tax_commands::{
     resetcooldown_command, vanity_command,
 };
 use cama_app::vanity_tax_service::VanityEligibility as PersistentVanityEligibility;
-use cama_db::core_repositories::PlayerRepository;
 use cama_db::economy_event_repository::{EconomyEventRepository, EventDirection, PolicyMode};
 use cama_db::tax_repository::{
     TaxBankruptcyAction, TaxBankruptcyOutcome, TaxBankruptcyRequest, TaxFineOutcome,
@@ -44,7 +43,7 @@ use cama_domain::permissions::{
 use chrono::Utc;
 
 use crate::application_config::ApplicationConfig;
-use crate::discord_transport::{GuildPlayerNameResolver, StoredUsernamePlayerNameResolver};
+use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
     InteractionActionRow, InteractionButton, InteractionButtonStyle, InteractionEmbed,
@@ -111,8 +110,7 @@ impl TaxRegistrationProvider {
         Self {
             handler: Arc::new(TaxHandler {
                 tax,
-                players: PlayerRepository::new(database_path.as_ref()),
-                player_names: Arc::new(StoredUsernamePlayerNameResolver),
+                player_names: Arc::new(DiscordIdPlayerNameResolver),
                 economy,
                 vanity: Arc::new(PersistentVanityPort {
                     service: vanity_tax,
@@ -284,7 +282,6 @@ fn tax_subcommands(vanity_tax_rate: f64) -> Vec<CommandOptionSpec> {
 
 struct TaxHandler {
     tax: Arc<SqliteTaxPort>,
-    players: PlayerRepository,
     player_names: Arc<dyn GuildPlayerNameResolver>,
     economy: Arc<SqliteEconomyStatusPort>,
     vanity: Arc<PersistentVanityPort>,
@@ -383,7 +380,7 @@ impl InteractionHandler for TaxHandler {
                     TaxCommandContext {
                         interaction_id,
                         actor_id: user_id,
-                        actor_display_name: format!("User {user_id}"),
+                        actor_display_name: user_id.to_string(),
                         guild_id,
                         member_permissions,
                         subcommand,
@@ -419,38 +416,11 @@ impl TaxHandler {
         }
         let mut requested_ids = vec![actor_id];
         requested_ids.extend(targets.iter().map(|(_, id)| *id));
-        let query_ids = requested_ids.clone();
-        let players = self.players.clone();
-        let stored_names = tokio::time::timeout(
-            Duration::from_secs(1),
-            tokio::task::spawn_blocking(move || {
-                players
-                    .get_by_ids(&query_ids, Some(guild_id))
-                    .map(|players| {
-                        players
-                            .into_iter()
-                            .filter_map(|player| player.discord_id.map(|id| (id, player.name)))
-                            .collect::<BTreeMap<_, _>>()
-                    })
-                    .map_err(|error| error.to_string())
-            }),
-        )
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .and_then(Result::ok)
-        .unwrap_or_default();
         let names = self
             .player_names
             .names_for_guild(guild_id, &requested_ids)
             .unwrap_or_default();
-        let resolve = |user_id: i64| {
-            let stored_name = stored_names
-                .get(&user_id)
-                .cloned()
-                .unwrap_or_else(|| format!("User {user_id}"));
-            names.resolve(user_id, &stored_name).to_owned()
-        };
+        let resolve = |user_id: i64| names.resolve(user_id);
         for (index, user_id) in targets {
             if let InteractionValue::User { display_name, .. } = &mut command.options[index].value {
                 *display_name = Some(resolve(user_id));
@@ -1859,7 +1829,7 @@ fn user_option(
             InteractionValue::User {
                 id, display_name, ..
             } => {
-                let display_name = display_name.clone().unwrap_or_else(|| format!("User {id}"));
+                let display_name = display_name.clone().unwrap_or_else(|| id.to_string());
                 Ok(UserRef {
                     id: *id,
                     name: display_name.to_lowercase(),

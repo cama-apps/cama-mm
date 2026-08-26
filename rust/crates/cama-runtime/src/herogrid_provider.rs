@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::discord_transport::{GuildPlayerNameResolver, StoredUsernamePlayerNameResolver};
+use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
 use crate::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, InteractionAttachment,
     InteractionEmbed, InteractionHandler, InteractionHandlerError, InteractionOption,
@@ -40,7 +40,7 @@ impl HeroGridRegistrationProvider {
                 service: HeroGridCommandService::new(repository.clone()),
                 repository,
                 draft_states,
-                player_names: Arc::new(StoredUsernamePlayerNameResolver),
+                player_names: Arc::new(DiscordIdPlayerNameResolver),
             }),
         }
     }
@@ -181,14 +181,17 @@ impl InteractionHandler for HeroGridHandler {
         })
         .await
         .map_err(|error| format!("Hero Grid source task failed: {error}"))??;
-        let player_name_overrides = self
+        let player_names = self
             .player_names
             .names_for_guild(guild_id, &player_ids)
-            .map(|names| names.server_nickname_overrides())
             .unwrap_or_else(|error| {
                 warn!(%error, guild_id, "Hero Grid player-name snapshot failed");
                 Default::default()
             });
+        let player_name_overrides = player_ids
+            .iter()
+            .map(|player_id| (*player_id, player_names.resolve(*player_id)))
+            .collect();
         let service = self.service.clone();
         let outcome = tokio::task::spawn_blocking(move || {
             service

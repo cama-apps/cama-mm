@@ -376,7 +376,7 @@ impl ScoutHandler {
             .into_iter()
             .filter_map(|player| {
                 let discord_id = player.discord_id?;
-                Some(player_names.resolve(discord_id, &player.name).to_owned())
+                Some(player_names.resolve(discord_id))
             })
             .collect();
         let view_id = self.next_view_id.fetch_add(1, Ordering::Relaxed);
@@ -501,9 +501,7 @@ impl ScoutHandler {
         .map_err(InteractionHandlerError::from)?;
         let (mut profiles, steam_ids) = loaded;
         for profile in &mut profiles {
-            profile.name = player_names
-                .resolve(profile.discord_id, &profile.name)
-                .to_owned();
+            profile.name = player_names.resolve(profile.discord_id);
         }
         match plan_links(&LinksRequest {
             sources: &sources,

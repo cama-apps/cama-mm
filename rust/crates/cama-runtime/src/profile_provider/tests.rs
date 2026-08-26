@@ -13,6 +13,7 @@ use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
 use super::*;
+use crate::discord_transport::GuildPlayerNameDirectory;
 use crate::registration::{
     InteractionMessageDelivery, InteractionResponseError, Registry, RegistryBuilder,
 };
@@ -31,6 +32,27 @@ struct CapturedResponses {
 #[derive(Debug, Default)]
 struct CapturingResponder {
     captured: StdMutex<CapturedResponses>,
+}
+
+struct FixedProfileNames;
+
+impl GuildPlayerNameResolver for FixedProfileNames {
+    fn names_for_guild(
+        &self,
+        _guild_id: i64,
+        player_ids: &[i64],
+    ) -> Result<GuildPlayerNameDirectory, String> {
+        Ok(GuildPlayerNameDirectory::new(Some(
+            player_ids
+                .iter()
+                .filter_map(|player_id| {
+                    u64::try_from(*player_id)
+                        .ok()
+                        .map(|player_id| (player_id, "Discord Display".to_owned()))
+                })
+                .collect(),
+        )))
+    }
 }
 
 #[async_trait]
@@ -654,9 +676,7 @@ async fn rating_component_uploads_chart_on_original_edit() {
     let response = captured
         .edits
         .iter()
-        .find(|response| {
-            response.embeds[0].title.as_deref() == Some("Profile: Database Name > Rating")
-        })
+        .find(|response| response.embeds[0].title.as_deref() == Some("Profile: 100 > Rating"))
         .expect("rating edit");
     assert_eq!(response.attachments.len(), 1);
     assert_eq!(response.attachments[0].filename, "rating_chart.png");
@@ -696,9 +716,7 @@ async fn gambling_component_uploads_chart_on_original_edit() {
     let response = captured
         .edits
         .iter()
-        .find(|response| {
-            response.embeds[0].title.as_deref() == Some("Profile: Database Name > Gambling")
-        })
+        .find(|response| response.embeds[0].title.as_deref() == Some("Profile: 100 > Gambling"))
         .expect("gambling edit");
     assert_eq!(response.attachments.len(), 1);
     assert_eq!(response.attachments[0].filename, "gamba_chart.png");
@@ -750,9 +768,7 @@ async fn economy_component_uploads_chart_on_original_edit() {
     let response = captured
         .edits
         .iter()
-        .find(|response| {
-            response.embeds[0].title.as_deref() == Some("Profile: Database Name > Economy")
-        })
+        .find(|response| response.embeds[0].title.as_deref() == Some("Profile: 100 > Economy"))
         .expect("economy edit");
     assert_eq!(response.attachments.len(), 1);
     assert_eq!(response.attachments[0].filename, "balance_history.png");
@@ -799,9 +815,7 @@ async fn dota_component_uploads_lane_chart_on_original_edit() {
     let response = captured
         .edits
         .iter()
-        .find(|response| {
-            response.embeds[0].title.as_deref() == Some("Profile: Database Name > Dota Stats")
-        })
+        .find(|response| response.embeds[0].title.as_deref() == Some("Profile: 100 > Dota Stats"))
         .expect("Dota edit");
     assert_eq!(response.attachments.len(), 1);
     assert_eq!(response.attachments[0].filename, "lane_graph.png");
@@ -931,9 +945,7 @@ async fn heroes_component_uploads_chart_on_original_edit() {
     let response = captured
         .edits
         .iter()
-        .find(|response| {
-            response.embeds[0].title.as_deref() == Some("Profile: Database Name > Heroes")
-        })
+        .find(|response| response.embeds[0].title.as_deref() == Some("Profile: 100 > Heroes"))
         .expect("Heroes edit");
     assert_eq!(response.attachments.len(), 1);
     assert_eq!(response.attachments[0].filename, "hero_chart.png");
@@ -987,10 +999,7 @@ async fn production_profile_route_uses_real_sqlite_and_loopback_opendota_for_eve
         assert_eq!(captured.followups.len(), 1);
         let response = &captured.followups[0];
         assert!(!response.ephemeral);
-        assert_eq!(
-            response.embeds[0].title.as_deref(),
-            Some("Profile: Database Name")
-        );
+        assert_eq!(response.embeds[0].title.as_deref(), Some("Profile: 100"));
         assert_eq!(response.components.len(), 2);
         assert_eq!(
             response.components[0]
@@ -1085,16 +1094,14 @@ async fn production_profile_route_uses_real_sqlite_and_loopback_opendota_for_eve
         assert!(
             pages
                 .iter()
-                .any(|title| title == &format!("Profile: Database Name > {suffix}")),
+                .any(|title| title == &format!("Profile: 100 > {suffix}")),
             "missing {suffix} live page from {pages:?}"
         );
     }
     let dota = captured
         .edits
         .iter()
-        .find(|response| {
-            response.embeds[0].title.as_deref() == Some("Profile: Database Name > Dota Stats")
-        })
+        .find(|response| response.embeds[0].title.as_deref() == Some("Profile: 100 > Dota Stats"))
         .expect("Dota edit");
     assert_eq!(
         dota.embeds[0].footer.as_deref(),
@@ -1112,7 +1119,28 @@ async fn production_profile_route_uses_real_sqlite_and_loopback_opendota_for_eve
 }
 
 #[tokio::test]
-async fn selected_unregistered_profile_is_public_and_preserves_resolved_display_name() {
+async fn registered_profile_uses_discord_render_name_instead_of_database_username() {
+    let database = migrated_player_fixture();
+    let provider = ProfileRegistrationProvider::new(database.path(), offline_services())
+        .with_player_names(Arc::new(FixedProfileNames));
+    let responder = Arc::new(CapturingResponder::default());
+
+    registry_for(&provider)
+        .command_handler("profile")
+        .expect("profile handler")
+        .handle(command_request(100, Vec::new()), responder.clone())
+        .await
+        .expect("profile response");
+
+    let captured = responder.captured.lock().expect("response capture lock");
+    assert_eq!(
+        captured.followups[0].embeds[0].title.as_deref(),
+        Some("Profile: Discord Display")
+    );
+}
+
+#[tokio::test]
+async fn selected_unregistered_profile_uses_discord_id_without_cached_member() {
     let database = migrated_player_fixture();
     let server = RouteServer::start(0);
     let provider = ProfileRegistrationProvider::new(database.path(), loopback_services(&server));
@@ -1148,7 +1176,7 @@ async fn selected_unregistered_profile_is_public_and_preserves_resolved_display_
     );
     assert_eq!(
         captured.followups[0].embeds[0].description.as_deref(),
-        Some("User 999 is not registered.\nUse `/player register` to get started.")
+        Some("999 is not registered.\nUse `/player register` to get started.")
     );
     assert_eq!(captured.followups[0].embeds[0].color, Some(0xE7_4C_3C));
     assert!(captured.immediate.is_empty());

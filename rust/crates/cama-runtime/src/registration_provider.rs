@@ -719,7 +719,7 @@ impl LobbyJoinObserver for PlayerRegistrationHandler {
             .on_lobby_join(
                 event.player_id,
                 Some(event.guild_id),
-                &event.player_name,
+                &event.player_display_name,
                 event.player_ids.len(),
             );
         let (Some(channel_id), Some(text)) = (
@@ -794,16 +794,14 @@ impl LobbyJoinObserver for PlayerRegistrationHandler {
 }
 
 impl PlayerRegistrationHandler {
-    fn render_player_name(&self, guild_id: u64, user_id: u64, stored_name: &str) -> String {
+    fn render_player_name(&self, guild_id: u64, user_id: u64) -> String {
         let names = self
             .discord
-            .cached_guild_member_server_nicknames(guild_id, &[user_id])
+            .cached_guild_member_render_names(guild_id, &[user_id])
             .map(GuildPlayerNameDirectory::new)
             .unwrap_or_default();
-        i64::try_from(user_id).map_or_else(
-            |_| stored_name.to_owned(),
-            |user_id| names.resolve(user_id, stored_name).to_owned(),
-        )
+        i64::try_from(user_id)
+            .map_or_else(|_| user_id.to_string(), |user_id| names.resolve(user_id))
     }
 
     async fn deliver_lobby_ready(&self, event: &ConfirmedLobbyJoin) -> Result<(), String> {
@@ -1466,8 +1464,7 @@ impl PlayerRegistrationHandler {
     }
 
     async fn best_effort_neon(&self, context: &CommandContext, guild_id: u64) {
-        let rendered_name =
-            self.render_player_name(guild_id, context.user_id, &context.user_display_name);
+        let rendered_name = self.render_player_name(guild_id, context.user_id);
         let result = match self.neon.lock() {
             Ok(mut neon) => neon.on_registration(context.user_id, Some(guild_id), &rendered_name),
             Err(_) => {
@@ -1575,18 +1572,18 @@ impl PlayerRegistrationHandler {
             return Ok(());
         };
         respond_ephemeral(&responder, "✅ MMR received").await?;
-        let user_display_name = self
+        let account_username = self
             .discord
-            .guild_member(encoded_guild, user_id)
+            .user(user_id)
             .await
             .ok()
             .flatten()
-            .map_or_else(|| format!("User {user_id}"), |member| member.display_name);
+            .map_or_else(|| user_id.to_string(), |user| user.account_username);
         let context = CommandContext {
             interaction_id: nonce,
             name: "player".to_owned(),
             user_id,
-            user_display_name,
+            user_display_name: account_username,
             guild_id: Some(encoded_guild),
             channel_id,
             options: Vec::new(),
@@ -2415,7 +2412,7 @@ impl PlayerRegistrationHandler {
         }
         let subscriber_id = signed_id(context.user_id, "subscriber")?;
         let guild = signed_id(guild_id, "guild")?;
-        let Some((target_id, target_name, is_bot)) = target else {
+        let Some((target_id, _target_name, is_bot)) = target else {
             let enabled = enabled.unwrap_or(true);
             let notifications = self.notifications.clone();
             let saved = tokio::task::spawn_blocking(move || {
@@ -2458,9 +2455,7 @@ impl PlayerRegistrationHandler {
             )
             .await;
         }
-        let stored_name = target_name.unwrap_or_else(|| format!("User {target_id}"));
-        let target_name =
-            escape_discord_text(&self.render_player_name(guild_id, target_id, &stored_name));
+        let target_name = escape_discord_text(&self.render_player_name(guild_id, target_id));
         let target = signed_id(target_id, "target")?;
         let notifications = self.notifications.clone();
         let duplicate = tokio::task::spawn_blocking(move || {

@@ -40,7 +40,7 @@ use tracing::warn;
 #[path = "profile_balance_history.rs"]
 mod profile_balance_history;
 
-use crate::discord_transport::{GuildPlayerNameResolver, StoredUsernamePlayerNameResolver};
+use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
 use crate::registration::{
     CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute, InteractionActionRow,
     InteractionAttachment, InteractionButton, InteractionButtonStyle, InteractionEmbed,
@@ -149,7 +149,7 @@ impl ProfileRegistrationProvider {
         Self {
             handler: Arc::new(ProfileHandler {
                 sources: ProfileDataSources::new(database_path, opendota),
-                player_names: Arc::new(StoredUsernamePlayerNameResolver),
+                player_names: Arc::new(DiscordIdPlayerNameResolver),
                 command_rate_limit: Mutex::new(CommandRateLimit::default()),
                 views: Arc::new(Mutex::new(BTreeMap::new())),
                 next_view_id: AtomicU64::new(1),
@@ -317,9 +317,8 @@ impl ProfileHandler {
             tokio::task::spawn_blocking(move || sources.registered_name(target_id, guild_id))
                 .await
                 .map_err(|error| format!("profile player lookup task failed: {error}"))??;
-        let Some(database_name) = registered_name else {
-            let fallback = format!("User {target_id}");
-            let target_name = names.resolve(target_id, &fallback);
+        if registered_name.is_none() {
+            let target_name = names.resolve(target_id);
             return responder
                 .followup(
                     InteractionResponse::message("").embed(
@@ -333,7 +332,7 @@ impl ProfileHandler {
                 .await
                 .map_err(|error| error.to_string());
         };
-        let target_name = names.resolve(target_id, &database_name).to_owned();
+        let target_name = names.resolve(target_id);
         let sources = self.sources.clone();
         let build_name = target_name.clone();
         let page = tokio::task::spawn_blocking(move || {

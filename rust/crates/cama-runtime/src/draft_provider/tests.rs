@@ -776,17 +776,17 @@ fn state_for_draft() -> DraftState {
 }
 
 #[test]
-fn draft_render_state_overrides_only_cached_server_nicknames() {
+fn draft_render_state_uses_cached_discord_render_names() {
     let state = state_for_draft();
     let names = GuildPlayerNameDirectory::new(Some(BTreeMap::from([
-        (1_u64, Some("Server Captain".to_owned())),
-        (2_u64, None),
+        (1_u64, "Server Captain".to_owned()),
+        (2_u64, "Discord Player".to_owned()),
     ])));
 
     let rendered = draft_render_state(&state, &names);
 
     assert_eq!(rendered.player_pool_data[&1].name, "Server Captain");
-    assert_eq!(rendered.player_pool_data[&2].name, "P2");
+    assert_eq!(rendered.player_pool_data[&2].name, "Discord Player");
     assert_eq!(state.player_pool_data[&1].name, "P1");
 }
 

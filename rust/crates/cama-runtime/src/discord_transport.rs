@@ -11,24 +11,24 @@ use async_trait::async_trait;
 
 use crate::registration::InteractionResponse;
 
-pub type DiscordGuildMemberServerNicknames = BTreeMap<u64, Option<String>>;
+pub type DiscordGuildMemberRenderNames = BTreeMap<u64, String>;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct GuildPlayerNameDirectory {
-    members: Option<BTreeMap<i64, Option<String>>>,
+    members: Option<BTreeMap<i64, String>>,
 }
 
 impl GuildPlayerNameDirectory {
     #[must_use]
-    pub fn new(members: Option<DiscordGuildMemberServerNicknames>) -> Self {
+    pub fn new(members: Option<DiscordGuildMemberRenderNames>) -> Self {
         Self {
             members: members.map(|members| {
                 members
                     .into_iter()
-                    .filter_map(|(discord_id, nickname)| {
+                    .filter_map(|(discord_id, render_name)| {
                         i64::try_from(discord_id)
                             .ok()
-                            .map(|discord_id| (discord_id, nickname))
+                            .map(|discord_id| (discord_id, render_name))
                     })
                     .collect()
             }),
@@ -36,12 +36,12 @@ impl GuildPlayerNameDirectory {
     }
 
     #[must_use]
-    pub fn resolve<'a>(&'a self, discord_id: i64, stored_username: &'a str) -> &'a str {
+    pub fn resolve(&self, discord_id: i64) -> String {
         self.members
             .as_ref()
             .and_then(|members| members.get(&discord_id))
-            .and_then(Option::as_deref)
-            .unwrap_or(stored_username)
+            .cloned()
+            .unwrap_or_else(|| discord_id.to_string())
     }
 
     #[must_use]
@@ -49,21 +49,6 @@ impl GuildPlayerNameDirectory {
         self.members
             .as_ref()
             .is_some_and(|members| members.contains_key(&discord_id))
-    }
-
-    #[must_use]
-    pub fn server_nickname_overrides(&self) -> BTreeMap<i64, String> {
-        self.members
-            .as_ref()
-            .map(|members| {
-                members
-                    .iter()
-                    .filter_map(|(discord_id, nickname)| {
-                        nickname.clone().map(|nickname| (*discord_id, nickname))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
     }
 }
 
@@ -76,9 +61,9 @@ pub trait GuildPlayerNameResolver: Send + Sync {
 }
 
 #[derive(Default)]
-pub struct StoredUsernamePlayerNameResolver;
+pub struct DiscordIdPlayerNameResolver;
 
-impl GuildPlayerNameResolver for StoredUsernamePlayerNameResolver {
+impl GuildPlayerNameResolver for DiscordIdPlayerNameResolver {
     fn names_for_guild(
         &self,
         _guild_id: i64,
@@ -117,7 +102,7 @@ impl GuildPlayerNameResolver for DiscordGuildPlayerNameResolver {
             .filter_map(|player_id| u64::try_from(*player_id).ok())
             .collect::<Vec<_>>();
         self.discord
-            .cached_guild_member_server_nicknames(guild_id, &user_ids)
+            .cached_guild_member_render_names(guild_id, &user_ids)
             .map(GuildPlayerNameDirectory::new)
     }
 }
@@ -252,6 +237,7 @@ pub struct DiscordGuildMemberSnapshot {
 pub struct DiscordUserSnapshot {
     pub user_id: u64,
     pub display_name: String,
+    pub account_username: String,
     pub is_bot: bool,
 }
 
@@ -576,19 +562,17 @@ pub trait DiscordTransport: Send + Sync {
         user_id: u64,
     ) -> Result<Option<DiscordGuildMemberSnapshot>, String>;
 
-    /// Snapshot the requested cached guild members and their optional
-    /// guild-specific nicknames. The inner `None` is distinct from an absent
-    /// requested member: it means the user is still in the guild but has no
-    /// server nickname, so rendering falls back to its stored username.
+    /// Snapshot render names for the requested cached guild members. Each name
+    /// uses the guild-specific nickname first, then the Discord display name.
     ///
     /// `Ok(None)` means the guild itself is unavailable from this transport's
-    /// cache. Callers must fall back to stored usernames instead of issuing
-    /// Discord HTTP requests solely to render names.
-    fn cached_guild_member_server_nicknames(
+    /// cache. Callers must fall back to Discord IDs instead of issuing HTTP
+    /// requests solely to render names.
+    fn cached_guild_member_render_names(
         &self,
         _guild_id: u64,
         _user_ids: &[u64],
-    ) -> Result<Option<DiscordGuildMemberServerNicknames>, String> {
+    ) -> Result<Option<DiscordGuildMemberRenderNames>, String> {
         Ok(None)
     }
 
@@ -624,21 +608,21 @@ mod player_render_name_tests {
     use super::GuildPlayerNameDirectory;
 
     #[test]
-    fn server_nickname_wins_and_missing_nickname_uses_stored_username() {
-        let names = GuildPlayerNameDirectory::new(Some(BTreeMap::from([
-            (7, Some("Server Nickname".to_owned())),
-            (8, None),
-        ])));
+    fn cached_render_name_wins_and_missing_member_uses_discord_id() {
+        let names = GuildPlayerNameDirectory::new(Some(BTreeMap::from([(
+            7,
+            "Server Nickname".to_owned(),
+        )])));
 
-        assert_eq!(names.resolve(7, "stored-seven"), "Server Nickname");
-        assert_eq!(names.resolve(8, "stored-eight"), "stored-eight");
-        assert_eq!(names.resolve(9, "stored-nine"), "stored-nine");
+        assert_eq!(names.resolve(7), "Server Nickname");
+        assert_eq!(names.resolve(8), "8");
+        assert_eq!(names.resolve(9), "9");
     }
 
     #[test]
-    fn unavailable_member_cache_uses_stored_username() {
+    fn unavailable_member_cache_uses_discord_id() {
         let names = GuildPlayerNameDirectory::new(None);
 
-        assert_eq!(names.resolve(7, "stored-seven"), "stored-seven");
+        assert_eq!(names.resolve(7), "7");
     }
 }

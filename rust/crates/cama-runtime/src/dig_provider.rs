@@ -71,7 +71,7 @@ use cama_domain::pet_evolution::PetActivity;
 use tracing::warn;
 
 use crate::application_config::ApplicationConfig;
-use crate::discord_transport::{GuildPlayerNameResolver, StoredUsernamePlayerNameResolver};
+use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
@@ -502,7 +502,7 @@ impl DigRegistrationProvider {
             handler: Arc::new(DigInteractionHandler {
                 state: Arc::new(DigRuntimeState {
                     database_path: path,
-                    player_names: Arc::new(StoredUsernamePlayerNameResolver),
+                    player_names: Arc::new(DiscordIdPlayerNameResolver),
                     configured_channel_id: config.channels.dig,
                     admin_user_ids: config.identities.admin_user_ids.iter().copied().collect(),
                     pet_hunger_decay_per_day: config.values.pet_hunger_decay_per_day,
@@ -1062,18 +1062,16 @@ impl DigInteractionHandler {
         .map_or_else(|| format!("User {user_id}"), |player| player.name)
     }
 
-    fn project_player_name(&self, user_id: i64, guild_id: i64, stored_name: &str) -> String {
+    fn project_player_name(&self, user_id: i64, guild_id: i64) -> String {
         self.state
             .player_names
             .names_for_guild(guild_id, &[user_id])
             .unwrap_or_default()
-            .resolve(user_id, stored_name)
-            .to_owned()
+            .resolve(user_id)
     }
 
     async fn render_player_name(&self, user_id: i64, guild_id: i64) -> String {
-        let stored_name = self.stored_player_name(user_id, guild_id).await;
-        self.project_player_name(user_id, guild_id, &stored_name)
+        self.project_player_name(user_id, guild_id)
     }
 
     fn render_delivery_responses(
@@ -1081,11 +1079,8 @@ impl DigInteractionHandler {
         delivery: &DigRuntimeDeliverySnapshot,
     ) -> (InteractionResponse, Option<InteractionResponse>) {
         let mut projected = delivery.clone();
-        projected.context.display_name = self.project_player_name(
-            delivery.discord_id,
-            delivery.guild_id,
-            &delivery.context.display_name,
-        );
+        projected.context.display_name =
+            self.project_player_name(delivery.discord_id, delivery.guild_id);
         dig_delivery_responses(&projected, &self.state.media, &self.state.view_nonce)
     }
 
@@ -2329,7 +2324,7 @@ impl DigInteractionHandler {
                 .await
                 .map_err(|error| error.to_string())?;
             let stored_name = self.stored_player_name(user_id, guild_id).await;
-            let user_display_name = self.project_player_name(user_id, guild_id, &stored_name);
+            let user_display_name = self.project_player_name(user_id, guild_id);
             let pending = self
                 .pending_deliveries(DigRuntimePendingDeliveryQuery {
                     guild_id: Some(guild_id),
@@ -3404,7 +3399,7 @@ impl DigInteractionHandler {
             .await
             .map_err(|error| error.to_string())?;
         let stored_name = self.stored_player_name(user_id, guild_id).await;
-        let display_name = self.project_player_name(user_id, guild_id, &stored_name);
+        let display_name = self.project_player_name(user_id, guild_id);
         let now = unix_now();
         let avatar = self
             .state

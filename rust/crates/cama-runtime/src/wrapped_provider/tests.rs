@@ -960,4 +960,14 @@ fn awards_match_python_tie_exclusions_hero_thresholds_and_flavor() {
     assert!(!titles.contains(&"Diamond Hands"));
     assert!(!titles.contains(&"House's Favorite"));
     assert!(awards.iter().all(|award| !award.flavor.is_empty()));
+
+    let slides = build_slides(raw, &BTreeMap::new(), 1, "1", 2026, 3, 3);
+    let rendered_lines = slides
+        .iter()
+        .flat_map(|slide| slide.lines.iter())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered_lines.contains("TOP PERFORMER - 1 -"));
+    assert!(!rendered_lines.contains("TOP PERFORMER - One -"));
 }

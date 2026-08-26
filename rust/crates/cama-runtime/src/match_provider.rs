@@ -116,7 +116,9 @@ use crate::admin_provider::{
     CorrectionWinRewardControl, CorrectionWinRewardRequest, CorrectionWinRewardResult,
 };
 use crate::application_config::ApplicationConfig;
-use crate::discord_transport::{DiscordMessage, DiscordTransport, GuildPlayerNameDirectory};
+use crate::discord_transport::{
+    DiscordMessage, DiscordTransport, GuildPlayerNameDirectory, GuildPlayerNameResolver,
+};
 use crate::enrichment_provider::{RecordedMatchDiscovery, RecordedMatchDiscoveryOutcome};
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
@@ -495,13 +497,14 @@ pub fn production_betting_flavor(
     database_path: impl AsRef<Path>,
     config: &ApplicationConfig,
     ai_service: Option<Arc<AIService>>,
+    player_names: Arc<dyn GuildPlayerNameResolver>,
 ) -> Arc<dyn BettingFlavorPort> {
     let Some(ai_service) = ai_service else {
         return Arc::new(StaticBettingFlavor);
     };
     let path = database_path.as_ref().to_path_buf();
     let player_context: Arc<dyn PlayerContextPort> =
-        Arc::new(ProductionBettingPlayerContext::new(&path));
+        Arc::new(ProductionBettingPlayerContext::new(&path, player_names));
     let guild_config: Arc<dyn GuildAiConfigPort> = Arc::new(ProductionBettingGuildAiConfig {
         repository: GuildConfigRepository::new(&path, config.values.ai_features_enabled),
     });
@@ -1722,7 +1725,7 @@ impl MatchHandler {
                 .filter(|guild_id| *guild_id != 0)
                 .and_then(|guild_id| {
                     self.discord
-                        .cached_guild_member_server_nicknames(guild_id, &blocked_discord_ids)
+                        .cached_guild_member_render_names(guild_id, &blocked_discord_ids)
                         .ok()
                 })
                 .flatten();
@@ -1730,7 +1733,7 @@ impl MatchHandler {
             let names = loaded
                 .iter()
                 .take(5)
-                .filter_map(|player| Some(player_names.resolve(player.discord_id?, &player.name)))
+                .filter_map(|player| Some(player_names.resolve(player.discord_id?)))
                 .collect::<Vec<_>>()
                 .join(", ");
             let remainder = if blocked.len() > 5 {
@@ -4628,7 +4631,7 @@ impl MatchHandler {
         {
             match self
                 .discord
-                .cached_guild_member_server_nicknames(guild_id, &discord_player_ids)
+                .cached_guild_member_render_names(guild_id, &discord_player_ids)
             {
                 Ok(nicknames) => GuildPlayerNameDirectory::new(nicknames),
                 Err(error) => {
@@ -4641,11 +4644,7 @@ impl MatchHandler {
         };
         let line = |player_id: i64, role: &str| {
             let player = players_by_id.get(&player_id);
-            let stored_name = player.map_or_else(
-                || format!("Unknown({player_id})"),
-                |player| player.name.clone(),
-            );
-            let name = player_names.resolve(player_id, &stored_name).to_owned();
+            let name = player_names.resolve(player_id);
             let on_role = player
                 .and_then(|player| player.preferred_roles.as_ref())
                 .is_some_and(|roles| roles.iter().any(|preferred| preferred == role));
@@ -4825,13 +4824,7 @@ impl MatchHandler {
                 .state
                 .excluded_player_ids
                 .iter()
-                .map(|player_id| {
-                    let stored_name = players_by_id.get(player_id).map_or_else(
-                        || format!("Unknown({player_id})"),
-                        |player| player.name.clone(),
-                    );
-                    player_names.resolve(*player_id, &stored_name).to_owned()
-                })
+                .map(|player_id| player_names.resolve(*player_id))
                 .collect::<Vec<_>>()
                 .join(", ");
             balance_info.push_str(&format!("\n**Excluded:** {names}"));
@@ -5550,14 +5543,16 @@ struct ProductionBettingPlayerContext {
     shop: ShopRuntimeRepository,
     gambling: GamblingStatsRepository,
     loans: LoanRepository,
+    player_names: Arc<dyn GuildPlayerNameResolver>,
 }
 
 impl ProductionBettingPlayerContext {
-    fn new(path: impl AsRef<Path>) -> Self {
+    fn new(path: impl AsRef<Path>, player_names: Arc<dyn GuildPlayerNameResolver>) -> Self {
         Self {
             shop: ShopRuntimeRepository::new(path.as_ref()),
             gambling: GamblingStatsRepository::new(path.as_ref()),
             loans: LoanRepository::new(path.as_ref()),
+            player_names,
         }
     }
 }
@@ -5590,8 +5585,13 @@ impl PlayerContextPort for ProductionBettingPlayerContext {
             .get_state(discord_id, Some(guild_id))
             .ok()
             .flatten();
+        let username = self
+            .player_names
+            .names_for_guild(guild_id, &[discord_id])
+            .unwrap_or_default()
+            .resolve(discord_id);
         Ok(Some(PlayerContext {
-            username: player.name,
+            username,
             balance: player.balance,
             debt_amount: (player.balance < 0).then_some(player.balance.saturating_abs()),
             win_rate: (games > 0).then_some(player.wins as f64 / games as f64 * 100.0),
