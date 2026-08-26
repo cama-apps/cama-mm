@@ -2299,7 +2299,7 @@ async fn ready_recovery_reenters_committed_match_money_exactly_once_then_clears_
             },
         )
         .expect("read committed policy effects");
-    assert_eq!(policy_before, (2, 1, 11, 6, 10, 10));
+    assert_eq!(policy_before, (2, 1, 10, 6, 10, 10));
     drop(connection);
 
     let context = ReadyRecoveryContext::new(
@@ -3810,8 +3810,15 @@ fn test_record_applies_deferred_exclusion_factor_updates() {
         .expect("read pre-record exclusion factors");
     let prepared = fixture.prepare_shuffle(player_ids, "glicko", vec![conditional_id]);
     assert_eq!(
-        prepared.pending.state.half_exclusion_increment_ids,
+        prepared.pending.state.excluded_conditional_player_ids,
         [conditional_id]
+    );
+    assert!(
+        prepared
+            .pending
+            .state
+            .half_exclusion_increment_ids
+            .is_empty()
     );
     fixture
         .provider
@@ -3841,7 +3848,7 @@ fn test_record_applies_deferred_exclusion_factor_updates() {
     for player_id in &prepared.pending.state.full_exclusion_increment_ids {
         assert_eq!(
             after.get(player_id).copied().expect("excluded after"),
-            before.get(player_id).copied().expect("excluded before") + 6
+            before.get(player_id).copied().expect("excluded before") + 5
         );
     }
     assert_eq!(
@@ -3853,7 +3860,6 @@ fn test_record_applies_deferred_exclusion_factor_updates() {
             .get(&conditional_id)
             .copied()
             .expect("conditional before")
-            + 1
     );
 }
 
@@ -5903,9 +5909,12 @@ fn test_readycheck_nonresponders_are_forwarded_to_normal_shuffle() {
         prepared.pending.state.excluded_conditional_player_ids,
         nonresponders
     );
-    assert_eq!(
-        prepared.pending.state.half_exclusion_increment_ids,
-        all_ids[10..]
+    assert!(
+        prepared
+            .pending
+            .state
+            .half_exclusion_increment_ids
+            .is_empty()
     );
 }
 

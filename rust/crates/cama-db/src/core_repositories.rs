@@ -820,7 +820,7 @@ impl PlayerRepository {
         guild_id: Option<i64>,
     ) -> Result<(), CoreRepositoryError> {
         self.update_counter(
-            "exclusion_count = COALESCE(exclusion_count, 0) + 6",
+            "exclusion_count = COALESCE(exclusion_count, 0) + 5",
             discord_id,
             guild_id,
         )
@@ -4371,7 +4371,7 @@ fn update_exclusion_counts(
     for discord_id in full_increment_ids {
         transaction.execute(
             "UPDATE players
-             SET exclusion_count = COALESCE(exclusion_count, 0) + 6,
+             SET exclusion_count = COALESCE(exclusion_count, 0) + 5,
                  updated_at = CURRENT_TIMESTAMP
              WHERE discord_id = ?1 AND guild_id = ?2",
             params![discord_id, guild_id],
@@ -5692,7 +5692,7 @@ mod tests {
                 .get_exclusion_counts(&[12_345], Some(TEST_GUILD_ID))
                 .unwrap()
                 .get(&12_345),
-            Some(&(NEW_PLAYER_EXCLUSION_BOOST + 12))
+            Some(&(NEW_PLAYER_EXCLUSION_BOOST + 10))
         );
         for _ in 0..20 {
             fixture
@@ -6777,7 +6777,7 @@ mod tests {
                 .get_exclusion_counts(&[11_101], Some(TEST_GUILD_ID))
                 .unwrap()
                 .get(&11_101),
-            Some(&(NEW_PLAYER_EXCLUSION_BOOST + 6))
+            Some(&(NEW_PLAYER_EXCLUSION_BOOST + 5))
         );
         fixture
             .players
@@ -6789,7 +6789,7 @@ mod tests {
                 .get_exclusion_counts(&[11_101], Some(TEST_GUILD_ID))
                 .unwrap()
                 .get(&11_101),
-            Some(&(NEW_PLAYER_EXCLUSION_BOOST + 12))
+            Some(&(NEW_PLAYER_EXCLUSION_BOOST + 10))
         );
     }
 
@@ -6803,7 +6803,7 @@ mod tests {
                 .increment_exclusion_count(11_201, Some(TEST_GUILD_ID))
                 .unwrap();
         }
-        let mut expected = NEW_PLAYER_EXCLUSION_BOOST + 60;
+        let mut expected = NEW_PLAYER_EXCLUSION_BOOST + 50;
         for _ in 0..6 {
             fixture
                 .players

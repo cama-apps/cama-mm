@@ -1701,7 +1701,7 @@ fn update_exclusion_counts(
     for discord_id in full_increment_ids {
         transaction.execute(
             "UPDATE players
-             SET exclusion_count = COALESCE(exclusion_count, 0) + 6,
+             SET exclusion_count = COALESCE(exclusion_count, 0) + 5,
                  updated_at = CURRENT_TIMESTAMP
              WHERE discord_id = ?1 AND guild_id = ?2",
             params![discord_id, guild_id],

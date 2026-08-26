@@ -1218,7 +1218,7 @@ fn test_exclusion_updates_apply_once_per_pending_match() {
     }
     assert_eq!(
         after_first[&full_increment_id],
-        before[&full_increment_id] + 6
+        before[&full_increment_id] + 5
     );
     assert_eq!(
         after_first[&half_increment_id],

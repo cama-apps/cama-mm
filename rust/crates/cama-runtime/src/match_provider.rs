@@ -4082,7 +4082,7 @@ impl MatchHandler {
             effective_deal_ids,
             exclusion_updates_deferred: true,
             full_exclusion_increment_ids: excluded_set.into_iter().collect(),
-            half_exclusion_increment_ids: request.excluded_conditional_ids,
+            half_exclusion_increment_ids: Vec::new(),
             ..PendingMatchState::default()
         };
         state

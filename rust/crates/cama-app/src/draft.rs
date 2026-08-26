@@ -160,6 +160,8 @@ pub struct DraftState {
     pub player_pool_data: BTreeMap<i64, PlayerPoolEntry>,
     pub excluded_player_ids: Vec<i64>,
     pub full_exclusion_increment_ids: Vec<i64>,
+    #[serde(default)]
+    pub excluded_conditional_player_ids: Vec<i64>,
     pub half_exclusion_increment_ids: Vec<i64>,
     pub captain1_id: Option<i64>,
     pub captain2_id: Option<i64>,
@@ -200,6 +202,7 @@ impl DraftState {
             player_pool_data: BTreeMap::new(),
             excluded_player_ids: Vec::new(),
             full_exclusion_increment_ids: Vec::new(),
+            excluded_conditional_player_ids: Vec::new(),
             half_exclusion_increment_ids: Vec::new(),
             captain1_id: None,
             captain2_id: None,
@@ -242,6 +245,15 @@ impl DraftState {
             .copied()
             .filter(|player_id| !picked.contains(player_id) && !captains.contains(player_id))
             .collect()
+    }
+
+    #[must_use]
+    pub fn conditional_exclusion_ids(&self) -> &[i64] {
+        if self.excluded_conditional_player_ids.is_empty() {
+            &self.half_exclusion_increment_ids
+        } else {
+            &self.excluded_conditional_player_ids
+        }
     }
 
     #[must_use]
@@ -3073,7 +3085,7 @@ where
             .copied()
             .filter(|player_id| request.regular_player_ids.contains(player_id))
             .collect::<Vec<_>>();
-        let half_exclusions = pool
+        let conditional_exclusions = pool
             .excluded_ids
             .iter()
             .copied()
@@ -3090,8 +3102,8 @@ where
                 .full_exclusion_increment_ids
                 .clone_from(&full_exclusions);
             state
-                .half_exclusion_increment_ids
-                .clone_from(&half_exclusions);
+                .excluded_conditional_player_ids
+                .clone_from(&conditional_exclusions);
             state.captain1_id = Some(captain_pair.captain1_id);
             state.captain2_id = Some(captain_pair.captain2_id);
             state.captain1_rating = captain_pair.captain1_rating;
@@ -3573,7 +3585,7 @@ where
             radiant_team_ids: state.radiant_player_ids.clone(),
             dire_team_ids: state.dire_player_ids.clone(),
             excluded_player_ids: state.excluded_player_ids.clone(),
-            excluded_conditional_player_ids: state.half_exclusion_increment_ids.clone(),
+            excluded_conditional_player_ids: state.conditional_exclusion_ids().to_vec(),
             exclusion_updates_deferred: true,
             full_exclusion_increment_ids: state.full_exclusion_increment_ids.clone(),
             half_exclusion_increment_ids: state.half_exclusion_increment_ids.clone(),
@@ -4091,9 +4103,29 @@ mod tests {
         state.phase = DraftPhase::Drafting;
         state.player_pool_ids = vec![1, 2, 3];
         state.full_exclusion_increment_ids = vec![11, 12];
+        state.excluded_conditional_player_ids = vec![13];
         state.half_exclusion_increment_ids = vec![13];
         let restored = DraftState::from_snapshot(state.to_snapshot());
         assert_eq!(restored, state);
+    }
+
+    #[test]
+    fn legacy_draft_state_uses_half_increments_as_conditional_metadata() {
+        let mut state = DraftState::with_session(123, LobbyKind::LowSkill, 7);
+        state.half_exclusion_increment_ids = vec![13];
+        let mut legacy = serde_json::to_value(state.to_snapshot()).expect("serialize draft");
+        legacy
+            .as_object_mut()
+            .expect("draft snapshot object")
+            .remove("excluded_conditional_player_ids");
+        let restored = DraftStateSnapshot::from_json(
+            &serde_json::to_string(&legacy).expect("serialize legacy draft"),
+        )
+        .expect("deserialize legacy draft")
+        .into_state();
+
+        assert!(restored.excluded_conditional_player_ids.is_empty());
+        assert_eq!(restored.conditional_exclusion_ids(), [13]);
     }
 
     #[test]
@@ -6114,7 +6146,7 @@ mod tests {
     }
 
     #[test]
-    fn test_roster_overrides_track_nonresponders_as_half_exclusions() {
+    fn test_roster_overrides_track_nonresponders_without_exclusion_increment() {
         let (mut application, player_ids) = application_with_players(18);
         let mut request = execute_request(&player_ids[..16]);
         request.conditional_player_ids = player_ids[16..].to_vec();
@@ -6131,12 +6163,13 @@ mod tests {
         let state = lock_recover(&state);
         assert_eq!(
             state
-                .half_exclusion_increment_ids
+                .excluded_conditional_player_ids
                 .iter()
                 .copied()
                 .collect::<BTreeSet<_>>(),
             player_ids[16..].iter().copied().collect()
         );
+        assert!(state.half_exclusion_increment_ids.is_empty());
         assert_eq!(
             state
                 .full_exclusion_increment_ids
@@ -6492,7 +6525,7 @@ mod tests {
             let mut state = lock_recover(&handle);
             state.excluded_player_ids = vec![60_001, 60_002];
             state.full_exclusion_increment_ids = vec![60_001, 60_002];
-            state.half_exclusion_increment_ids = vec![60_003, 60_004];
+            state.excluded_conditional_player_ids = vec![60_003, 60_004];
         }
         mark_final_pick_complete(&handle, player_ids[9]);
         let mut interaction = RecordingInteraction::new(TEST_GUILD_ID, player_ids[0]);
@@ -6500,7 +6533,7 @@ mod tests {
         let pending = application.matches.pending.as_ref().unwrap();
         assert_eq!(pending.excluded_player_ids, [60_001, 60_002]);
         assert_eq!(pending.excluded_conditional_player_ids, [60_003, 60_004]);
-        assert_eq!(pending.half_exclusion_increment_ids, [60_003, 60_004]);
+        assert!(pending.half_exclusion_increment_ids.is_empty());
         assert!(pending.exclusion_updates_deferred);
     }
 

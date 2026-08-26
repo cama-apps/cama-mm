@@ -3614,9 +3614,25 @@ fn pending_state_preserves_exclusions_lock_and_draft_marker() {
     assert_eq!(pending.excluded_player_ids, vec![11, 12]);
     assert_eq!(pending.excluded_conditional_player_ids, vec![12]);
     assert_eq!(pending.full_exclusion_increment_ids, vec![11]);
+    assert_eq!(pending.half_exclusion_increment_ids, vec![12]);
     assert_eq!(pending.bet_lock_until, Some(400));
     assert!(pending.is_draft);
     assert!(pending.is_bomb_pot);
+}
+
+#[test]
+fn pending_state_preserves_conditional_exclusions_without_incrementing_them() {
+    let mut state = state_for_draft();
+    state.phase = DraftPhase::Complete;
+    state.radiant_player_ids = vec![1, 3, 5, 7, 9];
+    state.dire_player_ids = vec![2, 4, 6, 8, 10];
+    state.excluded_conditional_player_ids = vec![12];
+    state.radiant_hero_pick_order = Some(1);
+
+    let pending = db_pending_state(&state, 100, 300, true).expect("pending state");
+
+    assert_eq!(pending.excluded_conditional_player_ids, vec![12]);
+    assert!(pending.half_exclusion_increment_ids.is_empty());
 }
 
 #[test]
