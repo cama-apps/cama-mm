@@ -231,7 +231,7 @@ impl BuffService {
     ) -> Result<i64, ManashopRepositoryError> {
         let data = BuffData {
             skimmed_total: Some(0),
-            cap: Some(150),
+            cap: None,
             skim_rate: Some(0.25),
             ..BuffData::default()
         };
