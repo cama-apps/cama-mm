@@ -1,7 +1,7 @@
 //! Production Discord provider for Python's `/ratinganalysis` command.
 
 use std::collections::{BTreeSet, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -16,6 +16,7 @@ use cama_app::rating_comparison_service::{
     CalibrationBucket, CurrentOpenSkillPredictionPort, HistoricalOpenSkillRatings,
     HistoricalRatingMatch, RatingComparisonMatchPort, RatingComparisonService,
 };
+use cama_db::core_repositories::PlayerRepository;
 use cama_db::rating_analysis::{
     RatingAnalysisHistoricalMatch, RatingAnalysisHistoricalRatings, RatingAnalysisPlayer,
     RatingAnalysisRepository,
@@ -26,6 +27,7 @@ use thiserror::Error;
 use tracing::{error, warn};
 
 use crate::application_config::ApplicationConfig;
+use crate::discord_transport::{GuildPlayerNameResolver, StoredUsernamePlayerNameResolver};
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, InteractionAttachment,
     InteractionEmbed, InteractionHandler, InteractionHandlerError, InteractionOption,
@@ -61,6 +63,7 @@ impl RatingAnalysisRegistrationProvider {
         database_path: impl AsRef<Path>,
         config: &ApplicationConfig,
     ) -> Result<Self, RatingAnalysisProviderBuildError> {
+        let database_path = database_path.as_ref().to_path_buf();
         let openskill = CamaOpenSkillSystem::with_config(config.migration.openskill.clone())?;
         // `with_config` validates update parameters; force validation of the
         // probability temperature before accepting live traffic as well.
@@ -69,18 +72,22 @@ impl RatingAnalysisRegistrationProvider {
             .glicko_rating_system()
             .map_err(RatingAnalysisProviderBuildError::InvalidRatingConfig)?;
         let repository = RatingAnalysisRepository::new(
-            database_path,
+            &database_path,
             openskill.clone(),
             rating_system,
             config.migration.new_player_mmr_discount,
         );
-        Ok(Self::with_worker(
+        let mut provider = Self::with_worker(
             config.identities.admin_user_ids.iter().copied().collect(),
             Arc::new(ProductionRatingAnalysisWorker {
                 repository,
                 openskill,
             }),
-        ))
+        );
+        Arc::get_mut(&mut provider.handler)
+            .expect("new rating-analysis provider owns its handler")
+            .database_path = Some(database_path);
+        Ok(provider)
     }
 
     fn with_worker(admin_user_ids: BTreeSet<i64>, worker: Arc<dyn RatingAnalysisWorkPort>) -> Self {
@@ -88,8 +95,18 @@ impl RatingAnalysisRegistrationProvider {
             handler: Arc::new(RatingAnalysisHandler {
                 admin_user_ids,
                 worker,
+                database_path: None,
+                player_names: Arc::new(StoredUsernamePlayerNameResolver),
             }),
         }
+    }
+
+    #[must_use]
+    pub fn with_player_names(mut self, player_names: Arc<dyn GuildPlayerNameResolver>) -> Self {
+        Arc::get_mut(&mut self.handler)
+            .expect("new rating-analysis provider owns its handler")
+            .player_names = player_names;
+        self
     }
 }
 
@@ -134,6 +151,8 @@ fn action_option() -> CommandOptionSpec {
 struct RatingAnalysisHandler {
     admin_user_ids: BTreeSet<i64>,
     worker: Arc<dyn RatingAnalysisWorkPort>,
+    database_path: Option<PathBuf>,
+    player_names: Arc<dyn GuildPlayerNameResolver>,
 }
 
 #[async_trait]
@@ -174,24 +193,64 @@ impl InteractionHandler for RatingAnalysisHandler {
         ) {
             return respond_initial(&responder, &format!("Unknown action: {action}")).await;
         }
-        let selected_user = user_option(&options, "user")
-            .map(|(id, display_name)| {
-                signed_id(id, "selected user")
-                    .map(|id| MemberTarget::new(id, display_name.unwrap_or_else(|| id.to_string())))
-            })
-            .transpose()?;
-        let input = RatingAnalysisInput {
-            admin_allowed: true,
-            action: action.clone(),
-            guild_id: Some(guild_id),
-            invoker: MemberTarget::new(user_id, user_display_name),
-            selected_user,
-        };
-
         if let Err(response_error) = responder.defer(true).await {
             warn!(%response_error, action, "unable to defer /ratinganalysis interaction");
             return Ok(());
         }
+        let selected_option = user_option(&options, "user")
+            .map(|(id, display_name)| signed_id(id, "selected user").map(|id| (id, display_name)))
+            .transpose()?;
+        let mut requested_ids = vec![user_id];
+        requested_ids.extend(selected_option.iter().map(|(id, _)| *id));
+        let stored_names = if let Some(path) = self.database_path.clone() {
+            let query_ids = requested_ids.clone();
+            tokio::task::spawn_blocking(move || {
+                PlayerRepository::new(path)
+                    .get_by_ids(&query_ids, Some(guild_id))
+                    .map(|players| {
+                        players
+                            .into_iter()
+                            .filter_map(|player| player.discord_id.map(|id| (id, player.name)))
+                            .collect::<HashMap<_, _>>()
+                    })
+                    .map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap_or_else(|error| Err(format!("rating-analysis name task failed: {error}")))
+            .unwrap_or_else(|error| {
+                warn!(%error, "unable to load rating-analysis player names");
+                HashMap::new()
+            })
+        } else {
+            HashMap::new()
+        };
+        let names = self
+            .player_names
+            .names_for_guild(guild_id, &requested_ids)
+            .unwrap_or_default();
+        let registered_name = |discord_id: i64, fallback: String| {
+            if self.database_path.is_some() {
+                stored_names
+                    .get(&discord_id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("User {discord_id}"))
+            } else {
+                fallback
+            }
+        };
+        let selected_user = selected_option.map(|(id, display_name)| {
+            let stored = registered_name(id, display_name.unwrap_or_else(|| format!("User {id}")));
+            MemberTarget::new(id, names.resolve(id, &stored))
+        });
+        let invoker_stored = registered_name(user_id, user_display_name);
+        let input = RatingAnalysisInput {
+            admin_allowed: true,
+            action: action.clone(),
+            guild_id: Some(guild_id),
+            invoker: MemberTarget::new(user_id, names.resolve(user_id, &invoker_stored)),
+            selected_user,
+        };
+
         if action == "backfill" {
             responder
                 .followup(

@@ -591,12 +591,38 @@ fn serenity_member_conversion_uses_server_nickname_not_global_display_name() {
     member.user.global_name = Some("Global Display Name".to_owned());
     member.nick = None;
 
+    assert_eq!(member_server_nickname(&member), None);
     assert_eq!(gateway_member(&member), GatewayMember::new(42, 7, None));
 
     member.nick = Some("Server Nickname".to_owned());
     assert_eq!(
+        member_server_nickname(&member),
+        Some("Server Nickname".to_owned())
+    );
+    assert_eq!(
         gateway_member(&member),
         GatewayMember::new(42, 7, Some("Server Nickname".to_owned()))
+    );
+}
+
+#[test]
+fn nickname_snapshot_includes_only_requested_cached_members() {
+    let mut requested = Member::default();
+    requested.guild_id = GuildId::new(42);
+    requested.user.id = UserId::new(7);
+    requested.nick = Some("Requested Nickname".to_owned());
+    let mut unrelated = Member::default();
+    unrelated.guild_id = GuildId::new(42);
+    unrelated.user.id = UserId::new(8);
+    unrelated.nick = Some("Unrelated Nickname".to_owned());
+    let members = HashMap::from([
+        (requested.user.id, requested),
+        (unrelated.user.id, unrelated),
+    ]);
+
+    assert_eq!(
+        requested_member_server_nicknames(&members, &[7]),
+        DiscordGuildMemberServerNicknames::from([(7, Some("Requested Nickname".to_owned()))])
     );
 }
 

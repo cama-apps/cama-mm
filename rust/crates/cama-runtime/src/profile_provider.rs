@@ -40,6 +40,7 @@ use tracing::warn;
 #[path = "profile_balance_history.rs"]
 mod profile_balance_history;
 
+use crate::discord_transport::{GuildPlayerNameResolver, StoredUsernamePlayerNameResolver};
 use crate::registration::{
     CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute, InteractionActionRow,
     InteractionAttachment, InteractionButton, InteractionButtonStyle, InteractionEmbed,
@@ -148,12 +149,21 @@ impl ProfileRegistrationProvider {
         Self {
             handler: Arc::new(ProfileHandler {
                 sources: ProfileDataSources::new(database_path, opendota),
+                player_names: Arc::new(StoredUsernamePlayerNameResolver),
                 command_rate_limit: Mutex::new(CommandRateLimit::default()),
                 views: Arc::new(Mutex::new(BTreeMap::new())),
                 next_view_id: AtomicU64::new(1),
                 view_timeout,
             }),
         }
+    }
+
+    #[must_use]
+    pub fn with_player_names(mut self, player_names: Arc<dyn GuildPlayerNameResolver>) -> Self {
+        Arc::get_mut(&mut self.handler)
+            .expect("new profile provider owns its handler")
+            .player_names = player_names;
+        self
     }
 }
 
@@ -178,6 +188,7 @@ impl RegistrationProvider for ProfileRegistrationProvider {
 
 struct ProfileHandler {
     sources: ProfileDataSources,
+    player_names: Arc<dyn GuildPlayerNameResolver>,
     command_rate_limit: Mutex<CommandRateLimit>,
     views: Arc<Mutex<BTreeMap<u64, Arc<tokio::sync::Mutex<ProfileViewState>>>>>,
     next_view_id: AtomicU64,
@@ -291,19 +302,24 @@ impl ProfileHandler {
             return Ok(());
         }
 
-        let (target_id, requested_name) = user_option(&options).map_or_else(
-            || (user_id, Some(user_display_name)),
-            |(id, display_name)| (id, display_name),
-        );
+        let (target_id, _) = user_option(&options).unwrap_or((user_id, Some(user_display_name)));
         let target_id = signed_discord_id(target_id, "target user")?;
         let guild_id = signed_optional_discord_id(guild_id, "guild")?;
+        let names = guild_id
+            .and_then(|guild_id| {
+                self.player_names
+                    .names_for_guild(guild_id, &[target_id])
+                    .ok()
+            })
+            .unwrap_or_default();
         let sources = self.sources.clone();
         let registered_name =
             tokio::task::spawn_blocking(move || sources.registered_name(target_id, guild_id))
                 .await
                 .map_err(|error| format!("profile player lookup task failed: {error}"))??;
         let Some(database_name) = registered_name else {
-            let target_name = requested_name.unwrap_or_else(|| format!("User {target_id}"));
+            let fallback = format!("User {target_id}");
+            let target_name = names.resolve(target_id, &fallback);
             return responder
                 .followup(
                     InteractionResponse::message("").embed(
@@ -317,7 +333,7 @@ impl ProfileHandler {
                 .await
                 .map_err(|error| error.to_string());
         };
-        let target_name = requested_name.unwrap_or(database_name);
+        let target_name = names.resolve(target_id, &database_name).to_owned();
         let sources = self.sources.clone();
         let build_name = target_name.clone();
         let page = tokio::task::spawn_blocking(move || {

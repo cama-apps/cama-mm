@@ -3,6 +3,7 @@ use cama_app::shop_commands::MANA_ITEMS;
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
 
+use crate::discord_transport::GuildPlayerNameDirectory;
 use crate::registration::{InteractionAllowedMentions, InteractionResponseError, Registry};
 use crate::test_support::initialize_test_database as initialize_or_migrate;
 
@@ -70,6 +71,22 @@ impl Fixture {
 #[derive(Default)]
 struct RecordingDiscord {
     temporary: Mutex<Vec<(i64, InteractionResponse, Duration)>>,
+}
+
+struct StaticPlayerNames;
+
+impl GuildPlayerNameResolver for StaticPlayerNames {
+    fn names_for_guild(
+        &self,
+        guild_id: i64,
+        _player_ids: &[i64],
+    ) -> Result<GuildPlayerNameDirectory, String> {
+        assert_eq!(guild_id, i64::try_from(GUILD).unwrap());
+        Ok(GuildPlayerNameDirectory::new(Some(BTreeMap::from([
+            (BUYER, None),
+            (TARGET, Some("Server Target".to_owned())),
+        ]))))
+    }
 }
 
 #[async_trait]
@@ -1012,6 +1029,135 @@ async fn avoid_and_package_purchases_are_private_listable_and_restart_durable() 
                 .is_some_and(|description| description.contains(&format!("<@{TARGET}>")))
         );
     }
+}
+
+#[tokio::test]
+async fn soft_avoid_renders_server_nickname_instead_of_interaction_display_name() {
+    let fixture = Fixture::migrated();
+    fixture.player(BUYER, 100_000);
+    fixture.player(TARGET, 100_000);
+    let port: Arc<dyn ShopDiscordPort> = fixture.discord.clone();
+    let provider = ShopRegistrationProvider::new(&fixture.path, &config(), port, None)
+        .expect("construct Shop provider")
+        .with_player_names(Arc::new(StaticPlayerNames));
+    let projected = provider
+        .handler
+        .with_rendered_player_names(CommandContext {
+            interaction_id: 22_499,
+            user_id: i64::try_from(BUYER).unwrap(),
+            user_display_name: "Global Buyer".to_owned(),
+            guild_id: i64::try_from(GUILD).unwrap(),
+            channel_id: None,
+            member_permissions: None,
+            subcommand: "buy".to_owned(),
+            options: vec![InteractionOption {
+                name: "target".to_owned(),
+                value: InteractionValue::User {
+                    id: TARGET,
+                    display_name: Some("Global Target".to_owned()),
+                    is_bot: Some(false),
+                },
+            }],
+            rendered_user_names: BTreeMap::new(),
+        })
+        .await
+        .expect("project player names");
+    let target = user_option(&projected, "target")
+        .expect("parse target")
+        .expect("target option");
+    assert_eq!(target.display_name, "Server Target");
+    assert_eq!(target.ai_display_name, "Global Target");
+    let mut builder = RegistryBuilder::default();
+    builder
+        .add_provider(&provider)
+        .expect("register Shop provider");
+    let responder = Arc::new(Responder::default());
+    builder
+        .build()
+        .command_handler("shop")
+        .expect("Shop handler")
+        .handle(
+            command(
+                "buy",
+                vec![
+                    string("item", "soft_avoid"),
+                    InteractionOption {
+                        name: "target".to_owned(),
+                        value: InteractionValue::User {
+                            id: TARGET,
+                            display_name: Some("Global Target".to_owned()),
+                            is_bot: Some(false),
+                        },
+                    },
+                ],
+                22_500,
+            ),
+            responder.clone(),
+        )
+        .await
+        .expect("soft avoid purchase");
+
+    let followups = responder.followups.lock().expect("followups");
+    let description = followups[0].embeds[0]
+        .description
+        .as_deref()
+        .expect("soft avoid description");
+    assert!(description.contains("Server Target"));
+    assert!(!description.contains("Global Target"));
+}
+
+#[tokio::test]
+async fn unregistered_target_without_nickname_uses_account_username() {
+    let fixture = Fixture::migrated();
+    fixture.player(BUYER, 100_000);
+    let projected = fixture
+        .provider
+        .handler
+        .with_rendered_player_names(CommandContext {
+            interaction_id: 22_501,
+            user_id: i64::try_from(BUYER).unwrap(),
+            user_display_name: "Buyer Account".to_owned(),
+            guild_id: i64::try_from(GUILD).unwrap(),
+            channel_id: None,
+            member_permissions: None,
+            subcommand: "buy".to_owned(),
+            options: vec![InteractionOption {
+                name: "target".to_owned(),
+                value: InteractionValue::User {
+                    id: TARGET,
+                    display_name: Some("Target Account".to_owned()),
+                    is_bot: Some(false),
+                },
+            }],
+            rendered_user_names: BTreeMap::new(),
+        })
+        .await
+        .expect("project player names");
+
+    let target = user_option(&projected, "target")
+        .expect("parse target")
+        .expect("target option");
+    assert_eq!(target.display_name, "Target Account");
+}
+
+#[test]
+fn arbitrary_shop_player_names_prefer_server_nicknames() {
+    let fixture = Fixture::migrated();
+    let provider = fixture
+        .provider
+        .with_player_names(Arc::new(StaticPlayerNames));
+
+    let names = provider.handler.project_stored_player_names(
+        i64::try_from(GUILD).unwrap(),
+        BTreeMap::from([(i64::try_from(TARGET).unwrap(), "Stored Target".to_owned())]),
+    );
+
+    assert_eq!(
+        names
+            .get(&i64::try_from(TARGET).unwrap())
+            .map(String::as_str),
+        Some("Server Target")
+    );
 }
 
 #[tokio::test]

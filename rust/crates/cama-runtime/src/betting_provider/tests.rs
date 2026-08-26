@@ -1216,7 +1216,7 @@ async fn balance_is_a_private_paginated_portfolio_with_tax_ledger_exposure() {
         let overview = &response.embeds[0];
         assert_eq!(
             overview.title.as_deref(),
-            Some("💰 Jopacoin Portfolio — Portfolio Player")
+            Some("💰 Jopacoin Portfolio — portfolio-player")
         );
         assert!(overview.fields.iter().any(|field| {
             field.name == "Asset Breakdown"

@@ -71,6 +71,7 @@ use cama_domain::pet_evolution::PetActivity;
 use tracing::warn;
 
 use crate::application_config::ApplicationConfig;
+use crate::discord_transport::{GuildPlayerNameResolver, StoredUsernamePlayerNameResolver};
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
@@ -501,6 +502,7 @@ impl DigRegistrationProvider {
             handler: Arc::new(DigInteractionHandler {
                 state: Arc::new(DigRuntimeState {
                     database_path: path,
+                    player_names: Arc::new(StoredUsernamePlayerNameResolver),
                     configured_channel_id: config.channels.dig,
                     admin_user_ids: config.identities.admin_user_ids.iter().copied().collect(),
                     pet_hunger_decay_per_day: config.values.pet_hunger_decay_per_day,
@@ -527,6 +529,15 @@ impl DigRegistrationProvider {
                 }),
             }),
         })
+    }
+
+    #[must_use]
+    pub fn with_player_names(mut self, player_names: Arc<dyn GuildPlayerNameResolver>) -> Self {
+        let handler = Arc::get_mut(&mut self.handler).expect("new Dig provider owns its handler");
+        Arc::get_mut(&mut handler.state)
+            .expect("new Dig provider owns its runtime state")
+            .player_names = player_names;
+        self
     }
 
     /// READY/resume hook for persisted Dig views.  Dig's long-lived state is
@@ -700,6 +711,7 @@ impl GatewayEventObserver for DigGatewayObserver {
 
 struct DigRuntimeState {
     database_path: PathBuf,
+    player_names: Arc<dyn GuildPlayerNameResolver>,
     configured_channel_id: Option<i64>,
     admin_user_ids: BTreeSet<i64>,
     pet_hunger_decay_per_day: i64,
@@ -1037,6 +1049,46 @@ impl InteractionHandler for DigInteractionHandler {
 }
 
 impl DigInteractionHandler {
+    async fn stored_player_name(&self, user_id: i64, guild_id: i64) -> String {
+        let path = self.state.database_path.clone();
+        blocking(move || {
+            PlayerRepository::new(path)
+                .get_by_id(user_id, Some(guild_id))
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .ok()
+        .flatten()
+        .map_or_else(|| format!("User {user_id}"), |player| player.name)
+    }
+
+    fn project_player_name(&self, user_id: i64, guild_id: i64, stored_name: &str) -> String {
+        self.state
+            .player_names
+            .names_for_guild(guild_id, &[user_id])
+            .unwrap_or_default()
+            .resolve(user_id, stored_name)
+            .to_owned()
+    }
+
+    async fn render_player_name(&self, user_id: i64, guild_id: i64) -> String {
+        let stored_name = self.stored_player_name(user_id, guild_id).await;
+        self.project_player_name(user_id, guild_id, &stored_name)
+    }
+
+    fn render_delivery_responses(
+        &self,
+        delivery: &DigRuntimeDeliverySnapshot,
+    ) -> (InteractionResponse, Option<InteractionResponse>) {
+        let mut projected = delivery.clone();
+        projected.context.display_name = self.project_player_name(
+            delivery.discord_id,
+            delivery.guild_id,
+            &delivery.context.display_name,
+        );
+        dig_delivery_responses(&projected, &self.state.media, &self.state.view_nonce)
+    }
+
     fn force_event_pending(&self, user_id: i64, guild_id: i64) -> Result<bool, String> {
         Ok(self
             .state
@@ -1618,7 +1670,7 @@ impl DigInteractionHandler {
             interaction_id,
             name,
             user_id,
-            user_display_name,
+            user_display_name: _,
             guild_id,
             channel_id,
             member_permissions,
@@ -1684,15 +1736,8 @@ impl DigInteractionHandler {
 
         match subcommand.as_slice() {
             [sub] if sub == "go" => {
-                self.command_go(
-                    interaction_id,
-                    user_id,
-                    guild_id,
-                    channel_id,
-                    &user_display_name,
-                    responder,
-                )
-                .await
+                self.command_go(interaction_id, user_id, guild_id, channel_id, responder)
+                    .await
             }
             [sub] if sub == "help" => {
                 self.command_help(user_id, guild_id, &options, responder)
@@ -1703,7 +1748,7 @@ impl DigInteractionHandler {
                     .await
             }
             [sub] if sub == "info" => {
-                self.command_info(user_id, guild_id, &user_display_name, &options, responder)
+                self.command_info(user_id, guild_id, &options, responder)
                     .await
             }
             [sub] if sub == "leaderboard" => {
@@ -1723,10 +1768,7 @@ impl DigInteractionHandler {
                 self.command_buy(user_id, guild_id, &options, responder)
                     .await
             }
-            [sub] if sub == "flex" => {
-                self.command_flex(user_id, guild_id, &user_display_name, responder)
-                    .await
-            }
+            [sub] if sub == "flex" => self.command_flex(user_id, guild_id, responder).await,
             [sub] if sub == "prestige" => self.command_prestige(user_id, guild_id, responder).await,
             [sub] if sub == "abandon" => self.command_abandon(user_id, guild_id, responder).await,
             [sub] if sub == "trap" => self.command_trap(user_id, guild_id, responder).await,
@@ -1752,15 +1794,8 @@ impl DigInteractionHandler {
                 .await
             }
             [group, sub] if group == "miner" => {
-                self.command_miner(
-                    user_id,
-                    guild_id,
-                    &user_display_name,
-                    sub,
-                    &options,
-                    responder,
-                )
-                .await
+                self.command_miner(user_id, guild_id, sub, &options, responder)
+                    .await
             }
             _ => Err(format!("unknown /dig subcommand: {}", subcommand.join(" "))),
         }
@@ -1855,7 +1890,7 @@ impl DigInteractionHandler {
             interaction_id,
             custom_id,
             user_id,
-            user_display_name,
+            user_display_name: _,
             guild_id,
             channel_id,
             values,
@@ -1908,14 +1943,7 @@ impl DigInteractionHandler {
         }
         if action.starts_with("prestige-") {
             return self
-                .handle_prestige_component(
-                    action,
-                    user_id,
-                    &user_display_name,
-                    guild_id,
-                    channel_id,
-                    responder,
-                )
+                .handle_prestige_component(action, user_id, guild_id, channel_id, responder)
                 .await;
         }
         if action.starts_with("paid:") {
@@ -1924,7 +1952,6 @@ impl DigInteractionHandler {
                     action,
                     interaction_id,
                     user_id,
-                    user_display_name,
                     guild_id,
                     channel_id,
                     responder,
@@ -1960,14 +1987,7 @@ impl DigInteractionHandler {
         }
         if action.starts_with("boss:") {
             return self
-                .handle_boss_component(
-                    action,
-                    user_id,
-                    &user_display_name,
-                    guild_id,
-                    channel_id,
-                    responder,
-                )
+                .handle_boss_component(action, user_id, guild_id, channel_id, responder)
                 .await;
         }
         if let Some(gear_action) = action.strip_prefix("gear:") {
@@ -2084,7 +2104,6 @@ impl DigInteractionHandler {
         &self,
         action: &str,
         user_id: i64,
-        user_display_name: &str,
         guild_id: i64,
         channel_id: Option<i64>,
         responder: Arc<dyn InteractionResponder>,
@@ -2187,6 +2206,7 @@ impl DigInteractionHandler {
                 .ok()
                 .flatten()
             {
+                let user_display_name = self.render_player_name(user_id, guild_id).await;
                 let announcement =
                     InteractionResponse::message(format!("*{user_display_name} has ascended.*"))
                         .without_mentions();
@@ -2261,7 +2281,6 @@ impl DigInteractionHandler {
         action: &str,
         interaction_id: u64,
         user_id: i64,
-        user_display_name: String,
         guild_id: i64,
         channel_id: Option<i64>,
         responder: Arc<dyn InteractionResponder>,
@@ -2309,6 +2328,8 @@ impl DigInteractionHandler {
                 )
                 .await
                 .map_err(|error| error.to_string())?;
+            let stored_name = self.stored_player_name(user_id, guild_id).await;
+            let user_display_name = self.project_player_name(user_id, guild_id, &stored_name);
             let pending = self
                 .pending_deliveries(DigRuntimePendingDeliveryQuery {
                     guild_id: Some(guild_id),
@@ -2357,7 +2378,7 @@ impl DigInteractionHandler {
                     DigRuntimeDeliveryContext::new(
                         interaction_id,
                         delivery_channel,
-                        user_display_name.clone(),
+                        stored_name,
                         avatar.clone(),
                     ),
                 )
@@ -2392,7 +2413,7 @@ impl DigInteractionHandler {
             };
             let bonus_outcome = result.outcome.clone();
             let (stats, event) = if let Some(delivery) = delivery.as_ref() {
-                dig_delivery_responses(delivery, &self.state.media, &self.state.view_nonce)
+                self.render_delivery_responses(delivery)
             } else if result.boss_boundary.is_some() {
                 (
                     self.render_boss_encounter(user_id, guild_id, unix_now())
@@ -2858,7 +2879,6 @@ impl DigInteractionHandler {
         &self,
         action: &str,
         user_id: i64,
-        user_display_name: &str,
         guild_id: i64,
         channel_id: Option<i64>,
         responder: Arc<dyn InteractionResponder>,
@@ -3100,6 +3120,7 @@ impl DigInteractionHandler {
             let result = self
                 .cheer_boss(user_id, target_id, guild_id, unix_now())
                 .await?;
+            let user_display_name = self.render_player_name(user_id, guild_id).await;
             return responder
                 .followup(InteractionResponse::message(format!(
                     "{user_display_name} cheers for the fighter! Boss odds boosted by +{}% ({}/3 cheers)",
@@ -3376,13 +3397,14 @@ impl DigInteractionHandler {
         user_id: i64,
         guild_id: i64,
         channel_id: Option<i64>,
-        display_name: &str,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
         responder
             .defer(false)
             .await
             .map_err(|error| error.to_string())?;
+        let stored_name = self.stored_player_name(user_id, guild_id).await;
+        let display_name = self.project_player_name(user_id, guild_id, &stored_name);
         let now = unix_now();
         let avatar = self
             .state
@@ -3447,7 +3469,7 @@ impl DigInteractionHandler {
                 DigRuntimeDeliveryContext::new(
                     interaction_id,
                     delivery_channel,
-                    display_name,
+                    stored_name,
                     avatar.clone(),
                 ),
             )
@@ -3511,7 +3533,7 @@ impl DigInteractionHandler {
         }
         let reaction_outcome = result.outcome.clone();
         let (response, event_response) = if let Some(delivery) = delivery.as_ref() {
-            dig_delivery_responses(delivery, &self.state.media, &self.state.view_nonce)
+            self.render_delivery_responses(delivery)
         } else if result.boss_boundary.is_some() {
             (
                 self.render_boss_encounter(user_id, guild_id, now).await?,
@@ -3522,7 +3544,7 @@ impl DigInteractionHandler {
                 reaction_outcome.clone(),
                 user_id,
                 guild_id,
-                display_name.to_owned(),
+                display_name,
                 avatar,
             )
             .await?
@@ -5151,8 +5173,7 @@ impl DigInteractionHandler {
             delivery.context.channel_id,
         )
         .await;
-        let (main, event) =
-            dig_delivery_responses(&delivery, &self.state.media, &self.state.view_nonce);
+        let (main, event) = self.render_delivery_responses(&delivery);
         if delivery.main_delivered_at.is_none() {
             self.deliver_part_once_with_failure(&delivery, DigRuntimeDeliveryPart::Main, main)
                 .await?;
@@ -5211,6 +5232,8 @@ impl DigInteractionHandler {
                 .await
                 .map_err(|error| error.to_string());
         }
+        let _ = target_name;
+        let target_name = self.render_player_name(target_id, guild_id).await;
         let path = self.state.database_path.clone();
         let now = unix_now();
         let result = blocking(move || {
@@ -5222,8 +5245,7 @@ impl DigInteractionHandler {
                 InteractionEmbed::titled("Tunnel Assistance")
                     .description(format!(
                         "You helped **{}**'s tunnel!\nBlocks added: **{}**",
-                        target_name.unwrap_or_else(|| format!("User {target_id}")),
-                        result.advance
+                        target_name, result.advance
                     ))
                     .color(0x2E_CC_71),
             ),
@@ -5268,7 +5290,8 @@ impl DigInteractionHandler {
                 .await;
             }
         };
-        let target_name = target_name.unwrap_or_else(|| format!("User {target_id}"));
+        let _ = target_name;
+        let target_name = self.render_player_name(target_id, guild_id).await;
         let token = self.create_sabotage_view(
             user_id,
             guild_id,
@@ -5302,14 +5325,12 @@ impl DigInteractionHandler {
         &self,
         user_id: i64,
         guild_id: i64,
-        display_name: &str,
         options: &[InteractionOption],
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
         let target = user_option(options, "user")?;
-        let (target_id, target_name) = target
-            .map(|(id, name)| (id, name.unwrap_or_else(|| format!("User {id}"))))
-            .unwrap_or((user_id, display_name.to_owned()));
+        let target_id = target.map_or(user_id, |(id, _)| id);
+        let target_name = self.render_player_name(target_id, guild_id).await;
         let path = self.state.database_path.clone();
         let info = blocking(move || {
             cama_app::dig_runtime::DigRuntimeService::sqlite(&path)
@@ -5523,6 +5544,8 @@ impl DigInteractionHandler {
         let Some((target_id, target_name)) = user_option(options, "user")? else {
             return Err("/dig gift requires user".to_owned());
         };
+        let _ = target_name;
+        let target_name = self.render_player_name(target_id, guild_id).await;
         let artifact = string_option(options, "artifact")?.unwrap_or_default();
         responder
             .defer(false)
@@ -5544,8 +5567,7 @@ impl DigInteractionHandler {
         let response = match result {
             Ok(result) => InteractionResponse::message(format!(
                 "You gifted **{}** to **{}**!",
-                result.artifact_name,
-                target_name.unwrap_or_else(|| format!("User {target_id}"))
+                result.artifact_name, target_name
             )),
             Err(error) => InteractionResponse::message(error.to_string()).ephemeral(),
         };
@@ -5704,13 +5726,13 @@ impl DigInteractionHandler {
         &self,
         user_id: i64,
         guild_id: i64,
-        display_name: &str,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
         responder
             .defer(false)
             .await
             .map_err(|error| error.to_string())?;
+        let display_name = self.render_player_name(user_id, guild_id).await;
         let path = self.state.database_path.clone();
         let info = blocking(move || {
             cama_app::dig_runtime::DigRuntimeService::sqlite(&path)
@@ -5747,7 +5769,7 @@ impl DigInteractionHandler {
         responder
             .followup(flex_response(
                 &info,
-                display_name,
+                &display_name,
                 avatar.as_deref(),
                 fastrand::usize(..FLEX_ROASTS.len()),
             ))
@@ -6193,7 +6215,6 @@ impl DigInteractionHandler {
         &self,
         user_id: i64,
         guild_id: i64,
-        display_name: &str,
         subcommand: &str,
         options: &[InteractionOption],
         responder: Arc<dyn InteractionResponder>,
@@ -6204,6 +6225,7 @@ impl DigInteractionHandler {
                     .defer(true)
                     .await
                     .map_err(|error| error.to_string())?;
+                let display_name = self.render_player_name(user_id, guild_id).await;
                 let path = self.state.database_path.clone();
                 let result =
                     blocking(move || {
@@ -6216,7 +6238,7 @@ impl DigInteractionHandler {
                     .await?;
                 let response = match result {
                     Ok(profile) => InteractionResponse::message("")
-                        .embed(miner_profile_embed(display_name, &profile))
+                        .embed(miner_profile_embed(&display_name, &profile))
                         .ephemeral(),
                     Err(error) => InteractionResponse::message(error.to_string()).ephemeral(),
                 };

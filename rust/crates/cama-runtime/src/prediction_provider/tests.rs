@@ -11,6 +11,7 @@ use tempfile::TempDir;
 use super::*;
 use crate::discord_transport::{
     DiscordEmoji, DiscordGuildMemberSnapshot, DiscordMessageReceipt, DiscordMessageSnapshot,
+    GuildPlayerNameDirectory, GuildPlayerNameResolver, StoredUsernamePlayerNameResolver,
 };
 use crate::gamba_guild_source::GambaDestination;
 use crate::registration::{InteractionResponseError, Registry};
@@ -100,6 +101,18 @@ impl PredictionVanityTaxPort for FakeVanityTax {
     }
 }
 
+struct FixedPlayerNames(GuildPlayerNameDirectory);
+
+impl GuildPlayerNameResolver for FixedPlayerNames {
+    fn names_for_guild(
+        &self,
+        _guild_id: i64,
+        _player_ids: &[i64],
+    ) -> Result<GuildPlayerNameDirectory, String> {
+        Ok(self.0.clone())
+    }
+}
+
 #[derive(Clone)]
 struct FakeGambaGuilds(Vec<GambaDestination>);
 
@@ -154,10 +167,6 @@ impl PredictionCommandDiscordPort for FakeCommandDiscord {
 
     async fn prediction_display_text(&self, _guild_id: i64, text: &str) -> Result<String, String> {
         Ok(text.replace("<@100>", "Trader"))
-    }
-
-    fn prediction_display_name(&self, _guild_id: i64, user_id: i64) -> String {
-        format!("Player {user_id}")
     }
 
     async fn create_prediction_market_surface(
@@ -504,6 +513,8 @@ impl Fixture {
                 gamba_guilds: Arc::new(FakeGambaGuilds::default()),
                 discord: self.discord.clone(),
                 neon: self.neon.clone(),
+                players: PlayerRepository::new(&self.path),
+                player_names: Arc::new(StoredUsernamePlayerNameResolver),
                 help_cooldowns: Mutex::new(BTreeMap::new()),
             }),
         }
@@ -516,6 +527,55 @@ impl Fixture {
             .expect("register prediction provider");
         builder.build()
     }
+}
+
+#[tokio::test]
+async fn recent_trades_prefer_server_nickname_over_transport_display_name() {
+    let fixture = Fixture::migrated();
+    fixture.player(TRADER, 1_000);
+    let prediction_id = fixture.market("Will the trade tape use the server nickname?");
+    PredictionRepository::new(&fixture.path)
+        .buy_contracts_atomic_with_max(prediction_id, TRADER, ContractSide::Yes, 2, 100)
+        .expect("buy visible trade");
+    let provider = fixture
+        .provider()
+        .with_player_names(Arc::new(FixedPlayerNames(GuildPlayerNameDirectory::new(
+            Some(BTreeMap::from([(
+                TRADER as u64,
+                Some("Server Trader".to_owned()),
+            )])),
+        ))));
+    let mut builder = RegistryBuilder::default();
+    builder
+        .add_provider(&provider)
+        .expect("register prediction provider");
+    let handler = builder
+        .build()
+        .command_handler("predict")
+        .expect("predict command handler");
+    let responder = Arc::new(CapturingResponder::default());
+
+    handler
+        .handle(
+            command_request(
+                "view",
+                vec![integer("prediction_id", prediction_id)],
+                TRADER,
+                None,
+            ),
+            responder.clone(),
+        )
+        .await
+        .expect("prediction view");
+
+    let captured = responder.snapshot();
+    let recent = captured.followups[0].embeds[0]
+        .fields
+        .iter()
+        .find(|field| field.name == "Recent")
+        .expect("recent trades field");
+    assert!(recent.value.contains("Server Trader"));
+    assert!(!recent.value.contains("Player 100"));
 }
 
 fn test_config() -> PredictionCommandConfig {

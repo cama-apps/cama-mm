@@ -116,7 +116,7 @@ use crate::admin_provider::{
     CorrectionWinRewardControl, CorrectionWinRewardRequest, CorrectionWinRewardResult,
 };
 use crate::application_config::ApplicationConfig;
-use crate::discord_transport::{DiscordMessage, DiscordTransport};
+use crate::discord_transport::{DiscordMessage, DiscordTransport, GuildPlayerNameDirectory};
 use crate::enrichment_provider::{RecordedMatchDiscovery, RecordedMatchDiscoveryOutcome};
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
@@ -1713,10 +1713,24 @@ impl MatchHandler {
             .await
             .map_err(|error| format!("blocked-player lookup task failed: {error}"))?
             .map_err(|error| error.to_string())?;
+            let blocked_discord_ids = blocked
+                .iter()
+                .filter_map(|player_id| u64::try_from(*player_id).ok())
+                .collect::<Vec<_>>();
+            let player_names = u64::try_from(guild_id)
+                .ok()
+                .filter(|guild_id| *guild_id != 0)
+                .and_then(|guild_id| {
+                    self.discord
+                        .cached_guild_member_server_nicknames(guild_id, &blocked_discord_ids)
+                        .ok()
+                })
+                .flatten();
+            let player_names = GuildPlayerNameDirectory::new(player_names);
             let names = loaded
                 .iter()
                 .take(5)
-                .map(|player| player.name.as_str())
+                .filter_map(|player| Some(player_names.resolve(player.discord_id?, &player.name)))
                 .collect::<Vec<_>>()
                 .join(", ");
             let remainder = if blocked.len() > 5 {
@@ -4604,40 +4618,34 @@ impl MatchHandler {
             .iter()
             .filter_map(|player| player.discord_id.map(|id| (id, player)))
             .collect::<BTreeMap<_, _>>();
-        let mut display_names = BTreeMap::new();
-        if let Some(guild_id) = u64::try_from(pending.guild_id)
+        let discord_player_ids = player_ids
+            .iter()
+            .filter_map(|player_id| u64::try_from(*player_id).ok())
+            .collect::<Vec<_>>();
+        let player_names = if let Some(guild_id) = u64::try_from(pending.guild_id)
             .ok()
             .filter(|guild_id| *guild_id != 0)
         {
-            for player_id in player_ids {
-                let Ok(user_id) = u64::try_from(player_id) else {
-                    continue;
-                };
-                if user_id == 0 {
-                    continue;
-                }
-                match self
-                    .discord
-                    .cached_guild_member_display_name(guild_id, user_id)
-                {
-                    Ok(Some(display_name)) => {
-                        display_names.insert(player_id, display_name);
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        debug!(%error, guild_id, player_id, "shuffle player name lookup failed");
-                    }
+            match self
+                .discord
+                .cached_guild_member_server_nicknames(guild_id, &discord_player_ids)
+            {
+                Ok(nicknames) => GuildPlayerNameDirectory::new(nicknames),
+                Err(error) => {
+                    debug!(%error, guild_id, "shuffle player name lookup failed");
+                    GuildPlayerNameDirectory::default()
                 }
             }
-        }
+        } else {
+            GuildPlayerNameDirectory::default()
+        };
         let line = |player_id: i64, role: &str| {
             let player = players_by_id.get(&player_id);
-            let name = display_names.get(&player_id).cloned().unwrap_or_else(|| {
-                player.map_or_else(
-                    || format!("Unknown({player_id})"),
-                    |player| player.name.clone(),
-                )
-            });
+            let stored_name = player.map_or_else(
+                || format!("Unknown({player_id})"),
+                |player| player.name.clone(),
+            );
+            let name = player_names.resolve(player_id, &stored_name).to_owned();
             let on_role = player
                 .and_then(|player| player.preferred_roles.as_ref())
                 .is_some_and(|roles| roles.iter().any(|preferred| preferred == role));
@@ -4818,12 +4826,11 @@ impl MatchHandler {
                 .excluded_player_ids
                 .iter()
                 .map(|player_id| {
-                    display_names.get(player_id).cloned().unwrap_or_else(|| {
-                        players_by_id.get(player_id).map_or_else(
-                            || format!("Unknown({player_id})"),
-                            |player| player.name.clone(),
-                        )
-                    })
+                    let stored_name = players_by_id.get(player_id).map_or_else(
+                        || format!("Unknown({player_id})"),
+                        |player| player.name.clone(),
+                    );
+                    player_names.resolve(*player_id, &stored_name).to_owned()
                 })
                 .collect::<Vec<_>>()
                 .join(", ");

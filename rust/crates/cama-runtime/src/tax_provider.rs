@@ -31,6 +31,7 @@ use cama_app::tax_commands::{
     resetcooldown_command, vanity_command,
 };
 use cama_app::vanity_tax_service::VanityEligibility as PersistentVanityEligibility;
+use cama_db::core_repositories::PlayerRepository;
 use cama_db::economy_event_repository::{EconomyEventRepository, EventDirection, PolicyMode};
 use cama_db::tax_repository::{
     TaxBankruptcyAction, TaxBankruptcyOutcome, TaxBankruptcyRequest, TaxFineOutcome,
@@ -43,6 +44,7 @@ use cama_domain::permissions::{
 use chrono::Utc;
 
 use crate::application_config::ApplicationConfig;
+use crate::discord_transport::{GuildPlayerNameResolver, StoredUsernamePlayerNameResolver};
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
     InteractionActionRow, InteractionButton, InteractionButtonStyle, InteractionEmbed,
@@ -91,7 +93,7 @@ impl TaxRegistrationProvider {
         }
         .normalized();
         let economy = Arc::new(SqliteEconomyStatusPort {
-            repository: EconomyEventRepository::new(database_path),
+            repository: EconomyEventRepository::new(database_path.as_ref()),
             config: economy_config,
         });
         let admin_user_ids = config
@@ -109,6 +111,8 @@ impl TaxRegistrationProvider {
         Self {
             handler: Arc::new(TaxHandler {
                 tax,
+                players: PlayerRepository::new(database_path.as_ref()),
+                player_names: Arc::new(StoredUsernamePlayerNameResolver),
                 economy,
                 vanity: Arc::new(PersistentVanityPort {
                     service: vanity_tax,
@@ -121,6 +125,14 @@ impl TaxRegistrationProvider {
                 views: Arc::new(Mutex::new(BTreeMap::new())),
             }),
         }
+    }
+
+    #[must_use]
+    pub fn with_player_names(mut self, player_names: Arc<dyn GuildPlayerNameResolver>) -> Self {
+        Arc::get_mut(&mut self.handler)
+            .expect("new tax provider owns its handler")
+            .player_names = player_names;
+        self
     }
 }
 
@@ -272,6 +284,8 @@ fn tax_subcommands(vanity_tax_rate: f64) -> Vec<CommandOptionSpec> {
 
 struct TaxHandler {
     tax: Arc<SqliteTaxPort>,
+    players: PlayerRepository,
+    player_names: Arc<dyn GuildPlayerNameResolver>,
     economy: Arc<SqliteEconomyStatusPort>,
     vanity: Arc<PersistentVanityPort>,
     admin_user_ids: Vec<u64>,
@@ -352,7 +366,7 @@ impl InteractionHandler for TaxHandler {
                 interaction_id,
                 name,
                 user_id,
-                user_display_name,
+                user_display_name: _,
                 guild_id,
                 member_permissions,
                 options,
@@ -369,7 +383,7 @@ impl InteractionHandler for TaxHandler {
                     TaxCommandContext {
                         interaction_id,
                         actor_id: user_id,
-                        actor_display_name: user_display_name,
+                        actor_display_name: format!("User {user_id}"),
                         guild_id,
                         member_permissions,
                         subcommand,
@@ -388,6 +402,64 @@ impl InteractionHandler for TaxHandler {
 }
 
 impl TaxHandler {
+    async fn render_command_names(
+        &self,
+        command: &mut TaxCommandContext,
+    ) -> Result<(), InteractionHandlerError> {
+        let actor_id = signed_id(command.actor_id, "actor")?;
+        let guild_id = signed_id(command.guild_id, "guild")?;
+        let mut targets = Vec::new();
+        for (index, option) in command.options.iter().enumerate() {
+            if let InteractionValue::User { id, .. } = &option.value {
+                let user_id = i64::try_from(*id).map_err(|_| {
+                    InteractionHandlerError::from("target user id exceeds SQLite range")
+                })?;
+                targets.push((index, user_id));
+            }
+        }
+        let mut requested_ids = vec![actor_id];
+        requested_ids.extend(targets.iter().map(|(_, id)| *id));
+        let query_ids = requested_ids.clone();
+        let players = self.players.clone();
+        let stored_names = tokio::time::timeout(
+            Duration::from_secs(1),
+            tokio::task::spawn_blocking(move || {
+                players
+                    .get_by_ids(&query_ids, Some(guild_id))
+                    .map(|players| {
+                        players
+                            .into_iter()
+                            .filter_map(|player| player.discord_id.map(|id| (id, player.name)))
+                            .collect::<BTreeMap<_, _>>()
+                    })
+                    .map_err(|error| error.to_string())
+            }),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .and_then(Result::ok)
+        .unwrap_or_default();
+        let names = self
+            .player_names
+            .names_for_guild(guild_id, &requested_ids)
+            .unwrap_or_default();
+        let resolve = |user_id: i64| {
+            let stored_name = stored_names
+                .get(&user_id)
+                .cloned()
+                .unwrap_or_else(|| format!("User {user_id}"));
+            names.resolve(user_id, &stored_name).to_owned()
+        };
+        for (index, user_id) in targets {
+            if let InteractionValue::User { display_name, .. } = &mut command.options[index].value {
+                *display_name = Some(resolve(user_id));
+            }
+        }
+        command.actor_display_name = resolve(actor_id);
+        Ok(())
+    }
+
     async fn handle_command(
         &self,
         command: TaxCommandContext,
@@ -527,14 +599,9 @@ impl TaxHandler {
 
     async fn vanity(
         &self,
-        command: TaxCommandContext,
+        mut command: TaxCommandContext,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
-        let target = user_option(&command.options, "user")?.unwrap_or_else(|| UserRef {
-            id: command.actor_id,
-            name: command.actor_display_name.to_lowercase(),
-            display_name: command.actor_display_name.clone(),
-        });
         let taxable = boolean_option(&command.options, "taxable");
         let permissions = self.permission_context(&command);
         if taxable.is_some() && !has_admin_permission(&permissions, &self.admin_user_ids) {
@@ -544,6 +611,12 @@ impl TaxHandler {
         if taxable.is_some() {
             defer(&responder, true).await?;
         }
+        self.render_command_names(&mut command).await?;
+        let target = user_option(&command.options, "user")?.unwrap_or_else(|| UserRef {
+            id: command.actor_id,
+            name: command.actor_display_name.to_lowercase(),
+            display_name: command.actor_display_name.clone(),
+        });
         let vanity = Arc::clone(&self.vanity);
         let admin = self.admin_user_ids.clone();
         let guild_id = command.guild_id;
@@ -570,13 +643,14 @@ impl TaxHandler {
 
     async fn player(
         &self,
-        command: TaxCommandContext,
+        mut command: TaxCommandContext,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
         if !self.require_tax_man(&command, &responder).await? {
             return Ok(());
         }
         defer(&responder, true).await?;
+        self.render_command_names(&mut command).await?;
         let target = required_user_option(&command.options, "user")?;
         let tax = Arc::clone(&self.tax);
         let guild_id = command.guild_id;
@@ -643,13 +717,14 @@ impl TaxHandler {
 
     async fn fine(
         &self,
-        command: TaxCommandContext,
+        mut command: TaxCommandContext,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
         if !self.require_tax_man(&command, &responder).await? {
             return Ok(());
         }
         defer(&responder, true).await?;
+        self.render_command_names(&mut command).await?;
         let target = required_user_option(&command.options, "user")?;
         let amount = required_integer_option(&command.options, "amount")?;
         let reason = string_option(&command.options, "reason");
@@ -679,13 +754,14 @@ impl TaxHandler {
 
     async fn resetcooldown(
         &self,
-        command: TaxCommandContext,
+        mut command: TaxCommandContext,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
         if !self.require_tax_man(&command, &responder).await? {
             return Ok(());
         }
         defer(&responder, true).await?;
+        self.render_command_names(&mut command).await?;
         let target = required_user_option(&command.options, "user")?;
         let tax = Arc::clone(&self.tax);
         let permissions = self.permission_context(&command);
@@ -711,13 +787,14 @@ impl TaxHandler {
 
     async fn bankruptcy(
         &self,
-        command: TaxCommandContext,
+        mut command: TaxCommandContext,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
         if !self.require_tax_man(&command, &responder).await? {
             return Ok(());
         }
         defer(&responder, true).await?;
+        self.render_command_names(&mut command).await?;
         let target = required_user_option(&command.options, "user")?;
         let action = required_string_option(&command.options, "action")?;
         let action = match action.as_str() {
@@ -756,13 +833,14 @@ impl TaxHandler {
 
     async fn ledger(
         &self,
-        command: TaxCommandContext,
+        mut command: TaxCommandContext,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
         if !self.require_tax_man(&command, &responder).await? {
             return Ok(());
         }
         defer(&responder, true).await?;
+        self.render_command_names(&mut command).await?;
         let tax = Arc::clone(&self.tax);
         let permissions = self.permission_context(&command);
         let admin = self.admin_user_ids.clone();

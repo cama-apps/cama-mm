@@ -47,7 +47,9 @@ use serde_json::Value as JsonValue;
 use tracing::{debug, error, warn};
 
 use crate::application_config::ApplicationConfig;
-use crate::discord_transport::{DiscordMessage, DiscordTransport};
+use crate::discord_transport::{
+    DiscordGuildPlayerNameResolver, DiscordMessage, DiscordTransport, GuildPlayerNameResolver,
+};
 use crate::global_hooks::{UsageMonitor, UsageSnapshot};
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, InteractionHandler,
@@ -461,6 +463,7 @@ impl AdminRegistrationProvider {
     ) -> Self {
         let path = database_path.as_ref();
         let command_config = AdminCommandConfig::from_application(config);
+        let player_names = Arc::new(DiscordGuildPlayerNameResolver::new(ports.discord.clone()));
         Self {
             admin_rating_max: command_config.admin_rating_max,
             handler: Arc::new(AdminHandler {
@@ -473,6 +476,7 @@ impl AdminRegistrationProvider {
                 recalibration: RatingHistoryRepository::new(path),
                 steam: OpenDotaPlayerRepository::new(path),
                 registration: RegistrationRepository::new(path),
+                player_names,
                 opendota,
                 ports,
                 config: command_config,
@@ -509,6 +513,7 @@ struct AdminHandler {
     recalibration: RatingHistoryRepository,
     steam: OpenDotaPlayerRepository,
     registration: RegistrationRepository,
+    player_names: Arc<dyn GuildPlayerNameResolver>,
     opendota: Arc<OpenDotaRuntimeServices>,
     ports: AdminRuntimePorts,
     config: AdminCommandConfig,
@@ -593,6 +598,25 @@ impl InteractionHandler for AdminHandler {
 }
 
 impl AdminHandler {
+    async fn render_player_name(&self, user_id: i64, guild_id: i64) -> String {
+        let players = self.players.clone();
+        let stored_name = tokio::task::spawn_blocking(move || {
+            players
+                .get_by_id(user_id, Some(guild_id))
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten()
+        .map_or_else(|| format!("User {user_id}"), |player| player.name);
+        self.player_names
+            .names_for_guild(guild_id, &[user_id])
+            .unwrap_or_default()
+            .resolve(user_id, &stored_name)
+            .to_owned()
+    }
+
     async fn lowprio_add(
         &self,
         context: AdminCommandContext,
@@ -2243,16 +2267,14 @@ impl AdminHandler {
             SuspensionScope::Open => AdminLobbyScope::Open,
             SuspensionScope::Lowskill => AdminLobbyScope::Lowskill,
         };
+        let player_display_name = self.render_player_name(target_id, guild_id).await;
         let ejection = self
             .ports
             .lobby
             .eject_suspended_player(AdminLobbyEjectionRequest {
                 guild_id,
                 player_id: target_id,
-                player_display_name: player
-                    .display_name
-                    .clone()
-                    .unwrap_or_else(|| format!("<@{}>", player.id)),
+                player_display_name,
                 scope: lobby_scope,
             })
             .await

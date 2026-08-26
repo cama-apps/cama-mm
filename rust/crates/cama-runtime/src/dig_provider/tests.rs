@@ -20,6 +20,7 @@ use super::{
     DigRuntimeBloodPactSnapshot, DigRuntimeFlavorSnapshot, JOPACOIN_EMOTE,
 };
 use crate::application_config::ApplicationConfig;
+use crate::discord_transport::{GuildPlayerNameDirectory, GuildPlayerNameResolver};
 use crate::gateway_events::{GatewayMember, GuildMemberPageSource, ReadyRecoveryContext};
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, InteractionHandler,
@@ -31,6 +32,18 @@ use crate::registration::{
 const USER: u64 = 77_001;
 const GUILD: u64 = 77_002;
 const CHANNEL: u64 = 77_003;
+
+struct FixedPlayerNames(GuildPlayerNameDirectory);
+
+impl GuildPlayerNameResolver for FixedPlayerNames {
+    fn names_for_guild(
+        &self,
+        _guild_id: i64,
+        _player_ids: &[i64],
+    ) -> Result<GuildPlayerNameDirectory, String> {
+        Ok(self.0.clone())
+    }
+}
 
 #[test]
 fn prestige_picker_embeds_match_python_presentation() {
@@ -403,6 +416,70 @@ async fn run_dig_returns_the_registered_typed_execution_and_delivery_notice() {
     assert_eq!(delivery.context.channel_id, CHANNEL as i64);
     assert_eq!(delivery.context.display_name, "Dig Test Miner");
     assert!(!delivery.render.description.is_empty());
+}
+
+#[tokio::test]
+async fn durable_dig_delivery_keeps_stored_username_while_rendering_server_nickname() {
+    let (database, provider, _discord) = fixture();
+    let provider =
+        provider.with_player_names(Arc::new(FixedPlayerNames(GuildPlayerNameDirectory::new(
+            Some(BTreeMap::from([(USER, Some("Server Miner".to_owned()))])),
+        ))));
+    let first = provider
+        .handler
+        .run_dig(
+            USER as i64,
+            GUILD as i64,
+            super::unix_now(),
+            false,
+            false,
+            cama_app::dig_runtime::DigRuntimeDeliveryContext::new(
+                0x5677,
+                CHANNEL as i64,
+                "dig-test-miner",
+                None,
+            ),
+        )
+        .await
+        .expect("first registered dig execution");
+    assert_eq!(
+        first
+            .delivery
+            .expect("first durable delivery snapshot")
+            .context
+            .display_name,
+        "dig-test-miner"
+    );
+    Connection::open(database.path())
+        .expect("open Dig database")
+        .execute(
+            "UPDATE tunnels SET last_dig_at=0 WHERE discord_id=?1 AND guild_id=?2",
+            params![USER as i64, GUILD as i64],
+        )
+        .expect("reset Dig cooldown");
+    let execution = provider
+        .handler
+        .run_dig(
+            USER as i64,
+            GUILD as i64,
+            super::unix_now(),
+            false,
+            false,
+            cama_app::dig_runtime::DigRuntimeDeliveryContext::new(
+                0x5678,
+                CHANNEL as i64,
+                "dig-test-miner",
+                Some("https://example.invalid/miner.png".to_owned()),
+            ),
+        )
+        .await
+        .expect("second registered dig execution");
+    let delivery = execution.delivery.expect("durable delivery snapshot");
+
+    assert_eq!(delivery.context.display_name, "dig-test-miner");
+    let (main, _event) = provider.handler.render_delivery_responses(&delivery);
+    assert_eq!(main.embeds[0].author_name.as_deref(), Some("Server Miner"));
+    assert_eq!(delivery.context.display_name, "dig-test-miner");
 }
 
 #[tokio::test]
@@ -4516,7 +4593,7 @@ async fn prestige_preview_selection_restart_and_forgery_use_atomic_app_service()
     {
         let public = discord.public.lock().expect("public ascension responses");
         assert_eq!(public.len(), 1);
-        assert_eq!(public[0].content, "*Dig Test Miner has ascended.*");
+        assert_eq!(public[0].content, "*dig-test-miner has ascended.*");
         assert!(
             public[0].attachments.is_empty(),
             "test config disables Neon"
@@ -6074,7 +6151,7 @@ async fn provider_help_and_gift_use_typed_social_service_and_python_delivery_con
             .description
             .as_deref()
             .expect("help description");
-        assert!(help_description.contains("You helped **Social Target**'s tunnel!"));
+        assert!(help_description.contains("You helped **dig-social-target**'s tunnel!"));
         assert!(help_description.contains("Blocks added: **"));
     }
     assert_eq!(
@@ -6125,7 +6202,7 @@ async fn provider_help_and_gift_use_typed_social_service_and_python_delivery_con
         assert!(!gift_followups[0].ephemeral);
         assert_eq!(
             gift_followups[0].content,
-            "You gifted **Mole Claws** to **Social Target**!"
+            "You gifted **Mole Claws** to **dig-social-target**!"
         );
     }
     assert_eq!(
@@ -6228,7 +6305,7 @@ async fn provider_sabotage_view_is_owner_bound_restart_expiring_and_exactly_once
             .as_deref()
             .expect("sabotage preview description"),
         format!(
-            "**Target:** Sabotage Target\n**Cost:** 20 {JOPACOIN_EMOTE}\n**Potential damage:** 3-8 blocks\n\nAre you sure? If they have a trap set, you could take damage instead."
+            "**Target:** dig-sabotage-target\n**Cost:** 20 {JOPACOIN_EMOTE}\n**Potential damage:** 3-8 blocks\n\nAre you sure? If they have a trap set, you could take damage instead."
         )
     );
     assert_eq!(preview.components[0].buttons.len(), 2);
@@ -6439,7 +6516,7 @@ async fn provider_miner_group_uses_typed_profile_allocation_respec_and_autobuy_s
     assert!(profile.ephemeral);
     assert_eq!(
         profile.embeds[0].title.as_deref(),
-        Some("Dig Test Miner - Miner Profile")
+        Some("dig-test-miner - Miner Profile")
     );
     assert_eq!(
         profile.embeds[0].description.as_deref(),

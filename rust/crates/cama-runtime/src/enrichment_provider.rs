@@ -47,6 +47,7 @@ use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
 use crate::application_config::ApplicationConfig;
+use crate::discord_transport::{GuildPlayerNameResolver, StoredUsernamePlayerNameResolver};
 use crate::registration::{
     CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute, InteractionActionRow,
     InteractionAttachment, InteractionButton, InteractionButtonStyle, InteractionEmbed,
@@ -259,6 +260,7 @@ impl EnrichmentRegistrationProvider {
             handler: Arc::new(EnrichmentHandler {
                 matches: MatchRepository::new(path),
                 players: PlayerRepository::new(path),
+                player_names: Arc::new(StoredUsernamePlayerNameResolver),
                 steam: OpenDotaPlayerRepository::new(path),
                 guild_config: GuildConfigRepository::new(path, config.values.ai_features_enabled),
                 administrative: MatchDiscoveryRepository::new(path),
@@ -292,6 +294,14 @@ impl EnrichmentRegistrationProvider {
     #[must_use]
     pub fn recorded_match_discovery(&self) -> Arc<dyn RecordedMatchDiscovery> {
         self.handler.clone()
+    }
+
+    #[must_use]
+    pub fn with_player_names(mut self, player_names: Arc<dyn GuildPlayerNameResolver>) -> Self {
+        Arc::get_mut(&mut self.handler)
+            .expect("new enrichment provider owns its handler")
+            .player_names = player_names;
+        self
     }
 }
 
@@ -538,6 +548,7 @@ impl BankruptcyPenaltySource for BankruptcySource {
 struct EnrichmentHandler {
     matches: MatchRepository,
     players: PlayerRepository,
+    player_names: Arc<dyn GuildPlayerNameResolver>,
     steam: OpenDotaPlayerRepository,
     guild_config: GuildConfigRepository,
     administrative: MatchDiscoveryRepository,
@@ -662,12 +673,14 @@ impl InteractionHandler for EnrichmentHandler {
                 ..
             } => {
                 let (subcommand, options) = selected_subcommand(&options)?;
+                let user_id = signed_id(user_id, "user")?;
+                let guild_id = guild_id
+                    .map(|guild_id| signed_id(guild_id, "guild"))
+                    .transpose()?;
                 let context = CommandContext {
-                    user_id: signed_id(user_id, "user")?,
+                    user_id,
                     user_display_name,
-                    guild_id: guild_id
-                        .map(|guild_id| signed_id(guild_id, "guild"))
-                        .transpose()?,
+                    guild_id,
                     member_permissions,
                 };
                 match (name.as_str(), subcommand) {
@@ -724,6 +737,24 @@ struct CommandContext {
 }
 
 impl EnrichmentHandler {
+    async fn render_player_name(&self, user_id: i64, guild_id: i64) -> String {
+        let players = self.players.clone();
+        let stored_name = run_blocking(move || {
+            players
+                .get_by_id(user_id, Some(guild_id))
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .ok()
+        .flatten()
+        .map_or_else(|| format!("User {user_id}"), |player| player.name);
+        self.player_names
+            .names_for_guild(guild_id, &[user_id])
+            .unwrap_or_default()
+            .resolve(user_id, &stored_name)
+            .to_owned()
+    }
+
     async fn recorded_match_discovery_response(
         &self,
         guild_id: i64,
@@ -1690,10 +1721,11 @@ impl EnrichmentHandler {
             return Ok(());
         }
         let selected_user = user_option(options, "user");
-        let (target_id, target_name, selected) = selected_user.map_or_else(
+        let (target_id, _target_name, selected) = selected_user.map_or_else(
             || (context.user_id, context.user_display_name.clone(), false),
             |(id, name)| (id, name, true),
         );
+        let target_name = self.render_player_name(target_id, guild_id).await;
         let limit = integer_option(options, "limit").unwrap_or(5).clamp(1, 10);
         let players = self.players.clone();
         let matches = self.matches.clone();
@@ -1823,8 +1855,12 @@ impl EnrichmentHandler {
         if !defer(&responder, false).await {
             return Ok(());
         }
-        let (target_id, target_name) =
+        let (target_id, _target_name) =
             user_option(options, "user").unwrap_or((context.user_id, context.user_display_name));
+        let target_name = match context.guild_id {
+            Some(guild_id) => self.render_player_name(target_id, guild_id).await,
+            None => format!("User {target_id}"),
+        };
         let limit = integer_option(options, "limit").unwrap_or(10).clamp(1, 20);
         let limit = usize::try_from(limit).unwrap_or(10);
         let steam = self.steam.clone();
@@ -1909,10 +1945,11 @@ impl EnrichmentHandler {
         let explicit_match_id = integer_option(options, "match_id").filter(|id| *id != 0);
         let selected_user = user_option(options, "user");
         let invoking_user_id = context.user_id;
-        let (target_id, target_name, user_was_selected) = selected_user.map_or_else(
+        let (target_id, _target_name, user_was_selected) = selected_user.map_or_else(
             || (context.user_id, context.user_display_name.clone(), false),
             |(id, name)| (id, name, true),
         );
+        let target_name = self.render_player_name(target_id, guild_id).await;
         let matches = self.matches.clone();
         let bankruptcy = self.bankruptcy.clone();
         let opendota = Arc::clone(&self.opendota);

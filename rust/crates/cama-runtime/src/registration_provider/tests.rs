@@ -79,6 +79,7 @@ struct MockDiscordState {
     channel_messages: Vec<(u64, DiscordMessage)>,
     channels: BTreeSet<(u64, u64)>,
     members: BTreeMap<(u64, u64), DiscordGuildMemberSnapshot>,
+    server_nicknames: BTreeMap<(u64, u64), Option<String>>,
     reaction_users: Vec<DiscordUserSnapshot>,
     direct_error: Option<crate::discord_transport::DiscordDirectMessageErrorKind>,
 }
@@ -121,6 +122,14 @@ impl MockDiscord {
                 activities: Vec::new(),
             },
         );
+    }
+
+    fn set_server_nickname(&self, guild_id: u64, user_id: u64, nickname: &str) {
+        self.state
+            .lock()
+            .expect("Discord state")
+            .server_nicknames
+            .insert((guild_id, user_id), Some(nickname.to_owned()));
     }
 
     fn set_direct_error(&self, kind: crate::discord_transport::DiscordDirectMessageErrorKind) {
@@ -319,6 +328,27 @@ impl DiscordTransport for MockDiscord {
             .members
             .get(&(guild_id, user_id))
             .cloned())
+    }
+
+    fn cached_guild_member_server_nicknames(
+        &self,
+        guild_id: u64,
+        user_ids: &[u64],
+    ) -> Result<Option<BTreeMap<u64, Option<String>>>, String> {
+        let state = self.state.lock().expect("Discord state");
+        Ok(Some(
+            state
+                .server_nicknames
+                .iter()
+                .filter_map(|((candidate_guild_id, user_id), nickname)| {
+                    if *candidate_guild_id == guild_id && user_ids.contains(user_id) {
+                        Some((*user_id, nickname.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+        ))
     }
 }
 
@@ -1360,6 +1390,50 @@ async fn production_registration_uses_one_loopback_fetch_and_atomic_migrated_sql
     assert_eq!(primary, (12_345, true));
 }
 
+#[tokio::test]
+async fn registration_neon_renders_cached_server_nickname() {
+    let database = database();
+    let server = RouteServer::start(Vec::new());
+    let discord = Arc::new(MockDiscord::default());
+    discord.set_server_nickname(42, 101, "Server Nick");
+    let mut runtime_config = config();
+    runtime_config.neon_degen_enabled = true;
+    let provider = PlayerRegistrationProvider::with_config(
+        database.path(),
+        services(&server),
+        discord.clone(),
+        runtime_config,
+    );
+    provider
+        .handler
+        .neon
+        .lock()
+        .expect("Neon service")
+        .queue_rolls([0.0]);
+
+    provider
+        .handler
+        .best_effort_neon(
+            &CommandContext {
+                interaction_id: 1,
+                name: "player".to_owned(),
+                user_id: 101,
+                user_display_name: "account_name".to_owned(),
+                guild_id: Some(42),
+                channel_id: Some(9),
+                options: Vec::new(),
+            },
+            42,
+        )
+        .await;
+
+    let state = discord.state.lock().expect("Discord state");
+    assert_eq!(state.channel_messages.len(), 1);
+    let content = &state.channel_messages[0].1.response.content;
+    assert!(content.contains("Server Nick"), "{content}");
+    assert!(!content.contains("account_name"), "{content}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_register_with_opendota_failure() {
     let database = database();
@@ -1639,6 +1713,7 @@ async fn one_shot_autonotify_preflights_persists_and_delivers_after_restart() {
     let database = database();
     let server = RouteServer::start(Vec::new());
     let discord = Arc::new(MockDiscord::default());
+    discord.set_server_nickname(42, 201, "Target_*");
     let provider = PlayerRegistrationProvider::with_config(
         database.path(),
         services(&server),
@@ -1667,7 +1742,7 @@ async fn one_shot_autonotify_preflights_persists_and_delivers_after_restart() {
                             "playername",
                             InteractionValue::User {
                                 id: 201,
-                                display_name: Some("Target_*".to_owned()),
+                                display_name: Some("target_account".to_owned()),
                                 is_bot: Some(false),
                             },
                         )]),
@@ -1678,8 +1753,12 @@ async fn one_shot_autonotify_preflights_persists_and_delivers_after_restart() {
         )
         .await
         .expect("arm one-shot alert");
-    assert!(discord.direct_messages()[0].1.contains("DM check passed"));
-    assert!(discord.direct_edits()[0].contains("One-time lobby alert set"));
+    assert!(
+        discord.direct_messages()[0].1.contains(
+            "DM check passed for your one-time lobby alert request about **Target\\_\\***"
+        )
+    );
+    assert!(discord.direct_edits()[0].contains("One-time lobby alert set for **Target\\_\\***"));
 
     let restarted = PlayerRegistrationProvider::with_config(
         database.path(),

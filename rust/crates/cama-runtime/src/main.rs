@@ -14,6 +14,7 @@ use cama_db::{
     audit_database,
     schema_manager::{MigrationSettings, initialize_or_migrate_with_settings},
 };
+use cama_runtime::discord_transport::DiscordGuildPlayerNameResolver;
 use cama_runtime::gateway::{GatewayError, GatewaySession};
 use cama_runtime::herogrid_provider::HeroGridRegistrationProvider;
 use cama_runtime::inventory;
@@ -531,7 +532,9 @@ async fn run_serve() -> ExitCode {
         &application_config,
         Arc::clone(&opendota),
     ) {
-        Ok(provider) => provider,
+        Ok(provider) => provider.with_player_names(Arc::new(DiscordGuildPlayerNameResolver::new(
+            discord_transport.clone(),
+        ))),
         Err(error) => {
             error!(%error, "enrichment runtime construction refused startup");
             return ExitCode::from(1);
@@ -630,7 +633,10 @@ async fn run_serve() -> ExitCode {
         discord_transport.clone(),
         reminder_provider.hooks(),
         production_ai_service.clone(),
-    );
+    )
+    .with_player_names(Arc::new(DiscordGuildPlayerNameResolver::new(
+        discord_transport.clone(),
+    )));
     let duel_provider = DuelRegistrationProvider::new(
         &config.db_path,
         &application_config,
@@ -654,7 +660,10 @@ async fn run_serve() -> ExitCode {
             discord: discord_transport.clone(),
             ai: production_ai_service.clone(),
         },
-    );
+    )
+    .with_player_names(Arc::new(DiscordGuildPlayerNameResolver::new(
+        discord_transport.clone(),
+    )));
     let trivia_provider = match TriviaRegistrationProvider::new(
         &config.db_path,
         &application_config,
@@ -662,7 +671,9 @@ async fn run_serve() -> ExitCode {
         discord_transport.clone(),
         Some(reminder_provider.hooks()),
     ) {
-        Ok(provider) => provider,
+        Ok(provider) => provider.with_player_names(Arc::new(DiscordGuildPlayerNameResolver::new(
+            discord_transport.clone(),
+        ))),
         Err(error) => {
             error!(%error, "trivia runtime construction refused startup");
             return ExitCode::from(1);
@@ -674,7 +685,10 @@ async fn run_serve() -> ExitCode {
         trivia_provider.catalog(),
         betting_provider.clone(),
         discord_transport.clone(),
-    );
+    )
+    .with_player_names(Arc::new(DiscordGuildPlayerNameResolver::new(
+        discord_transport.clone(),
+    )));
     let dig_provider = match DigRegistrationProvider::production(
         &config.db_path,
         &application_config,
@@ -684,7 +698,9 @@ async fn run_serve() -> ExitCode {
         production_ai_service.clone(),
         Arc::new(dig_bonus_runtime.clone()),
     ) {
-        Ok(provider) => provider,
+        Ok(provider) => provider.with_player_names(Arc::new(DiscordGuildPlayerNameResolver::new(
+            discord_transport.clone(),
+        ))),
         Err(error) => {
             error!(%error, "Dig runtime construction refused startup");
             return ExitCode::from(1);
@@ -694,12 +710,18 @@ async fn run_serve() -> ExitCode {
         &config.db_path,
         &application_config,
         discord_transport.clone(),
-    );
+    )
+    .with_player_names(Arc::new(DiscordGuildPlayerNameResolver::new(
+        discord_transport.clone(),
+    )));
     let player_trivia_provider = PlayerTriviaRegistrationProvider::new(
         &config.db_path,
         &application_config,
         discord_transport.clone(),
-    );
+    )
+    .with_player_names(Arc::new(DiscordGuildPlayerNameResolver::new(
+        discord_transport.clone(),
+    )));
     let info_provider = InfoRegistrationProvider::new(
         &config.db_path,
         &application_config,
@@ -707,26 +729,39 @@ async fn run_serve() -> ExitCode {
     );
     let rating_analysis_provider =
         match RatingAnalysisRegistrationProvider::new(&config.db_path, &application_config) {
-            Ok(provider) => provider,
+            Ok(provider) => provider.with_player_names(Arc::new(
+                DiscordGuildPlayerNameResolver::new(discord_transport.clone()),
+            )),
             Err(error) => {
                 error!(%error, "rating-analysis runtime construction refused startup");
                 return ExitCode::from(1);
             }
         };
-    let blame_luke_provider = BlameLukeRegistrationProvider::new(&config.db_path);
+    let blame_luke_provider = BlameLukeRegistrationProvider::new(&config.db_path)
+        .with_player_names(Arc::new(DiscordGuildPlayerNameResolver::new(
+            discord_transport.clone(),
+        )));
     let tax_provider = TaxRegistrationProvider::new(
         &config.db_path,
         &application_config,
         Arc::clone(&vanity_tax_service),
-    );
-    let scout_provider =
-        match ScoutRegistrationProvider::new(&config.db_path, Arc::clone(&draft_states)) {
-            Ok(provider) => provider,
-            Err(error) => {
-                error!(%error, "Scout runtime construction refused startup");
-                return ExitCode::from(1);
-            }
-        };
+    )
+    .with_player_names(Arc::new(DiscordGuildPlayerNameResolver::new(
+        discord_transport.clone(),
+    )));
+    let scout_provider = match ScoutRegistrationProvider::new(
+        &config.db_path,
+        Arc::clone(&draft_states),
+        Arc::new(DiscordGuildPlayerNameResolver::new(
+            discord_transport.clone(),
+        )),
+    ) {
+        Ok(provider) => provider,
+        Err(error) => {
+            error!(%error, "Scout runtime construction refused startup");
+            return ExitCode::from(1);
+        }
+    };
     let wrapped_provider = WrappedRegistrationProvider::new(
         &config.db_path,
         &application_config,
@@ -738,7 +773,9 @@ async fn run_serve() -> ExitCode {
         discord_transport.clone(),
         production_ai_service.clone(),
     ) {
-        Ok(provider) => provider,
+        Ok(provider) => provider.with_player_names(Arc::new(DiscordGuildPlayerNameResolver::new(
+            discord_transport.clone(),
+        ))),
         Err(error) => {
             error!(%error, "Shop runtime construction refused startup");
             return ExitCode::from(1);
@@ -781,10 +818,12 @@ async fn run_serve() -> ExitCode {
     let global_interaction_hooks = GlobalInteractionHooks::new(usage_monitor);
 
     let mut registry = RegistryBuilder::default();
-    if let Err(error) = registry.add_provider(&HeroGridRegistrationProvider::new(
-        &config.db_path,
-        Arc::clone(&draft_states),
-    )) {
+    if let Err(error) = registry.add_provider(
+        &HeroGridRegistrationProvider::new(&config.db_path, Arc::clone(&draft_states))
+            .with_player_names(Arc::new(DiscordGuildPlayerNameResolver::new(
+                discord_transport.clone(),
+            ))),
+    ) {
         error!(%error, "could not register Hero Grid command provider");
         return ExitCode::from(1);
     }
@@ -808,10 +847,12 @@ async fn run_serve() -> ExitCode {
         error!(%error, "could not register player registration command provider");
         return ExitCode::from(1);
     }
-    if let Err(error) = registry.add_provider(&ProfileRegistrationProvider::new(
-        &config.db_path,
-        Arc::clone(&opendota),
-    )) {
+    if let Err(error) = registry.add_provider(
+        &ProfileRegistrationProvider::new(&config.db_path, Arc::clone(&opendota))
+            .with_player_names(Arc::new(DiscordGuildPlayerNameResolver::new(
+                discord_transport.clone(),
+            ))),
+    ) {
         error!(%error, "could not register profile command provider");
         return ExitCode::from(1);
     }
@@ -879,9 +920,11 @@ async fn run_serve() -> ExitCode {
         error!(%error, "could not register Tax Man command provider");
         return ExitCode::from(1);
     }
-    if let Err(error) =
-        registry.add_provider(&AdvancedStatsRegistrationProvider::new(&config.db_path))
-    {
+    let advanced_stats_provider = AdvancedStatsRegistrationProvider::new(&config.db_path)
+        .with_player_names(Arc::new(DiscordGuildPlayerNameResolver::new(
+            discord_transport.clone(),
+        )));
+    if let Err(error) = registry.add_provider(&advanced_stats_provider) {
         error!(%error, "could not register advanced-statistics command provider");
         return ExitCode::from(1);
     }

@@ -885,6 +885,7 @@ pub struct HeroGridCommandRequest<'a> {
     pub min_games: i64,
     pub limit: Option<i64>,
     pub sources: &'a HeroGridSources,
+    pub player_name_overrides: Option<&'a BTreeMap<i64, String>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1006,8 +1007,10 @@ impl<P: HeroGridDataPort> HeroGridCommandService<P> {
             .filter(|player_id| seen.insert(*player_id))
             .map(|player_id| HeroGridPlayer {
                 discord_id: player_id,
-                name: stored_names
-                    .get(&player_id)
+                name: request
+                    .player_name_overrides
+                    .and_then(|names| names.get(&player_id))
+                    .or_else(|| stored_names.get(&player_id))
                     .cloned()
                     .unwrap_or_else(|| format!("User {player_id}")),
             })
@@ -1440,6 +1443,7 @@ mod tests {
             names: vec![player(100, "Alice"), player(200, "Bob")],
             ..MemoryPort::default()
         });
+        let name_overrides = BTreeMap::from([(100, "Server Alice".to_owned())]);
         let outcome = service
             .execute(&HeroGridCommandRequest {
                 source: HeroGridSource::Auto,
@@ -1449,6 +1453,7 @@ mod tests {
                 min_games: 1,
                 limit: None,
                 sources: &sources,
+                player_name_overrides: Some(&name_overrides),
             })
             .expect("full command pipeline");
         let HeroGridCommandOutcome::Attachment(attachment) = outcome else {
@@ -1461,6 +1466,15 @@ mod tests {
         assert_eq!(attachment.filename, "hero_grid.png");
         let decoded = decode_png(&attachment.png);
         assert_eq!((decoded.raster.width, decoded.raster.height), (238, 318));
+        let expected = draw_hero_grid(
+            &[stat(100, 1, 1, 1), stat(200, 2, 1, 0)],
+            &[player(100, "Server Alice"), player(200, "Bob")],
+            1,
+            &format!("Hero Grid: {}", LobbyKind::Open.label()),
+        )
+        .expect("render expected nickname override")
+        .into_inner();
+        assert_eq!(attachment.png, expected);
     }
 
     fn enriched(ids: &[i64]) -> Vec<EnrichedPlayer> {
@@ -1665,6 +1679,7 @@ mod tests {
                 min_games: 1,
                 limit: None,
                 sources: &sources,
+                player_name_overrides: None,
             })
             .expect("execute current-lobby command");
         let HeroGridCommandOutcome::Attachment(attachment) = outcome else {
@@ -1748,6 +1763,7 @@ mod tests {
                 min_games: 2,
                 limit: None,
                 sources: &sources,
+                player_name_overrides: None,
             })
             .expect("ambiguity is a command result");
         assert_eq!(
@@ -1856,6 +1872,7 @@ mod tests {
                 min_games: 1,
                 limit: None,
                 sources: &sources,
+                player_name_overrides: None,
             })
             .expect("signed-id pipeline");
         let HeroGridCommandOutcome::Attachment(attachment) = outcome else {

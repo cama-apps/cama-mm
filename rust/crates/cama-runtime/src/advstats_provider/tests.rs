@@ -4,10 +4,23 @@ use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
 use super::*;
+use crate::discord_transport::GuildPlayerNameDirectory;
 use crate::registration::{InteractionResponseError, Registry};
 use crate::test_support::initialize_test_database as initialize_or_migrate;
 
 const GUILD: i64 = 42;
+
+struct FixedPlayerNames(BTreeMap<u64, Option<String>>);
+
+impl GuildPlayerNameResolver for FixedPlayerNames {
+    fn names_for_guild(
+        &self,
+        _guild_id: i64,
+        _player_ids: &[i64],
+    ) -> Result<GuildPlayerNameDirectory, String> {
+        Ok(GuildPlayerNameDirectory::new(Some(self.0.clone())))
+    }
+}
 
 #[derive(Default)]
 struct Responder {
@@ -157,7 +170,7 @@ async fn validation_preserves_dm_self_and_unregistered_visibility() {
         .expect("missing response");
     assert_eq!(
         missing.followups.lock().expect("followups")[0].content,
-        "Bob is not registered."
+        "User 2 is not registered."
     );
 }
 
@@ -200,7 +213,7 @@ async fn test_unregistered_player1() {
         .expect("missing player response");
     assert_eq!(
         responder.followups.lock().expect("followups")[0].content,
-        "Alice is not registered."
+        "User 1 is not registered."
     );
 }
 
@@ -224,7 +237,7 @@ async fn test_unregistered_player2() {
         .expect("missing player response");
     assert_eq!(
         responder.followups.lock().expect("followups")[0].content,
-        "Bob is not registered."
+        "User 2 is not registered."
     );
 }
 
@@ -273,6 +286,45 @@ async fn assert_migrated_pairing_renders_canonical_wins_in_either_argument_order
 #[tokio::test]
 async fn migrated_pairing_renders_canonical_wins_in_either_argument_order() {
     assert_migrated_pairing_renders_canonical_wins_in_either_argument_order().await;
+}
+
+#[tokio::test]
+async fn matchup_uses_server_nickname_then_stored_username() {
+    let database = database();
+    let connection = Connection::open(database.path()).expect("open matchup database");
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .expect("production foreign-key mode");
+    register(&connection, 1, "AliceStored");
+    register(&connection, 2, "BobStored");
+    let provider = AdvancedStatsRegistrationProvider::new(database.path()).with_player_names(
+        Arc::new(FixedPlayerNames(BTreeMap::from([
+            (1, Some("Alice Server".to_owned())),
+            (2, None),
+        ]))),
+    );
+    let responder = Arc::new(Responder::default());
+
+    registry(&provider)
+        .command_handler("matchup")
+        .expect("handler")
+        .handle(
+            request(
+                (1, "Alice Global Display"),
+                (2, "Bob Global Display"),
+                Some(GUILD as u64),
+            ),
+            responder.clone(),
+        )
+        .await
+        .expect("matchup response");
+
+    assert_eq!(
+        responder.followups.lock().expect("followups")[0].embeds[0]
+            .title
+            .as_deref(),
+        Some("Alice Server vs BobStored")
+    );
 }
 
 #[tokio::test]

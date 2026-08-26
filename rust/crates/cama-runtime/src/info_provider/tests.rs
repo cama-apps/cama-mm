@@ -26,7 +26,7 @@ const CAROL: u64 = 303;
 #[derive(Default)]
 struct RecordingDiscord {
     members: BTreeMap<(u64, u64), DiscordGuildMemberSnapshot>,
-    snapshot: Option<BTreeMap<u64, String>>,
+    server_nicknames: Option<BTreeMap<u64, Option<String>>>,
     member_lookups: Mutex<Vec<(u64, u64)>>,
     snapshots: Mutex<Vec<u64>>,
 }
@@ -35,11 +35,27 @@ impl RecordingDiscord {
     fn with_members(members: impl IntoIterator<Item = (u64, &'static str)>) -> Self {
         let cached = Self::with_uncached_members(members);
         Self {
-            snapshot: Some(
+            server_nicknames: Some(
                 cached
                     .members
                     .values()
-                    .map(|member| (member.user_id, member.display_name.clone()))
+                    .map(|member| (member.user_id, Some(member.display_name.clone())))
+                    .collect(),
+            ),
+            ..cached
+        }
+    }
+
+    fn with_members_without_nicknames(
+        members: impl IntoIterator<Item = (u64, &'static str)>,
+    ) -> Self {
+        let cached = Self::with_uncached_members(members);
+        Self {
+            server_nicknames: Some(
+                cached
+                    .members
+                    .values()
+                    .map(|member| (member.user_id, None))
                     .collect(),
             ),
             ..cached
@@ -66,7 +82,7 @@ impl RecordingDiscord {
                     )
                 })
                 .collect(),
-            snapshot: None,
+            server_nicknames: None,
             member_lookups: Mutex::new(Vec::new()),
             snapshots: Mutex::new(Vec::new()),
         }
@@ -182,12 +198,13 @@ impl DiscordTransport for RecordingDiscord {
         Ok(self.members.get(&(guild_id, user_id)).cloned())
     }
 
-    fn cached_guild_member_display_names(
+    fn cached_guild_member_server_nicknames(
         &self,
         guild_id: u64,
-    ) -> Result<Option<BTreeMap<u64, String>>, String> {
+        _user_ids: &[u64],
+    ) -> Result<Option<BTreeMap<u64, Option<String>>>, String> {
         self.snapshots.lock().expect("snapshots").push(guild_id);
-        Ok(self.snapshot.clone())
+        Ok(self.server_nicknames.clone())
     }
 }
 
@@ -793,6 +810,51 @@ async fn gambling_leaderboard_renders_all_sections_from_production_stats() {
     }
 }
 
+#[tokio::test]
+async fn gambling_leaderboard_uses_stored_username_without_server_nickname() {
+    let (_directory, path) = migrated_database();
+    seed_gambling_leaderboard_data(&path);
+    let provider = InfoRegistrationProvider::new(
+        path,
+        &config(),
+        Arc::new(RecordingDiscord::with_members_without_nicknames([
+            (ALICE, "Alice Global Display"),
+            (CAROL, "Carol Global Display"),
+        ])),
+    );
+    let handler = registry(&provider)
+        .command_handler("leaderboard")
+        .expect("leaderboard handler");
+    let responder = Arc::new(RecordingResponder::default());
+    handler
+        .handle(
+            command_request(
+                "leaderboard",
+                ALICE,
+                Some(GUILD),
+                None,
+                vec![InteractionOption {
+                    name: "type".to_owned(),
+                    value: InteractionValue::String("gambling".to_owned()),
+                }],
+            ),
+            responder.clone(),
+        )
+        .await
+        .expect("render gambling leaderboard");
+
+    let embed = &responder.followups.lock().expect("followups")[0].embeds[0];
+    let rendered = embed
+        .fields
+        .iter()
+        .map(|field| field.value.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains("AliceStored"));
+    assert!(rendered.contains("CarolStored"));
+    assert!(!rendered.contains("Global Display"));
+}
+
 #[test]
 fn production_gambling_stats_preserve_entry_shape_and_wager_sorting() {
     let (_directory, path) = migrated_database();
@@ -1238,7 +1300,7 @@ async fn calibration_runs_live_sqlite_analytics_and_emits_real_png_bytes() {
     assert!(response.ephemeral);
     assert_eq!(
         response.embeds[0].title.as_deref(),
-        Some("Calibration Stats: AliceLive")
+        Some("Calibration Stats: AliceStored")
     );
     let profile = response.embeds[0]
         .fields
