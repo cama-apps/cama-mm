@@ -5836,7 +5836,7 @@ fn db_pending_state(
         radiant_team_ids: state.radiant_player_ids.clone(),
         dire_team_ids: state.dire_player_ids.clone(),
         excluded_player_ids: state.excluded_player_ids.clone(),
-        excluded_conditional_player_ids: state.half_exclusion_increment_ids.clone(),
+        excluded_conditional_player_ids: state.conditional_exclusion_ids().to_vec(),
         radiant_value,
         dire_value,
         value_diff: (radiant_value - dire_value).abs(),

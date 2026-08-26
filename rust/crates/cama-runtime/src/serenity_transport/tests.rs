@@ -153,7 +153,7 @@ fn component_request() -> InteractionRequest {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn delayed_component_update_is_automatically_deferred_then_edited() {
     let inner = Arc::new(RecordingInteractionResponder::default());
     let responder = coordinated_responder(inner.clone());
