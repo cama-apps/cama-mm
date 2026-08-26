@@ -1145,9 +1145,10 @@ where
             .get_by_ids(&player_ids, lobby.scope.guild_id);
         if let Some(name_overrides) = name_overrides {
             for player in &mut players {
-                if let Some(name) = name_overrides.get(&player.discord_id) {
-                    player.name.clone_from(name);
-                }
+                player.name = name_overrides
+                    .get(&player.discord_id)
+                    .cloned()
+                    .unwrap_or_else(|| player.discord_id.to_string());
             }
         }
         let bonus_pool_preview = preview_port.map(|port| {

@@ -10,10 +10,9 @@ use cama_db::blame_luke::{
     BlameLukeChargeOutcome, BlameLukeExistingOperation, BlameLukeOperationIdentity,
     BlameLukeOperationOutcome, BlameLukeRecoverySummary, BlameLukeRepository,
 };
-use cama_db::core_repositories::PlayerRepository;
 use tracing::{error, warn};
 
-use crate::discord_transport::{GuildPlayerNameResolver, StoredUsernamePlayerNameResolver};
+use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
@@ -44,15 +43,11 @@ impl BlameLukeRegistrationProvider {
     #[must_use]
     pub fn new(database_path: impl AsRef<Path>) -> Self {
         let database_path = database_path.as_ref();
-        let mut provider = Self::with_ports(
+        Self::with_ports(
             Arc::new(BlameLukeRepository::new(database_path)),
             Arc::new(RandomReasonSelector),
             Arc::new(NativeBlameLukeRenderer),
-        );
-        Arc::get_mut(&mut provider.handler)
-            .expect("new Blame Luke provider owns its handler")
-            .players = Some(PlayerRepository::new(database_path));
-        provider
+        )
     }
 
     fn with_ports(
@@ -65,8 +60,7 @@ impl BlameLukeRegistrationProvider {
                 wallet,
                 selector,
                 renderer,
-                players: None,
-                player_names: Arc::new(StoredUsernamePlayerNameResolver),
+                player_names: Arc::new(DiscordIdPlayerNameResolver),
             }),
         }
     }
@@ -253,7 +247,6 @@ struct BlameLukeHandler {
     wallet: Arc<dyn BlameLukeWalletPort>,
     selector: Arc<dyn BlameLukeReasonSelector>,
     renderer: Arc<dyn BlameLukeRenderPort>,
-    players: Option<PlayerRepository>,
     player_names: Arc<dyn GuildPlayerNameResolver>,
 }
 
@@ -354,24 +347,10 @@ impl InteractionHandler for BlameLukeHandler {
 
 impl BlameLukeHandler {
     async fn render_player_name(&self, user_id: i64, guild_id: i64) -> String {
-        let stored_name = if let Some(players) = self.players.clone() {
-            tokio::task::spawn_blocking(move || {
-                players
-                    .get_by_id(user_id, Some(guild_id))
-                    .ok()
-                    .flatten()
-                    .map_or_else(|| format!("User {user_id}"), |player| player.name)
-            })
-            .await
-            .unwrap_or_else(|_| format!("User {user_id}"))
-        } else {
-            format!("User {user_id}")
-        };
         self.player_names
             .names_for_guild(guild_id, &[user_id])
             .unwrap_or_default()
-            .resolve(user_id, &stored_name)
-            .to_owned()
+            .resolve(user_id)
     }
 
     async fn launcher(

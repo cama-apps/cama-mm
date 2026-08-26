@@ -1214,10 +1214,7 @@ async fn balance_is_a_private_paginated_portfolio_with_tax_ledger_exposure() {
         assert!(response.components[0].buttons[0].disabled);
         assert!(!response.components[0].buttons[2].disabled);
         let overview = &response.embeds[0];
-        assert_eq!(
-            overview.title.as_deref(),
-            Some("💰 Jopacoin Portfolio — portfolio-player")
-        );
+        assert_eq!(overview.title.as_deref(), Some("💰 Jopacoin Portfolio — 7"));
         assert!(overview.fields.iter().any(|field| {
             field.name == "Asset Breakdown"
                 && field.value.contains("Wallet")
@@ -2614,6 +2611,7 @@ fn extend_wedge_only_changes_an_existing_bankruptcy_penalty() {
         false,
         None,
         None,
+        &BTreeMap::new(),
     )
     .expect("resolve no-op extension");
     assert_eq!(
@@ -2643,6 +2641,7 @@ fn extend_wedge_only_changes_an_existing_bankruptcy_penalty() {
         false,
         None,
         None,
+        &BTreeMap::new(),
     )
     .expect("resolve active extension");
     assert_eq!(
@@ -2708,6 +2707,7 @@ fn bankrupt_wheel_losses_apply_self_protection_and_log_only_the_applied_debit() 
             false,
             None,
             None,
+            &BTreeMap::new(),
         )
         .expect("resolve bankrupt loss");
 
@@ -2757,6 +2757,7 @@ fn bankrupt_wheel_losses_apply_self_protection_and_log_only_the_applied_debit() 
             false,
             None,
             None,
+            &BTreeMap::new(),
         )
         .expect("retry bankrupt loss");
         assert_eq!(retry.logged, -expected_applied);
@@ -2840,6 +2841,7 @@ fn fully_shielded_numeric_wheel_losses_keep_their_landed_presentation_and_histor
             &BTreeSet::new(),
             &BTreeSet::new(),
             None,
+            &BTreeMap::new(),
         )
         .expect("resolve pending numeric loss");
         assert!(
@@ -3896,25 +3898,33 @@ fn hostile_result_notes_preserve_python_detail_fields() {
         lightning_count: 2,
         total: 27,
         count: 2,
-        victims: vec![("alice".to_owned(), 19), ("bob".to_owned(), 8)],
+        victims: vec![(11, 19), (12, 8)],
         shield_absorbed_total: 3,
         shielded_count: 1,
         ..HostileResolution::default()
     };
-    let note = hostile_result_note(WheelMechanic::LightningBolt, &lightning, &config);
+    let names = BTreeMap::from([(11, "Server Alice".to_owned())]);
+    let note = hostile_result_note(WheelMechanic::LightningBolt, &lightning, &config, &names);
     assert!(note.contains("**2** player(s)"));
     assert!(note.contains("27"));
-    assert!(note.contains("alice"));
+    assert!(note.contains("Server Alice"));
+    assert!(note.contains("12"));
+    assert!(!note.contains("bob"));
     assert!(note.contains("White Mana Shields"));
 
     let shell = HostileResolution {
         total: 12,
-        victim_name: Some("rival".to_owned()),
+        victim_id: Some(13),
         victim_new_balance: Some(88),
         ..HostileResolution::default()
     };
-    let note = hostile_result_note(WheelMechanic::RedShell, &shell, &config);
-    assert!(note.contains("rival"));
+    let note = hostile_result_note(
+        WheelMechanic::RedShell,
+        &shell,
+        &config,
+        &BTreeMap::from([(13, "Server Rival".to_owned())]),
+    );
+    assert!(note.contains("Server Rival"));
     assert!(note.contains("Victim's new balance: **88**"));
 }
 

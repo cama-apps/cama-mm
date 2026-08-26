@@ -10,7 +10,7 @@ use crate::test_support::initialize_test_database as initialize_or_migrate;
 
 const GUILD: i64 = 42;
 
-struct FixedPlayerNames(BTreeMap<u64, Option<String>>);
+struct FixedPlayerNames(BTreeMap<u64, String>);
 
 impl GuildPlayerNameResolver for FixedPlayerNames {
     fn names_for_guild(
@@ -170,7 +170,7 @@ async fn validation_preserves_dm_self_and_unregistered_visibility() {
         .expect("missing response");
     assert_eq!(
         missing.followups.lock().expect("followups")[0].content,
-        "User 2 is not registered."
+        "2 is not registered."
     );
 }
 
@@ -213,7 +213,7 @@ async fn test_unregistered_player1() {
         .expect("missing player response");
     assert_eq!(
         responder.followups.lock().expect("followups")[0].content,
-        "User 1 is not registered."
+        "1 is not registered."
     );
 }
 
@@ -237,7 +237,7 @@ async fn test_unregistered_player2() {
         .expect("missing player response");
     assert_eq!(
         responder.followups.lock().expect("followups")[0].content,
-        "User 2 is not registered."
+        "2 is not registered."
     );
 }
 
@@ -264,8 +264,8 @@ async fn assert_migrated_pairing_renders_canonical_wins_in_either_argument_order
         .expect("handler");
 
     for (first, second, expected_first, expected_second) in [
-        ((1, "Alice"), (2, "Bob"), "Alice: 2 wins", "Bob: 3 wins"),
-        ((2, "Bob"), (1, "Alice"), "Bob: 3 wins", "Alice: 2 wins"),
+        ((1, "Alice"), (2, "Bob"), "1: 2 wins", "2: 3 wins"),
+        ((2, "Bob"), (1, "Alice"), "2: 3 wins", "1: 2 wins"),
     ] {
         let responder = Arc::new(Responder::default());
         handler
@@ -289,7 +289,7 @@ async fn migrated_pairing_renders_canonical_wins_in_either_argument_order() {
 }
 
 #[tokio::test]
-async fn matchup_uses_server_nickname_then_stored_username() {
+async fn matchup_uses_server_nickname_then_discord_display_name() {
     let database = database();
     let connection = Connection::open(database.path()).expect("open matchup database");
     connection
@@ -299,8 +299,8 @@ async fn matchup_uses_server_nickname_then_stored_username() {
     register(&connection, 2, "BobStored");
     let provider = AdvancedStatsRegistrationProvider::new(database.path()).with_player_names(
         Arc::new(FixedPlayerNames(BTreeMap::from([
-            (1, Some("Alice Server".to_owned())),
-            (2, None),
+            (1, "Alice Server".to_owned()),
+            (2, "Bob Global Display".to_owned()),
         ]))),
     );
     let responder = Arc::new(Responder::default());
@@ -323,7 +323,7 @@ async fn matchup_uses_server_nickname_then_stored_username() {
         responder.followups.lock().expect("followups")[0].embeds[0]
             .title
             .as_deref(),
-        Some("Alice Server vs BobStored")
+        Some("Alice Server vs Bob Global Display")
     );
 }
 

@@ -26,7 +26,7 @@ const CAROL: u64 = 303;
 #[derive(Default)]
 struct RecordingDiscord {
     members: BTreeMap<(u64, u64), DiscordGuildMemberSnapshot>,
-    server_nicknames: Option<BTreeMap<u64, Option<String>>>,
+    render_names: Option<BTreeMap<u64, String>>,
     member_lookups: Mutex<Vec<(u64, u64)>>,
     snapshots: Mutex<Vec<u64>>,
 }
@@ -35,11 +35,11 @@ impl RecordingDiscord {
     fn with_members(members: impl IntoIterator<Item = (u64, &'static str)>) -> Self {
         let cached = Self::with_uncached_members(members);
         Self {
-            server_nicknames: Some(
+            render_names: Some(
                 cached
                     .members
                     .values()
-                    .map(|member| (member.user_id, Some(member.display_name.clone())))
+                    .map(|member| (member.user_id, member.display_name.clone()))
                     .collect(),
             ),
             ..cached
@@ -51,11 +51,11 @@ impl RecordingDiscord {
     ) -> Self {
         let cached = Self::with_uncached_members(members);
         Self {
-            server_nicknames: Some(
+            render_names: Some(
                 cached
                     .members
                     .values()
-                    .map(|member| (member.user_id, None))
+                    .map(|member| (member.user_id, member.display_name.clone()))
                     .collect(),
             ),
             ..cached
@@ -82,7 +82,7 @@ impl RecordingDiscord {
                     )
                 })
                 .collect(),
-            server_nicknames: None,
+            render_names: None,
             member_lookups: Mutex::new(Vec::new()),
             snapshots: Mutex::new(Vec::new()),
         }
@@ -198,13 +198,13 @@ impl DiscordTransport for RecordingDiscord {
         Ok(self.members.get(&(guild_id, user_id)).cloned())
     }
 
-    fn cached_guild_member_server_nicknames(
+    fn cached_guild_member_render_names(
         &self,
         guild_id: u64,
         _user_ids: &[u64],
-    ) -> Result<Option<BTreeMap<u64, Option<String>>>, String> {
+    ) -> Result<Option<BTreeMap<u64, String>>, String> {
         self.snapshots.lock().expect("snapshots").push(guild_id);
-        Ok(self.server_nicknames.clone())
+        Ok(self.render_names.clone())
     }
 }
 
@@ -811,7 +811,7 @@ async fn gambling_leaderboard_renders_all_sections_from_production_stats() {
 }
 
 #[tokio::test]
-async fn gambling_leaderboard_uses_stored_username_without_server_nickname() {
+async fn gambling_leaderboard_uses_discord_display_name_without_server_nickname() {
     let (_directory, path) = migrated_database();
     seed_gambling_leaderboard_data(&path);
     let provider = InfoRegistrationProvider::new(
@@ -850,9 +850,9 @@ async fn gambling_leaderboard_uses_stored_username_without_server_nickname() {
         .map(|field| field.value.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(rendered.contains("AliceStored"));
-    assert!(rendered.contains("CarolStored"));
-    assert!(!rendered.contains("Global Display"));
+    assert!(rendered.contains("Alice Global Display"));
+    assert!(rendered.contains("Carol Global Display"));
+    assert!(!rendered.contains("Stored"));
 }
 
 #[test]
@@ -1300,7 +1300,7 @@ async fn calibration_runs_live_sqlite_analytics_and_emits_real_png_bytes() {
     assert!(response.ephemeral);
     assert_eq!(
         response.embeds[0].title.as_deref(),
-        Some("Calibration Stats: AliceStored")
+        Some("Calibration Stats: 101")
     );
     let profile = response.embeds[0]
         .fields

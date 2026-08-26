@@ -1,7 +1,7 @@
 //! Production Discord provider for Python's `/ratinganalysis` command.
 
 use std::collections::{BTreeSet, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -16,7 +16,6 @@ use cama_app::rating_comparison_service::{
     CalibrationBucket, CurrentOpenSkillPredictionPort, HistoricalOpenSkillRatings,
     HistoricalRatingMatch, RatingComparisonMatchPort, RatingComparisonService,
 };
-use cama_db::core_repositories::PlayerRepository;
 use cama_db::rating_analysis::{
     RatingAnalysisHistoricalMatch, RatingAnalysisHistoricalRatings, RatingAnalysisPlayer,
     RatingAnalysisRepository,
@@ -27,7 +26,7 @@ use thiserror::Error;
 use tracing::{error, warn};
 
 use crate::application_config::ApplicationConfig;
-use crate::discord_transport::{GuildPlayerNameResolver, StoredUsernamePlayerNameResolver};
+use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, InteractionAttachment,
     InteractionEmbed, InteractionHandler, InteractionHandlerError, InteractionOption,
@@ -77,16 +76,13 @@ impl RatingAnalysisRegistrationProvider {
             rating_system,
             config.migration.new_player_mmr_discount,
         );
-        let mut provider = Self::with_worker(
+        let provider = Self::with_worker(
             config.identities.admin_user_ids.iter().copied().collect(),
             Arc::new(ProductionRatingAnalysisWorker {
                 repository,
                 openskill,
             }),
         );
-        Arc::get_mut(&mut provider.handler)
-            .expect("new rating-analysis provider owns its handler")
-            .database_path = Some(database_path);
         Ok(provider)
     }
 
@@ -95,8 +91,7 @@ impl RatingAnalysisRegistrationProvider {
             handler: Arc::new(RatingAnalysisHandler {
                 admin_user_ids,
                 worker,
-                database_path: None,
-                player_names: Arc::new(StoredUsernamePlayerNameResolver),
+                player_names: Arc::new(DiscordIdPlayerNameResolver),
             }),
         }
     }
@@ -151,7 +146,6 @@ fn action_option() -> CommandOptionSpec {
 struct RatingAnalysisHandler {
     admin_user_ids: BTreeSet<i64>,
     worker: Arc<dyn RatingAnalysisWorkPort>,
-    database_path: Option<PathBuf>,
     player_names: Arc<dyn GuildPlayerNameResolver>,
 }
 
@@ -165,7 +159,6 @@ impl InteractionHandler for RatingAnalysisHandler {
         let InteractionRequest::Command {
             name,
             user_id,
-            user_display_name,
             guild_id,
             member_permissions,
             options,
@@ -198,56 +191,20 @@ impl InteractionHandler for RatingAnalysisHandler {
             return Ok(());
         }
         let selected_option = user_option(&options, "user")
-            .map(|(id, display_name)| signed_id(id, "selected user").map(|id| (id, display_name)))
+            .map(|(id, _)| signed_id(id, "selected user"))
             .transpose()?;
         let mut requested_ids = vec![user_id];
-        requested_ids.extend(selected_option.iter().map(|(id, _)| *id));
-        let stored_names = if let Some(path) = self.database_path.clone() {
-            let query_ids = requested_ids.clone();
-            tokio::task::spawn_blocking(move || {
-                PlayerRepository::new(path)
-                    .get_by_ids(&query_ids, Some(guild_id))
-                    .map(|players| {
-                        players
-                            .into_iter()
-                            .filter_map(|player| player.discord_id.map(|id| (id, player.name)))
-                            .collect::<HashMap<_, _>>()
-                    })
-                    .map_err(|error| error.to_string())
-            })
-            .await
-            .unwrap_or_else(|error| Err(format!("rating-analysis name task failed: {error}")))
-            .unwrap_or_else(|error| {
-                warn!(%error, "unable to load rating-analysis player names");
-                HashMap::new()
-            })
-        } else {
-            HashMap::new()
-        };
+        requested_ids.extend(selected_option);
         let names = self
             .player_names
             .names_for_guild(guild_id, &requested_ids)
             .unwrap_or_default();
-        let registered_name = |discord_id: i64, fallback: String| {
-            if self.database_path.is_some() {
-                stored_names
-                    .get(&discord_id)
-                    .cloned()
-                    .unwrap_or_else(|| format!("User {discord_id}"))
-            } else {
-                fallback
-            }
-        };
-        let selected_user = selected_option.map(|(id, display_name)| {
-            let stored = registered_name(id, display_name.unwrap_or_else(|| format!("User {id}")));
-            MemberTarget::new(id, names.resolve(id, &stored))
-        });
-        let invoker_stored = registered_name(user_id, user_display_name);
+        let selected_user = selected_option.map(|id| MemberTarget::new(id, names.resolve(id)));
         let input = RatingAnalysisInput {
             admin_allowed: true,
             action: action.clone(),
             guild_id: Some(guild_id),
-            invoker: MemberTarget::new(user_id, names.resolve(user_id, &invoker_stored)),
+            invoker: MemberTarget::new(user_id, names.resolve(user_id)),
             selected_user,
         };
 

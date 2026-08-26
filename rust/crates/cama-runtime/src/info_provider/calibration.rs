@@ -106,7 +106,7 @@ pub(super) fn calibration_response(
             .map_err(|_| "Discord user ID exceeds SQLite's signed range".to_owned())?;
         sources.individual_response(
             user_id,
-            target.1.unwrap_or_else(|| format!("User {}", target.0)),
+            target.1.unwrap_or_else(|| target.0.to_string()),
             guild_id,
         )
     } else {

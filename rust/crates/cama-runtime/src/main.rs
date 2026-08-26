@@ -571,6 +571,9 @@ async fn run_serve() -> ExitCode {
         &config.db_path,
         &application_config,
         production_ai_service.clone(),
+        Arc::new(DiscordGuildPlayerNameResolver::new(
+            discord_transport.clone(),
+        )),
     )) {
         error!(%error, "match/betting flavor composition refused startup");
         return ExitCode::from(1);

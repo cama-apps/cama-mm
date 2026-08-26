@@ -599,22 +599,10 @@ impl InteractionHandler for AdminHandler {
 
 impl AdminHandler {
     async fn render_player_name(&self, user_id: i64, guild_id: i64) -> String {
-        let players = self.players.clone();
-        let stored_name = tokio::task::spawn_blocking(move || {
-            players
-                .get_by_id(user_id, Some(guild_id))
-                .map_err(|error| error.to_string())
-        })
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .flatten()
-        .map_or_else(|| format!("User {user_id}"), |player| player.name);
         self.player_names
             .names_for_guild(guild_id, &[user_id])
             .unwrap_or_default()
-            .resolve(user_id, &stored_name)
-            .to_owned()
+            .resolve(user_id)
     }
 
     async fn lowprio_add(

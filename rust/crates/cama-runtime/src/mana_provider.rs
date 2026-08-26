@@ -32,7 +32,7 @@ use cama_db::tip_repository::TipRepository;
 use chrono::{DateTime, FixedOffset, Utc};
 
 use crate::ApplicationConfig;
-use crate::discord_transport::{GuildPlayerNameResolver, StoredUsernamePlayerNameResolver};
+use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
 use crate::registration::{
     CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute, InteractionActionRow,
     InteractionButton, InteractionButtonStyle, InteractionEmbed, InteractionHandler,
@@ -116,7 +116,7 @@ impl ManaRegistrationProvider {
                 wheel_cooldown_seconds,
                 white_stipend,
                 discord,
-                player_names: Arc::new(StoredUsernamePlayerNameResolver),
+                player_names: Arc::new(DiscordIdPlayerNameResolver),
                 clock,
                 command_cooldowns: Mutex::new(BTreeMap::new()),
                 board_expirations: Mutex::new(BTreeMap::new()),
@@ -312,30 +312,8 @@ impl ManaInteractionHandler {
             .player_names
             .names_for_guild(guild_id, &player_ids)
             .unwrap_or_default();
-        let path = self.database_path.clone();
-        let query_ids = player_ids;
-        let stored_names = spawn_sqlite("mana player-name lookup", move || {
-            PlayerRepository::new(path)
-                .get_by_ids(&query_ids, Some(guild_id))
-                .map(|players| {
-                    players
-                        .into_iter()
-                        .filter_map(|player| {
-                            player
-                                .discord_id
-                                .map(|discord_id| (discord_id, player.name))
-                        })
-                        .collect::<BTreeMap<_, _>>()
-                })
-                .map_err(|error| error.to_string())
-        })
-        .await?;
         for member in members {
-            let stored_name = stored_names
-                .get(&member.user_id)
-                .cloned()
-                .unwrap_or_else(|| format!("User {}", member.user_id));
-            member.display_name = names.resolve(member.user_id, &stored_name).to_owned();
+            member.display_name = names.resolve(member.user_id);
         }
         Ok(())
     }

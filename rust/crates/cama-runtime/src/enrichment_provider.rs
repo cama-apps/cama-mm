@@ -47,7 +47,7 @@ use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
 use crate::application_config::ApplicationConfig;
-use crate::discord_transport::{GuildPlayerNameResolver, StoredUsernamePlayerNameResolver};
+use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
 use crate::registration::{
     CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute, InteractionActionRow,
     InteractionAttachment, InteractionButton, InteractionButtonStyle, InteractionEmbed,
@@ -260,7 +260,7 @@ impl EnrichmentRegistrationProvider {
             handler: Arc::new(EnrichmentHandler {
                 matches: MatchRepository::new(path),
                 players: PlayerRepository::new(path),
-                player_names: Arc::new(StoredUsernamePlayerNameResolver),
+                player_names: Arc::new(DiscordIdPlayerNameResolver),
                 steam: OpenDotaPlayerRepository::new(path),
                 guild_config: GuildConfigRepository::new(path, config.values.ai_features_enabled),
                 administrative: MatchDiscoveryRepository::new(path),
@@ -738,21 +738,10 @@ struct CommandContext {
 
 impl EnrichmentHandler {
     async fn render_player_name(&self, user_id: i64, guild_id: i64) -> String {
-        let players = self.players.clone();
-        let stored_name = run_blocking(move || {
-            players
-                .get_by_id(user_id, Some(guild_id))
-                .map_err(|error| error.to_string())
-        })
-        .await
-        .ok()
-        .flatten()
-        .map_or_else(|| format!("User {user_id}"), |player| player.name);
         self.player_names
             .names_for_guild(guild_id, &[user_id])
             .unwrap_or_default()
-            .resolve(user_id, &stored_name)
-            .to_owned()
+            .resolve(user_id)
     }
 
     async fn recorded_match_discovery_response(
@@ -1859,7 +1848,7 @@ impl EnrichmentHandler {
             user_option(options, "user").unwrap_or((context.user_id, context.user_display_name));
         let target_name = match context.guild_id {
             Some(guild_id) => self.render_player_name(target_id, guild_id).await,
-            None => format!("User {target_id}"),
+            None => target_id.to_string(),
         };
         let limit = integer_option(options, "limit").unwrap_or(10).clamp(1, 20);
         let limit = usize::try_from(limit).unwrap_or(10);

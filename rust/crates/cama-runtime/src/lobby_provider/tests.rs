@@ -1,8 +1,6 @@
 use super::*;
 
-use std::sync::{Mutex, mpsc};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::sync::Mutex;
 
 use crate::discord_transport::{
     DiscordGuildMemberSnapshot, DiscordMessageReceipt, DiscordMessageSnapshot, DiscordUserSnapshot,
@@ -19,7 +17,6 @@ use cama_db::moderation::{
 };
 use cama_domain::curfew::CurfewWindow;
 use chrono::Timelike;
-use rusqlite::Connection;
 use tempfile::NamedTempFile;
 
 #[derive(Default)]
@@ -467,11 +464,11 @@ impl DiscordTransport for RecordingTransport {
             .cloned())
     }
 
-    fn cached_guild_member_server_nicknames(
+    fn cached_guild_member_render_names(
         &self,
         guild_id: u64,
         user_ids: &[u64],
-    ) -> Result<Option<BTreeMap<u64, Option<String>>>, String> {
+    ) -> Result<Option<BTreeMap<u64, String>>, String> {
         let state = self.state.lock().expect("transport state");
         Ok(Some(
             state
@@ -481,14 +478,19 @@ impl DiscordTransport for RecordingTransport {
                     *member_guild_id == guild_id && user_ids.contains(user_id)
                 })
                 .map(|(_, user_id)| {
-                    (
-                        *user_id,
-                        state
-                            .server_nicknames
-                            .get(&(guild_id, *user_id))
-                            .cloned()
-                            .unwrap_or(None),
-                    )
+                    let name = state
+                        .server_nicknames
+                        .get(&(guild_id, *user_id))
+                        .cloned()
+                        .flatten()
+                        .or_else(|| {
+                            state
+                                .members
+                                .get(&(guild_id, *user_id))
+                                .map(|member| member.display_name.clone())
+                        })
+                        .unwrap_or_else(|| user_id.to_string());
+                    (*user_id, name)
                 })
                 .collect(),
         ))
@@ -716,39 +718,6 @@ fn database_with_players(players: &[(i64, &str)]) -> NamedTempFile {
         repository.add(&player).expect("insert registered player");
     }
     database
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn fallback_name_yields_while_sqlite_is_busy() {
-    let database = database_with_players(&[(10, "Creator")]);
-    let players = SqliteLobbyPlayers::new(database.path());
-    let path = database.path().to_path_buf();
-    let (locked_tx, locked_rx) = mpsc::channel();
-    let lock_thread = thread::spawn(move || {
-        let connection = Connection::open(path).expect("open lock connection");
-        connection
-            .execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE;")
-            .expect("hold exclusive database lock");
-        locked_tx.send(()).expect("announce database lock");
-        thread::sleep(Duration::from_millis(250));
-        connection.execute_batch("COMMIT;").expect("release lock");
-    });
-    locked_rx.recv().expect("database lock acquired");
-
-    let started = Instant::now();
-    let timer = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(25)).await;
-        started.elapsed()
-    });
-    let rendered_name = players.fallback_name(AppUserId(10), AppGuildId(42)).await;
-    let timer_elapsed = timer.await.expect("runtime timer task");
-    lock_thread.join().expect("database lock thread");
-
-    assert_eq!(rendered_name, "Creator");
-    assert!(
-        timer_elapsed < Duration::from_millis(150),
-        "SQLite lookup blocked the runtime worker for {timer_elapsed:?}"
-    );
 }
 
 fn provider_for(
@@ -1562,6 +1531,7 @@ async fn raw_jopacoin_subscribes_the_thread_then_invokes_the_shared_neon_observe
     transport.set_user(DiscordUserSnapshot {
         user_id: 20,
         display_name: "Fetched Spectator".to_owned(),
+        account_username: "fetched-spectator-account".to_owned(),
         is_bot: false,
     });
     let reaction = |user_id, name: Option<&str>| RawReactionEvent {
@@ -1586,7 +1556,7 @@ async fn raw_jopacoin_subscribes_the_thread_then_invokes_the_shared_neon_observe
         vec![LobbyGambaSpectator {
             guild_id: 42,
             player_id: 20,
-            player_display_name: "Spectator".to_owned(),
+            player_display_name: "Fetched Spectator".to_owned(),
             channel_id: 700,
         }]
     );
@@ -2892,7 +2862,7 @@ async fn live_readycheck_reconciles_raw_join_and_leave_against_the_active_genera
 }
 
 #[tokio::test]
-async fn readycheck_uses_stored_username_without_server_nickname() {
+async fn readycheck_uses_discord_display_name_without_server_nickname() {
     let database = database_with_players(&[(10, "Stored Creator")]);
     let transport = Arc::new(RecordingTransport::default());
     transport.set_member_without_nickname(
@@ -2921,7 +2891,7 @@ async fn readycheck_uses_stored_username_without_server_nickname() {
         .state
         .classify_readycheck_players(&lobby)
         .await;
-    assert_eq!(players[&AppUserId(10)].name, "Stored Creator");
+    assert_eq!(players[&AppUserId(10)].name, "Global Creator");
 }
 
 #[tokio::test]

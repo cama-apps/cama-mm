@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -57,7 +57,7 @@ use thiserror::Error;
 use tracing::{debug, error, warn};
 
 use crate::ApplicationConfig;
-use crate::discord_transport::{GuildPlayerNameResolver, StoredUsernamePlayerNameResolver};
+use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, InteractionAttachment,
     InteractionEmbed, InteractionHandler, InteractionHandlerError, InteractionOption,
@@ -163,6 +163,7 @@ pub enum ShopProviderBuildError {
 #[derive(Clone)]
 pub struct ShopRegistrationProvider {
     handler: Arc<ShopInteractionHandler>,
+    player_names: Arc<SharedGuildPlayerNameResolver>,
 }
 
 impl ShopRegistrationProvider {
@@ -177,6 +178,8 @@ impl ShopRegistrationProvider {
         repository.verify_schema()?;
         let economy_config = shop_economy_config(config);
         let runtime_config = ShopRuntimeConfig::from_application_config(config);
+        let player_names = Arc::new(SharedGuildPlayerNameResolver::default());
+        let player_name_resolver: Arc<dyn GuildPlayerNameResolver> = player_names.clone();
         let recalibration = RecalibrationService::new(
             RatingHistoryRepository::new(&path),
             RecalibrationServiceConfig {
@@ -188,13 +191,19 @@ impl ShopRegistrationProvider {
         );
         let flavor = ai_service.map(|ai| {
             Arc::new(
-                FlavorTextService::new(ai, Arc::new(ProductionShopPlayerContext::new(&path)))
-                    .with_config(Arc::new(ProductionShopGuildAiConfig {
-                        repository: GuildConfigRepository::new(
-                            &path,
-                            config.values.ai_features_enabled,
-                        ),
-                    })),
+                FlavorTextService::new(
+                    ai,
+                    Arc::new(ProductionShopPlayerContext::new(
+                        &path,
+                        Arc::clone(&player_name_resolver),
+                    )),
+                )
+                .with_config(Arc::new(ProductionShopGuildAiConfig {
+                    repository: GuildConfigRepository::new(
+                        &path,
+                        config.values.ai_features_enabled,
+                    ),
+                })),
             )
         });
         let mut neon = NeonDegenService::new(shop_seed());
@@ -214,7 +223,7 @@ impl ShopRegistrationProvider {
                 gambling: GamblingStatsRepository::new(&path),
                 economy_events: Arc::new(SqliteEconomyEventService::new(&path, economy_config)),
                 discord,
-                player_names: Arc::new(StoredUsernamePlayerNameResolver),
+                player_names: player_name_resolver,
                 flavor,
                 config: runtime_config,
                 clock: Arc::new(SystemShopClock),
@@ -224,15 +233,45 @@ impl ShopRegistrationProvider {
                 mana_rates: Mutex::new(BTreeMap::new()),
                 neon: Mutex::new(neon),
             }),
+            player_names,
         })
     }
 
     #[must_use]
-    pub fn with_player_names(mut self, player_names: Arc<dyn GuildPlayerNameResolver>) -> Self {
-        Arc::get_mut(&mut self.handler)
-            .expect("new shop provider owns its handler")
-            .player_names = player_names;
+    pub fn with_player_names(self, player_names: Arc<dyn GuildPlayerNameResolver>) -> Self {
+        self.player_names.replace(player_names);
         self
+    }
+}
+
+struct SharedGuildPlayerNameResolver {
+    inner: RwLock<Arc<dyn GuildPlayerNameResolver>>,
+}
+
+impl Default for SharedGuildPlayerNameResolver {
+    fn default() -> Self {
+        Self {
+            inner: RwLock::new(Arc::new(DiscordIdPlayerNameResolver)),
+        }
+    }
+}
+
+impl SharedGuildPlayerNameResolver {
+    fn replace(&self, player_names: Arc<dyn GuildPlayerNameResolver>) {
+        *self.inner.write().expect("shop player-name resolver lock") = player_names;
+    }
+}
+
+impl GuildPlayerNameResolver for SharedGuildPlayerNameResolver {
+    fn names_for_guild(
+        &self,
+        guild_id: i64,
+        player_ids: &[i64],
+    ) -> Result<crate::discord_transport::GuildPlayerNameDirectory, String> {
+        self.inner
+            .read()
+            .map_err(|_| "shop player-name resolver lock is poisoned".to_owned())?
+            .names_for_guild(guild_id, player_ids)
     }
 }
 
@@ -568,23 +607,18 @@ impl ShopInteractionHandler {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let mut stored_names = BTreeMap::new();
-        for (index, id) in &targets {
-            let target_id = signed_id(*id, "target user")?;
-            let fallback = match &context.options[*index].value {
-                InteractionValue::User { display_name, .. } => {
-                    display_name.clone().unwrap_or_else(|| format!("User {id}"))
-                }
-                _ => format!("User {id}"),
-            };
-            let stored_name = self
-                .load_player(target_id, context.guild_id)
-                .await?
-                .map(|player| player.name)
-                .unwrap_or(fallback);
-            stored_names.insert(target_id, stored_name);
-        }
-        let rendered_names = self.project_stored_player_names(context.guild_id, stored_names);
+        let mut player_ids = targets
+            .iter()
+            .map(|(_, id)| signed_id(*id, "target user"))
+            .collect::<Result<Vec<_>, _>>()?;
+        player_ids.push(context.user_id);
+        player_ids.sort_unstable();
+        player_ids.dedup();
+        let rendered_names = self.project_player_names(context.guild_id, &player_ids);
+        context.user_display_name = rendered_names
+            .get(&context.user_id)
+            .cloned()
+            .unwrap_or_else(|| context.user_id.to_string());
         for (_index, id) in targets {
             let target_id = signed_id(id, "target user")?;
             context.rendered_user_names.insert(
@@ -592,27 +626,20 @@ impl ShopInteractionHandler {
                 rendered_names
                     .get(&target_id)
                     .cloned()
-                    .unwrap_or_else(|| format!("User {id}")),
+                    .unwrap_or_else(|| target_id.to_string()),
             );
         }
         Ok(context)
     }
 
-    fn project_stored_player_names(
-        &self,
-        guild_id: i64,
-        stored_names: BTreeMap<i64, String>,
-    ) -> BTreeMap<i64, String> {
-        let player_ids = stored_names.keys().copied().collect::<Vec<_>>();
+    fn project_player_names(&self, guild_id: i64, player_ids: &[i64]) -> BTreeMap<i64, String> {
         let names = self
             .player_names
-            .names_for_guild(guild_id, &player_ids)
+            .names_for_guild(guild_id, player_ids)
             .unwrap_or_default();
-        stored_names
-            .into_iter()
-            .map(|(player_id, stored_name)| {
-                (player_id, names.resolve(player_id, &stored_name).to_owned())
-            })
+        player_ids
+            .iter()
+            .map(|player_id| (*player_id, names.resolve(*player_id)))
             .collect()
     }
 
@@ -1316,11 +1343,7 @@ impl ShopInteractionHandler {
                     .map(|request| request.victim_id)
                     .collect::<Vec<_>>();
                 let outcomes = self.apply_hostile_batch(requests).await?;
-                let stored_names = selected
-                    .iter()
-                    .map(|player| (player.discord_id, player.name.clone()))
-                    .collect::<BTreeMap<_, _>>();
-                let names = self.project_stored_player_names(guild_id, stored_names);
+                let names = self.project_player_names(guild_id, &victim_ids);
                 let mut total_destroyed = 0;
                 let mut total_absorbed = 0;
                 let mut lines = Vec::new();
@@ -2917,14 +2940,16 @@ struct ProductionShopPlayerContext {
     shop: ShopRuntimeRepository,
     gambling: GamblingStatsRepository,
     loans: LoanRepository,
+    player_names: Arc<dyn GuildPlayerNameResolver>,
 }
 
 impl ProductionShopPlayerContext {
-    fn new(path: impl AsRef<Path>) -> Self {
+    fn new(path: impl AsRef<Path>, player_names: Arc<dyn GuildPlayerNameResolver>) -> Self {
         Self {
             shop: ShopRuntimeRepository::new(path.as_ref()),
             gambling: GamblingStatsRepository::new(path.as_ref()),
             loans: LoanRepository::new(path.as_ref()),
+            player_names,
         }
     }
 }
@@ -2957,8 +2982,13 @@ impl PlayerContextPort for ProductionShopPlayerContext {
             .get_state(discord_id, Some(guild_id))
             .ok()
             .flatten();
+        let username = self
+            .player_names
+            .names_for_guild(guild_id, &[discord_id])
+            .unwrap_or_default()
+            .resolve(discord_id);
         Ok(Some(PlayerContext {
-            username: player.name,
+            username,
             balance: player.balance,
             debt_amount: (player.balance < 0).then_some(player.balance.saturating_abs()),
             win_rate: (games > 0).then_some(player.wins as f64 / games as f64 * 100.0),
@@ -3176,20 +3206,18 @@ fn user_option(context: &CommandContext, name: &str) -> Result<Option<UserOption
         .find(|option| option.name == name)
         .map(|option| &option.value);
     match value {
-        Some(InteractionValue::User {
-            id, display_name, ..
-        }) => {
-            let display_name = display_name.clone().unwrap_or_else(|| format!("User {id}"));
+        Some(InteractionValue::User { id, .. }) => {
             let signed_id = signed_id(*id, "target user")?;
+            let display_name = context
+                .rendered_user_names
+                .get(&signed_id)
+                .cloned()
+                .unwrap_or_else(|| id.to_string());
             Ok(Some(UserOption {
                 id: signed_id,
                 unsigned_id: *id,
                 ai_display_name: display_name.clone(),
-                display_name: context
-                    .rendered_user_names
-                    .get(&signed_id)
-                    .cloned()
-                    .unwrap_or_else(|| format!("User {id}")),
+                display_name,
             }))
         }
         None => Ok(None),

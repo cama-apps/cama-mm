@@ -334,7 +334,7 @@ impl InteractionHandler for InfoHandler {
 /// cache snapshot, or not at all because this transport keeps no cache.
 enum MemberResolution {
     Snapshot(GuildMemberDirectory),
-    Uncached(Vec<(i64, String)>),
+    Uncached(Vec<i64>),
 }
 
 impl InfoHandler {
@@ -511,41 +511,23 @@ impl InfoHandler {
             let ids = repository
                 .candidate_discord_ids(signed_guild_id)
                 .map_err(|error| error.to_string())?;
-            let stored_names = repository.registered_usernames(signed_guild_id)?;
             let requested_ids = ids
                 .iter()
                 .filter_map(|discord_id| u64::try_from(*discord_id).ok())
                 .collect::<Vec<_>>();
             Ok::<_, String>(
-                match discord.cached_guild_member_server_nicknames(guild_id, &requested_ids)? {
+                match discord.cached_guild_member_render_names(guild_id, &requested_ids)? {
                     // A candidate absent from the snapshot has left the guild
                     // and is simply not listed.
-                    Some(nicknames) => {
-                        let names = GuildPlayerNameDirectory::new(Some(nicknames));
+                    Some(render_names) => {
+                        let names = GuildPlayerNameDirectory::new(Some(render_names));
                         MemberResolution::Snapshot(GuildMemberDirectory::new(
                             ids.into_iter()
                                 .filter(|discord_id| names.contains(*discord_id))
-                                .map(|discord_id| {
-                                    let stored_name = stored_names
-                                        .get(&discord_id)
-                                        .cloned()
-                                        .unwrap_or_else(|| format!("User {discord_id}"));
-                                    let name = names.resolve(discord_id, &stored_name).to_owned();
-                                    (discord_id, name)
-                                }),
+                                .map(|discord_id| (discord_id, names.resolve(discord_id))),
                         ))
                     }
-                    None => MemberResolution::Uncached(
-                        ids.into_iter()
-                            .map(|discord_id| {
-                                let stored_name = stored_names
-                                    .get(&discord_id)
-                                    .cloned()
-                                    .unwrap_or_else(|| format!("User {discord_id}"));
-                                (discord_id, stored_name)
-                            })
-                            .collect(),
-                    ),
+                    None => MemberResolution::Uncached(ids),
                 },
             )
         })
@@ -567,15 +549,15 @@ impl InfoHandler {
     async fn member_directory_by_lookup(
         &self,
         guild_id: u64,
-        candidates: Vec<(i64, String)>,
+        candidates: Vec<i64>,
     ) -> GuildMemberDirectory {
         let mut members = Vec::with_capacity(candidates.len());
-        for (discord_id, stored_name) in candidates {
+        for discord_id in candidates {
             let Ok(user_id) = u64::try_from(discord_id) else {
                 continue;
             };
             match self.discord.guild_member(guild_id, user_id).await {
-                Ok(Some(_member)) => members.push((discord_id, stored_name)),
+                Ok(Some(member)) => members.push((discord_id, member.display_name)),
                 Ok(None) => {}
                 Err(error) => {
                     // A candidate that cannot be resolved is absent, not fatal
@@ -732,9 +714,7 @@ impl InfoHandler {
             .unwrap_or((user_id, false));
         let sources = self.calibration.clone();
         let signed_guild = signed_optional_id(guild_id, "guild")?;
-        let target_name = self
-            .player_render_name(guild_id, signed_guild, target_id)
-            .await?;
+        let target_name = self.player_render_name(guild_id, target_id).await?;
         let target = (target_id, Some(target_name), selected_user);
         let response = tokio::task::spawn_blocking(move || {
             calibration_response(sources, target, signed_guild)
@@ -762,25 +742,19 @@ impl InfoHandler {
     async fn player_render_name(
         &self,
         guild_id: Option<u64>,
-        signed_guild_id: Option<i64>,
         user_id: u64,
     ) -> Result<String, InteractionHandlerError> {
-        let repository = self.leaderboard.clone();
         let discord = Arc::clone(&self.discord);
         tokio::task::spawn_blocking(move || -> Result<String, String> {
             let signed_user_id = i64::try_from(user_id)
                 .map_err(|_| "target user id exceeds SQLite range".to_owned())?;
-            let stored_name = repository
-                .registered_usernames(signed_guild_id)?
-                .remove(&signed_user_id)
-                .unwrap_or_else(|| format!("User {user_id}"));
             let Some(guild_id) = guild_id else {
-                return Ok(stored_name);
+                return Ok(signed_user_id.to_string());
             };
             let names = GuildPlayerNameDirectory::new(
-                discord.cached_guild_member_server_nicknames(guild_id, &[user_id])?,
+                discord.cached_guild_member_render_names(guild_id, &[user_id])?,
             );
-            Ok(names.resolve(signed_user_id, &stored_name).to_owned())
+            Ok(names.resolve(signed_user_id))
         })
         .await
         .map_err(|error| {
@@ -1236,18 +1210,6 @@ impl InfoLeaderboardRepository {
             .map_err(|error| error.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())
-    }
-
-    fn registered_usernames(&self, guild_id: Option<i64>) -> Result<BTreeMap<i64, String>, String> {
-        PlayerRepository::new(&self.path)
-            .get_all(guild_id)
-            .map_err(|error| error.to_string())
-            .map(|players| {
-                players
-                    .into_iter()
-                    .filter_map(|player| Some((player.discord_id?, player.name)))
-                    .collect()
-            })
     }
 }
 

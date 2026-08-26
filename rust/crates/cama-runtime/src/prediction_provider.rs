@@ -38,8 +38,8 @@ use tracing::{debug, warn};
 
 use crate::ApplicationConfig;
 use crate::discord_transport::{
-    DiscordAllowedMentions, DiscordMessage, DiscordTransport, GuildPlayerNameResolver,
-    StoredUsernamePlayerNameResolver,
+    DiscordAllowedMentions, DiscordGuildPlayerNameResolver, DiscordIdPlayerNameResolver,
+    DiscordMessage, DiscordTransport, GuildPlayerNameResolver,
 };
 use crate::gamba_guild_source::GambaGuildSource;
 use crate::ids::signed_id;
@@ -157,6 +157,7 @@ pub struct ProductionPredictionNeonPort {
     cooldowns: Arc<Mutex<BTreeMap<(i64, i64), Instant>>>,
     database_path: std::path::PathBuf,
     discord: Arc<dyn DiscordTransport>,
+    player_names: Arc<dyn GuildPlayerNameResolver>,
     random: Arc<dyn PredictionNeonRandomPort>,
     sleep: Arc<dyn PredictionNeonSleepPort>,
 }
@@ -169,12 +170,15 @@ impl ProductionPredictionNeonPort {
         discord: Arc<dyn DiscordTransport>,
         ai: Option<Arc<AIService>>,
     ) -> Self {
+        let player_names: Arc<dyn GuildPlayerNameResolver> =
+            Arc::new(DiscordGuildPlayerNameResolver::new(Arc::clone(&discord)));
         Self {
             ai,
             config: PredictionNeonConfig::from_application_config(config),
             cooldowns: Arc::new(Mutex::new(BTreeMap::new())),
             database_path: database_path.as_ref().to_path_buf(),
             discord,
+            player_names,
             random: Arc::new(ProductionPredictionNeonRandom),
             sleep: Arc::new(TokioPredictionNeonSleep),
         }
@@ -194,6 +198,7 @@ impl ProductionPredictionNeonPort {
             cooldowns: Arc::new(Mutex::new(BTreeMap::new())),
             database_path: database_path.as_ref().to_path_buf(),
             discord,
+            player_names: Arc::new(DiscordIdPlayerNameResolver),
             random,
             sleep,
         }
@@ -245,19 +250,17 @@ struct PredictionNeonPlayerContext {
 fn load_prediction_neon_context(
     database_path: &Path,
     event: PredictionBigWin,
+    render_name: String,
 ) -> PredictionNeonPlayerContext {
     let players = PlayerRepository::new(database_path);
     let player = players
         .get_by_id(event.discord_id, Some(event.guild_id))
         .ok()
         .flatten();
-    let name = player.as_ref().map_or_else(
-        || format!("Client-{}", event.discord_id % 10_000),
-        |player| player.name.clone(),
-    );
+    let name = render_name;
     let mut values = BTreeMap::new();
     if let Some(player) = player {
-        values.insert("name".to_owned(), JsonValue::String(player.name));
+        values.insert("name".to_owned(), JsonValue::String(name.clone()));
         values.insert(
             "balance".to_owned(),
             JsonValue::Number(player.jopacoin_balance.into()),
@@ -432,8 +435,13 @@ impl PredictionNeonPort for ProductionPredictionNeonPort {
         let database_path = self.database_path.clone();
         let config = self.config.clone();
         let ai = self.ai.clone();
+        let render_name = self
+            .player_names
+            .names_for_guild(event.guild_id, &[event.discord_id])
+            .unwrap_or_default()
+            .resolve(event.discord_id);
         let (text, gif) = tokio::task::spawn_blocking(move || {
-            let context = load_prediction_neon_context(&database_path, event);
+            let context = load_prediction_neon_context(&database_path, event, render_name);
             let gif = render_big_win(
                 &context.name,
                 event.payout,
@@ -641,8 +649,7 @@ impl PredictionRegistrationProvider {
                 gamba_guilds: ports.gamba_guilds,
                 discord: ports.discord,
                 neon,
-                players: PlayerRepository::new(&path),
-                player_names: Arc::new(StoredUsernamePlayerNameResolver),
+                player_names: Arc::new(DiscordIdPlayerNameResolver),
                 help_cooldowns: Mutex::new(BTreeMap::new()),
             }),
         }
@@ -684,7 +691,6 @@ struct PredictionInteractionHandler {
     gamba_guilds: Arc<dyn GambaGuildSource>,
     discord: Arc<dyn DiscordTransport>,
     neon: Arc<dyn PredictionNeonPort>,
-    players: PlayerRepository,
     player_names: Arc<dyn GuildPlayerNameResolver>,
     help_cooldowns: Mutex<BTreeMap<u64, Instant>>,
 }
@@ -1291,39 +1297,13 @@ impl PredictionInteractionHandler {
             .iter()
             .map(|trade| trade.discord_id)
             .collect::<Vec<_>>();
-        let query_ids = player_ids.clone();
-        let players = self.players.clone();
-        let stored_names = spawn_sqlite("load prediction trade names", move || {
-            players
-                .get_by_ids(&query_ids, Some(guild_id))
-                .map(|players| {
-                    players
-                        .into_iter()
-                        .filter_map(|player| {
-                            player
-                                .discord_id
-                                .map(|discord_id| (discord_id, player.name))
-                        })
-                        .collect::<BTreeMap<_, _>>()
-                })
-                .map_err(|error| error.to_string())
-        })
-        .await
-        .unwrap_or_default();
         let names = self
             .player_names
             .names_for_guild(guild_id, &player_ids)
             .unwrap_or_default();
         trades
             .iter()
-            .map(|trade| {
-                let fallback = format!("User {}", trade.discord_id);
-                let stored_name = stored_names.get(&trade.discord_id).unwrap_or(&fallback);
-                (
-                    trade.discord_id,
-                    names.resolve(trade.discord_id, stored_name).to_owned(),
-                )
-            })
+            .map(|trade| (trade.discord_id, names.resolve(trade.discord_id)))
             .collect()
     }
 
@@ -2819,7 +2799,7 @@ fn recent_trade_text(trades: &[Trade], display_names: &BTreeMap<i64, String>) ->
             let name = display_names
                 .get(&trade.discord_id)
                 .cloned()
-                .unwrap_or_else(|| format!("User {}", trade.discord_id));
+                .unwrap_or_else(|| trade.discord_id.to_string());
             let verb = if trade.action.starts_with("buy") {
                 "bought"
             } else {

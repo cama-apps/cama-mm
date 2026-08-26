@@ -7,14 +7,13 @@
 //! not create schema; startup migration authority remains outside this module.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use cama_app::economy_event_sqlite::SqliteEconomyEventService;
 use cama_app::player_trivia_service as app;
-use cama_db::core_repositories::PlayerRepository;
 use cama_db::pet_evolution_repository::PetEvolutionRepository;
 use cama_db::player_trivia as db;
 use cama_db::predictions_repository::PredictionRepository;
@@ -24,7 +23,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use crate::ApplicationConfig;
-use crate::discord_transport::{GuildPlayerNameResolver, StoredUsernamePlayerNameResolver};
+use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
 use crate::economy_events_worker::EconomyEventsWorkerConfig;
 use crate::ids::signed_id;
 use crate::registration::{
@@ -91,8 +90,7 @@ impl PlayerTriviaRegistrationProvider {
         Self {
             handler: Arc::new(PlayerTriviaInteractionHandler {
                 state: Arc::new(PlayerTriviaRuntimeState {
-                    database_path: database_path.as_ref().to_path_buf(),
-                    player_names: Arc::new(StoredUsernamePlayerNameResolver),
+                    player_names: Arc::new(DiscordIdPlayerNameResolver),
                     repository,
                     service,
                     penalties: PredictionRepository::new(database_path.as_ref()),
@@ -172,7 +170,6 @@ struct PlayerTriviaInteractionHandler {
 }
 
 struct PlayerTriviaRuntimeState {
-    database_path: PathBuf,
     player_names: Arc<dyn GuildPlayerNameResolver>,
     repository: RuntimePlayerTriviaRepository,
     service: Arc<app::PlayerTriviaService<RuntimePlayerTriviaRepository>>,
@@ -210,22 +207,10 @@ impl InteractionHandler for PlayerTriviaInteractionHandler {
 
 impl PlayerTriviaRuntimeState {
     async fn render_player_name(&self, user_id: i64, guild_id: i64) -> String {
-        let path = self.database_path.clone();
-        let stored_name = tokio::task::spawn_blocking(move || {
-            PlayerRepository::new(path)
-                .get_by_id(user_id, Some(guild_id))
-                .map_err(|error| error.to_string())
-        })
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .flatten()
-        .map_or_else(|| format!("User {user_id}"), |player| player.name);
         self.player_names
             .names_for_guild(guild_id, &[user_id])
             .unwrap_or_default()
-            .resolve(user_id, &stored_name)
-            .to_owned()
+            .resolve(user_id)
     }
 
     async fn command(

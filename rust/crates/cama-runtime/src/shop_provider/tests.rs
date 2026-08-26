@@ -1,4 +1,5 @@
 use super::*;
+use cama_app::ai_services::{FlavorAiPort, FlavorPromptInput, build_flavor_prompt};
 use cama_app::shop_commands::MANA_ITEMS;
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
@@ -83,9 +84,33 @@ impl GuildPlayerNameResolver for StaticPlayerNames {
     ) -> Result<GuildPlayerNameDirectory, String> {
         assert_eq!(guild_id, i64::try_from(GUILD).unwrap());
         Ok(GuildPlayerNameDirectory::new(Some(BTreeMap::from([
-            (BUYER, None),
-            (TARGET, Some("Server Target".to_owned())),
+            (BUYER, "Buyer Display".to_owned()),
+            (TARGET, "Server Target".to_owned()),
         ]))))
+    }
+}
+
+#[derive(Default)]
+struct CapturingFlavorAi {
+    inputs: Mutex<Vec<FlavorPromptInput>>,
+}
+
+impl FlavorAiPort for CapturingFlavorAi {
+    fn generate_flavor(&self, input: &FlavorPromptInput) -> Result<Option<String>, String> {
+        self.inputs
+            .lock()
+            .expect("flavor inputs")
+            .push(input.clone());
+        Ok(Some("rendered flavor".to_owned()))
+    }
+
+    fn complete_insight(
+        &self,
+        _prompt: &str,
+        _system_prompt: &str,
+        _feature: &str,
+    ) -> Result<Option<String>, String> {
+        Ok(None)
     }
 }
 
@@ -1065,8 +1090,9 @@ async fn soft_avoid_renders_server_nickname_instead_of_interaction_display_name(
     let target = user_option(&projected, "target")
         .expect("parse target")
         .expect("target option");
+    assert_eq!(projected.user_display_name, "Buyer Display");
     assert_eq!(target.display_name, "Server Target");
-    assert_eq!(target.ai_display_name, "Global Target");
+    assert_eq!(target.ai_display_name, "Server Target");
     let mut builder = RegistryBuilder::default();
     builder
         .add_provider(&provider)
@@ -1106,8 +1132,39 @@ async fn soft_avoid_renders_server_nickname_instead_of_interaction_display_name(
     assert!(!description.contains("Global Target"));
 }
 
+#[test]
+fn shop_ai_prompt_uses_rendered_name_instead_of_stored_username() {
+    let fixture = Fixture::migrated();
+    fixture.player(BUYER, 100_000);
+    let ai = Arc::new(CapturingFlavorAi::default());
+    let player_context: Arc<dyn PlayerContextPort> = Arc::new(ProductionShopPlayerContext::new(
+        &fixture.path,
+        Arc::new(StaticPlayerNames),
+    ));
+    let service = FlavorTextService::new(ai.clone(), player_context);
+
+    assert_eq!(
+        service.generate_event_flavor(
+            Some(i64::try_from(GUILD).unwrap()),
+            FlavorEvent::DoubleOrNothingWin,
+            i64::try_from(BUYER).unwrap(),
+            BTreeMap::from([("amount".to_owned(), AiValue::Integer(500))]),
+        ),
+        Some("rendered flavor".to_owned())
+    );
+
+    let inputs = ai.inputs.lock().expect("flavor inputs");
+    let (system, prompt, _) = build_flavor_prompt(&inputs[0]);
+    let rendered_prompt = format!("{system}\n{prompt}");
+    assert!(
+        rendered_prompt.contains("Buyer Display"),
+        "{rendered_prompt}"
+    );
+    assert!(!rendered_prompt.contains("Player 101"), "{rendered_prompt}");
+}
+
 #[tokio::test]
-async fn unregistered_target_without_nickname_uses_account_username() {
+async fn unregistered_target_without_cached_member_uses_discord_id() {
     let fixture = Fixture::migrated();
     fixture.player(BUYER, 100_000);
     let projected = fixture
@@ -1137,7 +1194,7 @@ async fn unregistered_target_without_nickname_uses_account_username() {
     let target = user_option(&projected, "target")
         .expect("parse target")
         .expect("target option");
-    assert_eq!(target.display_name, "Target Account");
+    assert_eq!(target.display_name, TARGET.to_string());
 }
 
 #[test]
@@ -1147,9 +1204,9 @@ fn arbitrary_shop_player_names_prefer_server_nicknames() {
         .provider
         .with_player_names(Arc::new(StaticPlayerNames));
 
-    let names = provider.handler.project_stored_player_names(
+    let names = provider.handler.project_player_names(
         i64::try_from(GUILD).unwrap(),
-        BTreeMap::from([(i64::try_from(TARGET).unwrap(), "Stored Target".to_owned())]),
+        &[i64::try_from(TARGET).unwrap()],
     );
 
     assert_eq!(

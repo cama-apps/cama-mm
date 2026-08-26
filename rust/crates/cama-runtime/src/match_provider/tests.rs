@@ -16,7 +16,7 @@ use cama_domain::guild_config::GuildConfigStore;
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
-use crate::discord_transport::DiscordAllowedMentions;
+use crate::discord_transport::{DiscordAllowedMentions, DiscordIdPlayerNameResolver};
 use crate::registration::{InteractionAllowedMentions, InteractionResponseError};
 
 use super::*;
@@ -1890,11 +1890,32 @@ fn production_flavor_request(kind: FlavorKind, guild_id: i64) -> FlavorRequest {
     }
 }
 
+struct StaticBettingPlayerNames;
+
+impl GuildPlayerNameResolver for StaticBettingPlayerNames {
+    fn names_for_guild(
+        &self,
+        guild_id: i64,
+        player_ids: &[i64],
+    ) -> Result<GuildPlayerNameDirectory, String> {
+        assert_eq!(guild_id, GUILD);
+        assert_eq!(player_ids, &[81_105]);
+        Ok(GuildPlayerNameDirectory::new(Some(BTreeMap::from([(
+            81_105_u64,
+            "Server Leader".to_owned(),
+        )]))))
+    }
+}
+
 #[test]
 fn production_betting_flavor_without_ai_uses_static_fallback() {
     let fixture = MatchRuntimeFixture::new();
-    let flavor =
-        production_betting_flavor(fixture.database.path(), &production_test_config(), None);
+    let flavor = production_betting_flavor(
+        fixture.database.path(),
+        &production_test_config(),
+        None,
+        Arc::new(DiscordIdPlayerNameResolver),
+    );
     let output = flavor
         .generate(&production_flavor_request(FlavorKind::LastCall, GUILD))
         .expect("static betting flavor");
@@ -1940,6 +1961,7 @@ fn production_betting_flavor_loads_sqlite_leader_context_including_zero_win_rate
         fixture.database.path(),
         &config,
         Some(production_flavor_ai(Arc::clone(&provider))),
+        Arc::new(StaticBettingPlayerNames),
     );
     let output = flavor
         .generate(&production_flavor_request(FlavorKind::LastCall, GUILD))
@@ -1957,7 +1979,8 @@ fn production_betting_flavor_loads_sqlite_leader_context_including_zero_win_rate
         .map(|message| message.content.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(prompt.contains("Biggest bettor so far: ready-81105"));
+    assert!(prompt.contains("Biggest bettor so far: Server Leader"));
+    assert!(!prompt.contains("ready-81105"));
     assert!(prompt.contains("Their bet win rate: 0%"));
     assert!(prompt.contains("800 on dire"));
 }
@@ -1975,6 +1998,7 @@ fn production_betting_flavor_respects_guild_ai_disabled_without_provider_call() 
         fixture.database.path(),
         &config,
         Some(production_flavor_ai(Arc::clone(&provider))),
+        Arc::new(DiscordIdPlayerNameResolver),
     );
     let output = flavor
         .generate(&production_flavor_request(FlavorKind::LastCall, GUILD))
@@ -5019,11 +5043,11 @@ impl DiscordTransport for PublicationProbeDiscord {
             .cloned())
     }
 
-    fn cached_guild_member_server_nicknames(
+    fn cached_guild_member_render_names(
         &self,
         guild_id: u64,
-        _user_ids: &[u64],
-    ) -> Result<Option<BTreeMap<u64, Option<String>>>, String> {
+        user_ids: &[u64],
+    ) -> Result<Option<BTreeMap<u64, String>>, String> {
         self.nickname_snapshots
             .lock()
             .expect("publication nickname snapshots")
@@ -5036,13 +5060,25 @@ impl DiscordTransport for PublicationProbeDiscord {
         {
             return Err("cached nickname snapshot failed".to_owned());
         }
+        let server_nicknames = self
+            .server_nicknames
+            .lock()
+            .expect("publication server nicknames");
+        let members = self.members.lock().expect("publication members");
         Ok(Some(
-            self.server_nicknames
-                .lock()
-                .expect("publication server nicknames")
+            members
                 .iter()
-                .filter(|((member_guild_id, _), _)| *member_guild_id == guild_id)
-                .map(|((_, user_id), nickname)| (*user_id, nickname.clone()))
+                .filter(|((member_guild_id, user_id), _)| {
+                    *member_guild_id == guild_id && user_ids.contains(user_id)
+                })
+                .map(|((_, user_id), member)| {
+                    let name = server_nicknames
+                        .get(&(guild_id, *user_id))
+                        .cloned()
+                        .flatten()
+                        .unwrap_or_else(|| member.display_name.clone());
+                    (*user_id, name)
+                })
                 .collect(),
         ))
     }
@@ -6134,7 +6170,7 @@ async fn test_shuffle_embed_uses_server_nicknames_without_http_lookup() {
 }
 
 #[tokio::test]
-async fn test_shuffle_embed_ignores_global_display_name_without_server_nickname() {
+async fn test_shuffle_embed_uses_global_display_name_without_server_nickname() {
     let discord = Arc::new(PublicationProbeDiscord::default());
     let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
     let player_ids = fixture.add_shuffle_pool(10, false);
@@ -6158,8 +6194,8 @@ async fn test_shuffle_embed_ignores_global_display_name_without_server_nickname(
         .find(|field| field.name.contains("Radiant") && field.name.contains("Dire"))
         .expect("teams field");
 
-    assert!(teams.value.contains(&format!("shuffle-{participant_id}")));
-    assert!(!teams.value.contains("Global Display Name"));
+    assert!(teams.value.contains("Global Display Name"));
+    assert!(!teams.value.contains(&format!("shuffle-{participant_id}")));
 }
 
 #[tokio::test]
@@ -6198,7 +6234,7 @@ async fn test_shuffle_embed_uses_cached_name_when_player_row_is_missing() {
 }
 
 #[tokio::test]
-async fn test_shuffle_embed_falls_back_to_stored_name_on_cached_lookup_error() {
+async fn test_shuffle_embed_falls_back_to_discord_id_on_cached_lookup_error() {
     let discord = Arc::new(PublicationProbeDiscord::default());
     let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
     let player_ids = fixture.add_shuffle_pool(10, false);
@@ -6218,13 +6254,14 @@ async fn test_shuffle_embed_falls_back_to_stored_name_on_cached_lookup_error() {
         .find(|field| field.name.contains("Radiant") && field.name.contains("Dire"))
         .expect("teams field");
 
-    assert!(teams.value.contains(&format!("shuffle-{participant_id}")));
+    assert!(teams.value.contains(&participant_id.to_string()));
+    assert!(!teams.value.contains(&format!("shuffle-{participant_id}")));
     assert!(!teams.value.contains(&format!("Unknown({participant_id})")));
     assert!(discord.member_lookups().is_empty());
 }
 
 #[tokio::test]
-async fn test_shuffle_embed_falls_back_to_stored_name_for_excluded_player() {
+async fn test_shuffle_embed_falls_back_to_discord_id_for_excluded_player() {
     let discord = Arc::new(PublicationProbeDiscord::default());
     let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
     let player_ids = fixture.add_shuffle_pool(11, false);
@@ -6243,7 +6280,8 @@ async fn test_shuffle_embed_falls_back_to_stored_name_for_excluded_player() {
         .find(|field| field.name == "📊 Balance")
         .expect("balance field");
 
-    assert!(balance.value.contains(&format!("shuffle-{excluded_id}")));
+    assert!(balance.value.contains(&excluded_id.to_string()));
+    assert!(!balance.value.contains(&format!("shuffle-{excluded_id}")));
     assert!(!balance.value.contains(&format!("Unknown({excluded_id})")));
     assert!(discord.member_lookups().is_empty());
 }
@@ -6275,8 +6313,7 @@ async fn test_shuffle_embed_skips_discord_lookup_for_invalid_excluded_ids() {
         .find(|field| field.name == "📊 Balance")
         .expect("balance field");
 
-    assert!(balance.value.contains("zero-id-player"));
-    assert!(balance.value.contains("negative-id-player"));
+    assert!(balance.value.contains("**Excluded:** 0, -1"));
     assert!(discord.member_lookups().is_empty());
 }
 
@@ -6308,7 +6345,8 @@ async fn test_execute_shuffle_reuses_loaded_roster_for_pending_names() {
 
     let content = responder.contents().join("\n");
     assert!(content.contains("Cannot shuffle: 1 players"));
-    assert!(content.contains(&format!("shuffle-{}", player_ids[1])));
+    assert!(content.contains(&player_ids[1].to_string()));
+    assert!(!content.contains(&format!("shuffle-{}", player_ids[1])));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

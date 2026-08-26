@@ -80,6 +80,7 @@ struct MockDiscordState {
     channels: BTreeSet<(u64, u64)>,
     members: BTreeMap<(u64, u64), DiscordGuildMemberSnapshot>,
     server_nicknames: BTreeMap<(u64, u64), Option<String>>,
+    users: BTreeMap<u64, DiscordUserSnapshot>,
     reaction_users: Vec<DiscordUserSnapshot>,
     direct_error: Option<crate::discord_transport::DiscordDirectMessageErrorKind>,
 }
@@ -130,6 +131,14 @@ impl MockDiscord {
             .expect("Discord state")
             .server_nicknames
             .insert((guild_id, user_id), Some(nickname.to_owned()));
+    }
+
+    fn set_user(&self, user: DiscordUserSnapshot) {
+        self.state
+            .lock()
+            .expect("Discord state")
+            .users
+            .insert(user.user_id, user);
     }
 
     fn set_direct_error(&self, kind: crate::discord_transport::DiscordDirectMessageErrorKind) {
@@ -307,6 +316,16 @@ impl DiscordTransport for MockDiscord {
         Ok(Some(999))
     }
 
+    async fn user(&self, user_id: u64) -> Result<Option<DiscordUserSnapshot>, String> {
+        Ok(self
+            .state
+            .lock()
+            .expect("Discord state")
+            .users
+            .get(&user_id)
+            .cloned())
+    }
+
     async fn guild_channel_exists(&self, guild_id: u64, channel_id: u64) -> Result<bool, String> {
         Ok(self
             .state
@@ -330,22 +349,28 @@ impl DiscordTransport for MockDiscord {
             .cloned())
     }
 
-    fn cached_guild_member_server_nicknames(
+    fn cached_guild_member_render_names(
         &self,
         guild_id: u64,
         user_ids: &[u64],
-    ) -> Result<Option<BTreeMap<u64, Option<String>>>, String> {
+    ) -> Result<Option<BTreeMap<u64, String>>, String> {
         let state = self.state.lock().expect("Discord state");
         Ok(Some(
-            state
-                .server_nicknames
+            user_ids
                 .iter()
-                .filter_map(|((candidate_guild_id, user_id), nickname)| {
-                    if *candidate_guild_id == guild_id && user_ids.contains(user_id) {
-                        Some((*user_id, nickname.clone()))
-                    } else {
-                        None
-                    }
+                .filter_map(|user_id| {
+                    state
+                        .server_nicknames
+                        .get(&(guild_id, *user_id))
+                        .cloned()
+                        .flatten()
+                        .or_else(|| {
+                            state
+                                .members
+                                .get(&(guild_id, *user_id))
+                                .map(|member| member.display_name.clone())
+                        })
+                        .map(|name| (*user_id, name))
                 })
                 .collect(),
         ))
@@ -1610,6 +1635,12 @@ async fn mmr_button_and_modal_survive_provider_restart_without_refetch() {
     let server = RouteServer::start(vec![r#"{"mmr_estimate":{"estimate":null}}"#]);
     let discord = Arc::new(MockDiscord::default());
     discord.set_member(42, 101, "Restarted Player");
+    discord.set_user(DiscordUserSnapshot {
+        user_id: 101,
+        display_name: "Changeable Global Name".to_owned(),
+        account_username: "stable-account-name".to_owned(),
+        is_bot: false,
+    });
     let first = PlayerRegistrationProvider::with_config(
         database.path(),
         services(&server),
@@ -1697,13 +1728,19 @@ async fn mmr_button_and_modal_survive_provider_restart_without_refetch() {
     assert_eq!(
         connection
             .query_row(
-                "SELECT initial_mmr,inferred_region
+                "SELECT initial_mmr,inferred_region,discord_username
                  FROM players WHERE discord_id=101 AND guild_id=42",
                 [],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
             )
             .expect("modal-registered player"),
-        (4_200, None),
+        (4_200, None, "stable-account-name".to_owned()),
         "the manual-MMR path must skip region inference"
     );
 }
@@ -1877,6 +1914,7 @@ async fn persistent_autonotify_restarts_and_combines_clipboard_rally_mentions() 
         .push(DiscordUserSnapshot {
             user_id: 501,
             display_name: "Reactor".to_owned(),
+            account_username: "reactor-account".to_owned(),
             is_bot: false,
         });
     let provider = PlayerRegistrationProvider::with_config(
@@ -2151,6 +2189,13 @@ async fn lobby_neon_routes_only_explicit_join_and_gamba_to_the_python_channels()
     assert_eq!(state.channel_messages[0].0, 70);
     assert!(
         state.channel_messages[0]
+            .1
+            .response
+            .content
+            .contains("Display 100")
+    );
+    assert!(
+        !state.channel_messages[0]
             .1
             .response
             .content

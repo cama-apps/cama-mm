@@ -40,7 +40,6 @@ use cama_app::pet_eating::{
 use cama_app::pet_evolution_app::{PetEvolutionService, SystemEvolutionClock};
 use cama_app::pet_flavor::{PetFlavorEvent as FlavorEvent, PetFlavorService};
 use cama_app::pet_sqlite::SqlitePetCommandService;
-use cama_db::core_repositories::PlayerRepository;
 use cama_db::pet_brawl_repository::{
     BrawlSettlement, BrawlSettlementResult, DrawSettlementResult, PetBrawlRepository, SweepResult,
 };
@@ -64,7 +63,7 @@ use tracing::warn;
 
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{
-    DiscordTransport, GuildPlayerNameResolver, StoredUsernamePlayerNameResolver,
+    DiscordIdPlayerNameResolver, DiscordTransport, GuildPlayerNameResolver,
 };
 use crate::pet_death_delivery::DirectDeathDeliveryGuard;
 #[cfg(all(test, feature = "runtime-test-dig"))]
@@ -142,7 +141,7 @@ impl PetRegistrationProvider {
         );
         let state = Arc::new(PetRuntimeState {
             database_path,
-            player_names: Arc::new(StoredUsernamePlayerNameResolver),
+            player_names: Arc::new(DiscordIdPlayerNameResolver),
             decay_per_day: config.values.pet_hunger_decay_per_day,
             pet_channel_id: config.channels.pet,
             discord,
@@ -536,23 +535,11 @@ impl IntegerRangeOption for CommandOptionSpec {
 
 impl PetInteractionHandler {
     async fn render_player_name(&self, user_id: i64, guild_id: i64) -> String {
-        let path = self.state.database_path.clone();
-        let stored_name = tokio::task::spawn_blocking(move || {
-            PlayerRepository::new(path)
-                .get_by_id(user_id, Some(guild_id))
-                .map_err(|error| error.to_string())
-        })
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .flatten()
-        .map_or_else(|| format!("User {user_id}"), |player| player.name);
         self.state
             .player_names
             .names_for_guild(guild_id, &[user_id])
             .unwrap_or_default()
-            .resolve(user_id, &stored_name)
-            .to_owned()
+            .resolve(user_id)
     }
 
     async fn handle_command(
@@ -1159,9 +1146,10 @@ impl PetInteractionHandler {
             .defer(true)
             .await
             .map_err(|error| error.to_string())?;
+        let display_name = self.render_player_name(user_id, guild_id).await;
         let response = self
             .run_brawl(move |commands| {
-                let interaction = brawl_interaction(user_id, guild_id, 0, true);
+                let interaction = brawl_interaction(user_id, guild_id, 0, display_name, true);
                 let mut discord = InMemoryDiscord::default();
                 commands.train(&interaction, &mut discord);
                 let message = last_message(&discord)
@@ -1497,7 +1485,8 @@ impl PetInteractionHandler {
             .defer(false)
             .await
             .map_err(|error| error.to_string())?;
-        let mut interaction = brawl_interaction(user_id, guild_id, channel_id, true);
+        let display_name = self.render_player_name(user_id, guild_id).await;
+        let mut interaction = brawl_interaction(user_id, guild_id, channel_id, display_name, true);
         if channel_id != self.state.pet_channel_id.unwrap_or(channel_id) {
             interaction.parent_channel_id = self.state.pet_channel_id;
         }
@@ -2266,7 +2255,8 @@ impl PetInteractionHandler {
             .parse::<i64>()
             .map_err(|_| "invalid brawl id".to_owned())?;
         let verb = parts.next().unwrap_or_default().to_owned();
-        let interaction = brawl_interaction(user_id, guild_id, channel_id, true);
+        let display_name = self.render_player_name(user_id, guild_id).await;
+        let interaction = brawl_interaction(user_id, guild_id, channel_id, display_name, true);
         let mut challenge = self
             .state
             .challenges
@@ -2470,7 +2460,8 @@ impl PetInteractionHandler {
             )
             .await;
         }
-        let interaction = brawl_interaction(user_id, guild_id, channel_id, true);
+        let display_name = self.render_player_name(user_id, guild_id).await;
+        let interaction = brawl_interaction(user_id, guild_id, channel_id, display_name, true);
         let (outcome, recorder, mut view) = self
             .run_brawl(move |commands| {
                 let mut view = view;
@@ -3228,7 +3219,7 @@ fn optional_user(
             is_bot,
         }) => Ok(Some((
             signed_id(*id, "target user")?,
-            display_name.clone().unwrap_or_else(|| format!("User {id}")),
+            display_name.clone().unwrap_or_else(|| id.to_string()),
             is_bot.unwrap_or(false),
         ))),
         _ => Err(format!("invalid /pet user option {name}")),
@@ -3416,11 +3407,12 @@ fn brawl_interaction(
     user_id: i64,
     guild_id: i64,
     channel_id: i64,
+    display_name: String,
     rate_allowed: bool,
 ) -> InteractionModel {
     InteractionModel {
         user_id,
-        display_name: format!("User {user_id}"),
+        display_name,
         is_bot: false,
         guild_id: Some(guild_id),
         channel_id,
