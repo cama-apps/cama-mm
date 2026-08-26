@@ -5986,3 +5986,69 @@ fn production_dig_seeds_are_not_derivable_from_public_request_fields() {
     // The default config keeps the legacy seed so tests stay deterministic.
     assert_eq!(super::DigRuntimeConfig::default().entropy_secret, 0);
 }
+
+#[test]
+fn boss_progress_flat_vs_nested_shapes_both_parse_correctly() {
+    let database = fast_migrated_database();
+    let connection = Connection::open(database.path()).expect("open database");
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .expect("disable foreign keys");
+    let actor = 111_i64;
+    let guild = 222_i64;
+
+    // Seed player with tunnel
+    connection
+        .execute(
+            "INSERT INTO players (discord_id, guild_id, discord_username)
+             VALUES (?1, ?2, 'test-player')",
+            params![actor, guild],
+        )
+        .expect("insert player");
+
+    connection
+        .execute(
+            "INSERT INTO tunnels (discord_id, guild_id, depth, max_depth, total_digs, luminosity, total_jc_earned, paid_digs_today, pickaxe_tier, boss_progress)
+             VALUES (?1, ?2, 0, 0, 0, 100, 0, 0, 1, ?3)",
+            params![actor, guild, r#"{"25":"defeated","50":"defeated","75":"active"}"#],
+        )
+        .expect("insert tunnel with flat shape");
+    drop(connection);
+
+    let service = DigRuntimeService::sqlite(database.path());
+
+    // Read state with flat shape - should not panic and should correctly parse
+    let flat_snapshot = service
+        .snapshot(actor, guild)
+        .expect("flat snapshot")
+        .tunnel
+        .expect("flat tunnel");
+
+    // Verify flat shape was parsed: 25 and 50 defeated, so should be parked at 75 (first undefeated)
+    assert_eq!(
+        flat_snapshot.depth, 0,
+        "player at depth 0 with 25,50 defeated should not yet reach boss boundary"
+    );
+
+    // Now update the same tunnel with nested shape
+    let connection = Connection::open(database.path()).expect("reopen database");
+    connection
+        .execute(
+            "UPDATE tunnels SET boss_progress=?1 WHERE discord_id=?2 AND guild_id=?3",
+            params![r#"{"25":{"status":"defeated"},"50":{"status":"defeated"},"75":{"status":"active"}}"#, actor, guild],
+        )
+        .expect("update tunnel with nested shape");
+    drop(connection);
+
+    // Read state with nested shape - should produce identical result
+    let nested_snapshot = service
+        .snapshot(actor, guild)
+        .expect("nested snapshot")
+        .tunnel
+        .expect("nested tunnel");
+
+    assert_eq!(
+        flat_snapshot.depth, nested_snapshot.depth,
+        "flat and nested boss_progress shapes should parse to identical state"
+    );
+}
