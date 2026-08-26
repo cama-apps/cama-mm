@@ -4072,13 +4072,16 @@ fn tunnel_state(snapshot: &DigRuntimeSnapshot, paid_cost: Option<i64>) -> Tunnel
     let tunnel = snapshot.tunnel.as_ref().expect("staged tunnel exists");
     let mut defeated_bosses = BTreeSet::new();
     if let Ok(Value::Object(progress)) = serde_json::from_str::<Value>(&tunnel.boss_progress) {
-        for (boundary, status) in progress {
-            if status
-                .get("status")
-                .and_then(Value::as_str)
-                .is_some_and(|status| status == "defeated")
-                && let Ok(boundary) = boundary.parse::<i64>()
-            {
+        for (boundary, value) in progress {
+            let is_defeated = match value {
+                Value::Object(fields) => fields
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| s == "defeated"),
+                Value::String(status) => status == "defeated",
+                _ => false,
+            };
+            if is_defeated && let Ok(boundary) = boundary.parse::<i64>() {
                 defeated_bosses.insert(boundary);
             }
         }

@@ -923,6 +923,9 @@ fn run_consolidated_backfills(
     if pending(pending_migrations, "dig_boss_progress_persistent_hp") {
         transform_boss_progress(transaction, BossProgressTransform::WrapStatuses)?;
     }
+    if pending(pending_migrations, "normalize_boss_progress_flat_to_nested") {
+        transform_boss_progress(transaction, BossProgressTransform::NormalizeFlatToNested)?;
+    }
     if pending(pending_migrations, "predictions_mini_split_v1") {
         transaction.execute_batch(
             "UPDATE prediction_positions
@@ -1260,6 +1263,7 @@ enum BossProgressTransform {
     AddBossIds,
     WrapStatuses,
     ClearActiveBossIds,
+    NormalizeFlatToNested,
 }
 
 fn transform_boss_progress(
@@ -1330,6 +1334,15 @@ fn transform_boss_progress(
                         fields.insert("boss_id".to_owned(), JsonValue::String(String::new()));
                         changed = true;
                     }
+                }
+                BossProgressTransform::NormalizeFlatToNested => {
+                    let JsonValue::String(status) = value else {
+                        continue;
+                    };
+                    let mut nested = JsonMap::new();
+                    nested.insert("status".to_owned(), JsonValue::String(status.clone()));
+                    *value = JsonValue::Object(nested);
+                    changed = true;
                 }
             }
         }
