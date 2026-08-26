@@ -6351,14 +6351,22 @@ impl DigInteractionHandler {
                     "torch" => DigMinerAutoBuyUpdate {
                         torch: Some(enabled),
                         hard_hat: None,
+                        grappling_hook: None,
                     },
                     "hard_hat" => DigMinerAutoBuyUpdate {
                         torch: None,
                         hard_hat: Some(enabled),
+                        grappling_hook: None,
                     },
-                    "both" => DigMinerAutoBuyUpdate {
+                    "grappling_hook" => DigMinerAutoBuyUpdate {
+                        torch: None,
+                        hard_hat: None,
+                        grappling_hook: Some(enabled),
+                    },
+                    "all" => DigMinerAutoBuyUpdate {
                         torch: Some(enabled),
                         hard_hat: Some(enabled),
+                        grappling_hook: Some(enabled),
                     },
                     _ => {
                         return responder
@@ -6733,7 +6741,7 @@ fn dig_options() -> Vec<CommandOptionSpec> {
             ),
             subcommand(
                 "autobuy",
-                "Auto-buy Torch and/or Hard Hat for each dig",
+                "Auto-buy Torch, Hard Hat, and/or Grappling Hook for each dig",
                 vec![
                     CommandOptionSpec {
                         name: "item".to_owned(),
@@ -6751,8 +6759,12 @@ fn dig_options() -> Vec<CommandOptionSpec> {
                                 value: "hard_hat".to_owned(),
                             },
                             CommandOptionChoice::String {
-                                name: "Both".to_owned(),
-                                value: "both".to_owned(),
+                                name: "Grappling Hook".to_owned(),
+                                value: "grappling_hook".to_owned(),
+                            },
+                            CommandOptionChoice::String {
+                                name: "All Three".to_owned(),
+                                value: "all".to_owned(),
                             },
                         ],
                         min_integer: None,
@@ -7097,13 +7109,10 @@ fn format_miner_stat_values(
 
 fn format_miner_auto_buy(profile: &DigMinerProfile) -> String {
     format!(
-        "Torch: **{}**\nHard Hat: **{}**",
+        "Torch: **{}**\nHard Hat: **{}**\nGrappling Hook: **{}**",
         if profile.auto_buy.torch { "ON" } else { "OFF" },
-        if profile.auto_buy.hard_hat {
-            "ON"
-        } else {
-            "OFF"
-        }
+        if profile.auto_buy.hard_hat { "ON" } else { "OFF" },
+        if profile.auto_buy.grappling_hook { "ON" } else { "OFF" }
     )
 }
 
@@ -7802,7 +7811,7 @@ fn shop_embed(shop: &cama_app::dig_gear_runtime::DigGearShop) -> InteractionEmbe
         }),
     );
     embed.footer(format!(
-        "Your inventory: {}/{} items | Hard Hat/Torch auto-queue; use /dig use <item> for other active items",
+        "Your inventory: {}/{} items | Torch/Hard Hat/Grappling Hook auto-queue; use /dig use <item> for other active items",
         shop.inventory_count, INVENTORY_LIMIT,
     ))
 }

@@ -2178,7 +2178,14 @@ where
                     price: 8,
                 });
             }
-            if tunnel.auto_buy_torch {
+            let should_buy_torch = current.tunnel.as_ref().map_or(false, |t| {
+                let low_luminosity = t.luminosity <= 50;
+                // Buy torches before boss fights: check if approaching any boss boundary (within 1 block)
+                let boss_boundaries = [24, 49, 74, 99, 149, 199, 274, 349];
+                let near_boss = boss_boundaries.iter().any(|&b| t.depth >= b);
+                low_luminosity || near_boss
+            });
+            if tunnel.auto_buy_torch && should_buy_torch {
                 selections.push(AutoBuySelection {
                     item_type: "torch",
                     price: 6,
