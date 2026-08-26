@@ -1476,6 +1476,7 @@ mod tests {
         assert_eq!((decoded.raster.width, decoded.raster.height), (238, 318));
         let expected = draw_hero_grid(
             &[stat(100, 1, 1, 1), stat(200, 2, 1, 0)],
+            // The transient map is authoritative; missing entries use numeric IDs.
             &[player(100, "Server Alice"), player(200, "200")],
             1,
             &format!("Hero Grid: {}", LobbyKind::Open.label()),
