@@ -846,7 +846,7 @@ impl LobbyRuntimeState {
         self.transport
             .send_message_with_delivery_key(
                 to_u64(notice.channel_id)?,
-                notice.delivery_key(),
+                notice.delivery_nonce(),
                 readycheck_pruned_players_message(scope.kind, &users),
             )
             .await?;
