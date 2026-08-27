@@ -2575,14 +2575,14 @@ async fn stale_readycheck_fixture(
 }
 
 #[tokio::test]
-async fn stale_readycheck_notice_recovers_once_after_provider_restart() {
+async fn failed_stale_notice_delivery_does_not_block_readycheck_and_recovers_once() {
     let database = database_with_players(&[(10, "Creator"), (20, "Away One"), (30, "Away Two")]);
     let transport = Arc::new(RecordingTransport::default());
     let provider = stale_readycheck_fixture(&database, transport.clone()).await;
     transport.fail_next_pruned_notice();
     let sent_before = transport.sent_messages().len();
 
-    dispatch_command_allowing_failure(
+    let response = dispatch_command(
         &provider,
         "readycheck",
         10,
@@ -2590,6 +2590,17 @@ async fn stale_readycheck_notice_recovers_once_after_provider_restart() {
         vec![lobby_option(LobbyKind::Open)],
     )
     .await;
+
+    assert!(
+        response
+            .captured
+            .lock()
+            .expect("readycheck responses")
+            .followups
+            .iter()
+            .any(|response| response.content.starts_with("✅")),
+        "the durable notice retry must not block the replacement ready check"
+    );
 
     assert_eq!(
         lobby_snapshot(&provider, LobbyKind::Open).players,
@@ -2637,6 +2648,151 @@ async fn stale_readycheck_notice_recovers_once_after_provider_restart() {
         "second recovery failed: {second_report:?}"
     );
     assert_eq!(notice_count(), 1, "acknowledged notice must not repeat");
+}
+
+#[tokio::test]
+async fn failed_stale_notice_recovery_is_nonfatal_and_remains_retryable() {
+    let database = database_with_players(&[(10, "Creator"), (20, "Removed")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
+    let repository = ReadycheckRepository::new(database.path());
+    let lobby = repository
+        .load(scope.lobby_id(), Some(42))
+        .expect("load persisted lobby")
+        .expect("persisted lobby");
+    let thread_id = lobby.thread_id.expect("persisted lobby thread");
+    repository
+        .save_with_pruned_notice(&lobby, thread_id, &BTreeSet::from([20]))
+        .expect("queue stale-removal notice");
+    let sent_before = transport.sent_messages().len();
+    transport.fail_next_pruned_notice();
+
+    let first_report = provider
+        .gateway_observer()
+        .ready_recovery(ReadyRecoveryContext::new(
+            Arc::<[u64]>::from([42]),
+            Arc::new(NoMembers),
+        ))
+        .await;
+
+    assert!(
+        first_report.failures.is_empty(),
+        "a retained notice must not make the runtime unhealthy: {first_report:?}"
+    );
+    assert_eq!(
+        repository
+            .pending_pruned_notices()
+            .expect("reload retained notice")
+            .len(),
+        1,
+        "failed delivery must remain pending"
+    );
+    let notice_count = || {
+        transport.sent_messages()[sent_before..]
+            .iter()
+            .filter(|sent| {
+                sent.message
+                    .response
+                    .content
+                    .starts_with("🧹 Removed (away during ready check):")
+            })
+            .count()
+    };
+    assert_eq!(notice_count(), 0, "the injected delivery should fail");
+
+    let retry_report = provider
+        .gateway_observer()
+        .ready_recovery(ReadyRecoveryContext::new(
+            Arc::<[u64]>::from([42]),
+            Arc::new(NoMembers),
+        ))
+        .await;
+    assert!(
+        retry_report.failures.is_empty(),
+        "notice retry failed: {retry_report:?}"
+    );
+    assert_eq!(notice_count(), 1, "the retained notice should retry once");
+    assert!(
+        repository
+            .pending_pruned_notices()
+            .expect("reload acknowledged notices")
+            .is_empty(),
+        "successful retry must acknowledge the notice"
+    );
+
+    let final_report = provider
+        .gateway_observer()
+        .ready_recovery(ReadyRecoveryContext::new(
+            Arc::<[u64]>::from([42]),
+            Arc::new(NoMembers),
+        ))
+        .await;
+    assert!(
+        final_report.failures.is_empty(),
+        "post-ack recovery failed: {final_report:?}"
+    );
+    assert_eq!(notice_count(), 1, "acknowledged notice must not repeat");
+}
+
+#[tokio::test]
+async fn invalid_stale_notice_recovery_remains_fatal() {
+    let database = database_with_players(&[(10, "Creator"), (20, "Removed")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport);
+    dispatch_command(
+        &provider,
+        "lobby",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
+    let repository = ReadycheckRepository::new(database.path());
+    let lobby = repository
+        .load(scope.lobby_id(), Some(42))
+        .expect("load persisted lobby")
+        .expect("persisted lobby");
+    repository
+        .save_with_pruned_notice(&lobby, -1, &BTreeSet::from([20]))
+        .expect("queue invalid stale-removal notice");
+
+    let report = provider
+        .gateway_observer()
+        .ready_recovery(ReadyRecoveryContext::new(
+            Arc::<[u64]>::from([42]),
+            Arc::new(NoMembers),
+        ))
+        .await;
+
+    assert_eq!(
+        report.failures.len(),
+        1,
+        "invalid persisted notice: {report:?}"
+    );
+    assert!(
+        report.failures[0]
+            .message
+            .contains("invalid persisted Discord snowflake -1"),
+        "unexpected failure: {report:?}"
+    );
+    assert_eq!(
+        repository
+            .pending_pruned_notices()
+            .expect("reload invalid notice")
+            .len(),
+        1,
+        "invalid notice must remain available for diagnosis"
+    );
 }
 
 #[tokio::test]
