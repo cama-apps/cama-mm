@@ -541,10 +541,10 @@ impl BalancedShuffler {
         (maximum - minimum) / self.rating_spread_divisor
     }
 
-    /// Average five-player team total divided by nine.
+    /// Ten percent of the selected players' total active rating.
     #[must_use]
     pub fn calculate_lobby_rating_bonus(player_values: &[f64]) -> f64 {
-        player_values.iter().sum::<f64>() / 18.0
+        player_values.iter().sum::<f64>() * 0.1
     }
 
     /// Total whole minutes waited by selected players with Discord IDs.
@@ -3445,7 +3445,7 @@ mod tests {
     #[test]
     fn adjusted_value_weight_changes_borderline_pool_selection() {
         let ratings = [
-            1_832, 1_604, 1_380, 392, 2_072, 1_847, 432, 1_273, 865, 1_006, 678,
+            1_832, 1_604, 1_380, 392, 2_072, 1_847, 432, 1_273, 888, 1_006, 678,
         ];
         let exclusion_factors = [6, 4, 1, 3, 0, 0, 6, 5, 1, 2, 1];
         let players = ratings
@@ -3491,7 +3491,7 @@ mod tests {
                 .iter()
                 .map(|player| player.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["Player4"]
+            vec!["Player8"]
         );
     }
 
@@ -3516,7 +3516,7 @@ mod tests {
             &mut super::ScoringContext::default(),
         );
 
-        approx(selection.preselection_score, -441.111_111_111_111_1);
+        approx(selection.preselection_score, -890.0);
     }
 
     #[test]
@@ -3563,7 +3563,7 @@ mod tests {
                 ShuffleConstraints::default(),
             )
             .expect("fixed role matchup evaluates");
-        approx(matchup.total_score, 61.111_111_111_111_086);
+        approx(matchup.total_score, -530.0);
     }
 
     #[test]
@@ -5092,7 +5092,7 @@ mod tests {
             (5_477, "2"),
             (5_187, "2"),
             (2_118, "3"),
-            (1_266, "3"),
+            (1_328, "3"),
             (4_628, "4"),
             (2_244, "4"),
             (1_270, "5"),
@@ -5124,7 +5124,7 @@ mod tests {
                 + result.team2.get_off_role_count().expect("team 2 roles")
         };
 
-        assert_eq!(excluded_ids(&previous), HashSet::from([7]));
+        assert_eq!(excluded_ids(&previous), HashSet::from([10]));
         assert_eq!(off_roles(&previous), 1);
         assert_eq!(excluded_ids(&actual), HashSet::from([3]));
         assert_eq!(
