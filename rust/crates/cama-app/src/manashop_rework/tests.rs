@@ -116,6 +116,21 @@ impl Fixture {
             })
             .expect("grant fixture buff")
     }
+
+    /// Read the persisted `data` JSON for a buff so tests can assert what the
+    /// repository actually wrote, not just what it reads back.
+    fn raw_buff_data(&self, buff_id: i64) -> String {
+        Connection::open(&self.path)
+            .and_then(|connection| {
+                connection.query_row(
+                    "SELECT data FROM manashop_buffs WHERE id = ?1",
+                    params![buff_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+            })
+            .expect("read fixture buff data")
+            .unwrap_or_default()
+    }
 }
 
 impl Drop for Fixture {
@@ -270,7 +285,8 @@ fn test_blood_pact_skim_state_persists() {
     service.grant_blood_pact(USER, GUILD, TARGET).unwrap();
     let pact = service.blood_pact_skimmer(TARGET, GUILD).unwrap().unwrap();
     assert_eq!(pact.discord_id, USER);
-    assert_eq!(pact.data.cap, Some(150));
+    // `None` is the uncapped sentinel: newly granted pacts skim without a ceiling.
+    assert_eq!(pact.data.cap, None);
     assert_eq!(pact.data.skim_rate, Some(0.25));
     service
         .record_blood_pact_skim(pact.id, &pact.data, 25)
@@ -303,7 +319,7 @@ fn test_blood_pact_target_snapshot_is_batched_and_guild_scoped() {
 }
 
 #[test]
-fn test_blood_pact_skim_calculation_respects_rate_and_cap() {
+fn test_blood_pact_skim_applies_rate_without_a_cap() {
     let fixture = Fixture::new();
     let service = fixture.service();
     service.grant_blood_pact(USER, GUILD, TARGET).unwrap();
@@ -319,7 +335,15 @@ fn test_blood_pact_skim_calculation_respects_rate_and_cap() {
     assert_eq!((first.amount, first.new_total), (100, 100));
     assert_eq!(second.buff_id, first.buff_id);
     assert_eq!(second.skimmer_id, USER);
-    assert_eq!((second.amount, second.new_total), (50, 150));
+    // The retired 150 JC ceiling would have clipped this to (50, 150).
+    assert_eq!((second.amount, second.new_total), (100, 200));
+
+    // Skimming keeps paying the full rate well past that old ceiling.
+    let third = service
+        .claim_blood_pact_skim(TARGET, GUILD, 400)
+        .unwrap()
+        .expect("an uncapped pact never stops skimming while it is live");
+    assert_eq!((third.amount, third.new_total), (100, 300));
     assert_eq!(
         service
             .blood_pact_skimmer(TARGET, GUILD)
@@ -327,13 +351,74 @@ fn test_blood_pact_skim_calculation_respects_rate_and_cap() {
             .unwrap()
             .data
             .skimmed_total,
-        Some(150)
+        Some(300)
     );
+}
+
+#[test]
+fn test_uncapped_blood_pact_stays_uncapped_across_persistence() {
+    let fixture = Fixture::new();
+    let service = fixture.service();
+    let buff_id = service.grant_blood_pact(USER, GUILD, TARGET).unwrap();
+    service
+        .claim_blood_pact_skim(TARGET, GUILD, 400)
+        .unwrap()
+        .unwrap();
+
+    // An absent cap is omitted from the stored JSON rather than written as a
+    // number, so re-reading a skimmed pact cannot resurrect a ceiling.
+    let stored = fixture.raw_buff_data(buff_id);
+    assert!(!stored.contains("\"cap\""), "{stored}");
+
+    let reloaded = service.blood_pact_skimmer(TARGET, GUILD).unwrap().unwrap();
+    assert_eq!(reloaded.data.cap, None);
+    assert_eq!(reloaded.data.skimmed_total, Some(100));
+    assert_eq!(reloaded.data.skim_rate, Some(0.25));
+
+    let after_reload = service
+        .claim_blood_pact_skim(TARGET, GUILD, 400)
+        .unwrap()
+        .expect("uncapped pact keeps skimming after its state round-trips");
+    assert_eq!((after_reload.amount, after_reload.new_total), (100, 200));
+}
+
+#[test]
+fn test_legacy_blood_pact_with_stored_cap_still_stops_at_its_ceiling() {
+    let fixture = Fixture::new();
+    let service = fixture.service();
+    // A pact granted before the cap was retired keeps the ceiling it was
+    // written with; only newly granted pacts are uncapped.
+    let data = BuffData {
+        skimmed_total: Some(0),
+        cap: Some(150),
+        skim_rate: Some(0.25),
+        ..BuffData::default()
+    };
+    fixture.grant_raw(
+        USER,
+        GUILD,
+        BuffType::BloodPact,
+        Some(TARGET),
+        NOW + 3_600,
+        Some(&data),
+    );
+
+    let first = service
+        .claim_blood_pact_skim(TARGET, GUILD, 400)
+        .unwrap()
+        .unwrap();
+    assert_eq!((first.amount, first.new_total), (100, 100));
+    let second = service
+        .claim_blood_pact_skim(TARGET, GUILD, 400)
+        .unwrap()
+        .unwrap();
+    assert_eq!((second.amount, second.new_total), (50, 150));
     assert!(
         service
             .claim_blood_pact_skim(TARGET, GUILD, 400)
             .unwrap()
-            .is_none()
+            .is_none(),
+        "an explicitly capped pact must stop once its ceiling is reached"
     );
 }
 
