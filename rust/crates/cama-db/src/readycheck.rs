@@ -90,14 +90,15 @@ pub struct ReadycheckPrunedNotice {
     pub lobby_id: i64,
     pub channel_id: i64,
     pub player_ids: BTreeSet<i64>,
+    delivery_nonce: String,
     key: String,
     value: String,
 }
 
 impl ReadycheckPrunedNotice {
     #[must_use]
-    pub fn delivery_key(&self) -> &str {
-        &self.key
+    pub fn delivery_nonce(&self) -> &str {
+        &self.delivery_nonce
     }
 }
 
@@ -307,21 +308,37 @@ fn decode_pruned_notice(
     value: String,
 ) -> Result<ReadycheckPrunedNotice, ReadycheckRepositoryError> {
     let payload: ReadycheckPrunedNoticePayload = serde_json::from_str(&value)?;
-    let key_lobby_id = key
+    let key_parts = key
         .strip_prefix(PRUNED_NOTICE_PREFIX)
-        .and_then(|suffix| suffix.split(':').next())
-        .and_then(|lobby_id| lobby_id.parse::<i64>().ok());
+        .and_then(|suffix| suffix.split_once(':'));
+    let key_lobby_id = key_parts.and_then(|(lobby_id, _)| lobby_id.parse::<i64>().ok());
+    let delivery_id = key_parts.map(|(_, delivery_id)| delivery_id);
     if payload.player_ids.is_empty()
         || !matches!(payload.lobby_id, 1 | 2)
         || key_lobby_id != Some(payload.lobby_id)
+        || !delivery_id.is_some_and(|delivery_id| {
+            delivery_id.len() == 16
+                && delivery_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
     {
         return Err(ReadycheckRepositoryError::InvalidPrunedNotice(key));
     }
+    // Discord limits message nonce strings to 25 characters. Keep the
+    // descriptive key for durable app_kv identity and use its random u64
+    // token in a compact, lobby-scoped wire identity (22 characters).
+    let delivery_nonce = format!(
+        "rcp:{}:{}",
+        payload.lobby_id,
+        delivery_id.expect("validated ready-check delivery id")
+    );
     Ok(ReadycheckPrunedNotice {
         guild_id,
         lobby_id: payload.lobby_id,
         channel_id: payload.channel_id,
         player_ids: payload.player_ids,
+        delivery_nonce,
         key,
         value,
     })
@@ -626,6 +643,11 @@ mod tests {
         assert_eq!(notices[0].lobby_id, 1);
         assert_eq!(notices[0].channel_id, 333);
         assert_eq!(notices[0].player_ids, BTreeSet::from([200, 300]));
+        assert!(notices[0].delivery_nonce().starts_with("rcp:1:"));
+        assert!(
+            notices[0].delivery_nonce().len() <= 25,
+            "Discord rejects nonce strings longer than 25 characters"
+        );
         assert!(
             repository
                 .acknowledge_pruned_notice(&notices[0])
@@ -637,6 +659,48 @@ mod tests {
                 .expect("reload notices")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn pruned_notice_delivery_nonces_cover_both_lobbies_within_discord_limit() {
+        let (file, repository) = repository();
+        Connection::open(file.path())
+            .expect("open fixture")
+            .execute_batch(
+                "CREATE TABLE app_kv (
+                     guild_id INTEGER NOT NULL,
+                     key TEXT NOT NULL,
+                     value TEXT NOT NULL,
+                     PRIMARY KEY (guild_id, key)
+                 );",
+            )
+            .expect("create existing-schema outbox");
+
+        for lobby_id in [1, 2] {
+            let mut pruned = guild_state(42, 100, &[100]);
+            pruned.lobby_id = lobby_id;
+            repository
+                .save_with_pruned_notice(&pruned, 333, &BTreeSet::from([200]))
+                .expect("commit removal notice");
+        }
+
+        let notices = repository
+            .pending_pruned_notices()
+            .expect("load pending notices");
+        assert_eq!(notices.len(), 2);
+        for notice in notices {
+            assert!(
+                notice.delivery_nonce().len() <= 25,
+                "lobby {} nonce is too long: {}",
+                notice.lobby_id,
+                notice.delivery_nonce()
+            );
+            assert!(
+                notice
+                    .delivery_nonce()
+                    .starts_with(&format!("rcp:{}:", notice.lobby_id))
+            );
+        }
     }
 
     #[test]
