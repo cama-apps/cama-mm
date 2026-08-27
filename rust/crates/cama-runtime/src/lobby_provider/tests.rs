@@ -1,11 +1,13 @@
 use super::*;
 
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use crate::discord_transport::{
     DiscordGuildMemberSnapshot, DiscordMessageReceipt, DiscordMessageSnapshot, DiscordUserSnapshot,
 };
 use crate::gateway_events::{GatewayMember, GuildMemberPageSource};
+use crate::push_notification_provider::{PushNotificationRegistrationProvider, PushPublisher};
 use crate::raw_reactions::RawReactionEmoji;
 use crate::registration::{InteractionAllowedMentions, InteractionResponseError, Registry};
 use crate::test_support::initialize_test_database as initialize_or_migrate;
@@ -15,6 +17,7 @@ use cama_db::low_priority_repository::{LowPriorityRepository, SetLowPriorityInpu
 use cama_db::moderation::{
     ModerationRepository, ModerationSource, SuspensionCompletion, SuspensionScope,
 };
+use cama_db::push_notifications::PushNotificationRepository;
 use cama_domain::curfew::CurfewWindow;
 use chrono::Timelike;
 use tempfile::NamedTempFile;
@@ -23,6 +26,43 @@ use tempfile::NamedTempFile;
 struct CapturedResponses {
     deferred: Vec<bool>,
     followups: Vec<InteractionResponse>,
+}
+
+#[derive(Default)]
+struct RecordingPushPublisher {
+    titles: Mutex<Vec<String>>,
+}
+
+impl RecordingPushPublisher {
+    async fn wait_for_title(&self, expected: &str) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if self
+                .titles
+                .lock()
+                .expect("push titles")
+                .iter()
+                .any(|title| title == expected)
+            {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+}
+
+#[async_trait]
+impl PushPublisher for RecordingPushPublisher {
+    async fn publish(&self, _topic: &str, title: &str, _message: &str) -> Result<(), String> {
+        self.titles
+            .lock()
+            .expect("push titles")
+            .push(title.to_owned());
+        Ok(())
+    }
 }
 
 #[tokio::test]
@@ -2856,6 +2896,22 @@ async fn successful_bell_shortcut_advertises_in_the_persisted_origin_channel() {
         .insert(10, unix_time_now() - 11.0 * 60.0);
     repository.save(&persisted).expect("age the signup");
     let restarted = provider_for(&database, transport.clone());
+    let push_publisher = Arc::new(RecordingPushPublisher::default());
+    let push_provider = PushNotificationRegistrationProvider::with_test_publisher(
+        database.path(),
+        push_publisher.clone(),
+    );
+    PushNotificationRepository::new(database.path())
+        .set_target(
+            10,
+            Some(42),
+            "cama-000000000000000000000000000000000000000000000010",
+            1,
+        )
+        .expect("configure bell push target");
+    restarted
+        .attach_push_notification_hooks(push_provider.hooks())
+        .expect("attach bell push hooks");
     transport.set_member(
         42,
         DiscordGuildMemberSnapshot {
@@ -2897,6 +2953,10 @@ async fn successful_bell_shortcut_advertises_in_the_persisted_origin_channel() {
                 .contains("[React in the lobby thread]")
             && sent.message.allowed_mentions == DiscordAllowedMentions::Users(BTreeSet::from([10]))
     }));
+    assert!(
+        push_publisher.wait_for_title("⚔️ Readycheck!").await,
+        "the bell shortcut must trigger the same push notification as /readycheck"
+    );
 }
 
 #[tokio::test]

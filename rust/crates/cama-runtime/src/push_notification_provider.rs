@@ -6,34 +6,37 @@
 //! Discord interaction response. Failures are logged, not surfaced, matching
 //! the existing one-shot lobby alert precedent in `registration_provider.rs`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use cama_app::ntfy_http::{DEFAULT_NTFY_SERVER, NtfyBuildError, NtfyHttpClient};
 use cama_db::push_notifications::{
     PushNotificationConfig, PushNotificationKind, PushNotificationRepository,
 };
+use tokio::sync::Semaphore;
 use tracing::warn;
 
 use crate::registration::{
     CommandSpec, ComponentRoute, InteractionAcknowledgementPolicy, InteractionActionRow,
     InteractionButton, InteractionButtonStyle, InteractionHandler, InteractionHandlerError,
-    InteractionModal, InteractionRequest, InteractionResponder, InteractionResponse,
-    InteractionTextInput, RegistrationError, RegistrationProvider, RegistryBuilder,
+    InteractionRequest, InteractionResponder, InteractionResponse, RegistrationError,
+    RegistrationProvider, RegistryBuilder,
 };
 
 const COMMAND_NAME: &str = "notify";
 const COMPONENT_PREFIX: &str = "notify_";
-const MODAL_CUSTOM_ID: &str = "notify_modal";
 const BUTTON_SET: &str = "notify_set";
 const BUTTON_TOGGLE_READYCHECK: &str = "notify_toggle_readycheck";
 const BUTTON_TOGGLE_LOBBY: &str = "notify_toggle_lobby";
 const BUTTON_TEST: &str = "notify_test";
 const BUTTON_CLEAR: &str = "notify_clear";
-const TOPIC_FIELD: &str = "topic";
-const SERVER_FIELD: &str = "server";
+const TOPIC_PREFIX: &str = "cama-";
+const TOPIC_RANDOM_BYTES: usize = 24;
+const DELIVERY_CONCURRENCY: usize = 4;
+const TEST_DELIVERY_COOLDOWN: Duration = Duration::from_secs(60);
 
 const READYCHECK_TITLE: &str = "\u{2694}\u{fe0f} Readycheck!";
 const READYCHECK_MESSAGE: &str = "Your readycheck just launched \u{2014} react before it expires!";
@@ -49,12 +52,29 @@ pub struct PushNotificationRegistrationProvider {
 
 impl PushNotificationRegistrationProvider {
     pub fn new(database_path: impl AsRef<Path>) -> Result<Self, NtfyBuildError> {
-        Ok(Self {
+        Ok(Self::with_publisher(
+            database_path,
+            Arc::new(NtfyHttpClient::new()?),
+        ))
+    }
+
+    fn with_publisher(database_path: impl AsRef<Path>, publisher: Arc<dyn PushPublisher>) -> Self {
+        Self {
             handler: Arc::new(PushNotificationHandler {
                 repository: PushNotificationRepository::new(database_path),
-                client: NtfyHttpClient::new()?,
+                publisher,
+                delivery_semaphore: Arc::new(Semaphore::new(DELIVERY_CONCURRENCY)),
+                test_cooldowns: Mutex::new(BTreeMap::new()),
             }),
-        })
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_publisher(
+        database_path: impl AsRef<Path>,
+        publisher: Arc<dyn PushPublisher>,
+    ) -> Self {
+        Self::with_publisher(database_path, publisher)
     }
 
     /// Cheap, cloneable hooks for other providers to fire notifications from.
@@ -70,7 +90,7 @@ impl RegistrationProvider for PushNotificationRegistrationProvider {
     fn register(&self, registry: &mut RegistryBuilder) -> Result<(), RegistrationError> {
         registry.command(CommandSpec {
             name: COMMAND_NAME.to_owned(),
-            description: "Configure ntfy.sh push notifications for readychecks and full lobbies."
+            description: "Configure best-effort ntfy.sh alerts for readychecks and full lobbies."
                 .to_owned(),
             options: Vec::new(),
             handler: self.handler.clone(),
@@ -133,7 +153,23 @@ impl PushNotificationHooks {
 
 struct PushNotificationHandler {
     repository: PushNotificationRepository,
-    client: NtfyHttpClient,
+    publisher: Arc<dyn PushPublisher>,
+    delivery_semaphore: Arc<Semaphore>,
+    test_cooldowns: Mutex<BTreeMap<(i64, i64), Instant>>,
+}
+
+#[async_trait]
+pub(crate) trait PushPublisher: Send + Sync {
+    async fn publish(&self, topic: &str, title: &str, message: &str) -> Result<(), String>;
+}
+
+#[async_trait]
+impl PushPublisher for NtfyHttpClient {
+    async fn publish(&self, topic: &str, title: &str, message: &str) -> Result<(), String> {
+        NtfyHttpClient::publish(self, topic, title, message)
+            .await
+            .map_err(|error| error.to_string())
+    }
 }
 
 impl PushNotificationHandler {
@@ -188,16 +224,56 @@ impl PushNotificationHandler {
                     return;
                 }
             };
-            for (discord_id, target) in targets {
-                if let Err(error) = handler
-                    .client
-                    .publish(&target.server, &target.topic, title, message)
-                    .await
-                {
-                    warn!(discord_id, %error, "push notification delivery failed");
+            let mut targets = targets.into_iter();
+            let mut deliveries = tokio::task::JoinSet::new();
+            for _ in 0..DELIVERY_CONCURRENCY {
+                let Some((discord_id, target)) = targets.next() else {
+                    break;
+                };
+                deliveries.spawn(Self::deliver_target(
+                    Arc::clone(&handler.publisher),
+                    Arc::clone(&handler.delivery_semaphore),
+                    discord_id,
+                    target.topic,
+                    title,
+                    message,
+                ));
+            }
+            while let Some(delivery) = deliveries.join_next().await {
+                match delivery {
+                    Ok((_, Ok(()))) => {}
+                    Ok((discord_id, Err(error))) => {
+                        warn!(discord_id, %error, "push notification delivery failed");
+                    }
+                    Err(error) => warn!(%error, "push notification delivery task failed"),
+                }
+                if let Some((discord_id, target)) = targets.next() {
+                    deliveries.spawn(Self::deliver_target(
+                        Arc::clone(&handler.publisher),
+                        Arc::clone(&handler.delivery_semaphore),
+                        discord_id,
+                        target.topic,
+                        title,
+                        message,
+                    ));
                 }
             }
         });
+    }
+
+    async fn deliver_target(
+        publisher: Arc<dyn PushPublisher>,
+        semaphore: Arc<Semaphore>,
+        discord_id: i64,
+        topic: String,
+        title: &'static str,
+        message: &'static str,
+    ) -> (i64, Result<(), String>) {
+        let result = match semaphore.acquire_owned().await {
+            Ok(_permit) => publisher.publish(&topic, title, message).await,
+            Err(_) => Err("push notification delivery semaphore closed".to_owned()),
+        };
+        (discord_id, result)
     }
 
     async fn toggle(
@@ -250,14 +326,25 @@ impl PushNotificationHandler {
                 .await
                 .map_err(|error| error.to_string().into());
         };
+        if let Some(retry_after) = self.claim_test_delivery(discord_id, guild_id)? {
+            let mut response = status_response(Some(&config));
+            response.content.push_str(&format!(
+                "\n\n⏳ Test delivery is rate-limited. Try again in {retry_after}s."
+            ));
+            return responder
+                .update(response)
+                .await
+                .map_err(|error| error.to_string().into());
+        }
+        let _permit = self
+            .delivery_semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| "push notification delivery semaphore closed".to_owned())?;
         let result = self
-            .client
-            .publish(
-                &config.target.server,
-                &config.target.topic,
-                TEST_TITLE,
-                TEST_MESSAGE,
-            )
+            .publisher
+            .publish(&config.target.topic, TEST_TITLE, TEST_MESSAGE)
             .await;
         let mut response = status_response(Some(&config));
         if let Err(error) = result {
@@ -274,6 +361,31 @@ impl PushNotificationHandler {
             .update(response)
             .await
             .map_err(|error| error.to_string().into())
+    }
+
+    fn claim_test_delivery(&self, discord_id: i64, guild_id: i64) -> Result<Option<u64>, String> {
+        let now = Instant::now();
+        let mut cooldowns = self
+            .test_cooldowns
+            .lock()
+            .map_err(|_| "push notification test cooldown lock was poisoned".to_owned())?;
+        if cooldowns.len() >= 1_024 {
+            cooldowns.retain(|_, claimed| now.duration_since(*claimed) < TEST_DELIVERY_COOLDOWN);
+        }
+        let key = (guild_id, discord_id);
+        if let Some(claimed) = cooldowns.get(&key) {
+            let elapsed = now.duration_since(*claimed);
+            if elapsed < TEST_DELIVERY_COOLDOWN {
+                return Ok(Some(
+                    TEST_DELIVERY_COOLDOWN
+                        .saturating_sub(elapsed)
+                        .as_secs()
+                        .max(1),
+                ));
+            }
+        }
+        cooldowns.insert(key, now);
+        Ok(None)
     }
 
     async fn clear(
@@ -293,44 +405,19 @@ impl PushNotificationHandler {
             .map_err(|error| error.to_string().into())
     }
 
-    async fn set_target(
+    async fn create_target(
         &self,
         discord_id: i64,
         guild_id: i64,
-        fields: &std::collections::BTreeMap<String, String>,
         responder: &Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
-        let Some(topic) = fields
-            .get(TOPIC_FIELD)
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
-        else {
-            return respond_ephemeral(responder, "\u{274c} A topic is required.").await;
-        };
-        if topic.contains('/') || topic.contains(char::is_whitespace) {
-            return respond_ephemeral(responder, "\u{274c} Topic must not contain spaces or `/`.")
-                .await;
-        }
-        let server = fields
-            .get(SERVER_FIELD)
-            .map(|value| value.trim().trim_end_matches('/').to_owned())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| DEFAULT_NTFY_SERVER.to_owned());
-        if !server.starts_with("http://") && !server.starts_with("https://") {
-            return respond_ephemeral(
-                responder,
-                "\u{274c} Server must be a full URL, e.g. `https://ntfy.sh`.",
-            )
-            .await;
-        }
-
+        let topic = generate_topic()?;
         let repository = self.repository.clone();
         let updated_at = now_seconds();
         {
-            let server = server.clone();
             let topic = topic.clone();
             tokio::task::spawn_blocking(move || {
-                repository.set_target(discord_id, Some(guild_id), &server, &topic, updated_at)
+                repository.set_target(discord_id, Some(guild_id), &topic, updated_at)
             })
             .await
             .map_err(|error| format!("push notification set-target task failed: {error}"))?
@@ -338,7 +425,7 @@ impl PushNotificationHandler {
         }
         let config = self.config(discord_id, guild_id).await?;
         responder
-            .respond(status_response(config.as_ref()))
+            .update(status_response(config.as_ref()))
             .await
             .map_err(|error| error.to_string().into())
     }
@@ -348,14 +435,9 @@ impl PushNotificationHandler {
 impl InteractionHandler for PushNotificationHandler {
     fn acknowledgement_policy(
         &self,
-        request: &InteractionRequest,
+        _request: &InteractionRequest,
     ) -> InteractionAcknowledgementPolicy {
-        match request {
-            InteractionRequest::Component { custom_id, .. } if custom_id == BUTTON_SET => {
-                InteractionAcknowledgementPolicy::Modal
-            }
-            _ => InteractionAcknowledgementPolicy::Automatic,
-        }
+        InteractionAcknowledgementPolicy::Automatic
     }
 
     async fn handle(
@@ -394,23 +476,7 @@ impl InteractionHandler for PushNotificationHandler {
             } => {
                 let (discord_id, guild_id) = signed_ids(user_id, guild_id)?;
                 match custom_id.as_str() {
-                    BUTTON_SET => {
-                        let mut topic_input =
-                            InteractionTextInput::short(TOPIC_FIELD, "ntfy Topic");
-                        topic_input.placeholder = Some("a long random string".to_owned());
-                        let mut server_input =
-                            InteractionTextInput::short(SERVER_FIELD, "ntfy Server (optional)");
-                        server_input.required = false;
-                        server_input.placeholder = Some(DEFAULT_NTFY_SERVER.to_owned());
-                        responder
-                            .show_modal(InteractionModal {
-                                custom_id: MODAL_CUSTOM_ID.to_owned(),
-                                title: "Set ntfy Target".to_owned(),
-                                inputs: vec![topic_input, server_input],
-                            })
-                            .await
-                            .map_err(|error| error.to_string().into())
-                    }
+                    BUTTON_SET => self.create_target(discord_id, guild_id, &responder).await,
                     BUTTON_TOGGLE_READYCHECK => {
                         self.toggle(
                             discord_id,
@@ -434,21 +500,8 @@ impl InteractionHandler for PushNotificationHandler {
                     other => Err(format!("unknown push notification component {other:?}").into()),
                 }
             }
-            InteractionRequest::Modal {
-                custom_id,
-                user_id,
-                guild_id,
-                fields,
-                ..
-            } => {
-                if custom_id != MODAL_CUSTOM_ID {
-                    return Err(
-                        format!("push notification handler received modal {custom_id:?}").into(),
-                    );
-                }
-                let (discord_id, guild_id) = signed_ids(user_id, guild_id)?;
-                self.set_target(discord_id, guild_id, &fields, &responder)
-                    .await
+            InteractionRequest::Modal { .. } => {
+                Err("push notification handler does not accept modal interactions".into())
             }
             InteractionRequest::Autocomplete { .. } => {
                 Err("push notification handler received an autocomplete interaction".into())
@@ -482,35 +535,34 @@ fn now_seconds() -> i64 {
         .unwrap_or_default() as i64
 }
 
-async fn respond_ephemeral(
-    responder: &Arc<dyn InteractionResponder>,
-    message: impl Into<String>,
-) -> Result<(), InteractionHandlerError> {
-    responder
-        .respond(
-            InteractionResponse::message(message)
-                .ephemeral()
-                .without_mentions(),
-        )
-        .await
-        .map_err(|error| error.to_string().into())
+fn generate_topic() -> Result<String, String> {
+    let mut random = [0_u8; TOPIC_RANDOM_BYTES];
+    getrandom::fill(&mut random)
+        .map_err(|error| format!("could not generate a secure ntfy topic: {error}"))?;
+    let suffix = random
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(format!("{TOPIC_PREFIX}{suffix}"))
 }
 
 fn status_response(config: Option<&PushNotificationConfig>) -> InteractionResponse {
     let mut lines = vec![
         "**Push notifications (ntfy.sh)**".to_owned(),
-        "Get an alert on your phone/tablet when a readycheck launches with you in it, or a lobby you're in fills up.".to_owned(),
+        "Get a best-effort alert when a readycheck launches with you in it, or a lobby you're in fills up.".to_owned(),
         String::new(),
     ];
     let mut buttons = Vec::new();
     match config {
         Some(config) => {
-            lines.push(format!(
-                "Target: `{}` on `{}`",
-                config.target.topic, config.target.server
-            ));
+            lines.push(format!("Server: `{DEFAULT_NTFY_SERVER}`"));
+            lines.push(format!("Topic: `{}`", config.target.topic));
+            lines.push(
+                "Keep this topic private; anyone who knows it can receive or publish alerts."
+                    .to_owned(),
+            );
             buttons.push(
-                InteractionButton::new(BUTTON_SET, "Change Target")
+                InteractionButton::new(BUTTON_SET, "Regenerate Topic")
                     .emoji("\u{1f527}")
                     .style(InteractionButtonStyle::Secondary),
             );
@@ -565,9 +617,9 @@ fn status_response(config: Option<&PushNotificationConfig>) -> InteractionRespon
             );
         }
         None => {
-            lines.push("No ntfy target configured yet.".to_owned());
+            lines.push("No ntfy topic configured yet.".to_owned());
             buttons.push(
-                InteractionButton::new(BUTTON_SET, "Set ntfy Target")
+                InteractionButton::new(BUTTON_SET, "Create ntfy Topic")
                     .emoji("\u{1f527}")
                     .style(InteractionButtonStyle::Primary),
             );

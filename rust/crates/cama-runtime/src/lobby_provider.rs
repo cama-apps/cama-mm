@@ -2125,8 +2125,6 @@ impl LobbyInteractionHandler {
             .await
         {
             Ok(result) => {
-                self.state
-                    .notify_readycheck_launched(guild_id, &result.mention_ids);
                 if !result.mention_ids.is_empty() && channel_id != result.readycheck_channel_id {
                     let mention_ids = result
                         .mention_ids
@@ -2316,14 +2314,18 @@ impl LobbyInteractionHandler {
                 }
             }
         }
-        self.execute_readycheck_plan(
-            plan,
-            player_data,
-            mentionable,
-            invocation_channel_id,
-            mirror_invocation,
-        )
-        .await
+        let result = self
+            .execute_readycheck_plan(
+                plan,
+                player_data,
+                mentionable,
+                invocation_channel_id,
+                mirror_invocation,
+            )
+            .await?;
+        self.state
+            .notify_readycheck_launched(scope.guild_id, &result.mention_ids);
+        Ok(result)
     }
 
     /// Runs the plan and guarantees the publication permit is released.

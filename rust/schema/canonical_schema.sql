@@ -1386,12 +1386,17 @@ CREATE TABLE referrals (
 CREATE TABLE push_notification_targets (
                 discord_id         INTEGER NOT NULL,
                 guild_id           INTEGER NOT NULL DEFAULT 0,
-                ntfy_server        TEXT NOT NULL,
                 ntfy_topic         TEXT NOT NULL,
                 readycheck_enabled INTEGER NOT NULL DEFAULT 1,
                 lobby_enabled      INTEGER NOT NULL DEFAULT 1,
                 updated_at         INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (discord_id, guild_id)
+                PRIMARY KEY (discord_id, guild_id),
+                UNIQUE (ntfy_topic),
+                CHECK (length(ntfy_topic) = 53),
+                CHECK (substr(ntfy_topic, 1, 5) = 'cama-'),
+                CHECK (substr(ntfy_topic, 6) NOT GLOB '*[^0-9a-f]*'),
+                CHECK (readycheck_enabled IN (0, 1)),
+                CHECK (lobby_enabled IN (0, 1))
             );
 
 -- table: reminder_preferences

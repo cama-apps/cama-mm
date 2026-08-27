@@ -20,6 +20,10 @@ struct CapturedRequest {
 
 impl ScriptedServer {
     fn start(status: u16) -> Self {
+        Self::start_with_headers(status, Vec::new())
+    }
+
+    fn start_with_headers(status: u16, headers: Vec<(&'static str, &'static str)>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback test server");
         let base_url = format!("http://{}", listener.local_addr().expect("local address"));
         let requests = Arc::new(StdMutex::new(Vec::new()));
@@ -32,8 +36,12 @@ impl ScriptedServer {
                 captured.lock().expect("request capture lock").push(request);
             }
             let reason = if status == 200 { "OK" } else { "Test Status" };
+            let extra_headers = headers
+                .into_iter()
+                .map(|(name, value)| format!("{name}: {value}\r\n"))
+                .collect::<String>();
             let wire = format!(
-                "HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                "HTTP/1.1 {status} {reason}\r\n{extra_headers}Content-Length: 0\r\nConnection: close\r\n\r\n"
             );
             let _ = stream.write_all(wire.as_bytes());
         });
@@ -77,42 +85,37 @@ fn read_request(stream: &mut std::net::TcpStream) -> Option<CapturedRequest> {
 }
 
 #[tokio::test]
-async fn publish_rejects_empty_server() {
-    let client = NtfyHttpClient::new().expect("test client");
-    let result = client.publish("", "topic", "title", "message").await;
-    assert_eq!(result, Err(NtfyPublishError::EmptyServer));
-}
-
-#[tokio::test]
 async fn publish_rejects_empty_topic() {
     let client = NtfyHttpClient::new().expect("test client");
-    let result = client
-        .publish(DEFAULT_NTFY_SERVER, "", "title", "message")
-        .await;
+    let result = client.publish("", "title", "message").await;
     assert_eq!(result, Err(NtfyPublishError::EmptyTopic));
 }
 
 #[tokio::test]
 async fn publish_rejects_topic_with_path_separator() {
     let client = NtfyHttpClient::new().expect("test client");
-    let result = client
-        .publish(DEFAULT_NTFY_SERVER, "a/b", "title", "message")
-        .await;
+    let result = client.publish("a/b", "title", "message").await;
     assert_eq!(result, Err(NtfyPublishError::InvalidTopic));
+}
+
+#[tokio::test]
+async fn publish_rejects_topic_with_query_or_fragment_syntax() {
+    let client = NtfyHttpClient::new().expect("test client");
+    for topic in ["topic?admin=true", "topic#fragment", "topic%2Fnested"] {
+        assert_eq!(
+            client.publish(topic, "title", "message").await,
+            Err(NtfyPublishError::InvalidTopic)
+        );
+    }
 }
 
 #[tokio::test]
 async fn publish_sends_expected_request_to_topic_and_succeeds() {
     let server = ScriptedServer::start(200);
-    let client = NtfyHttpClient::new().expect("test client");
+    let client = NtfyHttpClient::for_server(&server.base_url).expect("test client");
 
     let result = client
-        .publish(
-            &server.base_url,
-            "my-topic",
-            "Ready!",
-            "Readycheck launched",
-        )
+        .publish("my-topic", "Ready!", "Readycheck launched")
         .await;
 
     assert_eq!(result, Ok(()));
@@ -137,12 +140,10 @@ async fn publish_sends_expected_request_to_topic_and_succeeds() {
 #[tokio::test]
 async fn publish_trims_trailing_slash_from_server() {
     let server = ScriptedServer::start(200);
-    let client = NtfyHttpClient::new().expect("test client");
-
     let base_with_slash = format!("{}/", server.base_url);
-    let result = client
-        .publish(&base_with_slash, "my-topic", "title", "message")
-        .await;
+    let client = NtfyHttpClient::for_server(&base_with_slash).expect("test client");
+
+    let result = client.publish("my-topic", "title", "message").await;
 
     assert_eq!(result, Ok(()));
     assert_eq!(server.requests().len(), 1);
@@ -151,11 +152,21 @@ async fn publish_trims_trailing_slash_from_server() {
 #[tokio::test]
 async fn publish_maps_non_success_status_to_rejected() {
     let server = ScriptedServer::start(500);
-    let client = NtfyHttpClient::new().expect("test client");
+    let client = NtfyHttpClient::for_server(&server.base_url).expect("test client");
 
-    let result = client
-        .publish(&server.base_url, "my-topic", "title", "message")
-        .await;
+    let result = client.publish("my-topic", "title", "message").await;
 
     assert_eq!(result, Err(NtfyPublishError::Rejected(500)));
+}
+
+#[tokio::test]
+async fn publish_does_not_follow_redirects() {
+    let server =
+        ScriptedServer::start_with_headers(307, vec![("Location", "http://127.0.0.1:1/internal")]);
+    let client = NtfyHttpClient::for_server(&server.base_url).expect("test client");
+
+    let result = client.publish("my-topic", "title", "message").await;
+
+    assert_eq!(result, Err(NtfyPublishError::Rejected(307)));
+    assert_eq!(server.requests().len(), 1);
 }

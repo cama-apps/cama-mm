@@ -724,7 +724,6 @@ impl LobbyJoinObserver for PlayerRegistrationHandler {
             warn!(%error, "one-shot lobby alert delivery failed independently");
         }
         if event.player_ids.len() == event.ready_threshold {
-            self.notify_lobby_confirmed(&event);
             self.deliver_lobby_ready(&event).await
         } else {
             self.deliver_lobby_rally(&event).await
@@ -855,6 +854,9 @@ impl PlayerRegistrationHandler {
             cooldowns.insert(key, now);
         }
         let result = self.send_lobby_ready(event).await;
+        if result.is_ok() {
+            self.notify_lobby_confirmed(event);
+        }
         if result.is_err()
             && let Ok(mut cooldowns) = self.ready_cooldowns.lock()
         {
