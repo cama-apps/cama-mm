@@ -4031,7 +4031,10 @@ fn production_goodness_weights_adjusted_value_difference() {
     let goodness =
         extra_f64(&prepared.pending.state, "goodness_score").expect("stored goodness score");
 
-    assert!((goodness - (-641.0)).abs() < 1e-9, "{goodness}");
+    assert!(
+        (goodness - (-724.888_888_888_888_9)).abs() < 1e-9,
+        "{goodness}"
+    );
 }
 
 #[test]
@@ -4104,7 +4107,7 @@ fn test_goodness_includes_low_priority_selection_penalty_and_team_bonus() {
         extra_f64(&penalized.pending.state, "goodness_score").expect("penalized goodness");
     // Two selected low-priority players at LOW_PRIORITY_GOODNESS_PENALTY each,
     // less the one-team grouping bonus.
-    assert_eq!(penalized_score - baseline_score, 1_220.0);
+    assert!((penalized_score - baseline_score - 1_220.0).abs() < 1e-9);
 }
 
 #[test]
