@@ -502,6 +502,14 @@ struct LobbyRuntimeState {
     membership_rate_limiter: StdMutex<RateLimiter>,
 }
 
+#[derive(Debug, Error)]
+enum ReadycheckNoticePublishError {
+    #[error("{0}")]
+    Delivery(String),
+    #[error("{0}")]
+    Fatal(String),
+}
+
 #[derive(Clone, Copy, Debug)]
 struct LobbyMembershipRateLimitClaim {
     at: f64,
@@ -831,25 +839,28 @@ impl LobbyRuntimeState {
     async fn publish_readycheck_pruned_notice(
         &self,
         notice: ReadycheckPrunedNotice,
-    ) -> Result<(), String> {
+    ) -> Result<(), ReadycheckNoticePublishError> {
         let scope = readycheck_notice_scope(&notice).ok_or_else(|| {
-            format!(
+            ReadycheckNoticePublishError::Fatal(format!(
                 "invalid ready-check removal notice lobby id {}",
                 notice.lobby_id
-            )
+            ))
         })?;
         let users = notice
             .player_ids
             .iter()
             .map(|player_id| to_u64(*player_id))
-            .collect::<Result<BTreeSet<_>, _>>()?;
+            .collect::<Result<BTreeSet<_>, _>>()
+            .map_err(ReadycheckNoticePublishError::Fatal)?;
+        let channel_id = to_u64(notice.channel_id).map_err(ReadycheckNoticePublishError::Fatal)?;
         self.transport
             .send_message_with_delivery_key(
-                to_u64(notice.channel_id)?,
+                channel_id,
                 notice.delivery_nonce(),
                 readycheck_pruned_players_message(scope.kind, &users),
             )
-            .await?;
+            .await
+            .map_err(ReadycheckNoticePublishError::Delivery)?;
         let persistence = Arc::clone(&self.readycheck_persistence);
         let acknowledged = tokio::task::spawn_blocking(move || {
             persistence
@@ -858,7 +869,8 @@ impl LobbyRuntimeState {
                 .map_err(|error| error.to_string())
         })
         .await
-        .map_err(|error| error.to_string())??;
+        .map_err(|error| ReadycheckNoticePublishError::Fatal(error.to_string()))?
+        .map_err(ReadycheckNoticePublishError::Fatal)?;
         if !acknowledged {
             debug!(
                 ?scope,
@@ -882,7 +894,17 @@ impl LobbyRuntimeState {
         .await
         .map_err(|error| error.to_string())??;
         for notice in notices {
-            self.publish_readycheck_pruned_notice(notice).await?;
+            match self.publish_readycheck_pruned_notice(notice).await {
+                Ok(()) => {}
+                Err(ReadycheckNoticePublishError::Delivery(error)) => {
+                    warn!(
+                        %error,
+                        ?scope,
+                        "ready-check removal notice delivery failed; retained for retry"
+                    );
+                }
+                Err(ReadycheckNoticePublishError::Fatal(error)) => return Err(error),
+            }
         }
         Ok(())
     }
@@ -4087,11 +4109,21 @@ impl GatewayEventObserver for LobbyGatewayObserver {
                         continue;
                     }
                     attempted_guilds.insert(guild_id);
-                    if let Err(error) = self.state.publish_readycheck_pruned_notice(notice).await {
-                        notice_failures.push(ReadyRecoveryFailure {
-                            guild_id,
-                            message: format!("ready-check removal notice: {error}"),
-                        });
+                    match self.state.publish_readycheck_pruned_notice(notice).await {
+                        Ok(()) => {}
+                        Err(ReadycheckNoticePublishError::Delivery(error)) => {
+                            warn!(
+                                %error,
+                                guild_id,
+                                "ready-check removal notice delivery failed; retained for retry"
+                            );
+                        }
+                        Err(ReadycheckNoticePublishError::Fatal(error)) => {
+                            notice_failures.push(ReadyRecoveryFailure {
+                                guild_id,
+                                message: format!("ready-check removal notice: {error}"),
+                            });
+                        }
                     }
                 }
             }
