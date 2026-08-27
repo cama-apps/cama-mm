@@ -1630,7 +1630,7 @@ impl ShopInteractionHandler {
                 .await
                 .map_err(|_| "Could not seal the pact; refunded.".to_owned())?;
                 Ok(format!(
-                    "🌿🩸 **BLOOD PACT** — <@{user_id}> marks <@{}> for skim.\nFor 24h, you receive 25% of {}'s match/wheel/dig earnings (cap 150 JC).\n(cost: {} {JOPACOIN_EMOTE}, balance: {new_balance})",
+                    "🌿🩸 **BLOOD PACT** — <@{user_id}> marks <@{}> for skim.\nFor 24h, you receive 25% of {}'s match/wheel/dig earnings, with no cap.\n(cost: {} {JOPACOIN_EMOTE}, balance: {new_balance})",
                     target.id, target.display_name, spec.cost
                 ))
             }
