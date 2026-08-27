@@ -255,9 +255,25 @@ fn command_and_component_registration_match_python_surface() {
     assert_eq!(command.description, "Check your daily mana land assignment");
     assert_eq!(command.options.len(), 2);
     assert_eq!(command.options[0].name, "user");
+    assert_eq!(
+        command.options[0].description,
+        "View another player's mana (optional)"
+    );
     assert_eq!(command.options[0].kind, CommandOptionKind::User);
     assert!(!command.options[0].required);
     assert_eq!(command.options[1].name, "all");
+    // `/mana` only ever reads now; the worker owns assignment, so this copy
+    // must not promise to roll anything.
+    assert_eq!(
+        command.options[1].description,
+        "Show the full guild's current mana assignments"
+    );
+    assert!(
+        !command.options[1]
+            .description
+            .to_lowercase()
+            .contains("roll")
+    );
     assert_eq!(command.options[1].kind, CommandOptionKind::Boolean);
     assert_eq!(
         registry.component_routes()[0].custom_id_prefix,
@@ -387,8 +403,11 @@ async fn selected_unassigned_player_is_read_only_and_uses_no_mana_embed() {
 }
 
 #[tokio::test]
-async fn all_assigns_every_registered_player_and_paginates_twelve_per_page() {
+async fn board_displays_all_players_already_assigned_and_paginates_twelve_per_page() {
     let fixture = Fixture::new(13);
+    for i in 0..13 {
+        fixture.assign(USER + i, "Plains", TODAY);
+    }
     let provider = provider(
         &fixture,
         FakeDiscord {
@@ -744,33 +763,6 @@ fn test_next_wheel_spin_matches_atomic_claim_semantics_future_adjusted_penalty()
 fn test_single_player_omits_assigned_field() {
     let embed = single_embed(&members(1)[0], &details(Land::Island), TODAY, Some(NOW), 0);
     assert!(embed.fields.iter().all(|field| field.name != "Assigned"));
-}
-
-#[tokio::test]
-async fn test_lost_race_reports_already_claimed() {
-    let fixture = Fixture::new(1);
-    let moment = FixedClock.moment().expect("fixed mana moment");
-    let repository = ManaRepository::new(fixture.database.path());
-    assert!(
-        repository
-            .claim_mana_atomic(USER, Some(GUILD), "Forest", TODAY)
-            .expect("winning claim")
-    );
-    let mut service = live_service(repository, fixture.database.path(), moment);
-    let error = service
-        .assign_daily_mana(
-            USER,
-            GUILD,
-            TODAY,
-            moment.day_start().expect("day start"),
-            false,
-        )
-        .expect_err("second claim loses");
-    assert_eq!(error, ManaServiceError::AlreadyAssigned);
-    let response =
-        InteractionResponse::message("You've already claimed your mana for today.").ephemeral();
-    assert!(response.ephemeral);
-    assert!(response.content.contains("already claimed"));
 }
 
 #[tokio::test]

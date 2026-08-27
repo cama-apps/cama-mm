@@ -42,8 +42,8 @@ use cama_runtime::{
     TriviaRegistrationProvider, UsageMonitor, VanityTaxGatewayObserver,
     WrappedRegistrationProvider, check_health, curfew_sweep_worker_spec, dig_weather_worker_spec,
     duel_challenges_worker_spec, economy_events_worker_spec, first_game_pool_worker_spec,
-    manashop_debt_worker_spec, pet_sweep_worker_spec_with_ai, prediction_digest_worker_spec,
-    prediction_refresh_worker_spec, validate_production_registry,
+    mana_auto_assign_worker_spec, manashop_debt_worker_spec, pet_sweep_worker_spec_with_ai,
+    prediction_digest_worker_spec, prediction_refresh_worker_spec, validate_production_registry,
 };
 use cama_runtime::{
     BettingRegistrationProvider, BettingRuntimeConfig, match_post_match_debrief_port,
@@ -976,6 +976,12 @@ async fn run_serve() -> ExitCode {
     }
     let manashop_debt_worker =
         manashop_debt_worker_spec(&config.db_path, discord_transport.clone());
+    let mana_auto_assign_worker = mana_auto_assign_worker_spec(
+        &config.db_path,
+        application_config.values.white_bankrupt_stipend,
+        discord_transport.clone(),
+        discord_transport.clone(),
+    );
     let duel_challenges_worker = duel_challenges_worker_spec(
         &config.db_path,
         application_config.channels.duel,
@@ -1047,6 +1053,7 @@ async fn run_serve() -> ExitCode {
     .with_global_interaction_hooks(global_interaction_hooks)
     .with_raw_reaction_observers(raw_reaction_observers)
     .with_worker(manashop_debt_worker)
+    .with_worker(mana_auto_assign_worker)
     .with_worker(duel_challenges_worker)
     .with_worker(prediction_refresh_worker)
     .with_worker(prediction_digest_worker)
