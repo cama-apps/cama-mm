@@ -3673,7 +3673,7 @@ impl ManaDiscordPort for SerenityDiscordTransport {
         Ok(Some(ManaGuildMember {
             user_id: i64::try_from(member.user.id.get())
                 .map_err(|_| "Discord mana user ID exceeds SQLite INTEGER")?,
-            display_name: member.user.name.clone(),
+            display_name: member_render_name(&member),
             avatar_url: Some(member.face()),
             role_names: member
                 .roles
@@ -3688,7 +3688,7 @@ fn serenity_mana_member(guild: &Guild, member: &Member) -> Result<ManaGuildMembe
     Ok(ManaGuildMember {
         user_id: i64::try_from(member.user.id.get())
             .map_err(|_| "Discord mana user ID exceeds SQLite INTEGER")?,
-        display_name: member.user.name.clone(),
+        display_name: member_render_name(member),
         avatar_url: Some(member.face()),
         role_names: member
             .roles
