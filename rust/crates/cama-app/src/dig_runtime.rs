@@ -2178,7 +2178,7 @@ where
                     price: 8,
                 });
             }
-            let should_buy_torch = current.tunnel.as_ref().map_or(false, |t| {
+            let should_buy_torch = current.tunnel.as_ref().is_some_and(|t| {
                 let low_luminosity = t.luminosity <= 50;
                 // Buy torches before boss fights: check if approaching any boss boundary (within 1 block)
                 let boss_boundaries = [24, 49, 74, 99, 149, 199, 274, 349];
@@ -2417,13 +2417,15 @@ where
         let perk_fx = aggregate_prestige_perk_effects(&prestige_perks);
         let (buff_fx, buff_remaining) =
             active_buff_effects(tunnel.temp_buffs.as_deref()).unwrap_or_default();
-        let stat_effects = MinerStats::new(tunnel.stat_strength, tunnel.stat_smarts, tunnel.stat_stamina)
-            .map(miner_stat_effects)
-            .unwrap_or_else(|_| {
-                miner_stat_effects(
-                    MinerStats::new(0, 0, 0).expect("zero stats must be valid"),
-                )
-            });
+        let stat_effects = MinerStats::new(
+            tunnel.stat_strength,
+            tunnel.stat_smarts,
+            tunnel.stat_stamina,
+        )
+        .map(miner_stat_effects)
+        .unwrap_or_else(|_| {
+            miner_stat_effects(MinerStats::new(0, 0, 0).expect("zero stats must be valid"))
+        });
         // Corruption is the first request-local random policy in Python. It
         // must consume the same entropy stream as the subsequent cave roll,
         // rather than a second seed that would shift only some Dig paths.
@@ -2547,7 +2549,10 @@ where
                 + curse_fx.advance_bonus
                 + gear_fx.advance_bonus
                 + buff_fx.advance_bonus,
-            advance_min: Some((layer_at(depth_before).advance_range.0 + stat_effects.advance_min_bonus as i64).max(1)),
+            advance_min: Some(
+                (layer_at(depth_before).advance_range.0 + stat_effects.advance_min_bonus as i64)
+                    .max(1),
+            ),
             advance_max: {
                 let layer_max = layer_at(depth_before).advance_range.1;
                 let route_penalty = active_route

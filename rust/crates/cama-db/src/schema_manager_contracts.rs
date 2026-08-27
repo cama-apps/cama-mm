@@ -101,6 +101,7 @@ const REQUIRED_TRIGGERS: [&str; 6] = [
 /// This duplicate is intentional: a schema migration that adds a tunnel
 /// column must remain writable from both runtimes or be explicitly excluded.
 pub const TUNNEL_UPDATABLE_COLUMNS: &[&str] = &[
+    "auto_buy_grappling_hook",
     "auto_buy_hard_hat",
     "auto_buy_torch",
     "best_run_score",
@@ -164,6 +165,7 @@ pub const TUNNEL_UPDATABLE_COLUMNS: &[&str] = &[
 
 /// Tunnel fields normalized to integers by Python's repository.
 pub const TUNNEL_INTEGER_COLUMNS: &[&str] = &[
+    "auto_buy_grappling_hook",
     "auto_buy_hard_hat",
     "auto_buy_torch",
     "best_run_score",

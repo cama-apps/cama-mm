@@ -1183,10 +1183,14 @@ fn discovery_diagnostics_are_append_only_and_valve_ids_are_unique_per_guild() {
 fn discovery_unique_valve_migration_reports_legacy_duplicates() {
     let file = empty_database();
     initialize_or_migrate(file.path()).expect("initialize duplicate fixture");
-    let final_migration = expected_migrations()
-        .last()
-        .copied()
-        .expect("final migration");
+    // Named rather than positional: this guard is not tied to being the last
+    // ledger entry, and appending a later migration must not silently disarm
+    // the duplicate check this test exercises.
+    let final_migration = "create_match_discovery_attempts_and_unique_valve_ids";
+    assert!(
+        expected_migrations().contains(&final_migration),
+        "duplicate-guard migration must remain in the ledger"
+    );
     let connection = Connection::open(file.path()).expect("open duplicate fixture");
     connection
         .execute_batch(
@@ -1207,6 +1211,92 @@ fn discovery_unique_valve_migration_reports_legacy_duplicates() {
     let message = error.to_string();
     assert!(message.contains("Valve match 9001"), "{message}");
     assert!(message.contains("11,12"), "{message}");
+}
+
+#[test]
+fn auto_buy_grappling_hook_column_upgrades_existing_tunnels_and_defaults_off() {
+    fn has_hook_column(connection: &Connection) -> bool {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('tunnels')
+                 WHERE name='auto_buy_grappling_hook'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("inspect tunnels columns")
+            > 0
+    }
+    fn hook_setting(connection: &Connection) -> i64 {
+        connection
+            .query_row(
+                "SELECT auto_buy_grappling_hook FROM tunnels
+                 WHERE discord_id=?1 AND guild_id=?2",
+                params![4_242_i64, 77_i64],
+                |row| row.get(0),
+            )
+            .expect("read grappling-hook setting")
+    }
+
+    let file = empty_database();
+    initialize_or_migrate(file.path()).expect("initialize grappling-hook fixture");
+    let connection = Connection::open(file.path()).expect("open grappling-hook fixture");
+    assert!(
+        has_hook_column(&connection),
+        "a freshly migrated database must already carry the column"
+    );
+
+    // Simulate a database written before the column existed, holding a tunnel
+    // whose other auto-buy settings are already switched on.
+    connection
+        .execute(
+            "INSERT INTO tunnels(
+                 discord_id,guild_id,depth,max_depth,total_digs,luminosity,
+                 total_jc_earned,paid_digs_today,pickaxe_tier,
+                 auto_buy_torch,auto_buy_hard_hat)
+             VALUES (?1,?2,7,9,3,100,50,0,1,1,1)",
+            params![4_242_i64, 77_i64],
+        )
+        .expect("seed pre-migration tunnel");
+    connection
+        .execute_batch(
+            "ALTER TABLE tunnels DROP COLUMN auto_buy_grappling_hook;
+             DELETE FROM schema_migrations WHERE name='add_dig_auto_buy_grappling_hook';",
+        )
+        .expect("simulate a database predating the grappling-hook column");
+    assert!(!has_hook_column(&connection));
+    drop(connection);
+
+    initialize_or_migrate(file.path()).expect("upgrade restores the grappling-hook column");
+
+    let connection = Connection::open(file.path()).expect("reopen upgraded fixture");
+    assert!(
+        has_hook_column(&connection),
+        "upgrading must add the column"
+    );
+    let (torch, hard_hat, depth): (i64, i64, i64) = connection
+        .query_row(
+            "SELECT auto_buy_torch,auto_buy_hard_hat,depth FROM tunnels
+             WHERE discord_id=?1 AND guild_id=?2",
+            params![4_242_i64, 77_i64],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read upgraded tunnel");
+    assert_eq!(
+        (torch, hard_hat, depth),
+        (1, 1, 7),
+        "the rebuild must preserve existing tunnel state"
+    );
+    assert_eq!(
+        hook_setting(&connection),
+        0,
+        "an existing miner must not be opted into buying grappling hooks"
+    );
+    drop(connection);
+
+    initialize_or_migrate(file.path()).expect("re-running the migration is idempotent");
+    let connection = Connection::open(file.path()).expect("reopen after idempotent retry");
+    assert!(has_hook_column(&connection));
+    assert_eq!(hook_setting(&connection), 0);
 }
 
 #[test]

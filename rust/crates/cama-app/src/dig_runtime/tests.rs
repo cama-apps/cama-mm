@@ -6075,7 +6075,7 @@ fn strength_stats_increase_minimum_blocks_dug() {
         .expect("seed tunnel with 10 strength");
     drop(connection);
 
-    let mut service = DigRuntimeService::sqlite(database.path());
+    let service = DigRuntimeService::sqlite(database.path());
 
     let request = DigRuntimeRequest {
         discord_id: 100,
@@ -6097,7 +6097,7 @@ fn strength_stats_increase_minimum_blocks_dug() {
         let depth_before = 5;
         let advance = outcome.depth_after - depth_before;
         assert!(
-            advance >= 3 && advance <= 8,
+            (3..=8).contains(&advance),
             "with 10 strength (no cave-in), advance should be 3-8 but got {}",
             advance
         );
@@ -6126,7 +6126,7 @@ fn strength_stats_do_not_apply_without_allocation() {
         .expect("seed tunnel with 0 strength");
     drop(connection);
 
-    let mut service = DigRuntimeService::sqlite(database.path());
+    let service = DigRuntimeService::sqlite(database.path());
 
     let request = DigRuntimeRequest {
         discord_id: 110,
@@ -6144,7 +6144,7 @@ fn strength_stats_do_not_apply_without_allocation() {
     // Layer 0 default range: (1, 3)
     // So advance should be between 1 and 3
     assert!(
-        advance >= 1 && advance <= 3,
+        (1..=3).contains(&advance),
         "with 0 strength, advance should be 1-3 but got {}",
         advance
     );
@@ -6172,7 +6172,7 @@ fn higher_strength_increases_max_blocks() {
         .expect("seed tunnel with 20 strength");
     drop(connection);
 
-    let mut service = DigRuntimeService::sqlite(database.path());
+    let service = DigRuntimeService::sqlite(database.path());
 
     let request = DigRuntimeRequest {
         discord_id: 120,
@@ -6194,7 +6194,7 @@ fn higher_strength_increases_max_blocks() {
         let depth_before = 5;
         let advance = outcome.depth_after - depth_before;
         assert!(
-            advance >= 5 && advance <= 13,
+            (5..=13).contains(&advance),
             "with 20 strength (no cave-in), advance should be 5-13 but got {}",
             advance
         );
