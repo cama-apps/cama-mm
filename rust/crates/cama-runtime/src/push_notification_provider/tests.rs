@@ -232,7 +232,13 @@ async fn toggle_button_flips_one_kind_independently() {
     assert!(!config.readycheck_enabled);
     assert!(config.lobby_enabled);
     let response = responder.update_response();
-    assert!(response.content.contains("Readycheck: OFF"));
+    let readycheck_button = response
+        .components
+        .iter()
+        .flat_map(|row| &row.buttons)
+        .find(|button| button.custom_id == BUTTON_TOGGLE_READYCHECK)
+        .expect("readycheck toggle button present");
+    assert_eq!(readycheck_button.label, "Readycheck: OFF");
 }
 
 #[tokio::test]
