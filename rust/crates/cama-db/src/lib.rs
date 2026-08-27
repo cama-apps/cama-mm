@@ -122,6 +122,7 @@ pub mod prediction_resolution_repository;
 pub mod prediction_worker_repository;
 #[path = "predictions.rs"]
 pub mod predictions_repository;
+pub mod push_notifications;
 pub mod rating_analysis;
 #[path = "rating_history.rs"]
 pub mod rating_history_repository;

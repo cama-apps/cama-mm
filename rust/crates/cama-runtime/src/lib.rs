@@ -68,6 +68,7 @@ pub mod prediction_provider;
 pub mod prediction_workers;
 pub mod process_lock;
 pub mod profile_provider;
+pub mod push_notification_provider;
 pub mod rating_analysis_provider;
 pub mod raw_reactions;
 pub mod registration;
@@ -204,6 +205,7 @@ pub use prediction_workers::{
 pub use profile_provider::{
     ProfileBalanceHistorySnapshot, ProfileRegistrationProvider, read_balance_history_snapshot,
 };
+pub use push_notification_provider::{PushNotificationHooks, PushNotificationRegistrationProvider};
 pub use rating_analysis_provider::{
     RatingAnalysisProviderBuildError, RatingAnalysisRegistrationProvider,
 };

@@ -249,7 +249,7 @@ pub fn validate_production_registry(
     }
 
     let ask_present = snapshot.top_level_commands.contains("ask");
-    let expected_top_level_count = 43 + usize::from(ask_present) + usize::from(pet_expected);
+    let expected_top_level_count = 44 + usize::from(ask_present) + usize::from(pet_expected);
     if snapshot.top_level_commands.len() != expected_top_level_count {
         return Err(CommandTreeContractError::UnexpectedTopLevelCount {
             expected: expected_top_level_count,
@@ -567,6 +567,7 @@ mod tests {
             "mybets",
             "bets",
             "ratinganalysis",
+            "notify",
         ] {
             builder
                 .command(command(root, Vec::new()))
@@ -603,7 +604,7 @@ mod tests {
         let registry = fixture_registry(true, true);
         let snapshot =
             validate_production_registry(&registry, true).expect("valid command contract");
-        assert_eq!(snapshot.top_level_commands.len(), 45);
+        assert_eq!(snapshot.top_level_commands.len(), 46);
         assert!(
             snapshot
                 .direct_option_counts
@@ -629,7 +630,7 @@ mod tests {
             );
         }
         assert!(snapshot.top_level_commands.contains("ask"));
-        assert_eq!(snapshot.top_level_commands.len(), 45);
+        assert_eq!(snapshot.top_level_commands.len(), 46);
     }
 
     #[test]
@@ -644,7 +645,7 @@ mod tests {
                 .iter()
                 .all(|path| !path.starts_with("/pet "))
         );
-        assert_eq!(snapshot.top_level_commands.len(), 43);
+        assert_eq!(snapshot.top_level_commands.len(), 44);
     }
 
     #[test]

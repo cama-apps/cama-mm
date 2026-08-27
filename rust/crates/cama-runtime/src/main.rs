@@ -34,15 +34,15 @@ use cama_runtime::{
     LifecycleEvent, LobbyRegistrationProvider, LobbyRuntimeConfig, MafiaRegistrationProvider,
     ManaRegistrationProvider, MatchRegistrationProvider, PetRegistrationProvider,
     PlayerRegistrationProvider, PlayerTriviaRegistrationProvider, PredictionRegistrationProvider,
-    PredictionRuntimePorts, ProfileRegistrationProvider, RatingAnalysisRegistrationProvider,
-    RawReactionObservers, RegistryBuilder, ReminderRegistrationProvider, Runtime, RuntimeConfig,
-    ScoutRegistrationProvider, SerenityDiscordTransport, SerenityGateway, ShopRegistrationProvider,
-    SqliteDatabaseInitializer, SurveyRegistrationProvider, TaxRegistrationProvider,
-    TriviaRegistrationProvider, UsageMonitor, VanityTaxGatewayObserver,
-    WrappedRegistrationProvider, check_health, curfew_sweep_worker_spec, dig_weather_worker_spec,
-    duel_challenges_worker_spec, economy_events_worker_spec, first_game_pool_worker_spec,
-    manashop_debt_worker_spec, pet_sweep_worker_spec_with_ai, prediction_digest_worker_spec,
-    prediction_refresh_worker_spec, validate_production_registry,
+    PredictionRuntimePorts, ProfileRegistrationProvider, PushNotificationRegistrationProvider,
+    RatingAnalysisRegistrationProvider, RawReactionObservers, RegistryBuilder,
+    ReminderRegistrationProvider, Runtime, RuntimeConfig, ScoutRegistrationProvider,
+    SerenityDiscordTransport, SerenityGateway, ShopRegistrationProvider, SqliteDatabaseInitializer,
+    SurveyRegistrationProvider, TaxRegistrationProvider, TriviaRegistrationProvider, UsageMonitor,
+    VanityTaxGatewayObserver, WrappedRegistrationProvider, check_health, curfew_sweep_worker_spec,
+    dig_weather_worker_spec, duel_challenges_worker_spec, economy_events_worker_spec,
+    first_game_pool_worker_spec, manashop_debt_worker_spec, pet_sweep_worker_spec_with_ai,
+    prediction_digest_worker_spec, prediction_refresh_worker_spec, validate_production_registry,
 };
 use cama_runtime::{
     BettingRegistrationProvider, BettingRuntimeConfig, match_post_match_debrief_port,
@@ -618,6 +618,26 @@ async fn run_serve() -> ExitCode {
         error!(%error, "match reminder composition refused startup");
         return ExitCode::from(1);
     }
+    let push_notification_provider =
+        match PushNotificationRegistrationProvider::new(&config.db_path) {
+            Ok(provider) => provider,
+            Err(error) => {
+                error!(%error, "push notification runtime construction refused startup");
+                return ExitCode::from(1);
+            }
+        };
+    if let Err(error) =
+        lobby_provider.attach_push_notification_hooks(push_notification_provider.hooks())
+    {
+        error!(%error, "lobby push notification composition refused startup");
+        return ExitCode::from(1);
+    }
+    if let Err(error) =
+        registration_provider.attach_push_notification_hooks(push_notification_provider.hooks())
+    {
+        error!(%error, "registration push notification composition refused startup");
+        return ExitCode::from(1);
+    }
     let pet_provider = PetRegistrationProvider::new(
         &config.db_path,
         &application_config,
@@ -819,6 +839,10 @@ async fn run_serve() -> ExitCode {
     }
     if let Err(error) = registry.add_provider(&reminder_provider) {
         error!(%error, "could not register reminder command provider");
+        return ExitCode::from(1);
+    }
+    if let Err(error) = registry.add_provider(&push_notification_provider) {
+        error!(%error, "could not register push notification command provider");
         return ExitCode::from(1);
     }
     if let Err(error) = registry.add_provider(&pet_provider) {

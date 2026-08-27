@@ -232,3 +232,4 @@ add_dota_play_hours_column
 create_curfew_windows_table
 add_curfew_window_days_column
 add_low_priority_reason_player_visibility
+create_push_notification_targets_table

@@ -1356,6 +1356,18 @@ CREATE TABLE referrals (
                 CHECK (referrer_id != referred_id)
             );
 
+-- table: push_notification_targets
+CREATE TABLE push_notification_targets (
+                discord_id         INTEGER NOT NULL,
+                guild_id           INTEGER NOT NULL DEFAULT 0,
+                ntfy_server        TEXT NOT NULL,
+                ntfy_topic         TEXT NOT NULL,
+                readycheck_enabled INTEGER NOT NULL DEFAULT 1,
+                lobby_enabled      INTEGER NOT NULL DEFAULT 1,
+                updated_at         INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (discord_id, guild_id)
+            );
+
 -- table: reminder_preferences
 CREATE TABLE reminder_preferences (
                 discord_id      INTEGER NOT NULL,
@@ -2048,6 +2060,9 @@ CREATE INDEX idx_rating_history_match_id ON rating_history(match_id);
 
 -- index: idx_recalibration_state_guild
 CREATE INDEX idx_recalibration_state_guild ON recalibration_state(guild_id);
+
+-- index: idx_push_notification_targets_guild
+CREATE INDEX idx_push_notification_targets_guild ON push_notification_targets(guild_id);
 
 -- index: idx_reminder_prefs_betting
 CREATE INDEX idx_reminder_prefs_betting ON reminder_preferences(guild_id, betting_enabled);

@@ -61,6 +61,7 @@ use crate::first_game_pool_worker::FirstGamePoolDisplayPort;
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
+use crate::push_notification_provider::PushNotificationHooks;
 use crate::raw_reactions::{RawReactionEvent, RawReactionKind, RawReactionObserver};
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, InteractionEmbed,
@@ -483,6 +484,7 @@ struct LobbyRuntimeState {
     moderation: ModerationRepository,
     curfew: CurfewService,
     join_observer: RwLock<Option<Arc<dyn LobbyJoinObserver>>>,
+    push_notifications: RwLock<Option<PushNotificationHooks>>,
 }
 
 #[derive(Clone, Debug)]
@@ -709,6 +711,26 @@ impl LobbyRuntimeState {
         }
         self.notify_readycheck_completion(scope, generation.message_id)
             .await;
+    }
+
+    /// Best-effort push-notification fan-out for a freshly launched
+    /// readycheck. `mention_ids` already excludes anyone who does not need to
+    /// react (an auto-confirmed invoker, a recently-ready player), matching
+    /// the same set Discord mentions in the readycheck message.
+    fn notify_readycheck_launched(&self, guild_id: AppGuildId, mention_ids: &BTreeSet<AppUserId>) {
+        let Ok(guild_id) = to_u64(guild_id.0) else {
+            return;
+        };
+        if let Ok(hooks) = self.push_notifications.read()
+            && let Some(hooks) = hooks.as_ref()
+        {
+            hooks.notify_readycheck_launched(
+                guild_id,
+                mention_ids
+                    .iter()
+                    .filter_map(|player_id| u64::try_from(player_id.0).ok()),
+            );
+        }
     }
 
     async fn notify_readycheck_completion(&self, scope: LobbyScope, message_id: AppMessageId) {
@@ -1501,6 +1523,7 @@ impl LobbyRegistrationProvider {
             moderation: ModerationRepository::new(database_path),
             curfew: CurfewService::new(CurfewRepository::new(database_path)),
             join_observer: RwLock::new(None),
+            push_notifications: RwLock::new(None),
         });
         Ok(Self {
             handler: Arc::new(LobbyInteractionHandler {
@@ -1579,6 +1602,24 @@ impl LobbyRegistrationProvider {
             .join_observer
             .write()
             .map_err(|_| "lobby join observer lock was poisoned".to_owned())? = Some(observer);
+        Ok(())
+    }
+
+    /// Attach push-notification delivery for readycheck launches. Calling
+    /// this after provider construction also affects every subsequent
+    /// `/readycheck` because the interaction handler shares the same runtime
+    /// state.
+    pub fn attach_push_notification_hooks(
+        &self,
+        hooks: PushNotificationHooks,
+    ) -> Result<(), String> {
+        *self
+            .handler
+            .state
+            .push_notifications
+            .write()
+            .map_err(|_| "lobby push notification hook lock was poisoned".to_owned())? =
+            Some(hooks);
         Ok(())
     }
 }
@@ -1771,6 +1812,8 @@ impl LobbyInteractionHandler {
             .await
         {
             Ok(result) => {
+                self.state
+                    .notify_readycheck_launched(guild_id, &result.mention_ids);
                 if !result.mention_ids.is_empty() && channel_id != result.readycheck_channel_id {
                     let mention_ids = result
                         .mention_ids
