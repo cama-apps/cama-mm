@@ -266,6 +266,21 @@ fn command_and_component_registration_match_python_surface() {
 }
 
 #[tokio::test]
+async fn member_rendering_preserves_fetched_discord_name_when_directory_is_empty() {
+    let fixture = Fixture::new(1);
+    let provider = provider(&fixture, FakeDiscord::default());
+    let mut fetched_members = members(1);
+
+    provider
+        .handler
+        .render_member_names(GUILD, &mut fetched_members)
+        .await
+        .expect("render fetched mana member");
+
+    assert_eq!(fetched_members[0].display_name, "Player 01");
+}
+
+#[tokio::test]
 async fn wrong_channel_charges_one_before_defer_and_uses_exact_ephemeral_copy() {
     let fixture = Fixture::new(1);
     let before = fixture.balance(USER);
@@ -317,7 +332,7 @@ async fn existing_single_assignment_preserves_embed_thumbnail_and_wheel_unlock_b
     assert_eq!(captured.defers, vec![false]);
     assert_eq!(captured.followups.len(), 1);
     let embed = &captured.followups[0].embeds[0];
-    assert_eq!(embed.title.as_deref(), Some("🔮 Daily Mana — 42"));
+    assert_eq!(embed.title.as_deref(), Some("🔮 Daily Mana — Player 01"));
     assert_eq!(
         embed.thumbnail_url.as_deref(),
         Some("https://cdn.test/avatar.png")
@@ -364,7 +379,7 @@ async fn selected_unassigned_player_is_read_only_and_uses_no_mana_embed() {
     assert_eq!(fixture.assigned_count(), 0);
     let captured = responder.captured.lock().expect("response capture");
     let embed = &captured.followups[0].embeds[0];
-    assert_eq!(embed.title.as_deref(), Some("🔮 Daily Mana — 43"));
+    assert_eq!(embed.title.as_deref(), Some("🔮 Daily Mana — Player 02"));
     assert_eq!(
         embed.description.as_deref(),
         Some("This player hasn't been assigned any mana yet.")

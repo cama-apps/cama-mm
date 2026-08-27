@@ -313,7 +313,9 @@ impl ManaInteractionHandler {
             .names_for_guild(guild_id, &player_ids)
             .unwrap_or_default();
         for member in members {
-            member.display_name = names.resolve(member.user_id);
+            if names.contains(member.user_id) {
+                member.display_name = names.resolve(member.user_id);
+            }
         }
         Ok(())
     }
