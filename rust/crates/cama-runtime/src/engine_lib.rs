@@ -41,6 +41,7 @@ pub mod health;
 pub mod inventory;
 pub mod lobby_provider;
 pub mod mafia_provider;
+pub mod mana_auto_assign_worker;
 pub mod mana_provider;
 pub mod manashop_debt_worker;
 pub mod match_provider;
@@ -148,6 +149,10 @@ pub use lobby_provider::{
     MatchLobbySnapshot, SqliteLobbyPlayers, SqlitePendingMatches,
 };
 pub use mafia_provider::{MafiaDiscordPort, MafiaRegistrationProvider};
+pub use mana_auto_assign_worker::{
+    MANA_AUTO_ASSIGN_WAKE_INTERVAL, MANA_AUTO_ASSIGN_WORKER_NAME, ManaAutoAssignWorker,
+    mana_auto_assign_worker_spec,
+};
 pub use mana_provider::{ManaDiscordPort, ManaGuildMember, ManaRegistrationProvider};
 pub use manashop_debt_worker::{
     MANASHOP_DEBT_WAKE_INTERVAL, MANASHOP_DEBT_WORKER_NAME, ManashopDebtWorker,

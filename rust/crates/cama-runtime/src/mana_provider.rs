@@ -7,7 +7,7 @@
 //! Python's public-message paging policy. Like the Python view, a restart drops
 //! those live leases and leaves the old buttons inert.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -106,7 +106,7 @@ impl ManaRegistrationProvider {
     fn from_parts(
         database_path: PathBuf,
         wheel_cooldown_seconds: i64,
-        white_stipend: i64,
+        _white_stipend: i64,
         discord: Arc<dyn ManaDiscordPort>,
         clock: Arc<dyn ManaClock>,
     ) -> Self {
@@ -114,7 +114,6 @@ impl ManaRegistrationProvider {
             handler: Arc::new(ManaInteractionHandler {
                 database_path,
                 wheel_cooldown_seconds,
-                white_stipend,
                 discord,
                 player_names: Arc::new(DiscordIdPlayerNameResolver),
                 clock,
@@ -146,7 +145,7 @@ impl RegistrationProvider for ManaRegistrationProvider {
                 ),
                 CommandOptionSpec::new(
                     "all",
-                    "Roll everyone's mana for today and show the full guild list",
+                    "Show the full guild's current mana assignments",
                     CommandOptionKind::Boolean,
                 ),
             ],
@@ -160,17 +159,17 @@ impl RegistrationProvider for ManaRegistrationProvider {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct ManaMoment {
-    now: i64,
-    la_offset_seconds: i32,
+pub(crate) struct ManaMoment {
+    pub now: i64,
+    pub la_offset_seconds: i32,
 }
 
-trait ManaClock: Send + Sync {
+pub(crate) trait ManaClock: Send + Sync {
     fn moment(&self) -> Result<ManaMoment, String>;
 }
 
 #[derive(Debug)]
-struct SystemManaClock;
+pub(crate) struct SystemManaClock;
 
 impl ManaClock for SystemManaClock {
     fn moment(&self) -> Result<ManaMoment, String> {
@@ -191,11 +190,11 @@ impl ManaMoment {
             .map(|time| time.with_timezone(&offset))
     }
 
-    fn today(self) -> Result<String, String> {
+    pub(crate) fn today(self) -> Result<String, String> {
         self.local().map(mana_day_label)
     }
 
-    fn day_start(self) -> Result<i64, String> {
+    pub(crate) fn day_start(self) -> Result<i64, String> {
         self.local().map(mana_day_start_timestamp)
     }
 }
@@ -203,7 +202,6 @@ impl ManaMoment {
 struct ManaInteractionHandler {
     database_path: PathBuf,
     wheel_cooldown_seconds: i64,
-    white_stipend: i64,
     discord: Arc<dyn ManaDiscordPort>,
     player_names: Arc<dyn GuildPlayerNameResolver>,
     clock: Arc<dyn ManaClock>,
@@ -322,7 +320,7 @@ impl ManaInteractionHandler {
 
     async fn single_command(
         &self,
-        invoker_id: i64,
+        _invoker_id: i64,
         guild_id: i64,
         member: ManaGuildMember,
         responder: Arc<dyn InteractionResponder>,
@@ -330,58 +328,15 @@ impl ManaInteractionHandler {
         let moment = self.clock.moment()?;
         let today = moment.today()?;
         let target_id = member.user_id;
-        let is_self = target_id == invoker_id;
         let path = self.database_path.clone();
         let data_path = path.clone();
         let today_for_read = today.clone();
-        let current = spawn_sqlite("mana current read", move || {
+        let details = spawn_sqlite("mana current read", move || {
             let repository = ManaRepository::new(path);
             let mut service = live_service(repository, &data_path, moment);
             service.get_current_mana(target_id, guild_id, &today_for_read)
         })
         .await?;
-
-        let details = if is_self
-            && current
-                .as_ref()
-                .is_none_or(|mana| mana.assigned_date != today)
-        {
-            let path = self.database_path.clone();
-            let today_for_claim = today.clone();
-            let is_ash_fan = member.is_ash_fan();
-            match spawn_sqlite("mana daily claim", move || {
-                let repository = ManaRepository::new(&path);
-                let mut service = live_service(repository, &path, moment);
-                service.assign_daily_mana(
-                    target_id,
-                    guild_id,
-                    &today_for_claim,
-                    moment.day_start().map_err(ManaServiceError::Data)?,
-                    is_ash_fan,
-                )
-            })
-            .await
-            {
-                Ok(details) => {
-                    let stipend = self.pay_stipend(target_id, guild_id, details.land).await;
-                    let next_spin = self.next_wheel_spin_at(target_id, guild_id).await?;
-                    let embed = single_embed(&member, &details, &today, Some(next_spin), stipend);
-                    return followup(&responder, InteractionResponse::message("").embed(embed))
-                        .await;
-                }
-                Err(error) if error.contains("Already assigned today") => {
-                    return followup(
-                        &responder,
-                        InteractionResponse::message("You've already claimed your mana for today.")
-                            .ephemeral(),
-                    )
-                    .await;
-                }
-                Err(error) => return Err(error),
-            }
-        } else {
-            current
-        };
 
         let response = if let Some(details) = details {
             let next_spin = self.next_wheel_spin_at(target_id, guild_id).await?;
@@ -402,6 +357,34 @@ impl ManaInteractionHandler {
         followup(&responder, response).await
     }
 
+    async fn read_board_rows(
+        &self,
+        guild_id: i64,
+        _moment: ManaMoment,
+    ) -> Result<Vec<BoardRow>, String> {
+        let path = self.database_path.clone();
+        let rows = spawn_sqlite("mana board read", move || {
+            ManaRepository::new(path)
+                .get_all_mana(Some(guild_id))
+                .map_err(|error| error.to_string())
+                .and_then(|rows| {
+                    rows.into_iter()
+                        .map(|row| {
+                            Ok(BoardRow {
+                                discord_id: row.discord_id,
+                                land: Land::from_name(&row.mana.current_land).ok_or_else(|| {
+                                    format!("unknown mana land {:?}", row.mana.current_land)
+                                })?,
+                                assigned_date: row.mana.assigned_date,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, String>>()
+                })
+        })
+        .await?;
+        Ok(rows)
+    }
+
     async fn board_command(
         &self,
         owner_id: i64,
@@ -412,26 +395,8 @@ impl ManaInteractionHandler {
         let today = moment.today()?;
         let mut members = self.discord.mana_guild_members(guild_id)?;
         self.render_member_names(guild_id, &mut members).await?;
-        let ash_fan_ids = members
-            .iter()
-            .filter(|member| member.is_ash_fan())
-            .map(|member| member.user_id)
-            .collect::<BTreeSet<_>>();
-        let path = self.database_path.clone();
-        let today_for_claim = today.clone();
-        let assignment_board = spawn_sqlite("guild mana assignment", move || {
-            let repository = ManaRepository::new(&path);
-            let mut service = live_service(repository, &path, moment);
-            service.assign_all_daily_mana_with_board(
-                guild_id,
-                &today_for_claim,
-                moment.day_start().map_err(ManaServiceError::Data)?,
-                &ash_fan_ids,
-            )
-        })
-        .await?;
-        self.pay_batch_stipends(&assignment_board, guild_id).await;
-        let pages = board_pages(&assignment_board.board, &members, &today);
+        let rows = self.read_board_rows(guild_id, moment).await?;
+        let pages = board_pages(&rows, &members, &today);
         let mut response = InteractionResponse::message("").embed(pages[0].clone());
         if pages.len() > 1 {
             response = response.action_row(board_controls(owner_id, 0, pages.len()));
@@ -490,26 +455,7 @@ impl ManaInteractionHandler {
         let today = moment.today()?;
         let mut members = self.discord.mana_guild_members(guild_id)?;
         self.render_member_names(guild_id, &mut members).await?;
-        let path = self.database_path.clone();
-        let rows = spawn_sqlite("mana board refresh", move || {
-            ManaRepository::new(path)
-                .get_all_mana(Some(guild_id))
-                .map_err(|error| error.to_string())
-                .and_then(|rows| {
-                    rows.into_iter()
-                        .map(|row| {
-                            Ok(BoardRow {
-                                discord_id: row.discord_id,
-                                land: Land::from_name(&row.mana.current_land).ok_or_else(|| {
-                                    format!("unknown mana land {:?}", row.mana.current_land)
-                                })?,
-                                assigned_date: row.mana.assigned_date,
-                            })
-                        })
-                        .collect::<Result<Vec<_>, String>>()
-                })
-        })
-        .await?;
+        let rows = self.read_board_rows(guild_id, moment).await?;
         let pages = board_pages(&rows, &members, &today);
         let page = requested_page.min(pages.len().saturating_sub(1));
         responder
@@ -585,50 +531,9 @@ impl ManaInteractionHandler {
             now.max(last.saturating_add(cooldown).saturating_add(1))
         }))
     }
-
-    async fn pay_stipend(&self, user_id: i64, guild_id: i64, land: Land) -> i64 {
-        pay_stipend_sqlite(
-            self.database_path.clone(),
-            user_id,
-            guild_id,
-            land,
-            self.white_stipend,
-        )
-        .await
-    }
-
-    async fn pay_batch_stipends(&self, board: &AssignmentBoard, guild_id: i64) {
-        pay_batch_stipends_sqlite(
-            self.database_path.clone(),
-            board,
-            guild_id,
-            self.white_stipend,
-        )
-        .await;
-    }
 }
 
-async fn pay_stipend_sqlite(
-    path: PathBuf,
-    user_id: i64,
-    guild_id: i64,
-    land: Land,
-    white_stipend: i64,
-) -> i64 {
-    if land != Land::Plains || white_stipend <= 0 {
-        return 0;
-    }
-    spawn_sqlite("mana White stipend", move || {
-        LoanRepository::new(path)
-            .distribute_nonprofit_stipends_atomic(&[user_id], Some(guild_id), white_stipend)
-            .map(|payments| payments.first().map_or(0, |payment| payment.amount))
-            .map_err(|error| error.to_string())
-    })
-    .await
-    .unwrap_or_default()
-}
-
-async fn pay_batch_stipends_sqlite(
+pub(crate) async fn pay_batch_stipends_sqlite(
     path: PathBuf,
     board: &AssignmentBoard,
     guild_id: i64,
@@ -656,7 +561,7 @@ async fn pay_batch_stipends_sqlite(
 }
 
 #[derive(Clone)]
-struct SqliteManaData {
+pub(crate) struct SqliteManaData {
     players: PlayerRepository,
     gambling: GamblingStatsRepository,
     bankruptcy: BankruptcyRepository,
@@ -852,7 +757,7 @@ impl ManaDataSource for SqliteManaData {
 }
 
 #[derive(Clone)]
-struct SqliteGuardianProtection {
+pub(crate) struct SqliteGuardianProtection {
     repository: ManaProtectionRepository,
     moment: ManaMoment,
 }
@@ -883,10 +788,14 @@ impl GuardianProtection for SqliteGuardianProtection {
     }
 }
 
-type LiveManaService =
+pub(crate) type LiveManaService =
     ManaService<ManaRepository, SqliteManaData, XorShift64Entropy, SqliteGuardianProtection>;
 
-fn live_service(repository: ManaRepository, path: &Path, moment: ManaMoment) -> LiveManaService {
+pub(crate) fn live_service(
+    repository: ManaRepository,
+    path: &Path,
+    moment: ManaMoment,
+) -> LiveManaService {
     let seed = u64::from_ne_bytes(moment.now.to_ne_bytes()) ^ fastrand::u64(..);
     ManaService::new(
         repository,
