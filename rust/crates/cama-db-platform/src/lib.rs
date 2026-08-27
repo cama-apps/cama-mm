@@ -28,6 +28,8 @@ pub mod notifications;
 pub mod opendota_player;
 #[path = "../../cama-db/src/player_trivia.rs"]
 pub mod player_trivia;
+#[path = "../../cama-db/src/push_notifications.rs"]
+pub mod push_notifications;
 #[path = "../../cama-db/src/registration.rs"]
 pub mod registration_repository;
 #[path = "../../cama-db/src/reminders.rs"]
