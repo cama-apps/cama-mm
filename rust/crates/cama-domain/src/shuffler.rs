@@ -541,10 +541,10 @@ impl BalancedShuffler {
         (maximum - minimum) / self.rating_spread_divisor
     }
 
-    /// Average five-player team total divided by ten.
+    /// Average five-player team total divided by nine.
     #[must_use]
     pub fn calculate_lobby_rating_bonus(player_values: &[f64]) -> f64 {
-        player_values.iter().sum::<f64>() / 20.0
+        player_values.iter().sum::<f64>() / 18.0
     }
 
     /// Total whole minutes waited by selected players with Discord IDs.
@@ -3516,7 +3516,7 @@ mod tests {
             &mut super::ScoringContext::default(),
         );
 
-        approx(selection.preselection_score, -385.0);
+        approx(selection.preselection_score, -441.111_111_111_111_1);
     }
 
     #[test]
@@ -3563,7 +3563,7 @@ mod tests {
                 ShuffleConstraints::default(),
             )
             .expect("fixed role matchup evaluates");
-        approx(matchup.total_score, 135.0);
+        approx(matchup.total_score, 61.111_111_111_111_086);
     }
 
     #[test]
@@ -4640,6 +4640,40 @@ mod tests {
             .expect("pool shuffle succeeds");
         assert_eq!(result.excluded.len(), 1);
         assert_eq!(result.excluded[0].glicko_rating, Some(1_475.0));
+    }
+
+    #[test]
+    fn stronger_pool_rating_bonus_excludes_borderline_low_rating_player() {
+        let ratings = [
+            800.0, 875.0, 950.0, 1_400.0, 1_450.0, 1_525.0, 1_550.0, 1_675.0, 2_075.0, 2_225.0,
+            2_375.0,
+        ];
+        let players = ratings
+            .into_iter()
+            .enumerate()
+            .map(|(index, rating)| Player {
+                discord_id: Some(index as i64 + 1),
+                glicko_rating: Some(rating),
+                preferred_roles: role_list(&["1", "2", "3", "4", "5"]),
+                ..Player::new(format!("Player{index}"))
+            })
+            .collect::<Vec<_>>();
+        let shuffler = BalancedShuffler {
+            off_role_flat_penalty: 0.0,
+            role_matchup_delta_weight: 0.0,
+            exclusion_penalty_weight: 0.0,
+            rd_priority_weight: 0.0,
+            recent_match_penalty_weight: 0.0,
+            rating_spread_divisor: 10.0,
+            ..BalancedShuffler::default()
+        };
+
+        let result = shuffler
+            .shuffle_from_pool(&players, PoolOptions::default())
+            .expect("pool shuffle succeeds");
+
+        assert_eq!(result.excluded.len(), 1);
+        assert_eq!(result.excluded[0].glicko_rating, Some(875.0));
     }
 
     #[test]
