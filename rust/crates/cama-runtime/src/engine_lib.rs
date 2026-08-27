@@ -53,6 +53,7 @@ pub mod player_trivia_provider;
 pub mod prediction_provider;
 pub mod prediction_workers;
 pub mod process_lock;
+pub mod push_notification_provider;
 pub mod registration_provider;
 pub mod reminder_provider;
 #[doc(hidden)]
@@ -174,6 +175,7 @@ pub use prediction_workers::{
     PredictionDigestWorker, PredictionDiscordPort, PredictionRefreshWorker, PredictionWorkerConfig,
     prediction_digest_worker_spec, prediction_refresh_worker_spec,
 };
+pub use push_notification_provider::{PushNotificationHooks, PushNotificationRegistrationProvider};
 pub use raw_reactions::{
     RawReactionEmoji, RawReactionEvent, RawReactionKind, RawReactionObserver,
     RawReactionObserverFailure, RawReactionObservers,

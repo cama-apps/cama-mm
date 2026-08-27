@@ -52,6 +52,7 @@ use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
 use crate::lobby_provider::{ConfirmedLobbyJoin, LobbyGambaSpectator, LobbyJoinObserver};
+use crate::push_notification_provider::PushNotificationHooks;
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
     InteractionAcknowledgementPolicy, InteractionActionRow, InteractionButton, InteractionHandler,
@@ -165,8 +166,25 @@ impl PlayerRegistrationProvider {
                 neon: Mutex::new(neon),
                 rally_cooldowns: Mutex::new(BTreeMap::new()),
                 ready_cooldowns: Mutex::new(BTreeMap::new()),
+                push_notifications: std::sync::RwLock::new(None),
             }),
         }
+    }
+
+    /// Attach push-notification delivery for lobby-confirmed events. Calling
+    /// this after provider construction also affects every subsequent
+    /// confirmed join because the observer shares the same handler state.
+    pub fn attach_push_notification_hooks(
+        &self,
+        hooks: PushNotificationHooks,
+    ) -> Result<(), String> {
+        *self
+            .handler
+            .push_notifications
+            .write()
+            .map_err(|_| "registration push notification hook lock was poisoned".to_owned())? =
+            Some(hooks);
+        Ok(())
     }
 
     /// Side-effect hook that must be attached to `LobbyRegistrationProvider`
@@ -573,6 +591,7 @@ struct PlayerRegistrationHandler {
     neon: Mutex<NeonDegenService>,
     rally_cooldowns: Mutex<BTreeMap<(u64, LobbyKindKey, usize, u64), Instant>>,
     ready_cooldowns: Mutex<BTreeMap<(u64, LobbyKindKey), Instant>>,
+    push_notifications: std::sync::RwLock<Option<PushNotificationHooks>>,
 }
 
 struct RegistrationDraftNeonObserver {
@@ -705,6 +724,7 @@ impl LobbyJoinObserver for PlayerRegistrationHandler {
             warn!(%error, "one-shot lobby alert delivery failed independently");
         }
         if event.player_ids.len() == event.ready_threshold {
+            self.notify_lobby_confirmed(&event);
             self.deliver_lobby_ready(&event).await
         } else {
             self.deliver_lobby_rally(&event).await
@@ -794,6 +814,16 @@ impl LobbyJoinObserver for PlayerRegistrationHandler {
 }
 
 impl PlayerRegistrationHandler {
+    /// Best-effort push-notification fan-out for a lobby that just reached
+    /// its ready threshold.
+    fn notify_lobby_confirmed(&self, event: &ConfirmedLobbyJoin) {
+        if let Ok(hooks) = self.push_notifications.read()
+            && let Some(hooks) = hooks.as_ref()
+        {
+            hooks.notify_lobby_confirmed(event.guild_id, &event.player_ids);
+        }
+    }
+
     fn render_player_name(&self, guild_id: u64, user_id: u64) -> String {
         let names = self
             .discord

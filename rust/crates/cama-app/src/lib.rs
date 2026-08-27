@@ -90,6 +90,7 @@ pub mod mafia_flavor;
 pub mod match_discovery;
 pub mod neon_bigwin_media;
 pub mod neon_degen;
+pub mod ntfy_http;
 pub mod opendota_http;
 pub mod opendota_player_service;
 pub mod pet_brawl_commands;
