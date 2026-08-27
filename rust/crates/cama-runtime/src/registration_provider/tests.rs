@@ -1,6 +1,7 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
 use cama_app::opendota_http::OpenDotaHttpConfig;
@@ -13,8 +14,36 @@ use crate::discord_transport::{
     DiscordPresence, DiscordUserSnapshot,
 };
 use crate::gateway_events::{GatewayMember, GuildMemberPageSource, ReadyRecoveryContext};
+use crate::push_notification_provider::{PushNotificationRegistrationProvider, PushPublisher};
 use crate::registration::{InteractionAllowedMentions, InteractionResponseError, Registry};
 use crate::test_support::initialize_test_database as initialize_or_migrate;
+use cama_db::push_notifications::PushNotificationRepository;
+
+#[derive(Default)]
+struct CountingPushPublisher {
+    count: AtomicUsize,
+}
+
+impl CountingPushPublisher {
+    fn wait_for_count(&self, expected: usize) -> usize {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let count = self.count.load(Ordering::SeqCst);
+            if count >= expected || Instant::now() >= deadline {
+                return count;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+#[async_trait]
+impl PushPublisher for CountingPushPublisher {
+    async fn publish(&self, _topic: &str, _title: &str, _message: &str) -> Result<(), String> {
+        self.count.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
 
 #[derive(Default)]
 struct CapturedResponses {
@@ -2069,6 +2098,51 @@ async fn exact_threshold_sends_one_python_ready_embed_instead_of_a_rally() {
             field.value == "[Jump to Lobby](https://discord.com/channels/42/70/71)"
         })
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exact_threshold_push_uses_the_same_ready_cooldown() {
+    let database = database();
+    let server = RouteServer::start(Vec::new());
+    let discord = Arc::new(MockDiscord::default());
+    let provider = PlayerRegistrationProvider::with_config(
+        database.path(),
+        services(&server),
+        discord,
+        config(),
+    );
+    let publisher = Arc::new(CountingPushPublisher::default());
+    let push_provider = PushNotificationRegistrationProvider::with_test_publisher(
+        database.path(),
+        publisher.clone(),
+    );
+    PushNotificationRepository::new(database.path())
+        .set_target(
+            1,
+            Some(42),
+            "cama-000000000000000000000000000000000000000000000001",
+            1,
+        )
+        .expect("configure lobby push target");
+    provider
+        .attach_push_notification_hooks(push_provider.hooks())
+        .expect("attach lobby push hooks");
+    let event = confirmed_join(10, 10, 10);
+
+    provider
+        .lobby_join_observer()
+        .confirmed_lobby_join(event.clone())
+        .await
+        .expect("first ready event");
+    assert_eq!(publisher.wait_for_count(1), 1);
+    provider
+        .lobby_join_observer()
+        .confirmed_lobby_join(event)
+        .await
+        .expect("cooldown duplicate");
+    thread::sleep(Duration::from_millis(50));
+
+    assert_eq!(publisher.count.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

@@ -1,6 +1,5 @@
-use std::io::{Read, Write};
-use std::net::TcpListener;
 use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tempfile::NamedTempFile;
 
@@ -11,6 +10,8 @@ use super::*;
 
 const GUILD: u64 = 707;
 const USER: u64 = 808;
+const TOPIC_1: &str = "cama-000000000000000000000000000000000000000000000001";
+const TOPIC_2: &str = "cama-000000000000000000000000000000000000000000000002";
 
 fn migrated_database() -> NamedTempFile {
     let file = NamedTempFile::new().expect("temporary database");
@@ -22,11 +23,80 @@ fn provider(path: &Path) -> PushNotificationRegistrationProvider {
     PushNotificationRegistrationProvider::new(path).expect("build push notification provider")
 }
 
+fn provider_with_publisher(
+    path: &Path,
+    publisher: Arc<dyn PushPublisher>,
+) -> PushNotificationRegistrationProvider {
+    PushNotificationRegistrationProvider::with_test_publisher(path, publisher)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PublishedNotification {
+    topic: String,
+    title: String,
+    message: String,
+}
+
+#[derive(Default)]
+struct RecordingPublisher {
+    published: StdMutex<Vec<PublishedNotification>>,
+}
+
+impl RecordingPublisher {
+    fn published(&self) -> Vec<PublishedNotification> {
+        self.published.lock().expect("published").clone()
+    }
+
+    fn wait_for_published(&self, expected: usize) -> Vec<PublishedNotification> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let published = self.published();
+            if published.len() >= expected || Instant::now() >= deadline {
+                return published;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+#[async_trait]
+impl PushPublisher for RecordingPublisher {
+    async fn publish(&self, topic: &str, title: &str, message: &str) -> Result<(), String> {
+        self.published
+            .lock()
+            .expect("published")
+            .push(PublishedNotification {
+                topic: topic.to_owned(),
+                title: title.to_owned(),
+                message: message.to_owned(),
+            });
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct SlowPublisher {
+    active: AtomicUsize,
+    maximum_active: AtomicUsize,
+    completed: AtomicUsize,
+}
+
+#[async_trait]
+impl PushPublisher for SlowPublisher {
+    async fn publish(&self, _topic: &str, _title: &str, _message: &str) -> Result<(), String> {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.maximum_active.fetch_max(active, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        self.completed.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 struct RecordingResponder {
     responses: StdMutex<Vec<InteractionResponse>>,
     updates: StdMutex<Vec<InteractionResponse>>,
-    modals: StdMutex<Vec<InteractionModal>>,
 }
 
 impl RecordingResponder {
@@ -36,10 +106,6 @@ impl RecordingResponder {
 
     fn update_response(&self) -> InteractionResponse {
         self.updates.lock().expect("updates")[0].clone()
-    }
-
-    fn modal(&self) -> InteractionModal {
-        self.modals.lock().expect("modals")[0].clone()
     }
 }
 
@@ -67,9 +133,11 @@ impl InteractionResponder for RecordingResponder {
         Ok(())
     }
 
-    async fn show_modal(&self, modal: InteractionModal) -> Result<(), InteractionResponseError> {
-        self.modals.lock().expect("modals").push(modal);
-        Ok(())
+    async fn show_modal(
+        &self,
+        _modal: crate::registration::InteractionModal,
+    ) -> Result<(), InteractionResponseError> {
+        panic!("push notification tests do not expect a modal")
     }
 }
 
@@ -99,23 +167,6 @@ fn component_request(custom_id: &str) -> InteractionRequest {
     }
 }
 
-fn modal_request(topic: &str, server: &str) -> InteractionRequest {
-    let mut fields = std::collections::BTreeMap::new();
-    fields.insert(TOPIC_FIELD.to_owned(), topic.to_owned());
-    if !server.is_empty() {
-        fields.insert(SERVER_FIELD.to_owned(), server.to_owned());
-    }
-    InteractionRequest::Modal {
-        interaction_id: 3,
-        custom_id: MODAL_CUSTOM_ID.to_owned(),
-        user_id: USER,
-        guild_id: Some(GUILD),
-        channel_id: Some(909),
-        member_permissions: None,
-        fields,
-    }
-}
-
 #[tokio::test]
 async fn command_with_no_target_offers_set_button() {
     let database = migrated_database();
@@ -130,14 +181,14 @@ async fn command_with_no_target_offers_set_button() {
         .await
         .expect("command handled");
     let response = responder.response();
-    assert!(response.content.contains("No ntfy target configured"));
+    assert!(response.content.contains("No ntfy topic configured"));
     assert_eq!(response.components.len(), 1);
     assert_eq!(response.components[0].buttons.len(), 1);
     assert_eq!(response.components[0].buttons[0].custom_id, BUTTON_SET);
 }
 
 #[tokio::test]
-async fn set_target_button_opens_modal() {
+async fn create_topic_button_persists_high_entropy_target_and_enables_both_kinds() {
     let database = migrated_database();
     let provider = provider(database.path());
     let responder = Arc::new(RecordingResponder::default());
@@ -148,62 +199,58 @@ async fn set_target_button_opens_modal() {
             Arc::clone(&responder) as Arc<dyn InteractionResponder>,
         )
         .await
-        .expect("set button handled");
-    let modal = responder.modal();
-    assert_eq!(modal.custom_id, MODAL_CUSTOM_ID);
-    assert_eq!(modal.inputs.len(), 2);
-}
-
-#[tokio::test]
-async fn modal_submit_persists_target_and_enables_both_kinds() {
-    let database = migrated_database();
-    let provider = provider(database.path());
-    let responder = Arc::new(RecordingResponder::default());
-    provider
-        .handler
-        .handle(
-            modal_request("my-secret-topic", ""),
-            Arc::clone(&responder) as Arc<dyn InteractionResponder>,
-        )
-        .await
-        .expect("modal handled");
+        .expect("create topic button handled");
 
     let repository = PushNotificationRepository::new(database.path());
     let config = repository
         .get_config(USER as i64, Some(GUILD as i64))
         .expect("read config")
         .expect("target persisted");
-    assert_eq!(config.target.topic, "my-secret-topic");
-    assert_eq!(config.target.server, DEFAULT_NTFY_SERVER);
+    assert!(config.target.topic.starts_with(TOPIC_PREFIX));
+    assert_eq!(
+        config.target.topic.len(),
+        TOPIC_PREFIX.len() + TOPIC_RANDOM_BYTES * 2
+    );
+    assert!(
+        config.target.topic[TOPIC_PREFIX.len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    );
     assert!(config.readycheck_enabled);
     assert!(config.lobby_enabled);
 
-    let response = responder.response();
-    assert!(response.content.contains("my-secret-topic"));
+    let response = responder.update_response();
+    assert!(response.content.contains(DEFAULT_NTFY_SERVER));
+    assert!(response.content.contains(&config.target.topic));
+    assert!(response.content.contains("Keep this topic private"));
 }
 
 #[tokio::test]
-async fn modal_submit_rejects_topic_with_slash() {
+async fn regenerate_topic_replaces_the_secret() {
     let database = migrated_database();
     let provider = provider(database.path());
-    let responder = Arc::new(RecordingResponder::default());
+    let repository = PushNotificationRepository::new(database.path());
+    let first = generate_topic().expect("first topic");
+    repository
+        .set_target(USER as i64, Some(GUILD as i64), &first, 1)
+        .expect("seed target");
+
     provider
         .handler
         .handle(
-            modal_request("bad/topic", ""),
-            Arc::clone(&responder) as Arc<dyn InteractionResponder>,
+            component_request(BUTTON_SET),
+            Arc::new(RecordingResponder::default()),
         )
         .await
-        .expect("modal handled");
+        .expect("regenerate topic");
 
-    let repository = PushNotificationRepository::new(database.path());
-    assert_eq!(
-        repository
-            .get_config(USER as i64, Some(GUILD as i64))
-            .expect("read config"),
-        None
-    );
-    assert!(responder.response().content.contains("must not contain"));
+    let second = repository
+        .get_config(USER as i64, Some(GUILD as i64))
+        .expect("read config")
+        .expect("target persisted")
+        .target
+        .topic;
+    assert_ne!(first, second);
 }
 
 #[tokio::test]
@@ -212,7 +259,7 @@ async fn toggle_button_flips_one_kind_independently() {
     let provider = provider(database.path());
     let repository = PushNotificationRepository::new(database.path());
     repository
-        .set_target(USER as i64, Some(GUILD as i64), DEFAULT_NTFY_SERVER, "t", 1)
+        .set_target(USER as i64, Some(GUILD as i64), TOPIC_1, 1)
         .expect("seed target");
 
     let responder = Arc::new(RecordingResponder::default());
@@ -247,7 +294,7 @@ async fn clear_button_deletes_target() {
     let provider = provider(database.path());
     let repository = PushNotificationRepository::new(database.path());
     repository
-        .set_target(USER as i64, Some(GUILD as i64), DEFAULT_NTFY_SERVER, "t", 1)
+        .set_target(USER as i64, Some(GUILD as i64), TOPIC_1, 1)
         .expect("seed target");
 
     let responder = Arc::new(RecordingResponder::default());
@@ -270,21 +317,21 @@ async fn clear_button_deletes_target() {
         responder
             .update_response()
             .content
-            .contains("No ntfy target configured")
+            .contains("No ntfy topic configured")
     );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn notify_readycheck_launched_delivers_only_to_enabled_subscribers() {
     let database = migrated_database();
-    let provider = provider(database.path());
+    let publisher = Arc::new(RecordingPublisher::default());
+    let provider = provider_with_publisher(database.path(), publisher.clone());
     let repository = PushNotificationRepository::new(database.path());
-    let server = LoopbackNtfyServer::start();
     repository
-        .set_target(1, Some(GUILD as i64), &server.base_url, "topic-1", 1)
+        .set_target(1, Some(GUILD as i64), TOPIC_1, 1)
         .expect("seed subscriber");
     repository
-        .set_target(2, Some(GUILD as i64), &server.base_url, "topic-2", 1)
+        .set_target(2, Some(GUILD as i64), TOPIC_2, 1)
         .expect("seed non-subscriber");
     repository
         .set_enabled(
@@ -300,50 +347,107 @@ async fn notify_readycheck_launched_delivers_only_to_enabled_subscribers() {
         .hooks()
         .notify_readycheck_launched(GUILD, [1_u64, 2_u64]);
 
-    let requests = server.wait_for_requests(1);
-    assert_eq!(requests.len(), 1);
-    assert!(requests[0].starts_with("POST /topic-1"));
+    let published = publisher.wait_for_published(1);
+    assert_eq!(published.len(), 1);
+    assert_eq!(published[0].topic, TOPIC_1);
+    assert_eq!(published[0].title, READYCHECK_TITLE);
+    assert_eq!(published[0].message, READYCHECK_MESSAGE);
 }
 
-struct LoopbackNtfyServer {
-    base_url: String,
-    requests: Arc<StdMutex<Vec<String>>>,
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn notify_lobby_confirmed_uses_the_independent_lobby_toggle() {
+    let database = migrated_database();
+    let publisher = Arc::new(RecordingPublisher::default());
+    let provider = provider_with_publisher(database.path(), publisher.clone());
+    let repository = PushNotificationRepository::new(database.path());
+    repository
+        .set_target(1, Some(GUILD as i64), TOPIC_1, 1)
+        .expect("seed subscriber");
+    repository
+        .set_enabled(
+            1,
+            Some(GUILD as i64),
+            PushNotificationKind::Readycheck,
+            false,
+            2,
+        )
+        .expect("disable readycheck only");
+
+    provider
+        .hooks()
+        .notify_lobby_confirmed(GUILD, &BTreeSet::from([1_u64]));
+
+    let published = publisher.wait_for_published(1);
+    assert_eq!(published.len(), 1);
+    assert_eq!(published[0].topic, TOPIC_1);
+    assert_eq!(published[0].title, LOBBY_TITLE);
+    assert_eq!(published[0].message, LOBBY_MESSAGE);
 }
 
-impl LoopbackNtfyServer {
-    fn start() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback ntfy server");
-        let base_url = format!("http://{}", listener.local_addr().expect("local address"));
-        let requests = Arc::new(StdMutex::new(Vec::new()));
-        let captured = requests.clone();
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else {
-                    return;
-                };
-                let mut buffer = [0_u8; 512];
-                if let Ok(read) = stream.read(&mut buffer) {
-                    let text = String::from_utf8_lossy(&buffer[..read]).into_owned();
-                    if let Some(line) = text.lines().next() {
-                        captured.lock().expect("requests").push(line.to_owned());
-                    }
-                }
-                let _ = stream.write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                );
-            }
-        });
-        Self { base_url, requests }
+#[tokio::test]
+async fn test_delivery_is_rate_limited_per_user_and_guild() {
+    let database = migrated_database();
+    let publisher = Arc::new(RecordingPublisher::default());
+    let provider = provider_with_publisher(database.path(), publisher.clone());
+    PushNotificationRepository::new(database.path())
+        .set_target(USER as i64, Some(GUILD as i64), TOPIC_1, 1)
+        .expect("seed target");
+
+    let first = Arc::new(RecordingResponder::default());
+    provider
+        .handler
+        .handle(
+            component_request(BUTTON_TEST),
+            Arc::clone(&first) as Arc<dyn InteractionResponder>,
+        )
+        .await
+        .expect("first test delivery");
+    let second = Arc::new(RecordingResponder::default());
+    provider
+        .handler
+        .handle(
+            component_request(BUTTON_TEST),
+            Arc::clone(&second) as Arc<dyn InteractionResponder>,
+        )
+        .await
+        .expect("rate-limited test delivery");
+
+    assert_eq!(publisher.published().len(), 1);
+    assert!(
+        first
+            .update_response()
+            .content
+            .contains("notification sent")
+    );
+    assert!(second.update_response().content.contains("rate-limited"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn event_fanout_is_parallel_but_globally_bounded() {
+    let database = migrated_database();
+    let publisher = Arc::new(SlowPublisher::default());
+    let provider = provider_with_publisher(database.path(), publisher.clone());
+    let repository = PushNotificationRepository::new(database.path());
+    let users = (1_i64..=8).collect::<Vec<_>>();
+    for user in &users {
+        repository
+            .set_target(*user, Some(GUILD as i64), &format!("cama-{user:048x}"), 1)
+            .expect("seed fanout target");
     }
 
-    fn wait_for_requests(&self, expected: usize) -> Vec<String> {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        loop {
-            let requests = self.requests.lock().expect("requests").clone();
-            if requests.len() >= expected || std::time::Instant::now() >= deadline {
-                return requests;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+    provider.hooks().notify_readycheck_launched(
+        GUILD,
+        users
+            .iter()
+            .map(|user| u64::try_from(*user).expect("test user ID")),
+    );
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while publisher.completed.load(Ordering::SeqCst) < users.len() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
+
+    assert_eq!(publisher.completed.load(Ordering::SeqCst), users.len());
+    let maximum_active = publisher.maximum_active.load(Ordering::SeqCst);
+    assert!(maximum_active > 1, "fanout should not be sequential");
+    assert!(maximum_active <= DELIVERY_CONCURRENCY);
 }
