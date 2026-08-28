@@ -1038,13 +1038,15 @@ async fn slash_join_uses_only_the_private_confirmation_message() {
     );
     assert!(captured.followups[0].ephemeral);
     assert_eq!(transport.sent_messages().len(), messages_before_join);
+    // Both the creator (from /lobby) and the joiner (from /join) are
+    // explicitly subscribed to the thread, not just pinged into it.
     assert_eq!(
         transport
             .state
             .lock()
             .expect("transport state")
             .thread_members,
-        [(21_000, 20)]
+        [(21_000, 10), (21_000, 20)]
     );
     assert_eq!(observer.confirmed.lock().expect("join observer").len(), 2);
 }
@@ -3200,9 +3202,12 @@ async fn live_readycheck_reconciles_raw_join_and_leave_against_the_active_genera
         .expect("readycheck remains live");
     assert_eq!(left.lobby_ids, BTreeSet::from([AppUserId(10)]));
     assert!(!left.reacted.contains_key(&AppUserId(20)));
-    assert!(transport.sent_messages().iter().any(|sent| {
-        sent.message.response.content == "🚪 Recent Join left 🍽️ All You Can Feed."
-    }));
+    assert!(
+        transport
+            .sent_messages()
+            .iter()
+            .any(|sent| sent.message.response.content == "🚪 Recent Join left.")
+    );
     assert!(
         transport
             .state
