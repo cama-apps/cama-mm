@@ -30,10 +30,10 @@ use cama_app::lobby_service::{
 };
 use cama_app::moderation::{ModerationService, RecordKick};
 use cama_app::readycheck::{
-    CommitPublicationResult, ExistingMessageState, PublicationMode, ReadinessGroup, ReadyLobby,
-    ReadycheckCommandFailure, ReadycheckCommandPlan, ReadycheckCommandRequest,
-    ReadycheckPlayerData, ReadycheckService, ReadycheckTransportOperation, ready_announcement,
-    readycheck_description,
+    CommitPublicationResult, ExistingMessageState, MINIMUM_READYCHECK_PLAYERS, PublicationMode,
+    ReadinessGroup, ReadyLobby, ReadycheckCommandFailure, ReadycheckCommandPlan,
+    ReadycheckCommandRequest, ReadycheckPlayerData, ReadycheckService,
+    ReadycheckTransportOperation, ready_announcement, readycheck_description,
 };
 use cama_db::core_repositories::{CoreRepositoryError, NewPlayer, PlayerRepository};
 use cama_db::curfew::CurfewRepository;
@@ -104,6 +104,9 @@ pub struct LobbyRuntimeConfig {
     pub ready_threshold: usize,
     pub max_players: usize,
     pub first_game_pool_daily_amount: i64,
+    /// A ready check against too small a lobby wastes everyone's react.
+    /// Fixed for now rather than a per-guild setting.
+    pub min_readycheck_players: usize,
 }
 
 impl LobbyRuntimeConfig {
@@ -129,6 +132,7 @@ impl LobbyRuntimeConfig {
             )?,
             max_players: positive_usize(config.values.lobby_max_players, "LOBBY_MAX_PLAYERS")?,
             first_game_pool_daily_amount: config.values.first_game_pool_daily_amount,
+            min_readycheck_players: MINIMUM_READYCHECK_PLAYERS,
         })
     }
 }
@@ -2132,7 +2136,7 @@ impl LobbyInteractionHandler {
                 followup_ephemeral(&responder, &content).await
             }
             Err(ReadycheckRunError::Policy(failure)) => {
-                followup_ephemeral(&responder, readycheck_failure_message(failure)).await
+                followup_ephemeral(&responder, &readycheck_failure_message(failure)).await
             }
             Err(ReadycheckRunError::Transport(message)) => Err(message.into()),
         }
@@ -2207,6 +2211,7 @@ impl LobbyInteractionHandler {
                     confirm_invoker,
                     existing_message,
                     reserved_players,
+                    minimum_players: self.state.config.min_readycheck_players,
                 },
                 player_data.clone(),
             )
@@ -3761,21 +3766,26 @@ enum ReadycheckRunError {
     Transport(String),
 }
 
-fn readycheck_failure_message(failure: ReadycheckCommandFailure) -> &'static str {
+fn readycheck_failure_message(failure: ReadycheckCommandFailure) -> String {
     match failure {
-        ReadycheckCommandFailure::NoGuild => "❌ Ready checks can only run in a server.",
+        ReadycheckCommandFailure::NoGuild => "❌ Ready checks can only run in a server.".to_owned(),
         ReadycheckCommandFailure::NoLobby => {
-            "❌ Ready check failed — make sure a lobby exists, then try again."
+            "❌ Ready check failed — make sure a lobby exists, then try again.".to_owned()
         }
-        ReadycheckCommandFailure::NotMember => "❌ Join that lobby before running a ready check.",
+        ReadycheckCommandFailure::TooFewPlayers { minimum, current } => {
+            format!("❌ Need at least {minimum} players to ready check — you have {current}.")
+        }
+        ReadycheckCommandFailure::NotMember => {
+            "❌ Join that lobby before running a ready check.".to_owned()
+        }
         ReadycheckCommandFailure::NoThread => {
-            "❌ Lobby thread not found. Use `/lobby` to repair or recreate the lobby."
+            "❌ Lobby thread not found. Use `/lobby` to repair or recreate the lobby.".to_owned()
         }
         ReadycheckCommandFailure::Cooldown { .. } => {
-            "⏳ A ready check was just sent. Please wait before trying again."
+            "⏳ A ready check was just sent. Please wait before trying again.".to_owned()
         }
         ReadycheckCommandFailure::PublicationInFlight => {
-            "⏳ A ready check is already being published. Please try again in a moment."
+            "⏳ A ready check is already being published. Please try again in a moment.".to_owned()
         }
     }
 }

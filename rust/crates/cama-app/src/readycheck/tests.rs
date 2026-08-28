@@ -631,7 +631,43 @@ fn request(now: f64) -> ReadycheckCommandRequest {
         confirm_invoker: true,
         existing_message: ExistingMessageState::Unknown,
         reserved_players: BTreeSet::new(),
+        minimum_players: 0,
     }
+}
+
+#[test]
+fn command_below_minimum_player_count_is_rejected() {
+    let service = command_ready_service();
+    let mut too_small = request(10_000.0);
+    too_small.minimum_players = 8;
+
+    let failure = service
+        .prepare_command(too_small, data([1, 2]))
+        .expect_err("a 2-player lobby must not clear an 8-player floor");
+
+    assert_eq!(
+        failure,
+        ReadycheckCommandFailure::TooFewPlayers {
+            minimum: 8,
+            current: 2,
+        }
+    );
+}
+
+#[test]
+fn command_at_minimum_player_count_is_allowed() {
+    let service = ReadycheckService::new();
+    let mut lobby = lobby_with(1..=8);
+    lobby.thread_id = Some(ChannelId(999));
+    service.put_lobby(lobby);
+    let mut at_minimum = request(10_000.0);
+    at_minimum.minimum_players = 8;
+
+    let plan = service
+        .prepare_command(at_minimum, data(1..=8))
+        .expect("an 8-player lobby clears an 8-player floor");
+
+    assert_eq!(plan.mode, PublicationMode::New);
 }
 
 #[test]

@@ -772,6 +772,7 @@ fn registration_exposes_the_complete_lobby_command_surface() {
             ready_threshold: 10,
             max_players: 20,
             first_game_pool_daily_amount: 100,
+            min_readycheck_players: 0,
         },
         Arc::new(DraftStateManager::default()),
         Arc::new(UnusedTransport),
@@ -801,6 +802,7 @@ fn runtime_config() -> LobbyRuntimeConfig {
         ready_threshold: 2,
         max_players: 20,
         first_game_pool_daily_amount: 100,
+        min_readycheck_players: 0,
     }
 }
 
@@ -2331,6 +2333,60 @@ async fn live_readycheck_reaches_quorum_once_with_explicit_user_allowlists() {
     assert!(sent.iter().filter(|sent| sent.message.response.content.contains("<@")) .all(
         |sent| matches!(sent.message.allowed_mentions, DiscordAllowedMentions::Users(ref users) if !users.is_empty())
     ));
+}
+
+#[tokio::test]
+async fn readycheck_below_minimum_player_count_is_rejected() {
+    let database = database_with_players(&[(10, "Creator"), (20, "Second")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let mut config = runtime_config();
+    config.min_readycheck_players = 8;
+    let provider = LobbyRegistrationProvider::new(
+        database.path(),
+        config,
+        Arc::new(DraftStateManager::default()),
+        transport.clone(),
+    )
+    .expect("construct lobby provider with a minimum ready-check floor");
+    dispatch_command(
+        &provider,
+        "lobby",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    dispatch_command(
+        &provider,
+        "join",
+        20,
+        "Second",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let messages_before_readycheck = transport.sent_messages().len();
+
+    let responder = dispatch_command(
+        &provider,
+        "readycheck",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    let captured = responder.captured.lock().expect("responses");
+    assert_eq!(captured.followups.len(), 1);
+    assert_eq!(
+        captured.followups[0].content,
+        "❌ Need at least 8 players to ready check — you have 2."
+    );
+    assert!(captured.followups[0].ephemeral);
+    assert_eq!(
+        transport.sent_messages().len(),
+        messages_before_readycheck,
+        "a rejected ready check must not post anything into the lobby thread"
+    );
 }
 
 #[tokio::test]
