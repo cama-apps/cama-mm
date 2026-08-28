@@ -393,9 +393,9 @@ Additional settings can be configured in `.env` (see the Rust application config
 - `OFF_ROLE_MULTIPLIER`, `OFF_ROLE_FLAT_VALUE_PENALTY` - Off-role effective
   value adjustments, applied on top of the role win-rate factor
   (defaults: 0.95 and 100)
-- `OFF_ROLE_FLAT_PENALTY` - Goodness penalty per off-role player (default: 610)
+- `OFF_ROLE_FLAT_PENALTY` - Goodness penalty per off-role player (default: 740)
 - `ROLE_MATCHUP_DELTA_WEIGHT` - Weight applied to the lane matchup and role
-  parity deltas when scoring teams (default: 0.18)
+  parity deltas when scoring teams (default: 0.16)
 - `EXCLUSION_PENALTY_WEIGHT` - Goodness penalty per excluded player (default: 80)
 - `RECALIBRATION_COOLDOWN_SECONDS` - Time between rating resets
 
