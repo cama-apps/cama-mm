@@ -645,9 +645,9 @@ async fn run_serve() -> ExitCode {
         return ExitCode::from(1);
     }
     if let Err(error) =
-        registration_provider.attach_push_notification_hooks(push_notification_provider.hooks())
+        match_provider.attach_push_notification_hooks(push_notification_provider.hooks())
     {
-        error!(%error, "registration push notification composition refused startup");
+        error!(%error, "match push notification composition refused startup");
         return ExitCode::from(1);
     }
     let pet_provider = PetRegistrationProvider::new(

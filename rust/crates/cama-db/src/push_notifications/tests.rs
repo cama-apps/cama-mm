@@ -31,7 +31,7 @@ fn set_target_enables_both_kinds_by_default() {
     let config = repository.get_config(1, Some(GUILD)).unwrap().unwrap();
     assert_eq!(config.target.topic, TOPIC_1);
     assert!(config.readycheck_enabled);
-    assert!(config.lobby_enabled);
+    assert!(config.match_started_enabled);
 }
 
 #[test]
@@ -53,14 +53,20 @@ fn set_target_again_replaces_topic_and_preserves_enabled_flags() {
     let (_file, repository) = repository();
     repository.set_target(1, Some(GUILD), TOPIC_1, NOW).unwrap();
     repository
-        .set_enabled(1, Some(GUILD), PushNotificationKind::Lobby, false, NOW)
+        .set_enabled(
+            1,
+            Some(GUILD),
+            PushNotificationKind::MatchStarted,
+            false,
+            NOW,
+        )
         .unwrap();
     repository
         .set_target(1, Some(GUILD), TOPIC_2, NOW + 1)
         .unwrap();
     let config = repository.get_config(1, Some(GUILD)).unwrap().unwrap();
     assert_eq!(config.target.topic, TOPIC_2);
-    assert!(!config.lobby_enabled);
+    assert!(!config.match_started_enabled);
 }
 
 #[test]
@@ -88,7 +94,7 @@ fn set_enabled_toggles_one_kind_independently() {
     assert!(changed);
     let config = repository.get_config(1, Some(GUILD)).unwrap().unwrap();
     assert!(!config.readycheck_enabled);
-    assert!(config.lobby_enabled);
+    assert!(config.match_started_enabled);
 }
 
 #[test]
@@ -106,7 +112,13 @@ fn enabled_targets_filters_by_kind_guild_and_discord_ids() {
     repository.set_target(1, Some(GUILD), TOPIC_1, NOW).unwrap();
     repository.set_target(2, Some(GUILD), TOPIC_2, NOW).unwrap();
     repository
-        .set_enabled(2, Some(GUILD), PushNotificationKind::Lobby, false, NOW)
+        .set_enabled(
+            2,
+            Some(GUILD),
+            PushNotificationKind::MatchStarted,
+            false,
+            NOW,
+        )
         .unwrap();
     // Different guild: must not leak into guild-scoped results.
     repository.set_target(1, Some(99), TOPIC_3, NOW).unwrap();
@@ -114,7 +126,7 @@ fn enabled_targets_filters_by_kind_guild_and_discord_ids() {
     repository.set_target(3, Some(GUILD), TOPIC_4, NOW).unwrap();
 
     let targets = repository
-        .enabled_targets(Some(GUILD), &[1, 2], PushNotificationKind::Lobby)
+        .enabled_targets(Some(GUILD), &[1, 2], PushNotificationKind::MatchStarted)
         .unwrap();
     assert_eq!(targets.len(), 1);
     assert_eq!(targets[0].0, 1);

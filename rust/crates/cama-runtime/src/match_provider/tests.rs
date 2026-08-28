@@ -17,7 +17,9 @@ use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
 use crate::discord_transport::{DiscordAllowedMentions, DiscordIdPlayerNameResolver};
+use crate::push_notification_provider::{PushNotificationRegistrationProvider, PushPublisher};
 use crate::registration::{InteractionAllowedMentions, InteractionResponseError};
+use cama_db::push_notifications::PushNotificationRepository;
 
 use super::*;
 use crate::test_support::{
@@ -2153,6 +2155,93 @@ async fn final_warning_uses_scoped_underdog_mentions_and_thread_reply_parent() {
     );
     assert_eq!(requests[0].leader_discord_id, Some(81_105));
     assert_eq!(requests[0].leader_amount, Some(500));
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PublishedPushNotification {
+    topic: String,
+    title: String,
+}
+
+#[derive(Default)]
+struct RecordingPushPublisher {
+    published: Mutex<Vec<PublishedPushNotification>>,
+}
+
+impl RecordingPushPublisher {
+    fn wait_for_published(&self, expected: usize) -> Vec<PublishedPushNotification> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let published = self.published.lock().expect("published").clone();
+            if published.len() >= expected || std::time::Instant::now() >= deadline {
+                return published;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+}
+
+#[async_trait]
+impl PushPublisher for RecordingPushPublisher {
+    async fn publish(&self, topic: &str, title: &str, _message: &str) -> Result<(), String> {
+        self.published
+            .lock()
+            .expect("published")
+            .push(PublishedPushNotification {
+                topic: topic.to_owned(),
+                title: title.to_owned(),
+            });
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn finalize_shuffle_notifies_the_shuffled_roster() {
+    let fixture = MatchRuntimeFixture::new();
+    let player_ids = fixture.add_shuffle_pool(10, false);
+    fixture.populate_lobby(&player_ids, LobbyKind::Open).await;
+
+    let push_publisher = Arc::new(RecordingPushPublisher::default());
+    let push_provider = PushNotificationRegistrationProvider::with_test_publisher(
+        fixture.database.path(),
+        push_publisher.clone(),
+    );
+    let repository = PushNotificationRepository::new(fixture.database.path());
+    for (index, discord_id) in player_ids.iter().enumerate() {
+        repository
+            .set_target(*discord_id, Some(GUILD), &format!("cama-{index:048x}"), 1)
+            .expect("configure push target");
+    }
+    fixture
+        .provider
+        .attach_push_notification_hooks(push_provider.hooks())
+        .expect("attach match push hooks");
+
+    fixture
+        .provider
+        .handler
+        .handle_shuffle(
+            shuffle_command_context(player_ids[0], LobbyKind::Open),
+            Arc::new(RecordingMatchResponder::default()),
+        )
+        .await
+        .expect("finalize shuffle");
+
+    let published = push_publisher.wait_for_published(player_ids.len());
+    assert_eq!(published.len(), player_ids.len());
+    assert!(
+        published
+            .iter()
+            .all(|notification| notification.title == "🎮 Match Started!")
+    );
+
+    let pending = PendingMatchRepository::new(fixture.database.path())
+        .pending_matches(GUILD)
+        .expect("read finalized shuffle")
+        .into_iter()
+        .next()
+        .expect("finalized pending exists");
+    abort_betting_tasks(&fixture, pending.pending_match_id);
 }
 
 fn abort_betting_tasks(fixture: &MatchRuntimeFixture, pending_match_id: i64) {

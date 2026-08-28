@@ -1,5 +1,5 @@
 //! Production `/notify` provider: per-user ntfy.sh push notifications for
-//! readycheck launches and lobby-confirmed events.
+//! full-lobby readychecks and shuffled matches.
 //!
 //! Delivery is fire-and-forget from the caller's perspective: both hooks
 //! spawn a detached task so a slow or unreachable ntfy server never delays a
@@ -30,18 +30,19 @@ const COMMAND_NAME: &str = "notify";
 const COMPONENT_PREFIX: &str = "notify_";
 const BUTTON_SET: &str = "notify_set";
 const BUTTON_TOGGLE_READYCHECK: &str = "notify_toggle_readycheck";
-const BUTTON_TOGGLE_LOBBY: &str = "notify_toggle_lobby";
+const BUTTON_TOGGLE_MATCH_STARTED: &str = "notify_toggle_match_started";
 const BUTTON_TEST: &str = "notify_test";
-const BUTTON_CLEAR: &str = "notify_clear";
+const BUTTON_UNSUBSCRIBE: &str = "notify_unsubscribe";
 const TOPIC_PREFIX: &str = "cama-";
 const TOPIC_RANDOM_BYTES: usize = 24;
 const DELIVERY_CONCURRENCY: usize = 4;
 const TEST_DELIVERY_COOLDOWN: Duration = Duration::from_secs(60);
 
 const READYCHECK_TITLE: &str = "\u{2694}\u{fe0f} Readycheck!";
-const READYCHECK_MESSAGE: &str = "Your readycheck just launched \u{2014} react before it expires!";
-const LOBBY_TITLE: &str = "\u{1f3ae} Lobby Ready!";
-const LOBBY_MESSAGE: &str = "Your lobby just filled up \u{2014} time to ready up!";
+const READYCHECK_MESSAGE: &str =
+    "Your lobby is full and a readycheck just launched \u{2014} react before it expires!";
+const MATCH_STARTED_TITLE: &str = "\u{1f3ae} Match Started!";
+const MATCH_STARTED_MESSAGE: &str = "Your shuffled match has started \u{2014} good luck!";
 const TEST_TITLE: &str = "\u{1f9ea} Test Notification";
 const TEST_MESSAGE: &str = "Your Cama push notifications are working.";
 
@@ -90,7 +91,7 @@ impl RegistrationProvider for PushNotificationRegistrationProvider {
     fn register(&self, registry: &mut RegistryBuilder) -> Result<(), RegistrationError> {
         registry.command(CommandSpec {
             name: COMMAND_NAME.to_owned(),
-            description: "Configure best-effort ntfy.sh alerts for readychecks and full lobbies."
+            description: "Configure best-effort ntfy.sh alerts for full-lobby readychecks and shuffled matches."
                 .to_owned(),
             options: Vec::new(),
             handler: self.handler.clone(),
@@ -132,9 +133,9 @@ impl PushNotificationHooks {
         );
     }
 
-    /// Notify enabled subscribers among `discord_ids` that their lobby just
-    /// reached its ready threshold.
-    pub fn notify_lobby_confirmed(&self, guild_id: u64, discord_ids: &BTreeSet<u64>) {
+    /// Notify enabled subscribers among `discord_ids` that a shuffled match
+    /// just started with them in it.
+    pub fn notify_match_started(&self, guild_id: u64, discord_ids: &BTreeSet<u64>) {
         let targets = discord_ids
             .iter()
             .copied()
@@ -144,9 +145,9 @@ impl PushNotificationHooks {
             &self.handler,
             guild_id,
             targets,
-            PushNotificationKind::Lobby,
-            LOBBY_TITLE,
-            LOBBY_MESSAGE,
+            PushNotificationKind::MatchStarted,
+            MATCH_STARTED_TITLE,
+            MATCH_STARTED_MESSAGE,
         );
     }
 }
@@ -388,7 +389,7 @@ impl PushNotificationHandler {
         Ok(None)
     }
 
-    async fn clear(
+    async fn unsubscribe(
         &self,
         discord_id: i64,
         guild_id: i64,
@@ -397,7 +398,7 @@ impl PushNotificationHandler {
         let repository = self.repository.clone();
         tokio::task::spawn_blocking(move || repository.delete_target(discord_id, Some(guild_id)))
             .await
-            .map_err(|error| format!("push notification clear task failed: {error}"))?
+            .map_err(|error| format!("push notification unsubscribe task failed: {error}"))?
             .map_err(|error| error.to_string())?;
         responder
             .update(status_response(None))
@@ -486,17 +487,17 @@ impl InteractionHandler for PushNotificationHandler {
                         )
                         .await
                     }
-                    BUTTON_TOGGLE_LOBBY => {
+                    BUTTON_TOGGLE_MATCH_STARTED => {
                         self.toggle(
                             discord_id,
                             guild_id,
-                            PushNotificationKind::Lobby,
+                            PushNotificationKind::MatchStarted,
                             &responder,
                         )
                         .await
                     }
                     BUTTON_TEST => self.send_test(discord_id, guild_id, &responder).await,
-                    BUTTON_CLEAR => self.clear(discord_id, guild_id, &responder).await,
+                    BUTTON_UNSUBSCRIBE => self.unsubscribe(discord_id, guild_id, &responder).await,
                     other => Err(format!("unknown push notification component {other:?}").into()),
                 }
             }
@@ -524,7 +525,7 @@ fn signed_ids(user_id: u64, guild_id: Option<u64>) -> Result<(i64, i64), String>
 const fn kind_str(kind: PushNotificationKind) -> &'static str {
     match kind {
         PushNotificationKind::Readycheck => "readycheck",
-        PushNotificationKind::Lobby => "lobby",
+        PushNotificationKind::MatchStarted => "match_started",
     }
 }
 
@@ -549,7 +550,7 @@ fn generate_topic() -> Result<String, String> {
 fn status_response(config: Option<&PushNotificationConfig>) -> InteractionResponse {
     let mut lines = vec![
         "**Push notifications (ntfy.sh)**".to_owned(),
-        "Get a best-effort alert when a readycheck launches with you in it, or a lobby you're in fills up.".to_owned(),
+        "Get a best-effort alert when your lobby is full and a readycheck launches needing your response, or a shuffled match starts with you in it.".to_owned(),
         String::new(),
     ];
     let mut buttons = Vec::new();
@@ -591,15 +592,22 @@ fn status_response(config: Option<&PushNotificationConfig>) -> InteractionRespon
             );
             buttons.push(
                 InteractionButton::new(
-                    BUTTON_TOGGLE_LOBBY,
-                    format!("Lobby: {}", if config.lobby_enabled { "ON" } else { "OFF" }),
+                    BUTTON_TOGGLE_MATCH_STARTED,
+                    format!(
+                        "Match Started: {}",
+                        if config.match_started_enabled {
+                            "ON"
+                        } else {
+                            "OFF"
+                        }
+                    ),
                 )
-                .emoji(if config.lobby_enabled {
+                .emoji(if config.match_started_enabled {
                     "\u{1f514}"
                 } else {
                     "\u{1f515}"
                 })
-                .style(if config.lobby_enabled {
+                .style(if config.match_started_enabled {
                     InteractionButtonStyle::Success
                 } else {
                     InteractionButtonStyle::Secondary
@@ -611,7 +619,7 @@ fn status_response(config: Option<&PushNotificationConfig>) -> InteractionRespon
                     .style(InteractionButtonStyle::Secondary),
             );
             buttons.push(
-                InteractionButton::new(BUTTON_CLEAR, "Clear")
+                InteractionButton::new(BUTTON_UNSUBSCRIBE, "Unsubscribe")
                     .emoji("\u{1f5d1}\u{fe0f}")
                     .style(InteractionButtonStyle::Danger),
             );

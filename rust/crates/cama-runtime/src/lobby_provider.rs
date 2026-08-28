@@ -1015,11 +1015,21 @@ impl LobbyRuntimeState {
     /// Best-effort push-notification fan-out for a freshly launched
     /// readycheck. `mention_ids` already excludes anyone who does not need to
     /// react (an auto-confirmed invoker, a recently-ready player), matching
-    /// the same set Discord mentions in the readycheck message.
-    fn notify_readycheck_launched(&self, guild_id: AppGuildId, mention_ids: &BTreeSet<AppUserId>) {
-        let Ok(guild_id) = to_u64(guild_id.0) else {
+    /// the same set Discord mentions in the readycheck message. Only fires
+    /// when the readycheck's full invited roster has reached the ready
+    /// threshold: a readycheck run against a partial lobby is not the
+    /// "everyone's here, go respond" moment players want pushed to their phone.
+    fn notify_readycheck_launched(&self, scope: LobbyScope, mention_ids: &BTreeSet<AppUserId>) {
+        let Ok(guild_id) = to_u64(scope.guild_id.0) else {
             return;
         };
+        let is_full_lobby = self
+            .readychecks
+            .readycheck_generation(scope)
+            .is_some_and(|generation| generation.lobby_ids.len() == self.config.ready_threshold);
+        if !is_full_lobby {
+            return;
+        }
         if let Ok(hooks) = self.push_notifications.read()
             && let Some(hooks) = hooks.as_ref()
         {
@@ -2324,7 +2334,7 @@ impl LobbyInteractionHandler {
             )
             .await?;
         self.state
-            .notify_readycheck_launched(scope.guild_id, &result.mention_ids);
+            .notify_readycheck_launched(scope, &result.mention_ids);
         Ok(result)
     }
 
@@ -3573,30 +3583,23 @@ impl LobbyInteractionHandler {
         let lobby = self.state.service.get_lobby(scope)?;
         if let Some(thread_id) = lobby.message_ids.thread_id
             && let Some(content) = match thread_activity {
-                JoinThreadActivity::Command => {
-                    Some(format!("✅ <@{}> joined the lobby!", player_id.0))
+                JoinThreadActivity::Command => Some(format!("✅ {player_name} joined the lobby!")),
+                JoinThreadActivity::RawReaction => {
+                    Some(format!("✅ {player_name} joined {}!", scope.kind.label()))
                 }
-                JoinThreadActivity::RawReaction => Some(format!(
-                    "✅ <@{}> joined {}!",
-                    player_id.0,
-                    scope.kind.label()
-                )),
                 JoinThreadActivity::Silent => None,
             }
         {
-            let thread_id = to_u64(thread_id.0).ok();
-            let player_snowflake = u64::try_from(player_id.0).ok();
-            if let (Some(thread_id), Some(player_snowflake)) = (thread_id, player_snowflake) {
+            // A joiner clicked the button/reacted themselves, so pinging them
+            // about their own action would just be noise -- the name alone is
+            // enough for everyone else already in the thread.
+            if let Ok(thread_id) = to_u64(thread_id.0) {
                 if let Err(error) = self
                     .state
                     .transport
                     .send_message(
                         thread_id,
-                        DiscordMessage::mentioning(
-                            InteractionResponse::message(content)
-                                .with_user_mentions(vec![player_snowflake]),
-                            BTreeSet::from([player_snowflake]),
-                        ),
+                        DiscordMessage::silent(InteractionResponse::message(content)),
                     )
                     .await
                 {
