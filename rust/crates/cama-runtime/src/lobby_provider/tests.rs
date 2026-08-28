@@ -2872,9 +2872,139 @@ async fn stale_readycheck_does_not_prune_without_the_durable_notice_outbox() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readycheck_push_notification_is_suppressed_for_a_partial_lobby() {
+    let database = database_with_players(&[(10, "Solo")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    let push_publisher = Arc::new(RecordingPushPublisher::default());
+    let push_provider = PushNotificationRegistrationProvider::with_test_publisher(
+        database.path(),
+        push_publisher.clone(),
+    );
+    PushNotificationRepository::new(database.path())
+        .set_target(
+            10,
+            Some(42),
+            "cama-000000000000000000000000000000000000000000000010",
+            1,
+        )
+        .expect("configure push target");
+    provider
+        .attach_push_notification_hooks(push_provider.hooks())
+        .expect("attach push hooks");
+
+    dispatch_command(
+        &provider,
+        "lobby",
+        10,
+        "Solo",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    dispatch_command(
+        &provider,
+        "readycheck",
+        10,
+        "Solo",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    assert!(
+        !push_publisher.wait_for_title("⚔️ Readycheck!").await,
+        "a readycheck launched against a partial lobby must not push a notification"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readycheck_push_notification_fires_when_the_lobby_is_full() {
+    // Player 20 must be aged out of the "just joined" grace window, otherwise
+    // they auto-confirm like the invoker does and never land in `mention_ids`
+    // -- the same set the push notification is filtered against.
+    let database = database_with_players(&[(10, "First"), (20, "Second")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    PushNotificationRepository::new(database.path())
+        .set_target(
+            20,
+            Some(42),
+            "cama-000000000000000000000000000000000000000000000020",
+            1,
+        )
+        .expect("configure push target");
+
+    dispatch_command(
+        &provider,
+        "lobby",
+        10,
+        "First",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    dispatch_command(
+        &provider,
+        "join",
+        20,
+        "Second",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
+    let repository = ReadycheckRepository::new(database.path());
+    let mut persisted = repository
+        .load(scope.lobby_id(), Some(42))
+        .expect("load lobby row")
+        .expect("persisted lobby");
+    persisted
+        .player_join_times
+        .insert(20, unix_time_now() - 11.0 * 60.0);
+    repository.save(&persisted).expect("age the signup");
+
+    // Reload from the aged persistence: the live provider's in-memory lobby
+    // state does not observe a direct repository write.
+    let restarted = provider_for(&database, transport.clone());
+    let push_publisher = Arc::new(RecordingPushPublisher::default());
+    let push_provider = PushNotificationRegistrationProvider::with_test_publisher(
+        database.path(),
+        push_publisher.clone(),
+    );
+    restarted
+        .attach_push_notification_hooks(push_provider.hooks())
+        .expect("attach push hooks");
+    // Only a resolvable guild member lands in the `mentionable` set that the
+    // readycheck's push notification is filtered against.
+    transport.set_member(
+        42,
+        DiscordGuildMemberSnapshot {
+            user_id: 20,
+            display_name: "Second".to_owned(),
+            presence: DiscordPresence::Online,
+            in_voice: false,
+            deafened: false,
+            activities: Vec::new(),
+        },
+    );
+
+    dispatch_command(
+        &restarted,
+        "readycheck",
+        10,
+        "First",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    assert!(
+        push_publisher.wait_for_title("⚔️ Readycheck!").await,
+        "a readycheck launched against a full lobby must push a notification to subscribers"
+    );
+}
+
 #[tokio::test]
 async fn successful_bell_shortcut_advertises_in_the_persisted_origin_channel() {
-    let database = database_with_players(&[(10, "Creator")]);
+    let database = database_with_players(&[(10, "Creator"), (20, "Second Player")]);
     let transport = Arc::new(RecordingTransport::default());
     let provider = provider_for(&database, transport.clone());
     dispatch_command(
@@ -2882,6 +3012,14 @@ async fn successful_bell_shortcut_advertises_in_the_persisted_origin_channel() {
         "lobby",
         10,
         "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    dispatch_command(
+        &provider,
+        "join",
+        20,
+        "Second Player",
         vec![lobby_option(LobbyKind::Open)],
     )
     .await;

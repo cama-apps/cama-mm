@@ -217,7 +217,7 @@ async fn create_topic_button_persists_high_entropy_target_and_enables_both_kinds
             .all(|byte| byte.is_ascii_hexdigit())
     );
     assert!(config.readycheck_enabled);
-    assert!(config.lobby_enabled);
+    assert!(config.match_started_enabled);
 
     let response = responder.update_response();
     assert!(response.content.contains(DEFAULT_NTFY_SERVER));
@@ -277,7 +277,7 @@ async fn toggle_button_flips_one_kind_independently() {
         .expect("read config")
         .expect("target still present");
     assert!(!config.readycheck_enabled);
-    assert!(config.lobby_enabled);
+    assert!(config.match_started_enabled);
     let response = responder.update_response();
     let readycheck_button = response
         .components
@@ -289,7 +289,7 @@ async fn toggle_button_flips_one_kind_independently() {
 }
 
 #[tokio::test]
-async fn clear_button_deletes_target() {
+async fn unsubscribe_button_deletes_target() {
     let database = migrated_database();
     let provider = provider(database.path());
     let repository = PushNotificationRepository::new(database.path());
@@ -301,11 +301,11 @@ async fn clear_button_deletes_target() {
     provider
         .handler
         .handle(
-            component_request(BUTTON_CLEAR),
+            component_request(BUTTON_UNSUBSCRIBE),
             Arc::clone(&responder) as Arc<dyn InteractionResponder>,
         )
         .await
-        .expect("clear handled");
+        .expect("unsubscribe handled");
 
     assert_eq!(
         repository
@@ -355,7 +355,7 @@ async fn notify_readycheck_launched_delivers_only_to_enabled_subscribers() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn notify_lobby_confirmed_uses_the_independent_lobby_toggle() {
+async fn notify_match_started_uses_the_independent_match_started_toggle() {
     let database = migrated_database();
     let publisher = Arc::new(RecordingPublisher::default());
     let provider = provider_with_publisher(database.path(), publisher.clone());
@@ -375,13 +375,13 @@ async fn notify_lobby_confirmed_uses_the_independent_lobby_toggle() {
 
     provider
         .hooks()
-        .notify_lobby_confirmed(GUILD, &BTreeSet::from([1_u64]));
+        .notify_match_started(GUILD, &BTreeSet::from([1_u64]));
 
     let published = publisher.wait_for_published(1);
     assert_eq!(published.len(), 1);
     assert_eq!(published[0].topic, TOPIC_1);
-    assert_eq!(published[0].title, LOBBY_TITLE);
-    assert_eq!(published[0].message, LOBBY_MESSAGE);
+    assert_eq!(published[0].title, MATCH_STARTED_TITLE);
+    assert_eq!(published[0].message, MATCH_STARTED_MESSAGE);
 }
 
 #[tokio::test]

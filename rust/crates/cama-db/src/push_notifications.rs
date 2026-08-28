@@ -13,7 +13,7 @@ use crate::open_runtime_connection;
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum PushNotificationKind {
     Readycheck,
-    Lobby,
+    MatchStarted,
 }
 
 impl PushNotificationKind {
@@ -21,7 +21,7 @@ impl PushNotificationKind {
     pub const fn column(self) -> &'static str {
         match self {
             Self::Readycheck => "readycheck_enabled",
-            Self::Lobby => "lobby_enabled",
+            Self::MatchStarted => "match_started_enabled",
         }
     }
 }
@@ -35,7 +35,7 @@ pub struct PushNotificationTarget {
 pub struct PushNotificationConfig {
     pub target: PushNotificationTarget,
     pub readycheck_enabled: bool,
-    pub lobby_enabled: bool,
+    pub match_started_enabled: bool,
 }
 
 impl PushNotificationConfig {
@@ -43,7 +43,7 @@ impl PushNotificationConfig {
     pub const fn enabled(&self, kind: PushNotificationKind) -> bool {
         match kind {
             PushNotificationKind::Readycheck => self.readycheck_enabled,
-            PushNotificationKind::Lobby => self.lobby_enabled,
+            PushNotificationKind::MatchStarted => self.match_started_enabled,
         }
     }
 }
@@ -87,7 +87,7 @@ impl PushNotificationRepository {
         Ok(self
             .connection()?
             .query_row(
-                "SELECT ntfy_topic,readycheck_enabled,lobby_enabled
+                "SELECT ntfy_topic,readycheck_enabled,match_started_enabled
                    FROM push_notification_targets
                   WHERE discord_id=?1 AND guild_id=?2",
                 params![discord_id, Self::normalize_guild_id(guild_id)],
@@ -95,7 +95,7 @@ impl PushNotificationRepository {
                     Ok(PushNotificationConfig {
                         target: PushNotificationTarget { topic: row.get(0)? },
                         readycheck_enabled: row.get(1)?,
-                        lobby_enabled: row.get(2)?,
+                        match_started_enabled: row.get(2)?,
                     })
                 },
             )
@@ -113,7 +113,7 @@ impl PushNotificationRepository {
     ) -> Result<(), PushNotificationRepositoryError> {
         self.connection()?.execute(
             "INSERT INTO push_notification_targets
-                 (discord_id,guild_id,ntfy_topic,readycheck_enabled,lobby_enabled,updated_at)
+                 (discord_id,guild_id,ntfy_topic,readycheck_enabled,match_started_enabled,updated_at)
              VALUES (?1,?2,?3,1,1,?4)
              ON CONFLICT(discord_id,guild_id) DO UPDATE SET
                  ntfy_topic=excluded.ntfy_topic,

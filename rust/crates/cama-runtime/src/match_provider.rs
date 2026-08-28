@@ -124,6 +124,7 @@ use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
 use crate::lobby_provider::{MatchLobbyPort, MatchLobbySnapshot};
+use crate::push_notification_provider::PushNotificationHooks;
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, InteractionEmbed,
     InteractionHandler, InteractionHandlerError, InteractionOption, InteractionRequest,
@@ -386,6 +387,7 @@ impl MatchRegistrationProvider {
             betting_reminders: Arc::new(OnceLock::new()),
             betting_flavor: Arc::new(RwLock::new(Arc::new(StaticBettingFlavor))),
             post_match_debrief: Arc::new(OnceLock::new()),
+            push_notifications: Arc::new(OnceLock::new()),
             finalizing_matches: Arc::new(Mutex::new(BTreeSet::new())),
             voting: MatchVotingService::new(MatchVotingRepository::new(&path)),
         });
@@ -448,6 +450,18 @@ impl MatchRegistrationProvider {
             .betting_reminders
             .set(Arc::new(hooks))
             .map_err(|_| "match reminder hooks were already attached".to_owned())
+    }
+
+    /// Attach the ntfy.sh push-notification hooks so a completed `/shuffle`
+    /// can alert subscribed participants that their match has started.
+    pub fn attach_push_notification_hooks(
+        &self,
+        hooks: PushNotificationHooks,
+    ) -> Result<(), String> {
+        self.handler
+            .push_notifications
+            .set(hooks)
+            .map_err(|_| "match push notification hooks were already attached".to_owned())
     }
 
     /// Attach Betting's AI/persona adapter for final-warning and last-call
@@ -1342,6 +1356,7 @@ struct MatchHandler {
     betting_reminders: Arc<OnceLock<Arc<dyn MatchReminderPort>>>,
     betting_flavor: Arc<RwLock<Arc<dyn BettingFlavorPort>>>,
     post_match_debrief: Arc<OnceLock<Arc<dyn MatchPostMatchDebriefPort>>>,
+    push_notifications: Arc<OnceLock<PushNotificationHooks>>,
     finalizing_matches: Arc<Mutex<BTreeSet<(i64, i64)>>>,
     voting: MatchVotingService<MatchVotingRepository>,
 }
@@ -4577,6 +4592,7 @@ impl MatchHandler {
         .ok_or("pending match disappeared during publication")?;
 
         self.schedule_betting_reminders(&prepared.pending, true);
+        self.notify_match_started(&prepared.pending);
         let thread_publish = self.publish_shuffle_thread(&snapshot, &prepared.pending, embed);
         let unpin = self.lobbies.unpin_source_message(&snapshot);
         let (thread_result, unpin_result) = tokio::join!(thread_publish, unpin);
@@ -5015,6 +5031,25 @@ impl MatchHandler {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert((pending.guild_id, pending.pending_match_id), tasks);
+    }
+
+    /// Best-effort push-notification fan-out for a freshly shuffled match.
+    /// Only the actual radiant/dire roster is notified — spectators and
+    /// excluded players never joined a match, so a push here would be noise.
+    fn notify_match_started(&self, pending: &PendingMatchRecord) {
+        let Some(hooks) = self.push_notifications.get() else {
+            return;
+        };
+        let Ok(guild_id) = u64::try_from(pending.guild_id) else {
+            return;
+        };
+        let discord_ids = pending
+            .state
+            .participant_ids()
+            .iter()
+            .filter_map(|player_id| u64::try_from(*player_id).ok())
+            .collect::<BTreeSet<_>>();
+        hooks.notify_match_started(guild_id, &discord_ids);
     }
 
     fn cancel_betting_tasks(&self, guild_id: i64, pending_match_id: Option<i64>) {
