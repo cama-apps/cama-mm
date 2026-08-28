@@ -2204,6 +2204,7 @@ async fn finalize_shuffle_notifies_the_shuffled_roster() {
     let push_publisher = Arc::new(RecordingPushPublisher::default());
     let push_provider = PushNotificationRegistrationProvider::with_test_publisher(
         fixture.database.path(),
+        Arc::new(PublicationDiscord::default()),
         push_publisher.clone(),
     );
     let repository = PushNotificationRepository::new(fixture.database.path());
