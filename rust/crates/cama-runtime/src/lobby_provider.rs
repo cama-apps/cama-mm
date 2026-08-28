@@ -3329,7 +3329,7 @@ impl LobbyInteractionHandler {
             };
             if removed {
                 left.push(kind);
-                self.best_effort_leave_publication(scope, command.user_id, &display_name, false)
+                self.best_effort_leave_publication(scope, command.user_id, &display_name)
                     .await;
             } else if self
                 .state
@@ -3581,47 +3581,48 @@ impl LobbyInteractionHandler {
         }
         self.state.sync_readycheck_with_lobby(scope).await;
         let lobby = self.state.service.get_lobby(scope)?;
-        if let Some(thread_id) = lobby.message_ids.thread_id
-            && let Some(content) = match thread_activity {
-                JoinThreadActivity::Command => Some(format!("✅ {player_name} joined the lobby!")),
-                JoinThreadActivity::RawReaction => {
-                    Some(format!("✅ {player_name} joined {}!", scope.kind.label()))
-                }
-                JoinThreadActivity::Silent => None,
+        if let Some(thread_id) = lobby.message_ids.thread_id {
+            // A mention is what actually subscribes a Discord user to a
+            // thread, so dropping the ping (below) also drops that
+            // subscription unless we join them to the thread explicitly.
+            if let (Ok(thread_id), Ok(player_snowflake)) =
+                (to_u64(thread_id.0), u64::try_from(player_id.0))
+                && let Err(error) = self
+                    .state
+                    .transport
+                    .add_thread_member(thread_id, player_snowflake)
+                    .await
+            {
+                debug!(%error, ?scope, "could not subscribe joiner to lobby thread");
             }
-        {
             // A joiner clicked the button/reacted themselves, so pinging them
             // about their own action would just be noise -- the name alone is
             // enough for everyone else already in the thread.
-            if let Ok(thread_id) = to_u64(thread_id.0) {
-                if let Err(error) = self
-                    .state
-                    .transport
-                    .send_message(
-                        thread_id,
-                        DiscordMessage::silent(InteractionResponse::message(content)),
-                    )
-                    .await
-                {
-                    warn!(%error, ?scope, "lobby thread join publication failed");
+            if let Some(content) = match thread_activity {
+                JoinThreadActivity::Command | JoinThreadActivity::RawReaction => {
+                    Some(format!("✅ {player_name} joined."))
                 }
-            } else {
-                warn!(
-                    ?scope,
-                    "lobby join publication has invalid persisted Discord IDs"
-                );
+                JoinThreadActivity::Silent => None,
+            } {
+                if let Ok(thread_id) = to_u64(thread_id.0) {
+                    if let Err(error) = self
+                        .state
+                        .transport
+                        .send_message(
+                            thread_id,
+                            DiscordMessage::silent(InteractionResponse::message(content)),
+                        )
+                        .await
+                    {
+                        warn!(%error, ?scope, "lobby thread join publication failed");
+                    }
+                } else {
+                    warn!(
+                        ?scope,
+                        "lobby join publication has invalid persisted Discord IDs"
+                    );
+                }
             }
-        } else if matches!(thread_activity, JoinThreadActivity::Silent)
-            && let Some(thread_id) = lobby.message_ids.thread_id
-            && let (Ok(thread_id), Ok(player_snowflake)) =
-                (to_u64(thread_id.0), u64::try_from(player_id.0))
-            && let Err(error) = self
-                .state
-                .transport
-                .add_thread_member(thread_id, player_snowflake)
-                .await
-        {
-            debug!(%error, ?scope, "could not subscribe slash-command joiner to lobby thread");
         }
 
         let (Ok(guild_id), Ok(player_snowflake)) =
@@ -3693,7 +3694,6 @@ impl LobbyInteractionHandler {
         scope: LobbyScope,
         player_id: AppUserId,
         display_name: &str,
-        raw_reaction: bool,
     ) {
         if let Err(error) = self.state.sync_lobby_display(scope).await {
             warn!(%error, ?scope, "lobby display sync after leave failed");
@@ -3711,11 +3711,7 @@ impl LobbyInteractionHandler {
             return;
         };
         if let Ok(thread_id) = to_u64(thread_id.0) {
-            let content = if raw_reaction {
-                format!("🚪 {display_name} left {}.", scope.kind.label())
-            } else {
-                format!("🚪 **{display_name}** left the lobby.")
-            };
+            let content = format!("🚪 {display_name} left.");
             let _ = self
                 .state
                 .transport
@@ -4590,7 +4586,7 @@ impl RawReactionObserver for LobbyRawReactionObserver {
                         }
                     };
                     handler
-                        .best_effort_leave_publication(scope, user_id, &display_name, true)
+                        .best_effort_leave_publication(scope, user_id, &display_name)
                         .await;
                 } else {
                     self.state.refund_membership_change(rate_limit_claim);
