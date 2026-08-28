@@ -1384,19 +1384,23 @@ CREATE TABLE referrals (
 
 -- table: push_notification_targets
 CREATE TABLE push_notification_targets (
-                discord_id            INTEGER NOT NULL,
-                guild_id              INTEGER NOT NULL DEFAULT 0,
-                ntfy_topic            TEXT NOT NULL,
-                readycheck_enabled    INTEGER NOT NULL DEFAULT 1,
-                match_started_enabled INTEGER NOT NULL DEFAULT 1,
-                updated_at            INTEGER NOT NULL DEFAULT 0,
+                discord_id               INTEGER NOT NULL,
+                guild_id                 INTEGER NOT NULL DEFAULT 0,
+                ntfy_topic               TEXT,
+                readycheck_enabled       INTEGER NOT NULL DEFAULT 1,
+                match_started_enabled    INTEGER NOT NULL DEFAULT 1,
+                dm_readycheck_enabled    INTEGER NOT NULL DEFAULT 0,
+                dm_match_started_enabled INTEGER NOT NULL DEFAULT 0,
+                updated_at               INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (discord_id, guild_id),
                 UNIQUE (ntfy_topic),
-                CHECK (length(ntfy_topic) = 53),
-                CHECK (substr(ntfy_topic, 1, 5) = 'cama-'),
-                CHECK (substr(ntfy_topic, 6) NOT GLOB '*[^0-9a-f]*'),
+                CHECK (ntfy_topic IS NULL OR length(ntfy_topic) = 53),
+                CHECK (ntfy_topic IS NULL OR substr(ntfy_topic, 1, 5) = 'cama-'),
+                CHECK (ntfy_topic IS NULL OR substr(ntfy_topic, 6) NOT GLOB '*[^0-9a-f]*'),
                 CHECK (readycheck_enabled IN (0, 1)),
-                CHECK (match_started_enabled IN (0, 1))
+                CHECK (match_started_enabled IN (0, 1)),
+                CHECK (dm_readycheck_enabled IN (0, 1)),
+                CHECK (dm_match_started_enabled IN (0, 1))
             );
 
 -- table: reminder_preferences

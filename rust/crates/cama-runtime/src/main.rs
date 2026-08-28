@@ -631,7 +631,8 @@ async fn run_serve() -> ExitCode {
         return ExitCode::from(1);
     }
     let push_notification_provider =
-        match PushNotificationRegistrationProvider::new(&config.db_path) {
+        match PushNotificationRegistrationProvider::new(&config.db_path, discord_transport.clone())
+        {
             Ok(provider) => provider,
             Err(error) => {
                 error!(%error, "push notification runtime construction refused startup");

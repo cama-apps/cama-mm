@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tempfile::NamedTempFile;
 
+use crate::discord_transport::DiscordMessageSnapshot;
 use crate::registration::InteractionResponseError;
 use crate::test_support::initialize_test_database;
 
@@ -20,14 +21,27 @@ fn migrated_database() -> NamedTempFile {
 }
 
 fn provider(path: &Path) -> PushNotificationRegistrationProvider {
-    PushNotificationRegistrationProvider::new(path).expect("build push notification provider")
+    PushNotificationRegistrationProvider::new(path, Arc::new(RecordingDiscord::default()))
+        .expect("build push notification provider")
 }
 
 fn provider_with_publisher(
     path: &Path,
     publisher: Arc<dyn PushPublisher>,
 ) -> PushNotificationRegistrationProvider {
-    PushNotificationRegistrationProvider::with_test_publisher(path, publisher)
+    PushNotificationRegistrationProvider::with_test_publisher(
+        path,
+        Arc::new(RecordingDiscord::default()),
+        publisher,
+    )
+}
+
+fn provider_with_discord_and_publisher(
+    path: &Path,
+    discord: Arc<RecordingDiscord>,
+    publisher: Arc<dyn PushPublisher>,
+) -> PushNotificationRegistrationProvider {
+    PushNotificationRegistrationProvider::with_test_publisher(path, discord, publisher)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -90,6 +104,137 @@ impl PushPublisher for SlowPublisher {
         self.active.fetch_sub(1, Ordering::SeqCst);
         self.completed.fetch_add(1, Ordering::SeqCst);
         Ok(())
+    }
+}
+
+#[derive(Default)]
+struct RecordingDiscord {
+    direct_messages: StdMutex<Vec<(u64, DiscordMessage)>>,
+}
+
+impl RecordingDiscord {
+    fn direct_messages(&self) -> Vec<(u64, DiscordMessage)> {
+        self.direct_messages
+            .lock()
+            .expect("direct messages")
+            .clone()
+    }
+
+    fn wait_for_direct_messages(&self, expected: usize) -> Vec<(u64, DiscordMessage)> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let sent = self.direct_messages();
+            if sent.len() >= expected || Instant::now() >= deadline {
+                return sent;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+#[async_trait]
+impl DiscordTransport for RecordingDiscord {
+    async fn fetch_message(
+        &self,
+        _channel_id: u64,
+        _message_id: u64,
+    ) -> Result<Option<DiscordMessageSnapshot>, String> {
+        Ok(None)
+    }
+
+    async fn send_message(
+        &self,
+        _channel_id: u64,
+        _message: DiscordMessage,
+    ) -> Result<crate::discord_transport::DiscordMessageReceipt, String> {
+        Err("recording transport does not send channel messages".to_owned())
+    }
+
+    async fn edit_message(
+        &self,
+        _channel_id: u64,
+        _message_id: u64,
+        _message: DiscordMessage,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn delete_message(&self, _channel_id: u64, _message_id: u64) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn create_public_thread(
+        &self,
+        _channel_id: u64,
+        _message_id: u64,
+        _name: &str,
+    ) -> Result<u64, String> {
+        Err("recording transport does not create threads".to_owned())
+    }
+
+    async fn pin_message(&self, _channel_id: u64, _message_id: u64) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn archive_thread(
+        &self,
+        _thread_id: u64,
+        _name: &str,
+        _locked: bool,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn add_reaction(
+        &self,
+        _channel_id: u64,
+        _message_id: u64,
+        _emoji: &crate::discord_transport::DiscordEmoji,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn remove_reaction(
+        &self,
+        _channel_id: u64,
+        _message_id: u64,
+        _emoji: &crate::discord_transport::DiscordEmoji,
+        _user_id: u64,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn clear_reaction(
+        &self,
+        _channel_id: u64,
+        _message_id: u64,
+        _emoji: &crate::discord_transport::DiscordEmoji,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn unpin_message(&self, _channel_id: u64, _message_id: u64) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn send_direct_message(
+        &self,
+        user_id: u64,
+        message: DiscordMessage,
+    ) -> Result<(), String> {
+        self.direct_messages
+            .lock()
+            .expect("direct messages")
+            .push((user_id, message));
+        Ok(())
+    }
+
+    async fn guild_member(
+        &self,
+        _guild_id: u64,
+        _user_id: u64,
+    ) -> Result<Option<crate::discord_transport::DiscordGuildMemberSnapshot>, String> {
+        Ok(None)
     }
 }
 
@@ -167,8 +312,16 @@ fn component_request(custom_id: &str) -> InteractionRequest {
     }
 }
 
+fn buttons(response: &InteractionResponse) -> Vec<&InteractionButton> {
+    response
+        .components
+        .iter()
+        .flat_map(|row| &row.buttons)
+        .collect()
+}
+
 #[tokio::test]
-async fn command_with_no_target_offers_set_button() {
+async fn command_with_no_target_offers_set_button_and_dm_toggles() {
     let database = migrated_database();
     let provider = provider(database.path());
     let responder = Arc::new(RecordingResponder::default());
@@ -182,13 +335,26 @@ async fn command_with_no_target_offers_set_button() {
         .expect("command handled");
     let response = responder.response();
     assert!(response.content.contains("No ntfy topic configured"));
-    assert_eq!(response.components.len(), 1);
-    assert_eq!(response.components[0].buttons.len(), 1);
-    assert_eq!(response.components[0].buttons[0].custom_id, BUTTON_SET);
+    let buttons = buttons(&response);
+    let ids = buttons
+        .iter()
+        .map(|button| button.custom_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        vec![
+            BUTTON_SET,
+            BUTTON_TOGGLE_READYCHECK_DM,
+            BUTTON_TOGGLE_MATCH_STARTED_DM,
+        ]
+    );
+    // No target and nothing enabled yet: no test/unsubscribe actions to show.
+    assert!(!ids.contains(&BUTTON_TEST));
+    assert!(!ids.contains(&BUTTON_UNSUBSCRIBE));
 }
 
 #[tokio::test]
-async fn create_topic_button_persists_high_entropy_target_and_enables_both_kinds() {
+async fn create_topic_button_persists_high_entropy_target_and_enables_both_ntfy_kinds() {
     let database = migrated_database();
     let provider = provider(database.path());
     let responder = Arc::new(RecordingResponder::default());
@@ -206,22 +372,22 @@ async fn create_topic_button_persists_high_entropy_target_and_enables_both_kinds
         .get_config(USER as i64, Some(GUILD as i64))
         .expect("read config")
         .expect("target persisted");
-    assert!(config.target.topic.starts_with(TOPIC_PREFIX));
-    assert_eq!(
-        config.target.topic.len(),
-        TOPIC_PREFIX.len() + TOPIC_RANDOM_BYTES * 2
-    );
+    let topic = &config.target.as_ref().expect("ntfy target").topic;
+    assert!(topic.starts_with(TOPIC_PREFIX));
+    assert_eq!(topic.len(), TOPIC_PREFIX.len() + TOPIC_RANDOM_BYTES * 2);
     assert!(
-        config.target.topic[TOPIC_PREFIX.len()..]
+        topic[TOPIC_PREFIX.len()..]
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit())
     );
     assert!(config.readycheck_enabled);
     assert!(config.match_started_enabled);
+    assert!(!config.dm_readycheck_enabled);
+    assert!(!config.dm_match_started_enabled);
 
     let response = responder.update_response();
     assert!(response.content.contains(DEFAULT_NTFY_SERVER));
-    assert!(response.content.contains(&config.target.topic));
+    assert!(response.content.contains(topic));
     assert!(response.content.contains("Keep this topic private"));
 }
 
@@ -249,12 +415,13 @@ async fn regenerate_topic_replaces_the_secret() {
         .expect("read config")
         .expect("target persisted")
         .target
+        .expect("ntfy target")
         .topic;
     assert_ne!(first, second);
 }
 
 #[tokio::test]
-async fn toggle_button_flips_one_kind_independently() {
+async fn toggle_button_flips_one_ntfy_kind_independently() {
     let database = migrated_database();
     let provider = provider(database.path());
     let repository = PushNotificationRepository::new(database.path());
@@ -266,7 +433,7 @@ async fn toggle_button_flips_one_kind_independently() {
     provider
         .handler
         .handle(
-            component_request(BUTTON_TOGGLE_READYCHECK),
+            component_request(BUTTON_TOGGLE_READYCHECK_NTFY),
             Arc::clone(&responder) as Arc<dyn InteractionResponder>,
         )
         .await
@@ -279,23 +446,86 @@ async fn toggle_button_flips_one_kind_independently() {
     assert!(!config.readycheck_enabled);
     assert!(config.match_started_enabled);
     let response = responder.update_response();
-    let readycheck_button = response
-        .components
-        .iter()
-        .flat_map(|row| &row.buttons)
-        .find(|button| button.custom_id == BUTTON_TOGGLE_READYCHECK)
-        .expect("readycheck toggle button present");
-    assert_eq!(readycheck_button.label, "Readycheck: OFF");
+    let readycheck_button = buttons(&response)
+        .into_iter()
+        .find(|button| button.custom_id == BUTTON_TOGGLE_READYCHECK_NTFY)
+        .expect("readycheck ntfy toggle button present");
+    assert_eq!(readycheck_button.label, "Readycheck (ntfy): OFF");
 }
 
 #[tokio::test]
-async fn unsubscribe_button_deletes_target() {
+async fn dm_toggle_creates_a_preference_row_without_any_ntfy_topic() {
+    let database = migrated_database();
+    let provider = provider(database.path());
+    let repository = PushNotificationRepository::new(database.path());
+    assert_eq!(
+        repository
+            .get_config(USER as i64, Some(GUILD as i64))
+            .expect("read config"),
+        None
+    );
+
+    let responder = Arc::new(RecordingResponder::default());
+    provider
+        .handler
+        .handle(
+            component_request(BUTTON_TOGGLE_MATCH_STARTED_DM),
+            Arc::clone(&responder) as Arc<dyn InteractionResponder>,
+        )
+        .await
+        .expect("DM toggle handled");
+
+    let config = repository
+        .get_config(USER as i64, Some(GUILD as i64))
+        .expect("read config")
+        .expect("DM preference row created");
+    assert!(config.target.is_none());
+    assert!(config.dm_match_started_enabled);
+    assert!(!config.dm_readycheck_enabled);
+
+    let response = responder.update_response();
+    let button = buttons(&response)
+        .into_iter()
+        .find(|button| button.custom_id == BUTTON_TOGGLE_MATCH_STARTED_DM)
+        .expect("match started DM toggle button present");
+    assert_eq!(button.label, "Match Started (DM): ON");
+    // No ntfy target yet: the ntfy toggle row must stay hidden.
+    assert!(
+        !buttons(&response)
+            .iter()
+            .any(|button| button.custom_id == BUTTON_TOGGLE_READYCHECK_NTFY)
+    );
+    // A DM preference now exists, so Send Test and Unsubscribe reappear.
+    assert!(
+        buttons(&response)
+            .iter()
+            .any(|button| button.custom_id == BUTTON_TEST)
+    );
+    assert!(
+        buttons(&response)
+            .iter()
+            .any(|button| button.custom_id == BUTTON_UNSUBSCRIBE)
+    );
+}
+
+#[tokio::test]
+async fn unsubscribe_button_deletes_target_and_dm_preferences() {
     let database = migrated_database();
     let provider = provider(database.path());
     let repository = PushNotificationRepository::new(database.path());
     repository
         .set_target(USER as i64, Some(GUILD as i64), TOPIC_1, 1)
         .expect("seed target");
+    repository
+        .set_enabled(
+            USER as i64,
+            Some(GUILD as i64),
+            PushNotificationKind::Readycheck,
+            PushNotificationChannel::DirectMessage,
+            true,
+            1,
+        )
+        .expect("seed DM preference");
 
     let responder = Arc::new(RecordingResponder::default());
     provider
@@ -322,7 +552,7 @@ async fn unsubscribe_button_deletes_target() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn notify_readycheck_launched_delivers_only_to_enabled_subscribers() {
+async fn notify_readycheck_launched_delivers_only_to_ntfy_enabled_subscribers() {
     let database = migrated_database();
     let publisher = Arc::new(RecordingPublisher::default());
     let provider = provider_with_publisher(database.path(), publisher.clone());
@@ -338,6 +568,7 @@ async fn notify_readycheck_launched_delivers_only_to_enabled_subscribers() {
             2,
             Some(GUILD as i64),
             PushNotificationKind::Readycheck,
+            PushNotificationChannel::Ntfy,
             false,
             2,
         )
@@ -355,7 +586,7 @@ async fn notify_readycheck_launched_delivers_only_to_enabled_subscribers() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn notify_match_started_uses_the_independent_match_started_toggle() {
+async fn notify_match_started_uses_the_independent_match_started_ntfy_toggle() {
     let database = migrated_database();
     let publisher = Arc::new(RecordingPublisher::default());
     let provider = provider_with_publisher(database.path(), publisher.clone());
@@ -368,6 +599,7 @@ async fn notify_match_started_uses_the_independent_match_started_toggle() {
             1,
             Some(GUILD as i64),
             PushNotificationKind::Readycheck,
+            PushNotificationChannel::Ntfy,
             false,
             2,
         )
@@ -382,6 +614,78 @@ async fn notify_match_started_uses_the_independent_match_started_toggle() {
     assert_eq!(published[0].topic, TOPIC_1);
     assert_eq!(published[0].title, MATCH_STARTED_TITLE);
     assert_eq!(published[0].message, MATCH_STARTED_MESSAGE);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn notify_readycheck_launched_also_delivers_dm_to_enabled_subscribers() {
+    let database = migrated_database();
+    let publisher = Arc::new(RecordingPublisher::default());
+    let discord = Arc::new(RecordingDiscord::default());
+    let provider = provider_with_discord_and_publisher(database.path(), discord.clone(), publisher);
+    let repository = PushNotificationRepository::new(database.path());
+    repository
+        .set_enabled(
+            1,
+            Some(GUILD as i64),
+            PushNotificationKind::Readycheck,
+            PushNotificationChannel::DirectMessage,
+            true,
+            1,
+        )
+        .expect("seed DM subscriber");
+    repository
+        .set_enabled(
+            2,
+            Some(GUILD as i64),
+            PushNotificationKind::Readycheck,
+            PushNotificationChannel::DirectMessage,
+            false,
+            1,
+        )
+        .expect("seed DM non-subscriber");
+
+    provider
+        .hooks()
+        .notify_readycheck_launched(GUILD, [1_u64, 2_u64]);
+
+    let sent = discord.wait_for_direct_messages(1);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].0, 1);
+    assert!(sent[0].1.response.content.contains(READYCHECK_TITLE));
+    assert!(sent[0].1.response.content.contains(READYCHECK_MESSAGE));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn notify_match_started_delivers_to_both_ntfy_and_dm_when_a_player_enables_both() {
+    let database = migrated_database();
+    let publisher = Arc::new(RecordingPublisher::default());
+    let discord = Arc::new(RecordingDiscord::default());
+    let provider =
+        provider_with_discord_and_publisher(database.path(), discord.clone(), publisher.clone());
+    let repository = PushNotificationRepository::new(database.path());
+    repository
+        .set_target(1, Some(GUILD as i64), TOPIC_1, 1)
+        .expect("seed ntfy target");
+    repository
+        .set_enabled(
+            1,
+            Some(GUILD as i64),
+            PushNotificationKind::MatchStarted,
+            PushNotificationChannel::DirectMessage,
+            true,
+            1,
+        )
+        .expect("also enable DM for the same player");
+
+    provider
+        .hooks()
+        .notify_match_started(GUILD, &BTreeSet::from([1_u64]));
+
+    let published = publisher.wait_for_published(1);
+    assert_eq!(published.len(), 1);
+    let sent = discord.wait_for_direct_messages(1);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].0, 1);
 }
 
 #[tokio::test]
@@ -420,6 +724,45 @@ async fn test_delivery_is_rate_limited_per_user_and_guild() {
             .contains("notification sent")
     );
     assert!(second.update_response().content.contains("rate-limited"));
+}
+
+#[tokio::test]
+async fn test_delivery_covers_both_channels_when_both_are_active() {
+    let database = migrated_database();
+    let publisher = Arc::new(RecordingPublisher::default());
+    let discord = Arc::new(RecordingDiscord::default());
+    let provider =
+        provider_with_discord_and_publisher(database.path(), discord.clone(), publisher.clone());
+    let repository = PushNotificationRepository::new(database.path());
+    repository
+        .set_target(USER as i64, Some(GUILD as i64), TOPIC_1, 1)
+        .expect("seed target");
+    repository
+        .set_enabled(
+            USER as i64,
+            Some(GUILD as i64),
+            PushNotificationKind::Readycheck,
+            PushNotificationChannel::DirectMessage,
+            true,
+            1,
+        )
+        .expect("seed DM preference");
+
+    let responder = Arc::new(RecordingResponder::default());
+    provider
+        .handler
+        .handle(
+            component_request(BUTTON_TEST),
+            Arc::clone(&responder) as Arc<dyn InteractionResponder>,
+        )
+        .await
+        .expect("test delivery");
+
+    assert_eq!(publisher.published().len(), 1);
+    assert_eq!(discord.direct_messages().len(), 1);
+    let content = responder.update_response().content;
+    assert!(content.contains("ntfy test notification sent"));
+    assert!(content.contains("DM test notification sent"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

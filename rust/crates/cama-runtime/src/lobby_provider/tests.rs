@@ -2880,6 +2880,7 @@ async fn readycheck_push_notification_is_suppressed_for_a_partial_lobby() {
     let push_publisher = Arc::new(RecordingPushPublisher::default());
     let push_provider = PushNotificationRegistrationProvider::with_test_publisher(
         database.path(),
+        transport.clone(),
         push_publisher.clone(),
     );
     PushNotificationRepository::new(database.path())
@@ -2968,6 +2969,7 @@ async fn readycheck_push_notification_fires_when_the_lobby_is_full() {
     let push_publisher = Arc::new(RecordingPushPublisher::default());
     let push_provider = PushNotificationRegistrationProvider::with_test_publisher(
         database.path(),
+        transport.clone(),
         push_publisher.clone(),
     );
     restarted
@@ -3037,6 +3039,7 @@ async fn successful_bell_shortcut_advertises_in_the_persisted_origin_channel() {
     let push_publisher = Arc::new(RecordingPushPublisher::default());
     let push_provider = PushNotificationRegistrationProvider::with_test_publisher(
         database.path(),
+        transport.clone(),
         push_publisher.clone(),
     );
     PushNotificationRepository::new(database.path())
