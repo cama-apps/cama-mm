@@ -401,11 +401,11 @@ impl Default for BalancedShuffler {
             use_jopacoin: false,
             off_role_multiplier: 0.95,
             off_role_flat_value_penalty: 100.0,
-            off_role_flat_penalty: 670.0,
-            role_matchup_delta_weight: 0.18,
+            off_role_flat_penalty: 740.0,
+            role_matchup_delta_weight: 0.16,
             exclusion_penalty_weight: 80.0,
             rd_priority_weight: 0.2,
-            recent_match_penalty_weight: 250.0,
+            recent_match_penalty_weight: 280.0,
             soft_avoid_penalty: 160.0,
             package_deal_penalty: 90.0,
             package_deal_split_penalty: 90.0,
@@ -1478,8 +1478,7 @@ impl BalancedShuffler {
                 context,
                 RoleScorePolicy {
                     rd_priority: Some(rd_priority),
-                    // Draft keeps its historical unweighted value-difference score.
-                    value_diff_weight: 1.0,
+                    value_diff_weight: ADJUSTED_VALUE_DIFF_WEIGHT,
                 },
             );
             if score < best_score {
@@ -2726,7 +2725,7 @@ mod tests {
     }
 
     #[test]
-    fn test_default_off_role_goodness_adds_670_per_player() {
+    fn test_default_off_role_goodness_adds_740_per_player() {
         let team1_players = (0..5)
             .map(|index| {
                 player(
@@ -2766,7 +2765,7 @@ mod tests {
             super::ADJUSTED_VALUE_DIFF_WEIGHT,
         );
 
-        assert_eq!(score, 1_340.0);
+        assert_eq!(score, 1_480.0);
     }
 
     #[test]
@@ -3372,7 +3371,7 @@ mod tests {
     }
 
     #[test]
-    fn test_goodness_adds_250_for_selected_last_match_player() {
+    fn test_goodness_adds_280_for_selected_last_match_player() {
         let players = (0..10)
             .map(|index| {
                 player(
@@ -3406,7 +3405,7 @@ mod tests {
                 },
             )
             .expect("recent-player shuffle");
-        assert_eq!(penalized.score - baseline.score, 250.0);
+        assert_eq!(penalized.score - baseline.score, 280.0);
     }
 
     #[test]
@@ -3439,7 +3438,7 @@ mod tests {
             .score_role_assignments_for_matchup(&team1, &team2, 1, ShuffleConstraints::default())
             .expect("fixed matchup scores");
 
-        approx(score, 120.0);
+        approx(score, 130.0);
     }
 
     #[test]
@@ -3516,7 +3515,7 @@ mod tests {
             &mut super::ScoringContext::default(),
         );
 
-        approx(selection.preselection_score, -890.0);
+        approx(selection.preselection_score, -880.0);
     }
 
     #[test]
@@ -3563,7 +3562,7 @@ mod tests {
                 ShuffleConstraints::default(),
             )
             .expect("fixed role matchup evaluates");
-        approx(matchup.total_score, -530.0);
+        approx(matchup.total_score, -500.0);
     }
 
     #[test]
@@ -5067,7 +5066,7 @@ mod tests {
     }
 
     #[test]
-    fn test_default_670_off_role_goodness_prefers_lower_off_role_roster() {
+    fn test_default_740_off_role_goodness_prefers_lower_off_role_roster() {
         let configured_shuffler = |off_role_flat_penalty| {
             let mut shuffler = BalancedShuffler {
                 use_glicko: false,
@@ -5130,7 +5129,7 @@ mod tests {
         assert_eq!(
             off_roles(&actual),
             0,
-            "the 670-point default should prefer the lower-off-role roster"
+            "the 740-point default should prefer the lower-off-role roster"
         );
     }
 
@@ -5290,7 +5289,7 @@ mod tests {
     fn test_config_default_value() {
         assert_eq!(
             BalancedShuffler::default().recent_match_penalty_weight,
-            250.0
+            280.0
         );
     }
 
@@ -5298,7 +5297,7 @@ mod tests {
     fn test_shuffler_uses_default_from_config() {
         assert_eq!(
             BalancedShuffler::default().recent_match_penalty_weight,
-            250.0
+            280.0
         );
     }
 
@@ -5495,8 +5494,8 @@ mod tests {
     }
 
     #[test]
-    fn test_default_role_matchup_delta_weight_is_point_eighteen() {
-        approx(BalancedShuffler::default().role_matchup_delta_weight, 0.18);
+    fn test_default_role_matchup_delta_weight_is_point_sixteen() {
+        approx(BalancedShuffler::default().role_matchup_delta_weight, 0.16);
     }
 
     fn role_delta_fixture() -> (Vec<Player>, Vec<Player>) {
@@ -5546,8 +5545,8 @@ mod tests {
             .expect("optimization succeeds")
             .2
         };
-        approx(score(1.0), 2_360.0);
-        approx(score(0.5), 1_360.0);
+        approx(score(1.0), 2_390.0);
+        approx(score(0.5), 1_390.0);
     }
 
     #[test]
@@ -5586,7 +5585,7 @@ mod tests {
         )
         .expect("matchup evaluates");
         approx(matchup.log_entry.parity_penalty, 1_200.0);
-        approx(matchup.total_score, 1_320.0);
+        approx(matchup.total_score, 1_330.0);
     }
 
     #[test]
@@ -5696,7 +5695,7 @@ mod tests {
                 },
             )
             .expect("fallback scoring succeeds");
-        approx(common.2, 1_630.0);
+        approx(common.2, 1_670.0);
         assert_eq!(common, fallback);
     }
 
@@ -6511,7 +6510,7 @@ mod tests {
     }
 
     #[test]
-    fn test_draft_score_keeps_unweighted_value_difference() {
+    fn test_draft_score_uses_adjusted_value_difference_weight() {
         let (captain_a, captain_b) = draft_captains(1_100.0, 1_000.0);
         let pool = draft_candidates(8, 1_000.0, 0.0);
         let shuffler = BalancedShuffler {
@@ -6527,7 +6526,27 @@ mod tests {
             .score_draft_pool(&captain_a, &captain_b, &pool)
             .expect("draft pool score");
 
-        approx(score, 95.0);
+        approx(score, 123.5);
+    }
+
+    #[test]
+    fn test_draft_score_uses_shared_shuffle_role_weights() {
+        let (captain_a, captain_b) = draft_captains(1_800.0, 1_200.0);
+        let pool = draft_candidates(8, 1_300.0, 80.0);
+        let baseline = BalancedShuffler::default()
+            .score_draft_pool(&captain_a, &captain_b, &pool)
+            .expect("baseline draft pool score");
+        let normal_shuffle_tuning = BalancedShuffler {
+            off_role_flat_penalty: 10_000.0,
+            role_matchup_delta_weight: 2.0,
+            ..BalancedShuffler::default()
+        };
+
+        let tuned = normal_shuffle_tuning
+            .score_draft_pool(&captain_a, &captain_b, &pool)
+            .expect("draft score with normal-shuffle tuning");
+
+        assert!(tuned > baseline, "{tuned} <= {baseline}");
     }
 
     #[test]
@@ -6664,6 +6683,22 @@ mod tests {
             .select_draft_pool(&captain_a, &captain_b, &candidates, None, None)
             .expect("baseline draft pool");
         assert!(with_recent.pool_score >= without_recent.pool_score);
+    }
+
+    #[test]
+    fn test_draft_select_uses_shared_280_recent_match_penalty() {
+        let (captain_a, captain_b) = draft_captains(1_600.0, 1_600.0);
+        let candidates = draft_candidates(8, 1_500.0, 0.0);
+        let recent = HashSet::from([candidates[0].name.clone()]);
+        let shuffler = BalancedShuffler::default();
+        let baseline = shuffler
+            .select_draft_pool(&captain_a, &captain_b, &candidates, None, None)
+            .expect("baseline draft pool");
+        let with_recent = shuffler
+            .select_draft_pool(&captain_a, &captain_b, &candidates, None, Some(&recent))
+            .expect("recent-aware draft pool");
+
+        approx(with_recent.pool_score - baseline.pool_score, 280.0);
     }
 
     #[test]

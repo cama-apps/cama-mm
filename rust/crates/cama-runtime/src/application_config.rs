@@ -510,7 +510,7 @@ impl ApplicationConfig {
                 new_player_exclusion_boost: p.i64("NEW_PLAYER_EXCLUSION_BOOST", 5),
                 new_player_mmr_discount: i64::from(migration.new_player_mmr_discount),
                 off_role_flat_value_penalty: p.f64("OFF_ROLE_FLAT_VALUE_PENALTY", 100.0),
-                off_role_flat_penalty: p.f64("OFF_ROLE_FLAT_PENALTY", 670.0),
+                off_role_flat_penalty: p.f64("OFF_ROLE_FLAT_PENALTY", 740.0),
                 off_role_multiplier: p.f64("OFF_ROLE_MULTIPLIER", 0.95),
                 openskill_calibration_sigma_threshold: migration.openskill.calibration_threshold,
                 openskill_performance_strength: migration.openskill.performance_strength,
@@ -571,7 +571,7 @@ impl ApplicationConfig {
                     .min(MAX_GLICKO_RD),
                 recalibration_initial_volatility: p.f64("RECALIBRATION_INITIAL_VOLATILITY", 0.06),
                 region_split_penalty: p.f64("REGION_SPLIT_PENALTY", 500.0),
-                role_matchup_delta_weight: p.f64("ROLE_MATCHUP_DELTA_WEIGHT", 0.18),
+                role_matchup_delta_weight: p.f64("ROLE_MATCHUP_DELTA_WEIGHT", 0.16),
                 shop_announce_cost: p.i64("SHOP_ANNOUNCE_COST", 10),
                 shop_announce_target_cost: p.i64("SHOP_ANNOUNCE_TARGET_COST", 100),
                 shop_double_or_nothing_cost: p.i64("SHOP_DOUBLE_OR_NOTHING_COST", 50),
@@ -639,7 +639,7 @@ impl ApplicationConfig {
                 white_bankrupt_stipend: p.i64("WHITE_BANKRUPT_STIPEND", 5),
                 wrapped_min_bets: p.i64("WRAPPED_MIN_BETS", 3),
                 wrapped_min_games: p.i64("WRAPPED_MIN_GAMES", 3),
-                recent_match_penalty_weight: 250.0,
+                recent_match_penalty_weight: 280.0,
                 pingedkevin_cost: p.i64("PINGEDASH_COST", 10),
                 pingedkevin_cooldown_seconds: p.i64("PINGEDASH_COOLDOWN_SECONDS", 86_400),
             },
@@ -874,7 +874,8 @@ mod tests {
         assert_eq!(config.values.auto_spectator_bet_percentage, 0.01);
         assert_eq!(config.values.auto_spectator_bet_top_percentage, 0.02);
         assert_eq!(config.values.pingedash_cost, 10);
-        assert_eq!(config.values.recent_match_penalty_weight, 250.0);
+        assert_eq!(config.values.recent_match_penalty_weight, 280.0);
+        assert_eq!(config.values.role_matchup_delta_weight, 0.16);
         assert_eq!(config.values.enrichment_history_limit, 500);
         assert_eq!(config.values.enrichment_refresh_interval_ms, 1_250);
         assert_eq!(60_000 / config.values.enrichment_refresh_interval_ms, 48);
@@ -926,7 +927,7 @@ mod tests {
         let config = parse(&[("DISCORD_BOT_TOKEN", "token")]);
         assert_eq!(config.values.new_player_exclusion_boost, 5);
         assert_eq!(config.values.off_role_flat_value_penalty, 100.0);
-        assert_eq!(config.values.off_role_flat_penalty, 670.0);
+        assert_eq!(config.values.off_role_flat_penalty, 740.0);
         assert_eq!(config.values.soft_avoid_penalty, 160.0);
         assert_eq!(config.values.package_deal_penalty, 90.0);
         assert_eq!(config.values.package_deal_split_penalty, 90.0);
