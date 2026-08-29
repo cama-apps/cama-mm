@@ -3103,6 +3103,122 @@ async fn successful_bell_shortcut_advertises_in_the_persisted_origin_channel() {
 }
 
 #[tokio::test]
+async fn lobby_command_join_uses_interaction_display_name_in_thread_announcement() {
+    let database = database_with_players(&[(10, ".pf")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+
+    dispatch_command(
+        &provider,
+        "lobby",
+        10,
+        "perry feng",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    let announcements = transport
+        .sent_messages()
+        .into_iter()
+        .map(|sent| sent.message.response.content)
+        .filter(|content| content.ends_with(" joined."))
+        .collect::<Vec<_>>();
+    assert_eq!(announcements, ["✅ perry feng joined."]);
+}
+
+#[tokio::test]
+async fn raw_sword_join_uses_server_nickname_in_thread_announcement() {
+    let database = database_with_players(&[(10, "Creator"), (20, "leafael.")]);
+    let transport = Arc::new(RecordingTransport::default());
+    transport.set_member(
+        42,
+        DiscordGuildMemberSnapshot {
+            user_id: 20,
+            display_name: "Leaf | Atharva".to_owned(),
+            presence: DiscordPresence::Online,
+            in_voice: false,
+            deafened: false,
+            activities: Vec::new(),
+        },
+    );
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let lobby_message_id = to_u64(
+        lobby_snapshot(&provider, LobbyKind::Open)
+            .message_ids
+            .message_id
+            .expect("lobby message")
+            .0,
+    )
+    .expect("Discord lobby message");
+
+    provider
+        .raw_reaction_observer()
+        .observe(raw_sword(
+            RawReactionKind::Add,
+            lobby_message_id,
+            20,
+            "leafael.",
+        ))
+        .await
+        .expect("raw join");
+
+    assert!(
+        transport
+            .sent_messages()
+            .iter()
+            .any(|sent| { sent.message.response.content == "✅ Leaf | Atharva joined." })
+    );
+}
+
+#[tokio::test]
+async fn raw_sword_join_falls_back_to_stored_name_when_discord_name_is_unavailable() {
+    let database = database_with_players(&[(10, "Creator"), (20, "leafael.")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let lobby_message_id = to_u64(
+        lobby_snapshot(&provider, LobbyKind::Open)
+            .message_ids
+            .message_id
+            .expect("lobby message")
+            .0,
+    )
+    .expect("Discord lobby message");
+    let sent_before = transport.sent_messages().len();
+    let mut reaction = raw_sword(RawReactionKind::Add, lobby_message_id, 20, "ignored");
+    reaction.actor_display_name = None;
+
+    provider
+        .raw_reaction_observer()
+        .observe(reaction)
+        .await
+        .expect("raw join");
+
+    let sent = transport.sent_messages();
+    let announcements = sent[sent_before..]
+        .iter()
+        .map(|sent| sent.message.response.content.as_str())
+        .filter(|content| content.ends_with(" joined."))
+        .collect::<Vec<_>>();
+    assert_eq!(announcements, ["✅ leafael. joined."]);
+}
+
+#[tokio::test]
 async fn live_readycheck_reconciles_raw_join_and_leave_against_the_active_generation() {
     let database = database_with_players(&[(10, "Creator"), (20, "Recent Join")]);
     let transport = Arc::new(RecordingTransport::default());
