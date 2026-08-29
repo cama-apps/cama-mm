@@ -4215,7 +4215,7 @@ fn production_goodness_weights_adjusted_value_difference() {
     let goodness =
         extra_f64(&prepared.pending.state, "goodness_score").expect("stored goodness score");
 
-    assert!((goodness - (-1_386.5)).abs() < 1e-9, "{goodness}");
+    assert!((goodness - (-2_896.5)).abs() < 1e-9, "{goodness}");
 }
 
 #[test]
