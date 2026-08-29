@@ -7111,8 +7111,16 @@ fn format_miner_auto_buy(profile: &DigMinerProfile) -> String {
     format!(
         "Torch: **{}**\nHard Hat: **{}**\nGrappling Hook: **{}**",
         if profile.auto_buy.torch { "ON" } else { "OFF" },
-        if profile.auto_buy.hard_hat { "ON" } else { "OFF" },
-        if profile.auto_buy.grappling_hook { "ON" } else { "OFF" }
+        if profile.auto_buy.hard_hat {
+            "ON"
+        } else {
+            "OFF"
+        },
+        if profile.auto_buy.grappling_hook {
+            "ON"
+        } else {
+            "OFF"
+        }
     )
 }
 

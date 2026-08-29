@@ -262,7 +262,11 @@ impl DigMinerRuntimeRepository {
             params![
                 i64::from(update.torch.unwrap_or(current.auto_buy_torch)),
                 i64::from(update.hard_hat.unwrap_or(current.auto_buy_hard_hat)),
-                i64::from(update.grappling_hook.unwrap_or(current.auto_buy_grappling_hook)),
+                i64::from(
+                    update
+                        .grappling_hook
+                        .unwrap_or(current.auto_buy_grappling_hook)
+                ),
                 discord_id,
                 guild_id,
                 i64::from(current.auto_buy_torch),

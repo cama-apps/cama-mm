@@ -87,7 +87,11 @@ fn audit_connection(connection: &Connection) -> Result<DigMigrationAudit, rusqli
         .collect();
 
     let tunnel_columns = table_columns(connection, "tunnels")?;
-    for required in ["auto_buy_torch", "auto_buy_hard_hat"] {
+    for required in [
+        "auto_buy_torch",
+        "auto_buy_hard_hat",
+        "auto_buy_grappling_hook",
+    ] {
         match tunnel_columns.get(required) {
             Some(Some(default)) if normalize_default(default) == "0" => {}
             Some(None) => audit
