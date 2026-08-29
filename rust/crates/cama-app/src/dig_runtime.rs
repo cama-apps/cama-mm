@@ -2417,6 +2417,15 @@ where
         let perk_fx = aggregate_prestige_perk_effects(&prestige_perks);
         let (buff_fx, buff_remaining) =
             active_buff_effects(tunnel.temp_buffs.as_deref()).unwrap_or_default();
+        let stat_effects = MinerStats::new(
+            tunnel.stat_strength,
+            tunnel.stat_smarts,
+            tunnel.stat_stamina,
+        )
+        .map(miner_stat_effects)
+        .unwrap_or_else(|_| {
+            miner_stat_effects(MinerStats::new(0, 0, 0).expect("zero stats must be valid"))
+        });
         // Corruption is the first request-local random policy in Python. It
         // must consume the same entropy stream as the subsequent cave roll,
         // rather than a second seed that would shift only some Dig paths.
@@ -2540,10 +2549,18 @@ where
                 + curse_fx.advance_bonus
                 + gear_fx.advance_bonus
                 + buff_fx.advance_bonus,
-            advance_min: None,
-            advance_max: active_route
-                .and_then(|route| route_effect(route, "advance_max_penalty"))
-                .map(|penalty| (layer_at(depth_before).advance_range.1 - penalty as i64).max(1)),
+            advance_min: Some(
+                (layer_at(depth_before).advance_range.0 + stat_effects.advance_min_bonus as i64)
+                    .max(1),
+            ),
+            advance_max: {
+                let layer_max = layer_at(depth_before).advance_range.1;
+                let route_penalty = active_route
+                    .and_then(|route| route_effect(route, "advance_max_penalty"))
+                    .map(|penalty| penalty as i64)
+                    .unwrap_or(0);
+                Some((layer_max + stat_effects.advance_max_bonus as i64 - route_penalty).max(1))
+            },
             event_chance_multiplier: event_chance_factor(
                 ascension_number("event_chance_multiplier"),
                 weather_fx.event_chance_multiplier,
