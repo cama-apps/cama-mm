@@ -6643,7 +6643,7 @@ async fn provider_miner_group_uses_typed_profile_allocation_respec_and_autobuy_s
                 vec![
                     InteractionOption {
                         name: "item".to_owned(),
-                        value: InteractionValue::String("both".to_owned()),
+                        value: InteractionValue::String("all".to_owned()),
                     },
                     InteractionOption {
                         name: "enabled".to_owned(),
@@ -6662,7 +6662,7 @@ async fn provider_miner_group_uses_typed_profile_allocation_respec_and_autobuy_s
     );
     assert_eq!(
         autobuy.embeds[0].description.as_deref(),
-        Some("Torch: **ON**\nHard Hat: **ON**")
+        Some("Torch: **ON**\nHard Hat: **ON**\nGrappling Hook: **ON**")
     );
     assert_eq!(
         autobuy.embeds[0].footer.as_deref(),
@@ -6892,7 +6892,10 @@ fn command_tree_matches_python_surface() {
             "Spend unallocated points on Strength, Smarts, and Stamina",
         ),
         ("respec", "Reset your allocated S points for 50 JC"),
-        ("autobuy", "Auto-buy Torch and/or Hard Hat for each dig"),
+        (
+            "autobuy",
+            "Auto-buy Torch, Hard Hat, and/or Grappling Hook for each dig",
+        ),
     ] {
         assert_eq!(find(&miner.options, name).description, description);
     }
@@ -6925,7 +6928,7 @@ fn command_tree_matches_python_surface() {
     }
     let autobuy = find(&miner.options, "autobuy");
     let item = find(&autobuy.options, "item");
-    assert_eq!(item.choices.len(), 3);
+    assert_eq!(item.choices.len(), 4);
     assert_eq!(
         item.choices,
         vec![
@@ -6938,8 +6941,12 @@ fn command_tree_matches_python_surface() {
                 value: "hard_hat".to_owned(),
             },
             CommandOptionChoice::String {
-                name: "Both".to_owned(),
-                value: "both".to_owned(),
+                name: "Grappling Hook".to_owned(),
+                value: "grappling_hook".to_owned(),
+            },
+            CommandOptionChoice::String {
+                name: "All Three".to_owned(),
+                value: "all".to_owned(),
             },
         ]
     );

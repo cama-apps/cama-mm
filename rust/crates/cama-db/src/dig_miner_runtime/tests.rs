@@ -219,6 +219,7 @@ fn auto_buy_partial_updates_preserve_the_other_setting() {
             DigMinerAutoBuyUpdate {
                 torch: Some(true),
                 hard_hat: Some(true),
+                grappling_hook: None,
             },
         )
         .unwrap();
@@ -230,6 +231,7 @@ fn auto_buy_partial_updates_preserve_the_other_setting() {
             DigMinerAutoBuyUpdate {
                 torch: Some(false),
                 hard_hat: None,
+                grappling_hook: None,
             },
         )
         .unwrap();
