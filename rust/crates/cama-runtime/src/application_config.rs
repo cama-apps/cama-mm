@@ -581,7 +581,7 @@ impl ApplicationConfig {
                 shop_package_deal_rating_divisor: p.f64("SHOP_PACKAGE_DEAL_RATING_DIVISOR", 10.0),
                 shop_recalibrate_cost: p.i64("SHOP_RECALIBRATE_COST", 300),
                 shop_soft_avoid_cost: p.i64("SHOP_SOFT_AVOID_COST", SHOP_SOFT_AVOID_COST),
-                soft_avoid_penalty: p.f64("SOFT_AVOID_PENALTY", 160.0),
+                soft_avoid_penalty: p.f64("SOFT_AVOID_PENALTY", 180.0),
                 streak_multiplier_per_game: migration.openskill.streak_multiplier_per_game,
                 streak_threshold: migration.streak_threshold,
                 streaming_bonus: p.i64("STREAMING_BONUS", 1),
@@ -928,7 +928,7 @@ mod tests {
         assert_eq!(config.values.new_player_exclusion_boost, 5);
         assert_eq!(config.values.off_role_flat_value_penalty, 100.0);
         assert_eq!(config.values.off_role_flat_penalty, 740.0);
-        assert_eq!(config.values.soft_avoid_penalty, 160.0);
+        assert_eq!(config.values.soft_avoid_penalty, 180.0);
         assert_eq!(config.values.package_deal_penalty, 90.0);
         assert_eq!(config.values.package_deal_split_penalty, 90.0);
     }
