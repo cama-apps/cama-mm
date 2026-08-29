@@ -2142,8 +2142,17 @@ impl MatchHandler {
         }
 
         let repository = self.pending.clone();
+        let participant_ids = if pending.state.is_draft {
+            Vec::new()
+        } else {
+            pending
+                .state
+                .participant_ids()
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
         tokio::task::spawn_blocking(move || {
-            repository.delete_pending_match(guild_id, pending_match_id)
+            repository.finalize_abort(guild_id, pending_match_id, &participant_ids)
         })
         .await
         .map_err(|error| format!("abort cleanup task failed: {error}"))?
