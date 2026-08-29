@@ -2029,6 +2029,7 @@ struct LobbyInteractionHandler {
 struct CommandContext {
     name: String,
     user_id: AppUserId,
+    user_display_name: String,
     guild_id: Option<AppGuildId>,
     channel_id: Option<AppChannelId>,
     member_permissions: Option<u64>,
@@ -2042,7 +2043,7 @@ impl TryFrom<InteractionRequest> for CommandContext {
         let InteractionRequest::Command {
             name,
             user_id,
-            user_display_name: _,
+            user_display_name,
             guild_id,
             channel_id,
             member_permissions,
@@ -2059,6 +2060,7 @@ impl TryFrom<InteractionRequest> for CommandContext {
                     value: user_id.to_string(),
                 }
             })?),
+            user_display_name,
             guild_id: guild_id
                 .map(|guild_id| i64::try_from(guild_id).map(AppGuildId))
                 .transpose()
@@ -2995,6 +2997,7 @@ impl LobbyInteractionHandler {
                     scope,
                     command.user_id,
                     &player.name,
+                    Some(&command.user_display_name),
                     JoinThreadActivity::Command,
                     join.joined_at_ns.expect("successful join has commit time"),
                 )
@@ -3171,6 +3174,7 @@ impl LobbyInteractionHandler {
                 scope,
                 command.user_id,
                 &player.name,
+                Some(&command.user_display_name),
                 JoinThreadActivity::Command,
                 join.joined_at_ns.expect("successful join has commit time"),
             )
@@ -3254,6 +3258,7 @@ impl LobbyInteractionHandler {
                 scope,
                 command.user_id,
                 &player.name,
+                Some(&command.user_display_name),
                 JoinThreadActivity::Silent,
                 result
                     .joined_at_ns
@@ -3572,7 +3577,8 @@ impl LobbyInteractionHandler {
         &self,
         scope: LobbyScope,
         player_id: AppUserId,
-        player_name: &str,
+        stored_player_name: &str,
+        discord_display_name: Option<&str>,
         thread_activity: JoinThreadActivity,
         joined_at_ns: i64,
     ) -> Option<ConfirmedLobbyJoin> {
@@ -3581,6 +3587,11 @@ impl LobbyInteractionHandler {
         }
         self.state.sync_readycheck_with_lobby(scope).await;
         let lobby = self.state.service.get_lobby(scope)?;
+        let player_display_name = self
+            .state
+            .cached_player_name(scope.guild_id, player_id)
+            .or_else(|| discord_display_name.map(str::to_owned))
+            .unwrap_or_else(|| stored_player_name.to_owned());
         if let Some(thread_id) = lobby.message_ids.thread_id {
             // A mention is what actually subscribes a Discord user to a
             // thread, so dropping the ping (below) also drops that
@@ -3600,7 +3611,7 @@ impl LobbyInteractionHandler {
             // enough for everyone else already in the thread.
             if let Some(content) = match thread_activity {
                 JoinThreadActivity::Command | JoinThreadActivity::RawReaction => {
-                    Some(format!("✅ {player_name} joined."))
+                    Some(format!("✅ {player_display_name} joined."))
                 }
                 JoinThreadActivity::Silent => None,
             } {
@@ -3631,11 +3642,10 @@ impl LobbyInteractionHandler {
             warn!(?scope, "lobby observer projection has invalid Discord IDs");
             return None;
         };
-        let player_display_name = self.state.render_player_name(scope.guild_id, player_id);
         let event = ConfirmedLobbyJoin {
             guild_id,
             player_id: player_snowflake,
-            player_name: player_name.to_owned(),
+            player_name: stored_player_name.to_owned(),
             player_display_name,
             lobby_kind: scope.kind,
             joined_at_ns,
@@ -4531,6 +4541,7 @@ impl RawReactionObserver for LobbyRawReactionObserver {
                         scope,
                         user_id,
                         &player.name,
+                        resolved_display_name.as_deref(),
                         JoinThreadActivity::RawReaction,
                         outcome
                             .joined_at_ns
@@ -4607,15 +4618,13 @@ impl LobbyRawReactionObserver {
         if let Some(name) = event.actor_display_name.clone() {
             return Some(name);
         }
-        Some(
-            self.state
-                .transport
-                .user(event.user_id)
-                .await
-                .ok()
-                .flatten()
-                .map_or_else(|| player_id.0.to_string(), |user| user.display_name),
-        )
+        self.state
+            .transport
+            .user(event.user_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|user| user.display_name)
     }
 
     async fn reject_sword_reaction(&self, event: &RawReactionEvent, reason: &str, ttl: Duration) {
