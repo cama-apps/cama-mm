@@ -3867,39 +3867,133 @@ fn test_shuffle_and_record_connection_budgets() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_shuffle_and_abort_leave_exclusion_factors_unchanged() {
+async fn test_shuffle_abort_applies_single_participant_only_exclusion_credit() {
     let fixture = MatchRuntimeFixture::new();
-    let player_ids = fixture.add_shuffle_pool(12, false);
+    let mut player_ids = fixture.add_shuffle_pool(13, false);
+    let conditional_id = player_ids.pop().expect("conditional fixture player");
+    let full_lobby_player_ids = player_ids
+        .iter()
+        .copied()
+        .chain([conditional_id])
+        .collect::<Vec<_>>();
     let before = fixture
         .provider
         .handler
         .players
-        .get_exclusion_counts(&player_ids, Some(GUILD))
+        .get_exclusion_counts(&full_lobby_player_ids, Some(GUILD))
         .expect("read pre-shuffle exclusion factors");
-    let prepared = fixture.prepare_shuffle(player_ids.clone(), "glicko", Vec::new());
+    let prepared = fixture.prepare_shuffle(player_ids, "glicko", vec![conditional_id]);
     assert!(prepared.pending.state.exclusion_updates_deferred);
     assert_eq!(
         fixture
             .provider
             .handler
             .players
-            .get_exclusion_counts(&player_ids, Some(GUILD))
+            .get_exclusion_counts(&full_lobby_player_ids, Some(GUILD))
             .expect("read persisted-shuffle exclusion factors"),
         before
     );
+    let participant_ids = prepared
+        .pending
+        .state
+        .radiant_team_ids
+        .iter()
+        .chain(&prepared.pending.state.dire_team_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let excluded_ids = prepared
+        .pending
+        .state
+        .excluded_player_ids
+        .iter()
+        .chain(&prepared.pending.state.excluded_conditional_player_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    assert_eq!(participant_ids.len(), 10);
+    assert_eq!(excluded_ids.len(), 3);
+    assert!(excluded_ids.contains(&conditional_id));
     fixture
         .provider
         .handler
         .finalize_abort_owned(&prepared.pending)
         .await
         .expect("abort prepared match");
+    let after = fixture
+        .provider
+        .handler
+        .players
+        .get_exclusion_counts(&full_lobby_player_ids, Some(GUILD))
+        .expect("read aborted exclusion factors");
+    for player_id in &participant_ids {
+        assert_eq!(
+            after.get(player_id).copied().expect("participant after"),
+            before.get(player_id).copied().expect("participant before") + 1
+        );
+    }
+    for player_id in excluded_ids {
+        assert_eq!(
+            after.get(&player_id).copied().expect("excluded after"),
+            before.get(&player_id).copied().expect("excluded before")
+        );
+    }
+
+    assert!(
+        !fixture
+            .provider
+            .handler
+            .pending
+            .finalize_abort(GUILD, prepared.pending.pending_match_id, &participant_ids,)
+            .expect("retry stale abort cleanup")
+    );
+    assert_eq!(
+        fixture
+            .provider
+            .handler
+            .players
+            .get_exclusion_counts(&full_lobby_player_ids, Some(GUILD))
+            .expect("read exclusion factors after abort retry"),
+        after
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_draft_abort_does_not_grant_shuffle_exclusion_credit() {
+    let fixture = MatchRuntimeFixture::new();
+    let mut pending = fixture.pending(unix_seconds() + 120);
+    pending.state.is_draft = true;
+    assert!(
+        PendingMatchRepository::new(fixture.database.path())
+            .update_pending_match(GUILD, pending.pending_match_id, &pending.state)
+            .expect("mark pending match as a draft")
+    );
+    let player_ids = pending
+        .state
+        .radiant_team_ids
+        .iter()
+        .chain(&pending.state.dire_team_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let before = fixture
+        .provider
+        .handler
+        .players
+        .get_exclusion_counts(&player_ids, Some(GUILD))
+        .expect("read pre-abort draft exclusion factors");
+
+    fixture
+        .provider
+        .handler
+        .finalize_abort_owned(&pending)
+        .await
+        .expect("abort draft");
+
     assert_eq!(
         fixture
             .provider
             .handler
             .players
             .get_exclusion_counts(&player_ids, Some(GUILD))
-            .expect("read aborted exclusion factors"),
+            .expect("read aborted draft exclusion factors"),
         before
     );
 }
