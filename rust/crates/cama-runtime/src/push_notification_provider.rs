@@ -30,6 +30,8 @@ use crate::registration::{
 };
 
 const COMMAND_NAME: &str = "notify";
+const COMMAND_DESCRIPTION: &str =
+    "Configure ntfy.sh and Discord DM alerts for lobby readychecks and matches.";
 const COMPONENT_PREFIX: &str = "notify_";
 const BUTTON_SET: &str = "notify_set";
 const BUTTON_TOGGLE_READYCHECK_NTFY: &str = "notify_toggle_readycheck_ntfy";
@@ -106,9 +108,7 @@ impl RegistrationProvider for PushNotificationRegistrationProvider {
     fn register(&self, registry: &mut RegistryBuilder) -> Result<(), RegistrationError> {
         registry.command(CommandSpec {
             name: COMMAND_NAME.to_owned(),
-            description:
-                "Configure best-effort ntfy.sh and/or Discord DM alerts for full-lobby readychecks and shuffled matches."
-                    .to_owned(),
+            description: COMMAND_DESCRIPTION.to_owned(),
             options: Vec::new(),
             handler: self.handler.clone(),
         })?;
