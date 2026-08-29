@@ -149,6 +149,31 @@ pub(super) fn active_curse_effects(raw: Option<&str>) -> Option<(ActiveCurseEffe
     ))
 }
 
+/// Decode the active curse for presentation, including the name the effect
+/// decoder discards.
+///
+/// Shares [`active_curse_effects`] rather than re-parsing the penalties, so a
+/// displayed curse can never disagree with the one applied to the roll.
+pub(super) fn active_curse_summary(raw: Option<&str>) -> Option<super::ActiveCurseSummary> {
+    let (effects, digs_remaining) = active_curse_effects(raw)?;
+    let value: Value = serde_json::from_str(raw?).ok()?;
+    let name = value
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Unnamed Hex")
+        .to_owned();
+    Some(super::ActiveCurseSummary {
+        name,
+        digs_remaining,
+        advance_bonus: effects.advance_bonus,
+        jc_bonus: effects.jc_bonus,
+        luminosity_drain: effects.luminosity_drain,
+        cave_in_percent: (effects.cave_in_bonus * 100.0).round() as i64,
+        cooldown_percent: (effects.cooldown_penalty * 100.0).round() as i64,
+    })
+}
+
 impl DigWeatherEffects {
     pub(super) const fn neutral() -> Self {
         Self {

@@ -850,9 +850,9 @@ pub use delivery::{
 };
 use effects::{
     CaveInLootRng, DigPrestige4Entropy, LootRelicEntropy, active_buff_effects,
-    active_curse_effects, active_pickaxe_tier, apply_mana_base_yield, bonus_basis_points,
-    event_chance_factor, gear_effects, luminosity_jc_multiplier, multiplier_millionths,
-    proportional_mana_yield_tax, weather_code, weather_effects,
+    active_curse_effects, active_curse_summary, active_pickaxe_tier, apply_mana_base_yield,
+    bonus_basis_points, event_chance_factor, gear_effects, luminosity_jc_multiplier,
+    multiplier_millionths, proportional_mana_yield_tax, weather_code, weather_effects,
 };
 pub use effects::{DigWeatherEffects, apply_cave_in_gear_ticks, catastrophic_cave_in_depth};
 pub use store::{AtomicTunnelBalanceUpdate, SqliteDigRuntimeStore};
@@ -1158,6 +1158,33 @@ pub struct DigRuntimeOutcome {
     /// forecast only once the main Dig path is admitted.
     #[serde(default)]
     pub weather: Option<DigRuntimeWeatherInfo>,
+    /// The hex still riding the miner as this Dig resolves, if any.
+    ///
+    /// A curse outlives the Dig that applied it, so presentation needs it on
+    /// every result rather than only on the one that inflicted it. `None`
+    /// means no curse is active once this Dig's decrement is accounted for.
+    #[serde(default)]
+    pub active_curse: Option<ActiveCurseSummary>,
+}
+
+/// A curse currently afflicting the miner, with what it costs per Dig.
+///
+/// The penalty fields mirror the persisted curse effects rather than being
+/// re-derived, so displayed numbers cannot drift from the ones actually
+/// applied to the roll.  Penalties keep their applied sign: `advance_bonus`
+/// and `jc_bonus` are negative for a curse.  The two rate penalties are
+/// carried as whole percents rather than the stored fractions, both because
+/// that is how they are shown and so this stays comparable by equality
+/// alongside the rest of the outcome.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ActiveCurseSummary {
+    pub name: String,
+    pub digs_remaining: i64,
+    pub advance_bonus: i64,
+    pub jc_bonus: i64,
+    pub luminosity_drain: i64,
+    pub cave_in_percent: i64,
+    pub cooldown_percent: i64,
 }
 
 const fn default_luminosity() -> i64 {
@@ -1235,6 +1262,7 @@ impl DigRuntimeOutcome {
             forced_event_consumed: false,
             relic_trim_notice: false,
             weather: None,
+            active_curse: None,
         }
     }
 }
@@ -1996,6 +2024,7 @@ where
                 forced_event_consumed: false,
                 relic_trim_notice: false,
                 weather: None,
+                active_curse: None,
             });
         }
 
@@ -2064,6 +2093,7 @@ where
                 forced_event_consumed: false,
                 relic_trim_notice: false,
                 weather: None,
+                active_curse: None,
             });
         }
 
@@ -2360,6 +2390,7 @@ where
                 forced_event_consumed: false,
                 relic_trim_notice: false,
                 weather: None,
+                active_curse: None,
             };
             let receipt =
                 self.commit_dig(commit, first_outcome.clone(), delivery_context.as_ref())?;
@@ -3407,6 +3438,13 @@ where
                 Some(curse.to_string())
             };
         }
+        // Report the hex the miner carries *out* of this Dig, so the count
+        // shown is what still lies ahead rather than what was just spent. A
+        // curse expiring on this Dig correctly reports nothing.
+        let active_curse = staged
+            .tunnel
+            .as_ref()
+            .and_then(|next_tunnel| active_curse_summary(next_tunnel.temp_curses.as_deref()));
         if !catastrophic_cave_in
             && buff_remaining > 0
             && let Some(next_tunnel) = staged.tunnel.as_mut()
@@ -3682,6 +3720,7 @@ where
                     description: definition.description.to_owned(),
                 })
             }),
+            active_curse,
         };
         let receipt =
             self.commit_dig(commit, runtime_outcome.clone(), delivery_context.as_ref())?;
