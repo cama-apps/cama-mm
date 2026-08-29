@@ -1905,6 +1905,7 @@ fn hook_outcome() -> DigRuntimeOutcome {
         forced_event_consumed: false,
         relic_trim_notice: false,
         weather: None,
+        active_curse: None,
     }
 }
 
@@ -4201,6 +4202,7 @@ fn paid_prompt_is_tokenized_owner_bound_one_shot_and_exactly_formatted() {
         forced_event_consumed: false,
         relic_trim_notice: false,
         weather: None,
+        active_curse: None,
     };
     let response = super::paid_dig_response(&result, "secret-token");
     assert_eq!(response.embeds[0].color, Some(0xFF_A5_00));
@@ -5241,6 +5243,7 @@ fn rendered_media_keeps_stats_and_event_ui_separate_with_exact_attachments() {
             description: "Worms churn the soil. Digging is easy, but they ate all the coins."
                 .to_owned(),
         }),
+        active_curse: None,
     };
 
     let (stats, event) =
@@ -5364,6 +5367,7 @@ fn event_prompt_applies_durable_darkness_and_reading_the_stone_policy() {
         forced_event_consumed: false,
         relic_trim_notice: false,
         weather: None,
+        active_curse: None,
     };
     let prompt = cama_app::dig_event_runtime::DigEventActionPresentation {
         event: cama_app::dig_loot::canonical_event_presentation("underground_stream")
@@ -6957,4 +6961,99 @@ fn command_tree_matches_python_surface() {
     assert!(find(&find(&options, "use").options, "item").autocomplete);
     assert!(find(&find(&options, "gift").options, "artifact").autocomplete);
     assert!(find(&find(&options, "buy").options, "item").autocomplete);
+}
+
+#[test]
+fn active_curse_field_lists_every_penalty_and_the_digs_left() {
+    let curse = cama_app::dig_runtime::ActiveCurseSummary {
+        name: "False Route".to_owned(),
+        digs_remaining: 6,
+        advance_bonus: -2,
+        jc_bonus: 0,
+        luminosity_drain: 20,
+        cave_in_percent: 0,
+        cooldown_percent: 0,
+    };
+
+    let rendered = super::active_curse_field(&curse);
+
+    // A player has to be able to see what the hex is costing them, not just
+    // that they have one.
+    assert!(rendered.contains("-2 blocks/dig"), "{rendered}");
+    assert!(rendered.contains("-20 luminosity/dig"), "{rendered}");
+    assert!(rendered.contains("Lasts 6 more digs."), "{rendered}");
+}
+
+#[test]
+fn active_curse_field_singularizes_the_final_dig() {
+    let curse = cama_app::dig_runtime::ActiveCurseSummary {
+        name: "Void Tithe".to_owned(),
+        digs_remaining: 1,
+        advance_bonus: -2,
+        ..Default::default()
+    };
+
+    let rendered = super::active_curse_field(&curse);
+
+    assert!(rendered.contains("Lasts 1 more dig."), "{rendered}");
+    assert!(!rendered.contains("1 more digs"), "{rendered}");
+}
+
+#[test]
+fn active_curse_field_renders_rate_penalties_as_percentages() {
+    let curse = cama_app::dig_runtime::ActiveCurseSummary {
+        name: "Salt-Glyph Bind".to_owned(),
+        digs_remaining: 3,
+        cave_in_percent: 10,
+        cooldown_percent: 25,
+        ..Default::default()
+    };
+
+    let rendered = super::active_curse_field(&curse);
+
+    assert!(rendered.contains("+10% cave-in risk"), "{rendered}");
+    assert!(rendered.contains("+25% cooldown"), "{rendered}");
+}
+
+#[test]
+fn dig_result_embed_shows_an_active_curse_on_a_later_dig() {
+    // The dig that applies a curse is not the only one it affects, so the
+    // hex has to appear on every result while it is still running.
+    let mut result = hook_outcome();
+    result.active_curse = Some(cama_app::dig_runtime::ActiveCurseSummary {
+        name: "Blackblooded Mark".to_owned(),
+        digs_remaining: 3,
+        advance_bonus: -4,
+        ..Default::default()
+    });
+
+    let embed = super::python_dig_result_embed(&result, "Dig", "Miner", None, None, None);
+    let field = embed
+        .fields
+        .iter()
+        .find(|field| field.name.contains("Cursed"))
+        .expect("active curse field");
+
+    assert!(field.name.contains("Blackblooded Mark"), "{}", field.name);
+    assert!(field.value.contains("-4 blocks/dig"), "{}", field.value);
+    assert!(
+        field.value.contains("Lasts 3 more digs."),
+        "{}",
+        field.value
+    );
+}
+
+#[test]
+fn dig_result_embed_omits_the_curse_field_when_uncursed() {
+    let result = hook_outcome();
+
+    let embed = super::python_dig_result_embed(&result, "Dig", "Miner", None, None, None);
+
+    assert!(
+        embed
+            .fields
+            .iter()
+            .all(|field| !field.name.contains("Cursed")),
+        "an uncursed dig must not render a curse field"
+    );
 }

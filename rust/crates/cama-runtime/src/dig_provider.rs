@@ -8357,6 +8357,41 @@ fn pickaxe_name(tier: i64) -> &'static str {
         .map_or("Unknown Pickaxe", |pickaxe| pickaxe.name)
 }
 
+/// Render what a curse costs its bearer, plus how much longer it lasts.
+///
+/// The penalties come from the persisted curse rather than being re-derived,
+/// so this cannot advertise a number the dig roll did not actually apply. A
+/// curse carrying several penalties lists all of them.
+fn active_curse_field(curse: &cama_app::dig_runtime::ActiveCurseSummary) -> String {
+    let mut penalties = Vec::new();
+    if curse.advance_bonus != 0 {
+        penalties.push(format!("{:+} blocks/dig", curse.advance_bonus));
+    }
+    if curse.jc_bonus != 0 {
+        penalties.push(format!("{:+} {JOPACOIN_EMOTE}/dig", curse.jc_bonus));
+    }
+    if curse.luminosity_drain > 0 {
+        penalties.push(format!("-{} luminosity/dig", curse.luminosity_drain));
+    }
+    if curse.cave_in_percent > 0 {
+        penalties.push(format!("+{}% cave-in risk", curse.cave_in_percent));
+    }
+    if curse.cooldown_percent > 0 {
+        penalties.push(format!("+{}% cooldown", curse.cooldown_percent));
+    }
+    let effect = if penalties.is_empty() {
+        "No mechanical penalty.".to_owned()
+    } else {
+        penalties.join(" · ")
+    };
+    let remaining = if curse.digs_remaining == 1 {
+        "1 more dig".to_owned()
+    } else {
+        format!("{} more digs", curse.digs_remaining)
+    };
+    format!("{effect}\nLasts {remaining}.")
+}
+
 fn python_dig_result_embed(
     result: &DigRuntimeResult,
     title: &str,
@@ -8497,6 +8532,13 @@ fn python_dig_result_embed(
             value.push_str(&format!(" (-{})", result.luminosity_drained));
         }
         embed = embed.field("Luminosity", value, false);
+    }
+    if let Some(curse) = result.active_curse.as_ref() {
+        embed = embed.field(
+            format!("🩸 Cursed: {}", curse.name),
+            active_curse_field(curse),
+            false,
+        );
     }
     if let Some(corruption) = result
         .corruption_description

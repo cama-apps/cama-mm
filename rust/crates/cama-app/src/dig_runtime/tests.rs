@@ -6052,3 +6052,49 @@ fn boss_progress_flat_vs_nested_shapes_both_parse_correctly() {
         "flat and nested boss_progress shapes should parse to identical state"
     );
 }
+
+#[test]
+fn active_curse_summary_carries_the_name_the_effect_decoder_discards() {
+    let raw = r#"{"id":"hex_false_route","name":"False Route","digs_remaining":6,
+        "effect":{"advance_bonus":-2,"luminosity_drain":20}}"#;
+
+    let curse = super::effects::active_curse_summary(Some(raw)).expect("active curse");
+
+    assert_eq!(curse.name, "False Route");
+    assert_eq!(curse.digs_remaining, 6);
+    // A multi-effect curse must surface every penalty, not just the first.
+    assert_eq!(curse.advance_bonus, -2);
+    assert_eq!(curse.luminosity_drain, 20);
+    assert_eq!(curse.jc_bonus, 0);
+}
+
+#[test]
+fn active_curse_summary_converts_rate_penalties_to_whole_percents() {
+    let raw = r#"{"name":"Salt-Glyph Bind","digs_remaining":3,
+        "effect":{"cave_in_bonus":0.1,"cooldown_penalty":0.25}}"#;
+
+    let curse = super::effects::active_curse_summary(Some(raw)).expect("active curse");
+
+    assert_eq!(curse.cave_in_percent, 10);
+    assert_eq!(curse.cooldown_percent, 25);
+}
+
+#[test]
+fn active_curse_summary_is_absent_once_the_curse_is_spent() {
+    // The dig loop decrements to zero rather than clearing eagerly, so an
+    // exhausted curse must read as no curse at all.
+    let spent = r#"{"name":"Void Tithe","digs_remaining":0,"effect":{"advance_bonus":-2}}"#;
+    assert!(super::effects::active_curse_summary(Some(spent)).is_none());
+    assert!(super::effects::active_curse_summary(None).is_none());
+    assert!(super::effects::active_curse_summary(Some("not json")).is_none());
+}
+
+#[test]
+fn active_curse_summary_falls_back_when_the_name_is_missing() {
+    let raw = r#"{"digs_remaining":2,"effect":{"advance_bonus":-1}}"#;
+
+    let curse = super::effects::active_curse_summary(Some(raw)).expect("active curse");
+
+    assert_eq!(curse.name, "Unnamed Hex");
+    assert_eq!(curse.digs_remaining, 2);
+}
