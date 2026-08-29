@@ -44,6 +44,30 @@ fn provider_with_discord_and_publisher(
     PushNotificationRegistrationProvider::with_test_publisher(path, discord, publisher)
 }
 
+#[test]
+fn command_schema_registers_with_discord_valid_metadata() {
+    let database = migrated_database();
+    let provider =
+        provider_with_publisher(database.path(), Arc::new(RecordingPublisher::default()));
+    let mut builder = RegistryBuilder::default();
+    builder
+        .add_provider(&provider)
+        .expect("register push notification provider");
+    let registry = builder.build();
+    let command = registry.commands().next().expect("notify command");
+
+    assert_eq!(command.name, COMMAND_NAME);
+    assert_eq!(command.description, COMMAND_DESCRIPTION);
+    assert!(command.description.chars().count() <= 100);
+    assert!(command.options.is_empty());
+    assert_eq!(registry.commands().count(), 1);
+    assert_eq!(registry.component_routes().len(), 1);
+    assert_eq!(
+        registry.component_routes()[0].custom_id_prefix,
+        COMPONENT_PREFIX
+    );
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PublishedNotification {
     topic: String,
