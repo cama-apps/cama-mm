@@ -18,7 +18,7 @@ use crate::embeds::LobbyKind;
 pub const FULL_LOBBY_SIZE: usize = 10;
 /// A ready check against a near-empty lobby wastes everyone's react; this is
 /// a fixed floor rather than a per-guild setting for now.
-pub const MINIMUM_READYCHECK_PLAYERS: usize = 9;
+pub const MINIMUM_READYCHECK_PLAYERS: usize = 10;
 pub const READYCHECK_COOLDOWN_SECONDS: f64 = 120.0;
 pub const READYCHECK_STALE_SECONDS: f64 = 30.0 * 60.0;
 pub const RECENT_JOIN_GRACE_SECONDS: f64 = 10.0 * 60.0;
