@@ -2340,7 +2340,7 @@ async fn readycheck_below_minimum_player_count_is_rejected() {
     let database = database_with_players(&[(10, "Creator"), (20, "Second")]);
     let transport = Arc::new(RecordingTransport::default());
     let mut config = runtime_config();
-    config.min_readycheck_players = 8;
+    config.min_readycheck_players = MINIMUM_READYCHECK_PLAYERS;
     let provider = LobbyRegistrationProvider::new(
         database.path(),
         config,
@@ -2379,7 +2379,9 @@ async fn readycheck_below_minimum_player_count_is_rejected() {
     assert_eq!(captured.followups.len(), 1);
     assert_eq!(
         captured.followups[0].content,
-        "❌ Need at least 8 players to ready check — you have 2."
+        format!(
+            "❌ Need at least {MINIMUM_READYCHECK_PLAYERS} players to ready check — you have 2."
+        )
     );
     assert!(captured.followups[0].ephemeral);
     assert_eq!(

@@ -639,16 +639,16 @@ fn request(now: f64) -> ReadycheckCommandRequest {
 fn command_below_minimum_player_count_is_rejected() {
     let service = command_ready_service();
     let mut too_small = request(10_000.0);
-    too_small.minimum_players = 8;
+    too_small.minimum_players = MINIMUM_READYCHECK_PLAYERS;
 
     let failure = service
         .prepare_command(too_small, data([1, 2]))
-        .expect_err("a 2-player lobby must not clear an 8-player floor");
+        .expect_err("a 2-player lobby must not clear the minimum floor");
 
     assert_eq!(
         failure,
         ReadycheckCommandFailure::TooFewPlayers {
-            minimum: 8,
+            minimum: MINIMUM_READYCHECK_PLAYERS,
             current: 2,
         }
     );
@@ -657,15 +657,15 @@ fn command_below_minimum_player_count_is_rejected() {
 #[test]
 fn command_at_minimum_player_count_is_allowed() {
     let service = ReadycheckService::new();
-    let mut lobby = lobby_with(1..=8);
+    let mut lobby = lobby_with(1..=MINIMUM_READYCHECK_PLAYERS as i64);
     lobby.thread_id = Some(ChannelId(999));
     service.put_lobby(lobby);
     let mut at_minimum = request(10_000.0);
-    at_minimum.minimum_players = 8;
+    at_minimum.minimum_players = MINIMUM_READYCHECK_PLAYERS;
 
     let plan = service
-        .prepare_command(at_minimum, data(1..=8))
-        .expect("an 8-player lobby clears an 8-player floor");
+        .prepare_command(at_minimum, data(1..=MINIMUM_READYCHECK_PLAYERS as i64))
+        .expect("a lobby at the minimum floor clears it");
 
     assert_eq!(plan.mode, PublicationMode::New);
 }
