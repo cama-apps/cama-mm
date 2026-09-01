@@ -302,35 +302,7 @@ pub trait DigDiscordPort: Send + Sync {
     }
 }
 
-/// Runtime adapter for the three rare bonus surfaces owned by the migrated
-/// application layer (wheel, package deal, and trivia). The provider owns the
-/// post-UI trigger and durable action claim; the adapter owns the existing
-/// interactive Discord/session implementations.
-#[async_trait]
-pub trait DigBonusDispatchPort: Send + Sync {
-    async fn dispatch_bonus(
-        &self,
-        action_id: i64,
-        user_id: i64,
-        guild_id: i64,
-        channel_id: i64,
-        bonus: cama_app::dig_bonus_events::DigBonus,
-        responder: Arc<dyn InteractionResponder>,
-    ) -> Result<(), String>;
-
-    async fn report_partial_failure(
-        &self,
-        responder: Arc<dyn InteractionResponder>,
-    ) -> Result<(), String> {
-        responder
-            .followup(
-                InteractionResponse::message(cama_app::dig_bonus_events::PARTIAL_BONUS_FAILURE)
-                    .ephemeral(),
-            )
-            .await
-            .map_err(|error| error.to_string())
-    }
-}
+pub use crate::runtime_ports::DigBonusDispatchPort;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DigProviderBuildError {
@@ -1062,16 +1034,17 @@ impl DigInteractionHandler {
         .map_or_else(|| format!("User {user_id}"), |player| player.name)
     }
 
-    fn project_player_name(&self, user_id: i64, guild_id: i64) -> String {
+    fn project_player_name(&self, user_id: i64, guild_id: i64, stored_name: &str) -> String {
         self.state
             .player_names
             .names_for_guild(guild_id, &[user_id])
             .unwrap_or_default()
-            .resolve(user_id)
+            .resolve_or(user_id, stored_name)
     }
 
     async fn render_player_name(&self, user_id: i64, guild_id: i64) -> String {
-        self.project_player_name(user_id, guild_id)
+        let stored_name = self.stored_player_name(user_id, guild_id).await;
+        self.project_player_name(user_id, guild_id, &stored_name)
     }
 
     fn render_delivery_responses(
@@ -1079,8 +1052,11 @@ impl DigInteractionHandler {
         delivery: &DigRuntimeDeliverySnapshot,
     ) -> (InteractionResponse, Option<InteractionResponse>) {
         let mut projected = delivery.clone();
-        projected.context.display_name =
-            self.project_player_name(delivery.discord_id, delivery.guild_id);
+        projected.context.display_name = self.project_player_name(
+            delivery.discord_id,
+            delivery.guild_id,
+            &delivery.context.display_name,
+        );
         dig_delivery_responses(&projected, &self.state.media, &self.state.view_nonce)
     }
 
@@ -2324,7 +2300,7 @@ impl DigInteractionHandler {
                 .await
                 .map_err(|error| error.to_string())?;
             let stored_name = self.stored_player_name(user_id, guild_id).await;
-            let user_display_name = self.project_player_name(user_id, guild_id);
+            let user_display_name = self.project_player_name(user_id, guild_id, &stored_name);
             let pending = self
                 .pending_deliveries(DigRuntimePendingDeliveryQuery {
                     guild_id: Some(guild_id),
@@ -3399,7 +3375,7 @@ impl DigInteractionHandler {
             .await
             .map_err(|error| error.to_string())?;
         let stored_name = self.stored_player_name(user_id, guild_id).await;
-        let display_name = self.project_player_name(user_id, guild_id);
+        let display_name = self.project_player_name(user_id, guild_id, &stored_name);
         let now = unix_now();
         let avatar = self
             .state
@@ -7487,44 +7463,26 @@ fn option<'a>(options: &'a [InteractionOption], name: &str) -> Option<&'a Intera
     })
 }
 
+// `/dig` looks options up recursively through subcommand payloads via
+// `option`; the typed conversions are the shared `option_ext` value helpers.
 fn user_option(
     options: &[InteractionOption],
     name: &str,
 ) -> Result<Option<(i64, Option<String>)>, String> {
-    let Some(value) = option(options, name) else {
-        return Ok(None);
-    };
-    match value {
-        InteractionValue::User {
-            id, display_name, ..
-        } => Ok(Some((signed_id(*id, name)?, display_name.clone()))),
-        InteractionValue::Unknown => Ok(None),
-        _ => Err(format!("{name} must be a Discord user")),
-    }
+    Ok(crate::option_ext::user_value(option(options, name), name)?
+        .map(|user| (user.id, user.display_name)))
 }
 
 fn string_option(options: &[InteractionOption], name: &str) -> Result<Option<String>, String> {
-    match option(options, name) {
-        None | Some(InteractionValue::Unknown) => Ok(None),
-        Some(InteractionValue::String(value)) => Ok(Some(value.clone())),
-        Some(_) => Err(format!("{name} must be text")),
-    }
+    crate::option_ext::string_value(option(options, name), name)
 }
 
 fn integer_option(options: &[InteractionOption], name: &str) -> Result<Option<i64>, String> {
-    match option(options, name) {
-        None | Some(InteractionValue::Unknown) => Ok(None),
-        Some(InteractionValue::Integer(value)) => Ok(Some(*value)),
-        Some(_) => Err(format!("{name} must be an integer")),
-    }
+    crate::option_ext::integer_value(option(options, name), name)
 }
 
 fn bool_option(options: &[InteractionOption], name: &str) -> Result<Option<bool>, String> {
-    match option(options, name) {
-        None | Some(InteractionValue::Unknown) => Ok(None),
-        Some(InteractionValue::Boolean(value)) => Ok(Some(*value)),
-        Some(_) => Err(format!("{name} must be true or false")),
-    }
+    crate::option_ext::boolean_value(option(options, name), name)
 }
 
 fn is_admin(user_id: i64, permissions: Option<u64>, admin_ids: &BTreeSet<i64>) -> bool {

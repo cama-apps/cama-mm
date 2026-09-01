@@ -9,7 +9,7 @@
 //! balance/deal writes remain durable before a message edit is attempted.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -25,12 +25,10 @@ use cama_app::trivia_questions::{TriviaCatalog, TriviaRandom, generate_question}
 use cama_db::dig_bonus_events_repository::DigBonusRepository;
 use cama_db::package_deal_repository::PackageDealRepository;
 use chrono::Utc;
-use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 
 use crate::application_config::ApplicationConfig;
 use crate::betting_provider::BettingRegistrationProvider;
-use crate::dig_provider::DigBonusDispatchPort;
 use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
 use crate::economy_events_worker::EconomyEventsWorkerConfig;
 use crate::registration::{
@@ -39,6 +37,7 @@ use crate::registration::{
     InteractionMessageReceipt, InteractionRequest, InteractionResponder, InteractionResponse,
     RegistrationError, RegistrationProvider, RegistryBuilder,
 };
+use crate::runtime_ports::DigBonusDispatchPort;
 
 /// Component prefix owned by this module.  The composition root should add a
 /// route for this prefix after constructing [`DigBonusRuntime`].
@@ -251,7 +250,7 @@ pub trait DigBonusRewardSource: Send + Sync {
 
 #[derive(Clone)]
 pub struct SqliteDigBonusRewardSource {
-    path: PathBuf,
+    actions: DigBonusRepository,
     economy_events: Arc<SqliteEconomyEventService>,
 }
 
@@ -261,7 +260,7 @@ impl SqliteDigBonusRewardSource {
         let path = path.as_ref().to_path_buf();
         Self {
             economy_events: Arc::new(SqliteEconomyEventService::new(&path, config)),
-            path,
+            actions: DigBonusRepository::new(&path),
         }
     }
 
@@ -291,17 +290,15 @@ impl DigBonusRewardSource for SqliteDigBonusRewardSource {
         guild_id: i64,
         dispatch_timestamp: i64,
     ) -> Result<i64, String> {
-        let connection = Connection::open(&self.path).map_err(|error| error.to_string())?;
-        connection
-            .query_row(
-                "SELECT 1 FROM dig_actions
-                   WHERE id=?1 AND actor_id=?2 AND guild_id=?3",
-                params![action_id, user_id, guild_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()
+        if !self
+            .actions
+            .dig_action_exists_for_actor(action_id, user_id, guild_id)
             .map_err(|error| error.to_string())?
-            .ok_or_else(|| format!("Dig action {action_id} was not found for this player"))?;
+        {
+            return Err(format!(
+                "Dig action {action_id} was not found for this player"
+            ));
+        }
         self.economy_events
             .adjust_reward_at(
                 guild_id,
@@ -1204,7 +1201,6 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::dig_provider::DigBonusDispatchPort;
     use crate::discord_transport::{GuildPlayerNameDirectory, GuildPlayerNameResolver};
     use crate::registration::{InteractionMessageDelivery, InteractionResponseError};
 

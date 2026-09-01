@@ -17,14 +17,12 @@ use cama_db::guild_config_repository::GuildConfigRepository;
 use cama_domain::guild_config::GuildConfigStore;
 use tracing::warn;
 
+use crate::embed_colors::{DISCORD_BLUE, DISCORD_RED};
 use crate::{
     CommandOptionKind, CommandOptionSpec, CommandSpec, InteractionEmbed, InteractionHandler,
     InteractionHandlerError, InteractionRequest, InteractionResponder, InteractionResponse,
     InteractionValue, RegistrationError, RegistrationProvider, RegistryBuilder,
 };
-
-const DISCORD_BLUE: u32 = 0x34_98_DB;
-const DISCORD_RED: u32 = 0xE7_4C_3C;
 
 #[derive(Clone)]
 pub struct AskRegistrationProvider {

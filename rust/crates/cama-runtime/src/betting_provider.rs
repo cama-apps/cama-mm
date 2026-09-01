@@ -13,6 +13,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use cama_app::dig_neon::{BigWinFlavor, BigWinSource};
+use cama_app::disburse_service::{
+    DistributionMethod, PlayerSnapshot as DisbursePlayerSnapshot, calculate_method_distributions,
+};
 use cama_app::dota_bet_seed::{BetTotals, bets_overview};
 use cama_app::economy_actions::apply_gamba_event_multiplier;
 use cama_app::economy_event_service::EconomyEventConfig;
@@ -81,16 +84,17 @@ use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{DiscordMessage, DiscordTransport, GuildPlayerNameDirectory};
 use crate::gateway_events::{GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryReport};
 use crate::ids::blocking as sqlite;
-use crate::match_provider::{
-    MatchBetSettlementParticipant, MatchBetSettlementRequest, MatchEasterEggRequest,
-    MatchPostMatchDebriefPort, MatchPostMatchDebriefRequest, MatchRegistrationProvider,
-};
+use crate::match_provider::MatchRegistrationProvider;
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
     InteractionActionRow, InteractionAttachment, InteractionButton, InteractionButtonStyle,
     InteractionEmbed, InteractionHandler, InteractionHandlerError, InteractionOption,
     InteractionRequest, InteractionResponder, InteractionResponse, InteractionValue,
     RegistrationError, RegistrationProvider, RegistryBuilder,
+};
+use crate::runtime_ports::{
+    MatchBetSettlementParticipant, MatchBetSettlementRequest, MatchEasterEggRequest,
+    MatchPostMatchDebriefPort, MatchPostMatchDebriefRequest,
 };
 use crate::worker::{BackgroundWorker, BackgroundWorkerSpec, WorkerContext};
 
@@ -6593,29 +6597,6 @@ fn disbursement_response(execution: &DisbursementExecution, forced: bool) -> Int
     )
 }
 
-/// Players excluded from the redistribution methods that deliberately skip the
-/// wealthiest accounts (`stimulus`, `social_security`).
-///
-/// Mirrors the legacy `LIMIT 3` sub-select over non-debtors ordered by balance
-/// descending, with a stable discord-id tiebreak so equal balances resolve the
-/// same way on every call.
-fn top_richest_non_debtors(players: &[Player], count: usize) -> BTreeSet<i64> {
-    let mut ranked = players
-        .iter()
-        .filter(|player| player.jopacoin_balance >= 0)
-        .filter_map(|player| player.discord_id.map(|id| (id, player.jopacoin_balance)))
-        .collect::<Vec<_>>();
-    ranked.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
-    ranked
-        .into_iter()
-        .take(count)
-        .map(|(discord_id, _)| discord_id)
-        .collect()
-}
-
-/// The number of top balances `stimulus` and `social_security` exclude.
-const DISBURSE_RICHEST_EXCLUSION: usize = 3;
-
 /// ISO-8601 cutoff admitting players whose last match is within `days`.
 ///
 /// A non-positive window would admit nobody, so it is clamped to zero, which
@@ -6635,180 +6616,49 @@ fn draw_lottery_winner(candidates: &[i64]) -> Option<i64> {
 /// `lottery_winner` is drawn by the caller from the recently-active roster so
 /// the pure calculation stays deterministic under test; see
 /// `draw_lottery_winner`.
+///
+/// The recipient selection and settlement math are owned by
+/// `cama_app::disburse_service::calculate_method_distributions`; this adapter
+/// only parses the stored method code and reshapes database rows into the
+/// service's roster snapshot. Unknown method codes disburse nothing, matching
+/// the legacy fallthrough.
 fn calculate_distributions(
     method: &str,
     fund: i64,
     players: &[Player],
     lottery_winner: Option<i64>,
 ) -> Vec<(i64, i64)> {
-    if fund <= 0 {
+    let Some(method) = DistributionMethod::from_code(method) else {
         return Vec::new();
-    }
-    let mut debtors = players
-        .iter()
-        .filter_map(|player| {
-            player
-                .discord_id
-                .filter(|_| player.jopacoin_balance < 0)
-                .map(|discord_id| (discord_id, player.jopacoin_balance))
-        })
-        .collect::<Vec<_>>();
-    match method {
-        "even" => even_distributions(fund, &debtors),
-        "proportional" => proportional_distributions(fund, &mut debtors),
-        "neediest" => debtors
-            .iter()
-            .min_by_key(|(_, balance)| *balance)
-            .map(|(discord_id, balance)| (*discord_id, fund.min(balance.saturating_abs())))
-            .filter(|(_, amount)| *amount > 0)
-            .into_iter()
-            .collect(),
-        "stimulus" => {
-            // Legacy contract: non-debtors who have actually played, ordered by
-            // balance descending with the top three skipped.
-            let mut eligible = players
-                .iter()
-                .filter(|player| player.jopacoin_balance >= 0)
-                .filter(|player| player.wins.saturating_add(player.losses) > 0)
-                .filter_map(|player| player.discord_id.map(|id| (id, player.jopacoin_balance)))
-                .collect::<Vec<_>>();
-            if eligible.len() <= DISBURSE_RICHEST_EXCLUSION {
-                return Vec::new();
-            }
-            eligible.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
-            let eligible = &eligible[DISBURSE_RICHEST_EXCLUSION..];
-            even_unlimited_distributions(fund, eligible)
-        }
-        // The winner is drawn at random from the recently-active roster before
-        // this call; an empty roster disburses nothing.
-        "lottery" => lottery_winner
-            .map(|discord_id| vec![(discord_id, fund)])
-            .unwrap_or_default(),
-        "social_security" => {
-            // Legacy contract excludes the same top three balances as stimulus.
-            let excluded = top_richest_non_debtors(players, DISBURSE_RICHEST_EXCLUSION);
-            let mut eligible = players
-                .iter()
-                .filter_map(|player| {
-                    player
-                        .discord_id
-                        .map(|discord_id| (discord_id, player.wins.saturating_add(player.losses)))
-                })
-                .filter(|(discord_id, _)| !excluded.contains(discord_id))
-                .filter(|(_, games)| *games > 0)
-                .collect::<Vec<_>>();
-            if eligible.is_empty() {
-                return Vec::new();
-            }
-            eligible.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
-            let total_games = eligible.iter().map(|(_, games)| *games).sum::<i64>();
-            let mut remaining = fund;
-            eligible
-                .iter()
-                .enumerate()
-                .filter_map(|(index, (discord_id, games))| {
-                    let amount = if index + 1 == eligible.len() {
-                        remaining
-                    } else {
-                        fund.saturating_mul(*games) / total_games
-                    };
-                    remaining = remaining.saturating_sub(amount);
-                    (amount > 0).then_some((*discord_id, amount))
-                })
-                .collect()
-        }
-        "richest" => players
-            .iter()
-            .filter_map(|player| player.discord_id.map(|id| (id, player.jopacoin_balance)))
-            .max_by(|left, right| left.1.cmp(&right.1).then(right.0.cmp(&left.0)))
-            .map(|(discord_id, _)| vec![(discord_id, fund)])
-            .unwrap_or_default(),
-        _ => Vec::new(),
-    }
+    };
+    calculate_method_distributions(
+        method,
+        fund,
+        &disbursement_snapshots(players),
+        lottery_winner,
+    )
+    .into_iter()
+    .map(|distribution| (distribution.discord_id, distribution.amount))
+    .collect()
 }
 
-fn even_distributions(fund: i64, debtors: &[(i64, i64)]) -> Vec<(i64, i64)> {
-    let mut remaining = fund;
-    let mut received = vec![0_i64; debtors.len()];
-    let mut open = (0..debtors.len()).collect::<Vec<_>>();
-    while remaining > 0 && !open.is_empty() {
-        let share = (remaining / i64::try_from(open.len()).unwrap_or(1)).max(1);
-        let mut distributed = 0;
-        let mut next = Vec::new();
-        for index in open {
-            let need = debtors[index]
-                .1
-                .saturating_abs()
-                .saturating_sub(received[index]);
-            let amount = share.min(need).min(remaining.saturating_sub(distributed));
-            if amount > 0 {
-                received[index] += amount;
-                distributed += amount;
-            }
-            if received[index] < debtors[index].1.saturating_abs() {
-                next.push(index);
-            }
-        }
-        if distributed == 0 {
-            break;
-        }
-        remaining -= distributed;
-        open = next;
-    }
-    debtors
-        .iter()
-        .enumerate()
-        .filter_map(|(index, (discord_id, _))| {
-            (received[index] > 0).then_some((*discord_id, received[index]))
-        })
-        .collect()
-}
-
-fn proportional_distributions(fund: i64, debtors: &mut [(i64, i64)]) -> Vec<(i64, i64)> {
-    debtors.sort_by(|left, right| left.1.cmp(&right.1).then(left.0.cmp(&right.0)));
-    let total_debt = debtors
-        .iter()
-        .map(|(_, balance)| balance.saturating_abs())
-        .sum::<i64>();
-    if total_debt <= 0 {
-        return even_distributions(fund, debtors);
-    }
-    let mut remaining = fund;
-    debtors
-        .iter()
-        .enumerate()
-        .filter_map(|(index, (discord_id, balance))| {
-            let debt = balance.saturating_abs();
-            let amount = if index + 1 == debtors.len() {
-                remaining.min(debt)
-            } else {
-                ((fund as f64 * debt as f64 / total_debt as f64) as i64)
-                    .min(debt)
-                    .min(remaining)
-            };
-            remaining = remaining.saturating_sub(amount);
-            (amount > 0).then_some((*discord_id, amount))
-        })
-        .collect()
-}
-
-fn even_unlimited_distributions(fund: i64, players: &[(i64, i64)]) -> Vec<(i64, i64)> {
-    if players.is_empty() {
-        return Vec::new();
-    }
-    let count = i64::try_from(players.len()).unwrap_or(1);
-    let base = fund / count;
-    let remainder = fund % count;
+/// Adapts database player rows into the roster snapshot the application-layer
+/// settlement math consumes. Rows without a Discord ID can never receive
+/// funds, so they are dropped here, matching the legacy per-method filters.
+fn disbursement_snapshots(players: &[Player]) -> Vec<DisbursePlayerSnapshot> {
     players
         .iter()
-        .enumerate()
-        .map(|(index, (discord_id, _))| {
-            (
-                *discord_id,
-                base + i64::from(i64::try_from(index).unwrap_or(i64::MAX) < remainder),
-            )
+        .filter_map(|player| {
+            let discord_id = player.discord_id?;
+            Some(DisbursePlayerSnapshot {
+                discord_id,
+                username: player.name.clone(),
+                balance: player.jopacoin_balance,
+                wins: u32::try_from(player.wins.max(0)).unwrap_or(u32::MAX),
+                losses: u32::try_from(player.losses.max(0)).unwrap_or(u32::MAX),
+                last_match_at: None,
+            })
         })
-        .filter(|(_, amount)| *amount > 0)
         .collect()
 }
 

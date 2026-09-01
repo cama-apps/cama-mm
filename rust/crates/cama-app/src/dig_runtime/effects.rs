@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::dig_event_threats::{CAVE_IN_CURSE_CAP, COOLDOWN_CURSE_CAP};
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct DigWeatherEffects {
     pub cave_in_bonus: f64,
@@ -140,8 +142,16 @@ pub(super) fn active_curse_effects(raw: Option<&str>) -> Option<(ActiveCurseEffe
     Some((
         ActiveCurseEffects {
             advance_bonus: number_i64("advance_bonus").unwrap_or(0),
-            cave_in_bonus: number_f64("cave_in_bonus").unwrap_or(0.0),
-            cooldown_penalty: number_f64("cooldown_penalty").unwrap_or(0.0),
+            // Clamp the two rate penalties once at decode time with the same
+            // caps `capped_curse_effect` enforces, so the applied roll and the
+            // displayed summary read structurally identical values even for an
+            // over-cap persisted curse.
+            cave_in_bonus: number_f64("cave_in_bonus")
+                .unwrap_or(0.0)
+                .clamp(0.0, CAVE_IN_CURSE_CAP),
+            cooldown_penalty: number_f64("cooldown_penalty")
+                .unwrap_or(0.0)
+                .clamp(0.0, COOLDOWN_CURSE_CAP),
             jc_bonus: number_i64("jc_bonus").unwrap_or(0),
             luminosity_drain: number_i64("luminosity_drain").unwrap_or(0),
         },
@@ -153,7 +163,9 @@ pub(super) fn active_curse_effects(raw: Option<&str>) -> Option<(ActiveCurseEffe
 /// decoder discards.
 ///
 /// Shares [`active_curse_effects`] rather than re-parsing the penalties, so a
-/// displayed curse can never disagree with the one applied to the roll.
+/// displayed curse can never disagree with the one applied to the roll.  The
+/// decoder already caps the two rate penalties, so an over-cap persisted
+/// curse displays what it actually costs.
 pub(super) fn active_curse_summary(raw: Option<&str>) -> Option<super::ActiveCurseSummary> {
     let (effects, digs_remaining) = active_curse_effects(raw)?;
     let value: Value = serde_json::from_str(raw?).ok()?;

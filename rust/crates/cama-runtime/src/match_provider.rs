@@ -63,7 +63,9 @@ use cama_db::match_correction_repository::MatchCorrectionRepository;
 use cama_db::match_recording_repository::{
     IncomeAwardCompensation, IncomeAwardReceipt, IncomeAwardRequest, MatchRecordingRepository,
 };
-use cama_db::match_runtime::{PendingMatchRecord, PendingMatchRepository, PendingMatchState};
+use cama_db::match_runtime::{
+    PendingMatchRecord, PendingMatchRepository, PendingMatchRepositoryError, PendingMatchState,
+};
 use cama_db::match_voting::{MatchVotingRepository, PendingVoteKey};
 use cama_db::moderation::{ModerationEventType, ModerationRepository};
 use cama_db::package_deal_repository::PackageDealRepository;
@@ -110,28 +112,34 @@ use thiserror::Error;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
-use crate::admin_provider::{
-    AdminExtendBettingRequest, AdminExtendBettingResult, AdminMatchControl,
-    AdminRoleBackfillResult, AdminSeedHeroGridRequest, AdminSeedHeroGridResult,
-    CorrectionWinRewardControl, CorrectionWinRewardRequest, CorrectionWinRewardResult,
-};
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{
     DiscordMessage, DiscordTransport, GuildPlayerNameDirectory, GuildPlayerNameResolver,
 };
-use crate::enrichment_provider::{RecordedMatchDiscovery, RecordedMatchDiscoveryOutcome};
+use crate::embed_colors::{DISCORD_BLUE, DISCORD_ORANGE};
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
-use crate::lobby_provider::{MatchLobbyPort, MatchLobbySnapshot};
+use crate::lobby_provider::MatchLobbyPort;
+use crate::option_ext::string_option;
 use crate::push_notification_provider::PushNotificationHooks;
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, InteractionEmbed,
     InteractionHandler, InteractionHandlerError, InteractionOption, InteractionRequest,
-    InteractionResponder, InteractionResponse, InteractionValue, RegistrationError,
-    RegistrationProvider, RegistryBuilder,
+    InteractionResponder, InteractionResponse, RegistrationError, RegistrationProvider,
+    RegistryBuilder,
 };
 use crate::reminder_provider::{ReminderDeliveryReport, ReminderHooks};
+use crate::runtime_ports::{
+    AdminExtendBettingRequest, AdminExtendBettingResult, AdminMatchControl,
+    AdminRoleBackfillResult, AdminSeedHeroGridRequest, AdminSeedHeroGridResult,
+    CorrectionWinRewardControl, CorrectionWinRewardRequest, CorrectionWinRewardResult,
+    MatchLobbySnapshot, RecordedMatchDiscovery, RecordedMatchDiscoveryOutcome,
+};
+pub use crate::runtime_ports::{
+    MatchBetSettlementParticipant, MatchBetSettlementRequest, MatchEasterEggRequest,
+    MatchPostMatchDebriefPort, MatchPostMatchDebriefRequest,
+};
 
 const ADMINISTRATOR_PERMISSION: u64 = 1 << 3;
 const MANAGE_GUILD_PERMISSION: u64 = 1 << 5;
@@ -139,8 +147,6 @@ const SHUFFLE_RATE_LIMIT: usize = 2;
 const RECORD_RATE_LIMIT: usize = 3;
 const RATE_LIMIT_WINDOW: u64 = 30;
 const SHUFFLE_LOCK_TIMEOUT: Duration = Duration::from_millis(500);
-const DISCORD_BLUE: u32 = 0x34_98_db;
-const DISCORD_ORANGE: u32 = 0xe6_7e_22;
 const PENDING_MATCH_EASTER_STREAKS_KEY: &str = "_rust_match_easter_streaks";
 
 #[derive(Debug, Error)]
@@ -149,37 +155,6 @@ pub enum MatchProviderBuildError {
     OpenSkill(#[from] OpenSkillError),
     #[error("invalid match runtime setting {0}")]
     InvalidConfig(&'static str),
-}
-
-/// Durable facts selected after Match commits its rating history. The
-/// composition root adapts this request to the live JOPA-T/Neon delivery
-/// service; Match owns the database read and Python-compatible winner policy.
-#[derive(Clone, Debug, PartialEq)]
-pub struct MatchPostMatchDebriefRequest {
-    pub guild_id: i64,
-    pub match_id: i64,
-    pub channel_id: Option<u64>,
-    pub winner_id: Option<i64>,
-    pub loser_id: Option<i64>,
-    pub payout: i64,
-    pub loss: i64,
-    pub leverage: i64,
-    pub rating_change: Option<f64>,
-    pub expected_win_prob: Option<f64>,
-}
-
-/// Committed Match-side Neon candidates. Settlement owns the degen/balance
-/// hooks; this adapter receives the remaining candidates so it can preserve
-/// Python's games-milestone, streak-record, rivalry, then fallback ordering
-/// and claim/replay the whole event atomically from the delivery boundary.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct MatchEasterEggRequest {
-    pub guild_id: i64,
-    pub match_id: i64,
-    pub channel_id: Option<u64>,
-    pub games_milestones: Vec<GamesMilestone>,
-    pub win_streak_records: Vec<WinStreakRecord>,
-    pub rivalries_detected: Vec<RivalryRecord>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -224,48 +199,6 @@ fn persisted_easter_streaks(
         })
         .collect();
     Ok(Some(records))
-}
-
-/// Settlement facts handed to Betting's Neon observer after Match has
-/// committed the immutable bet settlement rows.  Match owns the source of
-/// truth and this DTO deliberately contains no provider-local state, making
-/// it safe to replay from READY recovery.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MatchBetSettlementParticipant {
-    pub discord_id: i64,
-    pub amount: i64,
-    pub leverage: i64,
-    pub balance_after: i64,
-    pub payout: i64,
-    pub won: bool,
-    pub refunded: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MatchBetSettlementRequest {
-    pub guild_id: i64,
-    pub match_id: i64,
-    pub channel_id: Option<u64>,
-    pub participants: Vec<MatchBetSettlementParticipant>,
-}
-
-/// Narrow live seam for post-match JOPA-T/Neon presentation. Implementors
-/// must make delivery idempotent by `match_id`; READY recovery may replay a
-/// committed Match whose Discord presentation was interrupted.
-#[async_trait]
-pub trait MatchPostMatchDebriefPort: Send + Sync {
-    async fn on_bet_settlement(&self, _request: MatchBetSettlementRequest) -> Result<(), String> {
-        Ok(())
-    }
-
-    async fn on_match_easter_eggs(&self, _request: MatchEasterEggRequest) -> Result<(), String> {
-        Ok(())
-    }
-
-    async fn on_post_match_debrief(
-        &self,
-        request: MatchPostMatchDebriefRequest,
-    ) -> Result<(), String>;
 }
 
 /// Result returned by Match's persisted shuffle-message renderer after a
@@ -1525,6 +1458,16 @@ impl InteractionHandler for MatchHandler {
     }
 }
 
+/// Outcome of a durable abort finalization attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AbortFinalization {
+    /// The pending match was consumed; the abort announcements may proceed.
+    Aborted,
+    /// A committed match already exists for the pending identity, so the
+    /// abort was refused and nothing may be announced as refunded.
+    AlreadyRecorded,
+}
+
 impl MatchHandler {
     async fn recover_pending_match(&self, pending: PendingMatchRecord) -> Result<(), String> {
         let recorded = MatchRepository::new(&self.database_path)
@@ -1613,7 +1556,7 @@ impl MatchHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
         let explicit_kind = string_option(&context.options, "lobby")
-            .map(|value| parse_lobby_kind(&value))
+            .map(parse_lobby_kind)
             .transpose()?;
         let memberships = self
             .lobbies
@@ -1779,6 +1722,7 @@ impl MatchHandler {
         }
 
         let requested_rating_system = string_option(&context.options, "rating_system")
+            .map(str::to_owned)
             .unwrap_or_else(|| {
                 if fastrand::f64() < self.config.openskill_shuffle_chance {
                     "openskill".to_owned()
@@ -1796,6 +1740,7 @@ impl MatchHandler {
             lobby_wait_minutes,
             rating_system: requested_rating_system,
             shuffle_mode: string_option(&context.options, "mode")
+                .map(str::to_owned)
                 .unwrap_or_else(|| "balanced".to_owned()),
             shuffle_timestamp,
             is_bomb_pot: fastrand::f64() < self.config.bomb_pot_chance,
@@ -1851,6 +1796,7 @@ impl MatchHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
         let result = string_option(&context.options, "result")
+            .map(str::to_owned)
             .ok_or("required record result was not provided")?;
         if !matches!(result.as_str(), "radiant" | "dire" | "abort") {
             return followup_ephemeral(&responder, "❌ Invalid match result.").await;
@@ -1973,7 +1919,8 @@ impl MatchHandler {
         let winning_result = submission
             .result
             .ok_or("ready record vote did not contain a winning result")?;
-        let dotabuff_match_id = string_option(&context.options, "dotabuff_match_id");
+        let dotabuff_match_id =
+            string_option(&context.options, "dotabuff_match_id").map(str::to_owned);
         self.finalize_record(
             pending,
             context,
@@ -2050,13 +1997,26 @@ impl MatchHandler {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&key);
-        if let Err(error) = result {
-            warn!(%error, pending_match_id = pending.pending_match_id, "match abort failed");
-            return followup_ephemeral(
-                &responder,
-                "❌ Match abort failed while refunding bets. Please try again.",
-            )
-            .await;
+        match result {
+            Ok(AbortFinalization::Aborted) => {}
+            Ok(AbortFinalization::AlreadyRecorded) => {
+                return followup_ephemeral(
+                    &responder,
+                    &format!(
+                        "❌ Match #{} has already been recorded and can no longer be aborted.",
+                        pending.pending_match_id
+                    ),
+                )
+                .await;
+            }
+            Err(error) => {
+                warn!(%error, pending_match_id = pending.pending_match_id, "match abort failed");
+                return followup_ephemeral(
+                    &responder,
+                    "❌ Match abort failed while refunding bets. Please try again.",
+                )
+                .await;
+            }
         }
 
         let users = pending
@@ -2085,11 +2045,29 @@ impl MatchHandler {
             .map_err(|error| error.to_string().into())
     }
 
-    async fn finalize_abort_owned(&self, pending: &PendingMatchRecord) -> Result<(), String> {
-        let bets = self.bets.clone();
-        let seeds = self.seeds.clone();
+    async fn finalize_abort_owned(
+        &self,
+        pending: &PendingMatchRecord,
+    ) -> Result<AbortFinalization, String> {
         let guild_id = pending.guild_id;
         let pending_match_id = pending.pending_match_id;
+        // A committed core row means `/record` crossed the durable point, so
+        // this abort must not refund, announce, or credit anything.
+        // `PendingMatchRepository::finalize_abort` re-verifies this inside its
+        // own transaction; checking first keeps the refund calls and thread
+        // announcements from running when an abort races restart recovery.
+        let matches = MatchRepository::new(&self.database_path);
+        let recorded = tokio::task::spawn_blocking(move || {
+            matches.match_id_for_pending_match(guild_id, pending_match_id)
+        })
+        .await
+        .map_err(|error| format!("abort record-guard task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+        if recorded.is_some() {
+            return Ok(AbortFinalization::AlreadyRecorded);
+        }
+        let bets = self.bets.clone();
+        let seeds = self.seeds.clone();
         let shuffle_timestamp = pending.state.shuffle_timestamp.unwrap_or_default();
         tokio::task::spawn_blocking(move || {
             bets.refund_pending_bets_atomic(
@@ -2151,13 +2129,18 @@ impl MatchHandler {
                 .into_iter()
                 .collect::<Vec<_>>()
         };
-        tokio::task::spawn_blocking(move || {
+        let outcome = tokio::task::spawn_blocking(move || {
             repository.finalize_abort(guild_id, pending_match_id, &participant_ids)
         })
         .await
-        .map_err(|error| format!("abort cleanup task failed: {error}"))?
-        .map_err(|error| error.to_string())?;
-        Ok(())
+        .map_err(|error| format!("abort cleanup task failed: {error}"))?;
+        match outcome {
+            Ok(_) => Ok(AbortFinalization::Aborted),
+            Err(PendingMatchRepositoryError::MatchAlreadyRecorded(_)) => {
+                Ok(AbortFinalization::AlreadyRecorded)
+            }
+            Err(error) => Err(error.to_string()),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2201,6 +2184,26 @@ impl MatchHandler {
             )
         })
         .await;
+        // The core and every retryable money phase are durable once the task
+        // succeeds. Clear the pending token while the finalize key is still
+        // held (and before any Discord work): releasing the key first would
+        // open a window where a racing abort vote still sees the pending row
+        // and stacks a spurious exclusion credit on the completed match, and
+        // an announcement failure must not leave a completed match selectable
+        // for `/record`.
+        let cleanup = if matches!(recorded, Ok(Ok(_))) {
+            let repository = self.pending.clone();
+            let guild_id = pending.guild_id;
+            let pending_match_id = pending.pending_match_id;
+            Some(
+                tokio::task::spawn_blocking(move || {
+                    repository.delete_pending_match(guild_id, pending_match_id)
+                })
+                .await,
+            )
+        } else {
+            None
+        };
         self.finalizing_matches
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2223,19 +2226,11 @@ impl MatchHandler {
             }
         };
         self.cancel_betting_tasks(pending.guild_id, Some(pending.pending_match_id));
-
-        // The core and every retryable money phase are durable at this point.
-        // Clear the pending token before any Discord work so an announcement
-        // failure cannot leave a completed match selectable for `/record`.
-        let repository = self.pending.clone();
-        let guild_id = pending.guild_id;
-        let pending_match_id = pending.pending_match_id;
-        tokio::task::spawn_blocking(move || {
-            repository.delete_pending_match(guild_id, pending_match_id)
-        })
-        .await
-        .map_err(|error| format!("record cleanup task failed: {error}"))?
-        .map_err(|error| error.to_string())?;
+        if let Some(cleanup) = cleanup {
+            cleanup
+                .map_err(|error| format!("record cleanup task failed: {error}"))?
+                .map_err(|error| error.to_string())?;
+        }
 
         self.record_pet_match_activity(&pending, recorded.match_id)
             .await;
@@ -5720,16 +5715,6 @@ async fn followup_ephemeral(
         .followup(InteractionResponse::message(content).ephemeral())
         .await
         .map_err(|error| error.to_string().into())
-}
-
-fn string_option(options: &[InteractionOption], name: &str) -> Option<String> {
-    options
-        .iter()
-        .find(|option| option.name == name)
-        .and_then(|option| match &option.value {
-            InteractionValue::String(value) => Some(value.clone()),
-            _ => None,
-        })
 }
 
 fn parse_lobby_kind(value: &str) -> Result<LobbyKind, InteractionHandlerError> {

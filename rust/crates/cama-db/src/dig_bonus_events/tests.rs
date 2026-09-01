@@ -194,3 +194,29 @@ fn test_dig_trivia_persists_its_economy_ledger_context() {
         [1]
     );
 }
+
+#[test]
+fn test_dig_action_existence_check_is_scoped_to_actor_and_guild() {
+    let database = NamedTempFile::new().expect("temporary database");
+    let connection = Connection::open(database.path()).expect("fixture connection");
+    connection
+        .execute_batch(
+            "CREATE TABLE dig_actions (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 guild_id INTEGER NOT NULL DEFAULT 0,
+                 actor_id INTEGER NOT NULL,
+                 action_type TEXT NOT NULL,
+                 created_at INTEGER NOT NULL
+             );
+             INSERT INTO dig_actions (id, guild_id, actor_id, action_type, created_at)
+             VALUES (5, 99, 1, 'dig', 1700000000);",
+        )
+        .expect("fixture schema");
+    drop(connection);
+
+    let repository = DigBonusRepository::new(database.path());
+    assert!(repository.dig_action_exists_for_actor(5, 1, 99).unwrap());
+    assert!(!repository.dig_action_exists_for_actor(5, 2, 99).unwrap());
+    assert!(!repository.dig_action_exists_for_actor(5, 1, 100).unwrap());
+    assert!(!repository.dig_action_exists_for_actor(6, 1, 99).unwrap());
+}

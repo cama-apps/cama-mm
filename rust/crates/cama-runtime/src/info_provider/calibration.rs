@@ -17,11 +17,11 @@ use cama_domain::rating_insights::{
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::ApplicationConfig;
+use crate::embed_colors::DISCORD_BLUE;
 use crate::registration::{
     InteractionAllowedMentions, InteractionAttachment, InteractionEmbed, InteractionResponse,
 };
 
-const DISCORD_BLUE: u32 = 0x34_98_DB;
 const PRODUCTION_DOTABASE_PATH: &str = "/app/assets/dotabase.db";
 
 #[derive(Clone)]

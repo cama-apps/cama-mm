@@ -890,3 +890,112 @@ fn test_slow_drip_stamp_seen_preserves_gross_cap_and_refreshes_anchor() {
         }
     );
 }
+
+fn grant_uncapped_blood_pact(fixture: &Fixture) -> i64 {
+    fixture
+        .repository
+        .grant_buff(GrantBuffRequest {
+            discord_id: USER,
+            guild_id: Some(GUILD),
+            buff_type: "blood_pact",
+            target_id: Some(TARGET),
+            granted_at: NOW,
+            expires_at: NOW + 86_400,
+            data: Some(&BuffData {
+                skimmed_total: Some(0),
+                skim_rate: Some(0.25),
+                cap: None,
+                ..BuffData::default()
+            }),
+        })
+        .expect("grant uncapped Blood Pact")
+}
+
+#[test]
+fn test_blood_pact_extra_claim_treats_missing_cap_as_unlimited() {
+    let fixture = Fixture::new();
+    let buff_id = grant_uncapped_blood_pact(&fixture);
+
+    // Mirror reserve_scaled_skim at MINIGAME_JC_DELTA_SCALE=2.0: base claim
+    // of 25 from a 100 JC earning, then a 25 JC scaled top-up.
+    let claim = fixture
+        .repository
+        .claim_blood_pact_skim_atomic(TARGET, Some(GUILD), 100, NOW)
+        .expect("claim uncapped skim")
+        .expect("uncapped pact must reserve the base skim");
+    assert_eq!(claim.amount, 25);
+
+    let extra = fixture
+        .repository
+        .claim_blood_pact_extra_atomic(buff_id, 25)
+        .expect("claim scaled extra");
+    assert_eq!(
+        extra, 25,
+        "an uncapped pact must grant the full scaled extra, not zero headroom"
+    );
+
+    let active = fixture
+        .repository
+        .active_for(USER, Some(GUILD), "blood_pact", NOW)
+        .expect("read pact data");
+    assert_eq!(active[0].data.skimmed_total, Some(50));
+    assert_eq!(active[0].data.cap, None, "the pact must stay uncapped");
+}
+
+#[test]
+fn test_blood_pact_extra_claim_in_transaction_treats_missing_cap_as_unlimited() {
+    let fixture = Fixture::new();
+    let buff_id = grant_uncapped_blood_pact(&fixture);
+
+    let mut connection = Connection::open(fixture.file.path()).expect("open fixture connection");
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .expect("begin caller transaction");
+    let granted = ManashopRepository::claim_blood_pact_extra_in(&transaction, buff_id, 40)
+        .expect("claim scaled extra in caller transaction");
+    transaction.commit().expect("commit caller transaction");
+
+    assert_eq!(
+        granted, 40,
+        "an uncapped pact must grant the full scaled extra, not zero headroom"
+    );
+    let active = fixture
+        .repository
+        .active_for(USER, Some(GUILD), "blood_pact", NOW)
+        .expect("read pact data");
+    assert_eq!(active[0].data.skimmed_total, Some(40));
+}
+
+#[test]
+fn test_blood_pact_extra_claim_still_clamps_to_remaining_cap() {
+    let fixture = Fixture::new();
+    let buff_id = fixture
+        .repository
+        .grant_buff(GrantBuffRequest {
+            discord_id: USER,
+            guild_id: Some(GUILD),
+            buff_type: "blood_pact",
+            target_id: Some(TARGET),
+            granted_at: NOW,
+            expires_at: NOW + 86_400,
+            data: Some(&BuffData {
+                skimmed_total: Some(25),
+                cap: Some(30),
+                skim_rate: Some(0.25),
+                ..BuffData::default()
+            }),
+        })
+        .expect("grant capped Blood Pact");
+
+    let extra = fixture
+        .repository
+        .claim_blood_pact_extra_atomic(buff_id, 25)
+        .expect("claim capped extra");
+    assert_eq!(extra, 5, "a capped pact still grants only its headroom");
+
+    let active = fixture
+        .repository
+        .active_for(USER, Some(GUILD), "blood_pact", NOW)
+        .expect("read pact data");
+    assert_eq!(active[0].data.skimmed_total, Some(30));
+}

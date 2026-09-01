@@ -42,8 +42,8 @@ use crate::registration::{
     CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute, InteractionActionRow,
     InteractionAttachment, InteractionButton, InteractionEmbed, InteractionHandler,
     InteractionHandlerError, InteractionMessageReceipt, InteractionOption, InteractionRequest,
-    InteractionResponder, InteractionResponse, InteractionResponseError, InteractionValue,
-    RegistrationError, RegistrationProvider, RegistryBuilder,
+    InteractionResponder, InteractionResponse, InteractionResponseError, RegistrationError,
+    RegistrationProvider, RegistryBuilder,
 };
 use crate::{ApplicationConfig, ReminderHooks};
 
@@ -1252,16 +1252,8 @@ fn parse_component_id(custom_id: &str) -> Result<ParsedComponentId, String> {
 }
 
 fn user_option(options: &[InteractionOption]) -> Result<(i64, String), String> {
-    options
-        .iter()
-        .find_map(|option| match &option.value {
-            InteractionValue::User {
-                id, display_name, ..
-            } if option.name == "user" => signed_id(*id, "target user")
-                .ok()
-                .map(|id| (id, display_name.clone().unwrap_or_else(|| id.to_string()))),
-            _ => None,
-        })
+    crate::option_ext::user_option(options, "user")?
+        .map(|user| (user.id, user.display_name_or_id()))
         .ok_or_else(|| "trivia reset requires a user".to_owned())
 }
 

@@ -13,6 +13,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 
+#[path = "dig_assets/authored_asset_manifest.rs"]
 pub mod authored_asset_manifest;
 
 /// Discord's per-file limit used by the Python dig asset loader.
@@ -1014,4 +1015,5 @@ pub fn boss_ids_missing_asset_slugs() -> BTreeSet<&'static str> {
 }
 
 #[cfg(test)]
+#[path = "dig_assets/tests.rs"]
 mod tests;

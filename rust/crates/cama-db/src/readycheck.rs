@@ -109,6 +109,17 @@ struct ReadycheckPrunedNoticePayload {
     player_ids: BTreeSet<i64>,
 }
 
+/// Fail-open pruned-notice listing: rows that cannot be decoded are reported
+/// by key instead of failing the whole listing, so one corrupted or
+/// future-format `app_kv` row cannot wedge notice recovery for every guild.
+/// Skipped rows are retained in the database for diagnosis, matching how an
+/// undeliverable-but-decodable notice is retained rather than destroyed.
+#[derive(Debug, Default)]
+pub struct PendingPrunedNotices {
+    pub notices: Vec<ReadycheckPrunedNotice>,
+    pub skipped_keys: Vec<String>,
+}
+
 /// Narrow port used by the ready-check application model.
 pub trait ReadycheckLobbyStore {
     type Error;
@@ -190,33 +201,21 @@ impl ReadycheckRepository {
 
     pub fn pending_pruned_notices(
         &self,
-    ) -> Result<Vec<ReadycheckPrunedNotice>, ReadycheckRepositoryError> {
+    ) -> Result<PendingPrunedNotices, ReadycheckRepositoryError> {
         let connection = open_runtime_connection(&self.path)?;
         let mut statement = connection.prepare(
             "SELECT guild_id,key,value FROM app_kv
              WHERE key GLOB 'readycheck:pruned_notice:*'
              ORDER BY guild_id,key",
         )?;
-        let rows = statement.query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?;
-        let mut notices = Vec::new();
-        for row in rows {
-            let (guild_id, key, value) = row?;
-            notices.push(decode_pruned_notice(guild_id, key, value)?);
-        }
-        Ok(notices)
+        collect_pruned_notices(&mut statement, [])
     }
 
     pub fn pending_pruned_notices_for(
         &self,
         lobby_id: i64,
         guild_id: i64,
-    ) -> Result<Vec<ReadycheckPrunedNotice>, ReadycheckRepositoryError> {
+    ) -> Result<PendingPrunedNotices, ReadycheckRepositoryError> {
         let connection = open_runtime_connection(&self.path)?;
         let key_pattern = format!("{PRUNED_NOTICE_PREFIX}{lobby_id}:*");
         let mut statement = connection.prepare(
@@ -224,19 +223,7 @@ impl ReadycheckRepository {
              WHERE guild_id=?1 AND key GLOB ?2
              ORDER BY key",
         )?;
-        let rows = statement.query_map(params![guild_id, key_pattern], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?;
-        let mut notices = Vec::new();
-        for row in rows {
-            let (guild_id, key, value) = row?;
-            notices.push(decode_pruned_notice(guild_id, key, value)?);
-        }
-        Ok(notices)
+        collect_pruned_notices(&mut statement, params![guild_id, key_pattern])
     }
 
     pub fn acknowledge_pruned_notice(
@@ -300,6 +287,28 @@ impl ReadycheckRepository {
             params![lobby_id, guild_id],
         )? != 0)
     }
+}
+
+fn collect_pruned_notices(
+    statement: &mut rusqlite::Statement<'_>,
+    params: impl rusqlite::Params,
+) -> Result<PendingPrunedNotices, ReadycheckRepositoryError> {
+    let rows = statement.query_map(params, |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    let mut listing = PendingPrunedNotices::default();
+    for row in rows {
+        let (guild_id, key, value) = row?;
+        match decode_pruned_notice(guild_id, key.clone(), value) {
+            Ok(notice) => listing.notices.push(notice),
+            Err(_) => listing.skipped_keys.push(key),
+        }
+    }
+    Ok(listing)
 }
 
 fn decode_pruned_notice(
@@ -636,7 +645,8 @@ mod tests {
             .expect("commit lobby and removal notice");
         let notices = repository
             .pending_pruned_notices()
-            .expect("load pending notices");
+            .expect("load pending notices")
+            .notices;
 
         assert_eq!(notices.len(), 1);
         assert_eq!(notices[0].guild_id, 42);
@@ -657,6 +667,7 @@ mod tests {
             repository
                 .pending_pruned_notices()
                 .expect("reload notices")
+                .notices
                 .is_empty()
         );
     }
@@ -686,7 +697,8 @@ mod tests {
 
         let notices = repository
             .pending_pruned_notices()
-            .expect("load pending notices");
+            .expect("load pending notices")
+            .notices;
         assert_eq!(notices.len(), 2);
         for notice in notices {
             assert!(
@@ -701,6 +713,80 @@ mod tests {
                     .starts_with(&format!("rcp:{}:", notice.lobby_id))
             );
         }
+    }
+
+    #[test]
+    fn pruned_notice_listing_skips_undecodable_rows_instead_of_failing() {
+        let (file, repository) = repository();
+        let connection = Connection::open(file.path()).expect("open fixture");
+        connection
+            .execute_batch(
+                "CREATE TABLE app_kv (
+                     guild_id INTEGER NOT NULL,
+                     key TEXT NOT NULL,
+                     value TEXT NOT NULL,
+                     PRIMARY KEY (guild_id, key)
+                 );",
+            )
+            .expect("create existing-schema outbox");
+        // Undecodable payload plus a decodable payload behind an
+        // unrecognizable key: neither may fail the listing for other rows.
+        connection
+            .execute(
+                "INSERT INTO app_kv(guild_id,key,value)
+                 VALUES (42,'readycheck:pruned_notice:1:0000000000000bad','not-json')",
+                [],
+            )
+            .expect("insert corrupted notice row");
+        connection
+            .execute(
+                "INSERT INTO app_kv(guild_id,key,value)
+                 VALUES (42,'readycheck:pruned_notice:9:future-format',
+                         '{\"lobby_id\":9,\"channel_id\":333,\"player_ids\":[200]}')",
+                [],
+            )
+            .expect("insert future-format notice row");
+        drop(connection);
+        let pruned = guild_state(42, 100, &[100]);
+        repository
+            .save_with_pruned_notice(&pruned, 333, &BTreeSet::from([200]))
+            .expect("commit valid removal notice");
+
+        let listing = repository
+            .pending_pruned_notices()
+            .expect("corrupt rows must not fail the listing");
+        assert_eq!(listing.notices.len(), 1, "valid notice survives");
+        assert_eq!(listing.notices[0].player_ids, BTreeSet::from([200]));
+        assert_eq!(
+            listing.skipped_keys,
+            [
+                "readycheck:pruned_notice:1:0000000000000bad",
+                "readycheck:pruned_notice:9:future-format",
+            ]
+        );
+
+        let scoped = repository
+            .pending_pruned_notices_for(1, 42)
+            .expect("corrupt rows must not fail the scoped listing");
+        assert_eq!(scoped.notices.len(), 1);
+        assert_eq!(
+            scoped.skipped_keys,
+            ["readycheck:pruned_notice:1:0000000000000bad"]
+        );
+        // Skipped rows stay behind for diagnosis rather than being deleted.
+        assert!(
+            repository
+                .acknowledge_pruned_notice(&listing.notices[0])
+                .expect("acknowledge valid notice")
+        );
+        assert_eq!(
+            repository
+                .pending_pruned_notices()
+                .expect("reload listing")
+                .skipped_keys
+                .len(),
+            2
+        );
     }
 
     #[test]

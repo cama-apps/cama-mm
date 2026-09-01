@@ -47,17 +47,19 @@ use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{
     DiscordDirectMessageErrorKind, DiscordMessage, DiscordTransport, GuildPlayerNameDirectory,
 };
-use crate::draft_provider::{DraftNeonObserver, DraftNeonResult};
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
-use crate::lobby_provider::{ConfirmedLobbyJoin, LobbyGambaSpectator, LobbyJoinObserver};
+use crate::option_ext::{boolean_option, integer_option, string_option, user_option};
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
     InteractionAcknowledgementPolicy, InteractionActionRow, InteractionButton, InteractionHandler,
     InteractionHandlerError, InteractionModal, InteractionOption, InteractionRequest,
     InteractionResponder, InteractionResponse, InteractionTextInput, InteractionValue,
     RegistrationError, RegistrationProvider, RegistryBuilder,
+};
+use crate::runtime_ports::{
+    ConfirmedLobbyJoin, DraftNeonObserver, DraftNeonResult, LobbyGambaSpectator, LobbyJoinObserver,
 };
 
 const MMR_COMPONENT_PREFIX: &str = "registration:mmr:";
@@ -1216,17 +1218,18 @@ impl PlayerRegistrationHandler {
         guild_id: u64,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
-        let (target_id, _, target_bot) = user_option(&context.options, "player")
+        let target = user_option(&context.options, "player")?
             .ok_or_else(|| "refer requires player".to_owned())?;
-        if target_bot == Some(true) {
+        if target.is_bot == Some(true) {
             return followup_ephemeral(&responder, "❌ You can only refer human players.").await;
         }
-        if target_id == context.user_id {
+        if target.raw_id == context.user_id {
             return followup_ephemeral(&responder, "❌ You can't refer yourself.").await;
         }
         let repository = self.referrals.clone();
         let referrer = signed_id(context.user_id, "referrer")?;
-        let target = signed_id(target_id, "referred player")?;
+        let target_id = target.raw_id;
+        let target = target.id;
         let guild = signed_id(guild_id, "guild")?;
         let result = tokio::task::spawn_blocking(move || {
             repository.create_referral(referrer, target, Some(guild))
@@ -2404,7 +2407,7 @@ impl PlayerRegistrationHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
         let enabled = boolean_option(options, "enabled");
-        let target = user_option(options, "playername");
+        let target = user_option(options, "playername")?;
         if enabled.is_some() && target.is_some() {
             return followup_ephemeral(
                 &responder,
@@ -2414,7 +2417,7 @@ impl PlayerRegistrationHandler {
         }
         let subscriber_id = signed_id(context.user_id, "subscriber")?;
         let guild = signed_id(guild_id, "guild")?;
-        let Some((target_id, _target_name, is_bot)) = target else {
+        let Some(target) = target else {
             let enabled = enabled.unwrap_or(true);
             let notifications = self.notifications.clone();
             let saved = tokio::task::spawn_blocking(move || {
@@ -2443,22 +2446,22 @@ impl PlayerRegistrationHandler {
             };
             return followup_ephemeral(&responder, message).await;
         };
-        if target_id == context.user_id {
+        if target.raw_id == context.user_id {
             return followup_ephemeral(
                 &responder,
                 "❌ You can't subscribe to your own lobby signup.",
             )
             .await;
         }
-        if is_bot == Some(true) {
+        if target.is_bot == Some(true) {
             return followup_ephemeral(
                 &responder,
                 "❌ Bot accounts can't sign up for player lobbies.",
             )
             .await;
         }
-        let target_name = escape_discord_text(&self.render_player_name(guild_id, target_id));
-        let target = signed_id(target_id, "target")?;
+        let target_name = escape_discord_text(&self.render_player_name(guild_id, target.raw_id));
+        let target = target.id;
         let notifications = self.notifications.clone();
         let duplicate = tokio::task::spawn_blocking(move || {
             notifications.has_lobby_target_subscription(subscriber_id, target, Some(guild))
@@ -2622,57 +2625,6 @@ fn leaf_command(options: &[InteractionOption]) -> Result<(String, &[InteractionO
         }
         _ => unreachable!("filtered to a nested command"),
     }
-}
-
-fn integer_option(options: &[InteractionOption], name: &str) -> Option<i64> {
-    options.iter().find_map(|option| {
-        (option.name == name)
-            .then_some(&option.value)
-            .and_then(|value| match value {
-                InteractionValue::Integer(value) => Some(*value),
-                _ => None,
-            })
-    })
-}
-
-fn boolean_option(options: &[InteractionOption], name: &str) -> Option<bool> {
-    options.iter().find_map(|option| {
-        (option.name == name)
-            .then_some(&option.value)
-            .and_then(|value| match value {
-                InteractionValue::Boolean(value) => Some(*value),
-                _ => None,
-            })
-    })
-}
-
-fn string_option<'a>(options: &'a [InteractionOption], name: &str) -> Option<&'a str> {
-    options.iter().find_map(|option| {
-        (option.name == name)
-            .then_some(&option.value)
-            .and_then(|value| match value {
-                InteractionValue::String(value) => Some(value.as_str()),
-                _ => None,
-            })
-    })
-}
-
-fn user_option(
-    options: &[InteractionOption],
-    name: &str,
-) -> Option<(u64, Option<String>, Option<bool>)> {
-    options.iter().find_map(|option| {
-        (option.name == name)
-            .then_some(&option.value)
-            .and_then(|value| match value {
-                InteractionValue::User {
-                    id,
-                    display_name,
-                    is_bot,
-                } => Some((*id, display_name.clone(), *is_bot)),
-                _ => None,
-            })
-    })
 }
 
 async fn defer_ephemeral(responder: &Arc<dyn InteractionResponder>) -> bool {

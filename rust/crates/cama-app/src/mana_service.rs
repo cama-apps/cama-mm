@@ -561,11 +561,15 @@ pub trait ManaAssignmentStore {
         assigned_date: &str,
     ) -> Result<bool, ManaServiceError>;
 
+    /// Claim a batch and pay the Plains White stipend (when `white_stipend`
+    /// is positive) in the same storage transaction, so a claim and its
+    /// stipend commit or roll back together.
     fn claim_mana_batch_atomic(
         &mut self,
         assignments: &[(DiscordId, Land)],
         guild_id: GuildId,
         assigned_date: &str,
+        white_stipend: i64,
     ) -> Result<Vec<ClaimedMana>, ManaServiceError>;
 }
 
@@ -611,6 +615,7 @@ impl ManaAssignmentStore for SqliteManaRepository {
         assignments: &[(DiscordId, Land)],
         guild_id: GuildId,
         assigned_date: &str,
+        white_stipend: i64,
     ) -> Result<Vec<ClaimedMana>, ManaServiceError> {
         let db_assignments = assignments
             .iter()
@@ -621,6 +626,7 @@ impl ManaAssignmentStore for SqliteManaRepository {
             &db_assignments,
             Some(guild_id),
             assigned_date,
+            white_stipend,
         )
         .map_err(repository_error)?
         .into_iter()
@@ -906,6 +912,7 @@ where
         today: &str,
         day_start_timestamp: i64,
         ash_fan_ids: &BTreeSet<DiscordId>,
+        white_stipend: i64,
     ) -> Result<AssignmentBoard, ManaServiceError> {
         let players = self.data.players(guild_id)?;
         let current = self.repository.get_all_mana(guild_id)?;
@@ -972,9 +979,12 @@ where
                 )
             })
             .collect::<Vec<_>>();
-        let claimed = self
-            .repository
-            .claim_mana_batch_atomic(&assignments, guild_id, today)?;
+        let claimed = self.repository.claim_mana_batch_atomic(
+            &assignments,
+            guild_id,
+            today,
+            white_stipend,
+        )?;
         let plains_ids = claimed
             .iter()
             .filter(|row| row.mana.land == Land::Plains)

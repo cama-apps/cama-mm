@@ -3,11 +3,13 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
+use crate::embed_colors::DISCORD_BLUE;
+use crate::option_ext::{integer_option, string_option};
 use crate::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, InteractionAttachment,
-    InteractionEmbed, InteractionHandler, InteractionHandlerError, InteractionOption,
-    InteractionRequest, InteractionResponder, InteractionResponse, InteractionValue,
-    RegistrationError, RegistrationProvider, RegistryBuilder,
+    InteractionEmbed, InteractionHandler, InteractionHandlerError, InteractionRequest,
+    InteractionResponder, InteractionResponse, RegistrationError, RegistrationProvider,
+    RegistryBuilder,
 };
 use async_trait::async_trait;
 use cama_app::draft::DraftStateManager;
@@ -21,8 +23,6 @@ use cama_db::herogrid_repository::{
 };
 use tracing::{error, warn};
 
-// `discord.Color.blue()` in discord.py is the named blue 0x3498DB.
-const DISCORD_BLUE: u32 = 0x34_98_db;
 const GUILD_ONLY_MESSAGE: &str = "This command can only be used in a server.";
 const FRIENDLY_RENDER_ERROR: &str =
     "❌ Couldn't generate the hero grid right now — try again in a moment.";
@@ -188,10 +188,9 @@ impl InteractionHandler for HeroGridHandler {
                 warn!(%error, guild_id, "Hero Grid player-name snapshot failed");
                 Default::default()
             });
-        let player_name_overrides = player_ids
-            .iter()
-            .map(|player_id| (*player_id, player_names.resolve(*player_id)))
-            .collect();
+        // Only cache hits override; the grid service falls back to stored
+        // player names for misses instead of numeric Discord IDs.
+        let player_name_overrides = player_names.known_names(&player_ids);
         let service = self.service.clone();
         let outcome = tokio::task::spawn_blocking(move || {
             service
@@ -318,34 +317,6 @@ fn parse_lobby(value: Option<&str>) -> Result<Option<LobbyKind>, String> {
     }
 }
 
-fn string_option<'a>(options: &'a [InteractionOption], name: &str) -> Option<&'a str> {
-    options.iter().find_map(|option| {
-        (option.name == name)
-            .then_some(&option.value)
-            .and_then(|value| {
-                if let InteractionValue::String(value) = value {
-                    Some(value.as_str())
-                } else {
-                    None
-                }
-            })
-    })
-}
-
-fn integer_option(options: &[InteractionOption], name: &str) -> Option<i64> {
-    options.iter().find_map(|option| {
-        (option.name == name)
-            .then_some(&option.value)
-            .and_then(|value| {
-                if let InteractionValue::Integer(value) = value {
-                    Some(*value)
-                } else {
-                    None
-                }
-            })
-    })
-}
-
 fn outcome_response(outcome: HeroGridCommandOutcome) -> InteractionResponse {
     match outcome {
         HeroGridCommandOutcome::Message(message) => InteractionResponse::message(message),
@@ -372,7 +343,7 @@ fn attachment_response(attachment: HeroGridAttachment) -> InteractionResponse {
 mod tests {
     use std::sync::Mutex;
 
-    use crate::registration::InteractionResponseError;
+    use crate::registration::{InteractionOption, InteractionResponseError, InteractionValue};
     use cama_db::schema_manager::initialize_or_migrate;
     use rusqlite::{Connection, params};
     use tempfile::NamedTempFile;

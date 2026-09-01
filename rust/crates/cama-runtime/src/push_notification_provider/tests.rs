@@ -345,6 +345,79 @@ fn buttons(response: &InteractionResponse) -> Vec<&InteractionButton> {
 }
 
 #[tokio::test]
+async fn command_without_a_guild_is_rejected_as_server_only() {
+    let database = migrated_database();
+    let provider = provider(database.path());
+    let responder = Arc::new(RecordingResponder::default());
+    let request = InteractionRequest::Command {
+        interaction_id: 1,
+        name: COMMAND_NAME.to_owned(),
+        user_id: USER,
+        user_display_name: "Notify User".to_owned(),
+        guild_id: None,
+        channel_id: None,
+        member_permissions: None,
+        options: Vec::new(),
+    };
+
+    provider
+        .handler
+        .handle(
+            request,
+            Arc::clone(&responder) as Arc<dyn InteractionResponder>,
+        )
+        .await
+        .expect("DM command handled");
+
+    let response = responder.response();
+    assert_eq!(response.content, SERVER_ONLY_MESSAGE);
+    assert!(response.ephemeral);
+    // Nothing may be stored under the absent-guild sentinel.
+    let repository = PushNotificationRepository::new(database.path());
+    assert_eq!(
+        repository
+            .get_config(USER as i64, Some(0))
+            .expect("read config"),
+        None
+    );
+}
+
+#[tokio::test]
+async fn component_without_a_guild_is_rejected_without_writing_config() {
+    let database = migrated_database();
+    let provider = provider(database.path());
+    let responder = Arc::new(RecordingResponder::default());
+    let request = InteractionRequest::Component {
+        interaction_id: 2,
+        custom_id: BUTTON_SET.to_owned(),
+        user_id: USER,
+        user_display_name: "Notify User".to_owned(),
+        guild_id: None,
+        channel_id: None,
+        member_permissions: None,
+        values: Vec::new(),
+    };
+
+    provider
+        .handler
+        .handle(
+            request,
+            Arc::clone(&responder) as Arc<dyn InteractionResponder>,
+        )
+        .await
+        .expect("DM component handled");
+
+    assert_eq!(responder.update_response().content, SERVER_ONLY_MESSAGE);
+    let repository = PushNotificationRepository::new(database.path());
+    assert_eq!(
+        repository
+            .get_config(USER as i64, Some(0))
+            .expect("read config"),
+        None
+    );
+}
+
+#[tokio::test]
 async fn command_with_no_target_offers_set_button_and_dm_toggles() {
     let database = migrated_database();
     let provider = provider(database.path());

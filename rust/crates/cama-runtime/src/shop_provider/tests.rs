@@ -1218,7 +1218,7 @@ fn shop_ai_prompt_uses_rendered_name_instead_of_stored_username() {
 }
 
 #[tokio::test]
-async fn unregistered_target_without_cached_member_uses_discord_id() {
+async fn unregistered_target_without_cached_member_uses_payload_display_name() {
     let fixture = Fixture::migrated();
     fixture.player(BUYER, 100_000);
     let projected = fixture
@@ -1248,7 +1248,7 @@ async fn unregistered_target_without_cached_member_uses_discord_id() {
     let target = user_option(&projected, "target")
         .expect("parse target")
         .expect("target option");
-    assert_eq!(target.display_name, TARGET.to_string());
+    assert_eq!(target.display_name, "Target Account");
 }
 
 #[test]
@@ -1258,9 +1258,9 @@ fn arbitrary_shop_player_names_prefer_server_nicknames() {
         .provider
         .with_player_names(Arc::new(StaticPlayerNames));
 
-    let names = provider.handler.project_player_names(
+    let names = provider.handler.project_stored_player_names(
         i64::try_from(GUILD).unwrap(),
-        &[i64::try_from(TARGET).unwrap()],
+        BTreeMap::from([(i64::try_from(TARGET).unwrap(), "Stored Target".to_owned())]),
     );
 
     assert_eq!(

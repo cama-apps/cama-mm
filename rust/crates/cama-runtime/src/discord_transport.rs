@@ -37,11 +37,40 @@ impl GuildPlayerNameDirectory {
 
     #[must_use]
     pub fn resolve(&self, discord_id: i64) -> String {
+        self.cached_name(discord_id)
+            .unwrap_or_else(|| discord_id.to_string())
+    }
+
+    /// Resolve with a caller-supplied stored player name filling the gap
+    /// between the member cache and the bare Discord ID: cached render name
+    /// first, then the stored name, then the numeric ID as the last resort.
+    #[must_use]
+    pub fn resolve_or(&self, discord_id: i64, stored_name: &str) -> String {
+        self.cached_name(discord_id).unwrap_or_else(|| {
+            if stored_name.is_empty() {
+                discord_id.to_string()
+            } else {
+                stored_name.to_owned()
+            }
+        })
+    }
+
+    /// Render names for the requested players that are actually present in the
+    /// member cache. Misses are omitted so callers can layer stored player
+    /// names underneath instead of receiving a baked-in numeric fallback.
+    #[must_use]
+    pub fn known_names(&self, player_ids: &[i64]) -> BTreeMap<i64, String> {
+        player_ids
+            .iter()
+            .filter_map(|player_id| self.cached_name(*player_id).map(|name| (*player_id, name)))
+            .collect()
+    }
+
+    fn cached_name(&self, discord_id: i64) -> Option<String> {
         self.members
             .as_ref()
             .and_then(|members| members.get(&discord_id))
             .cloned()
-            .unwrap_or_else(|| discord_id.to_string())
     }
 
     #[must_use]
@@ -624,5 +653,38 @@ mod player_render_name_tests {
         let names = GuildPlayerNameDirectory::new(None);
 
         assert_eq!(names.resolve(7), "7");
+    }
+
+    #[test]
+    fn stored_name_fills_the_gap_between_cache_and_discord_id() {
+        let names = GuildPlayerNameDirectory::new(Some(BTreeMap::from([(
+            7,
+            "Server Nickname".to_owned(),
+        )])));
+
+        assert_eq!(names.resolve_or(7, "stored-seven"), "Server Nickname");
+        assert_eq!(names.resolve_or(8, "stored-eight"), "stored-eight");
+        assert_eq!(names.resolve_or(9, ""), "9");
+
+        let unavailable = GuildPlayerNameDirectory::new(None);
+        assert_eq!(unavailable.resolve_or(7, "stored-seven"), "stored-seven");
+    }
+
+    #[test]
+    fn known_names_omits_cache_misses_instead_of_baking_in_ids() {
+        let names = GuildPlayerNameDirectory::new(Some(BTreeMap::from([(
+            7,
+            "Server Nickname".to_owned(),
+        )])));
+
+        assert_eq!(
+            names.known_names(&[7, 8]),
+            BTreeMap::from([(7, "Server Nickname".to_owned())])
+        );
+        assert!(
+            GuildPlayerNameDirectory::new(None)
+                .known_names(&[7, 8])
+                .is_empty()
+        );
     }
 }

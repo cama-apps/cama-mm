@@ -612,7 +612,9 @@ async fn links_disclose_only_guild_registered_players_and_preserve_mentions() {
     );
 }
 
-#[tokio::test]
+// Paused time: the 5ms view-timeout task fires via auto-advance before the
+// 20ms sleep below, so the deletion assertion cannot race the scheduler.
+#[tokio::test(start_paused = true)]
 async fn view_timeout_deletes_the_followup_and_stale_components_fail_safely() {
     let fixture = Fixture::new();
     fixture.register(USER, "Alice", None);

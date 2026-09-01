@@ -13,8 +13,14 @@ mod lobby_provider {
 mod match_provider {
     pub use cama_runtime::match_provider::*;
 }
+mod option_ext {
+    pub use cama_runtime::option_ext::*;
+}
 mod registration {
     pub use cama_runtime::registration::*;
+}
+mod runtime_ports {
+    pub use cama_runtime::runtime_ports::*;
 }
 
 #[cfg(test)]

@@ -1241,6 +1241,109 @@ async fn legacy_enrichment_write_derives_compact_facts() {
     assert_production_manual_enrichment_is_atomic_and_match_view_survives_restart().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_enrichment_force_flag_relaxes_validation_and_default_stays_strict() {
+    let (_directory, path) = migrated();
+    let catalog = dotabase();
+    // Only 1 of 10 lobby players is linked and present in the OpenDota
+    // payload, so strict validation can never pass for this match.
+    seed_manual_match(&path);
+    let server = RouteServer::start(vec![manual_match_payload(), manual_match_payload()]);
+    let provider = EnrichmentRegistrationProvider::with_dotabase_path(
+        &path,
+        &application_config(),
+        services(&server),
+        catalog.path(),
+    )
+    .expect("compose enrichment provider");
+    let registry = registry(&provider);
+
+    // Without force (default), the service keeps strict roster validation.
+    let strict_responder = Arc::new(CapturingResponder::default());
+    registry
+        .command_handler("enrich")
+        .expect("enrich command handler")
+        .handle(
+            command(
+                "enrich",
+                "match",
+                vec![option("valve_match_id", InteractionValue::Integer(9_001))],
+                ADMIN,
+                Some(GUILD),
+                None,
+            ),
+            strict_responder.clone(),
+        )
+        .await
+        .expect("strict manual enrichment response");
+    {
+        let captured = strict_responder.captured.lock().expect("response capture");
+        assert_eq!(captured.deferred, [true]);
+        let response = captured.followups.last().expect("strict followup");
+        assert!(response.ephemeral);
+        assert!(response.content.starts_with("Enrichment failed:"));
+        assert!(response.content.contains("(need 10)"));
+        assert!(response.content.contains("force:True"));
+    }
+    let connection = Connection::open(&path).expect("inspect strict refusal");
+    let untouched: Option<i64> = connection
+        .query_row(
+            "SELECT valve_match_id FROM matches WHERE match_id=7 AND guild_id=?1",
+            [GUILD as i64],
+            |row| row.get(0),
+        )
+        .expect("strict refusal leaves the match unlinked");
+    assert_eq!(untouched, None);
+    drop(connection);
+
+    // force:true reaches the service with validation relaxed and enriches
+    // the same explicit Valve ID.
+    let force_responder = Arc::new(CapturingResponder::default());
+    registry
+        .command_handler("enrich")
+        .expect("enrich command handler")
+        .handle(
+            command(
+                "enrich",
+                "match",
+                vec![
+                    option("valve_match_id", InteractionValue::Integer(9_001)),
+                    option("force", InteractionValue::Boolean(true)),
+                ],
+                ADMIN,
+                Some(GUILD),
+                None,
+            ),
+            force_responder.clone(),
+        )
+        .await
+        .expect("forced manual enrichment response");
+    {
+        let captured = force_responder.captured.lock().expect("response capture");
+        assert_eq!(captured.deferred, [true]);
+        let response = captured.followups.last().expect("forced followup");
+        assert!(response.ephemeral);
+        assert_eq!(response.content, "Enriched 1/10 players");
+    }
+    let connection = Connection::open(&path).expect("inspect forced enrichment");
+    let persisted: (i64, String) = connection
+        .query_row(
+            "SELECT valve_match_id,enrichment_source FROM matches
+             WHERE match_id=7 AND guild_id=?1",
+            [GUILD as i64],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("forced enrichment persisted");
+    assert_eq!(persisted, (9_001, "manual".to_owned()));
+    assert_eq!(
+        server.requests(2),
+        [
+            "GET /matches/9001 HTTP/1.1".to_owned(),
+            "GET /matches/9001 HTTP/1.1".to_owned(),
+        ]
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn production_discovery_reuses_one_detail_fetch_and_persists_auto_provenance() {
     let (_directory, path) = migrated();

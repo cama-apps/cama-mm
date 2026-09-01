@@ -20,8 +20,8 @@ pub mod admin_match_correction;
 pub mod admin_provider;
 pub(crate) use cama_runtime_core::ids;
 pub use cama_runtime_core::{
-    application_config, config, discord_transport, gateway_events, global_hooks, raw_reactions,
-    registration,
+    application_config, config, discord_transport, embed_colors, gateway_events, global_hooks,
+    option_ext, raw_reactions, registration, runtime_ports,
 };
 pub mod betting_provider;
 pub mod command_tree_contract;

@@ -51,10 +51,6 @@ use cama_domain::rate_limiter::RateLimiter;
 use thiserror::Error;
 use tracing::{debug, warn};
 
-use crate::admin_provider::{
-    AdminFakeLobbyRequest, AdminFakeLobbyResult, AdminLobbyControl, AdminLobbyEjectionRequest,
-    AdminLobbyEjectionResult, AdminLobbyScope,
-};
 use crate::application_config::ApplicationConfig;
 use crate::curfew_sweep_worker::CurfewLobbyDisplayPort;
 use crate::discord_transport::{
@@ -72,6 +68,13 @@ use crate::registration::{
     InteractionHandler, InteractionHandlerError, InteractionOption, InteractionRequest,
     InteractionResponder, InteractionResponse, InteractionValue, RegistrationError,
     RegistrationProvider, RegistryBuilder,
+};
+use crate::runtime_ports::{
+    AdminFakeLobbyRequest, AdminFakeLobbyResult, AdminLobbyControl, AdminLobbyEjectionRequest,
+    AdminLobbyEjectionResult, AdminLobbyScope,
+};
+pub use crate::runtime_ports::{
+    ConfirmedLobbyJoin, LobbyGambaSpectator, LobbyJoinObserver, MatchLobbySnapshot,
 };
 
 const LEGACY_FROGLING_EMOJI_ID: u64 = 1_463_270_458_848_842_003;
@@ -101,59 +104,6 @@ pub struct LobbyRuntimeConfig {
     pub ready_threshold: usize,
     pub max_players: usize,
     pub first_game_pool_daily_amount: i64,
-}
-
-/// Durable-join projection delivered after the lobby display and ordered
-/// thread activity have been published.  Consumers can claim one-shot watches
-/// against `joined_at_ns` without reaching into lobby-runtime internals.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ConfirmedLobbyJoin {
-    pub guild_id: u64,
-    pub player_id: u64,
-    pub player_name: String,
-    pub player_display_name: String,
-    pub lobby_kind: LobbyKind,
-    pub joined_at_ns: i64,
-    pub player_ids: BTreeSet<u64>,
-    pub ready_threshold: usize,
-    pub lobby_channel_id: Option<u64>,
-    pub lobby_message_id: Option<u64>,
-    pub origin_channel_id: Option<u64>,
-    pub thread_id: Option<u64>,
-}
-
-/// Projection of the auxiliary jopacoin reaction. The registration provider
-/// owns the shared Neon service, so this keeps the lobby provider from
-/// constructing a second cooldown/event ledger.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LobbyGambaSpectator {
-    pub guild_id: u64,
-    pub player_id: u64,
-    pub player_display_name: String,
-    pub channel_id: u64,
-}
-
-#[async_trait]
-pub trait LobbyJoinObserver: Send + Sync {
-    async fn confirmed_lobby_join(&self, event: ConfirmedLobbyJoin) -> Result<(), String>;
-
-    /// Python invokes this only after the successful `/join` follow-up. Lobby
-    /// creation auto-join and raw sword joins deliberately never call it.
-    async fn explicit_lobby_join_neon(&self, _event: ConfirmedLobbyJoin) -> Result<(), String> {
-        Ok(())
-    }
-
-    async fn gamba_spectator(&self, _event: LobbyGambaSpectator) -> Result<(), String> {
-        Ok(())
-    }
-
-    /// Reset any generation-scoped join side effects after `/resetlobby` has
-    /// durably cleared the lobby. Python clears both rally and ready cooldowns
-    /// at this boundary so a newly-created generation is never suppressed by
-    /// the lobby it replaced.
-    async fn lobby_reset(&self, _guild_id: u64, _lobby_kind: LobbyKind) -> Result<(), String> {
-        Ok(())
-    }
 }
 
 impl LobbyRuntimeConfig {
@@ -712,11 +662,14 @@ impl LobbyRuntimeState {
                     .ok()
             })
             .flatten();
-        let names = GuildPlayerNameDirectory::new(names);
-        player_ids
-            .iter()
-            .map(|player_id| (player_id.0, names.resolve(player_id.0)))
-            .collect()
+        // Only cache hits override; the embed builder keeps stored player
+        // names for misses instead of degrading to numeric Discord IDs.
+        GuildPlayerNameDirectory::new(names).known_names(
+            &player_ids
+                .iter()
+                .map(|player_id| player_id.0)
+                .collect::<Vec<_>>(),
+        )
     }
 
     async fn classify_readycheck_players(
@@ -828,14 +781,18 @@ impl LobbyRuntimeState {
         &self,
     ) -> Result<Vec<ReadycheckPrunedNotice>, String> {
         let persistence = Arc::clone(&self.readycheck_persistence);
-        tokio::task::spawn_blocking(move || {
+        let listing = tokio::task::spawn_blocking(move || {
             persistence
                 .repository
                 .pending_pruned_notices()
                 .map_err(|error| error.to_string())
         })
         .await
-        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())??;
+        for key in &listing.skipped_keys {
+            warn!(%key, "skipping undecodable ready-check removal notice");
+        }
+        Ok(listing.notices)
     }
 
     async fn publish_readycheck_pruned_notice(
@@ -855,14 +812,27 @@ impl LobbyRuntimeState {
             .collect::<Result<BTreeSet<_>, _>>()
             .map_err(ReadycheckNoticePublishError::Fatal)?;
         let channel_id = to_u64(notice.channel_id).map_err(ReadycheckNoticePublishError::Fatal)?;
-        self.transport
-            .send_message_with_delivery_key(
-                channel_id,
-                notice.delivery_nonce(),
-                readycheck_pruned_players_message(scope.kind, &users),
-            )
+        // Discord's nonce dedup window is only minutes wide, while this outbox
+        // is at-least-once: a send whose acknowledgement DELETE was lost (busy
+        // database, crash before ack) is retried on the next Ready/Resume.
+        // History is checked for the durable delivery key first so an
+        // already-delivered notice is acknowledged without pinging the pruned
+        // players a second time.
+        let already_delivered = self
+            .transport
+            .find_message_by_delivery_key(channel_id, notice.delivery_nonce(), 0, 500)
             .await
             .map_err(ReadycheckNoticePublishError::Delivery)?;
+        if already_delivered.is_none() {
+            self.transport
+                .send_message_with_delivery_key(
+                    channel_id,
+                    notice.delivery_nonce(),
+                    readycheck_pruned_players_message(scope.kind, &users),
+                )
+                .await
+                .map_err(ReadycheckNoticePublishError::Delivery)?;
+        }
         let persistence = Arc::clone(&self.readycheck_persistence);
         let acknowledged = tokio::task::spawn_blocking(move || {
             persistence
@@ -887,7 +857,7 @@ impl LobbyRuntimeState {
         scope: LobbyScope,
     ) -> Result<(), String> {
         let persistence = Arc::clone(&self.readycheck_persistence);
-        let notices = tokio::task::spawn_blocking(move || {
+        let listing = tokio::task::spawn_blocking(move || {
             persistence
                 .repository
                 .pending_pruned_notices_for(scope.lobby_id(), scope.guild_id.0)
@@ -895,7 +865,10 @@ impl LobbyRuntimeState {
         })
         .await
         .map_err(|error| error.to_string())??;
-        for notice in notices {
+        for key in &listing.skipped_keys {
+            warn!(%key, ?scope, "skipping undecodable ready-check removal notice");
+        }
+        for notice in listing.notices {
             match self.publish_readycheck_pruned_notice(notice).await {
                 Ok(()) => {}
                 Err(ReadycheckNoticePublishError::Delivery(error)) => {
@@ -1026,7 +999,7 @@ impl LobbyRuntimeState {
         let is_full_lobby = self
             .readychecks
             .readycheck_generation(scope)
-            .is_some_and(|generation| generation.lobby_ids.len() == self.config.ready_threshold);
+            .is_some_and(|generation| generation.lobby_ids.len() >= self.config.ready_threshold);
         if !is_full_lobby {
             return;
         }
@@ -1203,26 +1176,6 @@ pub struct LobbyRegistrationProvider {
 pub struct MatchActiveDraft {
     pub lobby_kind: LobbyKind,
     pub captain_ids: BTreeSet<i64>,
-}
-
-/// Stable snapshot consumed while one live lobby operation lock is held.
-///
-/// `confirmed_player_ids` comes from [`ReadycheckService`], not the legacy
-/// readycheck fields retained in `LobbyService`. This distinction matters for
-/// the ten-confirmation conditional-roster behavior of Python `/shuffle`.
-#[derive(Clone, Debug, PartialEq)]
-pub struct MatchLobbySnapshot {
-    pub guild_id: i64,
-    pub lobby_kind: LobbyKind,
-    pub created_by: Option<i64>,
-    pub player_ids: Vec<i64>,
-    pub player_join_times: BTreeMap<i64, f64>,
-    pub confirmed_player_ids: Option<BTreeSet<i64>>,
-    pub ready_threshold: usize,
-    pub lobby_channel_id: Option<u64>,
-    pub lobby_message_id: Option<u64>,
-    pub origin_channel_id: Option<u64>,
-    pub thread_id: Option<u64>,
 }
 
 /// Cloneable bridge from `/match` to the single production lobby runtime.
@@ -3593,19 +3546,6 @@ impl LobbyInteractionHandler {
             .or_else(|| discord_display_name.map(str::to_owned))
             .unwrap_or_else(|| stored_player_name.to_owned());
         if let Some(thread_id) = lobby.message_ids.thread_id {
-            // A mention is what actually subscribes a Discord user to a
-            // thread, so dropping the ping (below) also drops that
-            // subscription unless we join them to the thread explicitly.
-            if let (Ok(thread_id), Ok(player_snowflake)) =
-                (to_u64(thread_id.0), u64::try_from(player_id.0))
-                && let Err(error) = self
-                    .state
-                    .transport
-                    .add_thread_member(thread_id, player_snowflake)
-                    .await
-            {
-                debug!(%error, ?scope, "could not subscribe joiner to lobby thread");
-            }
             // A joiner clicked the button/reacted themselves, so pinging them
             // about their own action would just be noise -- the name alone is
             // enough for everyone else already in the thread.
@@ -3633,6 +3573,22 @@ impl LobbyInteractionHandler {
                         "lobby join publication has invalid persisted Discord IDs"
                     );
                 }
+            }
+            // A mention is what actually subscribes a Discord user to a
+            // thread, so dropping the ping (above) also drops that
+            // subscription unless we join them to the thread explicitly.
+            // Subscribe only after the join message: Discord rejects member
+            // additions to an archived thread, and sending that message is
+            // what auto-unarchives it.
+            if let (Ok(thread_id), Ok(player_snowflake)) =
+                (to_u64(thread_id.0), u64::try_from(player_id.0))
+                && let Err(error) = self
+                    .state
+                    .transport
+                    .add_thread_member(thread_id, player_snowflake)
+                    .await
+            {
+                debug!(%error, ?scope, "could not subscribe joiner to lobby thread");
             }
         }
 

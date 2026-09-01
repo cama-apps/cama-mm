@@ -1230,6 +1230,61 @@ async fn python_mafia_act_command_case() {
     );
 }
 
+#[test]
+fn user_option_distinguishes_absent_from_out_of_range_target() {
+    assert_eq!(user_option(&[], "target"), Ok(None));
+    let valid = InteractionOption {
+        name: "target".to_owned(),
+        value: InteractionValue::User {
+            id: 5,
+            display_name: None,
+            is_bot: Some(false),
+        },
+    };
+    assert_eq!(
+        user_option(std::slice::from_ref(&valid), "target"),
+        Ok(Some(5))
+    );
+    let out_of_range = InteractionOption {
+        name: "target".to_owned(),
+        value: InteractionValue::User {
+            id: u64::MAX,
+            display_name: None,
+            is_bot: Some(false),
+        },
+    };
+    assert_eq!(
+        user_option(std::slice::from_ref(&out_of_range), "target"),
+        Err(InteractionHandlerError::Handler(
+            "target ID exceeds SQLite INTEGER".to_owned()
+        ))
+    );
+}
+
+#[tokio::test]
+async fn mafia_act_reports_invalid_target_id_not_missing_target() {
+    let fixture = media_fixture();
+    let target = InteractionOption {
+        name: "target".to_owned(),
+        value: InteractionValue::User {
+            id: u64::MAX,
+            display_name: None,
+            is_bot: Some(false),
+        },
+    };
+    let responder = Arc::new(CompositionResponder::default());
+    let error = fixture
+        .provider
+        .handler
+        .handle(mafia_request(1, mafia_leaf("act", vec![target])), responder)
+        .await
+        .expect_err("out-of-range target must fail closed");
+    assert_eq!(
+        error,
+        InteractionHandlerError::Handler("target ID exceeds SQLite INTEGER".to_owned())
+    );
+}
+
 #[tokio::test]
 async fn python_mafia_vote_command_case() {
     let fixture = media_fixture();

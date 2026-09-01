@@ -65,6 +65,10 @@ use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{
     DiscordIdPlayerNameResolver, DiscordTransport, GuildPlayerNameResolver,
 };
+use crate::option_ext::{
+    boolean_option as optional_bool, integer_option as optional_integer,
+    string_option as optional_string,
+};
 use crate::pet_death_delivery::DirectDeathDeliveryGuard;
 #[cfg(all(test, feature = "runtime-test-dig"))]
 use crate::pet_death_delivery::is_active as shared_direct_death_delivery_active;
@@ -915,7 +919,9 @@ impl PetInteractionHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
         let name = required_string(options, "name")?;
-        let egg = optional_string(options, "egg").unwrap_or_else(|| "standard".to_owned());
+        let egg = optional_string(options, "egg")
+            .map(str::to_owned)
+            .unwrap_or_else(|| "standard".to_owned());
         responder
             .defer(false)
             .await
@@ -1310,7 +1316,7 @@ impl PetInteractionHandler {
         options: &[InteractionOption],
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
-        let wear = optional_string(options, "wear");
+        let wear = optional_string(options, "wear").map(str::to_owned);
         responder
             .defer(true)
             .await
@@ -3157,39 +3163,10 @@ fn command_path(options: &[InteractionOption]) -> Result<(&str, &[InteractionOpt
     }
 }
 
-fn option<'a>(options: &'a [InteractionOption], name: &str) -> Option<&'a InteractionValue> {
-    options
-        .iter()
-        .find(|option| option.name == name)
-        .map(|option| &option.value)
-}
-
 fn required_string(options: &[InteractionOption], name: &str) -> Result<String, String> {
-    match option(options, name) {
-        Some(InteractionValue::String(value)) => Ok(value.clone()),
-        _ => Err(format!("missing /pet option {name}")),
-    }
-}
-
-fn optional_string(options: &[InteractionOption], name: &str) -> Option<String> {
-    match option(options, name) {
-        Some(InteractionValue::String(value)) => Some(value.clone()),
-        _ => None,
-    }
-}
-
-fn optional_integer(options: &[InteractionOption], name: &str) -> Option<i64> {
-    match option(options, name) {
-        Some(InteractionValue::Integer(value)) => Some(*value),
-        _ => None,
-    }
-}
-
-fn optional_bool(options: &[InteractionOption], name: &str) -> Option<bool> {
-    match option(options, name) {
-        Some(InteractionValue::Boolean(value)) => Some(*value),
-        _ => None,
-    }
+    optional_string(options, name)
+        .map(str::to_owned)
+        .ok_or_else(|| format!("missing /pet option {name}"))
 }
 
 fn empty_status() -> cama_domain::pet::PetStatus {
@@ -3211,19 +3188,13 @@ fn optional_user(
     options: &[InteractionOption],
     name: &str,
 ) -> Result<Option<(i64, String, bool)>, String> {
-    match option(options, name) {
-        None => Ok(None),
-        Some(InteractionValue::User {
-            id,
-            display_name,
-            is_bot,
-        }) => Ok(Some((
-            signed_id(*id, "target user")?,
-            display_name.clone().unwrap_or_else(|| id.to_string()),
-            is_bot.unwrap_or(false),
-        ))),
-        _ => Err(format!("invalid /pet user option {name}")),
-    }
+    Ok(crate::option_ext::user_option(options, name)?.map(|user| {
+        (
+            user.id,
+            user.display_name_or_id(),
+            user.is_bot.unwrap_or(false),
+        )
+    }))
 }
 
 fn required_user(options: &[InteractionOption], name: &str) -> Result<(i64, String, bool), String> {

@@ -749,7 +749,7 @@ impl MafiaInteractionHandler {
         options: &[InteractionOption],
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
-        let target = user_option(options, "target").ok_or("/mafia act requires target")?;
+        let target = user_option(options, "target")?.ok_or("/mafia act requires target")?;
         let repository = self.repository.clone();
         let actor = context.actor_id;
         let reply = blocking(move || submit_night_action(&repository, guild_id, actor, target))
@@ -796,7 +796,7 @@ impl MafiaInteractionHandler {
         options: &[InteractionOption],
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
-        let target = user_option(options, "target").ok_or("/mafia vote requires target")?;
+        let target = user_option(options, "target")?.ok_or("/mafia vote requires target")?;
         let repository = self.repository.clone();
         let actor = context.actor_id;
         let reply = blocking(move || submit_day_vote(&repository, guild_id, actor, target))
@@ -825,7 +825,7 @@ impl MafiaInteractionHandler {
         options: &[InteractionOption],
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
-        let target = user_option(options, "target").ok_or("/mafia bounty requires target")?;
+        let target = user_option(options, "target")?.ok_or("/mafia bounty requires target")?;
         let repository = self.repository.clone();
         let actor = context.actor_id;
         let max_debt = self.max_debt;
@@ -2539,14 +2539,14 @@ fn leaf_command(options: &[InteractionOption]) -> Result<(String, &[InteractionO
         _ => unreachable!(),
     }
 }
-fn user_option(options: &[InteractionOption], name: &str) -> Option<i64> {
-    options
-        .iter()
-        .find(|option| option.name == name)
-        .and_then(|option| match option.value {
-            InteractionValue::User { id, .. } => i64::try_from(id).ok(),
-            _ => None,
-        })
+/// `Ok(None)` means the option is absent; a supplied user whose ID does not
+/// fit SQLite's signed range fails closed with an invalid-ID error instead of
+/// masquerading as a missing option.
+fn user_option(
+    options: &[InteractionOption],
+    name: &str,
+) -> Result<Option<i64>, InteractionHandlerError> {
+    Ok(crate::option_ext::user_option(options, name)?.map(|user| user.id))
 }
 fn mafia_options() -> Vec<CommandOptionSpec> {
     vec![
