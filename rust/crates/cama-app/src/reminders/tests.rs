@@ -794,7 +794,7 @@ fn test_reschedule_creates_task_for_active_cooldown() {
             .task(task_key(1, TEST_GUILD_ID, ReminderKind::Wheel))
             .unwrap()
             .due_at,
-        NOW - 100 + WHEEL_COOLDOWN_SECONDS
+        next_wheel_reset_at(NOW - 100)
     );
 }
 
@@ -1284,7 +1284,7 @@ fn test_recovery_continues_after_guild_subscriber_snapshot_failure() {
 #[test]
 fn test_arm_preference_schedules_pending_wheel_cooldown() {
     let mut service = fixture();
-    let spun_at = NOW - 3 * 3_600;
+    let spun_at = NOW - 3_600;
     service
         .store()
         .seed_reminder_timestamps(
@@ -1313,7 +1313,7 @@ fn test_arm_preference_schedules_pending_wheel_cooldown() {
             .task(task_key(4_242, TEST_GUILD_ID, ReminderKind::Wheel))
             .unwrap()
             .due_at,
-        spun_at + WHEEL_COOLDOWN_SECONDS
+        next_wheel_reset_at(spun_at)
     );
     assert!(
         service
@@ -1365,7 +1365,7 @@ fn test_arm_preference_ignores_elapsed_cooldown() {
             user(4_244),
             guild(TEST_GUILD_ID),
             ReminderTimestamps {
-                last_wheel_spin: Some(NOW - WHEEL_COOLDOWN_SECONDS - 60),
+                last_wheel_spin: Some(NOW - GAME_DAY_SECONDS - 60),
                 ..ReminderTimestamps::default()
             },
         )

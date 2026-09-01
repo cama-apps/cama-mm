@@ -15,6 +15,8 @@ use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, TimeDelt
 pub const PST_OFFSET_SECONDS: i32 = -8 * 60 * 60;
 
 const GAME_DAY_ROLLOVER_HOURS: i64 = 4;
+/// Duration of one fixed-offset game day.
+pub const GAME_DAY_SECONDS: i64 = 86_400;
 const DATE_FORMAT: &str = "%Y-%m-%d";
 
 /// Errors raised while parsing a game date or converting a Unix timestamp.
@@ -128,6 +130,15 @@ pub fn game_day_start_ts(timestamp: i64) -> Result<i64, GameDateError> {
     Ok(start.timestamp())
 }
 
+/// Return the Unix timestamp of the next fixed 4 AM UTC-8 game-day boundary.
+///
+/// Because the game clock deliberately uses a fixed offset, consecutive
+/// boundaries are always exactly 86,400 seconds apart and do not move for
+/// daylight-saving time.
+pub fn next_game_day_start_ts(timestamp: i64) -> Result<i64, GameDateError> {
+    game_day_start_ts(timestamp).map(|start| start.saturating_add(GAME_DAY_SECONDS))
+}
+
 /// Return the weekday for a game-date string (`Monday = 0`, `Sunday = 6`).
 pub fn weekday_of_game_date(date: &str) -> Result<u32, GameDateError> {
     Ok(NaiveDate::parse_from_str(date, DATE_FORMAT)?
@@ -175,9 +186,9 @@ fn timestamp_to_utc(timestamp: f64) -> Option<DateTime<Utc>> {
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone;
+    use chrono::{TimeZone, Timelike};
 
-    use super::{fixed_pst, game_date_for};
+    use super::{fixed_pst, game_date_for, next_game_day_start_ts};
 
     #[test]
     fn test_game_date_boundary_is_dst_stable_across_march_transition() {
@@ -208,5 +219,16 @@ mod tests {
 
         assert_eq!(game_date_for(before), "2026-05-19");
         assert_eq!(game_date_for(after), "2026-05-20");
+    }
+
+    #[test]
+    fn next_game_day_boundary_is_always_noon_utc() {
+        for timestamp in [1_768_476_600, 1_784_115_000] {
+            let next = next_game_day_start_ts(timestamp).expect("timestamp is valid");
+            let utc = chrono::DateTime::from_timestamp(next, 0).expect("reset is valid");
+            assert_eq!(utc.hour(), 12);
+            assert_eq!(utc.minute(), 0);
+            assert_eq!(utc.second(), 0);
+        }
     }
 }

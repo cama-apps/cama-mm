@@ -18,6 +18,7 @@ use cama_app::mana_service::{
     ManaDetails, ManaService, ManaServiceError, PlayerProfile, TipStats, XorShift64Entropy,
     mana_day_label, mana_day_start_timestamp,
 };
+use cama_app::wheel::{next_wheel_reset_at, wheel_spin_is_available};
 use cama_db::bankruptcy_repository::BankruptcyRepository;
 use cama_db::core_repositories::PlayerRepository;
 use cama_db::gambling_stats_repository::{
@@ -96,7 +97,6 @@ impl ManaRegistrationProvider {
     ) -> Self {
         Self::from_parts(
             database_path.as_ref().to_path_buf(),
-            config.values.wheel_cooldown_seconds,
             config.values.white_bankrupt_stipend,
             discord,
             Arc::new(SystemManaClock),
@@ -105,7 +105,6 @@ impl ManaRegistrationProvider {
 
     fn from_parts(
         database_path: PathBuf,
-        wheel_cooldown_seconds: i64,
         _white_stipend: i64,
         discord: Arc<dyn ManaDiscordPort>,
         clock: Arc<dyn ManaClock>,
@@ -113,7 +112,6 @@ impl ManaRegistrationProvider {
         Self {
             handler: Arc::new(ManaInteractionHandler {
                 database_path,
-                wheel_cooldown_seconds,
                 discord,
                 player_names: Arc::new(DiscordIdPlayerNameResolver),
                 clock,
@@ -201,7 +199,6 @@ impl ManaMoment {
 
 struct ManaInteractionHandler {
     database_path: PathBuf,
-    wheel_cooldown_seconds: i64,
     discord: Arc<dyn ManaDiscordPort>,
     player_names: Arc<dyn GuildPlayerNameResolver>,
     clock: Arc<dyn ManaClock>,
@@ -535,7 +532,6 @@ impl ManaInteractionHandler {
 
     async fn next_wheel_spin_at(&self, user_id: i64, guild_id: i64) -> Result<i64, String> {
         let now = self.clock.moment()?.now;
-        let cooldown = self.wheel_cooldown_seconds;
         let path = self.database_path.clone();
         let last = spawn_sqlite("mana wheel cooldown read", move || {
             PlayerRepository::new(path)
@@ -543,9 +539,10 @@ impl ManaInteractionHandler {
                 .map_err(|error| error.to_string())
         })
         .await?;
-        Ok(last.map_or(now, |last| {
-            now.max(last.saturating_add(cooldown).saturating_add(1))
-        }))
+        Ok(match last {
+            Some(last) if !wheel_spin_is_available(now, Some(last)) => next_wheel_reset_at(last),
+            _ => now,
+        })
     }
 }
 

@@ -13,7 +13,8 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const WHEEL_COOLDOWN_SECONDS: i64 = 86_400;
+use cama_domain::game_date::{GAME_DAY_SECONDS, next_game_day_start_ts};
+
 pub const TRIVIA_COOLDOWN_SECONDS: i64 = 21_600;
 pub const LOWSKILL_RATING_CUTOFF: f64 = 1_400.0;
 
@@ -24,16 +25,18 @@ pub const TRIVIA_REMINDER_MESSAGE: &str =
 pub const DIG_REMINDER_MESSAGE: &str =
     "Your free dig cooldown has expired! You can `/dig go` again now.";
 
+fn next_wheel_reset_at(last_spin: i64) -> i64 {
+    next_game_day_start_ts(last_spin).unwrap_or_else(|_| last_spin.saturating_add(GAME_DAY_SECONDS))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReminderCooldowns {
-    pub wheel_seconds: i64,
     pub trivia_seconds: i64,
 }
 
 impl Default for ReminderCooldowns {
     fn default() -> Self {
         Self {
-            wheel_seconds: WHEEL_COOLDOWN_SECONDS,
             trivia_seconds: TRIVIA_COOLDOWN_SECONDS,
         }
     }
@@ -1369,8 +1372,7 @@ where
         else {
             return Ok(None);
         };
-        let cooldown = self.cooldown_for(kind).unwrap_or_default();
-        let ready_at = last_at.saturating_add(cooldown);
+        let ready_at = self.cooldown_ready_at(kind, last_at).unwrap_or(last_at);
         if ready_at <= now {
             return Ok(None);
         }
@@ -1439,7 +1441,6 @@ where
             };
 
             for kind in [ReminderKind::Wheel, ReminderKind::Trivia] {
-                let cooldown = self.cooldown_for(kind).unwrap_or_default();
                 for &user_id in subscribers_by_type.get(&kind).into_iter().flatten() {
                     let Some(last_at) = timestamps
                         .get(&user_id)
@@ -1447,7 +1448,7 @@ where
                     else {
                         continue;
                     };
-                    let ready_at = last_at.saturating_add(cooldown);
+                    let ready_at = self.cooldown_ready_at(kind, last_at).unwrap_or(last_at);
                     if ready_at <= now {
                         continue;
                     }
@@ -1646,11 +1647,20 @@ where
 
     const fn cooldown_for(&self, kind: ReminderKind) -> Option<i64> {
         match kind {
-            ReminderKind::Wheel => Some(self.cooldowns.wheel_seconds),
+            ReminderKind::Wheel => None,
             ReminderKind::Trivia => Some(self.cooldowns.trivia_seconds),
             ReminderKind::Betting | ReminderKind::Dig | ReminderKind::Lobby | ReminderKind::Pet => {
                 None
             }
+        }
+    }
+
+    fn cooldown_ready_at(&self, kind: ReminderKind, last_at: i64) -> Option<i64> {
+        match kind {
+            ReminderKind::Wheel => Some(next_wheel_reset_at(last_at)),
+            _ => self
+                .cooldown_for(kind)
+                .map(|cooldown| last_at.saturating_add(cooldown)),
         }
     }
 }

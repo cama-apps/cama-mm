@@ -1394,15 +1394,15 @@ impl PlayerRepository {
 
     /// Atomically claim a regular wheel spin for one player.
     ///
-    /// The check and timestamp write run under `BEGIN IMMEDIATE`, matching
-    /// Python's `try_claim_wheel_spin` contract.  A concurrent request can
-    /// therefore never observe the same cooldown window as available.
+    /// The caller supplies the start of the current fixed daily window. The
+    /// check and timestamp write run under `BEGIN IMMEDIATE`, so concurrent
+    /// requests can never both observe that window as available.
     pub fn try_claim_wheel_spin(
         &self,
         discord_id: i64,
         guild_id: Option<i64>,
         now: i64,
-        cooldown_seconds: i64,
+        current_window_started_at: i64,
     ) -> Result<WheelSpinClaim, CoreRepositoryError> {
         let guild_id = Self::normalize_guild_id(guild_id);
         let mut connection = self.connection()?;
@@ -1420,7 +1420,7 @@ impl PlayerRepository {
             return Ok(WheelSpinClaim::MissingPlayer);
         };
         if let Some(last_spin) = previous_spin
-            && now < last_spin.saturating_add(cooldown_seconds)
+            && last_spin >= current_window_started_at
         {
             transaction.commit()?;
             return Ok(WheelSpinClaim::Cooldown { last_spin });
@@ -5290,10 +5290,11 @@ mod tests {
     fn wheel_cooldown_claim_is_atomic_and_reports_the_persisted_anchor() {
         let fixture = Fixture::new();
         fixture.add_player(12_345, TEST_GUILD_ID);
+        let reset = 20 * 86_400 + 12 * 3_600;
         assert_eq!(
             fixture
                 .players
-                .try_claim_wheel_spin(12_345, Some(TEST_GUILD_ID), 1_000, 86_400)
+                .try_claim_wheel_spin(12_345, Some(TEST_GUILD_ID), reset - 1, reset - 86_400,)
                 .unwrap(),
             WheelSpinClaim::Claimed {
                 previous_spin: None
@@ -5302,23 +5303,25 @@ mod tests {
         assert_eq!(
             fixture
                 .players
-                .try_claim_wheel_spin(12_345, Some(TEST_GUILD_ID), 1_001, 86_400)
+                .try_claim_wheel_spin(12_345, Some(TEST_GUILD_ID), reset - 1, reset - 86_400,)
                 .unwrap(),
-            WheelSpinClaim::Cooldown { last_spin: 1_000 }
-        );
-        assert_eq!(
-            fixture
-                .players
-                .try_claim_wheel_spin(12_345, Some(TEST_GUILD_ID), 87_400, 86_400)
-                .unwrap(),
-            WheelSpinClaim::Claimed {
-                previous_spin: Some(1_000)
+            WheelSpinClaim::Cooldown {
+                last_spin: reset - 1
             }
         );
         assert_eq!(
             fixture
                 .players
-                .try_claim_wheel_spin(99_999, Some(TEST_GUILD_ID), 1_000, 86_400)
+                .try_claim_wheel_spin(12_345, Some(TEST_GUILD_ID), reset, reset)
+                .unwrap(),
+            WheelSpinClaim::Claimed {
+                previous_spin: Some(reset - 1)
+            }
+        );
+        assert_eq!(
+            fixture
+                .players
+                .try_claim_wheel_spin(99_999, Some(TEST_GUILD_ID), reset, reset)
                 .unwrap(),
             WheelSpinClaim::MissingPlayer
         );

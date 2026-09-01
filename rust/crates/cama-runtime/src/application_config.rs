@@ -247,7 +247,6 @@ pub struct Values {
     pub wheel_chain_reaction_est_ev: f64,
     pub wheel_comeback_est_ev: f64,
     pub wheel_commune_est_ev: f64,
-    pub wheel_cooldown_seconds: i64,
     pub wheel_discover_est_ev: f64,
     pub wheel_emergency_est_ev: f64,
     pub wheel_extend_1_est_ev: f64,
@@ -605,7 +604,6 @@ impl ApplicationConfig {
                 wheel_chain_reaction_est_ev: p.f64("WHEEL_CHAIN_REACTION_EST_EV", -25.0),
                 wheel_comeback_est_ev: p.f64("WHEEL_COMEBACK_EST_EV", 15.0),
                 wheel_commune_est_ev: p.f64("WHEEL_COMMUNE_EST_EV", 8.0),
-                wheel_cooldown_seconds: p.i64("WHEEL_COOLDOWN_SECONDS", 86400),
                 wheel_discover_est_ev: p.f64("WHEEL_DISCOVER_EST_EV", 5.0),
                 wheel_emergency_est_ev: p.f64("WHEEL_EMERGENCY_EST_EV", -25.0),
                 wheel_extend_1_est_ev: p.f64("WHEEL_EXTEND_1_EST_EV", -10.0),
@@ -1137,6 +1135,6 @@ mod tests {
     #[test]
     fn configuration_catalog_entries_are_unique() {
         let catalog = config_py_env_keys().collect::<BTreeSet<_>>();
-        assert_eq!(catalog.len(), 218, "catalog entries must remain unique");
+        assert_eq!(catalog.len(), 217, "catalog entries must remain unique");
     }
 }
