@@ -98,7 +98,6 @@ impl ReminderRegistrationProvider {
         let store = SqliteReminderStore::new(database_path, config.values.pet_hunger_decay_per_day);
         let service = ReminderService::new(store, SystemReminderClock, RuntimeDiscordPort)
             .with_cooldowns(ReminderCooldowns {
-                wheel_seconds: config.values.wheel_cooldown_seconds,
                 trivia_seconds: config.values.trivia_cooldown_seconds,
             });
         Self::from_service(service, discord)

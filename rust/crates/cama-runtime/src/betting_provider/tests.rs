@@ -993,6 +993,19 @@ fn gamba_preflight_keeps_registration_and_cooldown_errors_private() {
         .expect("cooldown preflight")
         .expect("cooldown copy");
     assert!(cooldown.contains("You already spun the wheel today!"));
+    assert!(cooldown.contains("The wheel resets in"));
+
+    // Crossing the fixed 4 AM UTC-8 boundary refreshes the wheel even when
+    // the prior spin was only one second earlier.
+    let current_window = wheel_window_start_at(now);
+    players
+        .set_last_wheel_spin(7, Some(42), current_window - 1)
+        .expect("set pre-reset wheel spin");
+    assert_eq!(
+        gamba_interaction_preflight(database.path(), 42, 7, current_window, false)
+            .expect("fixed reset preflight"),
+        None
+    );
     assert_eq!(
         gamba_interaction_preflight(database.path(), 42, 7, now, true).expect("admin preflight"),
         None
@@ -1992,7 +2005,7 @@ fn provider_exposes_dig_bonus_wheel_seam() {
     assert_eq!(explosion.credited_reward, 44);
     assert!(explosion.is_bonus);
     let next = cooldown_after_resolution(1_000, true, Some(900), CooldownOutcome::Other);
-    assert_eq!(next.next_spin_at, 87_300);
+    assert_eq!(next.next_spin_at, next_wheel_reset_at(900));
     assert!(!next.schedule_reminder);
 }
 

@@ -1,5 +1,6 @@
 use std::sync::Mutex as StdMutex;
 
+use cama_app::wheel::wheel_window_start_at;
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
@@ -212,7 +213,6 @@ fn members(count: i64) -> Vec<ManaGuildMember> {
 fn provider(fixture: &Fixture, discord: FakeDiscord) -> ManaRegistrationProvider {
     ManaRegistrationProvider::from_parts(
         fixture.database.path().to_path_buf(),
-        100,
         5,
         Arc::new(discord),
         Arc::new(FixedClock),
@@ -358,7 +358,7 @@ async fn existing_single_assignment_preserves_embed_thumbnail_and_wheel_unlock_b
         embed.fields[0].value,
         format!(
             "🌾 **Plains** · White Mana\nNext wheel spin <t:{}:R>",
-            NOW + 1
+            next_wheel_reset_at(NOW - 100)
         )
     );
     assert_eq!(embed.fields[1].name, "🌾 Guardian Aura");
@@ -752,30 +752,35 @@ async fn test_selected_player_countdown_uses_atomic_unlock_boundary() {
     assert!(
         captured.followups[0].embeds[0].fields[0]
             .value
-            .contains(&format!("<t:{}:R>", NOW + 151))
+            .contains(&format!("<t:{}:R>", next_wheel_reset_at(NOW + 50)))
     );
 }
 
 #[test]
-fn test_next_wheel_spin_matches_atomic_claim_semantics_never_spun() {
-    assert_eq!(wheel_unlock_at(NOW, None, 100), NOW);
+fn test_next_wheel_spin_is_now_when_never_spun() {
+    assert_eq!(wheel_unlock_at(NOW, None), NOW);
 }
 
 #[test]
-fn test_next_wheel_spin_matches_atomic_claim_semantics_expired() {
-    assert_eq!(wheel_unlock_at(NOW, Some(NOW - 101), 100), NOW);
-}
-
-#[test]
-fn test_next_wheel_spin_matches_atomic_claim_semantics_exact_boundary() {
-    assert_eq!(wheel_unlock_at(NOW, Some(NOW - 100), 100), NOW + 1);
-}
-
-#[test]
-fn test_next_wheel_spin_matches_atomic_claim_semantics_future_adjusted_penalty() {
+fn test_next_wheel_spin_is_now_after_the_fixed_reset() {
     assert_eq!(
-        wheel_unlock_at(NOW, Some(NOW + 345_600), 100),
-        NOW + 345_701
+        wheel_unlock_at(NOW, Some(wheel_window_start_at(NOW) - 1)),
+        NOW
+    );
+}
+
+#[test]
+fn test_next_wheel_spin_uses_the_next_fixed_boundary_for_this_window() {
+    let last = wheel_window_start_at(NOW);
+    assert_eq!(wheel_unlock_at(NOW, Some(last)), next_wheel_reset_at(last));
+}
+
+#[test]
+fn test_next_wheel_spin_aligns_a_future_penalty_anchor_to_a_reset() {
+    let future_anchor = NOW + 345_600;
+    assert_eq!(
+        wheel_unlock_at(NOW, Some(future_anchor)),
+        next_wheel_reset_at(future_anchor)
     );
 }
 
@@ -785,10 +790,11 @@ fn test_single_player_omits_assigned_field() {
     assert!(embed.fields.iter().all(|field| field.name != "Assigned"));
 }
 
-fn wheel_unlock_at(now: i64, last: Option<i64>, cooldown: i64) -> i64 {
-    last.map_or(now, |last| {
-        now.max(last.saturating_add(cooldown).saturating_add(1))
-    })
+fn wheel_unlock_at(now: i64, last: Option<i64>) -> i64 {
+    match last {
+        Some(last) if !wheel_spin_is_available(now, Some(last)) => next_wheel_reset_at(last),
+        _ => now,
+    }
 }
 
 #[test]

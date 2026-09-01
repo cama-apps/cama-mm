@@ -34,7 +34,8 @@ use cama_app::wheel::{
     WHEEL_BOMB_OMB_VICTIM_COUNT, WHEEL_BOMB_OMB_VICTIM_LOSS_MAX, WHEEL_BOMB_OMB_VICTIM_LOSS_MIN,
     WHEEL_GREEN_SHELL_STEAL_MAX, WHEEL_GREEN_SHELL_STEAL_MIN, WheelEconomyPolicy, WheelKind,
     WheelMechanic, WheelValue, canonical_outcome_code, cooldown_after_resolution, get_wheel_wedges,
-    requested_percentage_or_flat, resolve_explosion, select_wheel_kind,
+    next_wheel_reset_at, requested_percentage_or_flat, resolve_explosion, select_wheel_kind,
+    wheel_spin_is_available, wheel_window_start_at,
 };
 use cama_db::autobet_investments::AutobetInvestmentRepository;
 use cama_db::bankruptcy_repository::{
@@ -7289,7 +7290,7 @@ fn gamba_interaction_preflight(
         && let Some(last_spin) = players
             .get_last_wheel_spin(user_id, Some(guild_id))
             .map_err(|error| error.to_string())?
-        && last_spin.saturating_add(cama_app::wheel::WHEEL_COOLDOWN_SECONDS) > now
+        && !wheel_spin_is_available(now, Some(last_spin))
     {
         return Ok(Some(wheel_cooldown_message(now, last_spin)));
     }
@@ -7297,13 +7298,10 @@ fn gamba_interaction_preflight(
 }
 
 fn wheel_cooldown_message(now: i64, last_spin: i64) -> String {
-    let remaining = last_spin
-        .saturating_add(cama_app::wheel::WHEEL_COOLDOWN_SECONDS)
-        .saturating_sub(now)
-        .max(0);
+    let remaining = next_wheel_reset_at(last_spin).saturating_sub(now).max(0);
     let hours = remaining / 3_600;
     let minutes = (remaining % 3_600) / 60;
-    format!("You already spun the wheel today! Try again in **{hours}h {minutes}m**.")
+    format!("You already spun the wheel today! The wheel resets in **{hours}h {minutes}m**.")
 }
 
 async fn begin_gamba_response(
@@ -9424,12 +9422,7 @@ fn spin_once(
             .map_err(|error| error.to_string())?;
     } else {
         match players
-            .try_claim_wheel_spin(
-                user_id,
-                Some(guild_id),
-                now,
-                cama_app::wheel::WHEEL_COOLDOWN_SECONDS,
-            )
+            .try_claim_wheel_spin(user_id, Some(guild_id), now, wheel_window_start_at(now))
             .map_err(|error| error.to_string())?
         {
             WheelSpinClaim::MissingPlayer => {

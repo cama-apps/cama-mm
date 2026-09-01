@@ -10,11 +10,11 @@
 use std::cmp::Ordering;
 
 use cama_domain::economy_scaling::scale_minigame_jc_delta;
+use cama_domain::game_date::{GAME_DAY_SECONDS, game_day_start_ts, next_game_day_start_ts};
 
 use crate::economy_actions::apply_gamba_event_multiplier;
 
-pub const WHEEL_COOLDOWN_SECONDS: i64 = 86_400;
-pub const WHEEL_LOSE_PENALTY_COOLDOWN_SECONDS: i64 = 432_000;
+pub const WHEEL_LOSE_PENALTY_DAYS: i64 = 5;
 pub const WHEEL_EXPLOSION_REWARD: i64 = 67;
 pub const WHEEL_EXPLOSION_CHANCE: f64 = 0.01;
 pub const WHEEL_GOLDEN_TOP_N: usize = 3;
@@ -30,6 +30,28 @@ pub const WHEEL_BOMB_OMB_VICTIM_LOSS_MIN: i64 = 10;
 pub const WHEEL_BOMB_OMB_VICTIM_LOSS_MAX: i64 = 25;
 pub const WHEEL_BOMB_OMB_VICTIM_COUNT: usize = 3;
 pub const DIG_POSITIVE_JC_MULTIPLIER: f64 = 0.65;
+
+/// Start of the wheel window containing `timestamp`: 4 AM in fixed UTC-8.
+///
+/// Runtime and persisted timestamps are expected to be ordinary Unix times.
+/// The fallback fails closed for an out-of-range value without panicking on a
+/// corrupt database timestamp.
+#[must_use]
+pub fn wheel_window_start_at(timestamp: i64) -> i64 {
+    game_day_start_ts(timestamp).unwrap_or(timestamp)
+}
+
+/// First fixed daily reset strictly after the window containing `timestamp`.
+#[must_use]
+pub fn next_wheel_reset_at(timestamp: i64) -> i64 {
+    next_game_day_start_ts(timestamp).unwrap_or_else(|_| timestamp.saturating_add(GAME_DAY_SECONDS))
+}
+
+/// Whether a regular spin may be claimed in the current fixed daily window.
+#[must_use]
+pub fn wheel_spin_is_available(now: i64, last_spin: Option<i64>) -> bool {
+    last_spin.is_none_or(|last| last < wheel_window_start_at(now))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WheelKind {
@@ -478,7 +500,7 @@ pub trait SpinAdmissionPort {
         user_id: i64,
         guild_id: i64,
         now: i64,
-        cooldown_seconds: i64,
+        current_window_started_at: i64,
     ) -> Result<bool, Self::Error>;
     fn last_wheel_spin(&mut self, user_id: i64, guild_id: i64) -> Result<Option<i64>, Self::Error>;
     fn set_last_wheel_spin(
@@ -509,19 +531,27 @@ pub fn admit_spin<P: SpinAdmissionPort>(
         request.user_id,
         request.guild_id,
         request.now,
-        WHEEL_COOLDOWN_SECONDS,
+        wheel_window_start_at(request.now),
     )? {
         return Ok(SpinAdmission::Allowed);
     }
     let (hours, minutes) = match port.last_wheel_spin(request.user_id, request.guild_id)? {
         Some(last_spin) => {
-            let remaining = WHEEL_COOLDOWN_SECONDS - (request.now - last_spin);
+            let remaining = next_wheel_reset_at(last_spin)
+                .saturating_sub(request.now)
+                .max(0);
             (
                 remaining.div_euclid(3_600),
                 remaining.rem_euclid(3_600) / 60,
             )
         }
-        None => (24, 0),
+        None => {
+            let remaining = next_wheel_reset_at(request.now).saturating_sub(request.now);
+            (
+                remaining.div_euclid(3_600),
+                remaining.rem_euclid(3_600) / 60,
+            )
+        }
     };
     Ok(SpinAdmission::RejectedCooldown { hours, minutes })
 }
@@ -600,24 +630,25 @@ pub fn cooldown_after_resolution(
 ) -> CooldownPlan {
     if bonus_spin {
         return CooldownPlan {
-            next_spin_at: last_regular_spin.map_or(now, |last| {
-                now.max(last.saturating_add(WHEEL_COOLDOWN_SECONDS))
-            }),
+            next_spin_at: last_regular_spin.map_or(now, |last| now.max(next_wheel_reset_at(last))),
             replacement_last_spin: None,
             schedule_reminder: false,
         };
     }
     if outcome == CooldownOutcome::LoseTurn {
+        let next_spin_at = wheel_window_start_at(now)
+            .saturating_add(WHEEL_LOSE_PENALTY_DAYS.saturating_mul(GAME_DAY_SECONDS));
         return CooldownPlan {
-            next_spin_at: now.saturating_add(WHEEL_LOSE_PENALTY_COOLDOWN_SECONDS),
-            replacement_last_spin: Some(
-                now.saturating_add(WHEEL_LOSE_PENALTY_COOLDOWN_SECONDS - WHEEL_COOLDOWN_SECONDS),
-            ),
+            next_spin_at,
+            // `last_wheel_spin` remains the admission anchor. Placing the
+            // synthetic anchor immediately before the target window keeps the
+            // five-day penalty aligned to the same fixed daily reset.
+            replacement_last_spin: Some(next_spin_at.saturating_sub(1)),
             schedule_reminder: true,
         };
     }
     CooldownPlan {
-        next_spin_at: now.saturating_add(WHEEL_COOLDOWN_SECONDS),
+        next_spin_at: next_wheel_reset_at(now),
         replacement_last_spin: None,
         schedule_reminder: true,
     }
