@@ -18,7 +18,7 @@ use tempfile::NamedTempFile;
 
 use crate::discord_transport::{DiscordAllowedMentions, DiscordIdPlayerNameResolver};
 use crate::push_notification_provider::{PushNotificationRegistrationProvider, PushPublisher};
-use crate::registration::{InteractionAllowedMentions, InteractionResponseError};
+use crate::registration::{InteractionAllowedMentions, InteractionResponseError, InteractionValue};
 use cama_db::push_notifications::PushNotificationRepository;
 
 use super::*;
@@ -7477,6 +7477,69 @@ async fn test_concurrent_abort_finalizations_only_announce_once() {
             .count(),
         1
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_abort_after_committed_record_is_refused_without_credit() {
+    let fixture = MatchRuntimeFixture::new();
+    let pending = fixture.pending(unix_seconds() + 120);
+    let participant_ids = pending
+        .state
+        .participant_ids()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let before = fixture
+        .provider
+        .handler
+        .players
+        .get_exclusion_counts(&participant_ids, Some(GUILD))
+        .expect("read pre-record exclusion factors");
+    fixture
+        .provider
+        .handler
+        .record_match_blocking(&pending, "radiant", None)
+        .expect("record pending match durably");
+
+    // The durable record has committed but the pending row has not been
+    // cleared yet - exactly the window an abort vote must not exploit.
+    let responder = Arc::new(RecordingMatchResponder::default());
+    fixture
+        .provider
+        .handler
+        .finalize_abort(&pending, responder.clone())
+        .await
+        .expect("refused abort still responds");
+
+    let responses = responder.responses.lock().expect("refused abort response");
+    assert_eq!(responses.len(), 1);
+    assert!(responses[0].ephemeral);
+    assert!(responses[0].content.contains("already been recorded"));
+    assert!(!responses[0].content.contains("refunded"));
+
+    // No spurious +1 exclusion credit lands on the completed match, the
+    // pending row stays for the record path's own cleanup, and the atomic
+    // repository guard refuses a raw retry too.
+    assert_eq!(
+        fixture
+            .provider
+            .handler
+            .players
+            .get_exclusion_counts(&participant_ids, Some(GUILD))
+            .expect("read post-refusal exclusion factors"),
+        before
+    );
+    let repository = PendingMatchRepository::new(fixture.database.path());
+    assert!(
+        repository
+            .pending_match(GUILD, pending.pending_match_id)
+            .expect("read pending row after refused abort")
+            .is_some()
+    );
+    assert!(matches!(
+        repository.finalize_abort(GUILD, pending.pending_match_id, &participant_ids),
+        Err(PendingMatchRepositoryError::MatchAlreadyRecorded(id))
+            if id == pending.pending_match_id
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -1114,6 +1114,7 @@ CREATE TABLE pets (
                 died_at INTEGER,
                 death_cause TEXT,
                 death_announced_at INTEGER, training_xp INTEGER NOT NULL DEFAULT 0 CHECK (training_xp BETWEEN 0 AND 20), training_str INTEGER NOT NULL DEFAULT 0 CHECK (training_str BETWEEN 0 AND 2), training_int INTEGER NOT NULL DEFAULT 0 CHECK (training_int BETWEEN 0 AND 2), training_dex INTEGER NOT NULL DEFAULT 0 CHECK (training_dex BETWEEN 0 AND 2), solo_training_sessions INTEGER NOT NULL DEFAULT 3 CHECK (solo_training_sessions BETWEEN 0 AND 3), solo_training_recharged_at INTEGER, evolution_started_at INTEGER, evolution_due_at INTEGER, evolved_at INTEGER, evolution_calling TEXT, evolution_primary TEXT, evolution_secondary TEXT, evolution_announced_at INTEGER,
+                death_activated_pet_id INTEGER,
                 is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
                 stabled_at INTEGER,
                 CHECK (hatched_at >= adopted_at),

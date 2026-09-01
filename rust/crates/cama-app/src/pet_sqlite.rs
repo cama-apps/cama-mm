@@ -12,8 +12,8 @@ use cama_db::pet_eating_repository::PetEatingRepository;
 use cama_db::pet_evolution_repository::PetEvolutionRepository;
 use cama_db::pet_repository::{
     ActivatePetOutcome, ActivatePetRequest, AdoptPetRequest, AegisReviveRequest,
-    BuySuppliesRequest, DeathClaimRequest, FeedPetRequest, HungerTopUpRequest, PetRepository,
-    PetRepositoryError, SacrificePetOutcome, SacrificePetRequest, SaltLickRequest,
+    BuySuppliesRequest, DeathClaimOutcome, DeathClaimRequest, FeedPetRequest, HungerTopUpRequest,
+    PetRepository, PetRepositoryError, SacrificePetOutcome, SacrificePetRequest, SaltLickRequest,
     TrinketPurchaseOutcome, TrinketPurchaseRequest, UpgradeEggRequest,
 };
 use cama_domain::pet::{Pet, PetStatus, RENAME_COST, RefundNotice, adoption_fee};
@@ -181,8 +181,19 @@ impl PetStore for PetRepository {
         PetRepository::apply_hunger_top_up(self, request)
     }
 
-    fn claim_death(&mut self, request: &DeathClaimRequest<'_>) -> Result<bool, PetRepositoryError> {
+    fn claim_death(
+        &mut self,
+        request: &DeathClaimRequest<'_>,
+    ) -> Result<Option<DeathClaimOutcome>, PetRepositoryError> {
         PetRepository::claim_death(self, request)
+    }
+
+    fn get_death_activation(
+        &mut self,
+        pet_id: i64,
+        guild_id: Option<i64>,
+    ) -> Result<Option<DeathClaimOutcome>, PetRepositoryError> {
+        PetRepository::get_death_activation(self, pet_id, guild_id)
     }
 
     fn revive_with_aegis(

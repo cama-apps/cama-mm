@@ -17,7 +17,11 @@ use rusqlite::{
 };
 use thiserror::Error;
 
+use self::white_stipend::{WhiteStipendFailure, pay_white_stipend};
 use crate::open_runtime_connection;
+
+#[path = "white_stipend.rs"]
+mod white_stipend;
 
 const SQLITE_ID_CHUNK: usize = 900;
 
@@ -674,61 +678,15 @@ impl LoanRepository {
                 continue;
             }
             let amount = max_stipend.min(remaining);
-            let reserve_context = LedgerContext {
-                source: Some("mana".to_owned()),
-                related_type: Some("bankruptcy_stipend".to_owned()),
-                related_id: Some(payment.discord_id.to_string()),
-                reason: Some("white mana bankruptcy stipend reserve debit".to_owned()),
-                metadata: Some(format!(r#"{{"amount": {amount}, "land": "Plains"}}"#)),
-                actor_id: None,
-            };
-            with_ledger_context(&transaction, &reserve_context, || {
-                let changed = transaction.execute(
-                    "UPDATE nonprofit_fund
-                     SET total_collected = total_collected - ?1,
-                         updated_at = CURRENT_TIMESTAMP
-                     WHERE guild_id = ?2 AND total_collected >= ?1",
-                    params![amount, guild_id],
-                )?;
-                if changed == 1 {
-                    Ok(())
-                } else {
-                    Err(rusqlite::Error::QueryReturnedNoRows)
+            match pay_white_stipend(&transaction, guild_id, payment.discord_id, amount)? {
+                Ok(()) => {}
+                Err(WhiteStipendFailure::Reserve) => {
+                    return Err(LoanRepositoryError::StipendReserveChanged);
                 }
-            })
-            .map_err(|error| match error {
-                rusqlite::Error::QueryReturnedNoRows => LoanRepositoryError::StipendReserveChanged,
-                other => LoanRepositoryError::Sqlite(other),
-            })?;
-
-            let recipient_context = LedgerContext {
-                source: Some("mana".to_owned()),
-                related_type: Some("bankruptcy_stipend".to_owned()),
-                reason: Some("white mana bankruptcy stipend".to_owned()),
-                metadata: Some(format!(r#"{{"amount": {amount}, "land": "Plains"}}"#)),
-                ..LedgerContext::default()
-            };
-            with_ledger_context(&transaction, &recipient_context, || {
-                let changed = transaction.execute(
-                    "UPDATE players
-                     SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?1,
-                         updated_at = CURRENT_TIMESTAMP
-                     WHERE discord_id = ?2 AND guild_id = ?3
-                       AND COALESCE(jopacoin_balance, 0) <= 0",
-                    params![amount, payment.discord_id, guild_id],
-                )?;
-                if changed == 1 {
-                    Ok(())
-                } else {
-                    Err(rusqlite::Error::QueryReturnedNoRows)
+                Err(WhiteStipendFailure::Recipient) => {
+                    return Err(LoanRepositoryError::StipendRecipientChanged);
                 }
-            })
-            .map_err(|error| match error {
-                rusqlite::Error::QueryReturnedNoRows => {
-                    LoanRepositoryError::StipendRecipientChanged
-                }
-                other => LoanRepositoryError::Sqlite(other),
-            })?;
+            }
             payment.amount = amount;
             remaining -= amount;
         }

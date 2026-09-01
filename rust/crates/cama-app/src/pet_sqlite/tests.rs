@@ -212,3 +212,104 @@ fn production_sweep_rehydrates_durable_eating_outcome_after_restart() {
     assert_eq!(durable.get("penalty_games_remaining"), Some(&4));
     assert_eq!(durable.get("new_balance"), Some(&1_103));
 }
+
+#[test]
+fn production_sweep_names_the_claim_activated_pet_across_instances() {
+    const NOW: i64 = 1_800_000_000;
+    const DAY: i64 = 86_400;
+    const GUILD: i64 = 42;
+    const OWNER: i64 = 7;
+
+    let file = NamedTempFile::new().expect("temporary SQLite database");
+    initialize_or_migrate(file.path()).expect("initialize canonical schema");
+    let players = PlayerRepository::new(file.path());
+    players
+        .add(&NewPlayer::new(OWNER, "Pet Owner", Some(GUILD)))
+        .expect("register pet owner");
+    players
+        .update_balance(OWNER, Some(GUILD), 1_000)
+        .expect("fund pet owner");
+
+    let mut service =
+        SqlitePetCommandService::new(file.path(), SeededPetRandom::new(11), FixedClock(NOW), 20);
+    let first = service
+        .adopt(OWNER, Some(GUILD), "Blep", "standard")
+        .unwrap()
+        .pet;
+    let second = service
+        .adopt(OWNER, Some(GUILD), "Second", "standard")
+        .unwrap()
+        .pet;
+    let third = service
+        .adopt(OWNER, Some(GUILD), "Third", "standard")
+        .unwrap()
+        .pet;
+    drop(service);
+    let repository = PetRepository::new(file.path());
+    // Only the active pet can hatch; "Second" and "Third" stay stabled eggs.
+    repository
+        .resolve_hatch_species(first.pet_id, Some(GUILD), "common_cama", first.hatched_at)
+        .expect("resolve hatch species");
+
+    // Instance 1 (a command path) lazily claims the starvation death, which
+    // auto-activates the oldest stabled pet, "Second".
+    let claim_at = first.hatched_at + 6 * DAY;
+    let mut claimer = SqlitePetCommandService::new(
+        file.path(),
+        SeededPetRandom::new(11),
+        FixedClock(claim_at),
+        20,
+    );
+    let _ = claimer.status(OWNER, Some(GUILD));
+    drop(claimer);
+    assert!(
+        repository
+            .get_pet_by_id(first.pet_id, Some(GUILD))
+            .unwrap()
+            .unwrap()
+            .died_at
+            .is_some(),
+        "the command path must have claimed the starvation death"
+    );
+
+    // The owner voluntarily switches to "Third" before any announcement.
+    repository
+        .activate_pet_atomic(ActivatePetRequest {
+            discord_id: OWNER,
+            guild_id: Some(GUILD),
+            pet_id: third.pet_id,
+            cost: 25,
+            cooldown_seconds: DAY,
+            now: claim_at + 100,
+        })
+        .expect("switch to third");
+
+    // Instance 2 announces the death: it must name the pet the claim
+    // activated, not the pet that is active now.
+    let mut sweeper = SqlitePetCommandService::new(
+        file.path(),
+        SeededPetRandom::new(99),
+        FixedClock(claim_at + 200),
+        20,
+    );
+    let outcome = sweeper.sweep().expect("announcing sweep succeeds");
+    assert_eq!(outcome.deaths.len(), 1);
+    let notice = &outcome.deaths[0];
+    assert_eq!(notice.pet.pet_id, first.pet_id);
+    assert_eq!(
+        notice.activated_pet.as_ref().map(|pet| pet.pet_id),
+        Some(second.pet_id)
+    );
+    assert_eq!(
+        notice.activated_pet.as_ref().map(|pet| pet.name.as_str()),
+        Some("Second")
+    );
+    assert_eq!(
+        repository
+            .get_active_pet(OWNER, Some(GUILD))
+            .unwrap()
+            .unwrap()
+            .name,
+        "Third"
+    );
+}

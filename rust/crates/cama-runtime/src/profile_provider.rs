@@ -41,19 +41,18 @@ use tracing::warn;
 mod profile_balance_history;
 
 use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
+use crate::embed_colors::{
+    DISCORD_BLUE, DISCORD_GREEN, DISCORD_ORANGE, DISCORD_PURPLE, DISCORD_RED,
+};
+use crate::option_ext::user_option;
 use crate::registration::{
     CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute, InteractionActionRow,
     InteractionAttachment, InteractionButton, InteractionButtonStyle, InteractionEmbed,
-    InteractionHandler, InteractionHandlerError, InteractionMessageReceipt, InteractionOption,
-    InteractionRequest, InteractionResponder, InteractionResponse, InteractionValue,
-    RegistrationError, RegistrationProvider, RegistryBuilder,
+    InteractionHandler, InteractionHandlerError, InteractionMessageReceipt, InteractionRequest,
+    InteractionResponder, InteractionResponse, RegistrationError, RegistrationProvider,
+    RegistryBuilder,
 };
 
-const DISCORD_BLUE: u32 = 0x34_98_db;
-const DISCORD_GREEN: u32 = 0x2e_cc_71;
-const DISCORD_ORANGE: u32 = 0xe6_7e_22;
-const DISCORD_RED: u32 = 0xe7_4c_3c;
-const DISCORD_PURPLE: u32 = 0x9b_59_b6;
 const PROFILE_VIEW_TIMEOUT: Duration = Duration::from_secs(840);
 const PROFILE_CLICK_WINDOW: Duration = Duration::from_secs(2);
 const PROFILE_COMMAND_WINDOW: Duration = Duration::from_secs(30);
@@ -270,7 +269,6 @@ impl ProfileHandler {
         let InteractionRequest::Command {
             name,
             user_id,
-            user_display_name,
             guild_id,
             options,
             ..
@@ -302,8 +300,10 @@ impl ProfileHandler {
             return Ok(());
         }
 
-        let (target_id, _) = user_option(&options).unwrap_or((user_id, Some(user_display_name)));
-        let target_id = signed_discord_id(target_id, "target user")?;
+        let target_id = match user_option(&options, "user")? {
+            Some(user) => user.id,
+            None => signed_discord_id(user_id, "target user")?,
+        };
         let guild_id = signed_optional_discord_id(guild_id, "guild")?;
         let names = guild_id
             .and_then(|guild_id| {
@@ -461,20 +461,6 @@ impl ProfileHandler {
             }
         });
     }
-}
-
-fn user_option(options: &[InteractionOption]) -> Option<(u64, Option<String>)> {
-    options.iter().find_map(|option| {
-        if option.name != "user" {
-            return None;
-        }
-        match &option.value {
-            InteractionValue::User {
-                id, display_name, ..
-            } => Some((*id, display_name.clone())),
-            _ => None,
-        }
-    })
 }
 
 fn signed_discord_id(value: u64, label: &str) -> Result<i64, String> {

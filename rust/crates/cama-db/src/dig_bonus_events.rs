@@ -92,6 +92,23 @@ impl DigBonusRepository {
             .map_err(Into::into)
     }
 
+    /// True when the identified dig action belongs to the acting player.
+    pub fn dig_action_exists_for_actor(
+        &self,
+        action_id: i64,
+        actor_id: i64,
+        guild_id: i64,
+    ) -> Result<bool, DigBonusRepositoryError> {
+        let connection = self.connection()?;
+        crate::dig_runtime_store::dig_action_exists_for_actor(
+            &connection,
+            action_id,
+            actor_id,
+            guild_id,
+        )
+        .map_err(Into::into)
+    }
+
     /// Atomically apply one signed delta and let the existing ledger trigger
     /// copy the installed context into `economy_ledger_entries`.
     pub fn adjust_balance_atomic(

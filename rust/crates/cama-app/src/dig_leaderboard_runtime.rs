@@ -8,7 +8,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::dig_loot::{Rarity, artifact_catalog};
-use rusqlite::{Connection, params};
+use cama_db::dig_runtime_store;
+use rusqlite::Connection;
 use thiserror::Error;
 
 /// Errors returned by the read-only Dig leaderboard adapter.
@@ -133,28 +134,19 @@ impl DigLeaderboardRuntime {
         guild_id: i64,
     ) -> Result<DigLeaderboardResult, DigLeaderboardRuntimeError> {
         let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT discord_id,guild_id,tunnel_name,depth,total_digs,total_jc_earned,
-                    prestige_level,best_run_score
-             FROM tunnels
-             WHERE guild_id=?1
-             ORDER BY prestige_level DESC, depth DESC, discord_id ASC
-             LIMIT 10",
-        )?;
-        let tunnels = statement
-            .query_map(params![guild_id], |row| {
-                Ok(DigLeaderboardTunnel {
-                    discord_id: row.get(0)?,
-                    guild_id: row.get(1)?,
-                    tunnel_name: row.get(2)?,
-                    depth: row.get(3)?,
-                    total_digs: row.get(4)?,
-                    total_jc_earned: row.get(5)?,
-                    prestige_level: row.get(6)?,
-                    best_run_score: row.get(7)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
+        let tunnels = dig_runtime_store::leaderboard_tunnel_rows(&connection, guild_id)?
+            .into_iter()
+            .map(|row| DigLeaderboardTunnel {
+                discord_id: row.discord_id,
+                guild_id: row.guild_id,
+                tunnel_name: row.tunnel_name,
+                depth: row.depth,
+                total_digs: row.total_digs,
+                total_jc_earned: row.total_jc_earned,
+                prestige_level: row.prestige_level,
+                best_run_score: row.best_run_score,
+            })
+            .collect::<Vec<_>>();
 
         let max_depth = tunnels
             .iter()
@@ -193,23 +185,17 @@ impl DigLeaderboardRuntime {
         guild_id: i64,
     ) -> Result<DigHallOfFameResult, DigLeaderboardRuntimeError> {
         let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT discord_id,tunnel_name,prestige_level,best_run_score
-             FROM tunnels
-             WHERE guild_id=?1 AND best_run_score > 0
-             ORDER BY best_run_score DESC
-             LIMIT 10",
-        )?;
-        let entries = statement
-            .query_map(params![guild_id], |row| {
-                Ok(DigHallOfFameEntry {
-                    discord_id: row.get(0)?,
-                    tunnel_name: row.get(1)?,
-                    prestige_level: row.get(2)?,
-                    best_run_score: row.get(3)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
+        let entries = dig_runtime_store::hall_of_fame_entry_rows(&connection, guild_id)?
+            .into_iter()
+            .map(
+                |(discord_id, tunnel_name, prestige_level, best_run_score)| DigHallOfFameEntry {
+                    discord_id,
+                    tunnel_name,
+                    prestige_level,
+                    best_run_score,
+                },
+            )
+            .collect::<Vec<_>>();
         Ok(DigHallOfFameResult {
             success: true,
             error: None,
@@ -224,13 +210,7 @@ impl DigLeaderboardRuntime {
         guild_id: i64,
     ) -> Result<Option<usize>, DigLeaderboardRuntimeError> {
         let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT discord_id FROM tunnels WHERE guild_id=?1
-             ORDER BY prestige_level DESC, depth DESC, discord_id ASC",
-        )?;
-        Ok(statement
-            .query_map(params![guild_id], |row| row.get::<_, i64>(0))?
-            .collect::<Result<Vec<_>, _>>()?
+        Ok(dig_runtime_store::tunnel_rank_ids(&connection, guild_id)?
             .into_iter()
             .position(|candidate| candidate == discord_id)
             .map(|index| index + 1))
@@ -244,19 +224,12 @@ impl DigLeaderboardRuntime {
         guild_id: i64,
     ) -> Result<Vec<DigEquippedRelic>, DigLeaderboardRuntimeError> {
         let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT id,artifact_id FROM dig_artifacts
-             WHERE discord_id=?1 AND guild_id=?2 AND is_relic=1 AND equipped=1
-             ORDER BY id",
-        )?;
-        Ok(statement
-            .query_map(params![discord_id, guild_id], |row| {
-                Ok(DigEquippedRelic {
-                    id: row.get(0)?,
-                    artifact_id: row.get(1)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?)
+        Ok(
+            dig_runtime_store::equipped_relic_rows(&connection, discord_id, guild_id)?
+                .into_iter()
+                .map(|(id, artifact_id)| DigEquippedRelic { id, artifact_id })
+                .collect(),
+        )
     }
 
     /// Group one player's known artifacts by the authored catalog rarity.
@@ -270,39 +243,22 @@ impl DigLeaderboardRuntime {
             .map(|artifact| (artifact.id, rarity_title(artifact.rarity)))
             .collect::<BTreeMap<_, _>>();
         let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT id,discord_id,guild_id,artifact_id,found_at,is_relic,equipped
-             FROM dig_artifacts
-             WHERE discord_id=?1 AND guild_id=?2
-             ORDER BY id",
-        )?;
         let mut artifacts = BTreeMap::<String, Vec<DigCollectionArtifact>>::new();
-        for row in statement.query_map(params![discord_id, guild_id], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, i64>(5)? != 0,
-                row.get::<_, i64>(6)? != 0,
-            ))
-        })? {
-            let (id, owner, owner_guild, artifact_id, found_at, is_relic, equipped) = row?;
-            let Some(rarity) = rarity_by_id.get(artifact_id.as_str()) else {
+        for row in dig_runtime_store::artifact_collection_rows(&connection, discord_id, guild_id)? {
+            let Some(rarity) = rarity_by_id.get(row.artifact_id.as_str()) else {
                 continue;
             };
             artifacts
                 .entry((*rarity).to_owned())
                 .or_default()
                 .push(DigCollectionArtifact {
-                    id,
-                    discord_id: owner,
-                    guild_id: owner_guild,
-                    artifact_id,
-                    found_at,
-                    is_relic,
-                    equipped,
+                    id: row.id,
+                    discord_id: row.discord_id,
+                    guild_id: row.guild_id,
+                    artifact_id: row.artifact_id,
+                    found_at: row.found_at,
+                    is_relic: row.is_relic,
+                    equipped: row.equipped,
                     rarity: (*rarity).to_owned(),
                 });
         }
@@ -317,23 +273,20 @@ impl DigLeaderboardRuntime {
         guild_id: i64,
     ) -> Result<DigGuildStatsResult, DigLeaderboardRuntimeError> {
         let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT discord_id,tunnel_name,depth,total_digs,total_jc_earned
-             FROM tunnels WHERE guild_id=?1",
-        )?;
-        let tunnels = statement
-            .query_map(params![guild_id], |row| {
-                Ok((
+        let tunnels = dig_runtime_store::guild_tunnel_stat_rows(&connection, guild_id)?
+            .into_iter()
+            .map(|(discord_id, name, depth, total_digs, total_jc_earned)| {
+                (
                     DigGuildLeader {
-                        discord_id: row.get(0)?,
-                        name: row.get(1)?,
-                        depth: row.get(2)?,
-                        total_digs: row.get(3)?,
+                        discord_id,
+                        name,
+                        depth,
+                        total_digs,
                     },
-                    row.get::<_, i64>(4)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
+                    total_jc_earned,
+                )
+            })
+            .collect::<Vec<_>>();
         if tunnels.is_empty() {
             return Ok(DigGuildStatsResult {
                 success: true,

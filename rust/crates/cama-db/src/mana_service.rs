@@ -9,10 +9,14 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use thiserror::Error;
 
+use self::white_stipend::pay_white_stipend;
 use crate::open_runtime_connection;
+
+#[path = "white_stipend.rs"]
+mod white_stipend;
 
 pub const PLAINS_GUARDIAN_CAPACITY: i64 = 25;
 
@@ -20,6 +24,8 @@ pub const PLAINS_GUARDIAN_CAPACITY: i64 = 25;
 pub enum ManaRepositoryError {
     #[error("mana SQLite operation failed: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    #[error("mana White stipend mutation changed no row for player {0}")]
+    StipendGuard(i64),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -217,11 +223,17 @@ impl ManaRepository {
     /// Claim one mana day for a batch on one connection and one immediate
     /// transaction. Duplicate player IDs are ignored after their first entry;
     /// returned rows preserve the winning input order.
+    ///
+    /// When `white_stipend` is positive, the Plains White stipend is paid to
+    /// eligible bankrupt Plains claimants inside the same transaction, so a
+    /// claim and its stipend commit or roll back together. `white_stipend <= 0`
+    /// skips stipend payment entirely.
     pub fn claim_mana_batch_atomic(
         &self,
         assignments: &[(i64, String)],
         guild_id: Option<i64>,
         assigned_date: &str,
+        white_stipend: i64,
     ) -> Result<Vec<ManaClaim>, ManaRepositoryError> {
         if assignments.is_empty() {
             return Ok(Vec::new());
@@ -259,6 +271,13 @@ impl ManaRepository {
                 white_shield_remaining: guardian_capacity(land),
             });
         }
+
+        let plains_ids = claimed
+            .iter()
+            .filter(|claim| claim.current_land == "Plains")
+            .map(|claim| claim.discord_id)
+            .collect::<Vec<_>>();
+        pay_plains_stipends(&transaction, &plains_ids, guild_id, white_stipend)?;
 
         transaction.commit()?;
         Ok(claimed)
@@ -320,6 +339,58 @@ impl ManaRepository {
             .map(|value| value.unwrap_or(false))
             .map_err(Into::into)
     }
+}
+
+/// Pay the White stipend to eligible bankrupt Plains claimants inside the
+/// caller's claim transaction, mirroring
+/// `LoanRepository::distribute_nonprofit_stipends_atomic`: only players with a
+/// non-positive balance are paid, in input order, until the nonprofit reserve
+/// is empty, with each mutation running through the shared
+/// [`white_stipend::pay_white_stipend`] core.
+fn pay_plains_stipends(
+    transaction: &Transaction<'_>,
+    plains_ids: &[i64],
+    guild_id: i64,
+    white_stipend: i64,
+) -> Result<(), ManaRepositoryError> {
+    if white_stipend <= 0 || plains_ids.is_empty() {
+        return Ok(());
+    }
+    let mut remaining = transaction
+        .query_row(
+            "SELECT COALESCE(total_collected, 0)
+             FROM nonprofit_fund WHERE guild_id = ?1",
+            [guild_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .unwrap_or(0)
+        .max(0);
+
+    for discord_id in plains_ids {
+        if remaining == 0 {
+            break;
+        }
+        let bankrupt = transaction
+            .query_row(
+                "SELECT 1 FROM players
+                 WHERE discord_id = ?1 AND guild_id = ?2
+                   AND COALESCE(jopacoin_balance, 0) <= 0",
+                params![discord_id, guild_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !bankrupt {
+            continue;
+        }
+        let amount = white_stipend.min(remaining);
+        if pay_white_stipend(transaction, guild_id, *discord_id, amount)?.is_err() {
+            return Err(ManaRepositoryError::StipendGuard(*discord_id));
+        }
+        remaining -= amount;
+    }
+    Ok(())
 }
 
 fn guardian_capacity(land: &str) -> i64 {

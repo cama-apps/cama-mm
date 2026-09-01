@@ -14,9 +14,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use cama_app::mana_service::{
-    AssignmentBoard, BankruptcyState, BetOutcome, BoardRow, DegenScore, GuardianProtection, Land,
-    ManaDataSource, ManaDetails, ManaService, ManaServiceError, PlayerProfile, TipStats,
-    XorShift64Entropy, mana_day_label, mana_day_start_timestamp,
+    BankruptcyState, BetOutcome, BoardRow, DegenScore, GuardianProtection, Land, ManaDataSource,
+    ManaDetails, ManaService, ManaServiceError, PlayerProfile, TipStats, XorShift64Entropy,
+    mana_day_label, mana_day_start_timestamp,
 };
 use cama_db::bankruptcy_repository::BankruptcyRepository;
 use cama_db::core_repositories::PlayerRepository;
@@ -24,7 +24,6 @@ use cama_db::gambling_stats_repository::{
     BetHistoryEntry, GamblingOutcome, GamblingStatsPort, GamblingStatsRepository,
     GamblingStatsService,
 };
-use cama_db::loan_repository::LoanRepository;
 use cama_db::mana_protection::ManaProtectionRepository;
 use cama_db::mana_service_repository::ManaRepository;
 use cama_db::predictions_repository::PredictionRepository;
@@ -33,11 +32,12 @@ use chrono::{DateTime, FixedOffset, Utc};
 
 use crate::ApplicationConfig;
 use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
+use crate::option_ext::{boolean_option, user_option};
 use crate::registration::{
     CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute, InteractionActionRow,
     InteractionButton, InteractionButtonStyle, InteractionEmbed, InteractionHandler,
-    InteractionHandlerError, InteractionOption, InteractionRequest, InteractionResponder,
-    InteractionResponse, RegistrationError, RegistrationProvider, RegistryBuilder,
+    InteractionHandlerError, InteractionRequest, InteractionResponder, InteractionResponse,
+    RegistrationError, RegistrationProvider, RegistryBuilder,
 };
 
 const COMPONENT_PREFIX: &str = "mana:board:";
@@ -275,11 +275,11 @@ impl ManaInteractionHandler {
         if boolean_option(&options, "all").unwrap_or(false) {
             return self.board_command(user_id, guild_id, responder).await;
         }
-        let target = user_option(&options, "user");
-        let target_id = target.as_ref().map_or(user_id, |target| target.user_id);
+        let target = user_option(&options, "user")?;
+        let target_id = target.as_ref().map_or(user_id, |target| target.id);
         let target_name = target.as_ref().map_or_else(
             || user_display_name.clone(),
-            |target| target.display_name.clone(),
+            |target| target.display_name_or_mention(),
         );
         let mut member = self
             .discord
@@ -338,21 +338,28 @@ impl ManaInteractionHandler {
         })
         .await?;
 
-        let response = if let Some(details) = details {
-            let next_spin = self.next_wheel_spin_at(target_id, guild_id).await?;
-            InteractionResponse::message("").embed(single_embed(
-                &member,
-                &details,
-                &today,
-                Some(next_spin),
-                0,
-            ))
-        } else {
-            InteractionResponse::message("").embed(
+        let response = match details {
+            Some(details) if details.assigned_date == today => {
+                let next_spin = self.next_wheel_spin_at(target_id, guild_id).await?;
+                InteractionResponse::message("").embed(single_embed(
+                    &member,
+                    &details,
+                    &today,
+                    Some(next_spin),
+                    0,
+                ))
+            }
+            // A stored row from an earlier mana day is yesterday's land, not
+            // today's; between the 4 AM reset and the next auto-assign worker
+            // pass it must read as pending, exactly like a player with no row.
+            _ => InteractionResponse::message("").embed(
                 InteractionEmbed::titled(format!("🔮 Daily Mana — {}", member.display_name))
-                    .description("This player hasn't been assigned any mana yet.")
+                    .description(
+                        "This player hasn't been assigned today's mana yet — \
+                         it will be assigned automatically soon.",
+                    )
                     .color(0x95_A5_A6),
-            )
+            ),
         };
         followup(&responder, response).await
     }
@@ -367,18 +374,27 @@ impl ManaInteractionHandler {
             ManaRepository::new(path)
                 .get_all_mana(Some(guild_id))
                 .map_err(|error| error.to_string())
-                .and_then(|rows| {
+                .map(|rows| {
                     rows.into_iter()
-                        .map(|row| {
-                            Ok(BoardRow {
+                        .filter_map(|row| match Land::from_name(&row.mana.current_land) {
+                            Some(land) => Some(BoardRow {
                                 discord_id: row.discord_id,
-                                land: Land::from_name(&row.mana.current_land).ok_or_else(|| {
-                                    format!("unknown mana land {:?}", row.mana.current_land)
-                                })?,
+                                land,
                                 assigned_date: row.mana.assigned_date,
-                            })
+                            }),
+                            // Stale legacy/foreign land values must not wedge
+                            // the whole guild board; skip the row and warn.
+                            None => {
+                                tracing::warn!(
+                                    discord_id = row.discord_id,
+                                    guild_id,
+                                    land = %row.mana.current_land,
+                                    "skipping mana board row with unknown land"
+                                );
+                                None
+                            }
                         })
-                        .collect::<Result<Vec<_>, String>>()
+                        .collect::<Vec<_>>()
                 })
         })
         .await?;
@@ -531,33 +547,6 @@ impl ManaInteractionHandler {
             now.max(last.saturating_add(cooldown).saturating_add(1))
         }))
     }
-}
-
-pub(crate) async fn pay_batch_stipends_sqlite(
-    path: PathBuf,
-    board: &AssignmentBoard,
-    guild_id: i64,
-    white_stipend: i64,
-) {
-    if white_stipend <= 0 {
-        return;
-    }
-    let ids = board
-        .assignments
-        .iter()
-        .filter(|assignment| assignment.details.land == Land::Plains)
-        .map(|assignment| assignment.discord_id)
-        .collect::<Vec<_>>();
-    if ids.is_empty() {
-        return;
-    }
-    let _ = spawn_sqlite("guild mana White stipends", move || {
-        LoanRepository::new(path)
-            .distribute_nonprofit_stipends_atomic(&ids, Some(guild_id), white_stipend)
-            .map(|_| ())
-            .map_err(|error| error.to_string())
-    })
-    .await;
 }
 
 #[derive(Clone)]
@@ -979,41 +968,6 @@ fn parse_board_component(custom_id: &str) -> Result<(i64, usize), String> {
         return Err("invalid mana board component".to_owned());
     }
     Ok((owner, page))
-}
-
-#[derive(Clone, Debug)]
-struct UserOption {
-    user_id: i64,
-    display_name: String,
-}
-
-fn user_option(options: &[InteractionOption], name: &str) -> Option<UserOption> {
-    options.iter().find_map(|option| {
-        if option.name != name {
-            return None;
-        }
-        let crate::registration::InteractionValue::User {
-            id, display_name, ..
-        } = &option.value
-        else {
-            return None;
-        };
-        Some(UserOption {
-            user_id: i64::try_from(*id).ok()?,
-            display_name: display_name.clone().unwrap_or_else(|| format!("<@{id}>")),
-        })
-    })
-}
-
-fn boolean_option(options: &[InteractionOption], name: &str) -> Option<bool> {
-    options.iter().find_map(|option| {
-        (option.name == name)
-            .then_some(&option.value)
-            .and_then(|value| match value {
-                crate::registration::InteractionValue::Boolean(value) => Some(*value),
-                _ => None,
-            })
-    })
 }
 
 fn signed_id(value: u64, label: &str) -> Result<i64, String> {

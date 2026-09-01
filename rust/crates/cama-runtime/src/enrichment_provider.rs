@@ -48,6 +48,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
+use crate::embed_colors::{DISCORD_BLUE, DISCORD_GREEN, DISCORD_GREYPLE, DISCORD_RED};
+use crate::option_ext::{boolean_option, integer_option, user_option};
 use crate::registration::{
     CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute, InteractionActionRow,
     InteractionAttachment, InteractionButton, InteractionButtonStyle, InteractionEmbed,
@@ -62,10 +64,6 @@ const GUILD_ONLY: &str = "This command can only be used in a server.";
 const ADMIN_ONLY: &str = "This command is admin-only.";
 const COMPONENT_PREFIX: &str = "enrichment:";
 const MATCH_VIEW_TIMEOUT: Duration = Duration::from_secs(120);
-const DISCORD_BLUE: u32 = 0x34_98_db;
-const DISCORD_GREEN: u32 = 0x2e_cc_71;
-const DISCORD_RED: u32 = 0xe7_4c_3c;
-const DISCORD_GREYPLE: u32 = 0x99_aa_b5;
 const DISCORD_DARKER: u32 = 0x2f_31_36;
 const MATCH_CORRECTION_REPLAY_PREFIX: &str = "match_correction:";
 
@@ -95,31 +93,7 @@ pub enum EnrichmentProviderBuildError {
     InvalidRatingConfig(&'static str),
 }
 
-/// Result of Python-compatible post-record OpenDota discovery.
-#[derive(Clone, Debug, PartialEq)]
-pub enum RecordedMatchDiscoveryOutcome {
-    Disabled,
-    Discovered {
-        result: DiscoveryResult,
-        response: InteractionResponse,
-    },
-    Exhausted {
-        last_result: Option<DiscoveryResult>,
-    },
-    Stopped(DiscoveryResult),
-}
-
-/// Narrow handle shared with the match runtime. It deliberately owns no
-/// service state: the provider's existing handler supplies the one live
-/// discovery cache, enrichment pipeline, and OpenSkill replay policy.
-#[async_trait]
-pub trait RecordedMatchDiscovery: Send + Sync {
-    async fn discover_recorded_match(
-        &self,
-        guild_id: i64,
-        match_id: i64,
-    ) -> Result<RecordedMatchDiscoveryOutcome, String>;
-}
+pub use crate::runtime_ports::{RecordedMatchDiscovery, RecordedMatchDiscoveryOutcome};
 
 #[derive(Clone)]
 pub struct EnrichmentRegistrationProvider {
@@ -353,6 +327,11 @@ fn enrich_subcommands() -> Vec<CommandOptionSpec> {
                     "internal_match_id",
                     "Our internal match ID (optional - defaults to most recent)",
                     CommandOptionKind::Integer,
+                ),
+                CommandOptionSpec::new(
+                    "force",
+                    "Bypass 10/10 roster and side validation; a Valve ID owned by another match is still refused",
+                    CommandOptionKind::Boolean,
                 ),
             ],
         ),
@@ -1113,6 +1092,12 @@ impl EnrichmentHandler {
         // that edge case so a zero value still selects the normal fallback.
         let requested_internal = integer_option(options, "internal_match_id").filter(|id| *id != 0);
         let requested_valve = integer_option(options, "valve_match_id").filter(|id| *id != 0);
+        // Admin escape hatch for a lobby that can never satisfy strict
+        // validation (an unlinked Steam account, a side-swapped roster). The
+        // enrichment service still refuses a Valve ID that is already linked
+        // to another internal match, so a forced enrichment can never claim
+        // another lobby's game.
+        let force = boolean_option(options, "force").unwrap_or(false);
         let matches = self.matches.clone();
         let enrichment = Arc::clone(&self.enrichment);
         let bankruptcy = self.bankruptcy.clone();
@@ -1155,15 +1140,20 @@ impl EnrichmentHandler {
                 guild_id: Some(cama_app::dedicated_lobby_channel::GuildId(guild_id)),
                 source: EnrichmentSource::Manual,
                 confidence: None,
-                skip_validation: false,
+                skip_validation: force,
                 opendota_match_data: None,
             });
             if !result.success {
-                return Ok(InteractionResponse::message(format!(
+                let mut message = format!(
                     "Enrichment failed: {}",
                     result.error.as_deref().unwrap_or("Unknown error")
-                ))
-                .ephemeral());
+                );
+                if !force && result.validation_error.is_some() {
+                    message.push_str(
+                        "\nRe-run with `force:True` to bypass roster validation for this match.",
+                    );
+                }
+                return Ok(InteractionResponse::message(message).ephemeral());
             }
 
             let match_data = matches
@@ -1709,10 +1699,10 @@ impl EnrichmentHandler {
         if !defer(&responder, true).await {
             return Ok(());
         }
-        let selected_user = user_option(options, "user");
+        let selected_user = user_option(options, "user")?;
         let (target_id, _target_name, selected) = selected_user.map_or_else(
             || (context.user_id, context.user_display_name.clone(), false),
-            |(id, name)| (id, name, true),
+            |user| (user.id, user.display_name_or_id(), true),
         );
         let target_name = self.render_player_name(target_id, guild_id).await;
         let limit = integer_option(options, "limit").unwrap_or(5).clamp(1, 10);
@@ -1844,8 +1834,9 @@ impl EnrichmentHandler {
         if !defer(&responder, false).await {
             return Ok(());
         }
-        let (target_id, _target_name) =
-            user_option(options, "user").unwrap_or((context.user_id, context.user_display_name));
+        let (target_id, _target_name) = user_option(options, "user")?
+            .map(|user| (user.id, user.display_name_or_id()))
+            .unwrap_or((context.user_id, context.user_display_name));
         let target_name = match context.guild_id {
             Some(guild_id) => self.render_player_name(target_id, guild_id).await,
             None => target_id.to_string(),
@@ -1932,11 +1923,11 @@ impl EnrichmentHandler {
         // Match the Python truthiness check: an explicit zero means "use the
         // latest match" rather than attempting to load internal match #0.
         let explicit_match_id = integer_option(options, "match_id").filter(|id| *id != 0);
-        let selected_user = user_option(options, "user");
+        let selected_user = user_option(options, "user")?;
         let invoking_user_id = context.user_id;
         let (target_id, _target_name, user_was_selected) = selected_user.map_or_else(
             || (context.user_id, context.user_display_name.clone(), false),
-            |(id, name)| (id, name, true),
+            |user| (user.id, user.display_name_or_id(), true),
         );
         let target_name = self.render_player_name(target_id, guild_id).await;
         let matches = self.matches.clone();
@@ -2253,44 +2244,6 @@ fn selected_subcommand(
             _ => None,
         })
         .ok_or_else(|| "missing enrichment subcommand".into())
-}
-
-fn integer_option(options: &[InteractionOption], name: &str) -> Option<i64> {
-    options.iter().find_map(|option| {
-        (option.name == name)
-            .then_some(&option.value)
-            .and_then(|value| match value {
-                InteractionValue::Integer(value) => Some(*value),
-                _ => None,
-            })
-    })
-}
-
-fn boolean_option(options: &[InteractionOption], name: &str) -> Option<bool> {
-    options.iter().find_map(|option| {
-        (option.name == name)
-            .then_some(&option.value)
-            .and_then(|value| match value {
-                InteractionValue::Boolean(value) => Some(*value),
-                _ => None,
-            })
-    })
-}
-
-fn user_option(options: &[InteractionOption], name: &str) -> Option<(i64, String)> {
-    options.iter().find_map(|option| {
-        if option.name != name {
-            return None;
-        }
-        let InteractionValue::User {
-            id, display_name, ..
-        } = &option.value
-        else {
-            return None;
-        };
-        let id = i64::try_from(*id).ok()?;
-        Some((id, display_name.clone().unwrap_or_else(|| id.to_string())))
-    })
 }
 
 fn signed_id(id: u64, label: &str) -> Result<i64, InteractionHandlerError> {

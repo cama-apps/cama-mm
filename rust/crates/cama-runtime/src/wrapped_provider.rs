@@ -38,12 +38,12 @@ use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 use tracing::warn;
 
 use crate::application_config::ApplicationConfig;
+use crate::option_ext::user_option;
 use crate::registration::{
     CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute, InteractionActionRow,
     InteractionAttachment, InteractionButton, InteractionButtonStyle, InteractionHandler,
-    InteractionHandlerError, InteractionMessageReceipt, InteractionOption, InteractionRequest,
-    InteractionResponder, InteractionResponse, InteractionValue, RegistrationError,
-    RegistrationProvider, RegistryBuilder,
+    InteractionHandlerError, InteractionMessageReceipt, InteractionRequest, InteractionResponder,
+    InteractionResponse, RegistrationError, RegistrationProvider, RegistryBuilder,
 };
 
 const COMPONENT_PREFIX: &str = "wrapped:";
@@ -436,8 +436,9 @@ impl WrappedHandler {
             warn!(%error, "unable to defer /wrapped interaction");
             return Ok(());
         }
-        let (target_id, _target_name) =
-            user_option(&options).unwrap_or((user_id, user_display_name));
+        let (target_id, _target_name) = user_option(&options, "user")?
+            .map(|user| (user.raw_id, user.display_name_or_id()))
+            .unwrap_or((user_id, user_display_name));
         let (signed_guild, signed_target) =
             (signed_id(guild_id, "guild")?, signed_id(target_id, "user")?);
         let year = self.fixed_year.unwrap_or_else(|| Utc::now().year());
@@ -786,19 +787,6 @@ fn parse_component(custom_id: &str) -> Result<(u64, StoryDirection), Interaction
         return Err(format!("invalid wrapped component {custom_id:?}").into());
     }
     Ok((session_id, direction))
-}
-
-fn user_option(options: &[InteractionOption]) -> Option<(u64, String)> {
-    options.iter().find_map(|option| {
-        (option.name == "user")
-            .then_some(&option.value)
-            .and_then(|value| match value {
-                InteractionValue::User {
-                    id, display_name, ..
-                } => Some((*id, display_name.clone().unwrap_or_else(|| id.to_string()))),
-                _ => None,
-            })
-    })
 }
 
 fn signed_id(id: u64, label: &str) -> Result<i64, InteractionHandlerError> {

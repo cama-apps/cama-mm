@@ -4090,6 +4090,45 @@ fn lottery_disbursement_pays_the_drawn_winner_and_nothing_without_one() {
 }
 
 #[test]
+fn debtor_disbursements_route_through_the_disburse_service_math() {
+    let players = vec![
+        disburse_player(1, -100, 5),
+        disburse_player(2, -300, 5),
+        disburse_player(3, 900, 5),
+    ];
+
+    // Debtors are paid most-indebted first with a stable discord-id order.
+    assert_eq!(
+        calculate_distributions("even", 200, &players, None),
+        vec![(2, 100), (1, 100)]
+    );
+    assert_eq!(
+        calculate_distributions("proportional", 100, &players, None),
+        vec![(2, 75), (1, 25)]
+    );
+    assert_eq!(
+        calculate_distributions("neediest", 150, &players, None),
+        vec![(2, 150)]
+    );
+    // A lone remainder coin lands on the most indebted debtor: even splits
+    // follow the deterministic (balance asc, discord id asc) order, which
+    // intentionally supersedes the legacy unspecified roster order.
+    assert_eq!(
+        calculate_distributions("even", 1, &players, None),
+        vec![(2, 1)]
+    );
+}
+
+#[test]
+fn unknown_or_non_paying_disbursement_methods_pay_nobody() {
+    let players = vec![disburse_player(1, -100, 5)];
+
+    assert!(calculate_distributions("mystery", 100, &players, None).is_empty());
+    assert!(calculate_distributions("burn", 100, &players, None).is_empty());
+    assert!(calculate_distributions("even", 0, &players, None).is_empty());
+}
+
+#[test]
 fn lottery_draw_is_uniform_over_the_active_roster() {
     let candidates = [11_i64, 22, 33];
     let mut seen = std::collections::BTreeSet::new();

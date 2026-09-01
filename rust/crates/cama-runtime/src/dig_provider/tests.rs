@@ -4594,7 +4594,7 @@ async fn prestige_preview_selection_restart_and_forgery_use_atomic_app_service()
     {
         let public = discord.public.lock().expect("public ascension responses");
         assert_eq!(public.len(), 1);
-        assert_eq!(public[0].content, format!("*{USER} has ascended.*"));
+        assert_eq!(public[0].content, "*dig-test-miner has ascended.*");
         assert!(
             public[0].attachments.is_empty(),
             "test config disables Neon"
@@ -6154,7 +6154,7 @@ async fn provider_help_and_gift_use_typed_social_service_and_python_delivery_con
             .description
             .as_deref()
             .expect("help description");
-        assert!(help_description.contains(&format!("You helped **{TARGET}**'s tunnel!")));
+        assert!(help_description.contains("You helped **dig-social-target**'s tunnel!"));
         assert!(help_description.contains("Blocks added: **"));
     }
     assert_eq!(
@@ -6205,7 +6205,7 @@ async fn provider_help_and_gift_use_typed_social_service_and_python_delivery_con
         assert!(!gift_followups[0].ephemeral);
         assert_eq!(
             gift_followups[0].content,
-            format!("You gifted **Mole Claws** to **{TARGET}**!")
+            "You gifted **Mole Claws** to **dig-social-target**!"
         );
     }
     assert_eq!(
@@ -6308,7 +6308,7 @@ async fn provider_sabotage_view_is_owner_bound_restart_expiring_and_exactly_once
             .as_deref()
             .expect("sabotage preview description"),
         format!(
-            "**Target:** {TARGET}\n**Cost:** 20 {JOPACOIN_EMOTE}\n**Potential damage:** 3-8 blocks\n\nAre you sure? If they have a trap set, you could take damage instead."
+            "**Target:** dig-sabotage-target\n**Cost:** 20 {JOPACOIN_EMOTE}\n**Potential damage:** 3-8 blocks\n\nAre you sure? If they have a trap set, you could take damage instead."
         )
     );
     assert_eq!(preview.components[0].buttons.len(), 2);
@@ -6517,7 +6517,7 @@ async fn provider_miner_group_uses_typed_profile_allocation_respec_and_autobuy_s
     assert_eq!(profile_responder.defers.lock().unwrap().as_slice(), &[true]);
     let profile = profile_responder.followups.lock().unwrap()[0].clone();
     assert!(profile.ephemeral);
-    let expected_title = format!("{USER} - Miner Profile");
+    let expected_title = "dig-test-miner - Miner Profile".to_owned();
     assert_eq!(
         profile.embeds[0].title.as_deref(),
         Some(expected_title.as_str())

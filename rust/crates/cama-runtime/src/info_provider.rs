@@ -27,7 +27,6 @@ use cama_db::trivia_commands_repository::TriviaCommandsRepository;
 use cama_domain::embed_safety::EmbedModel;
 use cama_domain::formatting::JOPACOIN_EMOTE;
 use cama_domain::tip_service::{TipLeaderboardEntry, TipVolume};
-use rusqlite::{Connection, OpenFlags};
 use tracing::warn;
 
 /// Read-only counts returned by the production `/leaderboard` repository
@@ -88,13 +87,14 @@ pub fn read_info_analytics_snapshot(
 
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{DiscordTransport, GuildPlayerNameDirectory};
+use crate::embed_colors::{DISCORD_BLUE, DISCORD_GOLD};
+use crate::option_ext::{integer_option, string_option, user_option};
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
     InteractionActionRow, InteractionAllowedMentions, InteractionButton, InteractionButtonStyle,
     InteractionEmbed, InteractionHandler, InteractionHandlerError, InteractionMessageDelivery,
-    InteractionMessageReceipt, InteractionOption, InteractionRequest, InteractionResponder,
-    InteractionResponse, InteractionValue, RegistrationError, RegistrationProvider,
-    RegistryBuilder,
+    InteractionMessageReceipt, InteractionRequest, InteractionResponder, InteractionResponse,
+    RegistrationError, RegistrationProvider, RegistryBuilder,
 };
 
 #[path = "info_provider/calibration.rs"]
@@ -107,8 +107,6 @@ const VIEW_TIMEOUT: Duration = Duration::from_secs(840);
 const TAB_CLICK_WINDOW: Duration = Duration::from_millis(1_500);
 const ADMINISTRATOR_PERMISSION: u64 = 1 << 3;
 const MANAGE_GUILD_PERMISSION: u64 = 1 << 5;
-const DISCORD_BLUE: u32 = 0x34_98_DB;
-const DISCORD_GOLD: u32 = 0xF1_C4_0F;
 const TIPS_PINK: u32 = 0xE9_1E_63;
 const TRIVIA_ORANGE: u32 = 0xFF_A0_00;
 
@@ -415,7 +413,7 @@ impl InfoHandler {
         let limit = integer_option(&options, "limit")
             .unwrap_or(100)
             .clamp(1, 100) as usize;
-        let tab = LeaderboardTab::from_type_parameter(selected_type.as_deref());
+        let tab = LeaderboardTab::from_type_parameter(selected_type);
         let signed_guild = signed_optional_id(guild_id, "guild")?;
 
         let members = match guild_id {
@@ -709,8 +707,8 @@ impl InfoHandler {
             warn!(%error, "unable to defer /calibration interaction");
             return Ok(());
         }
-        let (target_id, selected_user) = user_option(&options)
-            .map(|id| (id, true))
+        let (target_id, selected_user) = user_option(&options, "user")?
+            .map(|user| (user.raw_id, true))
             .unwrap_or((user_id, false));
         let sources = self.calibration.clone();
         let signed_guild = signed_optional_id(guild_id, "guild")?;
@@ -836,40 +834,6 @@ fn leaderboard_failure_response() -> InteractionResponse {
     )
     .ephemeral()
     .without_mentions()
-}
-
-fn string_option(options: &[InteractionOption], name: &str) -> Option<String> {
-    options.iter().find_map(|option| {
-        (option.name == name)
-            .then_some(&option.value)
-            .and_then(|value| match value {
-                InteractionValue::String(value) => Some(value.clone()),
-                _ => None,
-            })
-    })
-}
-
-fn integer_option(options: &[InteractionOption], name: &str) -> Option<i64> {
-    options.iter().find_map(|option| {
-        (option.name == name)
-            .then_some(&option.value)
-            .and_then(|value| match value {
-                InteractionValue::Integer(value) => Some(*value),
-                _ => None,
-            })
-    })
-}
-
-fn user_option(options: &[InteractionOption]) -> Option<u64> {
-    options.iter().find_map(|option| {
-        if option.name != "user" {
-            return None;
-        }
-        match &option.value {
-            InteractionValue::User { id, .. } => Some(*id),
-            _ => None,
-        }
-    })
 }
 
 fn signed_optional_id(
@@ -1175,40 +1139,9 @@ impl InfoLeaderboardRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, String> {
-        let connection = Connection::open_with_flags(
-            &self.path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                | OpenFlags::SQLITE_OPEN_URI,
-        )
-        .map_err(|error| error.to_string())?;
-        connection
-            .busy_timeout(Duration::from_secs(5))
-            .map_err(|error| error.to_string())?;
-        connection
-            .pragma_update(None, "foreign_keys", false)
-            .map_err(|error| error.to_string())?;
-        Ok(connection)
-    }
-
     fn candidate_discord_ids(&self, guild_id: Option<i64>) -> Result<Vec<i64>, String> {
-        let guild_id = PlayerRepository::normalize_guild_id(guild_id);
-        let connection = self.connection()?;
-        let mut statement = connection
-            .prepare(
-                "SELECT discord_id FROM players WHERE guild_id = ?1
-                 UNION SELECT discord_id FROM bets WHERE guild_id = ?1
-                 UNION SELECT sender_id FROM tip_transactions WHERE guild_id = ?1
-                 UNION SELECT recipient_id FROM tip_transactions WHERE guild_id = ?1
-                 UNION SELECT discord_id FROM trivia_sessions WHERE guild_id = ?1
-                 ORDER BY 1",
-            )
-            .map_err(|error| error.to_string())?;
-        statement
-            .query_map([guild_id], |row| row.get(0))
-            .map_err(|error| error.to_string())?
-            .collect::<Result<Vec<_>, _>>()
+        PlayerRepository::new(&self.path)
+            .candidate_discord_ids(guild_id)
             .map_err(|error| error.to_string())
     }
 }

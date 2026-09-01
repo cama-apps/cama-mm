@@ -768,18 +768,20 @@ fn prepare_legacy_required_values(
     {
         let columns = table_columns(transaction, "matches")?;
         if columns.iter().any(|column| column.name == "valve_match_id") {
-            let guild_expression = if columns.iter().any(|column| column.name == "guild_id") {
-                "guild_id"
-            } else {
-                "0"
-            };
+            // SQLite reads a bare integer term in GROUP BY/ORDER BY as a
+            // 1-based output-column position, so when the legacy table has no
+            // guild_id column the guild term must be omitted entirely rather
+            // than substituted with a literal 0.
+            let has_guild_id = columns.iter().any(|column| column.name == "guild_id");
+            let guild_select = if has_guild_id { "guild_id" } else { "0" };
+            let guild_term = if has_guild_id { "guild_id, " } else { "" };
             let duplicate_sql = format!(
-                "SELECT {guild_expression}, valve_match_id, GROUP_CONCAT(match_id), COUNT(*)
+                "SELECT {guild_select}, valve_match_id, GROUP_CONCAT(match_id), COUNT(*)
                    FROM matches
                   WHERE valve_match_id IS NOT NULL
-                  GROUP BY {guild_expression}, valve_match_id
+                  GROUP BY {guild_term}valve_match_id
                  HAVING COUNT(*) > 1
-                  ORDER BY {guild_expression}, valve_match_id
+                  ORDER BY {guild_term}valve_match_id
                   LIMIT 1"
             );
             let duplicate = transaction
@@ -829,6 +831,97 @@ fn prepare_legacy_required_values(
                  SET is_active=CASE WHEN died_at IS NULL THEN 1 ELSE 0 END,
                      stabled_at=NULL;",
             )?;
+        }
+    }
+    if pending(
+        pending_migrations,
+        "converge_legacy_push_notification_targets",
+    ) && table_exists(transaction, "push_notification_targets")?
+    {
+        // Two historical shapes carry remnants of the pre-rename table: a
+        // database frozen on the original shape (free-form user-entered
+        // topics, ntfy_server, lobby_enabled instead of
+        // match_started_enabled), and a database whose rename ledger entry
+        // was consumed by a binary without conversion code, leaving
+        // ntfy_server/lobby_enabled behind as extra columns and
+        // match_started_enabled backfilled to its DEFAULT 1. Both converge
+        // here: lobby_enabled opt-outs move into match_started_enabled, the
+        // stale columns are dropped, and topics that can never satisfy the
+        // generated-topic CHECK/UNIQUE contract are cleared to NULL so the
+        // player's preferences survive re-running /notify.
+        let columns = table_columns(transaction, "push_notification_targets")?;
+        let has_lobby = columns.iter().any(|column| column.name == "lobby_enabled");
+        let has_server = columns.iter().any(|column| column.name == "ntfy_server");
+        if has_lobby || has_server {
+            if has_lobby {
+                if !columns
+                    .iter()
+                    .any(|column| column.name == "match_started_enabled")
+                {
+                    transaction.execute_batch(
+                        "ALTER TABLE push_notification_targets
+                         ADD COLUMN match_started_enabled INTEGER NOT NULL DEFAULT 1",
+                    )?;
+                }
+                // COALESCE: rows written after a remnant-leaving migration
+                // have a NULL lobby_enabled and keep their live preference.
+                transaction.execute_batch(
+                    "UPDATE push_notification_targets
+                        SET match_started_enabled=
+                            COALESCE(lobby_enabled, match_started_enabled);
+                     ALTER TABLE push_notification_targets DROP COLUMN lobby_enabled;",
+                )?;
+            }
+            if has_server {
+                transaction.execute_batch(
+                    "ALTER TABLE push_notification_targets DROP COLUMN ntfy_server",
+                )?;
+            }
+            // The original table declared ntfy_topic NOT NULL; the canonical
+            // contract is nullable. Swap the column to nullable so unusable
+            // topics can be cleared without deleting the row.
+            if columns
+                .iter()
+                .any(|column| column.name == "ntfy_topic" && column.not_null)
+            {
+                transaction.execute_batch(
+                    "ALTER TABLE push_notification_targets
+                     RENAME COLUMN ntfy_topic TO __legacy_ntfy_topic;
+                     ALTER TABLE push_notification_targets ADD COLUMN ntfy_topic TEXT;
+                     UPDATE push_notification_targets SET ntfy_topic=__legacy_ntfy_topic;
+                     ALTER TABLE push_notification_targets DROP COLUMN __legacy_ntfy_topic;",
+                )?;
+            }
+            let cleared: Vec<(i64, i64, i64)> = {
+                let mut statement = transaction.prepare(
+                    "SELECT rowid, discord_id, guild_id
+                     FROM push_notification_targets
+                     WHERE ntfy_topic IS NOT NULL
+                       AND (length(ntfy_topic) != 53
+                            OR substr(ntfy_topic, 1, 5) != 'cama-'
+                            OR substr(ntfy_topic, 6) GLOB '*[^0-9a-f]*'
+                            OR rowid NOT IN (
+                                SELECT MIN(rowid) FROM push_notification_targets
+                                WHERE ntfy_topic IS NOT NULL
+                                GROUP BY ntfy_topic
+                            ))
+                     ORDER BY discord_id, guild_id",
+                )?;
+                statement
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                    .collect::<Result<_, _>>()?
+            };
+            for (rowid, discord_id, guild_id) in cleared {
+                eprintln!(
+                    "push notification migration cleared an ntfy topic that cannot \
+                     satisfy the generated-topic contract for discord_id={discord_id} \
+                     guild_id={guild_id}; preferences are kept and the player re-runs /notify"
+                );
+                transaction.execute(
+                    "UPDATE push_notification_targets SET ntfy_topic=NULL WHERE rowid=?1",
+                    [rowid],
+                )?;
+            }
         }
     }
     Ok(())

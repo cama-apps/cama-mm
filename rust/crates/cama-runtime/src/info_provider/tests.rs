@@ -16,6 +16,7 @@ use crate::discord_transport::{
     DiscordMessageSnapshot, DiscordPresence,
 };
 use crate::registration::{InteractionMessageDelivery, InteractionResponseError};
+use crate::registration::{InteractionOption, InteractionValue};
 
 const GUILD: u64 = 7_001;
 const CHANNEL: u64 = 8_001;

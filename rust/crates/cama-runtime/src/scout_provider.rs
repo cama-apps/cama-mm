@@ -24,6 +24,8 @@ use thiserror::Error;
 use tracing::{error, warn};
 
 use crate::discord_transport::{GuildPlayerNameDirectory, GuildPlayerNameResolver};
+use crate::embed_colors::{DISCORD_BLUE, DISCORD_GOLD};
+use crate::option_ext::string_option;
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
     InteractionActionRow, InteractionAttachment, InteractionButton, InteractionButtonStyle,
@@ -33,8 +35,6 @@ use crate::registration::{
     RegistryBuilder,
 };
 
-const DISCORD_BLUE: u32 = 0x34_98_db;
-const DISCORD_GOLD: u32 = 0xf1_c4_0f;
 const HEROES_PER_PAGE: usize = 10;
 const REPORT_LIMIT: usize = 100;
 const VIEW_TIMEOUT: Duration = Duration::from_secs(840);
@@ -884,18 +884,6 @@ fn subcommand(options: &[InteractionOption]) -> Result<(&str, &[InteractionOptio
             _ => None,
         })
         .ok_or_else(|| "Scout command is missing a subcommand".to_owned())
-}
-
-fn string_option<'a>(options: &'a [InteractionOption], name: &str) -> Option<&'a str> {
-    options.iter().find_map(|option| {
-        if option.name != name {
-            return None;
-        }
-        match &option.value {
-            InteractionValue::String(value) => Some(value.as_str()),
-            _ => None,
-        }
-    })
 }
 
 fn parse_team(value: Option<&str>) -> Result<Option<TeamFilter>, String> {

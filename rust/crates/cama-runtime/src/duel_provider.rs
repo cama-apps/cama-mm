@@ -25,6 +25,7 @@ use crate::duel_challenges_worker::{DuelFlavorRuntimePort, ProductionDuelFlavorR
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
+use crate::option_ext::{integer_option, string_option, user_option};
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
     InteractionActionRow, InteractionButton, InteractionButtonStyle, InteractionEmbed,
@@ -466,8 +467,9 @@ impl DuelInteractionHandler {
         let (Some(guild_id), Some(channel_id)) = (context.guild_id, context.channel_id) else {
             return respond_ephemeral(&responder, "This command must be used in a server.").await;
         };
-        let (recipient_id, recipient_is_bot) = user_option(options, "player")
+        let recipient = user_option(options, "player")?
             .ok_or_else(|| "/duel issue requires player".to_owned())?;
+        let (recipient_id, recipient_is_bot) = (recipient.id, recipient.is_bot.unwrap_or(false));
         let wager = integer_option(options, "wager")
             .ok_or_else(|| "/duel issue requires wager".to_owned())?;
         responder
@@ -1091,41 +1093,6 @@ fn leaf_command(options: &[InteractionOption]) -> Result<(String, &[InteractionO
             _ => None,
         })
         .ok_or_else(|| "/duel requires a subcommand".to_owned())
-}
-
-fn string_option<'a>(options: &'a [InteractionOption], name: &str) -> Option<&'a str> {
-    options.iter().find_map(|option| {
-        (option.name == name)
-            .then_some(&option.value)
-            .and_then(|value| match value {
-                InteractionValue::String(value) => Some(value.as_str()),
-                _ => None,
-            })
-    })
-}
-
-fn integer_option(options: &[InteractionOption], name: &str) -> Option<i64> {
-    options.iter().find_map(|option| {
-        (option.name == name)
-            .then_some(&option.value)
-            .and_then(|value| match value {
-                InteractionValue::Integer(value) => Some(*value),
-                _ => None,
-            })
-    })
-}
-
-fn user_option(options: &[InteractionOption], name: &str) -> Option<(i64, bool)> {
-    options.iter().find_map(|option| {
-        (option.name == name)
-            .then_some(&option.value)
-            .and_then(|value| match value {
-                InteractionValue::User { id, is_bot, .. } => i64::try_from(*id)
-                    .ok()
-                    .map(|id| (id, is_bot.unwrap_or(false))),
-                _ => None,
-            })
-    })
 }
 
 async fn respond_ephemeral(

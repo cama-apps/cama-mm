@@ -1,11 +1,12 @@
 use std::sync::Mutex as StdMutex;
 
-use cama_app::mana_service::DailyAssignment;
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
 use super::*;
-use crate::registration::{InteractionResponseError, InteractionValue, Registry};
+use crate::registration::{
+    InteractionOption, InteractionResponseError, InteractionValue, Registry,
+};
 use crate::test_support::initialize_test_database as initialize_or_migrate;
 
 const GUILD: i64 = 9_001;
@@ -398,7 +399,79 @@ async fn selected_unassigned_player_is_read_only_and_uses_no_mana_embed() {
     assert_eq!(embed.title.as_deref(), Some("🔮 Daily Mana — Player 02"));
     assert_eq!(
         embed.description.as_deref(),
-        Some("This player hasn't been assigned any mana yet.")
+        Some(
+            "This player hasn't been assigned today's mana yet — \
+             it will be assigned automatically soon."
+        )
+    );
+}
+
+#[tokio::test]
+async fn stale_assignment_renders_pending_copy_instead_of_yesterdays_land() {
+    let fixture = Fixture::new(1);
+    fixture.assign(USER, "Mountain", "2026-08-10");
+    let provider = provider(
+        &fixture,
+        FakeDiscord {
+            gamba: true,
+            members: members(1),
+        },
+    );
+    let responder = Arc::new(CapturingResponder::default());
+
+    registry(&provider)
+        .command_handler("mana")
+        .expect("mana handler")
+        .handle(command(Vec::new()), responder.clone())
+        .await
+        .expect("dispatch stale-assignment display");
+
+    let captured = responder.captured.lock().expect("response capture");
+    let embed = &captured.followups[0].embeds[0];
+    assert_eq!(embed.title.as_deref(), Some("🔮 Daily Mana — Player 01"));
+    assert_eq!(
+        embed.description.as_deref(),
+        Some(
+            "This player hasn't been assigned today's mana yet — \
+             it will be assigned automatically soon."
+        )
+    );
+    // Yesterday's land must not be presented as the current assignment.
+    assert!(embed.fields.is_empty());
+}
+
+#[tokio::test]
+async fn board_skips_unknown_land_rows_and_renders_the_rest() {
+    let fixture = Fixture::new(2);
+    fixture.assign(USER, "Island", TODAY);
+    fixture.assign(USER + 1, "Chaos Orb", TODAY);
+    let provider = provider(
+        &fixture,
+        FakeDiscord {
+            gamba: true,
+            members: members(2),
+        },
+    );
+    let responder = Arc::new(CapturingResponder::default());
+    let options = vec![InteractionOption {
+        name: "all".to_owned(),
+        value: InteractionValue::Boolean(true),
+    }];
+
+    registry(&provider)
+        .command_handler("mana")
+        .expect("mana handler")
+        .handle(command(options), responder.clone())
+        .await
+        .expect("dispatch board with a legacy unknown-land row");
+
+    let captured = responder.captured.lock().expect("response capture");
+    let embed = &captured.followups[0].embeds[0];
+    let description = embed.description.as_deref().expect("board description");
+    assert_eq!(description, "🏝️ **Island** · Player 01");
+    assert_eq!(
+        embed.footer.as_deref(),
+        Some("Page 1/1 · 1/1 assigned today · Resets 4 AM PST")
     );
 }
 
@@ -564,62 +637,9 @@ fn cooldown_matches_discord_three_claims_per_ten_seconds_and_is_user_global() {
     assert_eq!(provider.handler.take_command_rate_limit(USER + 1), Ok(None));
 }
 
-async fn assert_white_stipends_are_only_paid_for_fresh_plains_winners_and_never_twice() {
-    let fixture = Fixture::new(2);
-    fixture
-        .connection()
-        .execute(
-            "UPDATE players SET jopacoin_balance = 0 WHERE guild_id = ?1",
-            [GUILD],
-        )
-        .expect("bankrupt players");
-    fixture
-        .connection()
-        .execute(
-            "INSERT INTO nonprofit_fund(guild_id, total_collected)
-             VALUES (?1, 20)",
-            [GUILD],
-        )
-        .expect("seed reserve");
-    let board = AssignmentBoard {
-        assignments: vec![
-            DailyAssignment {
-                discord_id: USER,
-                details: details(Land::Plains),
-            },
-            DailyAssignment {
-                discord_id: USER + 1,
-                details: details(Land::Forest),
-            },
-        ],
-        board: Vec::new(),
-    };
-
-    pay_batch_stipends_sqlite(fixture.database.path().to_path_buf(), &board, GUILD, 5).await;
-    assert_eq!(fixture.balance(USER), 5);
-    assert_eq!(fixture.balance(USER + 1), 0);
-
-    let retry = AssignmentBoard {
-        assignments: Vec::new(),
-        board: Vec::new(),
-    };
-    pay_batch_stipends_sqlite(fixture.database.path().to_path_buf(), &retry, GUILD, 5).await;
-    assert_eq!(fixture.balance(USER), 5);
-    let fund: i64 = fixture
-        .connection()
-        .query_row(
-            "SELECT total_collected FROM nonprofit_fund WHERE guild_id = ?1",
-            [GUILD],
-            |row| row.get(0),
-        )
-        .expect("read reserve");
-    assert_eq!(fund, 15);
-}
-
-#[tokio::test]
-async fn white_stipends_are_only_paid_for_fresh_plains_winners_and_never_twice() {
-    assert_white_stipends_are_only_paid_for_fresh_plains_winners_and_never_twice().await;
-}
+// The White stipend is paid inside `ManaRepository::claim_mana_batch_atomic`;
+// its behavior is covered by the cama-db mana_service tests and the
+// mana_auto_assign_worker tests.
 
 fn details(land: Land) -> ManaDetails {
     ManaDetails {
@@ -763,11 +783,6 @@ fn test_next_wheel_spin_matches_atomic_claim_semantics_future_adjusted_penalty()
 fn test_single_player_omits_assigned_field() {
     let embed = single_embed(&members(1)[0], &details(Land::Island), TODAY, Some(NOW), 0);
     assert!(embed.fields.iter().all(|field| field.name != "Assigned"));
-}
-
-#[tokio::test]
-async fn test_fresh_plains_stipends_only_process_batch_claim_winners() {
-    assert_white_stipends_are_only_paid_for_fresh_plains_winners_and_never_twice().await;
 }
 
 fn wheel_unlock_at(now: i64, last: Option<i64>, cooldown: i64) -> i64 {
