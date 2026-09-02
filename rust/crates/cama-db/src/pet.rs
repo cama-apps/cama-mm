@@ -348,6 +348,16 @@ pub struct DeathClaimRequest<'a> {
     pub anchor: AnchorGuard,
 }
 
+/// Result of a won death claim, captured inside the claiming transaction.
+///
+/// `activated_pet` is the stabled pet the claim automatically promoted, so
+/// announcements can name it even if the owner adopts or switches actives
+/// before the death notice is rendered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeathClaimOutcome {
+    pub activated_pet: Option<Pet>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AegisReviveRequest {
     pub pet_id: i64,
@@ -765,7 +775,17 @@ impl PetRepository {
             params![request.pet_id, request.discord_id, guild_id],
         )?
         .ok_or(PetRepositoryFailure::NoPet)?;
-        if pet.species != UNHATCHED_SPECIES || (pet.is_active && request.now >= pet.hatched_at) {
+        // Stabling freezes pet clocks: activation shifts hatched_at forward by
+        // the stabled duration, so a stabled egg's hatch clock reads stabled_at
+        // rather than the wall clock. Compare against the effective clock so an
+        // egg that passed its hatch deadline while active cannot dodge the
+        // refusal by being stabled first.
+        let hatch_clock_now = if pet.is_active {
+            request.now
+        } else {
+            pet.stabled_at.unwrap_or(request.now)
+        };
+        if pet.species != UNHATCHED_SPECIES || hatch_clock_now >= pet.hatched_at {
             return Err(PetRepositoryFailure::PetHatched.into());
         }
         if pet.egg_tier == "gilded" {
@@ -1566,7 +1586,10 @@ impl PetRepository {
         Ok(())
     }
 
-    pub fn claim_death(&self, request: &DeathClaimRequest<'_>) -> Result<bool, PetRepositoryError> {
+    pub fn claim_death(
+        &self,
+        request: &DeathClaimRequest<'_>,
+    ) -> Result<Option<DeathClaimOutcome>, PetRepositoryError> {
         let mut connection = self.connection()?;
         let guild_id = Self::normalize_guild_id(request.guild_id);
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1580,7 +1603,7 @@ impl PetRepository {
             .optional()?;
         let Some(discord_id) = owner else {
             transaction.commit()?;
-            return Ok(false);
+            return Ok(None);
         };
         let changed = transaction.execute(
             "UPDATE pets SET died_at = ?1, death_cause = ?2,
@@ -1604,12 +1627,60 @@ impl PetRepository {
                 request.anchor.expected_dig_work_at,
             ],
         )?;
-        if changed == 1 {
-            let _activated =
-                activate_oldest_stabled(&transaction, discord_id, guild_id, request.died_at)?;
+        if changed != 1 {
+            transaction.commit()?;
+            return Ok(None);
         }
+        let activated_pet =
+            activate_oldest_stabled(&transaction, discord_id, guild_id, request.died_at)?;
+        // Persist the claim outcome on the dead row (0 = nothing activated) so
+        // a later sweep, possibly in another process, announces the pet this
+        // claim actually activated rather than whoever is active by then.
+        transaction.execute(
+            "UPDATE pets SET death_activated_pet_id = ?1 WHERE pet_id = ?2 AND guild_id = ?3",
+            params![
+                activated_pet.as_ref().map_or(0, |pet| pet.pet_id),
+                request.pet_id,
+                guild_id
+            ],
+        )?;
         transaction.commit()?;
-        Ok(changed == 1)
+        Ok(Some(DeathClaimOutcome { activated_pet }))
+    }
+
+    /// The auto-activation a won [`Self::claim_death`] recorded for this death.
+    ///
+    /// `None` means no claim outcome is recorded (a legacy death or one claimed
+    /// outside `claim_death`); `Some` is authoritative, including
+    /// `activated_pet: None` when the claim found an empty stable.
+    pub fn get_death_activation(
+        &self,
+        pet_id: i64,
+        guild_id: Option<i64>,
+    ) -> Result<Option<DeathClaimOutcome>, PetRepositoryError> {
+        let connection = self.connection()?;
+        let guild_id = Self::normalize_guild_id(guild_id);
+        let recorded: Option<Option<i64>> = connection
+            .query_row(
+                "SELECT death_activated_pet_id FROM pets WHERE pet_id=?1 AND guild_id=?2",
+                params![pet_id, guild_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match recorded.flatten() {
+            None => Ok(None),
+            Some(0) => Ok(Some(DeathClaimOutcome {
+                activated_pet: None,
+            })),
+            Some(activated_pet_id) => {
+                let activated_pet = optional_pet(
+                    &connection,
+                    &format!("SELECT {PET_COLUMNS} FROM pets WHERE pet_id=?1 AND guild_id=?2"),
+                    params![activated_pet_id, guild_id],
+                )?;
+                Ok(Some(DeathClaimOutcome { activated_pet }))
+            }
+        }
     }
 
     /// Move the hunger anchor after a match reward while rejecting a stale
@@ -1761,7 +1832,7 @@ impl PetRepository {
     ) -> Result<(), PetRepositoryError> {
         let connection = self.connection()?;
         connection.execute(
-            "UPDATE pets SET death_announced_at = ?1
+            "UPDATE pets SET death_announced_at = ?1, death_activated_pet_id = NULL
              WHERE pet_id = ?2 AND guild_id = ?3 AND died_at IS NOT NULL",
             params![announced_at, pet_id, Self::normalize_guild_id(guild_id)],
         )?;
@@ -2398,9 +2469,9 @@ mod tests {
 
     use super::{
         ActivatePetRequest, AdoptPetRequest, AegisReviveRequest, AnchorGuard, BuySuppliesRequest,
-        DeathClaimRequest, FeedPetRequest, HungerTopUpRequest, PetRepository, PetRepositoryError,
-        PetRepositoryFailure, SacrificePetRequest, SaltLickRequest, TrinketPurchaseOutcome,
-        TrinketPurchaseRequest, UpgradeEggRequest,
+        DeathClaimOutcome, DeathClaimRequest, FeedPetRequest, HungerTopUpRequest, PetRepository,
+        PetRepositoryError, PetRepositoryFailure, SacrificePetRequest, SaltLickRequest,
+        TrinketPurchaseOutcome, TrinketPurchaseRequest, UpgradeEggRequest,
     };
 
     const NOW: i64 = 1_800_000_000;
@@ -2614,6 +2685,7 @@ mod tests {
                          evolution_primary      TEXT,
                          evolution_secondary    TEXT,
                          evolution_announced_at INTEGER,
+                         death_activated_pet_id INTEGER,
                          is_active              INTEGER NOT NULL DEFAULT 0,
                          stabled_at             INTEGER,
                          CHECK(hatched_at >= adopted_at),
@@ -2801,6 +2873,10 @@ mod tests {
         }
 
         fn claim_death(&self, pet: &Pet, died_at: i64) -> bool {
+            self.claim_death_outcome(pet, died_at).is_some()
+        }
+
+        fn claim_death_outcome(&self, pet: &Pet, died_at: i64) -> Option<DeathClaimOutcome> {
             self.repository
                 .claim_death(&DeathClaimRequest {
                     pet_id: pet.pet_id,
@@ -3206,6 +3282,79 @@ mod tests {
         }
 
         #[test]
+        fn test_upgrade_rejects_stabled_egg_past_hatch_deadline() {
+            let fixture = rich_fixture();
+            let egg = fixture.adopt_standard();
+            let second = fixture.adopt(AdoptOptions {
+                name: "Second",
+                ..AdoptOptions::default()
+            });
+            // The egg passes its hatch deadline while active, then gets
+            // stabled by activating the second pet.
+            let overdue_at = egg.hatched_at + 100;
+            fixture
+                .repository
+                .activate_pet_atomic(ActivatePetRequest {
+                    discord_id: 100,
+                    guild_id: Some(TEST_GUILD_ID),
+                    pet_id: second.pet_id,
+                    cost: 25,
+                    cooldown_seconds: DAY,
+                    now: overdue_at,
+                })
+                .expect("stable the overdue egg");
+            assert_failure(
+                fixture.repository.upgrade_egg(&UpgradeEggRequest {
+                    discord_id: 100,
+                    guild_id: Some(TEST_GUILD_ID),
+                    pet_id: egg.pet_id,
+                    name: "Too Late",
+                    premium: 230,
+                    now: overdue_at + 1,
+                }),
+                PetRepositoryFailure::PetHatched,
+            );
+        }
+
+        #[test]
+        fn test_upgrade_allows_stabled_egg_whose_frozen_clock_is_pre_deadline() {
+            let fixture = rich_fixture();
+            let egg = fixture.adopt_standard();
+            let second = fixture.adopt(AdoptOptions {
+                name: "Second",
+                ..AdoptOptions::default()
+            });
+            // Stable the egg one hour before its hatch deadline; stabling
+            // freezes its hatch clock at that moment.
+            fixture
+                .repository
+                .activate_pet_atomic(ActivatePetRequest {
+                    discord_id: 100,
+                    guild_id: Some(TEST_GUILD_ID),
+                    pet_id: second.pet_id,
+                    cost: 25,
+                    cooldown_seconds: DAY,
+                    now: egg.hatched_at - 3_600,
+                })
+                .expect("stable the pre-deadline egg");
+            // The wall clock passes the original deadline, but the frozen
+            // clock has not, so the upgrade still succeeds.
+            let upgraded = fixture
+                .repository
+                .upgrade_egg(&UpgradeEggRequest {
+                    discord_id: 100,
+                    guild_id: Some(TEST_GUILD_ID),
+                    pet_id: egg.pet_id,
+                    name: "Goldie",
+                    premium: 230,
+                    now: egg.hatched_at + DAY,
+                })
+                .expect("upgrade stabled pre-deadline egg");
+            assert_eq!(upgraded.egg_tier, "gilded");
+            assert!(!upgraded.is_active);
+        }
+
+        #[test]
         fn test_hatch_resolution_is_ready_gated_and_write_once() {
             let fixture = rich_fixture();
             let egg = fixture.adopt_standard();
@@ -3418,6 +3567,115 @@ mod tests {
                 .unwrap()
                 .flatten();
             assert_eq!(last_switch, None);
+        }
+
+        #[test]
+        fn claim_death_returns_the_pet_it_activated() {
+            let fixture = rich_fixture();
+            let first = fixture.adopt_standard();
+            let second = fixture.adopt(AdoptOptions {
+                name: "Second",
+                ..AdoptOptions::default()
+            });
+            let _third = fixture.adopt(AdoptOptions {
+                name: "Third",
+                ..AdoptOptions::default()
+            });
+
+            let outcome = fixture
+                .claim_death_outcome(&first, NOW + 600)
+                .expect("claim wins");
+            let activated = outcome.activated_pet.expect("stabled pet activated");
+
+            assert_eq!(activated.pet_id, second.pet_id);
+            assert_eq!(activated.name, "Second");
+            assert!(activated.is_active);
+        }
+
+        #[test]
+        fn claim_death_with_empty_stable_activates_nothing() {
+            let fixture = rich_fixture();
+            let pet = fixture.adopt_standard();
+
+            let outcome = fixture
+                .claim_death_outcome(&pet, NOW + 600)
+                .expect("claim wins");
+
+            assert_eq!(outcome.activated_pet, None);
+            // The empty-stable outcome is recorded durably, distinct from a
+            // legacy death that never recorded a claim outcome at all.
+            assert_eq!(
+                fixture
+                    .repository
+                    .get_death_activation(pet.pet_id, Some(TEST_GUILD_ID))
+                    .unwrap(),
+                Some(DeathClaimOutcome {
+                    activated_pet: None
+                })
+            );
+            fixture
+                .connection()
+                .execute(
+                    "UPDATE pets SET death_activated_pet_id=NULL WHERE pet_id=?1",
+                    [pet.pet_id],
+                )
+                .expect("simulate a legacy death row");
+            assert_eq!(
+                fixture
+                    .repository
+                    .get_death_activation(pet.pet_id, Some(TEST_GUILD_ID))
+                    .unwrap(),
+                None
+            );
+        }
+
+        #[test]
+        fn death_activation_survives_a_later_switch_and_clears_on_announce() {
+            let fixture = rich_fixture();
+            let first = fixture.adopt_standard();
+            let second = fixture.adopt(AdoptOptions {
+                name: "Second",
+                ..AdoptOptions::default()
+            });
+            let third = fixture.adopt(AdoptOptions {
+                name: "Third",
+                ..AdoptOptions::default()
+            });
+            assert!(fixture.claim_death(&first, NOW + 600));
+            // The owner switches to "Third" before the death is announced.
+            fixture
+                .repository
+                .activate_pet_atomic(ActivatePetRequest {
+                    discord_id: 100,
+                    guild_id: Some(TEST_GUILD_ID),
+                    pet_id: third.pet_id,
+                    cost: 25,
+                    cooldown_seconds: DAY,
+                    now: NOW + 700,
+                })
+                .expect("switch to third");
+
+            let outcome = fixture
+                .repository
+                .get_death_activation(first.pet_id, Some(TEST_GUILD_ID))
+                .unwrap()
+                .expect("recorded claim outcome");
+            assert_eq!(
+                outcome.activated_pet.as_ref().map(|pet| pet.pet_id),
+                Some(second.pet_id)
+            );
+
+            fixture
+                .repository
+                .mark_death_announced(first.pet_id, Some(TEST_GUILD_ID), NOW + 800)
+                .unwrap();
+            assert_eq!(
+                fixture
+                    .repository
+                    .get_death_activation(first.pet_id, Some(TEST_GUILD_ID))
+                    .unwrap(),
+                None
+            );
         }
 
         #[test]
@@ -3885,7 +4143,7 @@ mod tests {
             fixture.stock(100, Some(TEST_GUILD_ID), 5);
             fixture.feed(&pet, FeedOptions::default());
             assert!(
-                !fixture
+                fixture
                     .repository
                     .claim_death(&DeathClaimRequest {
                         pet_id: pet.pet_id,
@@ -3895,6 +4153,7 @@ mod tests {
                         anchor: AnchorGuard::new(pet.last_fed_at, pet.hunger_at_last_fed),
                     })
                     .unwrap()
+                    .is_none()
             );
             assert!(
                 fixture

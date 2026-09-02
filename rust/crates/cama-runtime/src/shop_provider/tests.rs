@@ -678,6 +678,60 @@ async fn failed_mana_effect_refunds_debit_releases_daily_slot_and_keeps_public_c
 }
 
 #[tokio::test]
+async fn blood_pact_purchase_copy_advertises_an_uncapped_skim() {
+    let fixture = Fixture::migrated();
+    fixture.player(BUYER, 10_000);
+    fixture.player(TARGET, 1_000);
+    let now = unix_timestamp().expect("current timestamp");
+    let today = pacific_mana_day(now).expect("Pacific mana day");
+    let connection = fixture.connection();
+    connection
+        .execute(
+            "INSERT INTO player_mana(
+               discord_id,guild_id,current_land,assigned_date,consumed_today,
+               white_shield_remaining)
+             VALUES(?1,?2,?3,?4,0,0)",
+            params![
+                i64::try_from(BUYER).unwrap(),
+                i64::try_from(GUILD).unwrap(),
+                land_for_color("Black"),
+                today
+            ],
+        )
+        .expect("seed Swamp mana");
+    drop(connection);
+
+    let responder = Arc::new(Responder::default());
+    fixture
+        .registry()
+        .command_handler("shop")
+        .expect("Shop handler")
+        .handle(
+            command(
+                "mana",
+                vec![string("item", "blood_pact"), user("target", TARGET)],
+                7_001,
+            ),
+            responder.clone(),
+        )
+        .await
+        .expect("Blood Pact purchase");
+
+    let followup = responder.followups.lock().expect("followups")[0].clone();
+    assert!(
+        followup.content.contains("with no cap"),
+        "Blood Pact copy must state the skim is uncapped: {}",
+        followup.content
+    );
+    // The 150 JC ceiling was retired; advertising it again would be a lie.
+    assert!(
+        !followup.content.contains("150"),
+        "retired 150 JC ceiling must not reappear: {}",
+        followup.content
+    );
+}
+
+#[tokio::test]
 async fn all_fifteen_mana_items_complete_durably_and_reject_replay_after_restart() {
     for (index, spec) in MANA_ITEMS.iter().copied().enumerate() {
         let fixture = Fixture::migrated();
@@ -1164,7 +1218,7 @@ fn shop_ai_prompt_uses_rendered_name_instead_of_stored_username() {
 }
 
 #[tokio::test]
-async fn unregistered_target_without_cached_member_uses_discord_id() {
+async fn unregistered_target_without_cached_member_uses_payload_display_name() {
     let fixture = Fixture::migrated();
     fixture.player(BUYER, 100_000);
     let projected = fixture
@@ -1194,7 +1248,7 @@ async fn unregistered_target_without_cached_member_uses_discord_id() {
     let target = user_option(&projected, "target")
         .expect("parse target")
         .expect("target option");
-    assert_eq!(target.display_name, TARGET.to_string());
+    assert_eq!(target.display_name, "Target Account");
 }
 
 #[test]
@@ -1204,9 +1258,9 @@ fn arbitrary_shop_player_names_prefer_server_nicknames() {
         .provider
         .with_player_names(Arc::new(StaticPlayerNames));
 
-    let names = provider.handler.project_player_names(
+    let names = provider.handler.project_stored_player_names(
         i64::try_from(GUILD).unwrap(),
-        &[i64::try_from(TARGET).unwrap()],
+        BTreeMap::from([(i64::try_from(TARGET).unwrap(), "Stored Target".to_owned())]),
     );
 
     assert_eq!(

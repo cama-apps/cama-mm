@@ -5582,6 +5582,296 @@ fn sqlite_queued_grapple_and_hard_hat_are_visible_to_cave_consequences() {
     assert_eq!(grapple_tunnel.grappling_hook_charges, 4);
 }
 
+fn auto_buy_purchases(database: &FastTestDatabase, action_id: Option<i64>) -> Vec<Value> {
+    let detail: String = Connection::open(database.path())
+        .expect("open database")
+        .query_row(
+            "SELECT detail FROM dig_actions WHERE id=?1",
+            params![action_id.expect("dig action id")],
+            |row| row.get(0),
+        )
+        .expect("dig detail");
+    serde_json::from_str::<Value>(&detail).expect("dig detail JSON")["auto_purchases"]
+        .as_array()
+        .expect("auto purchases array")
+        .clone()
+}
+
+#[test]
+fn sqlite_auto_buy_grappling_hook_purchases_and_applies_one_per_dig() {
+    let database = fast_migrated_database();
+    let discord_id = 60_030;
+    let guild_id = 60_031;
+    let now = 1_900_016_000;
+    seed_live_runtime_tunnel(
+        &database,
+        discord_id,
+        guild_id,
+        now,
+        10,
+        1,
+        Some(now - 7_200),
+    );
+    let connection = Connection::open(database.path()).expect("open database");
+    connection
+        .execute(
+            "UPDATE tunnels SET auto_buy_grappling_hook=1
+             WHERE discord_id=?1 AND guild_id=?2",
+            params![discord_id, guild_id],
+        )
+        .expect("enable grappling auto-buy");
+    connection
+        .execute(
+            "UPDATE players SET jopacoin_balance=100
+             WHERE discord_id=?1 AND guild_id=?2",
+            params![discord_id, guild_id],
+        )
+        .expect("seed balance");
+    drop(connection);
+
+    let outcome = DigRuntimeService::sqlite(database.path())
+        .dig(DigRuntimeRequest {
+            discord_id,
+            guild_id,
+            now: find_non_cave_dig_time(discord_id, guild_id, now),
+            paid: false,
+            forced_event: false,
+        })
+        .expect("auto-buy dig");
+    assert!(outcome.success);
+
+    let purchases = auto_buy_purchases(&database, outcome.action_id);
+    let hook = purchases
+        .iter()
+        .find(|purchase| purchase["item"] == "grappling_hook")
+        .expect("grappling hook auto purchase");
+    assert_eq!(hook["status"], "purchased");
+    assert_eq!(hook["cost"], 10);
+    let tunnel = SqliteDigRuntimeStore::new(database.path())
+        .snapshot(discord_id, guild_id)
+        .expect("post-dig snapshot")
+        .tunnel
+        .expect("post-dig tunnel");
+    assert_eq!(
+        tunnel.grappling_hook_charges, 5,
+        "the auto-bought hook must queue and apply like other queued items"
+    );
+
+    // A second dig with unspent charges must not buy another 10 JC hook.
+    let repeat = DigRuntimeService::sqlite(database.path())
+        .dig(DigRuntimeRequest {
+            discord_id,
+            guild_id,
+            now: find_non_cave_dig_time(discord_id, guild_id, now + 30_000),
+            paid: false,
+            forced_event: false,
+        })
+        .expect("repeat dig");
+    assert!(repeat.success);
+    let repeat_purchases = auto_buy_purchases(&database, repeat.action_id);
+    assert!(
+        repeat_purchases
+            .iter()
+            .all(|purchase| purchase["item"] != "grappling_hook"),
+        "unspent charges must block a repeat hook purchase: {repeat_purchases:?}"
+    );
+    let tunnel = SqliteDigRuntimeStore::new(database.path())
+        .snapshot(discord_id, guild_id)
+        .expect("repeat snapshot")
+        .tunnel
+        .expect("repeat tunnel");
+    assert_eq!(tunnel.grappling_hook_charges, 5, "charges must not stack");
+}
+
+#[test]
+fn sqlite_auto_buy_grappling_hook_skips_while_charges_remain() {
+    let database = fast_migrated_database();
+    let discord_id = 60_036;
+    let guild_id = 60_037;
+    let now = 1_900_016_000;
+    seed_live_runtime_tunnel(
+        &database,
+        discord_id,
+        guild_id,
+        now,
+        10,
+        1,
+        Some(now - 7_200),
+    );
+    let connection = Connection::open(database.path()).expect("open database");
+    connection
+        .execute(
+            "UPDATE tunnels SET auto_buy_grappling_hook=1, grappling_hook_charges=3
+             WHERE discord_id=?1 AND guild_id=?2",
+            params![discord_id, guild_id],
+        )
+        .expect("enable grappling auto-buy with live charges");
+    connection
+        .execute(
+            "UPDATE players SET jopacoin_balance=100
+             WHERE discord_id=?1 AND guild_id=?2",
+            params![discord_id, guild_id],
+        )
+        .expect("seed balance");
+    drop(connection);
+
+    let outcome = DigRuntimeService::sqlite(database.path())
+        .dig(DigRuntimeRequest {
+            discord_id,
+            guild_id,
+            now: find_non_cave_dig_time(discord_id, guild_id, now),
+            paid: false,
+            forced_event: false,
+        })
+        .expect("charged dig");
+    assert!(outcome.success);
+
+    let purchases = auto_buy_purchases(&database, outcome.action_id);
+    assert!(
+        purchases
+            .iter()
+            .all(|purchase| purchase["item"] != "grappling_hook"),
+        "live charges must gate the hook auto-buy: {purchases:?}"
+    );
+    let tunnel = SqliteDigRuntimeStore::new(database.path())
+        .snapshot(discord_id, guild_id)
+        .expect("post-dig snapshot")
+        .tunnel
+        .expect("post-dig tunnel");
+    assert_eq!(tunnel.grappling_hook_charges, 3);
+}
+
+#[test]
+fn sqlite_auto_buy_grappling_hook_disabled_buys_nothing() {
+    let database = fast_migrated_database();
+    let discord_id = 60_032;
+    let guild_id = 60_033;
+    let now = 1_900_016_000;
+    seed_live_runtime_tunnel(
+        &database,
+        discord_id,
+        guild_id,
+        now,
+        10,
+        1,
+        Some(now - 7_200),
+    );
+    let connection = Connection::open(database.path()).expect("open database");
+    connection
+        .execute(
+            "UPDATE players SET jopacoin_balance=100
+             WHERE discord_id=?1 AND guild_id=?2",
+            params![discord_id, guild_id],
+        )
+        .expect("seed balance");
+    drop(connection);
+
+    let outcome = DigRuntimeService::sqlite(database.path())
+        .dig(DigRuntimeRequest {
+            discord_id,
+            guild_id,
+            now: find_non_cave_dig_time(discord_id, guild_id, now),
+            paid: false,
+            forced_event: false,
+        })
+        .expect("default-settings dig");
+    assert!(outcome.success);
+
+    let purchases = auto_buy_purchases(&database, outcome.action_id);
+    assert!(
+        purchases
+            .iter()
+            .all(|purchase| purchase["item"] != "grappling_hook"),
+        "a disabled setting must not buy a hook: {purchases:?}"
+    );
+    let tunnel = SqliteDigRuntimeStore::new(database.path())
+        .snapshot(discord_id, guild_id)
+        .expect("post-dig snapshot")
+        .tunnel
+        .expect("post-dig tunnel");
+    assert_eq!(tunnel.grappling_hook_charges, 0);
+}
+
+#[test]
+fn sqlite_auto_buy_grappling_hook_queues_owned_reserve_without_charge() {
+    let database = fast_migrated_database();
+    let discord_id = 60_034;
+    let guild_id = 60_035;
+    let now = 1_900_016_000;
+    seed_live_runtime_tunnel(
+        &database,
+        discord_id,
+        guild_id,
+        now,
+        10,
+        1,
+        Some(now - 7_200),
+    );
+    let connection = Connection::open(database.path()).expect("open database");
+    connection
+        .execute(
+            "UPDATE tunnels SET auto_buy_grappling_hook=1
+             WHERE discord_id=?1 AND guild_id=?2",
+            params![discord_id, guild_id],
+        )
+        .expect("enable grappling auto-buy");
+    connection
+        .execute(
+            "UPDATE players SET jopacoin_balance=0
+             WHERE discord_id=?1 AND guild_id=?2",
+            params![discord_id, guild_id],
+        )
+        .expect("zero balance");
+    connection
+        .execute(
+            "INSERT INTO dig_inventory(
+                     discord_id,guild_id,item_type,queued,created_at
+                 ) VALUES(?1,?2,'grappling_hook',0,?3)",
+            params![discord_id, guild_id, now],
+        )
+        .expect("seed owned reserve hook");
+    drop(connection);
+
+    let outcome = DigRuntimeService::sqlite(database.path())
+        .dig(DigRuntimeRequest {
+            discord_id,
+            guild_id,
+            now: find_non_cave_dig_time(discord_id, guild_id, now),
+            paid: false,
+            forced_event: false,
+        })
+        .expect("reserve-queue dig");
+    assert!(outcome.success);
+
+    let purchases = auto_buy_purchases(&database, outcome.action_id);
+    let hook = purchases
+        .iter()
+        .find(|purchase| purchase["item"] == "grappling_hook")
+        .expect("grappling hook auto entry");
+    assert_eq!(
+        hook["status"], "queued_from_inventory",
+        "an owned reserve must be queued, not repurchased"
+    );
+    assert_eq!(hook["cost"], 0);
+    assert!(hook["item_id"].is_null());
+    let tunnel = SqliteDigRuntimeStore::new(database.path())
+        .snapshot(discord_id, guild_id)
+        .expect("post-dig snapshot")
+        .tunnel
+        .expect("post-dig tunnel");
+    assert_eq!(tunnel.grappling_hook_charges, 5);
+    let remaining: i64 = Connection::open(database.path())
+        .expect("reopen database")
+        .query_row(
+            "SELECT COUNT(*) FROM dig_inventory
+             WHERE discord_id=?1 AND guild_id=?2 AND item_type='grappling_hook'",
+            params![discord_id, guild_id],
+            |row| row.get(0),
+        )
+        .expect("count remaining hooks");
+    assert_eq!(remaining, 0, "the queued reserve is consumed by the dig");
+}
+
 #[test]
 fn sqlite_blocked_cooldown_does_not_initialize_weather() {
     let database = fast_migrated_database();
@@ -5985,4 +6275,156 @@ fn production_dig_seeds_are_not_derivable_from_public_request_fields() {
     );
     // The default config keeps the legacy seed so tests stay deterministic.
     assert_eq!(super::DigRuntimeConfig::default().entropy_secret, 0);
+}
+
+#[test]
+fn boss_progress_flat_vs_nested_shapes_both_parse_correctly() {
+    let database = fast_migrated_database();
+    let connection = Connection::open(database.path()).expect("open database");
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .expect("disable foreign keys");
+    let actor = 111_i64;
+    let guild = 222_i64;
+
+    // Seed player with tunnel
+    connection
+        .execute(
+            "INSERT INTO players (discord_id, guild_id, discord_username)
+             VALUES (?1, ?2, 'test-player')",
+            params![actor, guild],
+        )
+        .expect("insert player");
+
+    connection
+        .execute(
+            "INSERT INTO tunnels (discord_id, guild_id, depth, max_depth, total_digs, luminosity, total_jc_earned, paid_digs_today, pickaxe_tier, boss_progress)
+             VALUES (?1, ?2, 0, 0, 0, 100, 0, 0, 1, ?3)",
+            params![actor, guild, r#"{"25":"defeated","50":"defeated","75":"active"}"#],
+        )
+        .expect("insert tunnel with flat shape");
+    drop(connection);
+
+    let service = DigRuntimeService::sqlite(database.path());
+
+    // Read state with flat shape - should not panic and should correctly parse
+    let flat_snapshot = service
+        .snapshot(actor, guild)
+        .expect("flat snapshot")
+        .tunnel
+        .expect("flat tunnel");
+
+    // Verify flat shape was parsed: 25 and 50 defeated, so should be parked at 75 (first undefeated)
+    assert_eq!(
+        flat_snapshot.depth, 0,
+        "player at depth 0 with 25,50 defeated should not yet reach boss boundary"
+    );
+
+    // Now update the same tunnel with nested shape
+    let connection = Connection::open(database.path()).expect("reopen database");
+    connection
+        .execute(
+            "UPDATE tunnels SET boss_progress=?1 WHERE discord_id=?2 AND guild_id=?3",
+            params![r#"{"25":{"status":"defeated"},"50":{"status":"defeated"},"75":{"status":"active"}}"#, actor, guild],
+        )
+        .expect("update tunnel with nested shape");
+    drop(connection);
+
+    // Read state with nested shape - should produce identical result
+    let nested_snapshot = service
+        .snapshot(actor, guild)
+        .expect("nested snapshot")
+        .tunnel
+        .expect("nested tunnel");
+
+    assert_eq!(
+        flat_snapshot.depth, nested_snapshot.depth,
+        "flat and nested boss_progress shapes should parse to identical state"
+    );
+}
+
+#[test]
+fn active_curse_summary_carries_the_name_the_effect_decoder_discards() {
+    let raw = r#"{"id":"hex_false_route","name":"False Route","digs_remaining":6,
+        "effect":{"advance_bonus":-2,"luminosity_drain":20}}"#;
+
+    let curse = super::effects::active_curse_summary(Some(raw)).expect("active curse");
+
+    assert_eq!(curse.name, "False Route");
+    assert_eq!(curse.digs_remaining, 6);
+    // A multi-effect curse must surface every penalty, not just the first.
+    assert_eq!(curse.advance_bonus, -2);
+    assert_eq!(curse.luminosity_drain, 20);
+    assert_eq!(curse.jc_bonus, 0);
+}
+
+#[test]
+fn active_curse_summary_converts_rate_penalties_to_whole_percents() {
+    let raw = r#"{"name":"Salt-Glyph Bind","digs_remaining":3,
+        "effect":{"cave_in_bonus":0.1,"cooldown_penalty":0.25}}"#;
+
+    let curse = super::effects::active_curse_summary(Some(raw)).expect("active curse");
+
+    assert_eq!(curse.cave_in_percent, 10);
+    assert_eq!(curse.cooldown_percent, 25);
+}
+
+#[test]
+fn active_curse_summary_is_absent_once_the_curse_is_spent() {
+    // The dig loop decrements to zero rather than clearing eagerly, so an
+    // exhausted curse must read as no curse at all.
+    let spent = r#"{"name":"Void Tithe","digs_remaining":0,"effect":{"advance_bonus":-2}}"#;
+    assert!(super::effects::active_curse_summary(Some(spent)).is_none());
+    assert!(super::effects::active_curse_summary(None).is_none());
+    assert!(super::effects::active_curse_summary(Some("not json")).is_none());
+}
+
+#[test]
+fn active_curse_summary_falls_back_when_the_name_is_missing() {
+    let raw = r#"{"digs_remaining":2,"effect":{"advance_bonus":-1}}"#;
+
+    let curse = super::effects::active_curse_summary(Some(raw)).expect("active curse");
+
+    assert_eq!(curse.name, "Unnamed Hex");
+    assert_eq!(curse.digs_remaining, 2);
+}
+
+#[test]
+fn active_curse_summary_clamps_over_cap_rate_penalties_to_the_applied_caps() {
+    // The roll clamps a persisted curse to CAVE_IN_CURSE_CAP=0.10 and
+    // COOLDOWN_CURSE_CAP=0.25, so the embed must show those caps rather than
+    // the raw over-cap fractions.
+    let raw = r#"{"name":"Overloaded Hex","digs_remaining":3,
+        "effect":{"cave_in_bonus":0.30,"cooldown_penalty":0.40}}"#;
+
+    let curse = super::effects::active_curse_summary(Some(raw)).expect("active curse");
+
+    assert_eq!(curse.cave_in_percent, 10);
+    assert_eq!(curse.cooldown_percent, 25);
+}
+
+#[test]
+fn torch_auto_buy_fires_on_low_light_or_the_boss_window() {
+    // One or two blocks below the canonical depth-25 boss row.
+    assert!(super::should_auto_buy_torch(24, 40));
+    assert!(super::should_auto_buy_torch(23, 50));
+    assert!(super::should_auto_buy_torch(24, 100));
+    // The legacy low-light trigger works anywhere; a torch restores 50
+    // luminosity, so it is self-limiting between boundaries.
+    assert!(super::should_auto_buy_torch(30, 10));
+    assert!(super::should_auto_buy_torch(120, 0));
+    // The pinnacle engages at depth 349 and the endgame drain ramps from
+    // there, so the window stays open for every deeper depth.
+    assert!(super::should_auto_buy_torch(349, 10));
+    assert!(super::should_auto_buy_torch(350, 100));
+    assert!(super::should_auto_buy_torch(420, 100));
+    // Healthy light between boundaries buys nothing; this is the over-buy
+    // regression (the old `depth >= b` check fired on every dig past 24).
+    assert!(!super::should_auto_buy_torch(30, 100));
+    assert!(!super::should_auto_buy_torch(120, 100));
+    // A passed boundary closes its window: at depth 25 the next window is
+    // depths 48-49 for the depth-50 boss.
+    assert!(!super::should_auto_buy_torch(25, 100));
+    assert!(!super::should_auto_buy_torch(47, 51));
+    assert!(super::should_auto_buy_torch(48, 100));
 }

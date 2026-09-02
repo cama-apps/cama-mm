@@ -104,7 +104,9 @@ impl NtfyHttpClient {
             .body(message.to_owned())
             .send()
             .await
-            .map_err(|error| NtfyPublishError::Request(error.to_string()))?;
+            // The request URL embeds the secret topic; `without_url` drops it
+            // so no caller can leak the topic into logs or user-facing copy.
+            .map_err(|error| NtfyPublishError::Request(error.without_url().to_string()))?;
         if response.status().is_success() {
             Ok(())
         } else {

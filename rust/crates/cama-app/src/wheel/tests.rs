@@ -23,12 +23,12 @@ impl SpinAdmissionPort for MemoryAdmission {
         _user_id: i64,
         _guild_id: i64,
         now: i64,
-        cooldown_seconds: i64,
+        current_window_started_at: i64,
     ) -> Result<bool, Self::Error> {
         self.claim_calls += 1;
         let available = self
             .last_spin
-            .is_none_or(|last| now.saturating_sub(last) >= cooldown_seconds);
+            .is_none_or(|last| last < current_window_started_at);
         if available {
             self.last_spin = Some(now);
         }
@@ -209,7 +209,7 @@ fn test_wheel_cooldown_expired_allows_spin() {
     let now = 1_700_000_000;
     let mut port = MemoryAdmission {
         registered: true,
-        last_spin: Some(now - WHEEL_COOLDOWN_SECONDS - 1),
+        last_spin: Some(now - GAME_DAY_SECONDS - 1),
         ..MemoryAdmission::default()
     };
     let request = SpinRequest {
@@ -228,6 +228,59 @@ fn test_wheel_cooldown_expired_allows_spin() {
         Ok(SpinAdmission::RejectedCooldown { .. })
     ));
     assert_eq!(port.claim_calls, 2);
+}
+
+#[test]
+fn wheel_resets_at_fixed_four_am_utc_minus_eight_boundary() {
+    // Every fixed-PST 4 AM boundary is 12:00 UTC. A spin one second before
+    // this boundary is available again one second later, not 24 hours later.
+    let reset = 20 * GAME_DAY_SECONDS + 12 * 3_600;
+    let mut port = MemoryAdmission {
+        registered: true,
+        last_spin: Some(reset - 1),
+        ..MemoryAdmission::default()
+    };
+
+    assert_eq!(
+        admit_spin(
+            &mut port,
+            SpinRequest {
+                user_id: 1_001,
+                guild_id: 123,
+                now: reset,
+                bonus_spin: false,
+                is_admin: false,
+            },
+        ),
+        Ok(SpinAdmission::Allowed)
+    );
+    assert_eq!(port.last_spin, Some(reset));
+
+    // The newly claimed spin remains unavailable through the whole window.
+    assert!(matches!(
+        admit_spin(
+            &mut port,
+            SpinRequest {
+                user_id: 1_001,
+                guild_id: 123,
+                now: reset + GAME_DAY_SECONDS - 1,
+                bonus_spin: false,
+                is_admin: false,
+            },
+        ),
+        Ok(SpinAdmission::RejectedCooldown { .. })
+    ));
+}
+
+#[test]
+fn wheel_reset_timestamp_is_fixed_across_the_year() {
+    // 2026-01-15 and 2026-07-15 are on opposite sides of US daylight saving.
+    // Both reset at 12:00 UTC because the game clock is fixed UTC-8.
+    for reset in [1_768_478_400, 1_784_116_800] {
+        assert_eq!(wheel_window_start_at(reset), reset);
+        assert_eq!(next_wheel_reset_at(reset - 1), reset);
+        assert_eq!(next_wheel_reset_at(reset), reset + GAME_DAY_SECONDS);
+    }
 }
 
 #[test]
@@ -964,10 +1017,7 @@ fn test_dig_bonus_wheel_spin_preserves_regular_cooldown() {
     );
     assert_eq!(cooldown.replacement_last_spin, None);
     assert!(!cooldown.schedule_reminder);
-    assert_eq!(
-        cooldown.next_spin_at,
-        concurrent_spin + WHEEL_COOLDOWN_SECONDS
-    );
+    assert_eq!(cooldown.next_spin_at, next_wheel_reset_at(concurrent_spin));
     assert!(presentation.field_value.contains("cooldown unchanged"));
     assert!(!delivery_plan(RevealKind::Wheel, true).defer_initial);
 }
@@ -985,12 +1035,38 @@ fn test_dig_bonus_wheel_explosion_preserves_regular_cooldown() {
     assert_eq!(explosion.log_result, 67);
     assert_eq!(explosion.wheel_kind, WheelKind::Regular);
     assert!(explosion.is_bonus);
-    assert_eq!(
-        cooldown.next_spin_at,
-        previous_spin + WHEEL_COOLDOWN_SECONDS
-    );
+    assert_eq!(cooldown.next_spin_at, next_wheel_reset_at(previous_spin));
     assert!(!cooldown.schedule_reminder);
     assert!(!delivery_plan(RevealKind::Explosion, true).defer_initial);
+}
+
+#[test]
+fn regular_and_lose_turn_cooldowns_share_the_fixed_daily_reset() {
+    let reset = 20 * GAME_DAY_SECONDS + 12 * 3_600;
+    let now = reset + 23 * 3_600;
+
+    let regular = cooldown_after_resolution(now, false, None, CooldownOutcome::Other);
+    assert_eq!(regular.next_spin_at, reset + GAME_DAY_SECONDS);
+    assert_eq!(regular.replacement_last_spin, None);
+    assert!(regular.schedule_reminder);
+
+    let lose_turn = cooldown_after_resolution(now, false, None, CooldownOutcome::LoseTurn);
+    assert_eq!(
+        lose_turn.next_spin_at,
+        reset + WHEEL_LOSE_PENALTY_DAYS * GAME_DAY_SECONDS
+    );
+    assert_eq!(
+        lose_turn.replacement_last_spin,
+        Some(lose_turn.next_spin_at - 1)
+    );
+    assert!(wheel_spin_is_available(
+        lose_turn.next_spin_at,
+        lose_turn.replacement_last_spin
+    ));
+    assert!(!wheel_spin_is_available(
+        lose_turn.next_spin_at - 1,
+        lose_turn.replacement_last_spin
+    ));
 }
 
 #[test]

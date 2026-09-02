@@ -1183,10 +1183,14 @@ fn discovery_diagnostics_are_append_only_and_valve_ids_are_unique_per_guild() {
 fn discovery_unique_valve_migration_reports_legacy_duplicates() {
     let file = empty_database();
     initialize_or_migrate(file.path()).expect("initialize duplicate fixture");
-    let final_migration = expected_migrations()
-        .last()
-        .copied()
-        .expect("final migration");
+    // Named rather than positional: this guard is not tied to being the last
+    // ledger entry, and appending a later migration must not silently disarm
+    // the duplicate check this test exercises.
+    let final_migration = "create_match_discovery_attempts_and_unique_valve_ids";
+    assert!(
+        expected_migrations().contains(&final_migration),
+        "duplicate-guard migration must remain in the ledger"
+    );
     let connection = Connection::open(file.path()).expect("open duplicate fixture");
     connection
         .execute_batch(
@@ -1207,6 +1211,486 @@ fn discovery_unique_valve_migration_reports_legacy_duplicates() {
     let message = error.to_string();
     assert!(message.contains("Valve match 9001"), "{message}");
     assert!(message.contains("11,12"), "{message}");
+}
+
+fn matches_without_guild_id_fixture(path: &Path, rows: &str) {
+    let connection = Connection::open(path).expect("open pre-guild matches fixture");
+    connection
+        .execute_batch(&format!(
+            "CREATE TABLE matches (
+                 match_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 team1_players TEXT NOT NULL,
+                 team2_players TEXT NOT NULL,
+                 winning_team INTEGER,
+                 match_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                 valve_match_id INTEGER
+             );
+             INSERT INTO matches(match_id,team1_players,team2_players,valve_match_id)
+             VALUES {rows};"
+        ))
+        .expect("seed matches predating the guild_id column");
+}
+
+#[test]
+fn valve_duplicate_guard_migrates_matches_frozen_before_guild_id_column() {
+    let file = empty_database();
+    matches_without_guild_id_fixture(
+        file.path(),
+        "(11,'[]','[]',9001),(12,'[]','[]',9002),(13,'[]','[]',NULL)",
+    );
+
+    initialize_or_migrate(file.path()).expect("migrate matches without a guild_id column");
+
+    let connection = Connection::open(file.path()).expect("inspect migrated matches");
+    let rows: Vec<(i64, i64, Option<i64>)> = connection
+        .prepare("SELECT match_id, guild_id, valve_match_id FROM matches ORDER BY match_id")
+        .expect("prepare migrated match query")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .expect("read migrated matches")
+        .collect::<Result<_, _>>()
+        .expect("collect migrated matches");
+    assert_eq!(
+        rows,
+        vec![(11, 0, Some(9001)), (12, 0, Some(9002)), (13, 0, None)]
+    );
+    drop(connection);
+    let audit = audit_database(file.path()).expect("audit migrated pre-guild fixture");
+    assert!(audit.is_compatible(), "{:?}", audit.issues());
+}
+
+#[test]
+fn valve_duplicate_guard_reports_duplicates_in_matches_without_guild_id_column() {
+    let file = empty_database();
+    matches_without_guild_id_fixture(file.path(), "(11,'[]','[]',9001),(12,'[]','[]',9001)");
+
+    let error =
+        initialize_or_migrate(file.path()).expect_err("duplicate Valve IDs must stop migration");
+    assert!(matches!(
+        error,
+        SchemaMigrationError::DuplicateValveMatchIds(_)
+    ));
+    let message = error.to_string();
+    assert!(message.contains("guild 0"), "{message}");
+    assert!(message.contains("Valve match 9001"), "{message}");
+    assert!(message.contains("11,12"), "{message}");
+}
+
+const LEGACY_PUSH_TABLE_SQL: &str = "CREATE TABLE push_notification_targets (
+     discord_id         INTEGER NOT NULL,
+     guild_id           INTEGER NOT NULL DEFAULT 0,
+     ntfy_server        TEXT NOT NULL,
+     ntfy_topic         TEXT NOT NULL,
+     readycheck_enabled INTEGER NOT NULL DEFAULT 1,
+     lobby_enabled      INTEGER NOT NULL DEFAULT 1,
+     updated_at         INTEGER NOT NULL DEFAULT 0,
+     PRIMARY KEY (discord_id, guild_id)
+ );";
+
+fn push_notification_table_sql(path: &Path) -> String {
+    let sql: String = Connection::open(path)
+        .expect("open push table shape fixture")
+        .query_row(
+            "SELECT sql FROM sqlite_master
+             WHERE type='table' AND name='push_notification_targets'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read push table SQL");
+    normalize_sql(&sql)
+}
+
+fn fresh_push_notification_table_sql() -> String {
+    let fresh = empty_database();
+    initialize_or_migrate(fresh.path()).expect("initialize fresh comparison database");
+    push_notification_table_sql(fresh.path())
+}
+
+fn push_notification_rows(path: &Path) -> Vec<(i64, Option<String>, i64, i64, i64, i64)> {
+    Connection::open(path)
+        .expect("open push target row fixture")
+        .prepare(
+            "SELECT discord_id,ntfy_topic,readycheck_enabled,match_started_enabled,
+                    dm_readycheck_enabled,dm_match_started_enabled
+             FROM push_notification_targets ORDER BY discord_id",
+        )
+        .expect("prepare push target row query")
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        })
+        .expect("read push target rows")
+        .collect::<Result<_, _>>()
+        .expect("collect push target rows")
+}
+
+#[test]
+fn push_notification_converge_nulls_free_form_topics_and_preserves_preferences() {
+    const SURVIVOR_TOPIC: &str = "cama-000000000000000000000000000000000000000000000002";
+    let file = empty_database();
+    initialize_or_migrate(file.path()).expect("initialize current schema");
+    let connection = Connection::open(file.path()).expect("open legacy push fixture");
+    connection
+        .execute_batch(&format!(
+            "DROP TABLE push_notification_targets;
+             {LEGACY_PUSH_TABLE_SQL}
+             INSERT INTO push_notification_targets
+                 (discord_id,guild_id,ntfy_server,ntfy_topic,
+                  readycheck_enabled,lobby_enabled,updated_at)
+             VALUES
+                 (1,42,'https://ntfy.sh','my custom phone topic',1,1,100),
+                 (2,42,'https://ntfy.example','{SURVIVOR_TOPIC}',1,0,200);
+             DELETE FROM schema_migrations
+              WHERE name IN ('rename_push_notification_lobby_to_match_started',
+                             'add_push_notification_direct_message_channel',
+                             'converge_legacy_push_notification_targets');"
+        ))
+        .expect("seed 1692e956-era push notification table");
+    drop(connection);
+
+    initialize_or_migrate(file.path()).expect("migrate legacy push notification targets");
+
+    let expected_rows = vec![
+        (1, None, 1, 1, 0, 0),
+        (2, Some(SURVIVOR_TOPIC.to_owned()), 1, 0, 0, 0),
+    ];
+    assert_eq!(
+        push_notification_rows(file.path()),
+        expected_rows,
+        "free-form topics are cleared to NULL with preferences kept; the opt-out survives"
+    );
+    assert_eq!(
+        push_notification_table_sql(file.path()),
+        fresh_push_notification_table_sql(),
+        "the upgraded table must be shaped exactly like a fresh database"
+    );
+    let audit = audit_database(file.path()).expect("audit upgraded push fixture");
+    assert!(audit.is_compatible(), "{:?}", audit.issues());
+
+    Connection::open(file.path())
+        .expect("reopen for idempotent rerun")
+        .execute(
+            "DELETE FROM schema_migrations
+             WHERE name='converge_legacy_push_notification_targets'",
+            [],
+        )
+        .expect("make the converge migration pending again");
+    initialize_or_migrate(file.path()).expect("idempotent push migration rerun");
+    assert_eq!(push_notification_rows(file.path()), expected_rows);
+}
+
+#[test]
+fn push_notification_converge_repairs_databases_migrated_without_conversion() {
+    const TOPIC_A: &str = "cama-00000000000000000000000000000000000000000000000a";
+    const TOPIC_B: &str = "cama-00000000000000000000000000000000000000000000000b";
+    let file = empty_database();
+    initialize_or_migrate(file.path()).expect("initialize current schema");
+    let connection = Connection::open(file.path()).expect("open remnant push fixture");
+    // An origin/main-era binary consumed the rename ledger entry through the
+    // generic rebuild: the canonical columns exist, match_started_enabled was
+    // backfilled to DEFAULT 1, and ntfy_server/lobby_enabled survive as extra
+    // columns (NULL on rows written after that migration).
+    connection
+        .execute_batch(&format!(
+            "ALTER TABLE push_notification_targets ADD COLUMN ntfy_server TEXT;
+             ALTER TABLE push_notification_targets ADD COLUMN lobby_enabled INTEGER;
+             INSERT INTO push_notification_targets
+                 (discord_id,guild_id,ntfy_topic,readycheck_enabled,match_started_enabled,
+                  dm_readycheck_enabled,dm_match_started_enabled,updated_at,
+                  ntfy_server,lobby_enabled)
+             VALUES
+                 (1,42,'{TOPIC_A}',1,1,0,0,100,'https://ntfy.sh',0),
+                 (2,42,'{TOPIC_B}',1,0,1,0,200,NULL,NULL);
+             DELETE FROM schema_migrations
+              WHERE name='converge_legacy_push_notification_targets';"
+        ))
+        .expect("seed remnant-column push notification table");
+    drop(connection);
+
+    initialize_or_migrate(file.path()).expect("converge remnant push notification table");
+
+    assert_eq!(
+        push_notification_rows(file.path()),
+        vec![
+            (1, Some(TOPIC_A.to_owned()), 1, 0, 0, 0),
+            (2, Some(TOPIC_B.to_owned()), 1, 0, 1, 0),
+        ],
+        "the remnant lobby opt-out is restored and a post-remnant row keeps its live preference"
+    );
+    assert_eq!(
+        push_notification_table_sql(file.path()),
+        fresh_push_notification_table_sql(),
+        "the remnant columns must be gone"
+    );
+    let audit = audit_database(file.path()).expect("audit converged remnant fixture");
+    assert!(audit.is_compatible(), "{:?}", audit.issues());
+}
+
+#[test]
+fn push_notification_migrations_apply_from_pre_push_notification_snapshot() {
+    let file = empty_database();
+    initialize_or_migrate(file.path()).expect("initialize current schema");
+    let connection = Connection::open(file.path()).expect("open pre-push snapshot fixture");
+    connection
+        .execute_batch(
+            "DROP TABLE push_notification_targets;
+             DELETE FROM schema_migrations
+              WHERE name IN ('create_push_notification_targets_table',
+                             'rename_push_notification_lobby_to_match_started',
+                             'add_push_notification_direct_message_channel');",
+        )
+        .expect("simulate a database predating push notifications");
+    drop(connection);
+
+    let report = initialize_or_migrate(file.path()).expect("apply all push migrations");
+    for name in [
+        "create_push_notification_targets_table",
+        "rename_push_notification_lobby_to_match_started",
+        "add_push_notification_direct_message_channel",
+    ] {
+        assert!(
+            report.newly_applied.iter().any(|applied| applied == name),
+            "{name} must be applied: {report:?}"
+        );
+    }
+    assert!(
+        report
+            .created_tables
+            .contains(&"push_notification_targets".to_owned()),
+        "{report:?}"
+    );
+    assert_eq!(
+        push_notification_table_sql(file.path()),
+        fresh_push_notification_table_sql()
+    );
+    let audit = audit_database(file.path()).expect("audit pre-push snapshot upgrade");
+    assert!(audit.is_compatible(), "{:?}", audit.issues());
+}
+
+#[test]
+fn normalize_boss_progress_flat_to_nested_rewrites_flat_statuses_idempotently() {
+    fn boss_progress(path: &Path) -> serde_json::Value {
+        let raw: String = Connection::open(path)
+            .expect("open boss progress fixture")
+            .query_row(
+                "SELECT boss_progress FROM tunnels WHERE discord_id=7 AND guild_id=42",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read boss progress");
+        serde_json::from_str(&raw).expect("parse boss progress JSON")
+    }
+    fn make_normalize_pending(path: &Path) {
+        Connection::open(path)
+            .expect("reopen boss progress fixture")
+            .execute(
+                "DELETE FROM schema_migrations
+                 WHERE name='normalize_boss_progress_flat_to_nested'",
+                [],
+            )
+            .expect("make flat-to-nested migration pending");
+    }
+
+    let file = empty_database();
+    initialize_or_migrate(file.path()).expect("initialize boss progress fixture");
+    let connection = Connection::open(file.path()).expect("open boss progress fixture");
+    connection
+        .execute(
+            "INSERT INTO tunnels(
+                 discord_id,guild_id,depth,max_depth,total_digs,luminosity,
+                 total_jc_earned,paid_digs_today,pickaxe_tier,boss_progress)
+             VALUES (7,42,30,30,5,100,50,0,1,'{\"25\":\"defeated\",\"50\":\"active\"}')",
+            [],
+        )
+        .expect("seed flat legacy boss progress");
+    drop(connection);
+    make_normalize_pending(file.path());
+
+    initialize_or_migrate(file.path()).expect("normalize flat boss progress");
+    let nested = boss_progress(file.path());
+    assert_eq!(
+        nested,
+        serde_json::json!({"25": {"status": "defeated"}, "50": {"status": "active"}})
+    );
+
+    make_normalize_pending(file.path());
+    initialize_or_migrate(file.path()).expect("idempotent flat-to-nested rerun");
+    assert_eq!(boss_progress(file.path()), nested);
+}
+
+#[test]
+fn auto_buy_grappling_hook_column_upgrades_existing_tunnels_and_defaults_off() {
+    fn has_hook_column(connection: &Connection) -> bool {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('tunnels')
+                 WHERE name='auto_buy_grappling_hook'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("inspect tunnels columns")
+            > 0
+    }
+    fn hook_setting(connection: &Connection) -> i64 {
+        connection
+            .query_row(
+                "SELECT auto_buy_grappling_hook FROM tunnels
+                 WHERE discord_id=?1 AND guild_id=?2",
+                params![4_242_i64, 77_i64],
+                |row| row.get(0),
+            )
+            .expect("read grappling-hook setting")
+    }
+
+    let file = empty_database();
+    initialize_or_migrate(file.path()).expect("initialize grappling-hook fixture");
+    let connection = Connection::open(file.path()).expect("open grappling-hook fixture");
+    assert!(
+        has_hook_column(&connection),
+        "a freshly migrated database must already carry the column"
+    );
+
+    // Simulate a database written before the column existed, holding a tunnel
+    // whose other auto-buy settings are already switched on.
+    connection
+        .execute(
+            "INSERT INTO tunnels(
+                 discord_id,guild_id,depth,max_depth,total_digs,luminosity,
+                 total_jc_earned,paid_digs_today,pickaxe_tier,
+                 auto_buy_torch,auto_buy_hard_hat)
+             VALUES (?1,?2,7,9,3,100,50,0,1,1,1)",
+            params![4_242_i64, 77_i64],
+        )
+        .expect("seed pre-migration tunnel");
+    connection
+        .execute_batch(
+            "ALTER TABLE tunnels DROP COLUMN auto_buy_grappling_hook;
+             DELETE FROM schema_migrations WHERE name='add_dig_auto_buy_grappling_hook';",
+        )
+        .expect("simulate a database predating the grappling-hook column");
+    assert!(!has_hook_column(&connection));
+    drop(connection);
+
+    initialize_or_migrate(file.path()).expect("upgrade restores the grappling-hook column");
+
+    let connection = Connection::open(file.path()).expect("reopen upgraded fixture");
+    assert!(
+        has_hook_column(&connection),
+        "upgrading must add the column"
+    );
+    let (torch, hard_hat, depth): (i64, i64, i64) = connection
+        .query_row(
+            "SELECT auto_buy_torch,auto_buy_hard_hat,depth FROM tunnels
+             WHERE discord_id=?1 AND guild_id=?2",
+            params![4_242_i64, 77_i64],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read upgraded tunnel");
+    assert_eq!(
+        (torch, hard_hat, depth),
+        (1, 1, 7),
+        "the rebuild must preserve existing tunnel state"
+    );
+    assert_eq!(
+        hook_setting(&connection),
+        0,
+        "an existing miner must not be opted into buying grappling hooks"
+    );
+    drop(connection);
+
+    initialize_or_migrate(file.path()).expect("re-running the migration is idempotent");
+    let connection = Connection::open(file.path()).expect("reopen after idempotent retry");
+    assert!(has_hook_column(&connection));
+    assert_eq!(hook_setting(&connection), 0);
+}
+
+#[test]
+fn death_activated_pet_id_column_upgrades_existing_pets_and_defaults_null() {
+    fn has_activation_column(connection: &Connection) -> bool {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('pets')
+                 WHERE name='death_activated_pet_id'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("inspect pets columns")
+            > 0
+    }
+    fn dead_pet_state(connection: &Connection) -> (String, Option<i64>, Option<i64>) {
+        connection
+            .query_row(
+                "SELECT name, died_at, death_activated_pet_id FROM pets WHERE pet_id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read migrated dead pet")
+    }
+
+    let file = empty_database();
+    initialize_or_migrate(file.path()).expect("initialize death-activation fixture");
+    let connection = Connection::open(file.path()).expect("open death-activation fixture");
+    assert!(
+        has_activation_column(&connection),
+        "a freshly migrated database must already carry the column"
+    );
+
+    // Simulate a database written before the column existed, holding an
+    // unannounced death and the stabled pet its claim promoted.
+    connection
+        .execute_batch(
+            "ALTER TABLE pets DROP COLUMN death_activated_pet_id;
+             DELETE FROM schema_migrations WHERE name='add_pet_death_activated_pet_id';",
+        )
+        .expect("simulate a database predating the death-activation column");
+    assert!(!has_activation_column(&connection));
+    connection
+        .execute_batch(
+            "INSERT INTO pets
+                 (pet_id,discord_id,guild_id,name,species,adopted_at,hatched_at,
+                  adopt_fee,last_fed_at,hunger_at_last_fed,died_at,is_active,stabled_at)
+             VALUES
+                 (1,101,202,'Departed','common_cama',100,200,20,200,100,900,0,NULL),
+                 (2,101,202,'Heir','common_cama',100,200,20,200,100,NULL,1,NULL);",
+        )
+        .expect("seed pre-migration pet rows");
+    drop(connection);
+
+    initialize_or_migrate(file.path()).expect("upgrade restores the death-activation column");
+
+    let connection = Connection::open(file.path()).expect("reopen upgraded fixture");
+    assert!(
+        has_activation_column(&connection),
+        "upgrading must add the column"
+    );
+    assert_eq!(
+        dead_pet_state(&connection),
+        ("Departed".to_owned(), Some(900), None),
+        "the rebuild must preserve the legacy death and record no activation"
+    );
+    let ledger: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM schema_migrations
+             WHERE name='add_pet_death_activated_pet_id'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read migration ledger");
+    assert_eq!(ledger, 1);
+    drop(connection);
+
+    initialize_or_migrate(file.path()).expect("re-running the migration is idempotent");
+    let connection = Connection::open(file.path()).expect("reopen after idempotent retry");
+    assert!(has_activation_column(&connection));
+    assert_eq!(
+        dead_pet_state(&connection),
+        ("Departed".to_owned(), Some(900), None)
+    );
 }
 
 #[test]

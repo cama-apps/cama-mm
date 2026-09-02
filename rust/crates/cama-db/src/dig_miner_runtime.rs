@@ -21,6 +21,7 @@ pub struct DigMinerTunnelSnapshot {
     pub stat_boss_awards_json: Option<String>,
     pub auto_buy_torch: bool,
     pub auto_buy_hard_hat: bool,
+    pub auto_buy_grappling_hook: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -72,6 +73,7 @@ impl DigMinerAllocation {
 pub struct DigMinerAutoBuyUpdate {
     pub torch: Option<bool>,
     pub hard_hat: Option<bool>,
+    pub grappling_hook: Option<bool>,
 }
 
 #[derive(Debug, Error)]
@@ -254,16 +256,22 @@ impl DigMinerRuntimeRepository {
             return Ok(outcome(DigMinerMutationStatus::MissingTunnel, snapshot));
         };
         let changed = transaction.execute(
-            "UPDATE tunnels SET auto_buy_torch=?1,auto_buy_hard_hat=?2
-             WHERE discord_id=?3 AND guild_id=?4
-               AND auto_buy_torch=?5 AND auto_buy_hard_hat=?6",
+            "UPDATE tunnels SET auto_buy_torch=?1,auto_buy_hard_hat=?2,auto_buy_grappling_hook=?3
+             WHERE discord_id=?4 AND guild_id=?5
+               AND auto_buy_torch=?6 AND auto_buy_hard_hat=?7 AND auto_buy_grappling_hook=?8",
             params![
                 i64::from(update.torch.unwrap_or(current.auto_buy_torch)),
                 i64::from(update.hard_hat.unwrap_or(current.auto_buy_hard_hat)),
+                i64::from(
+                    update
+                        .grappling_hook
+                        .unwrap_or(current.auto_buy_grappling_hook)
+                ),
                 discord_id,
                 guild_id,
                 i64::from(current.auto_buy_torch),
                 i64::from(current.auto_buy_hard_hat),
+                i64::from(current.auto_buy_grappling_hook),
             ],
         )?;
         let status = if changed == 1 {
@@ -474,7 +482,8 @@ fn tunnel_in(
                     COALESCE(stat_strength,0),COALESCE(stat_smarts,0),
                     COALESCE(stat_stamina,0),COALESCE(stat_points,5),
                     COALESCE(prestige_level,0),stat_boss_awards,
-                    COALESCE(auto_buy_torch,0),COALESCE(auto_buy_hard_hat,0)
+                    COALESCE(auto_buy_torch,0),COALESCE(auto_buy_hard_hat,0),
+                    COALESCE(auto_buy_grappling_hook,0)
              FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
             params![discord_id, guild_id],
             |row| {
@@ -489,6 +498,7 @@ fn tunnel_in(
                     stat_boss_awards_json: row.get(7)?,
                     auto_buy_torch: row.get::<_, i64>(8)? != 0,
                     auto_buy_hard_hat: row.get::<_, i64>(9)? != 0,
+                    auto_buy_grappling_hook: row.get::<_, i64>(10)? != 0,
                 })
             },
         )

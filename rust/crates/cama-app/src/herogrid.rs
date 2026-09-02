@@ -1007,20 +1007,12 @@ impl<P: HeroGridDataPort> HeroGridCommandService<P> {
             .filter(|player_id| seen.insert(*player_id))
             .map(|player_id| HeroGridPlayer {
                 discord_id: player_id,
-                name: request.player_name_overrides.map_or_else(
-                    || {
-                        stored_names
-                            .get(&player_id)
-                            .cloned()
-                            .unwrap_or_else(|| format!("User {player_id}"))
-                    },
-                    |names| {
-                        names
-                            .get(&player_id)
-                            .cloned()
-                            .unwrap_or_else(|| player_id.to_string())
-                    },
-                ),
+                name: request
+                    .player_name_overrides
+                    .and_then(|names| names.get(&player_id))
+                    .or_else(|| stored_names.get(&player_id))
+                    .cloned()
+                    .unwrap_or_else(|| format!("User {player_id}")),
             })
             .collect::<Vec<_>>();
 
@@ -1476,8 +1468,8 @@ mod tests {
         assert_eq!((decoded.raster.width, decoded.raster.height), (238, 318));
         let expected = draw_hero_grid(
             &[stat(100, 1, 1, 1), stat(200, 2, 1, 0)],
-            // The transient map is authoritative; missing entries use numeric IDs.
-            &[player(100, "Server Alice"), player(200, "200")],
+            // Cached override wins; a cache miss keeps the stored player name.
+            &[player(100, "Server Alice"), player(200, "Bob")],
             1,
             &format!("Hero Grid: {}", LobbyKind::Open.label()),
         )

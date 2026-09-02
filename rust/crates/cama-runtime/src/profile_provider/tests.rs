@@ -15,7 +15,8 @@ use tempfile::NamedTempFile;
 use super::*;
 use crate::discord_transport::GuildPlayerNameDirectory;
 use crate::registration::{
-    InteractionMessageDelivery, InteractionResponseError, Registry, RegistryBuilder,
+    InteractionMessageDelivery, InteractionOption, InteractionResponseError, InteractionValue,
+    Registry, RegistryBuilder,
 };
 use crate::test_support::initialize_test_database as initialize_or_migrate;
 

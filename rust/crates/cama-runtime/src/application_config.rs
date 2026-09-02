@@ -247,7 +247,6 @@ pub struct Values {
     pub wheel_chain_reaction_est_ev: f64,
     pub wheel_comeback_est_ev: f64,
     pub wheel_commune_est_ev: f64,
-    pub wheel_cooldown_seconds: i64,
     pub wheel_discover_est_ev: f64,
     pub wheel_emergency_est_ev: f64,
     pub wheel_extend_1_est_ev: f64,
@@ -581,7 +580,7 @@ impl ApplicationConfig {
                 shop_package_deal_rating_divisor: p.f64("SHOP_PACKAGE_DEAL_RATING_DIVISOR", 10.0),
                 shop_recalibrate_cost: p.i64("SHOP_RECALIBRATE_COST", 300),
                 shop_soft_avoid_cost: p.i64("SHOP_SOFT_AVOID_COST", SHOP_SOFT_AVOID_COST),
-                soft_avoid_penalty: p.f64("SOFT_AVOID_PENALTY", 160.0),
+                soft_avoid_penalty: p.f64("SOFT_AVOID_PENALTY", 180.0),
                 streak_multiplier_per_game: migration.openskill.streak_multiplier_per_game,
                 streak_threshold: migration.streak_threshold,
                 streaming_bonus: p.i64("STREAMING_BONUS", 1),
@@ -605,7 +604,6 @@ impl ApplicationConfig {
                 wheel_chain_reaction_est_ev: p.f64("WHEEL_CHAIN_REACTION_EST_EV", -25.0),
                 wheel_comeback_est_ev: p.f64("WHEEL_COMEBACK_EST_EV", 15.0),
                 wheel_commune_est_ev: p.f64("WHEEL_COMMUNE_EST_EV", 8.0),
-                wheel_cooldown_seconds: p.i64("WHEEL_COOLDOWN_SECONDS", 86400),
                 wheel_discover_est_ev: p.f64("WHEEL_DISCOVER_EST_EV", 5.0),
                 wheel_emergency_est_ev: p.f64("WHEEL_EMERGENCY_EST_EV", -25.0),
                 wheel_extend_1_est_ev: p.f64("WHEEL_EXTEND_1_EST_EV", -10.0),
@@ -928,7 +926,7 @@ mod tests {
         assert_eq!(config.values.new_player_exclusion_boost, 5);
         assert_eq!(config.values.off_role_flat_value_penalty, 100.0);
         assert_eq!(config.values.off_role_flat_penalty, 740.0);
-        assert_eq!(config.values.soft_avoid_penalty, 160.0);
+        assert_eq!(config.values.soft_avoid_penalty, 180.0);
         assert_eq!(config.values.package_deal_penalty, 90.0);
         assert_eq!(config.values.package_deal_split_penalty, 90.0);
     }
@@ -1137,6 +1135,6 @@ mod tests {
     #[test]
     fn configuration_catalog_entries_are_unique() {
         let catalog = config_py_env_keys().collect::<BTreeSet<_>>();
-        assert_eq!(catalog.len(), 218, "catalog entries must remain unique");
+        assert_eq!(catalog.len(), 217, "catalog entries must remain unique");
     }
 }

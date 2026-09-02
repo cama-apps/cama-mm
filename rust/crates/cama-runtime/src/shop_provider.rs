@@ -607,14 +607,25 @@ impl ShopInteractionHandler {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let mut player_ids = targets
-            .iter()
-            .map(|(_, id)| signed_id(*id, "target user"))
-            .collect::<Result<Vec<_>, _>>()?;
-        player_ids.push(context.user_id);
-        player_ids.sort_unstable();
-        player_ids.dedup();
-        let rendered_names = self.project_player_names(context.guild_id, &player_ids);
+        let mut stored_names = BTreeMap::new();
+        // The invoking user's interaction payload name is the stored fallback
+        // when the member cache misses.
+        stored_names.insert(context.user_id, context.user_display_name.clone());
+        for (index, id) in &targets {
+            let target_id = signed_id(*id, "target user")?;
+            let payload_name = match &context.options[*index].value {
+                InteractionValue::User { display_name, .. } => display_name.clone(),
+                _ => None,
+            };
+            let stored_name = self
+                .load_player(target_id, context.guild_id)
+                .await?
+                .map(|player| player.name)
+                .or(payload_name)
+                .unwrap_or_default();
+            stored_names.insert(target_id, stored_name);
+        }
+        let rendered_names = self.project_stored_player_names(context.guild_id, stored_names);
         context.user_display_name = rendered_names
             .get(&context.user_id)
             .cloned()
@@ -632,14 +643,19 @@ impl ShopInteractionHandler {
         Ok(context)
     }
 
-    fn project_player_names(&self, guild_id: i64, player_ids: &[i64]) -> BTreeMap<i64, String> {
+    fn project_stored_player_names(
+        &self,
+        guild_id: i64,
+        stored_names: BTreeMap<i64, String>,
+    ) -> BTreeMap<i64, String> {
+        let player_ids = stored_names.keys().copied().collect::<Vec<_>>();
         let names = self
             .player_names
-            .names_for_guild(guild_id, player_ids)
+            .names_for_guild(guild_id, &player_ids)
             .unwrap_or_default();
-        player_ids
-            .iter()
-            .map(|player_id| (*player_id, names.resolve(*player_id)))
+        stored_names
+            .into_iter()
+            .map(|(player_id, stored_name)| (player_id, names.resolve_or(player_id, &stored_name)))
             .collect()
     }
 
@@ -1343,7 +1359,11 @@ impl ShopInteractionHandler {
                     .map(|request| request.victim_id)
                     .collect::<Vec<_>>();
                 let outcomes = self.apply_hostile_batch(requests).await?;
-                let names = self.project_player_names(guild_id, &victim_ids);
+                let stored_names = selected
+                    .iter()
+                    .map(|player| (player.discord_id, player.name.clone()))
+                    .collect::<BTreeMap<_, _>>();
+                let names = self.project_stored_player_names(guild_id, stored_names);
                 let mut total_destroyed = 0;
                 let mut total_absorbed = 0;
                 let mut lines = Vec::new();
@@ -1630,7 +1650,7 @@ impl ShopInteractionHandler {
                 .await
                 .map_err(|_| "Could not seal the pact; refunded.".to_owned())?;
                 Ok(format!(
-                    "🌿🩸 **BLOOD PACT** — <@{user_id}> marks <@{}> for skim.\nFor 24h, you receive 25% of {}'s match/wheel/dig earnings (cap 150 JC).\n(cost: {} {JOPACOIN_EMOTE}, balance: {new_balance})",
+                    "🌿🩸 **BLOOD PACT** — <@{user_id}> marks <@{}> for skim.\nFor 24h, you receive 25% of {}'s match/wheel/dig earnings, with no cap.\n(cost: {} {JOPACOIN_EMOTE}, balance: {new_balance})",
                     target.id, target.display_name, spec.cost
                 ))
             }
@@ -2986,7 +3006,7 @@ impl PlayerContextPort for ProductionShopPlayerContext {
             .player_names
             .names_for_guild(guild_id, &[discord_id])
             .unwrap_or_default()
-            .resolve(discord_id);
+            .resolve_or(discord_id, &player.name);
         Ok(Some(PlayerContext {
             username,
             balance: player.balance,
@@ -3189,40 +3209,28 @@ fn subcommand(
 }
 
 fn required_string(options: &[InteractionOption], name: &str) -> Result<String, String> {
-    options
-        .iter()
-        .find(|option| option.name == name)
-        .and_then(|option| match &option.value {
-            InteractionValue::String(value) => Some(value.clone()),
-            _ => None,
-        })
+    crate::option_ext::string_option(options, name)
+        .map(str::to_owned)
         .ok_or_else(|| format!("missing required string option {name:?}"))
 }
 
+/// Shop names prefer the freshly rendered guild name over the payload display
+/// name, falling back to the numeric ID (intentional shop-specific behavior).
 fn user_option(context: &CommandContext, name: &str) -> Result<Option<UserOption>, String> {
-    let value = context
-        .options
-        .iter()
-        .find(|option| option.name == name)
-        .map(|option| &option.value);
-    match value {
-        Some(InteractionValue::User { id, .. }) => {
-            let signed_id = signed_id(*id, "target user")?;
-            let display_name = context
-                .rendered_user_names
-                .get(&signed_id)
-                .cloned()
-                .unwrap_or_else(|| id.to_string());
-            Ok(Some(UserOption {
-                id: signed_id,
-                unsigned_id: *id,
-                ai_display_name: display_name.clone(),
-                display_name,
-            }))
-        }
-        None => Ok(None),
-        Some(_) => Err(format!("option {name:?} is not a user")),
-    }
+    let Some(user) = crate::option_ext::user_option(&context.options, name)? else {
+        return Ok(None);
+    };
+    let display_name = context
+        .rendered_user_names
+        .get(&user.id)
+        .cloned()
+        .unwrap_or_else(|| user.display_name_or_id());
+    Ok(Some(UserOption {
+        id: user.id,
+        unsigned_id: user.raw_id,
+        ai_display_name: display_name.clone(),
+        display_name,
+    }))
 }
 
 fn is_admin(context: &CommandContext, config: &ShopRuntimeConfig) -> bool {

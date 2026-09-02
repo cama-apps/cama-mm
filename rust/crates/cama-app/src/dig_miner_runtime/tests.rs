@@ -86,7 +86,8 @@ fn profile_requires_registration_and_creates_an_exact_first_dig_tunnel() {
         profile.auto_buy,
         DigMinerAutoBuy {
             torch: false,
-            hard_hat: false
+            hard_hat: false,
+            grappling_hook: false
         }
     );
     assert_eq!(profile.awarded_bosses, Vec::<i64>::new());
@@ -245,6 +246,7 @@ fn auto_buy_partial_updates_match_profile_contract() {
             DigMinerAutoBuyUpdate {
                 torch: Some(true),
                 hard_hat: Some(true),
+                grappling_hook: None,
             },
             NOW,
             &mut ScriptedNameEntropy::default(),
@@ -254,7 +256,8 @@ fn auto_buy_partial_updates_match_profile_contract() {
         both.auto_buy,
         DigMinerAutoBuy {
             torch: true,
-            hard_hat: true
+            hard_hat: true,
+            grappling_hook: false
         }
     );
     let torch_off = service
@@ -264,6 +267,7 @@ fn auto_buy_partial_updates_match_profile_contract() {
             DigMinerAutoBuyUpdate {
                 torch: Some(false),
                 hard_hat: None,
+                grappling_hook: None,
             },
             NOW,
         )
@@ -272,7 +276,8 @@ fn auto_buy_partial_updates_match_profile_contract() {
         torch_off.auto_buy,
         DigMinerAutoBuy {
             torch: false,
-            hard_hat: true
+            hard_hat: true,
+            grappling_hook: false
         }
     );
     assert_eq!(
@@ -283,6 +288,7 @@ fn auto_buy_partial_updates_match_profile_contract() {
                 DigMinerAutoBuyUpdate {
                     torch: None,
                     hard_hat: None,
+                    grappling_hook: None,
                 },
                 NOW,
             )

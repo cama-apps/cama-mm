@@ -29,6 +29,7 @@ use cama_db::dig_guild_modifiers::DigGuildModifierRepository;
 use cama_db::dig_inventory_repository::{
     AutoBuyRequest, AutoBuySelection, BuyInsuranceOutcome, DigInventoryRepository, SetTrapOutcome,
 };
+use cama_db::dig_runtime_store;
 use cama_db::dig_weather::{DigWeatherEntry, DigWeatherRepository, weather_by_id};
 use cama_db::loan_repository::{LedgerContext, LoanRepository};
 use cama_db::mana_service_repository::ManaRepository;
@@ -48,7 +49,7 @@ use cama_domain::game_date::game_date_for_timestamp;
 use cama_domain::mana::{ManaEffects, weather_combo_modifiers};
 use cama_domain::pet::{PetDigWork, PetDigWorkClaim};
 use chrono::NaiveDate;
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -105,6 +106,36 @@ pub const LUMINOSITY_DEEP_DRAIN_BLOCKS_PER_STEP: i64 = 20;
 
 const fn cama_app_boss_hard_cap() -> i64 {
     crate::dig_bosses::PRESTIGE_HARD_CAP as i64
+}
+
+/// True when the next canonical boss row is at most one block below the
+/// tunnel head, or the tunnel has reached the pinnacle stretch.
+///
+/// A boss at boundary `b` is engaged from depth `b - 1` (see
+/// [`crate::dig_bosses::at_boss_boundary`]), so depths `b - 2` and `b - 1`
+/// are the digs that reach or fight that boss.  The pinnacle engages from
+/// `PINNACLE_DEPTH - 1` and the endgame luminosity drain ramps up from
+/// there, so every deeper depth stays inside the window.
+fn near_boss_boundary(depth: i64) -> bool {
+    if depth >= i64::from(crate::dig_bosses::PINNACLE_DEPTH) - 1 {
+        return true;
+    }
+    crate::dig_bosses::BOSS_BOUNDARIES
+        .into_iter()
+        .any(|boundary| {
+            let boundary = i64::from(boundary);
+            depth < boundary && boundary - depth <= 2
+        })
+}
+
+/// Torch auto-buy admission, matching the legacy trigger: low light anywhere
+/// (self-limiting, since a torch restores 50 luminosity) or the boss window.
+///
+/// Unlike the old `depth >= b` check this does not fire on every dig between
+/// boundaries, so an opted-in miner with healthy light is not charged 6 JC
+/// per dig.
+fn should_auto_buy_torch(depth: i64, luminosity: i64) -> bool {
+    luminosity <= 50 || near_boss_boundary(depth)
 }
 
 /// Return the additional luminosity consumed by one dig in the deep ramp.
@@ -213,37 +244,9 @@ impl DigRuntimeConfig {
     }
 }
 
-/// A single migrated inventory row needed by the Dig application aggregate.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct DigRuntimeInventoryItem {
-    pub id: i64,
-    pub item_type: String,
-    pub queued: bool,
-}
-
-/// A single migrated artifact row needed by the Dig application aggregate.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct DigRuntimeArtifact {
-    pub id: i64,
-    pub artifact_id: String,
-    pub is_relic: bool,
-    pub equipped: bool,
-}
-
-/// A persisted gear row needed to apply pickaxe and combat modifiers before a
-/// dig is settled. Keeping this in the application snapshot is important:
-/// selecting/equipping gear in a component must not race a concurrent dig.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct DigRuntimeGear {
-    pub id: i64,
-    pub slot: String,
-    pub tier: i64,
-    pub durability: i64,
-    pub equipped: bool,
-    pub acquired_at: i64,
-    pub source: String,
-    pub item_id: Option<String>,
-}
+pub use cama_db::dig_runtime_store::{
+    DigRuntimeArtifact, DigRuntimeGear, DigRuntimeInventoryItem, DigRuntimeTunnel,
+};
 
 /// The persisted forecast row used by the current game date.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -261,152 +264,13 @@ impl From<DigWeatherEntry> for DigRuntimeWeather {
     }
 }
 
-/// The tunnel columns touched by a real Dig commit.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct DigRuntimeTunnel {
-    pub discord_id: i64,
-    pub guild_id: i64,
-    pub depth: i64,
-    pub max_depth: i64,
-    pub total_digs: i64,
-    pub total_jc_earned: i64,
-    pub last_dig_at: Option<i64>,
-    pub luminosity: i64,
-    pub tunnel_name: String,
-    pub prestige_level: i64,
-    pub prestige_perks: String,
-    pub boss_progress: String,
-    pub boss_attempts: String,
-    pub route_state: Option<String>,
-    pub injury_state: Option<String>,
-    pub hard_hat_charges: i64,
-    pub reinforced_until: i64,
-    pub void_bait_digs: i64,
-    pub sonar_skip_pending: bool,
-    pub temp_buffs: Option<String>,
-    pub temp_curses: Option<String>,
-    pub stat_strength: i64,
-    pub stat_smarts: i64,
-    pub stat_stamina: i64,
-    pub stat_points: i64,
-    pub paid_digs_today: i64,
-    pub paid_dig_date: Option<String>,
-    pub pickaxe_tier: i64,
-    pub current_run_jc: i64,
-    pub current_run_artifacts: i64,
-    pub current_run_events: i64,
-    pub best_run_score: i64,
-    pub total_prestige_score: i64,
-    pub streak_days: i64,
-    pub streak_last_date: Option<String>,
-    pub auto_buy_torch: bool,
-    pub auto_buy_hard_hat: bool,
-    pub trap_active: bool,
-    pub trap_free_today: bool,
-    pub trap_date: Option<String>,
-    pub insured_until: Option<i64>,
-    pub revenge_target: Option<i64>,
-    pub revenge_type: Option<String>,
-    pub revenge_until: Option<i64>,
-    pub cheer_data: Option<String>,
-    pub grappling_hook_charges: i64,
-    pub lantern_stub_date: Option<String>,
-    pub thick_skin_date: Option<String>,
-    pub mutations: Option<String>,
-    pub miner_origin: String,
-    pub miner_about: String,
-    pub engine_mode: String,
-    pub stat_boss_awards: String,
-    pub stinger_curse: Option<String>,
-    pub last_lum_update_at: Option<i64>,
-    pub pinnacle_boss_id: Option<String>,
-    pub pinnacle_phase: i64,
-    pub pinnacle_hp_remaining: Option<i64>,
-    pub pinnacle_last_engaged_at: Option<i64>,
-    pub retreat_cooldown_until: Option<i64>,
-    pub last_cheer_at: Option<i64>,
-    pub cavein_free_streak: i64,
-    pub relic_trim_notice: bool,
-}
-
-impl DigRuntimeTunnel {
-    #[must_use]
-    pub fn new(discord_id: i64, guild_id: i64, _now: i64) -> Self {
-        Self {
-            discord_id,
-            guild_id,
-            depth: 0,
-            max_depth: 0,
-            total_digs: 0,
-            total_jc_earned: 0,
-            last_dig_at: None,
-            luminosity: 100,
-            tunnel_name: format!("Miner {discord_id}"),
-            prestige_level: 0,
-            prestige_perks: "[]".to_owned(),
-            boss_progress: "{}".to_owned(),
-            boss_attempts: "{}".to_owned(),
-            route_state: None,
-            injury_state: None,
-            hard_hat_charges: 0,
-            reinforced_until: 0,
-            void_bait_digs: 0,
-            sonar_skip_pending: false,
-            temp_buffs: None,
-            temp_curses: None,
-            stat_strength: 0,
-            stat_smarts: 0,
-            stat_stamina: 0,
-            stat_points: 5,
-            paid_digs_today: 0,
-            paid_dig_date: None,
-            pickaxe_tier: 0,
-            current_run_jc: 0,
-            current_run_artifacts: 0,
-            current_run_events: 0,
-            best_run_score: 0,
-            total_prestige_score: 0,
-            streak_days: 0,
-            streak_last_date: None,
-            auto_buy_torch: false,
-            auto_buy_hard_hat: false,
-            trap_active: false,
-            trap_free_today: true,
-            trap_date: None,
-            insured_until: None,
-            revenge_target: None,
-            revenge_type: None,
-            revenge_until: None,
-            cheer_data: None,
-            grappling_hook_charges: 0,
-            lantern_stub_date: None,
-            thick_skin_date: None,
-            mutations: None,
-            miner_origin: String::new(),
-            miner_about: String::new(),
-            engine_mode: "legacy".to_owned(),
-            stat_boss_awards: "[]".to_owned(),
-            stinger_curse: None,
-            last_lum_update_at: None,
-            pinnacle_boss_id: None,
-            pinnacle_phase: 0,
-            pinnacle_hp_remaining: None,
-            pinnacle_last_engaged_at: None,
-            retreat_cooldown_until: None,
-            last_cheer_at: None,
-            cavein_free_streak: 0,
-            relic_trim_notice: false,
-        }
-    }
-
-    #[must_use]
-    pub fn stats(&self) -> MinerAllocation {
-        MinerAllocation {
-            strength: self.stat_strength.max(0),
-            smarts: self.stat_smarts.max(0),
-            stamina: self.stat_stamina.max(0),
-            stat_points: self.stat_points.max(0),
-        }
+/// Allocated miner stats for the Dig policy graph.
+fn miner_allocation(tunnel: &DigRuntimeTunnel) -> MinerAllocation {
+    MinerAllocation {
+        strength: tunnel.stat_strength.max(0),
+        smarts: tunnel.stat_smarts.max(0),
+        stamina: tunnel.stat_stamina.max(0),
+        stat_points: tunnel.stat_points.max(0),
     }
 }
 
@@ -850,9 +714,9 @@ pub use delivery::{
 };
 use effects::{
     CaveInLootRng, DigPrestige4Entropy, LootRelicEntropy, active_buff_effects,
-    active_curse_effects, active_pickaxe_tier, apply_mana_base_yield, bonus_basis_points,
-    event_chance_factor, gear_effects, luminosity_jc_multiplier, multiplier_millionths,
-    proportional_mana_yield_tax, weather_code, weather_effects,
+    active_curse_effects, active_curse_summary, active_pickaxe_tier, apply_mana_base_yield,
+    bonus_basis_points, event_chance_factor, gear_effects, luminosity_jc_multiplier,
+    multiplier_millionths, proportional_mana_yield_tax, weather_code, weather_effects,
 };
 pub use effects::{DigWeatherEffects, apply_cave_in_gear_ticks, catastrophic_cave_in_depth};
 pub use store::{AtomicTunnelBalanceUpdate, SqliteDigRuntimeStore};
@@ -1158,6 +1022,33 @@ pub struct DigRuntimeOutcome {
     /// forecast only once the main Dig path is admitted.
     #[serde(default)]
     pub weather: Option<DigRuntimeWeatherInfo>,
+    /// The hex still riding the miner as this Dig resolves, if any.
+    ///
+    /// A curse outlives the Dig that applied it, so presentation needs it on
+    /// every result rather than only on the one that inflicted it. `None`
+    /// means no curse is active once this Dig's decrement is accounted for.
+    #[serde(default)]
+    pub active_curse: Option<ActiveCurseSummary>,
+}
+
+/// A curse currently afflicting the miner, with what it costs per Dig.
+///
+/// The penalty fields mirror the persisted curse effects rather than being
+/// re-derived, so displayed numbers cannot drift from the ones actually
+/// applied to the roll.  Penalties keep their applied sign: `advance_bonus`
+/// and `jc_bonus` are negative for a curse.  The two rate penalties are
+/// carried as whole percents rather than the stored fractions, both because
+/// that is how they are shown and so this stays comparable by equality
+/// alongside the rest of the outcome.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ActiveCurseSummary {
+    pub name: String,
+    pub digs_remaining: i64,
+    pub advance_bonus: i64,
+    pub jc_bonus: i64,
+    pub luminosity_drain: i64,
+    pub cave_in_percent: i64,
+    pub cooldown_percent: i64,
 }
 
 const fn default_luminosity() -> i64 {
@@ -1235,6 +1126,7 @@ impl DigRuntimeOutcome {
             forced_event_consumed: false,
             relic_trim_notice: false,
             weather: None,
+            active_curse: None,
         }
     }
 }
@@ -1381,19 +1273,12 @@ impl DigRuntimeService<SqliteDigRuntimeStore> {
         guild_id: i64,
     ) -> Result<Vec<DigRuntimeLeaderboardRow>, DigRuntimeStoreError> {
         let connection = self.store.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT COALESCE(tunnel_name,'Unnamed Tunnel'), depth
-             FROM tunnels WHERE guild_id=?1
-             ORDER BY depth DESC, total_jc_earned DESC, discord_id ASC LIMIT 10",
-        )?;
-        Ok(statement
-            .query_map([guild_id], |row| {
-                Ok(DigRuntimeLeaderboardRow {
-                    name: row.get(0)?,
-                    depth: row.get(1)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?)
+        Ok(
+            dig_runtime_store::top_tunnel_depth_rows(&connection, guild_id)?
+                .into_iter()
+                .map(|(name, depth)| DigRuntimeLeaderboardRow { name, depth })
+                .collect(),
+        )
     }
 
     pub fn hall_of_fame(
@@ -1401,22 +1286,17 @@ impl DigRuntimeService<SqliteDigRuntimeStore> {
         guild_id: i64,
     ) -> Result<Vec<DigRuntimeHallOfFameRow>, DigRuntimeStoreError> {
         let connection = self.store.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT COALESCE(tunnel_name,'Unnamed Tunnel'), discord_id,
-                    best_run_score, prestige_level
-             FROM tunnels WHERE guild_id=?1 AND best_run_score > 0
-             ORDER BY best_run_score DESC, prestige_level DESC, discord_id ASC LIMIT 10",
-        )?;
-        Ok(statement
-            .query_map([guild_id], |row| {
-                Ok(DigRuntimeHallOfFameRow {
-                    name: row.get(0)?,
-                    user_id: row.get(1)?,
-                    score: row.get(2)?,
-                    prestige: row.get(3)?,
+        Ok(
+            dig_runtime_store::hall_of_fame_depth_rows(&connection, guild_id)?
+                .into_iter()
+                .map(|(name, user_id, score, prestige)| DigRuntimeHallOfFameRow {
+                    name,
+                    user_id,
+                    score,
+                    prestige,
                 })
-            })?
-            .collect::<Result<Vec<_>, _>>()?)
+                .collect(),
+        )
     }
 
     /// Apply the channel-admission penalty through the application boundary.
@@ -1430,12 +1310,7 @@ impl DigRuntimeService<SqliteDigRuntimeStore> {
     ) -> Result<(), DigRuntimeStoreError> {
         let mut connection = self.store.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute(
-            "UPDATE players SET jopacoin_balance=COALESCE(jopacoin_balance,0)-?1,
-                    updated_at=CURRENT_TIMESTAMP
-             WHERE discord_id=?2 AND guild_id=?3",
-            params![amount, discord_id, guild_id],
-        )?;
+        dig_runtime_store::debit_player_balance(&transaction, amount, discord_id, guild_id)?;
         transaction.commit()?;
         Ok(())
     }
@@ -1512,30 +1387,30 @@ impl DigRuntimeService<SqliteDigRuntimeStore> {
     ) -> Result<String, DigRuntimeStoreError> {
         let mut connection = self.store.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let target = transaction
-            .query_row(
-                "SELECT depth, max_depth FROM tunnels
-                 WHERE discord_id=?1 AND guild_id=?2",
-                params![target_id, guild_id],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-            )
-            .optional()?;
+        let target = dig_runtime_store::tunnel_depth_and_max(&transaction, target_id, guild_id)?;
         let Some((depth, max_depth)) = target else {
             transaction.commit()?;
             return Ok("That miner has not started a tunnel yet.".to_owned());
         };
         let depth_after = depth.saturating_add(1);
-        transaction.execute(
-            "UPDATE tunnels SET depth=?1, max_depth=?2
-             WHERE discord_id=?3 AND guild_id=?4",
-            params![depth_after, max_depth.max(depth_after), target_id, guild_id],
+        dig_runtime_store::set_tunnel_depth_and_max(
+            &transaction,
+            depth_after,
+            max_depth.max(depth_after),
+            target_id,
+            guild_id,
         )?;
-        transaction.execute(
-            "INSERT INTO dig_actions
-                (guild_id, actor_id, target_id, action_type, depth_before,
-                 depth_after, jc_delta, detail, created_at)
-             VALUES (?1, ?2, ?3, 'help', ?4, ?5, 0, '{}', ?6)",
-            params![guild_id, actor_id, target_id, depth, depth_after, now],
+        dig_runtime_store::insert_dig_action(
+            &transaction,
+            guild_id,
+            actor_id,
+            Some(target_id),
+            "help",
+            depth,
+            depth_after,
+            0,
+            "{}",
+            now,
         )?;
         transaction.commit()?;
         Ok(format!(
@@ -1556,27 +1431,18 @@ impl DigRuntimeService<SqliteDigRuntimeStore> {
         }
         let mut connection = self.store.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let target_exists = transaction
-            .query_row(
-                "SELECT 1 FROM players WHERE discord_id=?1 AND guild_id=?2",
-                params![target_id, guild_id],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
+        let target_exists = dig_runtime_store::player_exists(&transaction, target_id, guild_id)?;
         if !target_exists {
             transaction.commit()?;
             return Ok(false);
         }
-        let changed = transaction.execute(
-            "UPDATE dig_artifacts SET discord_id=?1, guild_id=?2, equipped=0, found_at=?3
-             WHERE id = (
-                 SELECT id FROM dig_artifacts
-                 WHERE discord_id=?4 AND guild_id=?2 AND artifact_id=?5
-                   AND is_relic=1
-                 ORDER BY id LIMIT 1
-             )",
-            params![target_id, guild_id, now, owner_id, artifact_id],
+        let changed = dig_runtime_store::transfer_relic(
+            &transaction,
+            target_id,
+            guild_id,
+            now,
+            owner_id,
+            artifact_id,
         )?;
         transaction.commit()?;
         Ok(changed == 1)
@@ -1588,11 +1454,7 @@ impl DigRuntimeService<SqliteDigRuntimeStore> {
         guild_id: i64,
     ) -> Result<DigAdminMutationOutcome, DigRuntimeStoreError> {
         let connection = self.store.connection()?;
-        let changed = connection.execute(
-            "UPDATE tunnels SET last_dig_at=0
-             WHERE discord_id=?1 AND guild_id=?2",
-            params![discord_id, guild_id],
-        )?;
+        let changed = dig_runtime_store::reset_tunnel_cooldown(&connection, discord_id, guild_id)?;
         Ok(if changed == 1 {
             DigAdminMutationOutcome::Applied
         } else {
@@ -1607,10 +1469,11 @@ impl DigRuntimeService<SqliteDigRuntimeStore> {
         depth: i64,
     ) -> Result<DigAdminMutationOutcome, DigRuntimeStoreError> {
         let connection = self.store.connection()?;
-        let changed = connection.execute(
-            "UPDATE tunnels SET depth=?1, last_dig_at=0
-             WHERE discord_id=?2 AND guild_id=?3",
-            params![depth.max(0), discord_id, guild_id],
+        let changed = dig_runtime_store::set_tunnel_depth_reset_cooldown(
+            &connection,
+            depth.max(0),
+            discord_id,
+            guild_id,
         )?;
         Ok(if changed == 1 {
             DigAdminMutationOutcome::Applied
@@ -1628,33 +1491,13 @@ impl DigRuntimeService<SqliteDigRuntimeStore> {
         const COST: i64 = 50;
         let mut connection = self.store.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let balance = transaction
-            .query_row(
-                "SELECT COALESCE(jopacoin_balance,0) FROM players
-                 WHERE discord_id=?1 AND guild_id=?2",
-                params![discord_id, guild_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?;
+        let balance = dig_runtime_store::player_balance(&transaction, discord_id, guild_id)?;
         let Some(balance) = balance else {
             transaction.commit()?;
             return Ok("You must be registered first.".to_owned());
         };
-        let tunnel_stats = transaction
-            .query_row(
-                "SELECT stat_strength, stat_smarts, stat_stamina, stat_points
-                   FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
-                params![discord_id, guild_id],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, i64>(3)?,
-                    ))
-                },
-            )
-            .optional()?;
+        let tunnel_stats =
+            dig_runtime_store::tunnel_stat_allocation(&transaction, discord_id, guild_id)?;
         let Some((strength, smarts, stamina, _stat_points)) = tunnel_stats else {
             transaction.commit()?;
             return Ok("You don't have any allocated S points to reset.".to_owned());
@@ -1681,49 +1524,45 @@ impl DigRuntimeService<SqliteDigRuntimeStore> {
             },
         })
         .to_string();
-        transaction.execute("DELETE FROM economy_ledger_context", [])?;
-        transaction.execute(
-            "INSERT INTO economy_ledger_context (
-                 id, source, actor_id, related_type, related_id, reason, metadata
-             ) VALUES (1, 'dig', ?1, 'miner_respec', 's_points',
-                       'dig miner respec debit', ?2)",
-            params![discord_id, detail],
+        dig_runtime_store::set_ledger_context(
+            &transaction,
+            "dig",
+            discord_id,
+            "miner_respec",
+            "s_points",
+            "dig miner respec debit",
+            &detail,
         )?;
-        let debited = transaction.execute(
-            "UPDATE players SET jopacoin_balance=jopacoin_balance-?1,
-                    updated_at=CURRENT_TIMESTAMP
-             WHERE discord_id=?2 AND guild_id=?3 AND jopacoin_balance>=?1",
-            params![COST, discord_id, guild_id],
+        let debited = dig_runtime_store::debit_player_balance_if_sufficient(
+            &transaction,
+            COST,
+            discord_id,
+            guild_id,
         )?;
-        transaction.execute("DELETE FROM economy_ledger_context", [])?;
+        dig_runtime_store::clear_ledger_context(&transaction)?;
         if debited != 1 {
             transaction.rollback()?;
             return Ok(format!(
                 "Respec costs {COST} {JOPACOIN_EMOTE}; your balance is {balance}."
             ));
         }
-        transaction.execute(
-            "UPDATE players SET lowest_balance_ever=jopacoin_balance
-             WHERE discord_id=?1 AND guild_id=?2
-               AND (lowest_balance_ever IS NULL OR jopacoin_balance<lowest_balance_ever)",
-            params![discord_id, guild_id],
-        )?;
-        let changed = transaction.execute(
-            "UPDATE tunnels SET stat_points=stat_points+stat_strength+stat_smarts+stat_stamina,
-                    stat_strength=0, stat_smarts=0, stat_stamina=0
-             WHERE discord_id=?1 AND guild_id=?2",
-            params![discord_id, guild_id],
-        )?;
+        dig_runtime_store::refresh_player_lowest_balance(&transaction, discord_id, guild_id)?;
+        let changed = dig_runtime_store::respec_tunnel_stats(&transaction, discord_id, guild_id)?;
         if changed == 0 {
             transaction.rollback()?;
             return Ok("You don't have a tunnel yet. Use /dig go to start.".to_owned());
         }
-        transaction.execute(
-            "INSERT INTO dig_actions
-                (guild_id, actor_id, target_id, action_type, depth_before,
-                 depth_after, jc_delta, detail, created_at)
-             VALUES (?1, ?2, NULL, 'miner_respec', 0, 0, ?3, ?4, ?5)",
-            params![guild_id, discord_id, -COST, detail, now],
+        dig_runtime_store::insert_dig_action(
+            &transaction,
+            guild_id,
+            discord_id,
+            None,
+            "miner_respec",
+            0,
+            0,
+            -COST,
+            &detail,
+            now,
         )?;
         transaction.commit()?;
         Ok(format!("Respec complete. Spent {COST} {JOPACOIN_EMOTE}."))
@@ -1739,18 +1578,17 @@ impl DigRuntimeService<SqliteDigRuntimeStore> {
         let connection = self.store.connection()?;
         let value = i64::from(enabled);
         let changed = match item {
-            "torch" => connection.execute(
-                "UPDATE tunnels SET auto_buy_torch=?1 WHERE discord_id=?2 AND guild_id=?3",
-                params![value, discord_id, guild_id],
-            )?,
-            "hard_hat" => connection.execute(
-                "UPDATE tunnels SET auto_buy_hard_hat=?1 WHERE discord_id=?2 AND guild_id=?3",
-                params![value, discord_id, guild_id],
-            )?,
-            "both" => connection.execute(
-                "UPDATE tunnels SET auto_buy_torch=?1, auto_buy_hard_hat=?1
-                 WHERE discord_id=?2 AND guild_id=?3",
-                params![value, discord_id, guild_id],
+            "torch" => {
+                dig_runtime_store::set_auto_buy_torch(&connection, value, discord_id, guild_id)?
+            }
+            "hard_hat" => {
+                dig_runtime_store::set_auto_buy_hard_hat(&connection, value, discord_id, guild_id)?
+            }
+            "both" => dig_runtime_store::set_auto_buy_torch_and_hard_hat(
+                &connection,
+                value,
+                discord_id,
+                guild_id,
             )?,
             _ => return Err(DigRuntimeStoreError::StateConflict),
         };
@@ -1996,6 +1834,7 @@ where
                 forced_event_consumed: false,
                 relic_trim_notice: false,
                 weather: None,
+                active_curse: None,
             });
         }
 
@@ -2064,6 +1903,7 @@ where
                 forced_event_consumed: false,
                 relic_trim_notice: false,
                 weather: None,
+                active_curse: None,
             });
         }
 
@@ -2129,7 +1969,10 @@ where
         );
         let after_stamina = (before_stamina as f64 * stat_fx.cooldown_multiplier) as i64;
         let cooldown_seconds = (after_stamina.max(1) as f64
-            * (1.0 + curse_fx.cooldown_penalty.clamp(0.0, 0.25)))
+            * (1.0
+                + curse_fx
+                    .cooldown_penalty
+                    .clamp(0.0, crate::dig_event_threats::COOLDOWN_CURSE_CAP)))
             as i64;
         let cooldown_seconds = cooldown_seconds
             .saturating_sub(mana_effects.dig_cooldown_reduction_seconds.max(0))
@@ -2178,10 +2021,26 @@ where
                     price: 8,
                 });
             }
-            if tunnel.auto_buy_torch {
+            let should_buy_torch = current
+                .tunnel
+                .as_ref()
+                .is_some_and(|t| should_auto_buy_torch(t.depth, t.luminosity));
+            if tunnel.auto_buy_torch && should_buy_torch {
                 selections.push(AutoBuySelection {
                     item_type: "torch",
                     price: 6,
+                });
+            }
+            // A queued hook is consumed the same dig for 5 charges that only
+            // drain on cave-ins, so admission gates on having no usable
+            // charges left; otherwise an opted-in miner would pay for a new
+            // hook on every single dig while charges stack unbounded.
+            if tunnel.auto_buy_grappling_hook && tunnel.grappling_hook_charges == 0 {
+                selections.push(AutoBuySelection {
+                    item_type: "grappling_hook",
+                    price: consumable("grappling_hook")
+                        .expect("grappling_hook is a shop consumable")
+                        .cost,
                 });
             }
             if !selections.is_empty() {
@@ -2353,6 +2212,7 @@ where
                 forced_event_consumed: false,
                 relic_trim_notice: false,
                 weather: None,
+                active_curse: None,
             };
             let receipt =
                 self.commit_dig(commit, first_outcome.clone(), delivery_context.as_ref())?;
@@ -3400,6 +3260,13 @@ where
                 Some(curse.to_string())
             };
         }
+        // Report the hex the miner carries *out* of this Dig, so the count
+        // shown is what still lies ahead rather than what was just spent. A
+        // curse expiring on this Dig correctly reports nothing.
+        let active_curse = staged
+            .tunnel
+            .as_ref()
+            .and_then(|next_tunnel| active_curse_summary(next_tunnel.temp_curses.as_deref()));
         if !catastrophic_cave_in
             && buff_remaining > 0
             && let Some(next_tunnel) = staged.tunnel.as_mut()
@@ -3675,6 +3542,7 @@ where
                     description: definition.description.to_owned(),
                 })
             }),
+            active_curse,
         };
         let receipt =
             self.commit_dig(commit, runtime_outcome.clone(), delivery_context.as_ref())?;
@@ -4072,13 +3940,16 @@ fn tunnel_state(snapshot: &DigRuntimeSnapshot, paid_cost: Option<i64>) -> Tunnel
     let tunnel = snapshot.tunnel.as_ref().expect("staged tunnel exists");
     let mut defeated_bosses = BTreeSet::new();
     if let Ok(Value::Object(progress)) = serde_json::from_str::<Value>(&tunnel.boss_progress) {
-        for (boundary, status) in progress {
-            if status
-                .get("status")
-                .and_then(Value::as_str)
-                .is_some_and(|status| status == "defeated")
-                && let Ok(boundary) = boundary.parse::<i64>()
-            {
+        for (boundary, value) in progress {
+            let is_defeated = match value {
+                Value::Object(fields) => fields
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| s == "defeated"),
+                Value::String(status) => status == "defeated",
+                _ => false,
+            };
+            if is_defeated && let Ok(boundary) = boundary.parse::<i64>() {
                 defeated_bosses.insert(boundary);
             }
         }
@@ -4101,7 +3972,7 @@ fn tunnel_state(snapshot: &DigRuntimeSnapshot, paid_cost: Option<i64>) -> Tunnel
         total_digs: tunnel.total_digs,
         last_dig_at: tunnel.last_dig_at,
         luminosity: tunnel.luminosity,
-        stats: tunnel.stats(),
+        stats: miner_allocation(tunnel),
         paid_digs_today: usize::try_from(tunnel.paid_digs_today.max(0)).unwrap_or_default(),
         paid_dig_day: None,
         queued_consumables: snapshot

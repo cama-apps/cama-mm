@@ -1905,6 +1905,7 @@ fn hook_outcome() -> DigRuntimeOutcome {
         forced_event_consumed: false,
         relic_trim_notice: false,
         weather: None,
+        active_curse: None,
     }
 }
 
@@ -4201,6 +4202,7 @@ fn paid_prompt_is_tokenized_owner_bound_one_shot_and_exactly_formatted() {
         forced_event_consumed: false,
         relic_trim_notice: false,
         weather: None,
+        active_curse: None,
     };
     let response = super::paid_dig_response(&result, "secret-token");
     assert_eq!(response.embeds[0].color, Some(0xFF_A5_00));
@@ -4592,7 +4594,7 @@ async fn prestige_preview_selection_restart_and_forgery_use_atomic_app_service()
     {
         let public = discord.public.lock().expect("public ascension responses");
         assert_eq!(public.len(), 1);
-        assert_eq!(public[0].content, format!("*{USER} has ascended.*"));
+        assert_eq!(public[0].content, "*dig-test-miner has ascended.*");
         assert!(
             public[0].attachments.is_empty(),
             "test config disables Neon"
@@ -5241,6 +5243,7 @@ fn rendered_media_keeps_stats_and_event_ui_separate_with_exact_attachments() {
             description: "Worms churn the soil. Digging is easy, but they ate all the coins."
                 .to_owned(),
         }),
+        active_curse: None,
     };
 
     let (stats, event) =
@@ -5364,6 +5367,7 @@ fn event_prompt_applies_durable_darkness_and_reading_the_stone_policy() {
         forced_event_consumed: false,
         relic_trim_notice: false,
         weather: None,
+        active_curse: None,
     };
     let prompt = cama_app::dig_event_runtime::DigEventActionPresentation {
         event: cama_app::dig_loot::canonical_event_presentation("underground_stream")
@@ -6150,7 +6154,7 @@ async fn provider_help_and_gift_use_typed_social_service_and_python_delivery_con
             .description
             .as_deref()
             .expect("help description");
-        assert!(help_description.contains(&format!("You helped **{TARGET}**'s tunnel!")));
+        assert!(help_description.contains("You helped **dig-social-target**'s tunnel!"));
         assert!(help_description.contains("Blocks added: **"));
     }
     assert_eq!(
@@ -6201,7 +6205,7 @@ async fn provider_help_and_gift_use_typed_social_service_and_python_delivery_con
         assert!(!gift_followups[0].ephemeral);
         assert_eq!(
             gift_followups[0].content,
-            format!("You gifted **Mole Claws** to **{TARGET}**!")
+            "You gifted **Mole Claws** to **dig-social-target**!"
         );
     }
     assert_eq!(
@@ -6304,7 +6308,7 @@ async fn provider_sabotage_view_is_owner_bound_restart_expiring_and_exactly_once
             .as_deref()
             .expect("sabotage preview description"),
         format!(
-            "**Target:** {TARGET}\n**Cost:** 20 {JOPACOIN_EMOTE}\n**Potential damage:** 3-8 blocks\n\nAre you sure? If they have a trap set, you could take damage instead."
+            "**Target:** dig-sabotage-target\n**Cost:** 20 {JOPACOIN_EMOTE}\n**Potential damage:** 3-8 blocks\n\nAre you sure? If they have a trap set, you could take damage instead."
         )
     );
     assert_eq!(preview.components[0].buttons.len(), 2);
@@ -6513,7 +6517,7 @@ async fn provider_miner_group_uses_typed_profile_allocation_respec_and_autobuy_s
     assert_eq!(profile_responder.defers.lock().unwrap().as_slice(), &[true]);
     let profile = profile_responder.followups.lock().unwrap()[0].clone();
     assert!(profile.ephemeral);
-    let expected_title = format!("{USER} - Miner Profile");
+    let expected_title = "dig-test-miner - Miner Profile".to_owned();
     assert_eq!(
         profile.embeds[0].title.as_deref(),
         Some(expected_title.as_str())
@@ -6643,7 +6647,7 @@ async fn provider_miner_group_uses_typed_profile_allocation_respec_and_autobuy_s
                 vec![
                     InteractionOption {
                         name: "item".to_owned(),
-                        value: InteractionValue::String("both".to_owned()),
+                        value: InteractionValue::String("all".to_owned()),
                     },
                     InteractionOption {
                         name: "enabled".to_owned(),
@@ -6662,7 +6666,7 @@ async fn provider_miner_group_uses_typed_profile_allocation_respec_and_autobuy_s
     );
     assert_eq!(
         autobuy.embeds[0].description.as_deref(),
-        Some("Torch: **ON**\nHard Hat: **ON**")
+        Some("Torch: **ON**\nHard Hat: **ON**\nGrappling Hook: **ON**")
     );
     assert_eq!(
         autobuy.embeds[0].footer.as_deref(),
@@ -6892,7 +6896,10 @@ fn command_tree_matches_python_surface() {
             "Spend unallocated points on Strength, Smarts, and Stamina",
         ),
         ("respec", "Reset your allocated S points for 50 JC"),
-        ("autobuy", "Auto-buy Torch and/or Hard Hat for each dig"),
+        (
+            "autobuy",
+            "Auto-buy Torch, Hard Hat, and/or Grappling Hook for each dig",
+        ),
     ] {
         assert_eq!(find(&miner.options, name).description, description);
     }
@@ -6925,7 +6932,7 @@ fn command_tree_matches_python_surface() {
     }
     let autobuy = find(&miner.options, "autobuy");
     let item = find(&autobuy.options, "item");
-    assert_eq!(item.choices.len(), 3);
+    assert_eq!(item.choices.len(), 4);
     assert_eq!(
         item.choices,
         vec![
@@ -6938,8 +6945,12 @@ fn command_tree_matches_python_surface() {
                 value: "hard_hat".to_owned(),
             },
             CommandOptionChoice::String {
-                name: "Both".to_owned(),
-                value: "both".to_owned(),
+                name: "Grappling Hook".to_owned(),
+                value: "grappling_hook".to_owned(),
+            },
+            CommandOptionChoice::String {
+                name: "All Three".to_owned(),
+                value: "all".to_owned(),
             },
         ]
     );
@@ -6957,4 +6968,99 @@ fn command_tree_matches_python_surface() {
     assert!(find(&find(&options, "use").options, "item").autocomplete);
     assert!(find(&find(&options, "gift").options, "artifact").autocomplete);
     assert!(find(&find(&options, "buy").options, "item").autocomplete);
+}
+
+#[test]
+fn active_curse_field_lists_every_penalty_and_the_digs_left() {
+    let curse = cama_app::dig_runtime::ActiveCurseSummary {
+        name: "False Route".to_owned(),
+        digs_remaining: 6,
+        advance_bonus: -2,
+        jc_bonus: 0,
+        luminosity_drain: 20,
+        cave_in_percent: 0,
+        cooldown_percent: 0,
+    };
+
+    let rendered = super::active_curse_field(&curse);
+
+    // A player has to be able to see what the hex is costing them, not just
+    // that they have one.
+    assert!(rendered.contains("-2 blocks/dig"), "{rendered}");
+    assert!(rendered.contains("-20 luminosity/dig"), "{rendered}");
+    assert!(rendered.contains("Lasts 6 more digs."), "{rendered}");
+}
+
+#[test]
+fn active_curse_field_singularizes_the_final_dig() {
+    let curse = cama_app::dig_runtime::ActiveCurseSummary {
+        name: "Void Tithe".to_owned(),
+        digs_remaining: 1,
+        advance_bonus: -2,
+        ..Default::default()
+    };
+
+    let rendered = super::active_curse_field(&curse);
+
+    assert!(rendered.contains("Lasts 1 more dig."), "{rendered}");
+    assert!(!rendered.contains("1 more digs"), "{rendered}");
+}
+
+#[test]
+fn active_curse_field_renders_rate_penalties_as_percentages() {
+    let curse = cama_app::dig_runtime::ActiveCurseSummary {
+        name: "Salt-Glyph Bind".to_owned(),
+        digs_remaining: 3,
+        cave_in_percent: 10,
+        cooldown_percent: 25,
+        ..Default::default()
+    };
+
+    let rendered = super::active_curse_field(&curse);
+
+    assert!(rendered.contains("+10% cave-in risk"), "{rendered}");
+    assert!(rendered.contains("+25% cooldown"), "{rendered}");
+}
+
+#[test]
+fn dig_result_embed_shows_an_active_curse_on_a_later_dig() {
+    // The dig that applies a curse is not the only one it affects, so the
+    // hex has to appear on every result while it is still running.
+    let mut result = hook_outcome();
+    result.active_curse = Some(cama_app::dig_runtime::ActiveCurseSummary {
+        name: "Blackblooded Mark".to_owned(),
+        digs_remaining: 3,
+        advance_bonus: -4,
+        ..Default::default()
+    });
+
+    let embed = super::python_dig_result_embed(&result, "Dig", "Miner", None, None, None);
+    let field = embed
+        .fields
+        .iter()
+        .find(|field| field.name.contains("Cursed"))
+        .expect("active curse field");
+
+    assert!(field.name.contains("Blackblooded Mark"), "{}", field.name);
+    assert!(field.value.contains("-4 blocks/dig"), "{}", field.value);
+    assert!(
+        field.value.contains("Lasts 3 more digs."),
+        "{}",
+        field.value
+    );
+}
+
+#[test]
+fn dig_result_embed_omits_the_curse_field_when_uncursed() {
+    let result = hook_outcome();
+
+    let embed = super::python_dig_result_embed(&result, "Dig", "Miner", None, None, None);
+
+    assert!(
+        embed
+            .fields
+            .iter()
+            .all(|field| !field.name.contains("Cursed")),
+        "an uncursed dig must not render a curse field"
+    );
 }

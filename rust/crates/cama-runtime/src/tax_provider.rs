@@ -44,6 +44,7 @@ use chrono::Utc;
 
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
+use crate::option_ext::{boolean_option, integer_option, string_option};
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
     InteractionActionRow, InteractionButton, InteractionButtonStyle, InteractionEmbed,
@@ -697,7 +698,7 @@ impl TaxHandler {
         self.render_command_names(&mut command).await?;
         let target = required_user_option(&command.options, "user")?;
         let amount = required_integer_option(&command.options, "amount")?;
-        let reason = string_option(&command.options, "reason");
+        let reason = string_option(&command.options, "reason").map(str::to_owned);
         let tax = Arc::clone(&self.tax);
         let permissions = self.permission_context(&command);
         let admin = self.admin_user_ids.clone();
@@ -786,7 +787,7 @@ impl TaxHandler {
             guild_id: command.guild_id,
             actor_id: command.actor_id,
             action,
-            reason: string_option(&command.options, "reason"),
+            reason: string_option(&command.options, "reason").map(str::to_owned),
         };
         let response = tokio::task::spawn_blocking(move || {
             let authorization = TaxCommandAuthorization {
@@ -1822,23 +1823,14 @@ fn user_option(
     options: &[InteractionOption],
     name: &str,
 ) -> Result<Option<UserRef>, InteractionHandlerError> {
-    options
-        .iter()
-        .find(|option| option.name == name)
-        .map(|option| match &option.value {
-            InteractionValue::User {
-                id, display_name, ..
-            } => {
-                let display_name = display_name.clone().unwrap_or_else(|| id.to_string());
-                Ok(UserRef {
-                    id: *id,
-                    name: display_name.to_lowercase(),
-                    display_name,
-                })
-            }
-            _ => Err(format!("/{name} must be a Discord user").into()),
-        })
-        .transpose()
+    Ok(crate::option_ext::user_option(options, name)?.map(|user| {
+        let display_name = user.display_name_or_id();
+        UserRef {
+            id: user.raw_id,
+            name: display_name.to_lowercase(),
+            display_name,
+        }
+    }))
 }
 
 fn required_user_option(
@@ -1849,17 +1841,6 @@ fn required_user_option(
         .ok_or_else(|| InteractionHandlerError::from(format!("/tax requires {name}")))
 }
 
-fn integer_option(options: &[InteractionOption], name: &str) -> Option<i64> {
-    options.iter().find_map(|option| {
-        (option.name == name)
-            .then_some(&option.value)
-            .and_then(|value| match value {
-                InteractionValue::Integer(value) => Some(*value),
-                _ => None,
-            })
-    })
-}
-
 fn required_integer_option(
     options: &[InteractionOption],
     name: &str,
@@ -1868,34 +1849,13 @@ fn required_integer_option(
         .ok_or_else(|| InteractionHandlerError::from(format!("/tax requires {name}")))
 }
 
-fn string_option(options: &[InteractionOption], name: &str) -> Option<String> {
-    options.iter().find_map(|option| {
-        (option.name == name)
-            .then_some(&option.value)
-            .and_then(|value| match value {
-                InteractionValue::String(value) => Some(value.clone()),
-                _ => None,
-            })
-    })
-}
-
 fn required_string_option(
     options: &[InteractionOption],
     name: &str,
 ) -> Result<String, InteractionHandlerError> {
     string_option(options, name)
+        .map(str::to_owned)
         .ok_or_else(|| InteractionHandlerError::from(format!("/tax requires {name}")))
-}
-
-fn boolean_option(options: &[InteractionOption], name: &str) -> Option<bool> {
-    options.iter().find_map(|option| {
-        (option.name == name)
-            .then_some(&option.value)
-            .and_then(|value| match value {
-                InteractionValue::Boolean(value) => Some(*value),
-                _ => None,
-            })
-    })
 }
 
 fn signed_id(value: u64, label: &str) -> Result<i64, InteractionHandlerError> {

@@ -15,6 +15,7 @@ struct MockStore {
     all_calls: usize,
     batch_calls: usize,
     last_batch: Vec<(DiscordId, Land)>,
+    last_stipend: i64,
 }
 
 impl MockStore {
@@ -77,9 +78,11 @@ impl ManaAssignmentStore for MockStore {
         assignments: &[(DiscordId, Land)],
         guild_id: GuildId,
         assigned_date: &str,
+        white_stipend: i64,
     ) -> Result<Vec<ClaimedMana>, ManaServiceError> {
         self.batch_calls += 1;
         self.last_batch = assignments.to_vec();
+        self.last_stipend = white_stipend;
         let mut seen = BTreeSet::new();
         let mut claimed = Vec::new();
         for (discord_id, land) in assignments {
@@ -642,12 +645,17 @@ fn test_batches_claims_and_reuses_loaded_players_and_bulk_stats() {
         protection,
     );
     let result = service
-        .assign_all_daily_mana_with_board(GUILD, TODAY, 1_750_000_000, &BTreeSet::from([3]))
+        .assign_all_daily_mana_with_board(GUILD, TODAY, 1_750_000_000, &BTreeSet::from([3]), 7)
         .expect("batch assignment");
 
     assert_eq!(service.repository().all_calls, 1);
     assert_eq!(service.repository().get_calls, 0);
     assert_eq!(service.repository().batch_calls, 1);
+    assert_eq!(
+        service.repository().last_stipend,
+        7,
+        "White stipend must reach the atomic batch claim"
+    );
     assert_eq!(
         service.repository().last_batch,
         [(2, Land::Plains), (3, Land::Forest)]

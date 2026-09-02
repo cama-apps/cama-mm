@@ -9,9 +9,10 @@ use std::collections::BTreeMap;
 
 use cama_db::pet_repository::{
     ActivatePetOutcome, ActivatePetRequest, AdoptPetRequest, AegisReviveRequest, AnchorGuard,
-    BuySuppliesRequest, DeathClaimRequest, FeedPetRequest, HungerTopUpRequest, PetRepositoryError,
-    PetRepositoryFailure, SacrificePetOutcome as RepositorySacrificeOutcome, SacrificePetRequest,
-    SaltLickRequest, TrinketPurchaseOutcome, TrinketPurchaseRequest, UpgradeEggRequest,
+    BuySuppliesRequest, DeathClaimOutcome, DeathClaimRequest, FeedPetRequest, HungerTopUpRequest,
+    PetRepositoryError, PetRepositoryFailure, SacrificePetOutcome as RepositorySacrificeOutcome,
+    SacrificePetRequest, SaltLickRequest, TrinketPurchaseOutcome, TrinketPurchaseRequest,
+    UpgradeEggRequest,
 };
 use cama_domain::game_date::{GameDateError, game_date_for_timestamp};
 use cama_domain::pet::{
@@ -242,7 +243,16 @@ pub trait PetStore {
         request: HungerTopUpRequest,
     ) -> Result<bool, PetRepositoryError>;
 
-    fn claim_death(&mut self, request: &DeathClaimRequest<'_>) -> Result<bool, PetRepositoryError>;
+    fn claim_death(
+        &mut self,
+        request: &DeathClaimRequest<'_>,
+    ) -> Result<Option<DeathClaimOutcome>, PetRepositoryError>;
+
+    fn get_death_activation(
+        &mut self,
+        pet_id: i64,
+        guild_id: Option<i64>,
+    ) -> Result<Option<DeathClaimOutcome>, PetRepositoryError>;
 
     fn revive_with_aegis(
         &mut self,
@@ -521,13 +531,20 @@ where
                 current = self.store.get_pet_by_id(pet.pet_id, Some(pet.guild_id))?;
                 continue;
             }
-            if self.store.claim_death(&DeathClaimRequest {
-                pet_id: pet.pet_id,
-                guild_id: Some(pet.guild_id),
-                died_at: starvation_at,
-                cause: "starvation",
-                anchor,
-            })? {
+            // A won claim records its auto-activation durably; the sweep reads
+            // it back when the death is announced, possibly in another
+            // process.
+            if self
+                .store
+                .claim_death(&DeathClaimRequest {
+                    pet_id: pet.pet_id,
+                    guild_id: Some(pet.guild_id),
+                    died_at: starvation_at,
+                    cause: "starvation",
+                    anchor,
+                })?
+                .is_some()
+            {
                 return Ok(None);
             }
             current = self.store.get_pet_by_id(pet.pet_id, Some(pet.guild_id))?;
@@ -1297,9 +1314,18 @@ where
         }
         let mut deaths = Vec::new();
         for pet in self.store.get_unannounced_deaths(announcement_limit)? {
-            let activated_pet = self
+            // Prefer the activation `claim_death` recorded durably at claim
+            // time; the current-active fallback only covers deaths without a
+            // recorded claim outcome (legacy rows, non-starvation causes).
+            let activated_pet = match self
                 .store
-                .get_active_pet(pet.discord_id, Some(pet.guild_id))?;
+                .get_death_activation(pet.pet_id, Some(pet.guild_id))?
+            {
+                Some(claim) => claim.activated_pet,
+                None => self
+                    .store
+                    .get_active_pet(pet.discord_id, Some(pet.guild_id))?,
+            };
             deaths.push(DeathNotice {
                 pet,
                 eating_outcome: None,
@@ -1798,6 +1824,9 @@ mod tests {
         in_brawl: bool,
         stale_feed_attempts: i64,
         last_switches: BTreeMap<(i64, i64), i64>,
+        // Models the durable `death_activated_pet_id` column: dead pet id to
+        // the activated pet id, with 0 meaning "claimed, nothing activated".
+        death_activated: BTreeMap<i64, i64>,
     }
 
     impl FakeStore {
@@ -2460,13 +2489,13 @@ mod tests {
         fn claim_death(
             &mut self,
             request: &DeathClaimRequest<'_>,
-        ) -> Result<bool, PetRepositoryError> {
+        ) -> Result<Option<DeathClaimOutcome>, PetRepositoryError> {
             let Some(index) = self.pet_index(request.pet_id, request.guild_id) else {
-                return Ok(false);
+                return Ok(None);
             };
             let pet = &mut self.pets[index];
             if pet.died_at.is_some() || !pet.is_active || !anchor_matches(pet, request.anchor) {
-                return Ok(false);
+                return Ok(None);
             }
             let discord_id = pet.discord_id;
             let guild_id = pet.guild_id;
@@ -2475,6 +2504,7 @@ mod tests {
             pet.is_active = false;
             pet.stabled_at = None;
             apply_work_anchor(pet, request.anchor);
+            let mut activated_pet = None;
             if let Some(next_index) = self
                 .pets
                 .iter()
@@ -2501,8 +2531,30 @@ mod tests {
                 next.evolution_due_at = next.evolution_due_at.map(|value| value + duration);
                 next.is_active = true;
                 next.stabled_at = None;
+                activated_pet = Some(next.clone());
             }
-            Ok(true)
+            self.death_activated.insert(
+                request.pet_id,
+                activated_pet.as_ref().map_or(0, |pet| pet.pet_id),
+            );
+            Ok(Some(DeathClaimOutcome { activated_pet }))
+        }
+
+        fn get_death_activation(
+            &mut self,
+            pet_id: i64,
+            guild_id: Option<i64>,
+        ) -> Result<Option<DeathClaimOutcome>, PetRepositoryError> {
+            let Some(&activated_pet_id) = self.death_activated.get(&pet_id) else {
+                return Ok(None);
+            };
+            let activated_pet = if activated_pet_id == 0 {
+                None
+            } else {
+                self.pet_index(activated_pet_id, guild_id)
+                    .map(|index| self.pets[index].clone())
+            };
+            Ok(Some(DeathClaimOutcome { activated_pet }))
         }
 
         fn revive_with_aegis(
@@ -2583,6 +2635,7 @@ mod tests {
         ) -> Result<(), PetRepositoryError> {
             if let Some(index) = self.pet_index(pet_id, guild_id) {
                 self.pets[index].death_announced_at = Some(announced_at);
+                self.death_activated.remove(&pet_id);
             }
             Ok(())
         }
@@ -3826,6 +3879,64 @@ mod tests {
             assert_eq!(service.sweep(100).unwrap().deaths.len(), 1);
             service.mark_death_announced(&result.deaths[0].pet).unwrap();
             assert!(service.sweep(100).unwrap().deaths.is_empty());
+        }
+
+        #[test]
+        fn death_notice_names_the_pet_the_claim_activated_not_current_active() {
+            let (mut service, clock) = fixture();
+            let pet = adopt_common(&mut service, "Blep");
+            clock.set(pet.hatched_at + 60);
+            let template = stored(&mut service, pet.pet_id);
+            let mut second = template.clone();
+            second.pet_id = pet.pet_id + 1;
+            second.name = "Second".to_owned();
+            second.is_active = false;
+            second.stabled_at = Some(clock.now());
+            second.hatch_announced_at = Some(clock.now());
+            let mut third = second.clone();
+            third.pet_id = pet.pet_id + 2;
+            third.name = "Third".to_owned();
+            service.store_mut().pets.push(second);
+            service.store_mut().pets.push(third);
+            clock.set(pet.hatched_at + 9 * DAY);
+
+            // The claim (as on any command path) auto-activates "Second".
+            let snapshot = stored(&mut service, pet.pet_id);
+            assert!(
+                service
+                    .resolve_starvation(snapshot, clock.now())
+                    .unwrap()
+                    .is_none()
+            );
+            // Before the sweep announces, the owner switches to "Third".
+            let now = clock.now();
+            for stored_pet in &mut service.store_mut().pets {
+                if stored_pet.name == "Second" {
+                    stored_pet.is_active = false;
+                    stored_pet.stabled_at = Some(now);
+                } else if stored_pet.name == "Third" {
+                    stored_pet.is_active = true;
+                    stored_pet.stabled_at = None;
+                    stored_pet.last_fed_at = now;
+                    stored_pet.hunger_at_last_fed = 100;
+                }
+            }
+
+            let result = service.sweep(100).unwrap();
+
+            assert_eq!(result.deaths.len(), 1);
+            let notice = &result.deaths[0];
+            assert_eq!(notice.pet.pet_id, pet.pet_id);
+            assert_eq!(
+                notice.activated_pet.as_ref().map(|pet| pet.name.as_str()),
+                Some("Second")
+            );
+            let active = service
+                .store_mut()
+                .get_active_pet(OWNER, Some(GUILD))
+                .unwrap()
+                .unwrap();
+            assert_eq!(active.name, "Third");
         }
 
         #[test]

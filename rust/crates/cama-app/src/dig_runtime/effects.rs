@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::dig_event_threats::{CAVE_IN_CURSE_CAP, COOLDOWN_CURSE_CAP};
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct DigWeatherEffects {
     pub cave_in_bonus: f64,
@@ -140,13 +142,48 @@ pub(super) fn active_curse_effects(raw: Option<&str>) -> Option<(ActiveCurseEffe
     Some((
         ActiveCurseEffects {
             advance_bonus: number_i64("advance_bonus").unwrap_or(0),
-            cave_in_bonus: number_f64("cave_in_bonus").unwrap_or(0.0),
-            cooldown_penalty: number_f64("cooldown_penalty").unwrap_or(0.0),
+            // Clamp the two rate penalties once at decode time with the same
+            // caps `capped_curse_effect` enforces, so the applied roll and the
+            // displayed summary read structurally identical values even for an
+            // over-cap persisted curse.
+            cave_in_bonus: number_f64("cave_in_bonus")
+                .unwrap_or(0.0)
+                .clamp(0.0, CAVE_IN_CURSE_CAP),
+            cooldown_penalty: number_f64("cooldown_penalty")
+                .unwrap_or(0.0)
+                .clamp(0.0, COOLDOWN_CURSE_CAP),
             jc_bonus: number_i64("jc_bonus").unwrap_or(0),
             luminosity_drain: number_i64("luminosity_drain").unwrap_or(0),
         },
         remaining,
     ))
+}
+
+/// Decode the active curse for presentation, including the name the effect
+/// decoder discards.
+///
+/// Shares [`active_curse_effects`] rather than re-parsing the penalties, so a
+/// displayed curse can never disagree with the one applied to the roll.  The
+/// decoder already caps the two rate penalties, so an over-cap persisted
+/// curse displays what it actually costs.
+pub(super) fn active_curse_summary(raw: Option<&str>) -> Option<super::ActiveCurseSummary> {
+    let (effects, digs_remaining) = active_curse_effects(raw)?;
+    let value: Value = serde_json::from_str(raw?).ok()?;
+    let name = value
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Unnamed Hex")
+        .to_owned();
+    Some(super::ActiveCurseSummary {
+        name,
+        digs_remaining,
+        advance_bonus: effects.advance_bonus,
+        jc_bonus: effects.jc_bonus,
+        luminosity_drain: effects.luminosity_drain,
+        cave_in_percent: (effects.cave_in_bonus * 100.0).round() as i64,
+        cooldown_percent: (effects.cooldown_penalty * 100.0).round() as i64,
+    })
 }
 
 impl DigWeatherEffects {

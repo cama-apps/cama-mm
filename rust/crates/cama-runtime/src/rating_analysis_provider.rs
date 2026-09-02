@@ -27,11 +27,12 @@ use tracing::{error, warn};
 
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
+use crate::option_ext::{string_option, user_option};
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, InteractionAttachment,
-    InteractionEmbed, InteractionHandler, InteractionHandlerError, InteractionOption,
-    InteractionRequest, InteractionResponder, InteractionResponse, InteractionValue,
-    RegistrationError, RegistrationProvider, RegistryBuilder,
+    InteractionEmbed, InteractionHandler, InteractionHandlerError, InteractionRequest,
+    InteractionResponder, InteractionResponse, RegistrationError, RegistrationProvider,
+    RegistryBuilder,
 };
 
 const ADMINISTRATOR_PERMISSION: u64 = 1 << 3;
@@ -181,7 +182,7 @@ impl InteractionHandler for RatingAnalysisHandler {
 
         let action = string_option(&options, "action").unwrap_or_default();
         if !matches!(
-            action.as_str(),
+            action,
             "backfill" | "compare" | "calibration" | "trend" | "player"
         ) {
             return respond_initial(&responder, &format!("Unknown action: {action}")).await;
@@ -190,9 +191,7 @@ impl InteractionHandler for RatingAnalysisHandler {
             warn!(%response_error, action, "unable to defer /ratinganalysis interaction");
             return Ok(());
         }
-        let selected_option = user_option(&options, "user")
-            .map(|(id, _)| signed_id(id, "selected user"))
-            .transpose()?;
+        let selected_option = user_option(&options, "user")?.map(|user| user.id);
         let mut requested_ids = vec![user_id];
         requested_ids.extend(selected_option);
         let names = self
@@ -202,7 +201,7 @@ impl InteractionHandler for RatingAnalysisHandler {
         let selected_user = selected_option.map(|id| MemberTarget::new(id, names.resolve(id)));
         let input = RatingAnalysisInput {
             admin_allowed: true,
-            action: action.clone(),
+            action: action.to_owned(),
             guild_id: Some(guild_id),
             invoker: MemberTarget::new(user_id, names.resolve(user_id)),
             selected_user,
@@ -226,14 +225,14 @@ impl InteractionHandler for RatingAnalysisHandler {
             Ok(Err(message)) => {
                 error!(action, %message, "rating-analysis worker failed");
                 return responder
-                    .followup(worker_failure(&action, &message))
+                    .followup(worker_failure(action, &message))
                     .await
                     .map_err(response_error);
             }
             Err(join_error) => {
                 error!(action, %join_error, "rating-analysis blocking task failed");
                 return responder
-                    .followup(worker_failure(&action, "worker task failed"))
+                    .followup(worker_failure(action, "worker task failed"))
                     .await
                     .map_err(response_error);
             }
@@ -622,31 +621,6 @@ async fn respond_initial(
         )
         .await
         .map_err(response_error)
-}
-
-fn string_option(options: &[InteractionOption], name: &str) -> Option<String> {
-    options
-        .iter()
-        .find_map(|option| match (&*option.name, &option.value) {
-            (candidate, InteractionValue::String(value)) if candidate == name => {
-                Some(value.clone())
-            }
-            _ => None,
-        })
-}
-
-fn user_option(options: &[InteractionOption], name: &str) -> Option<(u64, Option<String>)> {
-    options
-        .iter()
-        .find_map(|option| match (&*option.name, &option.value) {
-            (
-                candidate,
-                InteractionValue::User {
-                    id, display_name, ..
-                },
-            ) if candidate == name => Some((*id, display_name.clone())),
-            _ => None,
-        })
 }
 
 fn signed_id(value: u64, kind: &str) -> Result<i64, InteractionHandlerError> {

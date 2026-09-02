@@ -150,6 +150,28 @@ async fn publish_trims_trailing_slash_from_server() {
 }
 
 #[tokio::test]
+async fn publish_request_error_never_leaks_the_secret_topic() {
+    // Bind a loopback port and drop it immediately so the connection is
+    // refused: reqwest's error would normally append " for url (...)", which
+    // contains the secret topic path segment.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback port");
+    let base_url = format!("http://{}", listener.local_addr().expect("local address"));
+    drop(listener);
+    let client = NtfyHttpClient::for_server(&base_url).expect("test client");
+
+    let topic = "cama-secret-topic-0123456789abcdef";
+    let result = client.publish(topic, "title", "message").await;
+
+    let Err(NtfyPublishError::Request(message)) = result else {
+        panic!("expected a request error, got {result:?}");
+    };
+    assert!(
+        !message.contains(topic),
+        "request error leaked the topic: {message}"
+    );
+}
+
+#[tokio::test]
 async fn publish_maps_non_success_status_to_rejected() {
     let server = ScriptedServer::start(500);
     let client = NtfyHttpClient::for_server(&server.base_url).expect("test client");

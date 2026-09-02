@@ -46,6 +46,8 @@ pub mod dig_relic_recycling;
 pub mod dig_relic_rework;
 #[path = "../../cama-db/src/dig_routes.rs"]
 pub mod dig_routes_repository;
+#[path = "../../cama-db/src/dig_runtime_store.rs"]
+pub mod dig_runtime_store;
 #[path = "../../cama-db/src/dig_social_runtime.rs"]
 pub mod dig_social_runtime;
 #[path = "../../cama-db/src/dig_splash_runtime.rs"]

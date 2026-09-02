@@ -9,6 +9,8 @@ pub mod application_config;
 pub mod config;
 #[path = "../../cama-runtime/src/discord_transport.rs"]
 pub mod discord_transport;
+#[path = "../../cama-runtime/src/embed_colors.rs"]
+pub mod embed_colors;
 #[path = "../../cama-runtime/src/gateway_events.rs"]
 pub mod gateway_events;
 #[path = "../../cama-runtime/src/global_hooks.rs"]
@@ -16,10 +18,14 @@ pub mod global_hooks;
 #[doc(hidden)]
 #[path = "../../cama-runtime/src/ids.rs"]
 pub mod ids;
+#[path = "../../cama-runtime/src/option_ext.rs"]
+pub mod option_ext;
 #[path = "../../cama-runtime/src/raw_reactions.rs"]
 pub mod raw_reactions;
 #[path = "../../cama-runtime/src/registration.rs"]
 pub mod registration;
+#[path = "../../cama-runtime/src/runtime_ports.rs"]
+pub mod runtime_ports;
 
 pub use application_config::{
     ApplicationConfig, ChannelConfig, IdentityConfig, LlmConfig, Secret, Values, config_py_env_keys,

@@ -30,6 +30,8 @@ use crate::registration::{
 };
 
 const COMMAND_NAME: &str = "notify";
+const COMMAND_DESCRIPTION: &str =
+    "Configure ntfy.sh and Discord DM alerts for lobby readychecks and matches.";
 const COMPONENT_PREFIX: &str = "notify_";
 const BUTTON_SET: &str = "notify_set";
 const BUTTON_TOGGLE_READYCHECK_NTFY: &str = "notify_toggle_readycheck_ntfy";
@@ -50,6 +52,10 @@ const MATCH_STARTED_TITLE: &str = "\u{1f3ae} Match Started!";
 const MATCH_STARTED_MESSAGE: &str = "Your shuffled match has started \u{2014} good luck!";
 const TEST_TITLE: &str = "\u{1f9ea} Test Notification";
 const TEST_MESSAGE: &str = "Your Cama push notifications are working.";
+
+/// Deliveries always look up config by the real guild, so config saved from a
+/// DM (no guild) would be silently dead. Mirror the lobby commands' guard.
+const SERVER_ONLY_MESSAGE: &str = "This command can only be used in a server.";
 
 #[derive(Clone)]
 pub struct PushNotificationRegistrationProvider {
@@ -106,9 +112,7 @@ impl RegistrationProvider for PushNotificationRegistrationProvider {
     fn register(&self, registry: &mut RegistryBuilder) -> Result<(), RegistrationError> {
         registry.command(CommandSpec {
             name: COMMAND_NAME.to_owned(),
-            description:
-                "Configure best-effort ntfy.sh and/or Discord DM alerts for full-lobby readychecks and shuffled matches."
-                    .to_owned(),
+            description: COMMAND_DESCRIPTION.to_owned(),
             options: Vec::new(),
             handler: self.handler.clone(),
         })?;
@@ -620,11 +624,17 @@ impl InteractionHandler for PushNotificationHandler {
                         format!("push notification handler received command {name:?}").into(),
                     );
                 }
-                let (discord_id, guild_id) = signed_ids(user_id, guild_id)?;
                 responder
                     .defer(true)
                     .await
                     .map_err(|error| error.to_string())?;
+                let Some(guild_id) = guild_id else {
+                    return responder
+                        .followup(InteractionResponse::message(SERVER_ONLY_MESSAGE).ephemeral())
+                        .await
+                        .map_err(|error| error.to_string().into());
+                };
+                let (discord_id, guild_id) = signed_ids(user_id, guild_id)?;
                 let config = self.config(discord_id, guild_id).await?;
                 responder
                     .followup(status_response(config.as_ref()))
@@ -637,6 +647,12 @@ impl InteractionHandler for PushNotificationHandler {
                 guild_id,
                 ..
             } => {
+                let Some(guild_id) = guild_id else {
+                    return responder
+                        .update(InteractionResponse::message(SERVER_ONLY_MESSAGE).ephemeral())
+                        .await
+                        .map_err(|error| error.to_string().into());
+                };
                 let (discord_id, guild_id) = signed_ids(user_id, guild_id)?;
                 match custom_id.as_str() {
                     BUTTON_SET => self.create_target(discord_id, guild_id, &responder).await,
@@ -695,14 +711,11 @@ impl InteractionHandler for PushNotificationHandler {
     }
 }
 
-fn signed_ids(user_id: u64, guild_id: Option<u64>) -> Result<(i64, i64), String> {
+fn signed_ids(user_id: u64, guild_id: u64) -> Result<(i64, i64), String> {
     let user_id = i64::try_from(user_id)
         .map_err(|_| format!("Discord user snowflake {user_id} exceeds SQLite INTEGER range"))?;
-    let guild_id = guild_id
-        .map(i64::try_from)
-        .transpose()
-        .map_err(|_| "Discord guild snowflake exceeds SQLite INTEGER range".to_owned())?
-        .unwrap_or_default();
+    let guild_id = i64::try_from(guild_id)
+        .map_err(|_| "Discord guild snowflake exceeds SQLite INTEGER range".to_owned())?;
     Ok((user_id, guild_id))
 }
 

@@ -51,7 +51,7 @@ use crate::discord_transport::{
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
-use crate::lobby_provider::{MatchLobbyPort, MatchLobbySnapshot};
+use crate::lobby_provider::MatchLobbyPort;
 use crate::match_provider::MatchRegistrationProvider;
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
@@ -60,6 +60,8 @@ use crate::registration::{
     InteractionRequest, InteractionResponder, InteractionResponse, InteractionValue,
     RegistrationError, RegistrationProvider, RegistryBuilder,
 };
+use crate::runtime_ports::MatchLobbySnapshot;
+pub use crate::runtime_ports::{DraftNeonObserver, DraftNeonResult};
 
 const ADMINISTRATOR_PERMISSION: u64 = 1 << 3;
 const MANAGE_GUILD_PERMISSION: u64 = 1 << 5;
@@ -130,42 +132,6 @@ impl DraftReminderScheduler for MatchRegistrationProvider {
     ) -> Result<(), String> {
         self.schedule_draft_betting_reminders_recovery(pending)
     }
-}
-
-/// Typed Neon seam for the three Draft events owned by the Python command.
-/// The live composition layer can adapt the existing Neon service without
-/// making this provider depend on Neon implementation details.  Returning
-/// `None` is a normal no-event result; an error is logged and never turns a
-/// durable draft failure-prone.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DraftNeonResult {
-    pub text_block: String,
-    pub attachment: Option<crate::registration::InteractionAttachment>,
-}
-
-#[async_trait]
-pub trait DraftNeonObserver: Send + Sync {
-    async fn on_draft_coinflip(
-        &self,
-        guild_id: i64,
-        winner_id: i64,
-        loser_id: i64,
-    ) -> Result<Option<DraftNeonResult>, String>;
-
-    async fn on_captain_symmetry(
-        &self,
-        guild_id: i64,
-        radiant_captain_id: i64,
-        dire_captain_id: i64,
-        rating_diff: i64,
-    ) -> Result<Option<DraftNeonResult>, String>;
-
-    async fn on_bomb_pot(
-        &self,
-        guild_id: i64,
-        pool_amount: i64,
-        contributor_count: i64,
-    ) -> Result<Option<DraftNeonResult>, String>;
 }
 
 struct NoopDraftNeonObserver;
@@ -5155,13 +5121,7 @@ fn optional_lobby_kind(options: &[InteractionOption]) -> Result<Option<AppLobbyK
 }
 
 fn optional_user(options: &[InteractionOption], name: &str) -> Result<Option<i64>, String> {
-    let Some(option) = options.iter().find(|option| option.name == name) else {
-        return Ok(None);
-    };
-    let InteractionValue::User { id, .. } = &option.value else {
-        return Err(format!("draft {name} option must be a user"));
-    };
-    signed_id(*id, name).map(Some)
+    Ok(crate::option_ext::user_option(options, name)?.map(|user| user.id))
 }
 
 fn resolve_lobby_kind(

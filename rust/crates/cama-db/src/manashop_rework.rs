@@ -940,14 +940,19 @@ impl ManashopRepository {
             return Ok(None);
         };
         let mut data = buff_data_from_json(raw_data.as_deref().unwrap_or("{}"));
-        let cap = data.cap.unwrap_or(0);
         let current = data.skimmed_total.unwrap_or(0);
-        let remaining = cap.saturating_sub(current);
-        if remaining <= 0 {
-            return Ok(None);
-        }
         let rate = data.skim_rate.unwrap_or(0.0);
-        let amount = remaining.min(((earning as f64 * rate) as i64).max(1));
+        let skim_amount = ((earning as f64 * rate) as i64).max(1);
+        let amount = match data.cap {
+            Some(cap) => {
+                let remaining = cap.saturating_sub(current);
+                if remaining <= 0 {
+                    return Ok(None);
+                }
+                remaining.min(skim_amount)
+            }
+            None => skim_amount,
+        };
         if amount <= 0 {
             return Ok(None);
         }
@@ -995,9 +1000,12 @@ impl ManashopRepository {
         }
         self.mutate_buff_data_atomic(buff_id, |data| {
             let current = data.skimmed_total.unwrap_or(0);
-            let granted = amount
-                .min(data.cap.unwrap_or(0).saturating_sub(current))
-                .max(0);
+            // A missing cap means an uncapped pact, matching
+            // `claim_blood_pact_skim_in`; it must never read as zero headroom.
+            let granted = match data.cap {
+                Some(cap) => amount.min(cap.saturating_sub(current)).max(0),
+                None => amount,
+            };
             data.skimmed_total = Some(current.saturating_add(granted));
             granted
         })
@@ -1024,9 +1032,12 @@ impl ManashopRepository {
         };
         let mut data = buff_data_from_json(raw.as_deref().unwrap_or("{}"));
         let current = data.skimmed_total.unwrap_or(0);
-        let granted = amount
-            .min(data.cap.unwrap_or(0).saturating_sub(current))
-            .max(0);
+        // A missing cap means an uncapped pact, matching
+        // `claim_blood_pact_skim_in`; it must never read as zero headroom.
+        let granted = match data.cap {
+            Some(cap) => amount.min(cap.saturating_sub(current)).max(0),
+            None => amount,
+        };
         data.skimmed_total = Some(current.saturating_add(granted));
         connection.execute(
             "UPDATE manashop_buffs SET data = ?1 WHERE id = ?2",

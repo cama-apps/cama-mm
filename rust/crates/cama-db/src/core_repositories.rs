@@ -418,6 +418,29 @@ impl PlayerRepository {
             .map_err(Into::into)
     }
 
+    /// Discord IDs with any activity footprint in the guild: the union of
+    /// registered players, bettors, tip senders and recipients, and trivia
+    /// participants, deduplicated and in ascending ID order.  This backs the
+    /// unified leaderboard's member-candidate set.
+    pub fn candidate_discord_ids(
+        &self,
+        guild_id: Option<i64>,
+    ) -> Result<Vec<i64>, CoreRepositoryError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT discord_id FROM players WHERE guild_id = ?1
+             UNION SELECT discord_id FROM bets WHERE guild_id = ?1
+             UNION SELECT sender_id FROM tip_transactions WHERE guild_id = ?1
+             UNION SELECT recipient_id FROM tip_transactions WHERE guild_id = ?1
+             UNION SELECT discord_id FROM trivia_sessions WHERE guild_id = ?1
+             ORDER BY 1",
+        )?;
+        statement
+            .query_map([Self::normalize_guild_id(guild_id)], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn exists(
         &self,
         discord_id: i64,
@@ -1371,15 +1394,15 @@ impl PlayerRepository {
 
     /// Atomically claim a regular wheel spin for one player.
     ///
-    /// The check and timestamp write run under `BEGIN IMMEDIATE`, matching
-    /// Python's `try_claim_wheel_spin` contract.  A concurrent request can
-    /// therefore never observe the same cooldown window as available.
+    /// The caller supplies the start of the current fixed daily window. The
+    /// check and timestamp write run under `BEGIN IMMEDIATE`, so concurrent
+    /// requests can never both observe that window as available.
     pub fn try_claim_wheel_spin(
         &self,
         discord_id: i64,
         guild_id: Option<i64>,
         now: i64,
-        cooldown_seconds: i64,
+        current_window_started_at: i64,
     ) -> Result<WheelSpinClaim, CoreRepositoryError> {
         let guild_id = Self::normalize_guild_id(guild_id);
         let mut connection = self.connection()?;
@@ -1397,7 +1420,7 @@ impl PlayerRepository {
             return Ok(WheelSpinClaim::MissingPlayer);
         };
         if let Some(last_spin) = previous_spin
-            && now < last_spin.saturating_add(cooldown_seconds)
+            && last_spin >= current_window_started_at
         {
             transaction.commit()?;
             return Ok(WheelSpinClaim::Cooldown { last_spin });
@@ -5267,10 +5290,11 @@ mod tests {
     fn wheel_cooldown_claim_is_atomic_and_reports_the_persisted_anchor() {
         let fixture = Fixture::new();
         fixture.add_player(12_345, TEST_GUILD_ID);
+        let reset = 20 * 86_400 + 12 * 3_600;
         assert_eq!(
             fixture
                 .players
-                .try_claim_wheel_spin(12_345, Some(TEST_GUILD_ID), 1_000, 86_400)
+                .try_claim_wheel_spin(12_345, Some(TEST_GUILD_ID), reset - 1, reset - 86_400,)
                 .unwrap(),
             WheelSpinClaim::Claimed {
                 previous_spin: None
@@ -5279,23 +5303,25 @@ mod tests {
         assert_eq!(
             fixture
                 .players
-                .try_claim_wheel_spin(12_345, Some(TEST_GUILD_ID), 1_001, 86_400)
+                .try_claim_wheel_spin(12_345, Some(TEST_GUILD_ID), reset - 1, reset - 86_400,)
                 .unwrap(),
-            WheelSpinClaim::Cooldown { last_spin: 1_000 }
-        );
-        assert_eq!(
-            fixture
-                .players
-                .try_claim_wheel_spin(12_345, Some(TEST_GUILD_ID), 87_400, 86_400)
-                .unwrap(),
-            WheelSpinClaim::Claimed {
-                previous_spin: Some(1_000)
+            WheelSpinClaim::Cooldown {
+                last_spin: reset - 1
             }
         );
         assert_eq!(
             fixture
                 .players
-                .try_claim_wheel_spin(99_999, Some(TEST_GUILD_ID), 1_000, 86_400)
+                .try_claim_wheel_spin(12_345, Some(TEST_GUILD_ID), reset, reset)
+                .unwrap(),
+            WheelSpinClaim::Claimed {
+                previous_spin: Some(reset - 1)
+            }
+        );
+        assert_eq!(
+            fixture
+                .players
+                .try_claim_wheel_spin(99_999, Some(TEST_GUILD_ID), reset, reset)
                 .unwrap(),
             WheelSpinClaim::MissingPlayer
         );
@@ -9583,6 +9609,61 @@ mod tests {
         }
     }
 
+    #[test]
+    fn candidate_discord_ids_unions_activity_tables_per_guild() {
+        let fixture = Fixture::new();
+        fixture.add_player(11, TEST_GUILD_ID);
+        fixture.add_player(12, TEST_GUILD_ID);
+        fixture.add_player(99, TEST_GUILD_ID_SECONDARY);
+        let connection = fixture.connection();
+        connection
+            .execute(
+                "INSERT INTO bets (guild_id, discord_id, team_bet_on, amount, bet_time)
+                 VALUES (?1, 12, 'radiant', 10, 1), (?1, 13, 'dire', 10, 1), (?2, 98, 'dire', 5, 1)",
+                params![TEST_GUILD_ID, TEST_GUILD_ID_SECONDARY],
+            )
+            .expect("seed bets");
+        connection
+            .execute(
+                "INSERT INTO tip_transactions (guild_id, sender_id, recipient_id, amount, fee, timestamp)
+                 VALUES (?1, 14, 15, 3, 0, 1)",
+                params![TEST_GUILD_ID],
+            )
+            .expect("seed tips");
+        connection
+            .execute(
+                "INSERT INTO trivia_sessions (guild_id, discord_id, played_at)
+                 VALUES (?1, 16, 1), (?1, 11, 2)",
+                params![TEST_GUILD_ID],
+            )
+            .expect("seed trivia");
+        drop(connection);
+
+        // Union of players, bettors, tip senders/recipients, and trivia
+        // participants, deduplicated and ascending; other guilds excluded.
+        assert_eq!(
+            fixture
+                .players
+                .candidate_discord_ids(Some(TEST_GUILD_ID))
+                .expect("candidate ids"),
+            [11, 12, 13, 14, 15, 16]
+        );
+        assert_eq!(
+            fixture
+                .players
+                .candidate_discord_ids(Some(TEST_GUILD_ID_SECONDARY))
+                .expect("secondary guild ids"),
+            [98, 99]
+        );
+        assert_eq!(
+            fixture
+                .players
+                .candidate_discord_ids(None)
+                .expect("sentinel guild ids"),
+            [0i64; 0]
+        );
+    }
+
     const TEST_SCHEMA: &str = r#"
         PRAGMA journal_mode=WAL;
         PRAGMA busy_timeout=5000;
@@ -9666,6 +9747,23 @@ mod tests {
             amount INTEGER NOT NULL,
             bet_time INTEGER NOT NULL,
             pending_match_id INTEGER
+        );
+        CREATE TABLE tip_transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sender_id INTEGER NOT NULL,
+            recipient_id INTEGER NOT NULL,
+            amount INTEGER NOT NULL,
+            fee INTEGER NOT NULL,
+            guild_id INTEGER NOT NULL DEFAULT 0,
+            timestamp INTEGER NOT NULL
+        );
+        CREATE TABLE trivia_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            discord_id INTEGER NOT NULL,
+            guild_id INTEGER NOT NULL DEFAULT 0,
+            streak INTEGER NOT NULL DEFAULT 0,
+            jc_earned INTEGER NOT NULL DEFAULT 0,
+            played_at INTEGER NOT NULL
         );
         CREATE TABLE player_pairings (
             id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL,

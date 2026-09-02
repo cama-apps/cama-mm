@@ -612,6 +612,72 @@ fn db_writes_use_typed_transactions_not_manual_sql() {
     );
 }
 
+/// Production source with every module-level test region removed.  Unlike
+/// [`production_source`], this also strips runtime test modules gated as
+/// `#[cfg(all(test, feature = "..."))]`; only markers at the start of a line
+/// count so an indented, function-local cfg does not truncate the scan.
+fn production_source_without_gated_tests(relative: &str) -> String {
+    let source = read(relative);
+    let mut end = source.len();
+    for marker in ["\n#[cfg(test)]", "\n#[cfg(all(test"] {
+        if let Some(index) = source.find(marker) {
+            end = end.min(index);
+        }
+    }
+    source[..end].to_owned()
+}
+
+/// SQL statement text belongs to the `cama-db` repository layer.  Application
+/// and runtime production code must go through typed repositories instead of
+/// preparing statements on their own connections; every module still allowed
+/// to embed SQL is named explicitly below.
+#[test]
+fn application_and_runtime_production_sources_keep_sql_in_the_database_layer() {
+    // - health.rs / main.rs: self-contained startup, migration-ledger, and
+    //   loopback smoke checks that deliberately avoid repository wiring.
+    // - admin_provider.rs: the read-only `SELECT EXISTS` database health probe.
+    // - ai_query_sqlite.rs / ai_services.rs: the AI SQL sandbox composes and
+    //   validates SELECT statements as data, not as repository queries.
+    // - dotabase_sqlite.rs / hero_lookup.rs / calibration.rs /
+    //   pet_flavor_runtime.rs / profile_balance_history.rs: read-heavy SQLite
+    //   adapters tracked as tech debt; do not add new statements to them.
+    let allowlist = [
+        "rust/crates/cama-app/src/ai_query_sqlite.rs",
+        "rust/crates/cama-app/src/ai_services.rs",
+        "rust/crates/cama-app/src/dotabase_sqlite.rs",
+        "rust/crates/cama-app/src/hero_lookup.rs",
+        "rust/crates/cama-runtime/src/admin_provider.rs",
+        "rust/crates/cama-runtime/src/health.rs",
+        "rust/crates/cama-runtime/src/info_provider/calibration.rs",
+        "rust/crates/cama-runtime/src/main.rs",
+        "rust/crates/cama-runtime/src/pet_flavor_runtime.rs",
+        "rust/crates/cama-runtime/src/profile_balance_history.rs",
+    ];
+    for source_root in ["rust/crates/cama-app/src", "rust/crates/cama-runtime/src"] {
+        for file in rust_source_files(source_root) {
+            let relative = file
+                .strip_prefix(root())
+                .expect("workspace-relative path")
+                .display()
+                .to_string()
+                .replace('\\', "/");
+            if relative.ends_with("tests.rs") || allowlist.contains(&relative.as_str()) {
+                continue;
+            }
+            let source = production_source_without_gated_tests(&relative);
+            for pattern in ["\"SELECT ", "\"INSERT INTO ", "\"UPDATE ", "\"DELETE FROM "] {
+                assert!(
+                    !source.contains(pattern),
+                    "{relative} embeds a {} SQL statement literal; move the query \
+                     into a cama-db repository (or add the module to this audit's \
+                     allowlist as tracked tech debt)",
+                    pattern.trim_start_matches('"').trim_end()
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn application_services_do_not_reach_runtime_modules() {
     for file in rust_source_files("rust/crates/cama-app/src") {

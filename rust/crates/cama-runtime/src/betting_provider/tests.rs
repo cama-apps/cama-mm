@@ -993,6 +993,19 @@ fn gamba_preflight_keeps_registration_and_cooldown_errors_private() {
         .expect("cooldown preflight")
         .expect("cooldown copy");
     assert!(cooldown.contains("You already spun the wheel today!"));
+    assert!(cooldown.contains("The wheel resets in"));
+
+    // Crossing the fixed 4 AM UTC-8 boundary refreshes the wheel even when
+    // the prior spin was only one second earlier.
+    let current_window = wheel_window_start_at(now);
+    players
+        .set_last_wheel_spin(7, Some(42), current_window - 1)
+        .expect("set pre-reset wheel spin");
+    assert_eq!(
+        gamba_interaction_preflight(database.path(), 42, 7, current_window, false)
+            .expect("fixed reset preflight"),
+        None
+    );
     assert_eq!(
         gamba_interaction_preflight(database.path(), 42, 7, now, true).expect("admin preflight"),
         None
@@ -1992,7 +2005,7 @@ fn provider_exposes_dig_bonus_wheel_seam() {
     assert_eq!(explosion.credited_reward, 44);
     assert!(explosion.is_bonus);
     let next = cooldown_after_resolution(1_000, true, Some(900), CooldownOutcome::Other);
-    assert_eq!(next.next_spin_at, 87_300);
+    assert_eq!(next.next_spin_at, next_wheel_reset_at(900));
     assert!(!next.schedule_reminder);
 }
 
@@ -4087,6 +4100,45 @@ fn lottery_disbursement_pays_the_drawn_winner_and_nothing_without_one() {
         vec![(2, 250)]
     );
     assert!(calculate_distributions("lottery", 250, &players, None).is_empty());
+}
+
+#[test]
+fn debtor_disbursements_route_through_the_disburse_service_math() {
+    let players = vec![
+        disburse_player(1, -100, 5),
+        disburse_player(2, -300, 5),
+        disburse_player(3, 900, 5),
+    ];
+
+    // Debtors are paid most-indebted first with a stable discord-id order.
+    assert_eq!(
+        calculate_distributions("even", 200, &players, None),
+        vec![(2, 100), (1, 100)]
+    );
+    assert_eq!(
+        calculate_distributions("proportional", 100, &players, None),
+        vec![(2, 75), (1, 25)]
+    );
+    assert_eq!(
+        calculate_distributions("neediest", 150, &players, None),
+        vec![(2, 150)]
+    );
+    // A lone remainder coin lands on the most indebted debtor: even splits
+    // follow the deterministic (balance asc, discord id asc) order, which
+    // intentionally supersedes the legacy unspecified roster order.
+    assert_eq!(
+        calculate_distributions("even", 1, &players, None),
+        vec![(2, 1)]
+    );
+}
+
+#[test]
+fn unknown_or_non_paying_disbursement_methods_pay_nobody() {
+    let players = vec![disburse_player(1, -100, 5)];
+
+    assert!(calculate_distributions("mystery", 100, &players, None).is_empty());
+    assert!(calculate_distributions("burn", 100, &players, None).is_empty());
+    assert!(calculate_distributions("even", 0, &players, None).is_empty());
 }
 
 #[test]

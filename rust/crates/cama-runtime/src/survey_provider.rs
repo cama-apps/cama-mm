@@ -24,6 +24,9 @@ use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
 use crate::ids::blocking as sqlite;
+use crate::option_ext::{
+    boolean_option as optional_boolean, option_value, string_option as optional_string, user_option,
+};
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
     InteractionAcknowledgementPolicy, InteractionActionRow, InteractionButton,
@@ -1103,7 +1106,7 @@ impl SurveyInteractionHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
         let status = optional_string(options, "status")
-            .map(|value| parse_status(&value))
+            .map(parse_status)
             .transpose()?;
         let repository = self.state.repository.clone();
         let surveys = sqlite("list surveys", move || {
@@ -1262,9 +1265,9 @@ impl SurveyInteractionHandler {
     ) -> Result<(), String> {
         let survey_id = integer_option(options, "survey_id")?;
         let question_id = integer_option(options, "question_id")?;
-        let prompt = optional_string(options, "prompt");
+        let prompt = optional_string(options, "prompt").map(str::to_owned);
         let question_type = optional_string(options, "question_type")
-            .map(|value| parse_question_type(&value))
+            .map(parse_question_type)
             .transpose()?;
         let required = optional_boolean(options, "required");
         if prompt.is_none() && question_type.is_none() && required.is_none() {
@@ -1361,7 +1364,7 @@ impl SurveyInteractionHandler {
     ) -> Result<(), String> {
         let survey_id = integer_option(options, "survey_id")?;
         let target_type = parse_target(&string_option(options, "target")?)?;
-        let member = optional_user(options, "member");
+        let member = user_option(options, "member")?;
         let role = optional_role(options, "role");
         let registered_only = optional_boolean(options, "registered_only").unwrap_or(false);
         let guild = self.state.discord.survey_guild_snapshot(guild_id).await?;
@@ -1390,11 +1393,11 @@ impl SurveyInteractionHandler {
                 if role.is_some() || member.is_none() {
                     return Err("Choose exactly one member for member targeting".to_owned());
                 }
-                let (id, bot) = member.expect("checked");
+                let target_member = member.expect("checked");
                 let member = policy::MemberSnapshot {
-                    discord_id: id,
+                    discord_id: target_member.id,
                     guild_id,
-                    bot,
+                    bot: target_member.is_bot.unwrap_or(false),
                 };
                 policy::resolve_recipients(
                     &guild,
@@ -2429,49 +2432,18 @@ fn leaf_command(options: &[InteractionOption]) -> Result<(String, &[InteractionO
     }
 }
 
-fn option<'a>(options: &'a [InteractionOption], name: &str) -> Option<&'a InteractionValue> {
-    options
-        .iter()
-        .find(|option| option.name == name)
-        .map(|option| &option.value)
-}
-
 fn string_option(options: &[InteractionOption], name: &str) -> Result<String, String> {
-    optional_string(options, name).ok_or_else(|| format!("Missing {name}"))
-}
-
-fn optional_string(options: &[InteractionOption], name: &str) -> Option<String> {
-    match option(options, name) {
-        Some(InteractionValue::String(value)) => Some(value.clone()),
-        _ => None,
-    }
+    optional_string(options, name)
+        .map(str::to_owned)
+        .ok_or_else(|| format!("Missing {name}"))
 }
 
 fn integer_option(options: &[InteractionOption], name: &str) -> Result<i64, String> {
-    match option(options, name) {
-        Some(InteractionValue::Integer(value)) => Ok(*value),
-        _ => Err(format!("Missing {name}")),
-    }
-}
-
-fn optional_boolean(options: &[InteractionOption], name: &str) -> Option<bool> {
-    match option(options, name) {
-        Some(InteractionValue::Boolean(value)) => Some(*value),
-        _ => None,
-    }
-}
-
-fn optional_user(options: &[InteractionOption], name: &str) -> Option<(i64, bool)> {
-    match option(options, name) {
-        Some(InteractionValue::User { id, is_bot, .. }) => i64::try_from(*id)
-            .ok()
-            .map(|id| (id, is_bot.unwrap_or(false))),
-        _ => None,
-    }
+    crate::option_ext::integer_option(options, name).ok_or_else(|| format!("Missing {name}"))
 }
 
 fn optional_role(options: &[InteractionOption], name: &str) -> Option<i64> {
-    match option(options, name) {
+    match option_value(options, name) {
         Some(InteractionValue::Role(id)) => i64::try_from(*id).ok(),
         _ => None,
     }

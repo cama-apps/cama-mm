@@ -200,6 +200,10 @@ struct RecordingState {
     threads: Vec<(u64, u64, String, u64)>,
     thread_members: Vec<(u64, u64)>,
     archived: Vec<(u64, String, bool)>,
+    /// Threads currently archived. Discord rejects `add_thread_member` on an
+    /// archived thread, while sending a message auto-unarchives it; mirror
+    /// both so tests can assert join-publication ordering.
+    archived_threads: BTreeSet<u64>,
     unpinned: Vec<(u64, u64)>,
     removed_reactions: Vec<(u64, u64, DiscordEmoji, u64)>,
     cleared_reactions: Vec<(u64, u64, DiscordEmoji)>,
@@ -207,6 +211,9 @@ struct RecordingState {
     members: BTreeMap<(u64, u64), DiscordGuildMemberSnapshot>,
     server_nicknames: BTreeMap<(u64, u64), Option<String>>,
     users: BTreeMap<u64, DiscordUserSnapshot>,
+    /// Bot-authored messages retrievable by delivery nonce, mirroring
+    /// `find_message_by_delivery_key` history recovery.
+    delivery_keys: BTreeMap<(u64, String), DiscordMessageReceipt>,
 }
 
 impl Default for RecordingState {
@@ -221,6 +228,7 @@ impl Default for RecordingState {
             threads: Vec::new(),
             thread_members: Vec::new(),
             archived: Vec::new(),
+            archived_threads: BTreeSet::new(),
             unpinned: Vec::new(),
             removed_reactions: Vec::new(),
             cleared_reactions: Vec::new(),
@@ -228,6 +236,7 @@ impl Default for RecordingState {
             members: BTreeMap::new(),
             server_nicknames: BTreeMap::new(),
             users: BTreeMap::new(),
+            delivery_keys: BTreeMap::new(),
         }
     }
 }
@@ -306,6 +315,24 @@ impl RecordingTransport {
             .users
             .insert(user.user_id, user);
     }
+
+    /// Seed channel history with a bot message already carrying
+    /// `delivery_key`, standing in for a send whose acknowledgement was lost
+    /// before a crash.
+    fn seed_delivery_key(&self, channel_id: u64, delivery_key: &str) {
+        self.state
+            .lock()
+            .expect("transport state")
+            .delivery_keys
+            .insert(
+                (channel_id, delivery_key.to_owned()),
+                DiscordMessageReceipt {
+                    channel_id,
+                    message_id: 999,
+                    jump_url: format!("https://discord.com/channels/42/{channel_id}/999"),
+                },
+            );
+    }
 }
 
 #[async_trait]
@@ -336,6 +363,7 @@ impl DiscordTransport for RecordingTransport {
             return Err("ready-check removal notice refused".to_owned());
         }
         let mut state = self.state.lock().expect("transport state");
+        state.archived_threads.remove(&channel_id);
         let message_id = state.next_message_id;
         state.next_message_id += 1;
         let receipt = DiscordMessageReceipt {
@@ -355,6 +383,37 @@ impl DiscordTransport for RecordingTransport {
             message,
         });
         Ok(receipt)
+    }
+
+    async fn send_message_with_delivery_key(
+        &self,
+        channel_id: u64,
+        delivery_key: &str,
+        message: DiscordMessage,
+    ) -> Result<DiscordMessageReceipt, String> {
+        let receipt = self.send_message(channel_id, message).await?;
+        self.state
+            .lock()
+            .expect("transport state")
+            .delivery_keys
+            .insert((channel_id, delivery_key.to_owned()), receipt.clone());
+        Ok(receipt)
+    }
+
+    async fn find_message_by_delivery_key(
+        &self,
+        channel_id: u64,
+        delivery_key: &str,
+        _after_unix_seconds: i64,
+        _limit: usize,
+    ) -> Result<Option<DiscordMessageReceipt>, String> {
+        Ok(self
+            .state
+            .lock()
+            .expect("transport state")
+            .delivery_keys
+            .get(&(channel_id, delivery_key.to_owned()))
+            .cloned())
     }
 
     async fn edit_message(
@@ -398,11 +457,11 @@ impl DiscordTransport for RecordingTransport {
     }
 
     async fn add_thread_member(&self, thread_id: u64, member_id: u64) -> Result<(), String> {
-        self.state
-            .lock()
-            .expect("transport state")
-            .thread_members
-            .push((thread_id, member_id));
+        let mut state = self.state.lock().expect("transport state");
+        if state.archived_threads.contains(&thread_id) {
+            return Err("cannot add a member to an archived thread".to_owned());
+        }
+        state.thread_members.push((thread_id, member_id));
         Ok(())
     }
 
@@ -411,11 +470,9 @@ impl DiscordTransport for RecordingTransport {
     }
 
     async fn archive_thread(&self, thread_id: u64, name: &str, locked: bool) -> Result<(), String> {
-        self.state.lock().expect("transport state").archived.push((
-            thread_id,
-            name.to_owned(),
-            locked,
-        ));
+        let mut state = self.state.lock().expect("transport state");
+        state.archived_threads.insert(thread_id);
+        state.archived.push((thread_id, name.to_owned(), locked));
         Ok(())
     }
 
@@ -1051,6 +1108,56 @@ async fn slash_join_uses_only_the_private_confirmation_message() {
         [(21_000, 10), (21_000, 20)]
     );
     assert_eq!(observer.confirmed.lock().expect("join observer").len(), 2);
+}
+
+#[tokio::test]
+async fn join_during_an_archived_thread_spell_still_subscribes_the_joiner() {
+    let database = database_with_players(&[(10, "Creator"), (20, "Joiner")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let lobby = lobby_snapshot(&provider, LobbyKind::Open);
+    let thread_id =
+        to_u64(lobby.message_ids.thread_id.expect("lobby thread").0).expect("Discord thread id");
+    let message_id =
+        to_u64(lobby.message_ids.message_id.expect("lobby message").0).expect("Discord message id");
+    transport
+        .archive_thread(thread_id, "🍽️ All You Can Feed", false)
+        .await
+        .expect("archive lobby thread");
+
+    provider
+        .raw_reaction_observer()
+        .observe(raw_sword(RawReactionKind::Add, message_id, 20, "Joiner"))
+        .await
+        .expect("raw sword join");
+
+    // The join announcement is what auto-unarchives the thread, so it must be
+    // sent before the explicit thread subscription for the add to succeed.
+    assert!(
+        transport
+            .sent_messages()
+            .iter()
+            .any(|sent| sent.channel_id == thread_id
+                && sent.message.response.content.ends_with(" joined.")),
+        "the join announcement must reach the archived thread"
+    );
+    assert!(
+        transport
+            .state
+            .lock()
+            .expect("transport state")
+            .thread_members
+            .contains(&(thread_id, 20)),
+        "a joiner during an archived spell must still be subscribed to the thread"
+    );
 }
 
 #[tokio::test]
@@ -2792,6 +2899,7 @@ async fn failed_stale_notice_recovery_is_nonfatal_and_remains_retryable() {
         repository
             .pending_pruned_notices()
             .expect("reload retained notice")
+            .notices
             .len(),
         1,
         "failed delivery must remain pending"
@@ -2825,6 +2933,7 @@ async fn failed_stale_notice_recovery_is_nonfatal_and_remains_retryable() {
         repository
             .pending_pruned_notices()
             .expect("reload acknowledged notices")
+            .notices
             .is_empty(),
         "successful retry must acknowledge the notice"
     );
@@ -2841,6 +2950,146 @@ async fn failed_stale_notice_recovery_is_nonfatal_and_remains_retryable() {
         "post-ack recovery failed: {final_report:?}"
     );
     assert_eq!(notice_count(), 1, "acknowledged notice must not repeat");
+}
+
+#[tokio::test]
+async fn already_delivered_stale_notice_is_acknowledged_without_a_duplicate_ping() {
+    let database = database_with_players(&[(10, "Creator"), (20, "Removed")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
+    let repository = ReadycheckRepository::new(database.path());
+    let lobby = repository
+        .load(scope.lobby_id(), Some(42))
+        .expect("load persisted lobby")
+        .expect("persisted lobby");
+    let thread_id = lobby.thread_id.expect("persisted lobby thread");
+    repository
+        .save_with_pruned_notice(&lobby, thread_id, &BTreeSet::from([20]))
+        .expect("queue stale-removal notice");
+    // The notice message already exists in channel history: the send
+    // succeeded on a previous run, but the process crashed before the
+    // acknowledgement DELETE, leaving the outbox row behind.
+    let notice = repository
+        .pending_pruned_notices()
+        .expect("reload pending notice")
+        .notices
+        .pop()
+        .expect("queued notice");
+    transport.seed_delivery_key(
+        u64::try_from(notice.channel_id).expect("notice channel id"),
+        notice.delivery_nonce(),
+    );
+    let sent_before = transport.sent_messages().len();
+
+    let report = provider
+        .gateway_observer()
+        .ready_recovery(ReadyRecoveryContext::new(
+            Arc::<[u64]>::from([42]),
+            Arc::new(NoMembers),
+        ))
+        .await;
+
+    assert!(
+        report.failures.is_empty(),
+        "recovery of an already-delivered notice failed: {report:?}"
+    );
+    let duplicate_pings = transport.sent_messages()[sent_before..]
+        .iter()
+        .filter(|sent| {
+            sent.message
+                .response
+                .content
+                .starts_with("🧹 Removed (away during ready check):")
+        })
+        .count();
+    assert_eq!(
+        duplicate_pings, 0,
+        "an already-delivered notice must not ping the pruned players again"
+    );
+    assert!(
+        repository
+            .pending_pruned_notices()
+            .expect("reload acknowledged notices")
+            .notices
+            .is_empty(),
+        "the already-delivered notice must still be acknowledged"
+    );
+}
+
+#[tokio::test]
+async fn corrupt_pruned_notice_row_does_not_wedge_recovery_for_valid_notices() {
+    let database = database_with_players(&[(10, "Creator"), (20, "Removed")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
+    let repository = ReadycheckRepository::new(database.path());
+    let lobby = repository
+        .load(scope.lobby_id(), Some(42))
+        .expect("load persisted lobby")
+        .expect("persisted lobby");
+    let thread_id = lobby.thread_id.expect("persisted lobby thread");
+    repository
+        .save_with_pruned_notice(&lobby, thread_id, &BTreeSet::from([20]))
+        .expect("queue stale-removal notice");
+    rusqlite::Connection::open(database.path())
+        .expect("open lobby database")
+        .execute(
+            "INSERT INTO app_kv(guild_id,key,value)
+             VALUES (42,'readycheck:pruned_notice:1:0000000000000bad','not-json')",
+            [],
+        )
+        .expect("insert corrupted notice row");
+    let sent_before = transport.sent_messages().len();
+
+    let report = provider
+        .gateway_observer()
+        .ready_recovery(ReadyRecoveryContext::new(
+            Arc::<[u64]>::from([42]),
+            Arc::new(NoMembers),
+        ))
+        .await;
+
+    assert!(
+        report.failures.is_empty(),
+        "one corrupt notice row must not wedge recovery: {report:?}"
+    );
+    let delivered = transport.sent_messages()[sent_before..]
+        .iter()
+        .filter(|sent| {
+            sent.message
+                .response
+                .content
+                .starts_with("🧹 Removed (away during ready check):")
+        })
+        .count();
+    assert_eq!(delivered, 1, "the valid notice must still publish");
+    let listing = repository.pending_pruned_notices().expect("reload notices");
+    assert!(
+        listing.notices.is_empty(),
+        "the published notice must be acknowledged"
+    );
+    assert_eq!(
+        listing.skipped_keys,
+        ["readycheck:pruned_notice:1:0000000000000bad"],
+        "the corrupt row is retained for diagnosis"
+    );
 }
 
 #[tokio::test]
@@ -2889,6 +3138,7 @@ async fn invalid_stale_notice_recovery_remains_fatal() {
         repository
             .pending_pruned_notices()
             .expect("reload invalid notice")
+            .notices
             .len(),
         1,
         "invalid notice must remain available for diagnosis"
@@ -3064,6 +3314,104 @@ async fn readycheck_push_notification_fires_when_the_lobby_is_full() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readycheck_push_notification_fires_when_a_hydrated_lobby_exceeds_the_threshold() {
+    // A persisted lobby can hydrate with more players than the configured
+    // threshold after `ready_threshold` is lowered between restarts; the push
+    // gate must treat that as a full lobby instead of silently never firing.
+    let database = database_with_players(&[(10, "First"), (20, "Second"), (30, "Third")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let mut wide_config = runtime_config();
+    wide_config.ready_threshold = 3;
+    let provider = LobbyRegistrationProvider::new(
+        database.path(),
+        wide_config,
+        Arc::new(DraftStateManager::default()),
+        transport.clone(),
+    )
+    .expect("construct wide-threshold lobby provider");
+
+    dispatch_command(
+        &provider,
+        "lobby",
+        10,
+        "First",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    for (player_id, name) in [(20, "Second"), (30, "Third")] {
+        dispatch_command(
+            &provider,
+            "join",
+            player_id,
+            name,
+            vec![lobby_option(LobbyKind::Open)],
+        )
+        .await;
+    }
+
+    // Age the signups out of the "just joined" grace window so player 20
+    // lands in `mention_ids`, matching the full-lobby push test above.
+    let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
+    let repository = ReadycheckRepository::new(database.path());
+    let mut persisted = repository
+        .load(scope.lobby_id(), Some(42))
+        .expect("load lobby row")
+        .expect("persisted lobby");
+    for player_id in [20, 30] {
+        persisted
+            .player_join_times
+            .insert(player_id, unix_time_now() - 11.0 * 60.0);
+    }
+    repository.save(&persisted).expect("age the signups");
+    drop(provider);
+
+    // Restart on the default, lower threshold: three players against two.
+    let restarted = provider_for(&database, transport.clone());
+    let push_publisher = Arc::new(RecordingPushPublisher::default());
+    let push_provider = PushNotificationRegistrationProvider::with_test_publisher(
+        database.path(),
+        transport.clone(),
+        push_publisher.clone(),
+    );
+    PushNotificationRepository::new(database.path())
+        .set_target(
+            20,
+            Some(42),
+            "cama-000000000000000000000000000000000000000000000020",
+            1,
+        )
+        .expect("configure push target");
+    restarted
+        .attach_push_notification_hooks(push_provider.hooks())
+        .expect("attach push hooks");
+    transport.set_member(
+        42,
+        DiscordGuildMemberSnapshot {
+            user_id: 20,
+            display_name: "Second".to_owned(),
+            presence: DiscordPresence::Online,
+            in_voice: false,
+            deafened: false,
+            activities: Vec::new(),
+        },
+    );
+
+    dispatch_command(
+        &restarted,
+        "readycheck",
+        10,
+        "First",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    assert!(
+        push_publisher.wait_for_title("⚔️ Readycheck!").await,
+        "a hydrated lobby larger than a lowered ready threshold must still push"
+    );
+}
+
 #[tokio::test]
 async fn successful_bell_shortcut_advertises_in_the_persisted_origin_channel() {
     let database = database_with_players(&[(10, "Creator"), (20, "Second Player")]);
@@ -3158,6 +3506,122 @@ async fn successful_bell_shortcut_advertises_in_the_persisted_origin_channel() {
         push_publisher.wait_for_title("⚔️ Readycheck!").await,
         "the bell shortcut must trigger the same push notification as /readycheck"
     );
+}
+
+#[tokio::test]
+async fn lobby_command_join_uses_interaction_display_name_in_thread_announcement() {
+    let database = database_with_players(&[(10, ".pf")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+
+    dispatch_command(
+        &provider,
+        "lobby",
+        10,
+        "perry feng",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    let announcements = transport
+        .sent_messages()
+        .into_iter()
+        .map(|sent| sent.message.response.content)
+        .filter(|content| content.ends_with(" joined."))
+        .collect::<Vec<_>>();
+    assert_eq!(announcements, ["✅ perry feng joined."]);
+}
+
+#[tokio::test]
+async fn raw_sword_join_uses_server_nickname_in_thread_announcement() {
+    let database = database_with_players(&[(10, "Creator"), (20, "leafael.")]);
+    let transport = Arc::new(RecordingTransport::default());
+    transport.set_member(
+        42,
+        DiscordGuildMemberSnapshot {
+            user_id: 20,
+            display_name: "Leaf | Atharva".to_owned(),
+            presence: DiscordPresence::Online,
+            in_voice: false,
+            deafened: false,
+            activities: Vec::new(),
+        },
+    );
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let lobby_message_id = to_u64(
+        lobby_snapshot(&provider, LobbyKind::Open)
+            .message_ids
+            .message_id
+            .expect("lobby message")
+            .0,
+    )
+    .expect("Discord lobby message");
+
+    provider
+        .raw_reaction_observer()
+        .observe(raw_sword(
+            RawReactionKind::Add,
+            lobby_message_id,
+            20,
+            "leafael.",
+        ))
+        .await
+        .expect("raw join");
+
+    assert!(
+        transport
+            .sent_messages()
+            .iter()
+            .any(|sent| { sent.message.response.content == "✅ Leaf | Atharva joined." })
+    );
+}
+
+#[tokio::test]
+async fn raw_sword_join_falls_back_to_stored_name_when_discord_name_is_unavailable() {
+    let database = database_with_players(&[(10, "Creator"), (20, "leafael.")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let lobby_message_id = to_u64(
+        lobby_snapshot(&provider, LobbyKind::Open)
+            .message_ids
+            .message_id
+            .expect("lobby message")
+            .0,
+    )
+    .expect("Discord lobby message");
+    let sent_before = transport.sent_messages().len();
+    let mut reaction = raw_sword(RawReactionKind::Add, lobby_message_id, 20, "ignored");
+    reaction.actor_display_name = None;
+
+    provider
+        .raw_reaction_observer()
+        .observe(reaction)
+        .await
+        .expect("raw join");
+
+    let sent = transport.sent_messages();
+    let announcements = sent[sent_before..]
+        .iter()
+        .map(|sent| sent.message.response.content.as_str())
+        .filter(|content| content.ends_with(" joined."))
+        .collect::<Vec<_>>();
+    assert_eq!(announcements, ["✅ leafael. joined."]);
 }
 
 #[tokio::test]

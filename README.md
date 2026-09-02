@@ -219,7 +219,8 @@ Show your active bets.
 Show all bets in the current pool (optional `match` filter).
 
 #### `/gamba`
-Spin the Wheel of Fortune for random jopacoin outcomes. Daily cooldown.
+Spin the Wheel of Fortune for random jopacoin outcomes. The daily spin resets
+at 4:00 AM in fixed UTC-8 (12:00 UTC), without daylight-saving shifts.
 
 ### Economy — `/economy`
 
@@ -386,7 +387,6 @@ Additional settings can be configured in `.env` (see the Rust application config
   targeted by the paid `/shop pingedash` and `/shop pingedkevin` commands
 
 **Wheel of Fortune:**
-- `WHEEL_COOLDOWN_SECONDS` - Time between spins (default: 24 hours)
 - `WHEEL_TARGET_EV` - Target expected value per spin (default: -27.5)
 
 **Rating:**

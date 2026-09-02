@@ -1677,6 +1677,58 @@ fn manual_enrichment_cannot_reuse_a_valve_id_owned_by_another_match() {
 }
 
 #[test]
+fn forced_enrichment_relaxes_roster_validation_but_keeps_the_ownership_guard() {
+    let (matches, players, api, writer, _) = one_player_enrichment_fixture();
+    api.set_details(
+        ValveMatchId(8_181_518_332),
+        vec![
+            Ok(Some(enrichment_details(vec![enrichment_player(12_345)]))),
+            Ok(Some(enrichment_details(vec![enrichment_player(12_345)]))),
+        ],
+    );
+    let service = MatchEnrichmentService::new(
+        matches.clone(),
+        players,
+        api.clone(),
+        writer.clone(),
+        None::<FakeOpenSkill>,
+    );
+
+    // Strict validation refuses a 1/10 roster.
+    let mut strict = service_request();
+    strict.skip_validation = false;
+    let strict_result = service.enrich_match(strict);
+    assert!(!strict_result.success);
+    assert!(
+        strict_result
+            .validation_error
+            .as_deref()
+            .is_some_and(|error| error.contains("(need 10)"))
+    );
+    assert!(writer.writes.lock().expect("writes lock").is_empty());
+
+    // The forced (skip_validation) path enriches the same roster.
+    let forced_result = service.enrich_match(service_request());
+    assert!(forced_result.success);
+    assert_eq!(forced_result.players_enriched, 1);
+    assert_eq!(writer.writes.lock().expect("writes lock").len(), 1);
+
+    // Forcing never overrides another internal match's claim on the Valve ID.
+    matches.claim_valve_match(GUILD, ValveMatchId(8_181_518_332), InternalMatchId(99));
+    let details_before_guard = api.detail_call_count();
+    let stolen = service.enrich_match(service_request());
+    assert!(!stolen.success);
+    assert!(
+        stolen
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("already linked to internal match #99"))
+    );
+    assert_eq!(api.detail_call_count(), details_before_guard);
+    assert_eq!(writer.writes.lock().expect("writes lock").len(), 1);
+}
+
+#[test]
 fn stronger_concurrent_live_discovery_is_single_flight_and_idempotent() {
     let (service, _, _, api, enrichment, _) = setup_single();
     api.set_default_history(Ok(Some(history(99_999, MATCH_TIME))));

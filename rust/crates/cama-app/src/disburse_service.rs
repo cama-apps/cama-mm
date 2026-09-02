@@ -63,6 +63,12 @@ impl DistributionMethod {
         }
     }
 
+    /// Parses a stored method code; the inverse of [`Self::as_str`].
+    #[must_use]
+    pub fn from_code(code: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|method| method.as_str() == code)
+    }
+
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
@@ -1265,82 +1271,53 @@ fn execute_locked(
         _ => {}
     }
 
-    let (distributions, empty_message) = match method {
+    // The lottery winner is drawn before the shared dispatcher runs so the
+    // calculation itself stays deterministic; an empty active roster draws
+    // nobody and disburses nothing.
+    let lottery_winner = if method == DistributionMethod::Lottery {
+        let eligible = lottery_eligible_players(state, guild_id, LOTTERY_ACTIVITY_DAYS);
+        if eligible.is_empty() {
+            None
+        } else {
+            let draw = state.random_index(eligible.len());
+            eligible.get(draw).copied()
+        }
+    } else {
+        None
+    };
+    let snapshots = guild_snapshots(state, guild_id);
+    let distributions =
+        calculate_method_distributions(method, proposal.fund_amount, &snapshots, lottery_winner);
+    let empty_message = distributions.is_empty().then(|| match method {
         DistributionMethod::Stimulus => {
-            let eligible = stimulus_eligible_players(state, guild_id);
-            let distributions = calculate_stimulus_distribution(proposal.fund_amount, &eligible);
-            let message = distributions.is_empty().then(|| {
-                if forced {
-                    "No eligible players for stimulus.".to_owned()
-                } else {
-                    "No eligible players for stimulus (need 4+ non-debtor players).".to_owned()
-                }
-            });
-            (distributions, message)
+            if forced {
+                "No eligible players for stimulus.".to_owned()
+            } else {
+                "No eligible players for stimulus (need 4+ non-debtor players).".to_owned()
+            }
         }
         DistributionMethod::Lottery => {
-            let eligible = lottery_eligible_players(state, guild_id, LOTTERY_ACTIVITY_DAYS);
-            let distributions = if eligible.is_empty() {
-                Vec::new()
+            if forced {
+                format!("No active players for lottery (last {LOTTERY_ACTIVITY_DAYS} days).")
             } else {
-                let draw = u64::try_from(state.random_index(eligible.len())).unwrap_or(0);
-                calculate_lottery_distribution(proposal.fund_amount, &eligible, draw)
-            };
-            let message = distributions.is_empty().then(|| {
-                if forced {
-                    format!(
-                        "No active players for lottery (last {LOTTERY_ACTIVITY_DAYS} days)."
-                    )
-                } else {
-                    format!(
-                        "No active players for lottery (must have played in the last {LOTTERY_ACTIVITY_DAYS} days)."
-                    )
-                }
-            });
-            (distributions, message)
+                format!(
+                    "No active players for lottery (must have played in the last {LOTTERY_ACTIVITY_DAYS} days)."
+                )
+            }
         }
         DistributionMethod::SocialSecurity => {
-            let eligible = players_by_games_played(state, guild_id);
-            let distributions =
-                calculate_social_security_distribution(proposal.fund_amount, &eligible);
-            let message = distributions
-                .is_empty()
-                .then(|| "No players with games played for social security.".to_owned());
-            (distributions, message)
+            "No players with games played for social security.".to_owned()
         }
-        DistributionMethod::Richest => {
-            let richest = richest_player(state, guild_id);
-            let distributions = calculate_richest_distribution(proposal.fund_amount, richest);
-            let message = distributions
-                .is_empty()
-                .then(|| "No players found for richest distribution.".to_owned());
-            (distributions, message)
-        }
+        DistributionMethod::Richest => "No players found for richest distribution.".to_owned(),
         DistributionMethod::Even
         | DistributionMethod::Proportional
         | DistributionMethod::Neediest => {
-            let debtors = players_with_negative_balance(state, guild_id);
-            let distributions = match method {
-                DistributionMethod::Even => {
-                    calculate_even_distribution(proposal.fund_amount, &debtors)
-                }
-                DistributionMethod::Proportional => {
-                    calculate_proportional_distribution(proposal.fund_amount, &debtors)
-                }
-                DistributionMethod::Neediest => {
-                    calculate_neediest_distribution(proposal.fund_amount, &debtors)
-                }
-                _ => unreachable!(),
-            };
-            let message = distributions
-                .is_empty()
-                .then(|| "No players with negative balance to receive funds.".to_owned());
-            (distributions, message)
+            "No players with negative balance to receive funds.".to_owned()
         }
         DistributionMethod::Burn
         | DistributionMethod::NextMatchPot
         | DistributionMethod::Cancel => unreachable!(),
-    };
+    });
 
     let total_disbursed = complete_and_disburse(
         state,
@@ -1372,33 +1349,16 @@ fn players_for_guild(
         .map(|(_, player)| player)
 }
 
+fn guild_snapshots(state: &RepositoryState, guild_id: GuildId) -> Vec<PlayerSnapshot> {
+    players_for_guild(state, guild_id).cloned().collect()
+}
+
 fn players_with_negative_balance(state: &RepositoryState, guild_id: GuildId) -> Vec<Debtor> {
-    let mut debtors: Vec<_> = players_for_guild(state, guild_id)
-        .filter(|player| player.balance < 0)
-        .map(|player| Debtor {
-            discord_id: player.discord_id,
-            balance: player.balance,
-        })
-        .collect();
-    debtors.sort_by_key(|debtor| (debtor.balance, debtor.discord_id));
-    debtors
+    select_debtors(&guild_snapshots(state, guild_id))
 }
 
 fn stimulus_eligible_players(state: &RepositoryState, guild_id: GuildId) -> Vec<StimulusCandidate> {
-    let mut eligible: Vec<_> = players_for_guild(state, guild_id)
-        .filter(|player| player.balance >= 0 && player.games_played() > 0)
-        .map(|player| StimulusCandidate {
-            discord_id: player.discord_id,
-            balance: player.balance,
-        })
-        .collect();
-    eligible.sort_by(|left, right| {
-        right
-            .balance
-            .cmp(&left.balance)
-            .then_with(|| left.discord_id.cmp(&right.discord_id))
-    });
-    eligible.into_iter().skip(3).collect()
+    select_stimulus_recipients(&guild_snapshots(state, guild_id))
 }
 
 fn lottery_eligible_players(
@@ -1415,8 +1375,54 @@ fn lottery_eligible_players(
         .collect()
 }
 
-fn top_three_non_debtors(state: &RepositoryState, guild_id: GuildId) -> BTreeSet<DiscordId> {
-    let mut non_debtors: Vec<_> = players_for_guild(state, guild_id)
+fn players_by_games_played(state: &RepositoryState, guild_id: GuildId) -> Vec<GamesCandidate> {
+    select_social_security_recipients(&guild_snapshots(state, guild_id))
+}
+
+fn richest_player(state: &RepositoryState, guild_id: GuildId) -> Option<RichestCandidate> {
+    select_richest_candidate(&guild_snapshots(state, guild_id))
+}
+
+/// Debtors eligible for `even`, `proportional`, and `neediest`, ordered
+/// most-indebted first with a stable discord-id tiebreak.
+#[must_use]
+pub fn select_debtors(players: &[PlayerSnapshot]) -> Vec<Debtor> {
+    let mut debtors: Vec<_> = players
+        .iter()
+        .filter(|player| player.balance < 0)
+        .map(|player| Debtor {
+            discord_id: player.discord_id,
+            balance: player.balance,
+        })
+        .collect();
+    debtors.sort_by_key(|debtor| (debtor.balance, debtor.discord_id));
+    debtors
+}
+
+/// Non-debtors who have actually played, richest first with a stable
+/// discord-id tiebreak, with the top three balances excluded.
+#[must_use]
+pub fn select_stimulus_recipients(players: &[PlayerSnapshot]) -> Vec<StimulusCandidate> {
+    let mut eligible: Vec<_> = players
+        .iter()
+        .filter(|player| player.balance >= 0 && player.games_played() > 0)
+        .map(|player| StimulusCandidate {
+            discord_id: player.discord_id,
+            balance: player.balance,
+        })
+        .collect();
+    eligible.sort_by(|left, right| {
+        right
+            .balance
+            .cmp(&left.balance)
+            .then_with(|| left.discord_id.cmp(&right.discord_id))
+    });
+    eligible.into_iter().skip(3).collect()
+}
+
+fn top_three_non_debtors(players: &[PlayerSnapshot]) -> BTreeSet<DiscordId> {
+    let mut non_debtors: Vec<_> = players
+        .iter()
         .filter(|player| player.balance >= 0)
         .map(|player| (player.discord_id, player.balance))
         .collect();
@@ -1428,26 +1434,33 @@ fn top_three_non_debtors(state: &RepositoryState, guild_id: GuildId) -> BTreeSet
         .collect()
 }
 
-fn players_by_games_played(state: &RepositoryState, guild_id: GuildId) -> Vec<GamesCandidate> {
-    let excluded = top_three_non_debtors(state, guild_id);
-    let mut players: Vec<_> = players_for_guild(state, guild_id)
+/// Players with games played, most games first with a stable discord-id
+/// tiebreak, excluding the three richest non-debtors.
+#[must_use]
+pub fn select_social_security_recipients(players: &[PlayerSnapshot]) -> Vec<GamesCandidate> {
+    let excluded = top_three_non_debtors(players);
+    let mut recipients: Vec<_> = players
+        .iter()
         .filter(|player| player.games_played() > 0 && !excluded.contains(&player.discord_id))
         .map(|player| GamesCandidate {
             discord_id: player.discord_id,
             games_played: player.games_played(),
         })
         .collect();
-    players.sort_by(|left, right| {
+    recipients.sort_by(|left, right| {
         right
             .games_played
             .cmp(&left.games_played)
             .then_with(|| left.discord_id.cmp(&right.discord_id))
     });
-    players
+    recipients
 }
 
-fn richest_player(state: &RepositoryState, guild_id: GuildId) -> Option<RichestCandidate> {
-    players_for_guild(state, guild_id)
+/// The single richest player (debtors included), lowest discord id on ties.
+#[must_use]
+pub fn select_richest_candidate(players: &[PlayerSnapshot]) -> Option<RichestCandidate> {
+    players
+        .iter()
         .map(|player| RichestCandidate {
             discord_id: player.discord_id,
             balance: player.balance,
@@ -1459,6 +1472,15 @@ fn richest_player(state: &RepositoryState, guild_id: GuildId) -> Option<RichestC
         })
 }
 
+/// Round-robin even split over `debtors` in slice order, capping each player
+/// at their outstanding debt.
+///
+/// When the fund does not divide evenly, remainder coins go to the earliest
+/// entries, so with the [`select_debtors`] ordering every caller uses
+/// (balance ascending, then discord id ascending) the most indebted players
+/// are topped up first. This deterministic remainder allocation intentionally
+/// supersedes the legacy runtime behavior, which paid remainders in
+/// unspecified SQLite roster order.
 #[must_use]
 pub fn calculate_even_distribution(fund: i64, debtors: &[Debtor]) -> Vec<Distribution> {
     if fund <= 0 || debtors.is_empty() {
@@ -1645,6 +1667,48 @@ pub fn calculate_richest_distribution(
     richest
         .map(|player| vec![Distribution::new(player.discord_id, fund)])
         .unwrap_or_default()
+}
+
+/// Recipient selection plus settlement math for one distribution method over
+/// a guild roster snapshot; the single owner of this policy for both the
+/// in-memory contract service and the production runtime adapter.
+///
+/// `lottery_winner` is drawn by the caller from its recently-active roster so
+/// the calculation stays deterministic; `None` disburses nothing. `Burn`,
+/// `NextMatchPot`, and `Cancel` never pay players and always return no
+/// distributions.
+#[must_use]
+pub fn calculate_method_distributions(
+    method: DistributionMethod,
+    fund: i64,
+    players: &[PlayerSnapshot],
+    lottery_winner: Option<DiscordId>,
+) -> Vec<Distribution> {
+    match method {
+        DistributionMethod::Even => calculate_even_distribution(fund, &select_debtors(players)),
+        DistributionMethod::Proportional => {
+            calculate_proportional_distribution(fund, &select_debtors(players))
+        }
+        DistributionMethod::Neediest => {
+            calculate_neediest_distribution(fund, &select_debtors(players))
+        }
+        DistributionMethod::Stimulus => {
+            calculate_stimulus_distribution(fund, &select_stimulus_recipients(players))
+        }
+        DistributionMethod::Lottery => lottery_winner
+            .map(|winner| calculate_lottery_distribution(fund, &[winner], 0))
+            .unwrap_or_default(),
+        DistributionMethod::SocialSecurity => calculate_social_security_distribution(
+            fund,
+            &select_social_security_recipients(players),
+        ),
+        DistributionMethod::Richest => {
+            calculate_richest_distribution(fund, select_richest_candidate(players))
+        }
+        DistributionMethod::Burn
+        | DistributionMethod::NextMatchPot
+        | DistributionMethod::Cancel => Vec::new(),
+    }
 }
 
 #[cfg(test)]

@@ -406,7 +406,7 @@ impl Default for BalancedShuffler {
             exclusion_penalty_weight: 80.0,
             rd_priority_weight: 0.2,
             recent_match_penalty_weight: 280.0,
-            soft_avoid_penalty: 160.0,
+            soft_avoid_penalty: 180.0,
             package_deal_penalty: 90.0,
             package_deal_split_penalty: 90.0,
             rating_spread_divisor: 10.0,
@@ -541,10 +541,10 @@ impl BalancedShuffler {
         (maximum - minimum) / self.rating_spread_divisor
     }
 
-    /// Ten percent of the selected players' total active rating.
+    /// Twenty percent of the selected players' total active rating.
     #[must_use]
     pub fn calculate_lobby_rating_bonus(player_values: &[f64]) -> f64 {
-        player_values.iter().sum::<f64>() * 0.1
+        player_values.iter().sum::<f64>() * 0.2
     }
 
     /// Total whole minutes waited by selected players with Discord IDs.
@@ -3197,7 +3197,7 @@ mod tests {
     }
 
     #[test]
-    fn test_default_avoid_same_team_adds_160_goodness() {
+    fn test_default_avoid_same_team_adds_180_goodness() {
         let (team1, team2) = soft_avoid_teams();
         let avoids = [SoftAvoid {
             avoider_discord_id: 1000,
@@ -3211,7 +3211,7 @@ mod tests {
                 Some(&avoids),
                 None,
             ),
-            160.0
+            180.0
         );
     }
 
@@ -3444,7 +3444,7 @@ mod tests {
     #[test]
     fn adjusted_value_weight_changes_borderline_pool_selection() {
         let ratings = [
-            1_832, 1_604, 1_380, 392, 2_072, 1_847, 432, 1_273, 888, 1_006, 678,
+            1_832, 1_604, 1_380, 392, 2_072, 1_847, 432, 1_273, 888, 1_085, 678,
         ];
         let exclusion_factors = [6, 4, 1, 3, 0, 0, 6, 5, 1, 2, 1];
         let players = ratings
@@ -3515,7 +3515,49 @@ mod tests {
             &mut super::ScoringContext::default(),
         );
 
-        approx(selection.preselection_score, -880.0);
+        approx(selection.preselection_score, -1_890.0);
+    }
+
+    #[test]
+    fn doubled_pool_rating_bonus_prefers_higher_total_in_large_pool() {
+        let ratings = [
+            650, 800, 950, 1_000, 1_275, 1_300, 1_525, 1_650, 1_850, 2_100, 2_125, 2_400, 2_625,
+            2_775, 2_825,
+        ];
+        let players = ratings
+            .into_iter()
+            .enumerate()
+            .map(|(index, rating)| {
+                full_flex_player(
+                    format!("Player{index}"),
+                    rating,
+                    i64::try_from(index + 1).expect("fixture index fits"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let shuffler = BalancedShuffler {
+            use_glicko: false,
+            off_role_flat_penalty: 0.0,
+            role_matchup_delta_weight: 0.0,
+            exclusion_penalty_weight: 0.0,
+            rd_priority_weight: 0.0,
+            recent_match_penalty_weight: 0.0,
+            rating_spread_divisor: 10.0,
+            ..BalancedShuffler::default()
+        };
+
+        let result = shuffler
+            .shuffle_from_pool(&players, PoolOptions::default())
+            .expect("large pool shuffles");
+
+        assert_eq!(
+            result
+                .excluded
+                .iter()
+                .map(|player| player.mmr.expect("fixture MMR"))
+                .collect::<HashSet<_>>(),
+            HashSet::from([650, 800, 950, 1_000, 1_300])
+        );
     }
 
     #[test]
@@ -3562,7 +3604,7 @@ mod tests {
                 ShuffleConstraints::default(),
             )
             .expect("fixed role matchup evaluates");
-        approx(matchup.total_score, -500.0);
+        approx(matchup.total_score, -1_830.0);
     }
 
     #[test]
@@ -5091,7 +5133,7 @@ mod tests {
             (5_477, "2"),
             (5_187, "2"),
             (2_118, "3"),
-            (1_328, "3"),
+            (1_377, "3"),
             (4_628, "4"),
             (2_244, "4"),
             (1_270, "5"),

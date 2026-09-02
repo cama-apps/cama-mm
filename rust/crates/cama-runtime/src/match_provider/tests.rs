@@ -18,7 +18,7 @@ use tempfile::NamedTempFile;
 
 use crate::discord_transport::{DiscordAllowedMentions, DiscordIdPlayerNameResolver};
 use crate::push_notification_provider::{PushNotificationRegistrationProvider, PushPublisher};
-use crate::registration::{InteractionAllowedMentions, InteractionResponseError};
+use crate::registration::{InteractionAllowedMentions, InteractionResponseError, InteractionValue};
 use cama_db::push_notifications::PushNotificationRepository;
 
 use super::*;
@@ -3867,39 +3867,133 @@ fn test_shuffle_and_record_connection_budgets() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_shuffle_and_abort_leave_exclusion_factors_unchanged() {
+async fn test_shuffle_abort_applies_single_participant_only_exclusion_credit() {
     let fixture = MatchRuntimeFixture::new();
-    let player_ids = fixture.add_shuffle_pool(12, false);
+    let mut player_ids = fixture.add_shuffle_pool(13, false);
+    let conditional_id = player_ids.pop().expect("conditional fixture player");
+    let full_lobby_player_ids = player_ids
+        .iter()
+        .copied()
+        .chain([conditional_id])
+        .collect::<Vec<_>>();
     let before = fixture
         .provider
         .handler
         .players
-        .get_exclusion_counts(&player_ids, Some(GUILD))
+        .get_exclusion_counts(&full_lobby_player_ids, Some(GUILD))
         .expect("read pre-shuffle exclusion factors");
-    let prepared = fixture.prepare_shuffle(player_ids.clone(), "glicko", Vec::new());
+    let prepared = fixture.prepare_shuffle(player_ids, "glicko", vec![conditional_id]);
     assert!(prepared.pending.state.exclusion_updates_deferred);
     assert_eq!(
         fixture
             .provider
             .handler
             .players
-            .get_exclusion_counts(&player_ids, Some(GUILD))
+            .get_exclusion_counts(&full_lobby_player_ids, Some(GUILD))
             .expect("read persisted-shuffle exclusion factors"),
         before
     );
+    let participant_ids = prepared
+        .pending
+        .state
+        .radiant_team_ids
+        .iter()
+        .chain(&prepared.pending.state.dire_team_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let excluded_ids = prepared
+        .pending
+        .state
+        .excluded_player_ids
+        .iter()
+        .chain(&prepared.pending.state.excluded_conditional_player_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    assert_eq!(participant_ids.len(), 10);
+    assert_eq!(excluded_ids.len(), 3);
+    assert!(excluded_ids.contains(&conditional_id));
     fixture
         .provider
         .handler
         .finalize_abort_owned(&prepared.pending)
         .await
         .expect("abort prepared match");
+    let after = fixture
+        .provider
+        .handler
+        .players
+        .get_exclusion_counts(&full_lobby_player_ids, Some(GUILD))
+        .expect("read aborted exclusion factors");
+    for player_id in &participant_ids {
+        assert_eq!(
+            after.get(player_id).copied().expect("participant after"),
+            before.get(player_id).copied().expect("participant before") + 1
+        );
+    }
+    for player_id in excluded_ids {
+        assert_eq!(
+            after.get(&player_id).copied().expect("excluded after"),
+            before.get(&player_id).copied().expect("excluded before")
+        );
+    }
+
+    assert!(
+        !fixture
+            .provider
+            .handler
+            .pending
+            .finalize_abort(GUILD, prepared.pending.pending_match_id, &participant_ids,)
+            .expect("retry stale abort cleanup")
+    );
+    assert_eq!(
+        fixture
+            .provider
+            .handler
+            .players
+            .get_exclusion_counts(&full_lobby_player_ids, Some(GUILD))
+            .expect("read exclusion factors after abort retry"),
+        after
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_draft_abort_does_not_grant_shuffle_exclusion_credit() {
+    let fixture = MatchRuntimeFixture::new();
+    let mut pending = fixture.pending(unix_seconds() + 120);
+    pending.state.is_draft = true;
+    assert!(
+        PendingMatchRepository::new(fixture.database.path())
+            .update_pending_match(GUILD, pending.pending_match_id, &pending.state)
+            .expect("mark pending match as a draft")
+    );
+    let player_ids = pending
+        .state
+        .radiant_team_ids
+        .iter()
+        .chain(&pending.state.dire_team_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let before = fixture
+        .provider
+        .handler
+        .players
+        .get_exclusion_counts(&player_ids, Some(GUILD))
+        .expect("read pre-abort draft exclusion factors");
+
+    fixture
+        .provider
+        .handler
+        .finalize_abort_owned(&pending)
+        .await
+        .expect("abort draft");
+
     assert_eq!(
         fixture
             .provider
             .handler
             .players
             .get_exclusion_counts(&player_ids, Some(GUILD))
-            .expect("read aborted exclusion factors"),
+            .expect("read aborted draft exclusion factors"),
         before
     );
 }
@@ -4121,7 +4215,7 @@ fn production_goodness_weights_adjusted_value_difference() {
     let goodness =
         extra_f64(&prepared.pending.state, "goodness_score").expect("stored goodness score");
 
-    assert!((goodness - (-1_386.5)).abs() < 1e-9, "{goodness}");
+    assert!((goodness - (-2_896.5)).abs() < 1e-9, "{goodness}");
 }
 
 #[test]
@@ -7383,6 +7477,69 @@ async fn test_concurrent_abort_finalizations_only_announce_once() {
             .count(),
         1
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_abort_after_committed_record_is_refused_without_credit() {
+    let fixture = MatchRuntimeFixture::new();
+    let pending = fixture.pending(unix_seconds() + 120);
+    let participant_ids = pending
+        .state
+        .participant_ids()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let before = fixture
+        .provider
+        .handler
+        .players
+        .get_exclusion_counts(&participant_ids, Some(GUILD))
+        .expect("read pre-record exclusion factors");
+    fixture
+        .provider
+        .handler
+        .record_match_blocking(&pending, "radiant", None)
+        .expect("record pending match durably");
+
+    // The durable record has committed but the pending row has not been
+    // cleared yet - exactly the window an abort vote must not exploit.
+    let responder = Arc::new(RecordingMatchResponder::default());
+    fixture
+        .provider
+        .handler
+        .finalize_abort(&pending, responder.clone())
+        .await
+        .expect("refused abort still responds");
+
+    let responses = responder.responses.lock().expect("refused abort response");
+    assert_eq!(responses.len(), 1);
+    assert!(responses[0].ephemeral);
+    assert!(responses[0].content.contains("already been recorded"));
+    assert!(!responses[0].content.contains("refunded"));
+
+    // No spurious +1 exclusion credit lands on the completed match, the
+    // pending row stays for the record path's own cleanup, and the atomic
+    // repository guard refuses a raw retry too.
+    assert_eq!(
+        fixture
+            .provider
+            .handler
+            .players
+            .get_exclusion_counts(&participant_ids, Some(GUILD))
+            .expect("read post-refusal exclusion factors"),
+        before
+    );
+    let repository = PendingMatchRepository::new(fixture.database.path());
+    assert!(
+        repository
+            .pending_match(GUILD, pending.pending_match_id)
+            .expect("read pending row after refused abort")
+            .is_some()
+    );
+    assert!(matches!(
+        repository.finalize_abort(GUILD, pending.pending_match_id, &participant_ids),
+        Err(PendingMatchRepositoryError::MatchAlreadyRecorded(id))
+            if id == pending.pending_match_id
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

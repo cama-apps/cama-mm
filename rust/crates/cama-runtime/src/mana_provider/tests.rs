@@ -1,11 +1,13 @@
 use std::sync::Mutex as StdMutex;
 
-use cama_app::mana_service::DailyAssignment;
+use cama_app::wheel::wheel_window_start_at;
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
 use super::*;
-use crate::registration::{InteractionResponseError, InteractionValue, Registry};
+use crate::registration::{
+    InteractionOption, InteractionResponseError, InteractionValue, Registry,
+};
 use crate::test_support::initialize_test_database as initialize_or_migrate;
 
 const GUILD: i64 = 9_001;
@@ -211,7 +213,6 @@ fn members(count: i64) -> Vec<ManaGuildMember> {
 fn provider(fixture: &Fixture, discord: FakeDiscord) -> ManaRegistrationProvider {
     ManaRegistrationProvider::from_parts(
         fixture.database.path().to_path_buf(),
-        100,
         5,
         Arc::new(discord),
         Arc::new(FixedClock),
@@ -255,9 +256,25 @@ fn command_and_component_registration_match_python_surface() {
     assert_eq!(command.description, "Check your daily mana land assignment");
     assert_eq!(command.options.len(), 2);
     assert_eq!(command.options[0].name, "user");
+    assert_eq!(
+        command.options[0].description,
+        "View another player's mana (optional)"
+    );
     assert_eq!(command.options[0].kind, CommandOptionKind::User);
     assert!(!command.options[0].required);
     assert_eq!(command.options[1].name, "all");
+    // `/mana` only ever reads now; the worker owns assignment, so this copy
+    // must not promise to roll anything.
+    assert_eq!(
+        command.options[1].description,
+        "Show the full guild's current mana assignments"
+    );
+    assert!(
+        !command.options[1]
+            .description
+            .to_lowercase()
+            .contains("roll")
+    );
     assert_eq!(command.options[1].kind, CommandOptionKind::Boolean);
     assert_eq!(
         registry.component_routes()[0].custom_id_prefix,
@@ -341,7 +358,7 @@ async fn existing_single_assignment_preserves_embed_thumbnail_and_wheel_unlock_b
         embed.fields[0].value,
         format!(
             "🌾 **Plains** · White Mana\nNext wheel spin <t:{}:R>",
-            NOW + 1
+            next_wheel_reset_at(NOW - 100)
         )
     );
     assert_eq!(embed.fields[1].name, "🌾 Guardian Aura");
@@ -382,13 +399,88 @@ async fn selected_unassigned_player_is_read_only_and_uses_no_mana_embed() {
     assert_eq!(embed.title.as_deref(), Some("🔮 Daily Mana — Player 02"));
     assert_eq!(
         embed.description.as_deref(),
-        Some("This player hasn't been assigned any mana yet.")
+        Some(
+            "This player hasn't been assigned today's mana yet — \
+             it will be assigned automatically soon."
+        )
     );
 }
 
 #[tokio::test]
-async fn all_assigns_every_registered_player_and_paginates_twelve_per_page() {
+async fn stale_assignment_renders_pending_copy_instead_of_yesterdays_land() {
+    let fixture = Fixture::new(1);
+    fixture.assign(USER, "Mountain", "2026-08-10");
+    let provider = provider(
+        &fixture,
+        FakeDiscord {
+            gamba: true,
+            members: members(1),
+        },
+    );
+    let responder = Arc::new(CapturingResponder::default());
+
+    registry(&provider)
+        .command_handler("mana")
+        .expect("mana handler")
+        .handle(command(Vec::new()), responder.clone())
+        .await
+        .expect("dispatch stale-assignment display");
+
+    let captured = responder.captured.lock().expect("response capture");
+    let embed = &captured.followups[0].embeds[0];
+    assert_eq!(embed.title.as_deref(), Some("🔮 Daily Mana — Player 01"));
+    assert_eq!(
+        embed.description.as_deref(),
+        Some(
+            "This player hasn't been assigned today's mana yet — \
+             it will be assigned automatically soon."
+        )
+    );
+    // Yesterday's land must not be presented as the current assignment.
+    assert!(embed.fields.is_empty());
+}
+
+#[tokio::test]
+async fn board_skips_unknown_land_rows_and_renders_the_rest() {
+    let fixture = Fixture::new(2);
+    fixture.assign(USER, "Island", TODAY);
+    fixture.assign(USER + 1, "Chaos Orb", TODAY);
+    let provider = provider(
+        &fixture,
+        FakeDiscord {
+            gamba: true,
+            members: members(2),
+        },
+    );
+    let responder = Arc::new(CapturingResponder::default());
+    let options = vec![InteractionOption {
+        name: "all".to_owned(),
+        value: InteractionValue::Boolean(true),
+    }];
+
+    registry(&provider)
+        .command_handler("mana")
+        .expect("mana handler")
+        .handle(command(options), responder.clone())
+        .await
+        .expect("dispatch board with a legacy unknown-land row");
+
+    let captured = responder.captured.lock().expect("response capture");
+    let embed = &captured.followups[0].embeds[0];
+    let description = embed.description.as_deref().expect("board description");
+    assert_eq!(description, "🏝️ **Island** · Player 01");
+    assert_eq!(
+        embed.footer.as_deref(),
+        Some("Page 1/1 · 1/1 assigned today · Resets 4 AM PST")
+    );
+}
+
+#[tokio::test]
+async fn board_displays_all_players_already_assigned_and_paginates_twelve_per_page() {
     let fixture = Fixture::new(13);
+    for i in 0..13 {
+        fixture.assign(USER + i, "Plains", TODAY);
+    }
     let provider = provider(
         &fixture,
         FakeDiscord {
@@ -545,62 +637,9 @@ fn cooldown_matches_discord_three_claims_per_ten_seconds_and_is_user_global() {
     assert_eq!(provider.handler.take_command_rate_limit(USER + 1), Ok(None));
 }
 
-async fn assert_white_stipends_are_only_paid_for_fresh_plains_winners_and_never_twice() {
-    let fixture = Fixture::new(2);
-    fixture
-        .connection()
-        .execute(
-            "UPDATE players SET jopacoin_balance = 0 WHERE guild_id = ?1",
-            [GUILD],
-        )
-        .expect("bankrupt players");
-    fixture
-        .connection()
-        .execute(
-            "INSERT INTO nonprofit_fund(guild_id, total_collected)
-             VALUES (?1, 20)",
-            [GUILD],
-        )
-        .expect("seed reserve");
-    let board = AssignmentBoard {
-        assignments: vec![
-            DailyAssignment {
-                discord_id: USER,
-                details: details(Land::Plains),
-            },
-            DailyAssignment {
-                discord_id: USER + 1,
-                details: details(Land::Forest),
-            },
-        ],
-        board: Vec::new(),
-    };
-
-    pay_batch_stipends_sqlite(fixture.database.path().to_path_buf(), &board, GUILD, 5).await;
-    assert_eq!(fixture.balance(USER), 5);
-    assert_eq!(fixture.balance(USER + 1), 0);
-
-    let retry = AssignmentBoard {
-        assignments: Vec::new(),
-        board: Vec::new(),
-    };
-    pay_batch_stipends_sqlite(fixture.database.path().to_path_buf(), &retry, GUILD, 5).await;
-    assert_eq!(fixture.balance(USER), 5);
-    let fund: i64 = fixture
-        .connection()
-        .query_row(
-            "SELECT total_collected FROM nonprofit_fund WHERE guild_id = ?1",
-            [GUILD],
-            |row| row.get(0),
-        )
-        .expect("read reserve");
-    assert_eq!(fund, 15);
-}
-
-#[tokio::test]
-async fn white_stipends_are_only_paid_for_fresh_plains_winners_and_never_twice() {
-    assert_white_stipends_are_only_paid_for_fresh_plains_winners_and_never_twice().await;
-}
+// The White stipend is paid inside `ManaRepository::claim_mana_batch_atomic`;
+// its behavior is covered by the cama-db mana_service tests and the
+// mana_auto_assign_worker tests.
 
 fn details(land: Land) -> ManaDetails {
     ManaDetails {
@@ -713,30 +752,35 @@ async fn test_selected_player_countdown_uses_atomic_unlock_boundary() {
     assert!(
         captured.followups[0].embeds[0].fields[0]
             .value
-            .contains(&format!("<t:{}:R>", NOW + 151))
+            .contains(&format!("<t:{}:R>", next_wheel_reset_at(NOW + 50)))
     );
 }
 
 #[test]
-fn test_next_wheel_spin_matches_atomic_claim_semantics_never_spun() {
-    assert_eq!(wheel_unlock_at(NOW, None, 100), NOW);
+fn test_next_wheel_spin_is_now_when_never_spun() {
+    assert_eq!(wheel_unlock_at(NOW, None), NOW);
 }
 
 #[test]
-fn test_next_wheel_spin_matches_atomic_claim_semantics_expired() {
-    assert_eq!(wheel_unlock_at(NOW, Some(NOW - 101), 100), NOW);
-}
-
-#[test]
-fn test_next_wheel_spin_matches_atomic_claim_semantics_exact_boundary() {
-    assert_eq!(wheel_unlock_at(NOW, Some(NOW - 100), 100), NOW + 1);
-}
-
-#[test]
-fn test_next_wheel_spin_matches_atomic_claim_semantics_future_adjusted_penalty() {
+fn test_next_wheel_spin_is_now_after_the_fixed_reset() {
     assert_eq!(
-        wheel_unlock_at(NOW, Some(NOW + 345_600), 100),
-        NOW + 345_701
+        wheel_unlock_at(NOW, Some(wheel_window_start_at(NOW) - 1)),
+        NOW
+    );
+}
+
+#[test]
+fn test_next_wheel_spin_uses_the_next_fixed_boundary_for_this_window() {
+    let last = wheel_window_start_at(NOW);
+    assert_eq!(wheel_unlock_at(NOW, Some(last)), next_wheel_reset_at(last));
+}
+
+#[test]
+fn test_next_wheel_spin_aligns_a_future_penalty_anchor_to_a_reset() {
+    let future_anchor = NOW + 345_600;
+    assert_eq!(
+        wheel_unlock_at(NOW, Some(future_anchor)),
+        next_wheel_reset_at(future_anchor)
     );
 }
 
@@ -746,42 +790,11 @@ fn test_single_player_omits_assigned_field() {
     assert!(embed.fields.iter().all(|field| field.name != "Assigned"));
 }
 
-#[tokio::test]
-async fn test_lost_race_reports_already_claimed() {
-    let fixture = Fixture::new(1);
-    let moment = FixedClock.moment().expect("fixed mana moment");
-    let repository = ManaRepository::new(fixture.database.path());
-    assert!(
-        repository
-            .claim_mana_atomic(USER, Some(GUILD), "Forest", TODAY)
-            .expect("winning claim")
-    );
-    let mut service = live_service(repository, fixture.database.path(), moment);
-    let error = service
-        .assign_daily_mana(
-            USER,
-            GUILD,
-            TODAY,
-            moment.day_start().expect("day start"),
-            false,
-        )
-        .expect_err("second claim loses");
-    assert_eq!(error, ManaServiceError::AlreadyAssigned);
-    let response =
-        InteractionResponse::message("You've already claimed your mana for today.").ephemeral();
-    assert!(response.ephemeral);
-    assert!(response.content.contains("already claimed"));
-}
-
-#[tokio::test]
-async fn test_fresh_plains_stipends_only_process_batch_claim_winners() {
-    assert_white_stipends_are_only_paid_for_fresh_plains_winners_and_never_twice().await;
-}
-
-fn wheel_unlock_at(now: i64, last: Option<i64>, cooldown: i64) -> i64 {
-    last.map_or(now, |last| {
-        now.max(last.saturating_add(cooldown).saturating_add(1))
-    })
+fn wheel_unlock_at(now: i64, last: Option<i64>) -> i64 {
+    match last {
+        Some(last) if !wheel_spin_is_available(now, Some(last)) => next_wheel_reset_at(last),
+        _ => now,
+    }
 }
 
 #[test]

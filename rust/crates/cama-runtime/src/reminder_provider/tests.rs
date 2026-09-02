@@ -391,7 +391,6 @@ async fn ready_recovery_isolates_invalid_guild_and_failed_dm_is_consumed_once() 
         file.path(),
         discord.clone(),
         ReminderCooldowns {
-            wheel_seconds: 10_000,
             trivia_seconds: 10_000,
         },
     );

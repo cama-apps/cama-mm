@@ -6,7 +6,10 @@ use rusqlite::{Connection, params};
 use tempfile::TempDir;
 
 use super::*;
-use crate::registration::{InteractionAllowedMentions, InteractionResponseError, RegistryBuilder};
+use crate::registration::{
+    InteractionAllowedMentions, InteractionOption, InteractionResponseError, InteractionValue,
+    RegistryBuilder,
+};
 
 const ADMIN: u64 = 42;
 const GUILD: u64 = 4242;

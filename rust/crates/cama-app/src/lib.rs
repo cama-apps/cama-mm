@@ -6,8 +6,10 @@
 //! second migration authority.
 
 pub use cama_app_dig::{
-    dig_bosses, dig_command_views, dig_event_threats, dig_service, dig_splash_runtime,
-    dig_sweep_fixes, dig_tunnel_naming, dig_view_supplements,
+    dig_assets, dig_bosses, dig_command_views, dig_event_threats, dig_gear_runtime, dig_inventory,
+    dig_leaderboard_runtime, dig_loot, dig_new_events, dig_quest_policy, dig_relic_rework,
+    dig_routes, dig_service, dig_splash_runtime, dig_sweep_fixes, dig_tunnel_encounters,
+    dig_tunnel_naming, dig_tunnels, dig_view_supplements,
 };
 pub use cama_app_gameplay::{
     duel, mafia_service, mana_effects_service, mana_service, manashop_rework, pet, pet_assets,
@@ -43,32 +45,21 @@ pub mod curfew_service;
 pub mod dedicated_lobby_channel;
 pub mod dig_abandon_runtime;
 pub mod dig_artifact_catalog_runtime;
-pub mod dig_assets;
 pub mod dig_bonus_events;
 pub mod dig_boss_runtime;
 pub mod dig_carry_wager;
 pub mod dig_event_runtime;
 pub mod dig_flavor;
-pub mod dig_gear_runtime;
-pub mod dig_inventory;
-pub mod dig_leaderboard_runtime;
-pub mod dig_loot;
 pub mod dig_media_runtime;
 pub mod dig_miner_runtime;
 pub mod dig_neon;
-pub mod dig_new_events;
 pub mod dig_prestige4_content;
 pub mod dig_prestige_runtime;
 #[cfg(test)]
 mod dig_pure_policy_admission_tests;
-pub mod dig_quest_policy;
 pub mod dig_relic_recycling;
-pub mod dig_relic_rework;
-pub mod dig_routes;
 pub mod dig_runtime;
 pub mod dig_social_runtime;
-pub mod dig_tunnel_encounters;
-pub mod dig_tunnels;
 pub mod dota_bet_seed;
 pub mod dota_streak;
 pub mod dotabase_sqlite;

@@ -64,79 +64,13 @@ const ADMINISTRATOR_PERMISSION: u64 = 1 << 3;
 const MANAGE_GUILD_PERMISSION: u64 = 1 << 5;
 const RECALIBRATION_MIN_GAMES: i64 = 5;
 
-/// A request to extend one explicitly selected pending match.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AdminExtendBettingRequest {
-    pub guild_id: i64,
-    pub actor_id: i64,
-    pub minutes: i64,
-    pub pending_match_id: i64,
-}
-
-/// The live match runtime owns persistence, task replacement, and all rendered
-/// copies; this result contains only the copy needed by `/admin extendbetting`.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AdminExtendBettingResult {
-    pub pending_match_id: i64,
-    pub old_bet_lock_until: i64,
-    pub new_bet_lock_until: i64,
-    pub lobby_label: String,
-    pub jump_url: Option<String>,
-    pub refreshed_routes: usize,
-    pub refresh_failures: Vec<String>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AdminSeedHeroGridRequest {
-    pub guild_id: i64,
-    pub actor_id: i64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AdminSeedHeroGridResult {
-    pub players_seeded: usize,
-    pub matches_created: usize,
-}
-
-/// Additive control surface implemented by the production match provider.
-#[async_trait]
-pub trait AdminMatchControl: Send + Sync {
-    async fn extend_betting(
-        &self,
-        request: AdminExtendBettingRequest,
-    ) -> Result<AdminExtendBettingResult, String>;
-
-    async fn seed_hero_grid(
-        &self,
-        request: AdminSeedHeroGridRequest,
-    ) -> Result<AdminSeedHeroGridResult, String>;
-
-    async fn backfill_derived_roles(
-        &self,
-        guild_id: i64,
-    ) -> Result<AdminRoleBackfillResult, String>;
-}
-
-/// Result of a derived-role backfill, paired with the coverage that exists
-/// afterwards so the run can be confirmed rather than taken on trust.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct AdminRoleBackfillResult {
-    pub matches_scanned: u64,
-    pub teams_derived: u64,
-    pub gold_samples_written: u64,
-    pub last_hits_samples_written: u64,
-    pub unreadable_payloads: u64,
-    pub unparsed_teams: u64,
-    pub ambiguous_lanes: u64,
-    pub incomplete_teams: u64,
-    pub tied_farm_priority: u64,
-    pub tied_farm_and_ward_priority: u64,
-    pub participants: i64,
-    pub with_derived_role: i64,
-    pub with_gold_at_10: i64,
-    pub with_last_hits_at_10: i64,
-    pub player_roles_above_minimum_sample: i64,
-}
+pub use crate::runtime_ports::{
+    AdminExtendBettingRequest, AdminExtendBettingResult, AdminFakeLobbyRequest,
+    AdminFakeLobbyResult, AdminLobbyControl, AdminLobbyEjectionRequest, AdminLobbyEjectionResult,
+    AdminLobbyScope, AdminMatchControl, AdminRoleBackfillResult, AdminSeedHeroGridRequest,
+    AdminSeedHeroGridResult, CorrectionWinRewardControl, CorrectionWinRewardRequest,
+    CorrectionWinRewardResult,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AdminCorrectMatchSide {
@@ -204,89 +138,6 @@ pub trait AdminMatchCorrectionControl: Send + Sync {
         &self,
         request: AdminCorrectMatchRequest,
     ) -> Result<AdminCorrectMatchResult, AdminCorrectMatchError>;
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CorrectionWinRewardRequest {
-    pub guild_id: i64,
-    pub match_id: i64,
-    pub discord_id: i64,
-    pub gross_reward: i64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CorrectionWinRewardResult {
-    /// The exact participant snapshot used for a later result reversal:
-    /// service `net + garnished`, matching Python's durable correction input.
-    pub snapshot_balance_delta: i64,
-}
-
-/// Production reward policy invoked one corrected winner at a time. The
-/// implementation atomically credits and writes the match-win ledger marker,
-/// then applies the same garnishment, bankruptcy, vanity-tax, Sanctuary,
-/// Communion, and Blood Pact ordering as ordinary match recording.
-pub trait CorrectionWinRewardControl: Send + Sync {
-    fn award_match_win_bonus(
-        &self,
-        request: CorrectionWinRewardRequest,
-    ) -> Result<CorrectionWinRewardResult, String>;
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AdminFakeLobbyRequest {
-    pub interaction_id: u64,
-    pub guild_id: i64,
-    pub channel_id: u64,
-    pub count: usize,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AdminFakeLobbyResult {
-    pub users_added: usize,
-    pub user_names: Vec<String>,
-    pub already_at_threshold: Option<(usize, usize)>,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct AdminLobbyEjectionResult {
-    pub applicable_lobbies: Vec<String>,
-    pub evicted_lobbies: Vec<String>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AdminLobbyScope {
-    All,
-    Open,
-    Lowskill,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AdminLobbyEjectionRequest {
-    pub guild_id: i64,
-    pub player_id: i64,
-    pub player_display_name: String,
-    pub scope: AdminLobbyScope,
-}
-
-/// Additive control surface implemented by the production lobby provider.
-#[async_trait]
-pub trait AdminLobbyControl: Send + Sync {
-    async fn add_fake_users(
-        &self,
-        request: AdminFakeLobbyRequest,
-    ) -> Result<AdminFakeLobbyResult, String>;
-
-    async fn fill_lobby(
-        &self,
-        request: AdminFakeLobbyRequest,
-    ) -> Result<AdminFakeLobbyResult, String>;
-
-    /// Eject the player only from queued lobbies covered by `scope`. A lobby
-    /// already starting a match must be left untouched.
-    async fn eject_suspended_player(
-        &self,
-        request: AdminLobbyEjectionRequest,
-    ) -> Result<AdminLobbyEjectionResult, String>;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

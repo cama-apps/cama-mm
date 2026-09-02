@@ -203,6 +203,8 @@ pub enum PendingMatchRepositoryError {
     EncodePayload(String),
     #[error("pending match {0} was not found")]
     PendingMatchNotFound(i64),
+    #[error("pending match {0} was already recorded as a completed match")]
+    MatchAlreadyRecorded(i64),
     #[error("pending match {0} has no betting window")]
     MissingBettingWindow(i64),
     #[error("betting extension must be a positive number of seconds")]
@@ -403,6 +405,54 @@ impl PendingMatchRepository {
             "DELETE FROM pending_matches WHERE guild_id=?1 AND pending_match_id=?2",
             params![guild_id, pending_match_id],
         )?;
+        Ok(changed == 1)
+    }
+
+    /// Atomically consume one aborted match and credit its participants once.
+    ///
+    /// A missing pending row is a no-op so retrying a stale abort cannot grant
+    /// the exclusion-factor credit more than once. A committed `matches` row
+    /// for the same pending identity refuses the abort outright: the record
+    /// path already committed durably (its pending-row cleanup may still be in
+    /// flight), so a late abort must not stack a spurious exclusion credit on
+    /// a completed match or claim its bets were refunded.
+    pub fn finalize_abort(
+        &self,
+        guild_id: i64,
+        pending_match_id: i64,
+        participant_ids: &[i64],
+    ) -> Result<bool, PendingMatchRepositoryError> {
+        let mut connection = open_runtime_connection(&self.path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let recorded = transaction
+            .query_row(
+                "SELECT match_id FROM matches
+                 WHERE guild_id=?1 AND pending_match_id=?2",
+                params![guild_id, pending_match_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        if recorded.is_some() {
+            return Err(PendingMatchRepositoryError::MatchAlreadyRecorded(
+                pending_match_id,
+            ));
+        }
+        let changed = transaction.execute(
+            "DELETE FROM pending_matches WHERE guild_id=?1 AND pending_match_id=?2",
+            params![guild_id, pending_match_id],
+        )?;
+        if changed == 1 {
+            for discord_id in participant_ids.iter().copied().collect::<BTreeSet<_>>() {
+                transaction.execute(
+                    "UPDATE players
+                     SET exclusion_count = COALESCE(exclusion_count, 0) + 1,
+                         updated_at = CURRENT_TIMESTAMP
+                     WHERE discord_id = ?1 AND guild_id = ?2",
+                    params![discord_id, guild_id],
+                )?;
+            }
+        }
+        transaction.commit()?;
         Ok(changed == 1)
     }
 
@@ -615,6 +665,9 @@ fn encode_state(state: &PendingMatchState) -> Result<String, PendingMatchReposit
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
     use rusqlite::Connection;
     use serde_json::json;
     use tempfile::NamedTempFile;
@@ -643,6 +696,25 @@ mod tests {
         drop(connection);
         let repository = PendingMatchRepository::new(file.path());
         (file, repository)
+    }
+
+    fn create_abort_fixture_schema(connection: &Connection) {
+        connection
+            .execute_batch(
+                "CREATE TABLE players (
+                    discord_id INTEGER NOT NULL,
+                    guild_id INTEGER NOT NULL,
+                    exclusion_count INTEGER NOT NULL DEFAULT 0,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (discord_id, guild_id)
+                );
+                 CREATE TABLE matches (
+                    match_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER,
+                    pending_match_id INTEGER
+                );",
+            )
+            .expect("create abort fixture schema");
     }
 
     fn state(players: &[i64]) -> PendingMatchState {
@@ -771,6 +843,162 @@ mod tests {
                 .delete_pending_match(GUILD_A, created.pending_match_id)
                 .expect("delete pending")
         );
+    }
+
+    #[test]
+    fn concurrent_finalize_abort_credits_once_and_preserves_pending_and_guild_scopes() {
+        let (_file, repository) = fixture();
+        let connection = Connection::open(&repository.path).expect("open abort fixture");
+        create_abort_fixture_schema(&connection);
+        for (guild_id, discord_id, exclusion_count) in [
+            (GUILD_A, 11, 5),
+            (GUILD_A, 12, 5),
+            (GUILD_B, 11, 9),
+            (GUILD_B, 12, 9),
+            (GUILD_A, 21, 7),
+            (GUILD_A, 22, 7),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO players (discord_id,guild_id,exclusion_count)
+                     VALUES (?1,?2,?3)",
+                    params![discord_id, guild_id, exclusion_count],
+                )
+                .expect("insert abort player fixture");
+        }
+        let aborted = repository
+            .create_pending_match(GUILD_A, &state(&[11, 12]))
+            .expect("create aborted pending match");
+        let sibling = repository
+            .create_pending_match(GUILD_A, &state(&[21, 22]))
+            .expect("create sibling pending match");
+
+        let barrier = Arc::new(Barrier::new(3));
+        let workers = (0..2)
+            .map(|_| {
+                let repository = repository.clone();
+                let barrier = Arc::clone(&barrier);
+                let pending_match_id = aborted.pending_match_id;
+                thread::spawn(move || {
+                    barrier.wait();
+                    repository
+                        .finalize_abort(GUILD_A, pending_match_id, &[11, 12])
+                        .expect("finalize concurrent abort")
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let mut outcomes = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("join abort worker"))
+            .collect::<Vec<_>>();
+        outcomes.sort_unstable();
+        assert_eq!(outcomes, [false, true]);
+
+        let exclusion_count = |guild_id, discord_id| {
+            connection
+                .query_row(
+                    "SELECT exclusion_count FROM players
+                     WHERE guild_id=?1 AND discord_id=?2",
+                    params![guild_id, discord_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("read abort exclusion count")
+        };
+        assert_eq!(exclusion_count(GUILD_A, 11), 6);
+        assert_eq!(exclusion_count(GUILD_A, 12), 6);
+        assert_eq!(exclusion_count(GUILD_B, 11), 9);
+        assert_eq!(exclusion_count(GUILD_B, 12), 9);
+        assert_eq!(exclusion_count(GUILD_A, 21), 7);
+        assert_eq!(exclusion_count(GUILD_A, 22), 7);
+        assert!(
+            repository
+                .pending_match(GUILD_A, aborted.pending_match_id)
+                .expect("read aborted pending match")
+                .is_none()
+        );
+        assert!(
+            repository
+                .pending_match(GUILD_A, sibling.pending_match_id)
+                .expect("read sibling pending match")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn finalize_abort_refuses_recorded_match_and_grants_no_credit() {
+        let (_file, repository) = fixture();
+        let connection = Connection::open(&repository.path).expect("open recorded-abort fixture");
+        create_abort_fixture_schema(&connection);
+        for discord_id in [11, 12] {
+            connection
+                .execute(
+                    "INSERT INTO players (discord_id,guild_id,exclusion_count)
+                     VALUES (?1,?2,5)",
+                    params![discord_id, GUILD_A],
+                )
+                .expect("insert recorded-abort player fixture");
+        }
+        let pending = repository
+            .create_pending_match(GUILD_A, &state(&[11, 12]))
+            .expect("create recorded pending match");
+        // Another guild's committed match with the same pending identity must
+        // not block this guild's abort.
+        connection
+            .execute(
+                "INSERT INTO matches (guild_id,pending_match_id) VALUES (?1,?2)",
+                params![GUILD_B, pending.pending_match_id],
+            )
+            .expect("insert cross-guild match row");
+        connection
+            .execute(
+                "INSERT INTO matches (guild_id,pending_match_id) VALUES (?1,?2)",
+                params![GUILD_A, pending.pending_match_id],
+            )
+            .expect("insert committed match row");
+
+        let refused = repository.finalize_abort(GUILD_A, pending.pending_match_id, &[11, 12]);
+        assert!(matches!(
+            refused,
+            Err(PendingMatchRepositoryError::MatchAlreadyRecorded(id))
+                if id == pending.pending_match_id
+        ));
+
+        // The refusal leaves the pending row to the record path's own cleanup
+        // and grants no exclusion credit on top of the record's accounting.
+        assert!(
+            repository
+                .pending_match(GUILD_A, pending.pending_match_id)
+                .expect("read refused pending match")
+                .is_some()
+        );
+        let exclusion_count = |discord_id: i64| {
+            connection
+                .query_row(
+                    "SELECT exclusion_count FROM players
+                     WHERE guild_id=?1 AND discord_id=?2",
+                    params![GUILD_A, discord_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("read refused exclusion count")
+        };
+        assert_eq!(exclusion_count(11), 5);
+        assert_eq!(exclusion_count(12), 5);
+
+        // Once the committed row is gone the abort is allowed again.
+        connection
+            .execute(
+                "DELETE FROM matches WHERE guild_id=?1 AND pending_match_id=?2",
+                params![GUILD_A, pending.pending_match_id],
+            )
+            .expect("remove committed match row");
+        assert!(
+            repository
+                .finalize_abort(GUILD_A, pending.pending_match_id, &[11, 12])
+                .expect("finalize unrecorded abort")
+        );
+        assert_eq!(exclusion_count(11), 6);
+        assert_eq!(exclusion_count(12), 6);
     }
 
     #[test]

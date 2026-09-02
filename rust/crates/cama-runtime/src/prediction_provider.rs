@@ -43,6 +43,7 @@ use crate::discord_transport::{
 };
 use crate::gamba_guild_source::GambaGuildSource;
 use crate::ids::signed_id;
+use crate::option_ext::{boolean_option, integer_option, string_option};
 use crate::prediction_workers::PredictionDiscordPort;
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
@@ -2572,39 +2573,6 @@ fn leaf_command(options: &[InteractionOption]) -> Result<(String, &[InteractionO
         unreachable!("filtered to subcommand")
     };
     Ok((option.name.clone(), children))
-}
-
-fn integer_option(options: &[InteractionOption], name: &str) -> Option<i64> {
-    options.iter().find_map(|option| {
-        (option.name == name)
-            .then_some(&option.value)
-            .and_then(|value| match value {
-                InteractionValue::Integer(value) => Some(*value),
-                _ => None,
-            })
-    })
-}
-
-fn string_option<'a>(options: &'a [InteractionOption], name: &str) -> Option<&'a str> {
-    options.iter().find_map(|option| {
-        (option.name == name)
-            .then_some(&option.value)
-            .and_then(|value| match value {
-                InteractionValue::String(value) => Some(value.as_str()),
-                _ => None,
-            })
-    })
-}
-
-fn boolean_option(options: &[InteractionOption], name: &str) -> Option<bool> {
-    options.iter().find_map(|option| {
-        (option.name == name)
-            .then_some(&option.value)
-            .and_then(|value| match value {
-                InteractionValue::Boolean(value) => Some(*value),
-                _ => None,
-            })
-    })
 }
 
 fn rate_to_bps(rate: f64) -> i64 {

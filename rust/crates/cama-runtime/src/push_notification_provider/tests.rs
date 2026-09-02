@@ -44,6 +44,30 @@ fn provider_with_discord_and_publisher(
     PushNotificationRegistrationProvider::with_test_publisher(path, discord, publisher)
 }
 
+#[test]
+fn command_schema_registers_with_discord_valid_metadata() {
+    let database = migrated_database();
+    let provider =
+        provider_with_publisher(database.path(), Arc::new(RecordingPublisher::default()));
+    let mut builder = RegistryBuilder::default();
+    builder
+        .add_provider(&provider)
+        .expect("register push notification provider");
+    let registry = builder.build();
+    let command = registry.commands().next().expect("notify command");
+
+    assert_eq!(command.name, COMMAND_NAME);
+    assert_eq!(command.description, COMMAND_DESCRIPTION);
+    assert!(command.description.chars().count() <= 100);
+    assert!(command.options.is_empty());
+    assert_eq!(registry.commands().count(), 1);
+    assert_eq!(registry.component_routes().len(), 1);
+    assert_eq!(
+        registry.component_routes()[0].custom_id_prefix,
+        COMPONENT_PREFIX
+    );
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PublishedNotification {
     topic: String,
@@ -318,6 +342,79 @@ fn buttons(response: &InteractionResponse) -> Vec<&InteractionButton> {
         .iter()
         .flat_map(|row| &row.buttons)
         .collect()
+}
+
+#[tokio::test]
+async fn command_without_a_guild_is_rejected_as_server_only() {
+    let database = migrated_database();
+    let provider = provider(database.path());
+    let responder = Arc::new(RecordingResponder::default());
+    let request = InteractionRequest::Command {
+        interaction_id: 1,
+        name: COMMAND_NAME.to_owned(),
+        user_id: USER,
+        user_display_name: "Notify User".to_owned(),
+        guild_id: None,
+        channel_id: None,
+        member_permissions: None,
+        options: Vec::new(),
+    };
+
+    provider
+        .handler
+        .handle(
+            request,
+            Arc::clone(&responder) as Arc<dyn InteractionResponder>,
+        )
+        .await
+        .expect("DM command handled");
+
+    let response = responder.response();
+    assert_eq!(response.content, SERVER_ONLY_MESSAGE);
+    assert!(response.ephemeral);
+    // Nothing may be stored under the absent-guild sentinel.
+    let repository = PushNotificationRepository::new(database.path());
+    assert_eq!(
+        repository
+            .get_config(USER as i64, Some(0))
+            .expect("read config"),
+        None
+    );
+}
+
+#[tokio::test]
+async fn component_without_a_guild_is_rejected_without_writing_config() {
+    let database = migrated_database();
+    let provider = provider(database.path());
+    let responder = Arc::new(RecordingResponder::default());
+    let request = InteractionRequest::Component {
+        interaction_id: 2,
+        custom_id: BUTTON_SET.to_owned(),
+        user_id: USER,
+        user_display_name: "Notify User".to_owned(),
+        guild_id: None,
+        channel_id: None,
+        member_permissions: None,
+        values: Vec::new(),
+    };
+
+    provider
+        .handler
+        .handle(
+            request,
+            Arc::clone(&responder) as Arc<dyn InteractionResponder>,
+        )
+        .await
+        .expect("DM component handled");
+
+    assert_eq!(responder.update_response().content, SERVER_ONLY_MESSAGE);
+    let repository = PushNotificationRepository::new(database.path());
+    assert_eq!(
+        repository
+            .get_config(USER as i64, Some(0))
+            .expect("read config"),
+        None
+    );
 }
 
 #[tokio::test]
