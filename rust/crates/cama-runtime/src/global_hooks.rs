@@ -15,6 +15,7 @@ use crate::registration::{
 };
 
 const GENERIC_ERROR: &str = "An error occurred while processing your command. Please try again.";
+const USER_VISIBLE_DETAIL_CHARS: usize = 300;
 const SURVEY_TRANSFORM_ERROR: &str = "Could not resolve that survey target. Please use @mention or select from Discord's picker when typing.";
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -165,7 +166,10 @@ impl GlobalInteractionHooks {
             (InteractionHandlerError::Transformer { value }, false) => format!(
                 "Could not find user `{value}`. Please use @mention or select from Discord's user picker when typing."
             ),
-            (InteractionHandlerError::Handler(_), _) => GENERIC_ERROR.to_owned(),
+            (InteractionHandlerError::Handler(detail), false) => {
+                format!("{GENERIC_ERROR}\nError: `{}`", user_visible_detail(detail))
+            }
+            (InteractionHandlerError::Handler(_), true) => GENERIC_ERROR.to_owned(),
         };
         let mut response = InteractionResponse::message(format!("❌ {message}")).ephemeral();
         if is_survey {
@@ -208,6 +212,27 @@ fn interaction_error_audit(
         category: handler_error.category(),
         detail: (!is_survey).then(|| handler_error.to_string()),
     }
+}
+
+/// One bounded line of the handler error for the user-facing reply, so a
+/// failure can be diagnosed from Discord alone when the process log is out of
+/// reach. Whitespace is collapsed and backticks dropped so the detail renders
+/// as a single inline code span.
+fn user_visible_detail(detail: &str) -> String {
+    let collapsed = detail
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('`', "'");
+    if collapsed.is_empty() {
+        return "no detail".to_owned();
+    }
+    if collapsed.chars().count() <= USER_VISIBLE_DETAIL_CHARS {
+        return collapsed;
+    }
+    let mut truncated: String = collapsed.chars().take(USER_VISIBLE_DETAIL_CHARS).collect();
+    truncated.push('…');
+    truncated
 }
 
 fn is_survey_command(root_name: &str, qualified_name: Option<&str>) -> bool {

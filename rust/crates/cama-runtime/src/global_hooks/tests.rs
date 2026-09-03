@@ -193,7 +193,7 @@ async fn generic_and_response_delivery_failures_are_fail_soft() {
         .await;
     assert_eq!(
         responder.initial.lock().expect("initial responses")[0].content,
-        "❌ An error occurred while processing your command. Please try again."
+        "❌ An error occurred while processing your command. Please try again.\nError: `database secret detail`"
     );
 
     let failing = Arc::new(CapturingResponder::default());
@@ -207,4 +207,47 @@ async fn generic_and_response_delivery_failures_are_fail_soft() {
         )
         .await;
     assert_eq!(hooks.usage_monitor().snapshot().command_failures, 2);
+}
+
+#[tokio::test]
+async fn generic_error_detail_is_one_bounded_inline_code_line() {
+    let hooks = GlobalInteractionHooks::default();
+    let responder = Arc::new(CapturingResponder::deferred());
+    let detail = format!("first line\n  second `quoted`\ttail {}", "x".repeat(400));
+    hooks
+        .handle_error(
+            &command("dig"),
+            Some("dig go"),
+            &InteractionHandlerError::Handler(detail),
+            responder.clone(),
+        )
+        .await;
+    let content = responder.followups.lock().expect("followups")[0]
+        .content
+        .clone();
+    let (_, rendered) = content.split_once("\nError: `").expect("detail line");
+    let rendered = rendered.strip_suffix('`').expect("closing code span");
+    assert!(rendered.starts_with("first line second 'quoted' tail xxx"));
+    assert!(rendered.ends_with('…'));
+    assert_eq!(rendered.chars().count(), USER_VISIBLE_DETAIL_CHARS + 1);
+    assert!(!rendered.contains('`'));
+    assert!(!rendered.contains('\n'));
+}
+
+#[tokio::test]
+async fn generic_error_detail_stays_hidden_for_survey_commands() {
+    let hooks = GlobalInteractionHooks::default();
+    let responder = Arc::new(CapturingResponder::default());
+    hooks
+        .handle_error(
+            &command("survey"),
+            Some("survey"),
+            &InteractionHandlerError::Handler("target 123456789 detail".to_owned()),
+            responder.clone(),
+        )
+        .await;
+    assert_eq!(
+        responder.initial.lock().expect("initial responses")[0].content,
+        "❌ An error occurred while processing your command. Please try again."
+    );
 }
