@@ -2956,7 +2956,6 @@ impl LobbyInteractionHandler {
                     command.user_id,
                     &player.name,
                     Some(&command.user_display_name),
-                    JoinThreadActivity::Command,
                     join.joined_at_ns.expect("successful join has commit time"),
                 )
                 .await;
@@ -3133,7 +3132,6 @@ impl LobbyInteractionHandler {
                 command.user_id,
                 &player.name,
                 Some(&command.user_display_name),
-                JoinThreadActivity::Command,
                 join.joined_at_ns.expect("successful join has commit time"),
             )
             .await;
@@ -3217,7 +3215,6 @@ impl LobbyInteractionHandler {
                 command.user_id,
                 &player.name,
                 Some(&command.user_display_name),
-                JoinThreadActivity::Silent,
                 result
                     .joined_at_ns
                     .expect("successful join has commit time"),
@@ -3537,7 +3534,6 @@ impl LobbyInteractionHandler {
         player_id: AppUserId,
         stored_player_name: &str,
         discord_display_name: Option<&str>,
-        thread_activity: JoinThreadActivity,
         joined_at_ns: i64,
     ) -> Option<ConfirmedLobbyJoin> {
         if let Err(error) = self.state.sync_lobby_display(scope).await {
@@ -3551,49 +3547,31 @@ impl LobbyInteractionHandler {
             .or_else(|| discord_display_name.map(str::to_owned))
             .unwrap_or_else(|| stored_player_name.to_owned());
         if let Some(thread_id) = lobby.message_ids.thread_id {
-            // A joiner clicked the button/reacted themselves, so pinging them
-            // about their own action would just be noise -- the name alone is
-            // enough for everyone else already in the thread.
-            if let Some(content) = match thread_activity {
-                JoinThreadActivity::Command | JoinThreadActivity::RawReaction => {
-                    Some(format!("✅ {player_display_name} joined."))
-                }
-                JoinThreadActivity::Silent => None,
-            } {
-                if let Ok(thread_id) = to_u64(thread_id.0) {
-                    if let Err(error) = self
-                        .state
-                        .transport
-                        .send_message(
-                            thread_id,
-                            DiscordMessage::silent(InteractionResponse::message(content)),
-                        )
-                        .await
-                    {
-                        warn!(%error, ?scope, "lobby thread join publication failed");
-                    }
-                } else {
-                    warn!(
-                        ?scope,
-                        "lobby join publication has invalid persisted Discord IDs"
-                    );
-                }
-            }
-            // A mention is what actually subscribes a Discord user to a
-            // thread, so dropping the ping (above) also drops that
-            // subscription unless we join them to the thread explicitly.
-            // Subscribe only after the join message: Discord rejects member
-            // additions to an archived thread, and sending that message is
-            // what auto-unarchives it.
-            if let (Ok(thread_id), Ok(player_snowflake)) =
-                (to_u64(thread_id.0), u64::try_from(player_id.0))
-                && let Err(error) = self
+            // A joiner clicked the button/reacted/ran a command themselves,
+            // so pinging them about their own action would just be noise --
+            // mentioning them with the ping suppressed still subscribes them
+            // to the thread (Discord only does that silently for an organic
+            // join: posting, reacting, or being mentioned) without the extra
+            // "X added Y to the thread" system line the explicit
+            // thread-member API always prints.
+            let content = format!("✅ <@{}> joined.", player_id.0);
+            if let Ok(thread_id) = to_u64(thread_id.0) {
+                if let Err(error) = self
                     .state
                     .transport
-                    .add_thread_member(thread_id, player_snowflake)
+                    .send_message(
+                        thread_id,
+                        DiscordMessage::silent(InteractionResponse::message(content)),
+                    )
                     .await
-            {
-                debug!(%error, ?scope, "could not subscribe joiner to lobby thread");
+                {
+                    warn!(%error, ?scope, "lobby thread join publication failed");
+                }
+            } else {
+                warn!(
+                    ?scope,
+                    "lobby join publication has invalid persisted Discord IDs"
+                );
             }
         }
 
@@ -3700,13 +3678,6 @@ struct JoinPresentation {
     warning: Option<String>,
     rejection: Option<JoinRejection>,
     joined_at_ns: Option<i64>,
-}
-
-#[derive(Clone, Copy)]
-enum JoinThreadActivity {
-    Command,
-    RawReaction,
-    Silent,
 }
 
 enum JoinRejection {
@@ -4508,7 +4479,6 @@ impl RawReactionObserver for LobbyRawReactionObserver {
                         user_id,
                         &player.name,
                         resolved_display_name.as_deref(),
-                        JoinThreadActivity::RawReaction,
                         outcome
                             .joined_at_ns
                             .expect("successful join has commit time"),

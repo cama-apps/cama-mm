@@ -71,6 +71,7 @@ Rust tests are the default and required validation.
 - Discord allows one initial interaction callback. Slow component and modal-submit routes use the runtime's automatic acknowledgement coordinator. Buttons that must open a modal return `InteractionAcknowledgementPolicy::Modal`, open the modal immediately, and move database/network validation to modal submission.
 - After a deferred component update, edit the original response or send an appropriate follow-up. Never perform database, network, lock-wait, or image-render work before a modal is opened or an interaction is acknowledged.
 - Preserve the 100 top-level Discord command limit and prefer subcommands.
+- Always show players their live Discord display name (nickname, falling back to global display name), never their Discord username or a stale registered/DB name. Resolve it through the existing live-lookup helper (e.g. `render_player_name`/`resolve_player_name` in `lobby_provider.rs`) rather than a `player.name`/registration-record field, which can be a raw username or out of date. This has regressed more than once — check it explicitly when writing or reviewing any player-facing message.
 
 ### Guild isolation
 
