@@ -160,6 +160,10 @@ impl From<f64> for DuelWager {
 pub enum DuelRepositoryError {
     #[error("{0}")]
     Invalid(&'static str),
+    #[error("Your duel challenge cooldown has not elapsed.")]
+    ChallengerCooldown { ready_at: i64 },
+    #[error("That player was recently challenged and has weekly protection.")]
+    RecipientProtected { ready_at: i64 },
     #[error("The challenged player cannot cover the duel wager.")]
     RecipientFunding { recipient_id: i64, wager: i64 },
     #[error("duel SQLite operation failed: {0}")]
@@ -333,35 +337,29 @@ impl DuelChallengeRepository {
             ));
         }
 
-        let challenger_history = transaction
-            .query_row(
-                "SELECT 1 FROM duel_challenges
+        let latest_challenge_issued = transaction.query_row(
+            "SELECT MAX(created_at) FROM duel_challenges
                  WHERE guild_id = ?1 AND challenger_id = ?2
-                   AND status != 'delivery_failed' AND created_at > ?3
-                 LIMIT 1",
-                params![guild_id, challenger_id, now - challenger_cooldown_seconds],
-                |_| Ok(()),
-            )
-            .optional()?;
-        if challenger_history.is_some() {
-            return Err(DuelRepositoryError::Invalid(
-                "Your duel challenge cooldown has not elapsed.",
-            ));
+                   AND status != 'delivery_failed' AND created_at > ?3",
+            params![guild_id, challenger_id, now - challenger_cooldown_seconds],
+            |row| row.get::<_, Option<i64>>(0),
+        )?;
+        if let Some(created_at) = latest_challenge_issued {
+            return Err(DuelRepositoryError::ChallengerCooldown {
+                ready_at: created_at + challenger_cooldown_seconds,
+            });
         }
-        let recipient_history = transaction
-            .query_row(
-                "SELECT 1 FROM duel_challenges
+        let latest_challenge_received = transaction.query_row(
+            "SELECT MAX(created_at) FROM duel_challenges
                  WHERE guild_id = ?1 AND recipient_id = ?2
-                   AND status != 'delivery_failed' AND created_at > ?3
-                 LIMIT 1",
-                params![guild_id, recipient_id, now - recipient_cooldown_seconds],
-                |_| Ok(()),
-            )
-            .optional()?;
-        if recipient_history.is_some() {
-            return Err(DuelRepositoryError::Invalid(
-                "That player was recently challenged and has weekly protection.",
-            ));
+                   AND status != 'delivery_failed' AND created_at > ?3",
+            params![guild_id, recipient_id, now - recipient_cooldown_seconds],
+            |row| row.get::<_, Option<i64>>(0),
+        )?;
+        if let Some(created_at) = latest_challenge_received {
+            return Err(DuelRepositoryError::RecipientProtected {
+                ready_at: created_at + recipient_cooldown_seconds,
+            });
         }
         if challenger.balance < upfront_cost {
             return Err(DuelRepositoryError::Invalid(
@@ -2055,6 +2053,111 @@ mod tests {
         );
         let second = create_challenge(&repository, 1, 2, Some(GUILD_ID), NOW + 15 * DAY);
         assert_eq!(second.status, DuelStatus::Pending);
+    }
+
+    #[test]
+    fn test_challenger_cooldown_error_reports_when_the_latest_challenge_clears() {
+        let file = database();
+        seed_player(&file, 1, Some(1400.0), 3000, GUILD_ID);
+        seed_player(&file, 2, Some(1500.0), 500, GUILD_ID);
+        seed_player(&file, 3, Some(1500.0), 500, GUILD_ID);
+        let repository = DuelChallengeRepository::new(file.path());
+        let first = create_challenge(&repository, 1, 2, Some(GUILD_ID), NOW);
+        let connection = Connection::open(file.path()).expect("open duel test database");
+        connection
+            .execute(
+                "UPDATE duel_challenges SET status = 'declined', resolved_at = ?1
+                 WHERE challenge_id = ?2",
+                params![NOW + 1, first.challenge_id],
+            )
+            .expect("resolve first challenge");
+        connection
+            .execute(
+                "INSERT INTO duel_challenges (
+                     guild_id, channel_id, challenger_id, recipient_id, wager,
+                     issuance_fee, status, challenger_glicko, challenger_rd,
+                     recipient_glicko, recipient_rd, created_at, expires_at,
+                     resolved_at
+                 ) VALUES (?1, 77, 1, 3, 500, ?2, 'declined', 1400.0, 100.0,
+                           1500.0, 100.0, ?3, ?4, ?5)",
+                params![
+                    GUILD_ID,
+                    DUEL_ISSUANCE_FEE,
+                    NOW + 3 * DAY,
+                    NOW + 10 * DAY,
+                    NOW + 3 * DAY + 1
+                ],
+            )
+            .expect("insert a later declined challenge");
+
+        let error = repository
+            .create_challenge_atomic(
+                Some(GUILD_ID),
+                77,
+                1,
+                2,
+                500_i64,
+                NOW + 5 * DAY,
+                15 * DAY,
+                7 * DAY,
+                7 * DAY,
+                1,
+            )
+            .expect_err("challenge must be on cooldown");
+        assert!(
+            matches!(
+                error,
+                DuelRepositoryError::ChallengerCooldown { ready_at }
+                    if ready_at == NOW + 3 * DAY + 15 * DAY
+            ),
+            "the ready time follows the most recent challenge, not the oldest: {error:?}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("Your duel challenge cooldown has not elapsed.")
+        );
+    }
+
+    #[test]
+    fn test_recipient_protection_error_reports_when_protection_clears() {
+        let file = database();
+        seed_player(&file, 1, Some(1400.0), 550, GUILD_ID);
+        seed_player(&file, 2, Some(1600.0), 500, GUILD_ID);
+        seed_player(&file, 3, Some(1500.0), 1000, GUILD_ID);
+        let repository = DuelChallengeRepository::new(file.path());
+        let first = create_challenge(&repository, 1, 2, Some(GUILD_ID), NOW);
+        Connection::open(file.path())
+            .expect("open duel test database")
+            .execute(
+                "UPDATE duel_challenges SET status = 'declined', resolved_at = ?1
+                 WHERE challenge_id = ?2",
+                params![NOW + 1, first.challenge_id],
+            )
+            .expect("resolve first challenge");
+
+        let error = repository
+            .create_challenge_atomic(
+                Some(GUILD_ID),
+                77,
+                3,
+                2,
+                500_i64,
+                NOW + 2 * DAY,
+                30 * DAY,
+                7 * DAY,
+                7 * DAY,
+                3,
+            )
+            .expect_err("recipient must be protected");
+        assert!(
+            matches!(
+                error,
+                DuelRepositoryError::RecipientProtected { ready_at } if ready_at == NOW + 7 * DAY
+            ),
+            "unexpected error: {error:?}"
+        );
+        assert!(error.to_string().contains("recently challenged"));
     }
 
     #[test]

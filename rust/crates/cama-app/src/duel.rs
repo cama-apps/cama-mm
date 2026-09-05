@@ -499,6 +499,14 @@ pub trait DuelRepositoryPort {
 fn map_duel_repository_error(error: DuelRepositoryError) -> CommandError {
     match error {
         DuelRepositoryError::Invalid(message) => CommandError::Invalid(message.to_owned()),
+        DuelRepositoryError::ChallengerCooldown { ready_at } => CommandError::Invalid(format!(
+            "Your duel challenge cooldown has not elapsed. You can issue another challenge \
+             <t:{ready_at}:R> (<t:{ready_at}:f>)."
+        )),
+        DuelRepositoryError::RecipientProtected { ready_at } => CommandError::Invalid(format!(
+            "That player was recently challenged and has weekly protection until \
+             <t:{ready_at}:f> (<t:{ready_at}:R>)."
+        )),
         DuelRepositoryError::RecipientFunding {
             recipient_id,
             wager,
@@ -2471,6 +2479,33 @@ mod tests {
     const CHANNEL_ID: i64 = 200;
     const CHALLENGER_ID: i64 = 1;
     const RECIPIENT_ID: i64 = 2;
+
+    #[test]
+    fn cooldown_errors_tell_the_player_when_they_can_try_again() {
+        let challenger = map_duel_repository_error(DuelRepositoryError::ChallengerCooldown {
+            ready_at: 1_700_000_000,
+        });
+        let CommandError::Invalid(message) = challenger else {
+            panic!("expected an invalid-command error, got {challenger:?}");
+        };
+        assert!(message.starts_with("Your duel challenge cooldown has not elapsed."));
+        assert!(
+            message.contains("<t:1700000000:R>") && message.contains("<t:1700000000:f>"),
+            "message must carry the ready time as Discord timestamps: {message}"
+        );
+
+        let recipient = map_duel_repository_error(DuelRepositoryError::RecipientProtected {
+            ready_at: 1_700_000_000,
+        });
+        let CommandError::Invalid(message) = recipient else {
+            panic!("expected an invalid-command error, got {recipient:?}");
+        };
+        assert!(message.starts_with("That player was recently challenged"));
+        assert!(
+            message.contains("<t:1700000000:f>") && message.contains("<t:1700000000:R>"),
+            "message must carry the protection end as Discord timestamps: {message}"
+        );
+    }
 
     fn challenge_with(
         status: DuelStatus,
