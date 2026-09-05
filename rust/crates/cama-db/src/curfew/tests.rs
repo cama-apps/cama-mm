@@ -1,4 +1,4 @@
-use cama_domain::curfew::CurfewWindow;
+use cama_domain::curfew::{CurfewMode, CurfewWindow};
 use rusqlite::params;
 
 use super::*;
@@ -41,6 +41,7 @@ fn window(
         end_minute: 0,
         timezone: None,
         days: None,
+        mode: CurfewMode::Default,
     }
 }
 
@@ -240,4 +241,249 @@ fn test_out_of_range_day_mask_degrades_to_every_day_instead_of_truncating() {
             "stored day mask {stored} should fall back to the every-day default"
         );
     }
+}
+
+#[test]
+fn test_mode_round_trips_and_defaults() {
+    let (_dir, repository) = fixture();
+    repository
+        .add_or_replace(&window(1, GUILD, "work", 9, 17))
+        .unwrap();
+    let mut informational_window = window(1, GUILD, "night", 22, 6);
+    informational_window.mode = CurfewMode::Informational;
+    repository.add_or_replace(&informational_window).unwrap();
+
+    let windows = repository.list_for_player(1, GUILD).unwrap();
+    let work = windows.iter().find(|w| w.name == "work").unwrap();
+    assert_eq!(work.mode, CurfewMode::Default);
+    let night = windows.iter().find(|w| w.name == "night").unwrap();
+    assert_eq!(night.mode, CurfewMode::Informational);
+}
+
+#[test]
+fn test_get_window_returns_none_when_missing() {
+    let (_dir, repository) = fixture();
+    assert_eq!(repository.get_window(1, GUILD, "work").unwrap(), None);
+    repository
+        .add_or_replace(&window(1, GUILD, "work", 9, 17))
+        .unwrap();
+    assert_eq!(
+        repository
+            .get_window(1, GUILD, "work")
+            .unwrap()
+            .unwrap()
+            .name,
+        "work"
+    );
+}
+
+#[test]
+fn test_stage_pending_upsert_leaves_live_window_untouched() {
+    let (_dir, repository) = fixture();
+    let mut strict = window(1, GUILD, "work", 9, 17);
+    strict.mode = CurfewMode::Strict;
+    repository.add_or_replace(&strict).unwrap();
+
+    let mut edited = window(1, GUILD, "work", 8, 16);
+    edited.mode = CurfewMode::Strict;
+    let effective_at = chrono::Utc::now() + chrono::Duration::hours(6);
+    repository
+        .stage_pending_upsert(&edited, effective_at)
+        .unwrap();
+
+    // The live row is unchanged — today's enforcement still uses the old times.
+    let live = repository.get_window(1, GUILD, "work").unwrap().unwrap();
+    assert_eq!(live.start_hour, 9);
+
+    let pending = repository
+        .pending_change_for(1, GUILD, "work")
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.window.unwrap().start_hour, 8);
+    assert_eq!(pending.effective_at, effective_at);
+}
+
+#[test]
+fn test_apply_due_pending_changes_commits_upsert_and_clears_pending_row() {
+    let (_dir, repository) = fixture();
+    let mut strict = window(1, GUILD, "work", 9, 17);
+    strict.mode = CurfewMode::Strict;
+    repository.add_or_replace(&strict).unwrap();
+    let mut edited = window(1, GUILD, "work", 8, 16);
+    edited.mode = CurfewMode::Strict;
+    let past = chrono::Utc::now() - chrono::Duration::minutes(1);
+    repository.stage_pending_upsert(&edited, past).unwrap();
+
+    let applied = repository
+        .apply_due_pending_changes(chrono::Utc::now())
+        .unwrap();
+    assert_eq!(applied.len(), 1);
+    assert_eq!(applied[0].window.as_ref().unwrap().start_hour, 8);
+
+    let live = repository.get_window(1, GUILD, "work").unwrap().unwrap();
+    assert_eq!(live.start_hour, 8);
+    assert!(
+        repository
+            .pending_change_for(1, GUILD, "work")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn test_apply_due_pending_changes_skips_changes_not_yet_effective() {
+    let (_dir, repository) = fixture();
+    let mut strict = window(1, GUILD, "work", 9, 17);
+    strict.mode = CurfewMode::Strict;
+    repository.add_or_replace(&strict).unwrap();
+    let future = chrono::Utc::now() + chrono::Duration::hours(6);
+    repository
+        .stage_pending_upsert(&window(1, GUILD, "work", 8, 16), future)
+        .unwrap();
+
+    let applied = repository
+        .apply_due_pending_changes(chrono::Utc::now())
+        .unwrap();
+    assert!(applied.is_empty());
+    assert_eq!(
+        repository
+            .get_window(1, GUILD, "work")
+            .unwrap()
+            .unwrap()
+            .start_hour,
+        9
+    );
+}
+
+#[test]
+fn test_apply_due_pending_changes_commits_delete() {
+    let (_dir, repository) = fixture();
+    let mut strict = window(1, GUILD, "work", 9, 17);
+    strict.mode = CurfewMode::Strict;
+    repository.add_or_replace(&strict).unwrap();
+    let past = chrono::Utc::now() - chrono::Duration::minutes(1);
+    repository
+        .stage_pending_delete(1, GUILD, "work", past)
+        .unwrap();
+
+    let applied = repository
+        .apply_due_pending_changes(chrono::Utc::now())
+        .unwrap();
+    assert_eq!(applied.len(), 1);
+    assert!(applied[0].window.is_none());
+    assert!(repository.get_window(1, GUILD, "work").unwrap().is_none());
+}
+
+#[test]
+fn test_is_covered_is_false_until_coverage_is_recorded() {
+    let (dir, repository) = fixture();
+    let path = dir.path().join("curfew.db");
+    insert_player(&path, 1, GUILD);
+
+    assert!(
+        !repository
+            .is_covered(1, GUILD, "night", "2026-01-01")
+            .unwrap()
+    );
+    repository
+        .record_coverage(1, GUILD, "night", "2026-01-01")
+        .unwrap();
+    assert!(
+        repository
+            .is_covered(1, GUILD, "night", "2026-01-01")
+            .unwrap()
+    );
+    assert!(
+        !repository
+            .is_covered(1, GUILD, "night", "2026-01-02")
+            .unwrap(),
+        "coverage is per local calendar date"
+    );
+    assert!(
+        !repository
+            .is_covered(1, GUILD, "other", "2026-01-01")
+            .unwrap(),
+        "coverage is per window"
+    );
+}
+
+#[test]
+fn test_clear_coverage_removes_a_recorded_confirmation() {
+    let (dir, repository) = fixture();
+    let path = dir.path().join("curfew.db");
+    insert_player(&path, 1, GUILD);
+    repository
+        .record_coverage(1, GUILD, "night", "2026-01-01")
+        .unwrap();
+    repository.clear_coverage(&[1], GUILD).unwrap();
+    assert!(
+        !repository
+            .is_covered(1, GUILD, "night", "2026-01-01")
+            .unwrap()
+    );
+}
+
+#[test]
+fn test_record_coverage_is_idempotent_and_moves_to_the_latest_date() {
+    let (dir, repository) = fixture();
+    let path = dir.path().join("curfew.db");
+    insert_player(&path, 1, GUILD);
+    repository
+        .record_coverage(1, GUILD, "night", "2026-01-01")
+        .unwrap();
+    repository
+        .record_coverage(1, GUILD, "night", "2026-01-01")
+        .unwrap();
+    assert!(
+        repository
+            .is_covered(1, GUILD, "night", "2026-01-01")
+            .unwrap()
+    );
+
+    repository
+        .record_coverage(1, GUILD, "night", "2026-01-02")
+        .unwrap();
+    assert!(
+        !repository
+            .is_covered(1, GUILD, "night", "2026-01-01")
+            .unwrap()
+    );
+    assert!(
+        repository
+            .is_covered(1, GUILD, "night", "2026-01-02")
+            .unwrap()
+    );
+}
+
+#[test]
+fn test_clear_coverage_is_scoped_to_the_guild_and_players_given() {
+    let (dir, repository) = fixture();
+    let path = dir.path().join("curfew.db");
+    insert_player(&path, 1, GUILD);
+    insert_player(&path, 2, GUILD);
+    insert_player(&path, 1, OTHER_GUILD);
+    for (discord_id, guild_id) in [(1, GUILD), (2, GUILD), (1, OTHER_GUILD)] {
+        repository
+            .record_coverage(discord_id, guild_id, "night", "2026-01-01")
+            .unwrap();
+    }
+
+    repository.clear_coverage(&[1], GUILD).unwrap();
+
+    assert!(
+        !repository
+            .is_covered(1, GUILD, "night", "2026-01-01")
+            .unwrap()
+    );
+    assert!(
+        repository
+            .is_covered(2, GUILD, "night", "2026-01-01")
+            .unwrap()
+    );
+    assert!(
+        repository
+            .is_covered(1, OTHER_GUILD, "night", "2026-01-01")
+            .unwrap(),
+        "coverage in another guild is untouched"
+    );
 }

@@ -469,6 +469,11 @@ pub(crate) fn player_command_options() -> Vec<CommandOptionSpec> {
                         "Nights it starts, e.g. 'Sa,Su' — overnight spans run into the next morning; blank = every day",
                         CommandOptionKind::String,
                     ),
+                    curfew_mode_choices(CommandOptionSpec::new(
+                        "mode",
+                        "default (block), strict (shrinking edits wait until next morning), informational (asks first)",
+                        CommandOptionKind::String,
+                    )),
                 ],
             ),
             subcommand(
@@ -549,6 +554,24 @@ fn subcommand(
     options: Vec<CommandOptionSpec>,
 ) -> CommandOptionSpec {
     CommandOptionSpec::new(name, description, CommandOptionKind::Subcommand).options(options)
+}
+
+fn curfew_mode_choices(mut option: CommandOptionSpec) -> CommandOptionSpec {
+    option.choices = vec![
+        CommandOptionChoice::String {
+            name: "default".to_owned(),
+            value: "default".to_owned(),
+        },
+        CommandOptionChoice::String {
+            name: "strict".to_owned(),
+            value: "strict".to_owned(),
+        },
+        CommandOptionChoice::String {
+            name: "informational".to_owned(),
+            value: "informational".to_owned(),
+        },
+    ];
+    option
 }
 
 fn required_option(
@@ -2014,6 +2037,7 @@ impl PlayerRegistrationHandler {
             .ok_or_else(|| "curfew add requires an end time".to_owned())?;
         let timezone = string_option(options, "timezone").map(str::to_owned);
         let days = string_option(options, "days").map(str::to_owned);
+        let mode = string_option(options, "mode").map(str::to_owned);
 
         let (start_hour, start_minute) = match cama_domain::curfew::parse_clock(start) {
             Ok(parsed) => parsed,
@@ -2027,6 +2051,7 @@ impl PlayerRegistrationHandler {
         let user_id = signed_id(context.user_id, "user")?;
         let guild = signed_id(guild_id, "guild")?;
         let curfew = self.curfew.clone();
+        let now = chrono::Utc::now();
         let result = tokio::task::spawn_blocking(move || {
             curfew.add_window(
                 user_id,
@@ -2038,13 +2063,15 @@ impl PlayerRegistrationHandler {
                 end_minute,
                 timezone.as_deref(),
                 days.as_deref(),
+                mode.as_deref(),
+                now,
             )
         })
         .await
         .map_err(|error| format!("curfew add task failed: {error}"))?;
 
-        let window = match result {
-            Ok(window) => window,
+        let change = match result {
+            Ok(change) => change,
             Err(CurfewServiceError::PlayerNotRegistered) => {
                 return followup_ephemeral(&responder, "❌ Player not registered.").await;
             }
@@ -2061,15 +2088,44 @@ impl PlayerRegistrationHandler {
                 .await
                 .map_err(|error| format!("curfew timezone task failed: {error}"))?
                 .unwrap_or(None);
-        followup_ephemeral(
-            &responder,
-            format!(
-                "✅ Window added: {}. You'll be blocked from joining a lobby and auto-removed \
-                 from any lobby you're already in while inside this window.",
+        let content = match change {
+            cama_app::curfew_service::CurfewWindowChange::Applied(window) => {
+                let enforcement = match window.mode {
+                    cama_domain::curfew::CurfewMode::Default => {
+                        "You'll be blocked from joining a lobby and auto-removed from any lobby \
+                         you're already in while inside this window."
+                            .to_owned()
+                    }
+                    cama_domain::curfew::CurfewMode::Strict => {
+                        "You'll be blocked from joining a lobby and auto-removed from any lobby \
+                         you're already in while inside this window. Shrinking or removing it \
+                         only takes effect the next morning."
+                            .to_owned()
+                    }
+                    cama_domain::curfew::CurfewMode::Informational => {
+                        "Joining during this window asks you to confirm first; a yes covers you \
+                         until your next completed match or the day rolls over."
+                            .to_owned()
+                    }
+                };
+                format!(
+                    "✅ Window added: {}. {enforcement}",
+                    cama_domain::curfew::format_window(&window, general_timezone.as_deref())
+                )
+            }
+            cama_app::curfew_service::CurfewWindowChange::Staged {
+                window,
+                effective_at,
+            } => format!(
+                "🔒 **{}** is in {} mode and this edit shrinks it, so it won't take effect today — it's \
+                 scheduled for {} (server time), and today's version keeps enforcing until then. New settings: {}",
+                window.name,
+                window.mode.as_str(),
+                effective_at.format("%Y-%m-%d %H:%M UTC"),
                 cama_domain::curfew::format_window(&window, general_timezone.as_deref())
             ),
-        )
-        .await
+        };
+        followup_ephemeral(&responder, content).await
     }
 
     async fn curfew_remove(
@@ -2086,21 +2142,37 @@ impl PlayerRegistrationHandler {
         let guild = signed_id(guild_id, "guild")?;
         let curfew = self.curfew.clone();
         let remove_name = name.clone();
-        let removed =
-            tokio::task::spawn_blocking(move || curfew.remove_window(user_id, guild, &remove_name))
+        let now = chrono::Utc::now();
+        let outcome = tokio::task::spawn_blocking(move || {
+            curfew.remove_window(user_id, guild, &remove_name, now)
+        })
+        .await
+        .map_err(|error| format!("curfew remove task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+        match outcome {
+            cama_app::curfew_service::CurfewRemoveOutcome::Removed => {
+                followup_ephemeral(&responder, format!("✅ Removed **{name}**.")).await
+            }
+            cama_app::curfew_service::CurfewRemoveOutcome::Staged { effective_at } => {
+                followup_ephemeral(
+                    &responder,
+                    format!(
+                        "🔒 **{name}** is in a mode that delays removals, so it stays live for the rest of \
+                         today — the removal takes effect {} (server time).",
+                        effective_at.format("%Y-%m-%d %H:%M UTC")
+                    ),
+                )
                 .await
-                .map_err(|error| format!("curfew remove task failed: {error}"))?
-                .map_err(|error| error.to_string())?;
-        if removed {
-            followup_ephemeral(&responder, format!("✅ Removed **{name}**.")).await
-        } else {
-            followup_ephemeral(
-                &responder,
-                format!(
-                    "❌ You don't have a window named **{name}**. Use `/player curfew list` to see yours."
-                ),
-            )
-            .await
+            }
+            cama_app::curfew_service::CurfewRemoveOutcome::NotFound => {
+                followup_ephemeral(
+                    &responder,
+                    format!(
+                        "❌ You don't have a window named **{name}**. Use `/player curfew list` to see yours."
+                    ),
+                )
+                .await
+            }
         }
     }
 
@@ -2124,17 +2196,30 @@ impl PlayerRegistrationHandler {
             )
             .await;
         }
-        // general_timezone reads SQLite, so it runs on a blocking thread like
-        // the window query beside it.
+        // general_timezone and pending both read SQLite, so they run on a
+        // blocking thread like the window query beside them.
         let curfew = self.curfew.clone();
-        let general_timezone =
-            tokio::task::spawn_blocking(move || curfew.general_timezone(user_id, guild))
-                .await
-                .map_err(|error| format!("curfew timezone task failed: {error}"))?
-                .unwrap_or(None);
+        let (general_timezone, pending) = tokio::task::spawn_blocking(move || {
+            let general_timezone = curfew.general_timezone(user_id, guild).unwrap_or(None);
+            let pending = curfew.pending_changes(user_id, guild).unwrap_or_default();
+            (general_timezone, pending)
+        })
+        .await
+        .map_err(|error| format!("curfew timezone task failed: {error}"))?;
         let lines: Vec<String> = windows
             .iter()
-            .map(|window| cama_domain::curfew::format_window(window, general_timezone.as_deref()))
+            .map(|window| {
+                let mut line =
+                    cama_domain::curfew::format_window(window, general_timezone.as_deref());
+                if let Some(change) = pending.get(&window.name) {
+                    let effective_at = change.effective_at.format("%Y-%m-%d %H:%M UTC");
+                    line.push_str(&match &change.window {
+                        Some(_) => format!(" (edit scheduled for {effective_at})"),
+                        None => format!(" (removal scheduled for {effective_at})"),
+                    });
+                }
+                line
+            })
             .collect();
         followup_ephemeral(
             &responder,

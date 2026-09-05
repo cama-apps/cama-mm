@@ -1135,8 +1135,37 @@ CREATE TABLE player_curfew_windows (
                 end_minute   INTEGER NOT NULL DEFAULT 0,
                 timezone     TEXT,
                 days         INTEGER,
+                mode         TEXT NOT NULL DEFAULT 'default',
                 created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (discord_id, guild_id, name)
+            );
+
+-- table: player_curfew_pending_changes
+CREATE TABLE player_curfew_pending_changes (
+                discord_id   INTEGER NOT NULL,
+                guild_id     INTEGER NOT NULL DEFAULT 0,
+                name         TEXT NOT NULL,
+                action       TEXT NOT NULL,
+                start_hour   INTEGER,
+                start_minute INTEGER,
+                end_hour     INTEGER,
+                end_minute   INTEGER,
+                timezone     TEXT,
+                days         INTEGER,
+                mode         TEXT,
+                effective_at TIMESTAMP NOT NULL,
+                created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (discord_id, guild_id, name)
+            );
+
+-- table: player_curfew_acknowledgements
+CREATE TABLE player_curfew_acknowledgements (
+                discord_id        INTEGER NOT NULL,
+                guild_id          INTEGER NOT NULL DEFAULT 0,
+                window_name       TEXT NOT NULL,
+                acknowledged_date TEXT NOT NULL,
+                acknowledged_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (discord_id, guild_id, window_name)
             );
 
 -- table: player_mana

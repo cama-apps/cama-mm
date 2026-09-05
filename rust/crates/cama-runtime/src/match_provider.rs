@@ -48,6 +48,7 @@ use cama_db::core_repositories::{
     MatchRepository, NewCoreRatingHistory, NewPlayer, OrderedMap, ParticipantStatsUpdate,
     PlayerRepository, ShuffleInputs, StreakInsertDefaults,
 };
+use cama_db::curfew::CurfewRepository;
 use cama_db::dota_bet_seed_repository::{
     BettingMode as SeedBettingMode, BettingTeam, DotaBetSeedRepository, FirstGameLobby,
 };
@@ -302,6 +303,7 @@ impl MatchRegistrationProvider {
             players: PlayerRepository::new(&path),
             avoids: SoftAvoidRepository::new(&path),
             deals: PackageDealRepository::new(&path),
+            curfew: CurfewRepository::new(&path),
             low_priority: LowPriorityRepository::new(&path),
             bets: BettingServiceRepository::new(&path),
             rating_history: RatingHistoryRepository::new(&path),
@@ -1272,6 +1274,7 @@ struct MatchHandler {
     players: PlayerRepository,
     avoids: SoftAvoidRepository,
     deals: PackageDealRepository,
+    curfew: CurfewRepository,
     low_priority: LowPriorityRepository,
     bets: BettingServiceRepository,
     rating_history: RatingHistoryRepository,
@@ -3356,6 +3359,17 @@ impl MatchHandler {
                 )
             })?;
         self.apply_easter_streak_records(pending.guild_id, &streak_records)?;
+        // A completed (non-aborted) match clears any standing curfew
+        // acknowledgement for its participants — the next time they want
+        // to queue through an informational window, they're asked again.
+        // Best-effort: this is a minor side effect, not worth failing an
+        // already-durable match record over.
+        if let Err(error) = self
+            .curfew
+            .clear_coverage(&participant_ids, pending.guild_id)
+        {
+            warn!(%error, match_id, "failed to clear curfew coverage after recording match");
+        }
         Ok(RecordedMatch {
             match_id,
             jc_lines,

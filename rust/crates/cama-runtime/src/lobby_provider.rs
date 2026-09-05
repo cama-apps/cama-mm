@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex as StdMutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use cama_app::curfew_service::CurfewService;
+use cama_app::curfew_service::{CurfewConsent, CurfewService};
 use cama_app::dedicated_lobby_channel::{
     ChannelId as AppChannelId, GuildId as AppGuildId, LobbyMessageIds, LobbyScope,
     MessageId as AppMessageId, UserId as AppUserId,
@@ -64,7 +64,8 @@ use crate::gateway_events::{
 use crate::push_notification_provider::PushNotificationHooks;
 use crate::raw_reactions::{RawReactionEvent, RawReactionKind, RawReactionObserver};
 use crate::registration::{
-    CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, InteractionEmbed,
+    CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
+    InteractionActionRow, InteractionButton, InteractionButtonStyle, InteractionEmbed,
     InteractionHandler, InteractionHandlerError, InteractionOption, InteractionRequest,
     InteractionResponder, InteractionResponse, InteractionValue, RegistrationError,
     RegistrationProvider, RegistryBuilder,
@@ -1742,17 +1743,38 @@ impl CurfewLobbyDisplayPort for CurfewLobbyDisplay {
         self.handler.state.sync_lobby_display(scope).await
     }
 
-    async fn remove_curfew_lobby_reaction(
+    async fn publish_curfew_leave(
         &self,
         guild_id: i64,
         lobby_kind: LobbyKind,
         discord_id: i64,
     ) -> Result<(), String> {
         let scope = LobbyScope::new(AppGuildId(guild_id), lobby_kind);
-        self.handler
+        let player_id = AppUserId(discord_id);
+        // Privacy: a curfew removal looks exactly like the player leaving —
+        // the thread gets the ordinary "left" line under their live display
+        // name, the sword reaction comes off, and nothing public mentions
+        // curfew. The reason goes to them by DM only. There's no interaction
+        // here to carry a display name, so it's the guild-member cache, then
+        // the stored name — never a bare Discord ID.
+        let display_name = match self
+            .handler
             .state
-            .remove_lobby_reaction(scope, AppUserId(discord_id))
-            .await
+            .cached_player_name(scope.guild_id, player_id)
+        {
+            Some(display_name) => display_name,
+            None => self
+                .handler
+                .load_player(player_id, scope.guild_id)
+                .await
+                .ok()
+                .flatten()
+                .map_or_else(|| player_id.0.to_string(), |player| player.name),
+        };
+        self.handler
+            .best_effort_leave_publication(scope, player_id, &display_name)
+            .await;
+        Ok(())
     }
 }
 
@@ -1959,6 +1981,13 @@ impl RegistrationProvider for LobbyRegistrationProvider {
                 .to_owned(),
             options: vec![lobby_option()],
             handler: self.handler.clone(),
+        })?;
+        // The yes/no answer to a curfew confirmation prompt, wherever the
+        // prompt was delivered (ephemeral reply, DM after a sword reaction,
+        // DM after a sweep removal). Same handler, same join path.
+        registry.component(ComponentRoute {
+            custom_id_prefix: CURFEW_CONFIRMATION_PREFIX.to_owned(),
+            handler: self.handler.clone(),
         })
     }
 }
@@ -2043,6 +2072,17 @@ impl InteractionHandler for LobbyInteractionHandler {
         request: InteractionRequest,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
+        if let InteractionRequest::Component {
+            custom_id,
+            user_id,
+            user_display_name,
+            ..
+        } = request
+        {
+            return self
+                .handle_curfew_confirmation(&custom_id, user_id, &user_display_name, responder)
+                .await;
+        }
         let command = CommandContext::try_from(request)?;
         match command.name.as_str() {
             "lobby" => self.handle_lobby(command, responder).await,
@@ -2859,23 +2899,34 @@ impl LobbyInteractionHandler {
         let scope = LobbyScope::new(guild_id, kind);
         let operation_lock = self.state.commands.scope_operation_lock(scope);
         let _guard = operation_lock.lock().await;
-        // Opening a lobby is participation too, so curfew blocks it. Viewing
-        // one that already exists stays allowed, matching the get-or-create
-        // contract that keeps existing lobbies visible to suspended users; the
-        // join itself is refused downstream either way. The operation lock is
-        // already held, so no concurrent creator can slip in between.
+        // Opening a lobby is participation too, so a blocking curfew
+        // refuses it outright. A confirmation-mode window doesn't: the lobby
+        // is created and the creator's own join goes through the shared
+        // join gate below, which asks them just like any other join would.
+        // Viewing one that already exists stays allowed, matching the
+        // get-or-create contract that keeps existing lobbies visible to
+        // suspended users; the join itself is refused downstream either
+        // way. The operation lock is already held, so no concurrent creator
+        // can slip in between.
         let lobby_was_missing = self.state.service.get_lobby(scope).is_none();
-        if lobby_was_missing
-            && let Some(window_description) =
-                self.active_curfew_window(scope, command.user_id).await?
-        {
-            return followup_ephemeral(
-                &responder,
-                &format!(
-                    "❌ You're inside your {window_description} curfew window, so you can't open a lobby. Use `/player curfew remove` if you'd rather queue through it."
-                ),
-            )
-            .await;
+        if lobby_was_missing {
+            match self
+                .curfew_join_gate(scope, command.user_id, CurfewConsent::Withheld)
+                .await?
+            {
+                CurfewJoinGate::Blocked(window_description) => {
+                    return followup_ephemeral(
+                        &responder,
+                        &format!(
+                            "❌ You're inside your {window_description} curfew window, so you can't open a lobby. Use `/player curfew remove` if you'd rather queue through it."
+                        ),
+                    )
+                    .await;
+                }
+                CurfewJoinGate::NeedsConfirmation { .. }
+                | CurfewJoinGate::Covered
+                | CurfewJoinGate::Clear => {}
+            }
         }
         // Reserve the membership-change slot before creating a new lobby. The
         // lease refunds automatically if lobby creation, Discord setup, or
@@ -2948,6 +2999,7 @@ impl LobbyInteractionHandler {
                     command.user_id,
                     &player,
                     rate_limit_lease.as_mut(),
+                    CurfewConsent::Withheld,
                 )
                 .await?;
             if join.joined {
@@ -2962,14 +3014,24 @@ impl LobbyInteractionHandler {
             } else if let Err(error) = self.state.sync_lobby_display(scope).await {
                 warn!(%error, ?scope, "failed to refresh existing lobby display");
             }
+            if let Some(JoinRejection::CurfewConfirmation(prompt)) = &join.rejection {
+                let view = format!("[View {}]({})", kind.label(), message.receipt.jump_url);
+                return self
+                    .followup_curfew_confirmation(&responder, scope, prompt, Some(&view))
+                    .await;
+            }
             let warning = lobby_command_auto_join_warning(kind, &join);
             let content = if join.joined {
-                format!(
+                let mut content = format!(
                     "✅ Joined {}! [View {}]({})",
                     kind.label(),
                     kind.display_name(),
                     message.receipt.jump_url
-                )
+                );
+                if let Some(warning) = &warning {
+                    content.push_str(&format!("\n{warning}"));
+                }
+                content
             } else if let Some(warning) = warning {
                 format!(
                     "{warning} [View {}]({})",
@@ -3124,6 +3186,7 @@ impl LobbyInteractionHandler {
                 command.user_id,
                 &player,
                 rate_limit_lease.as_mut(),
+                CurfewConsent::Withheld,
             )
             .await?;
         if join.joined {
@@ -3136,13 +3199,23 @@ impl LobbyInteractionHandler {
             )
             .await;
         }
+        if let Some(JoinRejection::CurfewConfirmation(prompt)) = &join.rejection {
+            let view = format!("✅ {} created! [View]({})", kind.label(), receipt.jump_url);
+            return self
+                .followup_curfew_confirmation(&responder, scope, prompt, Some(&view))
+                .await;
+        }
         let warning = lobby_command_auto_join_warning(kind, &join);
         let content = if join.joined {
-            format!(
+            let mut content = format!(
                 "✅ {} created and joined! [View]({})",
                 kind.label(),
                 receipt.jump_url
-            )
+            );
+            if let Some(warning) = &warning {
+                content.push_str(&format!("\n{warning}"));
+            }
+            content
         } else if let Some(warning) = warning {
             format!(
                 "✅ {} created! {warning} [View]({})",
@@ -3199,6 +3272,11 @@ impl LobbyInteractionHandler {
         let result = self
             .join_registered_player(scope, command.user_id, &player)
             .await?;
+        if let Some(JoinRejection::CurfewConfirmation(prompt)) = &result.rejection {
+            return self
+                .followup_curfew_confirmation(&responder, scope, prompt, None)
+                .await;
+        }
         if !result.joined {
             return followup_ephemeral(
                 &responder,
@@ -3220,7 +3298,11 @@ impl LobbyInteractionHandler {
                     .expect("successful join has commit time"),
             )
             .await;
-        followup_ephemeral(&responder, &format!("✅ Joined {}!", kind.label())).await?;
+        let content = match &result.warning {
+            Some(warning) => format!("✅ Joined {}!\n{warning}", kind.label()),
+            None => format!("✅ Joined {}!", kind.label()),
+        };
+        followup_ephemeral(&responder, &content).await?;
         if let Some(event) = event {
             self.best_effort_explicit_lobby_join_neon(event).await;
         }
@@ -3337,43 +3419,60 @@ impl LobbyInteractionHandler {
             .map_err(InteractionHandlerError::from)
     }
 
-    /// Format the player's currently-active curfew window, if any, for
-    /// display. Shared by every join surface (`/lobby` auto-join, `/lobby
-    /// join`, and the sword-reaction join) so none of them can slip a player
-    /// into a lobby during their own curfew.
-    async fn active_curfew_window(
+    /// Decide what curfew does to a join right now: nothing, a hard block,
+    /// a confirmation prompt, or — once the player has answered yes — the
+    /// acknowledgement/charge that lets them in, with a ready-to-display
+    /// window description attached. Shared by every join surface (`/lobby`
+    /// auto-join, `/join`, lobby creation, the sword-reaction join, and the
+    /// confirmation button itself) so none of them can slip a player into a
+    /// lobby during their own curfew.
+    async fn curfew_join_gate(
         &self,
         scope: LobbyScope,
         player_id: AppUserId,
-    ) -> Result<Option<String>, InteractionHandlerError> {
+        consent: CurfewConsent,
+    ) -> Result<CurfewJoinGate, InteractionHandlerError> {
         let curfew = self.state.curfew.clone();
         let signed_guild_id = scope.guild_id.0;
         let signed_user_id = player_id.0;
-        // Both reads are blocking SQLite and this runs on every join surface,
-        // including the raw-reaction handler that has no interaction deferral
-        // behind it — keep the whole lookup inside the one blocking task.
+        // Blocking SQLite (and, with consent, a mutating write) — this runs
+        // on every join surface, including the raw-reaction handler that has
+        // no interaction deferral behind it — keep the whole thing inside
+        // one blocking task.
         let resolved = tokio::task::spawn_blocking(move || {
-            let active_window =
-                curfew.active_window(signed_user_id, signed_guild_id, chrono::Utc::now())?;
-            let general_timezone = match active_window {
-                Some(_) => curfew
+            let outcome =
+                curfew.join_gate(signed_user_id, signed_guild_id, chrono::Utc::now(), consent)?;
+            // Only a message that names the window needs the player's
+            // general timezone for its description.
+            let general_timezone = match &outcome {
+                cama_app::curfew_service::CurfewGateOutcome::Blocked(_)
+                | cama_app::curfew_service::CurfewGateOutcome::NeedsConfirmation { .. } => curfew
                     .general_timezone(signed_user_id, signed_guild_id)
                     .unwrap_or(None),
-                None => None,
+                cama_app::curfew_service::CurfewGateOutcome::Clear
+                | cama_app::curfew_service::CurfewGateOutcome::Covered { .. } => None,
             };
-            Ok::<_, cama_app::curfew_service::CurfewServiceError>((active_window, general_timezone))
+            Ok::<_, cama_app::curfew_service::CurfewServiceError>((outcome, general_timezone))
         })
         .await
-        .map_err(|error| format!("curfew lookup task failed: {error}"))?
+        .map_err(|error| format!("curfew gate task failed: {error}"))?
         .map_err(|error| error.to_string())?;
-        let (active_window, general_timezone) = resolved;
-        let Some(window) = active_window else {
-            return Ok(None);
+        let (outcome, general_timezone) = resolved;
+        let describe = |window: &cama_domain::curfew::CurfewWindow| {
+            cama_domain::curfew::format_window(window, general_timezone.as_deref())
         };
-        Ok(Some(cama_domain::curfew::format_window(
-            &window,
-            general_timezone.as_deref(),
-        )))
+        Ok(match outcome {
+            cama_app::curfew_service::CurfewGateOutcome::Clear => CurfewJoinGate::Clear,
+            cama_app::curfew_service::CurfewGateOutcome::Blocked(window) => {
+                CurfewJoinGate::Blocked(describe(&window))
+            }
+            cama_app::curfew_service::CurfewGateOutcome::NeedsConfirmation { window } => {
+                CurfewJoinGate::NeedsConfirmation {
+                    window_description: describe(&window),
+                }
+            }
+            cama_app::curfew_service::CurfewGateOutcome::Covered { .. } => CurfewJoinGate::Covered,
+        })
     }
 
     async fn join_registered_player(
@@ -3382,16 +3481,27 @@ impl LobbyInteractionHandler {
         player_id: AppUserId,
         player: &cama_domain::player::Player,
     ) -> Result<JoinPresentation, InteractionHandlerError> {
-        self.join_registered_player_with_rate_limit_lease(scope, player_id, player, None)
-            .await
+        self.join_registered_player_with_rate_limit_lease(
+            scope,
+            player_id,
+            player,
+            None,
+            CurfewConsent::Withheld,
+        )
+        .await
     }
 
+    /// The one join path every surface ends up in. `consent` is only ever
+    /// `Given` by the curfew confirmation button; a plain join from a
+    /// command or reaction withholds it, so an active informational
+    /// window is answered with a prompt rather than a seat.
     async fn join_registered_player_with_rate_limit_lease(
         &self,
         scope: LobbyScope,
         player_id: AppUserId,
         player: &cama_domain::player::Player,
         rate_limit_lease: Option<&mut LobbyMembershipRateLimitLease>,
+        consent: CurfewConsent,
     ) -> Result<JoinPresentation, InteractionHandlerError> {
         if player.preferred_roles.as_ref().is_none_or(Vec::is_empty) {
             return Ok(JoinPresentation {
@@ -3403,16 +3513,6 @@ impl LobbyInteractionHandler {
                 joined_at_ns: None,
             });
         }
-        if let Some(window_description) = self.active_curfew_window(scope, player_id).await? {
-            return Ok(JoinPresentation {
-                joined: false,
-                warning: Some(format!(
-                    "❌ You're inside your {window_description} curfew window. Use `/player curfew remove` if you'd rather queue through it."
-                )),
-                rejection: Some(JoinRejection::Curfew(window_description)),
-                joined_at_ns: None,
-            });
-        }
         if self.state.service.get_lobby(scope).is_none() {
             return Ok(JoinPresentation {
                 joined: false,
@@ -3420,6 +3520,29 @@ impl LobbyInteractionHandler {
                 rejection: None,
                 joined_at_ns: None,
             });
+        }
+        match self.curfew_join_gate(scope, player_id, consent).await? {
+            CurfewJoinGate::Blocked(window_description) => {
+                return Ok(JoinPresentation {
+                    joined: false,
+                    warning: Some(format!(
+                        "❌ You're inside your {window_description} curfew window. Use `/player curfew remove` if you'd rather queue through it."
+                    )),
+                    rejection: Some(JoinRejection::Curfew),
+                    joined_at_ns: None,
+                });
+            }
+            CurfewJoinGate::NeedsConfirmation { window_description } => {
+                return Ok(JoinPresentation {
+                    joined: false,
+                    warning: None,
+                    rejection: Some(JoinRejection::CurfewConfirmation(
+                        CurfewConfirmationPrompt { window_description },
+                    )),
+                    joined_at_ns: None,
+                });
+            }
+            CurfewJoinGate::Covered | CurfewJoinGate::Clear => {}
         }
         let rate_limit_claim = if let Some(lease) = rate_limit_lease {
             let Some(claim) = lease.take_claim() else {
@@ -3624,6 +3747,99 @@ impl LobbyInteractionHandler {
         Some(event)
     }
 
+    /// Reply to a command with the curfew confirmation prompt. `prefix`
+    /// carries whatever the command already had to say (e.g. the lobby's
+    /// jump link) above the question.
+    async fn followup_curfew_confirmation(
+        &self,
+        responder: &Arc<dyn InteractionResponder>,
+        scope: LobbyScope,
+        prompt: &CurfewConfirmationPrompt,
+        prefix: Option<&str>,
+    ) -> Result<(), InteractionHandlerError> {
+        responder
+            .followup(curfew_confirmation_prompt(scope, prompt, prefix).ephemeral())
+            .await
+            .map_err(|error| error.to_string().into())
+    }
+
+    /// The yes/no button on a curfew confirmation prompt. A yes re-runs the
+    /// exact same join path as `/join`, only with consent given, so the
+    /// acknowledgement and the seat are decided in one place; a
+    /// no just clears the prompt. The prompt message — ephemeral reply or
+    /// DM — is edited in place with the result, dropping the buttons.
+    async fn handle_curfew_confirmation(
+        &self,
+        custom_id: &str,
+        user_id: u64,
+        user_display_name: &str,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), InteractionHandlerError> {
+        let Some((accepted, scope)) = parse_curfew_confirmation_id(custom_id) else {
+            return Err(format!("unexpected lobby component {custom_id}").into());
+        };
+        let player_id = AppUserId(i64::try_from(user_id).map_err(|_| {
+            InteractionHandlerError::Transformer {
+                value: user_id.to_string(),
+            }
+        })?);
+        responder
+            .defer(true)
+            .await
+            .map_err(|error| error.to_string())?;
+        if !accepted {
+            return update_ephemeral(
+                &responder,
+                &format!("👍 Staying out of {} for now.", scope.kind.label()),
+            )
+            .await;
+        }
+        let Some(player) = self.load_player(player_id, scope.guild_id).await? else {
+            return update_ephemeral(
+                &responder,
+                "❌ You're not registered! Use `/player register` first.",
+            )
+            .await;
+        };
+        let operation_lock = self.state.commands.scope_operation_lock(scope);
+        let _guard = operation_lock.lock().await;
+        let result = self
+            .join_registered_player_with_rate_limit_lease(
+                scope,
+                player_id,
+                &player,
+                None,
+                CurfewConsent::Given,
+            )
+            .await?;
+        if !result.joined {
+            return update_ephemeral(
+                &responder,
+                result
+                    .warning
+                    .as_deref()
+                    .unwrap_or("❌ Could not join lobby."),
+            )
+            .await;
+        }
+        let event = self
+            .best_effort_join_publication(
+                scope,
+                player_id,
+                &player.name,
+                Some(user_display_name),
+                result
+                    .joined_at_ns
+                    .expect("successful join has commit time"),
+            )
+            .await;
+        update_ephemeral(&responder, &format!("✅ Joined {}!", scope.kind.label())).await?;
+        if let Some(event) = event {
+            self.best_effort_explicit_lobby_join_neon(event).await;
+        }
+        Ok(())
+    }
+
     async fn best_effort_explicit_lobby_join_neon(&self, event: ConfirmedLobbyJoin) {
         let observer = self
             .state
@@ -3687,13 +3903,32 @@ enum JoinRejection {
     RatingTooHigh,
     InFlight,
     Suspended(LobbySuspension),
-    Curfew(String),
-    RateLimited { retry_after_seconds: u64 },
+    Curfew,
+    /// An informational-mode window: not refused, but not seated until the
+    /// player answers the prompt built from this.
+    CurfewConfirmation(CurfewConfirmationPrompt),
+    RateLimited {
+        retry_after_seconds: u64,
+    },
     Storage,
+}
+
+/// What the curfew confirmation prompt needs to say. The window description
+/// names the window and its times, which are private to the player, so this
+/// only ever goes into an ephemeral reply or a DM.
+struct CurfewConfirmationPrompt {
+    window_description: String,
 }
 
 fn membership_rate_limit_message(retry_after_seconds: u64) -> String {
     format!("Slow down! Try joining or leaving again in {retry_after_seconds}s.")
+}
+
+enum CurfewJoinGate {
+    Clear,
+    Blocked(String),
+    NeedsConfirmation { window_description: String },
+    Covered,
 }
 
 fn lobby_command_auto_join_warning(
@@ -3710,15 +3945,16 @@ fn lobby_command_auto_join_warning(
                 .to_owned(),
         ),
         Some(
-            JoinRejection::Suspended(_)
-            | JoinRejection::Curfew(_)
-            | JoinRejection::RateLimited { .. },
+            JoinRejection::Suspended(_) | JoinRejection::Curfew | JoinRejection::RateLimited { .. },
         ) => presentation.warning.clone(),
         None => presentation.warning.clone(),
+        // The confirmation prompt carries its own buttons, so callers
+        // render it separately rather than as a plain warning line.
         Some(
             JoinRejection::PendingMatch(_)
             | JoinRejection::LobbyFull
             | JoinRejection::AlreadyJoined
+            | JoinRejection::CurfewConfirmation(_)
             | JoinRejection::Storage,
         ) => None,
     }
@@ -3933,6 +4169,98 @@ fn selected_user(
             }),
         })
         .transpose()
+}
+
+/// Custom-id prefix for the curfew confirmation buttons:
+/// `lobby_curfew:<yes|no>:<guild_id>:<open|lowskill>`.
+const CURFEW_CONFIRMATION_PREFIX: &str = "lobby_curfew:";
+
+fn curfew_confirmation_id(scope: LobbyScope, accepted: bool) -> String {
+    format!(
+        "{CURFEW_CONFIRMATION_PREFIX}{}:{}:{}",
+        if accepted { "yes" } else { "no" },
+        scope.guild_id.0,
+        lobby_kind_value(scope.kind)
+    )
+}
+
+fn parse_curfew_confirmation_id(custom_id: &str) -> Option<(bool, LobbyScope)> {
+    let rest = custom_id.strip_prefix(CURFEW_CONFIRMATION_PREFIX)?;
+    let mut parts = rest.split(':');
+    let accepted = match parts.next()? {
+        "yes" => true,
+        "no" => false,
+        _ => return None,
+    };
+    let guild_id: i64 = parts.next()?.parse().ok()?;
+    let kind = parse_lobby_kind(parts.next()?)?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((accepted, LobbyScope::new(AppGuildId(guild_id), kind)))
+}
+
+fn curfew_confirmation_buttons(scope: LobbyScope) -> InteractionActionRow {
+    InteractionActionRow::buttons(vec![
+        InteractionButton::new(curfew_confirmation_id(scope, true), "Join anyway")
+            .style(InteractionButtonStyle::Success),
+        InteractionButton::new(curfew_confirmation_id(scope, false), "No thanks")
+            .style(InteractionButtonStyle::Secondary),
+    ])
+}
+
+/// The join-time confirmation prompt for an informational window, with its
+/// yes/no buttons. Not ephemeral by itself: a command reply marks it
+/// ephemeral, a DM doesn't need to.
+fn curfew_confirmation_prompt(
+    scope: LobbyScope,
+    prompt: &CurfewConfirmationPrompt,
+    prefix: Option<&str>,
+) -> InteractionResponse {
+    let question = format!(
+        "ℹ️ You're inside your {} curfew window. Join {} anyway?",
+        prompt.window_description,
+        scope.kind.label()
+    );
+    let content = match prefix {
+        Some(prefix) => format!("{prefix}\n{question}"),
+        None => question,
+    };
+    InteractionResponse::message(content)
+        .without_mentions()
+        .action_row(curfew_confirmation_buttons(scope))
+}
+
+/// The DM sent when the sweep removes an unconfirmed informational-mode
+/// player: says why, and offers the same yes/no as a join would. The yes
+/// button lands in [`LobbyInteractionHandler::handle_curfew_confirmation`]
+/// like every other one.
+#[must_use]
+pub(crate) fn curfew_rejoin_prompt(
+    guild_id: i64,
+    kind: LobbyKind,
+    window_name: &str,
+) -> DiscordMessage {
+    let scope = LobbyScope::new(AppGuildId(guild_id), kind);
+    let content = format!(
+        "🔒 You've been removed from {} — your \"{window_name}\" curfew window started. Rejoin anyway?",
+        kind.label()
+    );
+    DiscordMessage::silent(
+        InteractionResponse::message(content)
+            .without_mentions()
+            .action_row(curfew_confirmation_buttons(scope)),
+    )
+}
+
+async fn update_ephemeral(
+    responder: &Arc<dyn InteractionResponder>,
+    content: &str,
+) -> Result<(), InteractionHandlerError> {
+    responder
+        .update(InteractionResponse::message(content).ephemeral())
+        .await
+        .map_err(|error| error.to_string().into())
 }
 
 async fn followup_ephemeral(
@@ -4456,8 +4784,13 @@ impl RawReactionObserver for LobbyRawReactionObserver {
                             .await;
                         return Ok(());
                     }
-                    if let Some(JoinRejection::Curfew(window_description)) = &outcome.rejection {
-                        self.reject_curfew_sword_reaction(&event, window_description)
+                    if matches!(outcome.rejection, Some(JoinRejection::Curfew)) {
+                        self.reject_curfew_sword_reaction(&event, outcome.warning.as_deref())
+                            .await;
+                        return Ok(());
+                    }
+                    if let Some(JoinRejection::CurfewConfirmation(prompt)) = &outcome.rejection {
+                        self.ask_curfew_confirmation_for_sword_reaction(&event, scope, prompt)
                             .await;
                         return Ok(());
                     }
@@ -4628,35 +4961,67 @@ impl LobbyRawReactionObserver {
             .await;
     }
 
-    /// Curfew window names, times, and timezones are private. Reject publicly
-    /// in generic terms and send the specifics by DM.
-    async fn reject_curfew_sword_reaction(
-        &self,
-        event: &RawReactionEvent,
-        window_description: &str,
-    ) {
-        self.reject_sword_reaction(
-            event,
-            &raw_rejection_message(
-                LobbyKind::Open,
-                &JoinRejection::Curfew(window_description.to_owned()),
-            ),
-            RAW_REJECTION_TTL,
-        )
-        .await;
+    /// Privacy: a curfew refusal never goes into the channel, unlike other
+    /// join failures. The sword comes off silently and the reason — which
+    /// may name the window — is DMed to the player alone.
+    async fn reject_curfew_sword_reaction(&self, event: &RawReactionEvent, reason: Option<&str>) {
         let _ = self
+            .state
+            .transport
+            .remove_reaction(
+                event.channel_id,
+                event.message_id,
+                &DiscordEmoji::unicode(SWORD_EMOJI),
+                event.user_id,
+            )
+            .await;
+        let content = reason.map_or_else(
+            || raw_rejection_message(LobbyKind::Open, &JoinRejection::Curfew),
+            str::to_owned,
+        );
+        if let Err(error) = self
             .state
             .transport
             .send_direct_message(
                 event.user_id,
-                DiscordMessage::silent(
-                    InteractionResponse::message(format!(
-                        "You're inside your {window_description} curfew window, so you weren't added to the lobby.\nUse `/player curfew remove` if you'd rather queue through it."
-                    ))
-                    .without_mentions(),
-                ),
+                DiscordMessage::silent(InteractionResponse::message(content).without_mentions()),
+            )
+            .await
+        {
+            debug!(%error, "failed to DM curfew rejection after sword reaction");
+        }
+    }
+
+    /// A confirmation-mode window: the player isn't seated yet, so take the
+    /// sword back, and ask them privately. The prompt names the window
+    /// (private), and a reaction has no ephemeral reply to carry it, so it
+    /// goes by DM — the buttons on it lead to the same join path as every
+    /// other yes.
+    async fn ask_curfew_confirmation_for_sword_reaction(
+        &self,
+        event: &RawReactionEvent,
+        scope: LobbyScope,
+        prompt: &CurfewConfirmationPrompt,
+    ) {
+        let _ = self
+            .state
+            .transport
+            .remove_reaction(
+                event.channel_id,
+                event.message_id,
+                &DiscordEmoji::unicode(SWORD_EMOJI),
+                event.user_id,
             )
             .await;
+        let message = DiscordMessage::silent(curfew_confirmation_prompt(scope, prompt, None));
+        if let Err(error) = self
+            .state
+            .transport
+            .send_direct_message(event.user_id, message)
+            .await
+        {
+            debug!(%error, ?scope, "failed to DM curfew confirmation after sword reaction");
+        }
     }
 }
 
@@ -4690,11 +5055,9 @@ fn raw_rejection_message(kind: LobbyKind, rejection: &JoinRejection) -> String {
             "You are temporarily restricted from this matchmaking lobby.".to_owned()
         }
         // A window's name, exact times, and timezone are private to the
-        // player. This message is posted publicly in the channel, so it stays
-        // generic and the details go out by DM — the same split the
-        // suspension path uses.
-        JoinRejection::Curfew(_) => {
-            "You're inside one of your curfew windows. Check your DMs, or use `/player curfew list`."
+        // player, so this public/in-channel message stays generic.
+        JoinRejection::Curfew | JoinRejection::CurfewConfirmation(_) => {
+            "You're inside one of your curfew windows. Use `/player curfew list` to check which one."
                 .to_owned()
         }
         JoinRejection::RateLimited {

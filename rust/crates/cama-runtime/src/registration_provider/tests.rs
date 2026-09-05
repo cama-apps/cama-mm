@@ -958,7 +958,8 @@ fn command_schema_matches_python_extension() {
             ("start", CommandOptionKind::String, true),
             ("end", CommandOptionKind::String, true),
             ("timezone", CommandOptionKind::String, false),
-            ("days", CommandOptionKind::String, false)
+            ("days", CommandOptionKind::String, false),
+            ("mode", CommandOptionKind::String, false)
         ]
     );
     assert_eq!(
@@ -2478,4 +2479,267 @@ async fn test_player_lobby_status_hides_reasons_written_before_they_were_player_
         "a reason written before the contract changed must not be disclosed"
     );
     assert!(!response.content.contains("Placed for"));
+}
+
+fn curfew_command(user_id: u64, leaf: &str, options: Vec<InteractionOption>) -> InteractionRequest {
+    InteractionRequest::Command {
+        interaction_id: 700,
+        name: "player".to_owned(),
+        user_id,
+        user_display_name: format!("Player {user_id}"),
+        guild_id: Some(42),
+        channel_id: Some(9),
+        member_permissions: None,
+        options: vec![InteractionOption {
+            name: "curfew".to_owned(),
+            value: InteractionValue::SubcommandGroup(vec![InteractionOption {
+                name: leaf.to_owned(),
+                value: InteractionValue::Subcommand(options),
+            }]),
+        }],
+    }
+}
+
+async fn curfew_response(
+    database: &NamedTempFile,
+    user_id: u64,
+    leaf: &str,
+    options: Vec<InteractionOption>,
+) -> String {
+    let server = RouteServer::start(Vec::new());
+    let provider = PlayerRegistrationProvider::with_config(
+        database.path(),
+        services(&server),
+        Arc::new(MockDiscord::default()),
+        config(),
+    );
+    let responder = Arc::new(CapturingResponder::default());
+    registry(&provider)
+        .command_handler("player")
+        .expect("player handler")
+        .handle(curfew_command(user_id, leaf, options), responder.clone())
+        .await
+        .expect("curfew response");
+    responder
+        .captured
+        .lock()
+        .expect("response capture")
+        .followups
+        .last()
+        .expect("curfew followup")
+        .content
+        .clone()
+}
+
+fn seed_curfew_player(database: &NamedTempFile, discord_id: i64) {
+    let connection = Connection::open(database.path()).expect("open curfew database");
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .expect("disable foreign keys for curfew player fixture");
+    connection
+        .execute(
+            "INSERT INTO players(discord_id,guild_id,discord_username) VALUES(?1,42,?2)",
+            params![discord_id, format!("player-{discord_id}")],
+        )
+        .expect("seed curfew player");
+}
+
+#[tokio::test]
+async fn test_curfew_add_defaults_to_default_mode() {
+    let database = database();
+    seed_curfew_player(&database, 1);
+
+    let content = curfew_response(
+        &database,
+        1,
+        "add",
+        vec![
+            option("name", InteractionValue::String("work".to_owned())),
+            option("start", InteractionValue::String("09:00".to_owned())),
+            option("end", InteractionValue::String("17:00".to_owned())),
+        ],
+    )
+    .await;
+
+    assert!(content.starts_with("✅ Window added"));
+    assert!(content.contains("blocked from joining"));
+}
+
+#[tokio::test]
+async fn test_curfew_add_rejects_unknown_mode() {
+    let database = database();
+    seed_curfew_player(&database, 1);
+
+    let content = curfew_response(
+        &database,
+        1,
+        "add",
+        vec![
+            option("name", InteractionValue::String("work".to_owned())),
+            option("start", InteractionValue::String("09:00".to_owned())),
+            option("end", InteractionValue::String("17:00".to_owned())),
+            option("mode", InteractionValue::String("chaotic".to_owned())),
+        ],
+    )
+    .await;
+
+    assert!(content.contains("Unknown curfew mode"));
+}
+
+#[tokio::test]
+async fn test_curfew_add_editing_a_strict_window_stages_the_change() {
+    let database = database();
+    seed_curfew_player(&database, 1);
+    curfew_response(
+        &database,
+        1,
+        "add",
+        vec![
+            option("name", InteractionValue::String("work".to_owned())),
+            option("start", InteractionValue::String("09:00".to_owned())),
+            option("end", InteractionValue::String("17:00".to_owned())),
+            option("mode", InteractionValue::String("strict".to_owned())),
+        ],
+    )
+    .await;
+
+    let content = curfew_response(
+        &database,
+        1,
+        "add",
+        vec![
+            option("name", InteractionValue::String("work".to_owned())),
+            option("start", InteractionValue::String("10:00".to_owned())),
+            option("end", InteractionValue::String("16:00".to_owned())),
+            option("mode", InteractionValue::String("strict".to_owned())),
+        ],
+    )
+    .await;
+
+    assert!(
+        content.contains("won't take effect today"),
+        "expected a staged-change response, got: {content}"
+    );
+    let windows = curfew_response(&database, 1, "list", Vec::new()).await;
+    assert!(
+        windows.contains("9:00 AM"),
+        "today's committed window must be unchanged: {windows}"
+    );
+}
+
+#[tokio::test]
+async fn test_curfew_remove_on_a_strict_window_stages_the_delete() {
+    let database = database();
+    seed_curfew_player(&database, 1);
+    curfew_response(
+        &database,
+        1,
+        "add",
+        vec![
+            option("name", InteractionValue::String("work".to_owned())),
+            option("start", InteractionValue::String("09:00".to_owned())),
+            option("end", InteractionValue::String("17:00".to_owned())),
+            option("mode", InteractionValue::String("strict".to_owned())),
+        ],
+    )
+    .await;
+
+    let content = curfew_response(
+        &database,
+        1,
+        "remove",
+        vec![option("name", InteractionValue::String("work".to_owned()))],
+    )
+    .await;
+
+    assert!(
+        content.contains("stays live for the rest of today"),
+        "expected a staged-removal response, got: {content}"
+    );
+    let windows = curfew_response(&database, 1, "list", Vec::new()).await;
+    assert!(
+        windows.contains("work"),
+        "the window must still be listed until the staged removal lands: {windows}"
+    );
+}
+
+#[tokio::test]
+async fn test_curfew_add_accepts_informational_mode() {
+    let database = database();
+    seed_curfew_player(&database, 1);
+
+    let content = curfew_response(
+        &database,
+        1,
+        "add",
+        vec![
+            option("name", InteractionValue::String("night".to_owned())),
+            option("start", InteractionValue::String("22:00".to_owned())),
+            option("end", InteractionValue::String("06:00".to_owned())),
+            option("mode", InteractionValue::String("informational".to_owned())),
+        ],
+    )
+    .await;
+
+    assert!(content.starts_with("✅ Window added"), "{content}");
+    assert!(content.contains("confirm first"), "{content}");
+    let windows = curfew_response(&database, 1, "list", Vec::new()).await;
+    assert!(windows.contains("informational"), "{windows}");
+}
+
+#[tokio::test]
+async fn test_curfew_add_extending_a_strict_window_applies_immediately() {
+    let database = database();
+    seed_curfew_player(&database, 1);
+    curfew_response(
+        &database,
+        1,
+        "add",
+        vec![
+            option("name", InteractionValue::String("work".to_owned())),
+            option("start", InteractionValue::String("09:00".to_owned())),
+            option("end", InteractionValue::String("17:00".to_owned())),
+            option("mode", InteractionValue::String("strict".to_owned())),
+        ],
+    )
+    .await;
+
+    let content = curfew_response(
+        &database,
+        1,
+        "add",
+        vec![
+            option("name", InteractionValue::String("work".to_owned())),
+            option("start", InteractionValue::String("08:00".to_owned())),
+            option("end", InteractionValue::String("18:00".to_owned())),
+            option("mode", InteractionValue::String("strict".to_owned())),
+        ],
+    )
+    .await;
+
+    assert!(content.starts_with("✅ Window added"), "{content}");
+    let windows = curfew_response(&database, 1, "list", Vec::new()).await;
+    assert!(windows.contains("8:00 AM"), "{windows}");
+    assert!(!windows.contains("scheduled"), "{windows}");
+}
+
+#[tokio::test]
+async fn test_curfew_add_rejects_the_retired_tax_mode() {
+    let database = database();
+    seed_curfew_player(&database, 1);
+
+    let content = curfew_response(
+        &database,
+        1,
+        "add",
+        vec![
+            option("name", InteractionValue::String("night".to_owned())),
+            option("start", InteractionValue::String("22:00".to_owned())),
+            option("end", InteractionValue::String("06:00".to_owned())),
+            option("mode", InteractionValue::String("tax".to_owned())),
+        ],
+    )
+    .await;
+
+    assert!(content.contains("Unknown curfew mode"), "{content}");
 }

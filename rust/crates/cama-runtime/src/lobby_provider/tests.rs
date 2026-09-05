@@ -26,6 +26,7 @@ use tempfile::NamedTempFile;
 struct CapturedResponses {
     deferred: Vec<bool>,
     followups: Vec<InteractionResponse>,
+    updates: Vec<InteractionResponse>,
 }
 
 #[derive(Default)]
@@ -179,6 +180,15 @@ impl InteractionResponder for CapturingResponder {
             .lock()
             .expect("response capture lock")
             .followups
+            .push(response);
+        Ok(())
+    }
+
+    async fn update(&self, response: InteractionResponse) -> Result<(), InteractionResponseError> {
+        self.captured
+            .lock()
+            .expect("response capture lock")
+            .updates
             .push(response);
         Ok(())
     }
@@ -3856,6 +3866,7 @@ async fn test_join_blocked_during_active_curfew_window() {
             end_minute: end.minute(),
             timezone: Some("UTC".to_owned()),
             days: None,
+            mode: cama_domain::curfew::CurfewMode::Default,
         })
         .expect("seed an always-active curfew window");
 
@@ -4000,6 +4011,7 @@ async fn test_curfew_sweep_refreshes_the_lobby_display_after_removing_a_player()
             end_minute: end.minute(),
             timezone: Some("UTC".to_owned()),
             days: None,
+            mode: cama_domain::curfew::CurfewMode::Default,
         })
         .expect("seed an always-active curfew window");
 
@@ -4081,6 +4093,7 @@ async fn test_curfew_sweep_removes_the_kicked_players_sword_reaction() {
             end_minute: end.minute(),
             timezone: Some("UTC".to_owned()),
             days: None,
+            mode: cama_domain::curfew::CurfewMode::Default,
         })
         .expect("seed an always-active curfew window");
 
@@ -4090,9 +4103,9 @@ async fn test_curfew_sweep_removes_the_kicked_players_sword_reaction() {
     for kick in &kicks {
         provider
             .curfew_lobby_display()
-            .remove_curfew_lobby_reaction(kick.guild_id, kick.lobby_kind, kick.discord_id)
+            .publish_curfew_leave(kick.guild_id, kick.lobby_kind, kick.discord_id)
             .await
-            .expect("remove sword reaction after curfew kick");
+            .expect("publish leave after curfew kick");
     }
 
     let state = transport.state.lock().expect("transport state");
@@ -4104,6 +4117,29 @@ async fn test_curfew_sweep_removes_the_kicked_players_sword_reaction() {
                 *message_id == lobby_message_id && emoji.name == SWORD_EMOJI && *user_id == 1
             }),
         "curfew kick must remove the kicked player's own sword reaction"
+    );
+    // Privacy: the thread sees an ordinary leave line (falling back to the
+    // stored name when the member cache has nothing), and nothing public
+    // says the word curfew.
+    let leave_line = state
+        .sent
+        .iter()
+        .rev()
+        .find(|sent| sent.message.response.content.contains("left."))
+        .expect("the sweep must post the normal leave line");
+    assert!(
+        leave_line.message.response.content.contains("Sleepy"),
+        "{}",
+        leave_line.message.response.content
+    );
+    assert!(
+        !state.sent.iter().any(|sent| sent
+            .message
+            .response
+            .content
+            .to_lowercase()
+            .contains("curfew")),
+        "a curfew removal must never be announced publicly"
     );
 }
 
@@ -4171,6 +4207,7 @@ async fn test_curfew_sweep_removes_the_kicked_player_from_the_active_readycheck(
             end_minute: end.minute(),
             timezone: Some("UTC".to_owned()),
             days: None,
+            mode: cama_domain::curfew::CurfewMode::Default,
         })
         .expect("seed an always-active curfew window");
 
@@ -4246,6 +4283,7 @@ async fn test_auto_join_blocked_during_active_curfew_window() {
             end_minute: end.minute(),
             timezone: Some("UTC".to_owned()),
             days: None,
+            mode: cama_domain::curfew::CurfewMode::Default,
         })
         .expect("seed an always-active curfew window");
 
@@ -4292,6 +4330,7 @@ async fn test_lobby_creation_blocked_during_active_curfew_window() {
             end_minute: end.minute(),
             timezone: Some("UTC".to_owned()),
             days: None,
+            mode: cama_domain::curfew::CurfewMode::Default,
         })
         .expect("seed an always-active curfew window");
 
@@ -4370,6 +4409,7 @@ async fn test_sword_reaction_join_blocked_during_active_curfew_window() {
             end_minute: end.minute(),
             timezone: Some("UTC".to_owned()),
             days: None,
+            mode: cama_domain::curfew::CurfewMode::Default,
         })
         .expect("seed an always-active curfew window");
 
@@ -4398,25 +4438,36 @@ async fn test_sword_reaction_join_blocked_during_active_curfew_window() {
                 *message_id == lobby_message_id && emoji.name == SWORD_EMOJI && *user_id == 1
             })
     );
-    // The window's name, times, and timezone are private. The public channel
-    // message must stay generic; the specifics go out by DM.
-    let public = &state.sent.last().expect("public curfew rejection").message;
-    assert_eq!(
-        public.response.content,
-        "<@1> ❌ You're inside one of your curfew windows. Check your DMs, or use `/player curfew list`."
-    );
-    let lowered = public.response.content.to_lowercase();
-    assert!(!lowered.contains("sleep"), "window name leaked publicly");
-    assert!(!lowered.contains("utc"), "window timezone leaked publicly");
-
-    let (recipient, direct) = state.direct_messages.last().expect("curfew DM");
-    assert_eq!(*recipient, 1);
+    // Privacy: nothing about the refusal goes into the channel. The reason
+    // (which names the window) reaches the player by DM only.
     assert!(
-        direct.response.content.contains("\"sleep\""),
-        "the DM should name the window: {}",
-        direct.response.content
+        !state.sent.iter().any(|sent| sent
+            .message
+            .response
+            .content
+            .to_lowercase()
+            .contains("curfew")),
+        "a curfew refusal must never be posted publicly: {:?}",
+        state
+            .sent
+            .iter()
+            .map(|sent| &sent.message.response.content)
+            .collect::<Vec<_>>()
     );
-    assert!(direct.response.content.contains("/player curfew remove"));
+    let (dm_user, dm) = state
+        .direct_messages
+        .last()
+        .expect("private curfew rejection");
+    assert_eq!(*dm_user, 1);
+    assert!(
+        dm.response.content.to_lowercase().contains("sleep"),
+        "{}",
+        dm.response.content
+    );
+    assert!(
+        dm.response.components.is_empty(),
+        "a hard block offers no buttons"
+    );
 }
 
 #[tokio::test]
@@ -4513,5 +4564,615 @@ async fn failed_readycheck_publication_releases_the_permit_for_the_next_attempt(
     assert!(
         !second_replies.iter().any(|content| content == in_flight),
         "the permit must be released after the failed run, got {second_replies:?}"
+    );
+}
+
+// ---- curfew confirmation (informational mode) ----------------------------
+
+fn seed_active_window(
+    database: &NamedTempFile,
+    discord_id: i64,
+    mode: cama_domain::curfew::CurfewMode,
+) {
+    let now = chrono::Utc::now();
+    let start = now - chrono::Duration::minutes(30);
+    let end = now + chrono::Duration::minutes(30);
+    CurfewRepository::new(database.path())
+        .add_or_replace(&CurfewWindow {
+            discord_id,
+            guild_id: 42,
+            name: "sleep".to_owned(),
+            start_hour: start.hour(),
+            start_minute: start.minute(),
+            end_hour: end.hour(),
+            end_minute: end.minute(),
+            timezone: Some("UTC".to_owned()),
+            days: None,
+            mode,
+        })
+        .expect("seed an always-active curfew window");
+}
+
+fn button_labels(response: &InteractionResponse) -> Vec<&str> {
+    response
+        .components
+        .iter()
+        .flat_map(|row| row.buttons.iter())
+        .map(|button| button.label.as_str())
+        .collect()
+}
+
+fn button_ids(response: &InteractionResponse) -> Vec<&str> {
+    response
+        .components
+        .iter()
+        .flat_map(|row| row.buttons.iter())
+        .map(|button| button.custom_id.as_str())
+        .collect()
+}
+
+/// Click a button on a curfew prompt. `guild_id` is `None` for a prompt that
+/// arrived by DM, where Discord sends no guild on the interaction.
+async fn dispatch_component(
+    provider: &LobbyRegistrationProvider,
+    custom_id: &str,
+    user_id: u64,
+    display_name: &str,
+    guild_id: Option<u64>,
+) -> Arc<CapturingResponder> {
+    let responder = Arc::new(CapturingResponder::default());
+    registry_for(provider)
+        .component_handler(custom_id)
+        .expect("registered curfew confirmation route")
+        .handle(
+            InteractionRequest::Component {
+                interaction_id: user_id + 1_000,
+                custom_id: custom_id.to_owned(),
+                user_id,
+                user_display_name: display_name.to_owned(),
+                guild_id,
+                channel_id: guild_id.map(|_| 9),
+                member_permissions: None,
+                values: Vec::new(),
+            },
+            responder.clone(),
+        )
+        .await
+        .expect("dispatch curfew confirmation");
+    responder
+}
+
+#[tokio::test]
+async fn test_lobby_registers_the_curfew_confirmation_component_route() {
+    let database = database_with_players(&[]);
+    let provider = provider_for(&database, Arc::new(RecordingTransport::default()));
+    let registry = registry_for(&provider);
+    assert_eq!(registry.component_routes().len(), 1);
+    assert_eq!(
+        registry.component_routes()[0].custom_id_prefix,
+        "lobby_curfew:"
+    );
+}
+
+#[tokio::test]
+async fn test_informational_mode_join_asks_before_seating() {
+    let database = database_with_players(&[(99, "Creator"), (1, "Sleepy")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        99,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    seed_active_window(&database, 1, cama_domain::curfew::CurfewMode::Informational);
+
+    let slash = dispatch_command(
+        &provider,
+        "join",
+        1,
+        "Sleepy",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    {
+        let captured = slash.captured.lock().expect("slash responses");
+        let response = captured.followups.last().expect("confirmation prompt");
+        assert!(
+            response.ephemeral,
+            "the prompt names the window, so it's private"
+        );
+        assert!(
+            response.content.to_lowercase().contains("sleep"),
+            "{}",
+            response.content
+        );
+        assert!(response.content.contains("anyway?"), "{}", response.content);
+        assert!(
+            !response.content.contains("Jopacoin"),
+            "{}",
+            response.content
+        );
+        assert_eq!(button_labels(response), vec!["Join anyway", "No thanks"]);
+        assert_eq!(
+            button_ids(response),
+            vec!["lobby_curfew:yes:42:open", "lobby_curfew:no:42:open"]
+        );
+    }
+    assert!(
+        !lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(1)),
+        "asking must not seat the player"
+    );
+    // Nothing public: no thread join line, no channel message about it.
+    let state = transport.state.lock().expect("transport state");
+    assert!(
+        !state
+            .sent
+            .iter()
+            .any(|sent| sent.message.response.content.contains("<@1>")),
+        "{:?}",
+        state
+            .sent
+            .iter()
+            .map(|sent| &sent.message.response.content)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn test_curfew_confirmation_yes_joins_through_the_shared_path() {
+    let database = database_with_players(&[(99, "Creator"), (1, "Sleepy")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        99,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    seed_active_window(&database, 1, cama_domain::curfew::CurfewMode::Informational);
+    dispatch_command(
+        &provider,
+        "join",
+        1,
+        "Sleepy",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    let click =
+        dispatch_component(&provider, "lobby_curfew:yes:42:open", 1, "Sleepy", Some(42)).await;
+
+    {
+        let captured = click.captured.lock().expect("component responses");
+        assert_eq!(
+            captured.deferred,
+            vec![true],
+            "acknowledge before the join work"
+        );
+        let response = captured.updates.last().expect("prompt edited in place");
+        assert!(
+            response.content.starts_with("✅ Joined"),
+            "{}",
+            response.content
+        );
+        assert!(response.components.is_empty());
+    }
+    assert!(
+        lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(1))
+    );
+    // The seat is announced exactly like any other join: the thread's
+    // mention line, nothing about curfew.
+    {
+        let state = transport.state.lock().expect("transport state");
+        let join_line = state
+            .sent
+            .iter()
+            .rev()
+            .find(|sent| sent.message.response.content.contains("<@1>"))
+            .expect("thread join line");
+        assert_eq!(join_line.message.response.content, "✅ <@1> joined.");
+        assert!(!state.sent.iter().any(|sent| {
+            sent.message
+                .response
+                .content
+                .to_lowercase()
+                .contains("curfew")
+        }));
+    }
+
+    // Having said yes, a plain /join later today doesn't ask again.
+    dispatch_command(&provider, "leave", 1, "Sleepy", Vec::new()).await;
+    let rejoin = dispatch_command(
+        &provider,
+        "join",
+        1,
+        "Sleepy",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let captured = rejoin.captured.lock().expect("slash responses");
+    let response = captured.followups.last().expect("rejoin response");
+    assert!(
+        response.content.starts_with("✅ Joined"),
+        "{}",
+        response.content
+    );
+    assert!(response.components.is_empty());
+}
+
+#[tokio::test]
+async fn test_curfew_confirmation_no_leaves_the_player_out() {
+    let database = database_with_players(&[(99, "Creator"), (1, "Sleepy")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        99,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    seed_active_window(&database, 1, cama_domain::curfew::CurfewMode::Informational);
+
+    let click =
+        dispatch_component(&provider, "lobby_curfew:no:42:open", 1, "Sleepy", Some(42)).await;
+
+    {
+        let captured = click.captured.lock().expect("component responses");
+        let response = captured.updates.last().expect("prompt edited in place");
+        assert!(
+            response.content.contains("Staying out"),
+            "{}",
+            response.content
+        );
+        assert!(response.components.is_empty());
+    }
+    assert!(
+        !lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(1))
+    );
+    // Saying no records nothing: the next join asks again.
+    let slash = dispatch_command(
+        &provider,
+        "join",
+        1,
+        "Sleepy",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let captured = slash.captured.lock().expect("slash responses");
+    let response = captured.followups.last().expect("prompt again");
+    assert_eq!(button_labels(response), vec!["Join anyway", "No thanks"]);
+}
+
+#[tokio::test]
+async fn test_curfew_confirmation_rejects_a_malformed_custom_id() {
+    let database = database_with_players(&[(1, "Sleepy")]);
+    let provider = provider_for(&database, Arc::new(RecordingTransport::default()));
+    let responder = Arc::new(CapturingResponder::default());
+    let result = registry_for(&provider)
+        .component_handler("lobby_curfew:maybe:42:open")
+        .expect("route matches by prefix")
+        .handle(
+            InteractionRequest::Component {
+                interaction_id: 1,
+                custom_id: "lobby_curfew:maybe:42:open".to_owned(),
+                user_id: 1,
+                user_display_name: "Sleepy".to_owned(),
+                guild_id: Some(42),
+                channel_id: Some(9),
+                member_permissions: None,
+                values: Vec::new(),
+            },
+            responder.clone(),
+        )
+        .await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_sword_reaction_join_asks_privately_for_a_confirmation_window() {
+    let database = database_with_players(&[(99, "Creator"), (1, "Sleepy")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        99,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let lobby_message_id = to_u64(
+        lobby_snapshot(&provider, LobbyKind::Open)
+            .message_ids
+            .message_id
+            .expect("lobby message")
+            .0,
+    )
+    .expect("Discord message id");
+    seed_active_window(&database, 1, cama_domain::curfew::CurfewMode::Informational);
+
+    provider
+        .raw_reaction_observer()
+        .observe(raw_sword(
+            RawReactionKind::Add,
+            lobby_message_id,
+            1,
+            "Sleepy",
+        ))
+        .await
+        .expect("raw curfew prompt");
+
+    assert!(
+        !lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(1))
+    );
+    let dm_custom_id = {
+        let state = transport.state.lock().expect("transport state");
+        assert!(
+            state
+                .removed_reactions
+                .iter()
+                .any(|(_, message_id, emoji, user_id)| {
+                    *message_id == lobby_message_id && emoji.name == SWORD_EMOJI && *user_id == 1
+                }),
+            "the sword comes off until they say yes"
+        );
+        assert!(
+            !state
+                .sent
+                .iter()
+                .any(|sent| sent.message.response.content.contains("<@1>")),
+            "a reaction has no ephemeral reply, so the prompt must not go public: {:?}",
+            state
+                .sent
+                .iter()
+                .map(|sent| &sent.message.response.content)
+                .collect::<Vec<_>>()
+        );
+        let (dm_user, dm) = state.direct_messages.last().expect("private prompt by DM");
+        assert_eq!(*dm_user, 1);
+        assert!(
+            dm.response.content.to_lowercase().contains("sleep"),
+            "{}",
+            dm.response.content
+        );
+        assert_eq!(
+            button_labels(&dm.response),
+            vec!["Join anyway", "No thanks"]
+        );
+        button_ids(&dm.response)[0].to_owned()
+    };
+
+    // The DM's button carries no guild; the scope lives in the custom id.
+    let click = dispatch_component(&provider, &dm_custom_id, 1, "Sleepy", None).await;
+    {
+        let captured = click.captured.lock().expect("component responses");
+        let response = captured.updates.last().expect("DM edited in place");
+        assert!(
+            response.content.starts_with("✅ Joined"),
+            "{}",
+            response.content
+        );
+    }
+    assert!(
+        lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(1))
+    );
+}
+
+#[tokio::test]
+async fn test_lobby_creation_with_a_confirmation_window_creates_then_asks() {
+    let database = database_with_players(&[(1, "Sleepy")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    seed_active_window(&database, 1, cama_domain::curfew::CurfewMode::Informational);
+
+    let slash = dispatch_command(
+        &provider,
+        "lobby",
+        1,
+        "Sleepy",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    {
+        let captured = slash.captured.lock().expect("slash responses");
+        let response = captured.followups.last().expect("created + prompt");
+        assert!(response.ephemeral);
+        assert!(
+            response.content.contains("created!"),
+            "{}",
+            response.content
+        );
+        assert!(response.content.contains("anyway?"), "{}", response.content);
+        assert_eq!(button_labels(response), vec!["Join anyway", "No thanks"]);
+    }
+    let snapshot = lobby_snapshot(&provider, LobbyKind::Open);
+    assert!(
+        !snapshot.players.contains(&AppUserId(1)),
+        "the lobby exists but its creator isn't seated until they say yes"
+    );
+
+    let click =
+        dispatch_component(&provider, "lobby_curfew:yes:42:open", 1, "Sleepy", Some(42)).await;
+    {
+        let captured = click.captured.lock().expect("component responses");
+        let response = captured.updates.last().expect("prompt edited in place");
+        assert!(
+            response.content.starts_with("✅ Joined"),
+            "{}",
+            response.content
+        );
+    }
+    assert!(
+        lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(1))
+    );
+}
+
+#[tokio::test]
+async fn test_lobby_command_with_existing_lobby_asks_and_keeps_the_view_link() {
+    let database = database_with_players(&[(99, "Creator"), (1, "Sleepy")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        99,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    seed_active_window(&database, 1, cama_domain::curfew::CurfewMode::Informational);
+
+    let slash = dispatch_command(
+        &provider,
+        "lobby",
+        1,
+        "Sleepy",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    let captured = slash.captured.lock().expect("slash responses");
+    let response = captured.followups.last().expect("view link + prompt");
+    assert!(
+        response.content.starts_with("[View"),
+        "{}",
+        response.content
+    );
+    assert!(response.content.contains("anyway?"), "{}", response.content);
+    assert_eq!(button_labels(response), vec!["Join anyway", "No thanks"]);
+    assert!(
+        !lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(1))
+    );
+}
+
+#[tokio::test]
+async fn test_curfew_sweep_removes_an_unconfirmed_player_like_a_leave_and_offers_rejoin() {
+    let database = database_with_players(&[(99, "Creator"), (1, "Sleepy")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        99,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    dispatch_command(
+        &provider,
+        "join",
+        1,
+        "Sleepy",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    // The window starts after they were seated.
+    seed_active_window(&database, 1, cama_domain::curfew::CurfewMode::Informational);
+    // The sweep has no interaction to take a display name from, so the
+    // leave line must come from the live guild-member cache (nickname),
+    // not the registered name.
+    transport.set_member(
+        42,
+        DiscordGuildMemberSnapshot {
+            user_id: 1,
+            display_name: "Sleepy Nick".to_owned(),
+            presence: DiscordPresence::Online,
+            in_voice: false,
+            deafened: false,
+            activities: Vec::new(),
+        },
+    );
+
+    let lobby = provider.live_lobby_service();
+    let now = chrono::Utc::now();
+    let kicks = provider.curfew_service().sweep(&lobby, &[42], now);
+    assert_eq!(kicks.len(), 1);
+    assert_eq!(
+        kicks[0].mode,
+        cama_domain::curfew::CurfewMode::Informational
+    );
+    provider
+        .curfew_lobby_display()
+        .publish_curfew_leave(kicks[0].guild_id, kicks[0].lobby_kind, kicks[0].discord_id)
+        .await
+        .expect("publish leave");
+    assert!(
+        !lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(1))
+    );
+    {
+        let state = transport.state.lock().expect("transport state");
+        let leave_line = state
+            .sent
+            .iter()
+            .rev()
+            .find(|sent| sent.message.response.content.contains("left."))
+            .expect("normal leave line");
+        assert_eq!(leave_line.message.response.content, "🚪 Sleepy Nick left.");
+        assert!(!state.sent.iter().any(|sent| {
+            sent.message
+                .response
+                .content
+                .to_lowercase()
+                .contains("curfew")
+        }));
+    }
+
+    // The worker's DM is the same prompt the join surface uses; its yes
+    // button rejoins through the same path and covers the rest of the day.
+    let prompt = curfew_rejoin_prompt(42, LobbyKind::Open, &kicks[0].window_name);
+    assert!(
+        prompt.response.content.contains("Rejoin anyway?"),
+        "{}",
+        prompt.response.content
+    );
+    assert_eq!(
+        button_labels(&prompt.response),
+        vec!["Join anyway", "No thanks"]
+    );
+    let yes = button_ids(&prompt.response)[0].to_owned();
+    let click = dispatch_component(&provider, &yes, 1, "Sleepy", None).await;
+    {
+        let captured = click.captured.lock().expect("component responses");
+        let response = captured.updates.last().expect("DM edited in place");
+        assert!(
+            response.content.starts_with("✅ Joined"),
+            "{}",
+            response.content
+        );
+    }
+    assert!(
+        lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(1))
+    );
+    let again = provider.curfew_service().sweep(&lobby, &[42], now);
+    assert!(
+        again.is_empty(),
+        "a confirmed player is left alone by later sweeps"
     );
 }
