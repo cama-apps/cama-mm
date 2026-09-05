@@ -41,6 +41,8 @@ CREATE TABLE bet_settlement_taxes (
                     CHECK (vanity_tax >= 0),
                 low_priority_tax INTEGER NOT NULL DEFAULT 0
                     CHECK (low_priority_tax >= 0),
+                bankruptcy_penalty INTEGER NOT NULL DEFAULT 0
+                    CHECK (bankruptcy_penalty >= 0),
                 PRIMARY KEY (match_id, guild_id, discord_id)
             );
 

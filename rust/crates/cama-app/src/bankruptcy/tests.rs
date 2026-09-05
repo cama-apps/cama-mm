@@ -36,14 +36,6 @@ impl FakePort {
             .insert((guild_id, discord_id), balance);
         assert!(replaced.is_some(), "fixture player must exist");
     }
-
-    fn balance(&self, discord_id: i64, guild_id: i64) -> Option<i64> {
-        self.data
-            .borrow()
-            .balances
-            .get(&(guild_id, discord_id))
-            .copied()
-    }
 }
 
 impl BankruptcyPort for FakePort {
@@ -181,49 +173,6 @@ impl BankruptcyPort for FakePort {
         }
         Ok(remaining)
     }
-
-    fn award_winners_atomic(
-        &self,
-        request: AtomicAwardRequest<'_>,
-    ) -> Result<Vec<AwardReceipt>, BankruptcyPortError> {
-        let guild_id = Self::guild(request.guild_id);
-        let mut working = self.data.borrow().clone();
-        let mut receipts = Vec::with_capacity(request.discord_ids.len());
-        for discord_id in request.discord_ids {
-            let key = (guild_id, *discord_id);
-            let balance = working.balances.get(&key).copied().ok_or_else(|| {
-                BankruptcyPortError::Backend(format!("missing player {discord_id}"))
-            })?;
-            let penalty_before = working
-                .states
-                .get(&key)
-                .map_or(0, |state| state.penalty_games_remaining);
-            let penalty = calculate_penalty(
-                request.gross_reward,
-                penalty_before,
-                request.penalty_kept_rate,
-            );
-            let balance_after = balance.saturating_add(penalty.penalized);
-            working.balances.insert(key, balance_after);
-            let penalty_games_remaining = if request.decrement_penalty && penalty_before > 0 {
-                let state = working.states.get_mut(&key).expect("penalty state exists");
-                state.penalty_games_remaining = state.penalty_games_remaining.saturating_sub(1);
-                state.penalty_games_remaining
-            } else {
-                penalty_before
-            };
-            receipts.push(AwardReceipt {
-                discord_id: *discord_id,
-                gross: request.gross_reward,
-                net: penalty.penalized,
-                bankruptcy_penalty: penalty.penalty_applied,
-                balance_after,
-                penalty_games_remaining,
-            });
-        }
-        *self.data.borrow_mut() = working;
-        Ok(receipts)
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -261,7 +210,7 @@ fn bankruptcy_policy() -> BankruptcyPolicy {
         fresh_start_balance: 3,
         cooldown_seconds: 604_800,
         penalty_games: 5,
-        penalty_kept_rate: 0.5,
+        penalty_rate_per_game: 0.1,
     }
 }
 
@@ -391,80 +340,6 @@ fn test_no_penalty_without_bankruptcy() {
             penalized: 10,
             penalty_applied: 0,
         }
-    );
-}
-
-#[test]
-fn test_win_bonus_applies_bankruptcy_penalty() {
-    let harness = Harness::new();
-    harness.port.add_player(1_001, GUILD, -200);
-    declare(&harness, 1_001);
-
-    let result = harness
-        .service
-        .award_win_bonus(&[1_001], Some(GUILD), 10)
-        .unwrap();
-    assert_eq!(result[&1_001].bankruptcy_penalty, 5);
-    assert_eq!(result[&1_001].net, 5);
-}
-
-#[test]
-fn test_final_penalty_win_is_still_penalized() {
-    let mut policy = bankruptcy_policy();
-    policy.penalty_games = 1;
-    let harness = Harness::with_policy(policy);
-    harness.port.add_player(1_001, GUILD, -200);
-    declare(&harness, 1_001);
-
-    let result = harness
-        .service
-        .award_win_bonus(&[1_001], Some(GUILD), 10)
-        .unwrap();
-    assert_eq!(result[&1_001].bankruptcy_penalty, 5);
-    assert_eq!(result[&1_001].net, 5);
-    assert_eq!(result[&1_001].penalty_games_remaining, 0);
-    assert_eq!(harness.port.balance(1_001, GUILD), Some(8));
-}
-
-#[test]
-fn test_participation_does_not_decrement_penalty() {
-    let harness = Harness::new();
-    harness.port.add_player(1_001, GUILD, -200);
-    declare(&harness, 1_001);
-
-    let result = harness
-        .service
-        .award_participation(&[1_001], Some(GUILD), 10)
-        .unwrap();
-    assert_eq!(result[&1_001].bankruptcy_penalty, 5);
-    assert_eq!(result[&1_001].penalty_games_remaining, 5);
-    assert_eq!(
-        harness
-            .service
-            .get_state(1_001, Some(GUILD))
-            .unwrap()
-            .penalty_games_remaining,
-        5
-    );
-}
-
-#[test]
-fn test_win_bonus_decrements_penalty() {
-    let harness = Harness::new();
-    harness.port.add_player(1_001, GUILD, -200);
-    declare(&harness, 1_001);
-
-    harness
-        .service
-        .award_win_bonus(&[1_001], Some(GUILD), 10)
-        .unwrap();
-    assert_eq!(
-        harness
-            .service
-            .get_state(1_001, Some(GUILD))
-            .unwrap()
-            .penalty_games_remaining,
-        4
     );
 }
 
@@ -645,10 +520,11 @@ fn test_bankruptcy_debuff_three_wins_clear_penalty() {
 }
 
 #[test]
-fn test_bankruptcy_debuff_rate_keeps_three_quarters() {
+fn test_bankruptcy_debuff_default_rate_withholds_five_percent_per_game() {
     let harness = debuff_harness();
     harness.port.add_player(5_003, GUILD, -50);
     declare(&harness, 5_003);
+    // Three outstanding games at the default 5% per game withhold 15%.
     assert_eq!(
         harness
             .service
@@ -656,8 +532,8 @@ fn test_bankruptcy_debuff_rate_keeps_three_quarters() {
             .unwrap(),
         PenaltyResult {
             original: 100,
-            penalized: 75,
-            penalty_applied: 25,
+            penalized: 85,
+            penalty_applied: 15,
         }
     );
 }
@@ -735,4 +611,58 @@ fn test_bankruptcy_debuff_trivia_reads_without_clearing_penalty() {
             .penalty_games_remaining,
         3
     );
+}
+
+#[test]
+fn test_penalty_scales_with_games_remaining() {
+    let harness = Harness::new();
+    harness.port.add_player(1_001, GUILD, -300);
+    // The harness policy withholds 10% per outstanding game, starting at five.
+    declare(&harness, 1_001);
+    let full = harness
+        .service
+        .apply_penalty_to_winnings(1_001, 12, Some(GUILD))
+        .unwrap();
+    assert_eq!(full.penalty_applied, 6);
+
+    harness
+        .port
+        .decrement_penalty_games(1_001, Some(GUILD))
+        .unwrap();
+    let four_left = harness
+        .service
+        .apply_penalty_to_winnings(1_001, 12, Some(GUILD))
+        .unwrap();
+    assert_eq!(four_left.penalty_applied, 4);
+
+    for _ in 0..3 {
+        harness
+            .port
+            .decrement_penalty_games(1_001, Some(GUILD))
+            .unwrap();
+    }
+    let one_left = harness
+        .service
+        .apply_penalty_to_winnings(1_001, 12, Some(GUILD))
+        .unwrap();
+    assert_eq!(
+        one_left,
+        PenaltyResult {
+            original: 12,
+            penalized: 11,
+            penalty_applied: 1,
+        }
+    );
+}
+
+#[test]
+fn test_calculate_penalty_scales_linearly_and_caps_at_full_withholding() {
+    // 5% per outstanding game: 1 -> 5%, 3 -> 15%, 6 -> 30%, 20+ -> 100%.
+    assert_eq!(calculate_penalty(120, 1, 0.05).penalty_applied, 6);
+    assert_eq!(calculate_penalty(120, 2, 0.05).penalty_applied, 12);
+    assert_eq!(calculate_penalty(120, 3, 0.05).penalty_applied, 18);
+    assert_eq!(calculate_penalty(120, 6, 0.05).penalty_applied, 36);
+    assert_eq!(calculate_penalty(120, 20, 0.05).penalty_applied, 120);
+    assert_eq!(calculate_penalty(120, 40, 0.05).penalty_applied, 120);
+    assert_eq!(calculate_penalty(120, 0, 0.05).penalty_applied, 0);
 }

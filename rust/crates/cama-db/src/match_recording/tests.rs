@@ -1838,7 +1838,8 @@ fn canonical_migrated_sqlite_income_order_and_match_marker_match_python() {
         gross: 100,
         garnishment_rate: 0.5,
         apply_bankruptcy_penalty: true,
-        bankruptcy_kept_rate: 0.75,
+        // Two outstanding games at 12.5% each withhold 25% of the net.
+        bankruptcy_penalty_rate_per_game: 0.125,
         vanity_tax_rate: 0.10,
         low_priority_tax_rate: 0.0,
         decrement_bankruptcy_penalty: true,
@@ -1977,7 +1978,8 @@ fn low_priority_tax_never_withholds_more_than_the_profit_basis() {
             Some(GUILD),
             &[IncomeAwardRequest {
                 apply_bankruptcy_penalty: true,
-                bankruptcy_kept_rate: 0.5,
+                // Two outstanding games at 25% each withhold half the basis.
+                bankruptcy_penalty_rate_per_game: 0.25,
                 vanity_tax_rate: 0.40,
                 low_priority_tax_rate: 0.25,
                 related_type: Some("match_win_bonus"),
@@ -2155,7 +2157,7 @@ fn penalty_base_uses_live_positive_balance_without_stale_garnishment_peek() {
         .execute(
             "INSERT INTO bankruptcy_state(
                  discord_id,guild_id,last_bankruptcy_at,penalty_games_remaining,bankruptcy_count
-             ) VALUES (?1,?2,0,3,1)",
+             ) VALUES (?1,?2,0,2,1)",
             params![70_111, GUILD],
         )
         .expect("positive penalty state");
@@ -2166,7 +2168,8 @@ fn penalty_base_uses_live_positive_balance_without_stale_garnishment_peek() {
             &[IncomeAwardRequest {
                 garnishment_rate: 0.5,
                 apply_bankruptcy_penalty: true,
-                bankruptcy_kept_rate: 0.5,
+                // Two outstanding games at 25% each withhold half the net.
+                bankruptcy_penalty_rate_per_game: 0.25,
                 ..IncomeAwardRequest::ordinary(70_111, 10, "match_participation")
             }],
         )
@@ -2186,7 +2189,7 @@ fn penalty_base_uses_atomic_garnished_net_while_player_is_in_debt() {
         .execute(
             "INSERT INTO bankruptcy_state(
                  discord_id,guild_id,last_bankruptcy_at,penalty_games_remaining,bankruptcy_count
-             ) VALUES (?1,?2,0,3,1)",
+             ) VALUES (?1,?2,0,2,1)",
             params![70_112, GUILD],
         )
         .expect("debt penalty state");
@@ -2197,7 +2200,8 @@ fn penalty_base_uses_atomic_garnished_net_while_player_is_in_debt() {
             &[IncomeAwardRequest {
                 garnishment_rate: 0.5,
                 apply_bankruptcy_penalty: true,
-                bankruptcy_kept_rate: 0.5,
+                // Two outstanding games at 25% each withhold half the net.
+                bankruptcy_penalty_rate_per_game: 0.25,
                 ..IncomeAwardRequest::ordinary(70_112, 10, "match_participation")
             }],
         )
@@ -2260,7 +2264,7 @@ fn race_fix4_garnishment_runs_before_bankruptcy_penalty() {
         .execute(
             "INSERT INTO bankruptcy_state(
                  discord_id,guild_id,last_bankruptcy_at,penalty_games_remaining,bankruptcy_count
-             ) VALUES (?1,?2,0,3,1)",
+             ) VALUES (?1,?2,0,2,1)",
             params![70_115, GUILD],
         )
         .expect("race ordering bankruptcy");
@@ -2271,7 +2275,8 @@ fn race_fix4_garnishment_runs_before_bankruptcy_penalty() {
             &[IncomeAwardRequest {
                 garnishment_rate: 0.5,
                 apply_bankruptcy_penalty: true,
-                bankruptcy_kept_rate: 0.5,
+                // Two outstanding games at 25% each withhold half the net.
+                bankruptcy_penalty_rate_per_game: 0.25,
                 ..IncomeAwardRequest::ordinary(70_115, 10, "match_win_bonus")
             }],
         )
@@ -2861,4 +2866,146 @@ fn test_house_settlement_leaves_another_pending_matchs_bets_alone() {
         untouched_balance,
         "no payout or loss is booked against the other match's better"
     );
+}
+
+#[test]
+fn bankruptcy_withholding_scales_with_penalty_games_remaining() {
+    const PLAYER: i64 = 70_303;
+    let database = migrated_award_database();
+    let connection = Connection::open(database.path()).expect("open scaled award database");
+    insert_award_player(&connection, PLAYER, 500);
+    connection
+        .execute(
+            "INSERT INTO bankruptcy_state (
+                 discord_id,guild_id,last_bankruptcy_at,
+                 penalty_games_remaining,bankruptcy_count
+             ) VALUES (?1,?2,0,1,1)",
+            params![PLAYER, GUILD],
+        )
+        .expect("insert bankruptcy state");
+    drop(connection);
+    let repository = MatchRecordingRepository::new(database.path());
+    let award = IncomeAwardRequest {
+        apply_bankruptcy_penalty: true,
+        bankruptcy_penalty_rate_per_game: 0.05,
+        ..IncomeAwardRequest::ordinary(PLAYER, 120, "match_participation")
+    };
+
+    // One outstanding game withholds one 5% step of the 120 JC income.
+    let receipts = repository
+        .credit_income_awards_atomic(Some(GUILD), &[award])
+        .expect("credit one-game-left award");
+    assert_eq!(receipts[0].bankruptcy_penalty, 6);
+    assert_eq!(receipts[0].net, 114);
+
+    // Every further outstanding game adds another 5% until the whole
+    // income is withheld at 20 games.
+    for (remaining, penalty) in [(3, 18), (6, 36), (20, 120)] {
+        Connection::open(database.path())
+            .expect("reopen scaled award database")
+            .execute(
+                "UPDATE bankruptcy_state SET penalty_games_remaining=?1
+                 WHERE discord_id=?2 AND guild_id=?3",
+                params![remaining, PLAYER, GUILD],
+            )
+            .expect("extend bankruptcy penalty");
+        let receipts = repository
+            .credit_income_awards_atomic(Some(GUILD), &[award])
+            .expect("credit extended award");
+        assert_eq!(receipts[0].bankruptcy_penalty, penalty, "{remaining} games");
+        assert_eq!(receipts[0].net, 120 - penalty, "{remaining} games");
+    }
+}
+
+#[test]
+fn compensating_a_win_bonus_restores_the_consumed_penalty_game() {
+    const PLAYER: i64 = 70_502;
+    const MATCH_ID: i64 = 954;
+    let database = migrated_award_database();
+    let connection = Connection::open(database.path()).expect("open compensation database");
+    insert_award_player(&connection, PLAYER, 500);
+    connection
+        .execute(
+            "INSERT INTO bankruptcy_state (
+                 discord_id,guild_id,last_bankruptcy_at,
+                 penalty_games_remaining,bankruptcy_count
+             ) VALUES (?1,?2,0,2,1)",
+            params![PLAYER, GUILD],
+        )
+        .expect("insert bankruptcy state");
+    drop(connection);
+    let remaining = || -> i64 {
+        Connection::open(database.path())
+            .expect("reopen compensation database")
+            .query_row(
+                "SELECT penalty_games_remaining FROM bankruptcy_state
+                 WHERE discord_id=?1 AND guild_id=?2",
+                params![PLAYER, GUILD],
+                |row| row.get(0),
+            )
+            .expect("read penalty games")
+    };
+
+    let win = IncomeAwardRequest {
+        apply_bankruptcy_penalty: true,
+        // Two outstanding games at 12.5% each withhold 25% of the bonus.
+        bankruptcy_penalty_rate_per_game: 0.125,
+        decrement_bankruptcy_penalty: true,
+        related_type: Some("match_win_bonus"),
+        related_id: Some(MATCH_ID),
+        exact_once: true,
+        ..IncomeAwardRequest::ordinary(PLAYER, 120, "match_win_bonus")
+    };
+    let repository = MatchRecordingRepository::new(database.path());
+    let credited = repository
+        .credit_income_awards_atomic(Some(GUILD), &[win])
+        .expect("first win bonus");
+    assert_eq!(credited[0].bankruptcy_penalty, 30);
+    assert_eq!(remaining(), 1);
+
+    repository
+        .compensate_income_awards_atomic(
+            Some(GUILD),
+            &[IncomeAwardCompensation {
+                discord_id: PLAYER,
+                source: "match_win_bonus",
+                related_id: MATCH_ID,
+                amount: credited[0].balance_delta,
+            }],
+        )
+        .expect("compensate the win bonus");
+    assert_eq!(remaining(), 2, "the rollback hands the consumed game back");
+
+    let reapplied = repository
+        .credit_income_awards_atomic(Some(GUILD), &[win])
+        .expect("retry the win bonus");
+    assert!(reapplied[0].applied);
+    assert_eq!(
+        reapplied[0].bankruptcy_penalty, 30,
+        "same share as the first attempt"
+    );
+    assert_eq!(remaining(), 1, "the retry decrements exactly once");
+
+    // A phase that never consumed a game leaves the counter alone.
+    let participation = IncomeAwardRequest {
+        related_type: Some("match_participation"),
+        related_id: Some(MATCH_ID),
+        exact_once: true,
+        ..IncomeAwardRequest::ordinary(PLAYER, 10, "match_participation")
+    };
+    let paid = repository
+        .credit_income_awards_atomic(Some(GUILD), &[participation])
+        .expect("participation");
+    repository
+        .compensate_income_awards_atomic(
+            Some(GUILD),
+            &[IncomeAwardCompensation {
+                discord_id: PLAYER,
+                source: "match_participation",
+                related_id: MATCH_ID,
+                amount: paid[0].balance_delta,
+            }],
+        )
+        .expect("compensate participation");
+    assert_eq!(remaining(), 1);
 }

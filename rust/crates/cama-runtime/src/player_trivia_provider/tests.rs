@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use cama_app::service_container::{ServiceContainer, ServiceContainerOptions};
 use chrono::{Days, Utc};
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
@@ -57,6 +58,18 @@ impl Fixture {
 
     fn repository(&self) -> db::PlayerTriviaRepository {
         db::PlayerTriviaRepository::new(self.database.path())
+    }
+
+    fn vanity_tax(&self) -> Arc<PersistentVanityTaxService> {
+        let mut container =
+            ServiceContainer::new(self.database.path(), ServiceContainerOptions::default());
+        container.initialize();
+        Arc::clone(
+            &container
+                .components()
+                .expect("resolve service container")
+                .vanity_tax_service,
+        )
     }
 
     fn balance(&self, user_id: i64) -> i64 {
@@ -260,7 +273,12 @@ fn provider(
     config: &ApplicationConfig,
     discord: Arc<FakeDiscord>,
 ) -> PlayerTriviaRegistrationProvider {
-    PlayerTriviaRegistrationProvider::new(fixture.database.path(), config, discord)
+    PlayerTriviaRegistrationProvider::new(
+        fixture.database.path(),
+        config,
+        fixture.vanity_tax(),
+        discord,
+    )
 }
 
 fn registry(provider: &PlayerTriviaRegistrationProvider) -> Registry {
@@ -893,6 +911,64 @@ async fn test_daily_event_failure_does_not_strand_player_trivia_session() {
     assert_eq!(session.jc_earned, 1);
 }
 
+#[tokio::test]
+async fn bankruptcy_penalty_and_low_priority_tax_are_withheld_from_the_answer_reward() {
+    let fixture = Fixture::migrated();
+    fixture
+        .connection()
+        .execute(
+            "INSERT INTO bankruptcy_state (guild_id, discord_id, penalty_games_remaining,
+                 bankruptcy_count) VALUES (?1, ?2, 3, 1)",
+            params![GUILD, USER],
+        )
+        .expect("seed bankruptcy penalty");
+    fixture
+        .connection()
+        .execute(
+            "INSERT INTO low_priority_state (
+                 discord_id, guild_id, wins_required, wins_remaining, active, set_by
+             ) VALUES (?1, ?2, 3, 3, 1, 901)",
+            params![USER, GUILD],
+        )
+        .expect("seed active low priority");
+    let session_id = start_manual(&fixture, 1);
+    // Three outstanding penalty games at the default 5% per game withhold 15%,
+    // and the low priority tax takes another 10% of the same 20 JC basis.
+    let config = config(
+        fixture.database.path(),
+        &[
+            ("PLAYER_TRIVIA_REWARD_PER_CORRECT", "20"),
+            ("LOW_PRIORITY_PROFIT_TAX_RATE", "0.1"),
+        ],
+    );
+    let provider = provider(&fixture, &config, discord());
+    let responder = Arc::new(RecordingResponder::default());
+    registry(&provider)
+        .component_handler("player_trivia:")
+        .unwrap()
+        .handle(
+            component(format!("player_trivia:{session_id}:1:1"), USER),
+            responder.clone(),
+        )
+        .await
+        .expect("withheld answer");
+    let session = fixture
+        .repository()
+        .get_session(session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(session.jc_earned, 15);
+    assert_eq!(fixture.balance(USER), 18);
+    let description = responder.captured.lock().unwrap().updates[0].embeds[0]
+        .description
+        .clone()
+        .expect("answer result");
+    assert!(
+        description.contains("**+15** ") && description.contains("(5 JC withheld.)"),
+        "{description}"
+    );
+}
+
 #[test]
 fn test_missing_bot_or_player_trivia_event_service_is_neutral() {
     assert_eq!(scale_minigame_jc_delta(8.0, 1.0), 8);
@@ -994,7 +1070,7 @@ async fn test_timeout_finishes_run_and_keeps_daily_cooldown() {
 
 #[test]
 fn wrong_answer_response_continues_with_exact_previous_result_copy() {
-    let previous = answer_result(&question(), false, 0);
+    let previous = answer_result(&question(), false, 0, 0);
     assert!(previous.starts_with("❌ Not this time. The answer was **B. Bravo**."));
     assert!(previous.contains("Computed from recorded inhouse matches."));
 }

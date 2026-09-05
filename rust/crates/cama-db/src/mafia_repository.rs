@@ -16,6 +16,9 @@ use rusqlite::{
 };
 use thiserror::Error;
 
+use cama_db_core::profit_deductions::penalty_games_remaining;
+use cama_domain::bankruptcy::BankruptcyPenaltyPolicy;
+
 use crate::open_runtime_connection;
 
 const SIGNUP_BUCKET: &str = "pending";
@@ -1296,7 +1299,7 @@ impl MafiaRepository {
         day_number: Option<i64>,
         lynched_was_mafia: bool,
         alive_count: i64,
-        bankruptcy_penalty_rate: Option<f64>,
+        bankruptcy_penalty: Option<BankruptcyPenaltyPolicy>,
         vanity_tax_rate: f64,
         vanity_taxable_ids: &BTreeSet<i64>,
         low_priority_tax_rate: f64,
@@ -1315,7 +1318,7 @@ impl MafiaRepository {
             day_number,
             lynched_was_mafia,
             alive_count,
-            bankruptcy_penalty_rate,
+            bankruptcy_penalty,
             vanity_tax_rate,
             vanity_taxable_ids,
             low_priority_tax_rate,
@@ -1344,7 +1347,7 @@ impl MafiaRepository {
         day_number: Option<i64>,
         lynched_was_mafia: bool,
         alive_count: i64,
-        bankruptcy_penalty_rate: Option<f64>,
+        bankruptcy_penalty: Option<BankruptcyPenaltyPolicy>,
         vanity_tax_rate: f64,
         vanity_taxable_ids: &BTreeSet<i64>,
         low_priority_tax_rate: f64,
@@ -1367,7 +1370,7 @@ impl MafiaRepository {
             day_number,
             lynched_was_mafia,
             alive_count,
-            bankruptcy_penalty_rate,
+            bankruptcy_penalty,
             vanity_tax_rate,
             vanity_taxable_ids,
             low_priority_tax_rate,
@@ -1391,7 +1394,7 @@ impl MafiaRepository {
         day_number: Option<i64>,
         lynched_was_mafia: bool,
         alive_count: i64,
-        bankruptcy_penalty_rate: Option<f64>,
+        bankruptcy_penalty: Option<BankruptcyPenaltyPolicy>,
         vanity_tax_rate: f64,
         vanity_taxable_ids: &BTreeSet<i64>,
         low_priority_tax_rate: f64,
@@ -1504,8 +1507,7 @@ impl MafiaRepository {
         // Python's penalty uses the configured kept-rate and durable
         // bankruptcy_state. Keep the same fail-soft behavior when that table
         // has no active penalty row.
-        if let Some(kept_rate) = bankruptcy_penalty_rate {
-            let kept_rate = kept_rate.clamp(0.0, 1.0);
+        if let Some(policy) = bankruptcy_penalty {
             set_ledger_context_with_metadata(
                 &transaction,
                 "mafia_bankruptcy_penalty",
@@ -1524,20 +1526,11 @@ impl MafiaRepository {
                     if profit == 0 {
                         continue;
                     }
-                    let active = transaction
-                        .query_row(
-                            "SELECT COALESCE(penalty_games_remaining,0) FROM bankruptcy_state
-                             WHERE discord_id=?1 AND guild_id=?2",
-                            params![discord_id, guild_id],
-                            |row| row.get::<_, i64>(0),
-                        )
-                        .optional()?
-                        .unwrap_or(0)
-                        > 0;
-                    if !active {
+                    let remaining = penalty_games_remaining(&transaction, guild_id, discord_id)?;
+                    if remaining <= 0 {
                         continue;
                     }
-                    let penalty = ((profit as f64) * (1.0 - kept_rate)) as i64;
+                    let penalty = ((profit as f64) * policy.withheld_rate(remaining)) as i64;
                     if penalty <= 0 {
                         continue;
                     }

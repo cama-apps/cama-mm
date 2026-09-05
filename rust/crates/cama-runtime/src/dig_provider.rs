@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use cama_app::ai_services::AIService;
+use cama_app::bankruptcy::BankruptcyPolicy;
 use cama_app::boss_duel::RiskTier;
 use cama_app::boss_multi_tier::{BossServiceError, EntropyPort, PausedBossDuel, ResolvedFight};
 use cama_app::dig_abandon_runtime::DigAbandonRuntimeService;
@@ -75,6 +76,7 @@ use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResol
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
+use crate::profit_deductions::ProfitDeductionSource;
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
     InteractionAcknowledgementPolicy, InteractionActionRow, InteractionAttachment,
@@ -438,7 +440,7 @@ impl DigRegistrationProvider {
                     .unwrap_or_default(),
                 },
             )
-            .with_bankruptcy_penalty_rate(config.values.bankruptcy_penalty_rate)
+            .with_bankruptcy_penalty_rate_per_game(config.values.bankruptcy_penalty_rate_per_game)
             .with_pet_decay_per_day(config.values.pet_hunger_decay_per_day);
         let mut neon = DigNeonService::new(
             SeededDigNeonRandom::new(fastrand::u64(..)),
@@ -473,7 +475,7 @@ impl DigRegistrationProvider {
         Ok(Self {
             handler: Arc::new(DigInteractionHandler {
                 state: Arc::new(DigRuntimeState {
-                    database_path: path,
+                    database_path: path.clone(),
                     player_names: Arc::new(DiscordIdPlayerNameResolver),
                     configured_channel_id: config.channels.dig,
                     admin_user_ids: config.identities.admin_user_ids.iter().copied().collect(),
@@ -484,8 +486,19 @@ impl DigRegistrationProvider {
                     media,
                     flavor,
                     flavor_data,
+                    profit_deductions: ProfitDeductionSource::from_config(
+                        config,
+                        path,
+                        vanity_tax.clone(),
+                    ),
                     vanity_tax,
                     low_priority_tax_rate: config.values.low_priority_profit_tax_rate,
+                    bankruptcy_policy: BankruptcyPolicy {
+                        fresh_start_balance: config.values.bankruptcy_fresh_start_balance,
+                        cooldown_seconds: config.values.bankruptcy_cooldown_seconds,
+                        penalty_games: config.values.bankruptcy_penalty_games,
+                        penalty_rate_per_game: config.values.bankruptcy_penalty_rate_per_game,
+                    },
                     neon: Mutex::new(neon),
                     boss_entropy: RuntimeBossEntropy::default(),
                     view_nonce: format!("{:016x}", fastrand::u64(..)),
@@ -700,6 +713,11 @@ struct DigRuntimeState {
     /// Rate applied to Dig JC profit for players in active low priority. The
     /// roster itself is persisted, so no gateway state is cached here.
     low_priority_tax_rate: f64,
+    /// Withholding for `/dig help` and `/dig sabotage` payouts. Resolved on
+    /// the blocking thread per guild; an unreadable roster fails closed.
+    profit_deductions: ProfitDeductionSource,
+    /// Bankruptcy penalty rate and length applied to boss winnings.
+    bankruptcy_policy: BankruptcyPolicy,
     neon: Mutex<DigNeonService<SeededDigNeonRandom, RuntimeDigNeonCooldown>>,
     boss_entropy: RuntimeBossEntropy,
     bonus_dispatcher: Mutex<Option<Arc<dyn DigBonusDispatchPort>>>,
@@ -783,11 +801,14 @@ fn configured_boss_runtime(
     pet_hunger_decay_per_day: i64,
     vanity_tax: Option<Arc<PersistentVanityTaxService>>,
     low_priority_tax_rate: f64,
+    bankruptcy_policy: BankruptcyPolicy,
 ) -> DigBossRuntimeService {
     let low_priority_tax = Arc::new(SqliteDigLowPriorityTax::new(&path, low_priority_tax_rate));
-    let service =
-        DigBossRuntimeService::sqlite(DigBossRuntimeConfig::new(path, pet_hunger_decay_per_day))
-            .with_low_priority_tax(low_priority_tax);
+    let service = DigBossRuntimeService::sqlite(
+        DigBossRuntimeConfig::new(path, pet_hunger_decay_per_day)
+            .with_bankruptcy_policy(bankruptcy_policy),
+    )
+    .with_low_priority_tax(low_priority_tax);
     if let Some(vanity_tax) = vanity_tax {
         service.with_vanity_tax(vanity_tax)
     } else {
@@ -2688,11 +2709,13 @@ impl DigInteractionHandler {
                     .await;
                 }
             };
-            let path = self.state.database_path.clone();
+            let state = Arc::clone(&self.state);
             let target_id = view.target_id;
             let target_name = view.target_name;
             let result = blocking(move || {
-                Ok(DigSocialRuntimeService::sqlite(&path)
+                let deductions = state.profit_deductions.resolve(guild_id)?;
+                Ok(DigSocialRuntimeService::sqlite(&state.database_path)
+                    .with_profit_deductions(deductions)
                     .sabotage(user_id, target_id, guild_id, now))
             })
             .await?;
@@ -3720,9 +3743,17 @@ impl DigInteractionHandler {
         let decay = self.state.pet_hunger_decay_per_day;
         let vanity_tax = self.state.vanity_tax.clone();
         let low_priority_tax_rate = self.state.low_priority_tax_rate;
+        let bankruptcy_policy = self.state.bankruptcy_policy;
         let entropy = self.state.boss_entropy.clone();
         tokio::task::spawn_blocking(move || {
-            configured_boss_runtime(path, decay, vanity_tax, low_priority_tax_rate).encounter(
+            configured_boss_runtime(
+                path,
+                decay,
+                vanity_tax,
+                low_priority_tax_rate,
+                bankruptcy_policy,
+            )
+            .encounter(
                 DigBossRuntimeRequest {
                     discord_id: user_id,
                     guild_id,
@@ -3763,20 +3794,27 @@ impl DigInteractionHandler {
         let decay = self.state.pet_hunger_decay_per_day;
         let vanity_tax = self.state.vanity_tax.clone();
         let low_priority_tax_rate = self.state.low_priority_tax_rate;
+        let bankruptcy_policy = self.state.bankruptcy_policy;
         let entropy = self.state.boss_entropy.clone();
         blocking(move || {
-            configured_boss_runtime(path, decay, vanity_tax, low_priority_tax_rate)
-                .start(
-                    DigBossRuntimeRequest {
-                        discord_id: user_id,
-                        guild_id,
-                        now,
-                    },
-                    risk_tier,
-                    wager,
-                    entropy,
-                )
-                .map_err(|error| error.to_string())
+            configured_boss_runtime(
+                path,
+                decay,
+                vanity_tax,
+                low_priority_tax_rate,
+                bankruptcy_policy,
+            )
+            .start(
+                DigBossRuntimeRequest {
+                    discord_id: user_id,
+                    guild_id,
+                    now,
+                },
+                risk_tier,
+                wager,
+                entropy,
+            )
+            .map_err(|error| error.to_string())
         })
         .await
     }
@@ -3809,19 +3847,26 @@ impl DigInteractionHandler {
         let decay = self.state.pet_hunger_decay_per_day;
         let vanity_tax = self.state.vanity_tax.clone();
         let low_priority_tax_rate = self.state.low_priority_tax_rate;
+        let bankruptcy_policy = self.state.bankruptcy_policy;
         let entropy = self.state.boss_entropy.clone();
         blocking(move || {
-            configured_boss_runtime(path, decay, vanity_tax, low_priority_tax_rate)
-                .resume(
-                    DigBossRuntimeRequest {
-                        discord_id: user_id,
-                        guild_id,
-                        now,
-                    },
-                    option_index,
-                    entropy,
-                )
-                .map_err(|error| error.to_string())
+            configured_boss_runtime(
+                path,
+                decay,
+                vanity_tax,
+                low_priority_tax_rate,
+                bankruptcy_policy,
+            )
+            .resume(
+                DigBossRuntimeRequest {
+                    discord_id: user_id,
+                    guild_id,
+                    now,
+                },
+                option_index,
+                entropy,
+            )
+            .map_err(|error| error.to_string())
         })
         .await
     }
@@ -3836,18 +3881,25 @@ impl DigInteractionHandler {
         let decay = self.state.pet_hunger_decay_per_day;
         let vanity_tax = self.state.vanity_tax.clone();
         let low_priority_tax_rate = self.state.low_priority_tax_rate;
+        let bankruptcy_policy = self.state.bankruptcy_policy;
         let entropy = self.state.boss_entropy.clone();
         blocking(move || {
-            configured_boss_runtime(path, decay, vanity_tax, low_priority_tax_rate)
-                .scout(
-                    DigBossRuntimeRequest {
-                        discord_id: user_id,
-                        guild_id,
-                        now,
-                    },
-                    entropy,
-                )
-                .map_err(|error| error.to_string())
+            configured_boss_runtime(
+                path,
+                decay,
+                vanity_tax,
+                low_priority_tax_rate,
+                bankruptcy_policy,
+            )
+            .scout(
+                DigBossRuntimeRequest {
+                    discord_id: user_id,
+                    guild_id,
+                    now,
+                },
+                entropy,
+            )
+            .map_err(|error| error.to_string())
         })
         .await
     }
@@ -3862,18 +3914,25 @@ impl DigInteractionHandler {
         let decay = self.state.pet_hunger_decay_per_day;
         let vanity_tax = self.state.vanity_tax.clone();
         let low_priority_tax_rate = self.state.low_priority_tax_rate;
+        let bankruptcy_policy = self.state.bankruptcy_policy;
         let entropy = self.state.boss_entropy.clone();
         blocking(move || {
-            configured_boss_runtime(path, decay, vanity_tax, low_priority_tax_rate)
-                .retreat(
-                    DigBossRuntimeRequest {
-                        discord_id: user_id,
-                        guild_id,
-                        now,
-                    },
-                    entropy,
-                )
-                .map_err(|error| error.to_string())
+            configured_boss_runtime(
+                path,
+                decay,
+                vanity_tax,
+                low_priority_tax_rate,
+                bankruptcy_policy,
+            )
+            .retreat(
+                DigBossRuntimeRequest {
+                    discord_id: user_id,
+                    guild_id,
+                    now,
+                },
+                entropy,
+            )
+            .map_err(|error| error.to_string())
         })
         .await
     }
@@ -3889,10 +3948,17 @@ impl DigInteractionHandler {
         let decay = self.state.pet_hunger_decay_per_day;
         let vanity_tax = self.state.vanity_tax.clone();
         let low_priority_tax_rate = self.state.low_priority_tax_rate;
+        let bankruptcy_policy = self.state.bankruptcy_policy;
         blocking(move || {
-            configured_boss_runtime(path, decay, vanity_tax, low_priority_tax_rate)
-                .cheer(cheerer_id, target_id, guild_id, now)
-                .map_err(|error| error.to_string())
+            configured_boss_runtime(
+                path,
+                decay,
+                vanity_tax,
+                low_priority_tax_rate,
+                bankruptcy_policy,
+            )
+            .cheer(cheerer_id, target_id, guild_id, now)
+            .map_err(|error| error.to_string())
         })
         .await
     }
@@ -5205,10 +5271,13 @@ impl DigInteractionHandler {
         }
         let _ = target_name;
         let target_name = self.render_player_name(target_id, guild_id).await;
-        let path = self.state.database_path.clone();
+        let state = Arc::clone(&self.state);
         let now = unix_now();
         let result = blocking(move || {
-            Ok(DigSocialRuntimeService::sqlite(&path).help(user_id, target_id, guild_id, now))
+            let deductions = state.profit_deductions.resolve(guild_id)?;
+            Ok(DigSocialRuntimeService::sqlite(&state.database_path)
+                .with_profit_deductions(deductions)
+                .help(user_id, target_id, guild_id, now))
         })
         .await?;
         let response = match result {

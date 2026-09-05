@@ -278,7 +278,8 @@ fn test_helltide_tax_precedes_independent_profit_deductions() {
     let mut input = outcome(1, 10);
     input.helltide_tax = 3;
     input.profit_policy = DigProfitPolicy {
-        bankruptcy_keep_basis_points: 7_500,
+        bankruptcy_penalty_bps_per_game: 2_500,
+        bankruptcy_penalty_games_remaining: 1,
         vanity_tax_basis_points: 1_000,
         low_priority_tax_basis_points: 0,
     };
@@ -297,7 +298,8 @@ fn test_mana_yield_tax_precedes_helltide_and_independent_profit_deductions() {
     input.mana_yield_tax = 2;
     input.helltide_tax = 3;
     input.profit_policy = DigProfitPolicy {
-        bankruptcy_keep_basis_points: 7_500,
+        bankruptcy_penalty_bps_per_game: 2_500,
+        bankruptcy_penalty_games_remaining: 1,
         vanity_tax_basis_points: 1_000,
         low_priority_tax_basis_points: 0,
     };
@@ -1122,7 +1124,8 @@ fn test_bankruptcy_debuff_shared_dig_profit_helper() {
     let penalized = apply_jc_profit_policies(
         100,
         DigProfitPolicy {
-            bankruptcy_keep_basis_points: 7_500,
+            bankruptcy_penalty_bps_per_game: 2_500,
+            bankruptcy_penalty_games_remaining: 1,
             vanity_tax_basis_points: 0,
             low_priority_tax_basis_points: 0,
         },
@@ -1145,7 +1148,8 @@ fn test_bankruptcy_debuff_shared_dig_profit_helper() {
         apply_jc_profit_policies(
             0,
             DigProfitPolicy {
-                bankruptcy_keep_basis_points: 7_500,
+                bankruptcy_penalty_bps_per_game: 2_500,
+                bankruptcy_penalty_games_remaining: 1,
                 vanity_tax_basis_points: 0,
                 low_priority_tax_basis_points: 0,
             },
@@ -1160,7 +1164,8 @@ fn test_bankruptcy_debuff_dig_vanity_tax_applies_independently() {
         apply_jc_profit_policies(
             250,
             DigProfitPolicy {
-                bankruptcy_keep_basis_points: 10_000,
+                bankruptcy_penalty_bps_per_game: 0,
+                bankruptcy_penalty_games_remaining: 1,
                 vanity_tax_basis_points: 1_000,
                 low_priority_tax_basis_points: 0,
             },
@@ -1181,7 +1186,8 @@ fn test_low_priority_tax_stacks_additively_on_the_same_profit_basis() {
         apply_jc_profit_policies(
             250,
             DigProfitPolicy {
-                bankruptcy_keep_basis_points: 10_000,
+                bankruptcy_penalty_bps_per_game: 0,
+                bankruptcy_penalty_games_remaining: 1,
                 vanity_tax_basis_points: 1_000,
                 low_priority_tax_basis_points: 1_000,
             },
@@ -1201,7 +1207,8 @@ fn test_combined_withholding_never_exceeds_the_profit_basis() {
     let settlement = apply_jc_profit_policies(
         100,
         DigProfitPolicy {
-            bankruptcy_keep_basis_points: 1_000,
+            bankruptcy_penalty_bps_per_game: 9_000,
+            bankruptcy_penalty_games_remaining: 1,
             vanity_tax_basis_points: 1_000,
             low_priority_tax_basis_points: 1_000,
         },
@@ -1215,7 +1222,8 @@ fn test_combined_withholding_never_exceeds_the_profit_basis() {
 #[test]
 fn test_bankruptcy_debuff_normal_dig_routes_yield_but_first_dig_is_exempt() {
     let policy = DigProfitPolicy {
-        bankruptcy_keep_basis_points: 7_500,
+        bankruptcy_penalty_bps_per_game: 2_500,
+        bankruptcy_penalty_games_remaining: 1,
         vanity_tax_basis_points: 0,
         low_priority_tax_basis_points: 0,
     };
@@ -1251,7 +1259,8 @@ fn test_bankruptcy_debuff_boss_victory_routes_payout_through_policy() {
         5,
         20,
         DigProfitPolicy {
-            bankruptcy_keep_basis_points: 7_500,
+            bankruptcy_penalty_bps_per_game: 2_500,
+            bankruptcy_penalty_games_remaining: 1,
             vanity_tax_basis_points: 0,
             low_priority_tax_basis_points: 0,
         },
@@ -1997,7 +2006,8 @@ fn test_cave_in_scales_combined_positive_reward_once() {
 fn test_pinnacle_reward_applies_edict_to_base_and_wager_profit() {
     let ordinary = resolve_boss(350, 1_000, 250, true, 1_000, 500, 20);
     let policy = DigProfitPolicy {
-        bankruptcy_keep_basis_points: 7_500,
+        bankruptcy_penalty_bps_per_game: 2_500,
+        bankruptcy_penalty_games_remaining: 1,
         vanity_tax_basis_points: 1_000,
         low_priority_tax_basis_points: 0,
     };
@@ -2009,4 +2019,35 @@ fn test_pinnacle_reward_applies_edict_to_base_and_wager_profit() {
     assert_eq!(settled.bankruptcy_penalty, expected.bankruptcy_penalty);
     assert_eq!(settled.vanity_tax, expected.vanity_tax);
     assert_eq!(settled.balance_after, 1_000 + expected.net);
+}
+
+#[test]
+fn bankruptcy_share_scales_with_games_remaining_like_every_other_surface() {
+    let policy = DigProfitPolicy {
+        bankruptcy_penalty_bps_per_game: 500,
+        bankruptcy_penalty_games_remaining: 1,
+        ..DigProfitPolicy::default()
+    };
+    // Every outstanding game withholds a flat 5%, truncated from the f64
+    // product exactly as bets, predictions, and match income do.
+    assert_eq!(
+        apply_jc_profit_policies(30_000, policy).bankruptcy_penalty,
+        (30_000.0 * cama_domain::bankruptcy::withheld_rate(0.05, 1)) as i64
+    );
+    assert_eq!(apply_jc_profit_policies(120, policy).bankruptcy_penalty, 6);
+    // 1 -> 5%, 3 -> 15%, 6 -> 30%, 20+ -> 100%; no games left withholds nothing.
+    for (remaining, expected) in [(0, 0), (3, 18), (6, 36), (20, 120), (40, 120)] {
+        assert_eq!(
+            apply_jc_profit_policies(
+                120,
+                DigProfitPolicy {
+                    bankruptcy_penalty_games_remaining: remaining,
+                    ..policy
+                }
+            )
+            .bankruptcy_penalty,
+            expected,
+            "{remaining} games remaining"
+        );
+    }
 }

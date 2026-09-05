@@ -131,13 +131,13 @@ fn settlement_is_ordered_idempotent_and_ledger_backed() {
     assert_eq!(
         fixture
             .repository
-            .settle_answer(session_id, 2, 2, 7, 30_001)
+            .settle_answer(session_id, 2, 2, 7, 30_001, &ProfitDeductionPolicy::none())
             .expect("stale"),
         None
     );
     let first = fixture
         .repository
-        .settle_answer(session_id, 1, 1, 7, 30_002)
+        .settle_answer(session_id, 1, 1, 7, 30_002, &ProfitDeductionPolicy::none())
         .expect("settle first")
         .expect("accepted");
     assert_eq!(
@@ -145,6 +145,7 @@ fn settlement_is_ordered_idempotent_and_ledger_backed() {
         PlayerTriviaSettlement {
             is_correct: true,
             reward: 7,
+            withheld: 0,
             score: 1,
             jc_earned: 7,
             completed: false,
@@ -154,13 +155,13 @@ fn settlement_is_ordered_idempotent_and_ledger_backed() {
     assert_eq!(
         fixture
             .repository
-            .settle_answer(session_id, 1, 1, 7, 30_003)
+            .settle_answer(session_id, 1, 1, 7, 30_003, &ProfitDeductionPolicy::none())
             .expect("duplicate"),
         None
     );
     let final_answer = fixture
         .repository
-        .settle_answer(session_id, 2, 0, 99, 30_004)
+        .settle_answer(session_id, 2, 0, 99, 30_004, &ProfitDeductionPolicy::none())
         .expect("settle final")
         .expect("accepted");
     assert_eq!(
@@ -168,6 +169,7 @@ fn settlement_is_ordered_idempotent_and_ledger_backed() {
         PlayerTriviaSettlement {
             is_correct: false,
             reward: 0,
+            withheld: 0,
             score: 1,
             jc_earned: 7,
             completed: true,
@@ -210,6 +212,224 @@ fn settlement_is_ordered_idempotent_and_ledger_backed() {
     );
 }
 
+fn deduction_policy<'a>(
+    vanity: &'a BTreeSet<i64>,
+    low_priority: &'a BTreeSet<i64>,
+) -> ProfitDeductionPolicy<'a> {
+    ProfitDeductionPolicy {
+        bankruptcy: Some(cama_domain::bankruptcy::BankruptcyPenaltyPolicy {
+            rate_per_game: 0.05,
+        }),
+        vanity_tax_rate: 0.10,
+        vanity_taxable_ids: vanity,
+        low_priority_tax_rate: 0.25,
+        low_priority_taxable_ids: low_priority,
+    }
+}
+
+#[test]
+fn settlement_withholds_bankruptcy_and_tax_shares_from_the_reward() {
+    let fixture = Fixture::migrated();
+    let connection = fixture.connection();
+    connection
+        .execute(
+            "INSERT INTO bankruptcy_state (guild_id, discord_id, penalty_games_remaining,
+                 bankruptcy_count) VALUES (?1, ?2, 1, 1)",
+            params![GUILD, USER],
+        )
+        .expect("seed bankruptcy penalty");
+    let empty = BTreeSet::new();
+    let roster = BTreeSet::from([USER]);
+
+    // One outstanding penalty game withholds one 5% step of the 120 reward.
+    let session_id = fixture
+        .repository
+        .try_start_session(USER, GUILD, &questions(), 80_000, 3_600, false)
+        .expect("start")
+        .expect("claimed");
+    let first = fixture
+        .repository
+        .settle_answer(
+            session_id,
+            1,
+            1,
+            120,
+            80_001,
+            &deduction_policy(&empty, &empty),
+        )
+        .expect("settle penalized")
+        .expect("accepted");
+    assert_eq!(
+        first,
+        PlayerTriviaSettlement {
+            is_correct: true,
+            reward: 114,
+            withheld: 6,
+            score: 1,
+            jc_earned: 114,
+            completed: false,
+            new_balance: 117,
+        }
+    );
+
+    // Six outstanding games withhold six 5% steps, 30%.
+    connection
+        .execute(
+            "UPDATE bankruptcy_state SET penalty_games_remaining = 6
+             WHERE guild_id = ?1 AND discord_id = ?2",
+            params![GUILD, USER],
+        )
+        .expect("extend penalty");
+    let second = fixture
+        .repository
+        .settle_answer(
+            session_id,
+            2,
+            2,
+            120,
+            80_002,
+            &deduction_policy(&empty, &empty),
+        )
+        .expect("settle extended")
+        .expect("accepted");
+    assert_eq!(
+        (second.reward, second.withheld, second.new_balance),
+        (84, 36, 201)
+    );
+    assert_eq!(second.jc_earned, 198);
+
+    // A vanity-taxable player with no penalty loses the flat vanity share.
+    connection
+        .execute(
+            "UPDATE bankruptcy_state SET penalty_games_remaining = 0
+             WHERE guild_id = ?1 AND discord_id = ?2",
+            params![GUILD, USER],
+        )
+        .expect("clear penalty");
+    let session_id = fixture
+        .repository
+        .try_start_session(USER, GUILD, &questions(), 80_003, 3_600, true)
+        .expect("restart")
+        .expect("claimed");
+    let vanity = fixture
+        .repository
+        .settle_answer(
+            session_id,
+            1,
+            1,
+            120,
+            80_004,
+            &deduction_policy(&roster, &empty),
+        )
+        .expect("settle vanity")
+        .expect("accepted");
+    assert_eq!(
+        (vanity.reward, vanity.withheld, vanity.new_balance),
+        (108, 12, 309)
+    );
+
+    // An unlisted player without a penalty keeps the whole reward.
+    let untaxed = fixture
+        .repository
+        .settle_answer(
+            session_id,
+            2,
+            2,
+            120,
+            80_005,
+            &deduction_policy(&empty, &empty),
+        )
+        .expect("settle untaxed")
+        .expect("accepted");
+    assert_eq!(
+        (untaxed.reward, untaxed.withheld, untaxed.new_balance),
+        (120, 0, 429)
+    );
+
+    // A wrong answer still credits and withholds nothing.
+    let session_id = fixture
+        .repository
+        .try_start_session(USER, GUILD, &questions(), 80_006, 3_600, true)
+        .expect("restart")
+        .expect("claimed");
+    let wrong = fixture
+        .repository
+        .settle_answer(
+            session_id,
+            1,
+            0,
+            120,
+            80_007,
+            &deduction_policy(&roster, &roster),
+        )
+        .expect("settle wrong")
+        .expect("accepted");
+    assert_eq!(
+        (wrong.reward, wrong.withheld, wrong.new_balance),
+        (0, 0, 429)
+    );
+
+    let mut statement = connection
+        .prepare(
+            "SELECT source, reason, delta FROM economy_ledger_entries
+             WHERE account_id = ?1
+               AND source IN ('player_trivia', 'vanity_tax', 'low_priority_tax')
+             ORDER BY rowid",
+        )
+        .expect("prepare ledger");
+    let rows = statement
+        .query_map([USER], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .expect("query ledger")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("ledger rows");
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "player_trivia".to_owned(),
+                "player trivia correct answer".to_owned(),
+                120
+            ),
+            (
+                "player_trivia".to_owned(),
+                "player trivia reward bankruptcy penalty".to_owned(),
+                -6
+            ),
+            (
+                "player_trivia".to_owned(),
+                "player trivia correct answer".to_owned(),
+                120
+            ),
+            (
+                "player_trivia".to_owned(),
+                "player trivia reward bankruptcy penalty".to_owned(),
+                -36
+            ),
+            (
+                "player_trivia".to_owned(),
+                "player trivia correct answer".to_owned(),
+                120
+            ),
+            (
+                "vanity_tax".to_owned(),
+                "vanity tax on JC profit".to_owned(),
+                -12
+            ),
+            (
+                "player_trivia".to_owned(),
+                "player trivia correct answer".to_owned(),
+                120
+            ),
+        ]
+    );
+}
+
 #[test]
 fn cancellation_only_releases_an_unanswered_session() {
     let fixture = Fixture::migrated();
@@ -244,7 +464,7 @@ fn cancellation_only_releases_an_unanswered_session() {
         .expect("claimed");
     fixture
         .repository
-        .settle_answer(second, 1, 0, 5, 20_004)
+        .settle_answer(second, 1, 0, 5, 20_004, &ProfitDeductionPolicy::none())
         .expect("answer");
     assert!(
         !fixture
@@ -296,7 +516,7 @@ fn concurrent_answer_settlement_credits_exactly_once() {
             thread::spawn(move || {
                 barrier.wait();
                 PlayerTriviaRepository::new(path)
-                    .settle_answer(session_id, 1, 1, 7, 60_001)
+                    .settle_answer(session_id, 1, 1, 7, 60_001, &ProfitDeductionPolicy::none())
                     .expect("concurrent settlement")
             })
         })
@@ -351,7 +571,7 @@ fn old_question_timeout_cannot_terminate_an_advanced_session() {
         .expect("claimed");
     fixture
         .repository
-        .settle_answer(session_id, 1, 0, 7, 70_001)
+        .settle_answer(session_id, 1, 0, 7, 70_001, &ProfitDeductionPolicy::none())
         .expect("settle")
         .expect("accepted");
 
@@ -492,7 +712,7 @@ fn answered_session_cannot_be_cancelled() {
         .expect("claimed");
     fixture
         .repository
-        .settle_answer(session_id, 1, 0, 5, 40_001)
+        .settle_answer(session_id, 1, 0, 5, 40_001, &ProfitDeductionPolicy::none())
         .expect("answer");
     assert!(
         !fixture

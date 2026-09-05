@@ -182,16 +182,19 @@ fn production_sweep_rehydrates_durable_eating_outcome_after_restart() {
         .expect("adult pet");
     assert_eq!(pet.stage(adult_at), PetStage::Adult);
     PetEatingRepository::new(file.path())
-        .eat_adult_pet_atomic(EatAdultPetRequest {
-            discord_id: OWNER,
-            guild_id: Some(GUILD),
-            pet_id: pet.pet_id,
-            expected_last_fed_at: pet.last_fed_at,
-            expected_hunger: pet.hunger_at_last_fed,
-            reward: 123,
-            penalty_games: 4,
-            now: adult_at,
-        })
+        .eat_adult_pet_atomic(
+            EatAdultPetRequest {
+                discord_id: OWNER,
+                guild_id: Some(GUILD),
+                pet_id: pet.pet_id,
+                expected_last_fed_at: pet.last_fed_at,
+                expected_hunger: pet.hunger_at_last_fed,
+                reward: 123,
+                penalty_games: 4,
+                now: adult_at,
+            },
+            &cama_db::profit_deductions::ProfitDeductionPolicy::none(),
+        )
         .expect("eat pet atomically");
     drop(service);
 

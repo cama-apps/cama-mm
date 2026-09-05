@@ -96,6 +96,8 @@ fn test_referral_jc_component_survives_post_match_bonus_accounting() {
             referred_id: 111,
             referrer_id: 110,
             reward_amount: 100,
+            referred_net: 100,
+            referrer_net: 100,
         }],
     );
     assert_eq!(

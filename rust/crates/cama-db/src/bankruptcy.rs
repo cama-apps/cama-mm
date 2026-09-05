@@ -2,12 +2,13 @@
 //!
 //! Python remains the migration and live runtime authority. This adapter only
 //! opens an already-migrated database through [`crate::open_runtime_connection`].
-//! Bankruptcy declaration and batched winner settlement acquire
-//! `BEGIN IMMEDIATE` before validating or mutating state.
+//! Bankruptcy declaration acquires `BEGIN IMMEDIATE` before validating or
+//! mutating state.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use cama_db_core::profit_deductions::penalty_games_remaining;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use thiserror::Error;
 
@@ -49,25 +50,6 @@ pub enum DeclarationOutcome {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct WinnerAwardRequest<'a> {
-    pub discord_ids: &'a [i64],
-    pub guild_id: Option<i64>,
-    pub gross_reward: i64,
-    pub penalty_kept_rate: f64,
-    pub decrement_penalty: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct WinnerAwardReceipt {
-    pub discord_id: i64,
-    pub gross: i64,
-    pub net: i64,
-    pub bankruptcy_penalty: i64,
-    pub balance_after: i64,
-    pub penalty_games_remaining: i64,
-}
-
 #[derive(Debug, Error)]
 pub enum BankruptcyRepositoryError {
     #[error("fresh-start balance cannot be negative: {0}")]
@@ -76,12 +58,6 @@ pub enum BankruptcyRepositoryError {
     InvalidCooldown(i64),
     #[error("penalty games cannot be negative: {0}")]
     InvalidPenaltyGames(i64),
-    #[error("winner reward cannot be negative: {0}")]
-    InvalidReward(i64),
-    #[error("bankruptcy kept rate must be finite and within 0..=1: {0}")]
-    InvalidPenaltyRate(f64),
-    #[error("player {0} was not found in the selected guild")]
-    PlayerNotFound(i64),
     #[error("bankruptcy arithmetic exceeded SQLite's signed 64-bit range")]
     ArithmeticOverflow,
     #[error(transparent)]
@@ -373,12 +349,7 @@ impl BankruptcyRepository {
                  updated_at = CURRENT_TIMESTAMP",
             params![discord_id, guild_id, delta],
         )?;
-        let remaining = transaction.query_row(
-            "SELECT COALESCE(penalty_games_remaining, 0)
-             FROM bankruptcy_state WHERE discord_id = ?1 AND guild_id = ?2",
-            params![discord_id, guild_id],
-            |row| row.get(0),
-        )?;
+        let remaining = penalty_games_remaining(&transaction, guild_id, discord_id)?;
         transaction.commit()?;
         Ok(remaining)
     }
@@ -419,120 +390,6 @@ impl BankruptcyRepository {
         }
         transaction.commit()?;
         Ok(remaining)
-    }
-
-    /// Credit all awards and optionally consume penalty wins in one transaction.
-    /// Results preserve input order; duplicate IDs are processed sequentially.
-    ///
-    /// WARNING — no production caller. This parallel implementation computes
-    /// the bankruptcy penalty from the gross award and skips garnishment,
-    /// unlike the live path (`match_recording_repository::
-    /// credit_income_awards_atomic`). Fix the penalty base before wiring it
-    /// anywhere.
-    pub fn award_winners_atomic(
-        &self,
-        request: WinnerAwardRequest<'_>,
-    ) -> Result<Vec<WinnerAwardReceipt>, BankruptcyRepositoryError> {
-        if request.discord_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        if request.gross_reward < 0 {
-            return Err(BankruptcyRepositoryError::InvalidReward(
-                request.gross_reward,
-            ));
-        }
-        if !request.penalty_kept_rate.is_finite()
-            || !(0.0..=1.0).contains(&request.penalty_kept_rate)
-        {
-            return Err(BankruptcyRepositoryError::InvalidPenaltyRate(
-                request.penalty_kept_rate,
-            ));
-        }
-        let guild_id = Self::normalize_guild_id(request.guild_id);
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut receipts = Vec::with_capacity(request.discord_ids.len());
-        for discord_id in request.discord_ids {
-            let balance = query_balance(&transaction, *discord_id, guild_id)?
-                .ok_or(BankruptcyRepositoryError::PlayerNotFound(*discord_id))?;
-            let penalty_before = query_state(&transaction, *discord_id, guild_id)?
-                .map_or(0, |state| state.penalty_games_remaining);
-            let bankruptcy_penalty = if penalty_before > 0 && request.gross_reward > 0 {
-                (request.gross_reward as f64 * (1.0 - request.penalty_kept_rate)) as i64
-            } else {
-                0
-            };
-            let net = request
-                .gross_reward
-                .checked_sub(bankruptcy_penalty)
-                .ok_or(BankruptcyRepositoryError::ArithmeticOverflow)?;
-            let after_gross = balance
-                .checked_add(request.gross_reward)
-                .ok_or(BankruptcyRepositoryError::ArithmeticOverflow)?;
-            with_ledger_context(
-                &transaction,
-                "match_win_bonus",
-                *discord_id,
-                "match win bonus",
-                &format!(
-                    "gross={};penalized={}",
-                    request.gross_reward,
-                    penalty_before > 0
-                ),
-                || {
-                    transaction.execute(
-                        "UPDATE players
-                            SET jopacoin_balance = ?1, updated_at = CURRENT_TIMESTAMP
-                          WHERE discord_id = ?2 AND guild_id = ?3",
-                        params![after_gross, discord_id, guild_id],
-                    )
-                },
-            )?;
-            let balance_after = after_gross
-                .checked_sub(bankruptcy_penalty)
-                .ok_or(BankruptcyRepositoryError::ArithmeticOverflow)?;
-            if bankruptcy_penalty > 0 {
-                with_ledger_context(
-                    &transaction,
-                    "match_win_bonus",
-                    *discord_id,
-                    "match win bonus bankruptcy penalty",
-                    &format!("penalty={bankruptcy_penalty}"),
-                    || {
-                        transaction.execute(
-                            "UPDATE players
-                                SET jopacoin_balance = ?1, updated_at = CURRENT_TIMESTAMP
-                              WHERE discord_id = ?2 AND guild_id = ?3",
-                            params![balance_after, discord_id, guild_id],
-                        )
-                    },
-                )?;
-            }
-            let penalty_games_remaining = if request.decrement_penalty && penalty_before > 0 {
-                transaction.execute(
-                    "UPDATE bankruptcy_state
-                        SET penalty_games_remaining = MAX(
-                                0, COALESCE(penalty_games_remaining, 0) - 1
-                            ),
-                            updated_at = CURRENT_TIMESTAMP
-                      WHERE discord_id = ?1 AND guild_id = ?2",
-                    params![discord_id, guild_id],
-                )?;
-                penalty_before - 1
-            } else {
-                penalty_before
-            };
-            receipts.push(WinnerAwardReceipt {
-                discord_id: *discord_id,
-                gross: request.gross_reward,
-                net,
-                bankruptcy_penalty,
-                balance_after,
-                penalty_games_remaining,
-            });
-        }
-        transaction.commit()?;
-        Ok(receipts)
     }
 }
 

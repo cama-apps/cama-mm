@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use cama_app::service_container::{ServiceContainer, ServiceContainerOptions};
+use cama_domain::bankruptcy::BankruptcyPenaltyPolicy;
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
 
@@ -295,15 +297,49 @@ impl GuildMemberPageSource for UnusedMembers {
 }
 
 fn provider(path: &Path, discord: Arc<MockDiscord>) -> DuelRegistrationProvider {
+    provider_with_vanity_tax(path, discord, persistent_vanity_tax(path))
+}
+
+fn provider_with_vanity_tax(
+    path: &Path,
+    discord: Arc<MockDiscord>,
+    vanity_tax: Arc<PersistentVanityTaxService>,
+) -> DuelRegistrationProvider {
     DuelRegistrationProvider {
         handler: Arc::new(DuelInteractionHandler {
             repository: DuelChallengeRepository::new(path),
             evolution: PetEvolutionRepository::new(path),
             flavor: Arc::new(ProductionDuelFlavorRuntime::new(path, None, false)),
+            profit_deductions: ProfitDeductionSource {
+                database_path: path.to_path_buf(),
+                bankruptcy: BankruptcyPenaltyPolicy {
+                    rate_per_game: 0.05,
+                },
+                vanity_tax_rate: 0.10,
+                low_priority_tax_rate: 0.10,
+                vanity: Some(vanity_tax),
+            },
             discord,
             admin_user_ids: BTreeSet::from([CHALLENGER]),
         }),
     }
+}
+
+fn persistent_vanity_tax(path: &Path) -> Arc<PersistentVanityTaxService> {
+    let mut container = ServiceContainer::new(
+        path,
+        ServiceContainerOptions {
+            vanity_tax_rate: 0.10,
+            ..ServiceContainerOptions::default()
+        },
+    );
+    container.initialize();
+    Arc::clone(
+        &container
+            .components()
+            .expect("vanity-tax service components")
+            .vanity_tax_service,
+    )
 }
 
 fn registry(provider: &DuelRegistrationProvider) -> Registry {
@@ -337,6 +373,31 @@ fn issue_request() -> InteractionRequest {
                 InteractionOption {
                     name: "wager".to_owned(),
                     value: InteractionValue::Integer(500),
+                },
+            ]),
+        }],
+    }
+}
+
+fn resolve_request(challenge_id: i64, outcome: &str) -> InteractionRequest {
+    InteractionRequest::Command {
+        interaction_id: 3,
+        name: "duel".to_owned(),
+        user_id: CHALLENGER as u64,
+        user_display_name: "Challenger".to_owned(),
+        guild_id: Some(GUILD as u64),
+        channel_id: Some(CHANNEL as u64),
+        member_permissions: None,
+        options: vec![InteractionOption {
+            name: "resolve".to_owned(),
+            value: InteractionValue::Subcommand(vec![
+                InteractionOption {
+                    name: "challenge_id".to_owned(),
+                    value: InteractionValue::Integer(challenge_id),
+                },
+                InteractionOption {
+                    name: "outcome".to_owned(),
+                    value: InteractionValue::String(outcome.to_owned()),
                 },
             ]),
         }],
@@ -435,6 +496,95 @@ async fn issue_bind_restart_recovery_and_persistent_response_use_migrated_databa
     assert_eq!(
         terminal_edit.2.content_mode,
         crate::discord_transport::DiscordMessageContentMode::Preserve
+    );
+}
+
+#[tokio::test]
+async fn resolve_withholds_bankruptcy_penalty_and_vanity_tax_from_the_wager() {
+    let fixture = Fixture::migrated();
+    let discord = Arc::new(MockDiscord::default());
+    let vanity_tax = persistent_vanity_tax(&fixture.path);
+    vanity_tax
+        .set_manual_taxation(GUILD, RECIPIENT, true, CHALLENGER)
+        .expect("tax the recipient");
+    fixture
+        .connection()
+        .execute(
+            "INSERT INTO bankruptcy_state (
+                 discord_id, guild_id, penalty_games_remaining, bankruptcy_count
+             ) VALUES (?1, ?2, 1, 1)",
+            params![RECIPIENT, GUILD],
+        )
+        .expect("seed recipient penalty");
+    let provider = provider_with_vanity_tax(&fixture.path, Arc::clone(&discord), vanity_tax);
+    let registry = registry(&provider);
+    registry
+        .command_handler("duel")
+        .expect("duel handler")
+        .handle(
+            issue_request(),
+            Arc::new(CapturingResponder::with_receipt(300)),
+        )
+        .await
+        .expect("issue duel");
+    let challenge = fixture.challenge();
+    registry
+        .component_handler(&format!("duel:{}:trial_by_combat", challenge.challenge_id))
+        .expect("duel component")
+        .handle(
+            component_request(challenge.challenge_id),
+            Arc::new(CapturingResponder::default()),
+        )
+        .await
+        .expect("accept duel");
+    assert_eq!(fixture.balance(RECIPIENT), 2_500);
+
+    let responder = Arc::new(CapturingResponder::default());
+    let responder_port: Arc<dyn InteractionResponder> = Arc::clone(&responder) as Arc<_>;
+    registry
+        .command_handler("duel")
+        .expect("duel handler")
+        .handle(
+            resolve_request(challenge.challenge_id, "recipient_victory"),
+            responder_port,
+        )
+        .await
+        .expect("resolve duel");
+
+    // Profit is the 500 JC wager: 5% of it for one outstanding penalty game
+    // at a 5% per-game rate (25), plus 10% vanity tax (50).
+    assert_eq!(fixture.balance(RECIPIENT), 2_500 + 1_000 - 25 - 50);
+    assert_eq!(fixture.balance(CHALLENGER), 2_450);
+    let resolved = fixture.challenge_by_id(challenge.challenge_id);
+    assert_eq!(resolved.status, DuelStatus::Resolved);
+    let followups = responder.followups.lock().expect("followups");
+    let announcement = &followups.last().expect("resolution announcement").content;
+    assert!(
+        announcement.ends_with(&format!(
+            "Challenge #{} is resolved: <@{RECIPIENT}> wins 925 JC (\u{2212}25 JC bankruptcy penalty, \u{2212}50 JC vanity tax).",
+            challenge.challenge_id
+        )),
+        "{announcement}"
+    );
+    let ledger: Vec<(String, i64)> = fixture
+        .connection()
+        .prepare(
+            "SELECT source, delta FROM economy_ledger_entries
+             WHERE account_id = ?1 AND delta < 0 AND related_type = 'duel_challenge'
+             ORDER BY ledger_id",
+        )
+        .expect("prepare ledger query")
+        .query_map(params![RECIPIENT], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("query ledger")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect ledger");
+    assert_eq!(
+        ledger,
+        vec![
+            ("duel_challenge".to_owned(), -500),
+            ("duel_challenge".to_owned(), -25),
+            ("vanity_tax".to_owned(), -50),
+        ]
     );
 }
 

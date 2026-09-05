@@ -402,6 +402,15 @@ where
                             durable.penalty_games_remaining,
                         ),
                         ("new_balance".to_owned(), durable.new_balance),
+                        (
+                            "bankruptcy_penalty".to_owned(),
+                            durable.deductions.bankruptcy_penalty,
+                        ),
+                        ("vanity_tax".to_owned(), durable.deductions.vanity_tax),
+                        (
+                            "low_priority_tax".to_owned(),
+                            durable.deductions.low_priority_tax,
+                        ),
                     ])
                 });
         }

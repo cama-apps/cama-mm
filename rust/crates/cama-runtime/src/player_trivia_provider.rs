@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use cama_app::economy_event_sqlite::SqliteEconomyEventService;
 use cama_app::player_trivia_service as app;
+use cama_app::service_container::PersistentVanityTaxService;
 use cama_db::pet_evolution_repository::PetEvolutionRepository;
 use cama_db::player_trivia as db;
 use cama_db::predictions_repository::PredictionRepository;
@@ -26,6 +27,7 @@ use crate::ApplicationConfig;
 use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
 use crate::economy_events_worker::EconomyEventsWorkerConfig;
 use crate::ids::signed_id;
+use crate::profit_deductions::ProfitDeductionSource;
 use crate::registration::{
     CommandSpec, ComponentRoute, InteractionActionRow, InteractionButton, InteractionEmbed,
     InteractionHandler, InteractionHandlerError, InteractionMessageReceipt, InteractionRequest,
@@ -82,9 +84,11 @@ impl PlayerTriviaRegistrationProvider {
     pub fn new(
         database_path: impl AsRef<Path>,
         config: &ApplicationConfig,
+        vanity_tax: Arc<PersistentVanityTaxService>,
         discord: Arc<dyn PlayerTriviaDiscordPort>,
     ) -> Self {
-        let repository = RuntimePlayerTriviaRepository::new(database_path.as_ref());
+        let repository =
+            RuntimePlayerTriviaRepository::new(database_path.as_ref(), config, vanity_tax);
         let service = Arc::new(app::PlayerTriviaService::new(Arc::new(repository.clone())));
         let event_config = EconomyEventsWorkerConfig::from_application_config(config).event;
         Self {
@@ -557,7 +561,7 @@ impl PlayerTriviaRuntimeState {
                     &session,
                     &user_display_name,
                     avatar.as_deref(),
-                    Some(answer_result(&question_for_display, false, 0)),
+                    Some(answer_result(&question_for_display, false, 0, 0)),
                 ))
                 .await
                 .map_err(|error| error.to_string());
@@ -583,15 +587,14 @@ impl PlayerTriviaRuntimeState {
                 );
         let repository = self.repository.clone();
         let settlement = tokio::task::spawn_blocking(move || {
-            repository
-                .settle_answer(
-                    parsed.session_id,
-                    parsed.question_number,
-                    parsed.selected_index,
-                    reward,
-                    now,
-                )
-                .map_err(|error| error.to_string())
+            repository.settle_answer(
+                guild_id,
+                parsed.session_id,
+                parsed.question_number,
+                parsed.selected_index,
+                reward,
+                now,
+            )
         })
         .await
         .map_err(|error| format!("player-trivia settlement task failed: {error}"));
@@ -675,6 +678,7 @@ impl PlayerTriviaRuntimeState {
             &question_for_display,
             settlement.is_correct,
             settlement.reward,
+            settlement.withheld,
         );
         if settlement.completed {
             let mut completed = session;
@@ -875,7 +879,7 @@ impl PlayerTriviaRuntimeState {
             &session,
             user_display_name,
             avatar,
-            Some(answer_result(&question, false, 0)),
+            Some(answer_result(&question, false, 0, 0)),
         );
         match target {
             TimeoutTarget::Receipt(receipt) => self
@@ -1006,7 +1010,12 @@ fn question_response(
         ])
 }
 
-fn answer_result(question: &app::PlayerTriviaQuestion, is_correct: bool, reward: i64) -> String {
+fn answer_result(
+    question: &app::PlayerTriviaQuestion,
+    is_correct: bool,
+    reward: i64,
+    withheld: i64,
+) -> String {
     let correct = format!(
         "**{}. {}**",
         OPTION_LABELS[question.correct_index], question.options[question.correct_index]
@@ -1016,6 +1025,9 @@ fn answer_result(question: &app::PlayerTriviaQuestion, is_correct: bool, reward:
     } else {
         format!("❌ Not this time. The answer was {correct}.")
     };
+    if withheld > 0 {
+        result.push_str(&format!(" ({withheld} JC withheld.)"));
+    }
     if !question.explanation.is_empty() {
         result.push('\n');
         result.push_str(&question.explanation);
@@ -1058,12 +1070,22 @@ fn summary_response(
 #[derive(Clone, Debug)]
 struct RuntimePlayerTriviaRepository {
     inner: db::PlayerTriviaRepository,
+    profit_deductions: ProfitDeductionSource,
 }
 
 impl RuntimePlayerTriviaRepository {
-    fn new(path: impl AsRef<Path>) -> Self {
+    fn new(
+        path: impl AsRef<Path>,
+        config: &ApplicationConfig,
+        vanity_tax: Arc<PersistentVanityTaxService>,
+    ) -> Self {
         Self {
-            inner: db::PlayerTriviaRepository::new(path),
+            inner: db::PlayerTriviaRepository::new(path.as_ref()),
+            profit_deductions: ProfitDeductionSource::from_config(
+                config,
+                path.as_ref().to_path_buf(),
+                Some(vanity_tax),
+            ),
         }
     }
 
@@ -1117,16 +1139,27 @@ impl RuntimePlayerTriviaRepository {
             .timeout_session_if_question_unanswered(session_id, question_number, now)
     }
 
+    /// Settle inside a blocking task: both taxable rosters are SQLite reads.
     fn settle_answer(
         &self,
+        guild_id: i64,
         session_id: i64,
         question_number: i64,
         selected_index: usize,
         reward: i64,
         now: i64,
-    ) -> Result<Option<db::PlayerTriviaSettlement>, db::PlayerTriviaRepositoryError> {
+    ) -> Result<Option<db::PlayerTriviaSettlement>, String> {
+        let policy = self.profit_deductions.resolve(guild_id)?;
         self.inner
-            .settle_answer(session_id, question_number, selected_index, reward, now)
+            .settle_answer(
+                session_id,
+                question_number,
+                selected_index,
+                reward,
+                now,
+                &policy.as_policy(),
+            )
+            .map_err(|error| error.to_string())
     }
 
     fn cancel_session_if_unanswered(
@@ -1190,21 +1223,22 @@ impl app::PlayerTriviaSessionRepository for RuntimePlayerTriviaRepository {
 
     fn settle_answer(
         &self,
+        guild_id: i64,
         session_id: i64,
         question_number: i64,
         selected_index: usize,
         reward: i64,
         answered_at: i64,
     ) -> Result<Self::AnswerResult, String> {
-        self.inner
-            .settle_answer(
-                session_id,
-                question_number,
-                selected_index,
-                reward,
-                answered_at,
-            )
-            .map_err(|error| error.to_string())
+        Self::settle_answer(
+            self,
+            guild_id,
+            session_id,
+            question_number,
+            selected_index,
+            reward,
+            answered_at,
+        )
     }
 
     fn finish_session(

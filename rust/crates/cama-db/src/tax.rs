@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
+use cama_db_core::profit_deductions::penalty_games_remaining;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::Value;
 use thiserror::Error;
@@ -661,15 +662,8 @@ impl TaxRepository {
             transaction.commit()?;
             return Ok(TaxBankruptcyOutcome::TargetNotRegistered);
         }
-        let previous_games = transaction
-            .query_row(
-                "SELECT COALESCE(penalty_games_remaining,0) FROM bankruptcy_state
-                 WHERE discord_id=?1 AND guild_id=?2",
-                params![request.discord_id, request.guild_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .unwrap_or(0);
+        let previous_games =
+            penalty_games_remaining(&transaction, request.guild_id, request.discord_id)?;
         let outcome = match request.action {
             TaxBankruptcyAction::Add { games } => {
                 let remaining = previous_games

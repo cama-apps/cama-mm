@@ -405,6 +405,49 @@ impl Fixture {
             .collect::<Result<_, _>>()
             .expect("settlement taxes")
     }
+
+    fn settlement_withholdings(&self, match_id: i64) -> Vec<(i64, i64, i64, i64)> {
+        self.connection()
+            .prepare(
+                "SELECT discord_id,bankruptcy_penalty,vanity_tax,low_priority_tax
+                 FROM bet_settlement_taxes WHERE match_id=?1 ORDER BY discord_id",
+            )
+            .expect("prepare settlement withholdings")
+            .query_map([match_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .expect("query settlement withholdings")
+            .collect::<Result<_, _>>()
+            .expect("settlement withholdings")
+    }
+
+    fn set_penalty_games(&self, discord_id: i64, remaining: i64) {
+        self.connection()
+            .execute(
+                "INSERT INTO bankruptcy_state (
+                     discord_id,guild_id,penalty_games_remaining,bankruptcy_count
+                 ) VALUES (?1,?2,?3,1)",
+                params![discord_id, GUILD, remaining],
+            )
+            .expect("seed bankruptcy state");
+    }
+}
+
+fn correction_deductions<'a>(
+    vanity_taxable_ids: &'a BTreeSet<i64>,
+    low_priority_taxable_ids: &'a BTreeSet<i64>,
+) -> BetCorrectionOptions<'a> {
+    BetCorrectionOptions {
+        pool_mode: true,
+        house_payout_multiplier: 1.0,
+        bankruptcy: Some(cama_domain::bankruptcy::BankruptcyPenaltyPolicy {
+            rate_per_game: 0.05,
+        }),
+        vanity_tax_rate: 0.10,
+        vanity_taxable_ids,
+        low_priority_tax_rate: 0.25,
+        low_priority_taxable_ids,
+    }
 }
 
 fn json_ids(ids: &[i64]) -> String {
@@ -1011,6 +1054,7 @@ fn test_correction_reverses_bet_payouts() {
             BetCorrectionOptions {
                 pool_mode: false,
                 house_payout_multiplier: 1.0,
+                bankruptcy: None,
                 vanity_tax_rate: 0.0,
                 vanity_taxable_ids: &BTreeSet::new(),
                 low_priority_tax_rate: 0.0,
@@ -1352,6 +1396,116 @@ fn test_correction_never_withholds_more_than_the_bet_profit() {
     assert_eq!(
         fixture.settlement_taxes(seeded.match_id),
         vec![(dire_bettor, 90, 10)]
+    );
+}
+
+#[test]
+fn test_correction_withholds_scaled_bankruptcy_penalty_from_new_winners() {
+    // Four dire bettors each stake 120 against a 480 radiant stake, so a
+    // correction to Dire pays each of them 240 for a 120 profit.
+    let fixture = Fixture::new();
+    let seeded = fixture.seed_match(3_600);
+    let radiant_bettor = 3_698;
+    let one_game_left = 3_691;
+    let six_games_left = 3_692;
+    let vanity_taxed = 3_693;
+    let unlisted = 3_694;
+    fixture.add_spectator(radiant_bettor, 1_000);
+    for bettor in [one_game_left, six_games_left, vanity_taxed, unlisted] {
+        fixture.add_spectator(bettor, 1_000);
+        fixture.bet(seeded.match_id, bettor, MatchSide::Dire, 120, None);
+    }
+    fixture.bet(
+        seeded.match_id,
+        radiant_bettor,
+        MatchSide::Radiant,
+        480,
+        Some(960),
+    );
+    fixture.set_penalty_games(one_game_left, 1);
+    fixture.set_penalty_games(six_games_left, 6);
+    let vanity = BTreeSet::from([vanity_taxed]);
+    let empty = BTreeSet::new();
+    let result = fixture
+        .repository
+        .settle_bet_correction_atomic(
+            seeded.match_id,
+            Some(GUILD),
+            MatchSide::Dire,
+            correction_deductions(&vanity, &empty),
+        )
+        .unwrap();
+    // 120 JC profit at 5% per outstanding game: one game withholds 6 and
+    // six games 36; the vanity share is a flat 10%.
+    assert_eq!(result.balance_changes[&one_game_left], 240 - 6);
+    assert_eq!(result.balance_changes[&six_games_left], 240 - 36);
+    assert_eq!(result.balance_changes[&vanity_taxed], 240 - 12);
+    assert_eq!(result.balance_changes[&unlisted], 240);
+    assert_eq!(fixture.balance(one_game_left), 1_234);
+    assert_eq!(fixture.balance(six_games_left), 1_204);
+    assert_eq!(fixture.balance(vanity_taxed), 1_228);
+    assert_eq!(fixture.balance(unlisted), 1_240);
+    assert_eq!(fixture.balance(radiant_bettor), 40);
+    assert_eq!(
+        fixture.settlement_withholdings(seeded.match_id),
+        vec![
+            (one_game_left, 6, 0, 0),
+            (six_games_left, 36, 0, 0),
+            (vanity_taxed, 0, 12, 0),
+        ]
+    );
+
+    // Correcting back refunds the bankruptcy share with the taxes, so every
+    // balance returns to exactly its pre-correction value.
+    fixture
+        .repository
+        .settle_bet_correction_atomic(
+            seeded.match_id,
+            Some(GUILD),
+            MatchSide::Radiant,
+            correction_deductions(&vanity, &empty),
+        )
+        .unwrap();
+    for bettor in [one_game_left, six_games_left, vanity_taxed, unlisted] {
+        assert_eq!(fixture.balance(bettor), 1_000, "bettor {bettor}");
+    }
+    assert_eq!(fixture.balance(radiant_bettor), 1_000);
+    assert!(fixture.settlement_withholdings(seeded.match_id).is_empty());
+}
+
+#[test]
+fn test_correction_clamps_low_priority_share_after_bankruptcy_and_vanity() {
+    let fixture = Fixture::new();
+    let seeded = fixture.seed_match(3_700);
+    let radiant_bettor = 3_798;
+    let dire_bettor = 3_799;
+    fixture.add_spectator(radiant_bettor, 300);
+    fixture.add_spectator(dire_bettor, 100);
+    fixture.bet(
+        seeded.match_id,
+        radiant_bettor,
+        MatchSide::Radiant,
+        100,
+        Some(200),
+    );
+    fixture.bet(seeded.match_id, dire_bettor, MatchSide::Dire, 100, None);
+    // 20 games left at 5% each withhold the full profit, so vanity still
+    // takes its 10 and the low-priority share is clamped to nothing.
+    fixture.set_penalty_games(dire_bettor, 20);
+    let taxable = BTreeSet::from([dire_bettor]);
+    fixture
+        .repository
+        .settle_bet_correction_atomic(
+            seeded.match_id,
+            Some(GUILD),
+            MatchSide::Dire,
+            correction_deductions(&taxable, &taxable),
+        )
+        .unwrap();
+    assert_eq!(fixture.balance(dire_bettor), 190);
+    assert_eq!(
+        fixture.settlement_withholdings(seeded.match_id),
+        vec![(dire_bettor, 100, 10, 0)]
     );
 }
 
@@ -2729,7 +2883,17 @@ CREATE TABLE bet_settlement_taxes (
     discord_id INTEGER NOT NULL,
     vanity_tax INTEGER NOT NULL,
     low_priority_tax INTEGER NOT NULL DEFAULT 0,
+    bankruptcy_penalty INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(match_id,guild_id,discord_id)
+);
+CREATE TABLE bankruptcy_state (
+    discord_id INTEGER NOT NULL,
+    guild_id INTEGER NOT NULL DEFAULT 0,
+    last_bankruptcy_at INTEGER,
+    penalty_games_remaining INTEGER DEFAULT 0,
+    bankruptcy_count INTEGER DEFAULT 0,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (discord_id, guild_id)
 );
 CREATE TABLE economy_ledger_context (
     id INTEGER PRIMARY KEY CHECK(id=1),

@@ -1881,7 +1881,8 @@ fn migrated_pool_seed_multiplier_penalty_and_tax_share_one_settlement() {
             BettingTeam::Radiant,
             BettingMode::Pool,
             &BetSettlementAdjustments {
-                bankruptcy_keep_basis_points: Some(7_500),
+                // Two outstanding games at 12.5% each withhold 25% of profit.
+                bankruptcy_penalty_rate_per_game: Some(0.125),
                 vanity_tax_basis_points: 1_000,
                 vanity_taxable_ids: BTreeSet::from([91_001]),
                 payout_multiplier: 2.0,
@@ -3704,4 +3705,120 @@ fn pool_settlement_reproduces_python_float_ceiling_ulp() {
         .collect::<Vec<_>>();
     payouts.sort_unstable();
     assert_eq!(payouts, [(90, 91), (586, 586)]);
+}
+
+#[test]
+fn migrated_pool_bankruptcy_withholding_scales_with_the_per_game_rate() {
+    let match_id = 9_102;
+    let pending_match_id = 9_002;
+    let file = migrated_seed_fixture(match_id, pending_match_id, BettingMode::Pool);
+    let repository = repo(file.path());
+    repository
+        .place_bet_atomic(request(pending_match_id, 91_001, BettingTeam::Radiant, 20))
+        .expect("place winning pool bet");
+    repository
+        .place_bet_atomic(request(pending_match_id, 91_002, BettingTeam::Dire, 30))
+        .expect("place losing pool bet");
+    Connection::open(file.path())
+        .expect("open bankruptcy state")
+        .execute(
+            "INSERT INTO bankruptcy_state(
+                 discord_id,guild_id,last_bankruptcy_at,
+                 penalty_games_remaining,bankruptcy_count
+             ) VALUES (91001,?1,0,2,1)",
+            [GUILD],
+        )
+        .expect("insert penalized bettor");
+    let settlement = repository
+        .settle_pending_bets_with_adjustments_atomic(
+            match_id,
+            Some(GUILD),
+            NOW,
+            Some(pending_match_id),
+            BettingTeam::Radiant,
+            BettingMode::Pool,
+            &BetSettlementAdjustments {
+                bankruptcy_penalty_rate_per_game: Some(0.05),
+                payout_multiplier: 2.0,
+                consume_seed: true,
+                ..BetSettlementAdjustments::default()
+            },
+        )
+        .expect("settle per-game-rate penalty pool");
+    // Two outstanding games at 5% each withhold 10% of the same profit the
+    // 12.5%-per-game fixture withholds 32 JC (25%) from.
+    assert_eq!(settlement.bankruptcy_penalties[&91_001], 13);
+}
+
+#[test]
+fn migrated_pool_correction_refunds_the_persisted_bankruptcy_share() {
+    use cama_db_match::match_correction_repository::{
+        BetCorrectionOptions, MatchCorrectionRepository, MatchSide,
+    };
+
+    let match_id = 9_103;
+    let pending_match_id = 9_003;
+    let file = migrated_seed_fixture(match_id, pending_match_id, BettingMode::Pool);
+    let repository = repo(file.path());
+    repository
+        .place_bet_atomic(request(pending_match_id, 91_001, BettingTeam::Radiant, 20))
+        .expect("place penalized winning bet");
+    repository
+        .place_bet_atomic(request(pending_match_id, 91_002, BettingTeam::Dire, 30))
+        .expect("place losing bet");
+    Connection::open(file.path())
+        .expect("open bankruptcy state")
+        .execute(
+            "INSERT INTO bankruptcy_state(
+                 discord_id,guild_id,last_bankruptcy_at,
+                 penalty_games_remaining,bankruptcy_count
+             ) VALUES (91001,?1,0,2,1)",
+            [GUILD],
+        )
+        .expect("insert penalized bettor");
+    let staked_winner = balance(file.path(), 91_001);
+    let staked_loser = balance(file.path(), 91_002);
+
+    let settlement = repository
+        .settle_pending_bets_with_adjustments_atomic(
+            match_id,
+            Some(GUILD),
+            NOW,
+            Some(pending_match_id),
+            BettingTeam::Radiant,
+            BettingMode::Pool,
+            &BetSettlementAdjustments {
+                bankruptcy_penalty_rate_per_game: Some(0.05),
+                consume_seed: true,
+                ..BetSettlementAdjustments::default()
+            },
+        )
+        .expect("settle penalized pool");
+    let penalty = settlement.bankruptcy_penalties[&91_001];
+    assert!(penalty > 0, "fixture must withhold a bankruptcy share");
+    let persisted: (i64, i64, i64) = Connection::open(file.path())
+        .expect("open persisted withholding")
+        .query_row(
+            "SELECT bankruptcy_penalty, vanity_tax, low_priority_tax
+             FROM bet_settlement_taxes
+             WHERE match_id=?1 AND guild_id=?2 AND discord_id=?3",
+            params![match_id, GUILD, 91_001],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("bankruptcy share persisted beside the taxes");
+    assert_eq!(persisted, (penalty, 0, 0));
+
+    // Flipping the result reverses the gross payout and refunds every
+    // persisted withholding, so the old winner lands exactly where the bet
+    // left them before settlement.
+    MatchCorrectionRepository::new(file.path())
+        .settle_bet_correction_atomic(
+            match_id,
+            Some(GUILD),
+            MatchSide::Dire,
+            BetCorrectionOptions::pool(0.0, &BTreeSet::new(), 0.0, &BTreeSet::new()),
+        )
+        .expect("correct the settled pool");
+    assert_eq!(balance(file.path(), 91_001), staked_winner);
+    assert!(balance(file.path(), 91_002) > staked_loser);
 }

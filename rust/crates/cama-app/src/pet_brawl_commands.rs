@@ -18,6 +18,7 @@ use crate::pet_brawl::{
     PetBrawlService, PetEvolutionPort, PetPort, PortResult, ServiceRng, SettleOutcome,
     SoloTrainingOutcome, WagerInput,
 };
+use crate::pet_commands::withholding_note;
 use crate::python_random::PythonRandom;
 
 pub const SAFE_MOVE: PetBrawlMove = PetBrawlMove::Spit;
@@ -1354,8 +1355,14 @@ fn build_decisive_embed(
         ),
         footer: Some(if decisive.wager != 0 {
             format!(
-                "Wager settled: {} JC to the winner · {} JC fee to the Reserve.",
-                decisive.payout, decisive.fee
+                "Wager settled: {} JC to the winner{} · {} JC fee to the Reserve.",
+                decisive.payout - decisive.deductions.total(),
+                withholding_note(
+                    decisive.deductions.bankruptcy_penalty,
+                    decisive.deductions.vanity_tax,
+                    decisive.deductions.low_priority_tax,
+                ),
+                decisive.fee
             )
         } else {
             "No jopacoins change hands — brawls play for fullness and honor.".to_owned()
@@ -1658,6 +1665,10 @@ mod tests {
                 payout: self.brawl.wager * 2,
                 wager: self.brawl.wager,
                 fee: self.brawl.fee,
+                deductions: cama_db::profit_deductions::ProfitDeductions {
+                    profit: self.brawl.wager,
+                    ..Default::default()
+                },
                 records,
                 career,
                 personality_event_key: None,
@@ -2455,6 +2466,28 @@ mod tests {
     }
 
     #[test]
+    fn test_wagered_result_footer_reports_the_net_payout_and_withholdings() {
+        let winner = duelist("common_cama", "Winner", CHALLENGER, 1);
+        let loser = duelist("common_cama", "Loser", RECIPIENT, 2);
+        let mut settlement = decisive(winner, loser, 10, -15, 60, 1);
+        settlement.deductions = cama_db::profit_deductions::ProfitDeductions {
+            profit: 60,
+            bankruptcy_penalty: 5,
+            vanity_tax: 6,
+            low_priority_tax: 0,
+        };
+
+        let embed = build_result_embed(&SettleOutcome::Decisive(settlement), 3, &[]);
+
+        assert_eq!(
+            embed.footer.as_deref(),
+            Some(
+                "Wager settled: 109 JC to the winner (−5 JC bankruptcy, −6 JC vanity) · 1 JC fee to the Reserve."
+            )
+        );
+    }
+
+    #[test]
     fn test_zero_delta_result_does_not_guess_why_fullness_was_unchanged() {
         let winner = duelist("common_cama", "Winner", CHALLENGER, 1);
         let loser = duelist("common_cama", "Loser", RECIPIENT, 2);
@@ -2564,6 +2597,10 @@ mod tests {
             payout: wager * 2,
             wager,
             fee,
+            deductions: cama_db::profit_deductions::ProfitDeductions {
+                profit: wager,
+                ..Default::default()
+            },
             records: BTreeMap::new(),
             career: BTreeMap::new(),
             personality_event_key: None,

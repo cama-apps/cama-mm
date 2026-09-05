@@ -61,27 +61,21 @@ pub const MILESTONES: [(i64, i64); 9] = [
 pub const STREAKS: [(i64, i64); 4] = [(3, 1), (7, 3), (14, 6), (30, 10)];
 
 /// Profit-only deductions shared by normal Dig yield and boss-victory yield.
-/// Basis points keep the transport-neutral mirror deterministic while matching
-/// Python's configured 75% bankruptcy keep and 10% vanity-tax rates exactly.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Basis points keep the transport-neutral mirror deterministic: the
+/// bankruptcy share is a flat number of basis points per outstanding penalty
+/// game, the vanity and low-priority taxes are flat shares of the same profit.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct DigProfitPolicy {
-    /// Fraction kept after bankruptcy. `10_000` means no active penalty.
-    pub bankruptcy_keep_basis_points: i64,
+    /// Basis points withheld per outstanding penalty game. `0` never
+    /// withholds.
+    pub bankruptcy_penalty_bps_per_game: i64,
+    /// Penalty games the miner still has to win; `0` withholds nothing.
+    pub bankruptcy_penalty_games_remaining: i64,
     /// Vanity tax on generated profit. `0` means the player is not taxable.
     pub vanity_tax_basis_points: i64,
     /// Low-priority tax on generated profit, accounted separately from the
     /// vanity tax. `0` means the player is not in active low priority.
     pub low_priority_tax_basis_points: i64,
-}
-
-impl Default for DigProfitPolicy {
-    fn default() -> Self {
-        Self {
-            bankruptcy_keep_basis_points: 10_000,
-            vanity_tax_basis_points: 0,
-            low_priority_tax_basis_points: 0,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -169,13 +163,18 @@ fn scale_dig_helltide_tax(amount: i64) -> i64 {
 
 /// Apply both profit policies independently to the same positive gross yield.
 /// The withheld bankruptcy share is floored, rather than the kept share, so a
-/// 1-2 JC trivia- or Dig-sized reward is never rounded down to zero.
+/// 1-2 JC trivia- or Dig-sized reward is never rounded down to zero. It is
+/// truncated from the same `f64` product every other profit surface uses so
+/// one player state withholds the same JC everywhere.
 #[must_use]
 pub fn apply_jc_profit_policies(gross: i64, policy: DigProfitPolicy) -> DigProfitSettlement {
     let gross = gross.max(0);
-    let keep_basis_points = policy.bankruptcy_keep_basis_points.clamp(0, 10_000);
-    let bankruptcy_penalty =
-        scale_dig_reward_basis_points(gross, 10_000_i64.saturating_sub(keep_basis_points));
+    let rate_per_game = policy.bankruptcy_penalty_bps_per_game.clamp(0, 10_000) as f64 / 10_000.0;
+    let withheld_rate = cama_domain::bankruptcy::withheld_rate(
+        rate_per_game,
+        policy.bankruptcy_penalty_games_remaining,
+    );
+    let bankruptcy_penalty = (gross as f64 * withheld_rate) as i64;
     let vanity_tax =
         scale_dig_reward_basis_points(gross, policy.vanity_tax_basis_points.clamp(0, 10_000));
     // Every sink takes its share of the same gross profit, so the combined

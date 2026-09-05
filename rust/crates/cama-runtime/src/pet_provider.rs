@@ -40,6 +40,7 @@ use cama_app::pet_eating::{
 use cama_app::pet_evolution_app::{PetEvolutionService, SystemEvolutionClock};
 use cama_app::pet_flavor::{PetFlavorEvent as FlavorEvent, PetFlavorService};
 use cama_app::pet_sqlite::SqlitePetCommandService;
+use cama_app::service_container::PersistentVanityTaxService;
 use cama_db::pet_brawl_repository::{
     BrawlSettlement, BrawlSettlementResult, DrawSettlementResult, PetBrawlRepository, SweepResult,
 };
@@ -74,6 +75,7 @@ use crate::pet_death_delivery::DirectDeathDeliveryGuard;
 use crate::pet_death_delivery::is_active as shared_direct_death_delivery_active;
 pub use crate::pet_flavor_runtime::read_production_pet_flavor_context;
 use crate::pet_flavor_runtime::{evolution_visual, production_pet_flavor_service};
+use crate::profit_deductions::ProfitDeductionSource;
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
     InteractionActionRow, InteractionAttachment, InteractionButton, InteractionButtonStyle,
@@ -118,6 +120,8 @@ impl PetRegistrationProvider {
     /// Compose the live command group and all of its component/autocomplete
     /// routes. `discord` is retained for media-independent channel fallback
     /// edits; interaction acknowledgement remains on the responder.
+    /// `vanity_tax` supplies the vanity roster withheld from brawl and eating
+    /// profit; production must pass the shared service, tests may pass `None`.
     #[must_use]
     pub fn new(
         database_path: impl AsRef<Path>,
@@ -125,6 +129,7 @@ impl PetRegistrationProvider {
         discord: Arc<dyn DiscordTransport>,
         reminders: ReminderHooks,
         ai_service: Option<Arc<AIService>>,
+        vanity_tax: Option<Arc<PersistentVanityTaxService>>,
     ) -> Self {
         let database_path = database_path.as_ref().to_path_buf();
         let flavor = Arc::new(ProductionPetFlavorRuntime::new(
@@ -132,10 +137,12 @@ impl PetRegistrationProvider {
             ai_service,
             config.values.ai_features_enabled || PET_FLAVOR_AI_DEFAULT,
         ));
+        let profit_deductions =
+            ProfitDeductionSource::from_config(config, database_path.clone(), vanity_tax);
         let brawl = PetBrawlCommands::new(
             ProductionBrawlService::new(
                 RuntimeBrawlPetPort::new(&database_path, config.values.pet_hunger_decay_per_day),
-                RuntimeBrawlPort::new(&database_path),
+                RuntimeBrawlPort::new(&database_path, profit_deductions.clone()),
                 RuntimeBrawlClock,
                 RuntimeBrawlRng::new(entropy_seed()),
                 Some(RuntimeEvolutionPort::new(&database_path)),
@@ -145,6 +152,7 @@ impl PetRegistrationProvider {
         );
         let state = Arc::new(PetRuntimeState {
             database_path,
+            profit_deductions,
             player_names: Arc::new(DiscordIdPlayerNameResolver),
             decay_per_day: config.values.pet_hunger_decay_per_day,
             pet_channel_id: config.channels.pet,
@@ -182,7 +190,7 @@ impl PetRegistrationProvider {
         discord: Arc<dyn DiscordTransport>,
         reminders: ReminderHooks,
     ) -> Self {
-        Self::new(database_path, config, discord, reminders, None)
+        Self::new(database_path, config, discord, reminders, None, None)
     }
 
     #[must_use]
@@ -215,6 +223,7 @@ impl RegistrationProvider for PetRegistrationProvider {
 
 struct PetRuntimeState {
     database_path: PathBuf,
+    profit_deductions: ProfitDeductionSource,
     player_names: Arc<dyn GuildPlayerNameResolver>,
     decay_per_day: i64,
     pet_channel_id: Option<i64>,
@@ -2205,6 +2214,15 @@ impl PetInteractionHandler {
                 outcome.penalty_games_remaining,
             ),
             ("new_balance".to_owned(), outcome.new_balance),
+            (
+                "bankruptcy_penalty".to_owned(),
+                outcome.deductions.bankruptcy_penalty,
+            ),
+            ("vanity_tax".to_owned(), outcome.deductions.vanity_tax),
+            (
+                "low_priority_tax".to_owned(),
+                outcome.deductions.low_priority_tax,
+            ),
         ]);
         let mut embed = build_eating_outcome_embed(&outcome.pet, &map);
         if let Some(activated_pet) = outcome.activated_pet.as_ref() {
@@ -2954,9 +2972,10 @@ impl PetInteractionHandler {
         F: FnOnce(&mut ProductionEatingService) -> Result<T, String> + Send + 'static,
     {
         let database_path = self.state.database_path.clone();
+        let profit_deductions = self.state.profit_deductions.clone();
         tokio::task::spawn_blocking(move || {
             operation(&mut PetEatingService::new(
-                RuntimeEatingRepository::new(database_path),
+                RuntimeEatingRepository::new(database_path, profit_deductions),
                 RuntimeEatingClock,
                 RuntimeEatingRng::new(entropy_seed()),
             ))
@@ -3685,12 +3704,14 @@ impl PetPort for RuntimeBrawlPetPort {
 #[derive(Clone)]
 struct RuntimeBrawlPort {
     repository: PetBrawlRepository,
+    profit_deductions: ProfitDeductionSource,
 }
 
 impl RuntimeBrawlPort {
-    fn new(database_path: impl AsRef<Path>) -> Self {
+    fn new(database_path: impl AsRef<Path>, profit_deductions: ProfitDeductionSource) -> Self {
         Self {
             repository: PetBrawlRepository::new(database_path),
+            profit_deductions,
         }
     }
 }
@@ -3791,8 +3812,14 @@ impl PetBrawlPort for RuntimeBrawlPort {
         guild_id: Option<i64>,
         settlement: BrawlSettlement<'_>,
     ) -> PortResult<BrawlSettlementResult> {
+        // Both rosters are SQLite reads; callers are already on a blocking
+        // thread.
+        let policy = self
+            .profit_deductions
+            .resolve(PetBrawlRepository::normalize_guild_id(guild_id))
+            .map_err(PortError::new)?;
         self.repository
-            .settle_brawl_atomic(brawl_id, guild_id, settlement)
+            .settle_brawl_atomic(brawl_id, guild_id, settlement, &policy.as_policy())
             .map_err(|error| PortError::new(error.to_string()))
     }
 
@@ -3915,14 +3942,16 @@ fn error_code(error: &PetTrainingError) -> String {
 struct RuntimeEatingRepository {
     repository: PetEatingRepository,
     database_path: PathBuf,
+    profit_deductions: ProfitDeductionSource,
 }
 
 impl RuntimeEatingRepository {
-    fn new(database_path: impl AsRef<Path>) -> Self {
+    fn new(database_path: impl AsRef<Path>, profit_deductions: ProfitDeductionSource) -> Self {
         let database_path = database_path.as_ref().to_path_buf();
         Self {
             repository: PetEatingRepository::new(&database_path),
             database_path,
+            profit_deductions,
         }
     }
 }
@@ -3954,21 +3983,29 @@ impl PetEatingRepositoryPort for RuntimeEatingRepository {
         guild_id: Option<i64>,
         request: &AppEatAdultPetRequest,
     ) -> Result<EatAdultPetCommit, Self::Error> {
-        let outcome = self.repository.eat_adult_pet_atomic(DbEatAdultPetRequest {
-            discord_id,
-            guild_id,
-            pet_id: request.pet_id,
-            expected_last_fed_at: request.expected_last_fed_at,
-            expected_hunger: request.expected_hunger,
-            reward: request.reward,
-            penalty_games: request.penalty_games,
-            now: request.now,
-        })?;
+        let policy = self
+            .profit_deductions
+            .resolve(PetBrawlRepository::normalize_guild_id(guild_id))
+            .map_err(PetEatingRepositoryError::DeductionRoster)?;
+        let outcome = self.repository.eat_adult_pet_atomic(
+            DbEatAdultPetRequest {
+                discord_id,
+                guild_id,
+                pet_id: request.pet_id,
+                expected_last_fed_at: request.expected_last_fed_at,
+                expected_hunger: request.expected_hunger,
+                reward: request.reward,
+                penalty_games: request.penalty_games,
+                now: request.now,
+            },
+            &policy.as_policy(),
+        )?;
         Ok(EatAdultPetCommit {
             pet: outcome.pet,
             activated_pet: outcome.activated_pet,
             new_balance: outcome.new_balance,
             penalty_games_remaining: outcome.penalty_games_remaining,
+            deductions: outcome.deductions,
         })
     }
 

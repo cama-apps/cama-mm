@@ -1844,18 +1844,26 @@ impl std::fmt::Debug for SqliteBossProfitPolicy {
 impl SqliteBossProfitPolicy {
     fn new(
         path: &Path,
+        policy: BankruptcyPolicy,
         vanity_tax: Arc<dyn DigBossVanityTaxPort>,
         low_priority_tax: Arc<dyn DigBossLowPriorityTaxPort>,
     ) -> Self {
+        let mut warnings = Vec::new();
+        let bankruptcy = match BankruptcyService::new(BankruptcyRepository::new(path), policy) {
+            Ok(service) => service,
+            Err(error) => {
+                warnings.push(format!(
+                    "invalid bankruptcy policy, falling back to defaults: {error}"
+                ));
+                BankruptcyService::new(BankruptcyRepository::new(path), BankruptcyPolicy::default())
+                    .expect("the default bankruptcy policy is valid")
+            }
+        };
         Self {
-            bankruptcy: BankruptcyService::new(
-                BankruptcyRepository::new(path),
-                BankruptcyPolicy::default(),
-            )
-            .expect("the default bankruptcy policy is valid"),
+            bankruptcy,
             vanity_tax,
             low_priority_tax,
-            warnings: Vec::new(),
+            warnings,
         }
     }
 }
@@ -2201,6 +2209,8 @@ pub struct DigBossRuntimeConfig {
     pub database_path: PathBuf,
     pub pet_hunger_decay_per_day: i64,
     pub economy_event: EconomyEventConfig,
+    /// Bankruptcy penalty rate and length applied to boss winnings.
+    pub bankruptcy: BankruptcyPolicy,
 }
 
 impl DigBossRuntimeConfig {
@@ -2210,7 +2220,14 @@ impl DigBossRuntimeConfig {
             database_path: database_path.as_ref().to_path_buf(),
             pet_hunger_decay_per_day,
             economy_event: EconomyEventConfig::default(),
+            bankruptcy: BankruptcyPolicy::default(),
         }
+    }
+
+    #[must_use]
+    pub fn with_bankruptcy_policy(mut self, policy: BankruptcyPolicy) -> Self {
+        self.bankruptcy = policy;
+        self
     }
 }
 
@@ -3629,6 +3646,7 @@ impl DigBossRuntimeService {
         let repository = DigBossRuntimeRepository::new(&self.config.database_path);
         let mut profit_policy = SqliteBossProfitPolicy::new(
             &self.config.database_path,
+            self.config.bankruptcy,
             Arc::clone(&self.vanity_tax),
             Arc::clone(&self.low_priority_tax),
         );
@@ -4456,6 +4474,7 @@ impl DigBossRuntimeService {
             ),
             SqliteBossProfitPolicy::new(
                 &self.config.database_path,
+                self.config.bankruptcy,
                 Arc::clone(&self.vanity_tax),
                 Arc::clone(&self.low_priority_tax),
             ),

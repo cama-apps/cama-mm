@@ -658,6 +658,7 @@ async fn run_serve() -> ExitCode {
         discord_transport.clone(),
         reminder_provider.hooks(),
         production_ai_service.clone(),
+        Some(Arc::clone(&vanity_tax_service)),
     )
     .with_player_names(Arc::new(DiscordGuildPlayerNameResolver::new(
         discord_transport.clone(),
@@ -665,6 +666,7 @@ async fn run_serve() -> ExitCode {
     let duel_provider = DuelRegistrationProvider::new(
         &config.db_path,
         &application_config,
+        Arc::clone(&vanity_tax_service),
         discord_transport.clone(),
         production_ai_service.clone(),
     );
@@ -742,6 +744,7 @@ async fn run_serve() -> ExitCode {
     let player_trivia_provider = PlayerTriviaRegistrationProvider::new(
         &config.db_path,
         &application_config,
+        Arc::clone(&vanity_tax_service),
         discord_transport.clone(),
     )
     .with_player_names(Arc::new(DiscordGuildPlayerNameResolver::new(

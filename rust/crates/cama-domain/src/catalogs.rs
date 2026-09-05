@@ -8,7 +8,7 @@
 pub const PAID_DIG_COSTS_PER_DAY: [u32; 8] = [3, 5, 10, 20, 40, 60, 80, 100];
 pub const WHEEL_TARGET_EV: f64 = -27.5;
 pub const BANKRUPTCY_PENALTY_GAMES: u32 = 3;
-pub const BANKRUPTCY_PENALTY_RATE: f64 = 0.75;
+pub const BANKRUPTCY_PENALTY_RATE_PER_GAME: f64 = 0.05;
 pub const MIN_RESOLUTION_VOTES: u32 = 3;
 
 /// A voice used to guide generated match or betting commentary.
@@ -287,9 +287,9 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        BANKRUPTCY_PENALTY_GAMES, BANKRUPTCY_PENALTY_RATE, BETTING_PERSONAS, MIN_RESOLUTION_VOTES,
-        PAID_DIG_COSTS_PER_DAY, PERSONAS, SeededPersonaChooser, WHEEL_TARGET_EV,
-        pick_betting_persona, pick_persona,
+        BANKRUPTCY_PENALTY_GAMES, BANKRUPTCY_PENALTY_RATE_PER_GAME, BETTING_PERSONAS,
+        MIN_RESOLUTION_VOTES, PAID_DIG_COSTS_PER_DAY, PERSONAS, SeededPersonaChooser,
+        WHEEL_TARGET_EV, pick_betting_persona, pick_persona,
     };
 
     #[test]
@@ -305,7 +305,7 @@ mod tests {
     #[test]
     fn test_bankruptcy_penalty_pinned() {
         assert_eq!(BANKRUPTCY_PENALTY_GAMES, 3);
-        assert_eq!(BANKRUPTCY_PENALTY_RATE, 0.75);
+        assert_eq!(BANKRUPTCY_PENALTY_RATE_PER_GAME, 0.05);
     }
 
     #[test]

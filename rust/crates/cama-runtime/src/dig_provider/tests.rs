@@ -6465,6 +6465,7 @@ fn sabotage_result_embed_keeps_prediction_contract_detail() {
     let response = super::sabotage_result_response(
         &cama_app::dig_social_runtime::DigSabotageResult {
             cost: 20,
+            target_deductions: Default::default(),
             damage: 7,
             target_tunnel: "Target Descent".to_owned(),
             target_depth_after: 93,

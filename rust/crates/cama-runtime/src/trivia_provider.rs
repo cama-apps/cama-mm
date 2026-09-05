@@ -145,7 +145,7 @@ impl TriviaRegistrationProvider {
                 fresh_start_balance: config.values.bankruptcy_fresh_start_balance,
                 cooldown_seconds: config.values.bankruptcy_cooldown_seconds,
                 penalty_games: config.values.bankruptcy_penalty_games,
-                penalty_kept_rate: config.values.bankruptcy_penalty_rate,
+                penalty_rate_per_game: config.values.bankruptcy_penalty_rate_per_game,
             },
         )
         .map_err(|error| error.to_string())?;
@@ -868,33 +868,35 @@ impl TriviaRuntimeState {
                     warn!(user_id, guild_id, %error, "failed to apply trivia bankrupt multiplier")
                 }
             }
-            let gross_streak_bonus = streak_bonus;
-            match self
-                .bankruptcy
-                .apply_penalty_to_winnings(user_id, streak_bonus, Some(guild_id))
-            {
-                Ok(penalty) => streak_bonus = penalty.penalized,
-                Err(error) => {
-                    warn!(user_id, guild_id, %error, "failed to apply trivia bankruptcy debuff")
-                }
-            }
-            // Both taxes bill the same pre-penalty streak bonus so the low
-            // priority share never compounds on top of the vanity share.
-            let vanity_tax = self
-                .vanity_tax
-                .calculate_tax(user_id, guild_id, gross_streak_bonus);
-            let low_priority_tax = self.low_priority_tax(user_id, guild_id, gross_streak_bonus);
-            // The bankruptcy debuff already withheld part of the bonus, so cap
-            // the combined withholding at the bonus itself: a streak reward
-            // must never turn into a charge against the per-question reward.
-            let withheld = (gross_streak_bonus - streak_bonus)
-                .saturating_add(vanity_tax)
-                .saturating_add(low_priority_tax)
-                .min(gross_streak_bonus);
-            streak_bonus = gross_streak_bonus - withheld;
         }
 
-        let raw = self.config.reward_per_question + streak_bonus;
+        // The whole generated reward is profit, so the bankruptcy debuff and
+        // both taxes withhold from the per-question reward and the streak
+        // bonus together. Every share bills the same pre-deduction basis so
+        // none compounds on another, and the combined withholding is capped
+        // at that basis so a correct answer never becomes a charge.
+        let gross = self.config.reward_per_question + streak_bonus;
+        let mut raw = gross;
+        if gross > 0 {
+            let bankruptcy_penalty = match self.bankruptcy.apply_penalty_to_winnings(
+                user_id,
+                gross,
+                Some(guild_id),
+            ) {
+                Ok(penalty) => penalty.penalty_applied,
+                Err(error) => {
+                    warn!(user_id, guild_id, %error, "failed to apply trivia bankruptcy debuff");
+                    0
+                }
+            };
+            let vanity_tax = self.vanity_tax.calculate_tax(user_id, guild_id, gross);
+            let low_priority_tax = self.low_priority_tax(user_id, guild_id, gross);
+            let withheld = bankruptcy_penalty
+                .saturating_add(vanity_tax)
+                .saturating_add(low_priority_tax)
+                .min(gross);
+            raw = gross - withheld;
+        }
         let scaled = scale_minigame_jc_delta(raw as f64, self.config.minigame_scale);
         let now = unix_timestamp().unwrap_or_default();
         let mut reward = match self.economy_events.adjust_reward_at(guild_id, scaled, now) {

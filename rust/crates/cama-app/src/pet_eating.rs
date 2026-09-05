@@ -9,11 +9,14 @@ use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use cama_db::profit_deductions::ProfitDeductions;
 use cama_domain::pet::{
     PET_EAT_PENALTY_GAMES_MAX, PET_EAT_PENALTY_GAMES_MIN, PET_EAT_REWARD_MAX, PET_EAT_REWARD_MIN,
     Pet, PetStage, PetStatus,
 };
 use cama_domain::service_result::ServiceResult;
+
+use crate::pet_commands::withholding_note;
 
 pub const NO_PET: &str = "no_pet";
 pub const PET_NOT_ADULT: &str = "pet_not_adult";
@@ -47,6 +50,8 @@ pub struct EatAdultPetCommit {
     pub activated_pet: Option<Pet>,
     pub new_balance: i64,
     pub penalty_games_remaining: i64,
+    /// Shares withheld from the reward.
+    pub deductions: ProfitDeductions,
 }
 
 /// Persistence boundary for the preview, atomic consume, and delivered-death
@@ -109,6 +114,8 @@ pub struct PetEatingOutcome {
     pub penalty_games_added: i64,
     pub penalty_games_remaining: i64,
     pub new_balance: i64,
+    /// Shares withheld from `reward`.
+    pub deductions: ProfitDeductions,
 }
 
 #[derive(Clone, Debug)]
@@ -187,6 +194,7 @@ where
                         penalty_games_added: penalty_games,
                         penalty_games_remaining: commit.penalty_games_remaining,
                         new_balance: commit.new_balance,
+                        deductions: commit.deductions,
                     });
                 }
                 Err(error) if R::classify_error(&error) == PetEatingRepositoryFailure::StalePet => {
@@ -523,11 +531,16 @@ pub fn build_eating_outcome_embed(outcome: &PetEatingOutcome) -> EatingEmbed {
                 pet.name
             )
         });
+    let note = withholding_note(
+        outcome.deductions.bankruptcy_penalty,
+        outcome.deductions.vanity_tax,
+        outcome.deductions.low_priority_tax,
+    );
     EatingEmbed {
         title: format!("🍖 {} was delicious", outcome.pet.name),
         description: format!(
-            "You received **{}** JC.\n\nBad karma adds **{}** game(s) to your sentence (**{} remaining**). Your future earnings are taxed until you win your way free.\n\nBalance: **{}** JC.{activation}",
-            grouped(outcome.reward),
+            "You received **{}** JC{note}.\n\nBad karma adds **{}** game(s) to your sentence (**{} remaining**). Your future earnings are taxed until you win your way free.\n\nBalance: **{}** JC.{activation}",
+            grouped(outcome.reward - outcome.deductions.total()),
             outcome.penalty_games_added,
             outcome.penalty_games_remaining,
             grouped(outcome.new_balance)

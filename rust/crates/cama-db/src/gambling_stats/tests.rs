@@ -117,6 +117,7 @@ impl Fixture {
                      discord_id INTEGER NOT NULL,
                      vanity_tax INTEGER NOT NULL DEFAULT 0,
                      low_priority_tax INTEGER NOT NULL DEFAULT 0,
+                     bankruptcy_penalty INTEGER NOT NULL DEFAULT 0,
                      PRIMARY KEY (match_id, guild_id, discord_id)
                  );
                  CREATE TABLE bankruptcy_state (
@@ -1038,7 +1039,7 @@ fn test_bankruptcy_debuff_vanity_tax_flows_into_history_and_aggregate_pnl() {
             BettingTeam::Radiant,
             BettingMode::House,
             &BetSettlementAdjustments {
-                bankruptcy_keep_basis_points: Some(7_500),
+                bankruptcy_penalty_rate_per_game: Some(0.05),
                 vanity_tax_basis_points: 1_000,
                 vanity_taxable_ids: BTreeSet::from([discord_id]),
                 ..BetSettlementAdjustments::default()

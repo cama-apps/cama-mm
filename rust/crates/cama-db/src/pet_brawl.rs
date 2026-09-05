@@ -9,6 +9,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use cama_db_core::profit_deductions::{
+    DeductionLedgerContext, ProfitDeductionPolicy, ProfitDeductions, withhold_profit_deductions,
+};
 use cama_domain::game_date::game_day_start_ts;
 use cama_domain::pet::{
     BRAWL_LOSS_XP, BRAWL_TRAINING_LEVEL_CAP, BRAWL_TRAINING_STAT_CAP, BRAWL_TRAINING_XP_CAP,
@@ -115,6 +118,9 @@ pub struct BrawlSettlementResult {
     pub payout: i64,
     pub wager: i64,
     pub fee: i64,
+    /// Bankruptcy, vanity, and low-priority shares withheld from the winner's
+    /// profit (the wager).
+    pub deductions: ProfitDeductions,
     pub personality_event_key: Option<String>,
 }
 
@@ -581,6 +587,7 @@ impl PetBrawlRepository {
         brawl_id: i64,
         guild_id: Option<i64>,
         settlement: BrawlSettlement<'_>,
+        policy: &ProfitDeductionPolicy<'_>,
     ) -> Result<BrawlSettlementResult, PetBrawlRepositoryError> {
         let guild_id = Self::normalize_guild_id(guild_id);
         let mut connection = self.connection()?;
@@ -659,6 +666,7 @@ impl PetBrawlRepository {
             personality_event_key = Some("milestone.build".to_owned());
         }
         let payout = 2 * brawl.wager;
+        let mut deductions = ProfitDeductions::default();
         if payout != 0 {
             update_player_balance(
                 &transaction,
@@ -669,6 +677,23 @@ impl PetBrawlRepository {
                 "winner_payout",
                 None,
             )?;
+            // The winner's profit is the opponent's wager; withhold the
+            // bankruptcy, vanity, and low-priority shares like every other
+            // profit payout.
+            deductions = withhold_profit_deductions(
+                &transaction,
+                guild_id,
+                settlement.winner_id,
+                brawl.wager,
+                policy,
+                &DeductionLedgerContext {
+                    source: "pet_brawl",
+                    related_type: Some("pet_brawl"),
+                    related_id: Some(brawl.brawl_id),
+                    reason: "winner_payout",
+                },
+            )?
+            .ok_or(PetBrawlRepositoryError::ParticipantBalanceUpdate)?;
             set_ledger_context(
                 &transaction,
                 &brawl,
@@ -711,6 +736,7 @@ impl PetBrawlRepository {
             payout,
             wager: brawl.wager,
             fee: brawl.fee,
+            deductions,
             personality_event_key,
         };
         transaction.commit()?;
@@ -1214,6 +1240,9 @@ mod tests {
         read_living_hunger,
     };
     use crate::test_support::FastTestDatabase;
+    use cama_db_core::profit_deductions::{ProfitDeductionPolicy, ProfitDeductions};
+    use cama_domain::bankruptcy::BankruptcyPenaltyPolicy;
+    use std::collections::BTreeSet;
 
     const GUILD_ID: i64 = 123_456;
     const NOW: i64 = 1_800_000_000;
@@ -1278,6 +1307,7 @@ mod tests {
                          discord_username TEXT NOT NULL,
                          jopacoin_balance INTEGER DEFAULT 0,
                          lowest_balance_ever INTEGER DEFAULT 0,
+                         updated_at TEXT,
                          PRIMARY KEY (discord_id, guild_id)
                      );
                      CREATE TABLE pets (
@@ -1329,6 +1359,15 @@ mod tests {
                          guild_id INTEGER PRIMARY KEY,
                          total_collected INTEGER NOT NULL DEFAULT 0,
                          updated_at TEXT
+                     );
+                     CREATE TABLE bankruptcy_state (
+                         discord_id INTEGER NOT NULL,
+                         guild_id INTEGER NOT NULL DEFAULT 0,
+                         last_bankruptcy_at INTEGER,
+                         penalty_games_remaining INTEGER NOT NULL DEFAULT 0,
+                         bankruptcy_count INTEGER NOT NULL DEFAULT 0,
+                         updated_at TEXT,
+                         PRIMARY KEY (discord_id, guild_id)
                      );
                      CREATE TABLE economy_ledger_entries (
                          ledger_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1549,6 +1588,7 @@ mod tests {
                     brawl_id,
                     Some(GUILD_ID),
                     settlement(winner_id, winner_pet_id, loser_pet_id, now),
+                    &ProfitDeductionPolicy::none(),
                 )
                 .expect("settle active brawl")
         }
@@ -1851,9 +1891,15 @@ mod tests {
         input.loser_stat_gain = Some("int");
         let result = fixture
             .repository
-            .settle_brawl_atomic(brawl.brawl_id, Some(GUILD_ID), input)
+            .settle_brawl_atomic(
+                brawl.brawl_id,
+                Some(GUILD_ID),
+                input,
+                &ProfitDeductionPolicy::none(),
+            )
             .unwrap();
         assert_eq!(result.payout, 40);
+        assert_eq!(result.deductions.total(), 0);
         assert_eq!((fixture.balance(100), fixture.balance(200)), (119, 80));
         assert_eq!(fixture.nonprofit_balance(), 1);
         let connection = fixture.connection();
@@ -1890,6 +1936,134 @@ mod tests {
             ]
         );
         assert!(ledger.iter().all(|row| row.3 == brawl.brawl_id.to_string()));
+    }
+
+    fn deduction_policy<'a>(vanity: &'a BTreeSet<i64>) -> ProfitDeductionPolicy<'a> {
+        static EMPTY: BTreeSet<i64> = BTreeSet::new();
+        ProfitDeductionPolicy {
+            bankruptcy: Some(BankruptcyPenaltyPolicy {
+                rate_per_game: 0.05,
+            }),
+            vanity_tax_rate: 0.10,
+            vanity_taxable_ids: vanity,
+            low_priority_tax_rate: 0.0,
+            low_priority_taxable_ids: &EMPTY,
+        }
+    }
+
+    fn seed_penalty(fixture: &Fixture, discord_id: i64, remaining: i64) {
+        fixture
+            .connection()
+            .execute(
+                "INSERT INTO bankruptcy_state (
+                     discord_id, guild_id, penalty_games_remaining, bankruptcy_count
+                 ) VALUES (?1, ?2, ?3, 1)",
+                params![discord_id, GUILD_ID, remaining],
+            )
+            .expect("seed bankruptcy penalty");
+    }
+
+    /// Settle a 60 JC wager (1 JC fee) won by player 100 and return the
+    /// result plus the winner's balance. Both players start at 1,000 JC, so
+    /// the winner nets 1,000 - 61 + 120 minus whatever is withheld from the
+    /// 60 JC profit.
+    fn settle_wagered(
+        fixture: &Fixture,
+        policy: &ProfitDeductionPolicy<'_>,
+    ) -> (super::BrawlSettlementResult, i64) {
+        fixture.seed_player(100, 1_000);
+        fixture.seed_player(200, 1_000);
+        let (brawl, pet_a, pet_b) = fixture.make_pending(100, 200, 60, 1);
+        fixture
+            .repository
+            .accept_atomic(brawl.brawl_id, Some(GUILD_ID), 200, pet_b, NOW + 5)
+            .expect("accept brawl");
+        let result = fixture
+            .repository
+            .settle_brawl_atomic(
+                brawl.brawl_id,
+                Some(GUILD_ID),
+                settlement(100, pet_a, pet_b, NOW + 60),
+                policy,
+            )
+            .expect("settle wagered brawl");
+        (result, fixture.balance(100))
+    }
+
+    #[test]
+    fn test_settlement_withholds_bankruptcy_share_scaled_by_games_remaining() {
+        let empty = BTreeSet::new();
+        let fixture = Fixture::new();
+        seed_penalty(&fixture, 100, 1);
+        let (result, balance) = settle_wagered(&fixture, &deduction_policy(&empty));
+        assert_eq!(result.payout, 120);
+        // 1 game outstanding withholds 60 * 0.05 = 3.
+        assert_eq!(
+            result.deductions,
+            ProfitDeductions {
+                profit: 60,
+                bankruptcy_penalty: 3,
+                vanity_tax: 0,
+                low_priority_tax: 0,
+            }
+        );
+        assert_eq!(balance, 1_000 - 61 + 120 - 3);
+        let ledger: Vec<(i64, String, String)> = fixture
+            .connection()
+            .prepare(
+                "SELECT delta, source, reason FROM economy_ledger_entries
+                 WHERE account_id = 100 AND delta < 0 AND related_type = 'pet_brawl'
+                 ORDER BY ledger_id",
+            )
+            .expect("prepare")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("rows");
+        assert_eq!(
+            ledger,
+            vec![
+                (-61, "pet_brawl".to_owned(), "challenger_escrow".to_owned()),
+                (
+                    -3,
+                    "pet_brawl".to_owned(),
+                    "winner_payout bankruptcy penalty".to_owned()
+                ),
+            ]
+        );
+
+        let fixture = Fixture::new();
+        seed_penalty(&fixture, 100, 6);
+        let (result, balance) = settle_wagered(&fixture, &deduction_policy(&empty));
+        // 6 games outstanding withhold six 5% steps, 30% of the 60 JC profit.
+        assert_eq!(result.deductions.bankruptcy_penalty, 18);
+        assert_eq!(balance, 1_000 - 61 + 120 - 18);
+    }
+
+    #[test]
+    fn test_settlement_withholds_vanity_tax_only_from_listed_winners() {
+        let roster = BTreeSet::from([100]);
+        let fixture = Fixture::new();
+        let (result, balance) = settle_wagered(&fixture, &deduction_policy(&roster));
+        assert_eq!(result.deductions.vanity_tax, 6);
+        assert_eq!(result.deductions.bankruptcy_penalty, 0);
+        assert_eq!(balance, 1_000 - 61 + 120 - 6);
+        let vanity_rows: i64 = fixture
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM economy_ledger_entries
+                 WHERE source = 'vanity_tax' AND delta = -6 AND account_id = 100",
+                [],
+                |row| row.get(0),
+            )
+            .expect("vanity ledger row");
+        assert_eq!(vanity_rows, 1);
+
+        let unlisted = BTreeSet::from([200]);
+        let fixture = Fixture::new();
+        let (result, balance) = settle_wagered(&fixture, &deduction_policy(&unlisted));
+        assert_eq!(result.deductions.total(), 0);
+        assert_eq!(balance, 1_000 - 61 + 120);
     }
 
     #[test]
@@ -2162,7 +2336,12 @@ mod tests {
         input.personality_event_key = Some("str.victory");
         let result = fixture
             .repository
-            .settle_brawl_atomic(brawl.brawl_id, Some(GUILD_ID), input)
+            .settle_brawl_atomic(
+                brawl.brawl_id,
+                Some(GUILD_ID),
+                input,
+                &ProfitDeductionPolicy::none(),
+            )
             .unwrap();
         assert_eq!(fixture.training(pet_a), (6, 1, 0, 0));
         assert_eq!(fixture.training(pet_b), (5, 0, 0, 1));
@@ -2270,6 +2449,7 @@ mod tests {
                 brawl.brawl_id,
                 Some(GUILD_ID),
                 settlement(100, pet_a, pet_b, NOW + 60),
+                &ProfitDeductionPolicy::none(),
             ),
             "already_done",
         );
@@ -2284,6 +2464,7 @@ mod tests {
                 brawl.brawl_id,
                 Some(GUILD_ID),
                 settlement(100, pet_a, pet_b, NOW + 60),
+                &ProfitDeductionPolicy::none(),
             ),
             "not_active",
         );
@@ -2333,7 +2514,12 @@ mod tests {
             input.winner_stat_gain = Some("dex");
             let result = fixture
                 .repository
-                .settle_brawl_atomic(brawl.brawl_id, Some(GUILD_ID), input)
+                .settle_brawl_atomic(
+                    brawl.brawl_id,
+                    Some(GUILD_ID),
+                    input,
+                    &ProfitDeductionPolicy::none(),
+                )
                 .unwrap();
             deltas.push(result.winner_delta);
             xp_deltas.push(result.winner_xp_delta);

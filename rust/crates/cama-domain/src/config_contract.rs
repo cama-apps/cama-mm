@@ -24,8 +24,8 @@ pub const DEFAULT_AUTO_SPECTATOR_BET_TOP_PERCENTAGE: f64 = 0.02;
 pub const DEFAULT_WHEEL_TARGET_EV: f64 = -27.5;
 /// Default number of wins needed to clear the bankruptcy penalty.
 pub const DEFAULT_BANKRUPTCY_PENALTY_GAMES: i64 = 3;
-/// Default fraction of winnings retained while the bankruptcy penalty applies.
-pub const DEFAULT_BANKRUPTCY_PENALTY_RATE: f64 = 0.75;
+/// Default share of profit withheld per outstanding bankruptcy penalty game.
+pub const DEFAULT_BANKRUPTCY_PENALTY_RATE_PER_GAME: f64 = 0.05;
 
 /// Price ladder for successive paid digs during one day.
 pub const PAID_DIG_COSTS_PER_DAY: [i64; 8] = [3, 5, 10, 20, 40, 60, 80, 100];
@@ -91,8 +91,8 @@ pub struct ConfigContract {
     pub wheel_target_ev: f64,
     /// Wins needed to clear the bankruptcy penalty.
     pub bankruptcy_penalty_games: i64,
-    /// Fraction of winnings retained during the bankruptcy penalty.
-    pub bankruptcy_penalty_rate: f64,
+    /// Share of profit withheld per outstanding bankruptcy penalty game.
+    pub bankruptcy_penalty_rate_per_game: f64,
 }
 
 impl Default for ConfigContract {
@@ -106,7 +106,7 @@ impl Default for ConfigContract {
             auto_spectator_bet_top_percentage: DEFAULT_AUTO_SPECTATOR_BET_TOP_PERCENTAGE,
             wheel_target_ev: DEFAULT_WHEEL_TARGET_EV,
             bankruptcy_penalty_games: DEFAULT_BANKRUPTCY_PENALTY_GAMES,
-            bankruptcy_penalty_rate: DEFAULT_BANKRUPTCY_PENALTY_RATE,
+            bankruptcy_penalty_rate_per_game: DEFAULT_BANKRUPTCY_PENALTY_RATE_PER_GAME,
         }
     }
 }
@@ -146,9 +146,9 @@ impl ConfigContract {
                 lookup("BANKRUPTCY_PENALTY_GAMES"),
                 DEFAULT_BANKRUPTCY_PENALTY_GAMES,
             ),
-            bankruptcy_penalty_rate: parse_f64(
-                lookup("BANKRUPTCY_PENALTY_RATE"),
-                DEFAULT_BANKRUPTCY_PENALTY_RATE,
+            bankruptcy_penalty_rate_per_game: parse_f64(
+                lookup("BANKRUPTCY_PENALTY_RATE_PER_GAME"),
+                DEFAULT_BANKRUPTCY_PENALTY_RATE_PER_GAME,
             ),
         }
     }
@@ -231,7 +231,7 @@ mod tests {
         let config = ConfigContract::default();
 
         assert_eq!(config.bankruptcy_penalty_games, 3);
-        assert_eq!(config.bankruptcy_penalty_rate, 0.75);
+        assert_eq!(config.bankruptcy_penalty_rate_per_game, 0.05);
     }
 
     #[test]
@@ -278,7 +278,10 @@ mod tests {
             ),
             ("WHEEL_TARGET_EV".to_owned(), "-10.5".to_owned()),
             ("BANKRUPTCY_PENALTY_GAMES".to_owned(), "4".to_owned()),
-            ("BANKRUPTCY_PENALTY_RATE".to_owned(), "0.5".to_owned()),
+            (
+                "BANKRUPTCY_PENALTY_RATE_PER_GAME".to_owned(),
+                "0.1".to_owned(),
+            ),
         ]);
         let config = ConfigContract::from_lookup(|name| values.get(name).map(String::as_str));
 
@@ -293,7 +296,7 @@ mod tests {
                 auto_spectator_bet_top_percentage: 0.04,
                 wheel_target_ev: -10.5,
                 bankruptcy_penalty_games: 4,
-                bankruptcy_penalty_rate: 0.5,
+                bankruptcy_penalty_rate_per_game: 0.1,
             }
         );
     }

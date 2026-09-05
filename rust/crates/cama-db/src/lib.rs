@@ -13,6 +13,7 @@ use thiserror::Error;
 
 #[doc(hidden)]
 pub mod json_numeric;
+pub mod profit_deductions;
 pub mod schema_manager;
 pub mod schema_manager_contracts;
 #[cfg(test)]

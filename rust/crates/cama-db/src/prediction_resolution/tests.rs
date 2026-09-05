@@ -89,11 +89,13 @@ impl Fixture {
             .expect("balance")
     }
 
+    /// Leave two penalty games outstanding, so `bps_per_game` withholds
+    /// twice that share of profit.
     fn set_bankruptcy_penalty(&self, discord_id: i64) {
         self.connection()
             .execute(
                 "INSERT INTO bankruptcy_state(discord_id,guild_id,penalty_games_remaining)
-                 VALUES (?1,?2,3)",
+                 VALUES (?1,?2,2)",
                 params![discord_id, GUILD],
             )
             .expect("penalty state");
@@ -223,7 +225,8 @@ fn initial_levels() -> Vec<NewLevel> {
 
 fn penalty_adjustments() -> SettlementAdjustments {
     SettlementAdjustments {
-        bankruptcy_credit_bps: Some(5_000),
+        // 25% per game withholds half the profit over the fixture's two games.
+        bankruptcy_penalty_bps_per_game: Some(2_500),
         ..SettlementAdjustments::default()
     }
 }
@@ -431,7 +434,7 @@ fn test_bankruptcy_debuff_orderbook_penalizes_profit_and_returns_cost_basis() {
     let fixture = Fixture::new();
     fixture.player(6_001, 1_000);
     fixture.set_bankruptcy_penalty(6_001);
-    let prediction_id = fixture.market("75 percent penalty?");
+    let prediction_id = fixture.market("25 percent penalty?");
     fixture.buy(prediction_id, 6_001, ContractSide::Yes, 5);
     let cost_basis = fixture.position(prediction_id, 6_001).yes_cost_basis_total;
     let before = fixture.balance(6_001);
@@ -440,11 +443,12 @@ fn test_bankruptcy_debuff_orderbook_penalizes_profit_and_returns_cost_basis() {
             prediction_id,
             ContractSide::Yes,
             &SettlementAdjustments {
-                bankruptcy_credit_bps: Some(7_500),
+                // 12.5% per game withholds 25% over the fixture's two games.
+                bankruptcy_penalty_bps_per_game: Some(1_250),
                 ..SettlementAdjustments::default()
             },
         )
-        .expect("75 percent settlement");
+        .expect("25 percent settlement");
     let winner = &result.winners[0];
     let gross_payout = 5 * CONTRACT_VALUE;
     let gross_profit = gross_payout - cost_basis;
@@ -572,7 +576,7 @@ fn test_resolve_orderbook_stacks_low_priority_tax_beside_the_vanity_row() {
             prediction_id,
             ContractSide::Yes,
             &SettlementAdjustments {
-                bankruptcy_credit_bps: Some(5_000),
+                bankruptcy_penalty_bps_per_game: Some(2_500),
                 vanity_tax_bps: 1_000,
                 vanity_taxable_ids: BTreeSet::from([1]),
                 ..low_priority_adjustments(1)
@@ -624,7 +628,8 @@ fn test_low_priority_tax_is_capped_by_the_profit_earlier_withholdings_leave() {
             prediction_id,
             ContractSide::Yes,
             &SettlementAdjustments {
-                bankruptcy_credit_bps: Some(0),
+                // 100% per game withholds the whole profit.
+                bankruptcy_penalty_bps_per_game: Some(10_000),
                 ..low_priority_adjustments(1)
             },
         )
@@ -1438,4 +1443,84 @@ fn rollback_succeeds_on_a_market_that_contains_a_sell_trade() {
         .expect("a market with a sell trade can still be rolled back");
     assert_eq!(rollback.total_reversed, settled.winners[0].payout);
     assert_eq!(fixture.balance(1), before);
+}
+
+#[test]
+fn test_bankruptcy_withholding_scales_with_penalty_games_remaining() {
+    let fixture = Fixture::new();
+    fixture.player(6_002, 10_000);
+    fixture.set_bankruptcy_penalty(6_002);
+    // 5% per outstanding game: 1 game withholds 5%, 3 games 15%, 6 games
+    // 30%, and 20 games cap at the whole profit.
+    for (remaining, expected_bps) in [(1, 500), (3, 1_500), (6, 3_000), (20, 10_000)] {
+        fixture
+            .connection()
+            .execute(
+                "UPDATE bankruptcy_state SET penalty_games_remaining=?1
+                 WHERE discord_id=?2 AND guild_id=?3",
+                params![remaining, 6_002, GUILD],
+            )
+            .expect("set games remaining");
+        let prediction_id = fixture.market(&format!("{remaining} games left?"));
+        fixture.buy(prediction_id, 6_002, ContractSide::Yes, 5);
+        let cost_basis = fixture.position(prediction_id, 6_002).yes_cost_basis_total;
+        let result = fixture
+            .settle(
+                prediction_id,
+                ContractSide::Yes,
+                &SettlementAdjustments {
+                    bankruptcy_penalty_bps_per_game: Some(500),
+                    ..SettlementAdjustments::default()
+                },
+            )
+            .expect("scaled settlement");
+        let gross_profit = 5 * CONTRACT_VALUE - cost_basis;
+        assert!(gross_profit > 0);
+        assert_eq!(
+            result.winners[0].bankruptcy_penalty,
+            gross_profit * expected_bps / 10_000,
+            "{remaining} games"
+        );
+    }
+}
+
+#[test]
+fn test_bankruptcy_withholding_truncates_the_f64_product_like_other_surfaces() {
+    let fixture = Fixture::new();
+    fixture.player(6_003, 1_000);
+    fixture.set_bankruptcy_penalty(6_003);
+    fixture
+        .connection()
+        .execute(
+            "UPDATE bankruptcy_state SET penalty_games_remaining=3
+             WHERE discord_id=?1 AND guild_id=?2",
+            params![6_003, GUILD],
+        )
+        .expect("three games left");
+    let prediction_id = fixture.market("inexact rate?");
+    // One contract at the 52 ask costs 5, so a 105 JC contract value pays
+    // exactly 100 JC of profit.
+    fixture.buy(prediction_id, 6_003, ContractSide::Yes, 1);
+    let cost_basis = fixture.position(prediction_id, 6_003).yes_cost_basis_total;
+    let result = fixture
+        .settle(
+            prediction_id,
+            ContractSide::Yes,
+            &SettlementAdjustments {
+                contract_value: 105,
+                bankruptcy_penalty_bps_per_game: Some(1_500),
+                ..SettlementAdjustments::default()
+            },
+        )
+        .expect("inexact-rate settlement");
+    let gross_profit = 105 - cost_basis;
+    assert_eq!(gross_profit, 100);
+    // Three games at 15% each multiply to 0.44999999999999996 in f64, one
+    // ulp under the 45% that integer basis points would floor to exactly 45;
+    // the truncated f64 product (44) is what every other profit surface pays.
+    let expected = (gross_profit as f64 * cama_domain::bankruptcy::withheld_rate(0.15, 3)) as i64;
+    assert_eq!(expected, 44);
+    assert_ne!(expected, gross_profit * 4_500 / 10_000);
+    assert_eq!(result.winners[0].bankruptcy_penalty, expected);
+    assert_eq!(fixture.deductions(prediction_id, 6_003).0, expected);
 }

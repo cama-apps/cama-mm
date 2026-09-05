@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use cama_db_core::profit_deductions::OwnedProfitDeductionPolicy;
 use cama_domain::player::{OPENSKILL_DISPLAY_SCALE, Player};
 use cama_domain::rating::cap_glicko_rd;
 use cama_domain::role_derivation::{
@@ -2509,6 +2510,9 @@ pub struct CoreMatchRecord {
     /// When present, settle eligible first-match referrals in the match-core
     /// transaction at this Unix timestamp. `None` preserves raw/test seeding.
     pub settle_referrals_at: Option<i64>,
+    /// Bankruptcy, vanity, and low-priority withholding applied to each
+    /// referral reward settled by `settle_referrals_at`.
+    pub referral_deductions: OwnedProfitDeductionPolicy,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2551,6 +2555,7 @@ impl CoreMatchRecord {
             expected_low_priority_ids: None,
             win_reward_jc: None,
             settle_referrals_at: None,
+            referral_deductions: OwnedProfitDeductionPolicy::default(),
         }
     }
 }
@@ -4075,6 +4080,7 @@ impl MatchRepository {
                 &core.match_record.team1_ids,
                 &core.match_record.team2_ids,
                 rewarded_at,
+                &core.referral_deductions.as_policy(),
             )
             .map_err(|error| CoreRepositoryError::InvalidInput(error.to_string()))?;
             let referral_changes = aggregate_referral_changes(&rewards);

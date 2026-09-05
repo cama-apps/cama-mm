@@ -110,6 +110,10 @@ impl PetEatingRepositoryPort for FakeRepository {
             activated_pet: None,
             new_balance: 1_000 + request.reward,
             penalty_games_remaining: request.penalty_games,
+            deductions: cama_db::profit_deductions::ProfitDeductions {
+                profit: request.reward,
+                ..Default::default()
+            },
         })
     }
 
@@ -358,6 +362,10 @@ fn command_outcome(pet: Pet, reward: i64, penalty_games: i64) -> PetEatingOutcom
         penalty_games_added: penalty_games,
         penalty_games_remaining: penalty_games,
         new_balance: 1_000 + reward,
+        deductions: cama_db::profit_deductions::ProfitDeductions {
+            profit: reward,
+            ..Default::default()
+        },
     }
 }
 

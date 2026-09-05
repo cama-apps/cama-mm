@@ -4338,11 +4338,11 @@ fn sqlite_low_priority_tax_never_withholds_more_than_the_reward_in_hand() {
     let basis = control_outcome.jc_earned;
     assert!(basis > 0, "fixture must earn something to tax");
 
-    // A full-rate sink against a quarter-withheld reward: the pre-bankruptcy
-    // basis exceeds what is left in hand.
+    // A full-rate sink against a quarter-withheld reward (two games left at
+    // 12.5% each): the pre-bankruptcy basis exceeds what is left in hand.
     let outcome = DigRuntimeService::sqlite_with_config(
         penalized.path(),
-        DigRuntimeConfig::default().with_bankruptcy_penalty_rate(0.75),
+        DigRuntimeConfig::default().with_bankruptcy_penalty_rate_per_game(0.125),
     )
     .with_low_priority_tax(Arc::new(FixedLowPriorityTax::new(actor, guild, 100)))
     .dig(request)
@@ -4411,7 +4411,8 @@ fn sqlite_bankruptcy_penalty_applies_to_normal_dig_without_consuming_games() {
     let control_outcome = DigRuntimeService::sqlite(control.path())
         .dig(request)
         .expect("control bankruptcy Dig");
-    let penalized_config = DigRuntimeConfig::default().with_bankruptcy_penalty_rate(0.75);
+    // Two games left at 12.5% per game withhold a quarter of the reward.
+    let penalized_config = DigRuntimeConfig::default().with_bankruptcy_penalty_rate_per_game(0.125);
     let penalized_outcome =
         DigRuntimeService::sqlite_with_config(penalized.path(), penalized_config)
             .dig(request)
@@ -4433,6 +4434,84 @@ fn sqlite_bankruptcy_penalty_applies_to_normal_dig_without_consuming_games() {
             )
             .expect("bankruptcy games after Dig"),
         2,
+        "ordinary Dig winnings do not consume a game-based penalty",
+    );
+    assert_eq!(
+        latest_dig_detail(&penalized, actor, guild)["bankruptcy_penalty"].as_i64(),
+        Some(expected_penalty),
+    );
+}
+
+#[test]
+fn sqlite_bankruptcy_penalty_scales_with_games_remaining() {
+    let control = fast_migrated_database();
+    let penalized = fast_migrated_database();
+    let actor = 60_099;
+    let guild = 60_100;
+    let now = 1_900_085_500;
+    for database in [&control, &penalized] {
+        seed_live_runtime_tunnel(database, actor, guild, now, 76, 1, Some(now - 7_200));
+        Connection::open(database.path())
+                .expect("bankruptcy boss-progress connection")
+                .execute(
+                    "UPDATE tunnels SET boss_progress=?1,temp_buffs=?2
+                     WHERE discord_id=?3 AND guild_id=?4",
+                    params![
+                        r#"{"25":{"status":"defeated"},"50":{"status":"defeated"},"75":{"status":"defeated"}}"#,
+                        r#"{"digs_remaining":1,"effect":{"yield_multiplier":2.0}}"#,
+                        actor,
+                        guild,
+                    ],
+                )
+                .expect("seed bankruptcy defeated bosses");
+    }
+    Connection::open(penalized.path())
+        .expect("bankruptcy state connection")
+        .execute(
+            "INSERT INTO bankruptcy_state(
+                     discord_id,guild_id,penalty_games_remaining,bankruptcy_count
+                 ) VALUES(?1,?2,6,1)",
+            params![actor, guild],
+        )
+        .expect("seed bankruptcy penalty");
+    let dig_now = find_non_cave_dig_time_with_jc(actor, guild, now, 76, 3);
+    let today = game_date_for_timestamp(dig_now as f64).expect("bankruptcy Dig date");
+    for database in [&control, &penalized] {
+        seed_two_weather_rows(database, guild, &today, "Magma", "fossil_rush");
+    }
+    let request = DigRuntimeRequest {
+        discord_id: actor,
+        guild_id: guild,
+        now: dig_now,
+        paid: false,
+        forced_event: false,
+    };
+    let control_outcome = DigRuntimeService::sqlite(control.path())
+        .dig(request)
+        .expect("control bankruptcy Dig");
+    let penalized_config = DigRuntimeConfig::default().with_bankruptcy_penalty_rate_per_game(0.05);
+    let penalized_outcome =
+        DigRuntimeService::sqlite_with_config(penalized.path(), penalized_config)
+            .dig(request)
+            .expect("penalized bankruptcy Dig");
+    // Six games left at 5% per game withhold 30% of the reward.
+    let expected_penalty = control_outcome.jc_earned * 3 / 10;
+    assert!(expected_penalty > 0);
+    assert_eq!(
+        penalized_outcome.jc_earned,
+        control_outcome.jc_earned - expected_penalty,
+    );
+    let connection = Connection::open(penalized.path()).expect("inspect bankruptcy Dig");
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT penalty_games_remaining FROM bankruptcy_state
+                     WHERE discord_id=?1 AND guild_id=?2",
+                params![actor, guild],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("bankruptcy games after Dig"),
+        6,
         "ordinary Dig winnings do not consume a game-based penalty",
     );
     assert_eq!(

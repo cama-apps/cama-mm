@@ -522,7 +522,7 @@ pub trait PredictionCommandDiscordPort: Send + Sync {
 #[derive(Clone, Debug)]
 pub struct PredictionCommandConfig {
     pub admin_user_ids: BTreeSet<i64>,
-    pub bankruptcy_credit_bps: i64,
+    pub bankruptcy_penalty_bps_per_game: i64,
     pub contract_value: i64,
     pub drift_min: i64,
     pub drift_max: i64,
@@ -553,7 +553,7 @@ impl PredictionCommandConfig {
         let values = &config.values;
         Self {
             admin_user_ids: config.identities.admin_user_ids.iter().copied().collect(),
-            bankruptcy_credit_bps: rate_to_bps(values.bankruptcy_penalty_rate),
+            bankruptcy_penalty_bps_per_game: rate_to_bps(values.bankruptcy_penalty_rate_per_game),
             contract_value: values.prediction_contract_value,
             drift_min: values.prediction_drift_min,
             drift_max: values.prediction_drift_max,
@@ -2254,7 +2254,9 @@ impl PredictionInteractionHandler {
                     &SettlementAdjustments {
                         contract_value: config.contract_value,
                         payout_multiplier_bps: effects.payout_multiplier_bps,
-                        bankruptcy_credit_bps: Some(config.bankruptcy_credit_bps),
+                        bankruptcy_penalty_bps_per_game: Some(
+                            config.bankruptcy_penalty_bps_per_game,
+                        ),
                         vanity_tax_bps: config.vanity_tax_bps,
                         vanity_taxable_ids: taxable,
                         low_priority_tax_bps: config.low_priority_tax_bps,

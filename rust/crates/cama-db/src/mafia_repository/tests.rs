@@ -1183,3 +1183,80 @@ fn investigation_lock_admits_only_the_first_read_of_the_night() {
         Some(3)
     );
 }
+
+#[test]
+fn test_finalize_day_resolution_scales_bankruptcy_penalty_with_games_remaining() {
+    let fixture = Fixture::new();
+    for discord_id in [1, 2, 3] {
+        fixture.seed_player(discord_id, GUILD, 100);
+    }
+    let connection = fixture.connection();
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS bankruptcy_state (
+                 discord_id INTEGER NOT NULL,
+                 guild_id INTEGER NOT NULL,
+                 last_bankruptcy_at INTEGER,
+                 penalty_games_remaining INTEGER,
+                 bankruptcy_count INTEGER,
+                 updated_at TEXT,
+                 PRIMARY KEY (discord_id, guild_id)
+             )",
+        )
+        .expect("create bankruptcy_state");
+    connection
+        .execute(
+            "INSERT INTO bankruptcy_state(
+                 discord_id,guild_id,penalty_games_remaining,bankruptcy_count
+             ) VALUES (1,?1,1,1),(2,?1,6,1)",
+            [GUILD],
+        )
+        .expect("seed penalties");
+    drop(connection);
+    let game_id = fixture.game(MafiaPhase::Day);
+    let result = fixture
+        .repository
+        .finalize_day_resolution(
+            game_id,
+            MafiaWinner::Town,
+            50,
+            None,
+            None,
+            &BTreeMap::from([(1, 50), (2, 50), (3, 10)]),
+            10,
+            0,
+            2_000,
+            None,
+            false,
+            0,
+            Some(BankruptcyPenaltyPolicy {
+                rate_per_game: 0.05,
+            }),
+            0.0,
+            &BTreeSet::new(),
+            0.0,
+            &BTreeSet::new(),
+        )
+        .expect("finalize scaled penalties");
+    assert!(result.applied);
+    // 40 JC profit each at 5% per outstanding game: one game left withholds
+    // 2 JC and six games left withhold 30% (12 JC).
+    assert_eq!(
+        result.bankruptcy_penalties,
+        BTreeMap::from([(1, 2), (2, 12)])
+    );
+    assert_eq!(
+        fixture
+            .repository
+            .player_balance(1, Some(GUILD))
+            .expect("balance one"),
+        100 + 50 - 2
+    );
+    assert_eq!(
+        fixture
+            .repository
+            .player_balance(2, Some(GUILD))
+            .expect("balance two"),
+        100 + 50 - 12
+    );
+}

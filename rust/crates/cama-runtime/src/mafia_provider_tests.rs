@@ -165,7 +165,7 @@ async fn migrated_sqlite_resolution_wires_bookie_mvp_overflow_and_taxes() {
     connection
         .execute(
             "INSERT INTO bankruptcy_state(discord_id,guild_id,penalty_games_remaining)
-             VALUES (2,77,1)",
+             VALUES (2,77,2)",
             [],
         )
         .expect("seed bankruptcy penalty");
@@ -2241,7 +2241,7 @@ fn composition_config() -> ApplicationConfig {
 fn economy_config() -> ApplicationConfig {
     ApplicationConfig::from_lookup(|name| match name {
         "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
-        "BANKRUPTCY_PENALTY_RATE" => Some("0.50".to_owned()),
+        "BANKRUPTCY_PENALTY_RATE_PER_GAME" => Some("0.25".to_owned()),
         "VANITY_TAX_RATE" => Some("0.25".to_owned()),
         _ => None,
     })

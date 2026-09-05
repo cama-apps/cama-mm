@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use cama_db::pet_brawl_repository::{
     BrawlSettlement, BrawlSettlementResult, DrawSettlementResult, SweepResult,
 };
+use cama_db::profit_deductions::ProfitDeductions;
 use cama_domain::pet::{
     BRAWL_INSURANCE_REDUCTION, BRAWL_LOSS_FLOOR, BRAWL_LOSS_HUNGER, BRAWL_LOSS_XP,
     BRAWL_TRAINING_LEVEL_CAP, BRAWL_TRAINING_STAT_CAP, BRAWL_TRAINING_XP_CAP, BRAWL_WIN_HUNGER,
@@ -233,6 +234,8 @@ pub struct DecisiveOutcome {
     pub payout: i64,
     pub wager: i64,
     pub fee: i64,
+    /// Shares withheld from the winner's profit (the wager).
+    pub deductions: ProfitDeductions,
     pub records: BTreeMap<i64, (i64, i64)>,
     pub career: BTreeMap<i64, CareerSummary>,
     pub personality_event_key: Option<String>,
@@ -657,6 +660,7 @@ where
             payout: settlement.payout,
             wager: settlement.wager,
             fee: settlement.fee,
+            deductions: settlement.deductions,
             records,
             career,
             personality_event: Self::personality_event_text(
@@ -1525,6 +1529,10 @@ mod tests {
                 payout,
                 wager: snapshot.wager,
                 fee: snapshot.fee,
+                deductions: ProfitDeductions {
+                    profit: snapshot.wager,
+                    ..ProfitDeductions::default()
+                },
                 personality_event_key,
             })
         }

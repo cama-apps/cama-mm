@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use cama_db_core::profit_deductions::penalty_games_remaining;
 use cama_domain::rating::{MAX_GLICKO_RD, cap_glicko_rd};
 use cama_domain::role_derivation::{LaneStats, derive_positions};
 use rusqlite::{
@@ -139,8 +140,9 @@ pub struct IncomeAwardRequest<'a> {
     pub gross: i64,
     pub garnishment_rate: f64,
     pub apply_bankruptcy_penalty: bool,
-    /// Fraction of post-garnishment income retained while penalized.
-    pub bankruptcy_kept_rate: f64,
+    /// Share of post-garnishment income withheld per outstanding penalty
+    /// game (`BANKRUPTCY_PENALTY_RATE_PER_GAME`), capped at the whole income.
+    pub bankruptcy_penalty_rate_per_game: f64,
     pub vanity_tax_rate: f64,
     /// Profit tax withheld while the player is serving active low priority.
     pub low_priority_tax_rate: f64,
@@ -162,7 +164,7 @@ impl<'a> IncomeAwardRequest<'a> {
             gross,
             garnishment_rate: 0.0,
             apply_bankruptcy_penalty: false,
-            bankruptcy_kept_rate: 1.0,
+            bankruptcy_penalty_rate_per_game: 0.0,
             vanity_tax_rate: 0.0,
             low_priority_tax_rate: 0.0,
             decrement_bankruptcy_penalty: false,
@@ -594,20 +596,16 @@ impl MatchRecordingRepository {
                 0
             };
             let net_before_penalty = gross.saturating_sub(garnished);
-            let penalty_games = transaction
-                .query_row(
-                    "SELECT COALESCE(penalty_games_remaining,0)
-                     FROM bankruptcy_state
-                     WHERE discord_id=?1 AND guild_id=?2",
-                    params![award.discord_id, guild_id],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()?
-                .unwrap_or_default();
+            let penalty_games = penalty_games_remaining(&transaction, guild_id, award.discord_id)?;
             let bankruptcy_penalty =
                 if award.apply_bankruptcy_penalty && penalty_games > 0 && net_before_penalty > 0 {
-                    let kept_rate = normalized_rate(award.bankruptcy_kept_rate, 1.0);
-                    truncated_rate(net_before_penalty, 1.0 - kept_rate)
+                    truncated_rate(
+                        net_before_penalty,
+                        cama_domain::bankruptcy::withheld_rate(
+                            normalized_rate(award.bankruptcy_penalty_rate_per_game, 1.0),
+                            penalty_games,
+                        ),
+                    )
                 } else {
                     0
                 };
@@ -640,8 +638,11 @@ impl MatchRecordingRepository {
                     .saturating_sub(vanity_tax)
                     .max(0),
             );
+            // Recorded so a compensating rollback can hand the consumed penalty
+            // game back before the award is retried.
+            let penalty_game_consumed = award.decrement_bankruptcy_penalty && penalty_games > 0;
             let metadata = format!(
-                "{{\"gross\":{gross},\"garnished\":{garnished},\"bankruptcy_penalty\":{bankruptcy_penalty},\"vanity_tax\":{vanity_tax},\"low_priority_tax\":{low_priority_tax}}}"
+                "{{\"gross\":{gross},\"garnished\":{garnished},\"bankruptcy_penalty\":{bankruptcy_penalty},\"vanity_tax\":{vanity_tax},\"low_priority_tax\":{low_priority_tax},\"penalty_game_consumed\":{penalty_game_consumed}}}"
             );
 
             install_income_ledger_context(
@@ -755,7 +756,9 @@ impl MatchRecordingRepository {
     /// Compensate already-applied generated income after a fallible reward
     /// phase.  The debit and its source-scoped retry marker commit together;
     /// the next exact-once award can therefore reapply the source while a
-    /// later retry remains idempotent.
+    /// later retry remains idempotent.  A win bonus that consumed a penalty
+    /// game hands it back so the retried award is withheld at the same share
+    /// and decrements only once.
     pub fn compensate_income_awards_atomic(
         &self,
         guild_id: Option<i64>,
@@ -771,6 +774,13 @@ impl MatchRecordingRepository {
             if compensation.amount <= 0 {
                 continue;
             }
+            let penalty_game_consumed = standing_award_consumed_penalty_game(
+                &transaction,
+                guild_id,
+                compensation.discord_id,
+                compensation.source,
+                compensation.related_id,
+            )?;
             let metadata = format!("{{\"compensates_source\":\"{}\"}}", compensation.source);
             transaction.execute("DELETE FROM economy_ledger_context", [])?;
             transaction.execute(
@@ -800,6 +810,15 @@ impl MatchRecordingRepository {
                 return Err(MatchRecordingRepositoryError::MissingPlayer(
                     compensation.discord_id,
                 ));
+            }
+            if penalty_game_consumed {
+                transaction.execute(
+                    "UPDATE bankruptcy_state
+                     SET penalty_games_remaining=COALESCE(penalty_games_remaining,0)+1,
+                         updated_at=CURRENT_TIMESTAMP
+                     WHERE discord_id=?1 AND guild_id=?2",
+                    params![compensation.discord_id, guild_id],
+                )?;
             }
         }
         clear_income_ledger_context(&transaction)?;
@@ -1908,6 +1927,42 @@ fn truncated_rate(amount: i64, rate: f64) -> i64 {
     (amount as f64 * rate) as i64
 }
 
+/// Whether the standing (not yet rolled back) award for one source consumed a
+/// penalty game, read from the metadata its ledger rows carry.
+fn standing_award_consumed_penalty_game(
+    transaction: &rusqlite::Transaction<'_>,
+    guild_id: i64,
+    discord_id: i64,
+    source: &str,
+    related_id: i64,
+) -> Result<bool, rusqlite::Error> {
+    let related_id = related_id.to_string();
+    Ok(transaction
+        .query_row(
+            "SELECT COALESCE(json_extract(metadata,'$.penalty_game_consumed'),0)
+             FROM economy_ledger_entries
+             WHERE guild_id=?1 AND account_type='player' AND account_id=?2
+               AND source=?3 AND related_id=?4
+               AND ledger_id > COALESCE((
+                   SELECT MAX(compensation.ledger_id)
+                   FROM economy_ledger_entries compensation
+                   WHERE compensation.guild_id=?1
+                     AND compensation.account_type='player'
+                     AND compensation.account_id=?2
+                     AND compensation.source='match_bonus_rollback'
+                     AND compensation.related_type=?3
+                     AND compensation.related_id=?4
+               ), 0)
+             ORDER BY ledger_id DESC
+             LIMIT 1",
+            params![guild_id, discord_id, source, related_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .unwrap_or(0)
+        != 0)
+}
+
 fn install_income_ledger_context(
     transaction: &rusqlite::Transaction<'_>,
     award: IncomeAwardRequest<'_>,
@@ -2053,15 +2108,7 @@ fn recover_income_award_receipt(
         .ok_or(MatchRecordingRepositoryError::MissingPlayer(
             award.discord_id,
         ))?;
-    let penalty_games_remaining = transaction
-        .query_row(
-            "SELECT COALESCE(penalty_games_remaining,0) FROM bankruptcy_state
-             WHERE discord_id=?1 AND guild_id=?2",
-            params![award.discord_id, guild_id],
-            |row| row.get(0),
-        )
-        .optional()?
-        .unwrap_or_default();
+    let remaining = penalty_games_remaining(transaction, guild_id, award.discord_id)?;
     Ok(IncomeAwardReceipt {
         discord_id: award.discord_id,
         gross,
@@ -2076,7 +2123,7 @@ fn recover_income_award_receipt(
             .saturating_sub(low_priority_tax),
         balance_delta,
         balance_after,
-        penalty_games_remaining,
+        penalty_games_remaining: remaining,
         applied: false,
     })
 }

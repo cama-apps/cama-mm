@@ -1,5 +1,6 @@
 //! Pure domain policies shared by the Rust implementation.
 
+pub mod bankruptcy;
 pub mod catalogs;
 pub mod config_contract;
 pub mod curfew;

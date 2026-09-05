@@ -344,8 +344,10 @@ pub trait PlayerTriviaSessionRepository: Send + Sync {
         bypass: bool,
     ) -> Result<Self::StartResult, String>;
 
+    /// `guild_id` names the guild whose profit-withholding rosters apply.
     fn settle_answer(
         &self,
+        guild_id: GuildId,
         session_id: i64,
         question_number: i64,
         selected_index: usize,
@@ -539,6 +541,7 @@ where
 
     pub fn settle_answer(
         &self,
+        guild_id: GuildId,
         session_id: i64,
         question_number: i64,
         selected_index: usize,
@@ -546,6 +549,7 @@ where
         answered_at: i64,
     ) -> Result<R::AnswerResult, String> {
         self.repository.settle_answer(
+            guild_id,
             session_id,
             question_number,
             selected_index,

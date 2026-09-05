@@ -7,6 +7,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use cama_db_core::profit_deductions::{
+    DeductionLedgerContext, ProfitDeductionPolicy, withhold_profit_deductions,
+};
 use rusqlite::types::Value;
 use rusqlite::{
     Connection, ErrorCode, OptionalExtension, Transaction, TransactionBehavior, params,
@@ -42,6 +45,8 @@ pub struct RecordReferralMatchRequest<'a> {
     pub winning_side: MatchSide,
     pub pending_match_id: i64,
     pub recorded_at: i64,
+    /// Withholding applied to each beneficiary's reward.
+    pub deductions: ProfitDeductionPolicy<'a>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -58,7 +63,13 @@ pub struct ReferralRecord {
 pub struct ReferralReward {
     pub referred_id: i64,
     pub referrer_id: i64,
+    /// Gross reward credited to each beneficiary; the profit basis of the
+    /// bankruptcy, vanity, and low-priority withholding.
     pub reward_amount: i64,
+    /// What the referred player kept after withholding.
+    pub referred_net: i64,
+    /// What the referrer kept after withholding.
+    pub referrer_net: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -229,6 +240,7 @@ impl ReferralRepository {
             request.radiant_ids,
             request.dire_ids,
             request.recorded_at,
+            &request.deductions,
         )?;
         let referral_jc_changes = aggregate_referral_changes(&rewards);
         if !referral_jc_changes.is_empty() {
@@ -544,6 +556,7 @@ pub(crate) fn settle_first_match_referrals(
     radiant_ids: &[i64],
     dire_ids: &[i64],
     rewarded_at: i64,
+    policy: &ProfitDeductionPolicy<'_>,
 ) -> Result<Vec<ReferralReward>, ReferralRepositoryError> {
     let participant_ids = radiant_ids
         .iter()
@@ -586,8 +599,11 @@ pub(crate) fn settle_first_match_referrals(
 
     let mut rewards = Vec::with_capacity(eligible.len());
     for (referred_id, referrer_id) in eligible {
-        for (beneficiary_id, beneficiary_role) in
+        let mut nets = [0; 2];
+        for (index, (beneficiary_id, beneficiary_role)) in
             [(referred_id, "referred"), (referrer_id, "referrer")]
+                .into_iter()
+                .enumerate()
         {
             set_ledger_context(
                 transaction,
@@ -608,6 +624,24 @@ pub(crate) fn settle_first_match_referrals(
                     "eligible beneficiary disappeared during settlement",
                 ));
             }
+            clear_ledger_context(transaction)?;
+            let deductions = withhold_profit_deductions(
+                transaction,
+                guild_id,
+                beneficiary_id,
+                REFERRAL_REWARD,
+                policy,
+                &DeductionLedgerContext {
+                    source: "referral_reward",
+                    related_type: Some("referral"),
+                    related_id: Some(referred_id),
+                    reason: "First-match referral reward",
+                },
+            )?
+            .ok_or(ReferralRepositoryError::Invariant(
+                "eligible beneficiary disappeared during settlement",
+            ))?;
+            nets[index] = deductions.net();
         }
 
         let claimed = transaction.execute(
@@ -627,11 +661,12 @@ pub(crate) fn settle_first_match_referrals(
                 "eligible referral claim lost its compare-and-set",
             ));
         }
-        clear_ledger_context(transaction)?;
         rewards.push(ReferralReward {
             referred_id,
             referrer_id,
             reward_amount: REFERRAL_REWARD,
+            referred_net: nets[0],
+            referrer_net: nets[1],
         });
     }
     Ok(rewards)
@@ -667,8 +702,11 @@ fn clear_ledger_context(transaction: &Transaction<'_>) -> Result<(), rusqlite::E
 pub(crate) fn aggregate_referral_changes(rewards: &[ReferralReward]) -> BTreeMap<i64, i64> {
     let mut changes = BTreeMap::new();
     for reward in rewards {
-        for beneficiary_id in [reward.referred_id, reward.referrer_id] {
-            *changes.entry(beneficiary_id).or_insert(0) += reward.reward_amount;
+        for (beneficiary_id, net) in [
+            (reward.referred_id, reward.referred_net),
+            (reward.referrer_id, reward.referrer_net),
+        ] {
+            *changes.entry(beneficiary_id).or_insert(0) += net;
         }
     }
     changes
@@ -720,16 +758,54 @@ fn referral_rewards_on(
          WHERE guild_id = ?1 AND rewarded_match_id = ?2
          ORDER BY referred_id",
     )?;
-    statement
+    let claims = statement
         .query_map(params![guild_id, match_id], |row| {
-            Ok(ReferralReward {
-                referred_id: row.get(0)?,
-                referrer_id: row.get(1)?,
-                reward_amount: row.get(2)?,
-            })
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
         })?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(Into::into)
+        .collect::<Result<Vec<_>, _>>()?;
+    claims
+        .into_iter()
+        .map(|(referred_id, referrer_id, reward_amount)| {
+            Ok(ReferralReward {
+                referred_id,
+                referrer_id,
+                reward_amount,
+                referred_net: referral_net_on_ledger(
+                    connection,
+                    guild_id,
+                    referred_id,
+                    referred_id,
+                )?,
+                referrer_net: referral_net_on_ledger(
+                    connection,
+                    guild_id,
+                    referrer_id,
+                    referred_id,
+                )?,
+            })
+        })
+        .collect()
+}
+
+/// The reward one beneficiary kept: the gross credit and every withheld
+/// share land on the ledger under the same referral attribution.
+fn referral_net_on_ledger(
+    connection: &Connection,
+    guild_id: i64,
+    beneficiary_id: i64,
+    referred_id: i64,
+) -> Result<i64, rusqlite::Error> {
+    connection.query_row(
+        "SELECT COALESCE(SUM(delta), 0) FROM economy_ledger_entries
+         WHERE guild_id = ?1 AND account_type = 'player' AND account_id = ?2
+           AND related_type = 'referral' AND related_id = ?3",
+        params![guild_id, beneficiary_id, referred_id.to_string()],
+        |row| row.get(0),
+    )
 }
 
 fn encode_ids(ids: &[i64]) -> String {

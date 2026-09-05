@@ -14,6 +14,9 @@ use cama_db::dig_social_runtime::{
 };
 use cama_db::mana_service_repository::ManaRepository;
 use cama_db::predictions_repository::{ContractSide, PredictionRepository};
+use cama_db::profit_deductions::{
+    OwnedProfitDeductionPolicy, ProfitDeductionPolicy, ProfitDeductions,
+};
 use cama_db::shop_runtime::ShopRuntimeRepository;
 use cama_domain::dig_economy::{DIG_POSITIVE_JC_MULTIPLIER, scale_positive_dig_jc};
 use cama_domain::game_date::game_date_for_timestamp;
@@ -82,6 +85,10 @@ pub struct DigHelpResult {
     pub helper_reward: i64,
     pub mentor_helper_bonus: i64,
     pub mentor_target_bonus: i64,
+    /// Withheld from `helper_reward` (bankruptcy penalty, vanity, low priority).
+    pub helper_deductions: ProfitDeductions,
+    /// Withheld from `mentor_target_bonus`.
+    pub mentor_target_deductions: ProfitDeductions,
     pub helper_balance_after: i64,
     pub action_id: i64,
 }
@@ -137,6 +144,9 @@ pub struct DigSabotageResult {
     pub absorbed_by_aegis: bool,
     pub protection_source: Option<String>,
     pub victim_tip: i64,
+    /// Withheld from the target's JC credit (bankruptcy penalty, vanity, low
+    /// priority).
+    pub target_deductions: ProfitDeductions,
     pub mana_steal_jc: i64,
     pub attacker_block_reward: i64,
     pub vendetta_reflect: i64,
@@ -198,6 +208,11 @@ pub struct DigSocialRuntimeService {
     path: PathBuf,
     repository: DigSocialRuntimeRepository,
     config: DigRuntimeConfig,
+    /// Withholding for the JC this service credits. The rosters are per
+    /// guild, so the provider resolves them on the blocking thread for the
+    /// guild it is settling and hands them in with
+    /// [`Self::with_profit_deductions`]. The default withholds nothing.
+    deductions: OwnedProfitDeductionPolicy,
 }
 
 impl DigSocialRuntimeService {
@@ -213,7 +228,16 @@ impl DigSocialRuntimeService {
             repository: DigSocialRuntimeRepository::new(&path),
             path,
             config,
+            deductions: OwnedProfitDeductionPolicy::default(),
         }
+    }
+
+    /// Withhold bankruptcy, vanity, and low-priority shares from the JC this
+    /// service credits.
+    #[must_use]
+    pub fn with_profit_deductions(mut self, deductions: OwnedProfitDeductionPolicy) -> Self {
+        self.deductions = deductions;
+        self
     }
 
     pub fn help(
@@ -296,15 +320,18 @@ impl DigSocialRuntimeService {
         } else {
             None
         };
-        let settlement = self.repository.atomic_help(AtomicDigHelpSettlement {
-            expected: &snapshot,
-            new_target_depth: target_depth_after,
-            helper_last_dig_at: now,
-            helper_reward,
-            create_helper_tunnel_name: create_name.as_deref(),
-            detail_json: &detail_json,
-            created_at: now,
-        })?;
+        let settlement = self.repository.atomic_help(
+            AtomicDigHelpSettlement {
+                expected: &snapshot,
+                new_target_depth: target_depth_after,
+                helper_last_dig_at: now,
+                helper_reward,
+                create_helper_tunnel_name: create_name.as_deref(),
+                detail_json: &detail_json,
+                created_at: now,
+            },
+            &self.deductions.as_policy(),
+        )?;
         let receipt = match settlement {
             DigHelpSettlementOutcome::Applied(receipt) => receipt,
             DigHelpSettlementOutcome::Conflict => return Err(DigSocialRuntimeError::Conflict),
@@ -325,19 +352,20 @@ impl DigSocialRuntimeService {
             "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
         })
         .to_string();
-        let mentor_target_bonus = if target_reward > 0 {
+        let (mentor_target_bonus, mentor_target_deductions) = if target_reward > 0 {
             match self.repository.credit_help_target_bonus(
                 helper_id,
                 target_id,
                 guild_id,
                 target_reward,
                 &target_bonus_detail,
+                &self.deductions.as_policy(),
             ) {
-                Ok(Some(_)) => target_reward,
-                Ok(None) | Err(_) => 0,
+                Ok(Some(receipt)) => (target_reward, receipt.deductions),
+                Ok(None) | Err(_) => (0, ProfitDeductions::default()),
             }
         } else {
-            0
+            (0, ProfitDeductions::default())
         };
         let helper_cooldown_until = now.saturating_add(effective_new_helper_cooldown(
             snapshot.helper_tunnel.as_ref(),
@@ -351,6 +379,8 @@ impl DigSocialRuntimeService {
             helper_reward,
             mentor_helper_bonus: if mentor_active { helper_reward } else { 0 },
             mentor_target_bonus,
+            helper_deductions: receipt.helper_deductions,
+            mentor_target_deductions,
             helper_balance_after: receipt.helper_balance_after,
             action_id: receipt.action_id,
         })
@@ -461,6 +491,7 @@ impl DigSocialRuntimeService {
             .to_string();
             let receipt = settle_sabotage(
                 &self.repository,
+                &self.deductions.as_policy(),
                 AtomicDigSabotageSettlement {
                     expected: &snapshot,
                     target_depth_delta: 0,
@@ -489,6 +520,7 @@ impl DigSocialRuntimeService {
                 absorbed_by_aegis: source == "aegis",
                 protection_source: Some(source),
                 victim_tip: awarded_tip,
+                target_deductions: receipt.target_deductions,
                 mana_steal_jc: 0,
                 attacker_block_reward: 0,
                 vendetta_reflect: 0,
@@ -519,6 +551,7 @@ impl DigSocialRuntimeService {
             .to_string();
             let receipt = settle_sabotage(
                 &self.repository,
+                &self.deductions.as_policy(),
                 AtomicDigSabotageSettlement {
                     expected: &snapshot,
                     target_depth_delta: 0,
@@ -557,6 +590,7 @@ impl DigSocialRuntimeService {
                 absorbed_by_aegis: false,
                 protection_source: None,
                 victim_tip,
+                target_deductions: receipt.target_deductions,
                 mana_steal_jc: 0,
                 attacker_block_reward: 0,
                 vendetta_reflect: 0,
@@ -578,6 +612,7 @@ impl DigSocialRuntimeService {
             .to_string();
             let receipt = settle_sabotage(
                 &self.repository,
+                &self.deductions.as_policy(),
                 AtomicDigSabotageSettlement {
                     expected: &snapshot,
                     target_depth_delta: 0,
@@ -593,6 +628,7 @@ impl DigSocialRuntimeService {
             )?;
             return Ok(DigSabotageResult {
                 cost,
+                target_deductions: receipt.target_deductions,
                 damage: 0,
                 target_tunnel: target.tunnel_name.clone(),
                 target_depth_after: receipt.target_depth_after,
@@ -638,6 +674,7 @@ impl DigSocialRuntimeService {
         .to_string();
         let receipt = settle_sabotage(
             &self.repository,
+            &self.deductions.as_policy(),
             AtomicDigSabotageSettlement {
                 expected: &snapshot,
                 target_depth_delta: -damage,
@@ -726,6 +763,7 @@ impl DigSocialRuntimeService {
             absorbed_by_aegis: false,
             protection_source: None,
             victim_tip: 0,
+            target_deductions: receipt.target_deductions,
             mana_steal_jc,
             attacker_block_reward,
             vendetta_reflect,
@@ -869,9 +907,10 @@ fn validate_help_snapshot(snapshot: &DigHelpSnapshot) -> Result<(), DigSocialRun
 
 fn settle_sabotage(
     repository: &DigSocialRuntimeRepository,
+    policy: &ProfitDeductionPolicy<'_>,
     settlement: AtomicDigSabotageSettlement<'_>,
 ) -> Result<cama_db::dig_social_runtime::DigSabotageSettlementReceipt, DigSocialRuntimeError> {
-    match repository.atomic_sabotage(settlement)? {
+    match repository.atomic_sabotage(settlement, policy)? {
         DigSabotageSettlementOutcome::Applied(receipt) => Ok(receipt),
         DigSabotageSettlementOutcome::MissingTargetTunnel => {
             Err(DigSocialRuntimeError::MissingTargetTunnel)

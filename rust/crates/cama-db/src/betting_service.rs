@@ -17,6 +17,7 @@ use crate::dota_bet_seed_repository::{
     settle_seed_in_transaction,
 };
 use crate::open_runtime_connection;
+use cama_db_core::profit_deductions::penalty_games_remaining;
 
 #[derive(Debug, Error)]
 pub enum BettingServiceRepositoryError {
@@ -272,11 +273,9 @@ pub struct SettlementResult {
 #[derive(Clone, Debug, PartialEq)]
 pub struct BetSettlementAdjustments {
     /// Fraction of positive profit kept by a persisted penalized player.
-    /// `None` skips the bankruptcy-state lookup.
-    pub bankruptcy_keep_basis_points: Option<i64>,
-    /// Exact floating-point policy used by production configuration. When
-    /// present this takes precedence over the compatibility basis-point field.
-    pub bankruptcy_kept_rate: Option<f64>,
+    /// Share of profit withheld per outstanding penalty game. `None` skips
+    /// the bankruptcy-state lookup.
+    pub bankruptcy_penalty_rate_per_game: Option<f64>,
     /// Profit-only vanity tax applied to `vanity_taxable_ids`.
     pub vanity_tax_basis_points: i64,
     /// Exact production vanity rate; takes precedence when present.
@@ -300,8 +299,7 @@ pub struct BetSettlementAdjustments {
 impl Default for BetSettlementAdjustments {
     fn default() -> Self {
         Self {
-            bankruptcy_keep_basis_points: None,
-            bankruptcy_kept_rate: None,
+            bankruptcy_penalty_rate_per_game: None,
             vanity_tax_basis_points: 0,
             vanity_tax_rate: None,
             vanity_taxable_ids: BTreeSet::new(),
@@ -1391,24 +1389,14 @@ impl BettingServiceRepository {
             if profit <= 0 {
                 continue;
             }
-            let kept_rate = adjustments.bankruptcy_kept_rate.or_else(|| {
-                adjustments
-                    .bankruptcy_keep_basis_points
-                    .map(|basis_points| basis_points.clamp(0, 10_000) as f64 / 10_000.0)
-            });
-            if let Some(kept_rate) = kept_rate {
-                let penalty_games = transaction
-                    .query_row(
-                        "SELECT COALESCE(penalty_games_remaining, 0)
-                         FROM bankruptcy_state
-                         WHERE discord_id = ?1 AND guild_id = ?2",
-                        params![discord_id, guild_id],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .optional()?
-                    .unwrap_or_default();
+            if let Some(rate_per_game) = adjustments.bankruptcy_penalty_rate_per_game {
+                let penalty_games = penalty_games_remaining(&transaction, guild_id, discord_id)?;
                 if penalty_games > 0 {
-                    let penalty = (profit as f64 * (1.0 - normalized_rate(kept_rate, 1.0))) as i64;
+                    let withheld = cama_domain::bankruptcy::withheld_rate(
+                        normalized_rate(rate_per_game, 1.0),
+                        penalty_games,
+                    );
+                    let penalty = (profit as f64 * withheld) as i64;
                     if penalty > 0 {
                         if let Some(credit) = credits.get_mut(&discord_id) {
                             *credit = credit.saturating_sub(penalty);
@@ -1457,35 +1445,53 @@ impl BettingServiceRepository {
             }
         }
 
+        // The bankruptcy share is netted from the credit below rather than
+        // debited as its own row, so a later correction can only refund it
+        // from this table. Persist it beside the taxes whenever any player
+        // had something withheld.
         if adjustments.vanity_tax_rate.is_some()
             || adjustments.vanity_tax_basis_points > 0
             || !adjustments.vanity_taxable_ids.is_empty()
             || adjustments.low_priority_tax_rate.is_some()
             || !adjustments.low_priority_taxable_ids.is_empty()
+            || !bankruptcy_penalties.is_empty()
         {
             transaction.execute(
                 "DELETE FROM bet_settlement_taxes
                  WHERE match_id = ?1 AND guild_id = ?2",
                 params![match_id, guild_id],
             )?;
-            // The row is keyed by player, and either withholding can apply on
-            // its own, so persist the union of both taxed sets.
-            let taxed_ids = vanity_taxes
+            // The row is keyed by player, and any withholding can apply on
+            // its own, so persist the union of every withheld set.
+            let withheld_ids = vanity_taxes
                 .keys()
                 .chain(low_priority_taxes.keys())
+                .chain(bankruptcy_penalties.keys())
                 .copied()
                 .collect::<BTreeSet<i64>>();
-            for discord_id in taxed_ids {
+            for discord_id in withheld_ids {
                 let vanity_tax = vanity_taxes.get(&discord_id).copied().unwrap_or_default();
                 let low_priority_tax = low_priority_taxes
                     .get(&discord_id)
                     .copied()
                     .unwrap_or_default();
+                let bankruptcy_penalty = bankruptcy_penalties
+                    .get(&discord_id)
+                    .copied()
+                    .unwrap_or_default();
                 transaction.execute(
                     "INSERT INTO bet_settlement_taxes
-                         (match_id, guild_id, discord_id, vanity_tax, low_priority_tax)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![match_id, guild_id, discord_id, vanity_tax, low_priority_tax],
+                         (match_id, guild_id, discord_id, vanity_tax, low_priority_tax,
+                          bankruptcy_penalty)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        match_id,
+                        guild_id,
+                        discord_id,
+                        vanity_tax,
+                        low_priority_tax,
+                        bankruptcy_penalty
+                    ],
                 )?;
             }
         }
