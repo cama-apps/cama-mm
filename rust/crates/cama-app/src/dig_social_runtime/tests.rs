@@ -189,6 +189,47 @@ fn mycelium_link_adds_one_then_caps_before_the_unfinished_boss() {
 }
 
 #[test]
+fn help_caps_before_the_pinnacle_and_before_noncanonical_boss_statuses() {
+    let database = fixture(true, 349);
+    let connection = Connection::open(database.path()).unwrap();
+    connection
+        .execute(
+            "UPDATE tunnels SET boss_progress=?1
+             WHERE discord_id=?2 AND guild_id=?3",
+            params![
+                r#"{"25":"defeated","50":"defeated","75":"defeated","100":"defeated","150":"defeated","200":"defeated","275":"defeated"}"#,
+                TARGET,
+                GUILD
+            ],
+        )
+        .unwrap();
+    let result = scripted_help(&DigSocialRuntimeService::sqlite(database.path()), 1, [], [])
+        .expect("pinnacle-capped help succeeds");
+    assert_eq!(
+        result.advance, 0,
+        "the pinnacle at 350 parks the target at 349"
+    );
+    assert_eq!(result.target_depth_after, 349);
+
+    let database = fixture(true, 23);
+    Connection::open(database.path())
+        .unwrap()
+        .execute(
+            "UPDATE tunnels SET boss_progress=?1
+             WHERE discord_id=?2 AND guild_id=?3",
+            params![r#"{"25":"pending"}"#, TARGET, GUILD],
+        )
+        .unwrap();
+    let result = scripted_help(&DigSocialRuntimeService::sqlite(database.path()), 3, [], [])
+        .expect("noncanonical-status help succeeds");
+    assert_eq!(
+        result.advance, 1,
+        "any status but defeated still parks the target"
+    );
+    assert_eq!(result.target_depth_after, 24);
+}
+
+#[test]
 fn mentor_rewards_both_players_after_daily_economy_then_positive_scaling() {
     let database = fixture(true, 10);
     Connection::open(database.path())

@@ -47,6 +47,7 @@ use crate::dig_loot::{
     select_canonical_reward,
 };
 use crate::dig_runtime::{DigRuntimeConfig, DigRuntimeEventRequest};
+use crate::dig_service::{defeated_boundaries_from_json, next_undefeated_boss};
 use crate::dig_tunnels::ascension_effects;
 use crate::economy_event_sqlite::SqliteEconomyEventService;
 
@@ -2554,23 +2555,7 @@ fn event_view_expired(created_at: i64, now: i64) -> bool {
 }
 
 fn next_boss_boundary(raw: &str) -> Option<i64> {
-    let progress = serde_json::from_str::<Value>(raw)
-        .ok()
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default();
-    let status = |boundary: i64| {
-        progress.get(&boundary.to_string()).and_then(|value| {
-            value
-                .as_str()
-                .or_else(|| value.get("status").and_then(Value::as_str))
-        })
-    };
-    for boundary in [25, 50, 75, 100, 150, 200, 275] {
-        if status(boundary) != Some("defeated") {
-            return Some(boundary);
-        }
-    }
-    (status(350) != Some("defeated")).then_some(350)
+    next_undefeated_boss(&defeated_boundaries_from_json(raw))
 }
 
 fn mana_effects_for_land(land: &str) -> ManaEffects {

@@ -54,7 +54,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::dig_carry_wager::current_boss_boundary_from_json;
 use crate::dig_loot::{
     CanonicalEventResolution, CaveInChanceRequest, DigLootModifiers, DigLootService, InventoryItem,
     LootActionResult, LootEntropy, LootRepository, RepositoryError, SeededLootEntropy,
@@ -75,7 +74,8 @@ use crate::dig_routes::{
 use crate::dig_service::{
     DIG_REWARD_BASIS_POINTS, DIG_YIELD_MULTIPLIER_SCALE, DigOutcomeInput, DigProfitPolicy,
     MinerAllocation, TunnelState, apply_boss_gate, apply_dig_outcome, apply_first_dig,
-    cooldown_remaining, layer_at, paid_dig_cost, scale_dig_minigame_jc, scale_dig_yield_once,
+    cooldown_remaining, defeated_boundaries_from_json, layer_at, paid_dig_cost,
+    scale_dig_minigame_jc, scale_dig_yield_once,
 };
 use crate::dig_tunnels::{
     aggregate_prestige_perk_effects, ascension_effects, mutation_effects, mutations_from_json,
@@ -112,7 +112,7 @@ const fn cama_app_boss_hard_cap() -> i64 {
 /// tunnel head, or the tunnel has reached the pinnacle stretch.
 ///
 /// A boss at boundary `b` is engaged from depth `b - 1` (see
-/// [`crate::dig_bosses::at_boss_boundary`]), so depths `b - 2` and `b - 1`
+/// [`crate::dig_service::parked_boss_boundary`]), so depths `b - 2` and `b - 1`
 /// are the digs that reach or fight that boss.  The pinnacle engages from
 /// `PINNACLE_DEPTH - 1` and the endgame luminosity drain ramps up from
 /// there, so every deeper depth stays inside the window.
@@ -1857,6 +1857,23 @@ where
             snapshot.balance = snapshot.balance.saturating_add(claim.credit_jc);
         }
 
+        // Reject the hard wall after Slow Drip has settled, but before the
+        // parked-boss re-open, daily weather initialization or any other
+        // Dig-only side effect: a capped tunnel must ascend, whatever its
+        // boss progress says.
+        if !first_dig
+            && current
+                .tunnel
+                .as_ref()
+                .is_some_and(|tunnel| tunnel.depth >= PRESTIGE_HARD_CAP)
+        {
+            return Ok(DigRuntimeOutcome::blocked(
+                &current,
+                "The tunnel has reached the prestige cap. Ascend to begin a new run.",
+                0,
+                0,
+            ));
+        }
         // Re-open a boss that was already reached by a previous Dig before
         // applying cap/cooldown/paid gates.  This is presentation-only: no
         // new Dig is consumed, and Slow Drip (above) remains the one intended
@@ -1907,21 +1924,6 @@ where
             });
         }
 
-        // Reject the hard wall after Slow Drip has settled, but before daily
-        // weather initialization or any other Dig-only side effect.
-        if !first_dig
-            && current
-                .tunnel
-                .as_ref()
-                .is_some_and(|tunnel| tunnel.depth >= PRESTIGE_HARD_CAP)
-        {
-            return Ok(DigRuntimeOutcome::blocked(
-                &current,
-                "The tunnel has reached the prestige cap. Ascend to begin a new run.",
-                0,
-                0,
-            ));
-        }
         let today = game_date_for_timestamp(now as f64).unwrap_or_else(|_| "unknown".to_owned());
         let mut tunnel = current
             .tunnel
@@ -3835,7 +3837,10 @@ pub(crate) fn seed_for(request: DigRuntimeRequest, secret: u64) -> u64 {
 }
 
 fn parked_boss_boundary(tunnel: &DigRuntimeTunnel) -> Option<i64> {
-    current_boss_boundary_from_json(tunnel.depth, &tunnel.boss_progress)
+    crate::dig_service::parked_boss_boundary(
+        tunnel.depth,
+        &defeated_boundaries_from_json(&tunnel.boss_progress),
+    )
 }
 
 fn injury_reduces_advance(raw: Option<&str>) -> bool {
@@ -3938,22 +3943,7 @@ fn fingerprint<T: Hash>(value: &T) -> u64 {
 
 fn tunnel_state(snapshot: &DigRuntimeSnapshot, paid_cost: Option<i64>) -> TunnelState {
     let tunnel = snapshot.tunnel.as_ref().expect("staged tunnel exists");
-    let mut defeated_bosses = BTreeSet::new();
-    if let Ok(Value::Object(progress)) = serde_json::from_str::<Value>(&tunnel.boss_progress) {
-        for (boundary, value) in progress {
-            let is_defeated = match value {
-                Value::Object(fields) => fields
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .is_some_and(|s| s == "defeated"),
-                Value::String(status) => status == "defeated",
-                _ => false,
-            };
-            if is_defeated && let Ok(boundary) = boundary.parse::<i64>() {
-                defeated_bosses.insert(boundary);
-            }
-        }
-    }
+    let defeated_bosses = defeated_boundaries_from_json(&tunnel.boss_progress);
     let artifacts = snapshot
         .artifacts
         .iter()

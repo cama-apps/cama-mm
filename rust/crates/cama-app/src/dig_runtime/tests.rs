@@ -2181,6 +2181,40 @@ fn live_blood_pact_delivery_fixture() -> (
 }
 
 #[test]
+fn test_dig_at_cap_is_rejected_before_any_parked_boss_reopens() {
+    let database = fast_migrated_database();
+    seed_cap_tunnel(&database, super::PRESTIGE_HARD_CAP, 77);
+    Connection::open(database.path())
+        .expect("open cap database")
+        .execute(
+            "UPDATE tunnels SET boss_progress='{}' WHERE discord_id=50001 AND guild_id=50002",
+            [],
+        )
+        .expect("strip boss progress");
+
+    let result = DigRuntimeService::sqlite(database.path())
+        .dig(DigRuntimeRequest {
+            discord_id: 50_001,
+            guild_id: 50_002,
+            now: 1_900_000_000,
+            paid: false,
+            forced_event: true,
+        })
+        .expect("hard cap response");
+    assert!(
+        !result.success,
+        "a capped tunnel must ascend even with a boss parked behind it"
+    );
+    assert!(
+        result
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("prestige cap"))
+    );
+    assert_eq!(result.boss_boundary, None);
+}
+
+#[test]
 fn test_dig_at_cap_is_rejected() {
     let database = fast_migrated_database();
     seed_cap_tunnel(&database, super::PRESTIGE_HARD_CAP, 77);

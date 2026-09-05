@@ -15,10 +15,6 @@ fn base_stats() -> CombatStats {
     }
 }
 
-fn all_tiers_defeated() -> BossProgress {
-    BossRunState::with_all_tiers_defeated(PINNACLE_DEPTH - 1).boss_progress
-}
-
 fn entry(status: BossStatus) -> BossProgressValue {
     BossProgressValue::Entry(BossProgressEntry {
         status,
@@ -621,103 +617,6 @@ fn test_guild_isolation() {
         2
     );
     assert!(store.active_boss_echo(None, "grothak", 1_001).is_none());
-}
-
-#[test]
-fn test_pinnacle_boundary_requires_all_tiers_defeated() {
-    let mut progress = all_tiers_defeated();
-    progress.insert("275".to_owned(), entry(BossStatus::Active));
-    assert_eq!(at_boss_boundary(PINNACLE_DEPTH - 1, &progress), Some(275));
-}
-
-#[test]
-fn test_pinnacle_boundary_fires_when_tiers_cleared() {
-    assert_eq!(
-        at_boss_boundary(PINNACLE_DEPTH - 1, &all_tiers_defeated()),
-        Some(PINNACLE_DEPTH)
-    );
-}
-
-#[test]
-fn test_pinnacle_does_not_re_fire_after_defeat() {
-    let mut progress = all_tiers_defeated();
-    progress.insert(PINNACLE_DEPTH.to_string(), entry(BossStatus::Defeated));
-    assert_eq!(at_boss_boundary(PINNACLE_DEPTH - 1, &progress), None);
-}
-
-#[test]
-fn test_reproc_fires_past_threshold_when_pinnacle_undefeated() {
-    assert_eq!(
-        at_boss_boundary(PINNACLE_REPROC_DEPTH + 56, &all_tiers_defeated()),
-        Some(PINNACLE_DEPTH)
-    );
-}
-
-#[test]
-fn test_reproc_fires_at_hard_cap_so_prestige_can_unlock() {
-    assert_eq!(
-        at_boss_boundary(PRESTIGE_HARD_CAP, &all_tiers_defeated()),
-        Some(PINNACLE_DEPTH)
-    );
-}
-
-#[test]
-fn test_pinnacle_reproc_yields_to_active_tier_boss() {
-    let mut progress = all_tiers_defeated();
-    progress.insert("275".to_owned(), entry(BossStatus::Active));
-    assert_eq!(
-        at_boss_boundary(PINNACLE_REPROC_DEPTH + 50, &progress),
-        Some(275)
-    );
-}
-
-#[test]
-fn test_reproc_does_not_fire_if_pinnacle_already_defeated() {
-    let mut progress = all_tiers_defeated();
-    progress.insert(PINNACLE_DEPTH.to_string(), entry(BossStatus::Defeated));
-    assert_eq!(
-        at_boss_boundary(PINNACLE_REPROC_DEPTH + 50, &progress),
-        None
-    );
-}
-
-#[test]
-fn test_pinnacle_reproc_fires_immediately_past_threshold() {
-    let below_legacy_reproc = PINNACLE_REPROC_DEPTH - 50;
-    assert_eq!(
-        at_boss_boundary(below_legacy_reproc, &all_tiers_defeated()),
-        Some(PINNACLE_DEPTH)
-    );
-}
-
-#[test]
-fn test_next_boundary_returns_skipped_active_boss() {
-    let mut progress = all_tiers_defeated();
-    progress.insert("200".to_owned(), entry(BossStatus::Active));
-    assert_eq!(next_boss_boundary(&progress), Some(200));
-}
-
-#[test]
-fn test_at_boundary_fires_for_parked_player() {
-    let mut progress = all_tiers_defeated();
-    progress.insert("200".to_owned(), entry(BossStatus::Active));
-    assert_eq!(at_boss_boundary(250, &progress), Some(200));
-}
-
-#[test]
-fn test_lowest_active_returned_when_multiple_skipped() {
-    let mut progress = all_tiers_defeated();
-    progress.insert("100".to_owned(), entry(BossStatus::Active));
-    progress.insert("200".to_owned(), entry(BossStatus::Active));
-    assert_eq!(next_boss_boundary(&progress), Some(100));
-    assert_eq!(at_boss_boundary(250, &progress), Some(100));
-}
-
-#[test]
-fn test_partial_phase_state_also_catches_up() {
-    let mut progress = all_tiers_defeated();
-    progress.insert("200".to_owned(), entry(BossStatus::PhaseOneDefeated));
-    assert_eq!(at_boss_boundary(240, &progress), Some(200));
 }
 
 #[test]
