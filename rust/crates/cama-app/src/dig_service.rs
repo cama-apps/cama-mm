@@ -595,6 +595,37 @@ pub fn next_undefeated_boss(defeated: &BTreeSet<i64>) -> Option<i64> {
         .find(|boundary| !defeated.contains(boundary))
 }
 
+/// Boundaries whose persisted status is `defeated`, read from raw
+/// `boss_progress` JSON. Both the legacy flat (`"25":"defeated"`) and nested
+/// (`"25":{"status":"defeated"}`) shapes count; invalid or non-object JSON
+/// reads as empty, so the gate parks at the first boss.
+#[must_use]
+pub fn defeated_boundaries_from_json(raw: &str) -> BTreeSet<i64> {
+    let mut defeated = BTreeSet::new();
+    if let Ok(serde_json::Value::Object(progress)) = serde_json::from_str::<serde_json::Value>(raw)
+    {
+        for (boundary, value) in progress {
+            let status = value
+                .as_str()
+                .or_else(|| value.get("status").and_then(serde_json::Value::as_str));
+            if status == Some("defeated")
+                && let Ok(boundary) = boundary.parse::<i64>()
+            {
+                defeated.insert(boundary);
+            }
+        }
+    }
+    defeated
+}
+
+/// The boss a tunnel at `depth` is parked on: the next undefeated boundary
+/// once the head is within one block of it. This is the single rule every
+/// "which boss am I at" reader must share with [`apply_boss_gate`].
+#[must_use]
+pub fn parked_boss_boundary(depth: i64, defeated: &BTreeSet<i64>) -> Option<i64> {
+    next_undefeated_boss(defeated).filter(|boundary| depth >= boundary - 1)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AdvanceResult {
     pub advance: i64,

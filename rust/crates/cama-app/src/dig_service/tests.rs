@@ -971,6 +971,93 @@ fn test_insurance_expires() {
     assert!(!insurance_active(insured_until, insured_until + 1));
 }
 
+fn parked_at(depth: i64, raw: &str) -> Option<i64> {
+    parked_boss_boundary(depth, &defeated_boundaries_from_json(raw))
+}
+
+#[test]
+fn parked_boss_boundary_uses_only_canonical_boundaries() {
+    assert_eq!(parked_at(24, r#"{"25":"active"}"#), Some(25));
+    assert_eq!(
+        parked_at(24, r#"{"25":{"status":"phase1_defeated"}}"#),
+        Some(25)
+    );
+    assert_eq!(
+        parked_at(12, r#"{"13":"active"}"#),
+        None,
+        "noncanonical boundaries must not be treated as boss encounters"
+    );
+    assert_eq!(
+        parked_at(23, "{}"),
+        None,
+        "one block short of the park depth"
+    );
+    assert_eq!(parked_at(24, r#"{"25":"defeated"}"#), None);
+    assert_eq!(parked_at(49, r#"{"25":"defeated"}"#), Some(50));
+    assert_eq!(
+        parked_at(250, r#"{"25":"defeated","50":"defeated"}"#),
+        Some(75)
+    );
+}
+
+#[test]
+fn parked_boss_boundary_treats_everything_but_defeated_as_unfinished() {
+    // The dig gate parks a player on every boundary whose status is not
+    // "defeated", so each of these shapes must open the encounter.
+    assert_eq!(
+        parked_at(24, "{}"),
+        Some(25),
+        "a fresh tunnel has no entries"
+    );
+    assert_eq!(
+        parked_at(24, r#"{"25":{"boss_id":"grothak"}}"#),
+        Some(25),
+        "an entry without a status field"
+    );
+    assert_eq!(
+        parked_at(24, r#"{"25":"pending"}"#),
+        Some(25),
+        "a noncanonical status"
+    );
+    for invalid in ["", "null", "[]", "not json", r#"{"25":7}"#] {
+        assert_eq!(
+            parked_at(24, invalid),
+            Some(25),
+            "unreadable progress {invalid:?} reads as empty, like the gate"
+        );
+    }
+
+    let regular_cleared = |pinnacle: &str| {
+        format!(
+            r#"{{"25":"defeated","50":"defeated","75":"defeated","100":"defeated","150":"defeated","200":"defeated","275":"defeated"{pinnacle}}}"#
+        )
+    };
+    assert_eq!(parked_at(349, &regular_cleared("")), Some(350));
+    assert_eq!(parked_at(500, &regular_cleared("")), Some(350));
+    assert_eq!(
+        parked_at(349, &regular_cleared(r#","350":"pending""#)),
+        Some(350)
+    );
+    assert_eq!(
+        parked_at(349, &regular_cleared(r#","350":{"boss_id":"x"}"#)),
+        Some(350)
+    );
+    assert_eq!(
+        parked_at(349, &regular_cleared(r#","350":"defeated""#)),
+        None
+    );
+    assert_eq!(parked_at(348, &regular_cleared("")), None);
+}
+
+#[test]
+fn defeated_boundaries_accept_flat_and_nested_shapes() {
+    let defeated = defeated_boundaries_from_json(
+        r#"{"25":"defeated","50":{"status":"defeated"},"75":"active","100":{"status":"phase1_defeated"},"350":"defeated","13":"defeated"}"#,
+    );
+    assert_eq!(defeated, BTreeSet::from([13, 25, 50, 350]));
+    assert_eq!(next_undefeated_boss(&defeated), Some(75));
+}
+
 #[test]
 fn test_boss_blocks_advancement() {
     let result = apply_boss_gate(24, 3, &BTreeSet::new());

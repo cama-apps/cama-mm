@@ -9,7 +9,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub const BOSS_BOUNDARIES: [i32; 7] = [25, 50, 75, 100, 150, 200, 275];
 pub const PINNACLE_DEPTH: i32 = 350;
-pub const PINNACLE_REPROC_DEPTH: i32 = 450;
 pub const PRESTIGE_HARD_CAP: i32 = 500;
 pub const PINNACLE_SECRET_PHASE_CHANCE: f64 = 0.10;
 pub const BOSS_ROUND_CAP: u8 = 20;
@@ -1986,38 +1985,6 @@ pub fn all_regular_bosses_defeated(progress: &BossProgress) -> bool {
     BOSS_BOUNDARIES
         .iter()
         .all(|boundary| progress_status(progress, *boundary) == Some(BossStatus::Defeated))
-}
-
-#[must_use]
-pub fn next_boss_boundary(progress: &BossProgress) -> Option<i32> {
-    for boundary in BOSS_BOUNDARIES {
-        if progress_status(progress, boundary).is_some_and(BossStatus::unfinished) {
-            return Some(boundary);
-        }
-    }
-    let pinnacle_status = progress_status(progress, PINNACLE_DEPTH);
-    if all_regular_bosses_defeated(progress) && pinnacle_status.is_none_or(BossStatus::unfinished) {
-        return Some(PINNACLE_DEPTH);
-    }
-    None
-}
-
-#[must_use]
-pub fn at_boss_boundary(depth: i32, progress: &BossProgress) -> Option<i32> {
-    for boundary in BOSS_BOUNDARIES {
-        if depth >= boundary - 1
-            && progress_status(progress, boundary).is_some_and(BossStatus::unfinished)
-        {
-            return Some(boundary);
-        }
-    }
-    if (depth >= PINNACLE_DEPTH - 1 || depth >= PINNACLE_REPROC_DEPTH)
-        && all_regular_bosses_defeated(progress)
-        && progress_status(progress, PINNACLE_DEPTH).is_none_or(BossStatus::unfinished)
-    {
-        return Some(PINNACLE_DEPTH);
-    }
-    None
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

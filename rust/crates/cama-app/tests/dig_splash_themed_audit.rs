@@ -17,7 +17,7 @@ use rusqlite::{Connection, MAIN_DB, OpenFlags, params};
 use tempfile::NamedTempFile;
 
 pub use cama_app::{
-    dig_loot, dig_runtime, dig_tunnels, economy_event_service, economy_event_sqlite,
+    dig_loot, dig_runtime, dig_service, dig_tunnels, economy_event_service, economy_event_sqlite,
 };
 
 // The in-progress application runtime deliberately is not admitted through

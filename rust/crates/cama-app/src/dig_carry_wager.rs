@@ -4,6 +4,8 @@
 //! carry lifecycle through typed repository and entropy ports; the existing
 //! Python runtime remains authoritative while parity is additive.
 
+use std::collections::BTreeSet;
+
 use cama_db::dig_carry_wager::{
     AtomicCarrySettlement, CarryProgressMutation, CarrySettlementOutcome, CarryTunnelKey,
     CarryTunnelSnapshot, ClearCarryOutcome, DigCarryWagerRepository, DigCarryWagerRepositoryError,
@@ -13,17 +15,16 @@ use cama_domain::dig_economy::{
     DigEconomyInputError, WagerMultiplier, WinChance, effective_wager_multiplier,
     scale_positive_dig_jc, settled_wager_multiplier,
 };
-use serde_json::Value;
 use thiserror::Error;
 
 use crate::boss_duel::RiskTier;
+use crate::dig_service::parked_boss_boundary;
 
 pub const PINNACLE_BOUNDARY: i64 = 350;
 pub const MAX_NEW_BOSS_WAGER: i64 = 1_000;
 pub const OVER_CAP_MESSAGE: &str = "Boss wagers cannot exceed 1,000 JC.";
 const PINNACLE_BASE_JC_REWARD: i64 = 500;
 const PINNACLE_JC_PER_PRESTIGE: i64 = 100;
-const REGULAR_BOUNDARIES: [i64; 7] = [25, 50, 75, 100, 150, 200, 275];
 
 /// Typed persistence boundary used by the policy service.
 pub trait DigCarryWagerPort {
@@ -571,46 +572,16 @@ pub fn pinnacle_wager_profit(
     Ok((wager as f64 * (settled - 1.0)) as i64)
 }
 
+/// The boss the carry snapshot is parked on, by the same rule as the dig gate.
 #[must_use]
 pub fn current_boss_boundary(snapshot: &CarryTunnelSnapshot) -> Option<i64> {
-    current_boss_boundary_for(snapshot.depth, |boundary| {
-        snapshot
-            .entry(boundary)
-            .and_then(|entry| entry.status.as_deref())
-    })
-}
-
-/// Resolve the current boss directly from persisted progress JSON using the
-/// same status and boundary rules as [`current_boss_boundary`].
-#[must_use]
-pub fn current_boss_boundary_from_json(depth: i64, raw_progress: &str) -> Option<i64> {
-    // Invalid or non-object progress reads as empty, matching the dig gate and
-    // the carry repository's `json_valid` fallback.
-    let progress = serde_json::from_str::<Value>(raw_progress)
-        .ok()
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default();
-    current_boss_boundary_for(depth, |boundary| {
-        let value = progress.get(&boundary.to_string())?;
-        value
-            .as_str()
-            .or_else(|| value.get("status").and_then(Value::as_str))
-    })
-}
-
-fn current_boss_boundary_for<'a>(
-    depth: i64,
-    mut status_for: impl FnMut(i64) -> Option<&'a str>,
-) -> Option<i64> {
-    for boundary in REGULAR_BOUNDARIES {
-        if depth >= boundary - 1 && is_unfinished_status(status_for(boundary)) {
-            return Some(boundary);
-        }
-    }
-    // Reaching this point at pinnacle depth means every regular boundary was
-    // observed defeated above.
-    (depth >= PINNACLE_BOUNDARY - 1 && is_unfinished_status(status_for(PINNACLE_BOUNDARY)))
-        .then_some(PINNACLE_BOUNDARY)
+    let defeated = snapshot
+        .entries
+        .iter()
+        .filter(|(_, entry)| entry.status.as_deref() == Some("defeated"))
+        .map(|(boundary, _)| *boundary)
+        .collect::<BTreeSet<i64>>();
+    parked_boss_boundary(snapshot.depth, &defeated)
 }
 
 #[must_use]
@@ -642,13 +613,6 @@ pub fn active_pinnacle_carry(
         risk_tier,
         boundary,
     })
-}
-
-/// The dig gate parks a player at every boundary whose status is not
-/// `defeated`, so the encounter must open for a missing entry, an entry
-/// without a status field, and any unrecognised status alike.
-fn is_unfinished_status(status: Option<&str>) -> bool {
-    status != Some("defeated")
 }
 
 const fn risk_name(risk_tier: RiskTier) -> &'static str {

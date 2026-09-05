@@ -27,7 +27,9 @@ use thiserror::Error;
 use crate::dig_event_threats::cursed_cooldown;
 use crate::dig_loot::artifact_catalog;
 use crate::dig_runtime::DigRuntimeConfig;
-use crate::dig_service::{PICKAXE_TIERS, SABOTAGE_COOLDOWN_SECONDS};
+use crate::dig_service::{
+    PICKAXE_TIERS, SABOTAGE_COOLDOWN_SECONDS, defeated_boundaries_from_json, next_undefeated_boss,
+};
 use crate::dig_service::{cooldown_duration, cooldown_remaining, layer_at};
 use crate::dig_sweep_fixes::{ProtectionSource, funded_protection};
 use crate::dig_tunnel_naming::{DigTunnelNamingService, TunnelNameEntropy};
@@ -1086,24 +1088,7 @@ fn json_string_eq(raw: Option<&str>, key: &str, expected: &str) -> bool {
 }
 
 fn next_unfinished_boss_boundary(raw: Option<&str>) -> Option<i64> {
-    const BOUNDARIES: [i64; 7] = [25, 50, 75, 100, 150, 200, 275];
-    let value = raw
-        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-    for boundary in BOUNDARIES {
-        let status = value
-            .get(boundary.to_string())
-            .and_then(|entry| {
-                entry
-                    .as_str()
-                    .or_else(|| entry.get("status").and_then(Value::as_str))
-            })
-            .unwrap_or("active");
-        if matches!(status, "active" | "phase1_defeated" | "phase2_defeated") {
-            return Some(boundary);
-        }
-    }
-    None
+    next_undefeated_boss(&defeated_boundaries_from_json(raw.unwrap_or("{}")))
 }
 
 #[cfg(test)]
