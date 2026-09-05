@@ -2937,7 +2937,7 @@ fn wheel_interaction_timeout_policy_matches_python_views() {
             bankruptcy_cooldown_seconds: 0,
             bankruptcy_fresh_start_balance: 0,
             bankruptcy_penalty_games: 0,
-            bankruptcy_penalty_rate: 0.0,
+            bankruptcy_penalty_rate_per_game: 0.0,
             garnishment_rate: 0.0,
             vanity_tax_rate: 0.0,
             low_priority_tax_rate: 0.0,

@@ -16,6 +16,7 @@ enum SessionCall {
         bypass: bool,
     },
     Answer {
+        guild_id: GuildId,
         session_id: i64,
         question_number: i64,
         selected_index: usize,
@@ -131,6 +132,7 @@ impl PlayerTriviaSessionRepository for FakeRepository {
 
     fn settle_answer(
         &self,
+        guild_id: GuildId,
         session_id: i64,
         question_number: i64,
         selected_index: usize,
@@ -141,6 +143,7 @@ impl PlayerTriviaSessionRepository for FakeRepository {
             .lock()
             .unwrap()
             .push(SessionCall::Answer {
+                guild_id,
                 session_id,
                 question_number,
                 selected_index,
@@ -662,7 +665,7 @@ fn test_question_record_and_persistence_delegates_use_immutable_snapshot_shape()
             .unwrap(),
         4
     );
-    assert!(service.settle_answer(4, 2, 1, 25, 101).unwrap());
+    assert!(service.settle_answer(2, 4, 2, 1, 25, 101).unwrap());
     service.finish_session(4, "completed", 102).unwrap();
     assert!(service.cancel_session_if_unanswered(4).unwrap());
 
@@ -678,6 +681,7 @@ fn test_question_record_and_persistence_delegates_use_immutable_snapshot_shape()
                 bypass: true,
             },
             SessionCall::Answer {
+                guild_id: 2,
                 session_id: 4,
                 question_number: 2,
                 selected_index: 1,

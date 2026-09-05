@@ -709,7 +709,7 @@ pub struct BettingRuntimeConfig {
     pub bankruptcy_cooldown_seconds: i64,
     pub bankruptcy_fresh_start_balance: i64,
     pub bankruptcy_penalty_games: i64,
-    pub bankruptcy_penalty_rate: f64,
+    pub bankruptcy_penalty_rate_per_game: f64,
     pub garnishment_rate: f64,
     /// Kept in the runtime snapshot for the coordinated VanityTaxPort hook.
     /// The provider intentionally does not tax every spinner until that port
@@ -766,7 +766,7 @@ impl BettingRuntimeConfig {
             bankruptcy_cooldown_seconds: values.bankruptcy_cooldown_seconds,
             bankruptcy_fresh_start_balance: values.bankruptcy_fresh_start_balance,
             bankruptcy_penalty_games: values.bankruptcy_penalty_games,
-            bankruptcy_penalty_rate: values.bankruptcy_penalty_rate,
+            bankruptcy_penalty_rate_per_game: values.bankruptcy_penalty_rate_per_game,
             garnishment_rate: values.garnishment_percentage,
             vanity_tax_rate: values.vanity_tax_rate,
             low_priority_tax_rate: values.low_priority_profit_tax_rate,
@@ -4008,7 +4008,7 @@ impl BettingInteractionHandler {
             &display_name,
             &statement,
             badge,
-            self.config.bankruptcy_penalty_rate,
+            self.config.bankruptcy_penalty_rate_per_game,
             self.config.garnishment_rate,
         );
         let result = responder
@@ -4112,7 +4112,7 @@ impl BettingInteractionHandler {
                 &view.display_name,
                 &statement,
                 badge,
-                self.config.bankruptcy_penalty_rate,
+                self.config.bankruptcy_penalty_rate_per_game,
                 self.config.garnishment_rate,
             ))
             .await
@@ -5210,13 +5210,18 @@ impl BettingInteractionHandler {
                         penalty_games = effects.swamp_bankruptcy_games;
                     }
                 }
+                let per_game = self.config.bankruptcy_penalty_rate_per_game;
+                let withheld_now =
+                    cama_domain::bankruptcy::withheld_rate(per_game, penalty_games) * 100.0;
+                let per_game = per_game * 100.0;
                 format!(
                     "**<@{user_id}> HAS DECLARED BANKRUPTCY**\n\n\
                      **Details:**\n\
                      Debt cleared: {debt_cleared} {JOPACOIN_EMOTE}\n\
-                     Penalty: {:.0}% win bonus until you **WIN** {penalty_games} games\n\
-                     New balance: 0 {JOPACOIN_EMOTE}",
-                    self.config.bankruptcy_penalty_rate * 100.0
+                     Penalty: {withheld_now:.0}% of profit withheld \
+                     ({per_game:.0}% per game left) \
+                     until you **WIN** {penalty_games} games\n\
+                     New balance: 0 {JOPACOIN_EMOTE}"
                 )
             }
             DeclarationOutcome::PlayerNotFound => {
@@ -6844,7 +6849,7 @@ fn balance_statement_response(
     display_name: &str,
     statement: &BalanceStatement,
     mana_badge: &str,
-    bankruptcy_penalty_rate: f64,
+    bankruptcy_penalty_rate_per_game: f64,
     garnishment_rate: f64,
 ) -> InteractionResponse {
     InteractionResponse::message("")
@@ -6852,7 +6857,7 @@ fn balance_statement_response(
             display_name,
             statement,
             mana_badge,
-            bankruptcy_penalty_rate,
+            bankruptcy_penalty_rate_per_game,
             garnishment_rate,
         ))
         .ephemeral()
@@ -6864,7 +6869,7 @@ fn balance_statement_embed(
     display_name: &str,
     statement: &BalanceStatement,
     mana_badge: &str,
-    bankruptcy_penalty_rate: f64,
+    bankruptcy_penalty_rate_per_game: f64,
     garnishment_rate: f64,
 ) -> InteractionEmbed {
     let snapshot = &statement.snapshot;
@@ -6888,7 +6893,7 @@ fn balance_statement_embed(
             footer,
             snapshot,
             mana_badge,
-            bankruptcy_penalty_rate,
+            bankruptcy_penalty_rate_per_game,
             garnishment_rate,
         ),
         BalancePageSection::Markets { page, total_pages } => {
@@ -6905,7 +6910,7 @@ fn balance_overview_embed(
     footer: String,
     snapshot: &TaxPlayerSnapshot,
     mana_badge: &str,
-    bankruptcy_penalty_rate: f64,
+    bankruptcy_penalty_rate_per_game: f64,
     garnishment_rate: f64,
 ) -> InteractionEmbed {
     let summary = &snapshot.prediction_exposure.summary;
@@ -6930,9 +6935,13 @@ fn balance_overview_embed(
         portfolio_jc(snapshot.total_fees_paid),
     );
     if snapshot.penalty_games_remaining > 0 {
+        let withheld = cama_domain::bankruptcy::withheld_rate(
+            bankruptcy_penalty_rate_per_game,
+            snapshot.penalty_games_remaining,
+        );
         status.push_str(&format!(
-            "\nBankruptcy modifier: **{:.0}% win bonus** for {} more win(s)",
-            bankruptcy_penalty_rate * 100.0,
+            "\nBankruptcy modifier: **{:.0}% of profit withheld** for {} more win(s)",
+            withheld * 100.0,
             grouped_jc(snapshot.penalty_games_remaining),
         ));
     }
@@ -7715,7 +7724,7 @@ fn credit_wheel_income(
                 gross,
                 garnishment_rate: config.garnishment_rate,
                 apply_bankruptcy_penalty: true,
-                bankruptcy_kept_rate: config.bankruptcy_penalty_rate,
+                bankruptcy_penalty_rate_per_game: config.bankruptcy_penalty_rate_per_game,
                 vanity_tax_rate: if vanity_taxable_ids.contains(&user_id) {
                     config.vanity_tax_rate
                 } else {

@@ -8,6 +8,9 @@
 
 use std::path::{Path, PathBuf};
 
+use cama_db_core::profit_deductions::{
+    DeductionLedgerContext, ProfitDeductionPolicy, ProfitDeductions, withhold_profit_deductions,
+};
 use cama_domain::rating::cap_glicko_rd;
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -118,6 +121,14 @@ impl DuelChallenge {
     pub const fn decline_penalty(&self) -> i64 {
         (self.wager + 1) / 2
     }
+}
+
+/// A settled duel plus what was withheld from the winner's profit.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DuelResolution {
+    pub challenge: DuelChallenge,
+    /// Withholding on the wager (the winner's profit); zero for a void.
+    pub deductions: ProfitDeductions,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -800,7 +811,8 @@ impl DuelChallengeRepository {
         winner_id: Option<i64>,
         now: i64,
         actor_id: i64,
-    ) -> Result<DuelChallenge, DuelRepositoryError> {
+        policy: &ProfitDeductionPolicy<'_>,
+    ) -> Result<DuelResolution, DuelRepositoryError> {
         let guild_id = Self::normalize_guild_id(guild_id);
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -818,6 +830,7 @@ impl DuelChallengeRepository {
         }
 
         let metadata = format!("{{\"wager\": {}}}", challenge.wager);
+        let mut deductions = ProfitDeductions::default();
         let status = if let Some(winner_id) = winner_id {
             update_player_balance(
                 &transaction,
@@ -832,6 +845,24 @@ impl DuelChallengeRepository {
                     metadata: &metadata,
                 },
             )?;
+            // The winner's own stake comes back untouched; only the wager
+            // won from the loser is profit.
+            deductions = withhold_profit_deductions(
+                &transaction,
+                guild_id,
+                winner_id,
+                challenge.wager,
+                policy,
+                &DeductionLedgerContext {
+                    source: "duel_challenge",
+                    related_type: Some("duel_challenge"),
+                    related_id: Some(challenge_id),
+                    reason: "duel winnings",
+                },
+            )?
+            .ok_or(DuelRepositoryError::Invalid(
+                "A duel participant balance could not be updated.",
+            ))?;
             DuelStatus::Resolved
         } else {
             for (player_id, reason) in [
@@ -877,7 +908,10 @@ impl DuelChallengeRepository {
             DuelRepositoryError::Invalid("Resolved duel challenge could not be read."),
         )?;
         transaction.commit()?;
-        Ok(resolved)
+        Ok(DuelResolution {
+            challenge: resolved,
+            deductions,
+        })
     }
 
     pub fn get_due_challenge_ids(&self, now: i64) -> Result<Vec<(i64, i64)>, DuelRepositoryError> {
@@ -1340,6 +1374,8 @@ mod tests {
     use std::thread;
     use tempfile::NamedTempFile;
 
+    use cama_domain::bankruptcy::BankruptcyPenaltyPolicy;
+
     use crate::test_support::FastTestDatabase;
 
     const GUILD_ID: i64 = 9_001;
@@ -1371,6 +1407,7 @@ mod tests {
             glicko_rating REAL,
             glicko_rd REAL,
             jopacoin_balance INTEGER DEFAULT 0,
+            updated_at TEXT,
             PRIMARY KEY (discord_id, guild_id)
         );
         CREATE TABLE duel_challenges (
@@ -1412,6 +1449,14 @@ mod tests {
             ON duel_challenges(status, expires_at);
         CREATE INDEX idx_duel_due_reminder
             ON duel_challenges(status, next_reminder_at);
+        CREATE TABLE bankruptcy_state (
+            discord_id INTEGER NOT NULL,
+            guild_id INTEGER NOT NULL DEFAULT 0,
+            last_bankruptcy_at INTEGER,
+            penalty_games_remaining INTEGER DEFAULT 0,
+            bankruptcy_count INTEGER DEFAULT 0,
+            PRIMARY KEY (discord_id, guild_id)
+        );
         CREATE TABLE economy_ledger_entries (
             ledger_id INTEGER PRIMARY KEY AUTOINCREMENT,
             guild_id INTEGER NOT NULL,
@@ -2686,9 +2731,17 @@ mod tests {
                 Some(2),
                 NOW + 200,
                 99,
+                &ProfitDeductionPolicy::none(),
             )
             .expect("resolve duel");
-        assert_eq!(resolved.status, DuelStatus::Resolved);
+        assert_eq!(resolved.challenge.status, DuelStatus::Resolved);
+        assert_eq!(
+            resolved.deductions,
+            ProfitDeductions {
+                profit: 500,
+                ..ProfitDeductions::default()
+            }
+        );
         assert_eq!(balance(&fixture.file, 2, GUILD_ID), 1000);
     }
 
@@ -2708,9 +2761,17 @@ mod tests {
             .expect("accept duel");
         let voided = fixture
             .repository
-            .resolve_atomic(accepted.challenge_id, Some(GUILD_ID), None, NOW + 200, 99)
+            .resolve_atomic(
+                accepted.challenge_id,
+                Some(GUILD_ID),
+                None,
+                NOW + 200,
+                99,
+                &ProfitDeductionPolicy::none(),
+            )
             .expect("void duel");
-        assert_eq!(voided.status, DuelStatus::Voided);
+        assert_eq!(voided.challenge.status, DuelStatus::Voided);
+        assert_eq!(voided.deductions, ProfitDeductions::default());
         assert_eq!(balance(&fixture.file, 1, GUILD_ID), 500);
         assert_eq!(balance(&fixture.file, 2, GUILD_ID), 500);
         assert!(
@@ -2731,6 +2792,163 @@ mod tests {
                 .expect("claim unresolved")
                 .is_none()
         );
+    }
+
+    fn set_penalty_games(file: &DuelTestDatabase, discord_id: i64, remaining: i64) {
+        Connection::open(file.path())
+            .expect("open duel test database")
+            .execute(
+                "INSERT INTO bankruptcy_state (
+                     discord_id, guild_id, penalty_games_remaining, bankruptcy_count
+                 ) VALUES (?1, ?2, ?3, 1)",
+                params![discord_id, GUILD_ID, remaining],
+            )
+            .expect("seed bankruptcy state");
+    }
+
+    fn deduction_policy<'a>(
+        vanity: &'a BTreeSet<i64>,
+        low_priority: &'a BTreeSet<i64>,
+    ) -> ProfitDeductionPolicy<'a> {
+        ProfitDeductionPolicy {
+            bankruptcy: Some(BankruptcyPenaltyPolicy {
+                rate_per_game: 0.05,
+            }),
+            vanity_tax_rate: 0.10,
+            vanity_taxable_ids: vanity,
+            low_priority_tax_rate: 0.25,
+            low_priority_taxable_ids: low_priority,
+        }
+    }
+
+    /// Accept a 500 JC duel and resolve it in the recipient's favour; the
+    /// recipient starts holding exactly the wager, so the gross pot is 1000.
+    fn resolve_recipient_win(
+        fixture: &BoundFixture,
+        policy: &ProfitDeductionPolicy<'_>,
+    ) -> DuelResolution {
+        let accepted = fixture
+            .repository
+            .accept_atomic(
+                fixture.challenge.challenge_id,
+                Some(GUILD_ID),
+                2,
+                DuelTrial::TrialByCombat,
+                NOW + 100,
+                2,
+            )
+            .expect("accept duel");
+        fixture
+            .repository
+            .resolve_atomic(
+                accepted.challenge_id,
+                Some(GUILD_ID),
+                Some(2),
+                NOW + 200,
+                99,
+                policy,
+            )
+            .expect("resolve duel")
+    }
+
+    #[test]
+    fn test_winner_bankruptcy_penalty_scales_with_games_remaining() {
+        let empty = BTreeSet::new();
+        // 5% of the 500 JC wager per outstanding game: one game withholds
+        // 25, six games 150, and twenty games the whole wager.
+        for (remaining, penalty) in [(1, 25), (6, 150), (20, 500)] {
+            let fixture = bound_fixture(500, 500);
+            set_penalty_games(&fixture.file, 2, remaining);
+            let resolution = resolve_recipient_win(&fixture, &deduction_policy(&empty, &empty));
+            assert_eq!(resolution.challenge.status, DuelStatus::Resolved);
+            assert_eq!(
+                resolution.deductions,
+                ProfitDeductions {
+                    profit: 500,
+                    bankruptcy_penalty: penalty,
+                    vanity_tax: 0,
+                    low_priority_tax: 0,
+                }
+            );
+            assert_eq!(balance(&fixture.file, 2, GUILD_ID), 1000 - penalty);
+            assert_eq!(balance(&fixture.file, 1, GUILD_ID), 0);
+            let rows = ledger_rows(&fixture.file, fixture.challenge.challenge_id);
+            let penalty_row = rows.last().expect("penalty ledger row");
+            assert_eq!(penalty_row.account_id, 2);
+            assert_eq!(penalty_row.delta, -penalty);
+            assert_eq!(penalty_row.source, "duel_challenge");
+            assert_eq!(
+                penalty_row.reason.as_deref(),
+                Some("duel winnings bankruptcy penalty")
+            );
+        }
+    }
+
+    #[test]
+    fn test_vanity_taxable_winner_pays_tax_on_the_wager() {
+        let fixture = bound_fixture(500, 500);
+        let empty = BTreeSet::new();
+        let vanity = BTreeSet::from([2]);
+        let resolution = resolve_recipient_win(&fixture, &deduction_policy(&vanity, &empty));
+        assert_eq!(resolution.deductions.vanity_tax, 50);
+        assert_eq!(resolution.deductions.total(), 50);
+        assert_eq!(balance(&fixture.file, 2, GUILD_ID), 950);
+        let rows = ledger_rows(&fixture.file, fixture.challenge.challenge_id);
+        let tax_row = rows.last().expect("vanity ledger row");
+        assert_eq!(tax_row.delta, -50);
+        assert_eq!(tax_row.source, "vanity_tax");
+    }
+
+    #[test]
+    fn test_unlisted_winner_without_penalty_keeps_the_whole_pot() {
+        let fixture = bound_fixture(500, 500);
+        // Only the loser is penalised and taxable; the winner is untouched.
+        set_penalty_games(&fixture.file, 1, 6);
+        let roster = BTreeSet::from([1]);
+        let resolution = resolve_recipient_win(&fixture, &deduction_policy(&roster, &roster));
+        assert_eq!(
+            resolution.deductions,
+            ProfitDeductions {
+                profit: 500,
+                ..ProfitDeductions::default()
+            }
+        );
+        assert_eq!(balance(&fixture.file, 2, GUILD_ID), 1000);
+        assert_eq!(balance(&fixture.file, 1, GUILD_ID), 0);
+    }
+
+    #[test]
+    fn test_void_ignores_deduction_policy() {
+        let fixture = bound_fixture(500, 500);
+        set_penalty_games(&fixture.file, 1, 6);
+        set_penalty_games(&fixture.file, 2, 6);
+        let roster = BTreeSet::from([1, 2]);
+        let accepted = fixture
+            .repository
+            .accept_atomic(
+                fixture.challenge.challenge_id,
+                Some(GUILD_ID),
+                2,
+                DuelTrial::TrialOfFive,
+                NOW + 100,
+                2,
+            )
+            .expect("accept duel");
+        let voided = fixture
+            .repository
+            .resolve_atomic(
+                accepted.challenge_id,
+                Some(GUILD_ID),
+                None,
+                NOW + 200,
+                99,
+                &deduction_policy(&roster, &roster),
+            )
+            .expect("void duel");
+        assert_eq!(voided.challenge.status, DuelStatus::Voided);
+        assert_eq!(voided.deductions, ProfitDeductions::default());
+        assert_eq!(balance(&fixture.file, 1, GUILD_ID), 500);
+        assert_eq!(balance(&fixture.file, 2, GUILD_ID), 500);
     }
 
     #[test]
@@ -2850,6 +3068,7 @@ mod tests {
                 Some(3),
                 NOW + 200,
                 99,
+                &ProfitDeductionPolicy::none(),
             ),
             "winner",
         );
@@ -2860,6 +3079,7 @@ mod tests {
                 Some(1),
                 NOW + 200,
                 99,
+                &ProfitDeductionPolicy::none(),
             ),
             "accepted",
         );
@@ -3367,6 +3587,7 @@ mod tests {
                 Some(2),
                 NOW + 200,
                 99,
+                &ProfitDeductionPolicy::none(),
             )
             .expect("resolve duel");
         assert!(

@@ -106,7 +106,8 @@ fn reward_fixture() -> (NamedTempFile, ProductionMatchRewardControl) {
     let control = ProductionMatchRewardControl {
         database_path: database.path().to_path_buf(),
         garnishment_rate: 0.5,
-        bankruptcy_kept_rate: 0.75,
+        // The fixture seeds two penalty games, so a quarter of profit is withheld.
+        bankruptcy_penalty_rate_per_game: 0.125,
         vanity_tax_rate: 0.10,
         low_priority_tax_rate: 0.10,
         minigame_scale: 1.0,
@@ -160,7 +161,7 @@ fn blood_pact_cap_fixture(
     let control = ProductionMatchRewardControl {
         database_path: database.path().to_path_buf(),
         garnishment_rate: 0.5,
-        bankruptcy_kept_rate: 0.75,
+        bankruptcy_penalty_rate_per_game: 0.05,
         vanity_tax_rate: 0.10,
         low_priority_tax_rate: 0.10,
         minigame_scale,
@@ -7917,4 +7918,81 @@ fn saga_compensation_reverses_the_movement_the_credit_actually_made() {
         blood_pact_skim: 5,
     };
     assert_eq!(recovered.compensatable_balance_delta(), 0);
+}
+
+#[test]
+fn same_match_streak_and_win_bonus_withhold_at_the_pre_decrement_penalty_share() {
+    // A 30% per-game rate withholds 30% of a profit while one game is left.
+    // The win bonus decrements that game; the streak bonus paid in the same
+    // settlement must still be withheld at the 30% share the win bonus and
+    // referral rewards used, not at zero.
+    let mut config = production_test_config();
+    config.values.jopacoin_win_reward = 120;
+    config.values.bankruptcy_penalty_rate_per_game = 0.3;
+    let fixture = MatchRuntimeFixture::new_with_config_and_discord(
+        config,
+        Arc::new(PublicationDiscord::default()),
+    );
+    let pending = fixture.pending(unix_seconds() + 120);
+    let winner = pending.state.radiant_team_ids[0];
+    let connection = Connection::open(fixture.database.path()).expect("open penalty fixture");
+    connection
+        .execute(
+            "INSERT INTO bankruptcy_state(
+                 discord_id,guild_id,last_bankruptcy_at,
+                 penalty_games_remaining,bankruptcy_count
+             ) VALUES(?1,?2,0,1,1)",
+            params![winner, GUILD],
+        )
+        .expect("insert one-game penalty");
+    // A 30-day streak already advanced today pays the top 10 JC streak bonus.
+    connection
+        .execute(
+            "UPDATE players SET dota_streak_days=30, dota_last_played_date=?1
+             WHERE discord_id=?2 AND guild_id=?3",
+            params![cama_domain::game_date::get_game_date(), winner, GUILD],
+        )
+        .expect("seed winner streak");
+    drop(connection);
+
+    fixture
+        .provider
+        .handler
+        .record_match_blocking(&pending, "radiant", None)
+        .expect("record penalized winner");
+
+    let connection = Connection::open(fixture.database.path()).expect("inspect withholding");
+    let withheld = |source: &str| -> i64 {
+        connection
+            .query_row(
+                "SELECT COALESCE(SUM(-delta),0) FROM economy_ledger_entries
+                 WHERE guild_id=?1 AND account_id=?2 AND source=?3 AND delta<0",
+                params![GUILD, winner, source],
+                |row| row.get(0),
+            )
+            .expect("sum withheld share")
+    };
+    let credited = |source: &str| -> i64 {
+        connection
+            .query_row(
+                "SELECT COALESCE(SUM(delta),0) FROM economy_ledger_entries
+                 WHERE guild_id=?1 AND account_id=?2 AND source=?3 AND delta>0",
+                params![GUILD, winner, source],
+                |row| row.get(0),
+            )
+            .expect("sum credited share")
+    };
+    assert_eq!(credited("match_win_bonus"), 120);
+    assert_eq!(withheld("match_win_bonus"), 36);
+    assert_eq!(credited("match_streak"), 10);
+    assert_eq!(withheld("match_streak"), 3);
+    let remaining: i64 = connection
+        .query_row(
+            "SELECT penalty_games_remaining FROM bankruptcy_state
+             WHERE discord_id=?1 AND guild_id=?2",
+            params![winner, GUILD],
+            |row| row.get(0),
+        )
+        .expect("read decremented penalty");
+    assert_eq!(remaining, 0);
 }

@@ -9,6 +9,10 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use cama_db_core::profit_deductions::{
+    DeductionLedgerContext, ProfitDeductionPolicy, ProfitDeductions, compute_profit_deductions,
+    debit_profit_deductions, penalty_games_remaining,
+};
 use cama_domain::pet::{ADULT_AGE_SECONDS, Pet};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use thiserror::Error;
@@ -51,6 +55,8 @@ pub enum PetEatingRepositoryError {
     PetRepository(#[from] PetRepositoryError),
     #[error("pet-eating SQLite operation failed: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    #[error("pet-eating profit deduction roster lookup failed: {0}")]
+    DeductionRoster(String),
 }
 
 impl PetEatingRepositoryError {
@@ -61,7 +67,8 @@ impl PetEatingRepositoryError {
             Self::ArithmeticOutOfRange
             | Self::CommittedPetMissing(_)
             | Self::PetRepository(_)
-            | Self::Sqlite(_) => None,
+            | Self::Sqlite(_)
+            | Self::DeductionRoster(_) => None,
         }
     }
 }
@@ -88,8 +95,12 @@ pub struct EatAdultPetRequest {
 pub struct EatAdultPetOutcome {
     pub pet: Pet,
     pub activated_pet: Option<Pet>,
+    /// Balance after the reward and every withheld share.
     pub new_balance: i64,
     pub penalty_games_remaining: i64,
+    /// Bankruptcy, vanity, and low-priority shares withheld from the reward,
+    /// computed against the penalty games outstanding *before* this meal.
+    pub deductions: ProfitDeductions,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -98,6 +109,7 @@ pub struct DurableEatingOutcome {
     pub penalty_games_added: i64,
     pub penalty_games_remaining: i64,
     pub new_balance: i64,
+    pub deductions: ProfitDeductions,
 }
 
 #[derive(Clone, Debug)]
@@ -169,6 +181,7 @@ impl PetEatingRepository {
     pub fn eat_adult_pet_atomic(
         &self,
         request: EatAdultPetRequest,
+        policy: &ProfitDeductionPolicy<'_>,
     ) -> Result<EatAdultPetOutcome, PetEatingRepositoryError> {
         let guild_id = Self::normalize_guild_id(request.guild_id);
         let adult_cutoff = request
@@ -261,29 +274,35 @@ impl PetEatingRepository {
             )
             .optional()?
             .ok_or(PetEatingFailure::PlayerNotFound)?;
-        let existing_penalty = transaction
-            .query_row(
-                "SELECT COALESCE(penalty_games_remaining, 0) FROM bankruptcy_state
-                  WHERE discord_id = ?1 AND guild_id = ?2",
-                params![request.discord_id, guild_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .unwrap_or(0);
+        let existing_penalty = penalty_games_remaining(&transaction, guild_id, request.discord_id)?;
+        // Withhold against the sentence outstanding before this meal so the
+        // games added below do not inflate this payout's own penalty.
+        let deductions = compute_profit_deductions(
+            &transaction,
+            guild_id,
+            request.discord_id,
+            request.reward,
+            policy,
+        )?;
         let new_balance = balance
             .checked_add(request.reward)
+            .and_then(|credited| credited.checked_sub(deductions.total()))
             .ok_or(PetEatingRepositoryError::ArithmeticOutOfRange)?;
         let penalty_games_remaining = existing_penalty
             .checked_add(request.penalty_games)
             .ok_or(PetEatingRepositoryError::ArithmeticOutOfRange)?;
         let metadata = format!(
             "{{\"pet_id\": {}, \"species\": {}, \"reward\": {}, \
-             \"penalty_games\": {}, \"penalty_games_remaining\": {}}}",
+             \"penalty_games\": {}, \"penalty_games_remaining\": {}, \
+             \"bankruptcy_penalty\": {}, \"vanity_tax\": {}, \"low_priority_tax\": {}}}",
             request.pet_id,
             json_string(&species),
             request.reward,
             request.penalty_games,
             penalty_games_remaining,
+            deductions.bankruptcy_penalty,
+            deductions.vanity_tax,
+            deductions.low_priority_tax,
         );
         transaction.execute("DELETE FROM economy_ledger_context", [])?;
         transaction.execute(
@@ -308,6 +327,22 @@ impl PetEatingRepository {
         let credited = credited?;
         cleared?;
         if credited != 1 {
+            return Err(PetEatingFailure::PlayerNotFound.into());
+        }
+        if deductions.total() > 0
+            && !debit_profit_deductions(
+                &transaction,
+                guild_id,
+                request.discord_id,
+                deductions,
+                &DeductionLedgerContext {
+                    source: "pet",
+                    related_type: Some("pet_eating"),
+                    related_id: Some(request.pet_id),
+                    reason: &format!("ate pet {pet_name}"),
+                },
+            )?
+        {
             return Err(PetEatingFailure::PlayerNotFound.into());
         }
 
@@ -335,6 +370,7 @@ impl PetEatingRepository {
             activated_pet,
             new_balance,
             penalty_games_remaining,
+            deductions,
         })
     }
 
@@ -351,11 +387,17 @@ impl PetEatingRepository {
                              THEN CAST(json_extract(metadata, '$.penalty_games') AS INTEGER) END,
                         CASE WHEN json_valid(metadata)
                              THEN CAST(json_extract(
-                                 metadata, '$.penalty_games_remaining') AS INTEGER) END
+                                 metadata, '$.penalty_games_remaining') AS INTEGER) END,
+                        CASE WHEN json_valid(metadata) THEN COALESCE(CAST(json_extract(
+                            metadata, '$.bankruptcy_penalty') AS INTEGER), 0) ELSE 0 END,
+                        CASE WHEN json_valid(metadata) THEN COALESCE(CAST(json_extract(
+                            metadata, '$.vanity_tax') AS INTEGER), 0) ELSE 0 END,
+                        CASE WHEN json_valid(metadata) THEN COALESCE(CAST(json_extract(
+                            metadata, '$.low_priority_tax') AS INTEGER), 0) ELSE 0 END
                    FROM economy_ledger_entries
                   WHERE guild_id = ?1 AND account_type = 'player'
                     AND source = 'pet' AND related_type = 'pet_eating'
-                    AND related_id = ?2
+                    AND related_id = ?2 AND delta > 0
                   ORDER BY ledger_id DESC LIMIT 1",
                 params![Self::normalize_guild_id(guild_id), pet_id.to_string()],
                 |row| {
@@ -364,17 +406,31 @@ impl PetEatingRepository {
                         row.get::<_, i64>(1)?,
                         row.get::<_, Option<i64>>(2)?,
                         row.get::<_, Option<i64>>(3)?,
+                        ProfitDeductions {
+                            profit: row.get::<_, i64>(0)?,
+                            bankruptcy_penalty: row.get::<_, i64>(4)?,
+                            vanity_tax: row.get::<_, i64>(5)?,
+                            low_priority_tax: row.get::<_, i64>(6)?,
+                        },
                     ))
                 },
             )
             .optional()?;
         Ok(row.and_then(
-            |(reward, new_balance, penalty_games_added, penalty_games_remaining)| {
+            |(
+                reward,
+                credited_balance,
+                penalty_games_added,
+                penalty_games_remaining,
+                deductions,
+            )| {
                 Some(DurableEatingOutcome {
                     reward,
                     penalty_games_added: penalty_games_added?,
                     penalty_games_remaining: penalty_games_remaining?,
-                    new_balance,
+                    // The credit row's balance predates the withheld shares.
+                    new_balance: credited_balance - deductions.total(),
+                    deductions,
                 })
             },
         ))

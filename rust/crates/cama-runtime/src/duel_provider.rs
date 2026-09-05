@@ -14,7 +14,9 @@ use async_trait::async_trait;
 use cama_app::ai_services::AIService;
 use cama_app::duel::{
     CommandError, DuelApplicationService, DuelEvolutionPort, FlavorEvent, TRIAL_BY_COMBAT_RULES,
+    resolution_detail,
 };
+use cama_app::service_container::PersistentVanityTaxService;
 use cama_db::duel_repository::{DuelChallenge, DuelChallengeRepository, DuelStatus, DuelTrial};
 use cama_db::pet_evolution_repository::PetEvolutionRepository;
 use cama_domain::pet_evolution::PetActivity;
@@ -26,6 +28,7 @@ use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
 use crate::option_ext::{integer_option, string_option, user_option};
+use crate::profit_deductions::ProfitDeductionSource;
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
     InteractionActionRow, InteractionButton, InteractionButtonStyle, InteractionEmbed,
@@ -48,6 +51,7 @@ impl DuelRegistrationProvider {
     pub fn new(
         database_path: impl AsRef<Path>,
         config: &ApplicationConfig,
+        vanity_tax: Arc<PersistentVanityTaxService>,
         discord: Arc<dyn DiscordTransport>,
         ai_service: Option<Arc<AIService>>,
     ) -> Self {
@@ -61,6 +65,11 @@ impl DuelRegistrationProvider {
                     ai_service,
                     config.values.ai_features_enabled,
                 )),
+                profit_deductions: ProfitDeductionSource::from_config(
+                    config,
+                    database_path,
+                    Some(vanity_tax),
+                ),
                 discord,
                 admin_user_ids: config.identities.admin_user_ids.iter().copied().collect(),
             }),
@@ -95,6 +104,7 @@ struct DuelInteractionHandler {
     repository: DuelChallengeRepository,
     evolution: PetEvolutionRepository,
     flavor: Arc<dyn DuelFlavorRuntimePort>,
+    profit_deductions: ProfitDeductionSource,
     discord: Arc<dyn DiscordTransport>,
     admin_user_ids: BTreeSet<i64>,
 }
@@ -806,41 +816,40 @@ impl DuelInteractionHandler {
         let repository = self.repository.clone();
         let evolution = self.evolution.clone();
         let actor_id = context.user_id;
-        let challenge = tokio::task::spawn_blocking(move || {
+        let profit_deductions = self.profit_deductions.clone();
+        let resolution = tokio::task::spawn_blocking(move || {
+            let policy = profit_deductions
+                .resolve(guild_id)
+                .map_err(CommandError::Internal)?;
             let now = unix_now();
             let mut service = DuelApplicationService::with_evolution(
                 repository,
                 move || now as f64,
                 RepositoryDuelEvolution(evolution),
             );
-            service.resolve(guild_id, actor_id, challenge_id, &outcome)
+            service.resolve(
+                guild_id,
+                actor_id,
+                challenge_id,
+                &outcome,
+                &policy.as_policy(),
+            )
         })
         .await
         .map_err(|error| format!("duel resolution task failed: {error}"))?;
-        let challenge = match challenge {
-            Ok(challenge) => challenge,
+        let resolution = match resolution {
+            Ok(resolution) => resolution,
             Err(error) => return followup_silent(&responder, error.to_string(), true).await,
         };
+        let challenge = &resolution.challenge;
         let event = if challenge.status == DuelStatus::Voided {
             FlavorEvent::Voided
         } else {
             FlavorEvent::Resolved
         };
-        let flavor = self.flavor.generate(event, &challenge).await;
-        self.edit_challenge(&challenge, &flavor).await;
-        let detail = if challenge.status == DuelStatus::Voided {
-            format!(
-                "Challenge #{} was voided. The {} JC stakes were refunded to each player; the issuance fee was not refunded.",
-                challenge.challenge_id, challenge.wager
-            )
-        } else {
-            format!(
-                "Challenge #{} is resolved: <@{}> wins {} JC.",
-                challenge.challenge_id,
-                challenge.winner_id.unwrap_or_default(),
-                challenge.wager * 2
-            )
-        };
+        let flavor = self.flavor.generate(event, challenge).await;
+        self.edit_challenge(challenge, &flavor).await;
+        let detail = resolution_detail(&resolution);
         followup_silent(&responder, format!("{flavor}\n{detail}"), false).await
     }
 

@@ -379,7 +379,7 @@ Additional settings can be configured in `.env` (see the Rust application config
 
 **Economy:**
 - `LOAN_COOLDOWN_SECONDS`, `LOAN_MAX_AMOUNT`, `LOAN_FEE_RATE` - Loan system
-- `BANKRUPTCY_COOLDOWN_SECONDS`, `BANKRUPTCY_PENALTY_GAMES` - Bankruptcy settings (default penalty: 3 games)
+- `BANKRUPTCY_COOLDOWN_SECONDS`, `BANKRUPTCY_PENALTY_GAMES`, `BANKRUPTCY_PENALTY_RATE_PER_GAME` - Bankruptcy settings (default penalty: 3 games, 5% of profit withheld per outstanding game, capped at 100%)
 - `TIP_FEE_RATE` - Tipping fee (default: 1%)
 - `VANITY_TAX_RATE` - Profit tax on members without a server nickname (default: 10%)
 - `DISBURSE_MIN_FUND`, `DISBURSE_QUORUM_PERCENTAGE` - Disbursement voting

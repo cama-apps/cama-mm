@@ -15,6 +15,8 @@ use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use thiserror::Error;
 
+use cama_db_core::profit_deductions::penalty_games_remaining;
+use cama_domain::bankruptcy::BankruptcyPenaltyPolicy;
 use cama_domain::openskill::{
     CamaOpenSkillSystem, Rating as OpenSkillRating, WeightedPlayer, WinningTeam,
 };
@@ -160,6 +162,9 @@ pub struct CoreCorrectionRequest<'a> {
 pub struct BetCorrectionOptions<'a> {
     pub pool_mode: bool,
     pub house_payout_multiplier: f64,
+    /// Bankruptcy withholding on each re-settled winner's profit, scaled by
+    /// the penalty games they still have to win. `None` withholds nothing.
+    pub bankruptcy: Option<BankruptcyPenaltyPolicy>,
     pub vanity_tax_rate: f64,
     pub vanity_taxable_ids: &'a BTreeSet<i64>,
     pub low_priority_tax_rate: f64,
@@ -177,6 +182,7 @@ impl<'a> BetCorrectionOptions<'a> {
         Self {
             pool_mode: true,
             house_payout_multiplier: 1.0,
+            bankruptcy: None,
             vanity_tax_rate,
             vanity_taxable_ids,
             low_priority_tax_rate,
@@ -1489,35 +1495,46 @@ impl MatchCorrectionRepository {
             *combined_deltas.entry(discord_id).or_insert(0) += taxes.total();
         }
         let total_stakes = total_stakes_by_player(&bets);
-        let new_taxes = new_deltas
-            .iter()
-            .filter_map(|(&discord_id, &payout)| {
-                let profit = payout - total_stakes.get(&discord_id).copied().unwrap_or(0);
-                if profit <= 0 {
-                    return None;
+        let mut new_taxes = BTreeMap::new();
+        for (&discord_id, &payout) in &new_deltas {
+            let profit = payout - total_stakes.get(&discord_id).copied().unwrap_or(0);
+            if profit <= 0 {
+                continue;
+            }
+            // The bankruptcy share reads the same pre-tax profit as both
+            // taxes and scales with the games the winner still has to win.
+            let bankruptcy_penalty = match options.bankruptcy {
+                Some(policy) => {
+                    let remaining = penalty_games_remaining(&transaction, guild_id, discord_id)?;
+                    (profit as f64 * policy.withheld_rate(remaining)) as i64
                 }
-                let vanity_tax = if options.vanity_taxable_ids.contains(&discord_id) {
-                    (profit as f64 * options.vanity_tax_rate) as i64
-                } else {
-                    0
-                };
-                // Both withholdings are charged against the same pre-tax
-                // profit, so misconfigured rates could otherwise take more
-                // than the player won.  Vanity totals are already visible to
-                // players, so the clamp falls on the low-priority share.
-                let low_priority_tax = if options.low_priority_taxable_ids.contains(&discord_id) {
-                    ((profit as f64 * options.low_priority_tax_rate) as i64)
-                        .clamp(0, (profit - vanity_tax).max(0))
-                } else {
-                    0
-                };
-                let taxes = SettlementTaxes {
-                    vanity_tax,
-                    low_priority_tax,
-                };
-                (taxes.total() > 0).then_some((discord_id, taxes))
-            })
-            .collect::<BTreeMap<_, _>>();
+                None => 0,
+            };
+            let vanity_tax = if options.vanity_taxable_ids.contains(&discord_id) {
+                (profit as f64 * options.vanity_tax_rate) as i64
+            } else {
+                0
+            };
+            // All three withholdings are charged against the same pre-tax
+            // profit, so misconfigured rates could otherwise take more than
+            // the player won.  Bankruptcy and vanity totals are already
+            // visible to players, so the clamp falls on the low-priority
+            // share.
+            let low_priority_tax = if options.low_priority_taxable_ids.contains(&discord_id) {
+                ((profit as f64 * options.low_priority_tax_rate) as i64)
+                    .clamp(0, (profit - bankruptcy_penalty - vanity_tax).max(0))
+            } else {
+                0
+            };
+            let taxes = SettlementTaxes {
+                bankruptcy_penalty,
+                vanity_tax,
+                low_priority_tax,
+            };
+            if taxes.total() > 0 {
+                new_taxes.insert(discord_id, taxes);
+            }
+        }
         for (&discord_id, taxes) in &new_taxes {
             *combined_deltas.entry(discord_id).or_insert(0) -= taxes.total();
         }
@@ -1564,14 +1581,16 @@ impl MatchCorrectionRepository {
         for (&discord_id, taxes) in &new_taxes {
             transaction.execute(
                 "INSERT INTO bet_settlement_taxes (
-                     match_id,guild_id,discord_id,vanity_tax,low_priority_tax
-                 ) VALUES (?1,?2,?3,?4,?5)",
+                     match_id,guild_id,discord_id,vanity_tax,low_priority_tax,
+                     bankruptcy_penalty
+                 ) VALUES (?1,?2,?3,?4,?5,?6)",
                 params![
                     match_id,
                     guild_id,
                     discord_id,
                     taxes.vanity_tax,
-                    taxes.low_priority_tax
+                    taxes.low_priority_tax,
+                    taxes.bankruptcy_penalty
                 ],
             )?;
         }
@@ -3215,13 +3234,14 @@ fn compute_new_payouts(
 /// settlement has to refund every one of them, not just the vanity share.
 #[derive(Clone, Copy, Debug)]
 struct SettlementTaxes {
+    bankruptcy_penalty: i64,
     vanity_tax: i64,
     low_priority_tax: i64,
 }
 
 impl SettlementTaxes {
     const fn total(self) -> i64 {
-        self.vanity_tax + self.low_priority_tax
+        self.bankruptcy_penalty + self.vanity_tax + self.low_priority_tax
     }
 }
 
@@ -3231,8 +3251,8 @@ fn load_settlement_taxes(
     guild_id: i64,
 ) -> Result<BTreeMap<i64, SettlementTaxes>, rusqlite::Error> {
     let mut statement = transaction.prepare(
-        "SELECT discord_id,vanity_tax,low_priority_tax FROM bet_settlement_taxes
-         WHERE match_id=?1 AND guild_id=?2",
+        "SELECT discord_id,vanity_tax,low_priority_tax,bankruptcy_penalty
+         FROM bet_settlement_taxes WHERE match_id=?1 AND guild_id=?2",
     )?;
     statement
         .query_map(params![match_id, guild_id], |row| {
@@ -3241,6 +3261,7 @@ fn load_settlement_taxes(
                 SettlementTaxes {
                     vanity_tax: row.get(1)?,
                     low_priority_tax: row.get(2)?,
+                    bankruptcy_penalty: row.get(3)?,
                 },
             ))
         })?

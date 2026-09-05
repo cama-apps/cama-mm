@@ -71,12 +71,15 @@ use cama_db::moderation::{ModerationEventType, ModerationRepository};
 use cama_db::package_deal_repository::PackageDealRepository;
 use cama_db::pairings_repository::PairingsRepository;
 use cama_db::pet_evolution_repository::PetEvolutionRepository;
+use cama_db::profit_deductions::OwnedProfitDeductionPolicy;
+use cama_db::profit_deductions::ProfitDeductionPolicy;
 use cama_db::rating_history_repository::RatingHistoryRepository;
 use cama_db::shop_runtime::{
     HostileDestination, HostileLossRequest as DbHostileLossRequest, ShopRuntimeRepository,
     ShopRuntimeRepositoryError,
 };
 use cama_db::soft_avoid_repository::SoftAvoidRepository;
+use cama_domain::bankruptcy::BankruptcyPenaltyPolicy;
 use cama_domain::discord_content::chunk_default_discord_content;
 use cama_domain::economy_scaling::scale_minigame_jc_delta;
 use cama_domain::formatting::{
@@ -290,7 +293,7 @@ impl MatchRegistrationProvider {
         let correction_rewards = Arc::new(ProductionMatchRewardControl {
             database_path: path.clone(),
             garnishment_rate: config.values.garnishment_percentage,
-            bankruptcy_kept_rate: config.values.bankruptcy_penalty_rate,
+            bankruptcy_penalty_rate_per_game: config.values.bankruptcy_penalty_rate_per_game,
             vanity_tax_rate: config.values.vanity_tax_rate,
             low_priority_tax_rate: config.values.low_priority_profit_tax_rate,
             minigame_scale: config.values.minigame_jc_delta_scale,
@@ -548,7 +551,7 @@ fn choices(mut option: CommandOptionSpec, values: &[(&str, &str)]) -> CommandOpt
 struct ProductionMatchRewardControl {
     database_path: PathBuf,
     garnishment_rate: f64,
-    bankruptcy_kept_rate: f64,
+    bankruptcy_penalty_rate_per_game: f64,
     vanity_tax_rate: f64,
     low_priority_tax_rate: f64,
     minigame_scale: f64,
@@ -756,7 +759,7 @@ impl ProductionMatchRewardControl {
                 gross: batch.gross,
                 garnishment_rate: self.garnishment_rate,
                 apply_bankruptcy_penalty: batch.apply_bankruptcy_penalty,
-                bankruptcy_kept_rate: self.bankruptcy_kept_rate,
+                bankruptcy_penalty_rate_per_game: self.bankruptcy_penalty_rate_per_game,
                 vanity_tax_rate: if batch.apply_vanity_tax
                     && vanity_taxable_ids.contains(discord_id)
                 {
@@ -954,7 +957,7 @@ impl ProductionMatchRewardControl {
             gross: request.gross_reward,
             garnishment_rate: self.garnishment_rate,
             apply_bankruptcy_penalty: true,
-            bankruptcy_kept_rate: self.bankruptcy_kept_rate,
+            bankruptcy_penalty_rate_per_game: self.bankruptcy_penalty_rate_per_game,
             vanity_tax_rate,
             low_priority_tax_rate,
             decrement_bankruptcy_penalty: true,
@@ -1180,7 +1183,7 @@ struct MatchConfig {
     first_game_pool_daily_amount: i64,
     dota_bet_seed_amount: i64,
     openskill_shuffle_chance: f64,
-    bankruptcy_kept_rate: f64,
+    bankruptcy_penalty_rate_per_game: f64,
     house_payout_multiplier: f64,
     vanity_tax_rate: f64,
     low_priority_profit_tax_rate: f64,
@@ -1234,7 +1237,7 @@ impl MatchConfig {
             first_game_pool_daily_amount: config.values.first_game_pool_daily_amount,
             dota_bet_seed_amount: config.values.dota_bet_seed_amount,
             openskill_shuffle_chance: config.values.openskill_shuffle_chance,
-            bankruptcy_kept_rate: config.values.bankruptcy_penalty_rate,
+            bankruptcy_penalty_rate_per_game: config.values.bankruptcy_penalty_rate_per_game,
             house_payout_multiplier: config.values.house_payout_multiplier,
             vanity_tax_rate: config.values.vanity_tax_rate,
             low_priority_profit_tax_rate: config.values.low_priority_profit_tax_rate,
@@ -3216,6 +3219,14 @@ impl MatchHandler {
         core.expected_low_priority_ids = Some(low_priority.clone());
         core.win_reward_jc = Some(self.config.jopacoin_win_reward);
         core.settle_referrals_at = Some(unix_seconds());
+        let vanity_taxable_ids = self.rewards.vanity_tax.taxable_ids(pending.guild_id);
+        core.referral_deductions = OwnedProfitDeductionPolicy {
+            bankruptcy: Some(self.bankruptcy_policy()),
+            vanity_tax_rate: self.config.vanity_tax_rate,
+            vanity_taxable_ids: vanity_taxable_ids.clone(),
+            low_priority_tax_rate: self.config.low_priority_profit_tax_rate,
+            low_priority_taxable_ids: low_priority_taxable_ids.clone(),
+        };
         let match_id = matches
             .record_match_core_atomic(&core)
             .map_err(|error| error.to_string())?;
@@ -3252,9 +3263,11 @@ impl MatchHandler {
                 winning_bet_team,
                 betting_mode,
                 &BetSettlementAdjustments {
-                    bankruptcy_kept_rate: Some(self.config.bankruptcy_kept_rate),
+                    bankruptcy_penalty_rate_per_game: Some(
+                        self.config.bankruptcy_penalty_rate_per_game,
+                    ),
                     vanity_tax_rate: Some(self.config.vanity_tax_rate),
-                    vanity_taxable_ids: self.rewards.vanity_tax.taxable_ids(pending.guild_id),
+                    vanity_taxable_ids: vanity_taxable_ids.clone(),
                     low_priority_tax_rate: Some(self.config.low_priority_profit_tax_rate),
                     low_priority_taxable_ids: low_priority_taxable_ids.clone(),
                     house_payout_multiplier: self.config.house_payout_multiplier,
@@ -3319,7 +3332,7 @@ impl MatchHandler {
             winners,
             losers,
             &settlement,
-            &low_priority_taxable_ids,
+            &self.profit_deductions(&vanity_taxable_ids, &low_priority_taxable_ids),
         )?;
         LoanService::new(
             LoanRepository::new(&self.database_path),
@@ -3365,6 +3378,29 @@ impl MatchHandler {
         })
     }
 
+    /// The configured bankruptcy penalty policy for generated profit.
+    const fn bankruptcy_policy(&self) -> BankruptcyPenaltyPolicy {
+        BankruptcyPenaltyPolicy {
+            rate_per_game: self.config.bankruptcy_penalty_rate_per_game,
+        }
+    }
+
+    /// The full withholding policy over rosters captured earlier in the
+    /// settlement flow, before this match drained low-priority counters.
+    const fn profit_deductions<'a>(
+        &self,
+        vanity_taxable_ids: &'a BTreeSet<i64>,
+        low_priority_taxable_ids: &'a BTreeSet<i64>,
+    ) -> ProfitDeductionPolicy<'a> {
+        ProfitDeductionPolicy {
+            bankruptcy: Some(self.bankruptcy_policy()),
+            vanity_tax_rate: self.config.vanity_tax_rate,
+            vanity_taxable_ids,
+            low_priority_tax_rate: self.config.low_priority_profit_tax_rate,
+            low_priority_taxable_ids,
+        }
+    }
+
     fn settle_match_rewards(
         &self,
         match_id: i64,
@@ -3372,8 +3408,9 @@ impl MatchHandler {
         winners: &[i64],
         losers: &[i64],
         settlement: &SettlementResult,
-        low_priority_taxable_ids: &BTreeSet<i64>,
+        deductions: &ProfitDeductionPolicy<'_>,
     ) -> Result<Vec<String>, String> {
+        let low_priority_taxable_ids = deductions.low_priority_taxable_ids;
         let matches = MatchRepository::new(&self.database_path);
         let bet_skims =
             self.rewards
@@ -3423,6 +3460,22 @@ impl MatchHandler {
         // resumable without replaying bets or bonuses.
         let mut compensate_partial = false;
         let payout = (|| -> Result<(), String> {
+            // Streak bonuses go first: every withholding in one settlement
+            // reads the same pre-decrement penalty count (the referral and
+            // win awards do), and the win award below is what decrements a
+            // winner's counter. Streak credits carry their own exact-once
+            // marker, so a later phase failure recovers them without a
+            // second payment.
+            self.award_match_streaks(
+                match_id,
+                pending.guild_id,
+                &winners.iter().chain(losers).copied().collect::<Vec<_>>(),
+                deductions,
+                &mut bonus_net,
+                &mut bonus_components,
+                &mut compensatable_net,
+            )?;
+
             let participation = self.rewards.award_generated_batch(GeneratedRewardBatch {
                 guild_id: pending.guild_id,
                 player_ids: losers,
@@ -3549,14 +3602,6 @@ impl MatchHandler {
                 &mut compensatable_by_source,
             );
 
-            self.award_match_streaks(
-                match_id,
-                pending.guild_id,
-                &winners.iter().chain(losers).copied().collect::<Vec<_>>(),
-                &mut bonus_net,
-                &mut bonus_components,
-                &mut compensatable_net,
-            )?;
             matches
                 .merge_match_jc_changes(match_id, Some(pending.guild_id), |jc_changes| {
                     for (discord_id, components) in &bonus_components {
@@ -3639,11 +3684,13 @@ impl MatchHandler {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn award_match_streaks(
         &self,
         match_id: i64,
         guild_id: i64,
         participant_ids: &[i64],
+        deductions: &ProfitDeductionPolicy<'_>,
         bonus_net: &mut BTreeMap<i64, i64>,
         bonus_components: &mut BTreeMap<i64, BTreeMap<String, i64>>,
         compensatable_net: &mut BTreeMap<i64, i64>,
@@ -3679,31 +3726,29 @@ impl MatchHandler {
             .unwrap_or_default();
         if targets.is_empty() {
             let outcomes = repository
-                .credit_match_awards_ordered_atomic(&credits, Some(guild_id), match_id)
+                .credit_match_awards_ordered_atomic(&credits, Some(guild_id), match_id, deductions)
                 .map_err(|error| error.to_string())?;
             for (credit, outcome) in credits.into_iter().zip(outcomes) {
+                let net = credit.bonus.saturating_sub(outcome.withheld);
                 accumulate_reward_component(
                     credit.discord_id,
                     "streak",
-                    credit.bonus,
-                    credit.bonus,
+                    net,
+                    net,
                     bonus_net,
                     bonus_components,
                 );
                 if outcome.applied {
-                    accumulate_compensatable_net(
-                        credit.discord_id,
-                        credit.bonus,
-                        compensatable_net,
-                    );
+                    accumulate_compensatable_net(credit.discord_id, net, compensatable_net);
                 }
             }
             return Ok(());
         }
         for credit in credits {
             let credited = repository
-                .credit_match_awards_ordered_atomic(&[credit], Some(guild_id), match_id)
+                .credit_match_awards_ordered_atomic(&[credit], Some(guild_id), match_id, deductions)
                 .map_err(|error| error.to_string())?;
+            let withheld = credited.first().map_or(0, |outcome| outcome.withheld);
             let skim = if targets.contains(&credit.discord_id) {
                 self.rewards
                     .apply_attributed_blood_pact(
@@ -3717,7 +3762,7 @@ impl MatchHandler {
             } else {
                 0
             };
-            let net = credit.bonus.saturating_sub(skim);
+            let net = credit.bonus.saturating_sub(withheld).saturating_sub(skim);
             accumulate_reward_component(
                 credit.discord_id,
                 "streak",

@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::{Arc, Barrier};
 
+use cama_domain::bankruptcy::BankruptcyPenaltyPolicy;
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
@@ -295,7 +296,7 @@ fn test_no_blood_pact_real_repository_uses_two_connections_and_exact_ledgers() {
     ];
     let outcomes = fixture
         .repository
-        .credit_awards_ordered_atomic(&credits, Some(GUILD))
+        .credit_awards_ordered_atomic(&credits, Some(GUILD), &ProfitDeductionPolicy::none())
         .expect("second connection credits ordered awards");
     assert_eq!(
         outcomes.iter().map(|row| row.bonus).collect::<Vec<_>>(),
@@ -363,7 +364,12 @@ fn match_streak_credit_recovery_is_exact_once_per_player_and_match() {
 
     let first = fixture
         .repository
-        .credit_match_awards_ordered_atomic(&credits, Some(GUILD), 8_001)
+        .credit_match_awards_ordered_atomic(
+            &credits,
+            Some(GUILD),
+            8_001,
+            &ProfitDeductionPolicy::none(),
+        )
         .expect("credit match streaks");
     assert!(first.iter().all(|outcome| outcome.applied));
     assert_eq!(
@@ -376,7 +382,12 @@ fn match_streak_credit_recovery_is_exact_once_per_player_and_match() {
 
     let retry = fixture
         .repository
-        .credit_match_awards_ordered_atomic(&credits, Some(GUILD), 8_001)
+        .credit_match_awards_ordered_atomic(
+            &credits,
+            Some(GUILD),
+            8_001,
+            &ProfitDeductionPolicy::none(),
+        )
         .expect("recover match streaks");
     assert!(retry.iter().all(|outcome| !outcome.applied));
     assert_eq!(
@@ -405,7 +416,12 @@ fn match_streak_credit_recovery_is_exact_once_per_player_and_match() {
 
     let next_match = fixture
         .repository
-        .credit_match_awards_ordered_atomic(&credits, Some(GUILD), 8_002)
+        .credit_match_awards_ordered_atomic(
+            &credits,
+            Some(GUILD),
+            8_002,
+            &ProfitDeductionPolicy::none(),
+        )
         .expect("credit a distinct match");
     assert!(next_match.iter().all(|outcome| outcome.applied));
     assert_eq!(
@@ -414,6 +430,206 @@ fn match_streak_credit_recovery_is_exact_once_per_player_and_match() {
             .map(|outcome| outcome.balance_after)
             .collect::<Vec<_>>(),
         vec![9, 5]
+    );
+}
+
+fn deduction_policy<'a>(
+    vanity: &'a BTreeSet<i64>,
+    low_priority: &'a BTreeSet<i64>,
+) -> ProfitDeductionPolicy<'a> {
+    ProfitDeductionPolicy {
+        bankruptcy: Some(BankruptcyPenaltyPolicy {
+            rate_per_game: 0.05,
+        }),
+        vanity_tax_rate: 0.10,
+        vanity_taxable_ids: vanity,
+        low_priority_tax_rate: 0.25,
+        low_priority_taxable_ids: low_priority,
+    }
+}
+
+fn streak_ledger(connection: &Connection, discord_id: i64) -> Vec<(String, String, i64)> {
+    let mut statement = connection
+        .prepare(
+            "SELECT source, reason, delta FROM economy_ledger_entries
+             WHERE account_id = ?1 AND source != 'balance_update' ORDER BY ledger_id",
+        )
+        .expect("ledger query");
+    statement
+        .query_map([discord_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .expect("ledger rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect ledger")
+}
+
+#[test]
+fn match_streak_bonus_withholds_scaled_bankruptcy_penalty_and_taxes() {
+    let fixture = Fixture::new();
+    for discord_id in [501, 502, 503, 504] {
+        fixture.player(discord_id, GUILD);
+        fixture
+            .connection()
+            .execute(
+                "UPDATE players SET jopacoin_balance = 1000
+                 WHERE discord_id = ?1 AND guild_id = ?2",
+                params![discord_id, GUILD],
+            )
+            .expect("fund player");
+    }
+    for (discord_id, remaining) in [(501, 1), (502, 6)] {
+        fixture
+            .connection()
+            .execute(
+                "INSERT INTO bankruptcy_state (
+                     discord_id, guild_id, penalty_games_remaining, bankruptcy_count
+                 ) VALUES (?1, ?2, ?3, 1)",
+                params![discord_id, GUILD, remaining],
+            )
+            .expect("bankruptcy row");
+    }
+    let credits = [501, 502, 503, 504].map(|discord_id| DotaStreakCredit {
+        discord_id,
+        streak_days: 30,
+        bonus: 120,
+    });
+    let vanity = BTreeSet::from([503]);
+    let empty = BTreeSet::new();
+    let outcomes = fixture
+        .repository
+        .credit_match_awards_ordered_atomic(
+            &credits,
+            Some(GUILD),
+            9_001,
+            &deduction_policy(&vanity, &empty),
+        )
+        .expect("credit taxed streaks");
+    // 120 JC bonus at 5% per outstanding game: one game withholds 6, six
+    // games 36; the vanity share is a flat 10%.
+    assert_eq!(
+        outcomes
+            .iter()
+            .map(|outcome| (outcome.withheld, outcome.balance_after, outcome.applied))
+            .collect::<Vec<_>>(),
+        vec![
+            (6, 1114, true),
+            (36, 1084, true),
+            (12, 1108, true),
+            (0, 1120, true)
+        ]
+    );
+    let connection = fixture.connection();
+    for (discord_id, expected) in [(501, 1114), (502, 1084), (503, 1108), (504, 1120)] {
+        let balance: i64 = connection
+            .query_row(
+                "SELECT jopacoin_balance FROM players WHERE discord_id = ?1 AND guild_id = ?2",
+                params![discord_id, GUILD],
+                |row| row.get(0),
+            )
+            .expect("balance");
+        assert_eq!(balance, expected, "player {discord_id}");
+    }
+    assert_eq!(
+        streak_ledger(&connection, 502),
+        vec![
+            (
+                "match_streak".to_owned(),
+                "Dota streak match bonus".to_owned(),
+                120
+            ),
+            (
+                "match_streak".to_owned(),
+                "Dota streak match bonus bankruptcy penalty".to_owned(),
+                -36
+            ),
+        ]
+    );
+    assert_eq!(
+        streak_ledger(&connection, 503),
+        vec![
+            (
+                "match_streak".to_owned(),
+                "Dota streak match bonus".to_owned(),
+                120
+            ),
+            (
+                "vanity_tax".to_owned(),
+                "vanity tax on JC profit".to_owned(),
+                -12
+            ),
+        ]
+    );
+    assert_eq!(streak_ledger(&connection, 504).len(), 1);
+    drop(connection);
+
+    // Recovery reports the same withholding without moving balances again.
+    let retry = fixture
+        .repository
+        .credit_match_awards_ordered_atomic(
+            &credits,
+            Some(GUILD),
+            9_001,
+            &deduction_policy(&vanity, &empty),
+        )
+        .expect("recover taxed streaks");
+    assert_eq!(
+        retry
+            .iter()
+            .map(|outcome| (outcome.withheld, outcome.balance_after, outcome.applied))
+            .collect::<Vec<_>>(),
+        vec![
+            (6, 1114, false),
+            (36, 1084, false),
+            (12, 1108, false),
+            (0, 1120, false)
+        ]
+    );
+}
+
+#[test]
+fn ordered_streak_awards_withhold_the_low_priority_share() {
+    let fixture = Fixture::new();
+    fixture.player(601, GUILD);
+    fixture
+        .connection()
+        .execute(
+            "UPDATE players SET jopacoin_balance = 1000
+             WHERE discord_id = 601 AND guild_id = ?1",
+            [GUILD],
+        )
+        .expect("fund player");
+    let low_priority = BTreeSet::from([601]);
+    let empty = BTreeSet::new();
+    let outcomes = fixture
+        .repository
+        .credit_awards_ordered_atomic(
+            &[DotaStreakCredit {
+                discord_id: 601,
+                streak_days: 30,
+                bonus: 120,
+            }],
+            Some(GUILD),
+            &deduction_policy(&empty, &low_priority),
+        )
+        .expect("credit low-priority streak");
+    assert_eq!(outcomes[0].withheld, 30);
+    assert_eq!(outcomes[0].balance_after, 1090);
+    let connection = fixture.connection();
+    assert_eq!(
+        streak_ledger(&connection, 601),
+        vec![
+            (
+                "match_streak".to_owned(),
+                "Dota streak match bonus".to_owned(),
+                120
+            ),
+            (
+                "low_priority_tax".to_owned(),
+                "low priority tax on JC profit".to_owned(),
+                -30
+            ),
+        ]
     );
 }
 
@@ -426,6 +642,15 @@ CREATE TABLE players (
     dota_streak_days INTEGER NOT NULL DEFAULT 0,
     dota_last_played_date TEXT,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (discord_id, guild_id)
+);
+CREATE TABLE bankruptcy_state (
+    discord_id INTEGER NOT NULL,
+    guild_id INTEGER NOT NULL DEFAULT 0,
+    last_bankruptcy_at INTEGER,
+    penalty_games_remaining INTEGER DEFAULT 0,
+    bankruptcy_count INTEGER DEFAULT 0,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (discord_id, guild_id)
 );
 CREATE TABLE economy_ledger_context (
@@ -473,3 +698,80 @@ BEGIN
     );
 END;
 ";
+
+#[test]
+fn match_streak_recovery_reports_the_originally_debited_withholding() {
+    let fixture = Fixture::new();
+    fixture.player(701, GUILD);
+    fixture
+        .connection()
+        .execute(
+            "UPDATE players SET jopacoin_balance = 1000
+             WHERE discord_id = 701 AND guild_id = ?1",
+            [GUILD],
+        )
+        .expect("fund player");
+    fixture
+        .connection()
+        .execute(
+            "INSERT INTO bankruptcy_state (
+                 discord_id, guild_id, penalty_games_remaining, bankruptcy_count
+             ) VALUES (701, ?1, 5, 1)",
+            [GUILD],
+        )
+        .expect("bankruptcy row");
+    let credits = [DotaStreakCredit {
+        discord_id: 701,
+        streak_days: 30,
+        bonus: 120,
+    }];
+    let vanity = BTreeSet::from([701]);
+    let empty = BTreeSet::new();
+    let first = fixture
+        .repository
+        .credit_match_awards_ordered_atomic(
+            &credits,
+            Some(GUILD),
+            9_101,
+            &deduction_policy(&vanity, &empty),
+        )
+        .expect("credit penalized streak");
+    // Five outstanding games at 5% each withhold 25% (30) plus the 10%
+    // vanity share (12).
+    assert_eq!(
+        first
+            .iter()
+            .map(|outcome| (outcome.withheld, outcome.balance_after, outcome.applied))
+            .collect::<Vec<_>>(),
+        vec![(42, 1078, true)]
+    );
+
+    // A later win in the same settlement decrements the counter before the
+    // retry re-enters; the recovered receipt must still describe the debit
+    // that actually happened.
+    fixture
+        .connection()
+        .execute(
+            "UPDATE bankruptcy_state SET penalty_games_remaining = 1
+             WHERE discord_id = 701 AND guild_id = ?1",
+            [GUILD],
+        )
+        .expect("decrement penalty");
+    let retry = fixture
+        .repository
+        .credit_match_awards_ordered_atomic(
+            &credits,
+            Some(GUILD),
+            9_101,
+            &deduction_policy(&vanity, &empty),
+        )
+        .expect("recover penalized streak");
+    assert_eq!(
+        retry
+            .iter()
+            .map(|outcome| (outcome.withheld, outcome.balance_after, outcome.applied))
+            .collect::<Vec<_>>(),
+        vec![(42, 1078, false)]
+    );
+    assert_eq!(streak_ledger(&fixture.connection(), 701).len(), 3);
+}

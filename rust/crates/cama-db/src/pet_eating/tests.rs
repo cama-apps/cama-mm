@@ -1,5 +1,7 @@
+use std::collections::BTreeSet;
 use std::path::Path;
 
+use cama_domain::bankruptcy::BankruptcyPenaltyPolicy;
 use cama_domain::pet::{ADULT_AGE_SECONDS, Pet};
 use rusqlite::{Connection, OptionalExtension, params};
 use tempfile::NamedTempFile;
@@ -303,7 +305,7 @@ fn test_consumption_is_atomic_and_adds_existing_penalty() {
 
     let outcome = fixture
         .repository
-        .eat_adult_pet_atomic(fixture.request(&pet))
+        .eat_adult_pet_atomic(fixture.request(&pet), &ProfitDeductionPolicy::none())
         .expect("eat adult pet atomically");
 
     assert_eq!(outcome.pet.died_at, Some(T0));
@@ -377,6 +379,10 @@ fn test_consumption_is_atomic_and_adds_existing_penalty() {
             penalty_games_added: 4,
             penalty_games_remaining: 6,
             new_balance: 1_777,
+            deductions: ProfitDeductions {
+                profit: 777,
+                ..ProfitDeductions::default()
+            },
         })
     );
 }
@@ -390,7 +396,7 @@ fn test_consumption_automatically_activates_the_oldest_stabled_pet() {
 
     let outcome = fixture
         .repository
-        .eat_adult_pet_atomic(fixture.request(&eaten))
+        .eat_adult_pet_atomic(fixture.request(&eaten), &ProfitDeductionPolicy::none())
         .expect("eat active pet and promote its stable mate");
 
     let activated = outcome.activated_pet.expect("automatic activation outcome");
@@ -418,7 +424,7 @@ fn test_bankruptcy_write_failure_rolls_back_pet_and_reward() {
 
     let error = fixture
         .repository
-        .eat_adult_pet_atomic(fixture.request(&pet))
+        .eat_adult_pet_atomic(fixture.request(&pet), &ProfitDeductionPolicy::none())
         .expect_err("bankruptcy failure must abort consumption");
 
     assert!(error.to_string().contains("penalty write failed"));
@@ -451,7 +457,7 @@ fn test_rejects_baby() {
 
     let error = fixture
         .repository
-        .eat_adult_pet_atomic(fixture.request(&baby))
+        .eat_adult_pet_atomic(fixture.request(&baby), &ProfitDeductionPolicy::none())
         .expect_err("baby must be rejected");
 
     assert_eq!(error.failure(), Some(PetEatingFailure::NotAdult));
@@ -467,10 +473,139 @@ fn test_rejects_stale_hunger_anchor() {
 
     let error = fixture
         .repository
-        .eat_adult_pet_atomic(request)
+        .eat_adult_pet_atomic(request, &ProfitDeductionPolicy::none())
         .expect_err("stale hunger anchor must be rejected");
 
     assert_eq!(error.failure(), Some(PetEatingFailure::StalePet));
+}
+
+fn deduction_policy(vanity: &BTreeSet<i64>) -> ProfitDeductionPolicy<'_> {
+    static EMPTY: BTreeSet<i64> = BTreeSet::new();
+    ProfitDeductionPolicy {
+        bankruptcy: Some(BankruptcyPenaltyPolicy {
+            rate_per_game: 0.05,
+        }),
+        vanity_tax_rate: 0.10,
+        vanity_taxable_ids: vanity,
+        low_priority_tax_rate: 0.0,
+        low_priority_taxable_ids: &EMPTY,
+    }
+}
+
+fn seed_penalty(fixture: &Fixture, remaining: i64) {
+    fixture
+        .connection()
+        .execute(
+            "INSERT INTO bankruptcy_state (
+                 discord_id, guild_id, last_bankruptcy_at,
+                 penalty_games_remaining, bankruptcy_count
+             ) VALUES (100, ?1, NULL, ?2, 1)",
+            params![GUILD_ID, remaining],
+        )
+        .expect("seed existing penalty");
+}
+
+/// Eat a 120 JC pet as player 100 (1,000 JC, 4 penalty games added).
+fn eat_for_120(fixture: &Fixture, policy: &ProfitDeductionPolicy<'_>) -> EatAdultPetOutcome {
+    fixture.seed_player(100, 1_000);
+    let pet = fixture.adult_pet(100, "Blep");
+    let mut request = fixture.request(&pet);
+    request.reward = 120;
+    fixture
+        .repository
+        .eat_adult_pet_atomic(request, policy)
+        .expect("eat adult pet")
+}
+
+#[test]
+fn test_bankruptcy_share_uses_the_sentence_before_this_meal() {
+    let empty = BTreeSet::new();
+    let fixture = Fixture::new();
+    seed_penalty(&fixture, 1);
+    let outcome = eat_for_120(&fixture, &deduction_policy(&empty));
+    // 1 game outstanding before the meal withholds 120 * 0.05 = 6; the 4
+    // games added by the meal (5 remaining afterwards) would have taken 30.
+    assert_eq!(
+        outcome.deductions,
+        ProfitDeductions {
+            profit: 120,
+            bankruptcy_penalty: 6,
+            vanity_tax: 0,
+            low_priority_tax: 0,
+        }
+    );
+    assert_eq!(outcome.penalty_games_remaining, 5);
+    assert_eq!(outcome.new_balance, 1_114);
+    assert_eq!(fixture.balance(100), 1_114);
+    let remaining: i64 = fixture
+        .connection()
+        .query_row(
+            "SELECT penalty_games_remaining FROM bankruptcy_state WHERE discord_id = 100",
+            [],
+            |row| row.get(0),
+        )
+        .expect("penalty games after the meal");
+    assert_eq!(remaining, 5);
+    let ledger: Vec<(i64, String, String)> = fixture
+        .connection()
+        .prepare(
+            "SELECT delta, source, reason FROM economy_ledger_entries
+              WHERE account_id = 100 ORDER BY ledger_id",
+        )
+        .expect("prepare")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .expect("query")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("rows");
+    assert_eq!(
+        ledger,
+        vec![
+            (120, "pet".to_owned(), "ate pet Blep".to_owned()),
+            (
+                -6,
+                "pet".to_owned(),
+                "ate pet Blep bankruptcy penalty".to_owned()
+            ),
+        ]
+    );
+    assert_eq!(
+        fixture
+            .repository
+            .get_eating_outcome(outcome.pet.pet_id, Some(GUILD_ID))
+            .expect("durable outcome"),
+        Some(DurableEatingOutcome {
+            reward: 120,
+            penalty_games_added: 4,
+            penalty_games_remaining: 5,
+            new_balance: 1_114,
+            deductions: outcome.deductions,
+        })
+    );
+
+    // 6 games outstanding withhold six 5% steps (36), not the 10 left after.
+    let fixture = Fixture::new();
+    seed_penalty(&fixture, 6);
+    let outcome = eat_for_120(&fixture, &deduction_policy(&empty));
+    assert_eq!(outcome.deductions.bankruptcy_penalty, 36);
+    assert_eq!(outcome.penalty_games_remaining, 10);
+    assert_eq!(fixture.balance(100), 1_084);
+}
+
+#[test]
+fn test_vanity_tax_applies_only_to_listed_eaters() {
+    let roster = BTreeSet::from([100]);
+    let fixture = Fixture::new();
+    let outcome = eat_for_120(&fixture, &deduction_policy(&roster));
+    assert_eq!(outcome.deductions.vanity_tax, 12);
+    assert_eq!(outcome.deductions.bankruptcy_penalty, 0);
+    assert_eq!(outcome.new_balance, 1_108);
+    assert_eq!(fixture.balance(100), 1_108);
+
+    let unlisted = BTreeSet::from([200]);
+    let fixture = Fixture::new();
+    let outcome = eat_for_120(&fixture, &deduction_policy(&unlisted));
+    assert_eq!(outcome.deductions.total(), 0);
+    assert_eq!(fixture.balance(100), 1_120);
 }
 
 #[test]
@@ -486,7 +621,7 @@ fn test_rejects_active_brawl() {
 
     let error = fixture
         .repository
-        .eat_adult_pet_atomic(fixture.request(&pet))
+        .eat_adult_pet_atomic(fixture.request(&pet), &ProfitDeductionPolicy::none())
         .expect_err("open brawl must block eating");
 
     assert_eq!(error.failure(), Some(PetEatingFailure::InBrawl));
@@ -501,7 +636,7 @@ fn test_brawl_cannot_be_created_after_challenger_pet_is_eaten() {
     fixture.adult_pet(200, "Spit");
     fixture
         .repository
-        .eat_adult_pet_atomic(fixture.request(&pet))
+        .eat_adult_pet_atomic(fixture.request(&pet), &ProfitDeductionPolicy::none())
         .expect("eat challenger pet");
 
     let error = PetBrawlRepository::new(fixture.path())
@@ -523,7 +658,10 @@ fn test_brawl_cannot_target_a_recipient_after_their_pet_is_eaten() {
     let challenger_pet = fixture.adult_pet(200, "Spit");
     fixture
         .repository
-        .eat_adult_pet_atomic(fixture.request(&recipient_pet))
+        .eat_adult_pet_atomic(
+            fixture.request(&recipient_pet),
+            &ProfitDeductionPolicy::none(),
+        )
         .expect("eat recipient pet");
 
     let error = PetBrawlRepository::new(fixture.path())
@@ -569,7 +707,7 @@ fn test_expired_pending_brawl_does_not_block_eating() {
 
     let outcome = fixture
         .repository
-        .eat_adult_pet_atomic(fixture.request(&pet))
+        .eat_adult_pet_atomic(fixture.request(&pet), &ProfitDeductionPolicy::none())
         .expect("expired pending brawl does not block");
 
     assert_eq!(outcome.pet.death_cause.as_deref(), Some("eaten"));
@@ -582,7 +720,7 @@ fn test_eaten_pet_does_not_advance_bad_luck_pity() {
     let pet = fixture.adult_pet(100, "Blep");
     fixture
         .repository
-        .eat_adult_pet_atomic(fixture.request(&pet))
+        .eat_adult_pet_atomic(fixture.request(&pet), &ProfitDeductionPolicy::none())
         .expect("eat adult pet");
 
     assert!(
@@ -611,7 +749,7 @@ fn test_eating_suppresses_a_queued_evolution_announcement() {
 
     let outcome = fixture
         .repository
-        .eat_adult_pet_atomic(fixture.request(&pet))
+        .eat_adult_pet_atomic(fixture.request(&pet), &ProfitDeductionPolicy::none())
         .expect("eat evolved pet");
 
     assert_eq!(outcome.pet.evolution_announced_at, Some(T0));
@@ -640,7 +778,7 @@ fn test_eating_at_evolution_due_does_not_create_a_posthumous_calling() {
 
     let outcome = fixture
         .repository
-        .eat_adult_pet_atomic(fixture.request(&pet))
+        .eat_adult_pet_atomic(fixture.request(&pet), &ProfitDeductionPolicy::none())
         .expect("eat exactly at evolution due time");
 
     assert_eq!(outcome.pet.died_at, Some(T0));
@@ -666,7 +804,7 @@ fn test_sweep_reconstructs_an_undelivered_exact_outcome() {
     request.reward = 888;
     fixture
         .repository
-        .eat_adult_pet_atomic(request)
+        .eat_adult_pet_atomic(request, &ProfitDeductionPolicy::none())
         .expect("eat adult pet");
 
     let deaths = PetRepository::new(fixture.path())
@@ -684,6 +822,10 @@ fn test_sweep_reconstructs_an_undelivered_exact_outcome() {
             penalty_games_added: 4,
             penalty_games_remaining: 4,
             new_balance: 1_888,
+            deductions: ProfitDeductions {
+                profit: 888,
+                ..ProfitDeductions::default()
+            },
         })
     );
     let announced = fixture

@@ -6,11 +6,16 @@
 //! `BEGIN IMMEDIATE` transaction so concurrent match finalizations can advance
 //! a game day only once. Ordered award credits use a separate immediate
 //! transaction, matching Python's streak-then-credit orchestration and keeping
-//! duplicate participant ledger entries distinct.
+//! duplicate participant ledger entries distinct. Each streak bonus is a
+//! generated profit, so the shared bankruptcy, vanity, and low-priority
+//! withholding is debited in the same transaction as the credit.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use cama_db_core::profit_deductions::{
+    DeductionLedgerContext, ProfitDeductionPolicy, ProfitDeductions, withhold_profit_deductions,
+};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use thiserror::Error;
 
@@ -32,7 +37,12 @@ pub struct DotaStreakCredit {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CreditedDotaStreak {
     pub discord_id: i64,
+    /// Gross bonus; the profit basis every withheld share was computed from.
     pub bonus: i64,
+    /// Bankruptcy penalty plus vanity and low-priority tax withheld from
+    /// `bonus`. A reconstructed credit reads it back from the ledger rows the
+    /// original credit debited, not from the current bankruptcy state.
+    pub withheld: i64,
     pub balance_after: i64,
     /// False when an exact-once match credit was already present and this
     /// call reconstructed it without moving the balance again.
@@ -162,11 +172,13 @@ impl DotaStreakRepository {
             .map_err(Into::into)
     }
 
-    /// Credit ordered awards with one trigger context and ledger row per item.
+    /// Credit ordered awards with one trigger context and ledger row per item,
+    /// then withhold each bonus's profit deductions.
     pub fn credit_awards_ordered_atomic(
         &self,
         credits: &[DotaStreakCredit],
         guild_id: Option<i64>,
+        policy: &ProfitDeductionPolicy<'_>,
     ) -> Result<Vec<CreditedDotaStreak>, DotaStreakRepositoryError> {
         if credits.is_empty() {
             return Ok(Vec::new());
@@ -188,7 +200,7 @@ impl DotaStreakRepository {
                      WHERE discord_id = ?2 AND guild_id = ?3
                      RETURNING jopacoin_balance",
                     params![credit.bonus, credit.discord_id, guild_id],
-                    |row| row.get(0),
+                    |row| row.get::<_, i64>(0),
                 )
                 .optional()?
                 .ok_or(DotaStreakRepositoryError::MissingPlayer {
@@ -196,10 +208,24 @@ impl DotaStreakRepository {
                     guild_id,
                 })?;
             clear_ledger_context(&transaction)?;
+            let deductions = withhold_streak_deductions(
+                &transaction,
+                guild_id,
+                credit.discord_id,
+                credit.bonus,
+                policy,
+                &DeductionLedgerContext {
+                    source: "match_streak",
+                    related_type: Some("dota_streak"),
+                    related_id: None,
+                    reason: "Dota streak match bonus",
+                },
+            )?;
             outcomes.push(CreditedDotaStreak {
                 discord_id: credit.discord_id,
                 bonus: credit.bonus,
-                balance_after,
+                withheld: deductions.total(),
+                balance_after: balance_after - deductions.total(),
                 applied: true,
             });
         }
@@ -219,6 +245,7 @@ impl DotaStreakRepository {
         credits: &[DotaStreakCredit],
         guild_id: Option<i64>,
         match_id: i64,
+        policy: &ProfitDeductionPolicy<'_>,
     ) -> Result<Vec<CreditedDotaStreak>, DotaStreakRepositoryError> {
         if credits.is_empty() {
             return Ok(Vec::new());
@@ -230,6 +257,12 @@ impl DotaStreakRepository {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let related_id = match_id.to_string();
+        let ledger = DeductionLedgerContext {
+            source: "match_streak",
+            related_type: Some("match"),
+            related_id: Some(match_id),
+            reason: "Dota streak match bonus",
+        };
         let mut outcomes = Vec::with_capacity(credits.len());
         for credit in credits {
             let already_applied = transaction
@@ -256,9 +289,21 @@ impl DotaStreakRepository {
                         discord_id: credit.discord_id,
                         guild_id,
                     })?;
+                // The withheld shares landed with the original credit. The
+                // bankruptcy state may have moved since (a later win in the
+                // same settlement decrements it), so report what that credit
+                // actually debited rather than recomputing from live state.
+                let withheld = recover_match_streak_withholding(
+                    &transaction,
+                    guild_id,
+                    credit.discord_id,
+                    &related_id,
+                    credit.bonus,
+                )?;
                 outcomes.push(CreditedDotaStreak {
                     discord_id: credit.discord_id,
                     bonus: credit.bonus,
+                    withheld,
                     balance_after,
                     applied: false,
                 });
@@ -274,7 +319,7 @@ impl DotaStreakRepository {
                      WHERE discord_id=?2 AND guild_id=?3
                      RETURNING jopacoin_balance",
                     params![credit.bonus, credit.discord_id, guild_id],
-                    |row| row.get(0),
+                    |row| row.get::<_, i64>(0),
                 )
                 .optional()?
                 .ok_or(DotaStreakRepositoryError::MissingPlayer {
@@ -282,16 +327,69 @@ impl DotaStreakRepository {
                     guild_id,
                 })?;
             clear_ledger_context(&transaction)?;
+            let deductions = withhold_streak_deductions(
+                &transaction,
+                guild_id,
+                credit.discord_id,
+                credit.bonus,
+                policy,
+                &ledger,
+            )?;
             outcomes.push(CreditedDotaStreak {
                 discord_id: credit.discord_id,
                 bonus: credit.bonus,
-                balance_after,
+                withheld: deductions.total(),
+                balance_after: balance_after - deductions.total(),
                 applied: true,
             });
         }
         transaction.commit()?;
         Ok(outcomes)
     }
+}
+
+/// Withhold a bonus's profit deductions right after its gross credit.
+fn withhold_streak_deductions(
+    transaction: &Transaction<'_>,
+    guild_id: i64,
+    discord_id: i64,
+    bonus: i64,
+    policy: &ProfitDeductionPolicy<'_>,
+    ledger: &DeductionLedgerContext<'_>,
+) -> Result<ProfitDeductions, DotaStreakRepositoryError> {
+    withhold_profit_deductions(transaction, guild_id, discord_id, bonus, policy, ledger)?.ok_or(
+        DotaStreakRepositoryError::MissingPlayer {
+            discord_id,
+            guild_id,
+        },
+    )
+}
+
+/// Sum what an already-applied match streak credit actually withheld.
+///
+/// The bankruptcy share is the `match_streak` debit for this match. The tax
+/// shares use their shared `vanity_tax` / `low_priority_tax` sources, which
+/// other match awards also write against the same match relation, so those
+/// rows are picked out by the `profit` basis in the deduction metadata that
+/// only the streak withholding stamps on this relation.
+fn recover_match_streak_withholding(
+    transaction: &Transaction<'_>,
+    guild_id: i64,
+    discord_id: i64,
+    related_id: &str,
+    bonus: i64,
+) -> Result<i64, rusqlite::Error> {
+    transaction.query_row(
+        "SELECT COALESCE(SUM(-delta),0) FROM economy_ledger_entries
+         WHERE guild_id=?1 AND account_type='player' AND account_id=?2
+           AND related_type='match' AND related_id=?3 AND delta<0
+           AND (source='match_streak'
+                OR (source IN ('vanity_tax','low_priority_tax')
+                    AND json_valid(metadata)
+                    AND json_extract(metadata,'$.profit')=?4))",
+        params![guild_id, discord_id, related_id, bonus],
+        |row| row.get(0),
+    )
 }
 
 fn set_ledger_context(

@@ -1,6 +1,8 @@
+use std::collections::BTreeSet;
 use std::sync::{Arc, Barrier};
 use std::thread;
 
+use cama_domain::bankruptcy::BankruptcyPenaltyPolicy;
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
@@ -149,22 +151,25 @@ fn sabotage_hit_commits_wallet_depths_revenge_ledger_and_audit_together() {
         r#"{{"target_id":{TARGET},"damage":4,"cost":30,"trap_triggered":false,"attacker_block_reward":5}}"#
     );
     let receipt = match repository
-        .atomic_sabotage(AtomicDigSabotageSettlement {
-            expected: &snapshot,
-            target_depth_delta: -4,
-            actor_jc_cost: 30,
-            target_jc_credit: 0,
-            actor_depth_delta: 5,
-            clear_target_trap: false,
-            revenge: Some(DigSabotageRevenge {
-                target_id: HELPER,
-                kind: "discount",
-                until: NOW + 6 * 3_600,
-            }),
-            action_type: "sabotage",
-            detail_json: &detail,
-            created_at: NOW,
-        })
+        .atomic_sabotage(
+            AtomicDigSabotageSettlement {
+                expected: &snapshot,
+                target_depth_delta: -4,
+                actor_jc_cost: 30,
+                target_jc_credit: 0,
+                actor_depth_delta: 5,
+                clear_target_trap: false,
+                revenge: Some(DigSabotageRevenge {
+                    target_id: HELPER,
+                    kind: "discount",
+                    until: NOW + 6 * 3_600,
+                }),
+                action_type: "sabotage",
+                detail_json: &detail,
+                created_at: NOW,
+            },
+            &ProfitDeductionPolicy::none(),
+        )
         .unwrap()
     {
         DigSabotageSettlementOutcome::Applied(receipt) => receipt,
@@ -223,18 +228,21 @@ fn sabotage_trap_branch_can_charge_double_and_clears_everything_atomically() {
         r#"{{"target_id":{TARGET},"trap_triggered":true,"jc_lost":60,"blocks_lost":3,"victim_tip":25}}"#
     );
     let receipt = match repository
-        .atomic_sabotage(AtomicDigSabotageSettlement {
-            expected: &snapshot,
-            target_depth_delta: 0,
-            actor_jc_cost: 60,
-            target_jc_credit: 55,
-            actor_depth_delta: -3,
-            clear_target_trap: true,
-            revenge: None,
-            action_type: "sabotage",
-            detail_json: &detail,
-            created_at: NOW,
-        })
+        .atomic_sabotage(
+            AtomicDigSabotageSettlement {
+                expected: &snapshot,
+                target_depth_delta: 0,
+                actor_jc_cost: 60,
+                target_jc_credit: 55,
+                actor_depth_delta: -3,
+                clear_target_trap: true,
+                revenge: None,
+                action_type: "sabotage",
+                detail_json: &detail,
+                created_at: NOW,
+            },
+            &ProfitDeductionPolicy::none(),
+        )
         .unwrap()
     {
         DigSabotageSettlementOutcome::Applied(receipt) => receipt,
@@ -284,7 +292,9 @@ fn stale_and_injected_sabotage_settlements_leave_no_partial_writes() {
         created_at: NOW,
     };
     assert_eq!(
-        repository.atomic_sabotage(request.clone()).unwrap(),
+        repository
+            .atomic_sabotage(request.clone(), &ProfitDeductionPolicy::none())
+            .unwrap(),
         DigSabotageSettlementOutcome::Conflict
     );
     Connection::open(database.path())
@@ -295,7 +305,7 @@ fn stale_and_injected_sabotage_settlements_leave_no_partial_writes() {
         )
         .unwrap();
     assert!(matches!(
-        repository.atomic_sabotage_inner(request, true),
+        repository.atomic_sabotage_inner(request, &ProfitDeductionPolicy::none(), true),
         Err(DigSocialRuntimeRepositoryError::InjectedFailure)
     ));
     let connection = Connection::open(database.path()).unwrap();
@@ -354,6 +364,7 @@ fn concurrent_sabotage_delivery_commits_exactly_once() {
                         detail_json: &detail,
                         created_at: NOW,
                     },
+                    &ProfitDeductionPolicy::none(),
                 )
             })
         })
@@ -635,7 +646,7 @@ fn help_creates_helper_and_commits_target_cooldown_wallet_ledger_and_audit() {
         .help_snapshot(HELPER, TARGET, GUILD)
         .expect("help snapshot");
     let receipt = match repository
-        .atomic_help(help_request(&snapshot))
+        .atomic_help(help_request(&snapshot), &ProfitDeductionPolicy::none())
         .expect("help settlement")
     {
         DigHelpSettlementOutcome::Applied(receipt) => receipt,
@@ -695,7 +706,7 @@ fn stale_help_revision_rolls_back_target_and_wallet() {
         .expect("change target");
     assert_eq!(
         repository
-            .atomic_help(help_request(&snapshot))
+            .atomic_help(help_request(&snapshot), &ProfitDeductionPolicy::none())
             .expect("help conflict"),
         DigHelpSettlementOutcome::Conflict
     );
@@ -736,7 +747,8 @@ fn concurrent_help_delivery_commits_exactly_once() {
             let barrier = Arc::clone(&barrier);
             thread::spawn(move || {
                 barrier.wait();
-                DigSocialRuntimeRepository::new(path).atomic_help(help_request(&snapshot))
+                DigSocialRuntimeRepository::new(path)
+                    .atomic_help(help_request(&snapshot), &ProfitDeductionPolicy::none())
             })
         })
         .collect::<Vec<_>>();
@@ -787,7 +799,11 @@ fn injected_help_failure_rolls_back_every_write() {
         .help_snapshot(HELPER, TARGET, GUILD)
         .expect("help snapshot");
     assert!(matches!(
-        repository.atomic_help_inner(help_request(&snapshot), true),
+        repository.atomic_help_inner(
+            help_request(&snapshot),
+            &ProfitDeductionPolicy::none(),
+            true
+        ),
         Err(DigSocialRuntimeRepositoryError::InjectedFailure)
     ));
     let connection = Connection::open(database.path()).expect("verify help rollback");
@@ -977,4 +993,220 @@ fn injected_gift_failure_preserves_source_and_creates_no_receiver_copy() {
             .unwrap(),
         (HELPER, 1)
     );
+}
+
+static NO_ROSTER: BTreeSet<i64> = BTreeSet::new();
+
+/// (penalty games remaining, vanity-taxable, JC withheld from a 120 JC credit)
+/// at 5% per outstanding game and a flat 10% vanity share.
+const WITHHOLDING_CASES: [(i64, bool, i64); 4] =
+    [(1, false, 6), (6, false, 36), (0, true, 12), (0, false, 0)];
+
+fn penalized(database: &NamedTempFile, discord_id: i64, remaining: i64) {
+    Connection::open(database.path())
+        .expect("penalty DB")
+        .execute(
+            "INSERT INTO bankruptcy_state(
+                 discord_id,guild_id,last_bankruptcy_at,penalty_games_remaining,bankruptcy_count
+             ) VALUES (?1,?2,0,?3,1)",
+            params![discord_id, GUILD, remaining],
+        )
+        .expect("penalty row");
+}
+
+fn vanity_roster(taxed: bool, discord_id: i64) -> BTreeSet<i64> {
+    if taxed {
+        BTreeSet::from([discord_id])
+    } else {
+        BTreeSet::new()
+    }
+}
+
+fn withholding_policy(vanity: &BTreeSet<i64>) -> ProfitDeductionPolicy<'_> {
+    ProfitDeductionPolicy {
+        bankruptcy: Some(BankruptcyPenaltyPolicy {
+            rate_per_game: 0.05,
+        }),
+        vanity_tax_rate: 0.10,
+        vanity_taxable_ids: vanity,
+        low_priority_tax_rate: 0.25,
+        low_priority_taxable_ids: &NO_ROSTER,
+    }
+}
+
+/// Every negative ledger row attributed to `related_type` for one player.
+fn withheld_rows(
+    connection: &Connection,
+    discord_id: i64,
+    related_type: &str,
+) -> Vec<(String, String, i64)> {
+    let mut statement = connection
+        .prepare(
+            "SELECT source,reason,delta FROM economy_ledger_entries
+             WHERE guild_id=?1 AND account_id=?2 AND related_type=?3 AND delta<0
+             ORDER BY rowid",
+        )
+        .unwrap();
+    statement
+        .query_map(params![GUILD, discord_id, related_type], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+}
+
+fn expected_withheld_rows(
+    reason: &str,
+    remaining: i64,
+    vanity_taxed: bool,
+    withheld: i64,
+) -> Vec<(String, String, i64)> {
+    if remaining > 0 {
+        vec![(
+            "dig".to_owned(),
+            format!("{reason} bankruptcy penalty"),
+            -withheld,
+        )]
+    } else if vanity_taxed {
+        vec![(
+            "vanity_tax".to_owned(),
+            "vanity tax on JC profit".to_owned(),
+            -withheld,
+        )]
+    } else {
+        Vec::new()
+    }
+}
+
+#[test]
+fn help_reward_withholds_bankruptcy_and_vanity_shares() {
+    for (remaining, vanity_taxed, withheld) in WITHHOLDING_CASES {
+        let database = fixture();
+        if remaining > 0 {
+            penalized(&database, HELPER, remaining);
+        }
+        let vanity = vanity_roster(vanity_taxed, HELPER);
+        let repository = DigSocialRuntimeRepository::new(database.path());
+        let snapshot = repository.help_snapshot(HELPER, TARGET, GUILD).unwrap();
+        let receipt = match repository
+            .atomic_help(
+                AtomicDigHelpSettlement {
+                    helper_reward: 120,
+                    ..help_request(&snapshot)
+                },
+                &withholding_policy(&vanity),
+            )
+            .unwrap()
+        {
+            DigHelpSettlementOutcome::Applied(receipt) => receipt,
+            outcome => panic!("unexpected help outcome: {outcome:?}"),
+        };
+        assert_eq!(receipt.helper_deductions.profit, 120);
+        assert_eq!(
+            receipt.helper_deductions.total(),
+            withheld,
+            "remaining={remaining} vanity={vanity_taxed}"
+        );
+        assert_eq!(receipt.helper_balance_after, 100 + 120 - withheld);
+        let connection = Connection::open(database.path()).unwrap();
+        assert_eq!(balance(&connection, HELPER), 100 + 120 - withheld);
+        assert_eq!(
+            withheld_rows(&connection, HELPER, "help"),
+            expected_withheld_rows("dig help reward", remaining, vanity_taxed, withheld)
+        );
+    }
+}
+
+#[test]
+fn help_target_bonus_withholds_bankruptcy_and_vanity_shares() {
+    for (remaining, vanity_taxed, withheld) in WITHHOLDING_CASES {
+        let database = fixture();
+        if remaining > 0 {
+            penalized(&database, TARGET, remaining);
+        }
+        let vanity = vanity_roster(vanity_taxed, TARGET);
+        let receipt = DigSocialRuntimeRepository::new(database.path())
+            .credit_help_target_bonus(
+                HELPER,
+                TARGET,
+                GUILD,
+                120,
+                r#"{"bonus":120}"#,
+                &withholding_policy(&vanity),
+            )
+            .unwrap()
+            .expect("target player exists");
+        assert_eq!(receipt.deductions.profit, 120);
+        assert_eq!(
+            receipt.deductions.total(),
+            withheld,
+            "remaining={remaining} vanity={vanity_taxed}"
+        );
+        assert_eq!(receipt.balance_after, 200 + 120 - withheld);
+        let connection = Connection::open(database.path()).unwrap();
+        assert_eq!(balance(&connection, TARGET), 200 + 120 - withheld);
+        assert_eq!(
+            withheld_rows(&connection, TARGET, "mentor_bonus"),
+            expected_withheld_rows("dig mentor target bonus", remaining, vanity_taxed, withheld)
+        );
+    }
+}
+
+#[test]
+fn sabotage_target_credit_withholds_bankruptcy_and_vanity_shares() {
+    for (remaining, vanity_taxed, withheld) in WITHHOLDING_CASES {
+        let database = sabotage_fixture();
+        if remaining > 0 {
+            penalized(&database, TARGET, remaining);
+        }
+        let vanity = vanity_roster(vanity_taxed, TARGET);
+        let repository = DigSocialRuntimeRepository::new(database.path());
+        let snapshot = repository
+            .sabotage_snapshot(HELPER, TARGET, GUILD, NOW - 7 * 86_400)
+            .unwrap();
+        let detail = format!(
+            r#"{{"target_id":{TARGET},"trap_triggered":true,"jc_lost":10,"victim_tip":120}}"#
+        );
+        let receipt = match repository
+            .atomic_sabotage(
+                AtomicDigSabotageSettlement {
+                    expected: &snapshot,
+                    target_depth_delta: 0,
+                    actor_jc_cost: 10,
+                    target_jc_credit: 120,
+                    actor_depth_delta: 0,
+                    clear_target_trap: false,
+                    revenge: None,
+                    action_type: "sabotage",
+                    detail_json: &detail,
+                    created_at: NOW,
+                },
+                &withholding_policy(&vanity),
+            )
+            .unwrap()
+        {
+            DigSabotageSettlementOutcome::Applied(receipt) => receipt,
+            outcome => panic!("unexpected sabotage outcome: {outcome:?}"),
+        };
+        assert_eq!(receipt.target_deductions.profit, 120);
+        assert_eq!(
+            receipt.target_deductions.total(),
+            withheld,
+            "remaining={remaining} vanity={vanity_taxed}"
+        );
+        assert_eq!(receipt.actor_balance_after, 90);
+        assert_eq!(receipt.target_balance_after, Some(200 + 120 - withheld));
+        let connection = Connection::open(database.path()).unwrap();
+        assert_eq!(balance(&connection, TARGET), 200 + 120 - withheld);
+        assert_eq!(
+            withheld_rows(&connection, TARGET, "sabotage"),
+            expected_withheld_rows(
+                "dig sabotage target credit",
+                remaining,
+                vanity_taxed,
+                withheld
+            )
+        );
+    }
 }

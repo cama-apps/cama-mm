@@ -13,6 +13,7 @@ use crate::first_game_pool_worker::FirstGamePoolGuildSource;
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
+use crate::profit_deductions::bankruptcy_penalty_policy;
 use crate::registration::{
     CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute, InteractionEmbed,
     InteractionHandler, InteractionHandlerError, InteractionOption, InteractionRequest,
@@ -31,6 +32,7 @@ use cama_db::mafia_repository::{
     MafiaPhase, MafiaPlayer, MafiaRepository, MafiaRepositoryError, MafiaRole, MafiaTwist,
     MafiaWinner, ThreadIds,
 };
+use cama_domain::bankruptcy::BankruptcyPenaltyPolicy;
 use cama_domain::formatting::JOPACOIN_EMOTE;
 use cama_domain::game_date::{game_date_for_timestamp, get_game_date, weekday_of_game_date};
 use serde::{Deserialize, Serialize};
@@ -247,7 +249,7 @@ impl MafiaRegistrationProvider {
                 database_path: path,
                 flavor: MafiaFlavorService::default(),
                 vanity_tax,
-                bankruptcy_penalty_rate: config.values.bankruptcy_penalty_rate,
+                bankruptcy_penalty: bankruptcy_penalty_policy(&config.values),
                 vanity_tax_rate: config.values.vanity_tax_rate,
                 low_priority_tax_rate: config.values.low_priority_profit_tax_rate,
                 discord,
@@ -345,7 +347,7 @@ struct MafiaInteractionHandler {
     database_path: std::path::PathBuf,
     flavor: MafiaFlavorService,
     vanity_tax: Arc<PersistentVanityTaxService>,
-    bankruptcy_penalty_rate: f64,
+    bankruptcy_penalty: BankruptcyPenaltyPolicy,
     vanity_tax_rate: f64,
     low_priority_tax_rate: f64,
     discord: Arc<dyn DiscordTransport>,
@@ -1184,7 +1186,7 @@ impl MafiaInteractionHandler {
                     .await
                     .map_err(|error| error.to_string())?;
                 let repository = self.repository.clone();
-                let bankruptcy_penalty_rate = self.bankruptcy_penalty_rate;
+                let bankruptcy_penalty = self.bankruptcy_penalty;
                 let vanity_tax_rate = self.vanity_tax_rate;
                 let vanity_taxable_ids = self.vanity_tax.taxable_ids(guild_id);
                 let low_priority_tax_rate = self.low_priority_tax_rate;
@@ -1196,7 +1198,7 @@ impl MafiaInteractionHandler {
                     force_finalize(
                         &repository,
                         guild_id,
-                        Some(bankruptcy_penalty_rate),
+                        Some(bankruptcy_penalty),
                         vanity_tax_rate,
                         &vanity_taxable_ids,
                         low_priority_tax_rate,
@@ -1519,7 +1521,7 @@ impl MafiaInteractionHandler {
             let ready = blocking(move || phase_ready(&repository, &phase_game, false)).await?;
             if ready || elapsed >= DAY_SECONDS {
                 let repository = self.repository.clone();
-                let bankruptcy_penalty_rate = self.bankruptcy_penalty_rate;
+                let bankruptcy_penalty = self.bankruptcy_penalty;
                 let vanity_tax_rate = self.vanity_tax_rate;
                 let vanity_taxable_ids = self.vanity_tax.taxable_ids(guild_id);
                 let low_priority_tax_rate = self.low_priority_tax_rate;
@@ -1531,7 +1533,7 @@ impl MafiaInteractionHandler {
                     resolve_day(
                         &repository,
                         guild_id,
-                        Some(bankruptcy_penalty_rate),
+                        Some(bankruptcy_penalty),
                         vanity_tax_rate,
                         &vanity_taxable_ids,
                         low_priority_tax_rate,
@@ -3740,7 +3742,7 @@ fn maybe_resurrect(
 fn resolve_day(
     repository: &MafiaRepository,
     guild_id: i64,
-    bankruptcy_penalty_rate: Option<f64>,
+    bankruptcy_penalty: Option<BankruptcyPenaltyPolicy>,
     vanity_tax_rate: f64,
     vanity_taxable_ids: &BTreeSet<i64>,
     low_priority_tax_rate: f64,
@@ -3929,7 +3931,7 @@ fn resolve_day(
                         .saturating_sub(usize::from(lynched_id.is_some())),
                 )
                 .unwrap_or_default(),
-                bankruptcy_penalty_rate,
+                bankruptcy_penalty,
                 vanity_tax_rate,
                 vanity_taxable_ids,
                 low_priority_tax_rate,
@@ -4000,7 +4002,7 @@ fn resolve_day(
 fn force_finalize(
     repository: &MafiaRepository,
     guild_id: i64,
-    bankruptcy_penalty_rate: Option<f64>,
+    bankruptcy_penalty: Option<BankruptcyPenaltyPolicy>,
     vanity_tax_rate: f64,
     vanity_taxable_ids: &BTreeSet<i64>,
     low_priority_tax_rate: f64,
@@ -4119,7 +4121,7 @@ fn force_finalize(
             false,
             i64::try_from(players.iter().filter(|player| player.is_alive).count())
                 .unwrap_or_default(),
-            bankruptcy_penalty_rate,
+            bankruptcy_penalty,
             vanity_tax_rate,
             vanity_taxable_ids,
             low_priority_tax_rate,

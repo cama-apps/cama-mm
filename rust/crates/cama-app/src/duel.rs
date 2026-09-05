@@ -10,8 +10,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use cama_db::duel_repository::{
     DuelChallenge, DuelChallengeRepository, DuelDueKind, DuelDueResult, DuelRepositoryError,
-    DuelStatus, DuelTrial,
+    DuelResolution, DuelStatus, DuelTrial,
 };
+use cama_db::profit_deductions::{ProfitDeductionPolicy, ProfitDeductions};
 use cama_domain::pet_evolution::PetActivity;
 use thiserror::Error;
 
@@ -371,7 +372,8 @@ pub trait DuelServicePort {
         actor_id: i64,
         challenge_id: i64,
         outcome: &str,
-    ) -> Result<DuelChallenge, CommandError>;
+        policy: &ProfitDeductionPolicy<'_>,
+    ) -> Result<DuelResolution, CommandError>;
     fn process_due(
         &mut self,
         challenge_id: i64,
@@ -438,7 +440,8 @@ pub trait DuelRepositoryPort {
         winner_id: Option<i64>,
         now: i64,
         actor_id: i64,
-    ) -> Result<DuelChallenge, CommandError>;
+        policy: &ProfitDeductionPolicy<'_>,
+    ) -> Result<DuelResolution, CommandError>;
     fn bind_message(
         &mut self,
         challenge_id: i64,
@@ -613,7 +616,8 @@ impl DuelRepositoryPort for DuelChallengeRepository {
         winner_id: Option<i64>,
         now: i64,
         actor_id: i64,
-    ) -> Result<DuelChallenge, CommandError> {
+        policy: &ProfitDeductionPolicy<'_>,
+    ) -> Result<DuelResolution, CommandError> {
         DuelChallengeRepository::resolve_atomic(
             self,
             challenge_id,
@@ -621,6 +625,7 @@ impl DuelRepositoryPort for DuelChallengeRepository {
             winner_id,
             now,
             actor_id,
+            policy,
         )
         .map_err(map_duel_repository_error)
     }
@@ -927,7 +932,8 @@ where
         actor_id: i64,
         challenge_id: i64,
         outcome: &str,
-    ) -> Result<DuelChallenge, CommandError> {
+        policy: &ProfitDeductionPolicy<'_>,
+    ) -> Result<DuelResolution, CommandError> {
         let challenge = self
             .repository
             .get_challenge(challenge_id, guild_id)?
@@ -943,9 +949,14 @@ where
             }
         };
         let now = self.integer_now();
-        let resolved =
-            self.repository
-                .resolve_atomic(challenge_id, guild_id, winner_id, now, actor_id)?;
+        let resolved = self.repository.resolve_atomic(
+            challenge_id,
+            guild_id,
+            winner_id,
+            now,
+            actor_id,
+            policy,
+        )?;
         if outcome != "void"
             && let Some(evolution) = self.evolution.as_mut()
         {
@@ -1162,8 +1173,9 @@ where
         actor_id: i64,
         challenge_id: i64,
         outcome: &str,
-    ) -> Result<DuelChallenge, CommandError> {
-        DuelApplicationService::resolve(self, guild_id, actor_id, challenge_id, outcome)
+        policy: &ProfitDeductionPolicy<'_>,
+    ) -> Result<DuelResolution, CommandError> {
+        DuelApplicationService::resolve(self, guild_id, actor_id, challenge_id, outcome, policy)
     }
 
     fn process_due(
@@ -1216,6 +1228,45 @@ pub struct RecoveryReport {
     pub peak_bound_edits: usize,
     pub distinct_channel_resolutions: usize,
     pub restored_unbound: usize,
+}
+
+/// The `/duel resolve` announcement: the net pot for a winner, with every
+/// non-zero withholding named, or the refund notice for a void.
+#[must_use]
+pub fn resolution_detail(resolution: &DuelResolution) -> String {
+    let challenge = &resolution.challenge;
+    if challenge.status == DuelStatus::Voided {
+        return format!(
+            "Challenge #{} was voided. The {} JC stakes were refunded to each player; \
+             the issuance fee was not refunded.",
+            challenge.challenge_id, challenge.wager
+        );
+    }
+    let deductions = resolution.deductions;
+    format!(
+        "Challenge #{} is resolved: <@{}> wins {} JC{}.",
+        challenge.challenge_id,
+        challenge.winner_id.unwrap_or_default(),
+        challenge.wager * 2 - deductions.total(),
+        withholding_note(deductions)
+    )
+}
+
+fn withholding_note(deductions: ProfitDeductions) -> String {
+    let parts = [
+        (deductions.bankruptcy_penalty, "bankruptcy penalty"),
+        (deductions.vanity_tax, "vanity tax"),
+        (deductions.low_priority_tax, "low priority tax"),
+    ]
+    .into_iter()
+    .filter(|(amount, _)| *amount > 0)
+    .map(|(amount, label)| format!("\u{2212}{amount} JC {label}"))
+    .collect::<Vec<_>>();
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", parts.join(", "))
+    }
 }
 
 pub struct DuelCommands<S, F, M, N, X> {
@@ -1718,6 +1769,7 @@ where
         io: &mut I,
         challenge_id: i64,
         outcome: &str,
+        policy: &ProfitDeductionPolicy<'_>,
     ) {
         let Some(guild_id) = interaction.guild_id else {
             self.send_immediate_error(io, "This command must be used in a server.");
@@ -1733,15 +1785,16 @@ where
         let actor_id = interaction.user_id;
         let service = &mut self.service;
         let resolved = self.scheduler.run("duel.resolve", || {
-            service.resolve(guild_id, actor_id, challenge_id, outcome)
+            service.resolve(guild_id, actor_id, challenge_id, outcome, policy)
         });
-        let challenge = match resolved {
-            Ok(challenge) => challenge,
+        let resolution = match resolved {
+            Ok(resolution) => resolution,
             Err(error) => {
                 self.send_deferred_error(io, &error.to_string());
                 return;
             }
         };
+        let challenge = &resolution.challenge;
         let event = if challenge.status == DuelStatus::Voided {
             FlavorEvent::Voided
         } else {
@@ -1749,22 +1802,9 @@ where
         };
         let flavor = self
             .flavor
-            .generate(event, guild_id, &Self::flavor_details(&challenge));
-        self.edit_original(&challenge, &flavor);
-        let detail = if challenge.status == DuelStatus::Voided {
-            format!(
-                "Challenge #{} was voided. The {} JC stakes were refunded to each player; \
-                 the issuance fee was not refunded.",
-                challenge.challenge_id, challenge.wager
-            )
-        } else {
-            format!(
-                "Challenge #{} is resolved: <@{}> wins {} JC.",
-                challenge.challenge_id,
-                challenge.winner_id.unwrap_or_default(),
-                challenge.wager * 2
-            )
-        };
+            .generate(event, guild_id, &Self::flavor_details(challenge));
+        self.edit_original(challenge, &flavor);
+        let detail = resolution_detail(&resolution);
         let _ = io.send_followup(ResponsePayload {
             content: Some(format!("{flavor}\n{detail}")),
             allowed_mentions: AllowedMentions::none(),
@@ -2823,6 +2863,7 @@ mod tests {
         list_results: VecDeque<Result<Vec<DuelChallenge>, CommandError>>,
         pending_results: VecDeque<Result<Vec<DuelChallenge>, CommandError>>,
         resolve_results: VecDeque<Result<DuelChallenge, CommandError>>,
+        resolve_deductions: ProfitDeductions,
         due_results: VecDeque<Result<Option<DuelDueResult>, CommandError>>,
         rearm_results: VecDeque<Result<bool, CommandError>>,
         confirm_results: VecDeque<Result<bool, CommandError>>,
@@ -2856,6 +2897,7 @@ mod tests {
                 list_results: VecDeque::from([Ok(vec![pending()])]),
                 pending_results: VecDeque::new(),
                 resolve_results: VecDeque::new(),
+                resolve_deductions: ProfitDeductions::default(),
                 due_results: VecDeque::new(),
                 rearm_results: VecDeque::new(),
                 confirm_results: VecDeque::new(),
@@ -2967,16 +3009,23 @@ mod tests {
             actor_id: i64,
             challenge_id: i64,
             outcome: &str,
-        ) -> Result<DuelChallenge, CommandError> {
+            _policy: &ProfitDeductionPolicy<'_>,
+        ) -> Result<DuelResolution, CommandError> {
             self.resolve_calls
                 .push((guild_id, actor_id, challenge_id, outcome.to_owned()));
-            self.resolve_results.pop_front().unwrap_or_else(|| {
-                Ok(challenge_with(
-                    DuelStatus::Voided,
-                    Some(DuelTrial::TrialByCombat),
-                    Some(300),
-                ))
-            })
+            self.resolve_results
+                .pop_front()
+                .unwrap_or_else(|| {
+                    Ok(challenge_with(
+                        DuelStatus::Voided,
+                        Some(DuelTrial::TrialByCombat),
+                        Some(300),
+                    ))
+                })
+                .map(|challenge| DuelResolution {
+                    challenge,
+                    deductions: self.resolve_deductions,
+                })
         }
 
         fn process_due(
@@ -3103,7 +3152,13 @@ mod tests {
         let mut io = FakeInteraction::available();
         command.list(&interaction(), &mut io);
         command.members.admins.insert((GUILD_ID, RECIPIENT_ID));
-        command.resolve(&interaction(), &mut io, 7, "void");
+        command.resolve(
+            &interaction(),
+            &mut io,
+            7,
+            "void",
+            &ProfitDeductionPolicy::none(),
+        );
         command.recover_pending().expect("recovery");
         assert!(
             command
@@ -4451,10 +4506,75 @@ mod tests {
             Some(300),
         )));
         let mut io = FakeInteraction::available();
-        command.resolve(&interaction(), &mut io, 7, "void");
+        command.resolve(
+            &interaction(),
+            &mut io,
+            7,
+            "void",
+            &ProfitDeductionPolicy::none(),
+        );
         let detail = content(io.followups.last().expect("announcement")).to_lowercase();
         assert!(detail.contains("stakes"));
         assert!(detail.contains("issuance fee was not refunded"));
+    }
+
+    #[test]
+    fn test_resolve_copy_shows_net_pot_and_names_withholdings() {
+        let mut command = harness();
+        command.members.admins.insert((GUILD_ID, RECIPIENT_ID));
+        let mut resolved = challenge_with(
+            DuelStatus::Resolved,
+            Some(DuelTrial::TrialByCombat),
+            Some(300),
+        );
+        resolved.wager = 600;
+        resolved.winner_id = Some(RECIPIENT_ID);
+        command.service.resolve_results.push_back(Ok(resolved));
+        command.service.resolve_deductions = ProfitDeductions {
+            profit: 600,
+            bankruptcy_penalty: 50,
+            vanity_tax: 60,
+            low_priority_tax: 0,
+        };
+        let mut io = FakeInteraction::available();
+        command.resolve(
+            &interaction(),
+            &mut io,
+            7,
+            "recipient_victory",
+            &ProfitDeductionPolicy::none(),
+        );
+        let detail = content(io.followups.last().expect("announcement"));
+        assert!(
+            detail.ends_with(&format!(
+                "<@{RECIPIENT_ID}> wins 1090 JC (\u{2212}50 JC bankruptcy penalty, \u{2212}60 JC vanity tax)."
+            )),
+            "{detail}"
+        );
+
+        let mut command = harness();
+        command.members.admins.insert((GUILD_ID, RECIPIENT_ID));
+        let mut resolved = challenge_with(
+            DuelStatus::Resolved,
+            Some(DuelTrial::TrialByCombat),
+            Some(300),
+        );
+        resolved.wager = 600;
+        resolved.winner_id = Some(RECIPIENT_ID);
+        command.service.resolve_results.push_back(Ok(resolved));
+        let mut io = FakeInteraction::available();
+        command.resolve(
+            &interaction(),
+            &mut io,
+            7,
+            "recipient_victory",
+            &ProfitDeductionPolicy::none(),
+        );
+        let detail = content(io.followups.last().expect("announcement"));
+        assert!(
+            detail.ends_with(&format!("<@{RECIPIENT_ID}> wins 1200 JC.")),
+            "{detail}"
+        );
     }
 
     #[test]
@@ -4507,7 +4627,13 @@ mod tests {
     fn test_resolve_denies_non_admin() {
         let mut command = harness();
         let mut io = FakeInteraction::available();
-        command.resolve(&interaction(), &mut io, 7, "void");
+        command.resolve(
+            &interaction(),
+            &mut io,
+            7,
+            "void",
+            &ProfitDeductionPolicy::none(),
+        );
         assert!(command.service.resolve_calls.is_empty());
         assert_eq!(io.immediate.len(), 1);
         assert_eq!(io.immediate[0].visibility, Visibility::Ephemeral);
@@ -4520,7 +4646,13 @@ mod tests {
         resolved.winner_id = winner_id;
         command.service.resolve_results.push_back(Ok(resolved));
         let mut io = FakeInteraction::available();
-        command.resolve(&interaction(), &mut io, 7, outcome);
+        command.resolve(
+            &interaction(),
+            &mut io,
+            7,
+            outcome,
+            &ProfitDeductionPolicy::none(),
+        );
         assert_eq!(
             command.service.resolve_calls,
             [(GUILD_ID, RECIPIENT_ID, 7, outcome.to_owned())]
@@ -5001,11 +5133,15 @@ mod tests {
             winner_id: Option<i64>,
             now: i64,
             actor_id: i64,
-        ) -> Result<DuelChallenge, CommandError> {
+            _policy: &ProfitDeductionPolicy<'_>,
+        ) -> Result<DuelResolution, CommandError> {
             self.operations.push("resolve");
             self.resolve_calls
                 .push((challenge_id, guild_id, winner_id, now, actor_id));
-            self.resolve_result.clone()
+            self.resolve_result.clone().map(|challenge| DuelResolution {
+                challenge,
+                deductions: ProfitDeductions::default(),
+            })
         }
 
         fn bind_message(
@@ -5281,7 +5417,13 @@ mod tests {
     fn assert_service_resolution(outcome: &str, winner_id: Option<i64>) {
         let mut service = recording_duel_service(SERVICE_NOW as f64);
         service
-            .resolve(SERVICE_GUILD_ID, 99, 7, outcome)
+            .resolve(
+                SERVICE_GUILD_ID,
+                99,
+                7,
+                outcome,
+                &ProfitDeductionPolicy::none(),
+            )
             .expect("resolve");
         assert_eq!(
             service.repository.resolve_calls,
@@ -5309,7 +5451,13 @@ mod tests {
         let mut service = recording_duel_service(SERVICE_NOW as f64);
         service.repository.challenge = Ok(None);
         assert_eq!(
-            service.resolve(SERVICE_GUILD_ID, 99, 7, "void"),
+            service.resolve(
+                SERVICE_GUILD_ID,
+                99,
+                7,
+                "void",
+                &ProfitDeductionPolicy::none()
+            ),
             Err(CommandError::Invalid("Challenge not found.".to_owned()))
         );
         assert!(service.repository.resolve_calls.is_empty());
@@ -5782,7 +5930,8 @@ mod tests {
             winner_id: Option<i64>,
             now: i64,
             actor_id: i64,
-        ) -> Result<DuelChallenge, CommandError> {
+            _policy: &ProfitDeductionPolicy<'_>,
+        ) -> Result<DuelResolution, CommandError> {
             let challenge = self.stored();
             if challenge.challenge_id != challenge_id
                 || challenge.guild_id != guild_id
@@ -5790,17 +5939,20 @@ mod tests {
             {
                 return Err(CommandError::Invalid("not accepted".to_owned()));
             }
-            Ok(self.update_challenge(|challenge| {
-                challenge.status = if winner_id.is_some() {
-                    DuelStatus::Resolved
-                } else {
-                    DuelStatus::Voided
-                };
-                challenge.winner_id = winner_id;
-                challenge.resolved_at = Some(now);
-                challenge.resolution_actor_id = Some(actor_id);
-                challenge.next_reminder_at = None;
-            }))
+            Ok(DuelResolution {
+                challenge: self.update_challenge(|challenge| {
+                    challenge.status = if winner_id.is_some() {
+                        DuelStatus::Resolved
+                    } else {
+                        DuelStatus::Voided
+                    };
+                    challenge.winner_id = winner_id;
+                    challenge.resolved_at = Some(now);
+                    challenge.resolution_actor_id = Some(actor_id);
+                    challenge.next_reminder_at = None;
+                }),
+                deductions: ProfitDeductions::default(),
+            })
         }
 
         fn bind_message(
@@ -6309,6 +6461,7 @@ mod tests {
                 99,
                 challenge.challenge_id,
                 "challenger_victory",
+                &ProfitDeductionPolicy::none(),
             )
             .expect("resolve");
         assert_eq!(

@@ -15,6 +15,7 @@ use thiserror::Error;
 
 use crate::open_runtime_connection;
 use crate::predictions_repository::{CONTRACT_VALUE, ContractSide, NewLevel};
+use cama_db_core::profit_deductions::penalty_games_remaining;
 
 pub const BASIS_POINTS: i64 = 10_000;
 
@@ -24,9 +25,9 @@ pub struct SettlementAdjustments {
     pub contract_value: i64,
     /// `10_000` is 1x; `100_000` is 10x.
     pub payout_multiplier_bps: i64,
-    /// The fraction of positive profit the player keeps. `None` disables the
-    /// bankruptcy lookup and withholding.
-    pub bankruptcy_credit_bps: Option<i64>,
+    /// Basis points of positive profit withheld per outstanding penalty game.
+    /// `None` disables the bankruptcy lookup and withholding.
+    pub bankruptcy_penalty_bps_per_game: Option<i64>,
     pub vanity_tax_bps: i64,
     pub vanity_taxable_ids: BTreeSet<i64>,
     pub low_priority_tax_bps: i64,
@@ -38,7 +39,7 @@ impl Default for SettlementAdjustments {
         Self {
             contract_value: CONTRACT_VALUE,
             payout_multiplier_bps: BASIS_POINTS,
-            bankruptcy_credit_bps: None,
+            bankruptcy_penalty_bps_per_game: None,
             vanity_tax_bps: 0,
             vanity_taxable_ids: BTreeSet::new(),
             low_priority_tax_bps: 0,
@@ -281,11 +282,12 @@ impl PredictionResolutionRepository {
 
             if base_payout > 0 {
                 if gross_profit > 0
-                    && let Some(credit_bps) = adjustments.bankruptcy_credit_bps
-                    && is_under_bankruptcy_penalty(&transaction, position.discord_id, guild_id)?
+                    && let Some(bps_per_game) = adjustments.bankruptcy_penalty_bps_per_game
                 {
+                    let remaining =
+                        penalty_games_remaining(&transaction, guild_id, position.discord_id)?;
                     bankruptcy_penalty =
-                        multiply_bps_floor(gross_profit, BASIS_POINTS - credit_bps)?;
+                        bankruptcy_withholding(gross_profit, bps_per_game, remaining)?;
                 }
                 if gross_profit > 0
                     && adjustments
@@ -1175,22 +1177,6 @@ fn player_balance(
         .ok_or(PredictionResolutionError::WinningPlayerNotFound)
 }
 
-fn is_under_bankruptcy_penalty(
-    transaction: &Transaction<'_>,
-    discord_id: i64,
-    guild_id: i64,
-) -> Result<bool, rusqlite::Error> {
-    Ok(transaction
-        .query_row(
-            "SELECT COALESCE(penalty_games_remaining,0)>0 FROM bankruptcy_state
-             WHERE discord_id=?1 AND guild_id=?2",
-            params![discord_id, guild_id],
-            |row| row.get(0),
-        )
-        .optional()?
-        .unwrap_or(false))
-}
-
 #[allow(clippy::too_many_arguments)]
 fn settlement_metadata(
     outcome: ContractSide,
@@ -1220,7 +1206,7 @@ fn validate_adjustments(
         || adjustments.vanity_tax_bps < 0
         || adjustments.low_priority_tax_bps < 0
         || adjustments
-            .bankruptcy_credit_bps
+            .bankruptcy_penalty_bps_per_game
             .is_some_and(|bps| !(0..=BASIS_POINTS).contains(&bps))
     {
         return Err(PredictionResolutionError::InvalidAdjustments);
@@ -1241,6 +1227,27 @@ fn multiply_bps_floor(value: i64, bps: i64) -> Result<i64, PredictionResolutionE
         .ok_or(PredictionResolutionError::ArithmeticOverflow)?
         / i128::from(BASIS_POINTS);
     i64::try_from(scaled).map_err(|_| PredictionResolutionError::ArithmeticOverflow)
+}
+
+/// Truncate `gross_profit * withheld_rate` in IEEE doubles so prediction
+/// settlement withholds the same coins as every other profit surface, which
+/// truncate the f64 product rather than flooring integer basis points.
+fn bankruptcy_withholding(
+    gross_profit: i64,
+    bps_per_game: i64,
+    penalty_games_remaining: i64,
+) -> Result<i64, PredictionResolutionError> {
+    let rate_per_game = bps_per_game as f64 / BASIS_POINTS as f64;
+    let product = gross_profit as f64
+        * cama_domain::bankruptcy::withheld_rate(rate_per_game, penalty_games_remaining);
+    if !product.is_finite() {
+        return Err(PredictionResolutionError::ArithmeticOverflow);
+    }
+    let truncated = product.trunc();
+    if truncated < i64::MIN as f64 || truncated >= 9_223_372_036_854_775_808.0 {
+        return Err(PredictionResolutionError::ArithmeticOverflow);
+    }
+    Ok(truncated as i64)
 }
 
 /// Python parity (`prediction_repository.py::resolve_market`):

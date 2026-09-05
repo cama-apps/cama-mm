@@ -157,7 +157,8 @@ pub struct DigRuntimeConfig {
     pub asset_root: PathBuf,
     pub require_authored_assets: bool,
     pub minigame_jc_delta_scale: f64,
-    pub bankruptcy_penalty_keep_basis_points: i64,
+    /// Basis points withheld from Dig profit per outstanding penalty game.
+    pub bankruptcy_penalty_bps_per_game: i64,
     pub economy_event: EconomyEventConfig,
     /// Pet dig work is settled lazily from the persisted hunger/work anchors.
     /// Keeping the decay policy on the runtime config makes the dig aggregate
@@ -180,7 +181,7 @@ impl Default for DigRuntimeConfig {
             asset_root: PathBuf::from(DEFAULT_DIG_ASSET_ROOT),
             require_authored_assets: false,
             minigame_jc_delta_scale: 1.0,
-            bankruptcy_penalty_keep_basis_points: DIG_REWARD_BASIS_POINTS,
+            bankruptcy_penalty_bps_per_game: 0,
             economy_event: EconomyEventConfig::default(),
             pet_decay_per_day: cama_domain::pet::DEFAULT_HUNGER_DECAY_PER_DAY,
             entropy_secret: 0,
@@ -229,11 +230,11 @@ impl DigRuntimeConfig {
     }
 
     #[must_use]
-    pub fn with_bankruptcy_penalty_rate(mut self, kept_rate: f64) -> Self {
-        self.bankruptcy_penalty_keep_basis_points = if kept_rate.is_finite() {
-            (kept_rate.clamp(0.0, 1.0) * DIG_REWARD_BASIS_POINTS as f64).round() as i64
+    pub fn with_bankruptcy_penalty_rate_per_game(mut self, rate_per_game: f64) -> Self {
+        self.bankruptcy_penalty_bps_per_game = if rate_per_game.is_finite() {
+            (rate_per_game.clamp(0.0, 1.0) * DIG_REWARD_BASIS_POINTS as f64).round() as i64
         } else {
-            DIG_REWARD_BASIS_POINTS
+            0
         };
         self
     }
@@ -2977,11 +2978,8 @@ where
             overgrowth_bonus: i64::from(overgrowth_active).saturating_mul(10),
             helltide_tax,
             profit_policy: DigProfitPolicy {
-                bankruptcy_keep_basis_points: if bankruptcy_penalty_games > 0 {
-                    self.config.bankruptcy_penalty_keep_basis_points
-                } else {
-                    DIG_REWARD_BASIS_POINTS
-                },
+                bankruptcy_penalty_bps_per_game: self.config.bankruptcy_penalty_bps_per_game,
+                bankruptcy_penalty_games_remaining: bankruptcy_penalty_games,
                 vanity_tax_basis_points: 0,
                 low_priority_tax_basis_points: 0,
             },

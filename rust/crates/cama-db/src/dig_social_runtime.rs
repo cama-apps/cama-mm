@@ -6,6 +6,9 @@
 
 use std::path::{Path, PathBuf};
 
+use cama_db_core::profit_deductions::{
+    DeductionLedgerContext, ProfitDeductionPolicy, ProfitDeductions, withhold_profit_deductions,
+};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use thiserror::Error;
 
@@ -55,7 +58,17 @@ pub struct AtomicDigHelpSettlement<'a> {
 pub struct DigHelpSettlementReceipt {
     pub target_depth_after: i64,
     pub helper_balance_after: i64,
+    /// What was withheld from the helper's reward (profit basis: the reward).
+    pub helper_deductions: ProfitDeductions,
     pub action_id: i64,
+}
+
+/// What a mentor target bonus actually moved.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DigHelpTargetBonusReceipt {
+    pub balance_after: i64,
+    /// What was withheld from the bonus (profit basis: the bonus).
+    pub deductions: ProfitDeductions,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -145,6 +158,8 @@ pub struct DigSabotageSettlementReceipt {
     pub target_balance_after: Option<i64>,
     pub actor_depth_after: Option<i64>,
     pub target_depth_after: i64,
+    /// What was withheld from the target's credit (profit basis: the credit).
+    pub target_deductions: ProfitDeductions,
     pub action_id: i64,
 }
 
@@ -246,16 +261,20 @@ impl DigSocialRuntimeRepository {
         Ok(snapshot)
     }
 
+    /// Settle a help action. `policy` decides the bankruptcy, vanity, and
+    /// low-priority shares withheld from the helper's reward.
     pub fn atomic_help(
         &self,
         settlement: AtomicDigHelpSettlement<'_>,
+        policy: &ProfitDeductionPolicy<'_>,
     ) -> Result<DigHelpSettlementOutcome, DigSocialRuntimeRepositoryError> {
-        self.atomic_help_inner(settlement, false)
+        self.atomic_help_inner(settlement, policy, false)
     }
 
     fn atomic_help_inner(
         &self,
         settlement: AtomicDigHelpSettlement<'_>,
+        policy: &ProfitDeductionPolicy<'_>,
         fail_after_target_update: bool,
     ) -> Result<DigHelpSettlementOutcome, DigSocialRuntimeRepositoryError> {
         if settlement.helper_reward < 0 {
@@ -360,6 +379,7 @@ impl DigSocialRuntimeRepository {
             return Ok(DigHelpSettlementOutcome::Conflict);
         }
 
+        let mut helper_deductions = ProfitDeductions::default();
         if settlement.helper_reward > 0 {
             set_ledger_context(
                 &transaction,
@@ -385,6 +405,24 @@ impl DigSocialRuntimeRepository {
                 transaction.rollback()?;
                 return Ok(DigHelpSettlementOutcome::MissingHelperPlayer);
             }
+            let Some(withheld) = withhold_profit_deductions(
+                &transaction,
+                expected.helper_key.guild_id,
+                expected.helper_key.discord_id,
+                settlement.helper_reward,
+                policy,
+                &DeductionLedgerContext {
+                    source: "dig",
+                    related_type: Some("help"),
+                    related_id: Some(expected.target_key.discord_id),
+                    reason: "dig help reward",
+                },
+            )?
+            else {
+                transaction.rollback()?;
+                return Ok(DigHelpSettlementOutcome::MissingHelperPlayer);
+            };
+            helper_deductions = withheld;
         }
         transaction.execute(
             "INSERT INTO dig_actions
@@ -409,11 +447,14 @@ impl DigSocialRuntimeRepository {
             DigHelpSettlementReceipt {
                 target_depth_after: settlement.new_target_depth,
                 helper_balance_after,
+                helper_deductions,
                 action_id,
             },
         ))
     }
 
+    /// Credit the mentor bonus to the help target, withholding the shares
+    /// `policy` decides. `None` when the target player row is missing.
     pub fn credit_help_target_bonus(
         &self,
         helper_id: i64,
@@ -421,7 +462,8 @@ impl DigSocialRuntimeRepository {
         guild_id: i64,
         amount: i64,
         detail_json: &str,
-    ) -> Result<Option<i64>, DigSocialRuntimeRepositoryError> {
+        policy: &ProfitDeductionPolicy<'_>,
+    ) -> Result<Option<DigHelpTargetBonusReceipt>, DigSocialRuntimeRepositoryError> {
         if amount < 0 {
             return Err(DigSocialRuntimeRepositoryError::NegativeReward);
         }
@@ -437,6 +479,7 @@ impl DigSocialRuntimeRepository {
             transaction.commit()?;
             return Ok(None);
         }
+        let mut deductions = ProfitDeductions::default();
         if amount > 0 {
             set_ledger_context(
                 &transaction,
@@ -455,10 +498,34 @@ impl DigSocialRuntimeRepository {
             );
             clear_ledger_context(&transaction)?;
             result?;
+            let Some(withheld) = withhold_profit_deductions(
+                &transaction,
+                guild_id,
+                target_id,
+                amount,
+                policy,
+                &DeductionLedgerContext {
+                    source: "dig",
+                    related_type: Some("mentor_bonus"),
+                    related_id: Some(helper_id),
+                    reason: "dig mentor target bonus",
+                },
+            )?
+            else {
+                transaction.rollback()?;
+                return Ok(None);
+            };
+            deductions = withheld;
         }
-        let balance = player_balance(&transaction, key)?;
+        let Some(balance_after) = player_balance(&transaction, key)? else {
+            transaction.rollback()?;
+            return Ok(None);
+        };
         transaction.commit()?;
-        Ok(balance)
+        Ok(Some(DigHelpTargetBonusReceipt {
+            balance_after,
+            deductions,
+        }))
     }
 
     pub fn sabotage_snapshot(
@@ -492,16 +559,20 @@ impl DigSocialRuntimeRepository {
         Ok(snapshot)
     }
 
+    /// Settle a sabotage. `policy` decides the bankruptcy, vanity, and
+    /// low-priority shares withheld from the target's credit.
     pub fn atomic_sabotage(
         &self,
         settlement: AtomicDigSabotageSettlement<'_>,
+        policy: &ProfitDeductionPolicy<'_>,
     ) -> Result<DigSabotageSettlementOutcome, DigSocialRuntimeRepositoryError> {
-        self.atomic_sabotage_inner(settlement, false)
+        self.atomic_sabotage_inner(settlement, policy, false)
     }
 
     fn atomic_sabotage_inner(
         &self,
         settlement: AtomicDigSabotageSettlement<'_>,
+        policy: &ProfitDeductionPolicy<'_>,
         fail_after_actor_debit: bool,
     ) -> Result<DigSabotageSettlementOutcome, DigSocialRuntimeRepositoryError> {
         if settlement.actor_jc_cost < 0 || settlement.target_jc_credit < 0 {
@@ -566,6 +637,7 @@ impl DigSocialRuntimeRepository {
         if fail_after_actor_debit {
             return Err(DigSocialRuntimeRepositoryError::InjectedFailure);
         }
+        let mut target_deductions = ProfitDeductions::default();
         if settlement.target_jc_credit > 0 {
             set_ledger_context(
                 &transaction,
@@ -587,7 +659,28 @@ impl DigSocialRuntimeRepository {
                 ],
             );
             clear_ledger_context(&transaction)?;
-            result?;
+            // A target without a player row receives nothing, so there is
+            // nothing to withhold from either.
+            if result? == 1 {
+                let Some(withheld) = withhold_profit_deductions(
+                    &transaction,
+                    expected.target_key.guild_id,
+                    expected.target_key.discord_id,
+                    settlement.target_jc_credit,
+                    policy,
+                    &DeductionLedgerContext {
+                        source: "dig",
+                        related_type: Some(settlement.action_type),
+                        related_id: Some(expected.actor_key.discord_id),
+                        reason: "dig sabotage target credit",
+                    },
+                )?
+                else {
+                    transaction.rollback()?;
+                    return Ok(DigSabotageSettlementOutcome::Conflict);
+                };
+                target_deductions = withheld;
+            }
         }
         if settlement.target_depth_delta != 0 {
             transaction.execute(
@@ -662,6 +755,7 @@ impl DigSocialRuntimeRepository {
                 target_balance_after,
                 actor_depth_after,
                 target_depth_after,
+                target_deductions,
                 action_id,
             },
         ))

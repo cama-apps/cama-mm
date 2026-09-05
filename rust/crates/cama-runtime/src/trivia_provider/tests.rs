@@ -899,18 +899,38 @@ fn pinned_catalog_constructs_the_full_production_provider() {
 }
 
 /// `flow_config` with the low priority profit tax and bankruptcy debuff raised
-/// high enough that a two-JC streak bonus produces non-zero truncated shares.
-fn taxed_flow_config(bankruptcy_penalty_rate: &str) -> ApplicationConfig {
-    let bankruptcy_penalty_rate = bankruptcy_penalty_rate.to_owned();
+/// high enough that a three-JC gross reward produces non-zero truncated shares.
+fn taxed_flow_config(bankruptcy_penalty_rate_per_game: &str) -> ApplicationConfig {
+    taxed_flow_config_with_reward(bankruptcy_penalty_rate_per_game, "1")
+}
+
+fn taxed_flow_config_with_reward(
+    bankruptcy_penalty_rate_per_game: &str,
+    reward_per_question: &str,
+) -> ApplicationConfig {
+    let bankruptcy_penalty_rate_per_game = bankruptcy_penalty_rate_per_game.to_owned();
+    let reward_per_question = reward_per_question.to_owned();
     ApplicationConfig::from_lookup(|key| match key {
         "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
         "ECONOMY_EVENTS_ENABLED" => Some("false".to_owned()),
         "TRIVIA_ANSWER_TIMEOUT_SECONDS" => Some("300".to_owned()),
         "LOW_PRIORITY_PROFIT_TAX_RATE" => Some("0.5".to_owned()),
-        "BANKRUPTCY_PENALTY_RATE" => Some(bankruptcy_penalty_rate.clone()),
+        "BANKRUPTCY_PENALTY_RATE_PER_GAME" => Some(bankruptcy_penalty_rate_per_game.clone()),
+        "TRIVIA_REWARD_PER_QUESTION" => Some(reward_per_question.clone()),
         _ => None,
     })
     .expect("taxed trivia flow configuration")
+}
+
+fn seed_bankruptcy_penalty(fixture: &MigratedFixture, penalty_games_remaining: i64) {
+    fixture
+        .connection()
+        .execute(
+            "INSERT INTO bankruptcy_state (discord_id, guild_id, penalty_games_remaining)
+             VALUES (?1, ?2, ?3)",
+            params![FLOW_USER, FLOW_GUILD, penalty_games_remaining],
+        )
+        .expect("seed bankruptcy penalty games");
 }
 
 fn seed_active_low_priority(fixture: &MigratedFixture) {
@@ -944,13 +964,13 @@ fn taxed_flow_provider(
 }
 
 #[test]
-fn active_low_priority_taxes_the_trivia_streak_bonus() {
+fn active_low_priority_taxes_the_whole_trivia_reward() {
     let fixture = MigratedFixture::new();
     let cache = tempfile::tempdir().expect("trivia cache directory");
     let provider = taxed_flow_provider(
         &fixture,
         cache.path(),
-        &taxed_flow_config("0.75"),
+        &taxed_flow_config("0.05"),
         fixture.vanity_tax(),
     );
 
@@ -962,6 +982,7 @@ fn active_low_priority_taxes_the_trivia_streak_bonus() {
     assert_eq!(untaxed, 3);
     assert_eq!(fixture.balance(), 6);
 
+    // Half of the three-JC gross truncates to one JC withheld.
     seed_active_low_priority(&fixture);
     let taxed = provider
         .handler
@@ -972,7 +993,36 @@ fn active_low_priority_taxes_the_trivia_streak_bonus() {
 }
 
 #[test]
-fn low_priority_and_vanity_trivia_taxes_bill_the_same_gross_streak_bonus() {
+fn trivia_withholding_applies_to_the_per_question_reward_without_a_streak_bonus() {
+    let fixture = MigratedFixture::new();
+    // Two outstanding penalty games at 15% per game withhold 30%, so a
+    // ten-JC answer reward loses three JC to bankruptcy.
+    seed_bankruptcy_penalty(&fixture, 2);
+    let cache = tempfile::tempdir().expect("trivia cache directory");
+    let vanity_tax = fixture.vanity_tax_at_rate(0.1);
+    vanity_tax
+        .set_manual_taxation(FLOW_GUILD, FLOW_USER, true, 901)
+        .expect("enforce vanity taxation");
+    let provider = taxed_flow_provider(
+        &fixture,
+        cache.path(),
+        &taxed_flow_config_with_reward("0.15", "10"),
+        vanity_tax,
+    );
+
+    // Streak 1 pays no bonus: the whole basis is the per-question reward.
+    // Bankruptcy withholds 3, vanity 1 and low priority 5 of the same 10 JC.
+    seed_active_low_priority(&fixture);
+    let award = provider
+        .handler
+        .state
+        .calculate_and_credit_award(FLOW_USER, FLOW_GUILD, 1, 1);
+    assert_eq!(award, 1);
+    assert_eq!(fixture.balance(), 4);
+}
+
+#[test]
+fn low_priority_and_vanity_trivia_taxes_bill_the_same_gross_reward() {
     let fixture = MigratedFixture::new();
     let cache = tempfile::tempdir().expect("trivia cache directory");
     let vanity_tax = fixture.vanity_tax_at_rate(0.5);
@@ -983,13 +1033,13 @@ fn low_priority_and_vanity_trivia_taxes_bill_the_same_gross_streak_bonus() {
     let provider = taxed_flow_provider(
         &fixture,
         cache.path(),
-        &taxed_flow_config("0.75"),
+        &taxed_flow_config("0.05"),
         vanity_tax,
     );
 
-    // Both taxes take half of the same two-JC bonus, leaving only the
-    // per-question reward. Billing the low priority share on the post-vanity
-    // remainder would truncate to zero and credit one JC of bonus anyway.
+    // Both taxes take half of the same three-JC gross (one JC each after
+    // truncation), leaving one JC. Billing the low priority share on the
+    // post-vanity remainder would compound the two shares.
     let award = provider
         .handler
         .state
@@ -999,16 +1049,9 @@ fn low_priority_and_vanity_trivia_taxes_bill_the_same_gross_streak_bonus() {
 }
 
 #[test]
-fn combined_trivia_withholding_never_exceeds_the_streak_bonus() {
+fn combined_trivia_withholding_never_exceeds_the_gross_reward() {
     let fixture = MigratedFixture::new();
-    fixture
-        .connection()
-        .execute(
-            "INSERT INTO bankruptcy_state (discord_id, guild_id, penalty_games_remaining)
-             VALUES (?1, ?2, 2)",
-            params![FLOW_USER, FLOW_GUILD],
-        )
-        .expect("seed bankruptcy penalty games");
+    seed_bankruptcy_penalty(&fixture, 3);
     let cache = tempfile::tempdir().expect("trivia cache directory");
     let vanity_tax = fixture.vanity_tax_at_rate(0.5);
     vanity_tax
@@ -1022,13 +1065,13 @@ fn combined_trivia_withholding_never_exceeds_the_streak_bonus() {
         vanity_tax,
     );
 
-    // The bankruptcy debuff keeps half the bonus while both taxes bill half of
-    // it, so uncapped withholding would turn a correct answer into a charge
-    // against the per-question reward.
+    // Three outstanding games at 50% per game cap at withholding the whole
+    // three-JC gross while both taxes bill one JC each, so the uncapped five
+    // JC would turn a correct answer into a charge.
     let award = provider
         .handler
         .state
         .calculate_and_credit_award(FLOW_USER, FLOW_GUILD, 10, 1);
-    assert_eq!(award, 1);
-    assert_eq!(fixture.balance(), 4);
+    assert_eq!(award, 0);
+    assert_eq!(fixture.balance(), 3);
 }

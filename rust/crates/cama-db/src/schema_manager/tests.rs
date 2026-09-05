@@ -1524,6 +1524,71 @@ fn normalize_boss_progress_flat_to_nested_rewrites_flat_statuses_idempotently() 
 }
 
 #[test]
+fn bet_settlement_bankruptcy_penalty_column_upgrades_existing_rows_and_defaults_to_zero() {
+    fn has_penalty_column(connection: &Connection) -> bool {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('bet_settlement_taxes')
+                 WHERE name='bankruptcy_penalty'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("inspect bet_settlement_taxes columns")
+            > 0
+    }
+    fn withholdings(connection: &Connection) -> (i64, i64, i64) {
+        connection
+            .query_row(
+                "SELECT vanity_tax,low_priority_tax,bankruptcy_penalty
+                 FROM bet_settlement_taxes WHERE match_id=?1 AND guild_id=?2 AND discord_id=?3",
+                params![9_001_i64, 77_i64, 4_242_i64],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read settlement withholdings")
+    }
+
+    let file = empty_database();
+    initialize_or_migrate(file.path()).expect("initialize bet settlement fixture");
+    let connection = Connection::open(file.path()).expect("open bet settlement fixture");
+    assert!(
+        has_penalty_column(&connection),
+        "a freshly migrated database must already carry the column"
+    );
+
+    // Simulate a database whose settlement rows predate the bankruptcy share.
+    connection
+        .execute(
+            "INSERT INTO bet_settlement_taxes(match_id,guild_id,discord_id,vanity_tax,low_priority_tax)
+             VALUES (?1,?2,?3,10,5)",
+            params![9_001_i64, 77_i64, 4_242_i64],
+        )
+        .expect("seed pre-migration settlement row");
+    connection
+        .execute_batch("ALTER TABLE bet_settlement_taxes DROP COLUMN bankruptcy_penalty")
+        .expect("simulate a database predating the bankruptcy column");
+    assert!(!has_penalty_column(&connection));
+    drop(connection);
+
+    initialize_or_migrate(file.path()).expect("upgrade restores the bankruptcy column");
+    let connection = Connection::open(file.path()).expect("reopen upgraded fixture");
+    assert!(
+        has_penalty_column(&connection),
+        "upgrading must add the column"
+    );
+    assert_eq!(
+        withholdings(&connection),
+        (10, 5, 0),
+        "the rebuild must preserve the taxes and default the bankruptcy share to zero"
+    );
+    drop(connection);
+
+    initialize_or_migrate(file.path()).expect("re-running the migration is idempotent");
+    let connection = Connection::open(file.path()).expect("reopen after idempotent retry");
+    assert!(has_penalty_column(&connection));
+    assert_eq!(withholdings(&connection), (10, 5, 0));
+}
+
+#[test]
 fn auto_buy_grappling_hook_column_upgrades_existing_tunnels_and_defaults_off() {
     fn has_hook_column(connection: &Connection) -> bool {
         connection

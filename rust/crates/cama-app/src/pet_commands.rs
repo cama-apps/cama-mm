@@ -1888,9 +1888,37 @@ pub fn build_death_embed(pet: &Pet) -> Embed {
     embed
 }
 
+/// Short parenthetical for the non-zero shares withheld from a payout, e.g.
+/// ` (−3 JC bankruptcy, −1 JC vanity)`; empty when nothing was withheld.
+#[must_use]
+pub fn withholding_note(bankruptcy: i64, vanity: i64, low_priority: i64) -> String {
+    let parts: Vec<String> = [
+        (bankruptcy, "bankruptcy"),
+        (vanity, "vanity"),
+        (low_priority, "low priority"),
+    ]
+    .into_iter()
+    .filter(|(amount, _)| *amount > 0)
+    .map(|(amount, label)| format!("−{amount} JC {label}"))
+    .collect();
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", parts.join(", "))
+    }
+}
+
 #[must_use]
 pub fn build_eating_outcome_embed(pet: &Pet, outcome: &BTreeMap<String, i64>) -> Embed {
-    let reward = outcome.get("reward").copied().unwrap_or_default();
+    let withheld = |key: &str| outcome.get(key).copied().unwrap_or_default();
+    let (bankruptcy, vanity, low_priority) = (
+        withheld("bankruptcy_penalty"),
+        withheld("vanity_tax"),
+        withheld("low_priority_tax"),
+    );
+    let reward =
+        outcome.get("reward").copied().unwrap_or_default() - bankruptcy - vanity - low_priority;
+    let note = withholding_note(bankruptcy, vanity, low_priority);
     let added = outcome
         .get("penalty_games_added")
         .copied()
@@ -1903,7 +1931,7 @@ pub fn build_eating_outcome_embed(pet: &Pet, outcome: &BTreeMap<String, i64>) ->
     Embed::new(
         format!("🍖 {} was delicious", pet.name),
         format!(
-            "You received **{}** {JOPACOIN_EMOTE}.\n\nBad karma adds **{added}** game(s) to your sentence (**{remaining} remaining**). Your future earnings are taxed until you win your way free.\n\nBalance: **{}** {JOPACOIN_EMOTE}.",
+            "You received **{}** {JOPACOIN_EMOTE}{note}.\n\nBad karma adds **{added}** game(s) to your sentence (**{remaining} remaining**). Your future earnings are taxed until you win your way free.\n\nBalance: **{}** {JOPACOIN_EMOTE}.",
             format_integer(reward),
             format_integer(balance)
         ),
@@ -3050,6 +3078,33 @@ mod tests {
             .last_payload()
             .and_then(|payload| payload.embed.as_ref())
             .expect("expected response embed")
+    }
+
+    #[test]
+    fn test_eating_outcome_embed_shows_the_net_reward_and_withholdings() {
+        let pet = make_pet();
+        let outcome = BTreeMap::from([
+            ("reward".to_owned(), 888),
+            ("penalty_games_added".to_owned(), 4),
+            ("penalty_games_remaining".to_owned(), 7),
+            ("new_balance".to_owned(), 1_884),
+            ("bankruptcy_penalty".to_owned(), 3),
+            ("vanity_tax".to_owned(), 1),
+            ("low_priority_tax".to_owned(), 0),
+        ]);
+
+        let embed = build_eating_outcome_embed(&pet, &outcome);
+
+        assert!(
+            embed.description.starts_with(&format!(
+                "You received **884** {JOPACOIN_EMOTE} (−3 JC bankruptcy, −1 JC vanity)."
+            )),
+            "{}",
+            embed.description
+        );
+        assert!(embed.description.contains("Balance: **1,884**"));
+        assert_eq!(withholding_note(0, 0, 0), "");
+        assert_eq!(withholding_note(0, 0, 2), " (−2 JC low priority)");
     }
 
     #[test]

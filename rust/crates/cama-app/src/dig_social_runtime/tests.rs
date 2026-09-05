@@ -1,10 +1,11 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
 use crate::test_support::{FastTestDatabase, fast_migrated_database};
 use cama_db::economy_event_repository::{
     EconomyEventRepository, EventDirection, EventDraft, EventEffects,
 };
 use cama_db::predictions_repository::{BookSide, NewLevel, PredictionRepository};
+use cama_domain::bankruptcy::BankruptcyPenaltyPolicy;
 use rusqlite::{Connection, params};
 
 use super::*;
@@ -926,4 +927,106 @@ fn sabotage_validation_errors_match_python_copy() {
             .to_string(),
         "That player doesn't have a tunnel."
     );
+}
+
+fn penalized(database: &FastTestDatabase, discord_id: i64, remaining: i64) {
+    Connection::open(database.path())
+        .unwrap()
+        .execute(
+            "INSERT INTO bankruptcy_state(
+                 discord_id,guild_id,last_bankruptcy_at,penalty_games_remaining,bankruptcy_count
+             ) VALUES (?1,?2,0,?3,1)",
+            params![discord_id, GUILD, remaining],
+        )
+        .unwrap();
+}
+
+fn withholding(vanity_taxed: Option<i64>) -> OwnedProfitDeductionPolicy {
+    OwnedProfitDeductionPolicy {
+        bankruptcy: Some(BankruptcyPenaltyPolicy {
+            rate_per_game: 0.05,
+        }),
+        vanity_tax_rate: 0.10,
+        vanity_taxable_ids: vanity_taxed.into_iter().collect(),
+        low_priority_tax_rate: 0.25,
+        low_priority_taxable_ids: BTreeSet::new(),
+    }
+}
+
+#[test]
+fn help_payouts_withhold_bankruptcy_shares_from_both_players() {
+    let database = fixture(true, 10);
+    Connection::open(database.path())
+        .unwrap()
+        .execute(
+            "INSERT INTO dig_artifacts
+                (discord_id,guild_id,artifact_id,found_at,is_relic,equipped)
+             VALUES (?1,?2,'mentors_lantern',?3,1,1)",
+            params![HELPER, GUILD, NOW - 1],
+        )
+        .unwrap();
+    penalized(&database, HELPER, 3);
+    penalized(&database, TARGET, 6);
+    let result = scripted_help(
+        &DigSocialRuntimeService::sqlite(database.path()).with_profit_deductions(withholding(None)),
+        1,
+        [],
+        [],
+    )
+    .unwrap();
+    assert_eq!(result.helper_reward, 7);
+    assert_eq!(
+        result.helper_deductions,
+        ProfitDeductions {
+            profit: 7,
+            bankruptcy_penalty: 1,
+            ..ProfitDeductions::default()
+        }
+    );
+    assert_eq!(result.helper_balance_after, 106);
+    assert!(result.mentor_target_bonus > 0);
+    // The helper's three games left withhold 15% (7 -> 1); the target's six
+    // games left withhold 30% of the mentor bonus.
+    let target_penalty = result.mentor_target_bonus * 3 / 10;
+    assert_eq!(
+        result.mentor_target_deductions.bankruptcy_penalty,
+        target_penalty
+    );
+    assert_eq!(balance(&database, HELPER), 106);
+    assert_eq!(
+        balance(&database, TARGET),
+        200 + result.mentor_target_bonus - target_penalty
+    );
+}
+
+#[test]
+fn sabotage_trap_credit_withholds_the_targets_vanity_share() {
+    let database = sabotage_fixture(30);
+    Connection::open(database.path())
+        .unwrap()
+        .execute(
+            "UPDATE tunnels SET trap_active=1 WHERE discord_id=?1 AND guild_id=?2",
+            params![TARGET, GUILD],
+        )
+        .unwrap();
+    let result = sabotage_with(
+        &DigSocialRuntimeService::sqlite(database.path())
+            .with_profit_deductions(withholding(Some(TARGET))),
+        [4],
+        [],
+        [],
+    )
+    .unwrap();
+    assert!(result.trap_triggered);
+    assert_eq!(result.victim_tip, 16);
+    assert_eq!(
+        result.target_deductions,
+        ProfitDeductions {
+            profit: 22,
+            vanity_tax: 2,
+            ..ProfitDeductions::default()
+        }
+    );
+    assert_eq!(balance(&database, HELPER), 88);
+    assert_eq!(balance(&database, TARGET), 220);
 }

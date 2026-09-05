@@ -1,8 +1,8 @@
-//! Discord-independent bankruptcy policy and match-award orchestration.
+//! Discord-independent bankruptcy policy and penalty orchestration.
 //!
 //! Python remains the live command and migration authority. This module keeps
-//! eligibility, cooldown derivation, penalty math, and award ordering behind a
-//! typed persistence port. The existing-schema SQLite adapter implements that
+//! eligibility, cooldown derivation, and penalty math behind a typed
+//! persistence port. The existing-schema SQLite adapter implements that
 //! port without creating or migrating production tables.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -12,7 +12,6 @@ use cama_db::bankruptcy_repository::{
     BankruptcyRepository, BankruptcyRepositoryError,
     DeclarationOutcome as DatabaseDeclarationOutcome,
     DeclarationRequest as DatabaseDeclarationRequest, RawBankruptcyState,
-    WinnerAwardRequest as DatabaseWinnerAwardRequest,
 };
 use thiserror::Error;
 
@@ -25,8 +24,8 @@ pub struct BankruptcyPolicy {
     pub fresh_start_balance: i64,
     pub cooldown_seconds: i64,
     pub penalty_games: i64,
-    /// Fraction of a penalized award the player keeps, not the withheld rate.
-    pub penalty_kept_rate: f64,
+    /// Share of an award withheld per outstanding penalty game.
+    pub penalty_rate_per_game: f64,
 }
 
 impl Default for BankruptcyPolicy {
@@ -35,7 +34,7 @@ impl Default for BankruptcyPolicy {
             fresh_start_balance: 3,
             cooldown_seconds: 604_800,
             penalty_games: 3,
-            penalty_kept_rate: 0.75,
+            penalty_rate_per_game: 0.05,
         }
     }
 }
@@ -57,9 +56,11 @@ impl BankruptcyPolicy {
                 self.penalty_games,
             ));
         }
-        if !self.penalty_kept_rate.is_finite() || !(0.0..=1.0).contains(&self.penalty_kept_rate) {
+        if !self.penalty_rate_per_game.is_finite()
+            || !(0.0..=1.0).contains(&self.penalty_rate_per_game)
+        {
             return Err(BankruptcyPolicyError::InvalidPenaltyRate(
-                self.penalty_kept_rate,
+                self.penalty_rate_per_game,
             ));
         }
         Ok(self)
@@ -74,7 +75,7 @@ pub enum BankruptcyPolicyError {
     InvalidCooldown(i64),
     #[error("penalty games cannot be negative: {0}")]
     InvalidPenaltyGames(i64),
-    #[error("bankruptcy kept rate must be finite and within 0..=1: {0}")]
+    #[error("bankruptcy penalty rate per game must be finite and within 0..=1: {0}")]
     InvalidPenaltyRate(f64),
 }
 
@@ -163,25 +164,6 @@ pub struct PenaltyResult {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AwardReceipt {
-    pub discord_id: i64,
-    pub gross: i64,
-    pub net: i64,
-    pub bankruptcy_penalty: i64,
-    pub balance_after: i64,
-    pub penalty_games_remaining: i64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct AtomicAwardRequest<'a> {
-    pub discord_ids: &'a [i64],
-    pub guild_id: Option<i64>,
-    pub gross_reward: i64,
-    pub penalty_kept_rate: f64,
-    pub decrement_penalty: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AtomicDeclarationRequest {
     pub discord_id: i64,
     pub guild_id: Option<i64>,
@@ -262,11 +244,6 @@ pub trait BankruptcyPort {
         discord_ids: &[i64],
         guild_id: Option<i64>,
     ) -> Result<BTreeMap<i64, i64>, BankruptcyPortError>;
-
-    fn award_winners_atomic(
-        &self,
-        request: AtomicAwardRequest<'_>,
-    ) -> Result<Vec<AwardReceipt>, BankruptcyPortError>;
 }
 
 impl BankruptcyPort for BankruptcyRepository {
@@ -365,36 +342,6 @@ impl BankruptcyPort for BankruptcyRepository {
     ) -> Result<BTreeMap<i64, i64>, BankruptcyPortError> {
         BankruptcyRepository::decrement_penalty_games_bulk(self, discord_ids, guild_id)
             .map_err(Into::into)
-    }
-
-    fn award_winners_atomic(
-        &self,
-        request: AtomicAwardRequest<'_>,
-    ) -> Result<Vec<AwardReceipt>, BankruptcyPortError> {
-        BankruptcyRepository::award_winners_atomic(
-            self,
-            DatabaseWinnerAwardRequest {
-                discord_ids: request.discord_ids,
-                guild_id: request.guild_id,
-                gross_reward: request.gross_reward,
-                penalty_kept_rate: request.penalty_kept_rate,
-                decrement_penalty: request.decrement_penalty,
-            },
-        )
-        .map(|receipts| {
-            receipts
-                .into_iter()
-                .map(|receipt| AwardReceipt {
-                    discord_id: receipt.discord_id,
-                    gross: receipt.gross,
-                    net: receipt.net,
-                    bankruptcy_penalty: receipt.bankruptcy_penalty,
-                    balance_after: receipt.balance_after,
-                    penalty_games_remaining: receipt.penalty_games_remaining,
-                })
-                .collect()
-        })
-        .map_err(Into::into)
     }
 }
 
@@ -570,7 +517,7 @@ where
         Ok(calculate_penalty(
             amount,
             penalty_games,
-            self.policy.penalty_kept_rate,
+            self.policy.penalty_rate_per_game,
         ))
     }
 
@@ -592,28 +539,6 @@ where
         self.port
             .decrement_penalty_games_bulk(discord_ids, guild_id)
             .map_err(Into::into)
-    }
-
-    /// Credit winners and consume penalty wins after calculating the award so
-    /// the final clearing win is still penalized.
-    pub fn award_win_bonus(
-        &self,
-        discord_ids: &[i64],
-        guild_id: Option<i64>,
-        gross_reward: i64,
-    ) -> Result<BTreeMap<i64, AwardReceipt>, BankruptcyServiceError> {
-        self.award(discord_ids, guild_id, gross_reward, true)
-    }
-
-    /// Participation uses the same penalty coefficient but never consumes a
-    /// required win.
-    pub fn award_participation(
-        &self,
-        discord_ids: &[i64],
-        guild_id: Option<i64>,
-        gross_reward: i64,
-    ) -> Result<BTreeMap<i64, AwardReceipt>, BankruptcyServiceError> {
-        self.award(discord_ids, guild_id, gross_reward, false)
     }
 
     fn validate_at(
@@ -648,26 +573,6 @@ where
         Ok(BankruptcyValidation::Eligible {
             debt: balance.saturating_abs(),
         })
-    }
-
-    fn award(
-        &self,
-        discord_ids: &[i64],
-        guild_id: Option<i64>,
-        gross_reward: i64,
-        decrement_penalty: bool,
-    ) -> Result<BTreeMap<i64, AwardReceipt>, BankruptcyServiceError> {
-        let receipts = self.port.award_winners_atomic(AtomicAwardRequest {
-            discord_ids,
-            guild_id,
-            gross_reward,
-            penalty_kept_rate: self.policy.penalty_kept_rate,
-            decrement_penalty,
-        })?;
-        Ok(receipts
-            .into_iter()
-            .map(|receipt| (receipt.discord_id, receipt))
-            .collect())
     }
 
     fn now(&self) -> Result<i64, BankruptcyServiceError> {
@@ -711,16 +616,23 @@ pub fn derive_state(
 
 /// Match Python's positive-award behavior: floor the amount withheld, not the
 /// amount kept, so a one-coin award cannot round all the way down to zero.
+/// The withheld share is `rate_per_game` for every outstanding penalty game,
+/// capped at the whole award.
 #[must_use]
-pub fn calculate_penalty(amount: i64, penalty_games: i64, kept_rate: f64) -> PenaltyResult {
-    if penalty_games <= 0 {
+pub fn calculate_penalty(
+    amount: i64,
+    penalty_games_remaining: i64,
+    rate_per_game: f64,
+) -> PenaltyResult {
+    if penalty_games_remaining <= 0 {
         return PenaltyResult {
             original: amount,
             penalized: amount,
             penalty_applied: 0,
         };
     }
-    let penalty_applied = (amount as f64 * (1.0 - kept_rate)) as i64;
+    let withheld = cama_domain::bankruptcy::withheld_rate(rate_per_game, penalty_games_remaining);
+    let penalty_applied = (amount as f64 * withheld) as i64;
     PenaltyResult {
         original: amount,
         penalized: amount.saturating_sub(penalty_applied),

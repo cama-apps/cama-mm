@@ -317,6 +317,7 @@ async fn brawl_channel_gate_accepts_channel_and_parent_thread_only() {
         discord.clone(),
         reminders.hooks(),
         None,
+        None,
     );
     assert!(
         provider

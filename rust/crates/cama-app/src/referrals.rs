@@ -119,14 +119,12 @@ pub fn merge_referral_rewards(
     rewards: &[ReferralReward],
 ) {
     for reward in rewards {
-        for beneficiary_id in [reward.referred_id, reward.referrer_id] {
+        for (beneficiary_id, net) in [
+            (reward.referred_id, reward.referred_net),
+            (reward.referrer_id, reward.referrer_net),
+        ] {
             let components = changes.entry(beneficiary_id).or_default();
-            components.referral = Some(
-                components
-                    .referral
-                    .unwrap_or_default()
-                    .saturating_add(reward.reward_amount),
-            );
+            components.referral = Some(components.referral.unwrap_or_default().saturating_add(net));
         }
     }
 }

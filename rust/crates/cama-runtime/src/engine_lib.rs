@@ -54,6 +54,7 @@ pub mod player_trivia_provider;
 pub mod prediction_provider;
 pub mod prediction_workers;
 pub mod process_lock;
+pub(crate) mod profit_deductions;
 pub mod push_notification_provider;
 pub mod registration_provider;
 pub mod reminder_provider;

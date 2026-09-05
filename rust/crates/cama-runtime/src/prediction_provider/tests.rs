@@ -580,7 +580,7 @@ async fn recent_trades_prefer_server_nickname_over_transport_display_name() {
 fn test_config() -> PredictionCommandConfig {
     PredictionCommandConfig {
         admin_user_ids: BTreeSet::from([ADMIN]),
-        bankruptcy_credit_bps: 7_500,
+        bankruptcy_penalty_bps_per_game: 500,
         contract_value: 100,
         drift_min: -2,
         drift_max: 2,

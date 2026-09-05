@@ -692,16 +692,19 @@ async fn durable_eaten_death_survives_transient_then_forbidden_and_dms_opted_in_
         .expect("read adult pet")
         .expect("adult pet exists");
     PetEatingRepository::new(database.path())
-        .eat_adult_pet_atomic(EatAdultPetRequest {
-            discord_id: pet.discord_id,
-            guild_id: Some(GUILD),
-            pet_id: pet.pet_id,
-            expected_last_fed_at: pet.last_fed_at,
-            expected_hunger: pet.hunger_at_last_fed,
-            reward: 123,
-            penalty_games: 4,
-            now,
-        })
+        .eat_adult_pet_atomic(
+            EatAdultPetRequest {
+                discord_id: pet.discord_id,
+                guild_id: Some(GUILD),
+                pet_id: pet.pet_id,
+                expected_last_fed_at: pet.last_fed_at,
+                expected_hunger: pet.hunger_at_last_fed,
+                reward: 123,
+                penalty_games: 4,
+                now,
+            },
+            &cama_db::profit_deductions::ProfitDeductionPolicy::none(),
+        )
         .expect("persist eaten outcome atomically");
     let assets = TempDir::new().expect("pet assets directory");
     let reminders = Arc::new(FakeReminders::default());
@@ -796,16 +799,19 @@ async fn direct_eat_delivery_guard_suppresses_sweep_until_retry() {
         .expect("read adult pet")
         .expect("adult pet exists");
     PetEatingRepository::new(database.path())
-        .eat_adult_pet_atomic(EatAdultPetRequest {
-            discord_id: pet.discord_id,
-            guild_id: Some(GUILD),
-            pet_id: pet.pet_id,
-            expected_last_fed_at: pet.last_fed_at,
-            expected_hunger: pet.hunger_at_last_fed,
-            reward: 123,
-            penalty_games: 4,
-            now,
-        })
+        .eat_adult_pet_atomic(
+            EatAdultPetRequest {
+                discord_id: pet.discord_id,
+                guild_id: Some(GUILD),
+                pet_id: pet.pet_id,
+                expected_last_fed_at: pet.last_fed_at,
+                expected_hunger: pet.hunger_at_last_fed,
+                reward: 123,
+                penalty_games: 4,
+                now,
+            },
+            &cama_db::profit_deductions::ProfitDeductionPolicy::none(),
+        )
         .expect("persist eaten outcome atomically");
     let assets = TempDir::new().expect("pet assets directory");
     let discord = Arc::new(FakeDiscord::new(Some(CHANNEL)));

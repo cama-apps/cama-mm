@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Barrier};
 use std::thread;
 
+use cama_domain::bankruptcy::BankruptcyPenaltyPolicy;
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
@@ -69,6 +70,15 @@ impl Fixture {
                      rewarded_at TIMESTAMP,
                      PRIMARY KEY (guild_id, referred_id),
                      CHECK (referrer_id != referred_id)
+                 );
+                 CREATE TABLE bankruptcy_state (
+                     discord_id INTEGER NOT NULL,
+                     guild_id INTEGER NOT NULL DEFAULT 0,
+                     last_bankruptcy_at INTEGER,
+                     penalty_games_remaining INTEGER DEFAULT 0,
+                     bankruptcy_count INTEGER DEFAULT 0,
+                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                     PRIMARY KEY (discord_id, guild_id)
                  );
                  CREATE TABLE economy_ledger_entries (
                      ledger_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -158,6 +168,32 @@ impl Fixture {
             })
             .expect("ledger context count")
     }
+
+    fn set_penalty_games(&self, discord_id: i64, guild_id: i64, remaining: i64) {
+        self.connection()
+            .execute(
+                "INSERT INTO bankruptcy_state (
+                     discord_id, guild_id, penalty_games_remaining, bankruptcy_count
+                 ) VALUES (?1, ?2, ?3, 1)",
+                params![discord_id, guild_id, remaining],
+            )
+            .expect("seed bankruptcy state");
+    }
+
+    fn all_ledger_entries(&self) -> Vec<(i64, String, i64)> {
+        let connection = self.connection();
+        let mut statement = connection
+            .prepare(
+                "SELECT account_id, source, delta FROM economy_ledger_entries
+                 ORDER BY ledger_id",
+            )
+            .expect("prepare ledger");
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .expect("query ledger")
+            .collect::<Result<_, _>>()
+            .expect("ledger rows")
+    }
 }
 
 fn request<'a>(
@@ -173,6 +209,22 @@ fn request<'a>(
         winning_side: MatchSide::Radiant,
         pending_match_id,
         recorded_at: NOW,
+        deductions: ProfitDeductionPolicy::none(),
+    }
+}
+
+fn deduction_policy<'a>(
+    vanity: &'a BTreeSet<i64>,
+    low_priority: &'a BTreeSet<i64>,
+) -> ProfitDeductionPolicy<'a> {
+    ProfitDeductionPolicy {
+        bankruptcy: Some(BankruptcyPenaltyPolicy {
+            rate_per_game: 0.05,
+        }),
+        vanity_tax_rate: 0.10,
+        vanity_taxable_ids: vanity,
+        low_priority_tax_rate: 0.25,
+        low_priority_taxable_ids: low_priority,
     }
 }
 
@@ -366,6 +418,8 @@ fn test_first_recorded_match_atomically_rewards_both_referral_accounts() {
             referred_id: 20,
             referrer_id: 10,
             reward_amount: REFERRAL_REWARD,
+            referred_net: REFERRAL_REWARD,
+            referrer_net: REFERRAL_REWARD,
         }]
     );
     assert_eq!(
@@ -415,6 +469,121 @@ fn test_first_recorded_match_atomically_rewards_both_referral_accounts() {
         (Some(outcome.match_id), Some(100), Some(NOW))
     );
     assert_eq!(fixture.context_count(), 0);
+}
+
+#[test]
+fn test_referral_rewards_withhold_scaled_bankruptcy_penalty_and_taxes() {
+    let fixture = Fixture::new();
+    // Referrer 10 has one penalty game left, referrer 11 six, referred 21 is
+    // vanity taxable, and referred 20 is unlisted.
+    enroll_then_register(&fixture, 10, 20, GUILD);
+    enroll_then_register(&fixture, 11, 21, GUILD);
+    fixture.add_player(30, GUILD);
+    fixture.set_penalty_games(10, GUILD, 1);
+    fixture.set_penalty_games(11, GUILD, 6);
+    let vanity = BTreeSet::from([21]);
+    let empty = BTreeSet::new();
+    let mut taxed = request(&[20, 21], &[30], GUILD, 1_101);
+    taxed.deductions = deduction_policy(&vanity, &empty);
+    let outcome = fixture
+        .repository
+        .record_match_with_referrals(taxed)
+        .expect("record taxed referral match");
+    // 100 JC basis at 5% per outstanding game: one game withholds 5, six
+    // games 30, and the 10% vanity share is 10.
+    assert_eq!(
+        outcome.rewards,
+        [
+            ReferralReward {
+                referred_id: 20,
+                referrer_id: 10,
+                reward_amount: 100,
+                referred_net: 100,
+                referrer_net: 95,
+            },
+            ReferralReward {
+                referred_id: 21,
+                referrer_id: 11,
+                reward_amount: 100,
+                referred_net: 90,
+                referrer_net: 70,
+            },
+        ]
+    );
+    assert_eq!(
+        outcome.referral_jc_changes,
+        BTreeMap::from([(10, 95), (11, 70), (20, 100), (21, 90)])
+    );
+    for (discord_id, expected) in [(10, 98), (11, 73), (20, 103), (21, 93)] {
+        assert_eq!(
+            fixture.repository.balance(discord_id, Some(GUILD)).unwrap(),
+            Some(expected),
+            "player {discord_id}"
+        );
+    }
+    assert_eq!(
+        fixture.all_ledger_entries(),
+        vec![
+            (20, "referral_reward".to_owned(), 100),
+            (10, "referral_reward".to_owned(), 100),
+            (10, "referral_reward".to_owned(), -5),
+            (21, "referral_reward".to_owned(), 100),
+            (21, "vanity_tax".to_owned(), -10),
+            (11, "referral_reward".to_owned(), 100),
+            (11, "referral_reward".to_owned(), -30),
+        ]
+    );
+    assert_eq!(
+        fixture
+            .repository
+            .match_jc_changes_json(outcome.match_id, Some(GUILD))
+            .unwrap()
+            .as_deref(),
+        Some(
+            "{\"10\":{\"referral\":95},\"11\":{\"referral\":70},\
+             \"20\":{\"referral\":100},\"21\":{\"referral\":90}}"
+        )
+    );
+    assert_eq!(fixture.context_count(), 0);
+
+    // A retry reconstructs the same net projection from the ledger.
+    let retry = fixture
+        .repository
+        .record_match_with_referrals(request(&[20, 21], &[30], GUILD, 1_101))
+        .expect("retry taxed referral match");
+    assert!(!retry.inserted);
+    assert_eq!(retry.rewards, outcome.rewards);
+    assert_eq!(retry.referral_jc_changes, outcome.referral_jc_changes);
+    assert_eq!(fixture.all_ledger_entries().len(), 7);
+}
+
+#[test]
+fn test_referral_reward_withholds_the_low_priority_share() {
+    let fixture = Fixture::new();
+    enroll_then_register(&fixture, 12, 22, GUILD);
+    fixture.add_player(31, GUILD);
+    let low_priority = BTreeSet::from([12]);
+    let empty = BTreeSet::new();
+    let mut taxed = request(&[22], &[31], GUILD, 1_102);
+    taxed.deductions = deduction_policy(&empty, &low_priority);
+    let outcome = fixture
+        .repository
+        .record_match_with_referrals(taxed)
+        .expect("record low-priority referral match");
+    assert_eq!(outcome.rewards[0].referrer_net, 75);
+    assert_eq!(outcome.rewards[0].referred_net, 100);
+    assert_eq!(
+        fixture.repository.balance(12, Some(GUILD)).unwrap(),
+        Some(78)
+    );
+    assert_eq!(
+        fixture.all_ledger_entries(),
+        vec![
+            (22, "referral_reward".to_owned(), 100),
+            (12, "referral_reward".to_owned(), 100),
+            (12, "low_priority_tax".to_owned(), -25),
+        ]
+    );
 }
 
 #[test]
@@ -634,11 +803,15 @@ fn test_same_match_settles_multiple_referrals_independently() {
                 referred_id: 82,
                 referrer_id: 80,
                 reward_amount: 100,
+                referred_net: 100,
+                referrer_net: 100,
             },
             ReferralReward {
                 referred_id: 83,
                 referrer_id: 81,
                 reward_amount: 100,
+                referred_net: 100,
+                referrer_net: 100,
             },
         ]
     );

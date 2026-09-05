@@ -16,6 +16,10 @@ use serde_json::json;
 use thiserror::Error;
 
 use crate::open_runtime_connection;
+use cama_db_core::profit_deductions::{
+    DeductionLedgerContext, ProfitDeductionPolicy, compute_profit_deductions,
+    debit_profit_deductions,
+};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PlayerTriviaPlayer {
@@ -291,7 +295,10 @@ pub struct PlayerTriviaQuestion {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlayerTriviaSettlement {
     pub is_correct: bool,
+    /// Net JC credited after the bankruptcy, vanity, and low-priority shares.
     pub reward: i64,
+    /// Everything withheld from this answer's gross reward.
+    pub withheld: i64,
     pub score: i64,
     pub jc_earned: i64,
     pub completed: bool,
@@ -742,6 +749,7 @@ impl PlayerTriviaRepository {
         selected_index: usize,
         reward_if_correct: i64,
         answered_at: i64,
+        deduction_policy: &ProfitDeductionPolicy<'_>,
     ) -> Result<Option<PlayerTriviaSettlement>, PlayerTriviaRepositoryError> {
         if reward_if_correct < 0 {
             return Err(PlayerTriviaRepositoryError::NegativeReward);
@@ -805,7 +813,15 @@ impl PlayerTriviaRepository {
             return Ok(None);
         }
         let is_correct = selected_index as i64 == correct_index;
-        let reward = if is_correct { reward_if_correct } else { 0 };
+        let gross_reward = if is_correct { reward_if_correct } else { 0 };
+        let deductions = compute_profit_deductions(
+            &transaction,
+            guild_id,
+            discord_id,
+            gross_reward,
+            deduction_policy,
+        )?;
+        let reward = deductions.net();
         let changed = transaction.execute(
             "UPDATE player_trivia_questions SET selected_index = ?1, is_correct = ?2,
                     reward = ?3, answered_at = ?4
@@ -835,7 +851,7 @@ impl PlayerTriviaRepository {
             return Err(PlayerTriviaRepositoryError::MissingPlayer);
         };
         let new_balance = balance.saturating_add(reward);
-        if reward > 0 {
+        if gross_reward > 0 {
             set_ledger_context(
                 &transaction,
                 discord_id,
@@ -847,7 +863,8 @@ impl PlayerTriviaRepository {
                     "category": category,
                     "selected_index": selected_index,
                     "correct_index": correct_index,
-                    "reward": reward,
+                    "reward": gross_reward,
+                    "withheld": deductions.total(),
                     "answered_at": answered_at,
                 })
                 .to_string(),
@@ -855,9 +872,23 @@ impl PlayerTriviaRepository {
             transaction.execute(
                 "UPDATE players SET jopacoin_balance = ?1, updated_at = CURRENT_TIMESTAMP
                  WHERE guild_id = ?2 AND discord_id = ?3",
-                params![new_balance, guild_id, discord_id],
+                params![balance.saturating_add(gross_reward), guild_id, discord_id],
             )?;
             clear_ledger_context(&transaction)?;
+            if !debit_profit_deductions(
+                &transaction,
+                guild_id,
+                discord_id,
+                deductions,
+                &DeductionLedgerContext {
+                    source: "player_trivia",
+                    related_type: Some("player_trivia_session"),
+                    related_id: Some(session_id),
+                    reason: "player trivia reward",
+                },
+            )? {
+                return Err(PlayerTriviaRepositoryError::MissingPlayer);
+            }
         }
         let score = old_score + i64::from(is_correct);
         let jc_earned = old_jc.saturating_add(reward);
@@ -879,6 +910,7 @@ impl PlayerTriviaRepository {
         Ok(Some(PlayerTriviaSettlement {
             is_correct,
             reward,
+            withheld: deductions.total(),
             score,
             jc_earned,
             completed,

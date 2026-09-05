@@ -20,6 +20,7 @@ use cama_db::match_correction_repository::{
     BetCorrectionOptions, ClaimState, CoreCorrectionRequest, MatchCorrectionError,
     MatchCorrectionRepository, MatchSide, OPENSKILL_REPLAY_ALGORITHM_VERSION,
 };
+use cama_domain::bankruptcy::BankruptcyPenaltyPolicy;
 use cama_domain::openskill::{CamaOpenSkillSystem, OpenSkillError};
 use cama_domain::rating::CamaRatingSystem;
 use thiserror::Error;
@@ -77,6 +78,7 @@ impl AdminMatchCorrectionRuntime {
             rating,
             new_player_mmr_discount: config.migration.new_player_mmr_discount,
             house_payout_multiplier: config.values.house_payout_multiplier,
+            bankruptcy_penalty_rate_per_game: config.values.bankruptcy_penalty_rate_per_game,
             vanity_tax_rate: config.values.vanity_tax_rate,
             low_priority_tax_rate: config.values.low_priority_profit_tax_rate,
             rewards,
@@ -130,6 +132,7 @@ struct ProductionAdminMatchCorrectionControl {
     rating: CamaRatingSystem,
     new_player_mmr_discount: i32,
     house_payout_multiplier: f64,
+    bankruptcy_penalty_rate_per_game: f64,
     vanity_tax_rate: f64,
     low_priority_tax_rate: f64,
     rewards: Arc<dyn CorrectionWinRewardControl>,
@@ -146,6 +149,7 @@ impl Clone for ProductionAdminMatchCorrectionControl {
             rating: self.rating,
             new_player_mmr_discount: self.new_player_mmr_discount,
             house_payout_multiplier: self.house_payout_multiplier,
+            bankruptcy_penalty_rate_per_game: self.bankruptcy_penalty_rate_per_game,
             vanity_tax_rate: self.vanity_tax_rate,
             low_priority_tax_rate: self.low_priority_tax_rate,
             rewards: Arc::clone(&self.rewards),
@@ -431,6 +435,9 @@ impl ProductionAdminMatchCorrectionControl {
                 BetCorrectionOptions {
                     pool_mode: context.pool_betting_mode,
                     house_payout_multiplier: self.house_payout_multiplier,
+                    bankruptcy: Some(BankruptcyPenaltyPolicy {
+                        rate_per_game: self.bankruptcy_penalty_rate_per_game,
+                    }),
                     vanity_tax_rate: self.vanity_tax_rate,
                     vanity_taxable_ids: &taxable,
                     low_priority_tax_rate: self.low_priority_tax_rate,
