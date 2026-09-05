@@ -1061,7 +1061,7 @@ async fn live_slash_creation_persists_and_restart_reuses_the_existing_discord_me
 }
 
 #[tokio::test]
-async fn slash_join_uses_only_the_private_confirmation_message() {
+async fn slash_join_posts_the_same_thread_line_as_a_sword_react() {
     let database = database_with_players(&[(10, "Creator"), (20, "Joiner")]);
     let transport = Arc::new(RecordingTransport::default());
     let provider = provider_for(&database, transport.clone());
@@ -1096,16 +1096,23 @@ async fn slash_join_uses_only_the_private_confirmation_message() {
         "✅ Joined 🍽️ All You Can Feed!"
     );
     assert!(captured.followups[0].ephemeral);
-    assert_eq!(transport.sent_messages().len(), messages_before_join);
-    // Both the creator (from /lobby) and the joiner (from /join) are
-    // explicitly subscribed to the thread, not just pinged into it.
-    assert_eq!(
+    // /join still gets its private ephemeral confirmation, but now also
+    // posts the same ping-suppressed "joined." mention into the thread as
+    // /lobby and a sword react do -- that mention is what silently
+    // subscribes the joiner to the thread, so no explicit thread-member
+    // call is needed for any join path any more.
+    let sent = transport.sent_messages();
+    assert_eq!(sent.len(), messages_before_join + 1);
+    let join_message = &sent[messages_before_join].message;
+    assert_eq!(join_message.response.content, "✅ <@20> joined.");
+    assert_eq!(join_message.allowed_mentions, DiscordAllowedMentions::None);
+    assert!(
         transport
             .state
             .lock()
             .expect("transport state")
-            .thread_members,
-        [(21_000, 10), (21_000, 20)]
+            .thread_members
+            .is_empty()
     );
     assert_eq!(observer.confirmed.lock().expect("join observer").len(), 2);
 }
@@ -1139,24 +1146,38 @@ async fn join_during_an_archived_thread_spell_still_subscribes_the_joiner() {
         .await
         .expect("raw sword join");
 
-    // The join announcement is what auto-unarchives the thread, so it must be
-    // sent before the explicit thread subscription for the add to succeed.
+    // The ping-suppressed @mention is both what auto-unarchives the thread
+    // and what subscribes the joiner to it (Discord treats a mention as an
+    // organic join), so it must still be posted into the archived thread
+    // and no explicit thread-member call may be attempted -- that API is
+    // rejected on an archived thread and would also print its own "X added
+    // Y to the thread" system line.
+    // /lobby already posted the creator's own "<@10> joined." line before
+    // the archive, so look specifically for the sword joiner's.
+    let join_lines = transport
+        .sent_messages()
+        .into_iter()
+        .filter(|sent| {
+            sent.channel_id == thread_id && sent.message.response.content == "✅ <@20> joined."
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        join_lines.len(),
+        1,
+        "the joiner's announcement must reach the archived thread exactly once"
+    );
+    assert_eq!(
+        join_lines[0].message.allowed_mentions,
+        DiscordAllowedMentions::None
+    );
+    let state = transport.state.lock().expect("transport state");
     assert!(
-        transport
-            .sent_messages()
-            .iter()
-            .any(|sent| sent.channel_id == thread_id
-                && sent.message.response.content.ends_with(" joined.")),
-        "the join announcement must reach the archived thread"
+        !state.archived_threads.contains(&thread_id),
+        "posting the join line must auto-unarchive the thread"
     );
     assert!(
-        transport
-            .state
-            .lock()
-            .expect("transport state")
-            .thread_members
-            .contains(&(thread_id, 20)),
-        "a joiner during an archived spell must still be subscribed to the thread"
+        state.thread_members.is_empty(),
+        "subscription rides on the mention; no explicit thread-member call may be made"
     );
 }
 
@@ -1650,11 +1671,18 @@ async fn raw_sword_routes_are_kind_scoped_dual_seat_persistent_and_mention_safe(
     );
     for sent in transport.sent_messages() {
         if sent.message.response.content.contains("<@") {
-            let DiscordAllowedMentions::Users(users) = sent.message.allowed_mentions else {
-                panic!("message containing a user tag must carry an explicit user allowlist");
-            };
-            assert!(!users.is_empty());
-            assert!(users.iter().all(|user_id| [10, 20].contains(user_id)));
+            match sent.message.allowed_mentions {
+                DiscordAllowedMentions::Users(ref users) => {
+                    assert!(!users.is_empty());
+                    assert!(users.iter().all(|user_id| [10, 20].contains(user_id)));
+                }
+                DiscordAllowedMentions::None => {}
+                DiscordAllowedMentions::Default => {
+                    panic!(
+                        "message containing a user tag must carry an explicit user allowlist or suppress mentions entirely"
+                    );
+                }
+            }
         }
     }
 }
@@ -2330,8 +2358,9 @@ async fn live_readycheck_reaches_quorum_once_with_explicit_user_allowlists() {
                 .content
                 .ends_with("You can `/shuffle` now; only ready players will be included.")
     }));
-    assert!(sent.iter().filter(|sent| sent.message.response.content.contains("<@")) .all(
+    assert!(sent.iter().filter(|sent| sent.message.response.content.contains("<@")).all(
         |sent| matches!(sent.message.allowed_mentions, DiscordAllowedMentions::Users(ref users) if !users.is_empty())
+            || sent.message.allowed_mentions == DiscordAllowedMentions::None
     ));
 }
 
@@ -3508,11 +3537,20 @@ async fn successful_bell_shortcut_advertises_in_the_persisted_origin_channel() {
     );
 }
 
+// The thread "joined." line is always a bare, ping-suppressed @mention now
+// (Discord resolves it to the live display name client-side -- see
+// slash_join_posts_the_same_thread_line_as_a_sword_react), so these
+// exercise the display-name fallback chain through the join observer's
+// ConfirmedLobbyJoin.player_display_name instead of the thread message text.
 #[tokio::test]
-async fn lobby_command_join_uses_interaction_display_name_in_thread_announcement() {
+async fn lobby_command_join_uses_interaction_display_name_for_the_confirmed_join_event() {
     let database = database_with_players(&[(10, ".pf")]);
     let transport = Arc::new(RecordingTransport::default());
     let provider = provider_for(&database, transport.clone());
+    let observer = Arc::new(RecordingJoinObserver::default());
+    provider
+        .set_join_observer(observer.clone())
+        .expect("install join observer");
 
     dispatch_command(
         &provider,
@@ -3523,17 +3561,13 @@ async fn lobby_command_join_uses_interaction_display_name_in_thread_announcement
     )
     .await;
 
-    let announcements = transport
-        .sent_messages()
-        .into_iter()
-        .map(|sent| sent.message.response.content)
-        .filter(|content| content.ends_with(" joined."))
-        .collect::<Vec<_>>();
-    assert_eq!(announcements, ["✅ perry feng joined."]);
+    let confirmed = observer.confirmed.lock().expect("join observer");
+    assert_eq!(confirmed.len(), 1);
+    assert_eq!(confirmed[0].player_display_name, "perry feng");
 }
 
 #[tokio::test]
-async fn raw_sword_join_uses_server_nickname_in_thread_announcement() {
+async fn raw_sword_join_uses_server_nickname_for_the_confirmed_join_event() {
     let database = database_with_players(&[(10, "Creator"), (20, "leafael.")]);
     let transport = Arc::new(RecordingTransport::default());
     transport.set_member(
@@ -3548,6 +3582,10 @@ async fn raw_sword_join_uses_server_nickname_in_thread_announcement() {
         },
     );
     let provider = provider_for(&database, transport.clone());
+    let observer = Arc::new(RecordingJoinObserver::default());
+    provider
+        .set_join_observer(observer.clone())
+        .expect("install join observer");
     dispatch_command(
         &provider,
         "lobby",
@@ -3576,11 +3614,19 @@ async fn raw_sword_join_uses_server_nickname_in_thread_announcement() {
         .await
         .expect("raw join");
 
+    let confirmed = observer.confirmed.lock().expect("join observer");
+    assert_eq!(
+        confirmed
+            .iter()
+            .find(|event| event.player_id == 20)
+            .map(|event| event.player_display_name.as_str()),
+        Some("Leaf | Atharva")
+    );
     assert!(
         transport
             .sent_messages()
             .iter()
-            .any(|sent| { sent.message.response.content == "✅ Leaf | Atharva joined." })
+            .any(|sent| sent.message.response.content == "✅ <@20> joined.")
     );
 }
 
@@ -3589,6 +3635,10 @@ async fn raw_sword_join_falls_back_to_stored_name_when_discord_name_is_unavailab
     let database = database_with_players(&[(10, "Creator"), (20, "leafael.")]);
     let transport = Arc::new(RecordingTransport::default());
     let provider = provider_for(&database, transport.clone());
+    let observer = Arc::new(RecordingJoinObserver::default());
+    provider
+        .set_join_observer(observer.clone())
+        .expect("install join observer");
     dispatch_command(
         &provider,
         "lobby",
@@ -3605,7 +3655,6 @@ async fn raw_sword_join_falls_back_to_stored_name_when_discord_name_is_unavailab
             .0,
     )
     .expect("Discord lobby message");
-    let sent_before = transport.sent_messages().len();
     let mut reaction = raw_sword(RawReactionKind::Add, lobby_message_id, 20, "ignored");
     reaction.actor_display_name = None;
 
@@ -3615,13 +3664,14 @@ async fn raw_sword_join_falls_back_to_stored_name_when_discord_name_is_unavailab
         .await
         .expect("raw join");
 
-    let sent = transport.sent_messages();
-    let announcements = sent[sent_before..]
-        .iter()
-        .map(|sent| sent.message.response.content.as_str())
-        .filter(|content| content.ends_with(" joined."))
-        .collect::<Vec<_>>();
-    assert_eq!(announcements, ["✅ leafael. joined."]);
+    let confirmed = observer.confirmed.lock().expect("join observer");
+    assert_eq!(
+        confirmed
+            .iter()
+            .find(|event| event.player_id == 20)
+            .map(|event| event.player_display_name.as_str()),
+        Some("leafael.")
+    );
 }
 
 #[tokio::test]
