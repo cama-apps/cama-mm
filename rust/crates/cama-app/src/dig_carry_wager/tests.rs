@@ -12,7 +12,7 @@ const ACTOR: i64 = 20_001;
 const GUILD: i64 = 12_345;
 
 #[test]
-fn persisted_boss_boundary_uses_only_canonical_statuses_and_boundaries() {
+fn persisted_boss_boundary_uses_only_canonical_boundaries() {
     assert_eq!(
         current_boss_boundary_from_json(24, r#"{"25":"active"}"#),
         Some(25)
@@ -22,14 +22,72 @@ fn persisted_boss_boundary_uses_only_canonical_statuses_and_boundaries() {
         Some(25)
     );
     assert_eq!(
-        current_boss_boundary_from_json(24, r#"{"25":"pending"}"#),
-        None,
-        "unknown statuses must not send /dig go into a boss service that rejects them"
-    );
-    assert_eq!(
         current_boss_boundary_from_json(12, r#"{"13":"active"}"#),
         None,
         "noncanonical boundaries must not be treated as boss encounters"
+    );
+    assert_eq!(
+        current_boss_boundary_from_json(24, r#"{"25":"defeated"}"#),
+        None
+    );
+    assert_eq!(
+        current_boss_boundary_from_json(49, r#"{"25":"defeated"}"#),
+        Some(50)
+    );
+}
+
+#[test]
+fn persisted_boss_boundary_treats_everything_but_defeated_as_unfinished() {
+    // The dig gate parks a player on every boundary whose status is not
+    // "defeated", so each of these shapes must open the encounter.
+    assert_eq!(
+        current_boss_boundary_from_json(24, "{}"),
+        Some(25),
+        "a fresh tunnel has no progress entries yet"
+    );
+    assert_eq!(
+        current_boss_boundary_from_json(24, r#"{"25":{"boss_id":"grothak"}}"#),
+        Some(25),
+        "an entry without a status field"
+    );
+    assert_eq!(
+        current_boss_boundary_from_json(24, r#"{"25":"pending"}"#),
+        Some(25),
+        "a noncanonical status"
+    );
+    for invalid in ["", "null", "[]", "not json"] {
+        assert_eq!(
+            current_boss_boundary_from_json(24, invalid),
+            Some(25),
+            "invalid progress {invalid:?} reads as empty, like the gate"
+        );
+    }
+
+    let regular_cleared = |pinnacle: &str| {
+        format!(
+            r#"{{"25":"defeated","50":"defeated","75":"defeated","100":"defeated","150":"defeated","200":"defeated","275":"defeated"{pinnacle}}}"#
+        )
+    };
+    assert_eq!(
+        current_boss_boundary_from_json(349, &regular_cleared("")),
+        Some(350)
+    );
+    assert_eq!(
+        current_boss_boundary_from_json(349, &regular_cleared(r#","350":"pending""#)),
+        Some(350)
+    );
+    assert_eq!(
+        current_boss_boundary_from_json(349, &regular_cleared(r#","350":{"boss_id":"x"}"#)),
+        Some(350)
+    );
+    assert_eq!(
+        current_boss_boundary_from_json(349, &regular_cleared(r#","350":"defeated""#)),
+        None
+    );
+    assert_eq!(
+        current_boss_boundary_from_json(348, &regular_cleared("")),
+        None,
+        "one step short of the pinnacle park depth"
     );
 }
 

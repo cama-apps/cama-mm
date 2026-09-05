@@ -584,8 +584,12 @@ pub fn current_boss_boundary(snapshot: &CarryTunnelSnapshot) -> Option<i64> {
 /// same status and boundary rules as [`current_boss_boundary`].
 #[must_use]
 pub fn current_boss_boundary_from_json(depth: i64, raw_progress: &str) -> Option<i64> {
-    let progress = serde_json::from_str::<Value>(raw_progress).ok()?;
-    let progress = progress.as_object()?;
+    // Invalid or non-object progress reads as empty, matching the dig gate and
+    // the carry repository's `json_valid` fallback.
+    let progress = serde_json::from_str::<Value>(raw_progress)
+        .ok()
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
     current_boss_boundary_for(depth, |boundary| {
         let value = progress.get(&boundary.to_string())?;
         value
@@ -603,19 +607,10 @@ fn current_boss_boundary_for<'a>(
             return Some(boundary);
         }
     }
-    if depth < PINNACLE_BOUNDARY - 1 {
-        return None;
-    }
-    let all_regular_defeated = REGULAR_BOUNDARIES
-        .iter()
-        .all(|boundary| status_for(*boundary) == Some("defeated"));
-    let pinnacle_status = status_for(PINNACLE_BOUNDARY);
-    (all_regular_defeated
-        && matches!(
-            pinnacle_status,
-            None | Some("active" | "phase1_defeated" | "phase2_defeated")
-        ))
-    .then_some(PINNACLE_BOUNDARY)
+    // Reaching this point at pinnacle depth means every regular boundary was
+    // observed defeated above.
+    (depth >= PINNACLE_BOUNDARY - 1 && is_unfinished_status(status_for(PINNACLE_BOUNDARY)))
+        .then_some(PINNACLE_BOUNDARY)
 }
 
 #[must_use]
@@ -649,11 +644,11 @@ pub fn active_pinnacle_carry(
     })
 }
 
+/// The dig gate parks a player at every boundary whose status is not
+/// `defeated`, so the encounter must open for a missing entry, an entry
+/// without a status field, and any unrecognised status alike.
 fn is_unfinished_status(status: Option<&str>) -> bool {
-    matches!(
-        status,
-        Some("active" | "phase1_defeated" | "phase2_defeated")
-    )
+    status != Some("defeated")
 }
 
 const fn risk_name(risk_tier: RiskTier) -> &'static str {
