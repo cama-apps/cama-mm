@@ -1,5 +1,7 @@
 use crate::test_support::copy_migrated_database as initialize_or_migrate;
 use cama_db::curfew::CurfewRepository;
+use cama_domain::curfew::CurfewMode;
+
 use chrono::{TimeZone, Utc};
 
 use super::*;
@@ -60,10 +62,13 @@ mod add_window {
         let (dir, service, repository) = fixture();
         insert_player(&repository, &dir, 1);
 
-        let window = service
-            .add_window(1, GUILD, "work", 9, 0, 17, 0, None, None)
+        let change = service
+            .add_window(1, GUILD, "work", 9, 0, 17, 0, None, None, None, Utc::now())
             .unwrap();
 
+        let CurfewWindowChange::Applied(window) = change else {
+            panic!("expected an immediate apply, got {change:?}");
+        };
         assert_eq!(window.name, "work");
         assert_eq!(
             repository.list_for_player(1, GUILD).unwrap()[0].name,
@@ -76,10 +81,25 @@ mod add_window {
         let (dir, service, repository) = fixture();
         insert_player(&repository, &dir, 1);
 
-        let window = service
-            .add_window(1, GUILD, "  work  ", 9, 0, 17, 0, None, None)
+        let change = service
+            .add_window(
+                1,
+                GUILD,
+                "  work  ",
+                9,
+                0,
+                17,
+                0,
+                None,
+                None,
+                None,
+                Utc::now(),
+            )
             .unwrap();
 
+        let CurfewWindowChange::Applied(window) = change else {
+            panic!("expected an immediate apply, got {change:?}");
+        };
         assert_eq!(window.name, "work");
     }
 
@@ -89,7 +109,7 @@ mod add_window {
         insert_player(&repository, &dir, 1);
 
         let error = service
-            .add_window(1, GUILD, "   ", 9, 0, 17, 0, None, None)
+            .add_window(1, GUILD, "   ", 9, 0, 17, 0, None, None, None, Utc::now())
             .unwrap_err();
         assert!(matches!(error, CurfewServiceError::EmptyName));
     }
@@ -101,7 +121,19 @@ mod add_window {
 
         let long_name = "x".repeat(41);
         let error = service
-            .add_window(1, GUILD, &long_name, 9, 0, 17, 0, None, None)
+            .add_window(
+                1,
+                GUILD,
+                &long_name,
+                9,
+                0,
+                17,
+                0,
+                None,
+                None,
+                None,
+                Utc::now(),
+            )
             .unwrap_err();
         assert!(matches!(error, CurfewServiceError::NameTooLong));
     }
@@ -112,7 +144,7 @@ mod add_window {
         insert_player(&repository, &dir, 1);
 
         let error = service
-            .add_window(1, GUILD, "work", 24, 0, 17, 0, None, None)
+            .add_window(1, GUILD, "work", 24, 0, 17, 0, None, None, None, Utc::now())
             .unwrap_err();
         assert!(matches!(error, CurfewServiceError::InvalidHour));
     }
@@ -123,7 +155,7 @@ mod add_window {
         insert_player(&repository, &dir, 1);
 
         let error = service
-            .add_window(1, GUILD, "work", 9, 0, 9, 0, None, None)
+            .add_window(1, GUILD, "work", 9, 0, 9, 0, None, None, None, Utc::now())
             .unwrap_err();
         assert!(matches!(error, CurfewServiceError::EqualStartAndEnd));
     }
@@ -134,9 +166,44 @@ mod add_window {
         insert_player(&repository, &dir, 1);
 
         let error = service
-            .add_window(1, GUILD, "work", 9, 0, 17, 0, Some("Not/AZone"), None)
+            .add_window(
+                1,
+                GUILD,
+                "work",
+                9,
+                0,
+                17,
+                0,
+                Some("Not/AZone"),
+                None,
+                None,
+                Utc::now(),
+            )
             .unwrap_err();
         assert!(matches!(error, CurfewServiceError::InvalidTimezone(_)));
+    }
+
+    #[test]
+    fn test_add_window_rejects_unknown_mode() {
+        let (dir, service, repository) = fixture();
+        insert_player(&repository, &dir, 1);
+
+        let error = service
+            .add_window(
+                1,
+                GUILD,
+                "work",
+                9,
+                0,
+                17,
+                0,
+                None,
+                None,
+                Some("chaotic"),
+                Utc::now(),
+            )
+            .unwrap_err();
+        assert!(matches!(error, CurfewServiceError::InvalidMode(_)));
     }
 
     #[test]
@@ -144,7 +211,19 @@ mod add_window {
         let (_dir, service, _repository) = fixture();
 
         let error = service
-            .add_window(999, GUILD, "work", 9, 0, 17, 0, None, None)
+            .add_window(
+                999,
+                GUILD,
+                "work",
+                9,
+                0,
+                17,
+                0,
+                None,
+                None,
+                None,
+                Utc::now(),
+            )
             .unwrap_err();
         assert!(matches!(error, CurfewServiceError::PlayerNotRegistered));
     }
@@ -154,16 +233,157 @@ mod add_window {
         let (dir, service, repository) = fixture();
         insert_player(&repository, &dir, 1);
         service
-            .add_window(1, GUILD, "work", 9, 0, 17, 0, None, None)
+            .add_window(1, GUILD, "work", 9, 0, 17, 0, None, None, None, Utc::now())
             .unwrap();
 
         service
-            .add_window(1, GUILD, "work", 8, 0, 16, 0, None, None)
+            .add_window(1, GUILD, "work", 8, 0, 16, 0, None, None, None, Utc::now())
             .unwrap();
 
         let windows = repository.list_for_player(1, GUILD).unwrap();
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].start_hour, 8);
+    }
+
+    #[test]
+    fn test_add_window_defaults_to_default_mode() {
+        let (dir, service, repository) = fixture();
+        insert_player(&repository, &dir, 1);
+
+        service
+            .add_window(1, GUILD, "work", 9, 0, 17, 0, None, None, None, Utc::now())
+            .unwrap();
+
+        assert_eq!(
+            repository.list_for_player(1, GUILD).unwrap()[0].mode,
+            CurfewMode::Default
+        );
+    }
+
+    #[test]
+    fn test_add_window_accepts_explicit_mode() {
+        let (dir, service, repository) = fixture();
+        insert_player(&repository, &dir, 1);
+
+        service
+            .add_window(
+                1,
+                GUILD,
+                "work",
+                9,
+                0,
+                17,
+                0,
+                None,
+                None,
+                Some("strict"),
+                Utc::now(),
+            )
+            .unwrap();
+        assert_eq!(
+            repository.list_for_player(1, GUILD).unwrap()[0].mode,
+            CurfewMode::Strict
+        );
+    }
+
+    #[test]
+    fn test_editing_a_strict_window_stages_instead_of_applying_immediately() {
+        let (dir, service, repository) = fixture();
+        insert_player(&repository, &dir, 1);
+        service
+            .add_window(
+                1,
+                GUILD,
+                "work",
+                9,
+                0,
+                17,
+                0,
+                Some("America/New_York"),
+                None,
+                Some("strict"),
+                Utc::now(),
+            )
+            .unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+
+        let change = service
+            .add_window(
+                1,
+                GUILD,
+                "work",
+                8,
+                0,
+                16,
+                0,
+                Some("America/New_York"),
+                None,
+                Some("strict"),
+                now,
+            )
+            .unwrap();
+
+        let CurfewWindowChange::Staged {
+            window,
+            effective_at,
+        } = change
+        else {
+            panic!("expected the edit to be staged, got {change:?}");
+        };
+        assert_eq!(window.start_hour, 8);
+        assert!(effective_at > now);
+
+        // Today's committed window is untouched.
+        let live = repository.get_window(1, GUILD, "work").unwrap().unwrap();
+        assert_eq!(live.start_hour, 9);
+    }
+
+    #[test]
+    fn test_editing_a_default_mode_window_still_applies_immediately() {
+        let (dir, service, repository) = fixture();
+        insert_player(&repository, &dir, 1);
+        service
+            .add_window(1, GUILD, "work", 9, 0, 17, 0, None, None, None, Utc::now())
+            .unwrap();
+
+        let change = service
+            .add_window(1, GUILD, "work", 8, 0, 16, 0, None, None, None, Utc::now())
+            .unwrap();
+
+        assert!(matches!(change, CurfewWindowChange::Applied(_)));
+        assert_eq!(
+            repository
+                .get_window(1, GUILD, "work")
+                .unwrap()
+                .unwrap()
+                .start_hour,
+            8
+        );
+    }
+
+    #[test]
+    fn test_creating_a_brand_new_strict_window_applies_immediately() {
+        let (dir, service, repository) = fixture();
+        insert_player(&repository, &dir, 1);
+
+        let change = service
+            .add_window(
+                1,
+                GUILD,
+                "work",
+                9,
+                0,
+                17,
+                0,
+                None,
+                None,
+                Some("strict"),
+                Utc::now(),
+            )
+            .unwrap();
+
+        assert!(matches!(change, CurfewWindowChange::Applied(_)));
+        assert!(repository.get_window(1, GUILD, "work").unwrap().is_some());
     }
 }
 
@@ -175,17 +395,55 @@ mod remove_and_list_windows {
         let (dir, service, repository) = fixture();
         insert_player(&repository, &dir, 1);
         service
-            .add_window(1, GUILD, "work", 9, 0, 17, 0, None, None)
+            .add_window(1, GUILD, "work", 9, 0, 17, 0, None, None, None, Utc::now())
             .unwrap();
 
-        assert!(service.remove_window(1, GUILD, "work").unwrap());
+        assert_eq!(
+            service.remove_window(1, GUILD, "work", Utc::now()).unwrap(),
+            CurfewRemoveOutcome::Removed
+        );
         assert!(service.list_windows(1, GUILD).unwrap().is_empty());
     }
 
     #[test]
     fn test_remove_missing_window() {
         let (_dir, service, _repository) = fixture();
-        assert!(!service.remove_window(1, GUILD, "nope").unwrap());
+        assert_eq!(
+            service.remove_window(1, GUILD, "nope", Utc::now()).unwrap(),
+            CurfewRemoveOutcome::NotFound
+        );
+    }
+
+    #[test]
+    fn test_removing_a_strict_window_stages_the_delete_instead() {
+        let (dir, service, repository) = fixture();
+        insert_player(&repository, &dir, 1);
+        service
+            .add_window(
+                1,
+                GUILD,
+                "work",
+                9,
+                0,
+                17,
+                0,
+                Some("America/New_York"),
+                None,
+                Some("strict"),
+                Utc::now(),
+            )
+            .unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+
+        let outcome = service.remove_window(1, GUILD, "work", now).unwrap();
+
+        let CurfewRemoveOutcome::Staged { effective_at } = outcome else {
+            panic!("expected the delete to be staged, got {outcome:?}");
+        };
+        assert!(effective_at > now);
+        // The window is still live today — a strict curfew can't be
+        // deleted out from under itself the same day it would fire.
+        assert!(repository.get_window(1, GUILD, "work").unwrap().is_some());
     }
 
     #[test]
@@ -193,10 +451,10 @@ mod remove_and_list_windows {
         let (dir, service, repository) = fixture();
         insert_player(&repository, &dir, 1);
         service
-            .add_window(1, GUILD, "work", 9, 0, 17, 0, None, None)
+            .add_window(1, GUILD, "work", 9, 0, 17, 0, None, None, None, Utc::now())
             .unwrap();
         service
-            .add_window(1, GUILD, "sleep", 22, 0, 6, 0, None, None)
+            .add_window(1, GUILD, "sleep", 22, 0, 6, 0, None, None, None, Utc::now())
             .unwrap();
 
         let names: std::collections::BTreeSet<String> = service
@@ -209,6 +467,72 @@ mod remove_and_list_windows {
             names,
             std::collections::BTreeSet::from(["work".to_owned(), "sleep".to_owned()])
         );
+    }
+}
+
+mod pending_changes {
+    use super::*;
+
+    #[test]
+    fn test_apply_due_pending_changes_commits_a_staged_strict_edit() {
+        let (dir, service, repository) = fixture();
+        insert_player(&repository, &dir, 1);
+        service
+            .add_window(
+                1,
+                GUILD,
+                "work",
+                9,
+                0,
+                17,
+                0,
+                Some("America/New_York"),
+                None,
+                Some("strict"),
+                Utc::now(),
+            )
+            .unwrap();
+        let staged_at = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+        service
+            .add_window(
+                1,
+                GUILD,
+                "work",
+                8,
+                0,
+                16,
+                0,
+                Some("America/New_York"),
+                None,
+                Some("strict"),
+                staged_at,
+            )
+            .unwrap();
+        assert!(!service.pending_changes(1, GUILD).unwrap().is_empty());
+
+        // The next local morning for a noon ET "now" is 08:00 ET the
+        // following day (13:00 UTC). Just after midnight is still too early.
+        let after_midnight = Utc.with_ymd_and_hms(2026, 1, 2, 6, 0, 0).unwrap();
+        assert!(
+            service
+                .apply_due_pending_changes(after_midnight)
+                .unwrap()
+                .is_empty(),
+            "a staged change must not land before the next local morning"
+        );
+        let next_morning = Utc.with_ymd_and_hms(2026, 1, 2, 13, 0, 0).unwrap();
+        let applied = service.apply_due_pending_changes(next_morning).unwrap();
+
+        assert_eq!(applied.len(), 1);
+        assert_eq!(
+            repository
+                .get_window(1, GUILD, "work")
+                .unwrap()
+                .unwrap()
+                .start_hour,
+            8
+        );
+        assert!(service.pending_changes(1, GUILD).unwrap().is_empty());
     }
 }
 
@@ -232,7 +556,7 @@ mod active_window {
         let (dir, service, repository) = fixture();
         insert_player(&repository, &dir, 1);
         service
-            .add_window(1, GUILD, "sleep", 22, 0, 6, 0, None, None)
+            .add_window(1, GUILD, "sleep", 22, 0, 6, 0, None, None, None, Utc::now())
             .unwrap();
 
         let matched = service
@@ -247,7 +571,7 @@ mod active_window {
         let (dir, service, repository) = fixture();
         insert_player(&repository, &dir, 1);
         service
-            .add_window(1, GUILD, "sleep", 22, 0, 6, 0, None, None)
+            .add_window(1, GUILD, "sleep", 22, 0, 6, 0, None, None, None, Utc::now())
             .unwrap();
 
         assert!(
@@ -269,7 +593,7 @@ mod active_window {
             )
             .unwrap();
         service
-            .add_window(1, GUILD, "sleep", 22, 0, 6, 0, None, None)
+            .add_window(1, GUILD, "sleep", 22, 0, 6, 0, None, None, None, Utc::now())
             .unwrap();
         // 10:30pm JST is 1:30pm UTC.
         let utc_now = Utc.with_ymd_and_hms(2026, 1, 1, 13, 30, 0).unwrap();
@@ -358,6 +682,24 @@ mod sweep {
         start_hour: u32,
         end_hour: u32,
     ) {
+        enable_curfew_with_mode(
+            repository,
+            discord_id,
+            guild_id,
+            start_hour,
+            end_hour,
+            CurfewMode::Default,
+        );
+    }
+
+    fn enable_curfew_with_mode(
+        repository: &CurfewRepository,
+        discord_id: i64,
+        guild_id: i64,
+        start_hour: u32,
+        end_hour: u32,
+        mode: CurfewMode,
+    ) {
         repository
             .add_or_replace(&cama_domain::curfew::CurfewWindow {
                 discord_id,
@@ -369,6 +711,7 @@ mod sweep {
                 end_minute: 0,
                 timezone: Some("America/New_York".to_owned()),
                 days: None,
+                mode,
             })
             .unwrap();
     }
@@ -431,7 +774,8 @@ mod sweep {
         let lobby = lobby_service();
         seat(&lobby, GUILD, 1, LobbyKind::Open);
 
-        assert!(service.sweep(&lobby, &[GUILD], eleven_pm_et()).is_empty());
+        let kicks = service.sweep(&lobby, &[GUILD], eleven_pm_et());
+        assert!(kicks.is_empty());
     }
 
     #[test]
@@ -447,6 +791,211 @@ mod sweep {
         assert_eq!(
             kicks.iter().map(|kick| kick.guild_id).collect::<Vec<_>>(),
             vec![GUILD]
+        );
+    }
+
+    #[test]
+    fn test_sweep_removes_strict_mode_players_like_default() {
+        let (dir, service, repository) = fixture();
+        insert_player(&repository, &dir, 1);
+        let lobby = lobby_service();
+        seat(&lobby, GUILD, 1, LobbyKind::Open);
+        enable_curfew_with_mode(&repository, 1, GUILD, 22, 6, CurfewMode::Strict);
+
+        let kicks = service.sweep(&lobby, &[GUILD], eleven_pm_et());
+
+        assert_eq!(kicks.len(), 1);
+        assert_eq!(kicks[0].discord_id, 1);
+        assert_eq!(kicks[0].window_name, "sleep");
+        let scope = LobbyScope::new(GuildId(GUILD), LobbyKind::Open);
+        assert!(!lobby.get_lobby(scope).unwrap().players.contains(&UserId(1)));
+    }
+}
+
+mod staged_changes {
+    use super::*;
+
+    fn add_named_mode_window(
+        service: &CurfewService,
+        mode: &str,
+        start_hour: u32,
+        now: DateTime<Utc>,
+    ) {
+        service
+            .add_window(
+                1,
+                GUILD,
+                "work",
+                start_hour,
+                0,
+                17,
+                0,
+                Some("America/New_York"),
+                None,
+                Some(mode),
+                now,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn test_staged_edit_lands_at_eight_the_next_local_morning() {
+        let (dir, service, repository) = fixture();
+        insert_player(&repository, &dir, 1);
+        add_named_mode_window(&service, "strict", 9, Utc::now());
+
+        // 9-17 -> 10-17 frees up 9-10, so it's a reduction.
+        let change = service
+            .add_window(
+                1,
+                GUILD,
+                "work",
+                10,
+                0,
+                17,
+                0,
+                Some("America/New_York"),
+                None,
+                Some("strict"),
+                noon_et(),
+            )
+            .unwrap();
+
+        let CurfewWindowChange::Staged { effective_at, .. } = change else {
+            panic!("expected a staged edit, got {change:?}");
+        };
+        let expected = chrono_tz::America::New_York
+            .with_ymd_and_hms(2026, 1, 2, 8, 0, 0)
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(effective_at, expected);
+    }
+
+    #[test]
+    fn test_extending_a_strict_window_applies_immediately() {
+        let (dir, service, repository) = fixture();
+        insert_player(&repository, &dir, 1);
+        add_named_mode_window(&service, "strict", 9, Utc::now());
+
+        // 9-17 -> 8-18 only adds curfewed time, so it can tighten today.
+        let change = service
+            .add_window(
+                1,
+                GUILD,
+                "work",
+                8,
+                0,
+                18,
+                0,
+                Some("America/New_York"),
+                None,
+                Some("strict"),
+                noon_et(),
+            )
+            .unwrap();
+
+        assert!(
+            matches!(change, CurfewWindowChange::Applied(_)),
+            "an extension must not wait for the morning: {change:?}"
+        );
+        let live = repository.get_window(1, GUILD, "work").unwrap().unwrap();
+        assert_eq!((live.start_hour, live.end_hour), (8, 18));
+        assert!(service.pending_changes(1, GUILD).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_adding_a_day_applies_immediately_but_dropping_one_is_staged() {
+        let (dir, service, repository) = fixture();
+        insert_player(&repository, &dir, 1);
+        service
+            .add_window(
+                1,
+                GUILD,
+                "work",
+                9,
+                0,
+                17,
+                0,
+                Some("America/New_York"),
+                Some("Mon,Tue"),
+                Some("strict"),
+                Utc::now(),
+            )
+            .unwrap();
+
+        let widened = service
+            .add_window(
+                1,
+                GUILD,
+                "work",
+                9,
+                0,
+                17,
+                0,
+                Some("America/New_York"),
+                Some("Mon,Tue,Wed"),
+                Some("strict"),
+                noon_et(),
+            )
+            .unwrap();
+        assert!(
+            matches!(widened, CurfewWindowChange::Applied(_)),
+            "{widened:?}"
+        );
+
+        let narrowed = service
+            .add_window(
+                1,
+                GUILD,
+                "work",
+                9,
+                0,
+                17,
+                0,
+                Some("America/New_York"),
+                Some("Mon"),
+                Some("strict"),
+                noon_et(),
+            )
+            .unwrap();
+        assert!(
+            matches!(narrowed, CurfewWindowChange::Staged { .. }),
+            "{narrowed:?}"
+        );
+    }
+
+    #[test]
+    fn test_switching_a_strict_window_to_default_mode_is_staged() {
+        let (dir, service, repository) = fixture();
+        insert_player(&repository, &dir, 1);
+        add_named_mode_window(&service, "strict", 9, Utc::now());
+
+        let change = service
+            .add_window(
+                1,
+                GUILD,
+                "work",
+                9,
+                0,
+                17,
+                0,
+                Some("America/New_York"),
+                None,
+                Some("default"),
+                noon_et(),
+            )
+            .unwrap();
+        assert!(
+            matches!(change, CurfewWindowChange::Staged { .. }),
+            "dropping to default loosens the guard, so it waits: {change:?}"
+        );
+        assert_eq!(
+            repository
+                .get_window(1, GUILD, "work")
+                .unwrap()
+                .unwrap()
+                .mode,
+            CurfewMode::Strict
         );
     }
 }
