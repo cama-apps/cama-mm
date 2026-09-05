@@ -309,6 +309,41 @@ fn regular_phase_transition_and_loss_suppress_loud_drop_rolls() {
 }
 
 #[test]
+fn encounter_opens_for_fresh_tunnel_without_progress_entries() {
+    let database = fixture();
+    Connection::open(database.path())
+        .expect("fresh DB")
+        .execute(
+            "UPDATE tunnels SET boss_progress='{}' WHERE discord_id=?1 AND guild_id=?2",
+            params![PLAYER, GUILD],
+        )
+        .expect("fresh progress");
+
+    let info = pinnacle_runtime(&database)
+        .encounter(
+            pinnacle_request(1_700_000_000),
+            SequenceEntropy::new(Vec::new(), vec![0], Vec::new()),
+        )
+        .expect("a fresh tunnel parked at depth 24 opens the boss 25 encounter");
+    assert_eq!(info.boundary, 25);
+    assert!(!info.is_pinnacle);
+    assert_eq!(info.phase, 1);
+
+    let progress: String = Connection::open(database.path())
+        .expect("encounter DB")
+        .query_row(
+            "SELECT boss_progress FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
+            params![PLAYER, GUILD],
+            |row| row.get(0),
+        )
+        .expect("progress");
+    let progress: Value = serde_json::from_str(&progress).expect("progress JSON");
+    assert_eq!(progress["25"]["status"], "active");
+    assert_eq!(progress["25"]["first_meet_seen"], true);
+    assert_eq!(progress["25"]["boss_id"], info.boss_id);
+}
+
+#[test]
 fn encounter_locks_and_marks_first_meet_without_losing_unknown_progress() {
     let database = fixture();
     let first = pinnacle_runtime(&database)

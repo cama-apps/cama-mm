@@ -1,6 +1,7 @@
 use crate::test_support::{FastTestDatabase, fast_migrated_database};
 use cama_db::core_repositories::{NewPlayer, PlayerRepository};
 use cama_db::dig_blood_pact::{DigBloodPactRepository, DigBloodPactSettlementRequest};
+use cama_db::dig_carry_wager::CARRY_BOUNDARIES;
 use cama_db::dig_event_runtime::{
     DigEventActorKey, DigEventQuestMutation, DigEventRuntimeRepository,
 };
@@ -2096,8 +2097,8 @@ fn seed_cap_tunnel(database: &FastTestDatabase, depth: i64, luminosity: i64) {
                      discord_id,guild_id,tunnel_name,depth,max_depth,total_digs,
                      total_jc_earned,last_dig_at,luminosity,prestige_level,
                      prestige_perks,boss_progress,boss_attempts
-                 ) VALUES(50001,50002,'Cap Tunnel',?1,?1,1,0,0,?2,1,'[]','{}','{}')",
-            params![depth, luminosity],
+                 ) VALUES(50001,50002,'Cap Tunnel',?1,?1,1,0,0,?2,1,'[]',?3,'{}')",
+            params![depth, luminosity, bosses_cleared_below(depth)],
         )
         .expect("seed tunnel");
 }
@@ -3292,10 +3293,30 @@ fn seed_live_runtime_tunnel(
                      discord_id,guild_id,tunnel_name,depth,max_depth,total_digs,
                      last_dig_at,luminosity,last_lum_update_at,prestige_perks,
                      boss_progress,boss_attempts
-                 ) VALUES (?1,?2,'Batch One',?3,?3,?4,?5,100,?6,'[]','{}','{}')",
-            params![discord_id, guild_id, depth, total_digs, last_dig_at, now],
+                 ) VALUES (?1,?2,'Batch One',?3,?3,?4,?5,100,?6,'[]',?7,'{}')",
+            params![
+                discord_id,
+                guild_id,
+                depth,
+                total_digs,
+                last_dig_at,
+                now,
+                bosses_cleared_below(depth),
+            ],
         )
         .expect("seed tunnel");
+}
+
+/// Boss progress a live tunnel must have reached the given depth with: every
+/// boundary at or above which the player stands has been defeated, because the
+/// boss gate parks the player one step short of any boss still standing.
+fn bosses_cleared_below(depth: i64) -> String {
+    let progress = CARRY_BOUNDARIES
+        .into_iter()
+        .filter(|boundary| depth >= *boundary)
+        .map(|boundary| (boundary.to_string(), Value::String("defeated".to_owned())))
+        .collect::<serde_json::Map<_, _>>();
+    Value::Object(progress).to_string()
 }
 
 fn grant_overgrowth(
