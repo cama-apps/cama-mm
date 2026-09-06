@@ -1058,6 +1058,7 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
             &connection,
             query.guild_id,
             query.discord_id,
+            query.committed_after,
             i64::try_from(query.limit).unwrap_or(i64::MAX),
         )?;
         let mut deliveries = Vec::new();

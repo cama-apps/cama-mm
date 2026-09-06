@@ -229,6 +229,9 @@ pub struct DigRuntimePendingDeliveryQuery {
     pub guild_id: Option<i64>,
     pub discord_id: Option<i64>,
     pub limit: usize,
+    /// Only rows committed at or after this unix second are candidates.
+    /// `None` scans the whole pending backlog.
+    pub committed_after: Option<i64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

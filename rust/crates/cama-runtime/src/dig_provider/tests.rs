@@ -2321,6 +2321,7 @@ async fn accepted_public_delivery_is_reconciled_after_restart_without_duplicate_
                 guild_id: Some(GUILD as i64),
                 discord_id: Some(USER as i64),
                 limit: 10,
+                committed_after: None,
             })
             .await
             .expect("delivery remains pending before restart")
@@ -2352,6 +2353,7 @@ async fn accepted_public_delivery_is_reconciled_after_restart_without_duplicate_
                 guild_id: Some(GUILD as i64),
                 discord_id: Some(USER as i64),
                 limit: 10,
+                committed_after: None,
             })
             .await
             .expect("reload reconciled delivery")
@@ -2753,11 +2755,108 @@ async fn configured_public_send_crash_reconciles_without_duplicate() {
                 guild_id: Some(GUILD as i64),
                 discord_id: Some(USER as i64),
                 limit: 10,
+                committed_after: None,
             })
             .await
             .expect("pending recovery query")
             .is_empty(),
         "receipt recovery completes the durable delivery CAS"
+    );
+}
+
+#[tokio::test]
+async fn ready_recovery_leaves_old_pending_rows_to_the_player_replay() {
+    const CONFIGURED_CHANNEL: i64 = CHANNEL as i64 + 1;
+    let discord = Arc::new(TestDiscord::with_channels([
+        CHANNEL as i64,
+        CONFIGURED_CHANNEL,
+    ]));
+    discord.arm_accept_then_fail_nonce_send();
+    discord.reject_un_nonnced_public_send();
+    let configured = ApplicationConfig::from_lookup(|name| match name {
+        "DISCORD_BOT_TOKEN" => Some("dig-provider-test-token".to_owned()),
+        "NEON_DEGEN_ENABLED" => Some("false".to_owned()),
+        "DIG_CHANNEL_ID" => Some(CONFIGURED_CHANNEL.to_string()),
+        _ => None,
+    })
+    .expect("configured Dig provider test config");
+    let (database, provider, discord) =
+        fixture_with_discord_and_config(discord, configured.clone());
+    let responder = Arc::new(TestResponder::default());
+    assert!(
+        provider
+            .handler
+            .handle(go_request(), responder)
+            .await
+            .is_err()
+    );
+    assert_eq!(discord.public.lock().expect("public responses").len(), 1);
+
+    // The row committed two days ago. READY repairs the crash window of a
+    // restart; a backlog this old belongs to the player's own /dig go replay,
+    // not to every restart and resume of every guild.
+    let connection = Connection::open(database.path()).expect("backdate connection");
+    connection
+        .execute(
+            "UPDATE dig_actions SET created_at = created_at - ?1 WHERE action_type='dig'",
+            params![2 * 24 * 60 * 60_i64],
+        )
+        .expect("backdate pending row");
+    drop(connection);
+
+    let restarted = DigRegistrationProvider::with_media(
+        database.path(),
+        &configured,
+        discord.clone(),
+        None,
+        provider.handler.state.media.clone(),
+    );
+    let report = restarted
+        .gateway_observer()
+        .ready_recovery(ReadyRecoveryContext::new(
+            vec![GUILD],
+            Arc::new(EmptyGatewayMembers),
+        ))
+        .await;
+    assert!(report.failures.is_empty(), "recovery report: {report:?}");
+    assert_eq!(
+        report.members_refreshed, 0,
+        "READY must not replay a two-day-old outbox row"
+    );
+    assert_eq!(
+        restarted
+            .handler
+            .pending_deliveries(cama_app::dig_runtime::DigRuntimePendingDeliveryQuery {
+                guild_id: Some(GUILD as i64),
+                discord_id: Some(USER as i64),
+                limit: 10,
+                committed_after: None,
+            })
+            .await
+            .expect("pending recovery query")
+            .len(),
+        1,
+        "the old row stays pending for the player's replay"
+    );
+
+    // The player's next /dig go still replays it first.
+    let responder = Arc::new(TestResponder::default());
+    let result = restarted.handler.handle(go_request(), responder).await;
+    assert!(result.is_ok(), "player replay: {result:?}");
+    assert!(
+        restarted
+            .handler
+            .pending_deliveries(cama_app::dig_runtime::DigRuntimePendingDeliveryQuery {
+                guild_id: Some(GUILD as i64),
+                discord_id: Some(USER as i64),
+                limit: 10,
+                committed_after: None,
+            })
+            .await
+            .expect("pending after player replay")
+            .into_iter()
+            .all(|delivery| delivery.committed_at > super::unix_now() - 60),
+        "the old row is delivered by the player's own /dig go"
     );
 }
 
@@ -2879,6 +2978,7 @@ async fn pending_configured_delivery_rejection_falls_back_to_interaction_channel
                 guild_id: Some(GUILD as i64),
                 discord_id: Some(USER as i64),
                 limit: 10,
+                committed_after: None,
             })
             .await
             .expect("pending delivery query")
@@ -2965,6 +3065,7 @@ async fn accepted_interaction_followup_is_reconciled_by_interaction_and_immutabl
                 guild_id: Some(GUILD as i64),
                 discord_id: Some(USER as i64),
                 limit: 10,
+                committed_after: None,
             })
             .await
             .expect("pending queue")
@@ -7153,6 +7254,7 @@ async fn assert_stale_boss_delivery_posted_as_plain_result(
                 guild_id: Some(GUILD as i64),
                 discord_id: Some(USER as i64),
                 limit: 10,
+                committed_after: None,
             })
             .await
             .expect("pending deliveries after replay")
