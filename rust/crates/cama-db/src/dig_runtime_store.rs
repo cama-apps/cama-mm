@@ -1053,7 +1053,15 @@ pub fn update_dig_action_detail_for_actor(
     )
 }
 
-/// Detail payloads of dig actions, oldest first, for delivery recovery.
+/// Detail payloads of dig actions that still carry an undelivered delivery
+/// projection, oldest first, for delivery recovery.
+///
+/// The pending rule mirrors the application filter: the Blood Pact effect is
+/// not terminal (rows written before Blood Pact admission have no key and
+/// read as `Pending`), the main part is undelivered, or an Event render still
+/// owes its event part. Applying it in SQL keeps `limit` a window over the
+/// pending rows rather than over the player's oldest actions, which delivered
+/// rows would otherwise fill for good.
 pub fn dig_action_details_for_delivery(
     connection: &Connection,
     guild_id: Option<i64>,
@@ -1065,6 +1073,14 @@ pub fn dig_action_details_for_delivery(
          WHERE action_type='dig'
            AND (?1 IS NULL OR guild_id=?1)
            AND (?2 IS NULL OR actor_id=?2)
+           AND json_valid(detail)
+           AND json_type(detail,'$.delivery')='object'
+           AND (
+               COALESCE(json_extract(detail,'$.delivery.blood_pact'),'Pending')='Pending'
+               OR json_extract(detail,'$.delivery.main_delivered_at') IS NULL
+               OR (json_extract(detail,'$.delivery.render.kind')='Event'
+                   AND json_extract(detail,'$.delivery.event_delivered_at') IS NULL)
+           )
          ORDER BY id ASC LIMIT ?3",
     )?;
     statement

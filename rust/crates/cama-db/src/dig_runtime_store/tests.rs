@@ -155,9 +155,95 @@ fn dig_action_insert_returns_the_row_id_and_detail_updates_are_scoped() {
             .expect("scoped update"),
         1
     );
+    assert!(
+        dig_action_details_for_delivery(&connection, Some(GUILD), Some(USER), 10)
+            .expect("pending")
+            .is_empty(),
+        "a detail without a delivery projection is never a delivery candidate"
+    );
+}
+
+#[test]
+fn delivery_scan_window_covers_pending_rows_not_the_oldest_actions() {
+    let database = fixture();
+    let connection = open(&database);
+    let delivered = r#"{"delivery":{"blood_pact":{"Applied":{"skimmed":0}},"render":{"kind":"Normal"},"main_delivered_at":1700000001,"event_delivered_at":null}}"#;
+    for index in 0..12 {
+        insert_dig_action(
+            &connection,
+            GUILD,
+            USER,
+            None,
+            "dig",
+            index,
+            index + 1,
+            1,
+            delivered,
+            1_700_000_000 + index,
+        )
+        .expect("delivered row");
+    }
+    let candidates = [
+        // Main part still owed.
+        r#"{"delivery":{"blood_pact":"Skipped","render":{"kind":"Normal"},"main_delivered_at":null,"event_delivered_at":null}}"#,
+        // Blood Pact effect not yet settled.
+        r#"{"delivery":{"blood_pact":"Pending","render":{"kind":"Normal"},"main_delivered_at":1700000001,"event_delivered_at":null}}"#,
+        // Row written before Blood Pact admission: no key reads as Pending.
+        r#"{"delivery":{"render":{"kind":"Normal"},"main_delivered_at":1700000001,"event_delivered_at":null}}"#,
+        // Event render still owes its event part.
+        r#"{"delivery":{"blood_pact":"Skipped","render":{"kind":"Event"},"main_delivered_at":1700000001,"event_delivered_at":null}}"#,
+    ];
+    for (index, detail) in candidates.iter().enumerate() {
+        insert_dig_action(
+            &connection,
+            GUILD,
+            USER,
+            None,
+            "dig",
+            20,
+            21,
+            1,
+            detail,
+            1_700_000_100 + index as i64,
+        )
+        .expect("pending row");
+    }
+    // Fully delivered non-event rows and rows of other action types are not candidates.
+    insert_dig_action(
+        &connection,
+        GUILD,
+        USER,
+        None,
+        "help",
+        20,
+        21,
+        1,
+        candidates[0],
+        1_700_000_200,
+    )
+    .expect("other action type");
+
+    let found = dig_action_details_for_delivery(&connection, Some(GUILD), Some(USER), 10)
+        .expect("pending scan");
     assert_eq!(
-        dig_action_details_for_delivery(&connection, Some(GUILD), Some(USER), 10).expect("pending"),
-        vec![Some("{}".to_owned())]
+        found,
+        candidates
+            .iter()
+            .map(|detail| Some((*detail).to_owned()))
+            .collect::<Vec<_>>(),
+        "every pending row must be found past twelve delivered ones, oldest first"
+    );
+    assert_eq!(
+        dig_action_details_for_delivery(&connection, Some(GUILD), Some(USER), 2)
+            .expect("bounded scan")
+            .len(),
+        2,
+        "the limit bounds the pending rows returned"
+    );
+    assert!(
+        dig_action_details_for_delivery(&connection, Some(GUILD), Some(USER + 1), 10)
+            .expect("other actor")
+            .is_empty()
     );
 }
 
