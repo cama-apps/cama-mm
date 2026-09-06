@@ -156,7 +156,7 @@ fn dig_action_insert_returns_the_row_id_and_detail_updates_are_scoped() {
         1
     );
     assert!(
-        dig_action_details_for_delivery(&connection, Some(GUILD), Some(USER), 10)
+        dig_action_details_for_delivery(&connection, Some(GUILD), Some(USER), None, 10)
             .expect("pending")
             .is_empty(),
         "a detail without a delivery projection is never a delivery candidate"
@@ -223,7 +223,7 @@ fn delivery_scan_window_covers_pending_rows_not_the_oldest_actions() {
     )
     .expect("other action type");
 
-    let found = dig_action_details_for_delivery(&connection, Some(GUILD), Some(USER), 10)
+    let found = dig_action_details_for_delivery(&connection, Some(GUILD), Some(USER), None, 10)
         .expect("pending scan");
     assert_eq!(
         found,
@@ -234,14 +234,14 @@ fn delivery_scan_window_covers_pending_rows_not_the_oldest_actions() {
         "every pending row must be found past twelve delivered ones, oldest first"
     );
     assert_eq!(
-        dig_action_details_for_delivery(&connection, Some(GUILD), Some(USER), 2)
+        dig_action_details_for_delivery(&connection, Some(GUILD), Some(USER), None, 2)
             .expect("bounded scan")
             .len(),
         2,
         "the limit bounds the pending rows returned"
     );
     assert!(
-        dig_action_details_for_delivery(&connection, Some(GUILD), Some(USER + 1), 10)
+        dig_action_details_for_delivery(&connection, Some(GUILD), Some(USER + 1), None, 10)
             .expect("other actor")
             .is_empty()
     );

@@ -108,6 +108,12 @@ const PAID_VIEW_TIMEOUT_SECONDS: i64 = 60;
 const ROUTE_VIEW_TIMEOUT_SECONDS: i64 = 180;
 const DELIVERY_RECEIPT_GRACE_SECONDS: i64 = 30;
 const DELIVERY_RECEIPT_SCAN_LIMIT: usize = 500;
+/// How far back READY recovery replays the Dig outbox. A restart or resume
+/// repairs the crash window between a Dig's commit and its public post; it
+/// runs for every guild before the gateway reports ready, and each replayed
+/// row costs a history scan, a possible AI flavor call, and a send. An older
+/// backlog is the player's own to replay: `/dig go` scans it without a window.
+const READY_RECOVERY_WINDOW_SECONDS: i64 = 24 * 60 * 60;
 const FLEX_ROASTS: [&str; 8] = [
     "Dug once, found nothing but regret.",
     "The tunnel is so shallow a worm filed a noise complaint.",
@@ -658,6 +664,7 @@ impl GatewayEventObserver for DigGatewayObserver {
                     guild_id: Some(guild_id_signed),
                     discord_id: None,
                     limit: 100,
+                    committed_after: Some(unix_now() - READY_RECOVERY_WINDOW_SECONDS),
                 })
                 .await
             {
@@ -2327,6 +2334,7 @@ impl DigInteractionHandler {
                     guild_id: Some(guild_id),
                     discord_id: Some(user_id),
                     limit: 10,
+                    committed_after: None,
                 })
                 .await?;
             if !pending.is_empty() {
@@ -3417,6 +3425,7 @@ impl DigInteractionHandler {
                 guild_id: Some(guild_id),
                 discord_id: Some(user_id),
                 limit: 10,
+                committed_after: None,
             })
             .await?
         {

@@ -331,6 +331,7 @@ fn sqlite_delivery_outbox_round_trips_and_marks_main_part_once() {
                 guild_id: Some(9),
                 discord_id: Some(7),
                 limit: 10,
+                committed_after: None,
             })
             .expect("pending outbox")
             .len(),
@@ -352,6 +353,7 @@ fn sqlite_delivery_outbox_round_trips_and_marks_main_part_once() {
                 guild_id: Some(9),
                 discord_id: Some(7),
                 limit: 10,
+                committed_after: None,
             })
             .expect("pending after main")
             .is_empty()
@@ -433,6 +435,7 @@ fn pending_deliveries_finds_a_newer_row_behind_many_delivered_digs() {
             guild_id: Some(9),
             discord_id: Some(7),
             limit: 10,
+            committed_after: None,
         })
         .expect("pending outbox");
     assert_eq!(
@@ -443,6 +446,51 @@ fn pending_deliveries_finds_a_newer_row_behind_many_delivered_digs() {
         vec![pending.action_id],
         "the only pending row must be found behind thirteen delivered ones"
     );
+}
+
+#[test]
+fn pending_deliveries_committed_after_excludes_older_rows() {
+    let database = fast_migrated_database();
+    PlayerRepository::new(database.path())
+        .add(&NewPlayer::new(7, "window-delivery", Some(9)))
+        .expect("seed player");
+    let service = DigRuntimeService::sqlite(database.path());
+    service
+        .dig_with_delivery(
+            DigRuntimeRequest {
+                discord_id: 7,
+                guild_id: 9,
+                now: 1_700_000_000,
+                paid: false,
+                forced_event: false,
+            },
+            DigRuntimeDeliveryContext::new(99, 11, "Window Miner", None),
+        )
+        .expect("dig")
+        .delivery
+        .expect("delivery");
+    let pending = |committed_after| {
+        service
+            .pending_deliveries(DigRuntimePendingDeliveryQuery {
+                guild_id: Some(9),
+                discord_id: None,
+                limit: 10,
+                committed_after,
+            })
+            .expect("pending outbox")
+            .len()
+    };
+    assert_eq!(
+        pending(Some(1_700_000_001)),
+        0,
+        "a row committed before the window is not a candidate"
+    );
+    assert_eq!(
+        pending(Some(1_700_000_000)),
+        1,
+        "the window includes its start"
+    );
+    assert_eq!(pending(None), 1, "no window scans every pending row");
 }
 
 #[test]
@@ -690,6 +738,7 @@ fn sqlite_delivery_channel_rebind_is_persisted_and_pending_part_guarded() {
             guild_id: Some(9),
             discord_id: Some(7),
             limit: 10,
+            committed_after: None,
         })
         .expect("restart pending delivery");
     assert_eq!(recovered.len(), 1);
