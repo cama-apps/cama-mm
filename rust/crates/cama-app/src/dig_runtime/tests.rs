@@ -359,6 +359,93 @@ fn sqlite_delivery_outbox_round_trips_and_marks_main_part_once() {
 }
 
 #[test]
+fn pending_deliveries_finds_a_newer_row_behind_many_delivered_digs() {
+    let database = fast_migrated_database();
+    PlayerRepository::new(database.path())
+        .add(&NewPlayer::new(7, "veteran-delivery", Some(9)))
+        .expect("seed player");
+    let service = DigRuntimeService::sqlite(database.path());
+    let first = service
+        .dig_with_delivery(
+            DigRuntimeRequest {
+                discord_id: 7,
+                guild_id: 9,
+                now: 1_700_000_000,
+                paid: false,
+                forced_event: false,
+            },
+            DigRuntimeDeliveryContext::new(99, 11, "Veteran Miner", None),
+        )
+        .expect("first dig")
+        .delivery
+        .expect("first delivery");
+    service
+        .settle_blood_pact_delivery(DigRuntimeSettleBloodPact {
+            action_id: first.action_id,
+            source_key: first.source_key.clone(),
+            occurred_at: 1_700_000_000,
+        })
+        .expect("settle first delivery");
+    assert!(
+        service
+            .mark_delivery_delivered(DigRuntimeMarkDelivered {
+                action_id: first.action_id,
+                source_key: first.source_key.clone(),
+                delivered_at: 1_700_000_001,
+                part: DigRuntimeDeliveryPart::Main,
+            })
+            .expect("mark first delivered")
+    );
+    // A long history of delivered digs, all older than the row that matters.
+    let connection = Connection::open(database.path()).expect("history connection");
+    for _ in 0..12 {
+        connection
+            .execute(
+                "INSERT INTO dig_actions
+                    (guild_id,actor_id,target_id,action_type,depth_before,depth_after,
+                     jc_delta,detail,created_at)
+                 SELECT guild_id,actor_id,target_id,action_type,depth_before,depth_after,
+                        jc_delta,detail,created_at
+                   FROM dig_actions WHERE id=?1",
+                params![first.action_id],
+            )
+            .expect("delivered history row");
+    }
+    drop(connection);
+
+    let pending = service
+        .dig_with_delivery(
+            DigRuntimeRequest {
+                discord_id: 7,
+                guild_id: 9,
+                now: 1_700_003_700,
+                paid: false,
+                forced_event: false,
+            },
+            DigRuntimeDeliveryContext::new(100, 11, "Veteran Miner", None),
+        )
+        .expect("second dig")
+        .delivery
+        .expect("second delivery");
+
+    let found = service
+        .pending_deliveries(DigRuntimePendingDeliveryQuery {
+            guild_id: Some(9),
+            discord_id: Some(7),
+            limit: 10,
+        })
+        .expect("pending outbox");
+    assert_eq!(
+        found
+            .iter()
+            .map(|delivery| delivery.action_id)
+            .collect::<Vec<_>>(),
+        vec![pending.action_id],
+        "the only pending row must be found behind thirteen delivered ones"
+    );
+}
+
+#[test]
 fn sqlite_blood_pact_delivery_applies_once_and_persists_terminal_state() {
     let (database, service, execution, now) = live_blood_pact_delivery_fixture();
     let delivery = execution.delivery.expect("Blood Pact delivery");
