@@ -64,7 +64,8 @@ use crate::gateway_events::{
 use crate::push_notification_provider::PushNotificationHooks;
 use crate::raw_reactions::{RawReactionEvent, RawReactionKind, RawReactionObserver};
 use crate::registration::{
-    CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, InteractionEmbed,
+    CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
+    InteractionActionRow, InteractionButton, InteractionButtonStyle, InteractionEmbed,
     InteractionHandler, InteractionHandlerError, InteractionOption, InteractionRequest,
     InteractionResponder, InteractionResponse, InteractionValue, RegistrationError,
     RegistrationProvider, RegistryBuilder,
@@ -375,6 +376,74 @@ fn lobby_kind_value(kind: LobbyKind) -> &'static str {
         LobbyKind::Open => "open",
         LobbyKind::LowSkill => "lowskill",
     }
+}
+
+/// Custom-id prefix for the Join/Leave buttons on a lobby message:
+/// `lobby_button:<join|leave>:<guild_id>:<open|lowskill>`. Stateless, so a
+/// button survives a restart and lands in the same handler as `/join` and
+/// `/leave`.
+const LOBBY_BUTTON_PREFIX: &str = "lobby_button:";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LobbyButtonAction {
+    Join,
+    Leave,
+}
+
+impl LobbyButtonAction {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Join => "join",
+            Self::Leave => "leave",
+        }
+    }
+}
+
+fn lobby_button_id(scope: LobbyScope, action: LobbyButtonAction) -> String {
+    format!(
+        "{LOBBY_BUTTON_PREFIX}{}:{}:{}",
+        action.as_str(),
+        scope.guild_id.0,
+        lobby_kind_value(scope.kind)
+    )
+}
+
+fn parse_lobby_button_id(custom_id: &str) -> Option<(LobbyButtonAction, LobbyScope)> {
+    let rest = custom_id.strip_prefix(LOBBY_BUTTON_PREFIX)?;
+    let mut parts = rest.split(':');
+    let action = match parts.next()? {
+        "join" => LobbyButtonAction::Join,
+        "leave" => LobbyButtonAction::Leave,
+        _ => return None,
+    };
+    let guild_id: i64 = parts.next()?.parse().ok()?;
+    let kind = parse_lobby_kind(parts.next()?)?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((action, LobbyScope::new(AppGuildId(guild_id), kind)))
+}
+
+fn lobby_buttons(scope: LobbyScope) -> InteractionActionRow {
+    InteractionActionRow::buttons(vec![
+        InteractionButton::new(
+            lobby_button_id(scope, LobbyButtonAction::Join),
+            format!("{SWORD_EMOJI} Join"),
+        )
+        .style(InteractionButtonStyle::Success),
+        InteractionButton::new(lobby_button_id(scope, LobbyButtonAction::Leave), "Leave")
+            .style(InteractionButtonStyle::Secondary),
+    ])
+}
+
+/// The lobby message body: the roster embed plus its Join/Leave buttons.
+/// Every post and every repaint of the lobby message goes through here,
+/// because a Discord edit replaces the component rows wholesale — an edit
+/// that only carried the embed would silently strip the buttons.
+fn lobby_display_response(scope: LobbyScope, embed: InteractionEmbed) -> InteractionResponse {
+    InteractionResponse::message("")
+        .embed(embed)
+        .action_row(lobby_buttons(scope))
 }
 
 fn private_suspension_message(suspension: &LobbySuspension) -> String {
@@ -1129,8 +1198,7 @@ impl LobbyRuntimeState {
             .edit_message(
                 to_u64(channel_id.0)?,
                 to_u64(message_id.0)?,
-                DiscordMessage::silent(InteractionResponse::message("").embed(embed))
-                    .preserving_content(),
+                DiscordMessage::silent(lobby_display_response(scope, embed)).preserving_content(),
             )
             .await
     }
@@ -1689,7 +1757,7 @@ impl FirstGamePoolDisplayPort for FirstGamePoolLobbyDisplay {
                 Ok::<_, String>(Some((
                     to_u64(channel_id.0)?,
                     to_u64(message_id.0)?,
-                    DiscordMessage::silent(InteractionResponse::message("").embed(embed))
+                    DiscordMessage::silent(lobby_display_response(scope, embed))
                         .preserving_content(),
                 )))
             })
@@ -1984,6 +2052,12 @@ impl RegistrationProvider for LobbyRegistrationProvider {
                 .to_owned(),
             options: vec![lobby_option()],
             handler: self.handler.clone(),
+        })?;
+        // The Join/Leave buttons on every lobby message. Same handler, same
+        // join and leave paths as the slash commands.
+        registry.component(ComponentRoute {
+            custom_id_prefix: LOBBY_BUTTON_PREFIX.to_owned(),
+            handler: self.handler.clone(),
         })
     }
 }
@@ -2068,6 +2142,17 @@ impl InteractionHandler for LobbyInteractionHandler {
         request: InteractionRequest,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
+        if let InteractionRequest::Component {
+            custom_id,
+            user_id,
+            user_display_name,
+            ..
+        } = request
+        {
+            return self
+                .handle_lobby_button(&custom_id, user_id, &user_display_name, responder)
+                .await;
+        }
         let command = CommandContext::try_from(request)?;
         match command.name.as_str() {
             "lobby" => self.handle_lobby(command, responder).await,
@@ -3028,7 +3113,7 @@ impl LobbyInteractionHandler {
             LobbyKind::Open => self.state.config.lobby_channel_id,
         };
         let primary_channel = configured_channel.unwrap_or(to_u64(channel_id.0)?);
-        let message = DiscordMessage::silent(InteractionResponse::message("").embed(embed));
+        let message = DiscordMessage::silent(lobby_display_response(scope, embed));
         let receipt = match self
             .state
             .transport
@@ -3201,7 +3286,29 @@ impl LobbyInteractionHandler {
             return followup_ephemeral(&responder, "This command can only be used in a server.")
                 .await;
         };
-        let Some(player) = self.load_player(command.user_id, guild_id).await? else {
+        let kind = selected_lobby_kind(&command.options).unwrap_or(LobbyKind::Open);
+        let scope = LobbyScope::new(guild_id, kind);
+        self.join_lobby_for_user(
+            scope,
+            command.user_id,
+            &command.user_display_name,
+            responder,
+        )
+        .await
+    }
+
+    /// Seat `player_id` in `scope`'s lobby and tell them how it went, in
+    /// private. Shared by `/join` and the Join button, so both surfaces
+    /// make the same checks and say the same things. The interaction must
+    /// already be acknowledged.
+    async fn join_lobby_for_user(
+        &self,
+        scope: LobbyScope,
+        player_id: AppUserId,
+        user_display_name: &str,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), InteractionHandlerError> {
+        let Some(player) = self.load_player(player_id, scope.guild_id).await? else {
             return followup_ephemeral(
                 &responder,
                 "❌ You're not registered! Use `/player register` first.",
@@ -3215,14 +3322,12 @@ impl LobbyInteractionHandler {
             )
             .await;
         }
-        let kind = selected_lobby_kind(&command.options).unwrap_or(LobbyKind::Open);
-        let scope = LobbyScope::new(guild_id, kind);
         if self.state.service.get_lobby(scope).is_none() {
             return followup_ephemeral(
                 &responder,
                 &format!(
                     "⚠️ No active {} lobby. Use `/lobby` to create one.",
-                    kind.label()
+                    scope.kind.label()
                 ),
             )
             .await;
@@ -3230,7 +3335,7 @@ impl LobbyInteractionHandler {
         let operation_lock = self.state.commands.scope_operation_lock(scope);
         let _guard = operation_lock.lock().await;
         let result = self
-            .join_registered_player(scope, command.user_id, &player)
+            .join_registered_player(scope, player_id, &player)
             .await?;
         if !result.joined {
             return followup_ephemeral(
@@ -3245,19 +3350,71 @@ impl LobbyInteractionHandler {
         let event = self
             .best_effort_join_publication(
                 scope,
-                command.user_id,
+                player_id,
                 &player.name,
-                Some(&command.user_display_name),
+                Some(user_display_name),
                 result
                     .joined_at_ns
                     .expect("successful join has commit time"),
             )
             .await;
-        followup_ephemeral(&responder, &format!("✅ Joined {}!", kind.label())).await?;
+        followup_ephemeral(&responder, &format!("✅ Joined {}!", scope.kind.label())).await?;
         if let Some(event) = event {
             self.best_effort_explicit_lobby_join_neon(event).await;
         }
         Ok(())
+    }
+
+    /// A Join or Leave button on a lobby message. Acknowledges with a
+    /// deferred update (the lobby message itself is repainted by the join
+    /// and leave paths as usual) and answers the player with an ephemeral
+    /// follow-up, so every refusal — curfew included — stays private.
+    async fn handle_lobby_button(
+        &self,
+        custom_id: &str,
+        user_id: u64,
+        user_display_name: &str,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), InteractionHandlerError> {
+        let Some((action, scope)) = parse_lobby_button_id(custom_id) else {
+            return Err(format!("unexpected lobby component {custom_id}").into());
+        };
+        let player_id = AppUserId(i64::try_from(user_id).map_err(|_| {
+            InteractionHandlerError::Transformer {
+                value: user_id.to_string(),
+            }
+        })?);
+        responder
+            .defer(true)
+            .await
+            .map_err(|error| error.to_string())?;
+        match action {
+            LobbyButtonAction::Join => {
+                self.join_lobby_for_user(scope, player_id, user_display_name, responder)
+                    .await
+            }
+            LobbyButtonAction::Leave => {
+                let memberships = self
+                    .state
+                    .service
+                    .get_lobby_kinds_for_player(player_id, scope.guild_id);
+                if !memberships.contains(&scope.kind) {
+                    return followup_ephemeral(
+                        &responder,
+                        &format!("⚠️ You're not in {}.", scope.kind.label()),
+                    )
+                    .await;
+                }
+                self.leave_lobbies(
+                    scope.guild_id,
+                    player_id,
+                    user_display_name.to_owned(),
+                    vec![scope.kind],
+                    responder,
+                )
+                .await
+            }
+        }
     }
 
     async fn handle_leave(
@@ -3280,20 +3437,39 @@ impl LobbyInteractionHandler {
         if memberships.is_empty() {
             return followup_ephemeral(&responder, "⚠️ You're not in a lobby.").await;
         }
-        let rate_limit_claim = match self
+        let display_name = self
             .state
-            .claim_membership_change(guild_id, command.user_id)?
-        {
+            .resolve_player_name(guild_id, command.user_id)
+            .await;
+        self.leave_lobbies(
+            guild_id,
+            command.user_id,
+            display_name,
+            memberships,
+            responder,
+        )
+        .await
+    }
+
+    /// Remove `player_id` from each of `memberships` (lobby kinds they're
+    /// known to be in) and report the result privately. Shared by `/leave`,
+    /// which passes every membership, and the Leave button, which passes
+    /// just its own lobby. The interaction must already be acknowledged.
+    async fn leave_lobbies(
+        &self,
+        guild_id: AppGuildId,
+        player_id: AppUserId,
+        display_name: String,
+        memberships: Vec<LobbyKind>,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), InteractionHandlerError> {
+        let rate_limit_claim = match self.state.claim_membership_change(guild_id, player_id)? {
             LobbyMembershipRateLimitDecision::Allowed(claim) => claim,
             LobbyMembershipRateLimitDecision::RetryAfter(retry_after) => {
                 return followup_ephemeral(&responder, &membership_rate_limit_message(retry_after))
                     .await;
             }
         };
-        let display_name = self
-            .state
-            .resolve_player_name(guild_id, command.user_id)
-            .await;
         let mut left = Vec::new();
         let mut pinned = Vec::new();
         for kind in memberships {
@@ -3302,7 +3478,7 @@ impl LobbyInteractionHandler {
             let _guard = operation_lock.lock().await;
             let state = Arc::clone(&self.state);
             let removal = tokio::task::spawn_blocking(move || {
-                state.service.try_leave_lobby(command.user_id, scope)
+                state.service.try_leave_lobby(player_id, scope)
             })
             .await;
             let removed = match removal {
@@ -3322,12 +3498,12 @@ impl LobbyInteractionHandler {
             };
             if removed {
                 left.push(kind);
-                self.best_effort_leave_publication(scope, command.user_id, &display_name)
+                self.best_effort_leave_publication(scope, player_id, &display_name)
                     .await;
             } else if self
                 .state
                 .service
-                .get_in_flight_lobby_kind_for_player(command.user_id, guild_id)
+                .get_in_flight_lobby_kind_for_player(player_id, guild_id)
                 == Some(kind)
             {
                 pinned.push(kind);
