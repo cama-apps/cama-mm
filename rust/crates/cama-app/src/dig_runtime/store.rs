@@ -1198,6 +1198,15 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
         if let Some(boss) = request.boss {
             delivery.render.kind = DigRuntimeRenderKind::Boss;
             delivery.render.boss = Some(boss);
+        } else if delivery.render.kind == DigRuntimeRenderKind::Boss {
+            // A boss row finalized without its encounter is stale: the
+            // tunnel no longer stands at that boundary. Post it as the plain
+            // result it records instead of announcing a boss that is gone.
+            delivery.outcome.boss_boundary = None;
+            delivery.render.kind = DigRuntimeRenderKind::Normal;
+            delivery.render.title =
+                super::delivery::standard_result_title(&delivery.outcome, delivery.action_id);
+            delivery.render.boss_boundary_copy = None;
         }
         delivery.render.flavor_narrative = delivery.flavor.narrative().map(str::to_owned);
         value["delivery"] = serde_json::to_value(&delivery)

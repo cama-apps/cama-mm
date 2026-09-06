@@ -3768,6 +3768,35 @@ impl DigInteractionHandler {
         })?
     }
 
+    async fn parked_boss_boundary(
+        &self,
+        user_id: i64,
+        guild_id: i64,
+        now: i64,
+    ) -> Result<Option<i64>, String> {
+        let path = self.state.database_path.clone();
+        let decay = self.state.pet_hunger_decay_per_day;
+        let vanity_tax = self.state.vanity_tax.clone();
+        let low_priority_tax_rate = self.state.low_priority_tax_rate;
+        let bankruptcy_policy = self.state.bankruptcy_policy;
+        blocking(move || {
+            configured_boss_runtime(
+                path,
+                decay,
+                vanity_tax,
+                low_priority_tax_rate,
+                bankruptcy_policy,
+            )
+            .parked_boundary(DigBossRuntimeRequest {
+                discord_id: user_id,
+                guild_id,
+                now,
+            })
+            .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
     async fn render_boss_encounter(
         &self,
         user_id: i64,
@@ -5021,28 +5050,37 @@ impl DigInteractionHandler {
         if delivery.flavor.is_terminal() {
             return Ok(delivery);
         }
-        // The encounter is read live only to enrich this replay. A tunnel
-        // that has since left the boundary (the boss was fought, the run
-        // ascended, the tunnel was reset) is a stale outbox row, not a
-        // failure: finalize it without the encounter so it stops blocking
-        // every later `/dig go`. Infrastructure errors still retry.
+        // The encounter is read live only to enrich this replay, and reading
+        // it locks the boss and marks it seen. A tunnel that no longer stands
+        // at this row's boundary (the boss was fought, the run ascended, the
+        // tunnel was reset, or it has moved on to another boss) makes the row
+        // stale, not failed: finalize it as the plain result it records so it
+        // stops blocking every later `/dig go`. Infrastructure errors retry.
         let boss_info = if delivery.render.kind == DigRuntimeRenderKind::Boss {
-            match self
-                .boss_encounter(delivery.discord_id, delivery.guild_id, unix_now())
-                .await
-            {
-                Ok(info) => Some(info),
-                Err(DigBossRuntimeError::Policy(
-                    BossServiceError::MissingTunnel | BossServiceError::NotAtBossBoundary,
-                )) => {
-                    warn!(
-                        action_id = delivery.action_id,
-                        "pending Dig boss delivery no longer stands at a boss boundary; finalizing without the encounter"
-                    );
-                    None
-                }
-                Err(error) => return Err(error.to_string()),
+            let parked = self
+                .parked_boss_boundary(delivery.discord_id, delivery.guild_id, unix_now())
+                .await?;
+            if parked != delivery.outcome.boss_boundary {
+                warn!(
+                    action_id = delivery.action_id,
+                    row_boundary = ?delivery.outcome.boss_boundary,
+                    parked_boundary = ?parked,
+                    "pending Dig boss delivery no longer matches the tunnel's boss; finalizing as a plain result"
+                );
+                return self
+                    .finalize_delivery_snapshot(DigRuntimeFinalizeDelivery {
+                        action_id: delivery.action_id,
+                        source_key: delivery.source_key.clone(),
+                        flavor: DigRuntimeFlavorSnapshot::Skipped,
+                        boss: None,
+                    })
+                    .await;
             }
+            Some(
+                self.boss_encounter(delivery.discord_id, delivery.guild_id, unix_now())
+                    .await
+                    .map_err(|error| error.to_string())?,
+            )
         } else {
             None
         };

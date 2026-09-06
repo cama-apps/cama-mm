@@ -33,6 +33,21 @@ const USER: u64 = 77_001;
 const GUILD: u64 = 77_002;
 const CHANNEL: u64 = 77_003;
 
+/// Pin the guild's daily weather so a Dig at a fixed timestamp rolls the
+/// same way on every run (the provider fixture already uses entropy secret 0).
+fn pin_deterministic_weather(connection: &Connection, now: i64) {
+    let game_date =
+        cama_domain::game_date::game_date_for_timestamp(now as f64).expect("pinned game date");
+    connection
+        .execute(
+            "INSERT INTO dig_weather(guild_id,game_date,layer_name,weather_id)
+             VALUES (?1,?2,'The Hollow','mineral_vein'),
+                    (?1,?2,'Dirt','earthworm_migration')",
+            params![GUILD as i64, game_date],
+        )
+        .expect("deterministic weather");
+}
+
 struct FixedPlayerNames(GuildPlayerNameDirectory);
 
 impl GuildPlayerNameResolver for FixedPlayerNames {
@@ -500,16 +515,7 @@ async fn production_runtime_injects_shared_vanity_tax_into_live_dig() {
             ],
         )
         .expect("normal Dig tunnel");
-    let game_date =
-        cama_domain::game_date::game_date_for_timestamp(now as f64).expect("vanity-tax game date");
-    connection
-        .execute(
-            "INSERT INTO dig_weather(guild_id,game_date,layer_name,weather_id)
-             VALUES (?1,?2,'The Hollow','mineral_vein'),
-                    (?1,?2,'Dirt','earthworm_migration')",
-            params![GUILD as i64, game_date],
-        )
-        .expect("deterministic vanity-tax weather");
+    pin_deterministic_weather(&connection, now);
     drop(connection);
     let vanity_tax = persistent_vanity_tax_with_rate(database.path(), 1.0);
     vanity_tax
@@ -7066,15 +7072,14 @@ fn dig_result_embed_omits_the_curse_field_when_uncursed() {
     );
 }
 
-#[tokio::test]
-async fn pending_boss_delivery_finalizes_after_the_player_leaves_the_boundary() {
-    let (database, provider, _discord) = fixture();
-    // The provider fixture seeds Dig entropy with secret 0 and the daily
-    // weather is pinned below, so a fixed timestamp makes the roll
-    // deterministic: this one advances without a cave-in and parks on the
-    // boss 25 gate.
-    let now = 1_700_000_000_i64;
-    let connection = Connection::open(database.path()).expect("stale boss delivery database");
+/// Commit a real Dig that parks on the boss 25 gate and return its
+/// still-pending Boss-kind delivery row.
+async fn committed_boss_delivery(
+    database: &NamedTempFile,
+    provider: &DigRegistrationProvider,
+    now: i64,
+) -> cama_app::dig_runtime::DigRuntimeDeliverySnapshot {
+    let connection = Connection::open(database.path()).expect("boss delivery database");
     connection
         .execute(
             "INSERT INTO tunnels
@@ -7084,16 +7089,8 @@ async fn pending_boss_delivery_finalizes_after_the_player_leaves_the_boundary() 
             params![USER as i64, GUILD as i64, now - 7_200],
         )
         .expect("tunnel one block short of the boss 25 gate");
-    let game_date =
-        cama_domain::game_date::game_date_for_timestamp(now as f64).expect("stale boss game date");
-    connection
-        .execute(
-            "INSERT INTO dig_weather(guild_id,game_date,layer_name,weather_id)
-             VALUES (?1,?2,'The Hollow','mineral_vein'),
-                    (?1,?2,'Dirt','earthworm_migration')",
-            params![GUILD as i64, game_date],
-        )
-        .expect("deterministic stale boss weather");
+    pin_deterministic_weather(&connection, now);
+    drop(connection);
     let execution = provider
         .handler
         .run_dig(
@@ -7117,23 +7114,38 @@ async fn pending_boss_delivery_finalizes_after_the_player_leaves_the_boundary() 
         delivery.render.kind,
         cama_app::dig_runtime::DigRuntimeRenderKind::Boss
     );
+    delivery
+}
 
-    // The original delivery never finalized, and the player has since moved
-    // past the boss: the outbox row is now a stale record of a real Dig.
-    connection
-        .execute(
-            "UPDATE tunnels SET depth=30, max_depth=30, boss_progress=?1
-              WHERE discord_id=?2 AND guild_id=?3",
-            params![r#"{"25":{"status":"defeated"}}"#, USER as i64, GUILD as i64],
-        )
-        .expect("player defeated the boss and dug on");
-    drop(connection);
-
-    provider
-        .handler
-        .deliver_to_channel(&delivery)
-        .await
-        .expect("a stale boss delivery must still finalize instead of blocking every /dig go");
+/// The replayed post must be the plain result of the recorded Dig: no boss
+/// title, no boss field, no skull reaction, and nothing left in the outbox.
+async fn assert_stale_boss_delivery_posted_as_plain_result(
+    provider: &DigRegistrationProvider,
+    discord: &TestDiscord,
+) {
+    {
+        let public = discord.public.lock().expect("public posts");
+        assert_eq!(public.len(), 1, "exactly one replayed post");
+        let embed = public[0].embeds.first().expect("result embed");
+        assert_eq!(embed.title.as_deref(), Some("Miner 77001 — Depth 24"));
+        assert!(
+            embed
+                .fields
+                .iter()
+                .all(|field| field.name != "Boss boundary"),
+            "a stale boss row must not announce a boss encounter: {:?}",
+            embed.fields
+        );
+    }
+    assert!(
+        discord
+            .reactions
+            .lock()
+            .expect("reactions")
+            .iter()
+            .all(|(_, _, emoji)| emoji != "💀"),
+        "a stale boss row must not get the boss reaction"
+    );
     assert!(
         provider
             .handler
@@ -7146,5 +7158,89 @@ async fn pending_boss_delivery_finalizes_after_the_player_leaves_the_boundary() 
             .expect("pending deliveries after replay")
             .is_empty(),
         "the replayed delivery must leave the outbox"
+    );
+}
+
+#[tokio::test]
+async fn pending_boss_delivery_finalizes_after_the_player_leaves_the_boundary() {
+    let (database, provider, discord) = fixture();
+    let now = 1_700_000_000_i64;
+    let delivery = committed_boss_delivery(&database, &provider, now).await;
+
+    // The original delivery never finalized, and the player has since moved
+    // past the boss: the outbox row is now a stale record of a real Dig.
+    Connection::open(database.path())
+        .expect("stale boss database")
+        .execute(
+            "UPDATE tunnels SET depth=30, max_depth=30, boss_progress=?1
+              WHERE discord_id=?2 AND guild_id=?3",
+            params![r#"{"25":{"status":"defeated"}}"#, USER as i64, GUILD as i64],
+        )
+        .expect("player defeated the boss and dug on");
+
+    provider
+        .handler
+        .deliver_to_channel(&delivery)
+        .await
+        .expect("a stale boss delivery must still finalize instead of blocking every /dig go");
+    assert_stale_boss_delivery_posted_as_plain_result(&provider, &discord).await;
+}
+
+#[tokio::test]
+async fn pending_boss_delivery_for_an_earlier_boss_is_not_enriched_with_the_current_one() {
+    let (database, provider, discord) = fixture();
+    let now = 1_700_000_000_i64;
+    let delivery = committed_boss_delivery(&database, &provider, now).await;
+
+    // The row records boss 25, but the tunnel is now parked on boss 50.
+    let connection = Connection::open(database.path()).expect("moved-on database");
+    connection
+        .execute(
+            "UPDATE tunnels SET depth=49, max_depth=49, boss_progress=?1
+              WHERE discord_id=?2 AND guild_id=?3",
+            params![r#"{"25":"defeated"}"#, USER as i64, GUILD as i64],
+        )
+        .expect("player parked on the next boss");
+
+    provider
+        .handler
+        .deliver_to_channel(&delivery)
+        .await
+        .expect("a row for another boss is stale, not an error");
+    assert_stale_boss_delivery_posted_as_plain_result(&provider, &discord).await;
+    // Replaying an outbox row must not lock or mark boss 50 as met.
+    let progress = connection
+        .query_row(
+            "SELECT boss_progress FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
+            params![USER as i64, GUILD as i64],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("boss progress after replay");
+    assert_eq!(progress, r#"{"25":"defeated"}"#);
+}
+
+#[tokio::test]
+async fn pending_boss_delivery_for_the_current_boss_still_opens_the_encounter() {
+    let (database, provider, discord) = fixture();
+    let now = 1_700_000_000_i64;
+    let delivery = committed_boss_delivery(&database, &provider, now).await;
+
+    provider
+        .handler
+        .deliver_to_channel(&delivery)
+        .await
+        .expect("a live boss row replays as the encounter");
+    let public = discord.public.lock().expect("public posts");
+    assert_eq!(public.len(), 1);
+    let embed = public[0].embeds.first().expect("encounter embed");
+    assert_ne!(embed.title.as_deref(), Some("Miner 77001 — Depth 24"));
+    assert!(
+        discord
+            .reactions
+            .lock()
+            .expect("reactions")
+            .iter()
+            .any(|(_, _, emoji)| emoji == "💀"),
+        "a live boss row keeps the boss reaction"
     );
 }
