@@ -448,21 +448,7 @@ pub(super) fn build_delivery_snapshot(
         } else if kind == DigRuntimeRenderKind::Boss {
             "Boss boundary reached".to_owned()
         } else {
-            let standard = format!("{} — Depth {}", outcome.tunnel_name, outcome.depth_after);
-            if action_id.rem_euclid(5) == 0 {
-                const TITLES: [&str; 5] = [
-                    "DIG DUG!",
-                    "Dig Dug would be proud.",
-                    "Another layer conquered!",
-                    "Dig Dug: Underground Champion",
-                    "You really dug that!",
-                ];
-                let index =
-                    usize::try_from(action_id.rem_euclid(TITLES.len() as i64)).unwrap_or_default();
-                format!("{} — Depth {}", TITLES[index], outcome.depth_after)
-            } else {
-                standard
-            }
+            standard_result_title(outcome, action_id)
         },
         description,
         layer_color: delivery_layer_color(layer.name),
@@ -503,6 +489,23 @@ pub(super) fn build_delivery_snapshot(
         main_delivered_at: None,
         event_delivered_at: None,
     })
+}
+
+/// Title of a plain (non-boss, non-first) Dig result post.
+pub(super) fn standard_result_title(outcome: &DigRuntimeOutcome, action_id: i64) -> String {
+    if action_id.rem_euclid(5) == 0 {
+        const TITLES: [&str; 5] = [
+            "DIG DUG!",
+            "Dig Dug would be proud.",
+            "Another layer conquered!",
+            "Dig Dug: Underground Champion",
+            "You really dug that!",
+        ];
+        let index = usize::try_from(action_id.rem_euclid(TITLES.len() as i64)).unwrap_or_default();
+        format!("{} — Depth {}", TITLES[index], outcome.depth_after)
+    } else {
+        format!("{} — Depth {}", outcome.tunnel_name, outcome.depth_after)
+    }
 }
 
 fn delivery_layer_color(layer_name: &str) -> u32 {

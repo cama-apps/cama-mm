@@ -4214,6 +4214,22 @@ impl DigBossRuntimeService {
         .ok_or_else(|| BossServiceError::NotAtBossBoundary.into())
     }
 
+    /// The boss the tunnel is parked on right now, read without side
+    /// effects. `Ok(None)` when there is no tunnel or it stands at no
+    /// boundary; only infrastructure failures are errors.
+    pub fn parked_boundary(
+        &self,
+        request: DigBossRuntimeRequest,
+    ) -> Result<Option<i64>, DigBossRuntimeError> {
+        let snapshot = DigCarryWagerRepository::new(&self.config.database_path)
+            .snapshot(CarryTunnelKey {
+                discord_id: request.discord_id,
+                guild_id: Some(request.guild_id),
+            })
+            .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?;
+        Ok(snapshot.as_ref().and_then(current_boss_boundary))
+    }
+
     fn current_boundary(&self, request: DigBossRuntimeRequest) -> Result<i32, DigBossRuntimeError> {
         let snapshot = DigCarryWagerRepository::new(&self.config.database_path)
             .snapshot(CarryTunnelKey {
