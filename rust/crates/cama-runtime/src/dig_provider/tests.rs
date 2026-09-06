@@ -7065,3 +7065,86 @@ fn dig_result_embed_omits_the_curse_field_when_uncursed() {
         "an uncursed dig must not render a curse field"
     );
 }
+
+#[tokio::test]
+async fn pending_boss_delivery_finalizes_after_the_player_leaves_the_boundary() {
+    let (database, provider, _discord) = fixture();
+    // The provider fixture seeds Dig entropy with secret 0 and the daily
+    // weather is pinned below, so a fixed timestamp makes the roll
+    // deterministic: this one advances without a cave-in and parks on the
+    // boss 25 gate.
+    let now = 1_700_000_000_i64;
+    let connection = Connection::open(database.path()).expect("stale boss delivery database");
+    connection
+        .execute(
+            "INSERT INTO tunnels
+             (discord_id,guild_id,depth,max_depth,total_digs,last_dig_at,luminosity,
+              boss_progress)
+             VALUES (?1,?2,23,23,4,?3,100,'{}')",
+            params![USER as i64, GUILD as i64, now - 7_200],
+        )
+        .expect("tunnel one block short of the boss 25 gate");
+    let game_date =
+        cama_domain::game_date::game_date_for_timestamp(now as f64).expect("stale boss game date");
+    connection
+        .execute(
+            "INSERT INTO dig_weather(guild_id,game_date,layer_name,weather_id)
+             VALUES (?1,?2,'The Hollow','mineral_vein'),
+                    (?1,?2,'Dirt','earthworm_migration')",
+            params![GUILD as i64, game_date],
+        )
+        .expect("deterministic stale boss weather");
+    let execution = provider
+        .handler
+        .run_dig(
+            USER as i64,
+            GUILD as i64,
+            now,
+            false,
+            false,
+            cama_app::dig_runtime::DigRuntimeDeliveryContext::new(
+                0xb055_0001,
+                CHANNEL as i64,
+                "Wedged Miner",
+                None,
+            ),
+        )
+        .await
+        .expect("committed Dig that reaches the boss gate");
+    assert_eq!(execution.outcome.boss_boundary, Some(25));
+    let delivery = execution.delivery.expect("boss delivery snapshot");
+    assert_eq!(
+        delivery.render.kind,
+        cama_app::dig_runtime::DigRuntimeRenderKind::Boss
+    );
+
+    // The original delivery never finalized, and the player has since moved
+    // past the boss: the outbox row is now a stale record of a real Dig.
+    connection
+        .execute(
+            "UPDATE tunnels SET depth=30, max_depth=30, boss_progress=?1
+              WHERE discord_id=?2 AND guild_id=?3",
+            params![r#"{"25":{"status":"defeated"}}"#, USER as i64, GUILD as i64],
+        )
+        .expect("player defeated the boss and dug on");
+    drop(connection);
+
+    provider
+        .handler
+        .deliver_to_channel(&delivery)
+        .await
+        .expect("a stale boss delivery must still finalize instead of blocking every /dig go");
+    assert!(
+        provider
+            .handler
+            .pending_deliveries(cama_app::dig_runtime::DigRuntimePendingDeliveryQuery {
+                guild_id: Some(GUILD as i64),
+                discord_id: Some(USER as i64),
+                limit: 10,
+            })
+            .await
+            .expect("pending deliveries after replay")
+            .is_empty(),
+        "the replayed delivery must leave the outbox"
+    );
+}

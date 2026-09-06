@@ -5021,12 +5021,28 @@ impl DigInteractionHandler {
         if delivery.flavor.is_terminal() {
             return Ok(delivery);
         }
+        // The encounter is read live only to enrich this replay. A tunnel
+        // that has since left the boundary (the boss was fought, the run
+        // ascended, the tunnel was reset) is a stale outbox row, not a
+        // failure: finalize it without the encounter so it stops blocking
+        // every later `/dig go`. Infrastructure errors still retry.
         let boss_info = if delivery.render.kind == DigRuntimeRenderKind::Boss {
-            Some(
-                self.boss_encounter(delivery.discord_id, delivery.guild_id, unix_now())
-                    .await
-                    .map_err(|error| error.to_string())?,
-            )
+            match self
+                .boss_encounter(delivery.discord_id, delivery.guild_id, unix_now())
+                .await
+            {
+                Ok(info) => Some(info),
+                Err(DigBossRuntimeError::Policy(
+                    BossServiceError::MissingTunnel | BossServiceError::NotAtBossBoundary,
+                )) => {
+                    warn!(
+                        action_id = delivery.action_id,
+                        "pending Dig boss delivery no longer stands at a boss boundary; finalizing without the encounter"
+                    );
+                    None
+                }
+                Err(error) => return Err(error.to_string()),
+            }
         } else {
             None
         };
