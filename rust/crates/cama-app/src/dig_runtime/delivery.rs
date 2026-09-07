@@ -202,6 +202,19 @@ pub struct DigRuntimeDeliverySnapshot {
     pub blood_pact: DigRuntimeBloodPactSnapshot,
     pub main_delivered_at: Option<i64>,
     pub event_delivered_at: Option<i64>,
+    /// Set when the row was closed without posting its result: it is older
+    /// than the recovery window, or its channel is permanently gone. Both
+    /// delivered stamps are set alongside so every pending reader agrees the
+    /// row is terminal, while the reason stays on record. The serde default
+    /// keeps rows written before retirement existed readable.
+    #[serde(default)]
+    pub retired: Option<DigRuntimeDeliveryRetirement>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DigRuntimeDeliveryRetirement {
+    pub retired_at: i64,
+    pub reason: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -226,12 +239,20 @@ impl Deref for DigRuntimeExecution {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DigRuntimePendingDeliveryQuery {
-    pub guild_id: Option<i64>,
+    pub guild_id: i64,
     pub discord_id: Option<i64>,
     pub limit: usize,
-    /// Only rows committed at or after this unix second are candidates.
-    /// `None` scans the whole pending backlog.
-    pub committed_after: Option<i64>,
+}
+
+/// Close one pending delivery without posting it. The Blood Pact effect must
+/// already be terminal: retirement records why a result was never shown, it
+/// does not forgive a skim owed to another player.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DigRuntimeRetireDelivery {
+    pub action_id: i64,
+    pub source_key: String,
+    pub retired_at: i64,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -489,6 +510,7 @@ pub(super) fn build_delivery_snapshot(
         // omitting the pending phase would lose the audited flavor boundary.
         flavor: DigRuntimeFlavorSnapshot::Pending,
         blood_pact: DigRuntimeBloodPactSnapshot::for_outcome(outcome),
+        retired: None,
         main_delivered_at: None,
         event_delivered_at: None,
     })

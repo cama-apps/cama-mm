@@ -1058,7 +1058,6 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
             &connection,
             query.guild_id,
             query.discord_id,
-            query.committed_after,
             i64::try_from(query.limit).unwrap_or(i64::MAX),
         )?;
         let mut deliveries = Vec::new();
@@ -1161,6 +1160,50 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
             return Err(DigRuntimeStoreError::StateConflict);
         }
         delivery.context.channel_id = request.fallback_channel_id;
+        value["delivery"] = serde_json::to_value(&delivery)
+            .map_err(|_| DigRuntimeStoreError::InvalidJson("delivery"))?;
+        let changed = dig_runtime_store::update_dig_action_detail(
+            &transaction,
+            &value.to_string(),
+            request.action_id,
+        )?;
+        if changed != 1 {
+            return Err(DigRuntimeStoreError::StateConflict);
+        }
+        transaction.commit()?;
+        Ok(delivery)
+    }
+
+    fn retire_delivery(
+        &self,
+        request: DigRuntimeRetireDelivery,
+    ) -> Result<DigRuntimeDeliverySnapshot, DigRuntimeStoreError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let detail = dig_runtime_store::dig_action_detail(&transaction, request.action_id)?
+            .flatten()
+            .ok_or(DigRuntimeStoreError::StateConflict)?;
+        let mut value = serde_json::from_str::<Value>(&detail)
+            .map_err(|_| DigRuntimeStoreError::InvalidJson("dig action detail"))?;
+        let raw = value
+            .get("delivery")
+            .cloned()
+            .ok_or(DigRuntimeStoreError::StateConflict)?;
+        let mut delivery = serde_json::from_value::<DigRuntimeDeliverySnapshot>(raw)
+            .map_err(|_| DigRuntimeStoreError::InvalidJson("delivery"))?;
+        if delivery.source_key != request.source_key || !delivery.blood_pact.is_terminal() {
+            return Err(DigRuntimeStoreError::StateConflict);
+        }
+        if delivery.retired.is_none() {
+            delivery.retired = Some(DigRuntimeDeliveryRetirement {
+                retired_at: request.retired_at,
+                reason: request.reason,
+            });
+        }
+        delivery.main_delivered_at.get_or_insert(request.retired_at);
+        delivery
+            .event_delivered_at
+            .get_or_insert(request.retired_at);
         value["delivery"] = serde_json::to_value(&delivery)
             .map_err(|_| DigRuntimeStoreError::InvalidJson("delivery"))?;
         let changed = dig_runtime_store::update_dig_action_detail(

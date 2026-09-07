@@ -54,8 +54,8 @@ use cama_app::dig_runtime::{
     DigRuntimeDeliveryContext, DigRuntimeDeliveryPart, DigRuntimeDeliverySnapshot,
     DigRuntimeExecution, DigRuntimeFinalizeDelivery, DigRuntimeFlavorSnapshot, DigRuntimeFlexData,
     DigRuntimeLowPriorityTaxPort, DigRuntimeMarkDelivered, DigRuntimePendingDeliveryQuery,
-    DigRuntimeRebindDeliveryChannel, DigRuntimeRenderKind, DigRuntimeSettleBloodPact,
-    DigWeatherEffects,
+    DigRuntimeRebindDeliveryChannel, DigRuntimeRenderKind, DigRuntimeRetireDelivery,
+    DigRuntimeSettleBloodPact, DigWeatherEffects,
 };
 use cama_app::dig_service::{PICKAXE_TIERS, layer_at};
 use cama_app::dig_social_runtime::DigSocialRuntimeService;
@@ -69,10 +69,15 @@ use cama_db::neon_events::NeonEventRepository;
 use cama_db::pet_evolution_repository::PetEvolutionRepository;
 use cama_domain::formatting::JOPACOIN_EMOTE;
 use cama_domain::pet_evolution::PetActivity;
-use tracing::warn;
+use tokio::sync::broadcast;
+use tokio::task::JoinHandle;
+use tracing::{error, info, warn};
 
 use crate::application_config::ApplicationConfig;
-use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
+use crate::discord_transport::{
+    DiscordDestinationStatus, DiscordIdPlayerNameResolver, GuildPlayerNameResolver,
+};
+use crate::gateway::LifecycleEvent;
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
@@ -108,12 +113,16 @@ const PAID_VIEW_TIMEOUT_SECONDS: i64 = 60;
 const ROUTE_VIEW_TIMEOUT_SECONDS: i64 = 180;
 const DELIVERY_RECEIPT_GRACE_SECONDS: i64 = 30;
 const DELIVERY_RECEIPT_SCAN_LIMIT: usize = 500;
-/// How far back READY recovery replays the Dig outbox. A restart or resume
-/// repairs the crash window between a Dig's commit and its public post; it
-/// runs for every guild before the gateway reports ready, and each replayed
-/// row costs a history scan, a possible AI flavor call, and a send. An older
-/// backlog is the player's own to replay: `/dig go` scans it without a window.
-const READY_RECOVERY_WINDOW_SECONDS: i64 = 24 * 60 * 60;
+/// Name reported for the Dig outbox recovery observer in lifecycle events.
+const PENDING_RECOVERY_OBSERVER: &str = "dig-pending-recovery";
+/// Rows per pending-outbox page during recovery. Pages continue until one
+/// brings no row that the pass has not already handled.
+const PENDING_RECOVERY_PAGE: usize = 100;
+/// How old a pending Dig result may be before recovery retires it instead of
+/// posting it. A row younger than this, or committed after the previous
+/// process's last heartbeat, is a crash-window result the player is still
+/// owed; anything older is a backlog that would only repost stale results.
+const PENDING_RECOVERY_WINDOW_SECONDS: i64 = 24 * 60 * 60;
 const FLEX_ROASTS: [&str; 8] = [
     "Dug once, found nothing but regret.",
     "The tunnel is so shallow a worm filed a noise complaint.",
@@ -272,6 +281,14 @@ pub trait DigDiscordPort: Send + Sync {
         response: InteractionResponse,
         nonce: &str,
     ) -> Result<InteractionMessageReceipt, DigPublicSendFailure>;
+
+    /// Ask Discord whether `channel_id` is permanently gone for this bot.
+    /// Consulted only after a delivery was rejected, so the success path
+    /// never pays for it. The default proves nothing, which keeps every
+    /// alternate transport on the retry contract.
+    async fn dig_destination_status(&self, _channel_id: i64) -> DiscordDestinationStatus {
+        DiscordDestinationStatus::Unknown
+    }
 
     /// Add one of the authored result reactions to a committed Dig message.
     ///
@@ -517,6 +534,9 @@ impl DigRegistrationProvider {
                     rate_limits: Mutex::new(BTreeMap::new()),
                     force_events: Mutex::new(BTreeSet::new()),
                     bonus_dispatcher: Mutex::new(None),
+                    lifecycle_events: Mutex::new(None),
+                    previous_heartbeat_at: Mutex::new(None),
+                    pending_recovery: Mutex::new(None),
                 }),
             }),
         })
@@ -548,6 +568,44 @@ impl DigRegistrationProvider {
         if let Ok(mut slot) = self.handler.state.bonus_dispatcher.lock() {
             *slot = Some(dispatcher);
         }
+    }
+
+    /// Route the background outbox drain's completion report into the
+    /// runtime lifecycle so health reflects its failures.
+    pub fn set_lifecycle_events(&self, events: broadcast::Sender<LifecycleEvent>) {
+        if let Ok(mut slot) = self.handler.state.lifecycle_events.lock() {
+            *slot = Some(events);
+        }
+    }
+
+    /// Record when the previous process last heartbeat, in unix seconds, so
+    /// recovery can post every result committed after it went down.
+    pub fn set_previous_heartbeat(&self, unix_seconds: Option<i64>) {
+        if let Ok(mut slot) = self.handler.state.previous_heartbeat_at.lock() {
+            *slot = unix_seconds;
+        }
+    }
+
+    /// Run one outbox recovery pass inline and return its report.
+    #[cfg(test)]
+    pub(crate) async fn recover_pending_deliveries(
+        &self,
+        guild_ids: &[u64],
+    ) -> ReadyRecoveryReport {
+        self.handler.recover_pending_deliveries(guild_ids).await
+    }
+
+    /// Await the background drain started by the last READY, if any.
+    #[cfg(test)]
+    pub(crate) async fn wait_for_pending_recovery(&self) -> Option<ReadyRecoveryReport> {
+        let task = self
+            .handler
+            .state
+            .pending_recovery
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())?;
+        task.await.ok()
     }
 }
 
@@ -581,15 +639,94 @@ struct DigGatewayObserver {
 #[async_trait]
 impl GatewayEventObserver for DigGatewayObserver {
     fn name(&self) -> &'static str {
-        "dig-pending-recovery"
+        PENDING_RECOVERY_OBSERVER
     }
 
+    /// Start the outbox drain in the background and return at once.
+    ///
+    /// The drain replays every committed Dig whose public post never
+    /// finalized. Each row costs a channel-history reconcile, possibly an AI
+    /// flavor call, and a send, and it runs for every guild; awaiting it
+    /// here would hold command sync, worker start, and the health gate
+    /// behind Discord's rate limits. Per-row duplicate protection is the
+    /// nonce/history reconcile, not this ordering, so `/dig go` may run
+    /// concurrently. The completion report reaches health through the
+    /// lifecycle stream so a storage failure still degrades the runtime.
     async fn ready_recovery(&self, context: ReadyRecoveryContext) -> ReadyRecoveryReport {
+        let report =
+            ReadyRecoveryReport::empty(PENDING_RECOVERY_OBSERVER, context.guild_ids().len());
+        let Ok(mut slot) = self.state.pending_recovery.lock() else {
+            return report;
+        };
+        if slot.as_ref().is_some_and(|task| !task.is_finished()) {
+            info!("Dig outbox recovery already running; skipping this pass");
+            return report;
+        }
         let handler = DigInteractionHandler {
             state: Arc::clone(&self.state),
         };
-        let mut report = ReadyRecoveryReport::empty(self.name(), context.guild_ids().len());
-        for guild_id in context.guild_ids() {
+        let guild_ids = context.guild_ids().to_vec();
+        *slot = Some(tokio::spawn(async move {
+            let report = handler.recover_pending_deliveries(&guild_ids).await;
+            for failure in &report.failures {
+                error!(
+                    observer = report.observer,
+                    guild_id = failure.guild_id,
+                    error = %failure.message,
+                    "Dig outbox recovery failed for guild"
+                );
+            }
+            info!(
+                guilds_attempted = report.guilds_attempted,
+                guilds_refreshed = report.guilds_refreshed,
+                deliveries = report.members_refreshed,
+                failures = report.failures.len(),
+                "Dig outbox recovery completed"
+            );
+            let events = handler
+                .state
+                .lifecycle_events
+                .lock()
+                .ok()
+                .and_then(|slot| slot.clone());
+            if let Some(events) = events {
+                let _ = events.send(LifecycleEvent::ReadyRecoveryCompleted {
+                    observer: report.observer.to_owned(),
+                    guilds_attempted: report.guilds_attempted,
+                    guilds_refreshed: report.guilds_refreshed,
+                    guilds_superseded: report.guilds_superseded,
+                    members_refreshed: report.members_refreshed,
+                    failure_count: report.failures.len(),
+                });
+            }
+            report
+        }));
+        report
+    }
+}
+
+/// Why a pending row was closed without a post.
+enum PendingRowDisposition {
+    Delivered,
+    Retired,
+    Retained,
+}
+
+impl DigInteractionHandler {
+    /// Replay the outbox for `guild_ids`: event rows first, then Dig rows.
+    ///
+    /// A row that cannot be posted is retained for the next pass and logged,
+    /// never counted as a failure: a transient Discord error or an AI
+    /// timeout on one row must not shadow newer rows or mark the runtime
+    /// degraded. Only a failed scan of the outbox itself, a storage fault,
+    /// is reported. Rows older than the recovery floor and rows whose
+    /// channel Discord reports gone are retired so they leave the queue
+    /// with their reason on record.
+    async fn recover_pending_deliveries(&self, guild_ids: &[u64]) -> ReadyRecoveryReport {
+        let mut report = ReadyRecoveryReport::empty(PENDING_RECOVERY_OBSERVER, guild_ids.len());
+        let now = unix_now();
+        let floor = self.pending_recovery_floor(now);
+        for guild_id in guild_ids {
             let Ok(guild_id_signed) = i64::try_from(*guild_id) else {
                 report.failures.push(ReadyRecoveryFailure {
                     guild_id: *guild_id,
@@ -603,88 +740,94 @@ impl GatewayEventObserver for DigGatewayObserver {
             // Event settlement has a two-phase application boundary. READY
             // first freezes any actor-committed Pending projection, then the
             // normal scan admits only Ready rows to the nonce/history sender.
-            match handler
+            match self
                 .pending_event_delivery_recoveries(DigEventPendingDeliveryQuery {
                     guild_id: Some(guild_id_signed),
                     discord_id: None,
-                    limit: 100,
+                    limit: PENDING_RECOVERY_PAGE,
                 })
                 .await
             {
                 Ok(recoveries) => {
                     for delivery in recoveries {
-                        match handler.recover_event_delivery(delivery.action_id).await {
+                        match self.recover_event_delivery(delivery.action_id).await {
                             Ok(true) => {}
-                            Ok(false) => {
-                                failed = Some(format!(
-                                    "Dig event recovery did not freeze action {}",
-                                    delivery.action_id
-                                ));
-                                break;
-                            }
-                            Err(message) => {
-                                failed = Some(message);
-                                break;
-                            }
+                            Ok(false) => warn!(
+                                action_id = delivery.action_id,
+                                "Dig event recovery did not freeze the action; retained for retry"
+                            ),
+                            Err(error) => warn!(
+                                action_id = delivery.action_id,
+                                %error,
+                                "Dig event recovery failed; retained for retry"
+                            ),
                         }
                     }
                 }
                 Err(message) => failed = Some(message),
             }
 
-            if failed.is_none() {
-                match handler
-                    .pending_event_deliveries(DigEventPendingDeliveryQuery {
-                        guild_id: Some(guild_id_signed),
-                        discord_id: None,
-                        limit: 100,
-                    })
-                    .await
-                {
-                    Ok(deliveries) => {
-                        for delivery in deliveries {
-                            match handler.deliver_event_to_channel(&delivery).await {
-                                Ok(()) => recovered += 1,
-                                Err(message) => {
-                                    failed = Some(message);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    Err(message) => failed = Some(message),
-                }
-            }
-
-            // The original Dig outbox remains independent from event rows;
-            // process it in the same READY pass so an event failure cannot
-            // prevent recovery of an already committed normal result.
-            let pending = match handler
-                .pending_deliveries(DigRuntimePendingDeliveryQuery {
+            match self
+                .pending_event_deliveries(DigEventPendingDeliveryQuery {
                     guild_id: Some(guild_id_signed),
                     discord_id: None,
-                    limit: 100,
-                    committed_after: Some(unix_now() - READY_RECOVERY_WINDOW_SECONDS),
+                    limit: PENDING_RECOVERY_PAGE,
                 })
                 .await
             {
-                Ok(pending) => pending,
+                Ok(deliveries) => {
+                    for delivery in deliveries {
+                        if self.recover_event_row(&delivery, floor, now).await {
+                            recovered += 1;
+                        }
+                    }
+                }
                 Err(message) => {
                     if failed.is_none() {
                         failed = Some(message);
                     }
-                    Vec::new()
                 }
-            };
-            for delivery in pending {
-                match handler.deliver_to_channel(&delivery).await {
-                    Ok(()) => recovered += 1,
+            }
+
+            // The original Dig outbox remains independent from event rows;
+            // process it in the same pass so an event failure cannot prevent
+            // recovery of an already committed normal result. Retained rows
+            // sort first, so paging stops once a page adds nothing new.
+            let mut handled = BTreeSet::new();
+            loop {
+                let page = match self
+                    .pending_deliveries(DigRuntimePendingDeliveryQuery {
+                        guild_id: guild_id_signed,
+                        discord_id: None,
+                        limit: PENDING_RECOVERY_PAGE,
+                    })
+                    .await
+                {
+                    Ok(page) => page,
                     Err(message) => {
                         if failed.is_none() {
                             failed = Some(message);
                         }
                         break;
                     }
+                };
+                let page_len = page.len();
+                let fresh = page
+                    .into_iter()
+                    .filter(|delivery| handled.insert(delivery.action_id))
+                    .collect::<Vec<_>>();
+                if fresh.is_empty() {
+                    break;
+                }
+                for delivery in &fresh {
+                    if let PendingRowDisposition::Delivered =
+                        self.recover_dig_row(delivery, floor, now).await
+                    {
+                        recovered += 1;
+                    }
+                }
+                if page_len < PENDING_RECOVERY_PAGE {
+                    break;
                 }
             }
             report.members_refreshed += recovered;
@@ -698,6 +841,152 @@ impl GatewayEventObserver for DigGatewayObserver {
             }
         }
         report
+    }
+
+    /// Rows committed before this unix second are retired rather than posted.
+    fn pending_recovery_floor(&self, now: i64) -> i64 {
+        let window = now - PENDING_RECOVERY_WINDOW_SECONDS;
+        self.state
+            .previous_heartbeat_at
+            .lock()
+            .ok()
+            .and_then(|slot| *slot)
+            .map_or(window, |heartbeat| heartbeat.min(window))
+    }
+
+    async fn recover_dig_row(
+        &self,
+        delivery: &DigRuntimeDeliverySnapshot,
+        floor: i64,
+        now: i64,
+    ) -> PendingRowDisposition {
+        if delivery.committed_at < floor {
+            return self
+                .retire_pending_row(delivery, now, "older than the recovery window")
+                .await;
+        }
+        match self.deliver_to_channel_with_failure(delivery).await {
+            Ok(()) => PendingRowDisposition::Delivered,
+            Err(DigDeliveryFailure::SafeFallback { error, .. })
+                if self
+                    .state
+                    .discord
+                    .dig_destination_status(delivery.context.channel_id)
+                    .await
+                    == DiscordDestinationStatus::Undeliverable =>
+            {
+                warn!(
+                    action_id = delivery.action_id,
+                    channel_id = delivery.context.channel_id,
+                    %error,
+                    "pending Dig delivery channel is permanently undeliverable; retiring the row"
+                );
+                self.retire_pending_row(delivery, now, "channel permanently undeliverable")
+                    .await
+            }
+            Err(DigDeliveryFailure::SafeFallback { error, .. })
+            | Err(DigDeliveryFailure::Ambiguous(error)) => {
+                warn!(
+                    action_id = delivery.action_id,
+                    %error,
+                    "pending Dig delivery could not be posted; retained for retry"
+                );
+                PendingRowDisposition::Retained
+            }
+        }
+    }
+
+    /// Settle the row's economy effect, then close it without a post.
+    async fn retire_pending_row(
+        &self,
+        delivery: &DigRuntimeDeliverySnapshot,
+        now: i64,
+        reason: &str,
+    ) -> PendingRowDisposition {
+        match self.retire_delivery(delivery, now, reason).await {
+            Ok(retired) => {
+                info!(
+                    action_id = retired.action_id,
+                    reason, "pending Dig delivery retired without a post"
+                );
+                PendingRowDisposition::Retired
+            }
+            Err(error) => {
+                warn!(
+                    action_id = delivery.action_id,
+                    reason,
+                    %error,
+                    "pending Dig delivery could not be retired; retained for retry"
+                );
+                PendingRowDisposition::Retained
+            }
+        }
+    }
+
+    /// Post one Ready event row, or close it for the same reasons a Dig row
+    /// is closed. Returns whether it was posted.
+    async fn recover_event_row(
+        &self,
+        delivery: &DigEventDeliverySnapshot,
+        floor: i64,
+        now: i64,
+    ) -> bool {
+        if delivery.committed_at < floor {
+            self.retire_event_row(delivery, now, "older than the recovery window")
+                .await;
+            return false;
+        }
+        match self
+            .deliver_event_to_channel_with_failure(
+                delivery,
+                event_resolution_response(&delivery.outcome),
+            )
+            .await
+        {
+            Ok(()) => true,
+            Err(DigEventDeliveryFailure::Rejected(error))
+                if self
+                    .state
+                    .discord
+                    .dig_destination_status(delivery.context.channel_id)
+                    .await
+                    == DiscordDestinationStatus::Undeliverable =>
+            {
+                warn!(
+                    action_id = delivery.action_id,
+                    channel_id = delivery.context.channel_id,
+                    %error,
+                    "pending Dig event channel is permanently undeliverable; retiring the row"
+                );
+                self.retire_event_row(delivery, now, "channel permanently undeliverable")
+                    .await;
+                false
+            }
+            Err(DigEventDeliveryFailure::Rejected(error))
+            | Err(DigEventDeliveryFailure::Ambiguous(error)) => {
+                warn!(
+                    action_id = delivery.action_id,
+                    %error,
+                    "pending Dig event could not be posted; retained for retry"
+                );
+                false
+            }
+        }
+    }
+
+    async fn retire_event_row(&self, delivery: &DigEventDeliverySnapshot, now: i64, reason: &str) {
+        match self.mark_event_delivery_at(delivery, now).await {
+            Ok(_) => info!(
+                action_id = delivery.action_id,
+                reason, "pending Dig event retired without a post"
+            ),
+            Err(error) => warn!(
+                action_id = delivery.action_id,
+                reason,
+                %error,
+                "pending Dig event could not be retired; retained for retry"
+            ),
+        }
     }
 }
 
@@ -728,6 +1017,16 @@ struct DigRuntimeState {
     neon: Mutex<DigNeonService<SeededDigNeonRandom, RuntimeDigNeonCooldown>>,
     boss_entropy: RuntimeBossEntropy,
     bonus_dispatcher: Mutex<Option<Arc<dyn DigBonusDispatchPort>>>,
+    /// Where the background outbox drain reports its completion so health
+    /// still sees a storage failure that happened after the gateway was
+    /// ready. Absent in tests and tools that never build a runtime.
+    lifecycle_events: Mutex<Option<broadcast::Sender<LifecycleEvent>>>,
+    /// The previous process's last health heartbeat, in unix seconds. Rows
+    /// committed after it are crash-window results however old they are.
+    previous_heartbeat_at: Mutex<Option<i64>>,
+    /// The single in-flight outbox drain; a READY or RESUME that arrives
+    /// while one runs is a no-op.
+    pending_recovery: Mutex<Option<JoinHandle<ReadyRecoveryReport>>>,
     view_nonce: String,
     abandon_views: Mutex<BTreeMap<String, DigAbandonViewState>>,
     prestige_views: Mutex<BTreeMap<String, DigPrestigeViewState>>,
@@ -2331,10 +2630,9 @@ impl DigInteractionHandler {
             let user_display_name = self.project_player_name(user_id, guild_id, &stored_name);
             let pending = self
                 .pending_deliveries(DigRuntimePendingDeliveryQuery {
-                    guild_id: Some(guild_id),
+                    guild_id,
                     discord_id: Some(user_id),
                     limit: 10,
-                    committed_after: None,
                 })
                 .await?;
             if !pending.is_empty() {
@@ -3420,15 +3718,30 @@ impl DigInteractionHandler {
             .await?
             .or(channel_id)
             .ok_or_else(|| "Dig interaction is missing its channel".to_owned())?;
+        // The player's own backlog replays first, under the same floor the
+        // background drain applies: a result older than the recovery window
+        // is retired, not reposted, whichever pass reaches it first.
+        let recovery_floor = self.pending_recovery_floor(now);
         for pending in self
             .pending_deliveries(DigRuntimePendingDeliveryQuery {
-                guild_id: Some(guild_id),
+                guild_id,
                 discord_id: Some(user_id),
                 limit: 10,
-                committed_after: None,
             })
             .await?
         {
+            if pending.committed_at < recovery_floor {
+                if let PendingRowDisposition::Retained = self
+                    .retire_pending_row(&pending, now, "older than the recovery window")
+                    .await
+                {
+                    return Err(format!(
+                        "pending Dig result {} could not be retired",
+                        pending.action_id
+                    ));
+                }
+                continue;
+            }
             match self.deliver_to_channel_with_failure(&pending).await {
                 Ok(()) => {}
                 Err(DigDeliveryFailure::SafeFallback { part, error }) => {
@@ -4810,6 +5123,14 @@ impl DigInteractionHandler {
         &self,
         delivery: &DigEventDeliverySnapshot,
     ) -> Result<bool, String> {
+        self.mark_event_delivery_at(delivery, unix_now()).await
+    }
+
+    async fn mark_event_delivery_at(
+        &self,
+        delivery: &DigEventDeliverySnapshot,
+        delivered_at: i64,
+    ) -> Result<bool, String> {
         let path = self.state.database_path.clone();
         let config = self.state.dig_config.clone();
         let request = DigEventDeliveryMarkRequest {
@@ -4817,7 +5138,7 @@ impl DigInteractionHandler {
             discord_id: delivery.discord_id,
             guild_id: delivery.guild_id,
             source_key: delivery.source_key.clone(),
-            delivered_at: unix_now(),
+            delivered_at,
         };
         blocking(move || {
             cama_app::dig_event_runtime::DigEventRuntimeService::sqlite_with_config(&path, config)
@@ -5039,6 +5360,35 @@ impl DigInteractionHandler {
         blocking(move || {
             configured_dig_runtime(path, config, vanity_tax, low_priority_tax_rate)
                 .settle_blood_pact_delivery(request)
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    /// Close a pending row without posting it. The Blood Pact skim is settled
+    /// first: retirement records why a result was never shown, it never
+    /// forgives what the digger owes another player.
+    async fn retire_delivery(
+        &self,
+        delivery: &DigRuntimeDeliverySnapshot,
+        retired_at: i64,
+        reason: &str,
+    ) -> Result<DigRuntimeDeliverySnapshot, String> {
+        let delivery = self.settle_blood_pact_delivery(delivery).await?;
+        if !delivery.blood_pact.is_terminal() {
+            return Err("Dig Blood Pact phase remains pending; delivery is blocked".to_owned());
+        }
+        let path = self.state.database_path.clone();
+        let config = self.state.dig_config.clone();
+        let request = DigRuntimeRetireDelivery {
+            action_id: delivery.action_id,
+            source_key: delivery.source_key.clone(),
+            retired_at,
+            reason: reason.to_owned(),
+        };
+        blocking(move || {
+            cama_app::dig_runtime::DigRuntimeService::sqlite_with_config(&path, config)
+                .retire_delivery(request)
                 .map_err(|error| error.to_string())
         })
         .await

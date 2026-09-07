@@ -426,6 +426,13 @@ impl DigDiscordPort for SerenityDiscordTransport {
             .map_err(dig_public_send_failure)
     }
 
+    async fn dig_destination_status(&self, channel_id: i64) -> DiscordDestinationStatus {
+        match u64::try_from(channel_id) {
+            Ok(channel_id) => DiscordTransport::destination_status(self, channel_id).await,
+            Err(_) => DiscordDestinationStatus::Unknown,
+        }
+    }
+
     async fn dig_add_reaction(
         &self,
         channel_id: i64,

@@ -156,7 +156,7 @@ fn dig_action_insert_returns_the_row_id_and_detail_updates_are_scoped() {
         1
     );
     assert!(
-        dig_action_details_for_delivery(&connection, Some(GUILD), Some(USER), None, 10)
+        dig_action_details_for_delivery(&connection, GUILD, Some(USER), 10)
             .expect("pending")
             .is_empty(),
         "a detail without a delivery projection is never a delivery candidate"
@@ -223,8 +223,8 @@ fn delivery_scan_window_covers_pending_rows_not_the_oldest_actions() {
     )
     .expect("other action type");
 
-    let found = dig_action_details_for_delivery(&connection, Some(GUILD), Some(USER), None, 10)
-        .expect("pending scan");
+    let found =
+        dig_action_details_for_delivery(&connection, GUILD, Some(USER), 10).expect("pending scan");
     assert_eq!(
         found,
         candidates
@@ -234,14 +234,14 @@ fn delivery_scan_window_covers_pending_rows_not_the_oldest_actions() {
         "every pending row must be found past twelve delivered ones, oldest first"
     );
     assert_eq!(
-        dig_action_details_for_delivery(&connection, Some(GUILD), Some(USER), None, 2)
+        dig_action_details_for_delivery(&connection, GUILD, Some(USER), 2)
             .expect("bounded scan")
             .len(),
         2,
         "the limit bounds the pending rows returned"
     );
     assert!(
-        dig_action_details_for_delivery(&connection, Some(GUILD), Some(USER + 1), None, 10)
+        dig_action_details_for_delivery(&connection, GUILD, Some(USER + 1), 10)
             .expect("other actor")
             .is_empty()
     );
@@ -432,4 +432,26 @@ fn slow_drip_claim_cas_and_insert_race_semantics() {
             .expect("cas"),
         1
     );
+}
+
+#[test]
+fn pending_delivery_scan_searches_the_guild_type_index() {
+    let database = fixture();
+    let connection = open(&database);
+    let mut statement = connection
+        .prepare(&format!("EXPLAIN QUERY PLAN {PENDING_DIG_DELIVERY_SQL}"))
+        .expect("explain pending delivery scan");
+    let plan = statement
+        .query_map(params![GUILD, Option::<i64>::None, 10_i64], |row| {
+            row.get::<_, String>(3)
+        })
+        .expect("query plan rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("query plan text")
+        .join("\n");
+    assert!(
+        plan.contains("USING INDEX idx_dig_actions_guild_type_created_actor"),
+        "READY recovery must not scan the whole dig_actions table: {plan}"
+    );
+    assert!(!plan.contains("SCAN dig_actions"), "{plan}");
 }
