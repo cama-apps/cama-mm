@@ -1000,13 +1000,21 @@ impl LobbyRuntimeState {
         let Ok(guild_id) = to_u64(scope.guild_id.0) else {
             return;
         };
-        let is_full_lobby = self
-            .readychecks
-            .readycheck_generation(scope)
-            .is_some_and(|generation| generation.lobby_ids.len() >= self.config.ready_threshold);
-        if !is_full_lobby {
+        let Some(generation) = self.readychecks.readycheck_generation(scope) else {
+            return;
+        };
+        if generation.lobby_ids.len() < self.config.ready_threshold {
             return;
         }
+        let jump_url = match (
+            to_u64(generation.channel_id.0),
+            to_u64(generation.message_id.0),
+        ) {
+            (Ok(channel_id), Ok(message_id)) => Some(format!(
+                "https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+            )),
+            _ => None,
+        };
         if let Ok(hooks) = self.push_notifications.read()
             && let Some(hooks) = hooks.as_ref()
         {
@@ -1015,6 +1023,7 @@ impl LobbyRuntimeState {
                 mention_ids
                     .iter()
                     .filter_map(|player_id| u64::try_from(player_id.0).ok()),
+                jump_url,
             );
         }
     }

@@ -133,11 +133,13 @@ impl PushNotificationHooks {
     /// launched with them in it. Callers are expected to have already
     /// excluded anyone who does not need to react (an auto-confirmed
     /// invoker, a recently-ready player) — the same set Discord mentions in
-    /// the readycheck message itself.
+    /// the readycheck message itself. `jump_url` links the readycheck message
+    /// from the DM so a player can open it straight from their inbox.
     pub fn notify_readycheck_launched(
         &self,
         guild_id: u64,
         discord_ids: impl IntoIterator<Item = u64>,
+        jump_url: Option<String>,
     ) {
         let targets = discord_ids
             .into_iter()
@@ -150,6 +152,7 @@ impl PushNotificationHooks {
             PushNotificationKind::Readycheck,
             READYCHECK_TITLE,
             READYCHECK_MESSAGE,
+            jump_url.map(Arc::from),
         );
     }
 
@@ -168,6 +171,7 @@ impl PushNotificationHooks {
             PushNotificationKind::MatchStarted,
             MATCH_STARTED_TITLE,
             MATCH_STARTED_MESSAGE,
+            None,
         );
     }
 }
@@ -194,10 +198,14 @@ impl PushPublisher for NtfyHttpClient {
     }
 }
 
-fn dm_message(title: &str, message: &str) -> DiscordMessage {
-    DiscordMessage::silent(InteractionResponse::message(format!(
-        "**{title}**\n{message}"
-    )))
+/// A jump link on the title line renders in Discord as the linked
+/// channel/thread name, so the DM doubles as a shortcut to the message.
+fn dm_message(title: &str, message: &str, jump_url: Option<&str>) -> DiscordMessage {
+    let content = match jump_url {
+        Some(jump_url) => format!("**{title}** {jump_url}\n{message}"),
+        None => format!("**{title}**\n{message}"),
+    };
+    DiscordMessage::silent(InteractionResponse::message(content))
 }
 
 impl PushNotificationHandler {
@@ -216,7 +224,7 @@ impl PushNotificationHandler {
     /// Fire-and-forget delivery: looks up enabled targets per channel on a
     /// blocking task, then fans out on the async runtime, all inside a
     /// detached task so the caller never waits on SQLite, ntfy, or Discord
-    /// I/O.
+    /// I/O. `dm_jump_url` is DM-only: ntfy bodies stay a plain sentence.
     fn spawn_notify(
         handler: &Arc<Self>,
         guild_id: u64,
@@ -224,6 +232,7 @@ impl PushNotificationHandler {
         kind: PushNotificationKind,
         title: &'static str,
         message: &'static str,
+        dm_jump_url: Option<Arc<str>>,
     ) {
         if discord_ids.is_empty() {
             return;
@@ -238,7 +247,16 @@ impl PushNotificationHandler {
         let handler = Arc::clone(handler);
         tokio::spawn(async move {
             Self::deliver_ntfy(&handler, guild_id, &discord_ids, kind, title, message).await;
-            Self::deliver_dm(&handler, guild_id, &discord_ids, kind, title, message).await;
+            Self::deliver_dm(
+                &handler,
+                guild_id,
+                &discord_ids,
+                kind,
+                title,
+                message,
+                dm_jump_url,
+            )
+            .await;
         });
     }
 
@@ -325,6 +343,7 @@ impl PushNotificationHandler {
         kind: PushNotificationKind,
         title: &'static str,
         message: &'static str,
+        jump_url: Option<Arc<str>>,
     ) {
         let repository = handler.repository.clone();
         let discord_ids = discord_ids.to_vec();
@@ -355,6 +374,7 @@ impl PushNotificationHandler {
                 discord_id,
                 title,
                 message,
+                jump_url.clone(),
             ));
         }
         while let Some(delivery) = deliveries.join_next().await {
@@ -372,6 +392,7 @@ impl PushNotificationHandler {
                     discord_id,
                     title,
                     message,
+                    jump_url.clone(),
                 ));
             }
         }
@@ -383,12 +404,16 @@ impl PushNotificationHandler {
         discord_id: i64,
         title: &'static str,
         message: &'static str,
+        jump_url: Option<Arc<str>>,
     ) -> (i64, Result<(), String>) {
         let result = match semaphore.acquire_owned().await {
             Ok(_permit) => match u64::try_from(discord_id) {
                 Ok(user_id) => {
                     discord
-                        .send_direct_message(user_id, dm_message(title, message))
+                        .send_direct_message(
+                            user_id,
+                            dm_message(title, message, jump_url.as_deref()),
+                        )
                         .await
                 }
                 Err(_) => Err("Discord ID exceeds Discord snowflake range".to_owned()),
@@ -505,7 +530,7 @@ impl PushNotificationHandler {
             let result = match u64::try_from(discord_id) {
                 Ok(user_id) => {
                     self.discord
-                        .send_direct_message(user_id, dm_message(TEST_TITLE, TEST_MESSAGE))
+                        .send_direct_message(user_id, dm_message(TEST_TITLE, TEST_MESSAGE, None))
                         .await
                 }
                 Err(_) => Err("Discord ID exceeds Discord snowflake range".to_owned()),
