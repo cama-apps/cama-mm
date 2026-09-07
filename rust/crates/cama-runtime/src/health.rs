@@ -5,7 +5,7 @@
 //! required worker crashed. The runtime therefore writes a small atomic state
 //! file beside the SQLite database and refreshes it on a bounded heartbeat.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -21,7 +21,7 @@ use crate::gateway::LifecycleEvent;
 
 pub const DEFAULT_MAX_HEARTBEAT_AGE: Duration = Duration::from_secs(90);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
-const HEALTH_FORMAT_VERSION: u32 = 5;
+const HEALTH_FORMAT_VERSION: u32 = 6;
 const RUNTIME_NAME: &str = "rust";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -52,12 +52,24 @@ pub struct HealthSnapshot {
     pub applied_migrations: usize,
     pub required_migrations: usize,
     pub recovery_failure_count: usize,
+    /// Failures reported by the last pass of each ready-recovery observer.
+    /// A later clean pass by the same observer clears its entry, so a
+    /// retried outbox drain heals health instead of degrading it until the
+    /// next reconnect. `recovery_failure_count` is the sum.
+    #[serde(default)]
+    pub recovery_failures: BTreeMap<String, usize>,
     pub worker_registration_complete: bool,
     pub expected_workers: BTreeSet<String>,
     pub started_workers: BTreeSet<String>,
     pub failed_workers: BTreeSet<String>,
     pub lifecycle_gap_detected: bool,
     pub ready_at_unix_ms: Option<u64>,
+    /// The last heartbeat of a process that was actually serving this
+    /// database, carried forward through markers of starts that never
+    /// reached READY. Crash recovery reads it to tell a crash-window row from
+    /// stale backlog; a failed restart must not move it.
+    #[serde(default)]
+    pub last_served_heartbeat_unix_ms: Option<u64>,
     pub updated_at_unix_ms: u64,
     pub last_error: Option<String>,
 }
@@ -79,15 +91,30 @@ impl HealthSnapshot {
             applied_migrations: 0,
             required_migrations: 0,
             recovery_failure_count: 0,
+            recovery_failures: BTreeMap::new(),
             worker_registration_complete: false,
             expected_workers: BTreeSet::new(),
             started_workers: BTreeSet::new(),
             failed_workers: BTreeSet::new(),
             lifecycle_gap_detected: false,
             ready_at_unix_ms: None,
+            last_served_heartbeat_unix_ms: None,
             updated_at_unix_ms: unix_time_ms()?,
             last_error: None,
         })
+    }
+
+    /// When a process was last serving this database: this marker's
+    /// heartbeat if its process ever became ready, else the value it carried
+    /// forward from the marker it replaced. A start that failed before READY,
+    /// or a smoke check against the same path, never counts as serving.
+    #[must_use]
+    pub const fn last_served_heartbeat_unix_ms(&self) -> Option<u64> {
+        if self.ready_at_unix_ms.is_some() {
+            Some(self.updated_at_unix_ms)
+        } else {
+            self.last_served_heartbeat_unix_ms
+        }
     }
 
     #[must_use]
@@ -158,6 +185,7 @@ impl HealthSnapshot {
                 self.command_tree_synchronized = false;
                 self.connected_shards.clear();
                 self.recovery_failure_count = 0;
+                self.recovery_failures.clear();
                 self.last_error = None;
             }
             LifecycleEvent::Ready { .. } => {
@@ -173,13 +201,25 @@ impl HealthSnapshot {
                 observer,
                 failure_count,
                 ..
-            } if failure_count > 0 => {
-                self.recovery_failure_count =
-                    self.recovery_failure_count.saturating_add(failure_count);
-                self.status = HealthStatus::Degraded;
-                self.last_error = Some(bounded_error(format!(
-                    "ready recovery {observer} reported {failure_count} failure(s)"
-                )));
+            } => {
+                if failure_count > 0 {
+                    self.recovery_failures
+                        .insert(observer.clone(), failure_count);
+                } else {
+                    self.recovery_failures.remove(&observer);
+                }
+                self.recovery_failure_count = self.recovery_failures.values().sum();
+                if failure_count > 0 {
+                    self.status = HealthStatus::Degraded;
+                    self.last_error = Some(bounded_error(format!(
+                        "ready recovery {observer} reported {failure_count} failure(s)"
+                    )));
+                } else if self.recovery_failure_count == 0 && self.status == HealthStatus::Degraded
+                {
+                    // The observer's retry came back clean; nothing else may
+                    // be wrong, and `mark_ready_if_possible` checks that.
+                    self.mark_ready_if_possible()?;
+                }
             }
             LifecycleEvent::Disconnected { reason } => {
                 self.status = HealthStatus::Reconnecting;
@@ -257,8 +297,7 @@ impl HealthSnapshot {
                     "required background worker {name} stopped unexpectedly"
                 )));
             }
-            LifecycleEvent::ReadyRecoveryCompleted { .. }
-            | LifecycleEvent::BackgroundWorkerRestartScheduled { .. }
+            LifecycleEvent::BackgroundWorkerRestartScheduled { .. }
             | LifecycleEvent::BackgroundWorkerStopped { .. } => {}
         }
         self.enforce_lifecycle_gap();
@@ -336,10 +375,12 @@ impl HealthReporter {
             .ok()
             .and_then(|bytes| serde_json::from_slice::<HealthSnapshot>(&bytes).ok())
             .filter(|snapshot| snapshot.database_path == database_path)
-            .map(|snapshot| snapshot.updated_at_unix_ms);
+            .and_then(|snapshot| snapshot.last_served_heartbeat_unix_ms());
+        let mut snapshot = HealthSnapshot::starting(database_path)?;
+        snapshot.last_served_heartbeat_unix_ms = previous_heartbeat_unix_ms;
         let reporter = Self {
             path,
-            snapshot: HealthSnapshot::starting(database_path)?,
+            snapshot,
             previous_heartbeat_unix_ms,
         };
         // Startup runs before the runtime is serving, so the write is direct.
@@ -1151,14 +1192,37 @@ mod tests {
             None,
             "a first start has no previous heartbeat"
         );
-        let first_heartbeat = first.snapshot.updated_at_unix_ms;
-
         let second = HealthReporter::initialize(&database_path).expect("restart");
-        assert_eq!(second.previous_heartbeat_unix_ms(), Some(first_heartbeat));
+        assert_eq!(
+            second.previous_heartbeat_unix_ms(),
+            None,
+            "a start that never reached READY was never serving"
+        );
         assert_eq!(
             second.snapshot.status,
             HealthStatus::Starting,
             "the marker is still invalidated"
+        );
+
+        // The second process serves, then dies mid-heartbeat.
+        let mut served = second.snapshot.clone();
+        served.ready_at_unix_ms = Some(served.updated_at_unix_ms);
+        served.status = HealthStatus::Ready;
+        served.updated_at_unix_ms += 1_000;
+        let served_heartbeat = served.updated_at_unix_ms;
+        persist_snapshot(second.path(), &served).expect("persist serving state");
+
+        let third = HealthReporter::initialize(&database_path).expect("restart after serving");
+        assert_eq!(third.previous_heartbeat_unix_ms(), Some(served_heartbeat));
+        // The third start fails before READY (a migration error, or a smoke
+        // check against the production path) and leaves its marker behind.
+        drop(third);
+        let fourth = HealthReporter::initialize(&database_path).expect("restart after failure");
+        assert_eq!(
+            fourth.previous_heartbeat_unix_ms(),
+            Some(served_heartbeat),
+            "a failed start carries the last serving heartbeat forward instead of \
+             replacing it with its own start time"
         );
 
         let other_database = directory.path().join("other.db");
@@ -1172,6 +1236,57 @@ mod tests {
             None,
             "a marker written for another database is not this one's heartbeat"
         );
+    }
+
+    #[test]
+    fn a_clean_recovery_pass_by_the_same_observer_heals_its_earlier_failure() {
+        let directory = tempdir().expect("temporary directory");
+        let mut snapshot =
+            HealthSnapshot::starting(directory.path().join("cama.db")).expect("starting state");
+        database_initialized(&mut snapshot);
+        register_workers(&mut snapshot, &[]);
+        snapshot
+            .apply(LifecycleEvent::Ready {
+                bot_user_id: 7,
+                guild_count: 1,
+            })
+            .expect("ready event");
+        synchronize_commands(&mut snapshot);
+        assert!(snapshot.is_healthy());
+
+        let recovery =
+            |observer: &str, failure_count: usize| LifecycleEvent::ReadyRecoveryCompleted {
+                observer: observer.to_owned(),
+                guilds_attempted: 1,
+                guilds_refreshed: 0,
+                guilds_superseded: 0,
+                members_refreshed: 0,
+                failure_count,
+            };
+        snapshot
+            .apply(recovery("dig-pending-recovery", 2))
+            .expect("retained rows degrade health");
+        snapshot
+            .apply(recovery("lobbies", 1))
+            .expect("another observer fails");
+        assert!(!snapshot.is_healthy());
+        assert_eq!(snapshot.recovery_failure_count, 3);
+
+        snapshot
+            .apply(recovery("dig-pending-recovery", 0))
+            .expect("the retry drains cleanly");
+        assert_eq!(
+            snapshot.recovery_failure_count, 1,
+            "only the retried observer's failures clear"
+        );
+        assert!(!snapshot.is_healthy(), "the other observer still failed");
+
+        snapshot
+            .apply(recovery("lobbies", 0))
+            .expect("the other observer recovers too");
+        assert_eq!(snapshot.recovery_failure_count, 0);
+        assert_eq!(snapshot.status, HealthStatus::Ready);
+        assert!(snapshot.is_healthy());
     }
 
     #[test]
