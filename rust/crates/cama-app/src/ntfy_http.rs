@@ -69,11 +69,13 @@ impl NtfyHttpClient {
     /// Publish one alert. `title` and `message` are sent as ntfy headers/body
     /// exactly as given; ntfy renders them verbatim, so callers are
     /// responsible for any Discord-specific escaping before calling this.
+    /// `click`, when given, becomes the notification's tap action.
     pub async fn publish(
         &self,
         topic: &str,
         title: &str,
         message: &str,
+        click: Option<&str>,
     ) -> Result<(), NtfyPublishError> {
         let topic = topic.trim();
         if topic.is_empty() {
@@ -94,12 +96,16 @@ impl NtfyHttpClient {
             .map_err(|()| NtfyPublishError::Request("ntfy server cannot host topics".to_owned()))?
             .pop_if_empty()
             .push(topic);
-        let response = self
+        let mut request = self
             .http
             .post(url)
             .header("Title", sanitize_header_value(title))
             .header("Priority", "urgent")
-            .header("Tags", "rotating_light")
+            .header("Tags", "rotating_light");
+        if let Some(click) = click {
+            request = request.header("Click", sanitize_header_value(click));
+        }
+        let response = request
             .timeout(REQUEST_TIMEOUT)
             .body(message.to_owned())
             .send()

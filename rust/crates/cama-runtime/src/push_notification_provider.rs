@@ -134,7 +134,7 @@ impl PushNotificationHooks {
     /// excluded anyone who does not need to react (an auto-confirmed
     /// invoker, a recently-ready player) — the same set Discord mentions in
     /// the readycheck message itself. `jump_url` links the readycheck message
-    /// from the DM so a player can open it straight from their inbox.
+    /// from both channels so a player can open it straight from the alert.
     pub fn notify_readycheck_launched(
         &self,
         guild_id: u64,
@@ -152,13 +152,18 @@ impl PushNotificationHooks {
             PushNotificationKind::Readycheck,
             READYCHECK_TITLE,
             READYCHECK_MESSAGE,
-            jump_url.map(Arc::from),
+            jump_url,
         );
     }
 
     /// Notify enabled subscribers among `discord_ids` that a shuffled match
-    /// just started with them in it.
-    pub fn notify_match_started(&self, guild_id: u64, discord_ids: &BTreeSet<u64>) {
+    /// just started with them in it. `jump_url` links the shuffle message.
+    pub fn notify_match_started(
+        &self,
+        guild_id: u64,
+        discord_ids: &BTreeSet<u64>,
+        jump_url: Option<String>,
+    ) {
         let targets = discord_ids
             .iter()
             .copied()
@@ -171,7 +176,7 @@ impl PushNotificationHooks {
             PushNotificationKind::MatchStarted,
             MATCH_STARTED_TITLE,
             MATCH_STARTED_MESSAGE,
-            None,
+            jump_url,
         );
     }
 }
@@ -186,13 +191,26 @@ struct PushNotificationHandler {
 
 #[async_trait]
 pub(crate) trait PushPublisher: Send + Sync {
-    async fn publish(&self, topic: &str, title: &str, message: &str) -> Result<(), String>;
+    /// `click` is the URL the notification opens when tapped, if any.
+    async fn publish(
+        &self,
+        topic: &str,
+        title: &str,
+        message: &str,
+        click: Option<&str>,
+    ) -> Result<(), String>;
 }
 
 #[async_trait]
 impl PushPublisher for NtfyHttpClient {
-    async fn publish(&self, topic: &str, title: &str, message: &str) -> Result<(), String> {
-        NtfyHttpClient::publish(self, topic, title, message)
+    async fn publish(
+        &self,
+        topic: &str,
+        title: &str,
+        message: &str,
+        click: Option<&str>,
+    ) -> Result<(), String> {
+        NtfyHttpClient::publish(self, topic, title, message, click)
             .await
             .map_err(|error| error.to_string())
     }
@@ -224,7 +242,8 @@ impl PushNotificationHandler {
     /// Fire-and-forget delivery: looks up enabled targets per channel on a
     /// blocking task, then fans out on the async runtime, all inside a
     /// detached task so the caller never waits on SQLite, ntfy, or Discord
-    /// I/O. `dm_jump_url` is DM-only: ntfy bodies stay a plain sentence.
+    /// I/O. `jump_url` becomes the ntfy tap action and the DM title link;
+    /// ntfy bodies stay a plain sentence.
     fn spawn_notify(
         handler: &Arc<Self>,
         guild_id: u64,
@@ -232,7 +251,7 @@ impl PushNotificationHandler {
         kind: PushNotificationKind,
         title: &'static str,
         message: &'static str,
-        dm_jump_url: Option<Arc<str>>,
+        jump_url: Option<String>,
     ) {
         if discord_ids.is_empty() {
             return;
@@ -246,17 +265,19 @@ impl PushNotificationHandler {
         };
         let handler = Arc::clone(handler);
         tokio::spawn(async move {
-            Self::deliver_ntfy(&handler, guild_id, &discord_ids, kind, title, message).await;
-            Self::deliver_dm(
+            let jump_url = jump_url.map(Arc::<str>::from);
+            Self::deliver_ntfy(
                 &handler,
                 guild_id,
                 &discord_ids,
                 kind,
                 title,
                 message,
-                dm_jump_url,
+                jump_url.clone(),
             )
             .await;
+            let dm = dm_message(title, message, jump_url.as_deref());
+            Self::deliver_dm(&handler, guild_id, &discord_ids, kind, dm).await;
         });
     }
 
@@ -267,6 +288,7 @@ impl PushNotificationHandler {
         kind: PushNotificationKind,
         title: &'static str,
         message: &'static str,
+        click: Option<Arc<str>>,
     ) {
         let repository = handler.repository.clone();
         let discord_ids = discord_ids.to_vec();
@@ -298,6 +320,7 @@ impl PushNotificationHandler {
                 target.topic,
                 title,
                 message,
+                click.clone(),
             ));
         }
         while let Some(delivery) = deliveries.join_next().await {
@@ -316,6 +339,7 @@ impl PushNotificationHandler {
                     target.topic,
                     title,
                     message,
+                    click.clone(),
                 ));
             }
         }
@@ -328,9 +352,14 @@ impl PushNotificationHandler {
         topic: String,
         title: &'static str,
         message: &'static str,
+        click: Option<Arc<str>>,
     ) -> (i64, Result<(), String>) {
         let result = match semaphore.acquire_owned().await {
-            Ok(_permit) => publisher.publish(&topic, title, message).await,
+            Ok(_permit) => {
+                publisher
+                    .publish(&topic, title, message, click.as_deref())
+                    .await
+            }
             Err(_) => Err("push notification delivery semaphore closed".to_owned()),
         };
         (discord_id, result)
@@ -341,9 +370,7 @@ impl PushNotificationHandler {
         guild_id: i64,
         discord_ids: &[i64],
         kind: PushNotificationKind,
-        title: &'static str,
-        message: &'static str,
-        jump_url: Option<Arc<str>>,
+        dm: DiscordMessage,
     ) {
         let repository = handler.repository.clone();
         let discord_ids = discord_ids.to_vec();
@@ -372,9 +399,7 @@ impl PushNotificationHandler {
                 Arc::clone(&handler.discord),
                 Arc::clone(&handler.delivery_semaphore),
                 discord_id,
-                title,
-                message,
-                jump_url.clone(),
+                dm.clone(),
             ));
         }
         while let Some(delivery) = deliveries.join_next().await {
@@ -390,9 +415,7 @@ impl PushNotificationHandler {
                     Arc::clone(&handler.discord),
                     Arc::clone(&handler.delivery_semaphore),
                     discord_id,
-                    title,
-                    message,
-                    jump_url.clone(),
+                    dm.clone(),
                 ));
             }
         }
@@ -402,20 +425,11 @@ impl PushNotificationHandler {
         discord: Arc<dyn DiscordTransport>,
         semaphore: Arc<Semaphore>,
         discord_id: i64,
-        title: &'static str,
-        message: &'static str,
-        jump_url: Option<Arc<str>>,
+        dm: DiscordMessage,
     ) -> (i64, Result<(), String>) {
         let result = match semaphore.acquire_owned().await {
             Ok(_permit) => match u64::try_from(discord_id) {
-                Ok(user_id) => {
-                    discord
-                        .send_direct_message(
-                            user_id,
-                            dm_message(title, message, jump_url.as_deref()),
-                        )
-                        .await
-                }
+                Ok(user_id) => discord.send_direct_message(user_id, dm).await,
                 Err(_) => Err("Discord ID exceeds Discord snowflake range".to_owned()),
             },
             Err(_) => Err("push notification delivery semaphore closed".to_owned()),
@@ -508,7 +522,7 @@ impl PushNotificationHandler {
                 .map_err(|_| "push notification delivery semaphore closed".to_owned())?;
             match self
                 .publisher
-                .publish(&target.topic, TEST_TITLE, TEST_MESSAGE)
+                .publish(&target.topic, TEST_TITLE, TEST_MESSAGE, None)
                 .await
             {
                 Ok(()) => notes.push("\u{2705} ntfy test notification sent.".to_owned()),

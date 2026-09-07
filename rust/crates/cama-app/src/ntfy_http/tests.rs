@@ -87,14 +87,14 @@ fn read_request(stream: &mut std::net::TcpStream) -> Option<CapturedRequest> {
 #[tokio::test]
 async fn publish_rejects_empty_topic() {
     let client = NtfyHttpClient::new().expect("test client");
-    let result = client.publish("", "title", "message").await;
+    let result = client.publish("", "title", "message", None).await;
     assert_eq!(result, Err(NtfyPublishError::EmptyTopic));
 }
 
 #[tokio::test]
 async fn publish_rejects_topic_with_path_separator() {
     let client = NtfyHttpClient::new().expect("test client");
-    let result = client.publish("a/b", "title", "message").await;
+    let result = client.publish("a/b", "title", "message", None).await;
     assert_eq!(result, Err(NtfyPublishError::InvalidTopic));
 }
 
@@ -103,7 +103,7 @@ async fn publish_rejects_topic_with_query_or_fragment_syntax() {
     let client = NtfyHttpClient::new().expect("test client");
     for topic in ["topic?admin=true", "topic#fragment", "topic%2Fnested"] {
         assert_eq!(
-            client.publish(topic, "title", "message").await,
+            client.publish(topic, "title", "message", None).await,
             Err(NtfyPublishError::InvalidTopic)
         );
     }
@@ -115,7 +115,12 @@ async fn publish_sends_expected_request_to_topic_and_succeeds() {
     let client = NtfyHttpClient::for_server(&server.base_url).expect("test client");
 
     let result = client
-        .publish("my-topic", "Ready!", "Readycheck launched")
+        .publish(
+            "my-topic",
+            "Ready!",
+            "Readycheck launched",
+            Some("https://discord.com/channels/1/2/3"),
+        )
         .await;
 
     assert_eq!(result, Ok(()));
@@ -134,7 +139,29 @@ async fn publish_sends_expected_request_to_topic_and_succeeds() {
             .iter()
             .any(|(name, value)| name.eq_ignore_ascii_case("Title") && value == "Ready!")
     );
+    assert!(requests[0].headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("Click") && value == "https://discord.com/channels/1/2/3"
+    }));
     assert_eq!(requests[0].body, "Readycheck launched");
+}
+
+#[tokio::test]
+async fn publish_omits_the_click_header_without_a_link() {
+    let server = ScriptedServer::start(200);
+    let client = NtfyHttpClient::for_server(&server.base_url).expect("test client");
+
+    client
+        .publish("my-topic", "title", "message", None)
+        .await
+        .expect("publish");
+
+    let requests = server.requests();
+    assert!(
+        !requests[0]
+            .headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("Click"))
+    );
 }
 
 #[tokio::test]
@@ -143,7 +170,7 @@ async fn publish_trims_trailing_slash_from_server() {
     let base_with_slash = format!("{}/", server.base_url);
     let client = NtfyHttpClient::for_server(&base_with_slash).expect("test client");
 
-    let result = client.publish("my-topic", "title", "message").await;
+    let result = client.publish("my-topic", "title", "message", None).await;
 
     assert_eq!(result, Ok(()));
     assert_eq!(server.requests().len(), 1);
@@ -160,7 +187,7 @@ async fn publish_request_error_never_leaks_the_secret_topic() {
     let client = NtfyHttpClient::for_server(&base_url).expect("test client");
 
     let topic = "cama-secret-topic-0123456789abcdef";
-    let result = client.publish(topic, "title", "message").await;
+    let result = client.publish(topic, "title", "message", None).await;
 
     let Err(NtfyPublishError::Request(message)) = result else {
         panic!("expected a request error, got {result:?}");
@@ -176,7 +203,7 @@ async fn publish_maps_non_success_status_to_rejected() {
     let server = ScriptedServer::start(500);
     let client = NtfyHttpClient::for_server(&server.base_url).expect("test client");
 
-    let result = client.publish("my-topic", "title", "message").await;
+    let result = client.publish("my-topic", "title", "message", None).await;
 
     assert_eq!(result, Err(NtfyPublishError::Rejected(500)));
 }
@@ -187,7 +214,7 @@ async fn publish_does_not_follow_redirects() {
         ScriptedServer::start_with_headers(307, vec![("Location", "http://127.0.0.1:1/internal")]);
     let client = NtfyHttpClient::for_server(&server.base_url).expect("test client");
 
-    let result = client.publish("my-topic", "title", "message").await;
+    let result = client.publish("my-topic", "title", "message", None).await;
 
     assert_eq!(result, Err(NtfyPublishError::Rejected(307)));
     assert_eq!(server.requests().len(), 1);

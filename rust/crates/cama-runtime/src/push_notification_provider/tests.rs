@@ -74,6 +74,7 @@ struct PublishedNotification {
     topic: String,
     title: String,
     message: String,
+    click: Option<String>,
 }
 
 #[derive(Default)]
@@ -100,7 +101,13 @@ impl RecordingPublisher {
 
 #[async_trait]
 impl PushPublisher for RecordingPublisher {
-    async fn publish(&self, topic: &str, title: &str, message: &str) -> Result<(), String> {
+    async fn publish(
+        &self,
+        topic: &str,
+        title: &str,
+        message: &str,
+        click: Option<&str>,
+    ) -> Result<(), String> {
         self.published
             .lock()
             .expect("published")
@@ -108,6 +115,7 @@ impl PushPublisher for RecordingPublisher {
                 topic: topic.to_owned(),
                 title: title.to_owned(),
                 message: message.to_owned(),
+                click: click.map(str::to_owned),
             });
         Ok(())
     }
@@ -122,7 +130,13 @@ struct SlowPublisher {
 
 #[async_trait]
 impl PushPublisher for SlowPublisher {
-    async fn publish(&self, _topic: &str, _title: &str, _message: &str) -> Result<(), String> {
+    async fn publish(
+        &self,
+        _topic: &str,
+        _title: &str,
+        _message: &str,
+        _click: Option<&str>,
+    ) -> Result<(), String> {
         let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.maximum_active.fetch_max(active, Ordering::SeqCst);
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -681,6 +695,11 @@ async fn notify_readycheck_launched_delivers_only_to_ntfy_enabled_subscribers() 
     assert_eq!(published[0].topic, TOPIC_1);
     assert_eq!(published[0].title, READYCHECK_TITLE);
     assert_eq!(published[0].message, READYCHECK_MESSAGE);
+    assert_eq!(
+        published[0].click.as_deref(),
+        Some(JUMP_URL),
+        "the ntfy alert must open the readycheck message when tapped"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -705,13 +724,14 @@ async fn notify_match_started_uses_the_independent_match_started_ntfy_toggle() {
 
     provider
         .hooks()
-        .notify_match_started(GUILD, &BTreeSet::from([1_u64]));
+        .notify_match_started(GUILD, &BTreeSet::from([1_u64]), None);
 
     let published = publisher.wait_for_published(1);
     assert_eq!(published.len(), 1);
     assert_eq!(published[0].topic, TOPIC_1);
     assert_eq!(published[0].title, MATCH_STARTED_TITLE);
     assert_eq!(published[0].message, MATCH_STARTED_MESSAGE);
+    assert_eq!(published[0].click, None);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -754,25 +774,6 @@ async fn notify_readycheck_launched_also_delivers_dm_to_enabled_subscribers() {
         format!("**{READYCHECK_TITLE}** {JUMP_URL}\n{READYCHECK_MESSAGE}"),
         "the readycheck DM title line must link the readycheck message"
     );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn notify_readycheck_launched_keeps_the_ntfy_body_free_of_the_jump_url() {
-    let database = migrated_database();
-    let publisher = Arc::new(RecordingPublisher::default());
-    let provider = provider_with_publisher(database.path(), publisher.clone());
-    PushNotificationRepository::new(database.path())
-        .set_target(1, Some(GUILD as i64), TOPIC_1, 1)
-        .expect("seed subscriber");
-
-    provider
-        .hooks()
-        .notify_readycheck_launched(GUILD, [1_u64], Some(JUMP_URL.to_owned()));
-
-    let published = publisher.wait_for_published(1);
-    assert_eq!(published.len(), 1);
-    assert_eq!(published[0].title, READYCHECK_TITLE);
-    assert_eq!(published[0].message, READYCHECK_MESSAGE);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -826,15 +827,24 @@ async fn notify_match_started_delivers_to_both_ntfy_and_dm_when_a_player_enables
         )
         .expect("also enable DM for the same player");
 
-    provider
-        .hooks()
-        .notify_match_started(GUILD, &BTreeSet::from([1_u64]));
+    provider.hooks().notify_match_started(
+        GUILD,
+        &BTreeSet::from([1_u64]),
+        Some(JUMP_URL.to_owned()),
+    );
 
     let published = publisher.wait_for_published(1);
     assert_eq!(published.len(), 1);
+    assert_eq!(published[0].message, MATCH_STARTED_MESSAGE);
+    assert_eq!(published[0].click.as_deref(), Some(JUMP_URL));
     let sent = discord.wait_for_direct_messages(1);
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].0, 1);
+    assert_eq!(
+        sent[0].1.response.content,
+        format!("**{MATCH_STARTED_TITLE}** {JUMP_URL}\n{MATCH_STARTED_MESSAGE}"),
+        "the match-started DM links the shuffle message on its title line"
+    );
 }
 
 #[tokio::test]
