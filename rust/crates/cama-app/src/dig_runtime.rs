@@ -659,6 +659,15 @@ pub trait DigRuntimeStore: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Read one delivery projection as currently stored, or `None` when the
+    /// action has no projection. Lightweight stores keep no outbox.
+    fn delivery(
+        &self,
+        _action_id: i64,
+    ) -> Result<Option<DigRuntimeDeliverySnapshot>, DigRuntimeStoreError> {
+        Ok(None)
+    }
+
     fn mark_delivery_delivered(
         &self,
         _request: DigRuntimeMarkDelivered,
@@ -719,10 +728,10 @@ pub use delivery::{
     DigRuntimeEventKind, DigRuntimeEventOutcome, DigRuntimeEventRenderSnapshot,
     DigRuntimeEventRequest, DigRuntimeExecution, DigRuntimeFinalizeDelivery,
     DigRuntimeFlavorSnapshot, DigRuntimeFlexData, DigRuntimeHallOfFameRow,
-    DigRuntimeLeaderboardRow, DigRuntimeMarkDelivered, DigRuntimePendingDeliveryQuery,
-    DigRuntimeRebindDeliveryChannel, DigRuntimeRenderKind, DigRuntimeRenderSnapshot,
-    DigRuntimeRetireDelivery, DigRuntimeSettleBloodPact, DigRuntimeTunnelInfo,
-    DigRuntimeWeatherInfo, DigRuntimeWeatherPresentation,
+    DigRuntimeLeaderboardRow, DigRuntimeMarkDelivered, DigRuntimePendingDeliveryCursor,
+    DigRuntimePendingDeliveryQuery, DigRuntimeRebindDeliveryChannel, DigRuntimeRenderKind,
+    DigRuntimeRenderSnapshot, DigRuntimeRetireDelivery, DigRuntimeSettleBloodPact,
+    DigRuntimeTunnelInfo, DigRuntimeWeatherInfo, DigRuntimeWeatherPresentation,
 };
 use effects::{
     CaveInLootRng, DigPrestige4Entropy, LootRelicEntropy, active_buff_effects,
@@ -1722,6 +1731,13 @@ where
         query: DigRuntimePendingDeliveryQuery,
     ) -> Result<Vec<DigRuntimeDeliverySnapshot>, DigRuntimeStoreError> {
         self.store.pending_deliveries(query)
+    }
+
+    pub fn delivery(
+        &self,
+        action_id: i64,
+    ) -> Result<Option<DigRuntimeDeliverySnapshot>, DigRuntimeStoreError> {
+        self.store.delivery(action_id)
     }
 
     pub fn mark_delivery_delivered(

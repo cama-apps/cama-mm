@@ -330,6 +330,7 @@ fn sqlite_delivery_outbox_round_trips_and_marks_main_part_once() {
             .pending_deliveries(DigRuntimePendingDeliveryQuery {
                 guild_id: 9,
                 discord_id: Some(7),
+                after: None,
                 limit: 10,
             })
             .expect("pending outbox")
@@ -351,6 +352,7 @@ fn sqlite_delivery_outbox_round_trips_and_marks_main_part_once() {
             .pending_deliveries(DigRuntimePendingDeliveryQuery {
                 guild_id: 9,
                 discord_id: Some(7),
+                after: None,
                 limit: 10,
             })
             .expect("pending after main")
@@ -432,6 +434,7 @@ fn pending_deliveries_finds_a_newer_row_behind_many_delivered_digs() {
         .pending_deliveries(DigRuntimePendingDeliveryQuery {
             guild_id: 9,
             discord_id: Some(7),
+            after: None,
             limit: 10,
         })
         .expect("pending outbox");
@@ -505,6 +508,7 @@ fn retire_delivery_closes_a_pending_row_only_after_its_blood_pact_settles() {
             .pending_deliveries(DigRuntimePendingDeliveryQuery {
                 guild_id: 9,
                 discord_id: None,
+                after: None,
                 limit: 10,
             })
             .expect("pending outbox")
@@ -513,6 +517,66 @@ fn retire_delivery_closes_a_pending_row_only_after_its_blood_pact_settles() {
     );
     let again = retire().expect("retirement is idempotent");
     assert_eq!(again.retired, retired.retired);
+}
+
+#[test]
+fn retire_delivery_never_stamps_a_row_that_was_already_posted() {
+    let database = fast_migrated_database();
+    PlayerRepository::new(database.path())
+        .add(&NewPlayer::new(7, "posted-delivery", Some(9)))
+        .expect("seed player");
+    let service = DigRuntimeService::sqlite(database.path());
+    let delivery = service
+        .dig_with_delivery(
+            DigRuntimeRequest {
+                discord_id: 7,
+                guild_id: 9,
+                now: 1_700_000_000,
+                paid: false,
+                forced_event: false,
+            },
+            DigRuntimeDeliveryContext::new(99, 11, "Posted Miner", None),
+        )
+        .expect("dig")
+        .delivery
+        .expect("delivery");
+    service
+        .settle_blood_pact_delivery(DigRuntimeSettleBloodPact {
+            action_id: delivery.action_id,
+            source_key: delivery.source_key.clone(),
+            occurred_at: 1_700_000_000,
+        })
+        .expect("settle delivery economy effects");
+    // A concurrent pass posted the row between the scan and the retirement.
+    assert!(
+        service
+            .mark_delivery_delivered(DigRuntimeMarkDelivered {
+                action_id: delivery.action_id,
+                source_key: delivery.source_key.clone(),
+                delivered_at: 1_700_000_005,
+                part: DigRuntimeDeliveryPart::Main,
+            })
+            .expect("post the row")
+    );
+
+    let unchanged = service
+        .retire_delivery(DigRuntimeRetireDelivery {
+            action_id: delivery.action_id,
+            source_key: delivery.source_key.clone(),
+            retired_at: 1_700_090_000,
+            reason: "older than the recovery window".to_owned(),
+        })
+        .expect("a posted row is left alone, not refused");
+    assert_eq!(unchanged.retired, None, "a shown result is never retired");
+    assert_eq!(unchanged.main_delivered_at, Some(1_700_000_005));
+    assert_eq!(
+        service
+            .delivery(delivery.action_id)
+            .expect("read the projection")
+            .expect("the projection exists"),
+        unchanged
+    );
+    assert!(!unchanged.is_pending());
 }
 
 #[test]
@@ -759,6 +823,7 @@ fn sqlite_delivery_channel_rebind_is_persisted_and_pending_part_guarded() {
         .pending_deliveries(DigRuntimePendingDeliveryQuery {
             guild_id: 9,
             discord_id: Some(7),
+            after: None,
             limit: 10,
         })
         .expect("restart pending delivery");

@@ -159,6 +159,47 @@ impl SqliteDigRuntimeStore {
         transaction.commit()?;
         Ok(action_id)
     }
+
+    /// Load, mutate, and store one delivery projection in a single immediate
+    /// transaction. `mutate` runs after the source key was matched; an error
+    /// from it leaves the row untouched, and the returned snapshot is what
+    /// was written.
+    fn update_delivery(
+        &self,
+        action_id: i64,
+        source_key: &str,
+        mutate: impl FnOnce(&mut DigRuntimeDeliverySnapshot) -> Result<(), DigRuntimeStoreError>,
+    ) -> Result<DigRuntimeDeliverySnapshot, DigRuntimeStoreError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let detail = dig_runtime_store::dig_action_detail(&transaction, action_id)?
+            .flatten()
+            .ok_or(DigRuntimeStoreError::StateConflict)?;
+        let mut value = serde_json::from_str::<Value>(&detail)
+            .map_err(|_| DigRuntimeStoreError::InvalidJson("dig action detail"))?;
+        let raw = value
+            .get("delivery")
+            .cloned()
+            .ok_or(DigRuntimeStoreError::StateConflict)?;
+        let mut delivery = serde_json::from_value::<DigRuntimeDeliverySnapshot>(raw)
+            .map_err(|_| DigRuntimeStoreError::InvalidJson("delivery"))?;
+        if delivery.source_key != source_key {
+            return Err(DigRuntimeStoreError::StateConflict);
+        }
+        mutate(&mut delivery)?;
+        value["delivery"] = serde_json::to_value(&delivery)
+            .map_err(|_| DigRuntimeStoreError::InvalidJson("delivery"))?;
+        let changed = dig_runtime_store::update_dig_action_detail(
+            &transaction,
+            &value.to_string(),
+            action_id,
+        )?;
+        if changed != 1 {
+            return Err(DigRuntimeStoreError::StateConflict);
+        }
+        transaction.commit()?;
+        Ok(delivery)
+    }
 }
 
 fn set_runtime_ledger_context(
@@ -1058,6 +1099,9 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
             &connection,
             query.guild_id,
             query.discord_id,
+            query
+                .after
+                .map(|cursor| (cursor.committed_at, cursor.action_id)),
             i64::try_from(query.limit).unwrap_or(i64::MAX),
         )?;
         let mut deliveries = Vec::new();
@@ -1071,15 +1115,30 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
             };
             let delivery = serde_json::from_value::<DigRuntimeDeliverySnapshot>(raw)
                 .map_err(|_| DigRuntimeStoreError::InvalidJson("delivery"))?;
-            if !delivery.blood_pact.is_terminal()
-                || delivery.main_delivered_at.is_none()
-                || (delivery.render.kind.requires_event_part()
-                    && delivery.event_delivered_at.is_none())
-            {
+            if delivery.is_pending() {
                 deliveries.push(delivery);
             }
         }
         Ok(deliveries)
+    }
+
+    fn delivery(
+        &self,
+        action_id: i64,
+    ) -> Result<Option<DigRuntimeDeliverySnapshot>, DigRuntimeStoreError> {
+        let connection = self.connection()?;
+        let Some(detail) = dig_runtime_store::dig_action_detail(&connection, action_id)?.flatten()
+        else {
+            return Ok(None);
+        };
+        let value = serde_json::from_str::<Value>(&detail)
+            .map_err(|_| DigRuntimeStoreError::InvalidJson("dig action detail"))?;
+        let Some(raw) = value.get("delivery").cloned() else {
+            return Ok(None);
+        };
+        serde_json::from_value::<DigRuntimeDeliverySnapshot>(raw)
+            .map(Some)
+            .map_err(|_| DigRuntimeStoreError::InvalidJson("delivery"))
     }
 
     fn mark_delivery_delivered(
@@ -1134,137 +1193,67 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
         &self,
         request: DigRuntimeRebindDeliveryChannel,
     ) -> Result<DigRuntimeDeliverySnapshot, DigRuntimeStoreError> {
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let detail = dig_runtime_store::dig_action_detail(&transaction, request.action_id)?
-            .flatten()
-            .ok_or(DigRuntimeStoreError::StateConflict)?;
-        let mut value = serde_json::from_str::<Value>(&detail)
-            .map_err(|_| DigRuntimeStoreError::InvalidJson("dig action detail"))?;
-        let raw = value
-            .get("delivery")
-            .cloned()
-            .ok_or(DigRuntimeStoreError::StateConflict)?;
-        let mut delivery = serde_json::from_value::<DigRuntimeDeliverySnapshot>(raw)
-            .map_err(|_| DigRuntimeStoreError::InvalidJson("delivery"))?;
-        let part_pending = match request.part {
-            DigRuntimeDeliveryPart::Main => delivery.main_delivered_at.is_none(),
-            DigRuntimeDeliveryPart::Event => {
-                delivery.render.kind.requires_event_part() && delivery.event_delivered_at.is_none()
+        self.update_delivery(request.action_id, &request.source_key, |delivery| {
+            if delivery.context.channel_id != request.expected_channel_id
+                || !delivery.part_pending(request.part)
+            {
+                return Err(DigRuntimeStoreError::StateConflict);
             }
-        };
-        if delivery.source_key != request.source_key
-            || delivery.context.channel_id != request.expected_channel_id
-            || !part_pending
-        {
-            return Err(DigRuntimeStoreError::StateConflict);
-        }
-        delivery.context.channel_id = request.fallback_channel_id;
-        value["delivery"] = serde_json::to_value(&delivery)
-            .map_err(|_| DigRuntimeStoreError::InvalidJson("delivery"))?;
-        let changed = dig_runtime_store::update_dig_action_detail(
-            &transaction,
-            &value.to_string(),
-            request.action_id,
-        )?;
-        if changed != 1 {
-            return Err(DigRuntimeStoreError::StateConflict);
-        }
-        transaction.commit()?;
-        Ok(delivery)
+            delivery.context.channel_id = request.fallback_channel_id;
+            Ok(())
+        })
     }
 
     fn retire_delivery(
         &self,
         request: DigRuntimeRetireDelivery,
     ) -> Result<DigRuntimeDeliverySnapshot, DigRuntimeStoreError> {
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let detail = dig_runtime_store::dig_action_detail(&transaction, request.action_id)?
-            .flatten()
-            .ok_or(DigRuntimeStoreError::StateConflict)?;
-        let mut value = serde_json::from_str::<Value>(&detail)
-            .map_err(|_| DigRuntimeStoreError::InvalidJson("dig action detail"))?;
-        let raw = value
-            .get("delivery")
-            .cloned()
-            .ok_or(DigRuntimeStoreError::StateConflict)?;
-        let mut delivery = serde_json::from_value::<DigRuntimeDeliverySnapshot>(raw)
-            .map_err(|_| DigRuntimeStoreError::InvalidJson("delivery"))?;
-        if delivery.source_key != request.source_key || !delivery.blood_pact.is_terminal() {
-            return Err(DigRuntimeStoreError::StateConflict);
-        }
-        if delivery.retired.is_none() {
-            delivery.retired = Some(DigRuntimeDeliveryRetirement {
-                retired_at: request.retired_at,
-                reason: request.reason,
-            });
-        }
-        delivery.main_delivered_at.get_or_insert(request.retired_at);
-        delivery
-            .event_delivered_at
-            .get_or_insert(request.retired_at);
-        value["delivery"] = serde_json::to_value(&delivery)
-            .map_err(|_| DigRuntimeStoreError::InvalidJson("delivery"))?;
-        let changed = dig_runtime_store::update_dig_action_detail(
-            &transaction,
-            &value.to_string(),
-            request.action_id,
-        )?;
-        if changed != 1 {
-            return Err(DigRuntimeStoreError::StateConflict);
-        }
-        transaction.commit()?;
-        Ok(delivery)
+        self.update_delivery(request.action_id, &request.source_key, |delivery| {
+            if !delivery.blood_pact.is_terminal() {
+                return Err(DigRuntimeStoreError::StateConflict);
+            }
+            // A concurrent pass may have posted the row between the caller's
+            // scan and this transaction. A shown result is never stamped
+            // retired: the caller reads `retired` to learn nothing happened.
+            if !delivery.is_pending() {
+                return Ok(());
+            }
+            if delivery.retired.is_none() {
+                delivery.retired = Some(DigRuntimeDeliveryRetirement {
+                    retired_at: request.retired_at,
+                    reason: request.reason.clone(),
+                });
+            }
+            delivery.main_delivered_at.get_or_insert(request.retired_at);
+            delivery
+                .event_delivered_at
+                .get_or_insert(request.retired_at);
+            Ok(())
+        })
     }
 
     fn finalize_delivery(
         &self,
         request: DigRuntimeFinalizeDelivery,
     ) -> Result<DigRuntimeDeliverySnapshot, DigRuntimeStoreError> {
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let detail = dig_runtime_store::dig_action_detail(&transaction, request.action_id)?
-            .flatten()
-            .ok_or(DigRuntimeStoreError::StateConflict)?;
-        let mut value = serde_json::from_str::<Value>(&detail)
-            .map_err(|_| DigRuntimeStoreError::InvalidJson("dig action detail"))?;
-        let raw = value
-            .get("delivery")
-            .cloned()
-            .ok_or(DigRuntimeStoreError::StateConflict)?;
-        let mut delivery = serde_json::from_value::<DigRuntimeDeliverySnapshot>(raw)
-            .map_err(|_| DigRuntimeStoreError::InvalidJson("delivery"))?;
-        if delivery.source_key != request.source_key {
-            return Err(DigRuntimeStoreError::StateConflict);
-        }
-        delivery.flavor = request.flavor;
-        if let Some(boss) = request.boss {
-            delivery.render.kind = DigRuntimeRenderKind::Boss;
-            delivery.render.boss = Some(boss);
-        } else if delivery.render.kind == DigRuntimeRenderKind::Boss {
-            // A boss row finalized without its encounter is stale: the
-            // tunnel no longer stands at that boundary. Post it as the plain
-            // result it records instead of announcing a boss that is gone.
-            delivery.outcome.boss_boundary = None;
-            delivery.render.kind = DigRuntimeRenderKind::Normal;
-            delivery.render.title =
-                super::delivery::standard_result_title(&delivery.outcome, delivery.action_id);
-            delivery.render.boss_boundary_copy = None;
-        }
-        delivery.render.flavor_narrative = delivery.flavor.narrative().map(str::to_owned);
-        value["delivery"] = serde_json::to_value(&delivery)
-            .map_err(|_| DigRuntimeStoreError::InvalidJson("delivery"))?;
-        let changed = dig_runtime_store::update_dig_action_detail(
-            &transaction,
-            &value.to_string(),
-            request.action_id,
-        )?;
-        if changed != 1 {
-            return Err(DigRuntimeStoreError::StateConflict);
-        }
-        transaction.commit()?;
-        Ok(delivery)
+        self.update_delivery(request.action_id, &request.source_key, |delivery| {
+            delivery.flavor = request.flavor.clone();
+            if let Some(boss) = request.boss.clone() {
+                delivery.render.kind = DigRuntimeRenderKind::Boss;
+                delivery.render.boss = Some(boss);
+            } else if delivery.render.kind == DigRuntimeRenderKind::Boss {
+                // A boss row finalized without its encounter is stale: the
+                // tunnel no longer stands at that boundary. Post it as the plain
+                // result it records instead of announcing a boss that is gone.
+                delivery.outcome.boss_boundary = None;
+                delivery.render.kind = DigRuntimeRenderKind::Normal;
+                delivery.render.title =
+                    super::delivery::standard_result_title(&delivery.outcome, delivery.action_id);
+                delivery.render.boss_boundary_copy = None;
+            }
+            delivery.render.flavor_narrative = delivery.flavor.narrative().map(str::to_owned);
+            Ok(())
+        })
     }
 
     fn settle_blood_pact_delivery(

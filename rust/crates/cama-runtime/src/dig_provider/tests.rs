@@ -1337,6 +1337,7 @@ struct TestDiscord {
     reject_configured_nonce_sends: StdMutex<bool>,
     undeliverable_channels: StdMutex<BTreeSet<i64>>,
     fail_next_history: StdMutex<bool>,
+    direct: StdMutex<Vec<(i64, InteractionResponse)>>,
     reject_un_nonnced_public_send: StdMutex<bool>,
     gamba: bool,
     avatar_url: Option<String>,
@@ -1357,6 +1358,7 @@ impl Default for TestDiscord {
             reject_configured_nonce_sends: StdMutex::new(false),
             undeliverable_channels: StdMutex::new(BTreeSet::new()),
             fail_next_history: StdMutex::new(false),
+            direct: StdMutex::new(Vec::new()),
             reject_un_nonnced_public_send: StdMutex::new(false),
             gamba: true,
             avatar_url: None,
@@ -1463,6 +1465,18 @@ impl DigDiscordPort for TestDiscord {
         } else {
             DiscordDestinationStatus::Unknown
         }
+    }
+
+    async fn dig_send_direct(
+        &self,
+        user_id: i64,
+        response: InteractionResponse,
+    ) -> Result<(), String> {
+        self.direct
+            .lock()
+            .expect("direct messages")
+            .push((user_id, response));
+        Ok(())
     }
 
     async fn dig_user_avatar_url(
@@ -2364,6 +2378,7 @@ async fn accepted_public_delivery_is_reconciled_after_restart_without_duplicate_
             .pending_deliveries(cama_app::dig_runtime::DigRuntimePendingDeliveryQuery {
                 guild_id: GUILD as i64,
                 discord_id: Some(USER as i64),
+                after: None,
                 limit: 10,
             })
             .await
@@ -2395,6 +2410,7 @@ async fn accepted_public_delivery_is_reconciled_after_restart_without_duplicate_
             .pending_deliveries(cama_app::dig_runtime::DigRuntimePendingDeliveryQuery {
                 guild_id: GUILD as i64,
                 discord_id: Some(USER as i64),
+                after: None,
                 limit: 10,
             })
             .await
@@ -2778,6 +2794,7 @@ async fn configured_public_send_crash_reconciles_without_duplicate() {
             .pending_deliveries(cama_app::dig_runtime::DigRuntimePendingDeliveryQuery {
                 guild_id: GUILD as i64,
                 discord_id: Some(USER as i64),
+                after: None,
                 limit: 10,
             })
             .await
@@ -2878,6 +2895,7 @@ async fn pending_rows(provider: &DigRegistrationProvider) -> Vec<DigRuntimeDeliv
         .pending_deliveries(cama_app::dig_runtime::DigRuntimePendingDeliveryQuery {
             guild_id: GUILD as i64,
             discord_id: None,
+            after: None,
             limit: 10,
         })
         .await
@@ -2959,6 +2977,9 @@ async fn recovery_retires_a_row_older_than_the_window_after_settling_its_effects
         stored[0].blood_pact.is_terminal(),
         "retirement settles the skim owed to another player first"
     );
+    let notices = direct_messages(&discord, USER);
+    assert_eq!(notices.len(), 1, "the digger is told the result was closed");
+    assert!(notices[0].contains("older than the recovery window"));
 }
 
 #[tokio::test]
@@ -3007,7 +3028,7 @@ async fn recovery_retires_a_row_whose_channel_is_permanently_gone() {
 }
 
 #[tokio::test]
-async fn recovery_retains_a_rejected_row_without_degrading_the_runtime() {
+async fn recovery_reports_a_retained_row_as_a_failure_for_retry() {
     let discord = Arc::new(TestDiscord::with_channels([
         CHANNEL as i64,
         CONFIGURED_CHANNEL,
@@ -3018,11 +3039,16 @@ async fn recovery_retains_a_rejected_row_without_degrading_the_runtime() {
     let restarted = restarted_provider(&database, &provider, &discord);
 
     let report = restarted.recover_pending_deliveries(&[GUILD]).await;
-    assert!(
-        report.failures.is_empty(),
-        "a rejected post is not a recovery failure: {report:?}"
+    assert_eq!(
+        report
+            .failures
+            .iter()
+            .map(|failure| (failure.guild_id, failure.message.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(GUILD, "1 pending Dig deliveries retained for retry")],
+        "a retained row is reported so health degrades and the drain retries"
     );
-    assert_eq!(report.guilds_refreshed, 1);
+    assert_eq!(report.guilds_refreshed, 0);
     assert_eq!(report.members_refreshed, 0);
     assert_eq!(
         pending_rows(&restarted).await.len(),
@@ -3078,8 +3104,12 @@ async fn recovery_continues_past_a_retained_row() {
     *discord.fail_next_history.lock().expect("history fault") = true;
 
     let report = restarted.recover_pending_deliveries(&[GUILD]).await;
-    assert!(report.failures.is_empty(), "recovery report: {report:?}");
     assert_eq!(report.members_refreshed, 1, "the second row was reconciled");
+    assert_eq!(
+        report.failures.len(),
+        1,
+        "the retained row is still reported: {report:?}"
+    );
     let remaining = pending_rows(&restarted).await;
     assert_eq!(remaining.len(), 1);
     assert_eq!(
@@ -3195,6 +3225,374 @@ async fn player_replay_retires_their_own_stale_row_instead_of_reposting_it() {
         "the stale result is not reposted"
     );
     assert!(pending_rows(&restarted).await.is_empty());
+}
+
+/// The direct messages the test transport recorded for `user_id`.
+fn direct_messages(discord: &TestDiscord, user_id: u64) -> Vec<String> {
+    discord
+        .direct
+        .lock()
+        .expect("direct messages")
+        .iter()
+        .filter(|(recipient, _)| *recipient == user_id as i64)
+        .map(|(_, response)| {
+            response
+                .embeds
+                .iter()
+                .map(|embed| {
+                    format!(
+                        "{}\n{}",
+                        embed.title.clone().unwrap_or_default(),
+                        embed.description.clone().unwrap_or_default()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .collect()
+}
+
+/// Clone the guild's newest pending Dig row `copies` times, each copy keyed
+/// to its own id so the outbox treats it as a distinct committed dig. Copies
+/// share the original's second and sort after it by id.
+fn clone_pending_rows(database: &NamedTempFile, copies: usize) {
+    let connection = Connection::open(database.path()).expect("clone connection");
+    for _ in 0..copies {
+        connection
+            .execute(
+                "INSERT INTO dig_actions
+                    (guild_id,actor_id,target_id,action_type,depth_before,depth_after,
+                     jc_delta,detail,created_at)
+                 SELECT guild_id,actor_id,target_id,action_type,depth_before,depth_after,
+                        jc_delta,detail,created_at
+                   FROM dig_actions
+                  WHERE action_type='dig' AND json_type(detail,'$.delivery')='object'
+                  ORDER BY id LIMIT 1",
+                [],
+            )
+            .expect("clone pending row");
+        connection
+            .execute(
+                "UPDATE dig_actions
+                    SET detail = json_set(detail,
+                                          '$.delivery.action_id', id,
+                                          '$.delivery.source_key', 'dig:' || id)
+                  WHERE id = last_insert_rowid()",
+                [],
+            )
+            .expect("rekey cloned row");
+    }
+}
+
+#[tokio::test]
+async fn recovery_walks_past_a_full_page_of_retained_rows() {
+    let discord = Arc::new(TestDiscord::with_channels([
+        CHANNEL as i64,
+        CONFIGURED_CHANNEL,
+    ]));
+    let (database, provider, discord) = crash_window_row(discord).await;
+    // One retained row already sits at the front; a full page more follow it.
+    clone_pending_rows(&database, super::PENDING_RECOVERY_PAGE);
+    // One more, newest, bound to a channel whose sends are accepted.
+    clone_pending_rows(&database, 1);
+    Connection::open(database.path())
+        .expect("rebind connection")
+        .execute(
+            "UPDATE dig_actions
+                SET created_at = created_at + 1,
+                    detail = json_set(detail,
+                                      '$.delivery.committed_at',
+                                      json_extract(detail,'$.delivery.committed_at') + 1,
+                                      '$.delivery.context.channel_id', ?1)
+              WHERE id = (SELECT MAX(id) FROM dig_actions)",
+            params![CHANNEL as i64],
+        )
+        .expect("rebind the newest row");
+    discord.forget_history();
+    discord.reject_configured_nonce_sends();
+    let restarted = restarted_provider(&database, &provider, &discord);
+
+    let report = restarted.recover_pending_deliveries(&[GUILD]).await;
+    assert_eq!(
+        report.members_refreshed, 1,
+        "the newest row behind a full page of retained rows was posted: {report:?}"
+    );
+    assert_eq!(
+        report
+            .failures
+            .iter()
+            .map(|failure| failure.message.as_str())
+            .collect::<Vec<_>>(),
+        vec![format!(
+            "{} pending Dig deliveries retained for retry",
+            super::PENDING_RECOVERY_PAGE + 1
+        )]
+    );
+}
+
+#[tokio::test]
+async fn recovery_retires_a_row_whose_gone_channel_fails_the_history_read() {
+    let discord = Arc::new(TestDiscord::with_channels([
+        CHANNEL as i64,
+        CONFIGURED_CHANNEL,
+    ]));
+    let (database, provider, discord) = crash_window_row(discord).await;
+    // A deleted channel fails the pre-send history reconcile, never the send.
+    *discord.fail_next_history.lock().expect("history fault") = true;
+    discord.mark_undeliverable(CONFIGURED_CHANNEL);
+    let restarted = restarted_provider(&database, &provider, &discord);
+
+    let report = restarted.recover_pending_deliveries(&[GUILD]).await;
+    assert!(report.failures.is_empty(), "recovery report: {report:?}");
+    assert!(pending_rows(&restarted).await.is_empty());
+    let stored = stored_deliveries(&database);
+    assert_eq!(
+        stored[0]
+            .retired
+            .as_ref()
+            .map(|retirement| retirement.reason.as_str()),
+        Some("channel permanently undeliverable")
+    );
+    assert_eq!(
+        discord.public.lock().expect("public responses").len(),
+        1,
+        "nothing was posted to the gone channel"
+    );
+    let notices = direct_messages(&discord, USER);
+    assert_eq!(notices.len(), 1, "the digger is told why: {notices:?}");
+    assert!(notices[0].contains("channel permanently undeliverable"));
+    assert!(notices[0].contains(&format!(
+        "depth {} → {}",
+        stored[0].outcome.depth_before, stored[0].outcome.depth_after
+    )));
+}
+
+#[tokio::test]
+async fn dig_go_retires_a_row_whose_channel_is_gone_instead_of_failing() {
+    let discord = Arc::new(TestDiscord::with_channels([
+        CHANNEL as i64,
+        CONFIGURED_CHANNEL,
+    ]));
+    let (database, provider, discord) = crash_window_row(discord).await;
+    *discord.fail_next_history.lock().expect("history fault") = true;
+    discord.mark_undeliverable(CONFIGURED_CHANNEL);
+    // The next dig posts normally once the stale row is out of the way.
+    discord.arm_accept_then_fail_nonce_send();
+    Connection::open(database.path())
+        .expect("open Dig database")
+        .execute(
+            "UPDATE tunnels SET last_dig_at=0 WHERE discord_id=?1 AND guild_id=?2",
+            params![USER as i64, GUILD as i64],
+        )
+        .expect("reset Dig cooldown");
+    let restarted = restarted_provider(&database, &provider, &discord);
+
+    let responder = Arc::new(TestResponder::default());
+    let _ = restarted.handler.handle(go_request(), responder).await;
+    let stored = stored_deliveries(&database);
+    assert_eq!(
+        stored[0]
+            .retired
+            .as_ref()
+            .map(|retirement| retirement.reason.as_str()),
+        Some("channel permanently undeliverable"),
+        "the gone channel no longer blocks the player's next dig"
+    );
+    assert_eq!(
+        stored.len(),
+        2,
+        "a new dig was committed after the retirement"
+    );
+    assert_eq!(direct_messages(&discord, USER).len(), 1);
+}
+
+#[tokio::test]
+async fn delivery_skips_the_send_when_the_row_was_retired_meanwhile() {
+    let discord = Arc::new(TestDiscord::with_channels([
+        CHANNEL as i64,
+        CONFIGURED_CHANNEL,
+    ]));
+    let (database, provider, discord) = crash_window_row(discord).await;
+    discord.forget_history();
+    let stale = pending_rows(&provider).await.remove(0);
+    // Another pass retires the row after this one scanned it.
+    provider
+        .handler
+        .retire_delivery(&stale, super::unix_now(), "older than the recovery window")
+        .await
+        .expect("retire the row");
+
+    provider
+        .handler
+        .deliver_to_channel(&stale)
+        .await
+        .expect("a retired row is nothing to deliver");
+    assert_eq!(
+        discord.public.lock().expect("public responses").len(),
+        1,
+        "the retired row was not posted"
+    );
+    assert!(stored_deliveries(&database)[0].retired.is_some());
+}
+
+#[tokio::test]
+async fn ready_recovery_queues_guilds_requested_while_a_drain_runs() {
+    let discord = Arc::new(TestDiscord::with_channels([
+        CHANNEL as i64,
+        CONFIGURED_CHANNEL,
+    ]));
+    let (database, provider, discord) = crash_window_row(discord).await;
+    let restarted = restarted_provider(&database, &provider, &discord);
+    let (events, mut lifecycle) = tokio::sync::broadcast::channel(8);
+    restarted.set_lifecycle_events(events);
+    let observer = restarted.gateway_observer();
+
+    let first = observer
+        .ready_recovery(ReadyRecoveryContext::new(
+            vec![GUILD],
+            Arc::new(EmptyGatewayMembers),
+        ))
+        .await;
+    // A guild join lands while the READY drain is still in flight.
+    let second = observer
+        .ready_recovery(ReadyRecoveryContext::new(
+            vec![GUILD + 1],
+            Arc::new(EmptyGatewayMembers),
+        ))
+        .await;
+    assert_eq!(first.guilds_attempted, 1);
+    assert_eq!(second.guilds_attempted, 1);
+
+    let drained = restarted
+        .wait_for_pending_recovery()
+        .await
+        .expect("a drain was started");
+    assert_eq!(
+        drained.guilds_attempted, 2,
+        "the queued guild joined the drain instead of being dropped: {drained:?}"
+    );
+    assert_eq!(drained.members_refreshed, 1);
+    assert!(drained.failures.is_empty(), "{drained:?}");
+    match lifecycle
+        .try_recv()
+        .expect("the pass reports to the lifecycle")
+    {
+        LifecycleEvent::ReadyRecoveryCompleted {
+            guilds_attempted, ..
+        } => assert_eq!(guilds_attempted, 2),
+        other => panic!("unexpected lifecycle event {other:?}"),
+    }
+    assert!(pending_rows(&restarted).await.is_empty());
+}
+
+#[tokio::test]
+async fn background_drain_retries_a_retained_row_until_it_posts() {
+    let discord = Arc::new(TestDiscord::with_channels([
+        CHANNEL as i64,
+        CONFIGURED_CHANNEL,
+    ]));
+    let (database, provider, discord) = crash_window_row(discord).await;
+    discord.forget_history();
+    discord.reject_configured_nonce_sends();
+    let restarted = restarted_provider(&database, &provider, &discord);
+    restarted.set_pending_recovery_retry(Duration::from_millis(10));
+    let (events, mut lifecycle) = tokio::sync::broadcast::channel(8);
+    restarted.set_lifecycle_events(events);
+
+    restarted
+        .gateway_observer()
+        .ready_recovery(ReadyRecoveryContext::new(
+            vec![GUILD],
+            Arc::new(EmptyGatewayMembers),
+        ))
+        .await;
+    match lifecycle.recv().await.expect("first pass reports") {
+        LifecycleEvent::ReadyRecoveryCompleted { failure_count, .. } => {
+            assert_eq!(failure_count, 1, "the retained row degrades health");
+        }
+        other => panic!("unexpected lifecycle event {other:?}"),
+    }
+    // Discord recovers; the next retry pass must post the row unprompted.
+    *discord
+        .reject_configured_nonce_sends
+        .lock()
+        .expect("configured send fault") = false;
+
+    let drained = restarted
+        .wait_for_pending_recovery()
+        .await
+        .expect("a drain was started");
+    assert_eq!(drained.members_refreshed, 1, "{drained:?}");
+    assert!(drained.failures.is_empty(), "{drained:?}");
+    assert!(pending_rows(&restarted).await.is_empty());
+    let mut healed = false;
+    while let Ok(event) = lifecycle.try_recv() {
+        if let LifecycleEvent::ReadyRecoveryCompleted { failure_count, .. } = event {
+            healed = failure_count == 0;
+        }
+    }
+    assert!(healed, "the last pass reported no failures so health heals");
+}
+
+#[tokio::test]
+async fn paid_confirmation_retires_a_stale_pending_row_instead_of_reposting_it() {
+    let (database, provider, discord) = fixture();
+    provider
+        .handler
+        .run_dig(
+            USER as i64,
+            GUILD as i64,
+            super::unix_now(),
+            false,
+            false,
+            cama_app::dig_runtime::DigRuntimeDeliveryContext::new(
+                0xdec0_1003,
+                CHANNEL as i64,
+                "Stale Miner",
+                None,
+            ),
+        )
+        .await
+        .expect("commit pending Dig");
+    backdate_outbox(&database, super::PENDING_RECOVERY_WINDOW_SECONDS + 3_600);
+    let posted_before = discord.public.lock().expect("public responses").len();
+    let token = provider
+        .handler
+        .create_paid_view(USER as i64, GUILD as i64, super::unix_now())
+        .expect("create paid view");
+    let responder = Arc::new(TestResponder::default());
+
+    provider
+        .handler
+        .handle(
+            component_request(format!("dig:paid:confirm:{token}"), Vec::new()),
+            responder.clone(),
+        )
+        .await
+        .expect("retire the stale row instead of charging");
+
+    assert_eq!(
+        discord.public.lock().expect("public responses").len(),
+        posted_before,
+        "a stale result is never reposted from the paid path"
+    );
+    assert_eq!(
+        stored_deliveries(&database)[0]
+            .retired
+            .as_ref()
+            .map(|retirement| retirement.reason.as_str()),
+        Some("older than the recovery window")
+    );
+    assert!(
+        responder
+            .original_edits
+            .lock()
+            .expect("paid recovery edit")
+            .iter()
+            .any(|response| response
+                .content
+                .contains("you were not charged for another dig"))
+    );
 }
 
 #[tokio::test]
@@ -3363,6 +3761,7 @@ async fn pending_configured_delivery_rejection_falls_back_to_interaction_channel
             .pending_deliveries(cama_app::dig_runtime::DigRuntimePendingDeliveryQuery {
                 guild_id: GUILD as i64,
                 discord_id: Some(USER as i64),
+                after: None,
                 limit: 10,
             })
             .await
@@ -3449,6 +3848,7 @@ async fn accepted_interaction_followup_is_reconciled_by_interaction_and_immutabl
             .pending_deliveries(cama_app::dig_runtime::DigRuntimePendingDeliveryQuery {
                 guild_id: GUILD as i64,
                 discord_id: Some(USER as i64),
+                after: None,
                 limit: 10,
             })
             .await
@@ -7637,6 +8037,7 @@ async fn assert_stale_boss_delivery_posted_as_plain_result(
             .pending_deliveries(cama_app::dig_runtime::DigRuntimePendingDeliveryQuery {
                 guild_id: GUILD as i64,
                 discord_id: Some(USER as i64),
+                after: None,
                 limit: 10,
             })
             .await

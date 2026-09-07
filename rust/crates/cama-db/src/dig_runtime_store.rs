@@ -1065,27 +1065,37 @@ pub fn update_dig_action_detail_for_actor(
 ///
 /// The guild is required so the `(guild_id, action_type, ...)` index prefix
 /// bounds the scan; an optional guild would force a full table scan on every
-/// READY pass.
+/// READY pass. Rows are ordered by `(created_at, id)`, which that index
+/// serves without sorting the guild's whole dig range first, and `after` is
+/// a keyset cursor over the same order: the `(created_at, id)` of the last
+/// row of the previous page, so a caller can walk every pending row even
+/// when earlier rows are retained rather than closed.
 pub fn dig_action_details_for_delivery(
     connection: &Connection,
     guild_id: i64,
     actor_id: Option<i64>,
+    after: Option<(i64, i64)>,
     limit: i64,
 ) -> Result<Vec<Option<String>>, rusqlite::Error> {
     let mut statement = connection.prepare(PENDING_DIG_DELIVERY_SQL)?;
+    let (after_created_at, after_id) = after.map_or((None, None), |(created_at, id)| {
+        (Some(created_at), Some(id))
+    });
     statement
-        .query_map(params![guild_id, actor_id, limit], |row| {
-            row.get::<_, Option<String>>(0)
-        })?
+        .query_map(
+            params![guild_id, actor_id, after_created_at, after_id, limit],
+            |row| row.get::<_, Option<String>>(0),
+        )?
         .collect()
 }
 
 /// The pending-delivery scan, kept addressable so its query plan can be
-/// asserted to use the guild/type index.
+/// asserted to use the guild/type index and its order.
 pub const PENDING_DIG_DELIVERY_SQL: &str = "SELECT detail FROM dig_actions
          WHERE guild_id=?1
            AND action_type='dig'
            AND (?2 IS NULL OR actor_id=?2)
+           AND (?3 IS NULL OR created_at>?3 OR (created_at=?3 AND id>?4))
            AND json_valid(detail)
            AND json_type(detail,'$.delivery')='object'
            AND (
@@ -1094,7 +1104,7 @@ pub const PENDING_DIG_DELIVERY_SQL: &str = "SELECT detail FROM dig_actions
                OR (json_extract(detail,'$.delivery.render.kind')='Event'
                    AND json_extract(detail,'$.delivery.event_delivered_at') IS NULL)
            )
-         ORDER BY id ASC LIMIT ?3";
+         ORDER BY created_at ASC, id ASC LIMIT ?5";
 
 // ---------------------------------------------------------------------------
 // dig_inventory

@@ -433,6 +433,15 @@ impl DigDiscordPort for SerenityDiscordTransport {
         }
     }
 
+    async fn dig_send_direct(
+        &self,
+        user_id: i64,
+        response: InteractionResponse,
+    ) -> Result<(), String> {
+        let user_id = u64::try_from(user_id).map_err(|_| "Dig user id is negative".to_owned())?;
+        DiscordTransport::send_direct_message(self, user_id, DiscordMessage::silent(response)).await
+    }
+
     async fn dig_add_reaction(
         &self,
         channel_id: i64,

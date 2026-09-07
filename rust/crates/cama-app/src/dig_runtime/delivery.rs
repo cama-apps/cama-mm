@@ -211,6 +211,29 @@ pub struct DigRuntimeDeliverySnapshot {
     pub retired: Option<DigRuntimeDeliveryRetirement>,
 }
 
+impl DigRuntimeDeliverySnapshot {
+    /// Whether `part` still owes a post. The event part is owed only by an
+    /// Event render.
+    #[must_use]
+    pub const fn part_pending(&self, part: DigRuntimeDeliveryPart) -> bool {
+        match part {
+            DigRuntimeDeliveryPart::Main => self.main_delivered_at.is_none(),
+            DigRuntimeDeliveryPart::Event => {
+                self.render.kind.requires_event_part() && self.event_delivered_at.is_none()
+            }
+        }
+    }
+
+    /// Whether the row still belongs in the outbox: its Blood Pact effect is
+    /// not terminal or a part is still owed. Mirrors the SQL pending rule.
+    #[must_use]
+    pub const fn is_pending(&self) -> bool {
+        !self.blood_pact.is_terminal()
+            || self.part_pending(DigRuntimeDeliveryPart::Main)
+            || self.part_pending(DigRuntimeDeliveryPart::Event)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DigRuntimeDeliveryRetirement {
     pub retired_at: i64,
@@ -241,7 +264,30 @@ impl Deref for DigRuntimeExecution {
 pub struct DigRuntimePendingDeliveryQuery {
     pub guild_id: i64,
     pub discord_id: Option<i64>,
+    /// Resume after this row of a previous page. Pending rows are scanned in
+    /// `(committed_at, action_id)` order, so a caller walking the outbox sets
+    /// this from the last row it received rather than relying on earlier
+    /// rows having left the queue.
+    pub after: Option<DigRuntimePendingDeliveryCursor>,
     pub limit: usize,
+}
+
+/// Keyset position in the pending-delivery scan: the audit row's `created_at`
+/// (the delivery's `committed_at`, written from the same clock read) and id.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DigRuntimePendingDeliveryCursor {
+    pub committed_at: i64,
+    pub action_id: i64,
+}
+
+impl DigRuntimePendingDeliveryCursor {
+    #[must_use]
+    pub const fn after(delivery: &DigRuntimeDeliverySnapshot) -> Self {
+        Self {
+            committed_at: delivery.committed_at,
+            action_id: delivery.action_id,
+        }
+    }
 }
 
 /// Close one pending delivery without posting it. The Blood Pact effect must

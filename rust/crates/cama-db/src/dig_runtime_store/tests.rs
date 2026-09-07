@@ -156,7 +156,7 @@ fn dig_action_insert_returns_the_row_id_and_detail_updates_are_scoped() {
         1
     );
     assert!(
-        dig_action_details_for_delivery(&connection, GUILD, Some(USER), 10)
+        dig_action_details_for_delivery(&connection, GUILD, Some(USER), None, 10)
             .expect("pending")
             .is_empty(),
         "a detail without a delivery projection is never a delivery candidate"
@@ -223,8 +223,8 @@ fn delivery_scan_window_covers_pending_rows_not_the_oldest_actions() {
     )
     .expect("other action type");
 
-    let found =
-        dig_action_details_for_delivery(&connection, GUILD, Some(USER), 10).expect("pending scan");
+    let found = dig_action_details_for_delivery(&connection, GUILD, Some(USER), None, 10)
+        .expect("pending scan");
     assert_eq!(
         found,
         candidates
@@ -234,14 +234,14 @@ fn delivery_scan_window_covers_pending_rows_not_the_oldest_actions() {
         "every pending row must be found past twelve delivered ones, oldest first"
     );
     assert_eq!(
-        dig_action_details_for_delivery(&connection, GUILD, Some(USER), 2)
+        dig_action_details_for_delivery(&connection, GUILD, Some(USER), None, 2)
             .expect("bounded scan")
             .len(),
         2,
         "the limit bounds the pending rows returned"
     );
     assert!(
-        dig_action_details_for_delivery(&connection, GUILD, Some(USER + 1), 10)
+        dig_action_details_for_delivery(&connection, GUILD, Some(USER + 1), None, 10)
             .expect("other actor")
             .is_empty()
     );
@@ -442,9 +442,16 @@ fn pending_delivery_scan_searches_the_guild_type_index() {
         .prepare(&format!("EXPLAIN QUERY PLAN {PENDING_DIG_DELIVERY_SQL}"))
         .expect("explain pending delivery scan");
     let plan = statement
-        .query_map(params![GUILD, Option::<i64>::None, 10_i64], |row| {
-            row.get::<_, String>(3)
-        })
+        .query_map(
+            params![
+                GUILD,
+                Option::<i64>::None,
+                Option::<i64>::None,
+                Option::<i64>::None,
+                10_i64
+            ],
+            |row| row.get::<_, String>(3),
+        )
         .expect("query plan rows")
         .collect::<Result<Vec<_>, _>>()
         .expect("query plan text")
@@ -454,4 +461,51 @@ fn pending_delivery_scan_searches_the_guild_type_index() {
         "READY recovery must not scan the whole dig_actions table: {plan}"
     );
     assert!(!plan.contains("SCAN dig_actions"), "{plan}");
+    assert!(
+        !plan.contains("TEMP B-TREE FOR ORDER BY"),
+        "the index must serve the scan order so LIMIT stops early instead of \
+         sorting every dig row of the guild: {plan}"
+    );
+}
+
+#[test]
+fn delivery_scan_cursor_resumes_after_the_previous_page() {
+    let database = fixture();
+    let connection = open(&database);
+    let pending = r#"{"delivery":{"blood_pact":"Skipped","render":{"kind":"Normal"},"main_delivered_at":null,"event_delivered_at":null}}"#;
+    // Three rows share one second, so the cursor must break ties on id.
+    let created_at = [1_700_000_000, 1_700_000_000, 1_700_000_000, 1_700_000_001];
+    let mut ids = Vec::new();
+    for (index, created_at) in created_at.into_iter().enumerate() {
+        let index = i64::try_from(index).expect("index");
+        ids.push(
+            insert_dig_action(
+                &connection,
+                GUILD,
+                USER,
+                None,
+                "dig",
+                index,
+                index + 1,
+                1,
+                pending,
+                created_at,
+            )
+            .expect("pending row"),
+        );
+    }
+    let page = |after: Option<(i64, i64)>, limit: i64| {
+        dig_action_details_for_delivery(&connection, GUILD, None, after, limit)
+            .expect("paged scan")
+            .len()
+    };
+    assert_eq!(page(None, 2), 2);
+    assert_eq!(page(Some((created_at[1], ids[1])), 2), 2);
+    assert_eq!(page(Some((created_at[2], ids[2])), 2), 1);
+    assert_eq!(page(Some((created_at[3], ids[3])), 2), 0);
+    assert_eq!(
+        page(Some((created_at[0] - 1, i64::MAX)), 10),
+        4,
+        "a cursor before the first row's second still finds every row"
+    );
 }
