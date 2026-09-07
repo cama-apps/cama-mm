@@ -384,7 +384,7 @@ impl DiscordTransport for RecordingTransport {
         if message
             .response
             .content
-            .starts_with("🧹 Removed (away during ready check):")
+            .starts_with("🧹 Removed (no response to the last ready check):")
             && self
                 .fail_next_pruned_notice
                 .swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -2665,6 +2665,7 @@ async fn stale_readycheck_publicly_names_pruned_players_in_the_lobby_thread() {
         .expect("load lobby row")
         .expect("persisted lobby");
     let long_ago = unix_time_now() - 3_605.0;
+    let stale_check_at = unix_time_now() - 2_400.0;
     persisted.player_join_times = BTreeMap::from([(10, long_ago), (20, long_ago), (30, long_ago)]);
     repository.save(&persisted).expect("age lobby signups");
 
@@ -2693,7 +2694,7 @@ async fn stale_readycheck_publicly_names_pruned_players_in_the_lobby_thread() {
             channel_id: AppChannelId(9),
             lobby_ids: BTreeSet::from([AppUserId(10), AppUserId(20), AppUserId(30)]),
             player_data: BTreeMap::new(),
-            created_at: Some(long_ago),
+            created_at: Some(stale_check_at),
             initial_reacted: BTreeMap::new(),
         },
     );
@@ -2723,13 +2724,13 @@ async fn stale_readycheck_publicly_names_pruned_players_in_the_lobby_thread() {
             sent.message
                 .response
                 .content
-                .starts_with("🧹 Removed (away during ready check):")
+                .starts_with("🧹 Removed (no response to the last ready check):")
         })
         .expect("public stale-sweep notice");
     assert_eq!(notice.channel_id, thread_id);
     assert_eq!(
         notice.message.response.content,
-        "🧹 Removed (away during ready check): <@20> <@30> — rejoin All You Can Feed with `/join` if you're back."
+        "🧹 Removed (no response to the last ready check): <@20> <@30> — rejoin All You Can Feed with `/join` if you're back."
     );
     assert_eq!(
         notice.message.allowed_mentions,
@@ -2805,6 +2806,7 @@ async fn stale_readycheck_fixture(
         .expect("load lobby row")
         .expect("persisted lobby");
     let long_ago = unix_time_now() - 3_605.0;
+    let stale_check_at = unix_time_now() - 2_400.0;
     persisted.player_join_times = BTreeMap::from([(10, long_ago), (20, long_ago), (30, long_ago)]);
     repository.save(&persisted).expect("age lobby signups");
 
@@ -2833,7 +2835,7 @@ async fn stale_readycheck_fixture(
             channel_id: AppChannelId(9),
             lobby_ids: BTreeSet::from([AppUserId(10), AppUserId(20), AppUserId(30)]),
             player_data: BTreeMap::new(),
-            created_at: Some(long_ago),
+            created_at: Some(stale_check_at),
             initial_reacted: BTreeMap::new(),
         },
     );
@@ -2880,7 +2882,7 @@ async fn failed_stale_notice_delivery_does_not_block_readycheck_and_recovers_onc
                 sent.message
                     .response
                     .content
-                    .starts_with("🧹 Removed (away during ready check):")
+                    .starts_with("🧹 Removed (no response to the last ready check):")
             })
             .count()
     };
@@ -2970,7 +2972,7 @@ async fn failed_stale_notice_recovery_is_nonfatal_and_remains_retryable() {
                 sent.message
                     .response
                     .content
-                    .starts_with("🧹 Removed (away during ready check):")
+                    .starts_with("🧹 Removed (no response to the last ready check):")
             })
             .count()
     };
@@ -3067,7 +3069,7 @@ async fn already_delivered_stale_notice_is_acknowledged_without_a_duplicate_ping
             sent.message
                 .response
                 .content
-                .starts_with("🧹 Removed (away during ready check):")
+                .starts_with("🧹 Removed (no response to the last ready check):")
         })
         .count();
     assert_eq!(
@@ -3135,7 +3137,7 @@ async fn corrupt_pruned_notice_row_does_not_wedge_recovery_for_valid_notices() {
             sent.message
                 .response
                 .content
-                .starts_with("🧹 Removed (away during ready check):")
+                .starts_with("🧹 Removed (no response to the last ready check):")
         })
         .count();
     assert_eq!(delivered, 1, "the valid notice must still publish");
@@ -4519,7 +4521,7 @@ async fn test_sword_reaction_join_blocked_during_active_curfew_window() {
 
 #[tokio::test]
 async fn failed_readycheck_publication_releases_the_permit_for_the_next_attempt() {
-    // A stale ready check prunes AFK players and then must repaint the lobby
+    // A stale ready check prunes no-shows and then must repaint the lobby
     // display. That repaint is Required, so a Discord failure aborts the run --
     // but the publication permit was already reserved, and leaking it makes
     // every later /readycheck for the scope report "already being published"
@@ -4527,12 +4529,13 @@ async fn failed_readycheck_publication_releases_the_permit_for_the_next_attempt(
     let database = database_with_players(&[(10, "Creator"), (20, "Afk")]);
     let transport = Arc::new(RecordingTransport::default());
     let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
-    let long_ago = unix_time_now() - 3_600.0;
+    let long_ago = unix_time_now() - 3_605.0;
+    let stale_check_at = unix_time_now() - 2_400.0;
     {
         let provider = provider_for(&database, transport.clone());
         create_lobby_and_join_player(&provider, LobbyKind::Open, 10, "Creator", 20, "Afk").await;
     }
-    // Age both join times past the recent-join grace window, then hydrate a
+    // Age both join times past the sign-up grace window, then hydrate a
     // fresh provider from that persisted state.
     rusqlite::Connection::open(database.path())
         .expect("open lobby database")
@@ -4558,7 +4561,7 @@ async fn failed_readycheck_publication_releases_the_permit_for_the_next_attempt(
             },
         );
     }
-    // A generation old enough to be stale, which is what enables pruning.
+    // A generation stale enough to replace but recent enough to sweep.
     provider.handler.state.readychecks.set_readycheck_state(
         scope,
         cama_app::readycheck::ReadycheckStateInput {
@@ -4566,7 +4569,7 @@ async fn failed_readycheck_publication_releases_the_permit_for_the_next_attempt(
             channel_id: AppChannelId(9),
             lobby_ids: BTreeSet::from([AppUserId(10), AppUserId(20)]),
             player_data: BTreeMap::new(),
-            created_at: Some(long_ago),
+            created_at: Some(stale_check_at),
             initial_reacted: BTreeMap::new(),
         },
     );

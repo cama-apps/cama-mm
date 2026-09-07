@@ -21,7 +21,11 @@ pub const FULL_LOBBY_SIZE: usize = 10;
 pub const MINIMUM_READYCHECK_PLAYERS: usize = 10;
 pub const READYCHECK_COOLDOWN_SECONDS: f64 = 120.0;
 pub const READYCHECK_STALE_SECONDS: f64 = 30.0 * 60.0;
-pub const RECENT_JOIN_GRACE_SECONDS: f64 = 10.0 * 60.0;
+/// A stale sweep only trusts a previous check this recent; an older
+/// non-response says nothing about whether the player is still around.
+pub const SWEEP_PREVIOUS_CHECK_MAX_AGE_SECONDS: f64 = 60.0 * 60.0;
+/// Players who signed up more recently than this are never swept.
+pub const SWEEP_SIGNUP_GRACE_SECONDS: f64 = 60.0 * 60.0;
 pub const READY_LOBBY_RECOMMENDATION: &str = "Run `/readycheck` before `/shuffle`.";
 
 #[must_use]
@@ -921,19 +925,19 @@ impl ReadycheckService {
         }
 
         let mut pruned_players = BTreeSet::new();
-        if stale {
+        let sweepable = stale
+            && scoped.readycheck.as_ref().is_some_and(|generation| {
+                request.now - generation.created_at <= SWEEP_PREVIOUS_CHECK_MAX_AGE_SECONDS
+            });
+        if sweepable {
             let generation = scoped.readycheck.as_ref().expect("stale generation");
             let confirmed = generation.reacted.keys().copied().collect::<BTreeSet<_>>();
             for player_id in lobby.players.iter().copied().collect::<Vec<_>>() {
-                let is_afk = player_data
-                    .get(&player_id)
-                    .is_some_and(|player| player.group == ReadinessGroup::Afk);
                 let outside_grace = lobby
                     .player_join_times
                     .get(&player_id)
-                    .is_none_or(|joined_at| request.now - joined_at >= RECENT_JOIN_GRACE_SECONDS);
-                if is_afk
-                    && outside_grace
+                    .is_none_or(|joined_at| request.now - joined_at >= SWEEP_SIGNUP_GRACE_SECONDS);
+                if outside_grace
                     && !confirmed.contains(&player_id)
                     && player_id != request.invoker_id
                     && !request.reserved_players.contains(&player_id)

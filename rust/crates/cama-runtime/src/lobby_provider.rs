@@ -3779,7 +3779,7 @@ fn readycheck_pruned_players_message(kind: LobbyKind, users: &BTreeSet<u64>) -> 
         .collect::<Vec<_>>()
         .join(" ");
     let content = format!(
-        "🧹 Removed (away during ready check): {tags} — rejoin {} with `/join` if you're back.",
+        "🧹 Removed (no response to the last ready check): {tags} — rejoin {} with `/join` if you're back.",
         kind.display_name()
     );
     DiscordMessage::mentioning(

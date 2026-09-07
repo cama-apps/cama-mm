@@ -702,7 +702,7 @@ fn stronger_concurrent_publication_reservation_is_atomic() {
 }
 
 #[test]
-fn stronger_stale_recovery_prunes_only_safe_afk_players_and_orders_transport() {
+fn stronger_stale_recovery_prunes_only_safe_no_shows_and_orders_transport() {
     let service = ReadycheckService::new();
     let mut lobby = lobby_with(1..=6);
     lobby.thread_id = Some(ChannelId(999));
@@ -715,7 +715,7 @@ fn stronger_stale_recovery_prunes_only_safe_afk_players_and_orders_transport() {
         (player(6), 0.0),
     ]);
     service.put_lobby(lobby);
-    set_generation(&service, 1..=6, 0.0);
+    set_generation(&service, 1..=6, 8_000.0);
     assert!(service.add_readycheck_reaction(scope(), player(4), "<@4>", None));
     let mut classifications = data(1..=6);
     classifications.get_mut(&player(6)).expect("player 6").group = ReadinessGroup::PlayingDota;
@@ -728,7 +728,7 @@ fn stronger_stale_recovery_prunes_only_safe_afk_players_and_orders_transport() {
         .expect("stale replacement plan");
 
     assert_eq!(plan.mode, PublicationMode::ReplaceStale);
-    assert_eq!(plan.pruned_players, BTreeSet::from([player(2)]));
+    assert_eq!(plan.pruned_players, BTreeSet::from([player(2), player(6)]));
     assert_eq!(
         plan.transport.operations,
         vec![
@@ -751,7 +751,7 @@ fn stronger_stale_recovery_prunes_only_safe_afk_players_and_orders_transport() {
             },
             ReadycheckTransportOperation::MirrorPing {
                 channel_id: ChannelId(555),
-                mentioned_users: BTreeSet::from([player(3), player(4), player(5), player(6),]),
+                mentioned_users: BTreeSet::from([player(3), player(4), player(5)]),
                 requirement: DeliveryRequirement::Required,
             },
         ]
@@ -1105,7 +1105,7 @@ fn test_stale_repost_deletes_old_and_resets_confirmations() {
 #[test]
 fn test_stale_repost_keeps_afk_player_who_confirmed_old_check() {
     let service = staleness_service([1, 2, 3, 4]);
-    set_generation(&service, [1, 2, 3, 4], 0.0);
+    set_generation(&service, [1, 2, 3, 4], 5_000.0);
     assert!(service.add_readycheck_reaction(scope(), player(2), "<@2>", None));
     let classifications = grouped_data(&[
         (1, ReadinessGroup::Ready),
@@ -1115,10 +1115,10 @@ fn test_stale_repost_keeps_afk_player_who_confirmed_old_check() {
     ]);
 
     let plan = service
-        .prepare_command(request(2_000.0), classifications)
+        .prepare_command(request(7_000.0), classifications)
         .expect("stale sweep");
 
-    assert_eq!(plan.pruned_players, BTreeSet::from([player(3)]));
+    assert_eq!(plan.pruned_players, BTreeSet::from([player(3), player(4)]));
     assert!(
         service
             .lobby(scope())
@@ -1129,17 +1129,17 @@ fn test_stale_repost_keeps_afk_player_who_confirmed_old_check() {
 }
 
 #[test]
-fn test_stale_repost_never_prunes_recent_join_even_if_classified_afk() {
+fn test_stale_repost_spares_players_signed_up_under_an_hour() {
     let service = staleness_service([1, 2]);
     let mut lobby = service.lobby(scope()).expect("lobby");
     lobby.player_join_times.insert(player(1), 0.0);
-    lobby.player_join_times.insert(player(2), 1_500.0);
+    lobby.player_join_times.insert(player(2), 5_200.0);
     service.put_lobby(lobby);
-    set_generation(&service, [1, 2], 0.0);
+    set_generation(&service, [1, 2], 5_000.0);
 
     let plan = service
         .prepare_command(
-            request(2_000.0),
+            request(7_000.0),
             grouped_data(&[(1, ReadinessGroup::Ready), (2, ReadinessGroup::Afk)]),
         )
         .expect("stale recent-join sweep");
@@ -1155,9 +1155,9 @@ fn test_stale_repost_never_prunes_recent_join_even_if_classified_afk() {
 }
 
 #[test]
-fn test_stale_repost_prunes_afk_no_shows() {
+fn test_stale_repost_prunes_no_shows_regardless_of_presence() {
     let service = staleness_service(1..=6);
-    set_generation(&service, 1..=6, 0.0);
+    set_generation(&service, 1..=6, 5_000.0);
     assert!(service.add_readycheck_reaction(scope(), player(4), "<@4>", None));
     let classifications = grouped_data(&[
         (1, ReadinessGroup::Afk),
@@ -1165,42 +1165,49 @@ fn test_stale_repost_prunes_afk_no_shows() {
         (3, ReadinessGroup::Afk),
         (4, ReadinessGroup::Afk),
         (5, ReadinessGroup::Ready),
-        (6, ReadinessGroup::Afk),
+        (6, ReadinessGroup::PlayingDota),
     ]);
 
     let plan = service
-        .prepare_command(request(2_000.0), classifications)
+        .prepare_command(request(7_000.0), classifications)
         .expect("stale sweep");
 
     assert_eq!(
         plan.pruned_players,
-        BTreeSet::from([player(2), player(3), player(6)])
+        BTreeSet::from([player(2), player(3), player(5), player(6)])
     );
     assert!(
         service
             .lobby(scope())
             .expect("lobby")
             .players
-            .is_superset(&BTreeSet::from([player(1), player(4), player(5)]))
+            .is_superset(&BTreeSet::from([player(1), player(4)]))
     );
+}
+
+#[test]
+fn test_stale_repost_skips_sweep_when_previous_check_is_older_than_an_hour() {
+    let service = staleness_service(1..=3);
+    set_generation(&service, 1..=3, 0.0);
+
+    let plan = service
+        .prepare_command(request(4_000.0), data(1..=3))
+        .expect("stale sweep");
+
+    assert_eq!(plan.mode, PublicationMode::ReplaceStale);
+    assert!(plan.pruned_players.is_empty());
+    assert_eq!(service.lobby(scope()).expect("lobby").total_count(), 3);
 }
 
 #[test]
 fn test_stale_prune_below_10_shows_shortfall_note() {
     let service = staleness_service(1..=12);
-    set_generation(&service, 1..=12, 0.0);
-    let classifications = (1..=12)
-        .map(|id| {
-            let group = if id <= 8 {
-                ReadinessGroup::Ready
-            } else {
-                ReadinessGroup::Afk
-            };
-            (id, group)
-        })
-        .collect::<Vec<_>>();
+    set_generation(&service, 1..=12, 5_000.0);
+    for id in 1..=8 {
+        assert!(service.add_readycheck_reaction(scope(), player(id), format!("<@{id}>"), None));
+    }
     let plan = service
-        .prepare_command(request(2_000.0), grouped_data(&classifications))
+        .prepare_command(request(7_000.0), data(1..=12))
         .expect("stale prune");
 
     assert_eq!(plan.pruned_players.len(), 4);
@@ -1296,8 +1303,8 @@ fn test_failed_reaction_removal_still_prunes_departed_confirmation() {
 #[test]
 fn test_stale_prune_keeps_player_reserved_by_in_flight_match() {
     let service = staleness_service([1, 2, 3]);
-    set_generation(&service, [1, 2, 3], 0.0);
-    let mut stale = request(2_000.0);
+    set_generation(&service, [1, 2, 3], 5_000.0);
+    let mut stale = request(7_000.0);
     stale.reserved_players.insert(player(2));
     let classifications = grouped_data(&[
         (1, ReadinessGroup::Ready),
