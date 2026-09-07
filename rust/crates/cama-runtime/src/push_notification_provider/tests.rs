@@ -13,6 +13,7 @@ const GUILD: u64 = 707;
 const USER: u64 = 808;
 const TOPIC_1: &str = "cama-000000000000000000000000000000000000000000000001";
 const TOPIC_2: &str = "cama-000000000000000000000000000000000000000000000002";
+const JUMP_URL: &str = "https://discord.com/channels/707/9001/9002";
 
 fn migrated_database() -> NamedTempFile {
     let file = NamedTempFile::new().expect("temporary database");
@@ -673,7 +674,7 @@ async fn notify_readycheck_launched_delivers_only_to_ntfy_enabled_subscribers() 
 
     provider
         .hooks()
-        .notify_readycheck_launched(GUILD, [1_u64, 2_u64]);
+        .notify_readycheck_launched(GUILD, [1_u64, 2_u64], Some(JUMP_URL.to_owned()));
 
     let published = publisher.wait_for_published(1);
     assert_eq!(published.len(), 1);
@@ -743,13 +744,64 @@ async fn notify_readycheck_launched_also_delivers_dm_to_enabled_subscribers() {
 
     provider
         .hooks()
-        .notify_readycheck_launched(GUILD, [1_u64, 2_u64]);
+        .notify_readycheck_launched(GUILD, [1_u64, 2_u64], Some(JUMP_URL.to_owned()));
 
     let sent = discord.wait_for_direct_messages(1);
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].0, 1);
-    assert!(sent[0].1.response.content.contains(READYCHECK_TITLE));
-    assert!(sent[0].1.response.content.contains(READYCHECK_MESSAGE));
+    assert_eq!(
+        sent[0].1.response.content,
+        format!("**{READYCHECK_TITLE}** {JUMP_URL}\n{READYCHECK_MESSAGE}"),
+        "the readycheck DM title line must link the readycheck message"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn notify_readycheck_launched_keeps_the_ntfy_body_free_of_the_jump_url() {
+    let database = migrated_database();
+    let publisher = Arc::new(RecordingPublisher::default());
+    let provider = provider_with_publisher(database.path(), publisher.clone());
+    PushNotificationRepository::new(database.path())
+        .set_target(1, Some(GUILD as i64), TOPIC_1, 1)
+        .expect("seed subscriber");
+
+    provider
+        .hooks()
+        .notify_readycheck_launched(GUILD, [1_u64], Some(JUMP_URL.to_owned()));
+
+    let published = publisher.wait_for_published(1);
+    assert_eq!(published.len(), 1);
+    assert_eq!(published[0].title, READYCHECK_TITLE);
+    assert_eq!(published[0].message, READYCHECK_MESSAGE);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn notify_readycheck_launched_dm_omits_the_link_when_no_jump_url_is_known() {
+    let database = migrated_database();
+    let publisher = Arc::new(RecordingPublisher::default());
+    let discord = Arc::new(RecordingDiscord::default());
+    let provider = provider_with_discord_and_publisher(database.path(), discord.clone(), publisher);
+    PushNotificationRepository::new(database.path())
+        .set_enabled(
+            1,
+            Some(GUILD as i64),
+            PushNotificationKind::Readycheck,
+            PushNotificationChannel::DirectMessage,
+            true,
+            1,
+        )
+        .expect("seed DM subscriber");
+
+    provider
+        .hooks()
+        .notify_readycheck_launched(GUILD, [1_u64], None);
+
+    let sent = discord.wait_for_direct_messages(1);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0].1.response.content,
+        format!("**{READYCHECK_TITLE}**\n{READYCHECK_MESSAGE}")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -880,6 +932,7 @@ async fn event_fanout_is_parallel_but_globally_bounded() {
         users
             .iter()
             .map(|user| u64::try_from(*user).expect("test user ID")),
+        None,
     );
     let deadline = Instant::now() + Duration::from_secs(2);
     while publisher.completed.load(Ordering::SeqCst) < users.len() && Instant::now() < deadline {

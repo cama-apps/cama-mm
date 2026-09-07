@@ -17,7 +17,9 @@ use cama_db::low_priority_repository::{LowPriorityRepository, SetLowPriorityInpu
 use cama_db::moderation::{
     ModerationRepository, ModerationSource, SuspensionCompletion, SuspensionScope,
 };
-use cama_db::push_notifications::PushNotificationRepository;
+use cama_db::push_notifications::{
+    PushNotificationChannel, PushNotificationKind, PushNotificationRepository,
+};
 use cama_domain::curfew::CurfewWindow;
 use chrono::Timelike;
 use tempfile::NamedTempFile;
@@ -3340,6 +3342,112 @@ async fn readycheck_push_notification_fires_when_the_lobby_is_full() {
     assert!(
         push_publisher.wait_for_title("⚔️ Readycheck!").await,
         "a readycheck launched against a full lobby must push a notification to subscribers"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readycheck_push_dm_links_the_readycheck_message() {
+    let database = database_with_players(&[(10, "First"), (20, "Second")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    PushNotificationRepository::new(database.path())
+        .set_enabled(
+            20,
+            Some(42),
+            PushNotificationKind::Readycheck,
+            PushNotificationChannel::DirectMessage,
+            true,
+            1,
+        )
+        .expect("configure DM preference");
+
+    dispatch_command(
+        &provider,
+        "lobby",
+        10,
+        "First",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    dispatch_command(
+        &provider,
+        "join",
+        20,
+        "Second",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
+    let repository = ReadycheckRepository::new(database.path());
+    let mut persisted = repository
+        .load(scope.lobby_id(), Some(42))
+        .expect("load lobby row")
+        .expect("persisted lobby");
+    persisted
+        .player_join_times
+        .insert(20, unix_time_now() - 11.0 * 60.0);
+    repository.save(&persisted).expect("age the signup");
+
+    let restarted = provider_for(&database, transport.clone());
+    let push_provider = PushNotificationRegistrationProvider::with_test_publisher(
+        database.path(),
+        transport.clone(),
+        Arc::new(RecordingPushPublisher::default()),
+    );
+    restarted
+        .attach_push_notification_hooks(push_provider.hooks())
+        .expect("attach push hooks");
+    transport.set_member(
+        42,
+        DiscordGuildMemberSnapshot {
+            user_id: 20,
+            display_name: "Second".to_owned(),
+            presence: DiscordPresence::Online,
+            in_voice: false,
+            deafened: false,
+            activities: Vec::new(),
+        },
+    );
+
+    dispatch_command(
+        &restarted,
+        "readycheck",
+        10,
+        "First",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    let generation = restarted
+        .handler
+        .state
+        .readychecks
+        .readycheck_generation(scope)
+        .expect("launched readycheck");
+    let expected_link = format!(
+        "https://discord.com/channels/42/{}/{}",
+        generation.channel_id.0, generation.message_id.0
+    );
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let dm = loop {
+        let dm = transport
+            .state
+            .lock()
+            .expect("transport state")
+            .direct_messages
+            .iter()
+            .find(|(recipient, _)| *recipient == 20)
+            .map(|(_, message)| message.response.content.clone());
+        if dm.is_some() || Instant::now() >= deadline {
+            break dm;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    let dm = dm.expect("readycheck DM delivered to the subscriber");
+    assert!(
+        dm.starts_with(&format!("**⚔️ Readycheck!** {expected_link}\n")),
+        "readycheck DM must link the readycheck message: {dm}"
     );
 }
 
