@@ -684,6 +684,16 @@ pub trait DigRuntimeStore: Send + Sync {
         Err(DigRuntimeStoreError::StateConflict)
     }
 
+    /// Close a pending delivery without posting it. Refused while the Blood
+    /// Pact effect is still pending, so a retired row never hides an unsettled
+    /// skim.
+    fn retire_delivery(
+        &self,
+        _request: DigRuntimeRetireDelivery,
+    ) -> Result<DigRuntimeDeliverySnapshot, DigRuntimeStoreError> {
+        Err(DigRuntimeStoreError::StateConflict)
+    }
+
     /// Settle the durable post-Dig Blood Pact effect before the delivery
     /// caller finalizes flavor or renders the message.  SQLite owns the
     /// exact-once repository boundary; lightweight stores leave the snapshot
@@ -705,12 +715,13 @@ use delivery::build_delivery_snapshot;
 pub use delivery::{
     DigAdminMutationOutcome, DigRuntimeActionResult, DigRuntimeBloodPactSnapshot,
     DigRuntimeBossRenderSnapshot, DigRuntimeDeliveryContext, DigRuntimeDeliveryDraft,
-    DigRuntimeDeliveryPart, DigRuntimeDeliverySnapshot, DigRuntimeEventKind,
-    DigRuntimeEventOutcome, DigRuntimeEventRenderSnapshot, DigRuntimeEventRequest,
-    DigRuntimeExecution, DigRuntimeFinalizeDelivery, DigRuntimeFlavorSnapshot, DigRuntimeFlexData,
-    DigRuntimeHallOfFameRow, DigRuntimeLeaderboardRow, DigRuntimeMarkDelivered,
-    DigRuntimePendingDeliveryQuery, DigRuntimeRebindDeliveryChannel, DigRuntimeRenderKind,
-    DigRuntimeRenderSnapshot, DigRuntimeSettleBloodPact, DigRuntimeTunnelInfo,
+    DigRuntimeDeliveryPart, DigRuntimeDeliveryRetirement, DigRuntimeDeliverySnapshot,
+    DigRuntimeEventKind, DigRuntimeEventOutcome, DigRuntimeEventRenderSnapshot,
+    DigRuntimeEventRequest, DigRuntimeExecution, DigRuntimeFinalizeDelivery,
+    DigRuntimeFlavorSnapshot, DigRuntimeFlexData, DigRuntimeHallOfFameRow,
+    DigRuntimeLeaderboardRow, DigRuntimeMarkDelivered, DigRuntimePendingDeliveryQuery,
+    DigRuntimeRebindDeliveryChannel, DigRuntimeRenderKind, DigRuntimeRenderSnapshot,
+    DigRuntimeRetireDelivery, DigRuntimeSettleBloodPact, DigRuntimeTunnelInfo,
     DigRuntimeWeatherInfo, DigRuntimeWeatherPresentation,
 };
 use effects::{
@@ -1732,6 +1743,13 @@ where
         request: DigRuntimeFinalizeDelivery,
     ) -> Result<DigRuntimeDeliverySnapshot, DigRuntimeStoreError> {
         self.store.finalize_delivery(request)
+    }
+
+    pub fn retire_delivery(
+        &self,
+        request: DigRuntimeRetireDelivery,
+    ) -> Result<DigRuntimeDeliverySnapshot, DigRuntimeStoreError> {
+        self.store.retire_delivery(request)
     }
 
     /// Settle the durable Blood Pact effect for a committed delivery.  Callers

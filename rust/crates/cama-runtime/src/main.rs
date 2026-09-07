@@ -733,6 +733,11 @@ async fn run_serve() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    dig_provider.set_previous_heartbeat(
+        health_reporter
+            .previous_heartbeat_unix_ms()
+            .and_then(|millis| i64::try_from(millis / 1000).ok()),
+    );
     let mana_provider = ManaRegistrationProvider::new(
         &config.db_path,
         &application_config,
@@ -1100,6 +1105,7 @@ async fn run_serve() -> ExitCode {
     if let Some(pet_sweep_worker) = pet_sweep_worker {
         runtime = runtime.with_worker(pet_sweep_worker);
     }
+    dig_provider.set_lifecycle_events(runtime.events().clone());
     let health_events = runtime.events().subscribe();
     let (health_failure_sender, health_failure_receiver) = tokio::sync::oneshot::channel();
     let health_task = tokio::spawn(async move {

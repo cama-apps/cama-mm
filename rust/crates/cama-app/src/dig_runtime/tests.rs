@@ -26,10 +26,10 @@ use super::{
     DigAdminMutationOutcome, DigRuntimeBloodPactSnapshot, DigRuntimeCommit, DigRuntimeConfig,
     DigRuntimeDeliveryContext, DigRuntimeDeliveryDraft, DigRuntimeDeliveryPart,
     DigRuntimeLowPriorityTaxPort, DigRuntimeMarkDelivered, DigRuntimePendingDeliveryQuery,
-    DigRuntimeRebindDeliveryChannel, DigRuntimeRequest, DigRuntimeService,
-    DigRuntimeSettleBloodPact, DigRuntimeSnapshot, DigRuntimeStore, DigRuntimeStoreError,
-    DigRuntimeVersion, InMemoryDigRuntimeStore, SqliteDigRuntimeStore, proportional_mana_yield_tax,
-    scale_dig_minigame_jc,
+    DigRuntimeRebindDeliveryChannel, DigRuntimeRequest, DigRuntimeRetireDelivery,
+    DigRuntimeService, DigRuntimeSettleBloodPact, DigRuntimeSnapshot, DigRuntimeStore,
+    DigRuntimeStoreError, DigRuntimeVersion, InMemoryDigRuntimeStore, SqliteDigRuntimeStore,
+    proportional_mana_yield_tax, scale_dig_minigame_jc,
 };
 use crate::vanity_tax_service::{VanityMember, VanityTaxService};
 use cama_domain::game_date::game_date_for_timestamp;
@@ -328,10 +328,9 @@ fn sqlite_delivery_outbox_round_trips_and_marks_main_part_once() {
     assert_eq!(
         service
             .pending_deliveries(DigRuntimePendingDeliveryQuery {
-                guild_id: Some(9),
+                guild_id: 9,
                 discord_id: Some(7),
                 limit: 10,
-                committed_after: None,
             })
             .expect("pending outbox")
             .len(),
@@ -350,10 +349,9 @@ fn sqlite_delivery_outbox_round_trips_and_marks_main_part_once() {
     assert!(
         service
             .pending_deliveries(DigRuntimePendingDeliveryQuery {
-                guild_id: Some(9),
+                guild_id: 9,
                 discord_id: Some(7),
                 limit: 10,
-                committed_after: None,
             })
             .expect("pending after main")
             .is_empty()
@@ -432,10 +430,9 @@ fn pending_deliveries_finds_a_newer_row_behind_many_delivered_digs() {
 
     let found = service
         .pending_deliveries(DigRuntimePendingDeliveryQuery {
-            guild_id: Some(9),
+            guild_id: 9,
             discord_id: Some(7),
             limit: 10,
-            committed_after: None,
         })
         .expect("pending outbox");
     assert_eq!(
@@ -449,13 +446,13 @@ fn pending_deliveries_finds_a_newer_row_behind_many_delivered_digs() {
 }
 
 #[test]
-fn pending_deliveries_committed_after_excludes_older_rows() {
+fn retire_delivery_closes_a_pending_row_only_after_its_blood_pact_settles() {
     let database = fast_migrated_database();
     PlayerRepository::new(database.path())
-        .add(&NewPlayer::new(7, "window-delivery", Some(9)))
+        .add(&NewPlayer::new(7, "retired-delivery", Some(9)))
         .expect("seed player");
     let service = DigRuntimeService::sqlite(database.path());
-    service
+    let delivery = service
         .dig_with_delivery(
             DigRuntimeRequest {
                 discord_id: 7,
@@ -464,33 +461,58 @@ fn pending_deliveries_committed_after_excludes_older_rows() {
                 paid: false,
                 forced_event: false,
             },
-            DigRuntimeDeliveryContext::new(99, 11, "Window Miner", None),
+            DigRuntimeDeliveryContext::new(99, 11, "Retired Miner", None),
         )
         .expect("dig")
         .delivery
         .expect("delivery");
-    let pending = |committed_after| {
+    assert!(
+        !delivery.blood_pact.is_terminal(),
+        "a rewarded dig leaves its Blood Pact effect pending until settled"
+    );
+    let retire = || {
+        service.retire_delivery(DigRuntimeRetireDelivery {
+            action_id: delivery.action_id,
+            source_key: delivery.source_key.clone(),
+            retired_at: 1_700_090_000,
+            reason: "older than the recovery window".to_owned(),
+        })
+    };
+    assert!(matches!(
+        retire().expect_err("an unsettled skim cannot be retired away"),
+        DigRuntimeStoreError::StateConflict
+    ));
+    service
+        .settle_blood_pact_delivery(DigRuntimeSettleBloodPact {
+            action_id: delivery.action_id,
+            source_key: delivery.source_key.clone(),
+            occurred_at: 1_700_000_000,
+        })
+        .expect("settle delivery economy effects");
+
+    let retired = retire().expect("retire the settled row");
+    assert_eq!(
+        retired
+            .retired
+            .as_ref()
+            .map(|retirement| retirement.reason.as_str()),
+        Some("older than the recovery window")
+    );
+    assert_eq!(retired.main_delivered_at, Some(1_700_090_000));
+    assert_eq!(retired.event_delivered_at, Some(1_700_090_000));
+    assert!(
         service
             .pending_deliveries(DigRuntimePendingDeliveryQuery {
-                guild_id: Some(9),
+                guild_id: 9,
                 discord_id: None,
                 limit: 10,
-                committed_after,
             })
             .expect("pending outbox")
-            .len()
-    };
-    assert_eq!(
-        pending(Some(1_700_000_001)),
-        0,
-        "a row committed before the window is not a candidate"
+            .is_empty(),
+        "a retired row is terminal for every pending reader"
     );
-    assert_eq!(
-        pending(Some(1_700_000_000)),
-        1,
-        "the window includes its start"
-    );
-    assert_eq!(pending(None), 1, "no window scans every pending row");
+    let again = retire().expect("retirement is idempotent");
+    assert_eq!(again.retired, retired.retired);
 }
 
 #[test]
@@ -735,10 +757,9 @@ fn sqlite_delivery_channel_rebind_is_persisted_and_pending_part_guarded() {
     let restarted = DigRuntimeService::sqlite(database.path());
     let recovered = restarted
         .pending_deliveries(DigRuntimePendingDeliveryQuery {
-            guild_id: Some(9),
+            guild_id: 9,
             discord_id: Some(7),
             limit: 10,
-            committed_after: None,
         })
         .expect("restart pending delivery");
     assert_eq!(recovered.len(), 1);

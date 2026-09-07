@@ -318,16 +318,29 @@ impl HealthSnapshot {
 pub struct HealthReporter {
     path: PathBuf,
     snapshot: HealthSnapshot,
+    previous_heartbeat_unix_ms: Option<u64>,
 }
 
 impl HealthReporter {
     /// Invalidate any stale ready marker immediately after the process lock is
     /// acquired and before migration or provider construction begins.
+    ///
+    /// The previous process's last heartbeat is read before the marker is
+    /// overwritten. It is the only durable record of when this database was
+    /// last served, which crash recovery uses to tell a crash-window row from
+    /// a stale backlog.
     pub fn initialize(database_path: &Path) -> Result<Self, HealthError> {
         let database_path = absolute_path(database_path)?;
+        let path = health_path(&database_path);
+        let previous_heartbeat_unix_ms = fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<HealthSnapshot>(&bytes).ok())
+            .filter(|snapshot| snapshot.database_path == database_path)
+            .map(|snapshot| snapshot.updated_at_unix_ms);
         let reporter = Self {
-            path: health_path(&database_path),
+            path,
             snapshot: HealthSnapshot::starting(database_path)?,
+            previous_heartbeat_unix_ms,
         };
         // Startup runs before the runtime is serving, so the write is direct.
         persist_snapshot(&reporter.path, &reporter.snapshot)?;
@@ -337,6 +350,14 @@ impl HealthReporter {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The last heartbeat the previous process wrote for this database, if
+    /// its marker was readable. `None` on a first start or after the marker
+    /// was removed.
+    #[must_use]
+    pub const fn previous_heartbeat_unix_ms(&self) -> Option<u64> {
+        self.previous_heartbeat_unix_ms
     }
 
     pub async fn run(
@@ -1118,6 +1139,39 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn initialize_reads_the_previous_process_heartbeat_before_overwriting_it() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database_path = directory.path().join("cama.db");
+        let first = HealthReporter::initialize(&database_path).expect("first start");
+        assert_eq!(
+            first.previous_heartbeat_unix_ms(),
+            None,
+            "a first start has no previous heartbeat"
+        );
+        let first_heartbeat = first.snapshot.updated_at_unix_ms;
+
+        let second = HealthReporter::initialize(&database_path).expect("restart");
+        assert_eq!(second.previous_heartbeat_unix_ms(), Some(first_heartbeat));
+        assert_eq!(
+            second.snapshot.status,
+            HealthStatus::Starting,
+            "the marker is still invalidated"
+        );
+
+        let other_database = directory.path().join("other.db");
+        let bytes = fs::read(health_path(&other_database)).ok();
+        assert!(bytes.is_none());
+        fs::copy(health_path(&database_path), health_path(&other_database))
+            .expect("copy marker under another database name");
+        let mismatched = HealthReporter::initialize(&other_database).expect("start");
+        assert_eq!(
+            mismatched.previous_heartbeat_unix_ms(),
+            None,
+            "a marker written for another database is not this one's heartbeat"
+        );
     }
 
     #[test]
