@@ -867,7 +867,7 @@ fn test_handle_mystery_gift_success_deducts_20k() {
             .response
             .embed_title
             .unwrap()
-            .contains("Mystery Gift")
+            .contains("Arcana/Immortal Gift")
     );
 }
 

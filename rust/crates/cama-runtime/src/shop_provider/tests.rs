@@ -883,7 +883,7 @@ async fn all_simple_products_debit_once_deliver_publicly_and_survive_restart() {
         (
             "mystery_gift",
             fixture.provider.handler.config.mystery_gift_cost,
-            "🎁 Mystery Gift Redeemed!",
+            "🎁 Arcana/Immortal Gift Redeemed!",
         ),
     ];
 

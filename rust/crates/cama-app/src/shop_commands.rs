@@ -579,7 +579,7 @@ pub fn item_autocomplete(
             value: "jopa_coin",
         },
         OwnedChoice {
-            name: format!("Mystery Gift ({SHOP_NEW_MYSTERY_GIFT_COST} jopacoin)"),
+            name: format!("Arcana/Immortal Gift ({SHOP_NEW_MYSTERY_GIFT_COST} jopacoin)"),
             value: "mystery_gift",
         },
         OwnedChoice {
@@ -690,7 +690,7 @@ impl SimpleProduct {
         match self {
             Self::Announce | Self::AnnounceTarget => "WEALTH ANNOUNCEMENT",
             Self::JopaCoin => "Jopa Coin(TM) Minted!",
-            Self::MysteryGift => "Mystery Gift Redeemed!",
+            Self::MysteryGift => "Arcana/Immortal Gift Redeemed!",
             Self::Recalibrate => "Rating Recalibration",
         }
     }
