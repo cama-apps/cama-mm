@@ -708,7 +708,10 @@ impl ShopInteractionHandler {
                 "jopa_coin",
             ),
             ShopChoice::new(
-                format!("Mystery Gift ({} jopacoin)", self.config.mystery_gift_cost),
+                format!(
+                    "Arcana/Immortal Gift ({} jopacoin)",
+                    self.config.mystery_gift_cost
+                ),
                 "mystery_gift",
             ),
             ShopChoice::new(
@@ -2085,8 +2088,10 @@ impl ShopInteractionHandler {
                 None,
             ),
             SimpleProduct::MysteryGift => (
-                "🎁 Mystery Gift Redeemed!",
-                format!("<@{user_id}> has redeemed a **Mystery Gift**!"),
+                "🎁 Arcana/Immortal Gift Redeemed!",
+                format!(
+                    "<@{user_id}> has redeemed a **random Arcana or Immortal** of pf's choice!"
+                ),
                 0x9B_59_B6,
                 format!("Cost: {cost} jopacoin"),
                 None,
@@ -2924,7 +2929,7 @@ impl SimpleProduct {
         match self {
             Self::Announce | Self::AnnounceTarget => "shop announcement purchase",
             Self::JopaCoin => "Jopa Coin(TM) purchase",
-            Self::MysteryGift => "Mystery Gift purchase",
+            Self::MysteryGift => "Arcana/Immortal Gift purchase",
         }
     }
 }
