@@ -5098,7 +5098,19 @@ impl MatchHandler {
             .iter()
             .filter_map(|player_id| u64::try_from(*player_id).ok())
             .collect::<BTreeSet<_>>();
-        hooks.notify_match_started(guild_id, &discord_ids);
+        // Rebuilt from IDs rather than reusing the stored receipt URL: the
+        // receipt is serenity's `Message::link`, which lacks the guild for
+        // HTTP-created messages and renders as a `@me` link.
+        let jump_url = match (
+            pending.state.shuffle_channel_id,
+            pending.state.shuffle_message_id,
+        ) {
+            (Some(channel_id), Some(message_id)) if channel_id >= 0 && message_id >= 0 => Some(
+                format!("https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"),
+            ),
+            _ => None,
+        };
+        hooks.notify_match_started(guild_id, &discord_ids, jump_url);
     }
 
     fn cancel_betting_tasks(&self, guild_id: i64, pending_match_id: Option<i64>) {

@@ -1006,15 +1006,8 @@ impl LobbyRuntimeState {
         if generation.lobby_ids.len() < self.config.ready_threshold {
             return;
         }
-        let jump_url = match (
-            to_u64(generation.channel_id.0),
-            to_u64(generation.message_id.0),
-        ) {
-            (Ok(channel_id), Ok(message_id)) => Some(format!(
-                "https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
-            )),
-            _ => None,
-        };
+        let jump_url =
+            discord_jump_url(scope.guild_id, generation.channel_id, generation.message_id).ok();
         if let Ok(hooks) = self.push_notifications.read()
             && let Some(hooks) = hooks.as_ref()
         {

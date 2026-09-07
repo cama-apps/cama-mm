@@ -2162,6 +2162,7 @@ async fn final_warning_uses_scoped_underdog_mentions_and_thread_reply_parent() {
 struct PublishedPushNotification {
     topic: String,
     title: String,
+    click: Option<String>,
 }
 
 #[derive(Default)]
@@ -2184,13 +2185,20 @@ impl RecordingPushPublisher {
 
 #[async_trait]
 impl PushPublisher for RecordingPushPublisher {
-    async fn publish(&self, topic: &str, title: &str, _message: &str) -> Result<(), String> {
+    async fn publish(
+        &self,
+        topic: &str,
+        title: &str,
+        _message: &str,
+        click: Option<&str>,
+    ) -> Result<(), String> {
         self.published
             .lock()
             .expect("published")
             .push(PublishedPushNotification {
                 topic: topic.to_owned(),
                 title: title.to_owned(),
+                click: click.map(str::to_owned),
             });
         Ok(())
     }
@@ -2243,6 +2251,17 @@ async fn finalize_shuffle_notifies_the_shuffled_roster() {
         .into_iter()
         .next()
         .expect("finalized pending exists");
+    let shuffle_link = format!(
+        "https://discord.com/channels/{GUILD}/{}/{}",
+        pending.state.shuffle_channel_id.expect("shuffle channel"),
+        pending.state.shuffle_message_id.expect("shuffle message")
+    );
+    assert!(
+        published
+            .iter()
+            .all(|notification| notification.click.as_deref() == Some(shuffle_link.as_str())),
+        "every match-started alert must open the shuffle message"
+    );
     abort_betting_tasks(&fixture, pending.pending_match_id);
 }
 

@@ -58,7 +58,13 @@ impl RecordingPushPublisher {
 
 #[async_trait]
 impl PushPublisher for RecordingPushPublisher {
-    async fn publish(&self, _topic: &str, title: &str, _message: &str) -> Result<(), String> {
+    async fn publish(
+        &self,
+        _topic: &str,
+        title: &str,
+        _message: &str,
+        _click: Option<&str>,
+    ) -> Result<(), String> {
         self.titles
             .lock()
             .expect("push titles")
@@ -189,6 +195,7 @@ impl InteractionResponder for CapturingResponder {
 #[derive(Clone)]
 struct SentMessage {
     channel_id: u64,
+    message_id: u64,
     message: DiscordMessage,
 }
 
@@ -269,6 +276,26 @@ impl RecordingTransport {
 
     fn sent_messages(&self) -> Vec<SentMessage> {
         self.state.lock().expect("transport state").sent.clone()
+    }
+
+    /// Waits for a DM to `recipient`; push notifications deliver from a
+    /// detached task, so the send lands after the command returns.
+    async fn wait_for_direct_message(&self, recipient: u64) -> Option<DiscordMessage> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let found = self
+                .state
+                .lock()
+                .expect("transport state")
+                .direct_messages
+                .iter()
+                .find(|(user_id, _)| *user_id == recipient)
+                .map(|(_, message)| message.clone());
+            if found.is_some() || Instant::now() >= deadline {
+                return found;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     fn edit_count(&self) -> usize {
@@ -382,6 +409,7 @@ impl DiscordTransport for RecordingTransport {
         );
         state.sent.push(SentMessage {
             channel_id,
+            message_id,
             message,
         });
         Ok(receipt)
@@ -3259,23 +3287,21 @@ async fn readycheck_push_notification_is_suppressed_for_a_partial_lobby() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn readycheck_push_notification_fires_when_the_lobby_is_full() {
-    // Player 20 must be aged out of the "just joined" grace window, otherwise
-    // they auto-confirm like the invoker does and never land in `mention_ids`
-    // -- the same set the push notification is filtered against.
-    let database = database_with_players(&[(10, "First"), (20, "Second")]);
-    let transport = Arc::new(RecordingTransport::default());
-    let provider = provider_for(&database, transport.clone());
-    PushNotificationRepository::new(database.path())
-        .set_target(
-            20,
-            Some(42),
-            "cama-000000000000000000000000000000000000000000000020",
-            1,
-        )
-        .expect("configure push target");
-
+/// A two-player Open lobby whose second player is aged out of the
+/// "just joined" grace window, with push hooks attached and the second player
+/// resolvable as a guild member. Player 20 is the only one who lands in the
+/// readycheck's `mention_ids`, so they are the push-notification target.
+///
+/// The invoker auto-confirms and never lands in `mention_ids`; player 20 must
+/// be aged past the grace window or they auto-confirm the same way. The
+/// provider is rebuilt after aging because the live in-memory lobby state
+/// does not observe a direct repository write.
+async fn full_lobby_readycheck_fixture(
+    database: &NamedTempFile,
+    transport: &Arc<RecordingTransport>,
+    push_publisher: Arc<RecordingPushPublisher>,
+) -> LobbyRegistrationProvider {
+    let provider = provider_for(database, transport.clone());
     dispatch_command(
         &provider,
         "lobby",
@@ -3303,21 +3329,30 @@ async fn readycheck_push_notification_fires_when_the_lobby_is_full() {
         .player_join_times
         .insert(20, unix_time_now() - 11.0 * 60.0);
     repository.save(&persisted).expect("age the signup");
+    drop(provider);
 
-    // Reload from the aged persistence: the live provider's in-memory lobby
-    // state does not observe a direct repository write.
-    let restarted = provider_for(&database, transport.clone());
-    let push_publisher = Arc::new(RecordingPushPublisher::default());
+    let restarted = provider_for(database, transport.clone());
+    attach_push_hooks_for_player_20(database, transport, push_publisher, &restarted);
+    restarted
+}
+
+/// Attaches push hooks to `provider` and makes player 20 a resolvable guild
+/// member: only resolvable members land in the `mentionable` set that the
+/// readycheck's push notification is filtered against.
+fn attach_push_hooks_for_player_20(
+    database: &NamedTempFile,
+    transport: &Arc<RecordingTransport>,
+    push_publisher: Arc<RecordingPushPublisher>,
+    provider: &LobbyRegistrationProvider,
+) {
     let push_provider = PushNotificationRegistrationProvider::with_test_publisher(
         database.path(),
         transport.clone(),
-        push_publisher.clone(),
+        push_publisher,
     );
-    restarted
+    provider
         .attach_push_notification_hooks(push_provider.hooks())
         .expect("attach push hooks");
-    // Only a resolvable guild member lands in the `mentionable` set that the
-    // readycheck's push notification is filtered against.
     transport.set_member(
         42,
         DiscordGuildMemberSnapshot {
@@ -3329,9 +3364,26 @@ async fn readycheck_push_notification_fires_when_the_lobby_is_full() {
             activities: Vec::new(),
         },
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readycheck_push_notification_fires_when_the_lobby_is_full() {
+    let database = database_with_players(&[(10, "First"), (20, "Second")]);
+    let transport = Arc::new(RecordingTransport::default());
+    PushNotificationRepository::new(database.path())
+        .set_target(
+            20,
+            Some(42),
+            "cama-000000000000000000000000000000000000000000000020",
+            1,
+        )
+        .expect("configure push target");
+    let push_publisher = Arc::new(RecordingPushPublisher::default());
+    let provider =
+        full_lobby_readycheck_fixture(&database, &transport, push_publisher.clone()).await;
 
     dispatch_command(
-        &restarted,
+        &provider,
         "readycheck",
         10,
         "First",
@@ -3349,7 +3401,6 @@ async fn readycheck_push_notification_fires_when_the_lobby_is_full() {
 async fn readycheck_push_dm_links_the_readycheck_message() {
     let database = database_with_players(&[(10, "First"), (20, "Second")]);
     let transport = Arc::new(RecordingTransport::default());
-    let provider = provider_for(&database, transport.clone());
     PushNotificationRepository::new(database.path())
         .set_enabled(
             20,
@@ -3360,58 +3411,15 @@ async fn readycheck_push_dm_links_the_readycheck_message() {
             1,
         )
         .expect("configure DM preference");
-
-    dispatch_command(
-        &provider,
-        "lobby",
-        10,
-        "First",
-        vec![lobby_option(LobbyKind::Open)],
-    )
-    .await;
-    dispatch_command(
-        &provider,
-        "join",
-        20,
-        "Second",
-        vec![lobby_option(LobbyKind::Open)],
-    )
-    .await;
-
-    let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
-    let repository = ReadycheckRepository::new(database.path());
-    let mut persisted = repository
-        .load(scope.lobby_id(), Some(42))
-        .expect("load lobby row")
-        .expect("persisted lobby");
-    persisted
-        .player_join_times
-        .insert(20, unix_time_now() - 11.0 * 60.0);
-    repository.save(&persisted).expect("age the signup");
-
-    let restarted = provider_for(&database, transport.clone());
-    let push_provider = PushNotificationRegistrationProvider::with_test_publisher(
-        database.path(),
-        transport.clone(),
+    let provider = full_lobby_readycheck_fixture(
+        &database,
+        &transport,
         Arc::new(RecordingPushPublisher::default()),
-    );
-    restarted
-        .attach_push_notification_hooks(push_provider.hooks())
-        .expect("attach push hooks");
-    transport.set_member(
-        42,
-        DiscordGuildMemberSnapshot {
-            user_id: 20,
-            display_name: "Second".to_owned(),
-            presence: DiscordPresence::Online,
-            in_voice: false,
-            deafened: false,
-            activities: Vec::new(),
-        },
-    );
+    )
+    .await;
 
     dispatch_command(
-        &restarted,
+        &provider,
         "readycheck",
         10,
         "First",
@@ -3419,35 +3427,35 @@ async fn readycheck_push_dm_links_the_readycheck_message() {
     )
     .await;
 
-    let generation = restarted
-        .handler
-        .state
-        .readychecks
-        .readycheck_generation(scope)
-        .expect("launched readycheck");
+    // Locate the readycheck roster message by what Discord received rather
+    // than by the provider's own bookkeeping, so a generation holding the
+    // wrong IDs would fail here instead of moving the expectation in lockstep.
+    let roster = transport
+        .sent_messages()
+        .into_iter()
+        .find(|sent| {
+            sent.message.response.embeds.iter().any(|embed| {
+                embed
+                    .title
+                    .as_deref()
+                    .is_some_and(|title| title.ends_with(" Ready Check"))
+            })
+        })
+        .expect("readycheck roster message sent");
     let expected_link = format!(
         "https://discord.com/channels/42/{}/{}",
-        generation.channel_id.0, generation.message_id.0
+        roster.channel_id, roster.message_id
     );
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let dm = loop {
-        let dm = transport
-            .state
-            .lock()
-            .expect("transport state")
-            .direct_messages
-            .iter()
-            .find(|(recipient, _)| *recipient == 20)
-            .map(|(_, message)| message.response.content.clone());
-        if dm.is_some() || Instant::now() >= deadline {
-            break dm;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    };
-    let dm = dm.expect("readycheck DM delivered to the subscriber");
+    let dm = transport
+        .wait_for_direct_message(20)
+        .await
+        .expect("readycheck DM delivered to the subscriber");
     assert!(
-        dm.starts_with(&format!("**⚔️ Readycheck!** {expected_link}\n")),
-        "readycheck DM must link the readycheck message: {dm}"
+        dm.response
+            .content
+            .starts_with(&format!("**⚔️ Readycheck!** {expected_link}\n")),
+        "readycheck DM must link the readycheck message: {}",
+        dm.response.content
     );
 }
 
@@ -3506,11 +3514,6 @@ async fn readycheck_push_notification_fires_when_a_hydrated_lobby_exceeds_the_th
     // Restart on the default, lower threshold: three players against two.
     let restarted = provider_for(&database, transport.clone());
     let push_publisher = Arc::new(RecordingPushPublisher::default());
-    let push_provider = PushNotificationRegistrationProvider::with_test_publisher(
-        database.path(),
-        transport.clone(),
-        push_publisher.clone(),
-    );
     PushNotificationRepository::new(database.path())
         .set_target(
             20,
@@ -3519,20 +3522,7 @@ async fn readycheck_push_notification_fires_when_a_hydrated_lobby_exceeds_the_th
             1,
         )
         .expect("configure push target");
-    restarted
-        .attach_push_notification_hooks(push_provider.hooks())
-        .expect("attach push hooks");
-    transport.set_member(
-        42,
-        DiscordGuildMemberSnapshot {
-            user_id: 20,
-            display_name: "Second".to_owned(),
-            presence: DiscordPresence::Online,
-            in_voice: false,
-            deafened: false,
-            activities: Vec::new(),
-        },
-    );
+    attach_push_hooks_for_player_20(&database, &transport, push_publisher.clone(), &restarted);
 
     dispatch_command(
         &restarted,
