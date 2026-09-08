@@ -2131,7 +2131,7 @@ impl LobbyInteractionHandler {
                 );
                 if result.pruned_count != 0 {
                     content.push_str(&format!(
-                        " Removed {} away player(s); they can rejoin with `/join`.",
+                        " Removed {} unconfirmed player(s); they can rejoin with `/join`.",
                         result.pruned_count
                     ));
                 }
@@ -3779,7 +3779,7 @@ fn readycheck_pruned_players_message(kind: LobbyKind, users: &BTreeSet<u64>) -> 
         .collect::<Vec<_>>()
         .join(" ");
     let content = format!(
-        "🧹 Removed (no response to the last ready check): {tags} — rejoin {} with `/join` if you're back.",
+        "🧹 Removed (didn't confirm the last ready check): {tags} — rejoin {} with `/join`.",
         kind.display_name()
     );
     DiscordMessage::mentioning(

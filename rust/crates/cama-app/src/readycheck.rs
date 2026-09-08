@@ -24,7 +24,8 @@ pub const READYCHECK_STALE_SECONDS: f64 = 30.0 * 60.0;
 /// A stale sweep only trusts a previous check this recent; an older
 /// non-response says nothing about whether the player is still around.
 pub const SWEEP_PREVIOUS_CHECK_MAX_AGE_SECONDS: f64 = 60.0 * 60.0;
-/// Players who signed up more recently than this are never swept.
+/// Players who signed up more recently than this are never swept, as are
+/// players whose sign-up time is unknown.
 pub const SWEEP_SIGNUP_GRACE_SECONDS: f64 = 60.0 * 60.0;
 pub const READY_LOBBY_RECOMMENDATION: &str = "Run `/readycheck` before `/shuffle`.";
 
@@ -933,10 +934,13 @@ impl ReadycheckService {
             let generation = scoped.readycheck.as_ref().expect("stale generation");
             let confirmed = generation.reacted.keys().copied().collect::<BTreeSet<_>>();
             for player_id in lobby.players.iter().copied().collect::<Vec<_>>() {
+                // An unknown sign-up time fails safe: a lobby row whose
+                // join-time blob failed to decode must not make everyone
+                // sweepable.
                 let outside_grace = lobby
                     .player_join_times
                     .get(&player_id)
-                    .is_none_or(|joined_at| request.now - joined_at >= SWEEP_SIGNUP_GRACE_SECONDS);
+                    .is_some_and(|joined_at| request.now - joined_at >= SWEEP_SIGNUP_GRACE_SECONDS);
                 if outside_grace
                     && !confirmed.contains(&player_id)
                     && player_id != request.invoker_id
