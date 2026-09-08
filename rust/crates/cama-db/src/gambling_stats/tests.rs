@@ -556,12 +556,9 @@ fn test_real_investment_bet_persists_attribution_and_uses_settled_pnl() {
         .get_player_stats(investor_id, Some(DEFAULT_GUILD))
         .expect("investment profile stats")
         .expect("investor stats");
+    assert_eq!(stats.auto_bet_performance.total.bet_count, 1);
     assert_eq!(stats.auto_bet_performance.total.net_pnl, 10);
     assert_eq!(stats.auto_bet_performance.generic.bet_count, 0);
-    assert_eq!(stats.auto_bet_performance.targets.len(), 1);
-    assert_eq!(stats.auto_bet_performance.targets[0].target_id, target_id);
-    assert_eq!(stats.auto_bet_performance.targets[0].directions, ["long"]);
-    assert_eq!(stats.auto_bet_performance.targets[0].net_pnl, 10);
 }
 
 #[test]
@@ -1633,7 +1630,7 @@ fn ids(entries: &[LeaderboardEntry]) -> Vec<i64> {
 }
 
 #[test]
-fn test_auto_bet_performance_groups_generic_and_each_target() {
+fn test_auto_bet_performance_totals_investment_bets_without_per_target_rows() {
     let history = [
         auto_history_bet(1, BetSide::Radiant, true, 10, 8, None, None),
         auto_history_bet(2, BetSide::Dire, true, 20, 15, Some(9_001), Some("long")),
@@ -1647,18 +1644,6 @@ fn test_auto_bet_performance_groups_generic_and_each_target() {
     assert_eq!(performance.total.net_pnl, 6);
     assert_eq!(performance.generic.bet_count, 1);
     assert_eq!(performance.generic.net_pnl, 8);
-    let targets = performance
-        .targets
-        .iter()
-        .map(|target| (target.target_id, target))
-        .collect::<BTreeMap<_, _>>();
-    assert_eq!(targets[&9_001].directions, ["long", "short"]);
-    assert_eq!(targets[&9_001].bet_count, 2);
-    assert_eq!(targets[&9_001].wins, 1);
-    assert_eq!(targets[&9_001].total_wagered, 25);
-    assert_eq!(targets[&9_001].net_pnl, 10);
-    assert_eq!(targets[&9_002].directions, ["short"]);
-    assert_eq!(targets[&9_002].net_pnl, -12);
 }
 
 #[test]

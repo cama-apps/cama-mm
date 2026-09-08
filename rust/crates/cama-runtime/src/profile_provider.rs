@@ -1878,10 +1878,6 @@ fn auto_bet_group_line(label: &str, group: &AutoBetGroupStats) -> String {
     )
 }
 
-fn truncate_profile_text(value: &str, budget: usize) -> String {
-    value.chars().take(budget).collect()
-}
-
 fn truncate_question(question: &str, limit: usize) -> String {
     if question.chars().count() <= limit {
         question.to_owned()
@@ -1919,20 +1915,23 @@ fn append_auto_bet_field(page: &mut ProfilePage, performance: &AutoBetPerformanc
     let remaining_total =
         PROFILE_EMBED_TOTAL_LIMIT.saturating_sub(profile_text_len(page) + name.chars().count());
     let budget = PROFILE_FIELD_VALUE_LIMIT.min(remaining_total);
-    if budget < 4 {
-        return;
-    }
-
-    let summary = [
+    // Compose whole lines only: a partial line would strand an unmatched "**"
+    // that Discord renders literally.
+    let mut value = String::new();
+    for line in [
         auto_bet_group_line("Auto total", &performance.total),
         auto_bet_group_line("Generic auto", &performance.generic),
         auto_bet_group_line("Arbitrage hedges", &performance.arbitrage),
-    ]
-    .join(
-        "
-",
-    );
-    let value = truncate_profile_text(&summary, budget);
+    ] {
+        let separator = usize::from(!value.is_empty());
+        if value.chars().count() + separator + line.chars().count() > budget {
+            break;
+        }
+        if separator > 0 {
+            value.push('\n');
+        }
+        value.push_str(&line);
+    }
     if !value.is_empty() {
         page.fields.push(ProfileField::new(name, value, false));
     }

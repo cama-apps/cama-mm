@@ -166,21 +166,10 @@ pub struct AutoBetGroupStats {
     pub net_pnl: i64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PlayerAutoBetStats {
-    pub target_id: i64,
-    pub directions: Vec<String>,
-    pub bet_count: usize,
-    pub wins: usize,
-    pub total_wagered: i64,
-    pub net_pnl: i64,
-}
-
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AutoBetPerformance {
     pub total: AutoBetGroupStats,
     pub generic: AutoBetGroupStats,
-    pub targets: Vec<PlayerAutoBetStats>,
     pub arbitrage: AutoBetGroupStats,
 }
 
@@ -1804,12 +1793,6 @@ fn calculate_auto_bet_performance(history: &[BetHistoryEntry]) -> AutoBetPerform
         .copied()
         .filter(|bet| bet.investment_target_id.is_none())
         .collect::<Vec<_>>();
-    let mut by_target = BTreeMap::<i64, Vec<&BetHistoryEntry>>::new();
-    for bet in &automatic {
-        if let Some(target_id) = bet.investment_target_id {
-            by_target.entry(target_id).or_default().push(bet);
-        }
-    }
     let auto_teams = automatic.iter().fold(
         BTreeMap::<i64, BTreeSet<BetSide>>::new(),
         |mut teams, bet| {
@@ -1829,39 +1812,9 @@ fn calculate_auto_bet_performance(history: &[BetHistoryEntry]) -> AutoBetPerform
                 })
         })
         .collect::<Vec<_>>();
-    let mut targets = by_target
-        .into_iter()
-        .map(|(target_id, bets)| {
-            let aggregate = auto_group(&bets);
-            let directions = ["long", "short"]
-                .into_iter()
-                .filter(|direction| {
-                    bets.iter()
-                        .any(|bet| bet.investment_direction.as_deref() == Some(*direction))
-                })
-                .map(str::to_owned)
-                .collect();
-            PlayerAutoBetStats {
-                target_id,
-                directions,
-                bet_count: aggregate.bet_count,
-                wins: aggregate.wins,
-                total_wagered: aggregate.total_wagered,
-                net_pnl: aggregate.net_pnl,
-            }
-        })
-        .collect::<Vec<_>>();
-    targets.sort_by_key(|target| {
-        (
-            std::cmp::Reverse(target.total_wagered),
-            std::cmp::Reverse(target.bet_count),
-            target.target_id,
-        )
-    });
     AutoBetPerformance {
         total: auto_group(&automatic),
         generic: auto_group(&generic),
-        targets,
         arbitrage: auto_group(&arbitrage),
     }
 }
