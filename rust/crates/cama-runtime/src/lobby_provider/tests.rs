@@ -384,7 +384,7 @@ impl DiscordTransport for RecordingTransport {
         if message
             .response
             .content
-            .starts_with("🧹 Removed (no response to the last ready check):")
+            .starts_with("🧹 Removed (didn't confirm the last ready check):")
             && self
                 .fail_next_pruned_notice
                 .swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -2724,13 +2724,13 @@ async fn stale_readycheck_publicly_names_pruned_players_in_the_lobby_thread() {
             sent.message
                 .response
                 .content
-                .starts_with("🧹 Removed (no response to the last ready check):")
+                .starts_with("🧹 Removed (didn't confirm the last ready check):")
         })
         .expect("public stale-sweep notice");
     assert_eq!(notice.channel_id, thread_id);
     assert_eq!(
         notice.message.response.content,
-        "🧹 Removed (no response to the last ready check): <@20> <@30> — rejoin All You Can Feed with `/join` if you're back."
+        "🧹 Removed (didn't confirm the last ready check): <@20> <@30> — rejoin All You Can Feed with `/join`."
     );
     assert_eq!(
         notice.message.allowed_mentions,
@@ -2843,6 +2843,41 @@ async fn stale_readycheck_fixture(
 }
 
 #[tokio::test]
+async fn stale_sweep_tells_the_invoker_the_players_were_unconfirmed_not_away() {
+    // The sweep prunes on "did not confirm", not on presence, so the invoker
+    // receipt must not claim the removed players were away.
+    let database = database_with_players(&[(10, "Creator"), (20, "Away One"), (30, "Away Two")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = stale_readycheck_fixture(&database, transport.clone()).await;
+
+    let response = dispatch_command(
+        &provider,
+        "readycheck",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    let captured = response.captured.lock().expect("readycheck responses");
+    let receipt = captured
+        .followups
+        .iter()
+        .find(|response| response.content.starts_with("✅"))
+        .expect("readycheck receipt");
+    assert!(
+        receipt.content.contains("Removed 2 unconfirmed player(s)"),
+        "invoker receipt must describe the sweep as unconfirmed, got: {}",
+        receipt.content
+    );
+    assert!(
+        !receipt.content.contains("away"),
+        "invoker receipt must not claim the players were away, got: {}",
+        receipt.content
+    );
+}
+
+#[tokio::test]
 async fn failed_stale_notice_delivery_does_not_block_readycheck_and_recovers_once() {
     let database = database_with_players(&[(10, "Creator"), (20, "Away One"), (30, "Away Two")]);
     let transport = Arc::new(RecordingTransport::default());
@@ -2882,7 +2917,7 @@ async fn failed_stale_notice_delivery_does_not_block_readycheck_and_recovers_onc
                 sent.message
                     .response
                     .content
-                    .starts_with("🧹 Removed (no response to the last ready check):")
+                    .starts_with("🧹 Removed (didn't confirm the last ready check):")
             })
             .count()
     };
@@ -2972,7 +3007,7 @@ async fn failed_stale_notice_recovery_is_nonfatal_and_remains_retryable() {
                 sent.message
                     .response
                     .content
-                    .starts_with("🧹 Removed (no response to the last ready check):")
+                    .starts_with("🧹 Removed (didn't confirm the last ready check):")
             })
             .count()
     };
@@ -3069,7 +3104,7 @@ async fn already_delivered_stale_notice_is_acknowledged_without_a_duplicate_ping
             sent.message
                 .response
                 .content
-                .starts_with("🧹 Removed (no response to the last ready check):")
+                .starts_with("🧹 Removed (didn't confirm the last ready check):")
         })
         .count();
     assert_eq!(
@@ -3137,7 +3172,7 @@ async fn corrupt_pruned_notice_row_does_not_wedge_recovery_for_valid_notices() {
             sent.message
                 .response
                 .content
-                .starts_with("🧹 Removed (no response to the last ready check):")
+                .starts_with("🧹 Removed (didn't confirm the last ready check):")
         })
         .count();
     assert_eq!(delivered, 1, "the valid notice must still publish");

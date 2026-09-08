@@ -1186,6 +1186,48 @@ fn test_stale_repost_prunes_no_shows_regardless_of_presence() {
 }
 
 #[test]
+fn test_stale_sweep_spares_a_player_whose_signup_time_is_missing() {
+    // A lobby row with an undecodable player_join_times blob hydrates with
+    // players present and join times empty. An unknown sign-up time must
+    // spare the player rather than condemn them.
+    let service = staleness_service(1..=3);
+    let mut lobby = service.lobby(scope()).expect("lobby");
+    lobby.player_join_times.remove(&player(2));
+    service.put_lobby(lobby);
+    set_generation(&service, 1..=3, 5_000.0);
+
+    let plan = service
+        .prepare_command(request(7_000.0), data(1..=3))
+        .expect("stale sweep");
+
+    assert_eq!(plan.pruned_players, BTreeSet::from([player(3)]));
+    assert!(
+        service
+            .lobby(scope())
+            .expect("lobby")
+            .players
+            .contains(&player(2)),
+        "an unknown sign-up time must not make a player sweepable"
+    );
+}
+
+#[test]
+fn test_stale_sweep_removes_a_player_who_explicitly_unreadied() {
+    // Un-readying is still "not marked ready on the previous check", so the
+    // sweep takes them; only the wording of the notice stays reason-neutral.
+    let service = staleness_service([1, 2, 3]);
+    set_generation(&service, [1, 2, 3], 5_000.0);
+    assert!(service.add_readycheck_reaction(scope(), player(2), "<@2>", None));
+    assert!(service.remove_readycheck_reaction(scope(), player(2), None));
+
+    let plan = service
+        .prepare_command(request(7_000.0), data([1, 2, 3]))
+        .expect("stale sweep");
+
+    assert!(plan.pruned_players.contains(&player(2)));
+}
+
+#[test]
 fn test_stale_repost_skips_sweep_when_previous_check_is_older_than_an_hour() {
     let service = staleness_service(1..=3);
     set_generation(&service, 1..=3, 0.0);
