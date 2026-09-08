@@ -5,9 +5,7 @@ use std::sync::atomic::AtomicUsize;
 use std::thread;
 
 use cama_app::opendota_http::OpenDotaHttpConfig;
-use cama_db::gambling_stats_repository::{
-    AutoBetGroupStats, AutoBetPerformance, PlayerAutoBetStats,
-};
+use cama_db::gambling_stats_repository::{AutoBetGroupStats, AutoBetPerformance};
 use cama_db::predictions_repository::{ContractSide, NewLevel, PredictionRepository};
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
@@ -522,25 +520,7 @@ fn insert_profile_prediction(
     (repository, prediction_id)
 }
 
-fn sample_auto_bet_performance(target_count: usize) -> AutoBetPerformance {
-    let targets = (0..target_count)
-        .map(|index| PlayerAutoBetStats {
-            target_id: 9_000_000_000_000_000_000_i64 + i64::try_from(index).unwrap(),
-            directions: if index % 2 == 0 {
-                vec!["long".to_owned()]
-            } else {
-                vec!["short".to_owned()]
-            },
-            bet_count: 12 + index,
-            wins: 7 + index / 2,
-            total_wagered: 12_345 + i64::try_from(index).unwrap(),
-            net_pnl: if index % 3 == 0 {
-                -(2_345 + i64::try_from(index).unwrap())
-            } else {
-                2_345 + i64::try_from(index).unwrap()
-            },
-        })
-        .collect();
+fn sample_auto_bet_performance() -> AutoBetPerformance {
     AutoBetPerformance {
         total: AutoBetGroupStats {
             bet_count: 180,
@@ -554,7 +534,6 @@ fn sample_auto_bet_performance(target_count: usize) -> AutoBetPerformance {
             total_wagered: 123_456,
             net_pnl: -7_890,
         },
-        targets,
         arbitrage: AutoBetGroupStats {
             bet_count: 13,
             wins: 8,
@@ -1490,19 +1469,30 @@ fn test_auto_bet_field_respects_remaining_total_embed_budget() {
         .description("x".repeat(4_096))
         .field("Existing A", "a".repeat(900), false)
         .field("Existing B", "b".repeat(800), false);
-    append_auto_bet_field(&mut page, &sample_auto_bet_performance(20));
+    append_auto_bet_field(&mut page, &sample_auto_bet_performance());
 
     let field = page.fields.last().expect("auto-bet field");
     assert_eq!(field.name, "Auto-Bet P&L");
     assert!(field.value.starts_with("**Auto total:**"));
+    // Only whole lines survive the budget: no fragment, no unmatched "**".
+    assert!(field.value.lines().all(|line| line.ends_with("wagered")));
     assert!(field.value.chars().count() <= PROFILE_FIELD_VALUE_LIMIT);
     assert!(profile_text_len(&page) <= PROFILE_EMBED_TOTAL_LIMIT);
 }
 
 #[test]
+fn test_auto_bet_field_is_omitted_when_no_whole_line_fits() {
+    let mut page = ProfilePage::new("Gambling", DISCORD_BLUE)
+        .description("x".repeat(PROFILE_EMBED_TOTAL_LIMIT - 32));
+    append_auto_bet_field(&mut page, &sample_auto_bet_performance());
+
+    assert!(page.fields.is_empty());
+}
+
+#[test]
 fn test_gambling_profile_renders_auto_bet_pnl_without_investment_targets() {
     let mut page = ProfilePage::new("Profile: Investor > Gambling", DISCORD_GREEN);
-    append_auto_bet_field(&mut page, &sample_auto_bet_performance(80));
+    append_auto_bet_field(&mut page, &sample_auto_bet_performance());
 
     let field = page.fields.last().expect("auto-bet field");
     assert_eq!(field.name, "Auto-Bet P&L");
