@@ -1494,13 +1494,13 @@ fn test_auto_bet_field_respects_remaining_total_embed_budget() {
 
     let field = page.fields.last().expect("auto-bet field");
     assert_eq!(field.name, "Auto-Bet P&L");
-    assert!(field.value.contains("omitted"));
+    assert!(field.value.starts_with("**Auto total:**"));
     assert!(field.value.chars().count() <= PROFILE_FIELD_VALUE_LIMIT);
     assert!(profile_text_len(&page) <= PROFILE_EMBED_TOTAL_LIMIT);
 }
 
 #[test]
-fn test_gambling_profile_renders_budgeted_auto_bet_pnl_with_omitted_targets() {
+fn test_gambling_profile_renders_auto_bet_pnl_without_investment_targets() {
     let mut page = ProfilePage::new("Profile: Investor > Gambling", DISCORD_GREEN);
     append_auto_bet_field(&mut page, &sample_auto_bet_performance(80));
 
@@ -1509,9 +1509,10 @@ fn test_gambling_profile_renders_budgeted_auto_bet_pnl_with_omitted_targets() {
     assert!(field.value.contains("**Auto total:** +12,345 JC"));
     assert!(field.value.contains("**Generic auto:** -7,890 JC"));
     assert!(field.value.contains("**Arbitrage hedges:** +4,567 JC"));
-    assert!(field.value.contains("<@9000000000000000000> LONG"));
-    assert!(field.value.contains("<@9000000000000000001> SHORT"));
-    assert!(field.value.contains("more targets omitted"));
+    assert!(!field.value.contains("By player"));
+    assert!(!field.value.contains("<@"));
+    assert!(!field.value.contains("LONG"));
+    assert!(!field.value.contains("SHORT"));
     assert!(field.value.chars().count() <= PROFILE_FIELD_VALUE_LIMIT);
 }
 
@@ -1599,6 +1600,12 @@ fn test_rating_loads_population_and_history_concurrently() {
 
     assert_eq!(page.title, "Profile: Player > Rating");
     assert!(page.fields.iter().any(|field| field.name == "OpenSkill"));
+    assert!(
+        !page
+            .fields
+            .iter()
+            .any(|field| field.name == "Matchmaking MMR")
+    );
     assert!(page.attachments.is_empty());
 }
 

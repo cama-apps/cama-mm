@@ -22,7 +22,7 @@ use cama_db::bankruptcy_repository::BankruptcyRepository;
 use cama_db::core_repositories::{MatchRepository, PlayerRepository};
 use cama_db::gambling_stats_repository::{
     AutoBetGroupStats, AutoBetPerformance, GamblingOutcome, GamblingSource,
-    GamblingStatsRepository, GamblingStatsService, PlayerAutoBetStats,
+    GamblingStatsRepository, GamblingStatsService,
 };
 use cama_db::loan_repository::LoanRepository;
 use cama_db::opendota_player::OpenDotaPlayerRepository;
@@ -879,14 +879,7 @@ impl ProfileDataSources {
         });
         let mut page = ProfilePage::new(format!("Profile: {target_name} > Rating"), DISCORD_BLUE)
             .field("Glicko", glicko, true)
-            .field("OpenSkill", openskill, true)
-            .field(
-                "Matchmaking MMR",
-                player
-                    .mmr
-                    .map_or_else(|| "Not set".to_owned(), |mmr| mmr.to_string()),
-                true,
-            );
+            .field("OpenSkill", openskill, true);
         if let Some(chart) = chart {
             page = page.image_attachment("rating_chart.png", chart);
         }
@@ -1885,45 +1878,6 @@ fn auto_bet_group_line(label: &str, group: &AutoBetGroupStats) -> String {
     )
 }
 
-fn auto_bet_direction_label(directions: &[String]) -> (&'static str, String) {
-    let normalized = directions
-        .iter()
-        .map(|direction| direction.to_ascii_lowercase())
-        .filter(|direction| matches!(direction.as_str(), "long" | "short"))
-        .fold(Vec::<String>::new(), |mut seen, direction| {
-            if !seen.contains(&direction) {
-                seen.push(direction);
-            }
-            seen
-        });
-    match normalized.as_slice() {
-        [direction] if direction == "long" => ("↗", "LONG".to_owned()),
-        [direction] if direction == "short" => ("↘", "SHORT".to_owned()),
-        [] => ("•", "AUTO".to_owned()),
-        directions => (
-            "↕",
-            directions
-                .iter()
-                .map(|direction| direction.to_ascii_uppercase())
-                .collect::<Vec<_>>()
-                .join("/"),
-        ),
-    }
-}
-
-fn auto_bet_target_line(target: &PlayerAutoBetStats) -> String {
-    let (icon, directions) = auto_bet_direction_label(&target.directions);
-    let losses = target.bet_count.saturating_sub(target.wins);
-    format!(
-        "{icon} <@{}> {directions} · {} JC · {}W–{}L · {} wagered",
-        target.target_id,
-        grouped_signed(target.net_pnl),
-        grouped_number(i64::try_from(target.wins).unwrap_or(i64::MAX)),
-        grouped_number(i64::try_from(losses).unwrap_or(i64::MAX)),
-        grouped_number(target.total_wagered)
-    )
-}
-
 fn truncate_profile_text(value: &str, budget: usize) -> String {
     value.chars().take(budget).collect()
 }
@@ -1957,10 +1911,6 @@ fn append_auto_bet_field(page: &mut ProfilePage, performance: &AutoBetPerformanc
     if performance.total.bet_count == 0
         && performance.generic.bet_count == 0
         && performance.arbitrage.bet_count == 0
-        && performance
-            .targets
-            .iter()
-            .all(|target| target.bet_count == 0)
     {
         return;
     }
@@ -1973,66 +1923,16 @@ fn append_auto_bet_field(page: &mut ProfilePage, performance: &AutoBetPerformanc
         return;
     }
 
-    let summary_lines = [
+    let summary = [
         auto_bet_group_line("Auto total", &performance.total),
         auto_bet_group_line("Generic auto", &performance.generic),
         auto_bet_group_line("Arbitrage hedges", &performance.arbitrage),
-    ];
-    let target_lines = performance
-        .targets
-        .iter()
-        .map(auto_bet_target_line)
-        .collect::<Vec<_>>();
-    let heading = "**By player:**";
-    let compose = |count: usize| {
-        let mut lines = summary_lines.to_vec();
-        if !target_lines.is_empty() {
-            lines.push(heading.to_owned());
-            lines.extend(target_lines.iter().take(count).cloned());
-            let omitted = target_lines.len().saturating_sub(count);
-            if omitted > 0 {
-                let noun = if omitted == 1 { "target" } else { "targets" };
-                lines.push(format!(
-                    "*…{} more {noun} omitted*",
-                    grouped_number(i64::try_from(omitted).unwrap_or(i64::MAX))
-                ));
-            }
-        }
-        lines.join("\n")
-    };
-    let mut value = compose(0);
-    if value.chars().count() > budget {
-        let suffix = if target_lines.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "\n{heading}\n*…{} more {} omitted*",
-                grouped_number(i64::try_from(target_lines.len()).unwrap_or(i64::MAX)),
-                if target_lines.len() == 1 {
-                    "target"
-                } else {
-                    "targets"
-                }
-            )
-        };
-        let prefix_budget = budget.saturating_sub(suffix.chars().count());
-        value = if prefix_budget == 0 {
-            truncate_profile_text(suffix.trim_start(), budget)
-        } else {
-            format!(
-                "{}{suffix}",
-                truncate_profile_text(&summary_lines.join("\n"), prefix_budget)
-            )
-        };
-    } else {
-        for count in 1..=target_lines.len() {
-            let candidate = compose(count);
-            if candidate.chars().count() > budget {
-                break;
-            }
-            value = candidate;
-        }
-    }
+    ]
+    .join(
+        "
+",
+    );
+    let value = truncate_profile_text(&summary, budget);
     if !value.is_empty() {
         page.fields.push(ProfileField::new(name, value, false));
     }
