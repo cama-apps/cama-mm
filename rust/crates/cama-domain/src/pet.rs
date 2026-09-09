@@ -29,6 +29,50 @@ pub const WARNING_HUNGER: i64 = 30;
 
 pub const PET_NAME_MAX_LEN: i64 = 32;
 pub const ADOPTION_FEES: [i64; 4] = [20, 50, 75, 100];
+pub const ADOPTION_MISCONDUCT_WINDOW_SECONDS: i64 = 7 * SECONDS_PER_DAY;
+
+/// Return the active adoption suspension from recorded deaths. The score is
+/// evaluated at each incident, so waiting or a later lesser offense cannot
+/// shorten an existing sentence. Hunger alone does not suspend adoption.
+#[must_use]
+pub fn adoption_suspended_until<'a>(
+    incidents: impl IntoIterator<Item = (i64, Option<&'a str>)>,
+    now: i64,
+) -> Option<i64> {
+    let mut incidents = incidents
+        .into_iter()
+        .filter(|(at, _)| *at <= now)
+        .map(|(at, cause)| {
+            (
+                at,
+                match cause {
+                    Some("eaten") => 10_i64,
+                    Some("sacrifice") => 8,
+                    _ => 5,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    incidents.sort_unstable();
+    let mut start = 0;
+    let mut score = 0_i64;
+    let mut suspended_until = None;
+    for (index, &(at, points)) in incidents.iter().enumerate() {
+        let cutoff = at.saturating_sub(ADOPTION_MISCONDUCT_WINDOW_SECONDS);
+        while start < index && incidents[start].0 < cutoff {
+            score -= incidents[start].1;
+            start += 1;
+        }
+        score = score.saturating_add(points);
+        let days = (score / 10).min(7);
+        let until = at.saturating_add(days * SECONDS_PER_DAY);
+        if days > 0 && until > now {
+            suspended_until = Some(suspended_until.map_or(until, |old: i64| old.max(until)));
+        }
+    }
+    suspended_until
+}
+
 pub const RENAME_COST: i64 = 10;
 pub const SUPPLY_STACK_CAP: i64 = 99;
 pub const MAX_BUY_QTY: i64 = 25;
@@ -1325,6 +1369,63 @@ mod tests {
     const T0: i64 = 1_800_000_000;
     const RATE: i64 = DEFAULT_HUNGER_DECAY_PER_DAY;
     const DAY: i64 = 86_400;
+
+    #[test]
+    fn adoption_suspension_thresholds_expiry_and_window() {
+        assert_eq!(adoption_suspended_until([], T0), None);
+        for cause in [None, Some("starvation"), Some("sacrifice")] {
+            assert_eq!(adoption_suspended_until([(T0, cause)], T0), None);
+        }
+        assert_eq!(
+            adoption_suspended_until([(T0, Some("eaten"))], T0),
+            Some(T0 + DAY)
+        );
+        assert_eq!(
+            adoption_suspended_until([(T0, None); 2], T0),
+            Some(T0 + DAY)
+        );
+        assert_eq!(
+            adoption_suspended_until([(T0, Some("eaten")); 3], T0),
+            Some(T0 + 3 * DAY)
+        );
+        assert_eq!(
+            adoption_suspended_until([(T0, Some("eaten")); 20], T0),
+            Some(T0 + 7 * DAY)
+        );
+        assert_eq!(
+            adoption_suspended_until([(T0, Some("eaten"))], T0 + DAY),
+            None
+        );
+        assert_eq!(
+            adoption_suspended_until([(T0 + 1, Some("eaten"))], T0),
+            None
+        );
+        assert_eq!(
+            adoption_suspended_until([(T0 - 7 * DAY - 1, None), (T0, None)], T0),
+            None
+        );
+        assert_eq!(
+            adoption_suspended_until([(T0 - 7 * DAY, None), (T0, None)], T0),
+            Some(T0 + DAY)
+        );
+    }
+
+    #[test]
+    fn adoption_suspension_does_not_slide_or_shorten_with_later_offense() {
+        let mut incidents = vec![(T0 - 6 * DAY, Some("eaten")); 6];
+        incidents.push((T0, Some("eaten")));
+        assert_eq!(
+            adoption_suspended_until(incidents.clone(), T0 + 2 * DAY),
+            Some(T0 + 7 * DAY)
+        );
+        incidents.push((T0 + 2 * DAY, None));
+        incidents.reverse();
+        assert_eq!(
+            adoption_suspended_until(incidents.clone(), T0 + 2 * DAY),
+            Some(T0 + 7 * DAY)
+        );
+        assert_eq!(adoption_suspended_until(incidents, T0 + 7 * DAY), None);
+    }
 
     fn make_pet() -> Pet {
         Pet::new(PetBase {

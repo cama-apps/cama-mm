@@ -49,6 +49,7 @@ pub const STACK_CAP: &str = "stack_cap";
 pub const BRAWL_BUSY: &str = "brawl_busy";
 pub const STABLE_FULL: &str = "stable_full";
 pub const SWITCH_COOLDOWN: &str = "switch_cooldown";
+pub const ADOPTION_SUSPENDED: &str = "adoption_suspended";
 
 const FORBIDDEN_NAME_FRAGMENTS: [&str; 4] = ["@", "http://", "https://", "discord.gg"];
 const DAY_SECONDS: i64 = 86_400;
@@ -1541,6 +1542,12 @@ pub(crate) fn map_repo_error<T>(error: PetRepositoryError, fee: Option<i64>) -> 
             format!("Your stable is full ({MAX_LIVING_PETS} living pets)."),
             STABLE_FULL,
         ),
+        PetRepositoryFailure::AdoptionSuspended { until } => (
+            format!(
+                "🚨 ASPCA adoption privileges suspended. The adoption desk has your photo under ‘DO NOT HAND THIS PERSON A CAMA’. You may apply again <t:{until}:R> (<t:{until}:f>). Review your case file with `/pet aspca`."
+            ),
+            ADOPTION_SUSPENDED,
+        ),
         PetRepositoryFailure::SwitchCooldown => (
             "You can only activate a different pet once every 24 hours.".to_owned(),
             SWITCH_COOLDOWN,
@@ -1959,6 +1966,15 @@ mod tests {
 
         fn adopt_pet(&mut self, request: &AdoptPetRequest<'_>) -> Result<Pet, PetRepositoryError> {
             let guild_id = normalized_guild(request.guild_id);
+            let incidents = self
+                .pets
+                .iter()
+                .filter(|pet| pet.discord_id == request.discord_id && pet.guild_id == guild_id)
+                .filter_map(|pet| pet.died_at.map(|at| (at, pet.death_cause.as_deref())));
+            if let Some(until) = cama_domain::pet::adoption_suspended_until(incidents, request.now)
+            {
+                return Err(rejected(PetRepositoryFailure::AdoptionSuspended { until }));
+            }
             let living_count = self
                 .pets
                 .iter()
@@ -2836,6 +2852,35 @@ mod tests {
 
     mod adopt {
         use super::*;
+
+        #[test]
+        fn suspended_adoption_returns_reopening_time_without_charge() {
+            let (mut service, clock) = fixture();
+            let pet = adopt_common(&mut service, "Snack");
+            let index = service
+                .store()
+                .pets
+                .iter()
+                .position(|p| p.pet_id == pet.pet_id)
+                .unwrap();
+            service.store_mut().pets[index].died_at = Some(T0);
+            service.store_mut().pets[index].death_cause = Some("eaten".to_owned());
+            service.store_mut().pets[index].is_active = false;
+            let balance = service.store().balance(OWNER, GUILD);
+            let result = service.adopt(OWNER, Some(GUILD), "Replacement", "gilded");
+            assert_eq!(error_code(&result), Some(ADOPTION_SUSPENDED));
+            let ServiceResult::Failure { error, .. } = result else {
+                panic!("expected suspension")
+            };
+            assert!(error.contains(&format!("<t:{}:R>", T0 + DAY)));
+            assert_eq!(service.store().balance(OWNER, GUILD), balance);
+            assert_eq!(service.store().pets.len(), 1);
+            clock.set(T0 + DAY);
+            assert!(matches!(
+                service.adopt(OWNER, Some(GUILD), "Reformed", "standard"),
+                ServiceResult::Success(_)
+            ));
+        }
 
         #[test]
         fn adopt_creates_egg_and_charges_first_fee() {

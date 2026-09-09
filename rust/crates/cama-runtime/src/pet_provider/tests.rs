@@ -1112,6 +1112,7 @@ fn command_schema_matches_python_pet_group() {
             "eat",
             "graveyard",
             "leaderboard",
+            "aspca",
         ]
     );
     let descriptions = options
@@ -1175,6 +1176,10 @@ fn command_schema_matches_python_pet_group() {
             (
                 "leaderboard".to_owned(),
                 "The oldest living camas".to_owned()
+            ),
+            (
+                "aspca".to_owned(),
+                "Open the server's Camagotchi cruelty case files".to_owned()
             ),
         ])
     );
@@ -1264,6 +1269,7 @@ fn command_schema_matches_python_pet_group() {
     assert_eq!(option("brawl").options[1].max_integer, Some(100));
     assert!(option("altar").options[0].required);
     assert!(!option("graveyard").options[0].required);
+    assert!(option("aspca").options.is_empty());
 }
 
 #[test]
@@ -1764,6 +1770,118 @@ async fn live_status_renders_evolution_pampered_trinket_brawl_projection() {
 }
 
 #[tokio::test]
+async fn adoption_suspension_replies_with_case_file_and_expiry() {
+    let (database, provider, pet_id) = fixture(true);
+    let now = SystemPetClock.now();
+    rusqlite::Connection::open(database.path())
+        .unwrap()
+        .execute(
+            "UPDATE pets SET died_at=?1, death_cause='eaten', is_active=0 WHERE pet_id=?2",
+            rusqlite::params![now, pet_id],
+        )
+        .unwrap();
+    let responder = Arc::new(TestResponder::new(false));
+    provider
+        .handler
+        .handle(
+            leaf_request(
+                "adopt",
+                vec![InteractionOption {
+                    name: "name".to_owned(),
+                    value: InteractionValue::String("Innocent replacement".to_owned()),
+                }],
+            ),
+            responder.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(*responder.defers.lock().unwrap(), vec![false]);
+    let followups = responder.followups.lock().unwrap();
+    assert_eq!(followups.len(), 1);
+    let text = format!("{:?}", followups[0]);
+    assert!(text.contains("adoption privileges suspended"));
+    assert!(text.contains("/pet aspca"));
+    assert!(text.contains(&format!("<t:{}:R>", now + 86_400)));
+    assert_eq!(
+        PetRepository::new(database.path())
+            .get_welfare_pets(Some(GUILD as i64))
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn aspca_publicly_reports_hungry_pets_without_mutating_them() {
+    let (database, provider, pet_id) = fixture(true);
+    rusqlite::Connection::open(database.path())
+        .expect("open welfare fixture")
+        .execute(
+            "UPDATE pets SET hunger_at_last_fed=10, last_fed_at=?1 WHERE pet_id=?2",
+            rusqlite::params![SystemPetClock.now(), pet_id],
+        )
+        .expect("seed hungry pet");
+    let repository = PetRepository::new(database.path());
+    let before = repository.get_welfare_pets(Some(GUILD as i64)).unwrap();
+    let responder = Arc::new(TestResponder::new(false));
+    provider
+        .handler
+        .handle(leaf_request("aspca", Vec::new()), responder.clone())
+        .await
+        .expect("aspca dispatch");
+    assert_eq!(*responder.defers.lock().unwrap(), vec![false]);
+    assert_eq!(responder.calls.lock().unwrap().first(), Some(&"defer"));
+    let followups = responder.followups.lock().unwrap();
+    assert_eq!(followups.len(), 1);
+    assert!(!followups[0].ephemeral);
+    let embed = &followups[0].embeds[0];
+    assert_eq!(
+        followups[0].allowed_mentions,
+        crate::registration::InteractionAllowedMentions::None
+    );
+    let text = format!("{embed:?}");
+    assert!(text.contains(&format!("<@{OWNER}>")));
+    assert_eq!(
+        repository.get_welfare_pets(Some(GUILD as i64)).unwrap(),
+        before
+    );
+}
+
+#[tokio::test]
+async fn aspca_handles_empty_guild_and_defers_before_database_failure() {
+    let (_database, provider, _) = fixture(true);
+    let empty = Arc::new(TestResponder::new(false));
+    provider
+        .handler
+        .command_aspca(99_999, empty.clone())
+        .await
+        .unwrap();
+    assert!(
+        empty.followups.lock().unwrap()[0].embeds[0]
+            .description
+            .as_ref()
+            .unwrap()
+            .contains("No charges today")
+    );
+    assert_eq!(*empty.defers.lock().unwrap(), vec![false]);
+
+    let database_path = &provider.handler.state.database_path;
+    rusqlite::Connection::open(database_path)
+        .unwrap()
+        .execute_batch("ALTER TABLE pets RENAME TO unavailable_pets")
+        .unwrap();
+    let failed = Arc::new(TestResponder::new(false));
+    assert!(
+        provider
+            .handler
+            .command_aspca(GUILD as i64, failed.clone())
+            .await
+            .is_err()
+    );
+    assert_eq!(*failed.calls.lock().unwrap(), vec!["defer"]);
+}
+
+#[tokio::test]
 async fn live_graveyard_and_leaderboard_render_python_projection_fields() {
     let (database, provider, pet_id, recipient_pet_id) = brawl_fixture();
     let now = SystemPetClock.now();
@@ -2003,6 +2121,7 @@ async fn live_migrated_sqlite_dispatches_all_pet_leaves_and_persistent_paths() {
         ),
         ("graveyard", Vec::new(), false),
         ("leaderboard", Vec::new(), false),
+        ("aspca", Vec::new(), false),
     ];
     for (name, options, expected_defer) in leaves {
         let responder = Arc::new(TestResponder::new(false));

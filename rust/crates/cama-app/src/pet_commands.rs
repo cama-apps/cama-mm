@@ -39,6 +39,7 @@ pub const COMMAND_GROUP: CommandGroup = CommandGroup {
         "altar",
         "eat",
         "graveyard",
+        "aspca",
         "leaderboard",
     ],
 };
@@ -2016,6 +2017,142 @@ pub fn build_refund_embed(notice: &RefundNotice) -> Embed {
     )
 }
 
+/// A read-only welfare audit. Dormant stable pets have frozen care clocks;
+/// pending starvation is reported as critical hunger until death is recorded.
+#[must_use]
+pub fn build_aspca_embed(pets: &[Pet], decay_per_day: i64, now: i64) -> Embed {
+    #[derive(Default)]
+    struct Charges {
+        hungry: usize,
+        critical: usize,
+        dead: usize,
+        eaten: usize,
+        sacrificed: usize,
+    }
+    impl Charges {
+        fn score(&self) -> usize {
+            self.hungry + self.critical * 3 + self.dead * 5 + self.sacrificed * 8 + self.eaten * 10
+        }
+    }
+    let mut owners: BTreeMap<i64, Charges> = BTreeMap::new();
+    let mut incidents: BTreeMap<i64, Vec<(i64, Option<&str>)>> = BTreeMap::new();
+    for pet in pets {
+        if let Some(died_at) = pet.died_at {
+            incidents
+                .entry(pet.discord_id)
+                .or_default()
+                .push((died_at, pet.death_cause.as_deref()));
+            let charges = owners.entry(pet.discord_id).or_default();
+            match pet.death_cause.as_deref() {
+                Some("eaten") => charges.eaten += 1,
+                Some("sacrifice") => charges.sacrificed += 1,
+                _ => charges.dead += 1,
+            }
+        } else if pet.is_active
+            && pet.species != UNHATCHED_SPECIES
+            && pet.stage(now) != PetStage::Egg
+        {
+            let hunger = pet.current_hunger(now, decay_per_day);
+            if hunger <= WARNING_HUNGER {
+                let charges = owners.entry(pet.discord_id).or_default();
+                if hunger == 0 {
+                    charges.critical += 1;
+                } else {
+                    charges.hungry += 1;
+                }
+            }
+        }
+    }
+    let mut ranked = owners.into_iter().collect::<Vec<_>>();
+    ranked.sort_by_key(|(owner, charges)| (std::cmp::Reverse(charges.score()), *owner));
+    let mut embed = Embed::new(
+        "🚨 ASPCA · Camagotchi Hall of Shame",
+        "**Association for Seriously Peeved Camagotchi Advocates**\n\
+         For just one feeding a day, you could stop being the subject of this report.",
+        EmbedColor::Red,
+    );
+    if ranked.is_empty() {
+        embed.description.push_str("\n\n🕊️ No charges today. Bowls are topped up, the altar is quiet, and nobody has confused a companion with a kebab. Inspectors remain suspicious.");
+        return embed;
+    }
+    let totals = ranked.iter().fold([0_usize; 5], |mut sums, (_, c)| {
+        for (sum, count) in
+            sums.iter_mut()
+                .zip([c.hungry, c.critical, c.dead, c.eaten, c.sacrificed])
+        {
+            *sum += count;
+        }
+        sums
+    });
+    embed.field("📋 Server case file", format!(
+        "{} hungry · {} at zero hunger · {} other deaths · {} eaten · {} sacrificed\n{} owners on file. The sad violin budget has been exceeded.",
+        totals[0], totals[1], totals[2], totals[3], totals[4], ranked.len()
+    ), false);
+    for (index, (owner, c)) in ranked.iter().take(10).enumerate() {
+        let mut evidence = Vec::new();
+        if c.hungry > 0 {
+            evidence.push(format!(
+                "🥣 **{} hungry** — the bowl is decorative, apparently.",
+                c.hungry
+            ));
+        }
+        if c.critical > 0 {
+            evidence.push(format!(
+                "🆘 **{} at zero hunger** — emergency inspection. Bring food, not excuses.",
+                c.critical
+            ));
+        }
+        if c.dead > 0 {
+            evidence.push(format!(
+                "🪦 **{} deaths on record** — the adoption desk remembers.",
+                c.dead
+            ));
+        }
+        if c.eaten > 0 {
+            evidence.push(format!(
+                "🍽️ **{} eaten** — ‘a forever home’ was your digestive tract.",
+                c.eaten
+            ));
+        }
+        if c.sacrificed > 0 {
+            evidence.push(format!(
+                "🕯️ **{} sacrificed** — traded unconditional love for better gacha odds.",
+                c.sacrificed
+            ));
+        }
+        let verdict = if c.eaten > 0 {
+            "Your pet was a friend, not a meal plan."
+        } else if c.sacrificed > 0 {
+            "The altar has requested a restraining order."
+        } else if c.dead > 0 {
+            "Your references are all tombstones."
+        } else {
+            "Sentenced to learning where the feed button is."
+        };
+        embed.field(
+            format!("#{} · {} shame points", index + 1, c.score()),
+            format!(
+                "<@{owner}>\n{}\n*{verdict}*{}",
+                evidence.join("\n"),
+                cama_domain::pet::adoption_suspended_until(
+                    incidents.get(owner).into_iter().flatten().copied(),
+                    now,
+                )
+                .map_or_else(String::new, |until| format!(
+                    "\n🔒 **Adoption suspended** until <t:{until}:f> (<t:{until}:R>)."
+                ))
+            ),
+            false,
+        );
+    }
+    embed.footer = Some(format!(
+        "Showing {} of {} owners • Shame: hungry 1 / zero hunger 3 / death 5 / sacrifice 8 / eaten 10 • Suspension: each 10 death points within 7 days = 1 day, max 7 • /pet feed",
+        ranked.len().min(10),
+        ranked.len()
+    ));
+    embed
+}
+
 #[must_use]
 pub fn build_graveyard_embed(pets: &[Pet], owner_name: &str) -> Embed {
     build_graveyard_embed_with_dex(pets, owner_name, None, None)
@@ -2321,6 +2458,86 @@ mod tests {
         let mut pet = make_pet();
         pet.discord_id = OWNER;
         pet
+    }
+
+    #[test]
+    fn aspca_distinguishes_causes_and_pending_starvation() {
+        let now = T0 + 10 * DAY;
+        let mut pets = Vec::new();
+        for cause in [Some("eaten"), Some("sacrifice"), Some("starvation"), None] {
+            let mut pet = owner_pet();
+            pet.died_at = Some(now - DAY);
+            pet.death_cause = cause.map(str::to_owned);
+            pets.push(pet);
+        }
+        let mut hungry = owner_pet();
+        hungry.last_fed_at = now;
+        hungry.hunger_at_last_fed = WARNING_HUNGER;
+        pets.push(hungry);
+        pets.push(owner_pet()); // Zero hunger, but no persisted death yet.
+        let embed = build_aspca_embed(&pets, 20, now);
+        let charges = &embed.fields[1];
+        assert_eq!(charges.name, "#1 · 32 shame points");
+        for text in [
+            "1 hungry",
+            "1 at zero hunger",
+            "2 deaths on record",
+            "1 eaten",
+            "1 sacrificed",
+            "<@100>",
+        ] {
+            assert!(charges.value.contains(text), "missing {text}");
+        }
+        assert!(charges.value.contains("Adoption suspended"));
+    }
+
+    #[test]
+    fn aspca_exempts_eggs_stabled_and_well_fed_pets() {
+        let now = T0 + 10 * DAY;
+        let mut stabled = owner_pet();
+        stabled.is_active = false;
+        let mut egg = owner_pet();
+        egg.species = UNHATCHED_SPECIES.to_owned();
+        let mut future_hatch = owner_pet();
+        future_hatch.hatched_at = now + DAY;
+        let mut healthy = owner_pet();
+        healthy.last_fed_at = now;
+        let embed = build_aspca_embed(&[stabled, egg, future_hatch, healthy], 20, now);
+        assert!(embed.description.contains("No charges today"));
+        assert!(embed.fields.is_empty());
+    }
+
+    #[test]
+    fn aspca_ranks_deterministically_and_fits_discord_embed_limits() {
+        let now = T0 + 10 * DAY;
+        let mut pets = Vec::new();
+        for owner in (1..=20).rev() {
+            for cause in ["eaten", "sacrifice", "starvation"] {
+                let mut pet = owner_pet();
+                pet.discord_id = owner;
+                pet.died_at = Some(now);
+                pet.death_cause = Some(cause.to_owned());
+                pets.push(pet);
+            }
+            let mut pet = owner_pet();
+            pet.discord_id = owner;
+            pets.push(pet.clone());
+            pet.last_fed_at = now;
+            pet.hunger_at_last_fed = WARNING_HUNGER;
+            pets.push(pet);
+        }
+        let embed = build_aspca_embed(&pets, 20, now);
+        assert_eq!(embed.fields.len(), 11);
+        assert!(embed.fields[1].value.starts_with("<@1>\n"));
+        assert!(embed.footer.as_ref().unwrap().contains("10 of 20"));
+        let mut length = embed.title.chars().count()
+            + embed.description.chars().count()
+            + embed.footer.as_ref().unwrap().chars().count();
+        for field in &embed.fields {
+            assert!(field.value.chars().count() <= 1024);
+            length += field.name.chars().count() + field.value.chars().count();
+        }
+        assert!(length <= 6000, "embed has {length} characters");
     }
 
     #[derive(Clone, Debug)]
