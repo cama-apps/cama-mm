@@ -29,8 +29,9 @@ use cama_app::pet_brawl_commands::{
 use cama_app::pet_commands::{
     Embed, EmbedColor, PetCommandService, PetFlavorEvent, StatusAction, StatusEmbedRequest,
     StatusView, build_adoption_embed, build_altar_cancel_embed, build_altar_preview_embed,
-    build_altar_success_embed, build_eating_outcome_embed, build_graveyard_embed_with_dex,
-    build_leaderboard_embed_with_records, build_shop_embed, build_status_embed_with_details,
+    build_altar_success_embed, build_aspca_embed, build_eating_outcome_embed,
+    build_graveyard_embed_with_dex, build_leaderboard_embed_with_records, build_shop_embed,
+    build_status_embed_with_details,
 };
 use cama_app::pet_eating::{
     EatAdultPetCommit, EatAdultPetRequest as AppEatAdultPetRequest, PetEatingApplicationPort,
@@ -501,6 +502,11 @@ fn pet_options() -> Vec<CommandOptionSpec> {
             )],
         ),
         subcommand("leaderboard", "The oldest living camas", Vec::new()),
+        subcommand(
+            "aspca",
+            "Open the server's Camagotchi cruelty case files",
+            Vec::new(),
+        ),
     ]
 }
 
@@ -678,6 +684,7 @@ impl PetInteractionHandler {
                 .await
             }
             "leaderboard" => self.command_leaderboard(guild_id, responder).await,
+            "aspca" => self.command_aspca(guild_id, responder).await,
             other => Err(format!("unknown /pet subcommand {other:?}")),
         }
     }
@@ -1431,6 +1438,32 @@ impl PetInteractionHandler {
         );
         responder
             .followup(response_embed(embed, None, Vec::new(), false))
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn command_aspca(
+        &self,
+        guild_id: i64,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        responder
+            .defer(false)
+            .await
+            .map_err(|error| error.to_string())?;
+        let database_path = self.state.database_path.clone();
+        let decay = self.state.decay_per_day;
+        let now = Utc::now().timestamp();
+        let embed = self
+            .run_service(move |_| {
+                let pets = PetRepository::new(database_path)
+                    .get_welfare_pets(Some(guild_id))
+                    .map_err(|error| error.to_string())?;
+                Ok(build_aspca_embed(&pets, decay, now))
+            })
+            .await?;
+        responder
+            .followup(response_embed(embed, None, Vec::new(), false).without_mentions())
             .await
             .map_err(|error| error.to_string())
     }

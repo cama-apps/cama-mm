@@ -16,6 +16,7 @@ use cama_domain::pet::{
     ADULT_AGE_SECONDS, BRAWL_TRAINING_LEVEL_CAP, BRAWL_TRAINING_STAT_CAP, BRAWL_TRAINING_XP_CAP,
     BRAWL_XP_PER_LEVEL, MAX_LIVING_PETS, Pet, PetRow, PetRowError, RefundNotice, RefundPayout,
     SOLO_TRAINING_SESSION_CAP, SOLO_TRAINING_XP_PER_SESSION, SqliteValue, UNHATCHED_SPECIES,
+    adoption_suspended_until,
 };
 use rusqlite::types::{Type, Value, ValueRef};
 use rusqlite::{
@@ -84,6 +85,7 @@ const PET_COLUMN_NAMES: [&str; 42] = [
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PetRepositoryFailure {
     InsufficientFunds,
+    AdoptionSuspended { until: i64 },
     AlreadyHasPet,
     NoPet,
     PetDead,
@@ -130,6 +132,7 @@ impl fmt::Display for PetRepositoryFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::InsufficientFunds => "insufficient_funds",
+            Self::AdoptionSuspended { .. } => "adoption_suspended",
             Self::AlreadyHasPet => "already_has_pet",
             Self::NoPet => "no_pet",
             Self::PetDead => "pet_dead",
@@ -625,6 +628,15 @@ impl PetRepository {
         )
     }
 
+    /// All current and historical pets in one guild, including stabled pets.
+    pub fn get_welfare_pets(&self, guild_id: Option<i64>) -> Result<Vec<Pet>, PetRepositoryError> {
+        query_pets(
+            &self.connection()?,
+            &format!("SELECT {PET_COLUMNS} FROM pets WHERE guild_id=?1 ORDER BY pet_id"),
+            params![Self::normalize_guild_id(guild_id)],
+        )
+    }
+
     pub fn get_oldest_living(
         &self,
         guild_id: Option<i64>,
@@ -697,6 +709,25 @@ impl PetRepository {
             .ok_or(PetRepositoryError::ArithmeticOutOfRange)?;
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let incidents = {
+            let mut statement = transaction.prepare(
+                "SELECT died_at, death_cause FROM pets
+                 WHERE discord_id=?1 AND guild_id=?2 AND died_at IS NOT NULL",
+            )?;
+            statement
+                .query_map(params![request.discord_id, guild_id], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        if let Some(until) = adoption_suspended_until(
+            incidents
+                .iter()
+                .map(|(died_at, cause)| (*died_at, cause.as_deref())),
+            request.now,
+        ) {
+            return Err(PetRepositoryFailure::AdoptionSuspended { until }.into());
+        }
         let living_count = transaction.query_row(
             "SELECT COUNT(*) FROM pets
              WHERE discord_id=?1 AND guild_id=?2 AND died_at IS NULL",
@@ -2908,6 +2939,88 @@ mod tests {
     mod adopt {
         use super::*;
 
+        fn record_eaten_pet(fixture: &Fixture) {
+            let pet = fixture.adopt_standard();
+            fixture
+                .connection()
+                .execute(
+                    "UPDATE pets SET died_at=?1, death_cause='eaten', is_active=0
+                     WHERE pet_id=?2",
+                    params![NOW, pet.pet_id],
+                )
+                .unwrap();
+        }
+
+        #[test]
+        fn adoption_suspension_blocks_both_egg_tiers_without_debit_or_insertion() {
+            let fixture = rich_fixture();
+            record_eaten_pet(&fixture);
+            for (egg_tier, fee) in [("standard", 20), ("gilded", 250)] {
+                assert_failure(
+                    fixture.adopt_result(AdoptOptions {
+                        egg_tier,
+                        fee,
+                        now: NOW + 1,
+                        ..AdoptOptions::default()
+                    }),
+                    PetRepositoryFailure::AdoptionSuspended { until: NOW + DAY },
+                );
+            }
+            assert_eq!(fixture.balance(100, TEST_GUILD_ID), 980);
+            assert_eq!(fixture.ledger_count("pet"), 1);
+            let count: i64 = fixture
+                .connection()
+                .query_row("SELECT COUNT(*) FROM pets", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(count, 1);
+        }
+
+        #[test]
+        fn adoption_suspension_expires_at_exact_boundary() {
+            let fixture = rich_fixture();
+            record_eaten_pet(&fixture);
+            assert_failure(
+                fixture.adopt_result(AdoptOptions {
+                    now: NOW + DAY - 1,
+                    ..AdoptOptions::default()
+                }),
+                PetRepositoryFailure::AdoptionSuspended { until: NOW + DAY },
+            );
+            let pet = fixture.adopt(AdoptOptions {
+                now: NOW + DAY,
+                ..AdoptOptions::default()
+            });
+            assert_eq!(pet.adopted_at, NOW + DAY);
+            assert_eq!(fixture.balance(100, TEST_GUILD_ID), 960);
+        }
+
+        #[test]
+        fn adoption_suspension_is_scoped_to_owner_and_guild() {
+            let fixture = rich_fixture();
+            record_eaten_pet(&fixture);
+            fixture.seed_player(100, TEST_GUILD_ID + 1, 1_000);
+            fixture.seed_player(101, TEST_GUILD_ID, 1_000);
+            fixture.seed_player(100, 0, 1_000);
+            for (discord_id, guild_id) in [
+                (100, Some(TEST_GUILD_ID + 1)),
+                (101, Some(TEST_GUILD_ID)),
+                (100, None),
+            ] {
+                let pet = fixture.adopt(AdoptOptions {
+                    discord_id,
+                    guild_id,
+                    now: NOW + 1,
+                    ..AdoptOptions::default()
+                });
+                assert_eq!(pet.discord_id, discord_id);
+                assert_eq!(pet.guild_id, guild_id.unwrap_or(0));
+            }
+            assert_failure(
+                fixture.adopt_result(AdoptOptions::default()),
+                PetRepositoryFailure::AdoptionSuspended { until: NOW + DAY },
+            );
+        }
+
         #[test]
         fn test_adopt_debits_fee_and_creates_egg() {
             let fixture = rich_fixture();
@@ -2989,6 +3102,47 @@ mod tests {
                     .count_dead_pets(100, Some(TEST_GUILD_ID))
                     .unwrap(),
                 1
+            );
+        }
+
+        #[test]
+        fn welfare_pets_includes_history_and_stable_without_crossing_guilds() {
+            let fixture = rich_fixture();
+            let dead = fixture.adopt_standard();
+            assert!(fixture.claim_death(&dead, NOW + DAY));
+            let active = fixture.adopt_standard();
+            let stabled = fixture.adopt(AdoptOptions {
+                name: "Stabled",
+                ..AdoptOptions::default()
+            });
+            fixture.seed_player(100, 0, 500);
+            let dm = fixture.adopt(AdoptOptions {
+                guild_id: None,
+                ..AdoptOptions::default()
+            });
+            fixture.seed_player(100, TEST_GUILD_ID + 1, 500);
+            fixture.adopt(AdoptOptions {
+                guild_id: Some(TEST_GUILD_ID + 1),
+                ..AdoptOptions::default()
+            });
+            let pets = fixture
+                .repository
+                .get_welfare_pets(Some(TEST_GUILD_ID))
+                .unwrap();
+            assert_eq!(
+                pets.iter().map(|pet| pet.pet_id).collect::<Vec<_>>(),
+                vec![dead.pet_id, active.pet_id, stabled.pet_id]
+            );
+            assert!(pets[0].died_at.is_some());
+            assert!(pets[1].is_active);
+            assert!(!pets[2].is_active);
+            assert_eq!(fixture.repository.get_welfare_pets(None).unwrap(), vec![dm]);
+            assert!(
+                fixture
+                    .repository
+                    .get_welfare_pets(Some(-1))
+                    .unwrap()
+                    .is_empty()
             );
         }
 

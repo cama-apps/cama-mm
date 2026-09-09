@@ -518,6 +518,7 @@ mod tests {
                         "buy",
                         "rename",
                         "graveyard",
+                        "aspca",
                         "leaderboard",
                         "trinket",
                         "brawl",
