@@ -4219,9 +4219,8 @@ fn soft_avoid_decrements_once_only_after_recording_opposite_teams() {
 }
 
 #[test]
-fn production_goodness_weights_adjusted_value_difference() {
+fn production_goodness_weights_team_value_and_role_deltas() {
     let mut config = production_test_config();
-    config.values.role_matchup_delta_weight = 0.0;
     config.values.rating_spread_divisor = f64::INFINITY;
     config.values.rd_priority_weight = 0.0;
     let fixture = MatchRuntimeFixture::new_with_config_and_discord(
@@ -4235,7 +4234,8 @@ fn production_goodness_weights_adjusted_value_difference() {
     let goodness =
         extra_f64(&prepared.pending.state, "goodness_score").expect("stored goodness score");
 
-    assert!((goodness - (-2_896.5)).abs() < 1e-9, "{goodness}");
+    // 95 value difference at 1.4 plus a 190 lane/parity delta at 0.18.
+    assert!((goodness - (-2_852.8)).abs() < 1e-9, "{goodness}");
 }
 
 #[test]

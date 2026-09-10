@@ -213,7 +213,6 @@ pub struct Values {
     pub recalibration_initial_rd: f64,
     pub recalibration_initial_volatility: f64,
     pub region_split_penalty: f64,
-    pub role_matchup_delta_weight: f64,
     pub shop_announce_cost: i64,
     pub shop_announce_target_cost: i64,
     pub shop_double_or_nothing_cost: i64,
@@ -570,7 +569,6 @@ impl ApplicationConfig {
                     .min(MAX_GLICKO_RD),
                 recalibration_initial_volatility: p.f64("RECALIBRATION_INITIAL_VOLATILITY", 0.06),
                 region_split_penalty: p.f64("REGION_SPLIT_PENALTY", 500.0),
-                role_matchup_delta_weight: p.f64("ROLE_MATCHUP_DELTA_WEIGHT", 0.16),
                 shop_announce_cost: p.i64("SHOP_ANNOUNCE_COST", 10),
                 shop_announce_target_cost: p.i64("SHOP_ANNOUNCE_TARGET_COST", 100),
                 shop_double_or_nothing_cost: p.i64("SHOP_DOUBLE_OR_NOTHING_COST", 50),
@@ -873,7 +871,6 @@ mod tests {
         assert_eq!(config.values.auto_spectator_bet_top_percentage, 0.02);
         assert_eq!(config.values.pingedash_cost, 10);
         assert_eq!(config.values.recent_match_penalty_weight, 280.0);
-        assert_eq!(config.values.role_matchup_delta_weight, 0.16);
         assert_eq!(config.values.enrichment_history_limit, 500);
         assert_eq!(config.values.enrichment_refresh_interval_ms, 1_250);
         assert_eq!(60_000 / config.values.enrichment_refresh_interval_ms, 48);
@@ -1135,6 +1132,6 @@ mod tests {
     #[test]
     fn configuration_catalog_entries_are_unique() {
         let catalog = config_py_env_keys().collect::<BTreeSet<_>>();
-        assert_eq!(catalog.len(), 217, "catalog entries must remain unique");
+        assert_eq!(catalog.len(), 216, "catalog entries must remain unique");
     }
 }
