@@ -572,16 +572,11 @@ impl RuntimeFirstGamePoolPreviews {
     fn load(
         &self,
         guild_id: AppGuildId,
-        regular_seed_amount: i64,
+        _regular_seed_amount: i64,
         game_date: &str,
     ) -> Result<FirstGamePoolPreviews, String> {
         self.repository
-            .first_game_pool_previews(
-                Some(guild_id.0),
-                regular_seed_amount,
-                Some(game_date),
-                self.daily_amount,
-            )
+            .first_game_player_pool_previews(Some(guild_id.0), Some(game_date), self.daily_amount)
             .map(|balances| FirstGamePoolPreviews {
                 open: balances.open,
                 low_skill: balances.low_skill,

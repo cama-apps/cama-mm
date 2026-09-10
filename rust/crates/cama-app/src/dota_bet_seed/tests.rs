@@ -5,6 +5,47 @@ use super::*;
 
 const GUILD: GuildId = GuildId(42);
 
+#[test]
+fn betting_seed_keeps_regular_contributions_but_excludes_daily_pool() {
+    let pool = SeedSplit {
+        radiant: 76,
+        dire: 75,
+        bonus: 0,
+    };
+    assert_eq!(
+        betting_seed_without_lobby_bonus(pool, 50, BettingMode::Pool),
+        SeedSplit {
+            radiant: 51,
+            dire: 50,
+            bonus: 0
+        }
+    );
+    assert_eq!(
+        betting_seed_without_lobby_bonus(pool, 0, BettingMode::Pool),
+        pool
+    );
+    assert_eq!(
+        betting_seed_without_lobby_bonus(pool, 200, BettingMode::Pool),
+        SeedSplit::default()
+    );
+    assert_eq!(
+        betting_seed_without_lobby_bonus(
+            SeedSplit {
+                radiant: 0,
+                dire: 0,
+                bonus: 175
+            },
+            50,
+            BettingMode::House
+        ),
+        SeedSplit {
+            radiant: 0,
+            dire: 0,
+            bonus: 125
+        }
+    );
+}
+
 #[derive(Debug)]
 struct FakeSeedPort {
     calls: RefCell<Vec<String>>,

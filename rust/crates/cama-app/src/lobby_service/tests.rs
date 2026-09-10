@@ -469,7 +469,7 @@ fn assert_bonus_pool(kind: LobbyKind, expected_amount: i64) {
     assert_eq!(
         field.value,
         format!(
-            "**{expected_amount} <:jopacoin:954159801049440297>** available if this lobby shuffles next."
+            "**{expected_amount} <:jopacoin:954159801049440297>** split equally among match players if this lobby shuffles next. Spectators do not share this pool."
         )
     );
     assert_eq!(

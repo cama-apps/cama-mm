@@ -1647,6 +1647,121 @@ async fn bet_command_uses_existing_schema_and_red_green_policy() {
 }
 
 #[tokio::test]
+async fn lobby_bonus_does_not_inflate_bettor_previews() {
+    for mode in ["pool", "house"] {
+        let database = NamedTempFile::new().expect("temporary database");
+        initialize_or_migrate(database.path()).expect("schema");
+        let now = unix_seconds().expect("timestamp");
+        let pending = PendingMatchRepository::new(database.path())
+            .create_pending_match(
+                42,
+                &PendingMatchState {
+                    shuffle_timestamp: Some(now.saturating_sub(10)),
+                    bet_lock_until: Some(now.saturating_add(600)),
+                    betting_mode: mode.to_owned(),
+                    bet_seed_radiant: if mode == "pool" { 500 } else { 0 },
+                    bet_seed_dire: if mode == "pool" { 500 } else { 0 },
+                    bet_seed_bonus: if mode == "house" { 1000 } else { 0 },
+                    first_game_pool_reserved: 600,
+                    ..PendingMatchState::default()
+                },
+            )
+            .expect("pending match");
+        let players = PlayerRepository::new(database.path());
+        let betting = BettingServiceRepository::new(database.path());
+        for (discord_id, team) in [(7, BettingTeam::Radiant), (8, BettingTeam::Dire)] {
+            players
+                .add(&NewPlayer::new(discord_id, "bettor", Some(42)))
+                .expect("player");
+            players
+                .update_balance(discord_id, Some(42), 100)
+                .expect("balance");
+            betting
+                .place_bet_atomic(PlaceBetRequest {
+                    guild_id: Some(42),
+                    pending_match_id: pending.pending_match_id,
+                    discord_id,
+                    team,
+                    amount: 10,
+                    bet_time: now,
+                    leverage: 1,
+                    max_debt: 500,
+                    is_blind: false,
+                    odds_at_placement: None,
+                })
+                .expect("place bet");
+        }
+        let config = ApplicationConfig::from_lookup(|name| {
+            (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
+        })
+        .expect("configuration");
+        let provider = BettingRegistrationProvider::new(
+            database.path(),
+            &config,
+            Arc::new(crate::serenity_transport::SerenityDiscordTransport::new()),
+        );
+        for command in ["mybets", "bets"] {
+            let responder = RecordingResponder::default();
+            provider
+                .handler
+                .handle(
+                    InteractionRequest::Command {
+                        interaction_id: 3,
+                        name: command.to_owned(),
+                        user_id: 7,
+                        user_display_name: "bettor".to_owned(),
+                        guild_id: Some(42),
+                        channel_id: Some(99),
+                        member_permissions: None,
+                        options: Vec::new(),
+                    },
+                    Arc::new(responder.clone()),
+                )
+                .await
+                .expect("dispatch preview");
+            let responses = responder.responses.lock().unwrap();
+            if command == "mybets" {
+                let expected = if mode == "pool" {
+                    "wins: ~220 "
+                } else {
+                    "wins: 420 "
+                };
+                assert!(
+                    responses
+                        .iter()
+                        .any(|response| response.content.contains(expected))
+                );
+            } else {
+                let fields = responses
+                    .iter()
+                    .flat_map(|response| &response.embeds)
+                    .flat_map(|embed| &embed.fields)
+                    .collect::<Vec<_>>();
+                assert!(fields.iter().any(|field| {
+                    field.name == "Lobby Bonus"
+                        && field.value.contains("600 ")
+                        && field
+                            .value
+                            .contains("shared equally among match participants")
+                }));
+                let odds = &fields
+                    .iter()
+                    .find(|field| field.name == "Current Odds")
+                    .expect("odds field")
+                    .value;
+                assert!(!odds.contains("1000"));
+                assert!(!odds.contains("600"));
+                assert!(odds.contains(if mode == "pool" {
+                    "Seed: Radiant 200 "
+                } else {
+                    "Winner bonus: 400 "
+                }));
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn bets_command_returns_more_than_fifteen_bets_without_omission() {
     let database = NamedTempFile::new().expect("temporary database");
     initialize_or_migrate(database.path()).expect("schema");

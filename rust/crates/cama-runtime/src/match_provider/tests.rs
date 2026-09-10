@@ -5394,6 +5394,26 @@ fn test_bet_jc_deltas_net_all_stakes_payouts_and_deductions_per_user() {
 }
 
 #[test]
+fn lobby_bonus_is_included_in_player_summary_totals() {
+    let changes = BTreeMap::from([
+        (
+            1,
+            BTreeMap::from([("payout".to_owned(), 20), ("lobby_bonus".to_owned(), 5)]),
+        ),
+        (
+            2,
+            BTreeMap::from([("payout".to_owned(), 2), ("lobby_bonus".to_owned(), 5)]),
+        ),
+        (3, BTreeMap::from([("bet".to_owned(), 10)])),
+    ]);
+    let lines = render_jc_lines(&[1], &[2], &[], &changes, &SettlementResult::default()).join("\n");
+    assert!(lines.contains("<@1>: **+25**"));
+    assert!(lines.contains("<@2>: **+7**"));
+    assert!(lines.contains("<@3>: **+10**"));
+    assert_eq!(lines.matches("lobby bonus +5").count(), 2);
+}
+
+#[test]
 fn test_jc_changes_format_groups_players_and_bettors_sorted_by_net_change() {
     let settlement = SettlementResult {
         winners: vec![
@@ -6961,6 +6981,75 @@ async fn test_record_scopes_finalize_to_recorded_match() {
             .iter()
             .all(|(channel_id, _)| *channel_id != 502)
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daily_lobby_bonus_reaches_both_teams_without_bets_and_survives_reward_snapshot() {
+    let fixture = MatchRuntimeFixture::new();
+    let pending = fixture.pending(unix_seconds() + 120);
+    let pending = PendingMatchRepository::new(fixture.database.path())
+        .mutate_pending_match(GUILD, pending.pending_match_id, |state| {
+            state.bet_seed_reserved = 50;
+            state.bet_seed_radiant = 25;
+            state.bet_seed_dire = 25;
+            state.first_game_pool_reserved = 50;
+        })
+        .unwrap()
+        .unwrap()
+        .0;
+    let responder = Arc::new(RecordingMatchResponder::default());
+    fixture
+        .provider
+        .handler
+        .finalize_record(
+            pending.clone(),
+            record_context(pending.state.radiant_team_ids[0], GUILD, "radiant", true),
+            responder.clone(),
+            "radiant",
+            3,
+            3,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
+    let matches = MatchRepository::new(fixture.database.path());
+    let match_id = matches
+        .match_id_for_pending_match(GUILD, pending.pending_match_id)
+        .unwrap()
+        .unwrap();
+    let recorded = matches.get_match(match_id, Some(GUILD)).unwrap().unwrap();
+    let connection = Connection::open(fixture.database.path()).unwrap();
+    for id in pending
+        .state
+        .radiant_team_ids
+        .iter()
+        .chain(&pending.state.dire_team_ids)
+    {
+        assert_eq!(recorded.jc_changes[id]["lobby_bonus"], 5);
+        let bonus: i64 = connection.query_row("SELECT bonus_jc FROM match_participants WHERE guild_id=?1 AND match_id=?2 AND discord_id=?3", params![GUILD, match_id, id], |row| row.get(0)).unwrap();
+        assert!(bonus >= recorded.jc_changes[id]["payout"] + 5);
+    }
+    assert_eq!(
+        responder
+            .contents()
+            .join("\n")
+            .matches("lobby bonus +5")
+            .count(),
+        10
+    );
+}
+
+#[test]
+fn betting_reminder_retains_regular_seed_but_excludes_daily_allocation() {
+    let fixture = MatchRuntimeFixture::new();
+    let mut pending = fixture.pending(unix_seconds() + 120);
+    pending.state.bet_seed_radiant = 75;
+    pending.state.bet_seed_dire = 75;
+    pending.state.first_game_pool_reserved = 50;
+    let reminder = reminder_pending_state(&pending);
+    assert_eq!(reminder.bet_seed_radiant, 50);
+    assert_eq!(reminder.bet_seed_dire, 50);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

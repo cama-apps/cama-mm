@@ -589,6 +589,33 @@ impl DotaBetSeedRepository {
         game_date: Option<&str>,
         daily_amount: i64,
     ) -> Result<FirstGamePoolBalances, DotaBetSeedRepositoryError> {
+        self.first_game_pool_previews_inner(
+            guild_id,
+            regular_seed_amount,
+            game_date,
+            daily_amount,
+            true,
+        )
+    }
+
+    /// Preview daily player awards, excluding betting seed and queued pots.
+    pub fn first_game_player_pool_previews(
+        &self,
+        guild_id: Option<i64>,
+        game_date: Option<&str>,
+        daily_amount: i64,
+    ) -> Result<FirstGamePoolBalances, DotaBetSeedRepositoryError> {
+        self.first_game_pool_previews_inner(guild_id, 0, game_date, daily_amount, false)
+    }
+
+    fn first_game_pool_previews_inner(
+        &self,
+        guild_id: Option<i64>,
+        regular_seed_amount: i64,
+        game_date: Option<&str>,
+        daily_amount: i64,
+        include_regular: bool,
+    ) -> Result<FirstGamePoolBalances, DotaBetSeedRepositoryError> {
         let target = if daily_amount > 0 {
             game_date.map(CivilDate::parse).transpose()?
         } else {
@@ -647,7 +674,9 @@ impl DotaBetSeedRepository {
             }
         }
 
-        let regular_seed = if queued > 0 {
+        let regular_seed = if !include_regular {
+            0
+        } else if queued > 0 {
             queued
         } else {
             available.min(regular_seed_amount.max(0))
@@ -743,6 +772,52 @@ impl DotaBetSeedRepository {
 /// transaction. This is the single crash-safe path used when real bets must
 /// receive the losing-side pool seed or the house bonus before bets are
 /// tagged as settled.
+/// Split the daily lobby award away from regular betting seed atomically.
+pub(crate) fn settle_seed_with_player_pool_in_transaction(
+    transaction: &Transaction<'_>,
+    guild_id: i64,
+    pending_match_id: i64,
+    mode: BettingMode,
+    winning_team: Option<BettingTeam>,
+    has_participants: bool,
+) -> Result<(SeedSettlement, i64), DotaBetSeedRepositoryError> {
+    let consumed = consume_seed_state(transaction, guild_id, pending_match_id)?;
+    let first_game_settled = settle_first_game_claim(transaction, guild_id, pending_match_id)?;
+    let daily = consumed.first_game_reserved.max(first_game_settled);
+    let regular = consumed
+        .split
+        .total()
+        .saturating_sub(consumed.first_game_reserved)
+        .max(0);
+    let routed = if consumed.first_game_reserved == 0 {
+        consumed.split
+    } else {
+        split_seed(regular, mode)
+    };
+    let routed = if mode == BettingMode::House {
+        split_seed(routed.total(), mode)
+    } else {
+        routed
+    };
+    let regular_return = match (mode, winning_team) {
+        (_, None) => routed.total(),
+        (BettingMode::Pool, Some(BettingTeam::Radiant)) => routed.radiant,
+        (BettingMode::Pool, Some(BettingTeam::Dire)) => routed.dire,
+        (BettingMode::House, Some(_)) => 0,
+    };
+    let returned_to_fund = regular_return.saturating_add(if has_participants { 0 } else { daily });
+    credit_fund(transaction, guild_id, returned_to_fund)?;
+    Ok((
+        SeedSettlement {
+            routed,
+            winner_seed: routed.total().saturating_sub(regular_return),
+            returned_to_fund,
+            first_game_settled,
+        },
+        if has_participants { daily } else { 0 },
+    ))
+}
+
 pub(crate) fn settle_seed_in_transaction(
     transaction: &Transaction<'_>,
     guild_id: i64,
