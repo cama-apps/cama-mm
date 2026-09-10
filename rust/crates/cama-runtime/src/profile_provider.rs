@@ -25,6 +25,7 @@ use cama_db::gambling_stats_repository::{
     GamblingStatsRepository, GamblingStatsService,
 };
 use cama_db::loan_repository::LoanRepository;
+use cama_db::match_draft::{DrafterStats, MatchDraftRepository};
 use cama_db::opendota_player::OpenDotaPlayerRepository;
 use cama_db::pairings_repository::{PairingsRepository, PairingsService};
 use cama_db::predictions_repository::{CONTRACT_VALUE, PredictionRepository};
@@ -677,11 +678,25 @@ impl ProfilePage {
     }
 }
 
+fn draft_stats_text(stats: &DrafterStats) -> String {
+    let decisive = stats.drafts_won.saturating_add(stats.drafts_lost);
+    let rate = if decisive > 0 {
+        format!("{:.1}%", stats.drafts_won as f64 / decisive as f64 * 100.0)
+    } else {
+        "—".to_owned()
+    };
+    format!(
+        "**{rate}** ({}W–{}L) · {} split · {} unavailable\nRecorded inhouse drafts · [Batru](https://batru.gg)\nSplits and unavailable estimates excluded from win rate.",
+        stats.drafts_won, stats.drafts_lost, stats.drafts_split, stats.drafts_unknown
+    )
+}
+
 #[derive(Clone)]
 struct ProfileDataSources {
     player: PlayerRepository,
     steam: OpenDotaPlayerRepository,
     matches: MatchRepository,
+    drafts: MatchDraftRepository,
     bankruptcy: BankruptcyRepository,
     loans: LoanRepository,
     gambling: GamblingStatsService<GamblingStatsRepository>,
@@ -701,6 +716,7 @@ impl ProfileDataSources {
             player: PlayerRepository::new(database_path),
             steam: OpenDotaPlayerRepository::new(database_path),
             matches: MatchRepository::new(database_path),
+            drafts: MatchDraftRepository::new(database_path),
             bankruptcy: BankruptcyRepository::new(database_path),
             loans: LoanRepository::new(database_path),
             gambling: GamblingStatsService::new(GamblingStatsRepository::new(database_path)),
@@ -820,6 +836,13 @@ impl ProfileDataSources {
             )
             .field("Roles", roles, true)
             .field("Server", region, true);
+        if let Some(guild_id) = guild_id {
+            let drafts = self
+                .drafts
+                .drafter_stats(guild_id, discord_id)
+                .map_err(|error| error.to_string())?;
+            page = page.field("Draft Win Rate", draft_stats_text(&drafts), false);
+        }
         if let Some(main_role) = &player.main_role {
             page = page.field("Main", role_name(main_role), true);
         }

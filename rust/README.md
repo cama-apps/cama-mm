@@ -4,6 +4,40 @@
 implementation. Historical behavior can be recovered from Git history when
 needed.
 
+## Draft analysis
+
+Successful match enrichment also requests a hero-composition estimate from Batru's
+free API. OpenDota's `radiant_captain` and `dire_captain` account IDs identify the
+hero drafters and are mapped to the participants' linked Discord accounts. No
+STRATZ or Batru API key is needed. Unknown captains remain unknown.
+
+Post-game and match-history embeds display both percentages, the drafters, and a
+Batru attribution link. Inclusive 48–52% estimates count as split drafts; missing
+estimates do not. Draft results are informational and do not affect match wins,
+ratings, rewards, or team balancing.
+
+- `/enrich drafts` runs a background backfill of all linked historical matches
+  (admin only). `/enrich drafts status:true` shows progress. It reuses saved
+  OpenDota responses, fetches missing data when needed, and updates only draft
+  analysis. Calls are paced and share Batru's 60-request/minute allowance with
+  normal enrichment. Discord progress-message expiry does not stop the job.
+  Rerun after a process restart or provider outages; existing predictions retain
+  their original timestamp.
+- `/matches drafts [view:matches] [sort:recent|imbalance] [page:1] [user] [limit:5]` browses all
+  recorded matches, or ranks estimated drafts by imbalance. Previous/Next buttons
+  preserve the sort and drafter filter. Each entry includes the actual game winner,
+  draft percentages, captains, and external match links when a Valve ID is available.
+- `/matches drafts view:best_drafters` or `view:worst_drafters` ranks captains by
+  draft win rate, showing wins, losses, splits, and sample sizes. Drafters with
+  no decisive draft estimates are excluded from the rankings.
+- Player profiles show draft win rate: favored drafts divided by favored plus
+  unfavored drafts. Splits and unavailable estimates are listed separately.
+
+Historical estimates use Batru's model at the time of calculation, not a
+reconstruction of the model for the historical Dota patch. The database stores
+the probability, classification, hero lineup, provider, and calculation time.
+Provider failures leave an unavailable estimate without blocking match recording.
+
 ## Workspace
 
 - `cama-domain`: storage- and transport-independent policy and models.

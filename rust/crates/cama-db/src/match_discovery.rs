@@ -432,6 +432,10 @@ fn clear_dependent_enrichment(
     )?;
     let bans_sql = format!("DELETE FROM match_bans WHERE match_id IN ({placeholders})");
     transaction.execute(&bans_sql, params_from_iter(match_ids.iter().copied()))?;
+    transaction.execute(
+        &format!("DELETE FROM match_draft_analysis WHERE match_id IN ({placeholders})"),
+        params_from_iter(match_ids.iter().copied()),
+    )?;
     Ok(())
 }
 
@@ -546,6 +550,7 @@ mod tests {
                      derived_role TEXT
                  );
                  CREATE TABLE match_bans (match_id INTEGER NOT NULL, discord_id INTEGER);
+                 CREATE TABLE match_draft_analysis (match_id INTEGER PRIMARY KEY);
                  CREATE TABLE wrapped_enrichment_facts (
                      match_id INTEGER NOT NULL,
                      guild_id INTEGER NOT NULL,
@@ -605,6 +610,10 @@ mod tests {
         let (file, repository) = repository();
         insert_match(&file, 1, GUILD);
         enrich(&repository, 1, GUILD, "manual", None);
+        let connection = Connection::open(file.path()).expect("fixture connection");
+        connection
+            .execute("INSERT INTO match_draft_analysis(match_id) VALUES (1)", [])
+            .unwrap();
         assert_eq!(
             repository
                 .enrichment_metadata(1, Some(GUILD))
@@ -618,6 +627,15 @@ mod tests {
             repository
                 .wipe_match_enrichment(1, None)
                 .expect("wipe enrichment")
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM match_draft_analysis", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            0
         );
 
         assert_eq!(

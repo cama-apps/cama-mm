@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "draft_integration_tests.rs"]
+mod draft_integration;
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -18,6 +21,56 @@ use crate::registration::{
 
 const ADMIN: u64 = 42;
 const GUILD: u64 = 4_242;
+
+struct FixtureDraftPrediction;
+
+impl DraftPredictionPort for FixtureDraftPrediction {
+    fn predict(&self, _draft: &cama_app::draft_analysis_http::HeroDraft) -> Result<i64, String> {
+        Ok(6166)
+    }
+}
+
+impl EnrichmentRegistrationProvider {
+    fn test_new(
+        database_path: impl AsRef<Path>,
+        config: &ApplicationConfig,
+        opendota: Arc<OpenDotaRuntimeServices>,
+    ) -> Result<Self, EnrichmentProviderBuildError> {
+        Self::test_with_dotabase_path(database_path, config, opendota, PRODUCTION_DOTABASE_PATH)
+    }
+
+    fn test_with_dotabase_path(
+        database_path: impl AsRef<Path>,
+        config: &ApplicationConfig,
+        opendota: Arc<OpenDotaRuntimeServices>,
+        dotabase_path: impl AsRef<Path>,
+    ) -> Result<Self, EnrichmentProviderBuildError> {
+        Self::test_compose(
+            database_path,
+            config,
+            opendota,
+            dotabase_path,
+            MATCH_VIEW_TIMEOUT,
+        )
+    }
+
+    fn test_compose(
+        database_path: impl AsRef<Path>,
+        config: &ApplicationConfig,
+        opendota: Arc<OpenDotaRuntimeServices>,
+        dotabase_path: impl AsRef<Path>,
+        timeout: Duration,
+    ) -> Result<Self, EnrichmentProviderBuildError> {
+        Self::compose(
+            database_path,
+            config,
+            opendota,
+            dotabase_path,
+            timeout,
+            Arc::new(FixtureDraftPrediction),
+        )
+    }
+}
 
 #[test]
 fn parsed_refresh_run_guard_excludes_overlap_and_releases_on_drop() {
@@ -711,6 +764,7 @@ fn registration_exposes_the_complete_python_tree() {
             "setleague",
             "match",
             "backfill",
+            "drafts",
             "config",
             "discover",
             "wipeall",
@@ -723,7 +777,7 @@ fn registration_exposes_the_complete_python_tree() {
             .iter()
             .map(|option| option.name.as_str())
             .collect::<Vec<_>>(),
-        ["history", "view", "recent"]
+        ["drafts", "history", "view", "recent"]
     );
 }
 
@@ -760,7 +814,7 @@ async fn production_match_view_uses_exact_timeout_and_disables_both_controls() {
     let server = RouteServer::start(Vec::new());
     let shared_services = services(&server);
 
-    let provider = EnrichmentRegistrationProvider::with_dotabase_path(
+    let provider = EnrichmentRegistrationProvider::test_with_dotabase_path(
         &path,
         &application_config(),
         Arc::clone(&shared_services),
@@ -819,7 +873,7 @@ async fn production_match_view_uses_exact_timeout_and_disables_both_controls() {
         assert!(route.expires_at <= after + 120);
     }
 
-    let short_provider = EnrichmentRegistrationProvider::compose(
+    let short_provider = EnrichmentRegistrationProvider::test_compose(
         &path,
         &application_config(),
         shared_services,
@@ -892,7 +946,7 @@ async fn production_match_view_uploads_advantage_attachment_on_component_edit() 
     seed_enriched_view_match(&path);
     let server = RouteServer::start(Vec::new());
     let shared_services = services(&server);
-    let provider = EnrichmentRegistrationProvider::with_dotabase_path(
+    let provider = EnrichmentRegistrationProvider::test_with_dotabase_path(
         &path,
         &application_config(),
         Arc::clone(&shared_services),
@@ -936,7 +990,7 @@ async fn production_match_view_uploads_advantage_attachment_on_component_edit() 
         response.components[0].buttons[1].custom_id.clone()
     };
 
-    let restarted = EnrichmentRegistrationProvider::with_dotabase_path(
+    let restarted = EnrichmentRegistrationProvider::test_with_dotabase_path(
         &path,
         &application_config(),
         Arc::clone(&shared_services),
@@ -989,7 +1043,7 @@ async fn assert_production_manual_enrichment_is_atomic_and_match_view_survives_r
     complete_manual_roster(&path);
     let server = RouteServer::start(vec![strict_manual_match_payload()]);
     let shared_services = services(&server);
-    let provider = EnrichmentRegistrationProvider::with_dotabase_path(
+    let provider = EnrichmentRegistrationProvider::test_with_dotabase_path(
         &path,
         &application_config(),
         Arc::clone(&shared_services),
@@ -1190,7 +1244,7 @@ async fn assert_production_manual_enrichment_is_atomic_and_match_view_survives_r
         response.components[0].buttons[1].custom_id.clone()
     };
 
-    let restarted = EnrichmentRegistrationProvider::with_dotabase_path(
+    let restarted = EnrichmentRegistrationProvider::test_with_dotabase_path(
         &path,
         &application_config(),
         Arc::clone(&shared_services),
@@ -1249,7 +1303,7 @@ async fn manual_enrichment_force_flag_relaxes_validation_and_default_stays_stric
     // payload, so strict validation can never pass for this match.
     seed_manual_match(&path);
     let server = RouteServer::start(vec![manual_match_payload(), manual_match_payload()]);
-    let provider = EnrichmentRegistrationProvider::with_dotabase_path(
+    let provider = EnrichmentRegistrationProvider::test_with_dotabase_path(
         &path,
         &application_config(),
         services(&server),
@@ -1355,7 +1409,7 @@ async fn production_discovery_reuses_one_detail_fetch_and_persists_auto_provenan
     .to_string();
     let server = RouteServer::start(vec![history, discovery_match_payload()]);
     let provider =
-        EnrichmentRegistrationProvider::new(&path, &application_config(), services(&server))
+        EnrichmentRegistrationProvider::test_new(&path, &application_config(), services(&server))
             .expect("compose discovery provider");
     let registry = registry(&provider);
     let responder = Arc::new(CapturingResponder::default());
@@ -1444,7 +1498,7 @@ async fn discovery_stops_at_local_daily_quota_before_http_or_database_work() {
         OpenDotaRuntimeServices::with_config(quota_config).expect("quota-limited services"),
     );
     let provider =
-        EnrichmentRegistrationProvider::new(&path, &application_config(), quota_services)
+        EnrichmentRegistrationProvider::test_new(&path, &application_config(), quota_services)
             .expect("compose quota-limited provider");
     let responder = Arc::new(CapturingResponder::default());
 
@@ -1480,7 +1534,7 @@ fn production_constructor_recovers_durable_openskill_replay_after_restart() {
     seed_pending_openskill_replay(&path);
 
     let _provider =
-        EnrichmentRegistrationProvider::new(&path, &application_config(), offline_services())
+        EnrichmentRegistrationProvider::test_new(&path, &application_config(), offline_services())
             .expect("startup recovers pending OpenSkill replay");
 
     let connection = Connection::open(&path).expect("inspect recovered OpenSkill state");
@@ -1611,7 +1665,7 @@ fn production_constructor_leaves_match_correction_replay_for_admin_recovery() {
     drop(connection);
 
     let _provider =
-        EnrichmentRegistrationProvider::new(&path, &application_config(), offline_services())
+        EnrichmentRegistrationProvider::test_new(&path, &application_config(), offline_services())
             .expect("compose while preserving correction recovery marker");
 
     let connection = Connection::open(&path).expect("inspect preserved correction job");
@@ -1653,7 +1707,7 @@ async fn live_permissions_visibility_backfill_recent_and_atomic_wipe_match_pytho
     .to_owned();
     let server = RouteServer::start(vec![strict_manual_match_payload(), recent_payload]);
     let provider =
-        EnrichmentRegistrationProvider::new(&path, &application_config(), services(&server))
+        EnrichmentRegistrationProvider::test_new(&path, &application_config(), services(&server))
             .expect("compose enrichment provider");
     let registry = registry(&provider);
 
@@ -1866,7 +1920,7 @@ async fn recorded_match_discovery_retries_not_ready_then_returns_live_enriched_p
     let mut config = application_config();
     config.values.enrichment_retry_delays = vec![0, 0];
     let catalog = dotabase();
-    let provider = EnrichmentRegistrationProvider::with_dotabase_path(
+    let provider = EnrichmentRegistrationProvider::test_with_dotabase_path(
         &path,
         &config,
         services(&server),
@@ -1938,7 +1992,7 @@ async fn recorded_match_discovery_honors_disabled_guild_without_http() {
         .expect("disable auto enrichment");
     let server = RouteServer::start(Vec::new());
     let catalog = dotabase();
-    let provider = EnrichmentRegistrationProvider::with_dotabase_path(
+    let provider = EnrichmentRegistrationProvider::test_with_dotabase_path(
         &path,
         &application_config(),
         services(&server),
@@ -1964,7 +2018,7 @@ async fn refresh_parsed_acknowledges_before_doing_any_work() {
     let catalog = dotabase();
     let server = RouteServer::start(vec![]);
     let shared_services = services(&server);
-    let provider = EnrichmentRegistrationProvider::with_dotabase_path(
+    let provider = EnrichmentRegistrationProvider::test_with_dotabase_path(
         &path,
         &application_config(),
         Arc::clone(&shared_services),
@@ -2056,7 +2110,7 @@ async fn refresh_parsed_drains_a_backlog_larger_than_one_chunk() {
         .collect::<Vec<_>>();
     let server = RouteServer::start(bodies);
     let shared_services = services(&server);
-    let provider = EnrichmentRegistrationProvider::with_dotabase_path(
+    let provider = EnrichmentRegistrationProvider::test_with_dotabase_path(
         &path,
         &application_config(),
         Arc::clone(&shared_services),
@@ -2118,7 +2172,7 @@ async fn refresh_parsed_keeps_partial_responses_eligible_for_a_later_run() {
     seed_stale_parsed_matches(&path, 1);
     let server = RouteServer::start(vec![manual_match_payload(), parsed_match_payload()]);
     let shared_services = services(&server);
-    let provider = EnrichmentRegistrationProvider::with_dotabase_path(
+    let provider = EnrichmentRegistrationProvider::test_with_dotabase_path(
         &path,
         &application_config(),
         Arc::clone(&shared_services),

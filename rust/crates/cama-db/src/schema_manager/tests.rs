@@ -7,10 +7,62 @@ use tempfile::NamedTempFile;
 
 use super::*;
 use crate::core_repositories::{NewPlayer, PlayerRepository};
-use crate::{audit_database, expected_migrations};
+use crate::{audit_database, expected_migrations, open_runtime_connection};
 
 fn empty_database() -> NamedTempFile {
     NamedTempFile::new().expect("create disposable database")
+}
+
+#[test]
+fn match_draft_analysis_schema_supports_fresh_and_upgraded_databases() {
+    for upgrade in [false, true] {
+        let database = empty_database();
+        if upgrade {
+            initialize_or_migrate(database.path()).unwrap();
+            let connection = open_runtime_connection(database.path()).unwrap();
+            connection
+                .execute_batch(
+                    "DROP TABLE match_draft_analysis;
+                 DELETE FROM schema_migrations WHERE name='create_match_draft_analysis';
+                 INSERT INTO matches(match_id,guild_id,valve_match_id,team1_players,team2_players)
+                 VALUES (1,10,100,'[]','[]');",
+                )
+                .unwrap();
+        }
+        let report = initialize_or_migrate(database.path()).unwrap();
+        assert!(
+            report
+                .newly_applied
+                .iter()
+                .any(|name| name == "create_match_draft_analysis")
+        );
+        let connection = open_runtime_connection(database.path()).unwrap();
+        if !upgrade {
+            connection.execute("INSERT INTO matches(match_id,guild_id,valve_match_id,team1_players,team2_players) VALUES (1,10,100,'[]','[]')", []).unwrap();
+        }
+        connection.execute(
+            "INSERT INTO match_draft_analysis(match_id,guild_id,valve_match_id,radiant_drafter_steam_id)
+             VALUES(1,10,100,44)", [],
+        ).unwrap();
+        assert!(connection.execute(
+            "UPDATE match_draft_analysis SET radiant_win_probability_bps=6166 WHERE match_id=1", [],
+        ).is_err(), "partial prediction must violate the storage contract");
+        drop(connection);
+        let retry = initialize_or_migrate(database.path()).unwrap();
+        assert!(retry.newly_applied.is_empty());
+        let connection = open_runtime_connection(database.path()).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT radiant_drafter_steam_id FROM match_draft_analysis WHERE match_id=1",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            44
+        );
+        assert!(audit_database(database.path()).unwrap().is_compatible());
+    }
 }
 
 fn ledger_names(path: &Path) -> BTreeSet<String> {

@@ -488,6 +488,50 @@ async fn test_retries_on_503_then_succeeds() {
     assert_eq!(server.request_lines().len(), 2);
 }
 
+#[test]
+fn match_projection_retains_explicit_captain_accounts() {
+    let details = project_match_details(
+        serde_json::json!({
+            "match_id": 42,
+            "radiant_captain": 156404497,
+            "dire_captain": "11758567",
+            "players": [],
+        }),
+        42,
+    )
+    .unwrap();
+    assert_eq!(details.radiant_captain, Some(SteamId(156404497)));
+    assert_eq!(details.dire_captain, Some(SteamId(11758567)));
+}
+
+#[test]
+fn match_projection_never_infers_missing_or_invalid_captains() {
+    let details = project_match_details(
+        serde_json::json!({"players": [{"account_id": 12345, "player_slot": 0}]}),
+        42,
+    )
+    .unwrap();
+    assert_eq!(details.radiant_captain, None);
+    assert_eq!(details.dire_captain, None);
+    for invalid in [
+        serde_json::Value::Null,
+        serde_json::json!(0),
+        serde_json::json!(-1),
+        serde_json::json!(4294967295_u64),
+        serde_json::json!(12345.9),
+        serde_json::json!("12345.9"),
+        serde_json::json!("captain"),
+    ] {
+        let details = project_match_details(
+            serde_json::json!({"radiant_captain": invalid, "dire_captain": invalid}),
+            42,
+        )
+        .unwrap();
+        assert_eq!(details.radiant_captain, None);
+        assert_eq!(details.dire_captain, None);
+    }
+}
+
 #[tokio::test]
 async fn test_no_retry_on_403() {
     let server = ScriptedServer::start(vec![ScriptedResponse::status(403)]);

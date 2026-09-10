@@ -10,6 +10,8 @@ pub mod core_repositories;
 pub mod match_correction_repository;
 #[path = "../../cama-db/src/match_discovery.rs"]
 pub mod match_discovery_repository;
+#[path = "../../cama-db/src/match_draft.rs"]
+pub mod match_draft;
 #[path = "../../cama-db/src/match_recording.rs"]
 pub mod match_recording_repository;
 #[path = "../../cama-db/src/match_runtime.rs"]

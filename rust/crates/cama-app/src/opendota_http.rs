@@ -1502,7 +1502,11 @@ fn project_history_matches(values: Vec<Value>) -> Vec<PlayerHistoryMatch> {
         .collect()
 }
 
-fn project_match_details(value: Value, requested_match_id: i64) -> Option<OpenDotaMatchDetails> {
+/// Project a previously saved OpenDota response without another network request.
+pub fn project_match_details(
+    value: Value,
+    requested_match_id: i64,
+) -> Option<OpenDotaMatchDetails> {
     let object = value.as_object()?;
     let raw_payload = serde_json::to_string(&value).ok();
     let players = object
@@ -1518,11 +1522,22 @@ fn project_match_details(value: Value, requested_match_id: i64) -> Option<OpenDo
         radiant_score: field_i64(object, "radiant_score").unwrap_or(0),
         dire_score: field_i64(object, "dire_score").unwrap_or(0),
         game_mode: field_i64(object, "game_mode").unwrap_or(0),
+        radiant_captain: captain_account_id(object.get("radiant_captain")),
+        dire_captain: captain_account_id(object.get("dire_captain")),
         comeback: field_i64(object, "comeback"),
         throw_amount: field_i64(object, "throw"),
         raw_payload,
         players,
     })
+}
+
+fn captain_account_id(value: Option<&Value>) -> Option<SteamId> {
+    let id = match value? {
+        Value::Number(number) => number.as_i64(),
+        Value::String(text) => text.parse::<i64>().ok(),
+        _ => None,
+    }?;
+    (id > 0 && id < i64::from(u32::MAX)).then_some(SteamId(id))
 }
 
 fn project_match_player(value: &Value) -> Option<OpenDotaPlayer> {
