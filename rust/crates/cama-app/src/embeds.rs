@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use cama_domain::draft_analysis::draft_winner;
 use cama_domain::embed_safety::{EmbedModel, FIELD_VALUE_LIMIT, truncate_field};
 use cama_domain::formatting::{JOPACOIN_EMOTE, ROLE_EMOJIS, TOMBSTONE_EMOJI};
 use cama_domain::rating::CamaRatingSystem;
@@ -474,6 +475,13 @@ fn format_team_field(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DraftAnalysisEmbed {
+    pub radiant_win_probability_bps: Option<i64>,
+    pub radiant_drafter_discord_id: Option<i64>,
+    pub dire_drafter_discord_id: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnrichedMatchRequest {
     pub match_id: i64,
     pub valve_match_id: Option<i64>,
@@ -483,6 +491,7 @@ pub struct EnrichedMatchRequest {
     pub winning_team: i64,
     pub show_mvp: bool,
     pub draft: bool,
+    pub draft_analysis: Option<DraftAnalysisEmbed>,
     pub guild_id: Option<i64>,
 }
 
@@ -558,6 +567,43 @@ pub fn create_enriched_match_embed(
         ),
         false,
     );
+    if let Some(analysis) = &request.draft_analysis {
+        let drafter = |discord_id: Option<i64>| {
+            discord_id
+                .filter(|id| *id > 0)
+                .map_or_else(|| "Unknown".to_owned(), |id| format!("<@{id}>"))
+        };
+        let estimate = analysis
+            .radiant_win_probability_bps
+            .filter(|probability| (0..=10_000).contains(probability))
+            .map_or_else(
+                || "Draft estimate unavailable".to_owned(),
+                |radiant_bps| {
+                    let dire_bps = 10_000 - radiant_bps;
+                    let outcome = match draft_winner(radiant_bps) {
+                        Some(0) => "Split",
+                        Some(2) => "Dire favored",
+                        _ => "Radiant favored",
+                    };
+                    format!(
+                        "Radiant **{}.{:02}%** · Dire **{}.{:02}%**\n{outcome} · [Batru](https://batru.gg)",
+                        radiant_bps / 100,
+                        radiant_bps % 100,
+                        dire_bps / 100,
+                        dire_bps % 100,
+                    )
+                },
+            );
+        embed.add_field(
+            "Draft favorability",
+            format!(
+                "{estimate}\nRadiant drafter: {}\nDire drafter: {}",
+                drafter(analysis.radiant_drafter_discord_id),
+                drafter(analysis.dire_drafter_discord_id),
+            ),
+            false,
+        );
+    }
     let winning_players = if request.winning_team == 1 {
         radiant
     } else {
@@ -727,6 +773,7 @@ mod tests {
             winning_team,
             show_mvp: true,
             draft: false,
+            draft_analysis: None,
             guild_id: None,
         }
     }
@@ -934,6 +981,100 @@ mod tests {
                 .title
                 .as_deref()
                 .is_some_and(|title| title.contains("Dire Victory"))
+        );
+    }
+
+    #[test]
+    fn draft_favorability_shows_precise_probabilities_attribution_and_live_mentions() {
+        for (probability, expected_percentages, expected_outcome) in [
+            (
+                6_166,
+                "Radiant **61.66%** · Dire **38.34%**",
+                "Radiant favored",
+            ),
+            (
+                3_834,
+                "Radiant **38.34%** · Dire **61.66%**",
+                "Dire favored",
+            ),
+        ] {
+            let request = EnrichedMatchRequest {
+                draft_analysis: Some(DraftAnalysisEmbed {
+                    radiant_win_probability_bps: Some(probability),
+                    radiant_drafter_discord_id: Some(123),
+                    dire_drafter_discord_id: Some(456),
+                }),
+                ..enriched_request(789, 2)
+            };
+            let embed = create_enriched_match_embed(&request, &[], &[], None);
+            let draft = &field(&embed, "Draft favorability").value;
+            assert!(draft.contains(expected_percentages));
+            assert!(draft.contains(expected_outcome));
+            assert!(draft.contains("[Batru](https://batru.gg)"));
+            assert!(draft.contains("Radiant drafter: <@123>"));
+            assert!(draft.contains("Dire drafter: <@456>"));
+            assert!(embed.title.as_deref().unwrap().contains("Dire Victory"));
+            assert!(field(&embed, "DIRE").name.contains("Winner"));
+            assert!(!field(&embed, "RADIANT").name.contains("Winner"));
+            assert!(validate_embed(&embed).is_empty());
+        }
+    }
+
+    #[test]
+    fn draft_split_keeps_numbers_including_inclusive_boundaries() {
+        for (probability, expected_percentages) in [
+            (4_800, "Radiant **48.00%** · Dire **52.00%**"),
+            (4_896, "Radiant **48.96%** · Dire **51.04%**"),
+            (5_000, "Radiant **50.00%** · Dire **50.00%**"),
+            (5_200, "Radiant **52.00%** · Dire **48.00%**"),
+        ] {
+            let request = EnrichedMatchRequest {
+                draft_analysis: Some(DraftAnalysisEmbed {
+                    radiant_win_probability_bps: Some(probability),
+                    radiant_drafter_discord_id: None,
+                    dire_drafter_discord_id: None,
+                }),
+                ..enriched_request(789, 1)
+            };
+            let embed = create_enriched_match_embed(&request, &[], &[], None);
+            let draft = &field(&embed, "Draft favorability").value;
+            assert!(draft.contains(expected_percentages));
+            assert!(draft.contains("Split · [Batru](https://batru.gg)"));
+            assert!(draft.contains("Radiant drafter: Unknown"));
+            assert!(draft.contains("Dire drafter: Unknown"));
+        }
+    }
+
+    #[test]
+    fn draft_unavailable_preserves_drafters_without_fabricating_split() {
+        for probability in [None, Some(-1), Some(10_001)] {
+            let request = EnrichedMatchRequest {
+                draft_analysis: Some(DraftAnalysisEmbed {
+                    radiant_win_probability_bps: probability,
+                    radiant_drafter_discord_id: Some(123),
+                    dire_drafter_discord_id: Some(0),
+                }),
+                ..enriched_request(789, 1)
+            };
+            let embed = create_enriched_match_embed(&request, &[], &[], None);
+            let draft = &field(&embed, "Draft favorability").value;
+            assert!(draft.contains("Draft estimate unavailable"));
+            assert!(draft.contains("Radiant drafter: <@123>"));
+            assert!(draft.contains("Dire drafter: Unknown"));
+            assert!(!draft.contains("Split"));
+            assert!(!draft.contains('%'));
+            assert!(!draft.contains("Batru"));
+        }
+    }
+
+    #[test]
+    fn no_draft_analysis_omits_draft_field() {
+        let embed = create_enriched_match_embed(&enriched_request(789, 1), &[], &[], None);
+        assert!(
+            !embed
+                .fields
+                .iter()
+                .any(|field| field.name.contains("Draft"))
         );
     }
 

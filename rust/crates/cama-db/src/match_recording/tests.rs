@@ -122,6 +122,9 @@ impl Fixture {
                      hero_id INTEGER NOT NULL,
                      PRIMARY KEY (match_id, ban_index)
                  );
+                 CREATE TABLE match_draft_analysis (
+                     match_id INTEGER PRIMARY KEY
+                 );
                  CREATE TABLE openskill_replay_jobs (
                      guild_id INTEGER PRIMARY KEY,
                      reason TEXT NOT NULL,

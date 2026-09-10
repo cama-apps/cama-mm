@@ -1713,3 +1713,85 @@ fn exact_component_rows_and_active_style_match_python_profile_view() {
         ["Predictions"]
     );
 }
+
+#[test]
+fn profile_overview_draft_win_rate_uses_drafter_side_and_excludes_split_and_unavailable() {
+    use cama_db::match_draft::MatchDraftAnalysis;
+    let database = migrated_player_fixture();
+    let connection = Connection::open(database.path()).unwrap();
+    let repository = MatchDraftRepository::new(database.path());
+    // Radiant wins, Dire wins, Radiant loses, split, and missing prediction.
+    for (index, (probability, radiant_drafter)) in [
+        (Some(6166), true),
+        (Some(3800), false),
+        (Some(4000), true),
+        (Some(5000), true),
+        (None, true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let match_id = index as i64 + 1;
+        connection.execute(
+            "INSERT INTO matches(match_id,guild_id,valve_match_id,team1_players,team2_players) VALUES (?1,42,?2,'[]','[]')",
+            params![match_id, 9000 + match_id],
+        ).unwrap();
+        let analysis = MatchDraftAnalysis {
+            match_id,
+            guild_id: 42,
+            valve_match_id: 9000 + match_id,
+            radiant_win_probability_bps: probability,
+            draft_winner: probability.map(|p| {
+                if p > 5200 {
+                    1
+                } else if p < 4800 {
+                    2
+                } else {
+                    0
+                }
+            }),
+            prediction_provider: probability.map(|_| "batru".to_owned()),
+            prediction_recorded_at: probability.map(|_| 123),
+            draft_heroes_json: probability
+                .map(|_| r#"{"radiant":[1,2,3,4,5],"dire":[6,7,8,9,10]}"#.to_owned()),
+            radiant_drafter_discord_id: radiant_drafter.then_some(100),
+            radiant_drafter_steam_id: radiant_drafter.then_some(12345),
+            dire_drafter_discord_id: (!radiant_drafter).then_some(100),
+            dire_drafter_steam_id: (!radiant_drafter).then_some(12345),
+            drafter_source: Some("opendota".to_owned()),
+        };
+        assert!(repository.save(&analysis).unwrap());
+    }
+    let sources = ProfileDataSources::new(database.path(), offline_services());
+    let page = sources.overview(100, Some(42), "Live Display").unwrap();
+    let field = page
+        .fields
+        .iter()
+        .find(|f| f.name == "Draft Win Rate")
+        .unwrap();
+    assert!(field.value.contains("**66.7%** (2W–1L)"));
+    assert!(field.value.contains("1 split · 1 unavailable"));
+    assert!(field.value.contains("[Batru](https://batru.gg)"));
+    assert_eq!(page.title, "Profile: Live Display");
+}
+
+#[test]
+fn profile_draft_win_rate_without_decisive_estimates_is_unknown() {
+    let database = migrated_player_fixture();
+    let sources = ProfileDataSources::new(database.path(), offline_services());
+    let page = sources.overview(100, Some(42), "Live Display").unwrap();
+    let field = page
+        .fields
+        .iter()
+        .find(|f| f.name == "Draft Win Rate")
+        .unwrap();
+    assert!(field.value.starts_with("**—** (0W–0L)"));
+    assert!(
+        draft_stats_text(&DrafterStats {
+            drafts_split: 3,
+            drafts_unknown: 2,
+            ..DrafterStats::default()
+        })
+        .starts_with("**—** (0W–0L) · 3 split · 2 unavailable")
+    );
+}

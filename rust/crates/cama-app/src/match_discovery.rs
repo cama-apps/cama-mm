@@ -8,7 +8,7 @@
 //! validation.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cama_db::core_repositories::{
@@ -161,6 +161,9 @@ pub struct OpenDotaMatchDetails {
     pub radiant_score: i64,
     pub dire_score: i64,
     pub game_mode: i64,
+    /// Captain's Mode hero drafters, as Steam account IDs from OpenDota.
+    pub radiant_captain: Option<SteamId>,
+    pub dire_captain: Option<SteamId>,
     pub comeback: Option<i64>,
     pub throw_amount: Option<i64>,
     /// Canonical JSON, when supplied by the transport, for compatible storage.
@@ -178,6 +181,8 @@ impl OpenDotaMatchDetails {
             radiant_score: 0,
             dire_score: 0,
             game_mode: 0,
+            radiant_captain: None,
+            dire_captain: None,
             comeback: None,
             throw_amount: None,
             raw_payload: None,
@@ -2021,6 +2026,8 @@ pub struct MatchEnrichmentServiceResult {
     pub dire_fantasy: f64,
     pub fantasy_points_calculated: bool,
     pub openskill_update: Option<OpenSkillEnrichmentResult>,
+    /// Optional informational enrichment never invalidates match recording.
+    pub draft_analysis_error: Option<String>,
 }
 
 impl MatchEnrichmentServiceResult {
@@ -2039,6 +2046,7 @@ impl MatchEnrichmentServiceResult {
             dire_fantasy: 0.0,
             fantasy_points_calculated: false,
             openskill_update: None,
+            draft_analysis_error: None,
         }
     }
 }
@@ -2122,6 +2130,20 @@ pub struct SteamIdBackfillResult {
 /// Typed orchestration for the Python enrichment service. Network transport,
 /// SQLite writes, and OpenSkill updates remain behind narrow ports; passing a
 /// preloaded payload preserves discovery's one-fetch validation contract.
+pub trait DraftEnrichmentPort: Send + Sync {
+    fn retry_after(&self) -> Option<Duration> {
+        None
+    }
+
+    fn enrich_draft(
+        &self,
+        match_id: i64,
+        guild_id: i64,
+        details: &OpenDotaMatchDetails,
+        discord_to_steam_ids: &BTreeMap<UserId, Vec<SteamId>>,
+    ) -> Result<(), String>;
+}
+
 pub struct MatchEnrichmentService<M, P, A, W, O> {
     match_repository: M,
     player_repository: P,
@@ -2129,6 +2151,7 @@ pub struct MatchEnrichmentService<M, P, A, W, O> {
     writer: W,
     openskill: Option<O>,
     minimum_roster_matches: usize,
+    draft_analysis: Option<Arc<dyn DraftEnrichmentPort>>,
 }
 
 impl<M, P, A, W, O> MatchEnrichmentService<M, P, A, W, O> {
@@ -2147,12 +2170,19 @@ impl<M, P, A, W, O> MatchEnrichmentService<M, P, A, W, O> {
             writer,
             openskill,
             minimum_roster_matches: REQUIRED_DISCOVERY_ROSTER_MATCHES,
+            draft_analysis: None,
         }
     }
 
     #[must_use]
     pub const fn with_minimum_roster_matches(mut self, _minimum: usize) -> Self {
         self.minimum_roster_matches = REQUIRED_DISCOVERY_ROSTER_MATCHES;
+        self
+    }
+
+    #[must_use]
+    pub fn with_draft_analysis(mut self, draft_analysis: Arc<dyn DraftEnrichmentPort>) -> Self {
+        self.draft_analysis = Some(draft_analysis);
         self
     }
 }
@@ -2226,6 +2256,10 @@ where
             Err(error) => return MatchEnrichmentServiceResult::failed(error.to_string()),
         };
         let policy = MatchEnrichmentPolicy::new(&self.writer);
+        let draft_context = self
+            .draft_analysis
+            .as_ref()
+            .map(|_| (details.clone(), discord_to_steam_ids.clone()));
         let result = policy.enrich_match(EnrichmentInput {
             internal_match,
             valve_match_id: request.valve_match_id,
@@ -2255,7 +2289,21 @@ where
             dire_fantasy: result.dire_fantasy,
             fantasy_points_calculated: result.success,
             openskill_update: None,
+            draft_analysis_error: None,
         };
+        if service_result.success
+            && let Some(draft_analysis) = &self.draft_analysis
+            && let Some((details, links)) = draft_context
+        {
+            service_result.draft_analysis_error = draft_analysis
+                .enrich_draft(
+                    request.internal_match_id.0,
+                    normalized_guild.0,
+                    &details,
+                    &links,
+                )
+                .err();
+        }
         if service_result.success
             && let Some(openskill) = &self.openskill
         {

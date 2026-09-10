@@ -63,6 +63,8 @@ pub mod dig_social_runtime;
 pub mod dota_bet_seed;
 pub mod dota_streak;
 pub mod dotabase_sqlite;
+pub mod draft_analysis;
+pub mod draft_analysis_http;
 pub mod drawing;
 pub mod duel_flavor;
 pub mod economy_event_service;

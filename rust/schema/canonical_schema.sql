@@ -875,6 +875,32 @@ CREATE TABLE match_predictions (
                 FOREIGN KEY (match_id) REFERENCES matches(match_id)
             );
 
+-- table: match_draft_analysis
+CREATE TABLE match_draft_analysis (
+    match_id INTEGER PRIMARY KEY REFERENCES matches(match_id) ON DELETE CASCADE,
+    guild_id INTEGER NOT NULL,
+    valve_match_id INTEGER NOT NULL,
+    radiant_win_probability_bps INTEGER CHECK(radiant_win_probability_bps BETWEEN 0 AND 10000),
+    draft_winner INTEGER CHECK(draft_winner IN (0, 1, 2)),
+    prediction_provider TEXT,
+    prediction_recorded_at INTEGER,
+    draft_heroes_json TEXT,
+    radiant_drafter_steam_id INTEGER,
+    dire_drafter_steam_id INTEGER,
+    radiant_drafter_discord_id INTEGER,
+    dire_drafter_discord_id INTEGER,
+    drafter_source TEXT,
+    CHECK (
+        (radiant_win_probability_bps IS NULL AND draft_winner IS NULL
+         AND prediction_provider IS NULL AND prediction_recorded_at IS NULL
+         AND draft_heroes_json IS NULL)
+        OR
+        (radiant_win_probability_bps IS NOT NULL AND draft_winner IS NOT NULL
+         AND prediction_provider IS NOT NULL AND prediction_recorded_at IS NOT NULL
+         AND draft_heroes_json IS NOT NULL)
+    )
+);
+
 -- table: matches
 CREATE TABLE matches (
                 match_id INTEGER PRIMARY KEY AUTOINCREMENT,

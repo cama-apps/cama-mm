@@ -852,6 +852,32 @@ impl EnrichmentWritePort for RecordingWriter {
     }
 }
 
+struct RecordingDraftEnrichment {
+    calls: Mutex<Vec<(i64, i64)>>,
+    writer: RecordingWriter,
+    failure: Option<String>,
+}
+
+impl DraftEnrichmentPort for RecordingDraftEnrichment {
+    fn enrich_draft(
+        &self,
+        match_id: i64,
+        guild_id: i64,
+        details: &OpenDotaMatchDetails,
+        discord_to_steam_ids: &BTreeMap<UserId, Vec<SteamId>>,
+    ) -> Result<(), String> {
+        assert_eq!(self.writer.writes.lock().unwrap().len(), 1);
+        assert_eq!(details.match_id, ValveMatchId(8_181_518_332));
+        assert_eq!(details.radiant_captain, Some(SteamId(12_345)));
+        assert_eq!(
+            discord_to_steam_ids.get(&UserId(100)),
+            Some(&vec![SteamId(12_345)])
+        );
+        self.calls.lock().unwrap().push((match_id, guild_id));
+        self.failure.clone().map_or(Ok(()), Err)
+    }
+}
+
 #[derive(Clone, Default)]
 struct FakeOpenSkill {
     calls: Arc<Mutex<OpenSkillCalls>>,
@@ -959,6 +985,8 @@ fn enrichment_details(players: Vec<OpenDotaPlayer>) -> OpenDotaMatchDetails {
         radiant_score: 35,
         dire_score: 22,
         game_mode: 2,
+        radiant_captain: None,
+        dire_captain: None,
         comeback: None,
         throw_amount: None,
         raw_payload: Some("{\"match_id\":8181518332}".to_owned()),
@@ -1012,6 +1040,8 @@ fn one_player_input(source: EnrichmentSource, confidence: Option<f64>) -> Enrich
             radiant_score: 35,
             dire_score: 22,
             game_mode: 2,
+            radiant_captain: None,
+            dire_captain: None,
             players: vec![OpenDotaPlayer {
                 account_id: Some(SteamId(42)),
                 player_slot: Some(0),
@@ -1245,6 +1275,8 @@ fn test_validation_success_with_full_match() {
             radiant_score: 35,
             dire_score: 22,
             game_mode: 2,
+            radiant_captain: None,
+            dire_captain: None,
             comeback: None,
             throw_amount: None,
             raw_payload: None,
@@ -1290,6 +1322,61 @@ fn test_enrich_match_success() {
     assert_eq!(writes.len(), 1);
     assert_eq!(writes[0].participant_updates[0].stats.hero_id, 1);
     assert_eq!(writes[0].participant_updates[0].stats.kills, 10);
+}
+
+#[test]
+fn draft_hook_runs_after_saved_enrichment_and_failure_remains_optional() {
+    for failure in [None, Some("draft provider unavailable".to_owned())] {
+        let (matches, players, api, writer, openskill) = one_player_enrichment_fixture();
+        let mut details = enrichment_details(vec![enrichment_player(12_345)]);
+        details.radiant_captain = Some(SteamId(12_345));
+        api.set_details(details.match_id, vec![Ok(Some(details))]);
+        let hook = Arc::new(RecordingDraftEnrichment {
+            calls: Mutex::new(Vec::new()),
+            writer: writer.clone(),
+            failure: failure.clone(),
+        });
+        let service = MatchEnrichmentService::new(
+            matches,
+            players,
+            api,
+            writer.clone(),
+            Some(openskill.clone()),
+        )
+        .with_draft_analysis(hook.clone());
+        let result = service.enrich_match(service_request());
+        assert!(result.success);
+        assert_eq!(result.error, None);
+        assert_eq!(result.draft_analysis_error, failure);
+        assert!(result.fantasy_points_calculated);
+        assert_eq!(writer.writes.lock().unwrap().len(), 1);
+        assert_eq!(hook.calls.lock().unwrap().as_slice(), &[(1, GUILD.0)]);
+        assert_eq!(openskill.calls.lock().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn draft_hook_is_skipped_when_enrichment_validation_fails() {
+    let (matches, players, api, writer, _) = one_player_enrichment_fixture();
+    api.set_details(
+        ValveMatchId(8_181_518_332),
+        vec![Ok(Some(enrichment_details(vec![enrichment_player(
+            99_999,
+        )])))],
+    );
+    let hook = Arc::new(RecordingDraftEnrichment {
+        calls: Mutex::new(Vec::new()),
+        writer: writer.clone(),
+        failure: None,
+    });
+    let service =
+        MatchEnrichmentService::new(matches, players, api, writer.clone(), None::<FakeOpenSkill>)
+            .with_draft_analysis(hook.clone());
+    let result = service.enrich_match(service_request());
+    assert!(!result.success);
+    assert_eq!(result.draft_analysis_error, None);
+    assert!(writer.writes.lock().unwrap().is_empty());
+    assert!(hook.calls.lock().unwrap().is_empty());
 }
 
 #[test]

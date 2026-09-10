@@ -14,15 +14,19 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use cama_app::dotabase_sqlite::{DotabaseSqliteSource, PRODUCTION_DOTABASE_PATH};
+use cama_app::draft_analysis::{DraftAnalysisService, DraftPredictionPort};
+use cama_app::draft_analysis_http::BatruDraftClient;
 use cama_app::drawing::{AdvantageData, MatchRow, draw_advantage_graph, draw_matches_table};
 use cama_app::embeds::{
-    BankruptcyPenaltySource, EnrichedMatchRequest, MatchParticipant as EmbedParticipant,
-    create_enriched_match_embed, create_match_summary_embed_with_context,
+    BankruptcyPenaltySource, DraftAnalysisEmbed, EnrichedMatchRequest,
+    MatchParticipant as EmbedParticipant, create_enriched_match_embed,
+    create_match_summary_embed_with_context,
 };
 use cama_app::match_discovery::{
-    BatchDiscoveryResult, DiscoveryConfig, DiscoveryResult, DiscoveryStatus, EnrichMatchRequest,
-    EnrichmentSource, InternalMatchId, MatchDiscoveryService, MatchEnrichmentService,
-    OpenSkillEnrichmentPort, OpenSkillEnrichmentResult, REQUIRED_DISCOVERY_ROSTER_MATCHES, SteamId,
+    BatchDiscoveryResult, DiscoveryConfig, DiscoveryResult, DiscoveryStatus, DraftEnrichmentPort,
+    EnrichMatchRequest, EnrichmentSource, InternalMatchId, MatchDiscoveryService,
+    MatchEnrichmentService, OpenDotaDiscoveryPort, OpenDotaMatchDetails, OpenSkillEnrichmentPort,
+    OpenSkillEnrichmentResult, PlayerSteamIdPort, REQUIRED_DISCOVERY_ROSTER_MATCHES, SteamId,
     SystemDiscoveryClock,
 };
 use cama_app::opendota_http::{OpenDotaHttpClient, OpenDotaQuotaSnapshot, OpenDotaRuntimeServices};
@@ -36,6 +40,7 @@ use cama_db::core_repositories::{
 use cama_db::guild_config_repository::GuildConfigRepository;
 use cama_db::match_correction_repository::MatchCorrectionRepository;
 use cama_db::match_discovery_repository::MatchDiscoveryRepository;
+use cama_db::match_draft::{MatchDraftAnalysis, MatchDraftRepository};
 use cama_db::match_recording_repository::MatchRecordingRepository;
 use cama_db::opendota_player::OpenDotaPlayerRepository;
 use cama_db::pairings_repository::{PairingsRepository, PairingsService};
@@ -51,11 +56,11 @@ use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResol
 use crate::embed_colors::{DISCORD_BLUE, DISCORD_GREEN, DISCORD_GREYPLE, DISCORD_RED};
 use crate::option_ext::{boolean_option, integer_option, user_option};
 use crate::registration::{
-    CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute, InteractionActionRow,
-    InteractionAttachment, InteractionButton, InteractionButtonStyle, InteractionEmbed,
-    InteractionHandler, InteractionHandlerError, InteractionOption, InteractionRequest,
-    InteractionResponder, InteractionResponse, InteractionValue, RegistrationError,
-    RegistrationProvider, RegistryBuilder,
+    CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
+    InteractionActionRow, InteractionAttachment, InteractionButton, InteractionButtonStyle,
+    InteractionEmbed, InteractionHandler, InteractionHandlerError, InteractionOption,
+    InteractionRequest, InteractionResponder, InteractionResponse, InteractionValue,
+    RegistrationError, RegistrationProvider, RegistryBuilder,
 };
 
 const ADMINISTRATOR_PERMISSION: u64 = 1 << 3;
@@ -66,6 +71,8 @@ const COMPONENT_PREFIX: &str = "enrichment:";
 const MATCH_VIEW_TIMEOUT: Duration = Duration::from_secs(120);
 const DISCORD_DARKER: u32 = 0x2f_31_36;
 const MATCH_CORRECTION_REPLAY_PREFIX: &str = "match_correction:";
+
+mod draft_views;
 
 type LiveEnrichment = MatchEnrichmentService<
     MatchRepository,
@@ -91,6 +98,8 @@ pub enum EnrichmentProviderBuildError {
     OpenSkill(#[from] OpenSkillError),
     #[error("invalid Glicko runtime configuration: {0}")]
     InvalidRatingConfig(&'static str),
+    #[error("invalid draft prediction client: {0}")]
+    DraftClient(#[from] cama_app::draft_analysis_http::DraftHttpError),
 }
 
 pub use crate::runtime_ports::{RecordedMatchDiscovery, RecordedMatchDiscoveryOutcome};
@@ -124,6 +133,7 @@ impl EnrichmentRegistrationProvider {
             opendota,
             dotabase_path,
             MATCH_VIEW_TIMEOUT,
+            Arc::new(BatruDraftClient::new()?),
         )
     }
 
@@ -133,6 +143,7 @@ impl EnrichmentRegistrationProvider {
         opendota: Arc<OpenDotaRuntimeServices>,
         dotabase_path: impl AsRef<Path>,
         match_view_timeout: Duration,
+        predictor: Arc<dyn DraftPredictionPort>,
     ) -> Result<Self, EnrichmentProviderBuildError> {
         let path = database_path.as_ref();
         let system = CamaOpenSkillSystem::with_config(config.migration.openskill.clone())?;
@@ -200,6 +211,11 @@ impl EnrichmentRegistrationProvider {
             rating_system,
             new_player_mmr_discount: config.migration.new_player_mmr_discount,
         };
+        let drafts = MatchDraftRepository::new(path);
+        let draft_analysis = Arc::new(RuntimeDraftAnalysis(DraftAnalysisService::new(
+            drafts.clone(),
+            predictor,
+        )));
         let make_enrichment = || {
             MatchEnrichmentService::new(
                 MatchRepository::new(path),
@@ -209,6 +225,7 @@ impl EnrichmentRegistrationProvider {
                 Some(replay.clone()),
             )
             .with_minimum_roster_matches(REQUIRED_DISCOVERY_ROSTER_MATCHES)
+            .with_draft_analysis(draft_analysis.clone())
         };
         let discovery = MatchDiscoveryService::new(
             MatchRepository::new(path),
@@ -233,6 +250,10 @@ impl EnrichmentRegistrationProvider {
         Ok(Self {
             handler: Arc::new(EnrichmentHandler {
                 matches: MatchRepository::new(path),
+                drafts,
+                draft_analysis: draft_analysis.clone(),
+                draft_backfill_running: Arc::new(AtomicBool::new(false)),
+                draft_backfill_status: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
                 players: PlayerRepository::new(path),
                 player_names: Arc::new(DiscordIdPlayerNameResolver),
                 steam: OpenDotaPlayerRepository::new(path),
@@ -340,6 +361,15 @@ fn enrich_subcommands() -> Vec<CommandOptionSpec> {
             "Backfill steam_id from dotabuff URLs for all players (Admin)",
             vec![],
         ),
+        subcommand(
+            "drafts",
+            "Backfill draft predictions and captains for recorded matches (Admin)",
+            vec![CommandOptionSpec::new(
+                "status",
+                "Show the latest backfill progress without starting a run",
+                CommandOptionKind::Boolean,
+            )],
+        ),
         subcommand("config", "Show current server configuration", vec![]),
         subcommand(
             "discover",
@@ -384,7 +414,60 @@ fn enrich_subcommands() -> Vec<CommandOptionSpec> {
 }
 
 fn matches_subcommands() -> Vec<CommandOptionSpec> {
+    let mut draft_view = CommandOptionSpec::new(
+        "view",
+        "Browse matches or rank drafters",
+        CommandOptionKind::String,
+    );
+    draft_view.choices = [
+        ("Matches", "matches"),
+        ("Most successful drafters", "best_drafters"),
+        ("Least successful drafters", "worst_drafters"),
+    ]
+    .into_iter()
+    .map(|(name, value)| CommandOptionChoice::String {
+        name: name.to_owned(),
+        value: value.to_owned(),
+    })
+    .collect();
+    let mut draft_sort =
+        CommandOptionSpec::new("sort", "Order the draft history", CommandOptionKind::String);
+    draft_sort.choices = [
+        ("All matches — newest first", "recent"),
+        ("Most imbalanced drafts", "imbalance"),
+    ]
+    .into_iter()
+    .map(|(name, value)| CommandOptionChoice::String {
+        name: name.to_owned(),
+        value: value.to_owned(),
+    })
+    .collect();
+    let mut draft_page = CommandOptionSpec::new(
+        "page",
+        "Page to show (default 1)",
+        CommandOptionKind::Integer,
+    );
+    draft_page.min_integer = Some(1);
     vec![
+        subcommand(
+            "drafts",
+            "Browse draft results or rank the most and least successful drafters",
+            vec![
+                draft_view,
+                draft_sort,
+                draft_page,
+                CommandOptionSpec::new(
+                    "user",
+                    "Filter to this player's drafted matches",
+                    CommandOptionKind::User,
+                ),
+                CommandOptionSpec::new(
+                    "limit",
+                    "Entries per page (default 5, max 10)",
+                    CommandOptionKind::Integer,
+                ),
+            ],
+        ),
         subcommand(
             "history",
             "View recent matches with detailed stats",
@@ -526,6 +609,10 @@ impl BankruptcyPenaltySource for BankruptcySource {
 
 struct EnrichmentHandler {
     matches: MatchRepository,
+    drafts: MatchDraftRepository,
+    draft_analysis: Arc<RuntimeDraftAnalysis>,
+    draft_backfill_running: Arc<AtomicBool>,
+    draft_backfill_status: Arc<std::sync::Mutex<BTreeMap<i64, String>>>,
     players: PlayerRepository,
     player_names: Arc<dyn GuildPlayerNameResolver>,
     steam: OpenDotaPlayerRepository,
@@ -547,6 +634,28 @@ struct EnrichmentHandler {
     parsed_refresh_interval: Duration,
     enrichment_retry_delays: Vec<Duration>,
     admin_user_ids: BTreeSet<i64>,
+}
+
+struct RuntimeDraftAnalysis(DraftAnalysisService);
+
+impl DraftEnrichmentPort for RuntimeDraftAnalysis {
+    fn retry_after(&self) -> Option<Duration> {
+        self.0.retry_after()
+    }
+
+    fn enrich_draft(
+        &self,
+        match_id: i64,
+        guild_id: i64,
+        details: &OpenDotaMatchDetails,
+        links: &BTreeMap<cama_app::dedicated_lobby_channel::UserId, Vec<SteamId>>,
+    ) -> Result<(), String> {
+        let result = self.0.enrich(match_id, guild_id, details, links);
+        if let Err(error) = &result {
+            warn!(match_id, guild_id, %error, "optional draft analysis incomplete");
+        }
+        result
+    }
 }
 
 struct ParsedRefreshRunGuard<'a>(&'a AtomicBool);
@@ -670,6 +779,10 @@ impl InteractionHandler for EnrichmentHandler {
                         self.handle_enrich_match(context, options, responder).await
                     }
                     ("enrich", "backfill") => self.handle_backfill(context, responder).await,
+                    ("enrich", "drafts") => {
+                        self.handle_draft_backfill(context, options, responder)
+                            .await
+                    }
                     ("enrich", "config") => self.handle_config(context, responder).await,
                     ("enrich", "discover") => {
                         self.handle_discover(context, options, responder).await
@@ -683,6 +796,9 @@ impl InteractionHandler for EnrichmentHandler {
                     }
                     ("matches", "history") => {
                         self.handle_history(context, options, responder).await
+                    }
+                    ("matches", "drafts") => {
+                        self.handle_draft_stats(context, options, responder).await
                     }
                     ("matches", "view") => self.handle_view(context, options, responder).await,
                     ("matches", "recent") => self.handle_recent(context, options, responder).await,
@@ -730,6 +846,7 @@ impl EnrichmentHandler {
     ) -> Result<InteractionResponse, String> {
         let matches = self.matches.clone();
         let bankruptcy = self.bankruptcy.clone();
+        let drafts = self.drafts.clone();
         let opendota = Arc::clone(&self.opendota);
         let hero_catalog = Arc::clone(&self.hero_catalog);
         let match_view_timeout = self.match_view_timeout;
@@ -762,6 +879,7 @@ impl EnrichmentHandler {
                 &match_data,
                 &participants,
                 &bankruptcy,
+                &drafts,
                 &opendota,
                 &hero_catalog,
             ));
@@ -1101,6 +1219,7 @@ impl EnrichmentHandler {
         let matches = self.matches.clone();
         let enrichment = Arc::clone(&self.enrichment);
         let bankruptcy = self.bankruptcy.clone();
+        let drafts = self.drafts.clone();
         let opendota = Arc::clone(&self.opendota);
         let hero_catalog = Arc::clone(&self.hero_catalog);
         let response = run_blocking(move || -> Result<InteractionResponse, String> {
@@ -1169,6 +1288,7 @@ impl EnrichmentHandler {
                     &match_data,
                     &participants,
                     &bankruptcy,
+                    &drafts,
                     &opendota,
                     &hero_catalog,
                 );
@@ -1708,6 +1828,7 @@ impl EnrichmentHandler {
         let limit = integer_option(options, "limit").unwrap_or(5).clamp(1, 10);
         let players = self.players.clone();
         let matches = self.matches.clone();
+        let drafts = self.drafts.clone();
         let opendota = Arc::clone(&self.opendota);
         let hero_catalog = Arc::clone(&self.hero_catalog);
         let response = run_blocking(move || {
@@ -1769,7 +1890,7 @@ impl EnrichmentHandler {
                 } else {
                     "🎲"
                 };
-                let field = if hero_id.is_some() {
+                let mut field = if hero_id.is_some() {
                     let kills = value_i64(&match_row.kills).unwrap_or(0);
                     let deaths = value_i64(&match_row.deaths).unwrap_or(0);
                     let assists = value_i64(&match_row.assists).unwrap_or(0);
@@ -1801,6 +1922,9 @@ impl EnrichmentHandler {
                          NW: -  Side: {capital_side}\n```"
                     )
                 };
+                if let Some(analysis) = drafts.get(match_row.match_id, guild_id).ok().flatten() {
+                    field.push_str(&format!("\n{}", draft_history_text(&analysis)));
+                }
                 embed = embed.field(
                     format!(
                         "{result_emoji}{lobby_emoji} #{} • {hero}",
@@ -1932,6 +2056,7 @@ impl EnrichmentHandler {
         let target_name = self.render_player_name(target_id, guild_id).await;
         let matches = self.matches.clone();
         let bankruptcy = self.bankruptcy.clone();
+        let drafts = self.drafts.clone();
         let opendota = Arc::clone(&self.opendota);
         let hero_catalog = Arc::clone(&self.hero_catalog);
         let timeout_seconds = i64::try_from(self.match_view_timeout.as_secs()).unwrap_or(i64::MAX);
@@ -2013,6 +2138,7 @@ impl EnrichmentHandler {
                 &match_data,
                 &participants,
                 &bankruptcy,
+                &drafts,
                 &opendota,
                 &hero_catalog,
             );
@@ -2071,6 +2197,12 @@ impl EnrichmentHandler {
         interaction_guild_id: Option<u64>,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
+        if custom_id.starts_with("enrichment:drafts:") {
+            let guild_id = interaction_guild_id
+                .map(|id| signed_id(id, "guild"))
+                .transpose()?;
+            return self.handle_draft_page(custom_id, guild_id, responder).await;
+        }
         let Some(route) = MatchViewRoute::parse(custom_id) else {
             return Err("invalid enrichment component route".into());
         };
@@ -2139,6 +2271,7 @@ impl EnrichmentHandler {
 
         let matches = self.matches.clone();
         let bankruptcy = self.bankruptcy.clone();
+        let drafts = self.drafts.clone();
         let opendota = Arc::clone(&self.opendota);
         let hero_catalog = Arc::clone(&self.hero_catalog);
         let response = run_blocking(move || {
@@ -2153,6 +2286,7 @@ impl EnrichmentHandler {
                 &match_data,
                 &participants,
                 &bankruptcy,
+                &drafts,
                 &opendota,
                 &hero_catalog,
             );
@@ -2402,10 +2536,47 @@ fn format_discovery(result: &BatchDiscoveryResult, dry_run: bool) -> String {
     lines.join("\n")
 }
 
+fn draft_embed_data(analysis: &MatchDraftAnalysis) -> DraftAnalysisEmbed {
+    DraftAnalysisEmbed {
+        radiant_win_probability_bps: analysis.radiant_win_probability_bps,
+        radiant_drafter_discord_id: analysis.radiant_drafter_discord_id,
+        dire_drafter_discord_id: analysis.dire_drafter_discord_id,
+    }
+}
+
+fn draft_history_text(analysis: &MatchDraftAnalysis) -> String {
+    let estimate = analysis
+        .radiant_win_probability_bps
+        .filter(|probability| (0..=10_000).contains(probability))
+        .map_or_else(
+            || "Draft estimate unavailable".to_owned(),
+            |radiant| {
+                let result = match cama_domain::draft_analysis::draft_winner(radiant) {
+                    Some(1) => "Radiant favored",
+                    Some(2) => "Dire favored",
+                    _ => "Split",
+                };
+                format!(
+                    "**Draft: {result}** · R {:.2}% / D {:.2}% · [Batru](https://batru.gg)",
+                    radiant as f64 / 100.0,
+                    (10_000 - radiant) as f64 / 100.0
+                )
+            },
+        );
+    let captain =
+        |id: Option<i64>| id.map_or_else(|| "Unknown".to_owned(), |id| format!("<@{id}>"));
+    format!(
+        "{estimate}\nDrafters: R {} · D {}",
+        captain(analysis.radiant_drafter_discord_id),
+        captain(analysis.dire_drafter_discord_id)
+    )
+}
+
 fn build_match_embed(
     match_data: &MatchSummary,
     participants: &[MatchParticipant],
     bankruptcy: &BankruptcySource,
+    drafts: &MatchDraftRepository,
     opendota: &OpenDotaRuntimeServices,
     hero_catalog: &HeroCatalog,
 ) -> InteractionEmbed {
@@ -2422,6 +2593,10 @@ fn build_match_embed(
             show_mvp: true,
             draft: match_data.lobby_type.as_deref() == Some("draft"),
             guild_id,
+            draft_analysis: guild_id
+                .and_then(|guild_id| drafts.get(match_data.match_id, guild_id).ok().flatten())
+                .as_ref()
+                .map(draft_embed_data),
         },
         &radiant,
         &dire,
