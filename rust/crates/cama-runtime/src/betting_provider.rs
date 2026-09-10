@@ -16,7 +16,7 @@ use cama_app::dig_neon::{BigWinFlavor, BigWinSource};
 use cama_app::disburse_service::{
     DistributionMethod, PlayerSnapshot as DisbursePlayerSnapshot, calculate_method_distributions,
 };
-use cama_app::dota_bet_seed::{BetTotals, bets_overview};
+use cama_app::dota_bet_seed::{BetTotals, bets_overview, betting_seed_without_lobby_bonus};
 use cama_app::economy_actions::apply_gamba_event_multiplier;
 use cama_app::economy_event_service::EconomyEventConfig;
 use cama_app::economy_event_sqlite::SqliteEconomyEventService;
@@ -3742,6 +3742,19 @@ impl BettingInteractionHandler {
                 };
                 let mut section = format!("{header}\n{}", lines.join("\n"));
                 if let Some(pending) = pending_state {
+                    let seed = betting_seed_without_lobby_bonus(
+                        SeedSplit {
+                            radiant: pending.state.bet_seed_radiant,
+                            dire: pending.state.bet_seed_dire,
+                            bonus: pending.state.bet_seed_bonus,
+                        },
+                        pending.state.first_game_pool_reserved,
+                        if pending.state.betting_mode == "pool" {
+                            BettingMode::Pool
+                        } else {
+                            BettingMode::House
+                        },
+                    );
                     let path = self.database_path.clone();
                     let totals = sqlite("betting mybets odds", move || {
                         BettingServiceRepository::new(path)
@@ -3756,8 +3769,8 @@ impl BettingInteractionHandler {
                     if pending.state.betting_mode == "pool" {
                         if my_team_total > 0 && totals.total() > 0 {
                             let seed_against = match team {
-                                BettingTeam::Radiant => pending.state.bet_seed_dire,
-                                BettingTeam::Dire => pending.state.bet_seed_radiant,
+                                BettingTeam::Radiant => seed.dire,
+                                BettingTeam::Dire => seed.radiant,
                             };
                             let seeded_pool = totals.total().saturating_add(seed_against);
                             let potential = (seeded_pool as f64 * total_effective as f64
@@ -3772,9 +3785,8 @@ impl BettingInteractionHandler {
                     } else {
                         let mut potential = total_effective.saturating_mul(2);
                         let mut bonus = 0;
-                        if pending.state.bet_seed_bonus > 0 && my_team_total > 0 {
-                            bonus = pending.state.bet_seed_bonus.saturating_mul(total_effective)
-                                / my_team_total;
+                        if seed.bonus > 0 && my_team_total > 0 {
+                            bonus = seed.bonus.saturating_mul(total_effective) / my_team_total;
                             potential = potential.saturating_add(bonus);
                         }
                         let bonus_text = if bonus > 0 {
@@ -3868,11 +3880,16 @@ impl BettingInteractionHandler {
         } else {
             BettingMode::Pool
         };
-        let seed = SeedSplit {
-            radiant: pending.state.bet_seed_radiant,
-            dire: pending.state.bet_seed_dire,
-            bonus: pending.state.bet_seed_bonus,
-        };
+        let lobby_bonus = pending.state.first_game_pool_reserved;
+        let seed = betting_seed_without_lobby_bonus(
+            SeedSplit {
+                radiant: pending.state.bet_seed_radiant,
+                dire: pending.state.bet_seed_dire,
+                bonus: pending.state.bet_seed_bonus,
+            },
+            lobby_bonus,
+            mode,
+        );
         let overview = bets_overview(
             pending_match_id,
             bets.len(),
@@ -3888,6 +3905,12 @@ impl BettingInteractionHandler {
             odds_text.push_str(&format!("\nBetting closes <t:{lock}:R>"));
         }
         let mut fields = vec![("Current Odds".to_owned(), odds_text)];
+        if lobby_bonus > 0 {
+            fields.push((
+                "Lobby Bonus".to_owned(),
+                format!("{lobby_bonus} {JOPACOIN_EMOTE} shared equally among match participants."),
+            ));
+        }
         for (team, label) in [
             (BettingTeam::Radiant, "🟢 Radiant"),
             (BettingTeam::Dire, "🔴 Dire"),

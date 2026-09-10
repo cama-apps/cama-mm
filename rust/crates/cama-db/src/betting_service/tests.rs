@@ -1714,6 +1714,232 @@ fn seed_adjustments() -> BetSettlementAdjustments {
     }
 }
 
+fn add_daily_player_pool(
+    file: &NamedTempFile,
+    match_id: i64,
+    pending_match_id: i64,
+    mode: BettingMode,
+    recovered: bool,
+) {
+    let connection = Connection::open(file.path()).unwrap();
+    for (discord_id, team) in [(91_001, 1), (91_002, 2)] {
+        connection
+            .execute(
+                "INSERT INTO match_participants(match_id,guild_id,discord_id,team_number,bonus_jc)
+             VALUES (?1,?2,?3,?4,3)",
+                params![match_id, GUILD, discord_id, team],
+            )
+            .unwrap();
+    }
+    connection.execute("INSERT INTO first_game_pool_claims(guild_id,lobby_kind,game_date,pending_match_id,amount)
+        VALUES (?1,'open','2026-09-09',?2,11)", params![GUILD,pending_match_id]).unwrap();
+    if !recovered {
+        let (radiant, dire, bonus) = match mode {
+            BettingMode::Pool => (31, 30, 0),
+            BettingMode::House => (0, 0, 61),
+        };
+        connection
+            .execute(
+                "UPDATE pending_matches SET payload=json_set(payload,
+            '$.first_game_pool_reserved',11,'$.bet_seed_reserved',61,
+            '$.bet_seed_radiant',?1,'$.bet_seed_dire',?2,'$.bet_seed_bonus',?3)
+            WHERE pending_match_id=?4 AND guild_id=?5",
+                params![radiant, dire, bonus, pending_match_id, GUILD],
+            )
+            .unwrap();
+    }
+}
+
+#[test]
+fn daily_pool_goes_to_both_teams_while_regular_seed_still_pays_bettors() {
+    for mode in [BettingMode::Pool, BettingMode::House] {
+        for recovered in [false, true] {
+            let file = migrated_seed_fixture(9401, 9400, mode);
+            add_daily_player_pool(&file, 9401, 9400, mode, recovered);
+            let repository = repo(file.path());
+            // Both players and the spectator bet: membership, not bet result,
+            // controls daily awards. The spectator retains regular seed odds.
+            for (id, team) in [
+                (91_001, BettingTeam::Radiant),
+                (91_002, BettingTeam::Dire),
+                (91_003, BettingTeam::Radiant),
+            ] {
+                repository
+                    .place_bet_atomic(request(9400, id, team, 20))
+                    .unwrap();
+            }
+            let settlement = repository
+                .settle_pending_bets_with_adjustments_atomic(
+                    9401,
+                    Some(GUILD),
+                    NOW,
+                    Some(9400),
+                    BettingTeam::Radiant,
+                    mode,
+                    &seed_adjustments(),
+                )
+                .unwrap();
+            assert_eq!(
+                settlement.seed.winner_seed,
+                if mode == BettingMode::Pool { 25 } else { 50 }
+            );
+            assert_eq!(settlement.seed.first_game_settled, 11);
+            let connection = Connection::open(file.path()).unwrap();
+            let raw: String = connection
+                .query_row(
+                    "SELECT jc_changes FROM matches WHERE match_id=9401",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let snapshot: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(snapshot["91001"]["lobby_bonus"], 6);
+            assert_eq!(snapshot["91002"]["lobby_bonus"], 5);
+            assert!(snapshot.get("91003").is_none());
+            let rows=connection.prepare("SELECT account_id,delta FROM economy_ledger_entries WHERE source='lobby_bonus' ORDER BY account_id").unwrap()
+                .query_map([],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?))).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
+            assert_eq!(rows, [(91_001, 6), (91_002, 5)]);
+            let bonuses=connection.prepare("SELECT bonus_jc FROM match_participants WHERE match_id=9401 ORDER BY discord_id").unwrap()
+                .query_map([],|r|r.get::<_,i64>(0)).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
+            assert_eq!(bonuses, [9, 8]);
+            let before = [
+                balance(file.path(), 91_001),
+                balance(file.path(), 91_002),
+                balance(file.path(), 91_003),
+            ];
+            let spectator = settlement
+                .winners
+                .iter()
+                .find(|w| w.discord_id == 91_003)
+                .unwrap();
+            assert_eq!(before[2], 80 + spectator.payout);
+            repository
+                .settle_pending_bets_with_adjustments_atomic(
+                    9401,
+                    Some(GUILD),
+                    NOW,
+                    Some(9400),
+                    BettingTeam::Radiant,
+                    mode,
+                    &seed_adjustments(),
+                )
+                .unwrap();
+            assert_eq!(
+                before,
+                [
+                    balance(file.path(), 91_001),
+                    balance(file.path(), 91_002),
+                    balance(file.path(), 91_003)
+                ]
+            );
+        }
+    }
+}
+
+#[test]
+fn daily_pool_awards_without_bets_and_rolls_back_for_missing_player() {
+    let file = migrated_seed_fixture(9401, 9400, BettingMode::Pool);
+    add_daily_player_pool(&file, 9401, 9400, BettingMode::Pool, false);
+    let connection = Connection::open(file.path()).unwrap();
+    connection
+        .execute(
+            "UPDATE match_participants SET discord_id=99999 WHERE discord_id=91002",
+            [],
+        )
+        .unwrap();
+    let repository = repo(file.path());
+    assert!(matches!(
+        repository.settle_pending_bets_with_adjustments_atomic(
+            9401,
+            Some(GUILD),
+            NOW,
+            Some(9400),
+            BettingTeam::Radiant,
+            BettingMode::Pool,
+            &seed_adjustments()
+        ),
+        Err(BettingServiceRepositoryError::MissingPlayer { .. })
+    ));
+    assert_eq!(balance(file.path(), 91_001), 100);
+    let reserved:i64=connection.query_row("SELECT json_extract(payload,'$.first_game_pool_reserved') FROM pending_matches WHERE pending_match_id=9400",[],|r|r.get(0)).unwrap();
+    assert_eq!(reserved, 11);
+    connection
+        .execute(
+            "UPDATE match_participants SET discord_id=91002 WHERE discord_id=99999",
+            [],
+        )
+        .unwrap();
+    let settlement = repository
+        .settle_pending_bets_with_adjustments_atomic(
+            9401,
+            Some(GUILD),
+            NOW,
+            Some(9400),
+            BettingTeam::Radiant,
+            BettingMode::Pool,
+            &seed_adjustments(),
+        )
+        .unwrap();
+    assert_eq!(settlement.seed.returned_to_fund, 50);
+    assert_eq!(balance(file.path(), 91_001), 106);
+    assert_eq!(balance(file.path(), 91_002), 105);
+}
+
+#[test]
+fn daily_pool_never_borrows_another_guilds_participants() {
+    let file = migrated_seed_fixture(9401, 9400, BettingMode::Pool);
+    add_daily_player_pool(&file, 9401, 9400, BettingMode::Pool, true);
+    let connection = Connection::open(file.path()).unwrap();
+    connection
+        .execute("UPDATE match_participants SET guild_id=guild_id+1", [])
+        .unwrap();
+    let repository = repo(file.path());
+    let settlement = repository
+        .settle_pending_bets_with_adjustments_atomic(
+            9401,
+            Some(GUILD),
+            NOW,
+            Some(9400),
+            BettingTeam::Radiant,
+            BettingMode::Pool,
+            &seed_adjustments(),
+        )
+        .unwrap();
+    assert_eq!(settlement.seed.returned_to_fund, 61);
+    assert_eq!(balance(file.path(), 91_001), 100);
+    assert_eq!(balance(file.path(), 91_002), 100);
+    let retry = repository
+        .settle_pending_bets_with_adjustments_atomic(
+            9401,
+            Some(GUILD),
+            NOW,
+            Some(9400),
+            BettingTeam::Radiant,
+            BettingMode::Pool,
+            &seed_adjustments(),
+        )
+        .unwrap();
+    assert_eq!(retry, SettlementResult::default());
+}
+
+#[test]
+fn daily_player_pool_preview_excludes_queued_and_regular_betting_money() {
+    use crate::dota_bet_seed_repository::DotaBetSeedRepository;
+    let file = migrated_seed_fixture(9401, 9400, BettingMode::Pool);
+    Connection::open(file.path()).unwrap().execute("UPDATE nonprofit_fund SET total_collected=1000,next_match_pot=777,first_game_open_pool=30,first_game_lowskill_pool=20",[]).unwrap();
+    let repository = DotaBetSeedRepository::new(file.path());
+    let preview = repository
+        .first_game_player_pool_previews(Some(GUILD), Some("2026-09-09"), 10)
+        .unwrap();
+    assert_eq!(preview.open, 40);
+    assert_eq!(preview.low_skill, 30);
+    let combined = repository
+        .first_game_pool_previews(Some(GUILD), 50, Some("2026-09-09"), 10)
+        .unwrap();
+    assert_eq!(combined.open, 817);
+    assert_eq!(combined.low_skill, 807);
+}
+
 #[test]
 fn migrated_settlement_stacks_low_priority_tax_beside_the_vanity_tax() {
     let match_id = 9_111;

@@ -285,7 +285,7 @@ pub fn create_lobby_embed(
     if let Some(bonus_pool) = request.bonus_pool_preview {
         embed.add_field(
             "🎲 Bonus Pool",
-            format!("**{bonus_pool} {JOPACOIN_EMOTE}** available if this lobby shuffles next."),
+            format!("**{bonus_pool} {JOPACOIN_EMOTE}** split equally among match players if this lobby shuffles next. Spectators do not share this pool."),
             false,
         );
     }
@@ -776,7 +776,7 @@ mod tests {
         );
         assert_eq!(
             field(&embed, "🎲 Bonus Pool").value,
-            "**0 <:jopacoin:954159801049440297>** available if this lobby shuffles next."
+            "**0 <:jopacoin:954159801049440297>** split equally among match players if this lobby shuffles next. Spectators do not share this pool."
         );
     }
 

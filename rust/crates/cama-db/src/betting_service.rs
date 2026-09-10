@@ -14,7 +14,7 @@ use thiserror::Error;
 
 use crate::dota_bet_seed_repository::{
     BettingMode, BettingTeam, DotaBetSeedRepositoryError, SeedSettlement,
-    settle_seed_in_transaction,
+    settle_seed_with_player_pool_in_transaction,
 };
 use crate::open_runtime_connection;
 use cama_db_core::profit_deductions::penalty_games_remaining;
@@ -1289,23 +1289,29 @@ impl BettingServiceRepository {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let bets =
             pending_bets_in_transaction(&transaction, guild_id, None, since_ts, pending_match_id)?;
+        let winning_pool = bets
+            .iter()
+            .filter(|bet| bet.team == winning_team)
+            .map(PendingBetRecord::effective_amount)
+            .sum::<i64>();
+        let seed = if adjustments.consume_seed {
+            pending_match_id.map_or_else(
+                || Ok(SeedSettlement::default()),
+                |pending_match_id| {
+                    award_lobby_bonus_in_transaction(
+                        &transaction,
+                        guild_id,
+                        match_id,
+                        pending_match_id,
+                        mode,
+                        (winning_pool > 0).then_some(winning_team),
+                    )
+                },
+            )?
+        } else {
+            SeedSettlement::default()
+        };
         if bets.is_empty() {
-            let seed = if adjustments.consume_seed {
-                pending_match_id.map_or_else(
-                    || Ok(SeedSettlement::default()),
-                    |pending_match_id| {
-                        settle_seed_in_transaction(
-                            &transaction,
-                            guild_id,
-                            pending_match_id,
-                            mode,
-                            None,
-                        )
-                    },
-                )?
-            } else {
-                SeedSettlement::default()
-            };
             transaction.commit()?;
             return Ok(SettlementResult {
                 seed,
@@ -1317,27 +1323,6 @@ impl BettingServiceRepository {
             .iter()
             .map(PendingBetRecord::effective_amount)
             .sum::<i64>();
-        let winning_pool = bets
-            .iter()
-            .filter(|bet| bet.team == winning_team)
-            .map(PendingBetRecord::effective_amount)
-            .sum::<i64>();
-        let seed = if adjustments.consume_seed {
-            pending_match_id.map_or_else(
-                || Ok(SeedSettlement::default()),
-                |pending_match_id| {
-                    settle_seed_in_transaction(
-                        &transaction,
-                        guild_id,
-                        pending_match_id,
-                        mode,
-                        (winning_pool > 0).then_some(winning_team),
-                    )
-                },
-            )?
-        } else {
-            SeedSettlement::default()
-        };
         let payouts = calculate_payouts(PayoutCalculation {
             bets: &bets,
             winning_team,
@@ -2755,6 +2740,88 @@ fn normalized_payout_multiplier(multiplier: f64) -> f64 {
 
 fn scaled_payout(payout: i64, multiplier: f64) -> i64 {
     ((payout as f64 * multiplier) as i64).max(0)
+}
+
+/// The daily lobby pool belongs to recorded players, independently of bets.
+/// Consuming its durable state, balances, and match snapshot share one commit.
+fn award_lobby_bonus_in_transaction(
+    transaction: &Transaction<'_>,
+    guild_id: i64,
+    match_id: i64,
+    pending_match_id: i64,
+    mode: BettingMode,
+    winning_team: Option<BettingTeam>,
+) -> Result<SeedSettlement, BettingServiceRepositoryError> {
+    let raw = transaction
+        .query_row(
+            "SELECT jc_changes FROM matches WHERE match_id=?1 AND guild_id=?2",
+            params![match_id, guild_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .ok_or(BettingServiceRepositoryError::MissingMatch { match_id, guild_id })?;
+    let participants = transaction
+        .prepare(
+            "SELECT DISTINCT discord_id FROM match_participants
+         WHERE match_id=?1 AND guild_id=?2 AND team_number IN (1,2)
+         ORDER BY discord_id",
+        )?
+        .query_map(params![match_id, guild_id], |row| row.get::<_, i64>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let (seed, pool) = settle_seed_with_player_pool_in_transaction(
+        transaction,
+        guild_id,
+        pending_match_id,
+        mode,
+        winning_team,
+        !participants.is_empty(),
+    )?;
+    if pool <= 0 {
+        return Ok(seed);
+    }
+    let mut changes = match raw.filter(|raw| !raw.trim().is_empty()) {
+        Some(raw) => serde_json::from_str::<BTreeMap<String, BTreeMap<String, i64>>>(&raw)
+            .map_err(|error| BettingServiceRepositoryError::InvalidSnapshot(error.to_string()))?,
+        None => BTreeMap::new(),
+    };
+    let count = participants.len() as i64;
+    set_ledger_context(
+        transaction,
+        "lobby_bonus",
+        Some(pending_match_id),
+        "lobby participant bonus",
+    )?;
+    for (index, discord_id) in participants.into_iter().enumerate() {
+        let amount = pool / count + i64::from((index as i64) < pool % count);
+        let changed = transaction.execute(
+            "UPDATE players SET jopacoin_balance=COALESCE(jopacoin_balance,0)+?1,
+             updated_at=CURRENT_TIMESTAMP WHERE discord_id=?2 AND guild_id=?3",
+            params![amount, discord_id, guild_id],
+        )?;
+        if changed != 1 {
+            return Err(BettingServiceRepositoryError::MissingPlayer {
+                discord_id,
+                guild_id,
+            });
+        }
+        transaction.execute(
+            "UPDATE match_participants SET bonus_jc=COALESCE(bonus_jc,0)+?1
+             WHERE match_id=?2 AND guild_id=?3 AND discord_id=?4",
+            params![amount, match_id, guild_id, discord_id],
+        )?;
+        changes
+            .entry(discord_id.to_string())
+            .or_default()
+            .insert("lobby_bonus".to_owned(), amount);
+    }
+    clear_ledger_context(transaction)?;
+    let encoded = serde_json::to_string(&changes)
+        .map_err(|error| BettingServiceRepositoryError::InvalidSnapshot(error.to_string()))?;
+    transaction.execute(
+        "UPDATE matches SET jc_changes=?1 WHERE match_id=?2 AND guild_id=?3",
+        params![encoded, match_id, guild_id],
+    )?;
+    Ok(seed)
 }
 
 fn set_ledger_context(

@@ -3448,7 +3448,21 @@ impl MatchHandler {
             .claim_match_bonuses_paid(match_id, Some(pending.guild_id))
             .map_err(|error| error.to_string())?;
 
-        let mut bonus_net = BTreeMap::<i64, i64>::new();
+        // Lobby shares commit with seed consumption before this recoverable
+        // reward phase. Preserve them when replacing aggregate bonus_jc below.
+        let mut bonus_net = matches
+            .get_match(match_id, Some(pending.guild_id))
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("recorded match {match_id} disappeared"))?
+            .jc_changes
+            .into_iter()
+            .filter_map(|(id, components)| {
+                components
+                    .get("lobby_bonus")
+                    .copied()
+                    .map(|amount| (id, amount))
+            })
+            .collect::<BTreeMap<_, _>>();
         let mut compensatable_net = BTreeMap::<i64, i64>::new();
         let mut compensatable_by_source = BTreeMap::<(i64, String), i64>::new();
         let mut bonus_components = BTreeMap::<i64, BTreeMap<String, i64>>::new();
@@ -4930,6 +4944,7 @@ impl MatchHandler {
         .await
         .map_err(|error| format!("bet totals task failed: {error}"))?
         .map_err(|error| error.to_string())?;
+        let betting_seed = participant_excluded_betting_seed(pending);
         let (wager_name, wager_value) = format_betting_display(
             totals.radiant,
             totals.dire,
@@ -4940,11 +4955,15 @@ impl MatchHandler {
                     .state
                     .bet_lock_until
                     .is_some_and(|lock| lock <= unix_seconds()),
-                seed_radiant: pending.state.bet_seed_radiant,
-                seed_dire: pending.state.bet_seed_dire,
-                seed_bonus: pending.state.bet_seed_bonus,
+                seed_radiant: betting_seed.radiant,
+                seed_dire: betting_seed.dire,
+                seed_bonus: betting_seed.bonus,
             },
         );
+        let lobby_bonus = pending.state.first_game_pool_reserved;
+        if lobby_bonus > 0 {
+            embed = embed.field("🎲 Lobby Bonus", format!("{lobby_bonus} {JOPACOIN_EMOTE} split equally among match players after the game. Spectator bets do not share this pool."), false);
+        }
         Ok(embed.field(wager_name, wager_value, false).footer(format!(
             "Match #{} | Radiant win chance: Glicko {:.1}% | OpenSkill {:.1}%",
             pending.pending_match_id,
@@ -5708,7 +5727,26 @@ impl PlayerContextPort for ProductionBettingPlayerContext {
     }
 }
 
+fn participant_excluded_betting_seed(
+    pending: &PendingMatchRecord,
+) -> cama_db::dota_bet_seed_repository::SeedSplit {
+    cama_app::dota_bet_seed::betting_seed_without_lobby_bonus(
+        cama_db::dota_bet_seed_repository::SeedSplit {
+            radiant: pending.state.bet_seed_radiant,
+            dire: pending.state.bet_seed_dire,
+            bonus: pending.state.bet_seed_bonus,
+        },
+        pending.state.first_game_pool_reserved,
+        if pending.state.betting_mode.eq_ignore_ascii_case("house") {
+            SeedBettingMode::House
+        } else {
+            SeedBettingMode::Pool
+        },
+    )
+}
+
 fn reminder_pending_state(pending: &PendingMatchRecord) -> PendingBettingState {
+    let betting_seed = participant_excluded_betting_seed(pending);
     PendingBettingState {
         betting_mode: if pending.state.betting_mode.eq_ignore_ascii_case("house") {
             ReminderBettingMode::House
@@ -5718,9 +5756,9 @@ fn reminder_pending_state(pending: &PendingMatchRecord) -> PendingBettingState {
         bet_lock_until: pending.state.bet_lock_until,
         pending_match_id: Some(pending.pending_match_id),
         lobby_kind: parse_persisted_lobby_kind(pending.state.lobby_kind.as_deref()),
-        bet_seed_radiant: pending.state.bet_seed_radiant,
-        bet_seed_dire: pending.state.bet_seed_dire,
-        bet_seed_bonus: pending.state.bet_seed_bonus,
+        bet_seed_radiant: betting_seed.radiant,
+        bet_seed_dire: betting_seed.dire,
+        bet_seed_bonus: betting_seed.bonus,
         shuffle_channel_id: pending.state.shuffle_channel_id,
         shuffle_message_id: pending.state.shuffle_message_id,
         command_shuffle_channel_id: pending.state.cmd_shuffle_channel_id,
@@ -6282,12 +6320,16 @@ fn render_jc_lines(
                 }
                 details.push(detail);
             }
-            for (component, label) in [("streak", "streak"), ("referral", "referral")] {
+            for (component, label) in [
+                ("lobby_bonus", "lobby bonus"),
+                ("streak", "streak"),
+                ("referral", "referral"),
+            ] {
                 if let Some(amount) = components.get(component) {
                     details.push(format!("{label} {}", signed(*amount)));
                 }
             }
-            let total = ["payout", "bet", "streak", "referral"]
+            let total = ["payout", "bet", "lobby_bonus", "streak", "referral"]
                 .into_iter()
                 .filter_map(|component| components.get(component))
                 .copied()

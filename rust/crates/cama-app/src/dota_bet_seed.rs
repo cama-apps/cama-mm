@@ -19,6 +19,23 @@ use cama_domain::game_date::get_game_date;
 use crate::dedicated_lobby_channel::{GuildId, UserId};
 use crate::embeds::LobbyKind;
 
+/// Only the accumulated daily lobby allocation is reserved for participants;
+/// regular seeds and contributed pots retain their existing betting behavior.
+#[must_use]
+pub fn betting_seed_without_lobby_bonus(
+    seed: SeedSplit,
+    first_game_reserved: i64,
+    mode: BettingMode,
+) -> SeedSplit {
+    if first_game_reserved <= 0 {
+        return seed;
+    }
+    cama_db::dota_bet_seed_repository::split_seed(
+        seed.total().saturating_sub(first_game_reserved).max(0),
+        mode,
+    )
+}
+
 pub trait DotaBetSeedPort {
     type Error;
 
