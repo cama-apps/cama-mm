@@ -18,7 +18,8 @@ use crate::team::{
     ROLES, Team, TeamError, calculate_off_role_value, compute_optimal_role_assignments,
 };
 use crate::team_balancing::{
-    ADJUSTED_VALUE_DIFF_WEIGHT, role_matchup_delta_from_values, role_parity_delta_from_values,
+    ADJUSTED_VALUE_DIFF_WEIGHT, ROLE_MATCHUP_DELTA_WEIGHT, role_matchup_delta_from_values,
+    role_parity_delta_from_values,
 };
 
 /// Low-priority shoppers contribute half-strength penalties as actors.
@@ -402,7 +403,7 @@ impl Default for BalancedShuffler {
             off_role_multiplier: 0.95,
             off_role_flat_value_penalty: 100.0,
             off_role_flat_penalty: 740.0,
-            role_matchup_delta_weight: 0.16,
+            role_matchup_delta_weight: ROLE_MATCHUP_DELTA_WEIGHT,
             exclusion_penalty_weight: 80.0,
             rd_priority_weight: 0.2,
             recent_match_penalty_weight: 280.0,
@@ -3438,7 +3439,7 @@ mod tests {
             .score_role_assignments_for_matchup(&team1, &team2, 1, ShuffleConstraints::default())
             .expect("fixed matchup scores");
 
-        approx(score, 130.0);
+        approx(score, 140.0);
     }
 
     #[test]
@@ -3515,7 +3516,7 @@ mod tests {
             &mut super::ScoringContext::default(),
         );
 
-        approx(selection.preselection_score, -1_890.0);
+        approx(selection.preselection_score, -1_880.0);
     }
 
     #[test]
@@ -3604,7 +3605,7 @@ mod tests {
                 ShuffleConstraints::default(),
             )
             .expect("fixed role matchup evaluates");
-        approx(matchup.total_score, -1_830.0);
+        approx(matchup.total_score, -1_800.0);
     }
 
     #[test]
@@ -5536,8 +5537,8 @@ mod tests {
     }
 
     #[test]
-    fn test_default_role_matchup_delta_weight_is_point_sixteen() {
-        approx(BalancedShuffler::default().role_matchup_delta_weight, 0.16);
+    fn test_default_role_matchup_delta_weight_is_point_one_eight() {
+        approx(BalancedShuffler::default().role_matchup_delta_weight, 0.18);
     }
 
     fn role_delta_fixture() -> (Vec<Player>, Vec<Player>) {
@@ -5587,8 +5588,8 @@ mod tests {
             .expect("optimization succeeds")
             .2
         };
-        approx(score(1.0), 2_390.0);
-        approx(score(0.5), 1_390.0);
+        approx(score(1.0), 2_420.0);
+        approx(score(0.5), 1_420.0);
     }
 
     #[test]
@@ -5627,7 +5628,7 @@ mod tests {
         )
         .expect("matchup evaluates");
         approx(matchup.log_entry.parity_penalty, 1_200.0);
-        approx(matchup.total_score, 1_330.0);
+        approx(matchup.total_score, 1_340.0);
     }
 
     #[test]
@@ -5737,7 +5738,7 @@ mod tests {
                 },
             )
             .expect("fallback scoring succeeds");
-        approx(common.2, 1_670.0);
+        approx(common.2, 1_710.0);
         assert_eq!(common, fallback);
     }
 
@@ -6568,7 +6569,7 @@ mod tests {
             .score_draft_pool(&captain_a, &captain_b, &pool)
             .expect("draft pool score");
 
-        approx(score, 123.5);
+        approx(score, 133.0);
     }
 
     #[test]

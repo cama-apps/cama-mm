@@ -1199,7 +1199,6 @@ struct MatchConfig {
     off_role_multiplier: f64,
     off_role_flat_value_penalty: f64,
     off_role_flat_penalty: f64,
-    role_matchup_delta_weight: f64,
     exclusion_penalty_weight: f64,
     rd_priority_weight: f64,
     recent_match_penalty_weight: f64,
@@ -1253,7 +1252,6 @@ impl MatchConfig {
             off_role_multiplier: config.values.off_role_multiplier,
             off_role_flat_value_penalty: config.values.off_role_flat_value_penalty,
             off_role_flat_penalty: config.values.off_role_flat_penalty,
-            role_matchup_delta_weight: config.values.role_matchup_delta_weight,
             exclusion_penalty_weight: config.values.exclusion_penalty_weight,
             rd_priority_weight: config.values.rd_priority_weight,
             recent_match_penalty_weight: config.values.recent_match_penalty_weight,
@@ -3925,7 +3923,6 @@ impl MatchHandler {
         shuffler.off_role_multiplier = self.config.off_role_multiplier;
         shuffler.off_role_flat_value_penalty = self.config.off_role_flat_value_penalty;
         shuffler.off_role_flat_penalty = self.config.off_role_flat_penalty;
-        shuffler.role_matchup_delta_weight = self.config.role_matchup_delta_weight;
         shuffler.exclusion_penalty_weight = self.config.exclusion_penalty_weight;
         shuffler.rd_priority_weight = self.config.rd_priority_weight;
         shuffler.recent_match_penalty_weight = self.config.recent_match_penalty_weight;
