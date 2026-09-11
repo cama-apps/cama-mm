@@ -1,4 +1,460 @@
 
 # cargo-vet audits file
 
-[audits]
+[criteria.rsa-public-key-encryption]
+description = "Reviewed only RSA public-key construction/decoding and padded public-key encryption used by this application. No RSA private-key generation, storage, signing, or decryption may be reachable from application or its direct integration dependencies. This criterion does not imply safe-to-deploy: rsa 0.9.10 contains the known Marvin private-key timing vulnerability. Callsite and inverse-dependency constraints must be checked whenever the source or dependency graph changes. Underlying dependencies independently require safe-to-deploy."
+
+[[audits.aes]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "0.8.4"
+notes = """
+Archive SHA-256 b169f7a6d4742236a0a00c541b845991d0ac43e546831af1249753ab4c3aa3a0.
+Reviewed manifest, CPU dispatch/union lifecycle, x86 AES-NI single/eight-block load/store and key expansion, ARMv8 load/store/key expansion/inline assembly, and safe software backend structure. Unsafe loads/stores operate on fixed 16-byte blocks and 8-block arrays through cipher InOut; AES-192 expands a 24-byte key into a 32-byte temporary before vector loads. Runtime cpufeatures tokens select exactly the initialized union member and gate target-feature calls, clone, conversion, and drop. ARM register-only asm uses nomem/nostack; key schedule slice reinterpretation has explicit alignment and array-size checks. No build script, network/filesystem/process access, or secret logging. Cryptographic primitive review, not a new proof of AES; use through existing RustCrypto CBC and Steam's authenticated protocol. Current graph enables default features, no hazmat or custom AES target cfg."""
+
+[[audits.another-steam-totp]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "0.4.2"
+notes = """
+Archive SHA-256 2da7a9955c48acfce671b92a5d671a31d0c01611eb447483d1d0c340adda0205.
+Read all runtime source, manifest, decoder/tag/error paths, and optional HTTP module. No unsafe/native/build/process/fs operations. Current graph enables no HTTP features and calls generate_auth_code with a configured nonempty shared secret and None offset. HMAC-SHA1 truncation bounds are within its 20-byte output; hex decoding checks even length and digits, base64 errors propagate, secrets are not logged. SHA-1 is mandated Steam HMAC compatibility. Explicit caveats: empty decoded secrets are accepted by HMAC, and extreme manually supplied i64::MIN offsets can overflow negation; neither is supplied by Cama. Optional time-query HTTP feature is outside current usage; it contacts only a fixed HTTPS Steam time endpoint and never sends the secret. Not a claim that every malformed local configuration produces an error."""
+
+[[audits.async-stream]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+delta = "0.3.5 -> 0.3.6"
+notes = """
+Reviewed every source/manifest delta against the Google-audited baseline. Sender PhantomData changes to fn(T)->T, making T invariant and preventing leaked borrowed yielded values. The thread-local store initialization becomes const without changing pointer lifecycle. Read the whole yielder module to verify the unsafe store dereference and RAII restoration remain coupled to the macro-generated stream. No new build script, filesystem, network, process, or environment access. Companion async-stream-impl 0.3.6 reviewed separately. Compile-fail reproductions verify the lifetime and nested-async soundness bugs are rejected; nested streams of different item types pass.
+Baseline archive SHA256: cd56dd203fef61ac097dd65721a419ddccb106b2d2b70ba60a6b529f03961a51.
+Target archive SHA256: 0b5a71a6f37880a80d1d7f19efd781e4b5de42c88f0722cc13bcb6cc2cfe8476.
+"""
+
+[[audits.async-stream-impl]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+delta = "0.3.5 -> 0.3.6"
+notes = """
+Reviewed every source/manifest delta against the Google-audited baseline. Generated yield expressions now carry an unreachable break to a hygienic label surrounding their own async-stream body. Rust rejects the label through nested async/closure/function boundaries, preventing writes through a different typed thread-local receiver. Existing unsafe pair construction and for-await pinning are unchanged. The other code change removes an unnecessary mutable iterator reference when emitting diagnostics. No build scripts or ambient I/O. Both historical unsoundness compile-fail reproductions reject correctly; normal nested streams run successfully. proc-macro2 minimum version update requires independent dependency coverage.
+Baseline archive SHA256: 16e62a023e7c117e27523144c5d2459f4397fcc3cab0085af8e2224f643a0193.
+Target archive SHA256: c7c24de15d275a1ecfd47a380fb4d5ec9bfe0933f309ed5e705b775596a3574d.
+"""
+
+[[audits.axum]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "0.8.9"
+notes = """
+Reviewed manifests, all unsafe/powerful capability sites, serving/listener ownership and request extraction/routing boundaries. No unsafe code or build script; network serving requires a caller-created listener and caller-provided handlers. Accepted streams are owned by per-connection Tokio tasks with shutdown propagation; no autonomous filesystem/process or credential access. Standard body-consuming extractors apply axum-core limits; raw streaming extractors explicitly delegate size/time/concurrency policy to the application. This is a capability/safety review, not certification of application authorization or arbitrary handlers.
+Archive SHA-256 31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90; verified against Cargo.lock and every extracted file.
+"""
+
+[[audits.axum-core]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "0.5.6"
+notes = """
+Reviewed manifests, module/import/unsafe inventory, body wrapper/downcast/pinning, request extraction and default-body-limit implementation. No unsafe source or ambient filesystem/network/process operations. Body wrappers preserve ownership through safe Any downcasts and pin-project-lite; ordinary Bytes/String extraction uses a 2 MiB default Limited body. Explicit raw-body streaming or disabling the limit requires caller resource policy. Generated pin projection and HTTP/body dependencies are independently vetted.
+Archive SHA-256 08c78f31d7b1291f7ee735c1c6780ccde7785daae9a9206026862dab7d8792d1; verified against Cargo.lock and every extracted file.
+"""
+
+[[audits.binrw]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "0.15.2"
+notes = """
+Archive SHA-256 6ad120d555272286c1017d25165ab8bd74806f13fc85b258484ec7e4ce75458f; all 198 published files byte-compared to review source.
+Reviewed manifest, complete build script, runtime unsafe/powerful-import inventory, BinRead/BinWrite stream contracts, collection allocation and primitive conversion helpers. No runtime unsafe code or ambient network/filesystem/process operations; IO acts on caller-provided Read/Write/Seek. Vec integer fast paths use initialized storage and bytemuck Pod casts. Length-driven allocation is a schema/caller responsibility: count reserves requested length before reading; Cama's reviewed Steam framing validates untrusted sizes before invoking these generated readers. Build script only invokes Cargo-selected RUSTC with literal --version to select nightly cfg, relying on trusted build environment; no shell or downloads. Review covers security-sensitive operations, not exhaustive binary-format correctness."""
+
+[[audits.binrw_derive]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "0.15.2"
+notes = """
+Archive SHA-256 6df92e0e9baae4dc82c7bad7715ca40c0a5c71539057bf2ea04a5c29c980410b; all 48 published files byte-compared to review source.
+Reviewed proc-macro entrypoints, generated-code templates and unsafe/powerful-import inventory, manifests and entire build script. No unsafe code or generation of unsafe blocks; typed syn/quote transforms trusted compile-time schemas into ordinary Rust stream operations. User-provided parser/assert/map expressions are source code, not remotely evaluated expressions. The filesystem-opening source occurrence is confined to a #[test] fixture parser; normal macro expansion performs no filesystem/network/process activity. Build script only invokes Cargo-selected RUSTC --version to select nightly cfg. Generated readers inherit caller allocation/recursion budgets; Cama's reviewed wire consumers bound lengths. Dependency parsers/token tools have separate coverage. No claim of exhaustive attribute-combination correctness."""
+
+[[audits.block-padding]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "0.3.3"
+notes = """
+Archive SHA-256 a8894febbff9f758034a5b8e12d87918f56dfc64a8e1fe757d65e29041538d93.
+Reviewed complete padding API structure and unsafe unpad_blocks slice conversion. The returned byte length is derived from the existing block slice and checked final-block unpadding; custom padding cannot return a longer result without hitting an assertion. Pkcs7 checks padding count and bytes for a nonempty valid-size cipher block. No build/native/network/process/filesystem behavior. Documented raw-pad position/block-size preconditions remain caller obligations; Cama uses fixed 16-byte AES blocks through cipher, and patched Steam crypto rejects empty/misaligned ciphertext before padding decode."""
+
+[[audits.bytemuck]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+delta = "1.25.0 -> 1.25.2"
+notes = """
+Reviewed every source/manifest delta against the Google/toolkit audited chain ending at 1.25.0. New unsafe NoUninit implementations cover arrays of char, bool, and each NonZero integer type only: these elements already satisfy NoUninit, and arrays add no inter-element or tail padding beyond their element layout; zero-length arrays are also inhabited and padding-free. These impls do not assert AnyBitPattern/Zeroable. Remaining runtime changes only omit core::error::Error on SPIR-V. Empty-slice alignment change is documentation plus regression test; rejection confirmed locally. No new build script or ambient I/O. bytemuck_derive is independently audited.
+Baseline archive SHA256: c8efb64bd706a16a1bdde310ae86b351e4d21550d98d056f22f8a7f7a2183fec.
+Target archive SHA256: 95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797.
+"""
+
+[[audits.bytemuck_derive]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+delta = "1.9.3 -> 1.12.0"
+notes = """
+Reviewed all source/manifest changes against the Google/Mozilla audited chain ending at 1.9.3. New NoUninit enum derivation validates every field and requires each variant field-size sum plus discriminant size to equal the whole enum size, rejecting internal/tail padding and unequal variants. Struct padding validation uses an evaluated const assertion instead of an unused transmute expression; transparent and packed(1) generic structs retain field trait checks and compiler layout guarantees. C-enum discriminant size is obtained from a same-variant fieldless enum, replacing an assumed c_int tag; bit-pattern union payload access remains guarded by discriminant checks. TransparentWrapper parsing accepts full types but still requires one token-matched wrapped field and compile-time zero-size/alignment plus Zeroable checks on extras. No build script or ambient I/O. Local compile-fail tests reject padded structs/enums, unequal enum variants, and extra transparent data; valid enum/array casts and invalid tag rejection pass. syn3 dependency needs its own coverage; this review does not certify syn.
+Baseline archive SHA256: 7ecc273b49b3205b83d648f0690daa588925572cc5063745bfe547fe7ec8e1a1.
+Target archive SHA256: fc0e56a716f1e132ff6bf4bdac1c944a3fcdc1cae65f70a4a2a1ac3b401d2d1f.
+"""
+
+[[audits.bzip2]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "0.6.1"
+notes = """
+Verified registry archive SHA-256 f3a53fac24f34a81bc9954b5d6cfce0c21e18ec6959f44f56e8e90e4bb7c346c and all 18 extracted files.
+Read all runtime modules: lib, mem, read, bufread, and write. No build script or
+ambient filesystem/network/process/environment access. Reviewed every unsafe
+boundary: stable boxed native stream address and matching destruction, borrowed
+nonoverlapping slice pointers, u32 length clamping, total-output accounting before
+Vec initialization/length updates, and Send/Sync with mutation requiring exclusive
+access. Reader truncation/error/progress and multistream reset paths preserve
+buffer limits. Production uses the Rust backend. Transitive libbz2-rs-sys is
+reviewed separately as a patched local snapshot; this does not certify its
+unpatched null/zero-capacity raw ABI defect. The wrapper supplies nonnull slice
+pointers even for empty output. Underlying Write returning Ok(0) indefinitely can
+stall the writer's drain loop; this application uses the bounded Read decoder on
+untrusted metadata, not an attacker-selected Write implementation. Review is of
+this package's security boundary, not a proof of every compression algorithm.
+"""
+
+[[audits.cbc]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "0.1.2"
+notes = """
+Archive SHA-256 26b52a9543ae338f279b96b0b9fed9c8093744685043739079ce85cd58f289a6.
+Read complete lib.rs, encrypt.rs, decrypt.rs and manifest. forbid(unsafe_code), no build script or ambient operations. Fixed-size cipher block wrappers implement XOR chaining, preserving previous ciphertext for parallel decode; IV and cipher Debug output redact internal state. CBC is explicitly unauthenticated by design and is not approved as standalone authenticated encryption: Steam's wrapper verifies HMAC and Cama uses WSS. Optional zeroize drops only IV state through the zeroize primitive; no hidden system behavior."""
+
+[[audits.crc]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "3.4.0"
+notes = """
+Reviewed manifests, all module/import/capability declarations, and fixed-table/bitwise update implementations. no_std and forbid(unsafe_code); only dependency is the algorithm catalog. Byte indexing follows slice length bounds; table indices are bytes/masked to 255. No build script, native code, filesystem, network or process access. Caller-defined algorithm widths must be valid for their integer type; this is a noncryptographic checksum, not an authentication primitive.
+Archive SHA-256 5eb8a2a1cd12ab0d987a5d5e825195d372001a4094a0376319d5a0ad71c1ba0d; checked against Cargo.lock and every extracted source file.
+"""
+
+[[audits.crc-catalog]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "2.5.0"
+notes = """
+Reviewed package manifests, complete library/type definitions and algorithm-constant structure. no_std with forbidden unsafe, no dependencies/build script or ambient capabilities. Remaining source is algorithm parameters and tests; no dynamically executable generated code. CRC constants are noncryptographic and must not be used for authentication.
+Archive SHA-256 217698eaf96b4a3f0bc4f3662aaa55bdf913cd54d7204591faa790070c6d0853; checked against Cargo.lock and every extracted source file.
+"""
+
+[[audits.crossbeam-utils]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "0.8.23"
+notes = """
+SCOPED TO CAMA USE OF CachePadded ONLY, enforced by the dependency usage guard restricting the reverse dependency graph and reviewed consumer source. Reviewed complete CachePadded implementation and build.rs plus included no_atomic.rs/build-common.rs. CachePadded owns one T; its unsafe Send/Sync impls exactly require T:Send/T:Sync and all access/destruction uses safe field operations. Alignment cfgs change padding only. Build script reads TARGET/CARGO_CFG_SANITIZE and emits cfg/check-cfg directives; no process, network or filesystem operations. Also inspected AtomicCell, sequence lock, scoped thread, wait-group, parker and sharded-lock unsafe paths: AtomicCell fallback explicitly permits an optimistic volatile read racing a writer, which remains theoretical UB in the Rust memory model despite MaybeUninit plus sequence validation preventing ordinary torn values from being returned. This review does NOT certify AtomicCell use or all generic atomic layouts; those APIs are absent from the reviewed Cama dependency usage. No current application path to that behavior was found. CachePadded ownership/alignment/drop-once regression passes.
+Archive SHA256: a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6.
+"""
+
+[[audits.directories]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "6.0.0"
+notes = """
+Read all five runtime source files and both manifests. No unsafe code, build script, process launch, network access, or filesystem mutation. Intended ambient capability is reading HOME/XDG directory environment variables and delegating OS home/known-folder lookup to dirs-sys. Linux rejects relative XDG values; defaults are joins under home. Project names/paths are caller-controlled and not a containment boundary; Cama's sole consumer steam-vent uses literal steam-vent names. Optional UserDirs asks dirs-sys to read trusted user configuration; its malformed local-config limitation is documented in the separate dirs-sys audit. Tests verify relative-XDG rejection, exact absolute-XDG construction and no directory creation. OS directory environment is trusted deployment configuration, not remotely supplied data.
+Archive SHA256: 16f5094c54661b38d03bd7e50df373292118db60b585c08a411c6d840017fe7d.
+"""
+
+[[audits.dirs-sys]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "0.5.0"
+notes = """
+Read complete two-file implementation and manifests. No build script, writes, network or process launch. Linux home fallback allocates a libc sysconf-sized buffer, passes actual capacity and live passwd/result storage to getpwuid_r, and copies the OS-provided NUL-terminated home directory before the buffer dies; non-success returns None. Windows known-folder pointer is copied while live and freed with CoTaskMemFree on both success/failure. OS libraries and HOME/XDG environment are trusted. UserDirs intentionally reads user-dirs.dirs as data, never evaluates shell escapes as commands. Found a safe panic for a one-byte quote value because [1..len-1] reverses its bounds; this does not affect Cama's sole ProjectDirs path, and requires malformed trusted local user configuration. Review discretion accepts that local-config failure, NOT a claim of arbitrary untrusted-config robustness. Tests reproduce the panic safely and verify ProjectDirs still succeeds without reading that file. Redox get_uid/basic-user lookup dependencies have separately scoped reviews; Linux deployment remains the supported Cama target.
+Archive SHA256: e01a3366d27ee9890022452ee61b2b63a67e6f13f58900b651ff5665f0bb1fab.
+"""
+
+[[audits.jobserver]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "0.1.35"
+notes = """
+Reviewed all five source files and manifests, with deployment scope the Unix/Linux cc build-tool consumer and trusted Cargo/Make environment. No build script, downloaded code, shell command or network action. Linux creates CLOEXEC pipe descriptors atomically; from_env APIs are explicitly unsafe and require authentic inherited descriptors stable during validation/duplication. Cloned descriptors are owned Files; /dev/fd reopening allows private nonblocking flags and fallback duplication sets CLOEXEC. Acquire/read/poll and release/write use one-byte buffers and typed live syscall arguments; FIONREAD initializes output before it is assumed initialized. Acquired tokens retain Arc<Client> until release, helper state uses Mutex/Condvar/Arc and shutdown signals only its retained joinable thread. The documented global SIGUSR1 handler is intentional build-process behavior; helper failure/abnormal exit can lose tokens or leave a thread, a build-liveness limitation. Environment-provided FIFO paths are trusted capabilities (not validated as FIFOs), and raw from_env(check_pipe=false) must not receive attacker-selected files. configure captures raw descriptor numbers in a pre_exec closure, so the client must remain alive through child spawn; Cama's cc1.4.2 consumer retains the inherited client in a static OnceLock and does not call configure. No unrestricted claim for applications with competing signal handlers, untrusted MAKEFLAGS, or different fd lifetimes. Windows/Wasm code also inspected, but not executed or part of this Linux build scope. Standalone Linux checks pass for token RAII, configured child inheritance/return, four malformed/closed-descriptor environments, helper delivery/shutdown, and blocked-helper interruption. No existing Cargo jobserver tokens were consumed by tests; an isolated fresh client was used.
+Archive SHA256 verified against Cargo.lock: 1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3.
+"""
+
+[[audits.libredox]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "0.1.23"
+notes = """
+SCOPED TO CAMA'S Redox-only redox_users home-lookup dependency, features base/call/libc/std; enforce reverse-dependency, feature and Linux-deployment guards. Read entire source/manifests, including all unsafe/FFI sites. No build script, initializer, network client, downloaded code or runtime action on linking. The actual consumer invokes scalar getruid/geteuid/getrgid/getegid FFI wrappers and Error-to-io::Error conversion; getruid is the only call in dirs-sys fallback. Those wrappers pass no pointers and demultiplex the documented negative-errno representation. Unit test checks all errno values1..4095 and success42. Other FFI wrappers generally pair slice pointers with their lengths; MaybeUninit outputs are assumed initialized only after OS success; mmap/munmap are explicitly unsafe; timespec casts assert size/alignment. This is NOT an unrestricted review of raw-FD ownership, signal-handler safety, OS ABI implementation or disabled protocol/numa features. In particular strerror assumes OS-returned UTF-8 and raw-FD APIs rely on caller capability discipline. Those APIs are outside the actual home-lookup usage and the package is not in the supported Linux runtime. No Redox execution or ABI conformance test claimed.
+Archive SHA256: 8d8f1ea3f21fd3405dcaf6c9b5c1630af9afc422d9073ea39c5f6d6c772e08ed.
+"""
+
+[[audits.matchit]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "0.8.4"
+notes = """
+Reviewed manifests, complete router public API and all six unsafe operations/impls in tree/router plus route/parameter representation. UnsafeCell value access exposes shared references only through shared router borrows and mutable references only through exclusive router borrows; clone/debug also use shared borrows, and Send/Sync require matching T bounds. Removal/insertion needs exclusive access; returned lifetimes keep the router borrowed. Parameter strings come from caller UTF-8 routes/paths with ASCII delimiter boundaries and are checked again before conversion. No build script or ambient I/O. Caller-owned route topology controls tree depth; not an authorization policy.
+Archive SHA-256 47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3; verified against Cargo.lock and every extracted file.
+"""
+
+[[audits.num-bigint-dig]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "0.8.6"
+notes = """
+Archive SHA-256 e661dda6640fad38e827a6d4a310ff4763082116fe217f279885c97f511bb0b7.
+Reviewed manifest/build.rs, all unsafe sites, parsing/string conversion, and the public modular-exponentiation boundary used by RSA. Build script only emits has_i128 cfg; no process/network/fs access. The only runtime unsafe operations are UTF-8 unchecked constructors after conversion to ASCII digits in radix 2..=36 plus optional ASCII minus sign, preserving UTF-8. Numeric storage/arithmetic otherwise uses safe Rust; ordinary arithmetic preconditions such as nonzero divisor and valid radix are required. Variable-time big integer arithmetic is not approved for secret RSA private-key operations; Cama uses public-key encryption with bounded public modulus/exponent. No new constant-time or full mathematical correctness proof is asserted."""
+
+[[audits.num-iter]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+delta = "0.1.45 -> 0.1.46"
+notes = """
+Complete archive delta reviewed: runtime source is byte-identical. Removes unused autocfg build dependency; remaining changes are package metadata, changelog and lockfile. Target archive SHA-256 c92800bd69a1eac91786bcfe9da64a897eb72911b8dc3095decbd07429e8048b verified against Cargo.lock and every reviewed extracted file.
+"""
+
+[[audits.num_enum]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+delta = "0.7.2 -> 0.7.6"
+notes = """
+Complete source/manifests delta reviewed: conditional core::error::Error implementation via rustversion and updated paired derive dependency. No added unsafe or ambient capabilities. Tests expand literal/catch-all cases. Target archive SHA-256 5d0bca838442ec211fa11de3a8b0e0e8f3a4522575b5c4c06ed722e005036f26 verified against Cargo.lock and reviewed files.
+"""
+
+[[audits.num_enum_derive]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+delta = "0.7.2 -> 0.7.6"
+notes = """
+Complete source/manifests delta reviewed. Adds parsed crate-path attribute with duplicate rejection, carries path into existing generated trait implementations, excludes catch-all variants consistently from parallel vectors, and handles byte literals in i128 discriminant parsing. New code performs typed syn parsing/token generation; unsafe transmute remains only in existing explicitly unsafe API with unchanged caller requirements. Cargo manifest discovery is unchanged. Target archive SHA-256 680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8 verified against Cargo.lock and reviewed files.
+"""
+
+[[audits.owo-colors]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "4.4.0"
+notes = """
+Reviewed manifests, all module/import/capability declarations, formatter wrappers/macros, dynamic styles and atomic override guard. Crate forbids unsafe; production uses core/alloc formatting to the caller-provided Formatter. No build script, arbitrary filesystem/network/process access. Optional supports-colors delegates only advertised terminal capability detection to its separately vetted dependency. Output intentionally includes ANSI sequences and does not sanitize user text; application must escape user text for its output context.
+Archive SHA-256 13c45bb4a6ae1280ec0803b1ef9d3455eb50f01efbbe1447ab020f1d54fba9d8; checked against Cargo.lock and every extracted source file.
+"""
+
+[[audits.pkcs1]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "0.7.5"
+notes = """
+Reviewed manifests, all module/unsafe/capability declarations, RSA public/private structure decoding and file/PEM traits. forbid(unsafe_code), no build script. DER readers constrain each nested sequence by its encoded length; integer/version and multi-prime consistency checks return errors. File reads/writes require explicit caller paths and delegate to independently vetted DER Document/SecretDocument; private Debug omits secret components. No network/process/environment operations. This audits key format handling, not RSA private-key operations or cryptographic security of a caller-selected algorithm.
+Archive SHA-256 c8ffb9f10fa047879315e6625af03c164b16962a5368d724ed16323b68ace47f; verified against Cargo.lock and every extracted file.
+"""
+
+[[audits.pkcs8]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "0.10.2"
+notes = """
+Reviewed manifests, all unsafe/capability sites, private/encrypted key structures, version/optional-public-key consistency and file traits. Crate forbids unsafe and has no build script. DER nested lengths and checked bit strings prevent out-of-bounds parsing; extension loop consumes a decoded field or errors. Private representations use SecretDocument/Zeroizing through DER; file operations require explicit caller paths. Optional encrypted-key handling delegates to independently vetted PKCS5 primitives and caller parameters, and is disabled in this graph. No autonomous network/process/environment access. Key serialization is distinct from vulnerable RSA private-key arithmetic, which this record does not certify.
+Archive SHA-256 f950b2377845cebe5cf8b5165cb3cc1a5e0fa5cfa3e1f7f55707d8fd82e0a7b7; verified against Cargo.lock and every extracted file.
+"""
+
+[[audits.proc-macro-crate]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "3.5.0"
+notes = """
+Reviewed the complete src/lib.rs and manifests. No unsafe code or build script. Intended ambient capabilities are limited to reading Cargo manifests/metadata at CARGO_MANIFEST_DIR, checking CARGO_TARGET_TMPDIR, and invoking the Cargo-selected CARGO executable as locate-project --workspace --message-format=plain with a separately passed --manifest-path argument. No shell, network, write/delete operation, or secret discovery; dependency names are only data. The cached map is mutex protected and refreshed on manifest timestamps. This is build-context tooling and relies on a trusted Cargo executable/build environment. Local test verifies a renamed dependency and a missing dependency. toml_edit has separate coverage.
+Archive SHA256: e67ba7e9b2b56446f1d419b1d807906278ffa1a658a8a5d8a39dcb1f5a78614f.
+"""
+
+[[audits.protobuf-support]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "3.5.1"
+notes = """
+Reviewed manifests, all runtime modules and capability declarations, complete lexer implementation, string decoding and topological-sort helper. No unsafe, build script, native code, filesystem/network/process/environment access. UTF-8 is checked through character iteration/from_utf8; position updates preserve boundaries and lexer loops consume input or return errors. Numeric parsing propagates errors. Topological sorting recursively visits caller-supplied dependency graphs with cycle detection; callers must bound graph depth and text size. This does not audit protobuf binary runtime, reviewed separately.
+Archive SHA-256 f0766e3675a627c327e4b3964582594b0e8741305d628a98a5de75a1d15f99b9; checked against Cargo.lock and every extracted source file.
+"""
+
+[[audits.redox_users]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "0.5.2"
+notes = """
+SCOPED TO CAMA'S directories -> dirs-sys -> target_os=redox fallback with auth disabled; enforce reverse-dependency, feature and Linux-deployment guards. Read complete runtime source including excluded authentication/admin paths and manifests. No unsafe code/build script. The reviewed fallback gets current UID and reads AllUsers::basic(Config::default()), then finds that UID and copies its home path. Default Config opens /etc/passwd read-only with a Redox shared lock; semicolon splitting uses checked Option/numeric parsing; all file storage is owned and dropped normally. No password/shadow read, write, command execution or user mutation is invoked by this path. Broader administration APIs are NOT certified: login_cmd relies on caller identity-range and environment/group policy, account serialization rejects semicolons but does not reject newline injection in all mutable fields, writes truncate rather than atomically replace, and non-Redox file locking is intentionally absent. Those APIs are neither called by dirs-sys nor compiled into Cama's Linux runtime. The Redox OS runtime was not available for execution testing; no account files were modified.
+Archive SHA256: a4e608c6638b9c18977b00b475ac1f28d14e84b27d8d42f70e0bf1e3dec127ac.
+"""
+
+[[audits.rsa]]
+who = "Codex (automated source review)"
+criteria = ["safe-to-run", "rsa-public-key-encryption"]
+version = "0.9.10"
+notes = "Archive SHA-256 b8573f03f5883dcaebdfcf4725caa1ecb9c15b2ef50c43a07b816e06799bb12d. Manifest build=false; source has no unsafe code or ambient filesystem/network/process operations. Read RsaPublicKey construction/checking and PKCS#1 v1.5/OAEP encryption paths, padding/MGF, and rsa_encrypt public modular exponentiation. Default public-key constructor limits modulus to 4096 bits and exponent to 2..2^33-1, rejecting even modulus/exponent and exponent >= modulus. Encryption validates message size before padding allocation; its padding RNG requires CryptoRngCore and Steam's wrapper supplies rand thread_rng. No private RSA key is held or used by this application: Steam integrations only decode/build RsaPublicKey, read public n/e, encrypt password/session-key bytes, and expose unused public signature verification. The known RUSTSEC-2023-0071/Marvin private-key timing vulnerability is acknowledged, NOT audited away. Do not import this as safe-to-deploy for private-key use. Enforce scoped inverse dependency and callsite constraints in CI; independently audit every primitive dependency."
+
+[[audits.serde_path_to_error]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+delta = "0.1.11 -> 0.1.20"
+notes = """
+Reviewed every compiled-source and manifest delta against Mozilla audit 0.1.11. Changes move imports to core/alloc and serde_core, unconditionally delegate 128-bit Serde methods, format numeric/bool map keys using itoa and bounded scalar strings, expose Segment Display, and make Track::new const. Numeric keys are copied before delegation; error-chain ownership/lifetimes remain safe Rust. No unsafe code, build script, network/filesystem/process/environment access was introduced. Allocation for path keys remains proportional to supplied input, with the existing deserializer responsible for overall depth/size limits. Malformed nested numeric-key input reports the expected error path in local regression test. New itoa/serde_core dependencies need independent coverage.
+Baseline archive SHA256: f7f05c1d5476066defcdfacce1f52fc3cae3af1d3089727100c02ae92e5abbe0.
+Target archive SHA256: 10a9ff822e371bb5403e391ecd83e182e0e77ba7f6fe0160b795797109d1b457.
+"""
+
+[[audits.sha-1]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "0.10.1"
+notes = """
+Archive SHA-256 f5058ada175748e33390e40e872bd0fe59a19f265d0158daa551c5a88a76009c.
+Reviewed manifest, hash state/buffer/finalization, compression dispatch, all active x86 unsafe sites, and software compressor structure. GenericArray<u8,U64> to [u8;64] slice cast preserves layout/length; four unaligned 16-byte loads stay inside each 64-byte block. SHA/SSE2/SSSE3/SSE4.1 target-feature function is gated by the matching cpufeatures check, with software fallback. No build script or ambient operations; optional external asm dependency is not enabled. SHA-1 collision resistance is broken and is not endorsed here; graph usage is Steam legacy HMAC/OAEP protocol compatibility, not collision-resistant content identity."""
+
+[[audits.spin]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "0.9.9"
+notes = """
+Archive SHA-256 3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e.
+Reviewed manifest and synchronization boundaries, especially complete active Once initialization/publication state machine and Lazy integration. Current graph enables only once (via lazy_static spin_no_std). Unsafe status casts remain valid because private AtomicStatus stores only its repr(u8) enum values. The initializer obtains exclusive state by acquire compare_exchange; it writes MaybeUninit before release Complete publication; readers use acquire and only access Complete data. Panic poisons state, failed fallible initialization resets Incomplete, and drop destroys T only after completed initialization. Send/Sync bounds reflect shared access to T. Also inspected mutex/rwlock guard lifetimes and acquire/release transitions; raw force-unlock APIs require their documented unsafe obligations. No build script/network/fs/ambient-secret operations. Optional std abort is for impossible overflow, not normal control flow; spin waiting remains a caller scheduling consideration."""
+
+[[audits.spki]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "0.7.3"
+notes = """
+Reviewed manifests, all unsafe/powerful-import declarations, AlgorithmIdentifier/SubjectPublicKeyInfo decode/encode and explicit public-key file traits. Crate forbids unsafe and has no build script. Nested DER sequence lengths, checked bit strings and PEM label validation delegate to vetted DER; file access requires a caller-supplied path and contains public key material. Optional fingerprinting delegates SHA256. No autonomous network/process/environment operations; algorithm OID comparison is exact. This record covers format/capability safety, not key authenticity or caller trust decisions.
+Archive SHA-256 d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d; verified against Cargo.lock and every extracted file.
+"""
+
+[[audits.steam-vent-proto-common]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "0.5.1"
+notes = """
+Reviewed the complete src/lib.rs and normalized/original manifests from the
+crates.io archive, SHA-256 62682aa488b34d33f1045f9e4ee3c33ceef709e878524188dea4431cfe4f2131.
+The package defines traits, enum-kind wrappers/masks, and an empty-message
+implementation. No unsafe blocks, build script, native code, ambient filesystem,
+network, process, or secret access. Casts and bit masks implement wire encoding.
+This audit covers this package only; protobuf 3.5.1 requires independent coverage.
+"""
+
+[[audits.steam-vent-proto-dota2]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "0.5.2"
+notes = """
+Verified crates.io archive SHA-256 42fcc961de3a221252996edf1ebc651bfcc5503a0bcb79d960beedfd291994ed
+and every extracted file. Rebuilt the generator pinned by shipped Dota flake.lock
+(steam-vent commit c03aa0f82cd4a4bccd55de13696f8fd9bffaf2bb, locked rust-protobuf
+3.5.1); all 77 generated files exactly match regeneration from bundled schemas.
+Read complete custom generator and handwritten entrypoints/manifests. Complete syn
+AST capability scan finds no unsafe, native ABI, build script, ambient filesystem,
+network, process, environment, or code inclusion. Runtime operations are owned
+message containers, wire-tag/enum constants, protobuf parse/write helpers and
+caller-supplied Read/Write delegates. Oneof panic branches are guarded by exclusive
+variant initialization. Review uses reproducible generation plus structural
+analysis, not line-by-line reading of generated output. Protobuf/common dependencies
+require separate review; this does not certify unpatched protobuf 3.5.1's known
+unknown-group recursion vulnerability (RUSTSEC-2024-0437).
+"""
+
+[[audits.steam-vent-proto-steam]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "0.5.2"
+notes = """
+Verified crates.io archive SHA-256 69b590586d9c9c002f36e7e65d14caaed2301249a7e1badae776a8349ed4a8ce
+and every extracted file. Rebuilt the generator pinned by shipped Dota flake.lock
+(steam-vent commit c03aa0f82cd4a4bccd55de13696f8fd9bffaf2bb, locked rust-protobuf
+3.5.1); all 109 generated files exactly match regeneration from bundled schemas.
+Read complete custom generator and handwritten entrypoints/manifests. Complete syn
+AST capability scan finds no unsafe, native ABI, build script, ambient filesystem,
+network, process, environment, or code inclusion. Runtime operations are owned
+message containers, wire-tag/enum constants, protobuf parse/write helpers and
+caller-supplied Read/Write delegates. Oneof panic branches are guarded by exclusive
+variant initialization. Review uses reproducible generation plus structural
+analysis, not line-by-line reading of generated output. Protobuf/common dependencies
+require separate review; this does not certify unpatched protobuf 3.5.1's known
+unknown-group recursion vulnerability (RUSTSEC-2024-0437).
+"""
+
+[[audits.tokio-stream]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+delta = "0.1.17 -> 0.1.19"
+notes = """
+Reviewed every compiled-source and manifest delta against the Google/Zcash audited chain ending at 0.1.17, including new collection and JoinSet wrappers. FusedStream implementations follow retained state or fused inner streams; map_while now latches termination. Peekable and StreamMap hints use saturating lower bounds and checked upper bounds; StreamMap next_many enforces its caller-provided limit. Collection extensions use standard collections, caller stream size hints, and mem::take with no new unsafe memory operations. Receiver size hints account for held permits; JoinSetStream only polls the caller-owned JoinSet. Cooperative budgeting delegates to Tokio under rt and retains bounded fallback polling otherwise. No new unsafe blocks, build script, autonomous network/filesystem/process behavior; existing wrappers require caller-owned resources. Runtime regressions for map_while termination, next_many limit, and hint overflow pass. Unbounded collecting still requires caller resource limits as before.
+Baseline archive SHA256: eca58d7bba4a75707817a2c44174253f9236b2d5fbd055602e9d5c07c139a047.
+Target archive SHA256: a3d06f0b082ba57c26b79407372e57cf2a1e28124f78e9479fe80322cf53420b.
+"""
+
+[[audits.tokio-tungstenite]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "0.29.0"
+notes = """
+Reviewed manifests, all six runtime module capability/unsafe declarations, connector/TLS handling and Stream/Sink pinning/state transitions. No unsafe source or build script. Network access occurs only on explicit caller request/stream; ws/wss selection and TLS ServerName validation are passed to the selected TLS implementation, with no insecure-certificate override. The async connector does not follow HTTP redirects. WouldBlock is translated to Pending with registered wakers, closed streams latch completion, and WebSocketConfig is passed through for frame/message limits. No filesystem/process/secret discovery. Tungstenite protocol parser and TLS dependencies have separate coverage; Cama uses its reviewed patched tungstenite and a bounded WSS configuration.
+Archive SHA-256 8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c; verified against Cargo.lock and every extracted file.
+"""
+
+[[audits.toml_edit]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "0.25.14+spec-1.1.0"
+notes = """
+Reviewed manifests, all unsafe/powerful-import sites (no unsafe code), parser entrypoints, value/key conversion, recursion guards, formatting/error paths and dependency interactions. Parsing is in-memory; input token/event collections are proportional to caller input. Default parsing uses RecursionGuard depth80 and limits dotted key paths; scalar conversion reports integer/float overflow and rejects invalid Unicode via the parser dependency. Optional debug prints parsing diagnostics to stderr; no network, process, environment or filesystem capability is introduced. The explicitly unbounded feature removes depth protection and is excluded from this Cama deployment review; keep it disabled with the dependency feature guard. Safe-feature toml_parser and winnow are independently reviewed. Tests cover malformed Unicode escapes, numeric overflow, depth500 arrays/key paths, and 10,000 deterministic malformed UTF-8-valid inputs without panic. This is a security-sensitive-operation review, not exhaustive TOML conformance certification.
+Archive SHA256: d2195eec204e2764644a4ea619704f9fbe5e0673038eded55ad9956f24fca0cc.
+"""
+
+[[audits.toml_parser]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "1.1.3+spec-1.1.0"
+notes = """
+SCOPED TO CAMA WITH THE unsafe FEATURE DISABLED, enforced by the repository dependency feature guard. Read manifests, unsafe operation sites, source/span APIs, lexer/parser boundaries, decoder validation and recursion-guard integration. The normal compiled configuration forbids unsafe code and uses checked string/slice indexing. No build script or ambient network/filesystem/process capability; optional debug writes diagnostics. With the explicitly opt-in unsafe feature, public safe ValidateWhitespace receiver methods can pass caller-invalid spans to Source::get_unchecked; this configuration is NOT certified. Span::new_unchecked is itself safe and does not validate bounds. Cama must continue consuming this package through toml_edit normal parser flow with unsafe disabled. Tests of that flow cover invalid Unicode, malformed syntax, depth limits and 10,000 generated inputs. No UB was executed when investigating the excluded configuration.
+Archive SHA256: 1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56.
+"""
+
+[[audits.winnow]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "1.0.4"
+notes = """
+Reviewed all unsafe declarations/operations and their surrounding ownership/bounds contracts, manifests, powerful imports, and parser progress checks. Bytes/BStr reference transmutations preserve the transparent [u8] representation and lifetime. All unchecked slicing methods are explicitly unsafe APIs requiring caller-valid bounds and UTF-8 boundaries; wrapper implementations forward the same contract to their inner stream. Safe parser operations do not invoke unchecked slicing. Optional debug tracing writes caller parser/input diagnostics to stderr and reads terminal width/COLUMNS; this is intentional opt-in behavior, not secret discovery or network access. No build script, process launch, filesystem reads/writes, FFI, or assembly. Repetition combinators check progress to avoid empty-parser infinite loops. Caller-defined grammars still control recursion/backtracking and resource budgets. UTF-8 boundaries and arbitrary byte wrapper tests pass. This is a safety/powerful-operation review, not exhaustive correctness verification of every grammar combinator.
+Archive SHA256: 23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81.
+"""
+
+[[audits.zstd-sys]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "2.1.0+zstd.1.5.7"
+notes = """
+Verified registry archive SHA-256 0ef0a8027ec3ee71300ab3bcbcd0393f434aa72b91ca6d635a39941deae8eea0 and all 129 extracted files. All 104 bundled native source/build/license files are byte-identical to upstream facebook/zstd v1.5.7.
+Read build.rs and FFI entrypoint/feature selection: bundled source compilation,
+expected compiler/OUT_DIR operations, no source download or unrelated execution.
+Reviewed native frame header length/reserved-bit/window parsing, streaming input
+and output bounds/state transitions, window-limit-before-allocation checks,
+compressed-block/literal limits, sequence copy slow/fast-path margins and history
+offsets, Huffman table/stream initialization and finishing bounds, and FSE table
+workspace/entropy decoding bounds. Scanned native sources for ambient capabilities;
+normal runtime is compression/decompression and allocation. Raw FFI callers must
+honor C pointer/size/lifetime contracts; the separately patched Rust wrapper now
+validates public cursors and holds prepared dictionaries for their retained life.
+Production feature scope is std only (no bindgen, pkg-config, legacy, dictionary
+builder, seekable, experimental or threading). Upstream native regression tests
+and 200 seeded fuzz trials passed on the matching source under ASan and UBSan;
+LeakSanitizer was disabled because sandbox ptrace prevents it. Upstream OSS-Fuzz
+configuration confirms ongoing address/memory/undefined sanitizer targets.
+Discretion: substantive boundary/allocation/decoder review plus verified source
+identity and bounded sanitizer evidence supports deployment; not every native
+algorithm/assembly instruction was read and tests are not exhaustive proof. No
+matching previous full safe-to-deploy native anchor was assumed. Production also
+caps decoder window at 64 MiB and downloaded/decompressed metadata sizes. Optional
+features require additional review; this attestation does not certify the
+unpatched zstd/zstd-safe prepared-dictionary and output-initialization defects.
+"""

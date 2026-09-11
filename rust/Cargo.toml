@@ -20,6 +20,30 @@ members = [
     "crates/cama-steam",
 ]
 resolver = "3"
+exclude = [
+    "vendor/libbz2-rs-sys",
+    "vendor/zstd-safe",
+    "vendor/zstd",
+    "vendor/const-oid",
+    "vendor/dashmap",
+    "vendor/protobuf",
+    "vendor/steam-vent",
+    "vendor/steam-vent-crypto",
+    "vendor/steamid-ng",
+    "vendor/tungstenite",
+]
+
+[patch.crates-io]
+libbz2-rs-sys = { path = "vendor/libbz2-rs-sys" }
+zstd-safe = { path = "vendor/zstd-safe" }
+zstd = { path = "vendor/zstd" }
+const-oid = { path = "vendor/const-oid" }
+dashmap = { path = "vendor/dashmap" }
+protobuf = { path = "vendor/protobuf" }
+steam-vent = { path = "vendor/steam-vent" }
+steam-vent-crypto = { path = "vendor/steam-vent-crypto" }
+steamid-ng = { path = "vendor/steamid-ng" }
+tungstenite = { path = "vendor/tungstenite" }
 
 [workspace.package]
 version = "0.1.0"

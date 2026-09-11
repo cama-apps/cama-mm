@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Exercise the local dependency security patches using the workspace's locked graph.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+
+scratch="$(mktemp -d)"
+trap 'rm -rf "$scratch"' EXIT
+rustc --edition=2024 --test rust/supply-chain/reviews/guard.rs -o "$scratch/review-guard-tests"
+"$scratch/review-guard-tests"
+
+cargo test --locked --manifest-path rust/Cargo.toml \
+  -p steam-vent -p steam-vent-crypto -p steamid-ng \
+  -p protobuf -p tungstenite@0.29.0 -p const-oid@0.9.6 \
+  -p libbz2-rs-sys -p zstd-safe --lib
+cargo test --locked --manifest-path rust/Cargo.toml \
+  -p dashmap@6.2.1 -p zstd-safe -p zstd --doc

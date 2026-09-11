@@ -1,0 +1,32 @@
+{
+  "bzip2": {
+    "version": "0.6.1",
+    "archive_sha256": "f3a53fac24f34a81bc9954b5d6cfce0c21e18ec6959f44f56e8e90e4bb7c346c",
+    "files_verified": 18,
+    "mismatches": []
+  },
+  "zstd-sys": {
+    "version": "2.1.0+zstd.1.5.7",
+    "archive_sha256": "0ef0a8027ec3ee71300ab3bcbcd0393f434aa72b91ca6d635a39941deae8eea0",
+    "files_verified": 129,
+    "mismatches": []
+  },
+  "libbz2-rs-sys": {
+    "version": "0.2.5",
+    "archive_sha256": "34b357333733e8260735ba5894eb928c02ecc69c78715f01a8019e7fa7f2db4c",
+    "files_verified": 17,
+    "mismatches": []
+  },
+  "zstd": {
+    "version": "0.13.3",
+    "archive_sha256": "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a",
+    "files_verified": 35,
+    "mismatches": []
+  },
+  "zstd-safe": {
+    "version": "7.3.0",
+    "archive_sha256": "64d80649ab6db9d9f6f9c80a40becd948eda4714a0a5ac8c4d157a32231c7882",
+    "files_verified": 13,
+    "mismatches": []
+  }
+}
