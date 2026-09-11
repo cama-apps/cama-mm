@@ -37,9 +37,18 @@ fn leaf_paths(options: &[CommandOptionSpec]) -> BTreeMap<String, Vec<String>> {
 }
 
 #[test]
-fn production_admin_tree_has_all_thirty_python_leaves() {
+fn production_admin_tree_preserves_legacy_leaves_and_adds_dota_controls() {
     let actual = leaf_paths(&admin_options(3_000.0));
     let expected = [
+        "dota settings",
+        "dota reset",
+        "dota status",
+        "dota start",
+        "dota cancel",
+        "dota resume",
+        "dota manual",
+        "dota resolve",
+        "dota betting",
         "adjust rating",
         "adjust rd",
         "lowprio add",
@@ -72,11 +81,223 @@ fn production_admin_tree_has_all_thirty_python_leaves() {
         "setprimarysteam",
         "seedherogrid",
     ];
-    assert_eq!(actual.len(), 31);
+    assert_eq!(actual.len(), 40);
     assert_eq!(
         actual.keys().cloned().collect::<BTreeSet<_>>(),
         expected.into_iter().map(str::to_owned).collect()
     );
+}
+
+#[test]
+fn dota_admin_schema_stays_within_discord_limits_and_constrains_values() {
+    let options = admin_options(3_000.0);
+    assert!(options.len() <= 25);
+    let dota = options.iter().find(|option| option.name == "dota").unwrap();
+    assert_eq!(dota.kind, CommandOptionKind::SubcommandGroup);
+    assert_eq!(dota.options.len(), 9);
+    // Discord integer options use signed int53 bounds, not SQLite's i64.
+    for command in &dota.options {
+        for option in &command.options {
+            for bound in [option.min_integer, option.max_integer]
+                .into_iter()
+                .flatten()
+            {
+                assert!(
+                    (-9_007_199_254_740_991..=9_007_199_254_740_991).contains(&bound),
+                    "{} {} has an invalid Discord integer bound",
+                    command.name,
+                    option.name
+                );
+            }
+        }
+    }
+    let settings = dota
+        .options
+        .iter()
+        .find(|option| option.name == "settings")
+        .unwrap();
+    assert!(settings.options.iter().all(|option| !option.required));
+    let region = settings
+        .options
+        .iter()
+        .find(|option| option.name == "server_region")
+        .unwrap();
+    assert_eq!(
+        (region.min_integer, region.max_integer),
+        (Some(1), Some(100))
+    );
+    let mode = settings
+        .options
+        .iter()
+        .find(|option| option.name == "game_mode")
+        .unwrap();
+    assert_eq!(mode.choices.len(), 11);
+    let delay = settings
+        .options
+        .iter()
+        .find(|option| option.name == "tv_delay")
+        .unwrap();
+    assert_eq!((delay.min_integer, delay.max_integer), (Some(0), Some(4)));
+}
+
+#[tokio::test]
+async fn dota_settings_merge_read_reset_are_guild_scoped() {
+    use cama_db::guild_config_repository::GuildConfigRepository;
+    use cama_domain::dota_hosting::{FirstPick, HostingMode, StartMode};
+
+    let fixture = ProviderFixture::new();
+    let repository = GuildConfigRepository::new(fixture.database.path(), false);
+    let initial = fixture
+        .dispatch_request(admin_group_command(
+            "dota",
+            "settings",
+            vec![],
+            801,
+            ADMIN,
+            Some(MANAGE_GUILD),
+        ))
+        .await;
+    assert!(initial.last().content.contains("deployment default"));
+    assert_eq!(*initial.defers.lock().unwrap(), vec![true]);
+    let update = fixture
+        .dispatch_request(admin_group_command(
+            "dota",
+            "settings",
+            vec![
+                integer_option("server_region", 31),
+                integer_option("game_mode", 2),
+                integer_option("tv_delay", 0),
+                integer_option("league_id", 19144),
+                integer_option("visibility", 2),
+                string_option("hosting", "manual"),
+                string_option("first_pick", "dire"),
+                string_option("start", "manual"),
+            ],
+            802,
+            ADMIN,
+            Some(MANAGE_GUILD),
+        ))
+        .await;
+    assert!(update.last().content.contains("future shuffles"));
+    assert!(update.last().ephemeral);
+    assert_eq!(*update.defers.lock().unwrap(), vec![true]);
+    let saved = repository.dota_hosting_options(GUILD as i64).unwrap();
+    assert_eq!(saved.region, Some(31));
+    assert_eq!(saved.hosting, Some(HostingMode::Manual));
+    assert_eq!(saved.first_pick, Some(FirstPick::Dire));
+    assert_eq!(saved.start, Some(StartMode::Manual));
+    assert_eq!(saved.league_id, Some(19144));
+    fixture
+        .dispatch_request(admin_group_command(
+            "dota",
+            "settings",
+            vec![integer_option("tv_delay", 2)],
+            803,
+            ADMIN,
+            Some(MANAGE_GUILD),
+        ))
+        .await;
+    let merged = repository.dota_hosting_options(GUILD as i64).unwrap();
+    assert_eq!(merged.region, Some(31));
+    assert_eq!(merged.tv_delay, Some(2));
+    assert_eq!(
+        repository.dota_hosting_options(GUILD as i64 + 1).unwrap(),
+        Default::default()
+    );
+    fixture
+        .dispatch_request(admin_group_command(
+            "dota",
+            "reset",
+            vec![],
+            804,
+            ADMIN,
+            Some(MANAGE_GUILD),
+        ))
+        .await;
+    assert_eq!(
+        repository.dota_hosting_options(GUILD as i64).unwrap(),
+        Default::default()
+    );
+}
+
+#[tokio::test]
+async fn dota_settings_reject_unauthorized_invalid_and_unacknowledged_writes() {
+    use cama_db::guild_config_repository::GuildConfigRepository;
+
+    let fixture = ProviderFixture::new();
+    let repository = GuildConfigRepository::new(fixture.database.path(), false);
+    for action in [
+        "settings", "reset", "status", "start", "cancel", "resume", "manual", "resolve", "betting",
+    ] {
+        let response = fixture
+            .dispatch_request(admin_group_command(
+                "dota",
+                action,
+                vec![],
+                810,
+                999,
+                Some(0),
+            ))
+            .await;
+        assert_eq!(response.last().content, ADMIN_DENIED, "{action}");
+        assert!(response.defers.lock().unwrap().is_empty());
+    }
+    for invalid in [
+        integer_option("server_region", 0),
+        integer_option("tv_delay", 5),
+        integer_option("game_mode", 999),
+        string_option("first_pick", "unknown"),
+        integer_option("league_id", -1),
+    ] {
+        let response = fixture
+            .dispatch_request(admin_group_command(
+                "dota",
+                "settings",
+                vec![invalid],
+                811,
+                ADMIN,
+                Some(MANAGE_GUILD),
+            ))
+            .await;
+        assert!(!response.last().content.contains("settings saved"));
+        assert!(response.defers.lock().unwrap().is_empty());
+    }
+    let responder = Arc::new(RecordingResponder::default());
+    responder.fail_defer.store(true, Ordering::Release);
+    let result = fixture
+        .registry()
+        .command_handler("admin")
+        .unwrap()
+        .handle(
+            admin_group_command(
+                "dota",
+                "settings",
+                vec![integer_option("server_region", 31)],
+                812,
+                ADMIN,
+                Some(MANAGE_GUILD),
+            ),
+            responder,
+        )
+        .await;
+    assert!(result.is_err());
+    assert_eq!(
+        repository.dota_hosting_options(GUILD as i64).unwrap(),
+        Default::default()
+    );
+    let mut request = admin_group_command(
+        "dota",
+        "settings",
+        vec![integer_option("server_region", 31)],
+        813,
+        ADMIN,
+        Some(MANAGE_GUILD),
+    );
+    if let InteractionRequest::Command { guild_id, .. } = &mut request {
+        *guild_id = Some(0);
+    }
+    let response = fixture.dispatch_request(request).await;
+    assert_eq!(response.last().content, GUILD_ONLY);
 }
 
 #[test]
@@ -1828,5 +2049,70 @@ fn lowprio_add_option_bounds_are_pinned() {
         reason.description.contains("do not name who reported them"),
         "{}",
         reason.description
+    );
+}
+
+#[tokio::test]
+async fn dota_betting_control_is_acknowledged_audited_and_survives_explicit_extensions() {
+    use cama_db::match_runtime::{PendingMatchRepository, PendingMatchState};
+    let fixture = ProviderFixture::new();
+    let repo = PendingMatchRepository::new(fixture.database.path());
+    let pending = repo
+        .create_pending_match(
+            GUILD as i64,
+            &PendingMatchState {
+                radiant_team_ids: (1..=5).collect(),
+                dire_team_ids: (6..=10).collect(),
+                bet_lock_until: Some(chrono::Utc::now().timestamp() + 600),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let options = |action: &str| {
+        vec![
+            string_option("action", action),
+            string_option("reason", "Investigating observed match start"),
+            integer_option("pending_match", pending.pending_match_id),
+        ]
+    };
+    let response = fixture
+        .dispatch_request(admin_group_command(
+            "dota",
+            "betting",
+            options("suspend"),
+            890,
+            ADMIN,
+            Some(MANAGE_GUILD),
+        ))
+        .await;
+    assert!(response.last().content.contains("Betting suspended"));
+    assert!(!response.defers.lock().unwrap().is_empty());
+    let saved = repo
+        .pending_match(GUILD as i64, pending.pending_match_id)
+        .unwrap()
+        .unwrap();
+    assert!(!saved.state.betting_open(chrono::Utc::now().timestamp()));
+    let audit = saved.state.extra["dota_betting_control_audit"]
+        .as_array()
+        .unwrap();
+    assert_eq!(audit[0]["actor_id"], serde_json::json!(ADMIN));
+    assert_eq!(audit[0]["action"], serde_json::json!("suspend"));
+    let response = fixture
+        .dispatch_request(admin_group_command(
+            "dota",
+            "betting",
+            options("resume"),
+            891,
+            ADMIN,
+            Some(MANAGE_GUILD),
+        ))
+        .await;
+    assert!(response.last().content.contains("suspension removed"));
+    assert!(
+        repo.pending_match(GUILD as i64, pending.pending_match_id)
+            .unwrap()
+            .unwrap()
+            .state
+            .betting_open(chrono::Utc::now().timestamp())
     );
 }

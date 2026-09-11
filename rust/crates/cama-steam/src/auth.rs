@@ -4,6 +4,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use steam_vent::auth::{
@@ -11,7 +12,7 @@ use steam_vent::auth::{
     EitherConfirmationHandler, GuardDataStore, SharedSecretAuthConfirmationHandler,
     UserProvidedAuthConfirmationHandler,
 };
-use steam_vent::{Connection, ConnectionError, ServerList};
+use steam_vent::{Connection, ConnectionError, EResult, LoginError, ServerList};
 use thiserror::Error;
 use tracing::{debug, warn};
 
@@ -19,8 +20,8 @@ use tracing::{debug, warn};
 ///
 /// `password` and `guard_code` are deliberately optional.  A deployed bot
 /// should normally have a persisted refresh token and machine token.  The
-/// password is only needed for the first bootstrap or after Steam revokes the
-/// session.  `shared_secret` is the base64 Steam Guard TOTP secret and is
+/// password is used automatically when no saved session exists or Steam
+/// rejects its token.  `shared_secret` is the base64 Steam Guard TOTP secret and is
 /// optional when the first login is confirmed from the mobile app or by the
 /// interactive bootstrap helper.
 #[derive(Clone)]
@@ -104,8 +105,8 @@ impl SteamAuthConfig {
 /// How a first login handles Steam Guard.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GuardConfirmation {
-    /// Generate a TOTP code from `shared_secret`, falling back to mobile
-    /// confirmation for confirmation-style challenges.
+    /// Generate a TOTP code from `shared_secret` or accept mobile confirmation.
+    /// This mode never reads stdin; email/code challenges need `guard_code`.
     Device,
     /// Ask for a code on stdin.  This is suitable for the bootstrap command.
     Console,
@@ -233,46 +234,22 @@ impl Debug for AuthenticatedSteam {
 pub struct SteamAuth;
 
 impl SteamAuth {
-    /// Connect using the persisted token when possible, then perform a fresh
-    /// session only when the persisted token is valid.
-    ///
-    /// This method is safe to call from an unattended runtime: it never asks
-    /// for a password or waits for a Steam Guard prompt.  Use
-    /// [`Self::bootstrap_login`] for the explicit first-login operation.
+    /// Prefer a saved session, then log in and save a new session using the
+    /// configured password when needed. This path never reads stdin, even if
+    /// console confirmation was configured for an interactive bootstrap.
     pub async fn connect(config: &SteamAuthConfig) -> Result<AuthenticatedSteam, AuthError> {
         reject_key_logging()?;
-        let servers = ServerList::discover().await?;
-
-        if let Some(session) = read_session(&config.session_path)?
-            && session.account == config.username
-        {
-            debug!(account = %config.username, "trying persisted Steam session");
-            match Connection::access(&servers, &config.username, &session.refresh_token).await {
-                Ok(connection) => {
-                    return Ok(AuthenticatedSteam {
-                        session: SteamSession {
-                            username: config.username.clone(),
-                            steam_id: connection.steam_id().into(),
-                            session_path: config.session_path.clone(),
-                        },
-                        connection,
-                    });
-                }
-                Err(error) => {
-                    warn!(error = %redact_auth_error(&error), "persisted Steam session rejected; requesting reauthentication");
-                }
-            }
-        }
-
-        Err(AuthError::ReauthenticationRequired {
-            session_path: config.session_path.clone(),
-            reason: "the persisted Steam session was absent or rejected; run bootstrap_login",
-        })
+        tokio::time::timeout(
+            Duration::from_secs(90),
+            connect_with_backend(config, &mut LiveAuthBackend),
+        )
+        .await
+        .map_err(|_| AuthError::AuthenticationTimeout)?
     }
 
     /// Explicit name for the first-login path used by a CLI or deployment
-    /// bootstrap command.  It uses the same secure persistence and MFA flow as
-    /// [`Self::connect`], while making the operator intent clear.
+    /// bootstrap command. It also supplies secure persistence for the automatic
+    /// password fallback in [`Self::connect`].
     pub async fn bootstrap_login(
         config: &SteamAuthConfig,
     ) -> Result<AuthenticatedSteam, AuthError> {
@@ -285,8 +262,14 @@ impl SteamAuth {
                     session_path: config.session_path.clone(),
                     reason: "bootstrap_login requires a Steam password",
                 })?;
-        let servers = ServerList::discover().await?;
         let machine_store = SecureFileGuardDataStore::new(config.default_machine_token_path());
+        // steam-vent logs and ignores store read failures. Validate first so an
+        // insecure or corrupt local credential file cannot trigger a new login.
+        machine_store.all_tokens().map_err(|error| match error {
+            GuardStoreError::Io { path, source } => AuthError::MachineTokenIo { path, source },
+            GuardStoreError::Json { path, source } => AuthError::MachineTokenFile { path, source },
+        })?;
+        let servers = ServerList::discover().await?;
         let handler = confirmation_handler(config).await;
         let connection =
             Connection::login(&servers, &config.username, password, machine_store, handler)
@@ -311,6 +294,108 @@ impl SteamAuth {
             connection,
         })
     }
+}
+
+// Keep the retry decision separate from network operations so outage and local
+// credential-file failures cannot accidentally trigger fresh password logins.
+trait AuthBackend {
+    type Authenticated;
+
+    async fn access(
+        &mut self,
+        config: &SteamAuthConfig,
+        token: &str,
+    ) -> Result<Self::Authenticated, AuthError>;
+
+    async fn password(
+        &mut self,
+        config: &SteamAuthConfig,
+    ) -> Result<Self::Authenticated, AuthError>;
+}
+
+struct LiveAuthBackend;
+
+impl AuthBackend for LiveAuthBackend {
+    type Authenticated = AuthenticatedSteam;
+
+    async fn access(
+        &mut self,
+        config: &SteamAuthConfig,
+        token: &str,
+    ) -> Result<AuthenticatedSteam, AuthError> {
+        let servers = ServerList::discover().await?;
+        let connection = Connection::access(&servers, &config.username, token)
+            .await
+            .map_err(AuthError::Login)?;
+        Ok(AuthenticatedSteam {
+            session: SteamSession {
+                username: config.username.clone(),
+                steam_id: connection.steam_id().into(),
+                session_path: config.session_path.clone(),
+            },
+            connection,
+        })
+    }
+
+    async fn password(
+        &mut self,
+        config: &SteamAuthConfig,
+    ) -> Result<AuthenticatedSteam, AuthError> {
+        let mut unattended = config.clone();
+        unattended.confirmation = GuardConfirmation::Device;
+        SteamAuth::bootstrap_login(&unattended)
+            .await
+            .map_err(|error| match error {
+                AuthError::Login(ConnectionError::UnsupportedConfirmationAction(_))
+                | AuthError::Login(ConnectionError::LoginError(LoginError::SteamGuardRequired)) => {
+                    AuthError::GuardRequired
+                }
+                error => error,
+            })
+    }
+}
+
+async fn connect_with_backend<B: AuthBackend>(
+    config: &SteamAuthConfig,
+    backend: &mut B,
+) -> Result<B::Authenticated, AuthError> {
+    if let Some(session) = read_session(&config.session_path)? {
+        if session.account != config.username {
+            return Err(AuthError::ReauthenticationRequired {
+                session_path: config.session_path.clone(),
+                reason: "session belongs to another account; choose a separate session path",
+            });
+        }
+        debug!(account = %config.username, "trying persisted Steam session");
+        match backend.access(config, &session.refresh_token).await {
+            Ok(authenticated) => return Ok(authenticated),
+            Err(AuthError::Login(error)) if token_was_rejected(&error) => {
+                warn!(error = %redact_auth_error(&error), "persisted Steam session rejected; requesting reauthentication");
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    if config.password.as_deref().is_none_or(str::is_empty) {
+        return Err(AuthError::ReauthenticationRequired {
+            session_path: config.session_path.clone(),
+            reason: "the persisted Steam session was absent or rejected",
+        });
+    }
+    backend.password(config).await
+}
+
+fn token_was_rejected(error: &ConnectionError) -> bool {
+    matches!(
+        error,
+        ConnectionError::AccessToken(_)
+            | ConnectionError::LoginError(
+                LoginError::InvalidCredentials
+                    | LoginError::SteamGuardRequired
+                    | LoginError::Unknown(
+                        EResult::Expired | EResult::Revoked | EResult::AccessDenied
+                    )
+            )
+    )
 }
 
 fn reject_key_logging() -> Result<(), AuthError> {
@@ -345,9 +430,7 @@ async fn confirmation_handler(config: &SteamAuthConfig) -> ConfirmationHandler {
             GuardConfirmation::Console => ConfirmationHandler::Console(
                 ConsoleAuthConfirmationHandler::default().or(DeviceConfirmationHandler),
             ),
-            GuardConfirmation::Device => ConfirmationHandler::Device(
-                DeviceConfirmationHandler.or(ConsoleAuthConfirmationHandler::default()),
-            ),
+            GuardConfirmation::Device => ConfirmationHandler::Device(DeviceConfirmationHandler),
         }
     }
 }
@@ -357,7 +440,7 @@ enum ConfirmationHandler {
         EitherConfirmationHandler<SharedSecretAuthConfirmationHandler, DeviceConfirmationHandler>,
     ),
     Console(EitherConfirmationHandler<ConsoleAuthConfirmationHandler, DeviceConfirmationHandler>),
-    Device(EitherConfirmationHandler<DeviceConfirmationHandler, ConsoleAuthConfirmationHandler>),
+    Device(DeviceConfirmationHandler),
     Code(UserProvidedAuthConfirmationHandler<tokio::io::DuplexStream, tokio::io::Sink>),
 }
 
@@ -532,18 +615,33 @@ pub enum AuthError {
     #[error("Steam login failed: {0}")]
     Login(#[source] ConnectionError),
     #[error(
-        "Steam session needs reauthentication ({reason}); provide a password and run bootstrap_login; session file: {session_path}"
+        "Steam session needs reauthentication ({reason}); set DOTA_STEAM_PASSWORD or use bootstrap_login; session file: {session_path}"
     )]
     ReauthenticationRequired {
         session_path: PathBuf,
         reason: &'static str,
     },
+    #[error(
+        "Steam authentication timed out after 90 seconds; if Steam Guard approval is pending, approve it and retry, or set DOTA_STEAM_GUARD_CODE to a fresh code"
+    )]
+    AuthenticationTimeout,
+    #[error(
+        "Steam Guard requires confirmation; set DOTA_STEAM_GUARD_CODE to a fresh email/device code and restart, or use the interactive steam-login command"
+    )]
+    GuardRequired,
     #[error("Steam returned no refresh token")]
     MissingRefreshToken,
     #[error("could not read Steam session file {}: {source}", path.display())]
     SessionIo { path: PathBuf, source: io::Error },
     #[error("could not decode Steam session file {}: {source}", path.display())]
     SessionFile {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
+    #[error("could not read Steam machine token file {}: {source}", path.display())]
+    MachineTokenIo { path: PathBuf, source: io::Error },
+    #[error("could not decode Steam machine token file {}: {source}", path.display())]
+    MachineTokenFile {
         path: PathBuf,
         source: serde_json::Error,
     },
@@ -557,6 +655,205 @@ pub enum AuthError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct FakeAuthBackend {
+        access_result: Option<Result<&'static str, AuthError>>,
+        attempts: Vec<&'static str>,
+    }
+
+    impl AuthBackend for FakeAuthBackend {
+        type Authenticated = &'static str;
+
+        async fn access(
+            &mut self,
+            _config: &SteamAuthConfig,
+            token: &str,
+        ) -> Result<Self::Authenticated, AuthError> {
+            assert_eq!(token, "saved-token");
+            self.attempts.push("session");
+            self.access_result.take().expect("one session attempt")
+        }
+
+        async fn password(
+            &mut self,
+            config: &SteamAuthConfig,
+        ) -> Result<Self::Authenticated, AuthError> {
+            assert_eq!(config.password.as_deref(), Some("configured-password"));
+            self.attempts.push("password");
+            Ok("new-session")
+        }
+    }
+
+    fn auth_fixture(saved_session: bool) -> (SteamAuthConfig, FakeAuthBackend) {
+        let config = SteamAuthConfig::new("bot", tempfile_path("cama-auth-policy"))
+            .with_password("configured-password");
+        if saved_session {
+            write_session(
+                &config.session_path,
+                &SessionFile {
+                    account: "bot".into(),
+                    refresh_token: "saved-token".into(),
+                },
+            )
+            .expect("saved token");
+        }
+        (
+            config,
+            FakeAuthBackend {
+                access_result: Some(Ok("saved-session")),
+                attempts: vec![],
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn saved_session_takes_precedence_over_password() {
+        let (config, mut backend) = auth_fixture(true);
+        assert_eq!(
+            connect_with_backend(&config, &mut backend).await.unwrap(),
+            "saved-session"
+        );
+        assert_eq!(backend.attempts, ["session"]);
+        fs::remove_file(config.session_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_session_uses_configured_password() {
+        let (config, mut backend) = auth_fixture(false);
+        assert_eq!(
+            connect_with_backend(&config, &mut backend).await.unwrap(),
+            "new-session"
+        );
+        assert_eq!(backend.attempts, ["password"]);
+    }
+
+    #[tokio::test]
+    async fn rejected_session_falls_back_to_password_once() {
+        for rejection in [
+            LoginError::InvalidCredentials,
+            LoginError::Unknown(EResult::Expired),
+            LoginError::Unknown(EResult::Revoked),
+        ] {
+            let (config, mut backend) = auth_fixture(true);
+            backend.access_result = Some(Err(AuthError::Login(rejection.into())));
+            assert_eq!(
+                connect_with_backend(&config, &mut backend).await.unwrap(),
+                "new-session"
+            );
+            assert_eq!(backend.attempts, ["session", "password"]);
+            fs::remove_file(config.session_path).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn connection_failure_and_rate_limit_do_not_retry_password() {
+        for failure in [
+            ConnectionError::Network(steam_vent::NetworkError::EOF),
+            ConnectionError::LoginError(LoginError::RateLimited),
+            ConnectionError::LoginError(LoginError::UnavailableAccount),
+        ] {
+            let (config, mut backend) = auth_fixture(true);
+            backend.access_result = Some(Err(AuthError::Login(failure)));
+            assert!(matches!(
+                connect_with_backend(&config, &mut backend).await,
+                Err(AuthError::Login(_))
+            ));
+            assert_eq!(backend.attempts, ["session"]);
+            fs::remove_file(config.session_path).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn absent_password_reports_actionable_reauthentication_error() {
+        for saved in [false, true] {
+            let (mut config, mut backend) = auth_fixture(saved);
+            config.password = None;
+            backend.access_result =
+                Some(Err(AuthError::Login(LoginError::InvalidCredentials.into())));
+            let error = connect_with_backend(&config, &mut backend)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, AuthError::ReauthenticationRequired { .. }));
+            assert!(error.to_string().contains("DOTA_STEAM_PASSWORD"));
+            assert!(!backend.attempts.contains(&"password"));
+            if saved {
+                fs::remove_file(config.session_path).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_session_json_and_foreign_account_do_not_attempt_login() {
+        let (config, mut backend) = auth_fixture(false);
+        write_private_file(&config.session_path, b"not json").unwrap();
+        assert!(matches!(
+            connect_with_backend(&config, &mut backend).await,
+            Err(AuthError::SessionFile { .. })
+        ));
+        write_session(
+            &config.session_path,
+            &SessionFile {
+                account: "another-bot".into(),
+                refresh_token: "saved-token".into(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            connect_with_backend(&config, &mut backend).await,
+            Err(AuthError::ReauthenticationRequired { .. })
+        ));
+        assert!(backend.attempts.is_empty());
+        fs::remove_file(config.session_path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn insecure_session_file_does_not_attempt_login() {
+        use std::os::unix::fs::PermissionsExt;
+        let (config, mut backend) = auth_fixture(true);
+        fs::set_permissions(&config.session_path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(matches!(
+            connect_with_backend(&config, &mut backend).await,
+            Err(AuthError::SessionIo { .. })
+        ));
+        assert!(backend.attempts.is_empty());
+        fs::remove_file(config.session_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unattended_email_guard_returns_without_stdin() {
+        use steam_vent_proto_steam::steammessages_auth_steamclient::{
+            CAuthentication_AllowedConfirmation, EAuthSessionGuardType,
+        };
+        let mut challenge = CAuthentication_AllowedConfirmation::new();
+        challenge.set_confirmation_type(EAuthSessionGuardType::k_EAuthSessionGuardType_EmailCode);
+        let config = SteamAuthConfig::new("bot", "unused.json");
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            confirmation_handler(&config)
+                .await
+                .handle_confirmation(&[challenge.into()]),
+        )
+        .await
+        .expect("unattended confirmation must not wait for input");
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn configured_guard_code_answers_email_challenge() {
+        use steam_vent::auth::ConfirmationAction;
+        use steam_vent_proto_steam::steammessages_auth_steamclient::{
+            CAuthentication_AllowedConfirmation, EAuthSessionGuardType,
+        };
+        let mut challenge = CAuthentication_AllowedConfirmation::new();
+        challenge.set_confirmation_type(EAuthSessionGuardType::k_EAuthSessionGuardType_EmailCode);
+        let config = SteamAuthConfig::new("bot", "unused.json").with_guard_code("ABCDE");
+        let result = confirmation_handler(&config)
+            .await
+            .handle_confirmation(&[challenge.into()])
+            .await;
+        assert!(matches!(result, Some(ConfirmationAction::GuardToken(..))));
+    }
 
     #[test]
     fn auth_config_debug_redacts_secrets() {

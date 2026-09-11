@@ -72,7 +72,9 @@ const MATCH_VIEW_TIMEOUT: Duration = Duration::from_secs(120);
 const DISCORD_DARKER: u32 = 0x2f_31_36;
 const MATCH_CORRECTION_REPLAY_PREFIX: &str = "match_correction:";
 
+mod coordinator;
 mod draft_views;
+mod win_probability;
 
 type LiveEnrichment = MatchEnrichmentService<
     MatchRepository,
@@ -714,6 +716,23 @@ impl RecordedMatchDiscovery for EnrichmentHandler {
             return Ok(RecordedMatchDiscoveryOutcome::Disabled);
         }
 
+        let matches = self.matches.clone();
+        let known = run_blocking(move || {
+            let row = matches
+                .get_match(match_id, Some(guild_id))
+                .map_err(|e| e.to_string())?;
+            let gc = matches
+                .gc_statistics(match_id, Some(guild_id))
+                .map_err(|e| e.to_string())?;
+            Ok::<_, String>((row.and_then(|row| row.valve_match_id), gc))
+        })
+        .await?;
+        if let (Some(valve_match_id), gc) = known {
+            return self
+                .enrich_known_recorded_match(guild_id, match_id, valve_match_id, gc)
+                .await;
+        }
+
         let mut last_result = None;
         for delay in &self.enrichment_retry_delays {
             tokio::time::sleep(*delay).await;
@@ -890,7 +909,8 @@ impl EnrichmentHandler {
                 .as_ref()
                 .map(advantage_data)
                 .unwrap_or_default();
-            if !advantage.radiant_gold.is_empty() || !advantage.radiant_xp.is_empty() {
+            if !advantage.radiant_gold.is_empty() || !advantage.radiant_xp.is_empty()
+                || matches.gc_statistics(match_id, Some(guild_id)).ok().flatten().is_some() {
                 let timeout_seconds =
                     i64::try_from(match_view_timeout.as_secs()).unwrap_or(i64::MAX);
                 response = response.action_row(match_view_buttons(
@@ -1556,7 +1576,25 @@ impl EnrichmentHandler {
                         ));
                     } else {
                         match matches.parsed_stats_coverage(match_id, Some(guild_id)) {
-                            Ok(coverage) if parsed_stats_complete(coverage) => {
+                            Ok(coverage)
+                                if parsed_stats_complete(coverage)
+                                    && matches
+                                        .gc_statistics(match_id, Some(guild_id))
+                                        .ok()
+                                        .flatten()
+                                        .is_none_or(|_| {
+                                            matches
+                                                .raw_enrichment_data(match_id, Some(guild_id))
+                                                .ok()
+                                                .flatten()
+                                                .as_deref()
+                                                .is_some_and(|raw| {
+                                                    !cama_app::match_discovery::statistics_need_api(
+                                                        raw,
+                                                    )
+                                                })
+                                        }) =>
+                            {
                                 chunk_refreshed += 1;
                             }
                             Ok(coverage) => chunk_partials.push((
@@ -2159,7 +2197,8 @@ impl EnrichmentHandler {
                 .map(advantage_data)
                 .unwrap_or_default();
             let mut response = InteractionResponse::message(String::new()).embed(embed);
-            if !advantage.radiant_gold.is_empty() || !advantage.radiant_xp.is_empty() {
+            if !advantage.radiant_gold.is_empty() || !advantage.radiant_xp.is_empty()
+                || win_probability::load_graph(&matches, guild_id, match_data.match_id)?.is_some() {
                 let expires_at = unix_now().saturating_add(timeout_seconds);
                 response = response.action_row(match_view_buttons(
                     guild_id,
@@ -2224,6 +2263,9 @@ impl EnrichmentHandler {
             )
             .await;
         }
+        if route.page == 2 {
+            return self.show_win_probability(route, responder).await;
+        }
         if route.page == 1 {
             // Rasterizing the graph is CPU work, so it renders on the same
             // blocking thread that loads the data rather than on the async
@@ -2240,10 +2282,7 @@ impl EnrichmentHandler {
             .await
             .map_err(InteractionHandlerError::from)?;
             let Some(image) = rendered else {
-                if let Err(response_error) = responder.defer(false).await {
-                    warn!(%response_error, "unable to acknowledge empty match graph");
-                }
-                return Ok(());
+                return respond_initial(&responder, InteractionResponse::message("Gold/XP timeline data is not available yet. Try again later, or reopen `/matches view` after this view expires.").ephemeral()).await;
             };
             return responder
                 .update(
@@ -2327,7 +2366,7 @@ impl MatchViewRoute {
             expires_at: parts.next()?.parse().ok()?,
             page: parts.next()?.parse().ok()?,
         };
-        (parts.next().is_none() && route.page <= 1).then_some(route)
+        (parts.next().is_none() && route.page <= 2).then_some(route)
     }
 }
 
@@ -2340,16 +2379,22 @@ fn match_view_buttons(
     InteractionActionRow::buttons(vec![
         InteractionButton::new(
             format!("{COMPONENT_PREFIX}match:{guild_id}:{match_id}:{expires_at}:0"),
-            "< Prev",
+            "Stats",
         )
         .style(InteractionButtonStyle::Secondary)
         .disabled(page == 0),
         InteractionButton::new(
             format!("{COMPONENT_PREFIX}match:{guild_id}:{match_id}:{expires_at}:1"),
-            "Next >",
+            "Gold / XP",
         )
         .style(InteractionButtonStyle::Primary)
         .disabled(page == 1),
+        InteractionButton::new(
+            format!("{COMPONENT_PREFIX}match:{guild_id}:{match_id}:{expires_at}:2"),
+            "Win probability",
+        )
+        .style(InteractionButtonStyle::Primary)
+        .disabled(page == 2),
     ])
 }
 
@@ -2664,6 +2709,8 @@ fn embed_participants(
             kills: value_i64(&participant.kills),
             deaths: value_i64(&participant.deaths),
             assists: value_i64(&participant.assists),
+            gpm: value_i64(&participant.gpm),
+            xpm: value_i64(&participant.xpm),
             hero_damage: value_i64(&participant.hero_damage),
             net_worth: value_i64(&participant.net_worth),
             lane_role: value_i64(&participant.lane_role),

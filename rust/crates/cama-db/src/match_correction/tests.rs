@@ -2795,8 +2795,10 @@ CREATE TABLE matches (
     team2_players TEXT,
     win_reward_jc INTEGER,
     betting_mode TEXT,
-    bonuses_paid INTEGER DEFAULT 0
+    bonuses_paid INTEGER DEFAULT 0,
+    pending_match_id INTEGER
 );
+CREATE TABLE pending_matches(pending_match_id INTEGER PRIMARY KEY,guild_id INTEGER NOT NULL,payload TEXT NOT NULL);
 CREATE TABLE match_participants (
     match_id INTEGER NOT NULL,
     discord_id INTEGER NOT NULL,
@@ -2972,3 +2974,47 @@ CREATE TABLE low_priority_state (
     PRIMARY KEY(discord_id,guild_id)
 );
 "#;
+
+#[test]
+fn correction_waits_until_original_recording_is_fully_finalized() {
+    let fixture = Fixture::new();
+    let seeded = fixture.seed_match(89000);
+    let connection = fixture.connection();
+    connection
+        .execute(
+            "INSERT INTO pending_matches(pending_match_id,guild_id,payload) VALUES (44,?1,'{}')",
+            [GUILD],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE matches SET pending_match_id=44 WHERE match_id=?1",
+            [seeded.match_id],
+        )
+        .unwrap();
+    assert!(matches!(
+        fixture.repository.claim_match_correction(
+            seeded.match_id,
+            Some(GUILD),
+            MatchSide::Dire,
+            "owner",
+            NOW,
+            60
+        ),
+        Err(MatchCorrectionError::Invariant(_))
+    ));
+    connection
+        .execute("DELETE FROM pending_matches WHERE pending_match_id=44", [])
+        .unwrap();
+    fixture
+        .repository
+        .claim_match_correction(
+            seeded.match_id,
+            Some(GUILD),
+            MatchSide::Dire,
+            "owner",
+            NOW,
+            60,
+        )
+        .unwrap();
+}

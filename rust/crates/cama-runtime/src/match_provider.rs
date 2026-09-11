@@ -63,9 +63,7 @@ use cama_db::match_correction_repository::MatchCorrectionRepository;
 use cama_db::match_recording_repository::{
     IncomeAwardCompensation, IncomeAwardReceipt, IncomeAwardRequest, MatchRecordingRepository,
 };
-use cama_db::match_runtime::{
-    PendingMatchRecord, PendingMatchRepository, PendingMatchRepositoryError, PendingMatchState,
-};
+use cama_db::match_runtime::{PendingMatchRecord, PendingMatchRepository, PendingMatchState};
 use cama_db::match_voting::{MatchVotingRepository, PendingVoteKey};
 use cama_db::moderation::{ModerationEventType, ModerationRepository};
 use cama_db::opendota_player::OpenDotaPlayerRepository;
@@ -82,6 +80,7 @@ use cama_db::shop_runtime::{
 use cama_db::soft_avoid_repository::SoftAvoidRepository;
 use cama_domain::bankruptcy::BankruptcyPenaltyPolicy;
 use cama_domain::discord_content::chunk_default_discord_content;
+use cama_domain::dota_hosting::DotaHostingOptions;
 use cama_domain::dota_lobby::{STEAM_INDIVIDUAL_BASE, account_id as dota_account_id};
 use cama_domain::economy_scaling::scale_minigame_jc_delta;
 use cama_domain::formatting::{
@@ -131,8 +130,8 @@ use crate::push_notification_provider::PushNotificationHooks;
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, InteractionEmbed,
     InteractionHandler, InteractionHandlerError, InteractionOption, InteractionRequest,
-    InteractionResponder, InteractionResponse, RegistrationError, RegistrationProvider,
-    RegistryBuilder,
+    InteractionResponder, InteractionResponse, InteractionValue, RegistrationError,
+    RegistrationProvider, RegistryBuilder,
 };
 use crate::reminder_provider::{ReminderDeliveryReport, ReminderHooks};
 use crate::runtime_ports::{
@@ -254,6 +253,9 @@ pub struct HostedMatchResult {
     pub winning_team: String,
     pub expected_roster: Vec<HostedMatchRosterEntry>,
     pub players: Vec<HostedMatchPlayer>,
+    /// Sparse coordinator statistics; absent fields remain eligible for API enrichment.
+    #[serde(default)]
+    pub postgame_statistics: Option<serde_json::Value>,
 }
 
 /// Process-local lease for the finalization boundary of one pending match.
@@ -640,7 +642,7 @@ impl RegistrationProvider for MatchRegistrationProvider {
 }
 
 fn shuffle_options() -> Vec<CommandOptionSpec> {
-    vec![
+    let mut options = vec![
         choices(
             CommandOptionSpec::new("mode", "Team-shuffle mode", CommandOptionKind::String),
             &[
@@ -671,7 +673,137 @@ fn shuffle_options() -> Vec<CommandOptionSpec> {
                 ("🧀 Whine & Cheese", "lowskill"),
             ],
         ),
+    ];
+    options.extend(dota_shuffle_options());
+    options
+}
+
+const DOTA_SHUFFLE_OPTIONS: &[(&str, &str)] = &[
+    ("hosting", "hosting"),
+    ("server_region", "region"),
+    ("game_mode", "game_mode"),
+    ("first_pick", "first_pick"),
+    ("start", "start"),
+    ("tv_delay", "tv_delay"),
+    ("league_id", "league_id"),
+    ("visibility", "visibility"),
+];
+
+fn dota_shuffle_options() -> Vec<CommandOptionSpec> {
+    let integer = |name: &str, description: &str, minimum, maximum| {
+        let mut option = CommandOptionSpec::new(name, description, CommandOptionKind::Integer);
+        option.min_integer = Some(minimum);
+        option.max_integer = Some(maximum);
+        option
+    };
+    let integer_choices = |name: &str, description: &str, values: &[(&str, i64)]| {
+        let mut option = CommandOptionSpec::new(name, description, CommandOptionKind::Integer);
+        option.choices = values
+            .iter()
+            .map(|(name, value)| CommandOptionChoice::Integer {
+                name: (*name).to_owned(),
+                value: *value,
+            })
+            .collect();
+        option
+    };
+    vec![
+        choices(
+            CommandOptionSpec::new(
+                "hosting",
+                "Admin: who creates this match's Dota lobby",
+                CommandOptionKind::String,
+            ),
+            &[("Bot hosted", "bot"), ("Manual (no Dota bot)", "manual")],
+        ),
+        integer(
+            "server_region",
+            "Admin: Dota server region ID for this match",
+            1,
+            100,
+        ),
+        integer_choices(
+            "game_mode",
+            "Admin: Dota game mode for this match",
+            &[
+                ("All Pick", 1),
+                ("Captains Mode", 2),
+                ("Random Draft", 3),
+                ("Single Draft", 4),
+                ("All Random", 5),
+                ("Least Played", 12),
+                ("Captains Draft", 16),
+                ("Ability Draft", 18),
+                ("All Random Deathmatch", 20),
+                ("Ranked All Pick", 22),
+                ("Turbo", 23),
+            ],
+        ),
+        choices(
+            CommandOptionSpec::new(
+                "first_pick",
+                "Admin: first-pick side for this match",
+                CommandOptionKind::String,
+            ),
+            &[
+                ("Radiant", "radiant"),
+                ("Dire", "dire"),
+                ("Random", "random"),
+            ],
+        ),
+        choices(
+            CommandOptionSpec::new(
+                "start",
+                "Admin: automatic start or wait for /admin dota start",
+                CommandOptionKind::String,
+            ),
+            &[
+                ("Automatic when everyone is ready", "automatic"),
+                ("Admin starts manually", "manual"),
+            ],
+        ),
+        integer_choices(
+            "tv_delay",
+            "Admin: Dota TV delay for this match",
+            &[
+                ("No added delay (0)", 0),
+                ("1 minute", 1),
+                ("2 minutes", 2),
+                ("5 minutes", 3),
+                ("15 minutes", 4),
+            ],
+        ),
+        integer(
+            "league_id",
+            "Admin: league ID for this match",
+            1,
+            i64::from(u32::MAX),
+        ),
+        integer_choices(
+            "visibility",
+            "Admin: Dota lobby visibility for this match",
+            &[("Public", 0), ("Unlisted", 2)],
+        ),
     ]
+}
+
+fn requested_dota_hosting(options: &[InteractionOption]) -> Result<DotaHostingOptions, String> {
+    let mut values = serde_json::Map::new();
+    for (name, field) in DOTA_SHUFFLE_OPTIONS {
+        let Some(option) = options.iter().find(|option| option.name == *name) else {
+            continue;
+        };
+        let value = match &option.value {
+            InteractionValue::String(value) => json!(value),
+            InteractionValue::Integer(value) => json!(value),
+            _ => return Err(format!("Invalid value for {name}.")),
+        };
+        values.insert((*field).to_owned(), value);
+    }
+    let options: DotaHostingOptions = serde_json::from_value(values.into())
+        .map_err(|error| format!("Invalid Dota lobby options: {error}"))?;
+    options.validate()?;
+    Ok(options)
 }
 
 fn record_options() -> Vec<CommandOptionSpec> {
@@ -722,6 +854,20 @@ struct ProductionMatchRewardControl {
 
 trait MatchVanityTaxSource: Send + Sync {
     fn taxable_ids(&self, guild_id: i64) -> BTreeSet<i64>;
+}
+
+struct FrozenMatchVanityTax {
+    guild_id: i64,
+    ids: BTreeSet<i64>,
+}
+impl MatchVanityTaxSource for FrozenMatchVanityTax {
+    fn taxable_ids(&self, guild_id: i64) -> BTreeSet<i64> {
+        if guild_id == self.guild_id {
+            self.ids.clone()
+        } else {
+            BTreeSet::new()
+        }
+    }
 }
 
 struct PersistentMatchVanityTax(Arc<PersistentVanityTaxService>);
@@ -1324,7 +1470,7 @@ fn pacific_mana_day(timestamp: i64) -> Result<String, String> {
     Ok(effective.format("%Y-%m-%d").to_string())
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct MatchConfig {
     admin_user_ids: BTreeSet<i64>,
     bet_lock_seconds: i64,
@@ -1531,6 +1677,7 @@ struct MatchCommandContext {
 
 #[derive(Clone, Debug)]
 struct PrepareShuffleRequest {
+    source_lobby_message_id: Option<u64>,
     guild_id: i64,
     lobby_kind: LobbyKind,
     player_ids: Vec<i64>,
@@ -1540,6 +1687,7 @@ struct PrepareShuffleRequest {
     shuffle_mode: String,
     shuffle_timestamp: i64,
     is_bomb_pot: bool,
+    dota_hosting: DotaHostingOptions,
 }
 
 #[derive(Clone, Debug)]
@@ -1636,6 +1784,68 @@ fn hosted_winning_team_number(winning_team: &str) -> Result<i64, String> {
         "dire" => Ok(2),
         _ => Err("winning_team must be 'radiant' or 'dire'.".to_owned()),
     }
+}
+
+fn validate_hosted_statistics(result: &HostedMatchResult) -> Result<(), String> {
+    let Some(payload) = &result.postgame_statistics else {
+        return Ok(());
+    };
+    if payload.get("match_id").and_then(serde_json::Value::as_u64) != Some(result.valve_match_id)
+        || payload
+            .get("radiant_win")
+            .and_then(serde_json::Value::as_bool)
+            != Some(result.winning_team == "radiant")
+    {
+        return Err("coordinator statistics conflict with the validated match result".into());
+    }
+    let players = payload
+        .get("players")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("coordinator statistics have no player roster")?;
+    let mut accounts = BTreeSet::new();
+    for player in players {
+        let account = player
+            .get("account_id")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|id| u32::try_from(id).ok())
+            .ok_or("coordinator statistics contain an invalid account")?;
+        let slot = player
+            .get("player_slot")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|slot| *slot <= 4 || (128..=132).contains(slot))
+            .ok_or("coordinator statistics contain an invalid player slot")?;
+        if !accounts.insert(account)
+            || !result
+                .players
+                .iter()
+                .any(|p| p.account32 == account && p.radiant == (slot < 128))
+        {
+            return Err("coordinator statistics conflict with the validated player roster".into());
+        }
+    }
+    if players.len() != 10 || accounts.len() != result.players.len() {
+        return Err("coordinator statistics require the complete validated player roster".into());
+    }
+    Ok(())
+}
+
+fn save_hosted_statistics(
+    path: &Path,
+    match_id: i64,
+    result: &HostedMatchResult,
+) -> Result<(), String> {
+    if let Some(payload) = &result.postgame_statistics {
+        MatchRecordingRepository::new(path)
+            .save_gc_statistics(
+                match_id,
+                Some(result.guild_id),
+                i64::try_from(result.valve_match_id)
+                    .map_err(|_| "Valve match ID exceeds SQLite INTEGER range")?,
+                &payload.to_string(),
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 fn validate_hosted_pending_match(
@@ -1881,6 +2091,8 @@ impl MatchHandler {
             return Err("winning_team must be 'radiant' or 'dire'.".to_owned());
         }
 
+        validate_hosted_statistics(&result)?;
+
         // Reserve finalization before reading the pending row. Otherwise an
         // abort could remove it after validation and we would record a stale
         // snapshot whose wagers had already been refunded.
@@ -1937,7 +2149,8 @@ impl MatchHandler {
                     .map_err(|error| error.to_string())?
                     .ok_or_else(|| format!("recorded match {match_id} disappeared"))?;
                 validate_hosted_existing_match(&path, &summary, &result_for_task, valve_match_id)?;
-                worker.ensure_valve_match_id(match_id, result_for_task.guild_id, valve_match_id)
+                worker.ensure_valve_match_id(match_id, result_for_task.guild_id, valve_match_id)?;
+                save_hosted_statistics(&path, match_id, &result_for_task)
             })
             .await
             .map_err(|error| {
@@ -2005,40 +2218,33 @@ impl MatchHandler {
             })??;
         }
 
+        let pending = self.prepare_recording_effects(&pending).await?;
         let worker = self.clone();
         let pending_for_task = pending.clone();
         let winning_for_task = result.winning_team.clone();
+        let statistics_for_task = result.clone();
         let task_guard = guard.clone();
         let recorded = tokio::task::spawn_blocking(move || {
             let _guard = task_guard;
-            worker.record_match_blocking_with_valve(
+            let recorded = worker.record_match_blocking_with_valve(
                 &pending_for_task,
                 &winning_for_task,
                 None,
                 Some(valve_match_id),
-            )
+            )?;
+            // Persist before pending cleanup and publication. A failed write
+            // leaves the pending row so the recording saga can retry safely.
+            save_hosted_statistics(
+                &worker.database_path,
+                recorded.match_id,
+                &statistics_for_task,
+            )?;
+            Ok::<_, String>(recorded)
         })
         .await;
 
         // Keep the finalization key through pending cleanup so an abort cannot
         // observe the committed core row and independently refund its bets.
-        let cleanup = if matches!(recorded, Ok(Ok(_))) {
-            let repository = self.pending.clone();
-            let guild_id = pending.guild_id;
-            let pending_match_id = pending.pending_match_id;
-            let cleanup_guard = guard.clone();
-            Some(
-                tokio::task::spawn_blocking(move || {
-                    let _guard = cleanup_guard;
-                    repository.delete_pending_match(guild_id, pending_match_id)
-                })
-                .await,
-            )
-        } else {
-            None
-        };
-        drop(guard);
-
         let recorded = match recorded {
             Ok(Ok(recorded)) => recorded,
             Ok(Err(error)) => {
@@ -2061,14 +2267,11 @@ impl MatchHandler {
             }
         };
         self.cancel_betting_tasks(pending.guild_id, Some(pending.pending_match_id));
-        if let Some(cleanup) = cleanup {
-            cleanup
-                .map_err(|error| format!("hosted record cleanup task failed: {error}"))?
-                .map_err(|error| error.to_string())?;
-        }
 
         self.finish_recorded_match(&pending, &result.winning_team, &recorded)
-            .await;
+            .await?;
+        self.complete_recording_pending(&pending).await?;
+        drop(guard);
         debug!(
             match_id = recorded.match_id,
             pending_match_id = pending.pending_match_id,
@@ -2079,6 +2282,9 @@ impl MatchHandler {
     }
 
     async fn recover_pending_match(&self, pending: PendingMatchRecord) -> Result<(), String> {
+        if self.recover_shuffle_setup(&pending).await? {
+            return Ok(());
+        }
         let Some(guard) =
             self.try_acquire_finalization_guard(pending.guild_id, pending.pending_match_id)
         else {
@@ -2100,12 +2306,16 @@ impl MatchHandler {
             // A committed core row means `/record` crossed the durable point.
             // Re-enter the idempotent core/money path to finish any stranded
             // bet, reward, streak, or loan phase, then remove the obsolete
-            // pending row.  Public presentation is intentionally not replayed:
-            // Python also treats it as best-effort after the durable clear.
-            let winner = MatchRepository::new(&self.database_path)
-                .get_match(match_id, Some(pending.guild_id))
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| format!("recorded match {match_id} disappeared"))?;
+            // pending row after the durable result delivery succeeds.
+            let path = self.database_path.clone();
+            let guild = pending.guild_id;
+            let winner = tokio::task::spawn_blocking(move || {
+                MatchRepository::new(path).get_match(match_id, Some(guild))
+            })
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("recorded match {match_id} disappeared"))?;
             let valve_match_id = winner.valve_match_id;
             let winner = sql_i64(&winner.winning_team).map_or("dire", |winning_team| {
                 if winning_team == 1 { "radiant" } else { "dire" }
@@ -2113,6 +2323,7 @@ impl MatchHandler {
             let worker = self.clone();
             let pending_for_task = pending.clone();
             let winner = winner.to_owned();
+            let winner_for_effects = winner.clone();
             let task_guard = guard.clone();
             let recorded = tokio::task::spawn_blocking(move || {
                 let _guard = task_guard;
@@ -2125,12 +2336,8 @@ impl MatchHandler {
             })
             .await
             .map_err(|error| format!("record recovery task failed: {error}"))??;
-            self.emit_post_match_hooks(
-                recorded.bet_settlement,
-                Some(recorded.easter_eggs),
-                recorded.debrief,
-            )
-            .await;
+            self.finish_recorded_match(&pending, &winner_for_effects, &recorded)
+                .await?;
             self.cancel_betting_tasks(pending.guild_id, Some(pending.pending_match_id));
             let repository = self.pending.clone();
             let cleanup_guard = guard.clone();
@@ -2185,6 +2392,21 @@ impl MatchHandler {
         context: MatchCommandContext,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
+        if context.options.iter().any(|option| {
+            DOTA_SHUFFLE_OPTIONS
+                .iter()
+                .any(|(name, _)| option.name == *name)
+        }) && !self.is_admin(&context)
+        {
+            return followup_ephemeral(
+                &responder,
+                "❌ Only admins can override Dota lobby settings. Omit those options to use the server defaults.",
+            ).await;
+        }
+        let dota_hosting = match requested_dota_hosting(&context.options) {
+            Ok(options) => options,
+            Err(error) => return followup_ephemeral(&responder, &format!("❌ {error}")).await,
+        };
         let explicit_kind = string_option(&context.options, "lobby")
             .map(parse_lobby_kind)
             .transpose()?;
@@ -2363,6 +2585,7 @@ impl MatchHandler {
         let shuffle_timestamp = unix_seconds();
         let lobby_wait_minutes = lobby_wait_minutes(&snapshot, &player_ids, shuffle_timestamp);
         let request = PrepareShuffleRequest {
+            source_lobby_message_id: snapshot.lobby_message_id,
             guild_id: context.guild_id,
             lobby_kind,
             player_ids,
@@ -2374,6 +2597,7 @@ impl MatchHandler {
                 .unwrap_or_else(|| "balanced".to_owned()),
             shuffle_timestamp,
             is_bomb_pot: fastrand::f64() < self.config.bomb_pot_chance,
+            dota_hosting,
         };
         let worker = self.clone();
         let prepared = tokio::task::spawn_blocking(move || worker.prepare_shuffle(request)).await;
@@ -2677,43 +2901,30 @@ impl MatchHandler {
     ) -> Result<AbortFinalization, String> {
         let guild_id = pending.guild_id;
         let pending_match_id = pending.pending_match_id;
-        // A committed core row means `/record` crossed the durable point, so
-        // this abort must not refund, announce, or credit anything.
-        // `PendingMatchRepository::finalize_abort` re-verifies this inside its
-        // own transaction; checking first keeps the refund calls and thread
-        // announcements from running when an abort races restart recovery.
-        let matches = MatchRepository::new(&self.database_path);
-        let record_guard = guard.clone();
-        let recorded = tokio::task::spawn_blocking(move || {
-            let _guard = record_guard;
-            matches.match_id_for_pending_match(guild_id, pending_match_id)
-        })
-        .await
-        .map_err(|error| format!("abort record-guard task failed: {error}"))?
-        .map_err(|error| error.to_string())?;
-        if recorded.is_some() {
-            return Ok(AbortFinalization::AlreadyRecorded);
-        }
         let bets = self.bets.clone();
-        let seeds = self.seeds.clone();
-        let shuffle_timestamp = pending.state.shuffle_timestamp.unwrap_or_default();
-        let refund_guard = guard.clone();
-        tokio::task::spawn_blocking(move || {
-            let _guard = refund_guard;
-            bets.refund_pending_bets_atomic(
-                Some(guild_id),
-                shuffle_timestamp,
-                Some(pending_match_id),
-            )
-            .map_err(|error| error.to_string())?;
-            seeds
-                .abort_seed_atomic(Some(guild_id), pending_match_id)
-                .map_err(|error| error.to_string())?;
-            Ok::<_, String>(())
+        let participant_ids = if pending.state.is_draft {
+            Vec::new()
+        } else {
+            pending
+                .state
+                .participant_ids()
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
+        let task_guard = guard.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            let _guard = task_guard;
+            bets.abort_pending_match_atomic(Some(guild_id), pending_match_id, &participant_ids)
         })
         .await
-        .map_err(|error| format!("abort refund task failed: {error}"))?
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("atomic abort task failed: {error}"))?;
+        match outcome {
+            Err(cama_db::betting_service_repository::BettingServiceRepositoryError::MatchAlreadyRecorded(
+                _,
+            )) => return Ok(AbortFinalization::AlreadyRecorded),
+            Err(error) => return Err(error.to_string()),
+            Ok(_) => {}
+        }
         self.cancel_betting_tasks(guild_id, Some(pending_match_id));
 
         if let Some(thread_id) = pending
@@ -2749,30 +2960,7 @@ impl MatchHandler {
             }
         }
 
-        let repository = self.pending.clone();
-        let participant_ids = if pending.state.is_draft {
-            Vec::new()
-        } else {
-            pending
-                .state
-                .participant_ids()
-                .into_iter()
-                .collect::<Vec<_>>()
-        };
-        let cleanup_guard = guard.clone();
-        let outcome = tokio::task::spawn_blocking(move || {
-            let _guard = cleanup_guard;
-            repository.finalize_abort(guild_id, pending_match_id, &participant_ids)
-        })
-        .await
-        .map_err(|error| format!("abort cleanup task failed: {error}"))?;
-        match outcome {
-            Ok(_) => Ok(AbortFinalization::Aborted),
-            Err(PendingMatchRepositoryError::MatchAlreadyRecorded(_)) => {
-                Ok(AbortFinalization::AlreadyRecorded)
-            }
-            Err(error) => Err(error.to_string()),
-        }
+        Ok(AbortFinalization::Aborted)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2799,6 +2987,10 @@ impl MatchHandler {
             )
             .await;
         };
+        let pending = match self.prepare_recording_effects(&pending).await {
+            Ok(pending) => pending,
+            Err(error) => return followup_ephemeral(&responder, &format!("❌ {error}")).await,
+        };
         let worker = self.clone();
         let pending_for_task = pending.clone();
         let winning_for_task = winning_result.to_owned();
@@ -2812,29 +3004,9 @@ impl MatchHandler {
             )
         })
         .await;
-        // The core and every retryable money phase are durable once the task
-        // succeeds. Clear the pending token while the finalize key is still
-        // held (and before any Discord work): releasing the key first would
-        // open a window where a racing abort vote still sees the pending row
-        // and stacks a spurious exclusion credit on the completed match, and
-        // an announcement failure must not leave a completed match selectable
-        // for `/record`.
-        let cleanup = if matches!(recorded, Ok(Ok(_))) {
-            let repository = self.pending.clone();
-            let guild_id = pending.guild_id;
-            let pending_match_id = pending.pending_match_id;
-            let cleanup_guard = guard.clone();
-            Some(
-                tokio::task::spawn_blocking(move || {
-                    let _guard = cleanup_guard;
-                    repository.delete_pending_match(guild_id, pending_match_id)
-                })
-                .await,
-            )
-        } else {
-            None
-        };
-        drop(guard);
+        // Keep the durable pending work and process guard through final result
+        // delivery. The committed match row blocks abort and conflicting retries;
+        // recovery finishes interrupted money/presentation before cleanup.
         let recorded = match recorded {
             Ok(Ok(recorded)) => recorded,
             Ok(Err(error)) => {
@@ -2853,15 +3025,12 @@ impl MatchHandler {
             }
         };
         self.cancel_betting_tasks(pending.guild_id, Some(pending.pending_match_id));
-        if let Some(cleanup) = cleanup {
-            cleanup
-                .map_err(|error| format!("record cleanup task failed: {error}"))?
-                .map_err(|error| error.to_string())?;
-        }
 
         let streaming = self
             .finish_recorded_match(&pending, winning_result, &recorded)
-            .await;
+            .await?;
+        self.complete_recording_pending(&pending).await?;
+        drop(guard);
 
         let admin_override = self.is_admin(&context) && non_admin_count < 3;
         let winner = if winning_result == "radiant" {
@@ -2903,67 +3072,47 @@ impl MatchHandler {
         Ok(())
     }
 
-    async fn record_pet_match_activity(&self, pending: &PendingMatchRecord, match_id: i64) {
+    async fn record_pet_match_activity(
+        &self,
+        pending: &PendingMatchRecord,
+        match_id: i64,
+    ) -> Result<(), String> {
         let participant_ids = pending
             .state
             .participant_ids()
             .into_iter()
-            .filter(|discord_id| *discord_id > 0)
+            .filter(|id| *id > 0)
             .collect::<Vec<_>>();
         let guild_id = pending.guild_id;
         let source_key = format!("match:{match_id}");
-        let occurred_at = unix_seconds();
-        let database_path = self.database_path.clone();
-        if let Err(error) = tokio::task::spawn_blocking(move || {
-            let repository = PetEvolutionRepository::new(database_path);
-            for discord_id in participant_ids {
-                // Match recording is already durable. Pet upbringing is a
-                // best-effort side effect and must never roll the match back.
-                let _ = repository.record_activity(
-                    discord_id,
-                    Some(guild_id),
-                    PetActivity::MatchRecorded,
-                    &source_key,
-                    occurred_at,
-                );
+        // Day buckets also form part of pet idempotency. Preserve the original
+        // event time so a next-day retry cannot award another day of activity.
+        let occurred_at = pending
+            .state
+            .extra
+            .get("recording_policy")
+            .and_then(|policy| policy.get("recorded_at"))
+            .and_then(serde_json::Value::as_i64)
+            .or(pending.state.shuffle_timestamp)
+            .unwrap_or_else(unix_seconds);
+        let path = self.database_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let repository = PetEvolutionRepository::new(path);
+            for id in participant_ids {
+                repository
+                    .record_activity(
+                        id,
+                        Some(guild_id),
+                        PetActivity::MatchRecorded,
+                        &source_key,
+                        occurred_at,
+                    )
+                    .map_err(|error| error.to_string())?;
             }
+            Ok::<(), String>(())
         })
         .await
-        {
-            warn!(%error, match_id, "pet match activity task failed");
-        }
-    }
-
-    async fn finalize_record_thread(
-        discord: Arc<dyn DiscordTransport>,
-        thread_id: u64,
-        lobby_label: String,
-        winner: String,
-        archive_delay: Duration,
-    ) {
-        if let Err(error) = discord
-            .send_message(
-                thread_id,
-                DiscordMessage::silent(InteractionResponse::message(format!(
-                    "🏆 **{lobby_label} Match Complete - {winner} Victory!**"
-                ))),
-            )
-            .await
-        {
-            debug!(%error, thread_id, "record thread result send failed");
-        }
-        tokio::time::sleep(archive_delay).await;
-        if let Err(error) = discord
-            .edit_thread(
-                thread_id,
-                &format!("✅ {lobby_label} Match Complete - {winner} Won"),
-                true,
-                true,
-            )
-            .await
-        {
-            debug!(%error, thread_id, "record thread archive failed");
-        }
+        .map_err(|error| error.to_string())?
     }
 
     fn spawn_moderation_completion_notifications(&self, guild_id: i64, match_id: i64) {
@@ -3344,91 +3493,120 @@ impl MatchHandler {
             .map_err(|error| error.to_string())
     }
 
-    /// Complete the post-core side effects shared by manual and hosted
-    /// recording. Every operation here is best effort after the durable match
-    /// and economy phases have committed; retryable money work remains inside
-    /// `record_match_blocking_with_valve`.
+    async fn complete_recording_pending(&self, pending: &PendingMatchRecord) -> Result<(), String> {
+        let repository = self.pending.clone();
+        let guild = pending.guild_id;
+        let id = pending.pending_match_id;
+        tokio::task::spawn_blocking(move || repository.delete_pending_match(guild, id))
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    async fn persist_recording_effect(
+        &self,
+        pending: &PendingMatchRecord,
+        key: &str,
+        value: serde_json::Value,
+    ) -> Result<PendingMatchRecord, String> {
+        let repository = self.pending.clone();
+        let guild = pending.guild_id;
+        let id = pending.pending_match_id;
+        let key = key.to_owned();
+        tokio::task::spawn_blocking(move || {
+            repository.mutate_pending_match(guild, id, move |state| {
+                state.extra.entry(key).or_insert(value);
+            })
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?
+        .map(|(record, ())| record)
+        .ok_or_else(|| "pending match no longer exists; recording was cancelled".to_owned())
+    }
+
+    async fn prepare_recording_effects(
+        &self,
+        pending: &PendingMatchRecord,
+    ) -> Result<PendingMatchRecord, String> {
+        if pending.state.extra.contains_key("record_streaming_ids") {
+            return Ok(pending.clone());
+        }
+        let ids = pending
+            .state
+            .participant_ids()
+            .into_iter()
+            .filter_map(|id| u64::try_from(id).ok())
+            .collect::<Vec<_>>();
+        let streaming = if self.config.streaming_bonus > 0 {
+            self.discord
+                .streaming_member_ids(
+                    u64::try_from(pending.guild_id).map_err(|error| error.to_string())?,
+                    &ids,
+                )
+                .await?
+        } else {
+            BTreeSet::new()
+        };
+        self.persist_recording_effect(pending, "record_streaming_ids", json!(streaming))
+            .await
+    }
+
+    /// Pending remains the durable work item until money and the canonical
+    /// public result are delivered. Restart recovery re-enters this path.
     async fn finish_recorded_match(
         &self,
         pending: &PendingMatchRecord,
         winning_result: &str,
         recorded: &RecordedMatch,
-    ) -> BTreeSet<u64> {
-        self.record_pet_match_activity(pending, recorded.match_id)
-            .await;
-        self.emit_post_match_hooks(
-            recorded.bet_settlement.clone(),
-            Some(recorded.easter_eggs.clone()),
-            recorded.debrief.clone(),
-        )
-        .await;
-
-        if let Some(thread_id) = pending
+    ) -> Result<BTreeSet<u64>, String> {
+        let pending = self.prepare_recording_effects(pending).await?;
+        let streaming: BTreeSet<u64> =
+            serde_json::from_value(pending.state.extra["record_streaming_ids"].clone())
+                .map_err(|error| error.to_string())?;
+        let config: MatchConfig = match pending
             .state
-            .thread_shuffle_thread_id
-            .and_then(|thread_id| u64::try_from(thread_id).ok())
+            .extra
+            .get("recording_policy")
+            .and_then(|policy| policy.get("config"))
         {
-            let discord = Arc::clone(&self.discord);
-            let lobby = parse_persisted_lobby_kind(pending.state.lobby_kind.as_deref());
-            let winner = if winning_result == "radiant" {
-                "Radiant"
-            } else {
-                "Dire"
-            };
-            tokio::spawn(Self::finalize_record_thread(
-                discord,
-                thread_id,
-                lobby.label().to_owned(),
-                winner.to_owned(),
-                Duration::from_secs(15),
-            ));
-        }
-
-        let streaming = self.apply_streaming_bonus(pending, recorded.match_id).await;
-        self.spawn_moderation_completion_notifications(pending.guild_id, recorded.match_id);
-        self.spawn_recorded_match_discovery(pending.guild_id, recorded.match_id, pending);
-        streaming
-    }
-
-    async fn apply_streaming_bonus(
-        &self,
-        pending: &PendingMatchRecord,
-        match_id: i64,
-    ) -> BTreeSet<u64> {
-        let streaming = if self.config.streaming_bonus > 0 {
-            let participant_ids = pending
-                .state
-                .participant_ids()
-                .into_iter()
-                .filter(|player_id| *player_id > 0)
-                .filter_map(|player_id| u64::try_from(player_id).ok())
-                .collect::<Vec<_>>();
-            self.discord
-                .streaming_member_ids(
-                    u64::try_from(pending.guild_id).unwrap_or_default(),
-                    &participant_ids,
-                )
-                .await
-                .unwrap_or_default()
-        } else {
-            BTreeSet::new()
+            Some(value) => {
+                serde_json::from_value(value.clone()).map_err(|error| error.to_string())?
+            }
+            None => self.config.clone(),
+        };
+        let taxable: BTreeSet<i64> = match pending
+            .state
+            .extra
+            .get("recording_policy")
+            .and_then(|policy| policy.get("low_priority_taxable_ids"))
+        {
+            Some(value) => {
+                serde_json::from_value(value.clone()).map_err(|error| error.to_string())?
+            }
+            None => BTreeSet::new(),
         };
         if !streaming.is_empty() {
-            let guild_id = pending.guild_id;
-            let amount = self.config.streaming_bonus;
-            let player_ids = streaming
+            let mut worker = self.clone();
+            worker.config = config.clone();
+            worker.restore_recording_reward_policy(&pending)?;
+            let rewards = Arc::clone(&worker.rewards);
+            let guild = pending.guild_id;
+            let match_id = recorded.match_id;
+            let amount = config.streaming_bonus;
+            let ids = streaming
                 .iter()
-                .filter_map(|discord_id| i64::try_from(*discord_id).ok())
+                .filter_map(|id| i64::try_from(*id).ok())
                 .collect::<Vec<_>>();
-            let rewards = Arc::clone(&self.rewards);
-            match tokio::task::spawn_blocking(move || {
+            tokio::task::spawn_blocking(move || {
                 rewards.award_generated_batch(GeneratedRewardBatch {
-                    guild_id,
-                    player_ids: &player_ids,
+                    guild_id: guild,
+                    player_ids: &ids,
                     gross: amount,
                     apply_bankruptcy_penalty: true,
                     apply_vanity_tax: true,
-                    low_priority_taxable_ids: None,
+                    low_priority_taxable_ids: Some(&taxable),
                     source: "match_streaming_bonus",
                     related_type: "match",
                     related_id: match_id,
@@ -3437,13 +3615,97 @@ impl MatchHandler {
                 })
             })
             .await
+            .map_err(|error| error.to_string())??;
+        }
+        self.record_pet_match_activity(&pending, recorded.match_id)
+            .await?;
+        self.emit_post_match_hooks(
+            recorded.bet_settlement.clone(),
+            Some(recorded.easter_eggs.clone()),
+            recorded.debrief.clone(),
+        )
+        .await;
+        let thread = pending
+            .state
+            .thread_shuffle_thread_id
+            .and_then(|id| u64::try_from(id).ok());
+        let destination = thread.or_else(|| {
+            pending
+                .state
+                .origin_channel_id
+                .or(pending.state.cmd_shuffle_channel_id)
+                .or(pending.state.shuffle_channel_id)
+                .and_then(|id| u64::try_from(id).ok())
+        });
+        let lobby = parse_persisted_lobby_kind(pending.state.lobby_kind.as_deref());
+        let winner = if winning_result == "radiant" {
+            "Radiant"
+        } else {
+            "Dire"
+        };
+        if let Some(channel) = destination {
+            if pending
+                .state
+                .extra
+                .get("record_result_delivered")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
             {
-                Ok(Ok(_)) => {}
-                Ok(Err(error)) => warn!(%error, "record streaming bonus failed"),
-                Err(error) => warn!(%error, "record streaming bonus task failed"),
+                let body = format!(
+                    "🏆 **{} Match Complete - {winner} Victory!**\nMatch #{}\n\n🪙 **JC Changes:**\n{}",
+                    lobby.label(),
+                    recorded.match_id,
+                    recorded.jc_lines.join("\n")
+                );
+                let saved = self
+                    .persist_recording_effect(
+                        &pending,
+                        "record_result_chunks",
+                        json!(chunk_default_discord_content(&body)),
+                    )
+                    .await?;
+                let chunks: Vec<String> =
+                    serde_json::from_value(saved.state.extra["record_result_chunks"].clone())
+                        .map_err(|error| error.to_string())?;
+                for (index, chunk) in chunks.into_iter().enumerate() {
+                    let key = format!("record_result_chunk_{index}");
+                    if saved
+                        .state
+                        .extra
+                        .get(&key)
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                    {
+                        continue;
+                    }
+                    let delivery_key = format!("m{:019}{index:04}", recorded.match_id);
+                    self.discord
+                        .send_message_with_delivery_key(
+                            channel,
+                            &delivery_key,
+                            DiscordMessage::silent(InteractionResponse::message(chunk)),
+                        )
+                        .await?;
+                    self.persist_recording_effect(&pending, &key, json!(true))
+                        .await?;
+                }
+                self.persist_recording_effect(&pending, "record_result_delivered", json!(true))
+                    .await?;
+            }
+            if let Some(thread) = thread {
+                self.discord
+                    .edit_thread(
+                        thread,
+                        &format!("✅ {} Match Complete - {winner} Won", lobby.label()),
+                        true,
+                        true,
+                    )
+                    .await?;
             }
         }
-        streaming
+        self.spawn_moderation_completion_notifications(pending.guild_id, recorded.match_id);
+        self.spawn_recorded_match_discovery(pending.guild_id, recorded.match_id, &pending);
+        Ok(streaming)
     }
 
     fn ensure_valve_match_id(
@@ -3512,29 +3774,104 @@ impl MatchHandler {
         dotabuff_match_id: Option<&str>,
         valve_match_id: Option<i64>,
     ) -> Result<RecordedMatch, String> {
+        // A command may have waited behind abort or a previous recorder. Always
+        // reload authority before calculations; the core transaction checks again.
+        let fresh = self
+            .pending
+            .pending_match(pending.guild_id, pending.pending_match_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| {
+                format!(
+                    "pending match {} no longer exists; recording was cancelled",
+                    pending.pending_match_id
+                )
+            })?;
+        if fresh.state.radiant_team_ids != pending.state.radiant_team_ids
+            || fresh.state.dire_team_ids != pending.state.dire_team_ids
+        {
+            return Err("pending match roster changed; retry recording".to_owned());
+        }
+        let mut worker = self.clone();
+        if let Some(config) = fresh
+            .state
+            .extra
+            .get("recording_policy")
+            .and_then(|policy| policy.get("config"))
+        {
+            worker.config = serde_json::from_value(config.clone())
+                .map_err(|error| format!("invalid saved recording policy: {error}"))?;
+        }
+        worker.restore_recording_reward_policy(&fresh)?;
+        worker.record_match_blocking_inner(
+            &fresh,
+            winning_result,
+            dotabuff_match_id,
+            valve_match_id,
+        )
+    }
+
+    fn restore_recording_reward_policy(
+        &mut self,
+        pending: &PendingMatchRecord,
+    ) -> Result<(), String> {
+        if let Some(policy) = pending.state.extra.get("recording_policy") {
+            let mut rewards = self.rewards.as_ref().clone();
+            rewards.bankruptcy_penalty_rate_per_game = self.config.bankruptcy_penalty_rate_per_game;
+            rewards.vanity_tax_rate = self.config.vanity_tax_rate;
+            rewards.low_priority_tax_rate = self.config.low_priority_profit_tax_rate;
+            if let Some(value) = policy
+                .get("garnishment_rate")
+                .and_then(serde_json::Value::as_f64)
+            {
+                rewards.garnishment_rate = value;
+            }
+            if let Some(value) = policy
+                .get("minigame_scale")
+                .and_then(serde_json::Value::as_f64)
+            {
+                rewards.minigame_scale = value;
+            }
+            if let Some(ids) = policy.get("vanity_taxable_ids") {
+                rewards.vanity_tax = Arc::new(FrozenMatchVanityTax {
+                    guild_id: pending.guild_id,
+                    ids: serde_json::from_value(ids.clone()).map_err(|error| error.to_string())?,
+                });
+            }
+            self.rewards = Arc::new(rewards);
+        }
+        Ok(())
+    }
+
+    fn record_match_blocking_inner(
+        &self,
+        pending: &PendingMatchRecord,
+        winning_result: &str,
+        dotabuff_match_id: Option<&str>,
+        valve_match_id: Option<i64>,
+    ) -> Result<RecordedMatch, String> {
         let winning_team = match winning_result {
             "radiant" => 1,
             "dire" => 2,
             _ => return Err("winning_team must be 'radiant' or 'dire'.".to_owned()),
         };
-        if let Some(valve_match_id) = valve_match_id {
-            let matches = MatchRepository::new(&self.database_path);
-            if let Some(existing_match_id) = matches
-                .match_id_for_pending_match(pending.guild_id, pending.pending_match_id)
+        let matches = MatchRepository::new(&self.database_path);
+        if let Some(existing_match_id) = matches
+            .match_id_for_pending_match(pending.guild_id, pending.pending_match_id)
+            .map_err(|error| error.to_string())?
+        {
+            let existing = matches
+                .get_match(existing_match_id, Some(pending.guild_id))
                 .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("recorded match {existing_match_id} disappeared"))?;
+            if sql_i64(&existing.winning_team) != Some(i64::from(winning_team))
+                || existing.team1_players != pending.state.radiant_team_ids
+                || existing.team2_players != pending.state.dire_team_ids
             {
-                let existing = matches
-                    .get_match(existing_match_id, Some(pending.guild_id))
-                    .map_err(|error| error.to_string())?
-                    .ok_or_else(|| format!("recorded match {existing_match_id} disappeared"))?;
-                if sql_i64(&existing.winning_team) != Some(i64::from(winning_team))
-                    || existing.team1_players != pending.state.radiant_team_ids
-                    || existing.team2_players != pending.state.dire_team_ids
-                {
-                    return Err(format!(
-                        "hosted result conflicts with recorded match {existing_match_id}"
-                    ));
-                }
+                return Err(format!(
+                    "result conflicts with recorded match {existing_match_id}; use the correction command"
+                ));
+            }
+            if let Some(valve_match_id) = valve_match_id {
                 self.ensure_valve_match_id(existing_match_id, pending.guild_id, valve_match_id)?;
             }
         }
@@ -3590,10 +3927,19 @@ impl MatchHandler {
         // so this match's winnings are taxed on the status it was played
         // under, not the status it produced. Guild-wide rather than
         // participant-scoped because bettors need not be participants.
-        let low_priority_taxable_ids = self
-            .low_priority
-            .active_taxable_ids(Some(pending.guild_id))
-            .map_err(|error| error.to_string())?;
+        let mut low_priority_taxable_ids: BTreeSet<i64> = match pending
+            .state
+            .extra
+            .get("recording_policy")
+            .and_then(|policy| policy.get("low_priority_taxable_ids"))
+        {
+            Some(ids) => serde_json::from_value(ids.clone())
+                .map_err(|error| format!("invalid saved tax policy: {error}"))?,
+            None => self
+                .low_priority
+                .active_taxable_ids(Some(pending.guild_id))
+                .map_err(|error| error.to_string())?,
+        };
 
         let mut glicko_before = BTreeMap::new();
         let mut openskill_before = BTreeMap::new();
@@ -3948,7 +4294,30 @@ impl MatchHandler {
         core.expected_low_priority_ids = Some(low_priority.clone());
         core.win_reward_jc = Some(self.config.jopacoin_win_reward);
         core.settle_referrals_at = Some(unix_seconds());
-        let vanity_taxable_ids = self.rewards.vanity_tax.taxable_ids(pending.guild_id);
+        let vanity_taxable_ids: BTreeSet<i64> = match pending
+            .state
+            .extra
+            .get("recording_policy")
+            .and_then(|policy| policy.get("vanity_taxable_ids"))
+        {
+            Some(ids) => serde_json::from_value(ids.clone())
+                .map_err(|error| format!("invalid saved vanity policy: {error}"))?,
+            None => self.rewards.vanity_tax.taxable_ids(pending.guild_id),
+        };
+        let payout_multiplier = pending
+            .state
+            .extra
+            .get("recording_policy")
+            .and_then(|policy| policy.get("payout_multiplier"))
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or_else(|| {
+                self.economy
+                    .effects_at(pending.guild_id, unix_seconds())
+                    .map_or(1.0, |effects| effects.bet_payout_multiplier)
+            });
+        core.recording_policy = Some(
+            json!({"config":self.config,"recorded_at":now.timestamp(),"low_priority_taxable_ids":low_priority_taxable_ids,"vanity_taxable_ids":vanity_taxable_ids,"payout_multiplier":payout_multiplier,"garnishment_rate":self.rewards.garnishment_rate,"minigame_scale":self.rewards.minigame_scale}),
+        );
         core.referral_deductions = OwnedProfitDeductionPolicy {
             bankruptcy: Some(self.bankruptcy_policy()),
             vanity_tax_rate: self.config.vanity_tax_rate,
@@ -3959,6 +4328,22 @@ impl MatchHandler {
         let match_id = matches
             .record_match_core_atomic(&core)
             .map_err(|error| error.to_string())?;
+        // The core freezes this under the same write lock that drains LP wins.
+        let committed = self
+            .pending
+            .pending_match(pending.guild_id, pending.pending_match_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "pending match disappeared during recording".to_owned())?;
+        if let Some(ids) = committed
+            .state
+            .extra
+            .get("recording_policy")
+            .and_then(|policy| policy.get("low_priority_taxable_ids"))
+        {
+            low_priority_taxable_ids = serde_json::from_value(ids.clone())
+                .map_err(|error| format!("invalid saved tax policy: {error}"))?;
+        }
+
         if let Some(valve_match_id) = valve_match_id {
             self.ensure_valve_match_id(match_id, pending.guild_id, valve_match_id)?;
         }
@@ -4003,10 +4388,7 @@ impl MatchHandler {
                     low_priority_tax_rate: Some(self.config.low_priority_profit_tax_rate),
                     low_priority_taxable_ids: low_priority_taxable_ids.clone(),
                     house_payout_multiplier: self.config.house_payout_multiplier,
-                    payout_multiplier: self
-                        .economy
-                        .effects_at(pending.guild_id, unix_seconds())
-                        .map_or(1.0, |effects| effects.bet_payout_multiplier),
+                    payout_multiplier,
                     consume_seed: true,
                     ..BetSettlementAdjustments::default()
                 },
@@ -4524,885 +4906,6 @@ impl MatchHandler {
         Ok(())
     }
 
-    fn prepare_shuffle(&self, request: PrepareShuffleRequest) -> Result<PreparedShuffle, String> {
-        if !matches!(
-            request.rating_system.as_str(),
-            "glicko" | "openskill" | "jopacoin"
-        ) {
-            return Err("rating_system must be 'glicko', 'openskill', or 'jopacoin'".to_owned());
-        }
-        if !matches!(request.shuffle_mode.as_str(), "balanced" | "region") {
-            return Err("shuffle_mode must be 'balanced' or 'region'".to_owned());
-        }
-        let ShuffleInputs {
-            mut players,
-            last_match_dates,
-            exclusion_counts,
-        } = self
-            .players
-            .get_shuffle_inputs(&request.player_ids, Some(request.guild_id))
-            .map_err(|error| error.to_string())?;
-        if players.len() != request.player_ids.len() {
-            return Err(format!(
-                "Could not load all players: expected {}, got {}",
-                request.player_ids.len(),
-                players.len()
-            ));
-        }
-        if players.len() < 10 {
-            return Err("Need at least 10 players to shuffle.".to_owned());
-        }
-
-        let now = Utc::now();
-        for player in &mut players {
-            let Some(player_id) = player.discord_id else {
-                continue;
-            };
-            let Some(last_match) = last_match_dates.get(&player_id).and_then(sql_datetime) else {
-                continue;
-            };
-            let days_since = (now - last_match).num_days().max(0);
-            if let Some(rd) = player.glicko_rd {
-                player.glicko_rd = Some(
-                    self.rating
-                        .apply_rd_decay(rd, i32::try_from(days_since).unwrap_or(i32::MAX)),
-                );
-            }
-            if let Some(sigma) = player.os_sigma {
-                player.os_sigma = Some(self.openskill.apply_sigma_decay(sigma, days_since));
-            }
-        }
-
-        // Per-role win/loss drives the role-performance multiplier. Loaded
-        // once for the whole pool: the factor varies by assigned role, but the
-        // underlying record does not, so the search can reuse it across every
-        // candidate arrangement.
-        let mut records_by_player: BTreeMap<i64, BTreeMap<String, RoleRecord>> = BTreeMap::new();
-        for ((discord_id, role), (wins, losses)) in MatchRepository::new(&self.database_path)
-            .role_records(&request.player_ids, Some(request.guild_id))
-            .map_err(|error| error.to_string())?
-        {
-            records_by_player
-                .entry(discord_id)
-                .or_default()
-                .insert(role, RoleRecord::new(wins, losses));
-        }
-        for player in &mut players {
-            if let Some(player_id) = player.discord_id
-                && let Some(records) = records_by_player.remove(&player_id)
-            {
-                player.role_records = records;
-            }
-        }
-
-        let mut rating_system = request.rating_system.clone();
-        if rating_system == "openskill" && players.iter().any(|player| player.os_mu.is_none()) {
-            rating_system = "glicko".to_owned();
-        }
-        let use_openskill = rating_system == "openskill";
-        let use_jopacoin = rating_system == "jopacoin";
-        let avoids = self
-            .avoids
-            .get_active_avoids_for_players(Some(request.guild_id), &request.player_ids)
-            .map_err(|error| error.to_string())?;
-        let deals = self
-            .deals
-            .get_active_deals_for_players(Some(request.guild_id), &request.player_ids)
-            .map_err(|error| error.to_string())?;
-        let low_priority_ids = self
-            .low_priority
-            .get_active_ids(&request.player_ids, Some(request.guild_id))
-            .map_err(|error| error.to_string())?;
-        // Low priority makes a player's games harder by balancing them as
-        // though they were stronger, until they win their way out. This scales
-        // only the value the shuffler compares; stored ratings, profiles, and
-        // the post-match rating update all read the untouched player. Jopacoin
-        // mode is excluded deliberately: its "rating" is a signed balance, so
-        // scaling would drive a debtor further negative and hand them easier
-        // games instead of harder ones.
-        if !use_jopacoin {
-            for player in &mut players {
-                if player
-                    .discord_id
-                    .is_some_and(|discord_id| low_priority_ids.contains(&discord_id))
-                {
-                    player.matchmaking_multiplier = Some(self.config.low_priority_mmr_multiplier);
-                }
-            }
-        }
-        let domain_avoids = avoids
-            .iter()
-            .map(|avoid| SoftAvoid {
-                avoider_discord_id: avoid.avoider_discord_id,
-                avoided_discord_id: avoid.avoided_discord_id,
-            })
-            .collect::<Vec<_>>();
-        let domain_deals = deals
-            .iter()
-            .map(|deal| PackageDeal {
-                buyer_discord_id: deal.buyer_discord_id,
-                partner_discord_id: deal.partner_discord_id,
-            })
-            .collect::<Vec<_>>();
-        let constraints = ShuffleConstraints {
-            avoids: Some(&domain_avoids),
-            deals: Some(&domain_deals),
-            low_priority_ids: Some(&low_priority_ids),
-        };
-
-        let mut shuffler = BalancedShuffler::default();
-        shuffler.use_glicko = true;
-        shuffler.use_openskill = use_openskill;
-        shuffler.use_jopacoin = use_jopacoin;
-        shuffler.off_role_multiplier = self.config.off_role_multiplier;
-        shuffler.off_role_flat_value_penalty = self.config.off_role_flat_value_penalty;
-        shuffler.off_role_flat_penalty = self.config.off_role_flat_penalty;
-        shuffler.exclusion_penalty_weight = self.config.exclusion_penalty_weight;
-        shuffler.rd_priority_weight = self.config.rd_priority_weight;
-        shuffler.recent_match_penalty_weight = self.config.recent_match_penalty_weight;
-        shuffler.soft_avoid_penalty = self.config.soft_avoid_penalty;
-        shuffler.package_deal_penalty = self.config.package_deal_penalty;
-        shuffler.package_deal_split_penalty = self.config.package_deal_split_penalty;
-        shuffler.rating_spread_divisor = self.config.rating_spread_divisor;
-        shuffler.region_split = request.shuffle_mode == "region";
-        shuffler.region_split_penalty = self.config.region_split_penalty;
-
-        let recent_match_ids = last_match_participant_ids(&self.database_path, request.guild_id)?;
-        let recent_match_names = players
-            .iter()
-            .filter(|player| {
-                player
-                    .discord_id
-                    .is_some_and(|id| recent_match_ids.contains(&id))
-            })
-            .map(|player| player.name.clone())
-            .collect::<HashSet<_>>();
-        let exclusion_counts = players
-            .iter()
-            .filter_map(|player| {
-                player.discord_id.map(|player_id| {
-                    (
-                        player.name.clone(),
-                        usize::try_from(
-                            exclusion_counts
-                                .get(&player_id)
-                                .copied()
-                                .unwrap_or_default()
-                                .max(0),
-                        )
-                        .unwrap_or(usize::MAX),
-                    )
-                })
-            })
-            .collect::<HashMap<_, _>>();
-        let result = shuffler
-            .shuffle_from_pool(
-                &players,
-                PoolOptions {
-                    exclusion_counts: Some(&exclusion_counts),
-                    recent_match_names: Some(&recent_match_names),
-                    constraints,
-                    lobby_wait_minutes: Some(&request.lobby_wait_minutes),
-                    sampling_seed: fastrand::u64(..),
-                },
-            )
-            .map_err(|error| error.to_string())?;
-        let (radiant_team, dire_team) = if fastrand::bool() {
-            (result.team1, result.team2)
-        } else {
-            (result.team2, result.team1)
-        };
-        let excluded_players = result.excluded;
-        let radiant_ids = team_player_ids(&radiant_team)?;
-        let dire_ids = team_player_ids(&dire_team)?;
-        let excluded_ids = player_ids(&excluded_players);
-        let radiant_roles = radiant_team
-            .role_assignments
-            .clone()
-            .ok_or_else(|| "Radiant role assignments were not produced".to_owned())?;
-        let dire_roles = dire_team
-            .role_assignments
-            .clone()
-            .ok_or_else(|| "Dire role assignments were not produced".to_owned())?;
-        let radiant_value = radiant_team
-            .get_team_value_with_off_role_value_penalty(
-                true,
-                shuffler.off_role_multiplier,
-                use_openskill,
-                use_jopacoin,
-                shuffler.off_role_flat_value_penalty,
-            )
-            .map_err(|error| error.to_string())?;
-        let dire_value = dire_team
-            .get_team_value_with_off_role_value_penalty(
-                true,
-                shuffler.off_role_multiplier,
-                use_openskill,
-                use_jopacoin,
-                shuffler.off_role_flat_value_penalty,
-            )
-            .map_err(|error| error.to_string())?;
-        let value_diff = (radiant_value - dire_value).abs();
-
-        let balancing = TeamBalancingService::new_with_off_role_value_penalty(
-            true,
-            shuffler.off_role_multiplier,
-            shuffler.off_role_flat_value_penalty,
-            shuffler.off_role_flat_penalty,
-            shuffler.role_matchup_delta_weight,
-        );
-        let off_role_penalty = (radiant_team
-            .get_off_role_count()
-            .map_err(|error| error.to_string())?
-            + dire_team
-                .get_off_role_count()
-                .map_err(|error| error.to_string())?) as f64
-            * shuffler.off_role_flat_penalty;
-        let weighted_parity_delta = (balancing
-            .calculate_role_matchup_delta(&radiant_team, &dire_team, use_openskill, use_jopacoin)
-            .map_err(|error| error.to_string())?
-            + balancing
-                .calculate_role_parity_delta(&radiant_team, &dire_team, use_openskill, use_jopacoin)
-                .map_err(|error| error.to_string())?)
-            * shuffler.role_matchup_delta_weight;
-        let radiant_set = radiant_ids.iter().copied().collect::<HashSet<_>>();
-        let dire_set = dire_ids.iter().copied().collect::<HashSet<_>>();
-        let selected_set = radiant_set
-            .union(&dire_set)
-            .copied()
-            .collect::<HashSet<_>>();
-        let excluded_set = excluded_ids.iter().copied().collect::<HashSet<_>>();
-        let excluded_penalty = excluded_players
-            .iter()
-            .map(|player| {
-                exclusion_counts
-                    .get(&player.name)
-                    .copied()
-                    .unwrap_or_default()
-            })
-            .sum::<usize>() as f64
-            * shuffler.exclusion_penalty_weight;
-        let recent_match_penalty = radiant_team
-            .players
-            .iter()
-            .chain(&dire_team.players)
-            .filter(|player| recent_match_names.contains(&player.name))
-            .count() as f64
-            * shuffler.recent_match_penalty_weight;
-        let soft_avoid_penalty = shuffler.calculate_soft_avoid_penalty(
-            &radiant_set,
-            &dire_set,
-            Some(&domain_avoids),
-            Some(&low_priority_ids),
-        );
-        let package_deal_penalty = shuffler.calculate_package_deal_penalty(
-            &radiant_set,
-            &dire_set,
-            Some(&domain_deals),
-            Some(&low_priority_ids),
-        );
-        let deal_split_penalty = shuffler.calculate_package_deal_split_penalty(
-            &selected_set,
-            &excluded_set,
-            Some(&domain_deals),
-            Some(&low_priority_ids),
-        );
-        let low_priority_penalty = BalancedShuffler::calculate_low_priority_penalty(
-            &selected_set,
-            Some(&low_priority_ids),
-        );
-        let low_priority_team_adjustment = BalancedShuffler::calculate_low_priority_team_adjustment(
-            &radiant_set,
-            &dire_set,
-            Some(&low_priority_ids),
-        );
-        let region_split_penalty = if request.shuffle_mode == "region" {
-            region_split_mismatches(
-                &region_inputs(&radiant_team.players),
-                &region_inputs(&dire_team.players),
-            ) as f64
-                * shuffler.region_split_penalty
-        } else {
-            0.0
-        };
-        let selected_players = radiant_team
-            .players
-            .iter()
-            .chain(&dire_team.players)
-            .collect::<Vec<_>>();
-        let selected_values = selected_players
-            .iter()
-            .map(|player| player.get_value(true, use_openskill, use_jopacoin))
-            .collect::<Vec<_>>();
-        let goodness_score = value_diff * ADJUSTED_VALUE_DIFF_WEIGHT
-            + off_role_penalty
-            + weighted_parity_delta
-            + excluded_penalty
-            + recent_match_penalty
-            + soft_avoid_penalty
-            + package_deal_penalty
-            + deal_split_penalty
-            + low_priority_penalty
-            + low_priority_team_adjustment
-            + region_split_penalty
-            + shuffler.calculate_rating_spread_penalty(&selected_values)
-            - BalancedShuffler::calculate_lobby_rating_bonus(&selected_values)
-            - BalancedShuffler::calculate_lobby_wait_bonus(
-                &selected_players,
-                Some(&request.lobby_wait_minutes),
-            )
-            - shuffler.calculate_rd_priority(&selected_players);
-
-        let glicko_radiant_win_prob =
-            glicko_probability(&self.rating, &radiant_team.players, &dire_team.players);
-        let openskill_radiant_win_prob =
-            openskill_probability(&self.openskill, &radiant_team.players, &dire_team.players)?;
-        let included_ids = selected_set;
-        let effective_avoid_ids = avoids
-            .iter()
-            .filter(|avoid| {
-                included_ids.contains(&avoid.avoider_discord_id)
-                    && included_ids.contains(&avoid.avoided_discord_id)
-                    && ((radiant_set.contains(&avoid.avoider_discord_id)
-                        && dire_set.contains(&avoid.avoided_discord_id))
-                        || (dire_set.contains(&avoid.avoider_discord_id)
-                            && radiant_set.contains(&avoid.avoided_discord_id)))
-            })
-            .map(|avoid| avoid.id)
-            .collect();
-        let effective_deal_ids = deals
-            .iter()
-            .filter(|deal| {
-                (radiant_set.contains(&deal.buyer_discord_id)
-                    && radiant_set.contains(&deal.partner_discord_id))
-                    || (dire_set.contains(&deal.buyer_discord_id)
-                        && dire_set.contains(&deal.partner_discord_id))
-            })
-            .map(|deal| deal.id)
-            .collect();
-
-        let mut state = PendingMatchState {
-            radiant_team_ids: radiant_ids.clone(),
-            dire_team_ids: dire_ids.clone(),
-            excluded_player_ids: excluded_ids,
-            excluded_conditional_player_ids: request.excluded_conditional_ids.clone(),
-            radiant_roles,
-            dire_roles,
-            radiant_value,
-            dire_value,
-            value_diff,
-            first_pick_team: Some(first_pick_team(fastrand::bool()).to_owned()),
-            shuffle_timestamp: Some(request.shuffle_timestamp),
-            bet_lock_until: Some(
-                request
-                    .shuffle_timestamp
-                    .checked_add(self.config.bet_lock_seconds)
-                    .ok_or_else(|| "betting lock timestamp overflow".to_owned())?,
-            ),
-            betting_mode: "pool".to_owned(),
-            is_bomb_pot: request.is_bomb_pot,
-            is_openskill_shuffle: use_openskill,
-            balancing_rating_system: rating_system,
-            lobby_kind: Some(lobby_kind_value(request.lobby_kind).to_owned()),
-            effective_avoid_ids,
-            effective_deal_ids,
-            exclusion_updates_deferred: true,
-            full_exclusion_increment_ids: excluded_set.into_iter().collect(),
-            half_exclusion_increment_ids: Vec::new(),
-            ..PendingMatchState::default()
-        };
-        state
-            .extra
-            .insert("shuffle_mode".to_owned(), json!(request.shuffle_mode));
-        state
-            .extra
-            .insert("goodness_score".to_owned(), json!(goodness_score));
-        state.extra.insert(
-            "glicko_radiant_win_prob".to_owned(),
-            json!(glicko_radiant_win_prob),
-        );
-        state.extra.insert(
-            "openskill_radiant_win_prob".to_owned(),
-            json!(openskill_radiant_win_prob),
-        );
-        let mut pending = self
-            .pending
-            .create_pending_match(request.guild_id, &state)
-            .map_err(|error| error.to_string())?;
-
-        let mut first_game_reserved = 0;
-        if self.config.first_game_pool_daily_amount > 0 {
-            let game_date = cama_domain::game_date::get_game_date();
-            self.seeds
-                .fund_first_game_pools(
-                    Some(request.guild_id),
-                    &game_date,
-                    self.config.first_game_pool_daily_amount,
-                )
-                .map_err(|error| error.to_string())?;
-            first_game_reserved = self
-                .seeds
-                .claim_first_game_pool(
-                    Some(request.guild_id),
-                    match request.lobby_kind {
-                        LobbyKind::Open => FirstGameLobby::Open,
-                        LobbyKind::LowSkill => FirstGameLobby::LowSkill,
-                    },
-                    &game_date,
-                    pending.pending_match_id,
-                )
-                .map_err(|error| error.to_string())?;
-        }
-        self.seeds
-            .reserve_seed_atomic(
-                Some(request.guild_id),
-                pending.pending_match_id,
-                self.config.dota_bet_seed_amount,
-                first_game_reserved,
-                SeedBettingMode::Pool,
-            )
-            .map_err(|error| error.to_string())?;
-        pending = self
-            .pending
-            .pending_match(request.guild_id, pending.pending_match_id)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "pending match disappeared after seed reservation".to_owned())?;
-
-        // Python snapshots configured-investment eligibility before the blind
-        // batch debits wallets, then sizes each position from the post-blind
-        // balance. Keep that two-snapshot contract across the DB hook rather
-        // than letting the blind transaction change the 50-JC gate.
-        let investment_starting_balances = {
-            let target_ids = radiant_ids
-                .iter()
-                .chain(dire_ids.iter())
-                .copied()
-                .collect::<Vec<_>>();
-            let investments = AutobetInvestmentRepository::new(&self.database_path);
-            match investments.for_targets(Some(request.guild_id), &target_ids) {
-                Ok(positions) => {
-                    let investor_ids = positions
-                        .iter()
-                        .map(|position| position.investor_id)
-                        .collect::<Vec<_>>();
-                    match self
-                        .players
-                        .get_balances_bulk(&investor_ids, Some(request.guild_id))
-                    {
-                        Ok(balances) => balances.into_iter().collect::<BTreeMap<_, _>>(),
-                        Err(error) => {
-                            warn!(
-                                %error,
-                                pending_match_id = pending.pending_match_id,
-                                "configured-investment starting-balance snapshot failed"
-                            );
-                            BTreeMap::new()
-                        }
-                    }
-                }
-                Err(error) => {
-                    warn!(
-                        %error,
-                        pending_match_id = pending.pending_match_id,
-                        "configured-investment position snapshot failed"
-                    );
-                    BTreeMap::new()
-                }
-            }
-        };
-
-        let blind_bets = if self.config.auto_blind_enabled {
-            let candidates = radiant_ids
-                .iter()
-                .copied()
-                .map(|discord_id| BlindBetCandidate {
-                    discord_id,
-                    team: BettingTeam::Radiant,
-                    ante_override: None,
-                })
-                .chain(
-                    dire_ids
-                        .iter()
-                        .copied()
-                        .map(|discord_id| BlindBetCandidate {
-                            discord_id,
-                            team: BettingTeam::Dire,
-                            ante_override: None,
-                        }),
-                )
-                .collect::<Vec<_>>();
-            match self.bets.create_auto_blind_bets_atomic(
-                Some(request.guild_id),
-                Some(pending.pending_match_id),
-                request.shuffle_timestamp,
-                &candidates,
-                BlindBetPolicy {
-                    is_bomb_pot: request.is_bomb_pot,
-                    normal_threshold: self.config.auto_blind_threshold,
-                    normal_percentage: percentage_points(self.config.auto_blind_percentage),
-                    bomb_percentage: percentage_points(self.config.bomb_pot_blind_percentage),
-                    bomb_ante: self.config.bomb_pot_ante,
-                    max_debt: self.config.max_debt,
-                },
-            ) {
-                Ok(outcome) => Some(outcome),
-                Err(error) => {
-                    warn!(
-                        %error,
-                        pending_match_id = pending.pending_match_id,
-                        "automatic blind bets failed"
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        // Python's `create_match_automatic_bets` runs the three automatic
-        // liquidity policies in this order: blind bets, configured
-        // long/short investments, then spectator balancing.  Each hook is
-        // best-effort after the durable pending row exists; one stale wallet
-        // or candidate must not roll back the published match.  The DB hooks
-        // use their own immediate transaction and are idempotent for this
-        // pending-match identity, so READY recovery can safely retry them.
-        let mut automatic_summary = blind_bets
-            .as_ref()
-            .map(|outcome| blind_outcome_json(outcome, self.config.clone(), request.is_bomb_pot))
-            .unwrap_or_else(|| {
-                json!({
-                    "created": 0,
-                    "total_radiant": 0,
-                    "total_dire": 0,
-                    "percentage": if request.is_bomb_pot {
-                        self.config.bomb_pot_blind_percentage
-                    } else {
-                        self.config.auto_blind_percentage
-                    },
-                    "is_bomb_pot": request.is_bomb_pot,
-                    "bets": [],
-                    "skipped": [],
-                })
-            });
-
-        match self
-            .bets
-            .create_configured_investment_bets_for_shuffle(ConfiguredInvestmentRequest {
-                guild_id: Some(request.guild_id),
-                pending_match_id: Some(pending.pending_match_id),
-                bet_time: request.shuffle_timestamp,
-                radiant_ids: radiant_ids.clone(),
-                dire_ids: dire_ids.clone(),
-                max_debt: self.config.max_debt,
-                starting_balances: investment_starting_balances,
-            }) {
-            Ok(outcome) => {
-                let target_ids = outcome
-                    .created
-                    .iter()
-                    .filter_map(|bet| bet.investment_target_id)
-                    .collect::<BTreeSet<_>>();
-                let investment_metadata = AutobetInvestmentRepository::new(&self.database_path)
-                    .for_targets(
-                        Some(request.guild_id),
-                        &target_ids.iter().copied().collect::<Vec<_>>(),
-                    )
-                    .map(|positions| {
-                        positions
-                            .into_iter()
-                            .map(|position| {
-                                (
-                                    (position.investor_id, position.target_id, position.direction),
-                                    position.percentage,
-                                )
-                            })
-                            .collect::<BTreeMap<_, _>>()
-                    })
-                    .unwrap_or_default();
-                automatic_summary["investment_bets"] =
-                    automatic_outcome_json(&outcome, &BTreeMap::new(), &investment_metadata);
-            }
-            Err(error) => warn!(
-                %error,
-                pending_match_id = pending.pending_match_id,
-                "configured-investment hook failed"
-            ),
-        }
-
-        if self.config.auto_spectator_bet_enabled {
-            let candidates = match self.players.get_all(Some(request.guild_id)) {
-                Ok(players) => players
-                    .into_iter()
-                    .filter_map(|player| {
-                        player.discord_id.map(|discord_id| WealthSnapshot {
-                            discord_id,
-                            balance: player.jopacoin_balance,
-                        })
-                    })
-                    .collect::<Vec<_>>(),
-                Err(error) => {
-                    warn!(
-                        %error,
-                        pending_match_id = pending.pending_match_id,
-                        "automatic spectator candidate lookup failed"
-                    );
-                    Vec::new()
-                }
-            };
-            let participant_ids = radiant_ids
-                .iter()
-                .chain(dire_ids.iter())
-                .copied()
-                .collect::<BTreeSet<_>>();
-            let plan = plan_automatic_spectator_bets(
-                &candidates,
-                &participant_ids,
-                AutomaticSpectatorConfig {
-                    enabled: true,
-                    total_count: self.config.auto_spectator_bet_count,
-                    top_count: self.config.auto_spectator_bet_top_count,
-                    base_basis_points: percentage_basis_points(
-                        self.config.auto_spectator_bet_percentage,
-                    ),
-                    top_basis_points: percentage_basis_points(
-                        self.config.auto_spectator_bet_top_percentage,
-                    ),
-                },
-            );
-            let requests = plan
-                .bets
-                .iter()
-                .map(|bet| AutomaticBasisPointBetRequest {
-                    discord_id: bet.discord_id,
-                    team: bet.team,
-                    basis_points: bet.basis_points,
-                })
-                .collect::<Vec<_>>();
-            match self.bets.place_automatic_basis_point_bets_atomic(
-                Some(request.guild_id),
-                Some(pending.pending_match_id),
-                request.shuffle_timestamp,
-                &requests,
-                self.config.max_debt,
-            ) {
-                Ok(outcome) => {
-                    automatic_summary["spectator_bets"] = automatic_outcome_json(
-                        &outcome,
-                        &plan
-                            .bets
-                            .iter()
-                            .map(|bet| (bet.discord_id, (bet.networth, bet.basis_points)))
-                            .collect::<BTreeMap<_, _>>(),
-                        &BTreeMap::new(),
-                    );
-                }
-                Err(error) => warn!(
-                    %error,
-                    pending_match_id = pending.pending_match_id,
-                    "spectator auto-wager hook failed"
-                ),
-            }
-        }
-
-        let has_automatic_bets = automatic_summary
-            .get("created")
-            .and_then(serde_json::Value::as_i64)
-            .unwrap_or_default()
-            > 0
-            || automatic_summary
-                .get("investment_bets")
-                .and_then(|value| value.get("created"))
-                .and_then(serde_json::Value::as_i64)
-                .unwrap_or_default()
-                > 0
-            || automatic_summary
-                .get("spectator_bets")
-                .and_then(|value| value.get("created"))
-                .and_then(serde_json::Value::as_i64)
-                .unwrap_or_default()
-                > 0;
-        if has_automatic_bets {
-            pending = self
-                .pending
-                .mutate_pending_match(request.guild_id, pending.pending_match_id, move |state| {
-                    state.blind_bets_result = Some(automatic_summary)
-                })
-                .map_err(|error| error.to_string())?
-                .map(|(record, ())| record)
-                .ok_or_else(|| "pending match disappeared after automatic bets".to_owned())?;
-        }
-
-        Ok(PreparedShuffle { pending })
-    }
-
-    async fn finalize_shuffle(
-        &self,
-        context: MatchCommandContext,
-        responder: Arc<dyn InteractionResponder>,
-        snapshot: MatchLobbySnapshot,
-        mut prepared: PreparedShuffle,
-    ) -> Result<(), InteractionHandlerError> {
-        let guild_id =
-            u64::try_from(context.guild_id).map_err(|_| "guild ID is outside Discord's range")?;
-        let guild_id_i64 = context.guild_id;
-        let full_lobby_ids = prepared.pending.state.full_lobby_player_ids();
-        let real_ids = full_lobby_ids
-            .iter()
-            .copied()
-            .filter(|player_id| *player_id > 0)
-            .filter_map(|player_id| u64::try_from(player_id).ok())
-            .collect::<Vec<_>>();
-        let streaming_ids = if self.config.streaming_bonus > 0 {
-            self.discord
-                .streaming_member_ids(guild_id, &real_ids)
-                .await
-                .unwrap_or_default()
-        } else {
-            BTreeSet::new()
-        };
-        if !streaming_ids.is_empty() {
-            let player_ids = streaming_ids
-                .iter()
-                .filter_map(|player_id| i64::try_from(*player_id).ok())
-                .collect::<Vec<_>>();
-            // These are SQLite money writes, so they belong on a blocking
-            // thread like the equivalent award at match record time.
-            let rewards = Arc::clone(&self.rewards);
-            let gross = self.config.streaming_bonus;
-            let pending_match_id = prepared.pending.pending_match_id;
-            let awarded = tokio::task::spawn_blocking(move || {
-                rewards.award_generated_batch(GeneratedRewardBatch {
-                    guild_id: guild_id_i64,
-                    player_ids: &player_ids,
-                    gross,
-                    apply_bankruptcy_penalty: true,
-                    apply_vanity_tax: true,
-                    low_priority_taxable_ids: None,
-                    source: "shuffle_streaming_bonus",
-                    related_type: "pending_match",
-                    related_id: pending_match_id,
-                    reason: "shuffle streaming bonus",
-                    event_nonce_tag: 5,
-                })
-            })
-            .await
-            .map_err(|error| format!("shuffle streaming bonus task failed: {error}"))?;
-            if let Err(error) = awarded {
-                warn!(%error, "shuffle streaming bonus failed");
-            }
-            let persisted_streamers = streaming_ids
-                .iter()
-                .filter_map(|player_id| i64::try_from(*player_id).ok())
-                .map(serde_json::Value::from)
-                .collect::<Vec<_>>();
-            let pending_repository = self.pending.clone();
-            let pending_match_id = prepared.pending.pending_match_id;
-            prepared.pending = tokio::task::spawn_blocking(move || {
-                pending_repository.mutate_pending_match(
-                    guild_id_i64,
-                    pending_match_id,
-                    move |state| {
-                        state.extra.insert(
-                            "shuffle_streaming_bonus_ids".to_owned(),
-                            serde_json::Value::Array(persisted_streamers),
-                        );
-                    },
-                )
-            })
-            .await
-            .map_err(|error| format!("streaming metadata task failed: {error}"))?
-            .map_err(|error| error.to_string())?
-            .map(|(pending, ())| pending)
-            .ok_or("pending match disappeared before publication")?;
-        }
-
-        let embed = self.render_shuffle_embed(&prepared.pending).await?;
-        let public_response = InteractionResponse::message("").embed(embed.clone());
-        let lobby_send = async {
-            let channel_id = snapshot.lobby_channel_id?;
-            match self
-                .discord
-                .send_message(channel_id, DiscordMessage::silent(public_response.clone()))
-                .await
-            {
-                Ok(receipt) => Some(receipt),
-                Err(error) => {
-                    warn!(%error, channel_id, "shuffle lobby-channel publication failed");
-                    None
-                }
-            }
-        };
-        let command_send = async {
-            let channel_id = context.channel_id?;
-            if Some(channel_id) == snapshot.lobby_channel_id {
-                return None;
-            }
-            match self
-                .discord
-                .send_message(channel_id, DiscordMessage::silent(public_response.clone()))
-                .await
-            {
-                Ok(receipt) => Some(receipt),
-                Err(error) => {
-                    warn!(%error, channel_id, "shuffle command-channel publication failed");
-                    None
-                }
-            }
-        };
-        let confirmation = responder.followup(
-            InteractionResponse::message(format!(
-                "✅ {} teams shuffled!",
-                snapshot.lobby_kind.label()
-            ))
-            .ephemeral(),
-        );
-        let (lobby_receipt, command_receipt, confirmation_result) =
-            tokio::join!(lobby_send, command_send, confirmation);
-        confirmation_result.map_err(|error| error.to_string())?;
-
-        let origin_channel_id = snapshot.origin_channel_id;
-        let pending_repository = self.pending.clone();
-        let pending_match_id = prepared.pending.pending_match_id;
-        let lobby_receipt_for_state = lobby_receipt.clone();
-        let command_receipt_for_state = command_receipt.clone();
-        prepared.pending = tokio::task::spawn_blocking(move || {
-            pending_repository.mutate_pending_match(guild_id_i64, pending_match_id, move |state| {
-                if let Some(receipt) = lobby_receipt_for_state {
-                    state.shuffle_channel_id = i64::try_from(receipt.channel_id).ok();
-                    state.shuffle_message_id = i64::try_from(receipt.message_id).ok();
-                    state.shuffle_message_jump_url = Some(receipt.jump_url);
-                }
-                if let Some(receipt) = command_receipt_for_state {
-                    state.cmd_shuffle_channel_id = i64::try_from(receipt.channel_id).ok();
-                    state.cmd_shuffle_message_id = i64::try_from(receipt.message_id).ok();
-                }
-                state.origin_channel_id = origin_channel_id.and_then(|id| i64::try_from(id).ok());
-            })
-        })
-        .await
-        .map_err(|error| format!("publication metadata task failed: {error}"))?
-        .map_err(|error| error.to_string())?
-        .map(|(pending, ())| pending)
-        .ok_or("pending match disappeared during publication")?;
-
-        self.schedule_betting_reminders(&prepared.pending, true);
-        self.notify_match_started(&prepared.pending);
-        let thread_publish = self.publish_shuffle_thread(&snapshot, &prepared.pending, embed);
-        let unpin = self.lobbies.unpin_source_message(&snapshot);
-        let (thread_result, unpin_result) = tokio::join!(thread_publish, unpin);
-        if let Err(error) = thread_result {
-            warn!(%error, "shuffle thread publication failed");
-        }
-        if let Err(error) = unpin_result {
-            warn!(%error, "shuffle source unpin failed");
-        }
-        self.lobbies
-            .reset_after_shuffle(context.guild_id, snapshot.lobby_kind)
-            .await
-            .map_err(Into::into)
-            .map(|_| ())
-    }
-
     async fn render_shuffle_embed(
         &self,
         pending: &PendingMatchRecord,
@@ -5580,6 +5083,22 @@ impl MatchHandler {
                 false,
             )
             .field("🌎 Recommended Server", summarize_region(&regions), false);
+        if let Some(options) = pending
+            .state
+            .extra
+            .get("dota_hosting")
+            .and_then(|value| serde_json::from_value::<DotaHostingOptions>(value.clone()).ok())
+        {
+            let bot_busy = pending
+                .state
+                .extra
+                .get("dota_hosting_fallback_reason")
+                .and_then(serde_json::Value::as_str)
+                == Some("bot_busy");
+            if let Some(instructions) = options.lobby_instructions(bot_busy) {
+                embed = embed.field("🎮 Dota Lobby", instructions, false);
+            }
+        }
         if shuffle_mode == "region" {
             let radiant_regions = pending
                 .state
@@ -5723,78 +5242,6 @@ impl MatchHandler {
             extra_f64(&pending.state, "glicko_radiant_win_prob").unwrap_or(0.5) * 100.0,
             extra_f64(&pending.state, "openskill_radiant_win_prob").unwrap_or(0.5) * 100.0,
         )))
-    }
-
-    async fn publish_shuffle_thread(
-        &self,
-        snapshot: &MatchLobbySnapshot,
-        pending: &PendingMatchRecord,
-        embed: InteractionEmbed,
-    ) -> Result<(), String> {
-        let Some(thread_id) = snapshot.thread_id else {
-            return Ok(());
-        };
-        let name = format!(
-            "🔒 {} Shuffled - Awaiting Results",
-            snapshot.lobby_kind.label()
-        );
-        let rename = self.discord.edit_thread(thread_id, &name, false, false);
-        let publish = async {
-            let receipt = self
-                .discord
-                .send_message(
-                    thread_id,
-                    DiscordMessage::silent(InteractionResponse::message("").embed(embed)),
-                )
-                .await?;
-            let real_player_ids = pending
-                .state
-                .participant_ids()
-                .into_iter()
-                .filter(|player_id| *player_id > 0)
-                .filter_map(|player_id| u64::try_from(player_id).ok())
-                .collect::<BTreeSet<_>>();
-            if !real_player_ids.is_empty() {
-                let mentions = real_player_ids
-                    .iter()
-                    .map(|player_id| format!("<@{player_id}>"))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                self.discord
-                    .send_message(
-                        thread_id,
-                        DiscordMessage::mentioning(
-                            InteractionResponse::message(format!(
-                                "{mentions}\nPlayers, take your starting positions"
-                            )),
-                            real_player_ids,
-                        ),
-                    )
-                    .await?;
-            }
-            Ok::<_, String>(receipt)
-        };
-        let (rename_result, publish_result) = tokio::join!(rename, publish);
-        if let Err(error) = rename_result {
-            debug!(%error, thread_id, "shuffle thread rename failed");
-        }
-        let receipt = publish_result?;
-        self.discord
-            .edit_thread(thread_id, &name, false, true)
-            .await?;
-        let repository = self.pending.clone();
-        let guild_id = pending.guild_id;
-        let pending_match_id = pending.pending_match_id;
-        tokio::task::spawn_blocking(move || {
-            repository.mutate_pending_match(guild_id, pending_match_id, move |state| {
-                state.thread_shuffle_thread_id = i64::try_from(thread_id).ok();
-                state.thread_shuffle_message_id = i64::try_from(receipt.message_id).ok();
-            })
-        })
-        .await
-        .map_err(|error| format!("thread metadata task failed: {error}"))?
-        .map_err(|error| error.to_string())?;
-        Ok(())
     }
 
     fn schedule_betting_reminders(&self, pending: &PendingMatchRecord, notify_subscribers: bool) {
@@ -7268,3 +6715,5 @@ fn automatic_outcome_json(
 #[cfg(all(test, feature = "runtime-test-match"))]
 #[path = "match_provider/tests.rs"]
 mod tests;
+
+mod shuffle_setup;

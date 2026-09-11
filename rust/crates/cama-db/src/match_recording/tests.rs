@@ -10,7 +10,219 @@ use crate::test_support::FastTestDatabase;
 
 const GUILD: i64 = 9_001;
 
+fn gc_statistics_fixture() -> (NamedTempFile, MatchRecordingRepository) {
+    let file = NamedTempFile::new().unwrap();
+    initialize_or_migrate(file.path()).unwrap();
+    let connection = Connection::open(file.path()).unwrap();
+    connection.execute("INSERT INTO matches(match_id,guild_id,valve_match_id,winning_team,team1_players,team2_players,enrichment_data) VALUES(1,9001,900,1,'[]','[]','{\"duration\":20}'),(2,0,901,2,'[]','[]',NULL)", []).unwrap();
+    let repository = MatchRecordingRepository::new(file.path());
+    (file, repository)
+}
+
+#[test]
+fn gc_statistics_preserve_first_sparse_snapshot_across_retries_and_guild_scoped_reads() {
+    let (file, repository) = gc_statistics_fixture();
+    let payload = serde_json::json!({"match_id":900,"radiant_win":true,"players":[{"account_id":10,"kills":0}]});
+    repository
+        .save_gc_statistics(1, Some(GUILD), 900, &payload.to_string())
+        .unwrap();
+    repository
+        .save_gc_statistics(1, Some(GUILD), 900, &payload.to_string())
+        .unwrap();
+    repository
+        .save_gc_statistics(1, Some(GUILD), 900, "{\"match_id\":900,\"duration\":null}")
+        .unwrap();
+    let reopened = MatchRecordingRepository::new(file.path());
+    assert_eq!(
+        serde_json::from_str::<JsonValue>(
+            &reopened.gc_statistics(1, Some(GUILD)).unwrap().unwrap()
+        )
+        .unwrap(),
+        payload
+    );
+    assert!(
+        reopened
+            .gc_statistics(1, Some(GUILD + 1))
+            .unwrap()
+            .is_none()
+    );
+    assert!(reopened.gc_statistics(1, None).unwrap().is_none());
+    reopened
+        .save_gc_statistics(2, None, 901, "{\"match_id\":901,\"radiant_win\":false}")
+        .unwrap();
+    assert!(reopened.gc_statistics(2, Some(0)).unwrap().is_some());
+
+    let read_repository = crate::core_repositories::MatchRepository::new(file.path());
+    assert_eq!(
+        read_repository.gc_statistics(1, Some(GUILD)).unwrap(),
+        reopened.gc_statistics(1, Some(GUILD)).unwrap()
+    );
+    assert!(read_repository.gc_statistics(1, None).unwrap().is_none());
+    assert_eq!(
+        read_repository
+            .raw_enrichment_data(1, Some(GUILD))
+            .unwrap()
+            .as_deref(),
+        Some("{\"duration\":20}")
+    );
+    assert!(
+        read_repository
+            .raw_enrichment_data(1, Some(GUILD + 1))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        read_repository
+            .raw_enrichment_data(2, None)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn gc_statistics_reject_invalid_identity_and_winner_without_persisting() {
+    let (_file, repository) = gc_statistics_fixture();
+    for (guild, valve_id, payload) in [
+        (Some(GUILD + 1), 900, "{\"match_id\":900}"),
+        (Some(GUILD), 901, "{\"match_id\":901}"),
+        (Some(GUILD), 900, "{\"match_id\":901}"),
+        (Some(GUILD), 900, "{\"match_id\":900,\"radiant_win\":false}"),
+        (Some(GUILD), 900, "{\"match_id\":900,\"radiant_win\":1}"),
+        (Some(GUILD), 900, "[]"),
+        (Some(GUILD), 900, "broken"),
+        (Some(GUILD), 900, "{}"),
+    ] {
+        assert!(matches!(
+            repository.save_gc_statistics(1, guild, valve_id, payload),
+            Err(MatchRecordingRepositoryError::InvalidGcStatistics(_))
+        ));
+        assert!(repository.gc_statistics(1, Some(GUILD)).unwrap().is_none());
+    }
+    assert!(
+        repository
+            .save_gc_statistics(999, Some(GUILD), 900, "{\"match_id\":900}")
+            .is_err()
+    );
+}
+
+#[test]
+fn gc_statistics_cannot_be_rebound_when_external_match_identity_changes() {
+    let (file, repository) = gc_statistics_fixture();
+    repository
+        .save_gc_statistics(1, Some(GUILD), 900, "{\"match_id\":900}")
+        .unwrap();
+    Connection::open(file.path())
+        .unwrap()
+        .execute("UPDATE matches SET valve_match_id=999 WHERE match_id=1", [])
+        .unwrap();
+    assert!(
+        repository.gc_statistics(1, Some(GUILD)).unwrap().is_none(),
+        "old statistics must never be returned for another Valve match"
+    );
+    assert!(
+        repository
+            .save_gc_statistics(1, Some(GUILD), 999, "{\"match_id\":999}")
+            .is_err()
+    );
+}
+
+#[test]
+fn gc_statistics_prevent_enrichment_from_replacing_the_valve_match_association() {
+    let (file, repository) = gc_statistics_fixture();
+    repository
+        .save_gc_statistics(1, Some(GUILD), 900, "{\"match_id\":900}")
+        .unwrap();
+    assert!(matches!(
+        repository.apply_enrichment_atomic(MatchEnrichmentRequest {
+            match_id: 1,
+            guild_id: Some(GUILD),
+            valve_match_id: 999,
+            duration_seconds: 999,
+            radiant_score: 99,
+            dire_score: 99,
+            game_mode: 2,
+            enrichment_data: Some("{\"match_id\":999}"),
+            enrichment_source: Some("opendota"),
+            enrichment_confidence: None,
+            participant_updates: &[],
+            wrapped_facts: &[],
+        }),
+        Err(MatchRecordingRepositoryError::InvalidGcStatistics(_))
+    ));
+    let (valve_id, payload): (i64, String) = Connection::open(file.path())
+        .unwrap()
+        .query_row(
+            "SELECT valve_match_id,enrichment_data FROM matches WHERE match_id=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(valve_id, 900);
+    assert_eq!(payload, "{\"duration\":20}");
+    assert!(repository.gc_statistics(1, Some(GUILD)).unwrap().is_some());
+}
+
 static FIXTURE_DATABASE_TEMPLATE: OnceLock<NamedTempFile> = OnceLock::new();
+
+#[test]
+fn gc_statistics_saved_after_api_read_reject_stale_projection_until_gc_merge() {
+    let (file, repository) = gc_statistics_fixture();
+    // An API request was prepared before the GC snapshot was available.
+    let mut request = MatchEnrichmentRequest {
+        match_id: 1,
+        guild_id: Some(GUILD),
+        valve_match_id: 900,
+        duration_seconds: 999,
+        radiant_score: 0,
+        dire_score: 0,
+        game_mode: 2,
+        enrichment_data: Some("{\"match_id\":900,\"duration\":999}"),
+        enrichment_source: Some("opendota"),
+        enrichment_confidence: None,
+        participant_updates: &[],
+        wrapped_facts: &[],
+    };
+    repository
+        .save_gc_statistics(1, Some(GUILD), 900, "{\"match_id\":900,\"duration\":1000}")
+        .unwrap();
+    for payload in [
+        None,
+        Some("{\"match_id\":900,\"duration\":999}"),
+        Some("{\"_cama_gc_statistics\":false}"),
+        Some("{\"_cama_gc_statistics\":\"true\"}"),
+    ] {
+        request.enrichment_data = payload;
+        assert!(
+            matches!(repository.apply_enrichment_atomic(request), Err(MatchRecordingRepositoryError::InvalidGcStatistics(message)) if message.contains("reload statistics"))
+        );
+        let stored: String = Connection::open(file.path())
+            .unwrap()
+            .query_row(
+                "SELECT enrichment_data FROM matches WHERE match_id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stored, "{\"duration\":20}",
+            "stale writes cannot partially replace canonical data"
+        );
+    }
+    request.enrichment_data =
+        Some("{\"match_id\":900,\"duration\":1000,\"_cama_gc_statistics\":true}");
+    request.duration_seconds = 1000;
+    repository.apply_enrichment_atomic(request).unwrap();
+    let (duration, stored): (i64, String) = Connection::open(file.path())
+        .unwrap()
+        .query_row(
+            "SELECT duration_seconds,enrichment_data FROM matches WHERE match_id=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(duration, 1000);
+    assert_eq!(stored, request.enrichment_data.unwrap());
+}
 
 struct Fixture {
     file: FastTestDatabase,
@@ -41,6 +253,7 @@ impl Fixture {
                      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                      PRIMARY KEY (discord_id, guild_id)
                  );
+                 CREATE TABLE pending_matches(pending_match_id INTEGER PRIMARY KEY,guild_id INTEGER NOT NULL,payload TEXT NOT NULL);
                  CREATE TABLE matches (
                      match_id INTEGER PRIMARY KEY AUTOINCREMENT,
                      guild_id INTEGER NOT NULL DEFAULT 0,
@@ -167,6 +380,14 @@ impl Fixture {
                      outstanding_fee INTEGER DEFAULT 0,
                      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                      PRIMARY KEY (discord_id, guild_id)
+                 );
+                 CREATE TABLE match_gc_statistics (
+                     guild_id INTEGER NOT NULL,
+                     match_id INTEGER NOT NULL,
+                     valve_match_id INTEGER NOT NULL,
+                     payload_json TEXT NOT NULL,
+                     captured_at INTEGER NOT NULL DEFAULT 0,
+                     PRIMARY KEY (guild_id, match_id)
                  );
                  CREATE TABLE nonprofit_fund (
                      guild_id INTEGER PRIMARY KEY DEFAULT 0,
@@ -1200,6 +1421,13 @@ fn test_exclusion_updates_apply_once_per_pending_match() {
     let decay_ids = [&radiant[..], &dire[..]].concat();
     let mut request = standard(&radiant, &dire, TeamSide::Radiant);
     request.pending_match_id = Some(77_001);
+    fixture
+        .connection()
+        .execute(
+            "INSERT INTO pending_matches(pending_match_id,guild_id,payload) VALUES (?1,?2,'{}')",
+            params![77_001, GUILD],
+        )
+        .unwrap();
     request.exclusion_decay_ids = &decay_ids;
     request.full_exclusion_increment_ids = std::slice::from_ref(&full_increment_id);
     request.half_exclusion_increment_ids = std::slice::from_ref(&half_increment_id);
@@ -2839,6 +3067,13 @@ fn test_house_settlement_leaves_another_pending_matchs_bets_alone() {
     let mut request = standard(&radiant, &dire, TeamSide::Radiant);
     request.pending_bet_since = 100;
     request.pending_match_id = Some(77);
+    fixture
+        .connection()
+        .execute(
+            "INSERT INTO pending_matches(pending_match_id,guild_id,payload) VALUES (?1,?2,'{}')",
+            params![77, GUILD],
+        )
+        .unwrap();
     request.update_ratings = false;
     let result = fixture
         .repository

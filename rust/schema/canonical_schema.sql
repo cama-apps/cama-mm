@@ -381,6 +381,28 @@ CREATE TABLE dota_sessions (
                 PRIMARY KEY (guild_id, pending_match_id)
             );
 
+-- table: dota_spectator_subscriptions
+CREATE TABLE dota_spectator_subscriptions (
+                guild_id INTEGER NOT NULL CHECK(guild_id > 0),
+                lobby_message_id INTEGER NOT NULL CHECK(lobby_message_id > 0),
+                user_id INTEGER NOT NULL CHECK(user_id > 0),
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (guild_id, lobby_message_id, user_id)
+            );
+
+-- table: dota_spectators
+CREATE TABLE dota_spectators (
+                guild_id INTEGER NOT NULL CHECK(guild_id > 0),
+                pending_match_id INTEGER NOT NULL CHECK(pending_match_id > 0),
+                marker TEXT NOT NULL CHECK(length(trim(marker)) BETWEEN 1 AND 200),
+                channel_id INTEGER CHECK(channel_id > 0),
+                payload TEXT NOT NULL CHECK(json_valid(payload) AND json_type(payload) = 'object'),
+                expires_at INTEGER CHECK(expires_at >= 0),
+                revision INTEGER NOT NULL DEFAULT 0 CHECK(revision >= 0),
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (guild_id, pending_match_id)
+            );
+
 -- table: economy_daily_events
 CREATE TABLE economy_daily_events (
                 event_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -498,7 +520,8 @@ CREATE TABLE guild_config (
                 auto_enrich_matches INTEGER DEFAULT 1,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            , ai_features_enabled INTEGER DEFAULT 0);
+            , ai_features_enabled INTEGER DEFAULT 0,
+                dota_hosting_options TEXT NOT NULL DEFAULT '{}');
 
 -- table: hostile_loss_events
 CREATE TABLE hostile_loss_events (
@@ -856,6 +879,16 @@ CREATE TABLE match_corrections (
                 corrected_by INTEGER NOT NULL,
                 corrected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (match_id) REFERENCES matches(match_id)
+            );
+
+-- table: match_gc_statistics
+CREATE TABLE match_gc_statistics (
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                match_id INTEGER NOT NULL REFERENCES matches(match_id) ON DELETE CASCADE,
+                valve_match_id INTEGER NOT NULL CHECK(valve_match_id > 0),
+                payload_json TEXT NOT NULL CHECK(json_valid(payload_json) AND json_type(payload_json) = 'object'),
+                captured_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                PRIMARY KEY (guild_id, match_id)
             );
 
 -- table: match_participants

@@ -12,7 +12,7 @@ use futures_util::StreamExt;
 use std::fmt::{Debug, Formatter};
 use std::io::Write;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use steam_vent::message::{EncodableMessage, MalformedBody};
 use steam_vent::{ConnectionTrait, GameCoordinator, NetMessage, NetMessageHeader, NetworkError};
 use steam_vent_proto_common::protobuf::{Enum, EnumOrUnknown, Message, MessageField};
@@ -47,6 +47,8 @@ const EVENT_BUFFER: usize = 128;
 const INITIAL_CACHE_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const ERESULT_OK: u32 = 1;
+const SO_OWNER_ACCOUNT: u32 = 1;
+const SO_OWNER_LOBBY: u32 = 3;
 
 // steam-vent-proto-dota2 0.5.2 predates Valve's addition of the 60-second
 // delay and the 900-second wire value.  Keep these current wire values raw in
@@ -85,6 +87,12 @@ pub enum DotaSteamError {
     AlreadyInLobby(u64),
     #[error("timed out waiting for the Dota Game Coordinator")]
     Timeout,
+    #[error(
+        "timed out establishing a Dota Game Coordinator session (last status: {last_status:?})"
+    )]
+    HandshakeTimeout { last_status: Option<i32> },
+    #[error("the Dota Game Coordinator suspended this session (raw time_end: {time_end:?})")]
+    SessionSuspended { time_end: Option<u32> },
     #[error("invalid {field} value {value}")]
     InvalidConfig { field: &'static str, value: i32 },
     #[error("invalid team value {0}")]
@@ -440,6 +448,58 @@ pub struct MatchReplay {
     pub server_port: Option<u32>,
 }
 
+/// Sensitive download coordinates for a match's metadata file.
+///
+/// Keep these coordinates out of public statistics and logs. This type does
+/// not implement serialization; exporting credentials must be explicit.
+#[derive(Clone)]
+pub struct MatchMetadataLocation {
+    pub match_id: u64,
+    pub duration: Option<u32>,
+    pub pre_game_duration: Option<u32>,
+    pub start_time: Option<u32>,
+    pub radiant_win: Option<bool>,
+    pub cluster: Option<u32>,
+    pub replay_salt: Option<u32>,
+    private_metadata_key: Option<u32>,
+}
+
+impl MatchMetadataLocation {
+    pub fn private_metadata_key(&self) -> Option<u32> {
+        self.private_metadata_key
+    }
+}
+
+impl Debug for MatchMetadataLocation {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MatchMetadataLocation")
+            .field("match_id", &self.match_id)
+            .field("cluster_present", &self.cluster.is_some())
+            .field("replay_salt", &"[redacted]")
+            .field("private_metadata_key", &"[redacted]")
+            .finish()
+    }
+}
+
+fn map_metadata_location(match_: &CMsgDOTAMatch) -> MatchMetadataLocation {
+    MatchMetadataLocation {
+        match_id: match_.match_id(),
+        duration: match_.duration,
+        pre_game_duration: match_.pre_game_duration,
+        start_time: match_.starttime,
+        radiant_win: match_
+            .match_outcome
+            .and_then(|outcome| match outcome.value() {
+                2 => Some(true),
+                3 => Some(false),
+                _ => None,
+            }),
+        cluster: match_.cluster,
+        replay_salt: match_.replay_salt,
+        private_metadata_key: match_.private_metadata_key,
+    }
+}
+
 /// A team summary in match details.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MatchTeam {
@@ -470,6 +530,8 @@ pub struct MatchDetails {
     pub players: Vec<MatchPlayer>,
     pub teams: Vec<MatchTeam>,
     pub gc_result: u32,
+    /// Sparse public statistics using OpenDota field names; absent GC fields stay absent.
+    pub postgame_statistics: serde_json::Value,
 }
 
 /// Events emitted after authoritative cache or live-scoreboard updates.
@@ -491,13 +553,27 @@ enum CacheStatus {
 
 #[derive(Debug)]
 struct ClientState {
+    own_steam_id: u64,
     status: CacheStatus,
     lobby: Option<LobbySnapshot>,
+    lobby_observed_at: Option<Instant>,
+}
+
+impl ClientState {
+    fn lobby_observation_is_fresh(&self, max_age: Duration) -> bool {
+        self.status == CacheStatus::Ready
+            && self.lobby.is_some()
+            && self
+                .lobby_observed_at
+                .is_some_and(|at| at.elapsed() <= max_age)
+    }
 }
 
 /// Dota Steam/Game Coordinator client.
 #[derive(Clone)]
 pub struct DotaSteamClient {
+    // GameCoordinator alone does not retain steam-vent's heartbeat drop guard.
+    _connection: steam_vent::Connection,
     gc: Arc<Mutex<GameCoordinator>>,
     state: Arc<RwLock<ClientState>>,
     events: broadcast::Sender<DotaSteamEvent>,
@@ -551,14 +627,13 @@ impl DotaSteamClient {
         let steam_id = auth.connection.steam_id();
         let own_steam_id = steam_id.steam64();
         let own_account_id = steam_id.account_id();
-        let (gc, welcome) = auth
-            .connection
-            .game_coordinator(&steam_vent_proto_dota2::GCHandshake::default())
-            .await?;
+        let (gc, welcome) = crate::handshake::connect(&auth.connection).await?;
         let (events, _) = broadcast::channel(EVENT_BUFFER);
         let state = Arc::new(RwLock::new(ClientState {
+            own_steam_id,
             status: CacheStatus::Hydrating,
             lobby: None,
+            lobby_observed_at: None,
         }));
         let gc = Arc::new(Mutex::new(gc));
         let (watcher_ready, watcher_start) = oneshot::channel();
@@ -567,6 +642,7 @@ impl DotaSteamClient {
         // drops messages that arrive before a kind subscription exists.
         let watcher = spawn_watchers(&gc, &state, &events, watcher_start).await;
         let client = Self {
+            _connection: auth.connection,
             gc,
             state,
             events,
@@ -613,6 +689,12 @@ impl DotaSteamClient {
             CacheStatus::Ready => Ok(state.lobby.clone()),
             CacheStatus::Hydrating | CacheStatus::Disconnected => Err(DotaSteamError::NotReady),
         }
+    }
+
+    /// Whether actual lobby data arrived recently from the coordinator.
+    /// Reading the cache does not refresh this observation.
+    pub async fn lobby_observation_is_fresh(&self, max_age: Duration) -> bool {
+        self.state.read().await.lobby_observation_is_fresh(max_age)
     }
 
     /// Return the current game-server SteamID used by server-side realtime
@@ -757,6 +839,28 @@ impl DotaSteamClient {
     /// Request authoritative match details, including roster, outcome and
     /// replay metadata.
     pub async fn match_details(&self, match_id: u64) -> Result<MatchDetails, DotaSteamError> {
+        let response = self.match_details_response(match_id).await?;
+        let details = match_response_details(&response, match_id)?;
+        Ok(map_match_details(details, response.result()))
+    }
+
+    /// Request metadata download coordinates without fetching a replay or file.
+    pub async fn match_metadata_location(
+        &self,
+        match_id: u64,
+    ) -> Result<MatchMetadataLocation, DotaSteamError> {
+        let response = self.match_details_response(match_id).await?;
+        let details = match_response_details(&response, match_id)?;
+        if details.match_id != Some(match_id) || match_id == 0 {
+            return Err(DotaSteamError::MatchNotFound(match_id));
+        }
+        Ok(map_metadata_location(details))
+    }
+
+    async fn match_details_response(
+        &self,
+        match_id: u64,
+    ) -> Result<CMsgGCMatchDetailsResponse, DotaSteamError> {
         let mut request = CMsgGCMatchDetailsRequest::new();
         request.set_match_id(match_id);
         // Match details responses carry the Steam job target id.  Holding the
@@ -772,8 +876,8 @@ impl DotaSteamClient {
         .await
         .map_err(|_| DotaSteamError::Timeout)??;
 
-        let details = match_response_details(&response, match_id)?;
-        Ok(map_match_details(details, response.result()))
+        match_response_details(&response, match_id)?;
+        Ok(response)
     }
 
     async fn send<Msg>(&self, message: Msg) -> Result<(), DotaSteamError>
@@ -1070,6 +1174,7 @@ async fn apply_subscribed(
         state.status = CacheStatus::Ready;
         if contains_lobby_type {
             state.lobby = lobby.clone();
+            state.lobby_observed_at = lobby.as_ref().map(|_| Instant::now());
         }
         previous
     };
@@ -1161,15 +1266,42 @@ async fn apply_single(
 }
 
 async fn apply_unsubscribed(
-    _message: CMsgSOCacheUnsubscribed,
+    message: CMsgSOCacheUnsubscribed,
     state: &Arc<RwLock<ClientState>>,
     events: &broadcast::Sender<DotaSteamEvent>,
 ) {
-    clear_lobby(state, events).await;
-    state.write().await.status = CacheStatus::Disconnected;
-    let _ = events.send(DotaSteamEvent::TransportDisconnected {
-        reason: "Dota SOCache unsubscribed".to_owned(),
-    });
+    let Some(owner) = message.owner_soid.as_ref() else {
+        return;
+    };
+    let (previous, account_unsubscribed) = {
+        let mut state = state.write().await;
+        let account_unsubscribed =
+            owner.type_ == Some(SO_OWNER_ACCOUNT) && owner.id == Some(state.own_steam_id);
+        let lobby_unsubscribed = owner.type_ == Some(SO_OWNER_LOBBY)
+            && owner.id.is_some()
+            && owner.id == state.lobby.as_ref().map(|lobby| lobby.lobby_id);
+        if !account_unsubscribed && !lobby_unsubscribed {
+            return;
+        }
+        // Leaving or destroying a lobby unsubscribes its separate cache;
+        // the authenticated account cache and GC session remain available.
+        if account_unsubscribed {
+            state.status = CacheStatus::Disconnected;
+        }
+        state.lobby_observed_at = None;
+        (
+            state.lobby.take().map(|lobby| lobby.lobby_id),
+            account_unsubscribed,
+        )
+    };
+    if previous.is_some() {
+        let _ = events.send(DotaSteamEvent::LobbyCleared { lobby_id: previous });
+    }
+    if account_unsubscribed {
+        let _ = events.send(DotaSteamEvent::TransportDisconnected {
+            reason: "Dota account SOCache unsubscribed".to_owned(),
+        });
+    }
 }
 
 async fn apply_lobby(
@@ -1181,6 +1313,7 @@ async fn apply_lobby(
         let mut state = state.write().await;
         state.status = CacheStatus::Ready;
         state.lobby = Some(lobby.clone());
+        state.lobby_observed_at = Some(Instant::now());
     }
     let _ = events.send(DotaSteamEvent::LobbyUpdated(lobby));
 }
@@ -1189,6 +1322,7 @@ async fn clear_lobby(state: &Arc<RwLock<ClientState>>, events: &broadcast::Sende
     let previous = {
         let mut state = state.write().await;
         state.status = CacheStatus::Ready;
+        state.lobby_observed_at = None;
         state.lobby.take().map(|lobby| lobby.lobby_id)
     };
     if previous.is_some() {
@@ -1358,7 +1492,7 @@ fn map_match_details(match_: &CMsgDOTAMatch, gc_result: u32) -> MatchDetails {
         match_id: match_.match_id(),
         duration: match_.duration(),
         start_time: match_.starttime(),
-        first_blood_time: nonzero(match_.first_blood_time()),
+        first_blood_time: match_.first_blood_time,
         cluster: nonzero(match_.cluster()),
         league_id: nonzero(match_.leagueid()),
         game_mode: match_.game_mode.map(|mode| mode.value()),
@@ -1381,7 +1515,146 @@ fn map_match_details(match_: &CMsgDOTAMatch, gc_result: u32) -> MatchDetails {
         players,
         teams,
         gc_result,
+        postgame_statistics: map_postgame_statistics(match_),
     }
+}
+
+fn insert_stat<T: Into<serde_json::Value>>(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    name: &str,
+    value: Option<T>,
+) {
+    if let Some(value) = value {
+        object.insert(name.to_owned(), value.into());
+    }
+}
+
+fn map_postgame_statistics(match_: &CMsgDOTAMatch) -> serde_json::Value {
+    use serde_json::{Map, Value};
+
+    let mut stats = Map::new();
+    insert_stat(&mut stats, "match_id", match_.match_id);
+    for (name, value) in [
+        ("duration", match_.duration),
+        ("start_time", match_.starttime),
+        ("first_blood_time", match_.first_blood_time),
+        ("radiant_score", match_.radiant_team_score),
+        ("dire_score", match_.dire_team_score),
+        ("leagueid", match_.leagueid),
+    ] {
+        insert_stat(&mut stats, name, value);
+    }
+    insert_stat(&mut stats, "game_mode", match_.game_mode.map(|v| v.value()));
+    insert_stat(
+        &mut stats,
+        "radiant_win",
+        match_.match_outcome.and_then(|v| match v.value() {
+            2 => Some(true),
+            3 => Some(false),
+            _ => None,
+        }),
+    );
+    if !match_.players.is_empty() {
+        let players = match_
+            .players
+            .iter()
+            .map(|player| {
+                let mut stats = Map::new();
+                // Modern GC responses identify the side independently of player_slot.
+                let slot = player
+                    .team_number
+                    .zip(player.team_slot)
+                    .and_then(|(team, slot)| match (team.value(), slot) {
+                        (0, 0..=4) => Some(slot),
+                        (1, 0..=4) => Some(128 + slot),
+                        _ => None,
+                    })
+                    .or_else(|| {
+                        player.player_slot.filter(|slot| {
+                            matches!(slot, 0..=4 | 128..=132)
+                                && match player.team_number {
+                                    Some(team) => match team.value() {
+                                        0 => *slot < 128,
+                                        1 => *slot >= 128,
+                                        _ => false,
+                                    },
+                                    None => true,
+                                }
+                        })
+                    });
+                for (name, value) in [
+                    ("account_id", player.account_id),
+                    ("player_slot", slot),
+                    ("kills", player.kills),
+                    ("deaths", player.deaths),
+                    ("assists", player.assists),
+                    ("gold", player.gold),
+                    ("last_hits", player.last_hits),
+                    ("denies", player.denies),
+                    ("gold_per_min", player.gold_per_min),
+                    ("xp_per_min", player.xp_per_min),
+                    ("hero_damage", player.hero_damage),
+                    ("tower_damage", player.tower_damage),
+                    ("hero_healing", player.hero_healing),
+                    ("level", player.level),
+                    ("net_worth", player.net_worth),
+                ] {
+                    insert_stat(&mut stats, name, value);
+                }
+                insert_stat(&mut stats, "hero_id", player.hero_id);
+                for (index, value) in [
+                    player.item_0,
+                    player.item_1,
+                    player.item_2,
+                    player.item_3,
+                    player.item_4,
+                    player.item_5,
+                    player.item_6,
+                    player.item_7,
+                    player.item_8,
+                    player.item_9,
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    insert_stat(&mut stats, &format!("item_{index}"), value);
+                }
+                if !player.ability_upgrades.is_empty() {
+                    let upgrades = player
+                        .ability_upgrades
+                        .iter()
+                        .map(|upgrade| {
+                            let mut entry = Map::new();
+                            insert_stat(&mut entry, "ability", upgrade.ability);
+                            insert_stat(&mut entry, "time", upgrade.time);
+                            Value::Object(entry)
+                        })
+                        .collect();
+                    stats.insert("ability_upgrades".to_owned(), Value::Array(upgrades));
+                }
+                Value::Object(stats)
+            })
+            .collect();
+        stats.insert("players".to_owned(), Value::Array(players));
+    }
+    if !match_.picks_bans.is_empty() {
+        let draft = match_
+            .picks_bans
+            .iter()
+            .enumerate()
+            .map(|(order, event)| {
+                let mut entry = Map::new();
+                insert_stat(&mut entry, "is_pick", event.is_pick);
+                insert_stat(&mut entry, "hero_id", event.hero_id);
+                // Only the standard two-side encoding is compatible with OpenDota.
+                insert_stat(&mut entry, "team", event.team.filter(|team| *team <= 1));
+                entry.insert("order".to_owned(), Value::from(order));
+                Value::Object(entry)
+            })
+            .collect();
+        stats.insert("picks_bans".to_owned(), Value::Array(draft));
+    }
+    Value::Object(stats)
 }
 
 fn match_response_details(
@@ -1487,6 +1760,141 @@ impl Default for DestroyLobbyWire {
 mod tests {
     use super::*;
     use steam_vent_proto_dota2::dota_gcmessages_common_lobby::csodotalobby;
+    use steam_vent_proto_dota2::gcsdk_gcmessages::CMsgSOIDOwner;
+
+    const TEST_STEAM_ID: u64 = 76561197960287930;
+
+    fn ready_lobby_state() -> Arc<RwLock<ClientState>> {
+        let mut lobby = CSODOTALobby::new();
+        lobby.set_lobby_id(7001);
+        Arc::new(RwLock::new(ClientState {
+            own_steam_id: TEST_STEAM_ID,
+            status: CacheStatus::Ready,
+            lobby: Some(map_lobby(&lobby)),
+            lobby_observed_at: Some(Instant::now()),
+        }))
+    }
+
+    #[tokio::test]
+    async fn cached_reads_and_unrelated_updates_do_not_renew_lobby_observation() {
+        let state = ready_lobby_state();
+        let max_age = Duration::from_secs(45);
+        let old = Instant::now() - Duration::from_secs(60);
+        state.write().await.lobby_observed_at = Some(old);
+        assert!(!state.read().await.lobby_observation_is_fresh(max_age));
+        let (events, _) = broadcast::channel(EVENT_BUFFER);
+        apply_subscribed(CMsgSOCacheSubscribed::new(), &state, &events).await;
+        assert_eq!(state.read().await.lobby_observed_at, Some(old));
+        assert!(!state.read().await.lobby_observation_is_fresh(max_age));
+        let lobby = state.read().await.lobby.clone().unwrap();
+        apply_lobby(lobby, &state, &events).await;
+        assert!(state.read().await.lobby_observation_is_fresh(max_age));
+        state.write().await.status = CacheStatus::Disconnected;
+        assert!(!state.read().await.lobby_observation_is_fresh(max_age));
+        clear_lobby(&state, &events).await;
+        assert!(!state.read().await.lobby_observation_is_fresh(max_age));
+    }
+
+    fn unsubscribe(owner_type: u32, owner_id: u64) -> CMsgSOCacheUnsubscribed {
+        let message = CMsgSOCacheUnsubscribed {
+            owner_soid: MessageField::some(CMsgSOIDOwner {
+                type_: Some(owner_type),
+                id: Some(owner_id),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        CMsgSOCacheUnsubscribed::parse_from_bytes(&message.write_to_bytes().unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn lobby_unsubscribe_clears_lobby_without_disconnecting_account() {
+        let state = ready_lobby_state();
+        let (events, mut received) = broadcast::channel(EVENT_BUFFER);
+
+        apply_unsubscribed(unsubscribe(3, 7001), &state, &events).await;
+
+        assert_eq!(state.read().await.status, CacheStatus::Ready);
+        assert!(state.read().await.lobby.is_none());
+        assert!(matches!(
+            received.try_recv(),
+            Ok(DotaSteamEvent::LobbyCleared {
+                lobby_id: Some(7001)
+            })
+        ));
+        assert!(matches!(
+            received.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+
+        // A duplicate notification after cleanup must remain harmless.
+        apply_unsubscribed(unsubscribe(3, 7001), &state, &events).await;
+        assert_eq!(state.read().await.status, CacheStatus::Ready);
+        assert!(matches!(
+            received.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn account_unsubscribe_invalidates_ready_state_and_clears_lobby() {
+        let state = ready_lobby_state();
+        let (events, mut received) = broadcast::channel(EVENT_BUFFER);
+
+        apply_unsubscribed(unsubscribe(1, TEST_STEAM_ID), &state, &events).await;
+
+        assert_eq!(state.read().await.status, CacheStatus::Disconnected);
+        assert!(state.read().await.lobby.is_none());
+        assert!(matches!(
+            received.try_recv(),
+            Ok(DotaSteamEvent::LobbyCleared {
+                lobby_id: Some(7001)
+            })
+        ));
+        assert!(matches!(
+            received.try_recv(),
+            Ok(DotaSteamEvent::TransportDisconnected { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn unrelated_or_missing_unsubscribe_owners_do_not_change_state() {
+        let state = ready_lobby_state();
+        let (events, mut received) = broadcast::channel(EVENT_BUFFER);
+        for message in [
+            unsubscribe(1, TEST_STEAM_ID + 1),
+            unsubscribe(3, 7000), // Delayed notification for a previous lobby.
+            unsubscribe(1, 7001), // Matching id with the wrong owner type.
+            unsubscribe(3, TEST_STEAM_ID),
+            unsubscribe(2, 7001),
+            CMsgSOCacheUnsubscribed::new(),
+            CMsgSOCacheUnsubscribed {
+                owner_soid: MessageField::some(CMsgSOIDOwner::new()),
+                ..Default::default()
+            },
+        ] {
+            apply_unsubscribed(message, &state, &events).await;
+            let state = state.read().await;
+            assert_eq!(state.status, CacheStatus::Ready);
+            assert_eq!(state.lobby.as_ref().unwrap().lobby_id, 7001);
+        }
+        assert!(matches!(
+            received.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn lobby_unsubscribe_does_not_restore_a_disconnected_account() {
+        let state = ready_lobby_state();
+        state.write().await.status = CacheStatus::Disconnected;
+        let (events, _) = broadcast::channel(EVENT_BUFFER);
+
+        apply_unsubscribed(unsubscribe(3, 7001), &state, &events).await;
+
+        assert_eq!(state.read().await.status, CacheStatus::Disconnected);
+        assert!(state.read().await.lobby.is_none());
+    }
 
     #[test]
     fn maps_lobby_members_and_configuration_without_losing_unknown_enums() {
@@ -1669,8 +2077,10 @@ mod tests {
         let mut welcome = CMsgClientWelcome::new();
         welcome.outofdate_subscribed_caches.push(cache);
         let state = Arc::new(RwLock::new(ClientState {
+            own_steam_id: 76561197960287930,
             status: CacheStatus::Hydrating,
             lobby: None,
+            lobby_observed_at: None,
         }));
         let (events, _events_rx) = broadcast::channel(EVENT_BUFFER);
 
@@ -1696,6 +2106,138 @@ mod tests {
         let details = match_response_details(&response, 31415).expect("successful response");
         assert_eq!(details.match_id(), 31415);
         assert_eq!(map_match_details(details, response.result()).gc_result, 1);
+    }
+
+    #[test]
+    fn metadata_location_preserves_wire_presence_and_redacts_credentials() {
+        let mut match_ = CMsgDOTAMatch::new();
+        match_.set_match_id(31415);
+        let missing = map_metadata_location(&match_);
+        assert_eq!(missing.private_metadata_key(), None);
+        assert_eq!(missing.replay_salt, None);
+        match_.set_private_metadata_key(3141592653);
+        match_.set_replay_salt(2718281828);
+        match_.set_cluster(152);
+        let decoded = CMsgDOTAMatch::parse_from_bytes(
+            &match_.write_to_bytes().expect("encode metadata location"),
+        )
+        .expect("decode metadata location");
+        let location = map_metadata_location(&decoded);
+        assert_eq!(location.private_metadata_key(), Some(3141592653));
+        assert_eq!(location.replay_salt, Some(2718281828));
+        let debug = format!("{location:?}");
+        assert!(!debug.contains("3141592653"));
+        assert!(!debug.contains("2718281828"));
+        assert!(debug.contains("redacted"));
+        assert!(
+            map_postgame_statistics(&decoded)
+                .get("private_metadata_key")
+                .is_none()
+        );
+    }
+
+    fn wire_match_details(match_: &CMsgDOTAMatch) -> MatchDetails {
+        let bytes = match_.write_to_bytes().expect("encode match details");
+        let decoded = CMsgDOTAMatch::parse_from_bytes(&bytes).expect("decode match details");
+        map_match_details(&decoded, ERESULT_OK)
+    }
+
+    #[test]
+    fn postgame_wire_fields_distinguish_absent_from_zero() {
+        use steam_vent_proto_dota2::dota_gcmessages_common::cmsg_dotamatch::Player;
+        let mut match_ = CMsgDOTAMatch::new();
+        assert_eq!(
+            wire_match_details(&match_).postgame_statistics,
+            serde_json::json!({})
+        );
+        match_.set_match_id(31415);
+        match_.set_duration(0);
+        match_.set_first_blood_time(0);
+        match_.set_leagueid(0);
+        match_.match_outcome = Some(EnumOrUnknown::from_i32(3));
+        let mut player = Player::new();
+        player.set_account_id(42);
+        player.set_kills(0);
+        player.set_item_0(0);
+        match_.players.push(player);
+        // Public statistics must never copy these values from the wire object.
+        match_.set_private_metadata_key(1234);
+        match_.set_replay_salt(5678);
+        match_.set_server_ip(9012);
+        let details = wire_match_details(&match_);
+        assert_eq!(details.first_blood_time, Some(0));
+        assert_eq!(
+            details.postgame_statistics,
+            serde_json::json!({
+                "match_id": 31415, "duration": 0, "first_blood_time": 0,
+                "leagueid": 0, "radiant_win": false,
+                "players": [{"account_id": 42, "kills": 0, "item_0": 0}]
+            })
+        );
+        match_.match_outcome = Some(EnumOrUnknown::from_i32(64));
+        assert!(
+            wire_match_details(&match_)
+                .postgame_statistics
+                .get("radiant_win")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn postgame_wire_slots_normalize_dire_and_reject_contradictions() {
+        use steam_vent_proto_dota2::dota_gcmessages_common::cmsg_dotamatch::Player;
+        let cases = [
+            (Some(1), Some(3), Some(3), Some(131)),
+            (Some(0), Some(0), None, Some(0)),
+            (Some(1), None, Some(129), Some(129)),
+            (None, None, Some(132), Some(132)),
+            (Some(1), None, Some(2), None),
+            (Some(0), None, Some(129), None),
+            (Some(4), None, Some(0), None),
+            (None, None, Some(5), None),
+            (None, None, None, None),
+        ];
+        for (team, slot, raw, expected) in cases {
+            let mut match_ = CMsgDOTAMatch::new();
+            let mut player = Player::new();
+            player.team_number = team.map(EnumOrUnknown::from_i32);
+            player.team_slot = slot;
+            player.player_slot = raw;
+            match_.players.push(player);
+            let details = wire_match_details(&match_);
+            assert_eq!(
+                details.postgame_statistics["players"][0].get("player_slot"),
+                expected.map(serde_json::Value::from).as_ref(),
+                "{team:?}/{slot:?}/{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn postgame_wire_draft_and_abilities_preserve_present_values() {
+        use steam_vent_proto_dota2::dota_gcmessages_common::{
+            CMatchHeroSelectEvent, CMatchPlayerAbilityUpgrade, cmsg_dotamatch::Player,
+        };
+        let mut match_ = CMsgDOTAMatch::new();
+        let mut player = Player::new();
+        let mut upgrade = CMatchPlayerAbilityUpgrade::new();
+        upgrade.set_ability(5034);
+        upgrade.set_time(0);
+        player.ability_upgrades.push(upgrade);
+        player.set_item_9(42);
+        match_.players.push(player);
+        let mut pick = CMatchHeroSelectEvent::new();
+        pick.set_is_pick(false);
+        pick.set_team(1);
+        pick.set_hero_id(23);
+        match_.picks_bans.push(pick);
+        assert_eq!(
+            wire_match_details(&match_).postgame_statistics,
+            serde_json::json!({
+                "players": [{"item_9": 42, "ability_upgrades": [{"ability":5034,"time":0}]}],
+                "picks_bans": [{"is_pick":false,"team":1,"hero_id":23,"order":0}]
+            })
+        );
     }
 
     #[test]

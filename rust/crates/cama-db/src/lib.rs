@@ -495,3 +495,5 @@ mod tests {
         assert_runtime_connection_reuses_schema_sqlite_configuration();
     }
 }
+
+pub mod dota_host_routing;

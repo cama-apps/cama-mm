@@ -1582,7 +1582,7 @@ impl DraftStatePersistencePort for SqliteDraftStatePersistence {
                 },
             )?;
         let plan = DraftFinalizationPlan::from_json(&linked.job.plan_json)?;
-        plan.validate(pending_payload_json)?;
+        plan.validate(&linked.pending_payload_json)?;
         Ok(DraftPendingMatchLink {
             envelope: Self::decode(linked.draft)?,
             completion_key: linked.completion_key,

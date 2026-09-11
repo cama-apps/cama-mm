@@ -335,7 +335,20 @@ impl DraftFinalizationRepository {
                                 .to_owned(),
                         });
                     }
-                    ensure_same_pending_payload(guild_id, &linked.payload, pending_payload_json)?;
+                    let routed_request = cama_db_core::dota_host_routing::replay_routing(
+                        pending_payload_json,
+                        &linked.payload,
+                    )?;
+                    ensure_same_pending_payload(guild_id, &linked.payload, &routed_request)?;
+                    let routed_plan = rebase_routing_plan(
+                        plan_request.raw(),
+                        pending_payload_json,
+                        &linked.payload,
+                    )?;
+                    let plan_request = match plan_request {
+                        PlanRequest::Frozen(_) => PlanRequest::Frozen(&routed_plan),
+                        PlanRequest::FinancialSeed(_) => PlanRequest::FinancialSeed(&routed_plan),
+                    };
                     let job = require_matching_finalization_job_request(
                         &transaction,
                         &completion_key,
@@ -388,13 +401,32 @@ impl DraftFinalizationRepository {
             // state instead of manufacturing a recovery plan for it.
             return Err(DraftFinalizationError::JobNotFound { completion_key });
         }
+        let mut routed_payload: Value = serde_json::from_str(pending_payload_json)
+            .map_err(|e| DraftFinalizationError::InvalidPendingPayload(e.to_string()))?;
+        let original_payload = routed_payload.clone();
+        cama_db_core::dota_host_routing::route_pending(
+            &transaction,
+            guild_id,
+            &mut routed_payload,
+        )?;
+        let persisted_payload = if routed_payload == original_payload {
+            pending_payload_json.to_owned()
+        } else {
+            routed_payload.to_string()
+        };
+        let routed_plan =
+            rebase_routing_plan(plan_request.raw(), pending_payload_json, &persisted_payload)?;
+        let plan_request = match plan_request {
+            PlanRequest::Frozen(_) => PlanRequest::Frozen(&routed_plan),
+            PlanRequest::FinancialSeed(_) => PlanRequest::FinancialSeed(&routed_plan),
+        };
+        let pending_payload_json = persisted_payload.as_str();
         transaction.execute(
             "INSERT INTO pending_matches(guild_id,payload,completion_key,updated_at)
              VALUES (?1,?2,?3,CURRENT_TIMESTAMP)",
             params![guild_id, pending_payload_json, completion_key],
         )?;
         let pending_match_id = transaction.last_insert_rowid();
-        let persisted_payload = pending_payload_json.to_owned();
         let frozen_plan_json = match plan_request {
             PlanRequest::Frozen(plan_json) => plan_json.to_owned(),
             PlanRequest::FinancialSeed(plan_seed_json) => {
@@ -889,6 +921,18 @@ impl DraftFinalizationRepository {
                 reason: "Draft envelope changed during terminal deletion".to_owned(),
             });
         }
+        let opened = transaction.execute(
+            "UPDATE pending_matches SET payload=json_set(payload,'$.draft_setup_complete',json('true')),
+                updated_at=CURRENT_TIMESTAMP WHERE guild_id=?1 AND pending_match_id=?2",
+            params![guild_id,pending_match_id],
+        )?;
+        if opened != 1 {
+            return Err(DraftFinalizationError::Conflict {
+                guild_id,
+                reason: "pending draft disappeared before terminal completion".to_owned(),
+            });
+        }
+        cama_db_core::dota_host_routing::apply_withdrawn(&transaction, guild_id, pending_match_id)?;
         let completed = require_job(&transaction, completion_key)?;
         transaction.commit()?;
         Ok(completed)
@@ -1249,6 +1293,20 @@ fn parse_json_object(
     } else {
         Err(error("root value must be an object".to_owned()))
     }
+}
+
+fn rebase_routing_plan(
+    plan_json: &str,
+    requested: &str,
+    routed: &str,
+) -> Result<String, DraftFinalizationError> {
+    ensure_plan_pending_hash(plan_json, requested)?;
+    if requested == routed {
+        return Ok(plan_json.to_owned());
+    }
+    let mut plan = parse_json_object(plan_json, DraftFinalizationError::InvalidPlan)?;
+    plan["pending_payload_sha256"] = Value::String(pending_payload_sha256(routed));
+    Ok(plan.to_string())
 }
 
 fn ensure_same_pending_payload(
@@ -3245,5 +3303,118 @@ mod tests {
                 )
                 .is_ok()
         );
+    }
+    #[test]
+    fn draft_routing_freezes_busy_fallback_and_withdrawal_survives_reenable_without_hash_mutation()
+    {
+        use cama_db_core::dota_host_routing::{DotaHostRouting, configure};
+        let file = fixture();
+        let mut connection = crate::open_runtime_connection(file.path()).unwrap();
+        connection
+            .execute(
+                "INSERT INTO guild_config(guild_id,league_id) VALUES(42,123)",
+                [],
+            )
+            .unwrap();
+        for id in 1..=10 {
+            connection.execute("INSERT INTO players(discord_id,guild_id,discord_username) VALUES(?1,42,'player')",[id]).unwrap();
+            connection.execute("INSERT INTO player_steam_ids(discord_id,steam_id,is_primary,added_at) VALUES(?1,?1,1,100)",[id]).unwrap();
+        }
+        let policy = Some(DotaHostRouting {
+            account_key: "99".into(),
+            guild_ids: vec![42],
+        });
+        configure(&mut connection, policy.clone()).unwrap();
+        let drafts = DraftStateRepository::new(file.path());
+        let repository = DraftFinalizationRepository::new(file.path());
+        let draft = fenced(&drafts, 42);
+        let payload=json!({"shuffle_timestamp":LINK_SHUFFLE_TIMESTAMP,"is_bomb_pot":false,
+            "radiant_team_ids":[1,2,3,4,5],"dire_team_ids":[6,7,8,9,10],"bet_lock_until":LINK_SHUFFLE_TIMESTAMP+600}).to_string();
+        let frozen = plan(file.path(), 42, draft.session_id, &payload);
+        let linked = repository
+            .link_pending_match(42, draft.session_id, draft.revision, &payload, &frozen)
+            .unwrap();
+        let routed: Value = serde_json::from_str(&linked.pending_payload_json).unwrap();
+        assert_eq!(routed["dota_host_account_key"], "99");
+        ensure_plan_pending_hash(&linked.job.plan_json, &linked.pending_payload_json).unwrap();
+        let repeated = repository
+            .link_pending_match(42, draft.session_id, draft.revision, &payload, &frozen)
+            .unwrap();
+        assert_eq!(repeated.pending_payload_json, linked.pending_payload_json);
+        configure(&mut connection, None).unwrap();
+        configure(&mut connection, policy).unwrap();
+        let still_hashed: String = connection
+            .query_row(
+                "SELECT payload FROM pending_matches WHERE pending_match_id=?1",
+                [linked.pending_match_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(still_hashed, linked.pending_payload_json);
+        let sessions =
+            cama_db_match::dota_session_repository::DotaSessionRepository::new(file.path());
+        assert!(matches!(sessions.claim_reserved_session(42,linked.pending_match_id,"99",json!({}),100),Err(cama_db_match::dota_session_repository::DotaSessionRepositoryError::ReservationUnavailable{..})));
+        let pending = cama_db_match::match_runtime::PendingMatchRepository::new(file.path());
+        let state: cama_db_match::match_runtime::PendingMatchState =
+            serde_json::from_str(&payload).unwrap();
+        let fresh = pending.create_pending_match(42, &state).unwrap();
+        assert_eq!(
+            fresh.state.extra["dota_host_account_key"], "99",
+            "withdrawn draft must not hold account busy"
+        );
+        let busy = pending.create_pending_match(42, &state).unwrap();
+        assert_eq!(busy.state.extra["dota_hosting_fallback_reason"], "bot_busy");
+        pending
+            .delete_pending_match(42, fresh.pending_match_id)
+            .unwrap();
+        assert_eq!(
+            pending
+                .pending_match(42, busy.pending_match_id)
+                .unwrap()
+                .unwrap()
+                .state
+                .extra["dota_hosting"]["hosting"],
+            "manual"
+        );
+        repository
+            .claim_job_lease(&linked.completion_key, 1, "worker", 100, 200)
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE draft_finalization_jobs SET stage='setup_complete' WHERE completion_key=?1",
+                [&linked.completion_key],
+            )
+            .unwrap();
+        let setup = repository.job(&linked.completion_key).unwrap().unwrap();
+        let published = repository
+            .advance_job_stage(
+                &linked.completion_key,
+                setup.revision,
+                DRAFT_FINANCIAL_SETUP_COMPLETE_STAGE,
+                DRAFT_FINALIZATION_PUBLICATION_COMPLETE_STAGE,
+                "{}",
+                "worker",
+                101,
+            )
+            .unwrap();
+        repository
+            .complete_job_and_delete_draft(
+                &linked.completion_key,
+                published.revision,
+                "worker",
+                102,
+                42,
+                draft.session_id,
+                linked.pending_match_id,
+                linked.draft.revision,
+                DRAFT_FINALIZATION_PUBLICATION_COMPLETE_STAGE,
+            )
+            .unwrap();
+        let withdrawn = pending
+            .pending_match(42, linked.pending_match_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(withdrawn.state.extra["dota_hosting"]["hosting"], "manual");
+        assert!(!withdrawn.state.extra.contains_key("dota_host_account_key"));
     }
 }

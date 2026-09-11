@@ -31,7 +31,7 @@ pub mod dig_provider;
 pub mod dig_weather_worker;
 pub mod dota_host;
 pub mod dota_live;
-pub mod dota_replay;
+pub mod dota_spectator;
 pub mod draft_provider;
 pub mod duel_challenges_worker;
 pub mod duel_provider;

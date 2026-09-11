@@ -9,15 +9,17 @@
 #![forbid(unsafe_code)]
 
 mod auth;
+mod handshake;
 mod lobby;
+pub mod metadata;
 
 pub use auth::{
     AuthError, AuthenticatedSteam, GuardConfirmation, SteamAuth, SteamAuthConfig, SteamSession,
 };
 pub use lobby::{
     DotaSteamClient, DotaSteamError, DotaSteamEvent, LivePlayer, LiveScoreboard, LiveTeam,
-    LobbyConfig, LobbyMember, LobbyOutcome, LobbySnapshot, LobbyState, MatchDetails, MatchPlayer,
-    MatchReplay, MatchTeam, Team,
+    LobbyConfig, LobbyMember, LobbyOutcome, LobbySnapshot, LobbyState, MatchDetails,
+    MatchMetadataLocation, MatchPlayer, MatchReplay, MatchTeam, Team,
 };
 
 /// Dota 2's Steam app ID.

@@ -14,6 +14,154 @@ fn empty_database() -> NamedTempFile {
 }
 
 #[test]
+fn spectator_schema_supports_fresh_upgrade_and_retry_with_durable_cleanup_intent() {
+    for upgrade in [false, true] {
+        let database = empty_database();
+        if upgrade {
+            initialize_or_migrate(database.path()).unwrap();
+            open_runtime_connection(database.path())
+                .unwrap()
+                .execute_batch(
+                    "DROP TABLE dota_spectators;
+                 DROP TABLE dota_spectator_subscriptions;
+                 DELETE FROM schema_migrations WHERE name='create_dota_spectators';",
+                )
+                .unwrap();
+        }
+        let report = initialize_or_migrate(database.path()).unwrap();
+        assert!(
+            report
+                .newly_applied
+                .iter()
+                .any(|name| name == "create_dota_spectators")
+        );
+        let connection = open_runtime_connection(database.path()).unwrap();
+        connection.execute("INSERT INTO dota_spectators(guild_id,pending_match_id,marker,payload,expires_at,updated_at) VALUES(10,20,'durable-owner','{\"outbox\":[\"delete\"]}',123,100)", []).unwrap();
+        connection.execute("INSERT INTO dota_spectator_subscriptions(guild_id,lobby_message_id,user_id,updated_at) VALUES(10,30,40,100)", []).unwrap();
+        drop(connection);
+        assert!(
+            initialize_or_migrate(database.path())
+                .unwrap()
+                .was_current()
+        );
+        let connection = open_runtime_connection(database.path()).unwrap();
+        let saved: (String, String, i64) = connection.query_row("SELECT marker,payload,expires_at FROM dota_spectators WHERE guild_id=10 AND pending_match_id=20", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+        assert_eq!(
+            saved,
+            (
+                "durable-owner".into(),
+                "{\"outbox\":[\"delete\"]}".into(),
+                123
+            )
+        );
+        assert_eq!(connection.query_row("SELECT user_id FROM dota_spectator_subscriptions WHERE guild_id=10 AND lobby_message_id=30", [], |row| row.get::<_, i64>(0)).unwrap(), 40);
+        assert!(audit_database(database.path()).unwrap().is_compatible());
+    }
+}
+
+#[test]
+fn gc_statistics_schema_supports_fresh_upgrade_and_retry_without_losing_matches() {
+    for upgrade in [false, true] {
+        let database = empty_database();
+        if upgrade {
+            initialize_or_migrate(database.path()).unwrap();
+            let connection = open_runtime_connection(database.path()).unwrap();
+            connection.execute_batch(
+                "DROP TABLE match_gc_statistics;
+                 DELETE FROM schema_migrations WHERE name='create_match_gc_statistics';
+                 INSERT INTO matches(match_id,guild_id,valve_match_id,team1_players,team2_players) VALUES(1,10,900,'[]','[]');"
+            ).unwrap();
+        }
+        let report = initialize_or_migrate(database.path()).unwrap();
+        assert!(
+            report
+                .newly_applied
+                .iter()
+                .any(|name| name == "create_match_gc_statistics")
+        );
+        let connection = open_runtime_connection(database.path()).unwrap();
+        if !upgrade {
+            connection.execute("INSERT INTO matches(match_id,guild_id,valve_match_id,team1_players,team2_players) VALUES(1,10,900,'[]','[]')", []).unwrap();
+        }
+        connection.execute("INSERT INTO match_gc_statistics(guild_id,match_id,valve_match_id,payload_json) VALUES(10,1,900,'{\"match_id\":900}')", []).unwrap();
+        assert!(
+            connection
+                .execute("UPDATE match_gc_statistics SET payload_json='[]'", [])
+                .is_err()
+        );
+        assert!(
+            connection
+                .execute("UPDATE match_gc_statistics SET payload_json='broken'", [])
+                .is_err()
+        );
+        drop(connection);
+        assert!(
+            initialize_or_migrate(database.path())
+                .unwrap()
+                .was_current()
+        );
+        let connection = open_runtime_connection(database.path()).unwrap();
+        let (payload, captured): (String, i64) = connection.query_row("SELECT payload_json,captured_at FROM match_gc_statistics WHERE guild_id=10 AND match_id=1", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(payload, "{\"match_id\":900}");
+        assert!(captured > 0);
+        assert!(audit_database(database.path()).unwrap().is_compatible());
+    }
+}
+
+#[test]
+fn guild_dota_hosting_options_supports_fresh_upgrade_and_idempotent_retry() {
+    for upgrade in [false, true] {
+        let database = empty_database();
+        if upgrade {
+            initialize_or_migrate(database.path()).unwrap();
+            let connection = open_runtime_connection(database.path()).unwrap();
+            connection.execute_batch(
+                "ALTER TABLE guild_config DROP COLUMN dota_hosting_options;
+                 DELETE FROM schema_migrations WHERE name='add_guild_dota_hosting_options';
+                 INSERT INTO guild_config(guild_id,league_id,auto_enrich_matches) VALUES(10,19144,0);"
+            ).unwrap();
+        }
+        let report = initialize_or_migrate(database.path()).unwrap();
+        assert!(
+            report
+                .newly_applied
+                .iter()
+                .any(|name| name == "add_guild_dota_hosting_options")
+        );
+        let connection = open_runtime_connection(database.path()).unwrap();
+        if !upgrade {
+            connection.execute("INSERT INTO guild_config(guild_id,league_id,auto_enrich_matches) VALUES(10,19144,0)", []).unwrap();
+        }
+        let values: (i64, i64, String) = connection.query_row(
+            "SELECT league_id,auto_enrich_matches,dota_hosting_options FROM guild_config WHERE guild_id=10", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        ).unwrap();
+        assert_eq!(values, (19144, 0, "{}".into()));
+        connection
+            .execute(
+                "UPDATE guild_config SET dota_hosting_options='{\"region\":31}' WHERE guild_id=10",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        let retry = initialize_or_migrate(database.path()).unwrap();
+        assert!(retry.was_current());
+        let connection = open_runtime_connection(database.path()).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT dota_hosting_options FROM guild_config WHERE guild_id=10",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "{\"region\":31}"
+        );
+        assert!(audit_database(database.path()).unwrap().is_compatible());
+    }
+}
+
+#[test]
 fn match_draft_analysis_schema_supports_fresh_and_upgraded_databases() {
     for upgrade in [false, true] {
         let database = empty_database();

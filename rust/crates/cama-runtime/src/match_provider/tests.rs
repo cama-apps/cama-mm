@@ -1,3 +1,4 @@
+use cama_db::match_runtime::PendingMatchRepositoryError;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -29,6 +30,7 @@ use crate::test_support::{
     FastTestDatabase, fast_database, initialize_test_database as initialize_or_migrate,
     migrated_database,
 };
+use cama_domain::dota_hosting::{FirstPick, HostingMode, StartMode};
 
 const GUILD: i64 = 82_001;
 const MATCH_ID: i64 = 91_001;
@@ -708,6 +710,7 @@ impl MatchRuntimeFixture {
         self.provider
             .handler
             .prepare_shuffle(PrepareShuffleRequest {
+                source_lobby_message_id: None,
                 guild_id: GUILD,
                 lobby_kind: LobbyKind::Open,
                 player_ids,
@@ -717,6 +720,7 @@ impl MatchRuntimeFixture {
                 shuffle_mode: "balanced".to_owned(),
                 shuffle_timestamp: unix_seconds(),
                 is_bomb_pot: false,
+                dota_hosting: DotaHostingOptions::default(),
             })
             .expect("prepare production shuffle")
     }
@@ -3253,11 +3257,12 @@ fn bonus_failure_compensates_partial_participation_and_releases_claim() {
     trigger_connection
         .execute("DROP TRIGGER fail_match_win_bonus_after_participation", [])
         .expect("remove win-bonus failure");
-    let recovered = fixture
-        .provider
-        .handler
+    let mut restarted = fixture.provider.handler.as_ref().clone();
+    restarted.config.jopacoin_win_reward = 999;
+    restarted.config.jopacoin_per_game = 999;
+    let recovered = restarted
         .record_match_blocking(&pending, "radiant", None)
-        .expect("retry after compensated reward failure");
+        .expect("retry uses committed policy despite config changes");
     assert_eq!(recovered.match_id, match_id);
 
     for (index, discord_id) in participant_ids.iter().enumerate() {
@@ -4897,6 +4902,16 @@ struct PublicationDiscord {
 
 #[async_trait]
 impl DiscordTransport for PublicationDiscord {
+    async fn edit_thread(
+        &self,
+        _id: u64,
+        _name: &str,
+        _archived: bool,
+        _locked: bool,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
     async fn fetch_message(
         &self,
         _channel_id: u64,
@@ -5717,6 +5732,260 @@ fn inferred_shuffle_command_context(user_id: i64) -> MatchCommandContext {
     }
 }
 
+#[test]
+fn dota_shuffle_schema_preserves_existing_options_and_bounds_host_settings() {
+    let options = shuffle_options();
+    assert_eq!(options.len(), 11);
+    assert_eq!(
+        &options[..3]
+            .iter()
+            .map(|option| option.name.as_str())
+            .collect::<Vec<_>>(),
+        &["mode", "rating_system", "lobby"]
+    );
+    assert!(options.iter().all(|option| !option.required));
+    let region = options
+        .iter()
+        .find(|option| option.name == "server_region")
+        .unwrap();
+    assert_eq!(
+        (region.min_integer, region.max_integer),
+        (Some(1), Some(100))
+    );
+    let modes = options
+        .iter()
+        .find(|option| option.name == "game_mode")
+        .unwrap();
+    assert_eq!(modes.choices.len(), 11);
+    assert!(
+        requested_dota_hosting(&[InteractionOption {
+            name: "game_mode".into(),
+            value: InteractionValue::Integer(21),
+        }])
+        .is_err()
+    );
+    assert!(
+        requested_dota_hosting(&[InteractionOption {
+            name: "hosting".into(),
+            value: InteractionValue::Integer(0),
+        }])
+        .is_err()
+    );
+}
+
+#[test]
+fn dota_shuffle_parses_all_admin_options_without_conflating_balance_mode() {
+    let options = vec![
+        InteractionOption {
+            name: "mode".into(),
+            value: InteractionValue::String("region".into()),
+        },
+        InteractionOption {
+            name: "hosting".into(),
+            value: InteractionValue::String("bot".into()),
+        },
+        InteractionOption {
+            name: "server_region".into(),
+            value: InteractionValue::Integer(31),
+        },
+        InteractionOption {
+            name: "game_mode".into(),
+            value: InteractionValue::Integer(23),
+        },
+        InteractionOption {
+            name: "first_pick".into(),
+            value: InteractionValue::String("random".into()),
+        },
+        InteractionOption {
+            name: "start".into(),
+            value: InteractionValue::String("manual".into()),
+        },
+        InteractionOption {
+            name: "tv_delay".into(),
+            value: InteractionValue::Integer(0),
+        },
+        InteractionOption {
+            name: "league_id".into(),
+            value: InteractionValue::Integer(19144),
+        },
+        InteractionOption {
+            name: "visibility".into(),
+            value: InteractionValue::Integer(0),
+        },
+    ];
+    assert_eq!(
+        requested_dota_hosting(&options).unwrap(),
+        DotaHostingOptions {
+            hosting: Some(HostingMode::Bot),
+            region: Some(31),
+            game_mode: Some(23),
+            first_pick: Some(FirstPick::Random),
+            start: Some(StartMode::Manual),
+            tv_delay: Some(0),
+            league_id: Some(19144),
+            visibility: Some(0),
+        }
+    );
+}
+
+#[tokio::test]
+async fn dota_shuffle_overrides_require_admin_before_any_lobby_changes() {
+    let fixture = MatchRuntimeFixture::new();
+    for (name, _) in DOTA_SHUFFLE_OPTIONS {
+        let responder = Arc::new(RecordingMatchResponder::default());
+        let mut context = inferred_shuffle_command_context(99);
+        context.options.push(InteractionOption {
+            name: (*name).to_owned(),
+            value: InteractionValue::String("manual".into()),
+        });
+        fixture
+            .provider
+            .handler
+            .handle_shuffle(context, responder.clone())
+            .await
+            .unwrap();
+        assert!(
+            responder.contents()[0].contains("Only admins can override"),
+            "{name}"
+        );
+    }
+    assert!(
+        PendingMatchRepository::new(fixture.database.path())
+            .single_pending_match(GUILD)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dota_shuffle_manual_override_is_persisted_before_publication() {
+    let fixture = MatchRuntimeFixture::new();
+    let defaults = DotaHostingOptions {
+        hosting: Some(HostingMode::Bot),
+        region: Some(31),
+        game_mode: Some(2),
+        tv_delay: Some(0),
+        league_id: Some(19144),
+        first_pick: Some(FirstPick::Radiant),
+        start: Some(StartMode::Automatic),
+        visibility: Some(2),
+    };
+    let config = GuildConfigRepository::new(fixture.database.path(), false);
+    config
+        .update_dota_hosting_options(GUILD, &defaults)
+        .unwrap();
+    let player_ids = fixture.add_shuffle_pool(10, false);
+    fixture.populate_lobby(&player_ids, LobbyKind::Open).await;
+    let mut context = inferred_shuffle_command_context(player_ids[0]);
+    context.member_permissions = Some(MANAGE_GUILD_PERMISSION);
+    context.options = vec![
+        InteractionOption {
+            name: "hosting".into(),
+            value: InteractionValue::String("manual".into()),
+        },
+        InteractionOption {
+            name: "first_pick".into(),
+            value: InteractionValue::String("dire".into()),
+        },
+    ];
+    let responder = Arc::new(RecordingMatchResponder::default());
+    fixture
+        .provider
+        .handler
+        .handle_shuffle(context, responder.clone())
+        .await
+        .unwrap();
+    assert!(
+        responder
+            .contents()
+            .iter()
+            .any(|content| content.contains("teams shuffled!"))
+    );
+    let pending = PendingMatchRepository::new(fixture.database.path())
+        .single_pending_match(GUILD)
+        .unwrap()
+        .unwrap();
+    let persisted = DotaHostingOptions::from_extra(&pending.state.extra).unwrap();
+    assert_eq!(
+        persisted,
+        defaults.merged(&DotaHostingOptions {
+            hosting: Some(HostingMode::Manual),
+            first_pick: Some(FirstPick::Dire),
+            ..Default::default()
+        })
+    );
+    assert_eq!(pending.state.first_pick_team.as_deref(), Some("Dire"));
+    let embed = fixture
+        .provider
+        .handler
+        .render_shuffle_embed(&pending)
+        .await
+        .unwrap();
+    let hosting = embed
+        .fields
+        .iter()
+        .find(|field| field.name == "🎮 Dota Lobby")
+        .unwrap();
+    assert!(hosting.value.contains("create the Dota lobby yourself"));
+    assert!(hosting.value.contains("`/record`"));
+    assert!(!hosting.value.contains("bot starts"));
+    assert!(pending.state.bet_lock_until.is_some());
+    config
+        .update_dota_hosting_options(
+            GUILD,
+            &DotaHostingOptions {
+                region: Some(1),
+                hosting: Some(HostingMode::Bot),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let reloaded = PendingMatchRepository::new(fixture.database.path())
+        .single_pending_match(GUILD)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        DotaHostingOptions::from_extra(&reloaded.state.extra).unwrap(),
+        persisted
+    );
+    abort_betting_tasks(&fixture, pending.pending_match_id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dota_shuffle_regular_members_inherit_frozen_guild_defaults() {
+    let fixture = MatchRuntimeFixture::new();
+    let defaults = DotaHostingOptions {
+        hosting: Some(HostingMode::Manual),
+        first_pick: Some(FirstPick::Radiant),
+        region: Some(31),
+        ..Default::default()
+    };
+    GuildConfigRepository::new(fixture.database.path(), false)
+        .update_dota_hosting_options(GUILD, &defaults)
+        .unwrap();
+    let player_ids = fixture.add_shuffle_pool(10, false);
+    fixture.populate_lobby(&player_ids, LobbyKind::Open).await;
+    fixture
+        .provider
+        .handler
+        .handle_shuffle(
+            inferred_shuffle_command_context(player_ids[0]),
+            Arc::new(RecordingMatchResponder::default()),
+        )
+        .await
+        .unwrap();
+    let pending = PendingMatchRepository::new(fixture.database.path())
+        .single_pending_match(GUILD)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        DotaHostingOptions::from_extra(&pending.state.extra).unwrap(),
+        defaults
+    );
+    assert_eq!(pending.state.first_pick_team.as_deref(), Some("Radiant"));
+    abort_betting_tasks(&fixture, pending.pending_match_id);
+}
+
 fn roster_snapshot(
     player_ids: Vec<i64>,
     confirmed_player_ids: Option<BTreeSet<i64>>,
@@ -5953,6 +6222,11 @@ async fn test_shuffle_preconditions_allow_regular_lobby_member() {
         .single_pending_match(GUILD)
         .expect("read regular shuffle")
         .expect("regular shuffle persists");
+    assert!(pending.state.extra.contains_key("dota_hosting"));
+    assert_eq!(
+        DotaHostingOptions::from_extra(&pending.state.extra).unwrap(),
+        DotaHostingOptions::default()
+    );
     abort_betting_tasks(&fixture, pending.pending_match_id);
 }
 
@@ -6158,9 +6432,8 @@ async fn test_execute_shuffle_refreshes_pool_exactly_once_on_later_failure() {
     let player_ids = fixture.add_shuffle_pool(10, false);
     fixture.populate_lobby(&player_ids, LobbyKind::Open).await;
     let baseline_edits = discord.message_edits().len();
-    let responder: Arc<dyn InteractionResponder> = Arc::new(FailingConfirmationResponder {
-        started: AtomicBool::new(false),
-    });
+    discord.fail_sends_to([77_001]);
+    let responder: Arc<dyn InteractionResponder> = Arc::new(RecordingMatchResponder::default());
 
     let result = fixture
         .provider
@@ -6171,7 +6444,10 @@ async fn test_execute_shuffle_refreshes_pool_exactly_once_on_later_failure() {
         )
         .await;
 
-    assert!(result.is_err());
+    assert!(
+        result.is_err(),
+        "publication failure retains work for retry"
+    );
     assert_eq!(discord.message_edits().len(), baseline_edits + 1);
     let pending = PendingMatchRepository::new(fixture.database.path())
         .pending_matches(GUILD)
@@ -6750,9 +7026,10 @@ async fn test_publication_sends_overlap_and_confirmation_error_waits_for_posts()
     });
 
     wait_for_count(&discord.blocked_send_started, 2).await;
-    while !responder.started.load(Ordering::Acquire) {
-        tokio::task::yield_now().await;
-    }
+    assert!(
+        !responder.started.load(Ordering::Acquire),
+        "confirmation must wait for durable public receipts"
+    );
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(25), &mut task)
             .await
@@ -6761,12 +7038,11 @@ async fn test_publication_sends_overlap_and_confirmation_error_waits_for_posts()
     );
 
     discord.send_gate.add_permits(2);
-    let error = task
-        .await
+    task.await
         .expect("publication task joins")
-        .expect_err("confirmation failure is propagated");
-    assert!(error.to_string().contains("confirmation failed"));
-    assert!(discord.unpins().is_empty());
+        .expect("expired confirmation does not fail a durable shuffle");
+    assert!(responder.started.load(Ordering::Acquire));
+    assert_eq!(discord.unpins(), vec![(100, 321)]);
     assert!(discord.thread_edits().is_empty());
     assert!(
         PendingMatchRepository::new(fixture.database.path())
@@ -6796,15 +7072,16 @@ async fn test_public_send_failures_are_isolated_and_logged() {
             prepared,
         )
         .await
-        .expect("public post failures are isolated");
+        .expect_err("missing public posts retain setup for retry");
 
     let responses = responder
         .responses
         .lock()
         .expect("publication confirmation");
-    assert_eq!(responses.len(), 1);
-    assert_eq!(responses[0].content, "✅ 🧀 Whine & Cheese teams shuffled!");
-    assert!(responses[0].ephemeral);
+    assert!(
+        responses.is_empty(),
+        "no success confirmation before publication"
+    );
     drop(responses);
     let persisted = PendingMatchRepository::new(fixture.database.path())
         .pending_match(GUILD, pending_match_id)
@@ -6812,7 +7089,7 @@ async fn test_public_send_failures_are_isolated_and_logged() {
         .expect("pending match remains");
     assert_eq!(persisted.state.shuffle_message_id, None);
     assert_eq!(persisted.state.cmd_shuffle_message_id, None);
-    assert_eq!(discord.unpins(), vec![(100, 321)]);
+    assert!(discord.unpins().is_empty());
     abort_betting_tasks(&fixture, pending_match_id);
 }
 
@@ -7042,10 +7319,13 @@ async fn test_completed_match_thread_retains_source_lobby_label() {
         .find(|(channel_id, _)| *channel_id == 42)
         .expect("thread result message")
         .1;
-    assert_eq!(
-        thread_message.response.content,
-        "🏆 **🧀 Whine & Cheese Match Complete - Radiant Victory!**"
+    assert!(
+        thread_message
+            .response
+            .content
+            .starts_with("🏆 **🧀 Whine & Cheese Match Complete - Radiant Victory!**")
     );
+    assert!(thread_message.response.content.contains("JC Changes"));
     assert!(discord.thread_edits().contains(&(
         42,
         "✅ 🧀 Whine & Cheese Match Complete - Radiant Won".to_owned(),
@@ -7469,21 +7749,39 @@ async fn test_record_captures_pet_activity_before_final_followup_send() {
 #[tokio::test]
 async fn test_finalize_archives_recorded_matchs_thread() {
     let discord = Arc::new(PublicationProbeDiscord::default());
-    MatchHandler::finalize_record_thread(
-        discord.clone(),
-        505,
-        "🍽️ All You Can Feed".to_owned(),
-        "Radiant".to_owned(),
-        Duration::ZERO,
-    )
-    .await;
-
+    let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
+    let pending = fixture.pending(unix_seconds() + 120);
+    let pending = PendingMatchRepository::new(fixture.database.path())
+        .mutate_pending_match(GUILD, pending.pending_match_id, |state| {
+            state.thread_shuffle_thread_id = Some(505)
+        })
+        .unwrap()
+        .unwrap()
+        .0;
+    fixture
+        .provider
+        .handler
+        .finalize_record(
+            pending,
+            record_context(1, GUILD, "radiant", true),
+            Arc::new(RecordingMatchResponder::default()),
+            "radiant",
+            0,
+            0,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
     let sent = discord.sent_messages();
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].0, 505);
-    assert_eq!(
-        sent[0].1.response.content,
-        "🏆 **🍽️ All You Can Feed Match Complete - Radiant Victory!**"
+    assert!(
+        sent[0]
+            .1
+            .response
+            .content
+            .starts_with("🏆 **🍽️ All You Can Feed Match Complete - Radiant Victory!**")
     );
     assert_eq!(
         discord.thread_edits(),
@@ -7491,7 +7789,7 @@ async fn test_finalize_archives_recorded_matchs_thread() {
             505,
             "✅ 🍽️ All You Can Feed Match Complete - Radiant Won".to_owned(),
             true,
-            true,
+            true
         )]
     );
 }
@@ -8263,4 +8561,177 @@ fn same_match_streak_and_win_bonus_withhold_at_the_pre_decrement_penalty_share()
         )
         .expect("read decremented penalty");
     assert_eq!(remaining, 0);
+}
+
+#[path = "adversarial_shuffle_tests.rs"]
+mod adversarial_shuffle;
+
+#[tokio::test]
+async fn manual_record_with_aborted_snapshot_cannot_commit_ratings() {
+    let fixture = MatchRuntimeFixture::new();
+    let pending = fixture.pending(unix_seconds() + 120);
+    fixture
+        .provider
+        .handler
+        .finalize_abort(&pending, Arc::new(RecordingMatchResponder::default()))
+        .await
+        .expect("abort completes before stale recorder acquires its guard");
+    assert!(
+        PendingMatchRepository::new(fixture.database.path())
+            .pending_match(GUILD, pending.pending_match_id)
+            .unwrap()
+            .is_none()
+    );
+    let responder = Arc::new(RecordingMatchResponder::default());
+    fixture
+        .provider
+        .handler
+        .finalize_record(
+            pending.clone(),
+            record_context(1, GUILD, "radiant", true),
+            responder.clone(),
+            "radiant",
+            0,
+            0,
+            0,
+            None,
+        )
+        .await
+        .expect("stale recording reports its late error");
+    assert!(
+        MatchRepository::new(fixture.database.path())
+            .match_id_for_pending_match(GUILD, pending.pending_match_id)
+            .unwrap()
+            .is_none()
+    );
+    let connection = Connection::open(fixture.database.path()).unwrap();
+    let wins: i64 = connection
+        .query_row(
+            "SELECT SUM(wins) FROM players WHERE guild_id=?1",
+            [GUILD],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(wins, 0, "aborted identities must never acquire ratings");
+    assert!(
+        responder
+            .contents()
+            .iter()
+            .any(|text| text.contains("no longer exists")),
+        "stale recording must be rejected: {:?}",
+        responder.contents()
+    );
+}
+
+#[tokio::test]
+async fn manual_retry_with_opposite_winner_is_rejected_without_rewards() {
+    let fixture = MatchRuntimeFixture::new();
+    let pending = fixture.pending(unix_seconds() + 120);
+    let first = fixture
+        .provider
+        .handler
+        .record_match_blocking_with_valve(&pending, "radiant", None, Some(9_000_123))
+        .unwrap();
+    // Reproduce a hosted cleanup failure after durable recording, before the pending row is removed.
+    let responder = Arc::new(RecordingMatchResponder::default());
+    fixture
+        .provider
+        .handler
+        .handle_record(record_context(1, GUILD, "dire", true), responder.clone())
+        .await
+        .unwrap();
+    assert!(
+        responder
+            .contents()
+            .iter()
+            .any(|text| text.contains("conflicts with recorded match")),
+        "the public manual recording route rejects conflicting outcomes"
+    );
+    let connection = Connection::open(fixture.database.path()).unwrap();
+    let winner: i64 = connection
+        .query_row(
+            "SELECT winning_team FROM matches WHERE match_id=?1",
+            [first.match_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(winner, 1, "the core retains the original Radiant winner");
+    let rewarded_winners = MatchCorrectionRepository::new(fixture.database.path())
+        .win_bonus_credited_ids(first.match_id, Some(GUILD))
+        .unwrap();
+    assert_eq!(
+        rewarded_winners.len(),
+        5,
+        "only the committed winning team receives win bonuses"
+    );
+}
+
+#[tokio::test]
+async fn result_delivery_failure_retains_work_and_recovery_finishes_without_double_rewards() {
+    let discord = Arc::new(PublicationProbeDiscord::default());
+    discord.fail_sends_to([555]);
+    let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
+    let pending = fixture.pending(unix_seconds() + 120);
+    let repository = PendingMatchRepository::new(fixture.database.path());
+    let pending = repository
+        .mutate_pending_match(GUILD, pending.pending_match_id, |state| {
+            state.thread_shuffle_thread_id = Some(555)
+        })
+        .unwrap()
+        .unwrap()
+        .0;
+    let responder = Arc::new(RecordingMatchResponder::default());
+    fixture
+        .provider
+        .handler
+        .finalize_record(
+            pending.clone(),
+            record_context(1, GUILD, "radiant", true),
+            responder,
+            "radiant",
+            0,
+            0,
+            0,
+            None,
+        )
+        .await
+        .expect_err("failed canonical result delivery retains retry work");
+    let saved = repository
+        .pending_match(GUILD, pending.pending_match_id)
+        .unwrap()
+        .expect("durable recording work remains");
+    let match_id = recorded_match_id_for_pending(&fixture, pending.pending_match_id);
+    let rewards = MatchCorrectionRepository::new(fixture.database.path())
+        .win_bonus_credited_ids(match_id, Some(GUILD))
+        .unwrap();
+    assert_eq!(rewards.len(), 5);
+    discord.failed_send_channels.lock().unwrap().clear();
+    fixture
+        .provider
+        .handler
+        .recover_pending_match(saved)
+        .await
+        .unwrap();
+    assert!(
+        repository
+            .pending_match(GUILD, pending.pending_match_id)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        MatchCorrectionRepository::new(fixture.database.path())
+            .win_bonus_credited_ids(match_id, Some(GUILD))
+            .unwrap(),
+        rewards
+    );
+    assert_eq!(
+        discord
+            .order
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry.as_str() == "send:555:content:done")
+            .count(),
+        1
+    );
 }

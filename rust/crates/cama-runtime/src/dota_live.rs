@@ -120,6 +120,7 @@ pub struct LiveMatchSnapshot {
     pub radiant_score: Option<i64>,
     pub dire_score: Option<i64>,
     pub players: Option<Vec<LivePlayerSnapshot>>,
+    pub announcement_frame: Option<cama_domain::live_announcements::LiveAnnouncementFrame>,
 }
 
 impl Default for LiveMatchSnapshot {
@@ -138,6 +139,7 @@ impl Default for LiveMatchSnapshot {
             radiant_score: None,
             dire_score: None,
             players: None,
+            announcement_frame: None,
         }
     }
 }
@@ -704,6 +706,7 @@ impl DotaLiveFeed {
             radiant_score: optional_i64(map, "radiant_score"),
             dire_score: optional_i64(map, "dire_score"),
             players,
+            announcement_frame: None,
         })
     }
 }
@@ -987,7 +990,72 @@ fn snapshot_from_scoreboard(
         radiant_score,
         dire_score,
         players,
+        announcement_frame: announcement_frame(
+            value,
+            match_id,
+            game_time_seconds,
+            radiant_score,
+            dire_score,
+        ),
     }
+}
+
+fn announcement_frame(
+    value: &Value,
+    match_id: u64,
+    game_time: Option<i64>,
+    radiant_score: Option<i64>,
+    dire_score: Option<i64>,
+) -> Option<cama_domain::live_announcements::LiveAnnouncementFrame> {
+    use cama_domain::live_announcements::{LiveAnnouncementFrame, LiveBuilding};
+    // Delta frames require reconstruction before any event analysis.
+    if value.get("delta_frame").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    let team_worth = |team_number| {
+        value
+            .get("teams")
+            .and_then(Value::as_array)
+            .and_then(|teams| {
+                teams
+                    .iter()
+                    .find(|team| first_i64(team, &["team_number", "team"]) == Some(team_number))
+            })
+            .and_then(|team| first_i64(team, &["net_worth"]))
+    };
+    let buildings = value
+        .get("buildings")
+        .and_then(Value::as_array)
+        .map(|buildings| {
+            buildings
+                .iter()
+                .take(64)
+                .filter_map(|building| {
+                    let team = first_i64(building, &["team"])?;
+                    if ![2, 3].contains(&team) {
+                        return None;
+                    }
+                    let destroyed = building.get("destroyed")?.as_bool()?;
+                    let x = building.get("x")?.as_f64()?;
+                    let y = building.get("y")?.as_f64()?;
+                    Some(LiveBuilding {
+                        key: format!("{team}:{x}:{y}"),
+                        radiant: team == 2,
+                        destroyed,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(LiveAnnouncementFrame {
+        match_id,
+        game_time: game_time?,
+        radiant_score,
+        dire_score,
+        radiant_net_worth: team_worth(2),
+        dire_net_worth: team_worth(3),
+        buildings,
+    })
 }
 
 fn parse_team_scoreboard_players(value: &Value) -> Option<Vec<LivePlayerSnapshot>> {
@@ -1073,6 +1141,7 @@ fn parse_player(value: &Value, account_hint: Option<u32>) -> LivePlayerSnapshot 
         .or(account_hint);
     let hero = value.get("hero").or_else(|| stats.get("hero"));
     let hero_id = object_value(stats, "hero_id")
+        .or_else(|| object_value(stats, "heroid"))
         .or_else(|| hero.and_then(|hero| object_value(hero, "id")))
         .and_then(value_u32);
     let hero_name = object_value(stats, "hero_name")
@@ -1083,13 +1152,19 @@ fn parse_player(value: &Value, account_hint: Option<u32>) -> LivePlayerSnapshot 
         account_id,
         hero_id,
         hero_name,
-        kills: optional_i64_from_value(stats, "kills"),
-        deaths: optional_i64_from_value(stats, "deaths"),
-        assists: optional_i64_from_value(stats, "assists"),
-        last_hits: optional_i64_from_value(stats, "last_hits"),
-        denies: optional_i64_from_value(stats, "denies"),
+        kills: optional_i64_from_value(stats, "kills")
+            .or_else(|| optional_i64_from_value(stats, "kill_count")),
+        deaths: optional_i64_from_value(stats, "deaths")
+            .or_else(|| optional_i64_from_value(stats, "death_count")),
+        assists: optional_i64_from_value(stats, "assists")
+            .or_else(|| optional_i64_from_value(stats, "assists_count")),
+        last_hits: optional_i64_from_value(stats, "last_hits")
+            .or_else(|| optional_i64_from_value(stats, "lh_count")),
+        denies: optional_i64_from_value(stats, "denies")
+            .or_else(|| optional_i64_from_value(stats, "denies_count")),
         gold: optional_i64_from_value(stats, "gold"),
-        net_worth: optional_i64_from_value(stats, "net_worth"),
+        net_worth: optional_i64_from_value(stats, "net_worth")
+            .or_else(|| optional_i64_from_value(stats, "net_gold")),
         items: parse_items(value.get("items").or_else(|| stats.get("items")))
             .or_else(|| parse_inline_items(stats)),
     }

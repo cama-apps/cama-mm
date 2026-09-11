@@ -2,9 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
+use cama_domain::dota_hosting::DotaHostingOptions;
 use cama_domain::guild_config::{GuildConfig, GuildConfigStore};
 use rusqlite::types::ValueRef;
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 
 use crate::open_runtime_connection;
 
@@ -27,6 +28,74 @@ impl GuildConfigRepository {
     fn connection(&self) -> Result<Connection, rusqlite::Error> {
         open_runtime_connection(&self.path)
     }
+
+    pub fn dota_hosting_options(
+        &self,
+        guild_id: i64,
+    ) -> Result<DotaHostingOptions, rusqlite::Error> {
+        read_dota_hosting_options(&self.connection()?, guild_id)
+    }
+
+    /// Merge under the writer lock so concurrent changes cannot erase one another.
+    pub fn update_dota_hosting_options(
+        &self,
+        guild_id: i64,
+        patch: &DotaHostingOptions,
+    ) -> Result<DotaHostingOptions, rusqlite::Error> {
+        patch.validate().map_err(invalid_options)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let options = read_dota_hosting_options(&transaction, guild_id)?.merged(patch);
+        options.validate().map_err(invalid_options)?;
+        let json =
+            serde_json::to_string(&options).map_err(|error| invalid_options(error.to_string()))?;
+        transaction.execute(
+            "INSERT INTO guild_config (guild_id, dota_hosting_options) VALUES (?1, ?2) \
+             ON CONFLICT(guild_id) DO UPDATE SET dota_hosting_options = ?2, updated_at = CURRENT_TIMESTAMP",
+            params![guild_id, json],
+        )?;
+        transaction.commit()?;
+        Ok(options)
+    }
+
+    pub fn reset_dota_hosting_options(&self, guild_id: i64) -> Result<(), rusqlite::Error> {
+        self.connection()?.execute(
+            "UPDATE guild_config SET dota_hosting_options = '{}', updated_at = CURRENT_TIMESTAMP \
+             WHERE guild_id = ?1",
+            [guild_id],
+        )?;
+        Ok(())
+    }
+}
+
+fn invalid_options(message: String) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        0,
+        rusqlite::types::Type::Text,
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            message,
+        )),
+    )
+}
+
+fn read_dota_hosting_options(
+    connection: &Connection,
+    guild_id: i64,
+) -> Result<DotaHostingOptions, rusqlite::Error> {
+    let json: Option<String> = connection
+        .query_row(
+            "SELECT dota_hosting_options FROM guild_config WHERE guild_id = ?1",
+            [guild_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let options: DotaHostingOptions = json.map_or_else(
+        || Ok(DotaHostingOptions::default()),
+        |json| serde_json::from_str(&json).map_err(|error| invalid_options(error.to_string())),
+    )?;
+    options.validate().map_err(invalid_options)?;
+    Ok(options)
 }
 
 impl GuildConfigStore for GuildConfigRepository {
@@ -134,9 +203,96 @@ fn sqlite_truthy(row: &Row<'_>, index: usize) -> Result<Option<bool>, rusqlite::
 #[cfg(test)]
 mod tests {
     use super::GuildConfigRepository;
+    use cama_domain::dota_hosting::{DotaHostingOptions, HostingMode};
     use cama_domain::guild_config::GuildConfigStore;
     use rusqlite::Connection;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn dota_hosting_preferences_merge_persist_and_reset_with_guild_isolation() {
+        let file = NamedTempFile::new().unwrap();
+        crate::schema_manager::initialize_or_migrate(file.path()).unwrap();
+        let repository = GuildConfigRepository::new(file.path(), false);
+        assert_eq!(
+            repository.dota_hosting_options(1).unwrap(),
+            DotaHostingOptions::default()
+        );
+        repository.set_league_id(1, 19144).unwrap();
+        repository
+            .update_dota_hosting_options(
+                1,
+                &DotaHostingOptions {
+                    hosting: Some(HostingMode::Bot),
+                    region: Some(31),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let merged = repository
+            .update_dota_hosting_options(
+                1,
+                &DotaHostingOptions {
+                    hosting: Some(HostingMode::Manual),
+                    tv_delay: Some(0),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(merged.region, Some(31));
+        assert_eq!(merged.hosting, Some(HostingMode::Manual));
+        assert_eq!(merged.tv_delay, Some(0));
+        let reopened = GuildConfigRepository::new(file.path(), false);
+        assert_eq!(reopened.dota_hosting_options(1).unwrap(), merged);
+        assert_eq!(
+            reopened.dota_hosting_options(2).unwrap(),
+            DotaHostingOptions::default()
+        );
+        assert!(
+            reopened
+                .update_dota_hosting_options(
+                    1,
+                    &DotaHostingOptions {
+                        region: Some(0),
+                        ..Default::default()
+                    }
+                )
+                .is_err()
+        );
+        assert_eq!(reopened.dota_hosting_options(1).unwrap(), merged);
+        reopened.reset_dota_hosting_options(2).unwrap();
+        assert_eq!(reopened.dota_hosting_options(1).unwrap(), merged);
+        reopened.reset_dota_hosting_options(1).unwrap();
+        assert_eq!(
+            reopened.dota_hosting_options(1).unwrap(),
+            DotaHostingOptions::default()
+        );
+        assert_eq!(reopened.get_league_id(1).unwrap(), Some(19144));
+    }
+
+    #[test]
+    fn malformed_dota_preferences_fail_closed_and_admin_reset_repairs_them() {
+        let file = NamedTempFile::new().unwrap();
+        crate::schema_manager::initialize_or_migrate(file.path()).unwrap();
+        let connection = Connection::open(file.path()).unwrap();
+        connection
+            .execute(
+                "INSERT INTO guild_config(guild_id,dota_hosting_options) VALUES(1,'{broken')",
+                [],
+            )
+            .unwrap();
+        let repository = GuildConfigRepository::new(file.path(), false);
+        assert!(repository.dota_hosting_options(1).is_err());
+        assert!(
+            repository
+                .update_dota_hosting_options(1, &DotaHostingOptions::default())
+                .is_err()
+        );
+        repository.reset_dota_hosting_options(1).unwrap();
+        assert_eq!(
+            repository.dota_hosting_options(1).unwrap(),
+            DotaHostingOptions::default()
+        );
+    }
 
     fn repository() -> (NamedTempFile, GuildConfigRepository) {
         let file = NamedTempFile::new().expect("temporary guild config database");

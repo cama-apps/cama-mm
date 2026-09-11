@@ -8,35 +8,43 @@ use crate::{ConfigError, Secret};
 /// Verified in scripts/regions.txt from client build 25219194 (2026-09-10).
 pub const US_SOUTH_CENTRAL_REGION: u32 = 31;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DotaHostTestMode {
+    #[default]
+    Off,
+    RealLobby,
+    Simulated,
+}
+
 pub const ENV_KEYS: &[&str] = &[
     "DOTA_HOST_ENABLED",
     "DOTA_HOST_GUILD_IDS",
     "DOTA_STEAM_USERNAME",
+    "DOTA_STEAM_PASSWORD",
+    "DOTA_STEAM_GUARD_CODE",
     "DOTA_BOT_ACCOUNT_ID",
     "DOTA_STEAM_SESSION_PATH",
-    "DOTA_HOST_START_AFTER",
     "DOTA_SERVER_REGION",
     "DOTA_GAME_MODE",
     "DOTA_TV_DELAY",
     "DOTA_LOBBY_TIMEOUT_SECONDS",
-    "DOTA_STEAM_WEB_API_KEY",
+    "STEAM_API_KEY",
     "DOTA_LIVE_BIND",
     "DOTA_LIVE_TOKEN",
     "DOTA_GSI_TOKEN",
-    "DOTA_REPLAY_DIRECTORY",
-    "DOTA_REPLAY_MAX_BYTES",
-    "DOTA_REPLAY_RETENTION_DAYS",
 ];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct DotaHostConfig {
     pub guild_ids: Vec<i64>,
+    /// Internal fixture injection only; deployment configuration always uses Off.
+    pub test_mode: DotaHostTestMode,
     pub username: Secret,
+    pub password: Option<Secret>,
+    pub guard_code: Option<Secret>,
     pub account_id: u32,
     pub session_path: PathBuf,
-    /// Do not adopt pre-activation manual matches. Persist this deployment value
-    /// across restarts so queued matches remain eligible.
-    pub start_after: i64,
     pub server_region: u32,
     pub game_mode: u32,
     pub tv_delay: u32,
@@ -45,9 +53,6 @@ pub struct DotaHostConfig {
     pub live_bind: Option<SocketAddr>,
     pub live_token: Option<Secret>,
     pub gsi_token: Option<Secret>,
-    pub replay_directory: PathBuf,
-    pub replay_max_bytes: u64,
-    pub replay_retention_days: u64,
 }
 
 impl DotaHostConfig {
@@ -95,16 +100,6 @@ impl DotaHostConfig {
                     "requires the bot's positive 32-bit Dota account ID",
                 )
             })?;
-        let start_after = number(&mut lookup, "DOTA_HOST_START_AFTER", 0)?;
-        let start_after = i64::try_from(start_after)
-            .ok()
-            .filter(|n| *n > 0)
-            .ok_or_else(|| {
-                invalid(
-                    "DOTA_HOST_START_AFTER",
-                    "requires the initial activation Unix timestamp; keep it across restarts",
-                )
-            })?;
         let server_region = number(
             &mut lookup,
             "DOTA_SERVER_REGION",
@@ -117,11 +112,18 @@ impl DotaHostConfig {
         let game_mode = number(&mut lookup, "DOTA_GAME_MODE", 2)?;
         let game_mode = u32::try_from(game_mode)
             .ok()
-            .filter(|id| matches!(*id, 1 | 2 | 22))
+            .filter(|id| {
+                cama_domain::dota_hosting::DotaHostingOptions {
+                    game_mode: Some(*id),
+                    ..Default::default()
+                }
+                .validate()
+                .is_ok()
+            })
             .ok_or_else(|| {
                 invalid(
                     "DOTA_GAME_MODE",
-                    "supported modes: 1 All Pick, 2 Captains Mode, 22 Ranked All Pick",
+                    "requires a supported ten-player Dota game mode",
                 )
             })?;
         let tv_delay = number(&mut lookup, "DOTA_TV_DELAY", 3)?;
@@ -154,36 +156,30 @@ impl DotaHostConfig {
         if gsi_token.as_ref().is_some_and(|s| s.len() < 32) {
             return Err(invalid("DOTA_GSI_TOKEN", "requires at least 32 characters"));
         }
-        let replay_max_bytes = number(&mut lookup, "DOTA_REPLAY_MAX_BYTES", 512 * 1024 * 1024)?;
-        if !(1024..=2 * 1024 * 1024 * 1024).contains(&replay_max_bytes) {
-            return Err(invalid(
-                "DOTA_REPLAY_MAX_BYTES",
-                "expected 1 KiB through 2 GiB",
-            ));
-        }
         Ok(Some(Self {
             guild_ids,
+            test_mode: DotaHostTestMode::Off,
             username: Secret::new(username),
+            password: lookup("DOTA_STEAM_PASSWORD")
+                .filter(|s| !s.is_empty())
+                .map(Secret::new),
+            guard_code: lookup("DOTA_STEAM_GUARD_CODE")
+                .filter(|s| !s.is_empty())
+                .map(Secret::new),
             account_id,
             session_path: lookup("DOTA_STEAM_SESSION_PATH")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| "data/steam/session.json".into()),
-            start_after,
             server_region,
             game_mode,
             tv_delay,
             lobby_timeout_seconds,
-            web_api_key: lookup("DOTA_STEAM_WEB_API_KEY")
+            web_api_key: lookup("STEAM_API_KEY")
                 .filter(|s| !s.is_empty())
                 .map(Secret::new),
             live_bind,
             live_token: live_token.map(Secret::new),
             gsi_token: gsi_token.map(Secret::new),
-            replay_directory: lookup("DOTA_REPLAY_DIRECTORY")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| "data/replays".into()),
-            replay_max_bytes,
-            replay_retention_days: number(&mut lookup, "DOTA_REPLAY_RETENTION_DAYS", 30)?,
         }))
     }
 }
@@ -194,6 +190,7 @@ mod tests {
 
     #[test]
     fn disabled_by_default_and_activation_requires_explicit_scope() {
+        assert!(ENV_KEYS.contains(&"STEAM_API_KEY"));
         assert!(DotaHostConfig::from_lookup(|_| None).unwrap().is_none());
         assert!(
             DotaHostConfig::from_lookup(|key| (key == "DOTA_HOST_ENABLED").then(|| "true".into()))
@@ -204,8 +201,8 @@ mod tests {
                 "DOTA_HOST_ENABLED" => Some("true"),
                 "DOTA_HOST_GUILD_IDS" => Some("123"),
                 "DOTA_STEAM_USERNAME" => Some("private-login"),
+                "STEAM_API_KEY" => Some("existing-api-key-fixture"),
                 "DOTA_BOT_ACCOUNT_ID" => Some("345"),
-                "DOTA_HOST_START_AFTER" => Some("1700000000"),
                 _ => None,
             }
             .map(str::to_owned)
@@ -213,9 +210,67 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(!format!("{config:?}").contains("private-login"));
+        assert_eq!(
+            config.web_api_key.as_ref().unwrap().expose(),
+            "existing-api-key-fixture"
+        );
+        assert!(!format!("{config:?}").contains("existing-api-key-fixture"));
         assert_eq!(config.game_mode, 2);
         assert_eq!(config.server_region, 31);
         assert_eq!(config.tv_delay, 3);
+        assert_eq!(config.test_mode, DotaHostTestMode::Off);
+    }
+
+    #[test]
+    fn removed_deployment_flags_are_not_read_and_cannot_enable_test_mode() {
+        assert!(!ENV_KEYS.contains(&"DOTA_HOST_TEST_MODE"));
+        assert!(!ENV_KEYS.contains(&"DOTA_HOST_START_AFTER"));
+        for old_mode in ["off", "real_lobby", "simulated", "invalid"] {
+            let mut looked_up = Vec::new();
+            let config = DotaHostConfig::from_lookup(|key| {
+                looked_up.push(key.to_owned());
+                match key {
+                    "DOTA_HOST_ENABLED" => Some("true"),
+                    "DOTA_HOST_GUILD_IDS" => Some("123,456"),
+                    "DOTA_STEAM_USERNAME" => Some("bot"),
+                    "DOTA_BOT_ACCOUNT_ID" => Some("345"),
+                    "DOTA_HOST_TEST_MODE" => Some(old_mode),
+                    "DOTA_HOST_START_AFTER" => Some("invalid-legacy-cutoff"),
+                    _ => None,
+                }
+                .map(str::to_owned)
+            })
+            .unwrap()
+            .unwrap();
+            assert_eq!(config.test_mode, DotaHostTestMode::Off);
+            assert_eq!(config.guild_ids, vec![123, 456]);
+            assert!(
+                !looked_up
+                    .iter()
+                    .any(|key| key == "DOTA_HOST_TEST_MODE" || key == "DOTA_HOST_START_AFTER")
+            );
+        }
+    }
+
+    #[test]
+    fn deployment_game_modes_match_command_validation() {
+        for value in [1, 2, 3, 4, 5, 12, 16, 18, 20, 22, 23, 0, 15, 21, 99] {
+            let parsed = DotaHostConfig::from_lookup(|key| match key {
+                "DOTA_HOST_ENABLED" => Some("true".into()),
+                "DOTA_HOST_GUILD_IDS" => Some("123".into()),
+                "DOTA_STEAM_USERNAME" => Some("bot".into()),
+                "DOTA_BOT_ACCOUNT_ID" => Some("345".into()),
+                "DOTA_GAME_MODE" => Some(value.to_string()),
+                _ => None,
+            });
+            let supported = cama_domain::dota_hosting::DotaHostingOptions {
+                game_mode: Some(value),
+                ..Default::default()
+            }
+            .validate()
+            .is_ok();
+            assert_eq!(parsed.is_ok(), supported, "mode {value}");
+        }
     }
 
     #[test]
@@ -227,7 +282,6 @@ mod tests {
                     "DOTA_HOST_GUILD_IDS" => Some("123"),
                     "DOTA_STEAM_USERNAME" => Some("bot"),
                     "DOTA_BOT_ACCOUNT_ID" => Some("345"),
-                    "DOTA_HOST_START_AFTER" => Some("1700000000"),
                     "DOTA_TV_DELAY" => Some(value),
                     _ => None,
                 }
@@ -239,5 +293,36 @@ mod tests {
                 assert!(parsed.is_err(), "unknown delay {value} was accepted");
             }
         }
+    }
+
+    #[test]
+    fn optional_startup_credentials_are_loaded_and_redacted() {
+        for credentials in [None, Some(""), Some("private-startup-credential")] {
+            let config = DotaHostConfig::from_lookup(|key| {
+                match key {
+                    "DOTA_HOST_ENABLED" => Some("true"),
+                    "DOTA_HOST_GUILD_IDS" => Some("123"),
+                    "DOTA_STEAM_USERNAME" => Some("private-login"),
+                    "DOTA_BOT_ACCOUNT_ID" => Some("345"),
+                    "DOTA_STEAM_PASSWORD" | "DOTA_STEAM_GUARD_CODE" => credentials,
+                    key if key.starts_with("DOTA_REPLAY_") => {
+                        panic!("hosting must not load replay archive settings")
+                    }
+                    _ => None,
+                }
+                .map(str::to_owned)
+            })
+            .unwrap()
+            .unwrap();
+            let expected = credentials.filter(|value| !value.is_empty());
+            assert_eq!(config.password.as_ref().map(Secret::expose), expected);
+            assert_eq!(config.guard_code.as_ref().map(Secret::expose), expected);
+            let debug = format!("{config:?}");
+            assert!(!debug.contains("private-login"));
+            assert!(!debug.contains("private-startup-credential"));
+        }
+        assert!(ENV_KEYS.contains(&"DOTA_STEAM_PASSWORD"));
+        assert!(ENV_KEYS.contains(&"DOTA_STEAM_GUARD_CODE"));
+        assert!(!ENV_KEYS.iter().any(|key| key.starts_with("DOTA_REPLAY_")));
     }
 }

@@ -6,7 +6,13 @@ use cama_steam::{
 };
 
 pub(super) async fn connect(config: &DotaHostConfig) -> Result<Arc<dyn DotaHostPort>, String> {
-    let auth = SteamAuthConfig::new(config.username.expose(), &config.session_path);
+    let mut auth = SteamAuthConfig::new(config.username.expose(), &config.session_path);
+    if let Some(password) = &config.password {
+        auth = auth.with_password(password.expose());
+    }
+    if let Some(code) = &config.guard_code {
+        auth = auth.with_guard_code(code.expose());
+    }
     let client = DotaSteamClient::connect(&auth)
         .await
         .map_err(|e| e.to_string())?;
@@ -15,6 +21,10 @@ pub(super) async fn connect(config: &DotaHostConfig) -> Result<Arc<dyn DotaHostP
             "Steam session belongs to a different account than DOTA_BOT_ACCOUNT_ID".to_owned(),
         );
     }
+    tracing::info!(
+        account_id = client.own_account_id(),
+        "Dota host connected to Steam and Game Coordinator"
+    );
     Ok(Arc::new(SteamHost(client)))
 }
 
@@ -46,7 +56,7 @@ pub async fn bootstrap_steam_login() -> Result<String, String> {
         .and_then(|id| u32::try_from(id).ok())
         .ok_or("authenticated Steam ID is not an individual account")?;
     Ok(format!(
-        "Steam session saved. Set DOTA_BOT_ACCOUNT_ID={account}; the serve process uses this session without a password."
+        "Steam session saved. Set DOTA_BOT_ACCOUNT_ID={account}; the serve process will reuse this session on startup."
     ))
 }
 
@@ -88,6 +98,11 @@ fn lobby_config(settings: &LobbySettings) -> LobbyConfig {
 
 #[async_trait]
 impl DotaHostPort for SteamHost {
+    async fn betting_observation_fresh(&self) -> bool {
+        self.0
+            .lobby_observation_is_fresh(Duration::from_secs(45))
+            .await
+    }
     async fn snapshot(&self) -> Result<Option<HostLobby>, String> {
         self.0
             .snapshot()
@@ -168,8 +183,9 @@ impl DotaHostPort for SteamHost {
             .map_err(|e| e.to_string())
     }
     async fn move_host_to_pool(&self, lobby: u64) -> Result<(), String> {
+        // The request uses slot 1; Dota reports slot 0 after entering the pool.
         self.0
-            .set_team_slot(lobby, self.0.own_account_id(), Team::PlayerPool, 0)
+            .set_team_slot(lobby, self.0.own_account_id(), Team::PlayerPool, 1)
             .await
             .map_err(|e| e.to_string())
     }
@@ -232,6 +248,20 @@ impl DotaHostPort for SteamHost {
             })
             .collect::<Result<Vec<_>, _>>()
             .unwrap_or_default();
+        // Sparse GC responses may omit identity fields needed to attach stats
+        // safely. The authoritative result can still settle; API enrichment
+        // will recover statistics without guessing a player's seat.
+        let mut postgame_statistics =
+            statistics_have_roster(&details.postgame_statistics, &players)
+                .then_some(details.postgame_statistics);
+        if finished
+            && winner.is_some()
+            && let Some(statistics) = postgame_statistics.as_mut()
+            && let Some(graph) =
+                optional_win_probability(|| self.0.postgame_win_probability(id)).await
+        {
+            statistics["_cama_win_probability"] = graph;
+        }
         Ok(HostMatchDetails {
             match_id: details.match_id,
             league_id: details.league_id.unwrap_or(0),
@@ -239,13 +269,112 @@ impl DotaHostPort for SteamHost {
             finished,
             players,
             replay,
+            postgame_statistics,
         })
     }
+}
+
+// Keep optional metadata availability out of authoritative result settlement.
+async fn optional_win_probability<F, Fut>(mut fetch: F) -> Option<serde_json::Value>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<
+            Output = Result<
+                cama_steam::metadata::WinProbabilityGraph,
+                cama_steam::metadata::MetadataError,
+            >,
+        >,
+{
+    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        for attempt in 0..2 {
+            match fetch().await {
+                Ok(graph) => return Some(graph.statistics_value()),
+                Err(error) => {
+                    tracing::debug!(%error, "optional postgame win probability unavailable")
+                }
+            }
+            if attempt == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+fn statistics_have_roster(payload: &serde_json::Value, roster: &[HostedMatchPlayer]) -> bool {
+    let Some(players) = payload.get("players").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    let mut accounts = std::collections::BTreeSet::new();
+    players.len() == 10
+        && roster.len() == 10
+        && players.iter().all(|player| {
+            let Some(account) = player
+                .get("account_id")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|id| u32::try_from(id).ok())
+            else {
+                return false;
+            };
+            let Some(slot) = player
+                .get("player_slot")
+                .and_then(serde_json::Value::as_u64)
+                .filter(|slot| *slot <= 4 || (128..=132).contains(slot))
+            else {
+                return false;
+            };
+            accounts.insert(account)
+                && roster
+                    .iter()
+                    .any(|entry| entry.account32 == account && entry.radiant == (slot < 128))
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn optional_graph_timeout_does_not_hold_result_settlement() {
+        let start = tokio::time::Instant::now();
+        let graph = optional_win_probability(std::future::pending).await;
+        assert!(graph.is_none());
+        assert_eq!(start.elapsed(), std::time::Duration::from_secs(8));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn optional_graph_retries_once_then_returns_without_statistics() {
+        let mut calls = 0;
+        let graph = optional_win_probability(|| {
+            calls += 1;
+            std::future::ready(Err(cama_steam::metadata::MetadataError::Unavailable))
+        })
+        .await;
+        assert!(graph.is_none());
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn sparse_statistics_without_canonical_identity_fall_back_to_api() {
+        let roster = (1..=10)
+            .map(|account32| HostedMatchPlayer {
+                account32,
+                radiant: account32 <= 5,
+            })
+            .collect::<Vec<_>>();
+        let mut payload = serde_json::json!({"players": roster.iter().enumerate().map(|(index, player)| serde_json::json!({
+            "account_id": player.account32, "player_slot": if player.radiant {index % 5} else {128 + index % 5}
+        })).collect::<Vec<_>>()});
+        assert!(statistics_have_roster(&payload, &roster));
+        payload["players"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("player_slot");
+        assert!(!statistics_have_roster(&payload, &roster));
+    }
 
     #[test]
     fn explicit_no_coach_team_preserves_a_players_side() {

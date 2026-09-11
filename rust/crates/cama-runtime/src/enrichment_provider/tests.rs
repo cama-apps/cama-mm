@@ -748,7 +748,13 @@ fn match_view_routes_round_trip_and_reject_extra_segments() {
             page: 1,
         }
     );
-    assert!(MatchViewRoute::parse("enrichment:match:42:7:1234:2").is_none());
+    assert_eq!(
+        MatchViewRoute::parse("enrichment:match:42:7:1234:2")
+            .unwrap()
+            .page,
+        2
+    );
+    assert!(MatchViewRoute::parse("enrichment:match:42:7:1234:3").is_none());
     assert!(MatchViewRoute::parse("enrichment:match:42:7:1234:1:extra").is_none());
 }
 
@@ -2254,4 +2260,130 @@ async fn refresh_parsed_keeps_partial_responses_eligible_for_a_later_run() {
             .expect("completed candidates")
             .is_empty()
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn coordinator_statistics_publish_immediately_and_original_graph_reads_later_api_data() {
+    let (_directory, path) = migrated();
+    seed_discovery_match(&path);
+    Connection::open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE matches SET valve_match_id=9002 WHERE match_id=8 AND guild_id=?1",
+            [GUILD as i64],
+        )
+        .unwrap();
+    let mut gc: serde_json::Value = serde_json::from_str(&discovery_match_payload()).unwrap();
+    for player in gc["players"].as_array_mut().unwrap() {
+        player["kills"] = serde_json::json!(0);
+        player.as_object_mut().unwrap().remove("deaths");
+    }
+    gc["_cama_win_probability"] = serde_json::json!({
+        "match_id":9002,"values":[15,45,75,95],"axis":"sample_index",
+        "unit":"percent","side":"radiant","source":"valve_metadata"
+    });
+    MatchRecordingRepository::new(&path)
+        .save_gc_statistics(8, Some(GUILD as i64), 9002, &gc.to_string())
+        .unwrap();
+    // Delay fallback so the first response can be asserted independently.
+    let mut config = application_config();
+    config.values.enrichment_retry_delays = vec![1];
+    let mut api: serde_json::Value = serde_json::from_str(&discovery_match_payload()).unwrap();
+    api["radiant_gold_adv"] = serde_json::json!([0, 100, 200]);
+    api["radiant_xp_adv"] = serde_json::json!([0, 150, 300]);
+    let server = RouteServer::start(vec![api.to_string()]);
+    let catalog = dotabase();
+    let provider = EnrichmentRegistrationProvider::test_with_dotabase_path(
+        &path,
+        &config,
+        services(&server),
+        catalog.path(),
+    )
+    .unwrap();
+    let outcome = provider
+        .recorded_match_discovery()
+        .discover_recorded_match(GUILD as i64, 8)
+        .await
+        .unwrap();
+    let RecordedMatchDiscoveryOutcome::Discovered { response, .. } = outcome else {
+        panic!("GC should publish without API");
+    };
+    assert!(server.requests(0).is_empty());
+    assert_eq!(response.embeds.len(), 1);
+    assert!(
+        response.embeds[0]
+            .fields
+            .iter()
+            .any(|field| field.value.contains("GPM") && field.value.contains("XPM"))
+    );
+    let probability_id = response.components[0].buttons[2].custom_id.clone();
+    let probability_responder = Arc::new(CapturingResponder::default());
+    provider
+        .handler
+        .handle_component(&probability_id, Some(GUILD), probability_responder.clone())
+        .await
+        .unwrap();
+    {
+        let captured = probability_responder.captured.lock().unwrap();
+        let update = &captured.updates[0];
+        assert_eq!(update.attachments[0].filename, "win-probability.png");
+        assert!(
+            update.attachments[0]
+                .bytes
+                .starts_with(b"\x89PNG\r\n\x1a\n")
+        );
+        assert!(update.components[0].buttons[2].disabled);
+    }
+    let graph_id = response.components[0].buttons[1].custom_id.clone();
+    let participant: (i64,Option<i64>,Option<f64>) = Connection::open(&path).unwrap().query_row("SELECT kills,deaths,fantasy_points FROM match_participants WHERE match_id=8 AND discord_id=300",[],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+    assert_eq!(participant, (0, None, None));
+    let pending = Arc::new(CapturingResponder::default());
+    provider
+        .handler
+        .handle_component(&graph_id, Some(GUILD), pending.clone())
+        .await
+        .unwrap();
+    assert!(
+        pending.captured.lock().unwrap().immediate[0]
+            .content
+            .contains("not available yet")
+    );
+    tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            let raw = MatchRepository::new(&path)
+                .raw_enrichment_data(8, Some(GUILD as i64))
+                .unwrap()
+                .unwrap();
+            if serde_json::from_str::<serde_json::Value>(&raw)
+                .unwrap()
+                .get("radiant_gold_adv")
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("API graph backfill");
+    let graph = Arc::new(CapturingResponder::default());
+    provider
+        .handler
+        .handle_component(&graph_id, Some(GUILD), graph.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        graph.captured.lock().unwrap().updates[0].attachments[0].filename,
+        "advantage.png"
+    );
+    let participant: (i64, i64) = Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT kills,deaths FROM match_participants WHERE match_id=8 AND discord_id=300",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(participant, (0, 2));
+    assert_eq!(server.requests(1), vec!["GET /matches/9002 HTTP/1.1"]);
 }
