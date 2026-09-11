@@ -10,6 +10,7 @@ pub mod dig_gear;
 pub mod dig_splash;
 pub mod dig_stats;
 pub mod discord_content;
+pub mod dota_lobby;
 pub mod draft_analysis;
 pub mod economy_scaling;
 pub mod embed_safety;

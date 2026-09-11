@@ -138,6 +138,62 @@ impl Default for PendingMatchState {
 }
 
 impl PendingMatchState {
+    /// Whether Dota lobby automation has adopted this match and owns the
+    /// point at which the betting window is closed.
+    ///
+    /// The closed marker deliberately wins over the adoption marker.  Keeping
+    /// that precedence here gives runtime recovery, reminders, and callers
+    /// that load the typed payload the same answer after a restart.
+    #[must_use]
+    pub fn hosted_betting_managed(&self) -> bool {
+        self.extra
+            .get(DOTA_HOSTED_BETTING_MARKER)
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            && !self.betting_closed()
+    }
+
+    /// Whether this pending match still accepts a wager at `now_unix`.
+    ///
+    /// A hosted match remains open after its historical timed deadline until
+    /// Dota automation closes it at actual game start.  Legacy and
+    /// not-yet-adopted matches retain the original timestamp policy.
+    #[must_use]
+    pub fn betting_open(&self, now_unix: i64) -> bool {
+        if self.betting_closed() {
+            // Dota's automatic close is terminal for the ordinary timed
+            // window.  An administrator may explicitly reopen that window
+            // by extending it; the persisted extension deadline is the only
+            // authority while the closed marker is present.
+            return self
+                .betting_extension_until()
+                .is_some_and(|extension_until| now_unix < extension_until);
+        }
+        self.hosted_betting_managed()
+            || self
+                .bet_lock_until
+                .is_some_and(|lock_until| lock_until != 0 && now_unix < lock_until)
+    }
+
+    #[must_use]
+    pub fn betting_closed(&self) -> bool {
+        self.extra
+            .get(DOTA_BETTING_CLOSED_MARKER)
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    /// Explicit administrator deadline persisted by a Dota betting-window
+    /// extension.  Non-positive and malformed values are ignored so a bad
+    /// payload cannot accidentally reopen an automatically closed match.
+    #[must_use]
+    pub fn betting_extension_until(&self) -> Option<i64> {
+        self.extra
+            .get(DOTA_BETTING_EXTENDED_UNTIL)
+            .and_then(Value::as_i64)
+            .filter(|extension_until| *extension_until > 0)
+    }
+
     /// Actual match participants, excluding players left out of the game.
     #[must_use]
     pub fn participant_ids(&self) -> BTreeSet<i64> {
@@ -173,6 +229,26 @@ impl PendingMatchState {
     }
 }
 
+/// Payload key set by [`PendingMatchRepository::begin_hosted_betting`] after
+/// the bot has durably adopted a Dota lobby.
+pub const DOTA_HOSTED_BETTING_MARKER: &str = "dota_hosted_betting";
+
+/// Payload key set by [`PendingMatchRepository::close_betting_now`] when
+/// betting has reached its terminal pregame boundary.
+pub const DOTA_BETTING_CLOSED_MARKER: &str = "dota_betting_closed";
+
+/// Payload key set by [`PendingMatchRepository::extend_betting_atomic`] for
+/// Dota-managed windows.  Unlike the historical `bet_lock_until`, this
+/// deadline remains authoritative after an automatic close so an explicit
+/// administrator extension can reopen the window until this exact time.
+pub const DOTA_BETTING_EXTENDED_UNTIL: &str = "dota_betting_extended_until";
+
+/// Optional audit timestamp for the first successful hosted-betting adoption.
+pub const DOTA_HOSTED_BETTING_STARTED_AT: &str = "dota_hosted_betting_started_at";
+
+/// Optional audit timestamp for a cancellation that releases hosted betting.
+pub const DOTA_HOSTED_BETTING_RELEASED_AT: &str = "dota_hosted_betting_released_at";
+
 /// Row metadata kept outside the JSON payload.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PendingMatchRecord {
@@ -187,6 +263,18 @@ pub struct PendingMatchRecord {
 pub struct PendingBettingExtension {
     pub pending_match: PendingMatchRecord,
     pub old_lock_until: i64,
+    pub new_lock_until: i64,
+}
+
+/// Result of atomically closing the betting window for a Dota-managed match.
+///
+/// `old_lock_until` is `None` when a legacy payload had no usable betting
+/// lock.  The payload marker still closes such a row; an explicit administrator
+/// extension may reopen it only until its persisted Dota extension deadline.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingBettingClose {
+    pub pending_match: PendingMatchRecord,
+    pub old_lock_until: Option<i64>,
     pub new_lock_until: i64,
 }
 
@@ -207,6 +295,8 @@ pub enum PendingMatchRepositoryError {
     MatchAlreadyRecorded(i64),
     #[error("pending match {0} has no betting window")]
     MissingBettingWindow(i64),
+    #[error("betting for pending match {0} was closed by Dota lobby automation")]
+    BettingClosedByDotaSession(i64),
     #[error("betting extension must be a positive number of seconds")]
     InvalidBettingExtension,
     #[error("integer arithmetic overflow")]
@@ -511,10 +601,17 @@ impl PendingMatchRepository {
     /// Extend betting from `max(current_lock, now)` under one immediate
     /// SQLite writer lock.
     ///
-    /// This mutation operates on the raw JSON object and changes only
-    /// `bet_lock_until`, which guarantees that fields unknown to this binary
-    /// survive the write. A missing, null, or zero lock is treated as no
+    /// This mutation operates on the raw JSON object and preserves fields
+    /// unknown to this binary. A missing, null, or zero lock is treated as no
     /// betting window, matching the Python command.
+    ///
+    /// The resulting deadline is also persisted in
+    /// [`DOTA_BETTING_EXTENDED_UNTIL`]. Persisting it for every successful
+    /// extension preserves an administrator's intent if a queued match is
+    /// adopted by Dota automation before gameplay begins. The automatic
+    /// closed marker remains in place; [`PendingMatchState::betting_open`] and
+    /// the betting service use this explicit deadline to decide whether the
+    /// administrator reopened betting.
     pub fn extend_betting_atomic(
         &self,
         guild_id: i64,
@@ -528,6 +625,20 @@ impl PendingMatchRepository {
 
         let mut connection = open_runtime_connection(&self.path)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let recorded = transaction
+            .query_row(
+                "SELECT match_id FROM matches
+                 WHERE guild_id=?1 AND pending_match_id=?2
+                 LIMIT 1",
+                params![guild_id, pending_match_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        if recorded.is_some() {
+            return Err(PendingMatchRepositoryError::MatchAlreadyRecorded(
+                pending_match_id,
+            ));
+        }
         let raw = query_raw(&transaction, guild_id, pending_match_id)?.ok_or(
             PendingMatchRepositoryError::PendingMatchNotFound(pending_match_id),
         )?;
@@ -550,6 +661,12 @@ impl PendingMatchRepository {
             .checked_add(extension_seconds)
             .ok_or(PendingMatchRepositoryError::ArithmeticOverflow)?;
         object.insert("bet_lock_until".to_owned(), Value::from(new_lock_until));
+        if new_lock_until > 0 {
+            object.insert(
+                DOTA_BETTING_EXTENDED_UNTIL.to_owned(),
+                Value::from(new_lock_until),
+            );
+        }
         let encoded = serde_json::to_string(&payload)
             .map_err(|error| PendingMatchRepositoryError::EncodePayload(error.to_string()))?;
         let changed = transaction.execute(
@@ -569,6 +686,260 @@ impl PendingMatchRepository {
         let pending_match = decode_raw(updated_raw)?;
         transaction.commit()?;
         Ok(PendingBettingExtension {
+            pending_match,
+            old_lock_until,
+            new_lock_until,
+        })
+    }
+
+    /// Atomically mark a pending match as owned by Dota lobby automation.
+    ///
+    /// Adoption leaves `bet_lock_until` unchanged so the original timed
+    /// deadline remains available to UI and can be restored simply by
+    /// releasing the marker. The betting repository treats this marker as an
+    /// open-ended window while it is active. This operation is idempotent for
+    /// an already-adopted row and never reopens a row whose closed marker was
+    /// already committed.
+    pub fn begin_hosted_betting(
+        &self,
+        guild_id: i64,
+        pending_match_id: i64,
+        now_unix: i64,
+    ) -> Result<PendingMatchRecord, PendingMatchRepositoryError> {
+        let mut connection = open_runtime_connection(&self.path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let recorded = transaction
+            .query_row(
+                "SELECT match_id FROM matches
+                 WHERE guild_id=?1 AND pending_match_id=?2
+                 LIMIT 1",
+                params![guild_id, pending_match_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        if recorded.is_some() {
+            return Err(PendingMatchRepositoryError::MatchAlreadyRecorded(
+                pending_match_id,
+            ));
+        }
+
+        let raw = query_raw(&transaction, guild_id, pending_match_id)?.ok_or(
+            PendingMatchRepositoryError::PendingMatchNotFound(pending_match_id),
+        )?;
+        let mut payload = decode_value(pending_match_id, &raw.payload)?;
+        let object = payload.as_object_mut().ok_or_else(|| {
+            PendingMatchRepositoryError::MalformedPayload {
+                pending_match_id,
+                message: "root value is not an object".to_owned(),
+            }
+        })?;
+
+        // A closed row is terminal. Return the current document so callers
+        // can inspect the durable state without accidentally reopening it.
+        if object
+            .get(DOTA_BETTING_CLOSED_MARKER)
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            let pending_match = decode_raw(raw)?;
+            transaction.commit()?;
+            return Ok(pending_match);
+        }
+
+        let already_managed = object
+            .get(DOTA_HOSTED_BETTING_MARKER)
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !already_managed {
+            object.insert(DOTA_HOSTED_BETTING_MARKER.to_owned(), Value::Bool(true));
+            object.insert(
+                DOTA_HOSTED_BETTING_STARTED_AT.to_owned(),
+                Value::from(now_unix),
+            );
+            // A row may be adopted again after a pregame cancellation. The
+            // old release timestamp is only audit data and must not make a
+            // new adoption look cancelled.
+            object.remove(DOTA_HOSTED_BETTING_RELEASED_AT);
+        }
+        let encoded = serde_json::to_string(&payload)
+            .map_err(|error| PendingMatchRepositoryError::EncodePayload(error.to_string()))?;
+        let changed = transaction.execute(
+            "UPDATE pending_matches
+                SET payload=?1,updated_at=CURRENT_TIMESTAMP
+              WHERE guild_id=?2 AND pending_match_id=?3",
+            params![encoded, guild_id, pending_match_id],
+        )?;
+        if changed != 1 {
+            return Err(PendingMatchRepositoryError::PendingMatchNotFound(
+                pending_match_id,
+            ));
+        }
+        let updated_raw = query_raw(&transaction, guild_id, pending_match_id)?.ok_or(
+            PendingMatchRepositoryError::PendingMatchNotFound(pending_match_id),
+        )?;
+        let pending_match = decode_raw(updated_raw)?;
+        transaction.commit()?;
+        Ok(pending_match)
+    }
+
+    /// Atomically release a hosted-betting adoption before the game starts.
+    ///
+    /// Releasing only removes the adoption marker and leaves the original
+    /// `bet_lock_until` in place, restoring normal timed betting semantics.
+    /// Once [`Self::close_betting_now`] has committed the closed marker this
+    /// operation refuses to reopen the window, even if a stale cancellation
+    /// arrives later.
+    pub fn release_hosted_betting(
+        &self,
+        guild_id: i64,
+        pending_match_id: i64,
+        now_unix: i64,
+    ) -> Result<PendingMatchRecord, PendingMatchRepositoryError> {
+        let mut connection = open_runtime_connection(&self.path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let recorded = transaction
+            .query_row(
+                "SELECT match_id FROM matches
+                 WHERE guild_id=?1 AND pending_match_id=?2
+                 LIMIT 1",
+                params![guild_id, pending_match_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        if recorded.is_some() {
+            return Err(PendingMatchRepositoryError::MatchAlreadyRecorded(
+                pending_match_id,
+            ));
+        }
+
+        let raw = query_raw(&transaction, guild_id, pending_match_id)?.ok_or(
+            PendingMatchRepositoryError::PendingMatchNotFound(pending_match_id),
+        )?;
+        let mut payload = decode_value(pending_match_id, &raw.payload)?;
+        let object = payload.as_object_mut().ok_or_else(|| {
+            PendingMatchRepositoryError::MalformedPayload {
+                pending_match_id,
+                message: "root value is not an object".to_owned(),
+            }
+        })?;
+
+        if object
+            .get(DOTA_BETTING_CLOSED_MARKER)
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Err(PendingMatchRepositoryError::BettingClosedByDotaSession(
+                pending_match_id,
+            ));
+        }
+
+        let already_managed = object
+            .get(DOTA_HOSTED_BETTING_MARKER)
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if already_managed {
+            object.remove(DOTA_HOSTED_BETTING_MARKER);
+            object.remove(DOTA_HOSTED_BETTING_STARTED_AT);
+            object.insert(
+                DOTA_HOSTED_BETTING_RELEASED_AT.to_owned(),
+                Value::from(now_unix),
+            );
+            let encoded = serde_json::to_string(&payload)
+                .map_err(|error| PendingMatchRepositoryError::EncodePayload(error.to_string()))?;
+            let changed = transaction.execute(
+                "UPDATE pending_matches
+                    SET payload=?1,updated_at=CURRENT_TIMESTAMP
+                  WHERE guild_id=?2 AND pending_match_id=?3",
+                params![encoded, guild_id, pending_match_id],
+            )?;
+            if changed != 1 {
+                return Err(PendingMatchRepositoryError::PendingMatchNotFound(
+                    pending_match_id,
+                ));
+            }
+        }
+        let updated_raw = query_raw(&transaction, guild_id, pending_match_id)?.ok_or(
+            PendingMatchRepositoryError::PendingMatchNotFound(pending_match_id),
+        )?;
+        let pending_match = decode_raw(updated_raw)?;
+        transaction.commit()?;
+        Ok(pending_match)
+    }
+
+    /// Atomically close one pending match's betting window and mark its JSON
+    /// document as Dota-owned.
+    ///
+    /// The immediate transaction serializes this operation with betting,
+    /// extension, voting, recording, and pending-row cleanup.  A completed
+    /// match is rejected so a late lobby worker cannot mutate an identity
+    /// that has already entered the recording path.  Repeating the close is
+    /// idempotent: the lock is shortened for an ordinary timed window, while
+    /// an explicit Dota extension deadline is preserved across repeated
+    /// closes. The durable closed marker remains true in either case.
+    pub fn close_betting_now(
+        &self,
+        guild_id: i64,
+        pending_match_id: i64,
+        now_unix: i64,
+    ) -> Result<PendingBettingClose, PendingMatchRepositoryError> {
+        let mut connection = open_runtime_connection(&self.path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let recorded = transaction
+            .query_row(
+                "SELECT match_id FROM matches
+                 WHERE guild_id=?1 AND pending_match_id=?2
+                 LIMIT 1",
+                params![guild_id, pending_match_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        if recorded.is_some() {
+            return Err(PendingMatchRepositoryError::MatchAlreadyRecorded(
+                pending_match_id,
+            ));
+        }
+
+        let raw = query_raw(&transaction, guild_id, pending_match_id)?.ok_or(
+            PendingMatchRepositoryError::PendingMatchNotFound(pending_match_id),
+        )?;
+        let mut payload = decode_value(pending_match_id, &raw.payload)?;
+        let object = payload.as_object_mut().ok_or_else(|| {
+            PendingMatchRepositoryError::MalformedPayload {
+                pending_match_id,
+                message: "root value is not an object".to_owned(),
+            }
+        })?;
+        let old_lock_until = object
+            .get("bet_lock_until")
+            .and_then(Value::as_i64)
+            .filter(|lock| *lock != 0);
+        let new_lock_until = object
+            .get(DOTA_BETTING_EXTENDED_UNTIL)
+            .and_then(Value::as_i64)
+            .filter(|extension_until| *extension_until > 0)
+            .or_else(|| old_lock_until.map(|lock| lock.min(now_unix)))
+            .unwrap_or(now_unix);
+        object.insert("bet_lock_until".to_owned(), Value::from(new_lock_until));
+        object.insert(DOTA_BETTING_CLOSED_MARKER.to_owned(), Value::Bool(true));
+        let encoded = serde_json::to_string(&payload)
+            .map_err(|error| PendingMatchRepositoryError::EncodePayload(error.to_string()))?;
+        let changed = transaction.execute(
+            "UPDATE pending_matches
+                SET payload=?1,updated_at=CURRENT_TIMESTAMP
+              WHERE guild_id=?2 AND pending_match_id=?3",
+            params![encoded, guild_id, pending_match_id],
+        )?;
+        if changed != 1 {
+            return Err(PendingMatchRepositoryError::PendingMatchNotFound(
+                pending_match_id,
+            ));
+        }
+        let updated_raw = query_raw(&transaction, guild_id, pending_match_id)?.ok_or(
+            PendingMatchRepositoryError::PendingMatchNotFound(pending_match_id),
+        )?;
+        let pending_match = decode_raw(updated_raw)?;
+        transaction.commit()?;
+        Ok(PendingBettingClose {
             pending_match,
             old_lock_until,
             new_lock_until,
@@ -1088,6 +1459,16 @@ mod tests {
     #[test]
     fn extension_uses_later_base_and_preserves_unknown_json() {
         let (_file, repository) = fixture();
+        Connection::open(&repository.path)
+            .expect("open extension fixture")
+            .execute_batch(
+                "CREATE TABLE matches (
+                match_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER,
+                pending_match_id INTEGER
+            );",
+            )
+            .expect("create extension matches fixture");
         let mut pending = state(&[11, 12]);
         pending
             .extra
@@ -1115,6 +1496,386 @@ mod tests {
             .expect("extend open window");
         assert_eq!(extension.old_lock_until, 2_300);
         assert_eq!(extension.new_lock_until, 2_360);
+    }
+
+    #[test]
+    fn extension_before_host_adoption_survives_gameplay_close() {
+        let (_file, repository) = fixture();
+        Connection::open(&repository.path)
+            .expect("open queued extension fixture")
+            .execute_batch(
+                "CREATE TABLE matches (
+                    match_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER,
+                    pending_match_id INTEGER
+                );",
+            )
+            .expect("create queued extension matches fixture");
+        let created = repository
+            .create_pending_match(GUILD_A, &state(&[11, 12]))
+            .expect("create queued pending match");
+
+        // The administrator can extend a queued match before the Dota host
+        // has adopted it. The explicit deadline must survive that adoption.
+        let extension = repository
+            .extend_betting_atomic(GUILD_A, created.pending_match_id, 2_000, 300)
+            .expect("extend queued betting");
+        assert_eq!(extension.new_lock_until, 2_300);
+        assert_eq!(
+            extension.pending_match.state.betting_extension_until(),
+            Some(2_300)
+        );
+
+        let adopted = repository
+            .begin_hosted_betting(GUILD_A, created.pending_match_id, 2_100)
+            .expect("adopt queued match");
+        assert!(adopted.state.hosted_betting_managed());
+        assert!(adopted.state.betting_open(9_000));
+        assert_eq!(adopted.state.betting_extension_until(), Some(2_300));
+
+        // Gameplay begins before the explicit deadline. Automatic close must
+        // keep the deadline so the admin override remains effective.
+        let closed = repository
+            .close_betting_now(GUILD_A, created.pending_match_id, 2_200)
+            .expect("close at gameplay start");
+        assert!(closed.pending_match.state.betting_closed());
+        assert_eq!(closed.new_lock_until, 2_300);
+        assert_eq!(closed.pending_match.state.bet_lock_until, Some(2_300));
+        assert!(closed.pending_match.state.betting_open(2_299));
+        assert!(!closed.pending_match.state.betting_open(2_300));
+    }
+
+    #[test]
+    fn hosted_betting_stays_open_past_deadline_and_release_restores_timer_after_restart() {
+        let (file, repository) = fixture();
+        Connection::open(&repository.path)
+            .expect("open hosted betting fixture")
+            .execute_batch(
+                "CREATE TABLE matches (
+                    match_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER,
+                    pending_match_id INTEGER
+                );",
+            )
+            .expect("create hosted betting matches table");
+        let mut pending = state(&[11, 12]);
+        pending.extra.insert("future_field".to_owned(), json!(true));
+        let created = repository
+            .create_pending_match(GUILD_A, &pending)
+            .expect("create pending");
+
+        // The historical deadline has passed, but host adoption opens the
+        // window and preserves that deadline for a possible cancellation.
+        let adopted = repository
+            .begin_hosted_betting(GUILD_A, created.pending_match_id, 2_000)
+            .expect("adopt hosted betting");
+        assert!(adopted.state.hosted_betting_managed());
+        assert!(adopted.state.betting_open(2_001));
+        assert_eq!(adopted.state.bet_lock_until, Some(1_000));
+        assert_eq!(
+            adopted.state.extra.get(DOTA_HOSTED_BETTING_STARTED_AT),
+            Some(&json!(2_000))
+        );
+        assert_eq!(adopted.state.extra.get("future_field"), Some(&json!(true)));
+
+        // A fresh repository instance sees the marker and keeps the original
+        // adoption timestamp on an idempotent retry.
+        let restarted = PendingMatchRepository::new(file.path());
+        let retried = restarted
+            .begin_hosted_betting(GUILD_A, created.pending_match_id, 3_000)
+            .expect("retry hosted adoption after restart");
+        assert!(retried.state.hosted_betting_managed());
+        assert_eq!(
+            retried.state.extra.get(DOTA_HOSTED_BETTING_STARTED_AT),
+            Some(&json!(2_000))
+        );
+
+        // Pregame cancellation removes ownership while retaining the old
+        // deadline, so the ordinary timer policy resumes.
+        let released = restarted
+            .release_hosted_betting(GUILD_A, created.pending_match_id, 4_000)
+            .expect("release hosted betting");
+        assert!(!released.state.hosted_betting_managed());
+        assert!(!released.state.betting_open(4_000));
+        assert_eq!(released.state.bet_lock_until, Some(1_000));
+        assert!(
+            !released
+                .state
+                .extra
+                .contains_key(DOTA_HOSTED_BETTING_MARKER)
+        );
+        assert!(
+            !released
+                .state
+                .extra
+                .contains_key(DOTA_HOSTED_BETTING_STARTED_AT)
+        );
+        assert_eq!(
+            released.state.extra.get(DOTA_HOSTED_BETTING_RELEASED_AT),
+            Some(&json!(4_000))
+        );
+    }
+
+    #[test]
+    fn hosted_betting_is_guild_scoped_and_closed_marker_requires_explicit_extension() {
+        let (_file, repository) = fixture();
+        Connection::open(&repository.path)
+            .expect("open hosted betting fixture")
+            .execute_batch(
+                "CREATE TABLE matches (
+                    match_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER,
+                    pending_match_id INTEGER
+                );",
+            )
+            .expect("create hosted betting matches table");
+        let created = repository
+            .create_pending_match(GUILD_A, &state(&[11, 12]))
+            .expect("create pending");
+
+        assert!(matches!(
+            repository.begin_hosted_betting(GUILD_B, created.pending_match_id, 2_000),
+            Err(PendingMatchRepositoryError::PendingMatchNotFound(id))
+                if id == created.pending_match_id
+        ));
+        assert!(matches!(
+            repository.release_hosted_betting(GUILD_B, created.pending_match_id, 2_000),
+            Err(PendingMatchRepositoryError::PendingMatchNotFound(id))
+                if id == created.pending_match_id
+        ));
+
+        let adopted = repository
+            .begin_hosted_betting(GUILD_A, created.pending_match_id, 2_000)
+            .expect("adopt hosted betting");
+        assert!(adopted.state.hosted_betting_managed());
+        let extension = repository
+            .extend_betting_atomic(GUILD_A, created.pending_match_id, 2_000, 60)
+            .expect("extend hosted draft");
+        assert_eq!(extension.old_lock_until, 1_000);
+        assert_eq!(extension.new_lock_until, 2_060);
+        assert_eq!(
+            extension.pending_match.state.betting_extension_until(),
+            Some(2_060)
+        );
+        assert_eq!(
+            repository
+                .pending_match(GUILD_A, created.pending_match_id)
+                .unwrap()
+                .unwrap()
+                .state
+                .bet_lock_until,
+            extension.pending_match.state.bet_lock_until
+        );
+        let closed = repository
+            .close_betting_now(GUILD_A, created.pending_match_id, 2_100)
+            .expect("close hosted betting");
+        assert!(closed.pending_match.state.betting_closed());
+        assert!(!closed.pending_match.state.hosted_betting_managed());
+        assert!(!closed.pending_match.state.betting_open(2_100));
+
+        // Begin is idempotent over the durable closed state, and release
+        // cannot turn that final decision back into an open window. An admin
+        // extension may explicitly reopen it until its new deadline.
+        let retried = repository
+            .begin_hosted_betting(GUILD_A, created.pending_match_id, 3_000)
+            .expect("retry adoption keeps close");
+        assert!(retried.state.betting_closed());
+        assert!(!retried.state.hosted_betting_managed());
+        assert!(matches!(
+            repository.release_hosted_betting(GUILD_A, created.pending_match_id, 3_000),
+            Err(PendingMatchRepositoryError::BettingClosedByDotaSession(id))
+                if id == created.pending_match_id
+        ));
+        let reopened = repository
+            .extend_betting_atomic(GUILD_A, created.pending_match_id, 3_000, 60)
+            .expect("extend closed hosted draft");
+        assert_eq!(reopened.old_lock_until, 2_060);
+        assert_eq!(reopened.new_lock_until, 3_060);
+        assert!(reopened.pending_match.state.betting_closed());
+        assert!(reopened.pending_match.state.betting_open(3_059));
+        assert!(!reopened.pending_match.state.betting_open(3_060));
+    }
+
+    #[test]
+    fn close_betting_preserves_explicit_extension_and_repeated_close() {
+        let (_file, repository) = fixture();
+        let connection = Connection::open(&repository.path).expect("open close fixture");
+        connection
+            .execute_batch(
+                "CREATE TABLE matches (
+                    match_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER,
+                    pending_match_id INTEGER
+                );",
+            )
+            .expect("create matches fixture");
+        let created = repository
+            .create_pending_match(GUILD_A, &state(&[11, 12]))
+            .expect("create pending");
+        drop(connection);
+
+        let closed = repository
+            .close_betting_now(GUILD_A, created.pending_match_id, 1_500)
+            .expect("close betting");
+        assert_eq!(closed.old_lock_until, Some(1_000));
+        assert_eq!(closed.new_lock_until, 1_000);
+        assert_eq!(closed.pending_match.state.bet_lock_until, Some(1_000));
+        assert_eq!(
+            closed.pending_match.state.extra.get("dota_betting_closed"),
+            Some(&json!(true))
+        );
+        let extension = repository
+            .extend_betting_atomic(GUILD_A, created.pending_match_id, 1_500, 60)
+            .expect("extend automatically closed betting");
+        assert_eq!(extension.old_lock_until, 1_000);
+        assert_eq!(extension.new_lock_until, 1_560);
+        assert_eq!(
+            extension.pending_match.state.betting_extension_until(),
+            Some(1_560)
+        );
+        assert!(extension.pending_match.state.betting_open(1_559));
+        assert!(!extension.pending_match.state.betting_open(1_560));
+
+        // A retry with a later wall clock value keeps the administrator's
+        // explicit deadline; a repeated close cannot cancel the extension.
+        let repeated = repository
+            .close_betting_now(GUILD_A, created.pending_match_id, 2_000)
+            .expect("repeat close betting");
+        assert_eq!(repeated.old_lock_until, Some(1_560));
+        assert_eq!(repeated.new_lock_until, 1_560);
+        assert_eq!(repeated.pending_match.state.bet_lock_until, Some(1_560));
+        assert_eq!(
+            repeated.pending_match.state.betting_extension_until(),
+            Some(1_560)
+        );
+    }
+
+    #[test]
+    fn close_betting_rejects_recorded_and_cross_guild_rows() {
+        let (_file, repository) = fixture();
+        let connection = Connection::open(&repository.path).expect("open close fixture");
+        connection
+            .execute_batch(
+                "CREATE TABLE matches (
+                    match_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER,
+                    pending_match_id INTEGER
+                );",
+            )
+            .expect("create matches fixture");
+        let created = repository
+            .create_pending_match(GUILD_A, &state(&[11, 12]))
+            .expect("create pending");
+        drop(connection);
+
+        assert!(matches!(
+            repository.close_betting_now(GUILD_B, created.pending_match_id, 2_000),
+            Err(PendingMatchRepositoryError::PendingMatchNotFound(id)) if id == created.pending_match_id
+        ));
+        Connection::open(&repository.path)
+            .expect("open close fixture")
+            .execute(
+                "INSERT INTO matches(guild_id,pending_match_id) VALUES(?1,?2)",
+                params![GUILD_A, created.pending_match_id],
+            )
+            .expect("record completed match");
+        assert!(matches!(
+            repository.close_betting_now(GUILD_A, created.pending_match_id, 2_000),
+            Err(PendingMatchRepositoryError::MatchAlreadyRecorded(id)) if id == created.pending_match_id
+        ));
+        let raw: String = Connection::open(&repository.path)
+            .expect("open close fixture")
+            .query_row(
+                "SELECT payload FROM pending_matches WHERE guild_id=?1 AND pending_match_id=?2",
+                params![GUILD_A, created.pending_match_id],
+                |row| row.get(0),
+            )
+            .expect("read pending after refused close");
+        assert!(!raw.contains("dota_betting_closed"));
+    }
+
+    #[test]
+    fn extend_betting_rejects_recorded_rows_but_is_guild_scoped() {
+        let (_file, repository) = fixture();
+        Connection::open(&repository.path)
+            .expect("open extension fixture")
+            .execute_batch(
+                "CREATE TABLE matches (
+                    match_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER,
+                    pending_match_id INTEGER
+                );",
+            )
+            .expect("create extension matches fixture");
+        let created = repository
+            .create_pending_match(GUILD_A, &state(&[11, 12]))
+            .expect("create pending");
+
+        // A completed row in another guild with the same pending ID cannot
+        // block the guild-owned extension.
+        Connection::open(&repository.path)
+            .expect("open extension fixture")
+            .execute(
+                "INSERT INTO matches(guild_id,pending_match_id) VALUES(?1,?2)",
+                params![GUILD_B, created.pending_match_id],
+            )
+            .expect("record sibling guild match");
+        let extended = repository
+            .extend_betting_atomic(GUILD_A, created.pending_match_id, 2_000, 300)
+            .expect("extend despite sibling guild record");
+        assert_eq!(extended.new_lock_until, 2_300);
+
+        // Once this guild has a completed match row, extension is rejected
+        // atomically even when the pending payload is still present.
+        Connection::open(&repository.path)
+            .expect("open extension fixture")
+            .execute(
+                "INSERT INTO matches(guild_id,pending_match_id) VALUES(?1,?2)",
+                params![GUILD_A, created.pending_match_id],
+            )
+            .expect("record matching guild match");
+        assert!(matches!(
+            repository.extend_betting_atomic(GUILD_A, created.pending_match_id, 2_500, 60),
+            Err(PendingMatchRepositoryError::MatchAlreadyRecorded(id))
+                if id == created.pending_match_id
+        ));
+        let pending = repository
+            .pending_match(GUILD_A, created.pending_match_id)
+            .expect("load pending after rejected extension")
+            .expect("pending remains for cleanup");
+        assert_eq!(pending.state.bet_lock_until, Some(2_300));
+    }
+
+    #[test]
+    fn close_betting_closes_legacy_payload_without_a_lock() {
+        let (_file, repository) = fixture();
+        Connection::open(&repository.path)
+            .expect("open close fixture")
+            .execute_batch(
+                "CREATE TABLE matches (
+                    match_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER,
+                    pending_match_id INTEGER
+                );",
+            )
+            .expect("create matches fixture");
+        let legacy = PendingMatchState {
+            bet_lock_until: None,
+            ..Default::default()
+        };
+        let created = repository
+            .create_pending_match(GUILD_A, &legacy)
+            .expect("create legacy pending");
+        let closed = repository
+            .close_betting_now(GUILD_A, created.pending_match_id, 3_000)
+            .expect("close legacy betting");
+        assert_eq!(closed.old_lock_until, None);
+        assert_eq!(closed.new_lock_until, 3_000);
+        assert_eq!(closed.pending_match.state.bet_lock_until, Some(3_000));
+        assert_eq!(
+            closed.pending_match.state.extra.get("dota_betting_closed"),
+            Some(&json!(true))
+        );
     }
 
     #[test]

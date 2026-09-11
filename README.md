@@ -433,3 +433,5 @@ disposable copy; never delete or run reset experiments against deployed data.
 ## License
 
 This project is for the Camaraderous Dota 2 league.
+
+Automated league lobby hosting, result recording, and replay archival are documented in [DOTA_HOSTING.md](DOTA_HOSTING.md). Hosting is opt-in and uses one dedicated Steam account; bot spectating and live-stat publishing are deferred.

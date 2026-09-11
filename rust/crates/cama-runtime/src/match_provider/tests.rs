@@ -16,6 +16,9 @@ use cama_domain::guild_config::GuildConfigStore;
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
+#[path = "hosted_tests.rs"]
+mod hosted_tests;
+
 use crate::discord_transport::{DiscordAllowedMentions, DiscordIdPlayerNameResolver};
 use crate::push_notification_provider::{PushNotificationRegistrationProvider, PushPublisher};
 use crate::registration::{InteractionAllowedMentions, InteractionResponseError, InteractionValue};
@@ -490,6 +493,41 @@ impl MatchRuntimeFixture {
             )
             .await
             .expect("dispatch fixture lobby command");
+        responder
+    }
+
+    async fn dispatch_record_command(
+        &self,
+        user_id: i64,
+        result: &str,
+    ) -> Arc<RecordingMatchResponder> {
+        let mut builder = RegistryBuilder::default();
+        self.provider
+            .register(&mut builder)
+            .expect("register fixture match provider");
+        let responder = Arc::new(RecordingMatchResponder::default());
+        builder
+            .build()
+            .command_handler("record")
+            .expect("fixture record command")
+            .handle(
+                InteractionRequest::Command {
+                    interaction_id: u64::try_from(user_id).expect("fixture Discord user"),
+                    name: "record".to_owned(),
+                    user_id: u64::try_from(user_id).expect("fixture Discord user"),
+                    user_display_name: format!("Admin {user_id}"),
+                    guild_id: Some(u64::try_from(GUILD).expect("fixture Discord guild")),
+                    channel_id: Some(77_001),
+                    member_permissions: Some(ADMINISTRATOR_PERMISSION),
+                    options: vec![InteractionOption {
+                        name: "result".to_owned(),
+                        value: InteractionValue::String(result.to_owned()),
+                    }],
+                },
+                responder.clone(),
+            )
+            .await
+            .expect("dispatch fixture record command");
         responder
     }
 
@@ -3581,6 +3619,112 @@ async fn admin_record_override_commits_and_clears_the_production_pending_match()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn registered_admin_record_settles_an_active_hosted_match_once() {
+    let fixture = MatchRuntimeFixture::new();
+    let pending = fixture.pending(unix_seconds() + 120);
+    let bettor = pending.state.radiant_team_ids[0];
+    BettingServiceRepository::new(fixture.database.path())
+        .place_bet_atomic(PlaceBetRequest {
+            guild_id: Some(GUILD),
+            pending_match_id: pending.pending_match_id,
+            discord_id: bettor,
+            team: BettingTeam::Radiant,
+            amount: 1,
+            bet_time: unix_seconds(),
+            leverage: 1,
+            max_debt: 1_000,
+            is_blind: false,
+            odds_at_placement: None,
+        })
+        .expect("place hosted-match wager before the close");
+
+    let pending_repository = PendingMatchRepository::new(fixture.database.path());
+    let managed = pending_repository
+        .begin_hosted_betting(GUILD, pending.pending_match_id, unix_seconds())
+        .expect("adopt pending match for hosted betting");
+    assert!(managed.state.hosted_betting_managed());
+    let closed = pending_repository
+        .close_betting_now(GUILD, pending.pending_match_id, unix_seconds())
+        .expect("close hosted betting at gameplay start");
+    assert!(closed.pending_match.state.betting_closed());
+
+    let sessions =
+        cama_db::dota_session_repository::DotaSessionRepository::new(fixture.database.path());
+    let session = match sessions
+        .claim_session(
+            GUILD,
+            pending.pending_match_id,
+            "hosted-record-test-bot",
+            json!({"test": "active hosted session"}),
+            unix_seconds(),
+        )
+        .expect("claim active hosted session")
+    {
+        cama_db::dota_session_repository::DotaSessionClaim::Created(record) => record,
+        other => panic!("expected a new hosted session, got {other:?}"),
+    };
+    let session = sessions
+        .transition_phase(
+            &session,
+            cama_db::dota_session_repository::DotaSessionPhase::Running,
+            session.revision,
+            unix_seconds(),
+        )
+        .expect("mark hosted session running");
+    sessions
+        .attach_valve_match_id(&session, "987654321", session.revision, unix_seconds())
+        .expect("attach hosted Valve match ID");
+
+    let first = fixture.dispatch_record_command(99_001, "radiant").await;
+    assert!(
+        first
+            .contents()
+            .iter()
+            .any(|content| content.contains("Match recorded")),
+        "admin route response: {:?}",
+        first.contents()
+    );
+
+    let match_id = MatchRepository::new(fixture.database.path())
+        .match_id_for_pending_match(GUILD, pending.pending_match_id)
+        .expect("read hosted manual match ID")
+        .expect("manual hosted match committed");
+    assert!(
+        PendingMatchRepository::new(fixture.database.path())
+            .pending_match(GUILD, pending.pending_match_id)
+            .expect("read pending after hosted manual record")
+            .is_none()
+    );
+
+    let second = fixture.dispatch_record_command(99_001, "radiant").await;
+    assert_eq!(second.contents(), ["❌ No pending match to record."]);
+
+    let (match_count, settled_bets): (i64, i64) = Connection::open(fixture.database.path())
+        .expect("inspect hosted manual settlement")
+        .query_row(
+            "SELECT
+                 (SELECT COUNT(*) FROM matches WHERE guild_id=?1),
+                 (SELECT COUNT(*) FROM bets
+                  WHERE guild_id=?1 AND pending_match_id=?2 AND match_id=?3)",
+            params![GUILD, pending.pending_match_id, match_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("count hosted manual settlement");
+    assert_eq!(match_count, 1);
+    assert_eq!(settled_bets, 1);
+
+    let active_session = sessions
+        .session(GUILD, pending.pending_match_id)
+        .expect("read active hosted session")
+        .expect("hosted session remains after manual record");
+    assert_eq!(
+        active_session.phase,
+        cama_db::dota_session_repository::DotaSessionPhase::Running
+    );
+    assert_eq!(active_session.valve_match_id.as_deref(), Some("987654321"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn non_admin_record_requires_three_matching_participant_submissions() {
     let fixture = MatchRuntimeFixture::new();
     let pending = fixture.pending(unix_seconds() + 120);
@@ -3932,10 +4076,14 @@ async fn test_shuffle_abort_applies_single_participant_only_exclusion_credit() {
     assert_eq!(participant_ids.len(), 10);
     assert_eq!(excluded_ids.len(), 3);
     assert!(excluded_ids.contains(&conditional_id));
+    let guard = fixture
+        .provider
+        .try_acquire_hosted_finalization_guard(GUILD, prepared.pending.pending_match_id)
+        .expect("acquire abort finalization guard");
     fixture
         .provider
         .handler
-        .finalize_abort_owned(&prepared.pending)
+        .finalize_abort_owned(&prepared.pending, guard)
         .await
         .expect("abort prepared match");
     let after = fixture
@@ -4000,10 +4148,14 @@ async fn test_draft_abort_does_not_grant_shuffle_exclusion_credit() {
         .get_exclusion_counts(&player_ids, Some(GUILD))
         .expect("read pre-abort draft exclusion factors");
 
+    let guard = fixture
+        .provider
+        .try_acquire_hosted_finalization_guard(GUILD, pending.pending_match_id)
+        .expect("acquire draft abort finalization guard");
     fixture
         .provider
         .handler
-        .finalize_abort_owned(&pending)
+        .finalize_abort_owned(&pending, guard)
         .await
         .expect("abort draft");
 
@@ -6738,10 +6890,14 @@ async fn test_abort_does_not_touch_a_new_or_sibling_lobby() {
         )
         .expect("create sibling pending match");
 
+    let guard = fixture
+        .provider
+        .try_acquire_hosted_finalization_guard(GUILD, aborted.pending_match_id)
+        .expect("acquire selected abort finalization guard");
     fixture
         .provider
         .handler
-        .finalize_abort_owned(&aborted)
+        .finalize_abort_owned(&aborted, guard)
         .await
         .expect("abort selected match");
 
@@ -7356,10 +7512,14 @@ async fn test_aborted_match_thread_retains_source_lobby_label() {
         )
         .expect("create low-skill pending match");
 
+    let guard = fixture
+        .provider
+        .try_acquire_hosted_finalization_guard(GUILD, pending.pending_match_id)
+        .expect("acquire low-skill abort finalization guard");
     fixture
         .provider
         .handler
-        .finalize_abort_owned(&pending)
+        .finalize_abort_owned(&pending, guard)
         .await
         .expect("abort low-skill match");
 

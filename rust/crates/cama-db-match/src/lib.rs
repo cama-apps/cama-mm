@@ -6,6 +6,8 @@ pub(crate) use cama_db_core::{json_numeric, open_runtime_connection};
 
 #[path = "../../cama-db/src/core_repositories.rs"]
 pub mod core_repositories;
+#[path = "../../cama-db/src/dota_session.rs"]
+pub mod dota_session_repository;
 #[path = "../../cama-db/src/match_correction.rs"]
 pub mod match_correction_repository;
 #[path = "../../cama-db/src/match_discovery.rs"]

@@ -22,11 +22,13 @@ runtime-test-draft = ["cama-runtime-core/runtime-test-draft"]
 runtime-test-match = ["cama-runtime-core/runtime-test-match"]
 
 [dependencies]
+async-trait.workspace = true
+axum.workspace = true
 cama-app = { path = "../cama-app" }
 cama-db = { path = "../cama-db" }
 cama-domain = { path = "../cama-domain" }
 cama-runtime-core = { path = "../cama-runtime-core", default-features = false }
-async-trait.workspace = true
+cama-steam = { path = "../cama-steam" }
 chrono.workspace = true
 fastrand.workspace = true
 fs2.workspace = true
@@ -38,13 +40,14 @@ rusqlite.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints]

@@ -52,7 +52,9 @@ fn fixture() -> FastTestDatabase {
              );
              CREATE TABLE matches (
                  match_id INTEGER PRIMARY KEY,
-                 winning_team INTEGER NOT NULL
+                 winning_team INTEGER NOT NULL,
+                 guild_id INTEGER NOT NULL DEFAULT 0,
+                 pending_match_id INTEGER
              );
              CREATE TABLE manashop_buffs (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2361,6 +2363,226 @@ fn test_bet_lock_enforced() {
         repo(file.path())
             .place_bet_atomic(request(1, 1001, BettingTeam::Radiant, 5))
             .expect_err("closed betting must reject"),
+        BettingServiceRepositoryError::BettingClosed
+    ));
+}
+
+#[test]
+fn test_hosted_betting_stays_open_after_original_deadline() {
+    let file = fixture();
+    add_pending_payload(
+        file.path(),
+        1,
+        &format!(
+            "{{\"radiant_team_ids\":[1,2,3,4,5],\"dire_team_ids\":[6,7,8,9,10],\"bet_lock_until\":{},\"dota_hosted_betting\":true}}",
+            NOW - 1
+        ),
+    );
+    add_player(file.path(), 1001, 50);
+    add_player(file.path(), 1002, 50);
+    let repository = repo(file.path());
+
+    repository
+        .place_bet_atomic(PlaceBetRequest {
+            bet_time: NOW + 10_000,
+            ..request(1, 1001, BettingTeam::Radiant, 5)
+        })
+        .expect("hosted match remains open past its timed deadline");
+    let automatic = repository
+        .place_automatic_amount_bets_atomic(
+            Some(GUILD),
+            Some(1),
+            NOW + 10_001,
+            &[AutomaticAmountBetRequest {
+                discord_id: 1002,
+                team: BettingTeam::Dire,
+                amount: 5,
+            }],
+            500,
+        )
+        .expect("automatic hosted wager remains open");
+    assert_eq!(automatic.created.len(), 1);
+}
+
+#[test]
+fn test_completed_hosted_match_rejects_bets_and_keeps_sibling_guild_open() {
+    let file = fixture();
+    add_pending_payload(
+        file.path(),
+        1,
+        &format!(
+            "{{\"radiant_team_ids\":[1,2,3,4,5],\"dire_team_ids\":[6,7,8,9,10],\"bet_lock_until\":{},\"dota_hosted_betting\":true}}",
+            NOW - 1
+        ),
+    );
+    add_player(file.path(), 1_001, 50);
+    add_player(file.path(), 1_002, 50);
+    Connection::open(file.path())
+        .expect("open completed-match fixture")
+        .execute(
+            "INSERT INTO matches (match_id, guild_id, pending_match_id, winning_team)
+             VALUES (?1, ?2, ?3, 1)",
+            params![7_001, GUILD, 1],
+        )
+        .expect("insert completed hosted match");
+    let repository = repo(file.path());
+
+    assert!(matches!(
+        repository
+            .place_bet_atomic(request(1, 1_001, BettingTeam::Radiant, 5))
+            .expect_err("completed hosted match must reject manual wager"),
+        BettingServiceRepositoryError::BettingClosed
+    ));
+    let automatic_error = repository
+        .place_automatic_amount_bets_atomic(
+            Some(GUILD),
+            Some(1),
+            NOW + 10_000,
+            &[AutomaticAmountBetRequest {
+                discord_id: 1_002,
+                team: BettingTeam::Dire,
+                amount: 5,
+            }],
+            500,
+        )
+        .expect_err("completed hosted match must reject automatic wager");
+    assert!(matches!(
+        automatic_error,
+        BettingServiceRepositoryError::BettingClosed
+    ));
+    assert_eq!(balance(file.path(), 1_001), 50);
+    assert_eq!(balance(file.path(), 1_002), 50);
+    assert!(
+        repository
+            .get_pending_bets(Some(GUILD), None, NOW, Some(1))
+            .expect("read rejected hosted wagers")
+            .is_empty()
+    );
+
+    let sibling_guild = GUILD + 1;
+    let sibling_player = 1_003;
+    add_player_in_guild(file.path(), sibling_player, sibling_guild, 50);
+    Connection::open(file.path())
+        .expect("open sibling-guild fixture")
+        .execute(
+            "INSERT INTO pending_matches (pending_match_id, guild_id, payload)
+             VALUES (?1, ?2, ?3)",
+            params![
+                2,
+                sibling_guild,
+                format!(
+                    "{{\"radiant_team_ids\":[1,2,3,4,5],\"dire_team_ids\":[6,7,8,9,10],\"bet_lock_until\":{},\"dota_hosted_betting\":true}}",
+                    NOW - 1
+                )
+            ],
+        )
+        .expect("insert sibling-guild pending match");
+    let mut sibling_request = request(2, sibling_player, BettingTeam::Radiant, 5);
+    sibling_request.guild_id = Some(sibling_guild);
+    repository
+        .place_bet_atomic(sibling_request)
+        .expect("completed match in another guild must not block wager");
+    assert_eq!(
+        balance_for_guild(file.path(), sibling_player, sibling_guild),
+        45
+    );
+}
+
+#[test]
+fn test_closed_marker_wins_over_hosted_betting_marker() {
+    let file = fixture();
+    add_pending_payload(
+        file.path(),
+        1,
+        &format!(
+            "{{\"radiant_team_ids\":[1,2,3,4,5],\"dire_team_ids\":[6,7,8,9,10],\"bet_lock_until\":{},\"dota_hosted_betting\":true,\"dota_betting_closed\":true}}",
+            NOW + 10_000
+        ),
+    );
+    add_player(file.path(), 1001, 50);
+    assert!(matches!(
+        repo(file.path())
+            .place_bet_atomic(request(1, 1001, BettingTeam::Radiant, 5))
+            .expect_err("closed marker must win over hosted marker"),
+        BettingServiceRepositoryError::BettingClosed
+    ));
+}
+
+#[test]
+fn test_dota_extension_reopens_closed_window_until_exact_deadline() {
+    let file = fixture();
+    add_pending_payload(
+        file.path(),
+        1,
+        &format!(
+            "{{\"radiant_team_ids\":[1,2,3,4,5],\"dire_team_ids\":[6,7,8,9,10],\"bet_lock_until\":{},\"dota_hosted_betting\":true,\"dota_betting_closed\":true,\"dota_betting_extended_until\":{}}}",
+            NOW - 1,
+            NOW + 100
+        ),
+    );
+    for discord_id in [1001, 1002, 1003, 1004] {
+        add_player(file.path(), discord_id, 50);
+    }
+    let repository = repo(file.path());
+
+    repository
+        .place_bet_atomic(PlaceBetRequest {
+            bet_time: NOW + 99,
+            ..request(1, 1001, BettingTeam::Radiant, 5)
+        })
+        .expect("manual wager remains open through extension deadline");
+    let automatic = repository
+        .place_automatic_amount_bets_atomic(
+            Some(GUILD),
+            Some(1),
+            NOW + 99,
+            &[AutomaticAmountBetRequest {
+                discord_id: 1002,
+                team: BettingTeam::Dire,
+                amount: 5,
+            }],
+            500,
+        )
+        .expect("automatic wager remains open through extension deadline");
+    assert_eq!(automatic.created.len(), 1);
+
+    let manual_at_deadline = repository
+        .place_bet_atomic(PlaceBetRequest {
+            bet_time: NOW + 100,
+            ..request(1, 1003, BettingTeam::Radiant, 5)
+        })
+        .expect_err("manual wager at the exact extension deadline must reject");
+    assert!(matches!(
+        manual_at_deadline,
+        BettingServiceRepositoryError::BettingClosed
+    ));
+    let automatic_at_deadline = repository
+        .place_automatic_amount_bets_atomic(
+            Some(GUILD),
+            Some(1),
+            NOW + 100,
+            &[AutomaticAmountBetRequest {
+                discord_id: 1004,
+                team: BettingTeam::Dire,
+                amount: 5,
+            }],
+            500,
+        )
+        .expect_err("automatic wager at the exact extension deadline must reject");
+    assert!(matches!(
+        automatic_at_deadline,
+        BettingServiceRepositoryError::BettingClosed
+    ));
+
+    // The closed marker remains authoritative after the host goes offline;
+    // an expired extension cannot be revived by the stale hosted marker.
+    assert!(matches!(
+        repository
+            .place_bet_atomic(PlaceBetRequest {
+                bet_time: NOW + 101,
+                ..request(1, 1003, BettingTeam::Radiant, 5)
+            })
+            .expect_err("expired extension must reject while host is offline"),
         BettingServiceRepositoryError::BettingClosed
     ));
 }

@@ -1,0 +1,8 @@
+# Optional local HTTP listener. Put TLS/authenticated reverse proxying in front
+# of this port when the dashboard or observer is on another machine.
+services:
+  bot:
+    environment:
+      DOTA_LIVE_BIND: 0.0.0.0:8787
+    ports:
+      - "127.0.0.1:${DOTA_LIVE_PORT:-8787}:8787"

@@ -100,7 +100,8 @@ impl Fixture {
                      guild_id INTEGER NOT NULL DEFAULT 0,
                      team1_players TEXT NOT NULL DEFAULT '[]',
                      team2_players TEXT NOT NULL DEFAULT '[]',
-                     winning_team INTEGER
+                     winning_team INTEGER,
+                     pending_match_id INTEGER
                  );
                  CREATE TABLE match_participants (
                      match_id INTEGER NOT NULL,

@@ -41,6 +41,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "dig_boss_echoes",
     "dig_gear",
     "dig_inventory",
+    "dota_sessions",
     "double_or_nothing_spins",
     "draft_financial_effects",
     "draft_finalization_jobs",
@@ -329,6 +330,7 @@ mod tests {
                 CREATE TABLE dig_boss_echoes (id INTEGER PRIMARY KEY);
                 CREATE TABLE dig_gear (id INTEGER PRIMARY KEY);
                 CREATE TABLE dig_inventory (id INTEGER PRIMARY KEY);
+                CREATE TABLE dota_sessions (id INTEGER PRIMARY KEY);
                 CREATE TABLE double_or_nothing_spins (id INTEGER PRIMARY KEY);
                 CREATE TABLE draft_financial_effects (effect_key TEXT PRIMARY KEY);
                 CREATE TABLE draft_finalization_jobs (completion_key TEXT PRIMARY KEY);

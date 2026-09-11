@@ -1,0 +1,22 @@
+[package]
+name = "cama-steam"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Dota 2 Steam/Game Coordinator lobby transport for Cama"
+
+[dependencies]
+bytes = "1.10.1"
+futures-util = "0.3.31"
+serde.workspace = true
+serde_json.workspace = true
+steam-vent = "0.5.0"
+steam-vent-proto-common = "0.5.1"
+steam-vent-proto-dota2 = "0.5.2"
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
+tracing.workspace = true
+
+[lints]
+workspace = true

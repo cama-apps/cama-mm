@@ -243,8 +243,10 @@ fn crate_dependency_dag_has_only_inward_edges() {
                 "cama-db".to_owned(),
                 "cama-domain".to_owned(),
                 "cama-runtime-core".to_owned(),
+                "cama-steam".to_owned(),
             ]),
         ),
+        ("rust/crates/cama-steam/Cargo.toml", BTreeSet::new()),
         (
             "rust/crates/cama-runtime/Cargo.toml",
             BTreeSet::from([

@@ -3587,9 +3587,14 @@ impl BettingInteractionHandler {
                     .await
                     .ok();
                     let lock_until = pending.state.lock_time.or(pending.state.bet_lock_until);
-                    let seconds_remaining = lock_until
-                        .map(|lock| lock.saturating_sub(now).max(0))
-                        .unwrap_or_default();
+                    let seconds_remaining = if pending.state.hosted_betting_managed() {
+                        // There is no fixed last-call countdown for a hosted draft.
+                        0
+                    } else {
+                        lock_until
+                            .map(|lock| lock.saturating_sub(now).max(0))
+                            .unwrap_or_default()
+                    };
                     self.emit_bet_neon(
                         channel_id,
                         user_id,
@@ -3866,14 +3871,23 @@ impl BettingInteractionHandler {
             return followup_ephemeral(responder, "No bets placed yet.").await;
         }
         let path = self.database_path.clone();
-        let totals = sqlite("betting pool totals", move || {
-            BettingServiceRepository::new(path)
+        let (totals, recorded) = sqlite("betting pool totals", move || {
+            let totals = BettingServiceRepository::new(&path)
                 .get_pending_totals(Some(guild_id), 0, Some(pending_match_id))
-                .map_err(|error| error.to_string())
+                .map_err(|error| error.to_string())?;
+            let recorded = MatchRepository::new(path)
+                .match_id_for_pending_match(guild_id, pending_match_id)
+                .map_err(|error| error.to_string())?
+                .is_some();
+            Ok((totals, recorded))
         })
         .await?;
         let lock_until = pending.state.bet_lock_until.or(pending.state.lock_time);
-        let betting_open = lock_until.is_some_and(|lock| lock > unix_seconds().unwrap_or_default());
+        let managed_betting = !recorded && pending.state.hosted_betting_managed();
+        let betting_open = !recorded
+            && pending
+                .state
+                .betting_open(unix_seconds().unwrap_or_default());
         let total = totals.total();
         let mode = if pending.state.betting_mode == "house" {
             BettingMode::House
@@ -3901,7 +3915,21 @@ impl BettingInteractionHandler {
             seed,
         );
         let mut odds_text = overview.current_odds;
-        if let Some(lock) = lock_until {
+        if !betting_open {
+            odds_text.push_str("\nBetting is closed.");
+        } else if managed_betting {
+            if let Some(deadline) = pending
+                .state
+                .betting_extension_until()
+                .filter(|deadline| *deadline > unix_seconds().unwrap_or_default())
+            {
+                odds_text.push_str(&format!(
+                    "\nBetting stays open through the hero draft and at least until <t:{deadline}:R> (admin extension)."
+                ));
+            } else {
+                odds_text.push_str("\nBetting closes when gameplay starts after the hero draft.");
+            }
+        } else if let Some(lock) = lock_until {
             odds_text.push_str(&format!("\nBetting closes <t:{lock}:R>"));
         }
         let mut fields = vec![("Current Odds".to_owned(), odds_text)];

@@ -361,6 +361,26 @@ CREATE TABLE draft_finalization_jobs (
                 UNIQUE(guild_id, session_id)
             );
 
+-- table: dota_sessions
+CREATE TABLE dota_sessions (
+                guild_id INTEGER NOT NULL,
+                pending_match_id INTEGER NOT NULL,
+                account_key TEXT NOT NULL CHECK(length(trim(account_key)) > 0),
+                phase TEXT NOT NULL CHECK(phase IN (
+                    'creating', 'gathering', 'launching', 'running',
+                    'finishing', 'recorded', 'cancelled', 'failed',
+                    'needs_review'
+                )),
+                lobby_id TEXT,
+                valve_match_id TEXT,
+                payload TEXT NOT NULL CHECK(json_valid(payload)),
+                revision INTEGER NOT NULL DEFAULT 0 CHECK(revision >= 0),
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                last_error TEXT,
+                PRIMARY KEY (guild_id, pending_match_id)
+            );
+
 -- table: economy_daily_events
 CREATE TABLE economy_daily_events (
                 event_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1996,6 +2016,23 @@ CREATE INDEX idx_package_deals_guild_active ON package_deals(guild_id, games_rem
 
 -- index: idx_package_deals_partner
 CREATE INDEX idx_package_deals_partner ON package_deals(guild_id, partner_discord_id);
+
+-- index: idx_dota_sessions_active_updated_at
+CREATE INDEX idx_dota_sessions_active_updated_at
+            ON dota_sessions(updated_at, guild_id, pending_match_id)
+            WHERE phase IN ('creating', 'gathering', 'launching', 'running',
+                            'finishing', 'needs_review');
+
+-- index: uq_dota_sessions_active_account
+CREATE UNIQUE INDEX uq_dota_sessions_active_account
+            ON dota_sessions(account_key)
+            WHERE phase IN ('creating', 'gathering', 'launching', 'running',
+                            'finishing', 'needs_review');
+
+-- index: uq_dota_sessions_valve_match
+CREATE UNIQUE INDEX uq_dota_sessions_valve_match
+            ON dota_sessions(valve_match_id)
+            WHERE valve_match_id IS NOT NULL;
 
 -- index: idx_pending_matches_guild
 CREATE INDEX idx_pending_matches_guild ON pending_matches(guild_id);

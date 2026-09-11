@@ -242,3 +242,4 @@ add_dig_auto_buy_grappling_hook
 converge_legacy_push_notification_targets
 add_pet_death_activated_pet_id
 create_match_draft_analysis
+create_dota_sessions_table
