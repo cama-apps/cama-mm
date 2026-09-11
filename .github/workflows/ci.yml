@@ -50,6 +50,9 @@ jobs:
           - name: cama-domain
             package: cama-domain
             arguments: --all-targets --all-features
+          - name: cama-steam
+            package: cama-steam
+            arguments: --all-targets --all-features
           - name: cama-db
             package: cama-db
             arguments: --all-targets --all-features

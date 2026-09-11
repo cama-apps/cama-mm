@@ -211,3 +211,8 @@ docs/stats.md
 docs/
 !docs/server-setup.md
 .beads/
+
+# Dedicated Steam credentials and archived Dota replays
+data/steam/
+data/replays/
+*.dem.bz2

@@ -14,6 +14,12 @@ use crate::process_lock::ProcessLock;
 #[derive(Debug, Eq, PartialEq)]
 pub enum Command {
     Serve,
+    SteamLogin,
+    DotaHost {
+        action: String,
+        guild_id: Option<i64>,
+        pending_match_id: Option<i64>,
+    },
     DatabaseCheck {
         path: PathBuf,
     },
@@ -44,13 +50,47 @@ pub fn parse_command(mut args: impl Iterator<Item = String>) -> Result<Command, 
             reject_remaining(args, "inventory")?;
             Ok(Command::Inventory)
         }
+        Some("steam-login") => {
+            reject_remaining(args, "steam-login")?;
+            Ok(Command::SteamLogin)
+        }
+        Some("dota-host") => {
+            let action = args.next().unwrap_or_else(|| "status".to_owned());
+            if action == "status" {
+                reject_remaining(args, "dota-host status")?;
+                return Ok(Command::DotaHost {
+                    action,
+                    guild_id: None,
+                    pending_match_id: None,
+                });
+            }
+            if !matches!(action.as_str(), "resume" | "cancel") {
+                return Err("dota-host expects status, resume, or cancel".to_owned());
+            }
+            let positive = |value: Option<String>| {
+                value
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .filter(|id| *id > 0)
+                    .ok_or_else(|| {
+                        "dota-host resume/cancel requires GUILD_ID PENDING_MATCH_ID".to_owned()
+                    })
+            };
+            let guild_id = Some(positive(args.next())?);
+            let pending_match_id = Some(positive(args.next())?);
+            reject_remaining(args, "dota-host")?;
+            Ok(Command::DotaHost {
+                action,
+                guild_id,
+                pending_match_id,
+            })
+        }
         Some("catalog-check") => parse_catalog_check(args),
         Some("db-admit") => parse_db_admit(args),
         Some("db-check") => parse_db_check(args),
         Some("health-check") => parse_health_check(args),
         Some("health-smoke") => parse_health_smoke(args),
         Some(command) => Err(format!(
-            "unknown command {command:?}; expected `serve`, `db-admit`, `db-check`, `health-check`, `health-smoke`, `catalog-check`, or `inventory`"
+            "unknown command {command:?}; expected `serve`, `steam-login`, `dota-host`, `db-admit`, `db-check`, `health-check`, `health-smoke`, `catalog-check`, or `inventory`"
         )),
     }
 }

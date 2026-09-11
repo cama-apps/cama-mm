@@ -68,6 +68,7 @@ use cama_db::match_runtime::{
 };
 use cama_db::match_voting::{MatchVotingRepository, PendingVoteKey};
 use cama_db::moderation::{ModerationEventType, ModerationRepository};
+use cama_db::opendota_player::OpenDotaPlayerRepository;
 use cama_db::package_deal_repository::PackageDealRepository;
 use cama_db::pairings_repository::PairingsRepository;
 use cama_db::pet_evolution_repository::PetEvolutionRepository;
@@ -81,6 +82,7 @@ use cama_db::shop_runtime::{
 use cama_db::soft_avoid_repository::SoftAvoidRepository;
 use cama_domain::bankruptcy::BankruptcyPenaltyPolicy;
 use cama_domain::discord_content::chunk_default_discord_content;
+use cama_domain::dota_lobby::{STEAM_INDIVIDUAL_BASE, account_id as dota_account_id};
 use cama_domain::economy_scaling::scale_minigame_jc_delta;
 use cama_domain::formatting::{
     BettingDisplayOptions, JOPACOIN_EMOTE, ROLE_EMOJIS, ROLE_NAMES, format_betting_display,
@@ -211,6 +213,86 @@ pub struct MatchWagerRefreshReport {
     pub attempted: usize,
     pub refreshed: usize,
     pub failures: Vec<String>,
+}
+
+/// One player observed in the hosted Dota lobby/result payload.
+///
+/// The lobby worker supplies account IDs exactly as Valve reports them. The
+/// account is deliberately kept as a 32-bit value at this boundary so a
+/// malformed or truncated external ID cannot silently become a different
+/// signed SQLite ID.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HostedMatchPlayer {
+    pub account32: u32,
+    pub radiant: bool,
+}
+
+/// The frozen Discord-to-Steam mapping captured when a hosted lobby is
+/// created. The recording boundary checks this mapping against the global
+/// Steam-link repository and against the actual Valve result before it awards
+/// ratings, bets, or economy rewards.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HostedMatchRosterEntry {
+    pub discord_id: i64,
+    pub steam_account_id: u32,
+    pub radiant: bool,
+}
+
+/// A completed match reported by the dedicated Dota lobby worker.
+///
+/// `expected_roster` is part of the request on purpose. A caller cannot turn
+/// an arbitrary set of Steam accounts into a Cama result merely by claiming
+/// that it belongs to the pending match: the mapping must be a ten-player,
+/// side-correct roster from the pending payload, each account must still be a
+/// globally linked account for the claimed Discord identity, and Valve's
+/// actual account/side set must equal the frozen mapping.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HostedMatchResult {
+    pub guild_id: i64,
+    pub pending_match_id: i64,
+    pub valve_match_id: u64,
+    pub winning_team: String,
+    pub expected_roster: Vec<HostedMatchRosterEntry>,
+    pub players: Vec<HostedMatchPlayer>,
+}
+
+/// Process-local lease for the finalization boundary of one pending match.
+///
+/// The hosted Dota worker holds this guard while it closes betting, performs
+/// its last roster check, and sends the launch request. Manual `/record` and
+/// `/abort` acquire the same underlying lease, so either path defers instead
+/// of racing the other. Dropping the guard releases the key on every return
+/// path, including an async cancellation or an external I/O error. Clones
+/// share the lease; production blocking tasks keep a clone until their work
+/// exits so cancelling the awaiting future cannot release the key early.
+#[must_use = "a hosted finalization guard must be held through the protected operation"]
+#[derive(Clone)]
+pub struct HostedMatchFinalizationGuard {
+    lease: Arc<HostedFinalizationLease>,
+}
+
+struct HostedFinalizationLease {
+    finalizing_matches: Arc<Mutex<BTreeSet<(i64, i64)>>>,
+    key: (i64, i64),
+}
+
+impl std::fmt::Debug for HostedMatchFinalizationGuard {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HostedMatchFinalizationGuard")
+            .field("guild_id", &self.lease.key.0)
+            .field("pending_match_id", &self.lease.key.1)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for HostedFinalizationLease {
+    fn drop(&mut self) {
+        self.finalizing_matches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.key);
+    }
 }
 
 #[derive(Clone)]
@@ -379,6 +461,85 @@ impl MatchRegistrationProvider {
         self.handler
             .refresh_wager_message(guild_id, pending_match_id)
             .await
+    }
+
+    /// Record a completed match reported by the dedicated Dota lobby worker.
+    ///
+    /// This enters the same production recording saga as `/record`: Glicko,
+    /// OpenSkill, betting settlement, JC rewards, loans, pets, post-match
+    /// hooks, and enrichment discovery all use the existing durable paths.
+    /// No synthetic interaction or admin vote is created for the worker.
+    pub async fn record_hosted_match(&self, result: HostedMatchResult) -> Result<i64, String> {
+        self.handler.record_hosted_match(result).await
+    }
+
+    /// Try to reserve the same finalization key used by manual `/record` and
+    /// `/abort`. The Dota host should acquire it before its final
+    /// admission, and launch checks and hold it until the remote launch call
+    /// returns. A `None` result means another finalization is already in
+    /// flight and the host should defer its tick.
+    #[must_use]
+    pub fn try_acquire_hosted_finalization_guard(
+        &self,
+        guild_id: i64,
+        pending_match_id: i64,
+    ) -> Option<HostedMatchFinalizationGuard> {
+        self.handler
+            .try_acquire_finalization_guard(guild_id, pending_match_id)
+    }
+
+    /// Stop reminder tasks after a worker atomically closes betting in the
+    /// betting repository. The close operation itself remains owned by the
+    /// betting provider; this only removes the in-process reminder handles.
+    pub fn cancel_betting_reminders(&self, guild_id: i64, pending_match_id: i64) {
+        self.handler
+            .cancel_betting_tasks(guild_id, Some(pending_match_id));
+    }
+
+    /// Finish the runtime side of a worker-owned atomic betting close.
+    ///
+    /// The worker/session repository records the close marker first. Once
+    /// that succeeds, this method stops reminders and best-effort refreshes
+    /// the persisted shuffle wager message so players see the locked state.
+    pub async fn hosted_betting_closed(
+        &self,
+        guild_id: i64,
+        pending_match_id: i64,
+    ) -> Result<(), String> {
+        self.hosted_betting_window_changed(guild_id, pending_match_id)
+            .await
+    }
+
+    /// Refresh the wager display and reminders after hosted betting begins,
+    /// closes at gameplay start, or returns to manual timing on cancellation.
+    pub async fn hosted_betting_window_changed(
+        &self,
+        guild_id: i64,
+        pending_match_id: i64,
+    ) -> Result<(), String> {
+        self.cancel_betting_reminders(guild_id, pending_match_id);
+        let repository = self.handler.pending.clone();
+        if let Some(pending) = tokio::task::spawn_blocking(move || {
+            repository.pending_match(guild_id, pending_match_id)
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?
+        {
+            self.handler.schedule_betting_reminders(&pending, false);
+        }
+        let report = self
+            .refresh_wager_message(guild_id, pending_match_id)
+            .await?;
+        if !report.failures.is_empty() {
+            warn!(
+                guild_id,
+                pending_match_id,
+                failures = report.failures.len(),
+                "hosted betting wager refresh was partially unsuccessful"
+            );
+        }
+        Ok(())
     }
 
     pub fn attach_reminder_hooks(&self, hooks: ReminderHooks) -> Result<(), String> {
@@ -1469,11 +1630,472 @@ enum AbortFinalization {
     AlreadyRecorded,
 }
 
+fn hosted_winning_team_number(winning_team: &str) -> Result<i64, String> {
+    match winning_team {
+        "radiant" => Ok(1),
+        "dire" => Ok(2),
+        _ => Err("winning_team must be 'radiant' or 'dire'.".to_owned()),
+    }
+}
+
+fn validate_hosted_pending_match(
+    database_path: &Path,
+    pending: &PendingMatchRecord,
+    result: &HostedMatchResult,
+) -> Result<(), String> {
+    if result.guild_id != pending.guild_id {
+        return Err(format!(
+            "hosted result guild {} does not match pending guild {}",
+            result.guild_id, pending.guild_id
+        ));
+    }
+    validate_hosted_result_roster(
+        database_path,
+        result.guild_id,
+        &pending.state.radiant_team_ids,
+        &pending.state.dire_team_ids,
+        result,
+    )
+}
+
+fn validate_hosted_existing_match(
+    database_path: &Path,
+    summary: &cama_db::core_repositories::MatchSummary,
+    result: &HostedMatchResult,
+    valve_match_id: i64,
+) -> Result<(), String> {
+    let expected_winner = hosted_winning_team_number(&result.winning_team)?;
+    let actual_winner = sql_i64(&summary.winning_team).ok_or_else(|| {
+        format!(
+            "recorded match {} has an invalid winning team",
+            summary.match_id
+        )
+    })?;
+    if actual_winner != expected_winner {
+        return Err(format!(
+            "hosted result winner conflicts with recorded match {}",
+            summary.match_id
+        ));
+    }
+    if let Some(existing_valve_match_id) = summary.valve_match_id
+        && existing_valve_match_id != valve_match_id
+    {
+        return Err(format!(
+            "Valve match ID {valve_match_id} conflicts with recorded match {} Valve ID {existing_valve_match_id}",
+            summary.match_id
+        ));
+    }
+    validate_hosted_result_roster(
+        database_path,
+        result.guild_id,
+        &summary.team1_players,
+        &summary.team2_players,
+        result,
+    )
+}
+
+fn validate_hosted_result_roster(
+    database_path: &Path,
+    guild_id: i64,
+    radiant_team_ids: &[i64],
+    dire_team_ids: &[i64],
+    result: &HostedMatchResult,
+) -> Result<(), String> {
+    let participant_ids = radiant_team_ids
+        .iter()
+        .chain(dire_team_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let participant_set = participant_ids.iter().copied().collect::<BTreeSet<_>>();
+    if participant_ids.len() != 10 || participant_set.len() != 10 {
+        return Err("A hosted match requires ten distinct pending participants.".to_owned());
+    }
+    if participant_ids.iter().any(|discord_id| *discord_id <= 0) {
+        return Err("A hosted match requires positive Discord participant IDs.".to_owned());
+    }
+    if radiant_team_ids.len() != 5 || dire_team_ids.len() != 5 {
+        return Err("A hosted match requires five Radiant and five Dire participants.".to_owned());
+    }
+
+    if result.expected_roster.len() != 10 {
+        return Err(format!(
+            "hosted expected roster must contain ten players, got {}",
+            result.expected_roster.len()
+        ));
+    }
+    if result.players.len() != 10 {
+        return Err(format!(
+            "hosted Valve roster must contain ten players, got {}",
+            result.players.len()
+        ));
+    }
+
+    let radiant_set = radiant_team_ids.iter().copied().collect::<BTreeSet<_>>();
+    let mut expected_discord_ids = BTreeSet::new();
+    let mut expected_accounts = BTreeSet::new();
+    let mut expected_account_sides = BTreeSet::new();
+    for entry in &result.expected_roster {
+        if !participant_set.contains(&entry.discord_id) {
+            return Err(format!(
+                "hosted roster contains Discord player {} outside the pending match",
+                entry.discord_id
+            ));
+        }
+        if !expected_discord_ids.insert(entry.discord_id) {
+            return Err(format!(
+                "hosted roster repeats Discord player {}",
+                entry.discord_id
+            ));
+        }
+        if entry.steam_account_id == 0 {
+            return Err(format!(
+                "hosted roster has an invalid Steam account for Discord player {}",
+                entry.discord_id
+            ));
+        }
+        let pending_radiant = radiant_set.contains(&entry.discord_id);
+        if entry.radiant != pending_radiant {
+            return Err(format!(
+                "hosted roster side for Discord player {} conflicts with the pending match",
+                entry.discord_id
+            ));
+        }
+        if !expected_accounts.insert(entry.steam_account_id) {
+            return Err(format!(
+                "hosted roster reuses Steam account {}",
+                entry.steam_account_id
+            ));
+        }
+        expected_account_sides.insert((entry.steam_account_id, entry.radiant));
+    }
+    if expected_discord_ids != participant_set {
+        return Err(
+            "hosted expected roster does not exactly match pending participants".to_owned(),
+        );
+    }
+
+    let steam = OpenDotaPlayerRepository::new(database_path);
+    let linked = steam
+        .get_steam_ids_bulk(&participant_ids, Some(guild_id))
+        .map_err(|error| format!("could not verify hosted Steam mappings: {error}"))?;
+    for entry in &result.expected_roster {
+        let linked_accounts = linked.get(&entry.discord_id).cloned().unwrap_or_default();
+        let matching_raw_accounts = linked_accounts
+            .iter()
+            .copied()
+            .filter(|account| dota_account_id(*account) == Some(entry.steam_account_id))
+            .collect::<Vec<_>>();
+        if matching_raw_accounts.is_empty() {
+            return Err(format!(
+                "Steam account {} is not linked to Discord player {}",
+                entry.steam_account_id, entry.discord_id
+            ));
+        }
+        // The legacy table and the migrated junction can contain either a
+        // Dota account32 or its Steam64 identity.  Raw integer uniqueness does
+        // not prevent another Discord identity from holding the equivalent
+        // representation, so check both forms before trusting the mapping.
+        let steam64 =
+            i64::try_from(STEAM_INDIVIDUAL_BASE.saturating_add(u64::from(entry.steam_account_id)))
+                .map_err(|_| {
+                    format!(
+                        "Steam account {} cannot be represented as Steam64",
+                        entry.steam_account_id
+                    )
+                })?;
+        for account in [i64::from(entry.steam_account_id), steam64] {
+            let owner = steam
+                .get_steam_id_owner(account)
+                .map_err(|error| format!("could not verify hosted Steam ownership: {error}"))?;
+            if let Some(owner) = owner
+                && owner != entry.discord_id
+            {
+                return Err(format!(
+                    "Steam account {} is owned by a different Discord player",
+                    entry.steam_account_id
+                ));
+            }
+        }
+        for account in matching_raw_accounts {
+            let owner = steam
+                .get_steam_id_owner(account)
+                .map_err(|error| format!("could not verify hosted Steam ownership: {error}"))?;
+            if owner != Some(entry.discord_id) {
+                return Err(format!(
+                    "Steam account {} is owned by a different Discord player",
+                    entry.steam_account_id
+                ));
+            }
+        }
+    }
+
+    let mut actual_accounts = BTreeSet::new();
+    let mut actual_account_sides = BTreeSet::new();
+    for player in &result.players {
+        if player.account32 == 0 {
+            return Err("hosted Valve roster contains an invalid Steam account".to_owned());
+        }
+        if !actual_accounts.insert(player.account32) {
+            return Err(format!(
+                "hosted Valve roster repeats Steam account {}",
+                player.account32
+            ));
+        }
+        actual_account_sides.insert((player.account32, player.radiant));
+    }
+    if actual_account_sides != expected_account_sides {
+        return Err(
+            "hosted Valve roster accounts or sides do not match the frozen roster".to_owned(),
+        );
+    }
+    Ok(())
+}
+
 impl MatchHandler {
+    fn try_acquire_finalization_guard(
+        &self,
+        guild_id: i64,
+        pending_match_id: i64,
+    ) -> Option<HostedMatchFinalizationGuard> {
+        let key = (guild_id, pending_match_id);
+        let acquired = self
+            .finalizing_matches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key);
+        acquired.then(|| HostedMatchFinalizationGuard {
+            lease: Arc::new(HostedFinalizationLease {
+                finalizing_matches: Arc::clone(&self.finalizing_matches),
+                key,
+            }),
+        })
+    }
+
+    async fn record_hosted_match(&self, result: HostedMatchResult) -> Result<i64, String> {
+        let valve_match_id = i64::try_from(result.valve_match_id)
+            .map_err(|_| "Valve match ID exceeds SQLite INTEGER range".to_owned())?;
+        if valve_match_id <= 0 {
+            return Err("Valve match ID must be positive".to_owned());
+        }
+        if !matches!(result.winning_team.as_str(), "radiant" | "dire") {
+            return Err("winning_team must be 'radiant' or 'dire'.".to_owned());
+        }
+
+        // Reserve finalization before reading the pending row. Otherwise an
+        // abort could remove it after validation and we would record a stale
+        // snapshot whose wagers had already been refunded.
+        let Some(guard) =
+            self.try_acquire_finalization_guard(result.guild_id, result.pending_match_id)
+        else {
+            return Err(format!(
+                "match recording already in progress (Match #{})",
+                result.pending_match_id
+            ));
+        };
+
+        let matches = MatchRepository::new(&self.database_path);
+        let existing_match_id = tokio::task::spawn_blocking({
+            let matches = matches.clone();
+            let result = result.clone();
+            move || {
+                matches
+                    .match_id_for_pending_match(result.guild_id, result.pending_match_id)
+                    .map_err(|error| error.to_string())
+            }
+        })
+        .await
+        .map_err(|error| format!("hosted match id lookup task failed: {error}"))??;
+
+        let pending_repository = self.pending.clone();
+        let pending = tokio::task::spawn_blocking({
+            let result = result.clone();
+            move || {
+                pending_repository
+                    .pending_match(result.guild_id, result.pending_match_id)
+                    .map_err(|error| error.to_string())
+            }
+        })
+        .await
+        .map_err(|error| format!("hosted pending-match lookup task failed: {error}"))??;
+
+        let Some(pending) = pending else {
+            let Some(match_id) = existing_match_id else {
+                return Err(format!(
+                    "pending match {} was not found in guild {}",
+                    result.pending_match_id, result.guild_id
+                ));
+            };
+            let path = self.database_path.clone();
+            let worker = self.clone();
+            let result_for_task = result.clone();
+            let task_guard = guard.clone();
+            tokio::task::spawn_blocking(move || {
+                let _guard = task_guard;
+                let matches = MatchRepository::new(&path);
+                let summary = matches
+                    .get_match(match_id, Some(result_for_task.guild_id))
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| format!("recorded match {match_id} disappeared"))?;
+                validate_hosted_existing_match(&path, &summary, &result_for_task, valve_match_id)?;
+                worker.ensure_valve_match_id(match_id, result_for_task.guild_id, valve_match_id)
+            })
+            .await
+            .map_err(|error| {
+                format!("hosted recorded-match verification task failed: {error}")
+            })??;
+            // A missing pending row means the durable record and all of its
+            // retryable post-core phases already crossed their cleanup point.
+            // The idempotent retry only needs to verify the immutable result.
+            return Ok(match_id);
+        };
+
+        let validation = {
+            let path = self.database_path.clone();
+            let result = result.clone();
+            let pending = pending.clone();
+            tokio::task::spawn_blocking(move || {
+                validate_hosted_pending_match(&path, &pending, &result)
+            })
+            .await
+            .map_err(|error| format!("hosted roster validation task failed: {error}"))?
+        };
+        validation?;
+
+        if existing_match_id.is_none() {
+            let matches = matches.clone();
+            let guild_id = result.guild_id;
+            let owner = tokio::task::spawn_blocking(move || {
+                matches
+                    .match_id_for_valve_match(valve_match_id, Some(guild_id))
+                    .map_err(|error| error.to_string())
+            })
+            .await
+            .map_err(|error| format!("hosted Valve match lookup task failed: {error}"))??;
+            if let Some(owner) = owner {
+                return Err(format!(
+                    "Valve match ID {valve_match_id} is already attached to match {owner}"
+                ));
+            }
+        }
+
+        if let Some(match_id) = existing_match_id {
+            let path = self.database_path.clone();
+            let result_for_task = result.clone();
+            let pending_for_task = pending.clone();
+            tokio::task::spawn_blocking(move || {
+                let matches = MatchRepository::new(&path);
+                let summary = matches
+                    .get_match(match_id, Some(result_for_task.guild_id))
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| format!("recorded match {match_id} disappeared"))?;
+                validate_hosted_existing_match(&path, &summary, &result_for_task, valve_match_id)?;
+                if summary.team1_players != pending_for_task.state.radiant_team_ids
+                    || summary.team2_players != pending_for_task.state.dire_team_ids
+                {
+                    return Err(format!(
+                        "recorded match {match_id} roster conflicts with pending match {}",
+                        result_for_task.pending_match_id
+                    ));
+                }
+                Ok::<_, String>(())
+            })
+            .await
+            .map_err(|error| {
+                format!("hosted recorded-match verification task failed: {error}")
+            })??;
+        }
+
+        let worker = self.clone();
+        let pending_for_task = pending.clone();
+        let winning_for_task = result.winning_team.clone();
+        let task_guard = guard.clone();
+        let recorded = tokio::task::spawn_blocking(move || {
+            let _guard = task_guard;
+            worker.record_match_blocking_with_valve(
+                &pending_for_task,
+                &winning_for_task,
+                None,
+                Some(valve_match_id),
+            )
+        })
+        .await;
+
+        // Keep the finalization key through pending cleanup so an abort cannot
+        // observe the committed core row and independently refund its bets.
+        let cleanup = if matches!(recorded, Ok(Ok(_))) {
+            let repository = self.pending.clone();
+            let guild_id = pending.guild_id;
+            let pending_match_id = pending.pending_match_id;
+            let cleanup_guard = guard.clone();
+            Some(
+                tokio::task::spawn_blocking(move || {
+                    let _guard = cleanup_guard;
+                    repository.delete_pending_match(guild_id, pending_match_id)
+                })
+                .await,
+            )
+        } else {
+            None
+        };
+        drop(guard);
+
+        let recorded = match recorded {
+            Ok(Ok(recorded)) => recorded,
+            Ok(Err(error)) => {
+                self.cancel_betting_tasks(pending.guild_id, Some(pending.pending_match_id));
+                warn!(
+                    %error,
+                    pending_match_id = pending.pending_match_id,
+                    "hosted match record failed"
+                );
+                return Err(error);
+            }
+            Err(error) => {
+                self.cancel_betting_tasks(pending.guild_id, Some(pending.pending_match_id));
+                warn!(
+                    %error,
+                    pending_match_id = pending.pending_match_id,
+                    "hosted match record task failed"
+                );
+                return Err(format!("hosted match record task failed: {error}"));
+            }
+        };
+        self.cancel_betting_tasks(pending.guild_id, Some(pending.pending_match_id));
+        if let Some(cleanup) = cleanup {
+            cleanup
+                .map_err(|error| format!("hosted record cleanup task failed: {error}"))?
+                .map_err(|error| error.to_string())?;
+        }
+
+        self.finish_recorded_match(&pending, &result.winning_team, &recorded)
+            .await;
+        debug!(
+            match_id = recorded.match_id,
+            pending_match_id = pending.pending_match_id,
+            valve_match_id,
+            "hosted match committed and finalized"
+        );
+        Ok(recorded.match_id)
+    }
+
     async fn recover_pending_match(&self, pending: PendingMatchRecord) -> Result<(), String> {
-        let recorded = MatchRepository::new(&self.database_path)
-            .match_id_for_pending_match(pending.guild_id, pending.pending_match_id)
-            .map_err(|error| error.to_string())?;
+        let Some(guard) =
+            self.try_acquire_finalization_guard(pending.guild_id, pending.pending_match_id)
+        else {
+            return Err(format!(
+                "match finalization already in progress (Match #{})",
+                pending.pending_match_id
+            ));
+        };
+        let matches = MatchRepository::new(&self.database_path);
+        let guild_id = pending.guild_id;
+        let pending_match_id = pending.pending_match_id;
+        let recorded = tokio::task::spawn_blocking(move || {
+            matches.match_id_for_pending_match(guild_id, pending_match_id)
+        })
+        .await
+        .map_err(|error| format!("record recovery identity task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
         if let Some(match_id) = recorded {
             // A committed core row means `/record` crossed the durable point.
             // Re-enter the idempotent core/money path to finish any stranded
@@ -1483,18 +2105,23 @@ impl MatchHandler {
             let winner = MatchRepository::new(&self.database_path)
                 .get_match(match_id, Some(pending.guild_id))
                 .map_err(|error| error.to_string())?
-                .and_then(|summary| sql_i64(&summary.winning_team))
-                .map_or(
-                    "dire",
-                    |winning_team| {
-                        if winning_team == 1 { "radiant" } else { "dire" }
-                    },
-                );
+                .ok_or_else(|| format!("recorded match {match_id} disappeared"))?;
+            let valve_match_id = winner.valve_match_id;
+            let winner = sql_i64(&winner.winning_team).map_or("dire", |winning_team| {
+                if winning_team == 1 { "radiant" } else { "dire" }
+            });
             let worker = self.clone();
             let pending_for_task = pending.clone();
             let winner = winner.to_owned();
+            let task_guard = guard.clone();
             let recorded = tokio::task::spawn_blocking(move || {
-                worker.record_match_blocking(&pending_for_task, &winner, None)
+                let _guard = task_guard;
+                worker.record_match_blocking_with_valve(
+                    &pending_for_task,
+                    &winner,
+                    None,
+                    valve_match_id,
+                )
             })
             .await
             .map_err(|error| format!("record recovery task failed: {error}"))??;
@@ -1506,7 +2133,9 @@ impl MatchHandler {
             .await;
             self.cancel_betting_tasks(pending.guild_id, Some(pending.pending_match_id));
             let repository = self.pending.clone();
+            let cleanup_guard = guard.clone();
             tokio::task::spawn_blocking(move || {
+                let _guard = cleanup_guard;
                 repository.delete_pending_match(pending.guild_id, pending.pending_match_id)
             })
             .await
@@ -1982,22 +2611,17 @@ impl MatchHandler {
         pending: &PendingMatchRecord,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
-        let key = (pending.guild_id, pending.pending_match_id);
-        let acquired = {
-            let mut finalizing = self
-                .finalizing_matches
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            finalizing.insert(key)
+        let Some(guard) =
+            self.try_acquire_finalization_guard(pending.guild_id, pending.pending_match_id)
+        else {
+            return followup_ephemeral(
+                &responder,
+                "⏳ This match is being launched or finalized. Please retry in a moment.",
+            )
+            .await;
         };
-        if !acquired {
-            return followup_ephemeral(&responder, "⏳ This match is already being aborted.").await;
-        }
-        let result = self.finalize_abort_owned(pending).await;
-        self.finalizing_matches
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&key);
+        let result = self.finalize_abort_owned(pending, guard.clone()).await;
+        drop(guard);
         match result {
             Ok(AbortFinalization::Aborted) => {}
             Ok(AbortFinalization::AlreadyRecorded) => {
@@ -2049,6 +2673,7 @@ impl MatchHandler {
     async fn finalize_abort_owned(
         &self,
         pending: &PendingMatchRecord,
+        guard: HostedMatchFinalizationGuard,
     ) -> Result<AbortFinalization, String> {
         let guild_id = pending.guild_id;
         let pending_match_id = pending.pending_match_id;
@@ -2058,7 +2683,9 @@ impl MatchHandler {
         // own transaction; checking first keeps the refund calls and thread
         // announcements from running when an abort races restart recovery.
         let matches = MatchRepository::new(&self.database_path);
+        let record_guard = guard.clone();
         let recorded = tokio::task::spawn_blocking(move || {
+            let _guard = record_guard;
             matches.match_id_for_pending_match(guild_id, pending_match_id)
         })
         .await
@@ -2070,7 +2697,9 @@ impl MatchHandler {
         let bets = self.bets.clone();
         let seeds = self.seeds.clone();
         let shuffle_timestamp = pending.state.shuffle_timestamp.unwrap_or_default();
+        let refund_guard = guard.clone();
         tokio::task::spawn_blocking(move || {
+            let _guard = refund_guard;
             bets.refund_pending_bets_atomic(
                 Some(guild_id),
                 shuffle_timestamp,
@@ -2130,7 +2759,9 @@ impl MatchHandler {
                 .into_iter()
                 .collect::<Vec<_>>()
         };
+        let cleanup_guard = guard.clone();
         let outcome = tokio::task::spawn_blocking(move || {
+            let _guard = cleanup_guard;
             repository.finalize_abort(guild_id, pending_match_id, &participant_ids)
         })
         .await
@@ -2156,15 +2787,9 @@ impl MatchHandler {
         dire_votes: usize,
         dotabuff_match_id: Option<String>,
     ) -> Result<(), InteractionHandlerError> {
-        let key = (pending.guild_id, pending.pending_match_id);
-        let acquired = {
-            let mut finalizing = self
-                .finalizing_matches
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            finalizing.insert(key)
-        };
-        if !acquired {
+        let Some(guard) =
+            self.try_acquire_finalization_guard(pending.guild_id, pending.pending_match_id)
+        else {
             return followup_ephemeral(
                 &responder,
                 &format!(
@@ -2173,11 +2798,13 @@ impl MatchHandler {
                 ),
             )
             .await;
-        }
+        };
         let worker = self.clone();
         let pending_for_task = pending.clone();
         let winning_for_task = winning_result.to_owned();
+        let task_guard = guard.clone();
         let recorded = tokio::task::spawn_blocking(move || {
+            let _guard = task_guard;
             worker.record_match_blocking(
                 &pending_for_task,
                 &winning_for_task,
@@ -2196,8 +2823,10 @@ impl MatchHandler {
             let repository = self.pending.clone();
             let guild_id = pending.guild_id;
             let pending_match_id = pending.pending_match_id;
+            let cleanup_guard = guard.clone();
             Some(
                 tokio::task::spawn_blocking(move || {
+                    let _guard = cleanup_guard;
                     repository.delete_pending_match(guild_id, pending_match_id)
                 })
                 .await,
@@ -2205,10 +2834,7 @@ impl MatchHandler {
         } else {
             None
         };
-        self.finalizing_matches
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&key);
+        drop(guard);
         let recorded = match recorded {
             Ok(Ok(recorded)) => recorded,
             Ok(Err(error)) => {
@@ -2233,85 +2859,9 @@ impl MatchHandler {
                 .map_err(|error| error.to_string())?;
         }
 
-        self.record_pet_match_activity(&pending, recorded.match_id)
+        let streaming = self
+            .finish_recorded_match(&pending, winning_result, &recorded)
             .await;
-        self.emit_post_match_hooks(
-            recorded.bet_settlement.clone(),
-            Some(recorded.easter_eggs.clone()),
-            recorded.debrief.clone(),
-        )
-        .await;
-
-        if let Some(thread_id) = pending
-            .state
-            .thread_shuffle_thread_id
-            .and_then(|thread_id| u64::try_from(thread_id).ok())
-        {
-            let discord = Arc::clone(&self.discord);
-            let lobby = parse_persisted_lobby_kind(pending.state.lobby_kind.as_deref());
-            let winner = if winning_result == "radiant" {
-                "Radiant"
-            } else {
-                "Dire"
-            };
-            tokio::spawn(Self::finalize_record_thread(
-                discord,
-                thread_id,
-                lobby.label().to_owned(),
-                winner.to_owned(),
-                Duration::from_secs(15),
-            ));
-        }
-
-        let streaming = if self.config.streaming_bonus > 0 {
-            let participant_ids = pending
-                .state
-                .participant_ids()
-                .into_iter()
-                .filter(|player_id| *player_id > 0)
-                .filter_map(|player_id| u64::try_from(player_id).ok())
-                .collect::<Vec<_>>();
-            self.discord
-                .streaming_member_ids(
-                    u64::try_from(pending.guild_id).unwrap_or_default(),
-                    &participant_ids,
-                )
-                .await
-                .unwrap_or_default()
-        } else {
-            BTreeSet::new()
-        };
-        if !streaming.is_empty() {
-            let guild_id = pending.guild_id;
-            let amount = self.config.streaming_bonus;
-            let match_id = recorded.match_id;
-            let player_ids = streaming
-                .iter()
-                .filter_map(|discord_id| i64::try_from(*discord_id).ok())
-                .collect::<Vec<_>>();
-            let rewards = Arc::clone(&self.rewards);
-            match tokio::task::spawn_blocking(move || {
-                rewards.award_generated_batch(GeneratedRewardBatch {
-                    guild_id,
-                    player_ids: &player_ids,
-                    gross: amount,
-                    apply_bankruptcy_penalty: true,
-                    apply_vanity_tax: true,
-                    low_priority_taxable_ids: None,
-                    source: "match_streaming_bonus",
-                    related_type: "match",
-                    related_id: match_id,
-                    reason: "match streaming bonus",
-                    event_nonce_tag: 6,
-                })
-            })
-            .await
-            {
-                Ok(Ok(_)) => {}
-                Ok(Err(error)) => warn!(%error, "record streaming bonus failed"),
-                Err(error) => warn!(%error, "record streaming bonus task failed"),
-            }
-        }
 
         let admin_override = self.is_admin(&context) && non_admin_count < 3;
         let winner = if winning_result == "radiant" {
@@ -2346,8 +2896,6 @@ impl MatchHandler {
                 .map_err(|error| error.to_string())?;
         }
 
-        self.spawn_moderation_completion_notifications(pending.guild_id, recorded.match_id);
-        self.spawn_recorded_match_discovery(pending.guild_id, recorded.match_id, &pending);
         debug!(
             match_id = recorded.match_id,
             "match committed and announced"
@@ -2796,17 +3344,200 @@ impl MatchHandler {
             .map_err(|error| error.to_string())
     }
 
+    /// Complete the post-core side effects shared by manual and hosted
+    /// recording. Every operation here is best effort after the durable match
+    /// and economy phases have committed; retryable money work remains inside
+    /// `record_match_blocking_with_valve`.
+    async fn finish_recorded_match(
+        &self,
+        pending: &PendingMatchRecord,
+        winning_result: &str,
+        recorded: &RecordedMatch,
+    ) -> BTreeSet<u64> {
+        self.record_pet_match_activity(pending, recorded.match_id)
+            .await;
+        self.emit_post_match_hooks(
+            recorded.bet_settlement.clone(),
+            Some(recorded.easter_eggs.clone()),
+            recorded.debrief.clone(),
+        )
+        .await;
+
+        if let Some(thread_id) = pending
+            .state
+            .thread_shuffle_thread_id
+            .and_then(|thread_id| u64::try_from(thread_id).ok())
+        {
+            let discord = Arc::clone(&self.discord);
+            let lobby = parse_persisted_lobby_kind(pending.state.lobby_kind.as_deref());
+            let winner = if winning_result == "radiant" {
+                "Radiant"
+            } else {
+                "Dire"
+            };
+            tokio::spawn(Self::finalize_record_thread(
+                discord,
+                thread_id,
+                lobby.label().to_owned(),
+                winner.to_owned(),
+                Duration::from_secs(15),
+            ));
+        }
+
+        let streaming = self.apply_streaming_bonus(pending, recorded.match_id).await;
+        self.spawn_moderation_completion_notifications(pending.guild_id, recorded.match_id);
+        self.spawn_recorded_match_discovery(pending.guild_id, recorded.match_id, pending);
+        streaming
+    }
+
+    async fn apply_streaming_bonus(
+        &self,
+        pending: &PendingMatchRecord,
+        match_id: i64,
+    ) -> BTreeSet<u64> {
+        let streaming = if self.config.streaming_bonus > 0 {
+            let participant_ids = pending
+                .state
+                .participant_ids()
+                .into_iter()
+                .filter(|player_id| *player_id > 0)
+                .filter_map(|player_id| u64::try_from(player_id).ok())
+                .collect::<Vec<_>>();
+            self.discord
+                .streaming_member_ids(
+                    u64::try_from(pending.guild_id).unwrap_or_default(),
+                    &participant_ids,
+                )
+                .await
+                .unwrap_or_default()
+        } else {
+            BTreeSet::new()
+        };
+        if !streaming.is_empty() {
+            let guild_id = pending.guild_id;
+            let amount = self.config.streaming_bonus;
+            let player_ids = streaming
+                .iter()
+                .filter_map(|discord_id| i64::try_from(*discord_id).ok())
+                .collect::<Vec<_>>();
+            let rewards = Arc::clone(&self.rewards);
+            match tokio::task::spawn_blocking(move || {
+                rewards.award_generated_batch(GeneratedRewardBatch {
+                    guild_id,
+                    player_ids: &player_ids,
+                    gross: amount,
+                    apply_bankruptcy_penalty: true,
+                    apply_vanity_tax: true,
+                    low_priority_taxable_ids: None,
+                    source: "match_streaming_bonus",
+                    related_type: "match",
+                    related_id: match_id,
+                    reason: "match streaming bonus",
+                    event_nonce_tag: 6,
+                })
+            })
+            .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => warn!(%error, "record streaming bonus failed"),
+                Err(error) => warn!(%error, "record streaming bonus task failed"),
+            }
+        }
+        streaming
+    }
+
+    fn ensure_valve_match_id(
+        &self,
+        match_id: i64,
+        guild_id: i64,
+        valve_match_id: i64,
+    ) -> Result<(), String> {
+        if valve_match_id <= 0 {
+            return Err("Valve match ID must be positive".to_owned());
+        }
+        let matches = MatchRepository::new(&self.database_path);
+        if let Some(owner) = matches
+            .match_id_for_valve_match(valve_match_id, Some(guild_id))
+            .map_err(|error| error.to_string())?
+            && owner != match_id
+        {
+            return Err(format!(
+                "Valve match ID {valve_match_id} is already attached to match {owner}"
+            ));
+        }
+        let summary = matches
+            .get_match(match_id, Some(guild_id))
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("recorded match {match_id} disappeared"))?;
+        match summary.valve_match_id {
+            Some(existing) if existing != valve_match_id => Err(format!(
+                "Valve match ID {valve_match_id} conflicts with recorded match {match_id} Valve ID {existing}"
+            )),
+            Some(_) => Ok(()),
+            None => {
+                if !matches
+                    .set_valve_match_id(match_id, valve_match_id)
+                    .map_err(|error| error.to_string())?
+                {
+                    return Err(format!("recorded match {match_id} disappeared"));
+                }
+                let updated = matches
+                    .get_match(match_id, Some(guild_id))
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| format!("recorded match {match_id} disappeared"))?;
+                if updated.valve_match_id == Some(valve_match_id) {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "Valve match ID {valve_match_id} was not persisted for match {match_id}"
+                    ))
+                }
+            }
+        }
+    }
+
     fn record_match_blocking(
         &self,
         pending: &PendingMatchRecord,
         winning_result: &str,
         dotabuff_match_id: Option<&str>,
     ) -> Result<RecordedMatch, String> {
+        self.record_match_blocking_with_valve(pending, winning_result, dotabuff_match_id, None)
+    }
+
+    fn record_match_blocking_with_valve(
+        &self,
+        pending: &PendingMatchRecord,
+        winning_result: &str,
+        dotabuff_match_id: Option<&str>,
+        valve_match_id: Option<i64>,
+    ) -> Result<RecordedMatch, String> {
         let winning_team = match winning_result {
             "radiant" => 1,
             "dire" => 2,
             _ => return Err("winning_team must be 'radiant' or 'dire'.".to_owned()),
         };
+        if let Some(valve_match_id) = valve_match_id {
+            let matches = MatchRepository::new(&self.database_path);
+            if let Some(existing_match_id) = matches
+                .match_id_for_pending_match(pending.guild_id, pending.pending_match_id)
+                .map_err(|error| error.to_string())?
+            {
+                let existing = matches
+                    .get_match(existing_match_id, Some(pending.guild_id))
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| format!("recorded match {existing_match_id} disappeared"))?;
+                if sql_i64(&existing.winning_team) != Some(i64::from(winning_team))
+                    || existing.team1_players != pending.state.radiant_team_ids
+                    || existing.team2_players != pending.state.dire_team_ids
+                {
+                    return Err(format!(
+                        "hosted result conflicts with recorded match {existing_match_id}"
+                    ));
+                }
+                self.ensure_valve_match_id(existing_match_id, pending.guild_id, valve_match_id)?;
+            }
+        }
         let persisted_streak_records = persisted_easter_streaks(&pending.state)?;
         let participant_ids = pending
             .state
@@ -3228,6 +3959,9 @@ impl MatchHandler {
         let match_id = matches
             .record_match_core_atomic(&core)
             .map_err(|error| error.to_string())?;
+        if let Some(valve_match_id) = valve_match_id {
+            self.ensure_valve_match_id(match_id, pending.guild_id, valve_match_id)?;
+        }
 
         let winning_bet_team = if winning_team == 1 {
             BettingTeam::Radiant
@@ -4933,30 +5667,52 @@ impl MatchHandler {
             );
         }
         let bets = self.bets.clone();
+        let matches = MatchRepository::new(&self.database_path);
         let shuffle_timestamp = pending.state.shuffle_timestamp.unwrap_or_default();
         let pending_match_id = pending.pending_match_id;
-        let totals = tokio::task::spawn_blocking(move || {
-            bets.get_pending_totals(Some(guild_id), shuffle_timestamp, Some(pending_match_id))
+        let (totals, recorded) = tokio::task::spawn_blocking(move || {
+            let totals = bets
+                .get_pending_totals(Some(guild_id), shuffle_timestamp, Some(pending_match_id))
+                .map_err(|error| error.to_string())?;
+            let recorded = matches
+                .match_id_for_pending_match(guild_id, pending_match_id)
+                .map_err(|error| error.to_string())?
+                .is_some();
+            Ok::<_, String>((totals, recorded))
         })
         .await
-        .map_err(|error| format!("bet totals task failed: {error}"))?
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("bet totals task failed: {error}"))??;
         let betting_seed = participant_excluded_betting_seed(pending);
-        let (wager_name, wager_value) = format_betting_display(
+        let managed_betting = !recorded && pending.state.hosted_betting_managed();
+        let (wager_name, mut wager_value) = format_betting_display(
             totals.radiant,
             totals.dire,
             &pending.state.betting_mode,
             BettingDisplayOptions {
-                lock_until: pending.state.bet_lock_until,
-                locked: pending
-                    .state
-                    .bet_lock_until
-                    .is_some_and(|lock| lock <= unix_seconds()),
+                lock_until: (!managed_betting)
+                    .then_some(pending.state.bet_lock_until)
+                    .flatten(),
+                locked: recorded || !pending.state.betting_open(unix_seconds()),
                 seed_radiant: betting_seed.radiant,
                 seed_dire: betting_seed.dire,
                 seed_bonus: betting_seed.bonus,
             },
         );
+        if managed_betting {
+            if let Some(deadline) = pending
+                .state
+                .betting_extension_until()
+                .filter(|deadline| *deadline > unix_seconds())
+            {
+                wager_value.push_str(&format!(
+                    "\nBetting stays open through the hero draft and at least until <t:{deadline}:R> (admin extension)."
+                ));
+            } else {
+                wager_value.push_str(
+                    "\nBetting stays open through the hero draft and closes when gameplay starts.",
+                );
+            }
+        }
         let lobby_bonus = pending.state.first_game_pool_reserved;
         if lobby_bonus > 0 {
             embed = embed.field("🎲 Lobby Bonus", format!("{lobby_bonus} {JOPACOIN_EMOTE} split equally among match players after the game. Spectator bets do not share this pool."), false);
@@ -5043,6 +5799,11 @@ impl MatchHandler {
 
     fn schedule_betting_reminders(&self, pending: &PendingMatchRecord, notify_subscribers: bool) {
         self.cancel_betting_tasks(pending.guild_id, Some(pending.pending_match_id));
+        if pending.state.hosted_betting_managed()
+            || (pending.state.betting_closed() && pending.state.betting_extension_until().is_none())
+        {
+            return;
+        }
         let Some(lock_until) = pending.state.bet_lock_until else {
             return;
         };
@@ -5170,7 +5931,10 @@ impl MatchHandler {
         let Some(pending) = pending else {
             return;
         };
-        if pending.state.bet_lock_until != Some(expected_lock_until) {
+        if pending.state.hosted_betting_managed()
+            || (pending.state.betting_closed() && pending.state.betting_extension_until().is_none())
+            || pending.state.bet_lock_until != Some(expected_lock_until)
+        {
             return;
         }
         let totals_repository = self.bets.clone();
@@ -5539,6 +6303,7 @@ impl AdminMatchControl for MatchHandler {
             pending_match_id: request.pending_match_id,
             old_bet_lock_until: extension.old_lock_until,
             new_bet_lock_until: extension.new_lock_until,
+            waits_for_gameplay_start: extension.pending_match.state.hosted_betting_managed(),
             lobby_label: parse_persisted_lobby_kind(
                 extension.pending_match.state.lobby_kind.as_deref(),
             )

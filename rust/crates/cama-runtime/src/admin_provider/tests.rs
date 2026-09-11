@@ -413,6 +413,7 @@ impl AdminLobbyControl for RecordingLobbyControl {
 #[derive(Default)]
 struct RecordingMatchControl {
     extensions: Mutex<Vec<AdminExtendBettingRequest>>,
+    waits_for_gameplay_start: AtomicBool,
     seeds: Mutex<Vec<AdminSeedHeroGridRequest>>,
     role_backfills: Mutex<Vec<i64>>,
     role_backfill_result: Mutex<AdminRoleBackfillResult>,
@@ -440,6 +441,7 @@ impl AdminMatchControl for RecordingMatchControl {
             pending_match_id: request.pending_match_id,
             old_bet_lock_until: 1_000,
             new_bet_lock_until: 1_300,
+            waits_for_gameplay_start: self.waits_for_gameplay_start.load(Ordering::Relaxed),
             lobby_label: "All You Can Feed".to_owned(),
             jump_url: Some("https://discord.test/match".to_owned()),
             refreshed_routes: 2,
@@ -1076,6 +1078,32 @@ async fn production_admin_routes_share_lobby_match_and_correction_controls() {
             correct_result: AdminCorrectMatchSide::Dire,
         }
     );
+}
+
+#[tokio::test]
+async fn hosted_draft_extension_acknowledges_both_gameplay_and_admin_deadline() {
+    let fixture = ProviderFixture::new();
+    fixture
+        .matches
+        .waits_for_gameplay_start
+        .store(true, Ordering::Relaxed);
+    let response = fixture
+        .dispatch(
+            "extendbetting",
+            vec![
+                integer_option("minutes", 5),
+                integer_option("pending_match_id", 88),
+            ],
+            11,
+        )
+        .await
+        .last();
+    assert!(
+        response
+            .content
+            .contains("open through the hero draft and at least until <t:1300:R>")
+    );
+    assert!(!response.content.contains("Closes <t:"));
 }
 
 #[tokio::test]

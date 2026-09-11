@@ -65,6 +65,71 @@ fn match_draft_analysis_schema_supports_fresh_and_upgraded_databases() {
     }
 }
 
+#[test]
+fn dota_session_schema_supports_fresh_upgrade_and_idempotent_retry() {
+    for upgrade in [false, true] {
+        let database = empty_database();
+        if upgrade {
+            initialize_or_migrate(database.path()).expect("initialize legacy schema");
+            let connection = open_runtime_connection(database.path()).expect("open legacy schema");
+            connection
+                .execute_batch(
+                    "DROP TABLE dota_sessions;
+                     DELETE FROM schema_migrations WHERE name='create_dota_sessions_table';",
+                )
+                .expect("remove Dota session migration");
+        }
+
+        let report = initialize_or_migrate(database.path()).expect("apply Dota session schema");
+        assert!(
+            report
+                .newly_applied
+                .iter()
+                .any(|name| name == "create_dota_sessions_table")
+        );
+        let connection = open_runtime_connection(database.path()).expect("open Dota schema");
+        let columns = table_columns(&connection, "dota_sessions").expect("read Dota columns");
+        assert!(columns.iter().any(|column| column.name == "account_key"));
+        let table_sql: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='dota_sessions'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read Dota table SQL");
+        assert!(table_sql.contains("needs_review"));
+        let indexes = connection
+            .prepare(
+                "SELECT name, sql FROM sqlite_master
+                 WHERE type='index' AND tbl_name='dota_sessions' AND sql IS NOT NULL ORDER BY name",
+            )
+            .expect("prepare Dota indexes")
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .expect("read Dota indexes")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect Dota indexes");
+        assert!(indexes.iter().any(|(name, sql)| {
+            name == "uq_dota_sessions_active_account" && sql.contains("needs_review")
+        }));
+        assert!(
+            indexes
+                .iter()
+                .any(|(name, _)| name == "uq_dota_sessions_valve_match")
+        );
+        drop(connection);
+
+        let retry = initialize_or_migrate(database.path()).expect("retry Dota schema");
+        assert!(retry.newly_applied.is_empty());
+        assert!(
+            audit_database(database.path())
+                .expect("audit Dota schema")
+                .is_compatible()
+        );
+    }
+}
+
 fn ledger_names(path: &Path) -> BTreeSet<String> {
     let connection = Connection::open(path).expect("open migration fixture");
     let mut statement = connection

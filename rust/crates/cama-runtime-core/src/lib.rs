@@ -9,6 +9,8 @@ pub mod application_config;
 pub mod config;
 #[path = "../../cama-runtime/src/discord_transport.rs"]
 pub mod discord_transport;
+#[path = "../../cama-runtime/src/dota_host_config.rs"]
+pub mod dota_host_config;
 #[path = "../../cama-runtime/src/embed_colors.rs"]
 pub mod embed_colors;
 #[path = "../../cama-runtime/src/gateway_events.rs"]

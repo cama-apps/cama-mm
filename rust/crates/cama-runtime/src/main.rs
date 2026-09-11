@@ -60,6 +60,42 @@ async fn main() -> ExitCode {
     initialize_logging();
     match parse_command(env::args().skip(1)) {
         Ok(Command::Serve) => run_serve().await,
+        Ok(Command::SteamLogin) => match cama_runtime::dota_host::bootstrap_steam_login().await {
+            Ok(message) => {
+                println!("{message}");
+                ExitCode::SUCCESS
+            }
+            Err(message) => {
+                eprintln!("{message}");
+                ExitCode::from(1)
+            }
+        },
+        Ok(Command::DotaHost {
+            action,
+            guild_id,
+            pending_match_id,
+        }) => {
+            let path = env::var_os("DB_PATH")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| "cama_shuffle.db".into());
+            match cama_runtime::dota_host::operator_command(
+                path,
+                &action,
+                guild_id,
+                pending_match_id,
+            )
+            .await
+            {
+                Ok(message) => {
+                    println!("{message}");
+                    ExitCode::SUCCESS
+                }
+                Err(message) => {
+                    eprintln!("{message}");
+                    ExitCode::from(1)
+                }
+            }
+        }
         Ok(Command::DatabaseCheck { path }) => run_db_check(path),
         Ok(Command::DatabaseAdmit { path, source }) => run_db_admit(path, source),
         Ok(Command::HealthCheck { path, maximum_age }) => run_health_check(path, maximum_age),
@@ -1069,6 +1105,26 @@ async fn run_serve() -> ExitCode {
         reminder_provider.hooks(),
         production_ai_service.clone(),
     );
+    let mut dota_workers = Vec::new();
+    if let Some(host_config) = application_config.dota_host.clone() {
+        let live = match cama_runtime::dota_live::DotaLiveFeed::new(&host_config) {
+            Ok(live) => live,
+            Err(reason) => {
+                error!(%reason,"cannot configure Dota live feed");
+                return ExitCode::from(64);
+            }
+        };
+        dota_workers.extend(live.clone().workers());
+        dota_workers.push(cama_runtime::dota_host::worker_spec(
+            cama_runtime::dota_host::DotaHostWorker::new(
+                &config.db_path,
+                host_config,
+                Arc::new(match_provider.clone()),
+                discord_transport.clone(),
+                live,
+            ),
+        ));
+    }
     info!(
         runtime = "rust",
         git_sha = %env::var("GIT_SHA").unwrap_or_else(|_| "unknown".to_owned()),
@@ -1104,6 +1160,9 @@ async fn run_serve() -> ExitCode {
     }
     if let Some(pet_sweep_worker) = pet_sweep_worker {
         runtime = runtime.with_worker(pet_sweep_worker);
+    }
+    for worker in dota_workers {
+        runtime = runtime.with_worker(worker);
     }
     dig_provider.set_lifecycle_events(runtime.events().clone());
     let health_events = runtime.events().subscribe();

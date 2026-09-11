@@ -295,6 +295,7 @@ pub struct ApplicationConfig {
     pub migration: MigrationSettings,
     pub llm: LlmConfig,
     pub opendota_api_key: Option<Secret>,
+    pub dota_host: Option<crate::dota_host_config::DotaHostConfig>,
 }
 
 impl fmt::Debug for ApplicationConfig {
@@ -308,6 +309,7 @@ impl fmt::Debug for ApplicationConfig {
             .field("migration", &self.migration)
             .field("llm", &self.llm)
             .field("opendota_api_key", &self.opendota_api_key)
+            .field("dota_host", &self.dota_host)
             .finish()
     }
 }
@@ -647,6 +649,9 @@ impl ApplicationConfig {
                 selected_api_key,
             },
             opendota_api_key: p.secret("OPENDOTA_API_KEY"),
+            dota_host: crate::dota_host_config::DotaHostConfig::from_lookup(|name| {
+                captured.get(name).cloned()
+            })?,
         })
     }
 
@@ -841,6 +846,7 @@ fn all_runtime_env_keys() -> Vec<&'static str> {
         "GAMBA_SYNTHETIC_MEMBERS_ENABLED",
         "OPENDOTA_API_KEY",
     ]);
+    keys.extend(crate::dota_host_config::ENV_KEYS);
     keys
 }
 

@@ -2396,11 +2396,19 @@ impl AdminHandler {
             .as_deref()
             .filter(|url| !url.is_empty())
             .map_or_else(String::new, |url| format!(" [View match]({url})"));
+        let deadline = if result.waits_for_gameplay_start {
+            format!(
+                "Betting stays open through the hero draft and at least until <t:{}:R>.",
+                result.new_bet_lock_until
+            )
+        } else {
+            format!("Closes <t:{}:R>.", result.new_bet_lock_until)
+        };
         send_response(
             &responder,
             InteractionResponse::message(format!(
-                "⏰ **{} / Match #{} — betting window extended by {minutes} minute(s)!** Closes <t:{}:R>.{jump_link}",
-                result.lobby_label, result.pending_match_id, result.new_bet_lock_until
+                "⏰ **{} / Match #{} — betting window extended by {minutes} minute(s)!** {deadline}{jump_link}",
+                result.lobby_label, result.pending_match_id
             )),
         )
         .await

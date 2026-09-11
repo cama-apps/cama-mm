@@ -20,8 +20,8 @@ pub mod admin_match_correction;
 pub mod admin_provider;
 pub(crate) use cama_runtime_core::ids;
 pub use cama_runtime_core::{
-    application_config, config, discord_transport, embed_colors, gateway_events, global_hooks,
-    option_ext, raw_reactions, registration, runtime_ports,
+    application_config, config, discord_transport, dota_host_config, embed_colors, gateway_events,
+    global_hooks, option_ext, raw_reactions, registration, runtime_ports,
 };
 pub mod betting_provider;
 pub mod command_tree_contract;
@@ -29,6 +29,9 @@ pub mod curfew_sweep_worker;
 pub mod dig_bonus_runtime;
 pub mod dig_provider;
 pub mod dig_weather_worker;
+pub mod dota_host;
+pub mod dota_live;
+pub mod dota_replay;
 pub mod draft_provider;
 pub mod duel_challenges_worker;
 pub mod duel_provider;

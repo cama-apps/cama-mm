@@ -102,6 +102,11 @@ fn parse_seconds(
 
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum ConfigError {
+    #[error("{name}: {reason}")]
+    InvalidDotaSetting {
+        name: &'static str,
+        reason: &'static str,
+    },
     #[error("DISCORD_BOT_TOKEN is required")]
     MissingToken,
     #[error("DISCORD_BOT_TOKEN contains whitespace and is not a valid bot token")]
