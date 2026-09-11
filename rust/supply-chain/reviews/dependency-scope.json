@@ -1,0 +1,467 @@
+{
+  "schema": 1,
+  "target": "x86_64-unknown-linux-gnu",
+  "packages": [
+    {
+      "name": "aes",
+      "version": "0.8.4",
+      "features": [],
+      "parents": [
+        {
+          "name": "steam-vent-crypto",
+          "version": "0.2.1",
+          "kinds": [
+            {
+              "kind": "normal",
+              "target": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "another-steam-totp",
+      "version": "0.4.2",
+      "features": [],
+      "parents": [
+        {
+          "name": "steam-vent",
+          "version": "0.5.0",
+          "kinds": [
+            {
+              "kind": "normal",
+              "target": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "binrw",
+      "version": "0.15.2",
+      "features": [
+        "default",
+        "std",
+        "verbose-backtrace"
+      ],
+      "parents": [
+        {
+          "name": "steam-vent",
+          "version": "0.5.0",
+          "kinds": [
+            {
+              "kind": "normal",
+              "target": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "binrw_derive",
+      "version": "0.15.2",
+      "features": [
+        "default",
+        "owo-colors",
+        "verbose-backtrace"
+      ],
+      "parents": [
+        {
+          "name": "binrw",
+          "version": "0.15.2",
+          "kinds": [
+            {
+              "kind": "normal",
+              "target": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "bzip2",
+      "version": "0.6.1",
+      "features": [
+        "default"
+      ],
+      "parents": [
+        {
+          "name": "cama-steam",
+          "version": "0.1.0",
+          "kinds": [
+            {
+              "kind": "normal",
+              "target": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "crossbeam-utils",
+      "version": "0.8.23",
+      "features": [
+        "default",
+        "std"
+      ],
+      "parents": [
+        {
+          "name": "dashmap",
+          "version": "6.2.1",
+          "kinds": [
+            {
+              "kind": "normal",
+              "target": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "directories",
+      "version": "6.0.0",
+      "features": [],
+      "parents": [
+        {
+          "name": "steam-vent",
+          "version": "0.5.0",
+          "kinds": [
+            {
+              "kind": "normal",
+              "target": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "dirs-sys",
+      "version": "0.5.0",
+      "features": [],
+      "parents": [
+        {
+          "name": "directories",
+          "version": "6.0.0",
+          "kinds": [
+            {
+              "kind": "normal",
+              "target": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "jobserver",
+      "version": "0.1.35",
+      "features": [],
+      "parents": [
+        {
+          "name": "cc",
+          "version": "1.4.2",
+          "kinds": [
+            {
+              "kind": "normal",
+              "target": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "libbz2-rs-sys",
+      "version": "0.2.5",
+      "features": [
+        "rust-allocator"
+      ],
+      "parents": [
+        {
+          "name": "bzip2",
+          "version": "0.6.1",
+          "kinds": [
+            {
+              "kind": "normal",
+              "target": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "libredox",
+      "version": "0.1.23",
+      "features": [
+        "base",
+        "call",
+        "libc",
+        "std"
+      ],
+      "parents": [
+        {
+          "name": "redox_users",
+          "version": "0.5.2",
+          "kinds": [
+            {
+              "kind": "normal",
+              "target": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "pkcs1",
+      "version": "0.7.5",
+      "features": [
+        "alloc",
+        "pem",
+        "pkcs8",
+        "std",
+        "zeroize"
+      ],
+      "parents": [
+        {
+          "name": "rsa",
+          "version": "0.9.10",
+          "kinds": [
+            {
+              "kind": "normal",
+              "target": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "pkcs8",
+      "version": "0.10.2",
+      "features": [
+        "alloc",
+        "pem",
+        "std"
+      ],
+      "parents": [
+        {
+          "name": "pkcs1",
+          "version": "0.7.5",
+          "kinds": [
+            {
+              "kind": "normal",
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "rsa",
+          "version": "0.9.10",
+          "kinds": [
+            {
+              "kind": "normal",
+              "target": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "redox_users",
+      "version": "0.5.2",
+      "features": [],
+      "parents": [
+        {
+          "name": "dirs-sys",
+          "version": "0.5.0",
+          "kinds": [
+            {
+              "kind": "normal",
+              "target": "cfg(target_os = \"redox\")"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "rsa",
+      "version": "0.9.10",
+      "features": [
+        "default",
+        "pem",
+        "std",
+        "u64_digit"
+      ],
+      "parents": [
+        {
+          "name": "steam-vent",
+          "version": "0.5.0",
+          "kinds": [
+            {
+              "kind": "normal",
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "steam-vent-crypto",
+          "version": "0.2.1",
+          "kinds": [
+            {
+              "kind": "build",
+              "target": null
+            },
+            {
+              "kind": "normal",
+              "target": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "sha-1",
+      "version": "0.10.1",
+      "features": [
+        "default",
+        "std"
+      ],
+      "parents": [
+        {
+          "name": "another-steam-totp",
+          "version": "0.4.2",
+          "kinds": [
+            {
+              "kind": "normal",
+              "target": null
+            }
+          ]
+        },
+        {
+          "name": "steam-vent-crypto",
+          "version": "0.2.1",
+          "kinds": [
+            {
+              "kind": "normal",
+              "target": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "spin",
+      "version": "0.9.9",
+      "features": [
+        "once"
+      ],
+      "parents": [
+        {
+          "name": "lazy_static",
+          "version": "1.5.0",
+          "kinds": [
+            {
+              "kind": "normal",
+              "target": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "toml_edit",
+      "version": "0.25.14+spec-1.1.0",
+      "features": [
+        "parse"
+      ],
+      "parents": [
+        {
+          "name": "proc-macro-crate",
+          "version": "3.5.0",
+          "kinds": [
+            {
+              "kind": "normal",
+              "target": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "toml_parser",
+      "version": "1.1.3+spec-1.1.0",
+      "features": [
+        "alloc",
+        "default",
+        "std"
+      ],
+      "parents": [
+        {
+          "name": "toml_edit",
+          "version": "0.25.14+spec-1.1.0",
+          "kinds": [
+            {
+              "kind": "normal",
+              "target": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "zstd",
+      "version": "0.13.3",
+      "features": [],
+      "parents": [
+        {
+          "name": "cama-steam",
+          "version": "0.1.0",
+          "kinds": [
+            {
+              "kind": "normal",
+              "target": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "zstd-safe",
+      "version": "7.3.0",
+      "features": [
+        "std"
+      ],
+      "parents": [
+        {
+          "name": "zstd",
+          "version": "0.13.3",
+          "kinds": [
+            {
+              "kind": "normal",
+              "target": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "zstd-sys",
+      "version": "2.1.0+zstd.1.5.7",
+      "features": [
+        "std"
+      ],
+      "parents": [
+        {
+          "name": "zstd-safe",
+          "version": "7.3.0",
+          "kinds": [
+            {
+              "kind": "normal",
+              "target": null
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "cargo_configs": {
+    ".cargo/config.toml": "1c7e4e72dfa14d7dd3c9274b637333944d11f1372b91f6ba5d53bfac613e47cc"
+  }
+}

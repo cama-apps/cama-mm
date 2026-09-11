@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+# Keep usage-scoped cargo-vet reviews tied to the actual dependency graph and source.
+set -euo pipefail
+
+fail() { printf 'Dependency review guard: %s\n' "$*" >&2; exit 1; }
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+metadata_path=""
+scope_path=""
+inventory_path=""
+while (($#)); do
+  case "$1" in
+    --root|--metadata|--scope|--inventory)
+      (($# >= 2)) || fail "missing value for $1"
+      case "$1" in
+        --root) repo_root="$2" ;;
+        --metadata) metadata_path="$2" ;;
+        --scope) scope_path="$2" ;;
+        --inventory) inventory_path="$2" ;;
+      esac
+      shift 2 ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+repo_root="$(cd "$repo_root" && pwd -P)"
+scope_path="${scope_path:-$repo_root/rust/supply-chain/reviews/dependency-scope.json}"
+inventory_path="${inventory_path:-$repo_root/rust/supply-chain/reviews/vendor-files.json}"
+for program in jq sha256sum find sort rustc cargo; do
+  command -v "$program" >/dev/null || fail "required tool not found: $program"
+done
+[[ "$(uname -s)" == Linux ]] || fail 'reviewed builds require Linux'
+[[ -f "$scope_path" && -f "$inventory_path" ]] || fail 'missing review manifests'
+
+jq -e '
+  .schema == 1 and (.target | type == "string") and
+  (.target | test("^[A-Za-z0-9_]+-unknown-linux-(gnu|musl)$")) and
+  (.cargo_configs | type == "object") and
+  all(.cargo_configs | to_entries[];
+    (.key == ".cargo/config" or .key == ".cargo/config.toml" or
+     .key == "rust/.cargo/config" or .key == "rust/.cargo/config.toml") and
+    (.value | type == "string" and test("^[0-9a-f]{64}$"))) and
+  (.packages | type == "array" and length > 0) and
+  ([.packages[].name] | length == (unique | length)) and
+  all(.packages[];
+    (.name | type == "string") and (.version | type == "string") and
+    (.features | type == "array") and all(.features[]; type == "string") and
+    (.parents | type == "array") and all(.parents[];
+      (.name | type == "string") and (.version | type == "string") and
+      (.kinds | type == "array" and length > 0) and all(.kinds[];
+        (.kind == "normal" or .kind == "build" or .kind == "dev") and
+        (.target == null or (.target | type == "string"))))) and
+  ([.packages[].name] as $names |
+    all(["toml_parser", "toml_edit", "crossbeam-utils", "rsa"][]; . as $n | $names | index($n) != null))
+' "$scope_path" >/dev/null || fail 'invalid dependency-scope manifest'
+review_target="$(jq -r .target "$scope_path")"
+rust_host="$(rustc -vV | sed -n 's/^host: //p')"
+[[ "$rust_host" == "$review_target" ]] || fail "rustc host $rust_host differs from reviewed target $review_target"
+[[ "${CARGO_BUILD_TARGET:-$review_target}" == "$review_target" ]] || fail 'CARGO_BUILD_TARGET changes the reviewed platform'
+
+scratch="$(mktemp -d)"
+trap 'rm -rf "$scratch"' EXIT
+(
+  cd "$repo_root"
+  [[ ! -L .cargo && ! -L rust && ! -L rust/.cargo ]] || fail 'Cargo configuration ancestor is a symlink'
+  for config in .cargo/config .cargo/config.toml rust/.cargo/config rust/.cargo/config.toml; do
+    if [[ -e "$config" || -L "$config" ]]; then
+      [[ -f "$config" && ! -L "$config" ]] || fail "Cargo configuration is not a regular file: $config"
+      printf '%s\n' "$config"
+    fi
+  done > "$scratch/config-files"
+  jq -Rs 'split("\n") | map(select(length > 0)) | sort' "$scratch/config-files" > "$scratch/configs.json"
+  jq '.cargo_configs | keys | sort' "$scope_path" > "$scratch/expected-configs.json"
+  cmp -s "$scratch/configs.json" "$scratch/expected-configs.json" || fail 'Cargo config inventory changed; target/backend settings need review'
+  if [[ -s "$scratch/config-files" ]]; then
+    jq -r '.cargo_configs | to_entries[] | .value + "  " + .key' "$scope_path" |
+      sha256sum --check --strict --quiet || fail 'reviewed Cargo configuration checksum changed'
+  fi
+)
+if [[ -z "$metadata_path" ]]; then
+  metadata_path="$scratch/metadata.json"
+  cargo metadata --manifest-path "$repo_root/rust/Cargo.toml" --locked --all-features --format-version=1 > "$metadata_path"
+fi
+jq -e '.packages | type == "array"' "$metadata_path" >/dev/null || fail 'invalid Cargo metadata'
+jq -e '.resolve.nodes | type == "array"' "$metadata_path" >/dev/null || fail 'Cargo metadata has no resolved dependency graph'
+
+# Normalize path-dependent package IDs so a checkout location cannot change policy.
+jq --slurpfile policy "$scope_path" '
+  . as $m |
+  def package($id): $m.packages[] | select(.id == $id);
+  [ $policy[0].packages[].name ] as $names |
+  [ .resolve.nodes[] | . as $node | package(.id) as $p |
+    select($names | index($p.name)) |
+    {name:$p.name, version:$p.version, features:($node.features | sort | unique),
+     parents:([
+       $m.resolve.nodes[] | . as $parent | .deps[] | select(.pkg == $node.id) |
+       package($parent.id) as $pp |
+       {name:$pp.name,version:$pp.version,
+        kinds:([.dep_kinds[] | {kind:(.kind // "normal"),target:.target}] | sort_by(.kind,.target) | unique)}
+     ] | sort_by(.name,.version,.kinds) | unique)}
+  ] | sort_by(.name,.version)
+' "$metadata_path" > "$scratch/actual.json"
+jq '[.packages[] | {name,version,features:(.features|sort|unique),
+  parents:([.parents[] | {name,version,kinds:(.kinds|sort_by(.kind,.target)|unique)}]
+  |sort_by(.name,.version,.kinds)|unique)}] | sort_by(.name,.version)' "$scope_path" > "$scratch/expected.json"
+if ! cmp -s "$scratch/expected.json" "$scratch/actual.json"; then
+  diff -u "$scratch/expected.json" "$scratch/actual.json" >&2 || true
+  fail 'reviewed dependency versions, features, or consumers changed; review and update the scope manifest'
+fi
+jq -e '
+  all(.[];
+    (if .name == "toml_parser" then (.features | index("unsafe") == null) else true end) and
+    (if .name == "toml_edit" then (.features | index("unbounded") == null) else true end) and
+    (if .name == "crossbeam-utils" then
+      (.parents | length == 1 and all(.[]; .name == "dashmap")) else true end) and
+    (if .name == "rsa" then
+      (.parents | length > 0 and all(.[]; .name == "steam-vent" or .name == "steam-vent-crypto")) else true end))
+' "$scratch/actual.json" >/dev/null || fail 'a prohibited feature or consumer violates the scoped review'
+
+# Consumer names alone are insufficient: their reviewed vendored source must be pinned too.
+jq -e --arg root "$repo_root" '
+  . as $m |
+  [.packages[] | select(.name == "crossbeam-utils" or .name == "rsa") | .id] as $scoped |
+  [.resolve.nodes[] | select(any(.deps[]; .pkg as $id | $scoped | index($id) != null)) | .id] as $consumers |
+  all(.packages[] | select(.id as $id | $consumers | index($id) != null);
+    .manifest_path == ($root + "/rust/vendor/" + .name + "/Cargo.toml"))
+' "$metadata_path" >/dev/null || fail 'scoped consumer is not the reviewed vendored package'
+
+jq -e '
+  def safe_path: type == "string" and test("^[A-Za-z0-9_./+@ -]+$") and
+    (startswith("/")|not) and (split("/") | all(. != ".." and . != "." and . != ""));
+  .schema == 1 and (.roots | type == "array" and length > 0) and
+  (.files | type == "object" and length > 0) and
+  all(.roots[]; safe_path and startswith("rust/vendor/")) and
+  (.roots as $roots | all(.files | to_entries[];
+    (.key | safe_path) and (.value | type == "string" and test("^[0-9a-f]{64}$")) and
+    (.key as $p | any($roots[]; . as $r | $p | startswith($r + "/"))))) and
+  (.files | has("rust/vendor/dashmap/Cargo.toml") and
+    has("rust/vendor/steam-vent/Cargo.toml") and has("rust/vendor/steam-vent-crypto/Cargo.toml"))
+' "$inventory_path" >/dev/null || fail 'invalid vendor inventory or missing scoped consumer manifests'
+mapfile -t vendor_roots < <(jq -r '.roots[]' "$inventory_path")
+(
+  cd "$repo_root"
+  [[ ! -L rust && ! -L rust/vendor ]] || fail 'vendor ancestor is a symlink'
+  find rust/vendor -mindepth 1 -maxdepth 1 -print0 |
+    jq -Rs 'split("\u0000") | map(select(length > 0)) | sort' > "$scratch/roots.json"
+  jq '.roots | sort' "$inventory_path" > "$scratch/expected-roots.json"
+  cmp -s "$scratch/roots.json" "$scratch/expected-roots.json" || fail 'vendor root inventory changed; new or missing crate needs review'
+  for dir in "${vendor_roots[@]}"; do
+    [[ -d "$dir" && ! -L "$dir" ]] || fail "missing or symlinked vendor root: $dir"
+  done
+  # Reject links, sockets, and other special files rather than following them.
+  find "${vendor_roots[@]}" ! -type d ! -type f -print0 > "$scratch/special"
+  [[ ! -s "$scratch/special" ]] || fail 'vendor inventory contains a symlink or special file'
+  find "${vendor_roots[@]}" -type f -print0 |
+    jq -Rs 'split("\u0000") | map(select(length > 0)) | sort | unique' > "$scratch/files.json"
+  jq '.files | keys | sort' "$inventory_path" > "$scratch/expected-files.json"
+  if ! cmp -s "$scratch/files.json" "$scratch/expected-files.json"; then
+    diff -u "$scratch/expected-files.json" "$scratch/files.json" >&2 || true
+    fail 'vendor file inventory changed; review additions and removals'
+  fi
+  jq -r '.files | to_entries[] | .value + "  " + .key' "$inventory_path" |
+    sha256sum --check --strict --quiet || fail 'reviewed vendor source checksum changed'
+)
+# Cargo-vet treats local dependencies specially. Every non-workspace local package
+# must be inside the fully inventoried vendor tree, never an external path patch.
+jq -e --arg root "$repo_root" --slurpfile inventory "$inventory_path" '
+  . as $m | all(.packages[] | select(.source == null);
+    . as $p |
+    if (($m.workspace_members // []) | index($p.id)) != null then
+      (.manifest_path | startswith($root + "/rust/crates/"))
+    else
+      (.manifest_path | startswith($root + "/rust/vendor/")) and
+      (.manifest_path | ltrimstr($root + "/") as $path | $inventory[0].files | has($path))
+    end)
+' "$metadata_path" >/dev/null || fail 'local dependency is outside the reviewed vendor inventory or workspace'
+printf 'Dependency review guard passed (%s).\n' "$review_target"

@@ -1,0 +1,17 @@
+[package]
+name = "steamid-ng"
+version = "3.0.0"
+authors = ["Moses Miller <moses@memiller.net>"]
+description = "An easy-to-use SteamID type with functions to parse and render steam2 and steam3 IDs"
+repository = "https://github.com/Majora320/steamid-ng"
+readme = "README.md"
+keywords = ["steam", "id", "steamid", "parser"]
+categories = ["parser-implementations", "games"]
+license = "MIT"
+edition = "2024"
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"], optional = true }
+
+[dev-dependencies]
+serde_json = { version = "1.0.145" }

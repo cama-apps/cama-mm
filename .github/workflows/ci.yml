@@ -36,6 +36,9 @@ jobs:
       - name: Fetch the locked dependency graph
         run: cargo fetch --locked --manifest-path rust/Cargo.toml
 
+      - name: Verify reviewed sources and dependency usage
+        run: .github/scripts/check-reviewed-dependencies
+
       - name: Require an approved dependency graph
         run: cargo vet check --locked --manifest-path rust/Cargo.toml
 
@@ -151,6 +154,10 @@ jobs:
         run: >-
           cargo test --locked --manifest-path rust/Cargo.toml
           --package ${{ matrix.package }} ${{ matrix.arguments }}
+
+      - name: Test reviewed dependency security patches
+        if: matrix.package == 'cama-steam'
+        run: .github/scripts/test-reviewed-dependencies
 
   rust-lint:
     needs: dependency-policy

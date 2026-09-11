@@ -4,20 +4,23 @@
 [cargo-vet]
 version = "0.10"
 
+[imports.bytecode-alliance]
+url = "https://raw.githubusercontent.com/bytecodealliance/wasmtime/b016297de18a8cb6cf2ee5387a96b1870b4c19d2/supply-chain/audits.toml"
+
 [imports.embark-studios]
-url = "https://raw.githubusercontent.com/EmbarkStudios/rust-ecosystem/bc9f6c527108a8b79b74d44121aed574e7b5e526/audits.toml"
+url = "https://raw.githubusercontent.com/EmbarkStudios/rust-ecosystem/732513edfd9172f4eda358b2d0cefc6cad1585ee/audits.toml"
 
 [imports.google]
 url = "https://raw.githubusercontent.com/google/supply-chain/c5115397e1ad0a0d2ac630a9aafe3eb2b615426b/audits.toml"
 
 [imports.isrg]
-url = "https://raw.githubusercontent.com/divviup/libprio-rs/b7f0cbe7145c01b618cd7b2f6a9636490b62f276/supply-chain/audits.toml"
+url = "https://raw.githubusercontent.com/divviup/libprio-rs/7549f3c7dffe96d3a6e6fb214007911cdec3e8e6/supply-chain/audits.toml"
 
 [imports.mozilla]
 url = "https://raw.githubusercontent.com/mozilla/supply-chain/d7f9f897cbabc04d16ae2a62374e098d850d46fa/audits.toml"
 
 [imports.nautech]
-url = "https://raw.githubusercontent.com/nautechsystems/nautilus_trader/2114cf6f761429e0adb5ca9596fcd7b895b16011/.supply-chain/audits.toml"
+url = "https://raw.githubusercontent.com/nautechsystems/nautilus_trader/c684a30fff71af8995d79a7bab199b87135c0823/.supply-chain/audits.toml"
 exclude = ["data-encoding"]
 
 [imports.toolkit]
@@ -26,6 +29,65 @@ exclude = ["data-encoding", "getrandom", "gif", "r-efi", "typenum", "weezl"]
 
 [imports.zcash]
 url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/ce132d7abdd52f2b3b0d55ed5dc9f152331535c2/supply-chain/audits.toml"
+
+[policy.const-oid]
+audit-as-crates-io = false
+notes = "Reviewed security patch maintained in rust/vendor/const-oid, with source/patch provenance and CI snapshot verification in supply-chain/reviews/pr669.md. The crates.io artifact is not the code deployed."
+
+[policy.dashmap]
+audit-as-crates-io = false
+notes = "Reviewed security patch maintained in rust/vendor/dashmap, with source/patch provenance and CI snapshot verification in supply-chain/reviews/pr669.md. The crates.io artifact is not the code deployed."
+
+[policy.libbz2-rs-sys]
+audit-as-crates-io = false
+notes = "Reviewed local security patch in rust/vendor/libbz2-rs-sys; source provenance and enforced snapshot/usage scope are documented in supply-chain/reviews/pr669.md. The unpatched registry artifact is not certified."
+
+[policy.protobuf]
+audit-as-crates-io = false
+notes = "Backported upstream recursion-limit security fix. Reviewed local source in rust/vendor/protobuf; source identities, patch evidence and CI snapshot verification are recorded in supply-chain/reviews/pr669.md. Auditing the unpatched crates.io version would not describe the code we deploy."
+
+[policy."rsa:0.9.10"]
+notes = "Only public-key encryption is reviewed; every primitive still requires safe-to-deploy and CI restricts RSA consumers to the reviewed Steam patches."
+
+[policy."rsa:0.9.10".dependency-criteria]
+const-oid = "safe-to-deploy"
+digest = "safe-to-deploy"
+num-bigint-dig = "safe-to-deploy"
+num-integer = "safe-to-deploy"
+num-traits = "safe-to-deploy"
+pkcs1 = "safe-to-deploy"
+pkcs8 = "safe-to-deploy"
+rand_core = "safe-to-deploy"
+signature = "safe-to-deploy"
+spki = "safe-to-deploy"
+subtle = "safe-to-deploy"
+zeroize = "safe-to-deploy"
+
+[policy.steam-vent]
+audit-as-crates-io = false
+dependency-criteria = { rsa = ["safe-to-run", "rsa-public-key-encryption"] }
+notes = "Bounded wire parsing, redacted authentication logs, and request cleanup. Reviewed local source in rust/vendor/steam-vent; source identities, patch evidence and CI snapshot verification are recorded in supply-chain/reviews/pr669.md. Auditing the unpatched crates.io version would not describe the code we deploy."
+
+[policy.steam-vent-crypto]
+audit-as-crates-io = false
+dependency-criteria = { rsa = ["safe-to-run", "rsa-public-key-encryption"] }
+notes = "Reviewed security patch maintained in rust/vendor/steam-vent-crypto, with source/patch provenance and CI snapshot verification in supply-chain/reviews/pr669.md. The crates.io artifact is not the code deployed."
+
+[policy.steamid-ng]
+audit-as-crates-io = false
+notes = "Reviewed security patch maintained in rust/vendor/steamid-ng, with source/patch provenance and CI snapshot verification in supply-chain/reviews/pr669.md. The crates.io artifact is not the code deployed."
+
+[policy.tungstenite]
+audit-as-crates-io = false
+notes = "Redacted payload logging and aligned rand with the existing reviewed graph. Reviewed local source in rust/vendor/tungstenite; source identities, patch evidence and CI snapshot verification are recorded in supply-chain/reviews/pr669.md. Auditing the unpatched crates.io version would not describe the code we deploy."
+
+[policy.zstd]
+audit-as-crates-io = false
+notes = "Reviewed local security patch in rust/vendor/zstd; source provenance and enforced snapshot/usage scope are documented in supply-chain/reviews/pr669.md. The unpatched registry artifact is not certified."
+
+[policy.zstd-safe]
+audit-as-crates-io = false
+notes = "Reviewed local security patch in rust/vendor/zstd-safe; source provenance and enforced snapshot/usage scope are documented in supply-chain/reviews/pr669.md. The unpatched registry artifact is not certified."
 
 [[exemptions.adler2]]
 version = "2.0.1"
