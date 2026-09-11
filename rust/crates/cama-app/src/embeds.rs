@@ -259,7 +259,7 @@ pub fn create_lobby_embed(
     let mut embed = EmbedModel {
         title: Some(request.kind.label().to_owned()),
         description: Some(format!(
-            "{}\nJoin to play!\n{timestamp}",
+            "{}\nJoin to play!\n📻 React to follow spectator updates. Players selected for the match are excluded.\n{timestamp}",
             request.kind.eligibility_text()
         )),
         ..EmbedModel::default()
@@ -338,6 +338,8 @@ pub struct MatchParticipant {
     pub kills: Option<i64>,
     pub deaths: Option<i64>,
     pub assists: Option<i64>,
+    pub gpm: Option<i64>,
+    pub xpm: Option<i64>,
     pub hero_damage: Option<i64>,
     pub net_worth: Option<i64>,
     pub lane_role: Option<i64>,
@@ -433,9 +435,12 @@ fn format_team_field(
                 .hero_name
                 .as_deref()
                 .unwrap_or_else(|| hero_name(fallback_hero));
-            let kills = participant.kills.unwrap_or(0);
-            let deaths = participant.deaths.unwrap_or(0);
-            let assists = participant.assists.unwrap_or(0);
+            let stat = |value: Option<i64>| {
+                value.map_or_else(|| "—".to_owned(), |value| value.to_string())
+            };
+            let kills = stat(participant.kills);
+            let deaths = stat(participant.deaths);
+            let assists = stat(participant.assists);
             let damage = format_number(participant.hero_damage);
             let net_worth = format_number(participant.net_worth);
             let lane = participant.lane_role.map_or_else(String::new, |lane_role| {
@@ -459,6 +464,13 @@ fn format_team_field(
                 |discord_id| format!("{tombstone}<@{discord_id}>"),
             );
             let mut stats = vec![format!("`{kills}/{deaths}/{assists}`")];
+            if participant.gpm.is_some() || participant.xpm.is_some() {
+                stats.push(format!(
+                    "`{} GPM / {} XPM`",
+                    stat(participant.gpm),
+                    stat(participant.xpm)
+                ));
+            }
             if damage != "—" {
                 stats.push(format!("`{damage} dmg`"));
             }

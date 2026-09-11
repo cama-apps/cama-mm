@@ -1768,6 +1768,7 @@ mod tests {
 
     fn pending_payload() -> String {
         json!({
+            "draft_setup_complete": false,
             "radiant_team_ids": [1],
             "dire_team_ids": [2],
             "shuffle_timestamp": SHUFFLE_AT,

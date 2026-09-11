@@ -82,6 +82,7 @@ const SWORD_EMOJI: &str = "⚔️";
 const READY_EMOJI: &str = "✅";
 const BELL_EMOJI: &str = "🔔";
 const CLIPBOARD_EMOJI: &str = "📋";
+const SPECTATOR_EMOJI: &str = "📻";
 const ADMINISTRATOR_PERMISSION: u64 = 1 << 3;
 const MANAGE_GUILD_PERMISSION: u64 = 1 << 5;
 const RECONCILE_ATTEMPTS: usize = 3;
@@ -445,6 +446,7 @@ struct LobbyRuntimeState {
     pending_matches: SqlitePendingMatches,
     service: Arc<LiveLobbyService>,
     readycheck_persistence: Arc<SqliteLobbyPersistence>,
+    spectators: cama_db::dota_spectator_repository::DotaSpectatorRepository,
     commands: Arc<LiveLobbyRuntime>,
     readychecks: ReadycheckService,
     drafts: Arc<DraftStateManager>,
@@ -1792,6 +1794,9 @@ impl LobbyRegistrationProvider {
             pending_matches,
             service,
             readycheck_persistence: persistence,
+            spectators: cama_db::dota_spectator_repository::DotaSpectatorRepository::new(
+                database_path,
+            ),
             commands,
             readychecks,
             drafts,
@@ -3109,6 +3114,14 @@ impl LobbyInteractionHandler {
                     &DiscordEmoji::unicode(BELL_EMOJI),
                 )
                 .await,
+            self.state
+                .transport
+                .add_reaction(
+                    receipt.channel_id,
+                    receipt.message_id,
+                    &DiscordEmoji::unicode(SPECTATOR_EMOJI),
+                )
+                .await,
         ] {
             if let Err(error) = result {
                 debug!(%error, ?scope, "best-effort lobby decoration failed");
@@ -4153,6 +4166,20 @@ impl GatewayEventObserver for LobbyGatewayObserver {
                         .await?
                         .ok_or_else(|| "persisted lobby message was not found".to_owned())?;
                     self.state.sync_lobby_display(lobby.scope).await?;
+                    if !message
+                        .reactions
+                        .iter()
+                        .any(|emoji| emoji.id.is_none() && emoji.name == SPECTATOR_EMOJI)
+                    {
+                        self.state
+                            .transport
+                            .add_reaction(
+                                to_u64(channel_id.0)?,
+                                to_u64(message_id.0)?,
+                                &DiscordEmoji::unicode(SPECTATOR_EMOJI),
+                            )
+                            .await?;
+                    }
                     if message
                         .reactions
                         .iter()
@@ -4290,6 +4317,35 @@ impl RawReactionObserver for LobbyRawReactionObserver {
         else {
             return Ok(());
         };
+        if event.emoji.id.is_none() && event.emoji.name == SPECTATOR_EMOJI {
+            if event.actor_is_bot == Some(true) {
+                return Ok(());
+            }
+            let Some(lobby) = self.state.service.get_lobby(scope) else {
+                return Ok(());
+            };
+            let Some(message) = lobby.message_ids.message_id else {
+                return Ok(());
+            };
+            // Subscription is an intent, not admission. The spectator worker
+            // subtracts the final shuffled roster before granting any access.
+            let repository = self.state.spectators.clone();
+            let user = i64::try_from(event.user_id).map_err(|_| "spectator user ID overflow")?;
+            let subscribed = event.kind == RawReactionKind::Add;
+            tokio::task::spawn_blocking(move || {
+                repository.update_subscription(
+                    scope.guild_id.0,
+                    message.0,
+                    user,
+                    subscribed,
+                    chrono::Utc::now().timestamp(),
+                )
+            })
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+            return Ok(());
+        }
         if event.emoji.id == Some(LEGACY_FROGLING_EMOJI_ID) {
             if event.kind == RawReactionKind::Add {
                 let _ = self

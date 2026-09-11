@@ -11,6 +11,52 @@ const GUILD_A: i64 = 7;
 const GUILD_B: i64 = 8;
 const ACCOUNT: &str = "steam-bot-main";
 
+#[test]
+fn guild_history_filters_before_limit_and_orders_only_its_own_rows() {
+    let (_file, repository) = fixture();
+    claim_created(&repository, GUILD_A, 1, "host-a1", 10);
+    claim_created(&repository, GUILD_A, 2, "host-a2", 20);
+    for pending_id in 1..=5 {
+        claim_created(
+            &repository,
+            GUILD_B,
+            pending_id,
+            &format!("host-b{pending_id}"),
+            100 + pending_id,
+        );
+    }
+    let recent = repository.recent_sessions_for_guild(GUILD_A, 1).unwrap();
+    assert_eq!(recent.len(), 1);
+    assert_eq!(
+        (recent[0].guild_id, recent[0].pending_match_id),
+        (GUILD_A, 2)
+    );
+    let recent = repository.recent_sessions_for_guild(GUILD_A, 10).unwrap();
+    assert_eq!(
+        recent
+            .iter()
+            .map(|row| row.pending_match_id)
+            .collect::<Vec<_>>(),
+        vec![2, 1]
+    );
+    assert!(
+        repository
+            .recent_sessions_for_guild(999, 10)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        repository
+            .recent_sessions_for_guild(GUILD_A, 0)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(matches!(
+        repository.recent_sessions_for_guild(GUILD_A, 1001),
+        Err(DotaSessionRepositoryError::InvalidHistoryLimit(1001))
+    ));
+}
+
 fn fixture() -> (NamedTempFile, DotaSessionRepository) {
     let file = NamedTempFile::new().expect("temporary database");
     let connection = Connection::open(file.path()).expect("open fixture");
@@ -360,4 +406,65 @@ fn sqlite_unique_valve_index_is_retained_by_the_fixture_contract() {
         )
         .expect("count Valve IDs");
     assert_eq!(raw_count, 1);
+}
+
+#[test]
+fn terminal_status_outbox_is_account_scoped_and_retains_old_undelivered_rows() {
+    let (_file, repository) = fixture();
+    for (id, account, phase, notice, channel) in [
+        (
+            1,
+            ACCOUNT,
+            DotaSessionPhase::Cancelled,
+            json!("retry"),
+            json!(55),
+        ),
+        (
+            2,
+            ACCOUNT,
+            DotaSessionPhase::Recorded,
+            json!(null),
+            json!(55),
+        ),
+        (
+            3,
+            "other",
+            DotaSessionPhase::Cancelled,
+            json!("private"),
+            json!(55),
+        ),
+        (
+            4,
+            ACCOUNT,
+            DotaSessionPhase::Cancelled,
+            json!("no destination"),
+            json!(null),
+        ),
+        (
+            5,
+            ACCOUNT,
+            DotaSessionPhase::Gathering,
+            json!("active"),
+            json!(55),
+        ),
+    ] {
+        let mut row = claim_created(&repository, GUILD_A, id, account, id);
+        row.phase = phase;
+        row.payload = json!({"pending_status":notice,"channel_id":channel});
+        repository.update(&row, row.revision, id).unwrap();
+    }
+    let rows = repository.terminal_status_pending(ACCOUNT).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].pending_match_id, 1);
+    let mut delivered = rows[0].clone();
+    delivered.payload["pending_status"] = json!(null);
+    repository
+        .update(&delivered, delivered.revision, 100)
+        .unwrap();
+    assert!(
+        repository
+            .terminal_status_pending(ACCOUNT)
+            .unwrap()
+            .is_empty()
+    );
 }

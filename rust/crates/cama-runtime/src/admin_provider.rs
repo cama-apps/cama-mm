@@ -64,6 +64,8 @@ const ADMINISTRATOR_PERMISSION: u64 = 1 << 3;
 const MANAGE_GUILD_PERMISSION: u64 = 1 << 5;
 const RECALIBRATION_MIN_GAMES: i64 = 5;
 
+mod dota;
+
 pub use crate::runtime_ports::{
     AdminExtendBettingRequest, AdminExtendBettingResult, AdminFakeLobbyRequest,
     AdminFakeLobbyResult, AdminLobbyControl, AdminLobbyEjectionRequest, AdminLobbyEjectionResult,
@@ -697,6 +699,10 @@ impl AdminHandler {
     ) -> Result<(), InteractionHandlerError> {
         let route = context.path.join(" ");
         match route.as_str() {
+            "dota settings" | "dota reset" | "dota status" | "dota start" | "dota cancel"
+            | "dota resume" | "dota manual" | "dota resolve" | "dota betting" => {
+                self.dota_command(context, responder).await
+            }
             "adjust rating" => self.adjust_rating(context, responder).await,
             "adjust rd" => self.adjust_rd(context, responder).await,
             "lowprio add" => self.lowprio_add(context, responder).await,
@@ -3069,6 +3075,11 @@ impl RegistrationProvider for AdminRegistrationProvider {
 
 fn admin_options(admin_rating_max: f64) -> Vec<CommandOptionSpec> {
     vec![
+        group(
+            "dota",
+            "Dota lobby settings and hosting controls",
+            dota::options(),
+        ),
         group(
             "adjust",
             "Adjust player rating fields",

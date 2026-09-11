@@ -23,6 +23,7 @@ async-trait.workspace = true
 cama-app = { path = "../cama-app" }
 cama-db = { path = "../cama-db" }
 cama-domain = { path = "../cama-domain" }
+serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

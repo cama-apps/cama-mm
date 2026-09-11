@@ -83,6 +83,8 @@ use crate::survey_provider::{
 use crate::trivia_provider::TriviaDiscordPort;
 use crate::wrapped_provider::{WrappedDiscordPort, WrappedDiscordProfile};
 
+mod spectator;
+
 const WRAPPED_AVATAR_MAX_BYTES: usize = 2 * 1024 * 1024;
 const WRAPPED_AVATAR_TIMEOUT: Duration = Duration::from_secs(10);
 const COMPONENT_ACKNOWLEDGEMENT_DEADLINE: Duration = Duration::from_millis(1_500);
@@ -3790,6 +3792,63 @@ async fn ensure_prediction_thread_writable(
 
 #[async_trait]
 impl DiscordTransport for SerenityDiscordTransport {
+    async fn delete_spectator_channels_by_marker(
+        &self,
+        guild_id: u64,
+        marker: &str,
+    ) -> Result<(), String> {
+        spectator::delete_by_marker(&self.context()?.http, guild_id, marker).await
+    }
+
+    async fn ensure_spectator_channel(
+        &self,
+        guild_id: u64,
+        marker: &str,
+        name: &str,
+        participants: &[u64],
+        viewers: &[u64],
+        known_channel: Option<u64>,
+    ) -> Result<u64, String> {
+        spectator::ensure(
+            &self.context()?.http,
+            guild_id,
+            marker,
+            name,
+            participants,
+            viewers,
+            known_channel,
+        )
+        .await
+    }
+
+    async fn audit_spectator_channel(
+        &self,
+        guild_id: u64,
+        marker: &str,
+        participants: &[u64],
+        viewers: &[u64],
+        channel_id: u64,
+    ) -> Result<(), String> {
+        spectator::audit(
+            &self.context()?.http,
+            guild_id,
+            marker,
+            participants,
+            viewers,
+            channel_id,
+        )
+        .await
+    }
+
+    async fn delete_spectator_channel(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+        marker: &str,
+    ) -> Result<(), String> {
+        spectator::delete(&self.context()?.http, guild_id, channel_id, marker).await
+    }
+
     async fn fetch_message(
         &self,
         channel_id: u64,

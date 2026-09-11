@@ -71,6 +71,8 @@ pub enum MatchRecordingRepositoryError {
     OutstandingLoan(i64),
     #[error("loan amount must be positive")]
     InvalidLoanAmount,
+    #[error("invalid Game Coordinator statistics: {0}")]
+    InvalidGcStatistics(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -390,6 +392,89 @@ impl MatchRecordingRepository {
 
     fn connection(&self) -> Result<Connection, rusqlite::Error> {
         open_runtime_connection(&self.path)
+    }
+
+    /// Persist the first validated postgame snapshot independently of API
+    /// enrichment. Retries retain that snapshot, including sparse fields.
+    pub fn save_gc_statistics(
+        &self,
+        match_id: i64,
+        guild_id: Option<i64>,
+        valve_match_id: i64,
+        payload: &str,
+    ) -> Result<(), MatchRecordingRepositoryError> {
+        let invalid = MatchRecordingRepositoryError::InvalidGcStatistics;
+        let payload: JsonValue = serde_json::from_str(payload)
+            .map_err(|error| invalid(format!("malformed JSON: {error}")))?;
+        let object = payload
+            .as_object()
+            .ok_or_else(|| invalid("payload must be an object".into()))?;
+        if valve_match_id <= 0
+            || object.get("match_id").and_then(JsonValue::as_i64) != Some(valve_match_id)
+        {
+            return Err(invalid(
+                "payload match_id must equal the positive Valve match ID".into(),
+            ));
+        }
+        let guild_id = Self::normalize_guild_id(guild_id);
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let stored: Option<(Option<i64>, Option<i64>)> = transaction
+            .query_row(
+                "SELECT valve_match_id,winning_team FROM matches WHERE match_id=?1 AND guild_id=?2",
+                params![match_id, guild_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((stored_valve_id, winning_team)) = stored else {
+            return Err(invalid("match does not exist in this guild".into()));
+        };
+        if stored_valve_id != Some(valve_match_id) {
+            return Err(invalid(
+                "Valve match ID does not match the recorded match".into(),
+            ));
+        }
+        if let Some(winner) = object.get("radiant_win").filter(|value| !value.is_null()) {
+            let winner = winner
+                .as_bool()
+                .ok_or_else(|| invalid("radiant_win must be a boolean when present".into()))?;
+            if winning_team.is_some_and(|team| team != if winner { 1 } else { 2 }) {
+                return Err(invalid("winner does not match the recorded match".into()));
+            }
+        }
+        let existing_valve_id: Option<i64> = transaction
+            .query_row(
+                "SELECT valve_match_id FROM match_gc_statistics WHERE match_id=?1 AND guild_id=?2",
+                params![match_id, guild_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if existing_valve_id.is_some_and(|existing| existing != valve_match_id) {
+            return Err(invalid(
+                "saved statistics belong to another Valve match".into(),
+            ));
+        }
+        transaction.execute(
+            "INSERT INTO match_gc_statistics(guild_id,match_id,valve_match_id,payload_json)
+             VALUES(?1,?2,?3,?4) ON CONFLICT(guild_id,match_id) DO NOTHING",
+            params![guild_id, match_id, valve_match_id, payload.to_string()],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn gc_statistics(
+        &self,
+        match_id: i64,
+        guild_id: Option<i64>,
+    ) -> Result<Option<String>, MatchRecordingRepositoryError> {
+        self.connection()?.query_row(
+            "SELECT statistics.payload_json FROM match_gc_statistics AS statistics
+             JOIN matches ON matches.match_id=statistics.match_id AND matches.guild_id=statistics.guild_id
+              AND matches.valve_match_id=statistics.valve_match_id
+             WHERE statistics.match_id=?1 AND statistics.guild_id=?2",
+            params![match_id, Self::normalize_guild_id(guild_id)], |row| row.get(0),
+        ).optional().map_err(Into::into)
     }
 
     pub fn add_player(
@@ -1108,6 +1193,21 @@ impl MatchRecordingRepository {
                 )
                 .optional()?;
             if let Some(match_id) = existing_match_id {
+                let (winner,radiant,dire): (i64,String,String) = transaction.query_row(
+                    "SELECT winning_team,team1_players,team2_players FROM matches WHERE match_id=?1",[match_id],|row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
+                let requested_winner = if request.winning_team == TeamSide::Radiant {
+                    1
+                } else {
+                    2
+                };
+                if winner != requested_winner
+                    || decode_ids(&radiant) != request.radiant_ids
+                    || decode_ids(&dire) != request.dire_ids
+                {
+                    return Err(MatchRecordingRepositoryError::InvalidTeams(
+                        "result conflicts with committed match; use correction",
+                    ));
+                }
                 transaction.commit()?;
                 return Ok(MatchFinalization {
                     match_id,
@@ -1120,6 +1220,50 @@ impl MatchRecordingRepository {
                     jc_changes: BTreeMap::new(),
                     loan_repayments: Vec::new(),
                 });
+            }
+        }
+
+        if let Some(pending_id) = request.pending_match_id {
+            let raw: String = transaction
+                .query_row(
+                    "SELECT payload FROM pending_matches WHERE guild_id=?1 AND pending_match_id=?2",
+                    params![guild_id, pending_id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or(MatchRecordingRepositoryError::InvalidTeams(
+                    "pending match no longer exists",
+                ))?;
+            let payload: serde_json::Value = serde_json::from_str(&raw).map_err(|_| {
+                MatchRecordingRepositoryError::InvalidTeams("invalid pending payload")
+            })?;
+            for (key, ids) in [
+                ("radiant_team_ids", request.radiant_ids),
+                ("dire_team_ids", request.dire_ids),
+            ] {
+                if let Some(stored) = payload.get(key)
+                    && serde_json::from_value::<Vec<i64>>(stored.clone())
+                        .ok()
+                        .as_deref()
+                        != Some(ids)
+                {
+                    return Err(MatchRecordingRepositoryError::InvalidTeams(
+                        "pending roster changed",
+                    ));
+                }
+            }
+            if payload
+                .get("shuffle_setup_complete")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+                || payload
+                    .get("draft_setup_complete")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(false)
+            {
+                return Err(MatchRecordingRepositoryError::InvalidTeams(
+                    "shuffle setup is incomplete",
+                ));
             }
         }
 
@@ -1368,6 +1512,36 @@ impl MatchRecordingRepository {
         let guild_id = Self::normalize_guild_id(request.guild_id);
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let gc_valve_id: Option<i64> = transaction
+            .query_row(
+                "SELECT valve_match_id FROM match_gc_statistics WHERE match_id=?1 AND guild_id=?2",
+                params![request.match_id, guild_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if gc_valve_id.is_some_and(|valve_id| valve_id != request.valve_match_id) {
+            return Err(MatchRecordingRepositoryError::InvalidGcStatistics(
+                "enrichment cannot replace a Game Coordinator match association".into(),
+            ));
+        }
+        // API retrieval and app-side projection happen before this writer
+        // lock. If the first GC snapshot appeared in between, a stale API
+        // projection must reload and merge it before replacing canonical data.
+        if gc_valve_id.is_some()
+            && !request
+                .enrichment_data
+                .and_then(|payload| serde_json::from_str::<JsonValue>(payload).ok())
+                .is_some_and(|payload| {
+                    payload
+                        .get("_cama_gc_statistics")
+                        .and_then(JsonValue::as_bool)
+                        == Some(true)
+                })
+        {
+            return Err(MatchRecordingRepositoryError::InvalidGcStatistics(
+                "coordinator snapshot appeared; reload statistics before enrichment".into(),
+            ));
+        }
         let changed = transaction.execute(
             "UPDATE matches
              SET valve_match_id = ?1, duration_seconds = ?2,

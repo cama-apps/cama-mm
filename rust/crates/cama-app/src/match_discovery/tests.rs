@@ -17,6 +17,8 @@ type SteamIdBulkLinkCalls = Vec<Vec<(UserId, SteamId)>>;
 
 #[derive(Clone, Default)]
 struct FakeMatchRepository {
+    gc: Arc<Mutex<Option<String>>>,
+    previous: Arc<Mutex<Option<String>>>,
     matches: Arc<Mutex<BTreeMap<(GuildId, InternalMatchId), InternalMatch>>>,
     participants: Arc<Mutex<ParticipantRows>>,
     point_match_calls: Arc<AtomicUsize>,
@@ -58,6 +60,24 @@ impl FakeMatchRepository {
 }
 
 impl MatchDiscoveryReadPort for FakeMatchRepository {
+    fn gc_statistics(
+        &self,
+        _: InternalMatchId,
+        guild: GuildId,
+    ) -> Result<Option<String>, DiscoveryPortError> {
+        Ok(if guild == GUILD {
+            self.gc.lock().unwrap().clone()
+        } else {
+            None
+        })
+    }
+    fn enrichment_payload(
+        &self,
+        _: InternalMatchId,
+        _: GuildId,
+    ) -> Result<Option<String>, DiscoveryPortError> {
+        Ok(self.previous.lock().unwrap().clone())
+    }
     fn get_match(
         &self,
         match_id: InternalMatchId,
@@ -1918,4 +1938,89 @@ fn stronger_roster_count_deduplicates_multiple_accounts_per_player() {
     ]);
 
     assert_eq!(count_roster_matches(&details, &participants, &steam_ids), 2);
+}
+
+#[test]
+fn coordinator_statistics_win_over_api_by_presence_and_account_identity() {
+    let (matches, players, api, writer, _) = one_player_enrichment_fixture();
+    *matches.gc.lock().unwrap() = Some(serde_json::json!({"match_id":8181518332_i64,"radiant_win":true,"players":[{"account_id":12345,"player_slot":0,"hero_id":1,"kills":0,"gold_per_min":601}]}).to_string());
+    let api_raw = serde_json::json!({"match_id":8181518332_i64,"radiant_win":true,"players":[{"account_id":999,"kills":99},{"account_id":12345,"player_slot":0,"hero_id":2,"kills":12,"deaths":3,"xp_per_min":702}],"radiant_gold_adv":[0,100],"radiant_xp_adv":[0,200]});
+    api.set_details(
+        ValveMatchId(8181518332),
+        vec![Ok(project_match_details(api_raw, 8181518332))],
+    );
+    let service =
+        MatchEnrichmentService::new(matches, players, api, writer.clone(), None::<FakeOpenSkill>);
+    let result = service.enrich_match(service_request());
+    assert!(result.success);
+    assert!(!result.fantasy_points_calculated);
+    let writes = writer.writes.lock().unwrap();
+    let stats = &writes[0].participant_updates[0];
+    assert_eq!(
+        (
+            stats.stats.hero_id,
+            stats.stats.kills,
+            stats.stats.deaths,
+            stats.stats.gpm,
+            stats.stats.xpm
+        ),
+        (1, 0, 3, 601, 702)
+    );
+    let raw: serde_json::Value =
+        serde_json::from_str(writes[0].raw_payload.as_deref().unwrap()).unwrap();
+    assert_eq!(raw["players"].as_array().unwrap().len(), 1);
+    assert_eq!(raw["radiant_gold_adv"], serde_json::json!([0, 100]));
+}
+
+#[test]
+fn coordinator_statistics_survive_api_outage_without_fabricating_missing_stats_or_fantasy() {
+    let (matches, players, api, writer, openskill) = one_player_enrichment_fixture();
+    *matches.gc.lock().unwrap() = Some(serde_json::json!({"match_id":8181518332_i64,"radiant_win":true,"players":[{"account_id":12345,"player_slot":0,"hero_id":1,"kills":0}]}).to_string());
+    api.set_details(
+        ValveMatchId(8181518332),
+        vec![Err(DiscoveryPortError::new("unavailable"))],
+    );
+    let service = MatchEnrichmentService::new(
+        matches,
+        players,
+        api,
+        writer.clone(),
+        Some(openskill.clone()),
+    );
+    let result = service.enrich_match(service_request());
+    assert!(result.success);
+    assert!(!result.fantasy_points_calculated);
+    assert!(result.openskill_update.is_none());
+    let writes = writer.writes.lock().unwrap();
+    let update = &writes[0].participant_updates[0];
+    assert_eq!(update.stats.kills, 0);
+    assert!(update.present_stats.as_ref().unwrap().contains("kills"));
+    assert!(!update.present_stats.as_ref().unwrap().contains("deaths"));
+    assert!(!update.fantasy_complete);
+    let raw: serde_json::Value =
+        serde_json::from_str(writes[0].raw_payload.as_deref().unwrap()).unwrap();
+    assert!(raw.get("radiant_gold_adv").is_none());
+}
+
+#[test]
+fn later_partial_api_refresh_preserves_gc_zeros_and_previous_parsed_graphs() {
+    let gc = serde_json::json!({"match_id":42,"radiant_win":true,"players":[{"account_id":1,"hero_id":2,"kills":0}]}).to_string();
+    let previous = serde_json::json!({"match_id":42,"players":[{"account_id":1,"deaths":5,"lane_role":2,"lh_t":[0,1]}],"radiant_gold_adv":[0,100],"radiant_xp_adv":[0,200]}).to_string();
+    let incoming = project_match_details(
+        serde_json::json!({"match_id":42,"players":[{"account_id":1,"kills":9,"deaths":null,"lane_role":null}],"radiant_gold_adv":[],"radiant_xp_adv":null}),
+        42,
+    );
+    let merged = statistics::merged_details(Some(&previous), incoming, &gc, 42).unwrap();
+    assert_eq!(
+        (
+            merged.players[0].stats.kills,
+            merged.players[0].stats.deaths,
+            merged.players[0].stats.lane_role
+        ),
+        (0, 5, Some(2))
+    );
+    let raw: serde_json::Value =
+        serde_json::from_str(merged.raw_payload.as_deref().unwrap()).unwrap();
+    assert_eq!(raw["radiant_gold_adv"], serde_json::json!([0, 100]));
+    assert_eq!(raw["radiant_xp_adv"], serde_json::json!([0, 200]));
 }

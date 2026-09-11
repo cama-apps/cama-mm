@@ -4651,3 +4651,84 @@ async fn failed_readycheck_publication_releases_the_permit_for_the_next_attempt(
         "the permit must be released after the failed run, got {second_replies:?}"
     );
 }
+
+#[tokio::test]
+async fn radio_subscription_is_durable_lobby_intent_and_never_joins_playing_roster() {
+    let database = database_with_players(&[(10, "Creator"), (20, "Viewer")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let lobby = lobby_snapshot(&provider, LobbyKind::Open);
+    let message = lobby.message_ids.message_id.unwrap().0;
+    let mut reaction = raw_sword(RawReactionKind::Add, message as u64, 20, "Viewer");
+    reaction.emoji = RawReactionEmoji::unicode(SPECTATOR_EMOJI);
+    provider
+        .raw_reaction_observer()
+        .observe(reaction.clone())
+        .await
+        .unwrap();
+    let repository = &provider.handler.state.spectators;
+    assert_eq!(repository.subscribers(42, message).unwrap(), vec![20]);
+    assert!(
+        !lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(20))
+    );
+    assert!(repository.subscribers(43, message).unwrap().is_empty());
+    reaction.kind = RawReactionKind::Remove;
+    provider
+        .raw_reaction_observer()
+        .observe(reaction)
+        .await
+        .unwrap();
+    assert!(repository.subscribers(42, message).unwrap().is_empty());
+}
+#[tokio::test]
+async fn radio_on_foreign_or_non_lobby_messages_does_not_subscribe() {
+    let database = database_with_players(&[(10, "Creator")]);
+    let provider = provider_for(&database, Arc::new(RecordingTransport::default()));
+    dispatch_command(
+        &provider,
+        "lobby",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let message = lobby_snapshot(&provider, LobbyKind::Open)
+        .message_ids
+        .message_id
+        .unwrap()
+        .0;
+    let mut reaction = raw_sword(RawReactionKind::Add, message as u64, 20, "Viewer");
+    reaction.emoji = RawReactionEmoji::unicode(SPECTATOR_EMOJI);
+    reaction.guild_id = Some(43);
+    provider
+        .raw_reaction_observer()
+        .observe(reaction.clone())
+        .await
+        .unwrap();
+    reaction.guild_id = Some(42);
+    reaction.message_id += 999;
+    provider
+        .raw_reaction_observer()
+        .observe(reaction)
+        .await
+        .unwrap();
+    assert!(
+        provider
+            .handler
+            .state
+            .spectators
+            .subscribers(42, message)
+            .unwrap()
+            .is_empty()
+    );
+}

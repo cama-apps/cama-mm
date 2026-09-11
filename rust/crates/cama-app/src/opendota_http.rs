@@ -16,7 +16,6 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
-use cama_domain::role_derivation::FARM_PRIORITY_MINUTE;
 use chrono::Utc;
 use reqwest::{Client, Response, StatusCode};
 use serde_json::{Map, Value};
@@ -25,9 +24,8 @@ use tokio::runtime::{Builder, Runtime};
 use tokio::sync::Mutex;
 
 use crate::match_discovery::{
-    DiscoveryPortError, DotabuffIdExtractionPort, EnrichedParticipantStats, FantasyStats,
-    OpenDotaDiscoveryPort, OpenDotaMatchDetails, OpenDotaPlayer, PlayerHistoryMatch, SteamId,
-    ValveMatchId, WrappedPlayerTelemetry,
+    DiscoveryPortError, DotabuffIdExtractionPort, OpenDotaDiscoveryPort, OpenDotaMatchDetails,
+    PlayerHistoryMatch, SteamId, ValveMatchId,
 };
 use crate::opendota_player_service::{
     HeroMetadata, OpenDotaPlayerApiPort, OpenDotaPlayerPortError, OpenDotaPlayerService,
@@ -1503,125 +1501,7 @@ fn project_history_matches(values: Vec<Value>) -> Vec<PlayerHistoryMatch> {
 }
 
 /// Project a previously saved OpenDota response without another network request.
-pub fn project_match_details(
-    value: Value,
-    requested_match_id: i64,
-) -> Option<OpenDotaMatchDetails> {
-    let object = value.as_object()?;
-    let raw_payload = serde_json::to_string(&value).ok();
-    let players = object
-        .get("players")
-        .and_then(Value::as_array)
-        .map_or_else(Vec::new, |players| {
-            players.iter().filter_map(project_match_player).collect()
-        });
-    Some(OpenDotaMatchDetails {
-        match_id: ValveMatchId(field_i64(object, "match_id").unwrap_or(requested_match_id)),
-        duration_seconds: field_i64(object, "duration").unwrap_or(0),
-        radiant_win: field_bool(object, "radiant_win").unwrap_or(false),
-        radiant_score: field_i64(object, "radiant_score").unwrap_or(0),
-        dire_score: field_i64(object, "dire_score").unwrap_or(0),
-        game_mode: field_i64(object, "game_mode").unwrap_or(0),
-        radiant_captain: captain_account_id(object.get("radiant_captain")),
-        dire_captain: captain_account_id(object.get("dire_captain")),
-        comeback: field_i64(object, "comeback"),
-        throw_amount: field_i64(object, "throw"),
-        raw_payload,
-        players,
-    })
-}
-
-fn captain_account_id(value: Option<&Value>) -> Option<SteamId> {
-    let id = match value? {
-        Value::Number(number) => number.as_i64(),
-        Value::String(text) => text.parse::<i64>().ok(),
-        _ => None,
-    }?;
-    (id > 0 && id < i64::from(u32::MAX)).then_some(SteamId(id))
-}
-
-fn project_match_player(value: &Value) -> Option<OpenDotaPlayer> {
-    let object = value.as_object()?;
-    let purchase_keys = object
-        .get("purchase_log")
-        .and_then(Value::as_array)
-        .map_or_else(Vec::new, |entries| {
-            entries
-                .iter()
-                .filter_map(|entry| entry.get("key").and_then(Value::as_str))
-                .map(ToOwned::to_owned)
-                .collect()
-        });
-    Some(OpenDotaPlayer {
-        account_id: field_i64(object, "account_id").map(SteamId),
-        player_slot: field_i64(object, "player_slot").and_then(|value| u16::try_from(value).ok()),
-        stats: EnrichedParticipantStats {
-            hero_id: field_i64(object, "hero_id").unwrap_or(0),
-            kills: field_i64(object, "kills").unwrap_or(0),
-            deaths: field_i64(object, "deaths").unwrap_or(0),
-            assists: field_i64(object, "assists").unwrap_or(0),
-            gpm: field_i64(object, "gold_per_min").unwrap_or(0),
-            xpm: field_i64(object, "xp_per_min").unwrap_or(0),
-            hero_damage: field_i64(object, "hero_damage").unwrap_or(0),
-            tower_damage: field_i64(object, "tower_damage").unwrap_or(0),
-            last_hits: field_i64(object, "last_hits").unwrap_or(0),
-            denies: field_i64(object, "denies").unwrap_or(0),
-            net_worth: field_i64(object, "net_worth")
-                .or_else(|| field_i64(object, "total_gold"))
-                .unwrap_or(0),
-            hero_healing: field_i64(object, "hero_healing").unwrap_or(0),
-            lane_role: field_i64(object, "lane_role"),
-            lane_efficiency: field_i64(object, "lane_efficiency_pct"),
-            gold_at_10: object
-                .get("gold_t")
-                .and_then(Value::as_array)
-                .and_then(|series| series.get(FARM_PRIORITY_MINUTE))
-                .and_then(Value::as_i64),
-            last_hits_at_10: object
-                .get("lh_t")
-                .and_then(Value::as_array)
-                .and_then(|series| series.get(FARM_PRIORITY_MINUTE))
-                .and_then(Value::as_i64),
-            towers_killed: field_i64(object, "towers_killed"),
-            roshans_killed: field_i64(object, "roshans_killed"),
-            teamfight_participation: field_f64(object, "teamfight_participation"),
-            obs_placed: field_i64(object, "obs_placed"),
-            sen_placed: field_i64(object, "sen_placed"),
-            camps_stacked: field_i64(object, "camps_stacked"),
-            rune_pickups: field_i64(object, "rune_pickups"),
-            firstblood_claimed: Some(i64::from(
-                field_bool(object, "firstblood_claimed").unwrap_or(false),
-            )),
-            stuns: field_f64(object, "stuns"),
-        },
-        fantasy: FantasyStats {
-            kills: field_f64(object, "kills").unwrap_or(0.0),
-            deaths: object.get("deaths").and_then(value_f64),
-            assists: field_f64(object, "assists").unwrap_or(0.0),
-            last_hits: field_f64(object, "last_hits").unwrap_or(0.0),
-            denies: field_f64(object, "denies").unwrap_or(0.0),
-            gold_per_min: field_f64(object, "gold_per_min").unwrap_or(0.0),
-            xp_per_min: field_f64(object, "xp_per_min").unwrap_or(0.0),
-            towers_killed: field_f64(object, "towers_killed").unwrap_or(0.0),
-            roshans_killed: field_f64(object, "roshans_killed").unwrap_or(0.0),
-            teamfight_participation: field_f64(object, "teamfight_participation").unwrap_or(0.0),
-            obs_placed: field_f64(object, "obs_placed").unwrap_or(0.0),
-            sen_placed: field_f64(object, "sen_placed").unwrap_or(0.0),
-            camps_stacked: field_f64(object, "camps_stacked").unwrap_or(0.0),
-            rune_pickups: field_f64(object, "rune_pickups").unwrap_or(0.0),
-            firstblood_claimed: field_bool(object, "firstblood_claimed").unwrap_or(false),
-            stuns: field_f64(object, "stuns").unwrap_or(0.0),
-            hero_healing: field_f64(object, "hero_healing").unwrap_or(0.0),
-        },
-        wrapped: WrappedPlayerTelemetry {
-            actions_per_min: field_i64(object, "actions_per_min"),
-            courier_kills: field_i64(object, "courier_kills"),
-            pings: field_i64(object, "pings"),
-            lane_role: field_i64(object, "lane_role"),
-            purchase_keys,
-        },
-    })
-}
+pub use crate::match_discovery::project_match_details;
 
 fn project_registration_player(value: Value) -> Option<OpenDotaPlayerData> {
     let object = value.as_object()?;

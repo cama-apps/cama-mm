@@ -2024,6 +2024,23 @@ async fn terminal_job_cas_failure_retains_linked_job_and_envelope() {
 }
 
 #[tokio::test]
+async fn saved_draft_resume_rejects_non_admin_before_recovery() {
+    let (_database, provider, _drafts, _persistence, _handle, _state, _discord) =
+        persistent_completion_fixture().await;
+    let responder = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .resume_saved_completion(42, 123456, None, responder.clone())
+        .await
+        .unwrap();
+    assert!(
+        responder.responses.lock().unwrap()[0]
+            .content
+            .contains("Only server admins")
+    );
+}
+
+#[tokio::test]
 async fn financial_setup_failure_retains_live_draft_then_retry_completes_once() {
     let (database, provider, drafts, persistence, handle, state, _discord) =
         persistent_completion_fixture().await;
@@ -2066,6 +2083,23 @@ async fn financial_setup_failure_retains_live_draft_then_retry_completes_once() 
     let pending_match_id = envelopes[0]
         .pending_match_id
         .expect("retained linked pending match");
+    let gated = provider
+        .handler
+        .pending
+        .pending_match(42, pending_match_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(gated.state.extra["draft_setup_complete"], json!(false));
+    assert!(!gated.state.betting_open(unix_now()));
+    assert!(matches!(
+        provider
+            .handler
+            .pending
+            .begin_hosted_betting(42, pending_match_id, unix_now()),
+        Err(cama_db::match_runtime::PendingMatchRepositoryError::SetupIncomplete(_))
+    ));
+    assert!(matches!(provider.handler.bets.abort_pending_match_atomic(Some(42),pending_match_id,&[]),
+        Err(cama_db::betting_service_repository::BettingServiceRepositoryError::DraftFinalizationInProgress(_))));
     let completion_key = cama_db::draft_finalization::draft_completion_key(42, state.session_id);
     let finalization =
         cama_db::draft_finalization::DraftFinalizationRepository::new(database.path());
@@ -2099,7 +2133,7 @@ async fn financial_setup_failure_retains_live_draft_then_retry_completes_once() 
         let response = responder.responses.lock().expect("retry responses");
         assert_eq!(response.len(), 1);
         assert!(response[0].content.contains("safely retained"));
-        assert!(response[0].content.contains("Retry finalization"));
+        assert!(response[0].content.contains("/draft resume"));
     }
     connection
         .execute_batch("DROP TRIGGER fail_draft_financial_setup;")
@@ -2108,15 +2142,16 @@ async fn financial_setup_failure_retains_live_draft_then_retry_completes_once() 
 
     provider
         .handler
-        .complete_owned(
-            42,
-            handle,
-            state.clone(),
-            Arc::new(TestResponder::default()),
-            true,
-        )
+        .resume_saved_completion(42, 999, Some(8), Arc::new(TestResponder::default()))
         .await
-        .expect("retry frozen setup and complete Draft");
+        .expect("admin resumes frozen setup and completes Draft");
+    let ready = provider
+        .handler
+        .pending
+        .pending_match(42, pending_match_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(ready.state.extra["draft_setup_complete"], json!(true));
 
     assert!(!drafts.has_active_draft(Some(42)));
     assert!(
@@ -3292,7 +3327,7 @@ fn seed_players(path: &std::path::Path, guild_id: i64, ids: &[i64], balance: i64
 }
 
 #[test]
-fn command_surface_is_exactly_the_four_python_subcommands() {
+fn command_surface_includes_admin_finalization_recovery() {
     let options = draft_options();
     let names = options
         .iter()
@@ -3300,7 +3335,13 @@ fn command_surface_is_exactly_the_four_python_subcommands() {
         .collect::<Vec<_>>();
     assert_eq!(
         names,
-        ["start", "restart", "sampleinprogress", "samplecomplete"]
+        [
+            "start",
+            "resume",
+            "restart",
+            "sampleinprogress",
+            "samplecomplete"
+        ]
     );
     assert!(
         options[0]
@@ -4706,4 +4747,32 @@ fn one_guild_hydration_failure_does_not_block_other_guilds() {
         drafts.has_active_draft(Some(43)),
         "the healthy guild must still hydrate"
     );
+}
+
+#[test]
+fn busy_bot_draft_result_explains_manual_creation_and_recording() {
+    let state = state_for_draft();
+    let pending = PendingMatchRecord {
+        pending_match_id: 88,
+        guild_id: 42,
+        created_at: None,
+        updated_at: None,
+        state: PendingMatchState {
+            extra: BTreeMap::from([
+                ("dota_hosting".into(), json!({"hosting":"manual"})),
+                ("dota_hosting_fallback_reason".into(), json!("bot_busy")),
+            ]),
+            ..Default::default()
+        },
+    };
+    let embed = completion_embed(&state, &pending);
+    let text = &embed
+        .fields
+        .iter()
+        .find(|f| f.name == "🎮 Dota Lobby")
+        .unwrap()
+        .value;
+    assert!(text.contains("hosting another match"));
+    assert!(text.contains("create the Dota lobby yourself"));
+    assert!(text.contains("`/record`"));
 }

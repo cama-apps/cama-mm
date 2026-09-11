@@ -27,6 +27,9 @@ use serde::Serialize;
 
 use crate::dedicated_lobby_channel::{GuildId, UserId};
 
+mod statistics;
+pub use statistics::{project_match_details, statistics_need_api};
+
 /// Identity discovery is intentionally all-or-nothing: a Dota match must
 /// contain every player from the recorded 5v5 lobby.
 pub const REQUIRED_DISCOVERY_ROSTER_MATCHES: usize = 10;
@@ -219,6 +222,20 @@ impl DiscoveryPortError {
 }
 
 pub trait MatchDiscoveryReadPort: Send + Sync {
+    fn gc_statistics(
+        &self,
+        _match_id: InternalMatchId,
+        _guild_id: GuildId,
+    ) -> Result<Option<String>, DiscoveryPortError> {
+        Ok(None)
+    }
+    fn enrichment_payload(
+        &self,
+        _match_id: InternalMatchId,
+        _guild_id: GuildId,
+    ) -> Result<Option<String>, DiscoveryPortError> {
+        Ok(None)
+    }
     fn get_match(
         &self,
         match_id: InternalMatchId,
@@ -281,6 +298,22 @@ pub trait PlayerSteamIdPort: Send + Sync {
 }
 
 impl MatchDiscoveryReadPort for CoreMatchRepository {
+    fn gc_statistics(
+        &self,
+        match_id: InternalMatchId,
+        guild_id: GuildId,
+    ) -> Result<Option<String>, DiscoveryPortError> {
+        CoreMatchRepository::gc_statistics(self, match_id.0, Some(guild_id.0))
+            .map_err(|error| DiscoveryPortError::new(error.to_string()))
+    }
+    fn enrichment_payload(
+        &self,
+        match_id: InternalMatchId,
+        guild_id: GuildId,
+    ) -> Result<Option<String>, DiscoveryPortError> {
+        CoreMatchRepository::raw_enrichment_data(self, match_id.0, Some(guild_id.0))
+            .map_err(|error| DiscoveryPortError::new(error.to_string()))
+    }
     fn get_match(
         &self,
         match_id: InternalMatchId,
@@ -1643,6 +1676,8 @@ pub fn validate_enrichment(
 pub struct ParticipantFantasyUpdate {
     pub discord_id: UserId,
     pub fantasy_points: f64,
+    pub fantasy_complete: bool,
+    pub present_stats: Option<BTreeSet<String>>,
     pub side: TeamSide,
     pub stats: EnrichedParticipantStats,
 }
@@ -1686,18 +1721,68 @@ impl EnrichmentWritePort for MatchRecordingRepository {
             .iter()
             .map(|update| DbEnrichmentParticipantUpdate {
                 discord_id: update.discord_id.0,
-                hero_id: Some(update.stats.hero_id),
-                kills: Some(update.stats.kills),
-                deaths: Some(update.stats.deaths),
-                assists: Some(update.stats.assists),
-                gpm: Some(update.stats.gpm),
-                xpm: Some(update.stats.xpm),
-                hero_damage: Some(update.stats.hero_damage),
-                tower_damage: Some(update.stats.tower_damage),
-                last_hits: Some(update.stats.last_hits),
-                denies: Some(update.stats.denies),
-                net_worth: Some(update.stats.net_worth),
-                hero_healing: Some(update.stats.hero_healing),
+                hero_id: update
+                    .present_stats
+                    .as_ref()
+                    .is_none_or(|fields| fields.contains("hero_id"))
+                    .then_some(update.stats.hero_id),
+                kills: update
+                    .present_stats
+                    .as_ref()
+                    .is_none_or(|fields| fields.contains("kills"))
+                    .then_some(update.stats.kills),
+                deaths: update
+                    .present_stats
+                    .as_ref()
+                    .is_none_or(|fields| fields.contains("deaths"))
+                    .then_some(update.stats.deaths),
+                assists: update
+                    .present_stats
+                    .as_ref()
+                    .is_none_or(|fields| fields.contains("assists"))
+                    .then_some(update.stats.assists),
+                gpm: update
+                    .present_stats
+                    .as_ref()
+                    .is_none_or(|fields| fields.contains("gold_per_min"))
+                    .then_some(update.stats.gpm),
+                xpm: update
+                    .present_stats
+                    .as_ref()
+                    .is_none_or(|fields| fields.contains("xp_per_min"))
+                    .then_some(update.stats.xpm),
+                hero_damage: update
+                    .present_stats
+                    .as_ref()
+                    .is_none_or(|fields| fields.contains("hero_damage"))
+                    .then_some(update.stats.hero_damage),
+                tower_damage: update
+                    .present_stats
+                    .as_ref()
+                    .is_none_or(|fields| fields.contains("tower_damage"))
+                    .then_some(update.stats.tower_damage),
+                last_hits: update
+                    .present_stats
+                    .as_ref()
+                    .is_none_or(|fields| fields.contains("last_hits"))
+                    .then_some(update.stats.last_hits),
+                denies: update
+                    .present_stats
+                    .as_ref()
+                    .is_none_or(|fields| fields.contains("denies"))
+                    .then_some(update.stats.denies),
+                net_worth: update
+                    .present_stats
+                    .as_ref()
+                    .is_none_or(|fields| {
+                        fields.contains("net_worth") || fields.contains("total_gold")
+                    })
+                    .then_some(update.stats.net_worth),
+                hero_healing: update
+                    .present_stats
+                    .as_ref()
+                    .is_none_or(|fields| fields.contains("hero_healing"))
+                    .then_some(update.stats.hero_healing),
                 lane_role: update.stats.lane_role,
                 lane_efficiency: update.stats.lane_efficiency,
                 gold_at_10: update.stats.gold_at_10,
@@ -1711,7 +1796,7 @@ impl EnrichmentWritePort for MatchRecordingRepository {
                 rune_pickups: update.stats.rune_pickups,
                 firstblood_claimed: update.stats.firstblood_claimed,
                 stuns: update.stats.stuns,
-                fantasy_points: Some(update.fantasy_points),
+                fantasy_points: update.fantasy_complete.then_some(update.fantasy_points),
             })
             .collect::<Vec<_>>();
         let wrapped_facts = write
@@ -1907,9 +1992,12 @@ impl<W: EnrichmentWritePort> MatchEnrichmentPolicy<W> {
                 TeamSide::Radiant => radiant_fantasy += fantasy_points,
                 TeamSide::Dire => dire_fantasy += fantasy_points,
             }
+            let present_stats = statistics::presence(&input.details, steam_id);
             updates.push(ParticipantFantasyUpdate {
                 discord_id,
                 fantasy_points,
+                fantasy_complete: statistics::fantasy_complete(present_stats.as_ref()),
+                present_stats,
                 side,
                 stats: player.stats.clone(),
             });
@@ -2223,9 +2311,36 @@ where
             }
             Err(error) => return MatchEnrichmentServiceResult::failed(error.to_string()),
         };
-        let details = match request.opendota_match_data {
-            Some(details) => details,
-            None => match self.opendota.match_details(request.valve_match_id) {
+        let gc = match self
+            .match_repository
+            .gc_statistics(request.internal_match_id, normalized_guild)
+        {
+            Ok(gc) => gc,
+            Err(error) => return MatchEnrichmentServiceResult::failed(error.to_string()),
+        };
+        let fetched = match request.opendota_match_data {
+            Some(details) => Ok(Some(details)),
+            None => self.opendota.match_details(request.valve_match_id),
+        };
+        let details = if let Some(gc) = gc {
+            let previous = match self
+                .match_repository
+                .enrichment_payload(request.internal_match_id, normalized_guild)
+            {
+                Ok(previous) => previous,
+                Err(error) => return MatchEnrichmentServiceResult::failed(error.to_string()),
+            };
+            match statistics::merged_details(
+                previous.as_deref(),
+                fetched.ok().flatten(),
+                &gc,
+                request.valve_match_id.0,
+            ) {
+                Ok(details) => details,
+                Err(error) => return MatchEnrichmentServiceResult::failed(error),
+            }
+        } else {
+            match fetched {
                 Ok(Some(details)) => details,
                 Ok(None) => {
                     return MatchEnrichmentServiceResult::failed(
@@ -2233,8 +2348,13 @@ where
                     );
                 }
                 Err(error) => return MatchEnrichmentServiceResult::failed(error.to_string()),
-            },
+            }
         };
+        let fantasy_complete = details.players.iter().all(|player| {
+            player.account_id.is_some_and(|account| {
+                statistics::fantasy_complete(statistics::presence(&details, account).as_ref())
+            })
+        });
         let radiant_score = details.radiant_score;
         let dire_score = details.dire_score;
         let participants = match self
@@ -2287,7 +2407,7 @@ where
             dire_score,
             radiant_fantasy: result.radiant_fantasy,
             dire_fantasy: result.dire_fantasy,
-            fantasy_points_calculated: result.success,
+            fantasy_points_calculated: result.success && fantasy_complete,
             openskill_update: None,
             draft_analysis_error: None,
         };
@@ -2305,6 +2425,7 @@ where
                 .err();
         }
         if service_result.success
+            && fantasy_complete
             && let Some(openskill) = &self.openskill
         {
             service_result.openskill_update = Some(

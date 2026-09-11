@@ -5,6 +5,9 @@
 //! bytes without Python, native graphics dependencies, or process-global
 //! plotting state.
 
+mod win_probability;
+pub use win_probability::draw_win_probability_graph;
+
 use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::sync::OnceLock;

@@ -1532,3 +1532,15 @@ fn test_position_radar_keeps_every_spoke_label_on_the_canvas() {
     });
     assert!(!right_edge_painted, "a spoke label reached the canvas edge");
 }
+
+#[test]
+fn win_probability_chart_uses_percent_scale_and_rejects_invalid_samples() {
+    let graph = draw_win_probability_graph(&[0.0, 50.0, 100.0], 42).unwrap();
+    let decoded = decode_png(&graph);
+    assert_eq!((decoded.width, decoded.height), (790, 360));
+    assert!(decoded.contains_in((55, 280, 65, 289), DISCORD_GREEN));
+    assert!(decoded.contains_in((769, 40, 778, 50), DISCORD_GREEN));
+    for values in [&[][..], &[50.0], &[0.0, f64::NAN], &[0.0, 100.1]] {
+        assert!(draw_win_probability_graph(values, 42).is_none());
+    }
+}

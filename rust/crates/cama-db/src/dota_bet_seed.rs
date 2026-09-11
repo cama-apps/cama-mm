@@ -27,7 +27,7 @@ impl BettingMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum BettingTeam {
     Radiant,
     Dire,
@@ -535,17 +535,9 @@ impl DotaBetSeedRepository {
         let guild_id = Self::normalize_guild_id(guild_id);
         let mut connection = open_runtime_connection(&self.path)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let consumed = consume_seed_state(&transaction, guild_id, pending_match_id)?;
-        let first_game_restored =
-            release_first_game_claim(&transaction, guild_id, pending_match_id)?;
-        let returned_to_fund = consumed.reserved.saturating_sub(first_game_restored).max(0);
-        credit_fund(&transaction, guild_id, returned_to_fund)?;
+        let result = abort_seed_in_transaction(&transaction, guild_id, pending_match_id)?;
         transaction.commit()?;
-        Ok(SeedAbort {
-            consumed,
-            first_game_restored,
-            returned_to_fund,
-        })
+        Ok(result)
     }
 
     pub fn nonprofit_balance(
@@ -816,6 +808,22 @@ pub(crate) fn settle_seed_with_player_pool_in_transaction(
         },
         if has_participants { daily } else { 0 },
     ))
+}
+
+pub(crate) fn abort_seed_in_transaction(
+    transaction: &Transaction<'_>,
+    guild_id: i64,
+    pending_match_id: i64,
+) -> Result<SeedAbort, DotaBetSeedRepositoryError> {
+    let consumed = consume_seed_state(transaction, guild_id, pending_match_id)?;
+    let first_game_restored = release_first_game_claim(transaction, guild_id, pending_match_id)?;
+    let returned_to_fund = consumed.reserved.saturating_sub(first_game_restored).max(0);
+    credit_fund(transaction, guild_id, returned_to_fund)?;
+    Ok(SeedAbort {
+        consumed,
+        first_game_restored,
+        returned_to_fund,
+    })
 }
 
 pub(crate) fn settle_seed_in_transaction(

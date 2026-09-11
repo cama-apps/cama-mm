@@ -2513,6 +2513,8 @@ pub struct CoreMatchRecord {
     /// Bankruptcy, vanity, and low-priority withholding applied to each
     /// referral reward settled by `settle_referrals_at`.
     pub referral_deductions: OwnedProfitDeductionPolicy,
+    /// Immutable retry policy committed with the core result.
+    pub recording_policy: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2556,6 +2558,7 @@ impl CoreMatchRecord {
             win_reward_jc: None,
             settle_referrals_at: None,
             referral_deductions: OwnedProfitDeductionPolicy::default(),
+            recording_policy: None,
         }
     }
 }
@@ -2619,6 +2622,37 @@ pub struct MatchRepository {
 }
 
 impl MatchRepository {
+    /// Authoritative postgame data remains independent of later API refreshes.
+    pub fn gc_statistics(
+        &self,
+        match_id: i64,
+        guild_id: Option<i64>,
+    ) -> Result<Option<String>, CoreRepositoryError> {
+        self.connection()?.query_row(
+            "SELECT statistics.payload_json FROM match_gc_statistics AS statistics
+             JOIN matches ON matches.match_id=statistics.match_id AND matches.guild_id=statistics.guild_id
+              AND matches.valve_match_id=statistics.valve_match_id
+             WHERE statistics.match_id=?1 AND statistics.guild_id=?2",
+            params![match_id, Self::normalize_guild_id(guild_id)], |row| row.get(0),
+        ).optional().map_err(Into::into)
+    }
+
+    pub fn raw_enrichment_data(
+        &self,
+        match_id: i64,
+        guild_id: Option<i64>,
+    ) -> Result<Option<String>, CoreRepositoryError> {
+        self.connection()?
+            .query_row(
+                "SELECT enrichment_data FROM matches WHERE match_id=?1 AND guild_id=?2",
+                params![match_id, Self::normalize_guild_id(guild_id)],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(Option::flatten)
+            .map_err(Into::into)
+    }
+
     /// Return the internal match currently owning a Valve match ID in a guild.
     pub fn match_id_for_valve_match(
         &self,
@@ -2785,11 +2819,27 @@ impl MatchRepository {
             "SELECT m.match_id, m.valve_match_id
                FROM matches AS m
               WHERE m.guild_id = ?1 AND m.valve_match_id IS NOT NULL
-                AND EXISTS (
+                AND (EXISTS (
                     SELECT 1 FROM match_participants AS mp
                      WHERE mp.match_id = m.match_id AND mp.guild_id = m.guild_id
                        AND (mp.lane_role IS NULL OR mp.last_hits_at_10 IS NULL)
-                )
+                ) OR EXISTS (
+                    SELECT 1 FROM match_gc_statistics AS gc
+                     WHERE gc.match_id=m.match_id AND gc.guild_id=m.guild_id
+                       AND gc.valve_match_id=m.valve_match_id
+                       AND (
+                           COALESCE(json_array_length(CASE WHEN json_valid(m.enrichment_data)
+                               THEN m.enrichment_data ELSE '{}' END, '$.radiant_gold_adv'), 0)=0
+                           OR COALESCE(json_array_length(CASE WHEN json_valid(m.enrichment_data)
+                               THEN m.enrichment_data ELSE '{}' END, '$.radiant_xp_adv'), 0)=0
+                           OR EXISTS (
+                               SELECT 1 FROM match_participants AS stats
+                                WHERE stats.match_id=m.match_id AND stats.guild_id=m.guild_id
+                                  AND (stats.kills IS NULL OR stats.deaths IS NULL
+                                       OR stats.assists IS NULL OR stats.gpm IS NULL OR stats.xpm IS NULL)
+                           )
+                       )
+                ))
               ORDER BY m.parsed_refresh_attempts ASC, m.match_id ASC
               LIMIT ?2",
         )?;
@@ -3988,18 +4038,91 @@ impl MatchRepository {
         let guild_id = Self::normalize_guild_id(core.match_record.guild_id);
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if let Some(pending_match_id) = core.pending_match_id
-            && let Some(existing) = transaction
+        if let Some(pending_match_id) = core.pending_match_id {
+            let existing = transaction
                 .query_row(
-                    "SELECT match_id FROM matches
-                     WHERE guild_id = ?1 AND pending_match_id = ?2",
+                    "SELECT match_id,winning_team,team1_players,team2_players FROM matches
+                 WHERE guild_id=?1 AND pending_match_id=?2",
+                    params![guild_id, pending_match_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            if let Some((match_id, winner, radiant, dire)) = existing {
+                if winner != core.match_record.winning_team
+                    || serde_json::from_str::<Vec<i64>>(&radiant).ok().as_ref()
+                        != Some(&core.match_record.team1_ids)
+                    || serde_json::from_str::<Vec<i64>>(&dire).ok().as_ref()
+                        != Some(&core.match_record.team2_ids)
+                {
+                    return Err(CoreRepositoryError::InvalidInput(format!(
+                        "result conflicts with recorded match {match_id}; use the correction command"
+                    )));
+                }
+                transaction.commit()?;
+                return Ok(match_id);
+            }
+            let raw: String = transaction
+                .query_row(
+                    "SELECT payload FROM pending_matches WHERE guild_id=?1 AND pending_match_id=?2",
                     params![guild_id, pending_match_id],
                     |row| row.get(0),
                 )
                 .optional()?
-        {
-            transaction.commit()?;
-            return Ok(existing);
+                .ok_or_else(|| {
+                    CoreRepositoryError::InvalidInput(format!(
+                        "pending match {pending_match_id} no longer exists; recording was cancelled"
+                    ))
+                })?;
+            let mut payload: serde_json::Value = serde_json::from_str(&raw)
+                .map_err(|error| CoreRepositoryError::InvalidInput(error.to_string()))?;
+            for (key, ids) in [
+                ("radiant_team_ids", &core.match_record.team1_ids),
+                ("dire_team_ids", &core.match_record.team2_ids),
+            ] {
+                if let Some(stored) = payload.get(key)
+                    && serde_json::from_value::<Vec<i64>>(stored.clone())
+                        .ok()
+                        .as_ref()
+                        != Some(ids)
+                {
+                    return Err(CoreRepositoryError::InvalidInput(
+                        "pending match roster changed; retry recording".to_owned(),
+                    ));
+                }
+            }
+            if payload
+                .get("shuffle_setup_complete")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+                || payload
+                    .get("draft_setup_complete")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(false)
+            {
+                return Err(CoreRepositoryError::InvalidInput(
+                    "match setup is incomplete; use /draft resume for a retained Draft".to_owned(),
+                ));
+            }
+            let taxable = {
+                let mut statement = transaction.prepare("SELECT discord_id FROM low_priority_state WHERE guild_id=?1 AND active=1 AND wins_remaining>0")?;
+                statement
+                    .query_map([guild_id], |row| row.get::<_, i64>(0))?
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            let mut policy = core
+                .recording_policy
+                .clone()
+                .unwrap_or_else(|| serde_json::json!({}));
+            policy["low_priority_taxable_ids"] = serde_json::json!(taxable);
+            payload["recording_policy"] = policy;
+            transaction.execute("UPDATE pending_matches SET payload=?1,updated_at=CURRENT_TIMESTAMP WHERE guild_id=?2 AND pending_match_id=?3",params![payload.to_string(),guild_id,pending_match_id])?;
         }
 
         if let Some(expected_revision) = core.expected_openskill_revision {
@@ -6103,6 +6226,61 @@ mod tests {
         (9, 3, 1_700),
         (10, 1, 1_400),
     ];
+
+    #[test]
+    fn gc_statistics_refresh_candidates_include_missing_graphs_or_basic_stats_only_for_gc_matches()
+    {
+        let fixture = Fixture::new();
+        let connection = fixture.connection();
+        for match_id in 1..=5 {
+            let guild = if match_id == 5 {
+                TEST_GUILD_ID_SECONDARY
+            } else {
+                TEST_GUILD_ID
+            };
+            connection.execute("INSERT INTO matches(match_id,guild_id,valve_match_id,team1_players,team2_players,enrichment_data) VALUES(?1,?2,?3,'[]','[]','{\"radiant_gold_adv\":[0],\"radiant_xp_adv\":[0]}')", params![match_id, guild, 900 + match_id]).unwrap();
+            connection.execute("INSERT INTO match_participants(match_id,guild_id,discord_id,lane_role,last_hits_at_10,kills,deaths,assists,gpm,xpm) VALUES(?1,?2,1,1,10,0,0,0,100,100)", params![match_id, guild]).unwrap();
+            if match_id != 4 {
+                connection.execute("INSERT INTO match_gc_statistics(guild_id,match_id,valve_match_id,payload_json) VALUES(?1,?2,?3,'{}')", params![guild, match_id, 900 + match_id]).unwrap();
+            }
+        }
+        // Match 1 has complete data. Match 2 lost one graph, match 3 lacks
+        // one basic stat, and API-only match 4 keeps its existing semantics.
+        connection.execute("UPDATE matches SET enrichment_data='{\"radiant_gold_adv\":[0],\"radiant_xp_adv\":[]}' WHERE match_id IN (2,4,5)", []).unwrap();
+        connection
+            .execute(
+                "UPDATE match_participants SET xpm=NULL WHERE match_id IN (3,4,5)",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            fixture
+                .matches
+                .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 100)
+                .unwrap(),
+            vec![(2, 902), (3, 903)]
+        );
+        assert_eq!(
+            fixture
+                .matches
+                .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 1)
+                .unwrap(),
+            vec![(2, 902)]
+        );
+        connection
+            .execute(
+                "UPDATE matches SET enrichment_data='invalid' WHERE match_id=2",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            fixture
+                .matches
+                .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 100)
+                .unwrap(),
+            vec![(2, 902), (3, 903)]
+        );
+    }
 
     #[test]
     fn test_matches_missing_parsed_stats_selects_only_stale_enrichments() {
@@ -8761,6 +8939,7 @@ mod tests {
             "2026-08-05T00:00:00+00:00",
         );
         core.pending_match_id = Some(94_001);
+        fixture.connection().execute("INSERT INTO pending_matches(pending_match_id,guild_id,payload) VALUES (?1,?2,'{}')",params![94_001,TEST_GUILD_ID]).unwrap();
         let match_id = fixture
             .matches
             .record_match_core_atomic(&core)
@@ -9006,6 +9185,7 @@ mod tests {
             "2026-08-05T00:00:00+00:00",
         );
         core.pending_match_id = Some(818);
+        Connection::open(database.path()).unwrap().execute("INSERT INTO pending_matches(pending_match_id,guild_id,payload) VALUES (?1,?2,'{}')",params![818,TEST_GUILD_ID]).unwrap();
         core.winning_ids = vec![81_001];
         core.losing_ids = vec![81_002];
         core.settle_referrals_at = Some(1_754_352_000);
@@ -9708,6 +9888,14 @@ mod tests {
             lobby_kind TEXT CHECK(lobby_kind IS NULL OR lobby_kind IN ('open','lowskill')), parsed_refresh_attempts INTEGER NOT NULL DEFAULT 0
         );
         CREATE UNIQUE INDEX uq_matches_guild_pending_match ON matches(guild_id,pending_match_id) WHERE pending_match_id IS NOT NULL;
+        CREATE TABLE match_gc_statistics (
+            guild_id INTEGER NOT NULL,
+            match_id INTEGER NOT NULL,
+            valve_match_id INTEGER NOT NULL,
+            payload_json TEXT NOT NULL,
+            captured_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (guild_id, match_id)
+        );
         CREATE TABLE match_participants (
             match_id INTEGER, discord_id INTEGER, team_number INTEGER, won BOOLEAN,
             side TEXT, hero_id INTEGER, kills INTEGER, deaths INTEGER, assists INTEGER,

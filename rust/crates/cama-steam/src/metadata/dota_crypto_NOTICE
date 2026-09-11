@@ -1,0 +1,9 @@
+The metadata block decryption algorithm and fixed lookup table are derived from
+thedanill/dota_crypto, https://github.com/thedanill/dota_crypto.
+Upstream source: dota_crypto.py, retrieved September 11, 2026.
+Licensed under Apache License 2.0; see dota_crypto_LICENSE in this directory.
+
+Changes: translated into Rust, use unsigned key packing for all u32 keys,
+reject partial cipher blocks, and bound inputs and outputs.
+Used by the production metadata client and offline diagnostic.
+The published example fixture is from the same Apache-2.0 repository.

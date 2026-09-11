@@ -29,7 +29,6 @@ use cama_app::embeds::LobbyKind as AppLobbyKind;
 use cama_db::autobet_investments::AutobetInvestmentRepository;
 use cama_db::betting_service_repository::{
     AutomaticBasisPointBetRequest, BettingServiceRepository, BlindBetCandidate, BlindBetPolicy,
-    PlaceBetRequest,
 };
 use cama_db::core_repositories::{CoreRepositoryError, NewPlayer, PlayerRepository};
 use cama_db::dota_bet_seed_repository::{
@@ -2590,6 +2589,10 @@ impl DraftHandler {
                 )
                 .await
             }
+            "resume" => {
+                self.resume_saved_completion(guild_id, user_id, permissions, responder)
+                    .await
+            }
             "restart" => {
                 self.restart(
                     guild_id,
@@ -2609,6 +2612,48 @@ impl DraftHandler {
                     .await
             }
             other => Err(format!("unknown /draft subcommand {other:?}")),
+        }
+    }
+
+    async fn resume_saved_completion(
+        &self,
+        guild_id: i64,
+        user_id: i64,
+        permissions: Option<u64>,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        if !is_admin(&self.config, user_id, permissions) {
+            return respond_ephemeral(
+                &responder,
+                "Only server admins can resume Draft finalization.",
+            )
+            .await;
+        }
+        responder.defer(true).await.map_err(|e| e.to_string())?;
+        let Some(envelope) = self.reload_durable_envelope(guild_id).await? else {
+            return followup_ephemeral(&responder, "No saved Draft finalization needs recovery.")
+                .await;
+        };
+        if !envelope.finalizing || envelope.pending_match_id.is_none() {
+            return followup_ephemeral(
+                &responder,
+                "The Draft has not reached match finalization yet.",
+            )
+            .await;
+        }
+        let operation = self.draft_operation_lock(guild_id, envelope.session_id);
+        let _guard = operation.lock().await;
+        let lobby_operation = self.lobbies.operation_lock(
+            guild_id,
+            to_runtime_kind(envelope.state.as_state().lobby_kind),
+        );
+        let _lobby_guard = lobby_operation.lock().await;
+        let Some(current) = self.reload_durable_envelope(guild_id).await? else {
+            return followup_ephemeral(&responder, "Draft finalization already completed.").await;
+        };
+        match self.recover_finalizing_envelope(current).await {
+            Ok(()) => followup_ephemeral(&responder,"Draft finalization completed; the match is ready.").await,
+            Err(error) => followup_ephemeral(&responder,format!("Draft remains safely paused. Fix the reported service failure and retry `/draft resume`: {error}")).await,
         }
     }
 
@@ -3861,6 +3906,25 @@ impl DraftHandler {
                     pending_match_id = pending.pending_match_id,
                     "draft seed/bet setup failed"
                 );
+                let bets = self.bets.clone();
+                let failed_id = pending.pending_match_id;
+                let cleanup = tokio::task::spawn_blocking(move || {
+                    bets.abort_pending_match_atomic(Some(guild_id), failed_id, &[])
+                })
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string());
+                if let Err(cleanup) = cleanup {
+                    return completion_response(
+                        &responder,
+                        Some(failed_id),
+                        format!(
+                            "Draft setup remains paused: {error}; refund retry failed: {cleanup}"
+                        ),
+                        deferred,
+                    )
+                    .await;
+                }
                 self.finish_draft_without_match(&handle, &state);
                 return completion_response(
                     &responder,
@@ -4146,15 +4210,11 @@ impl DraftHandler {
                     }),
             )
             .collect::<Vec<_>>();
-        let investment_starting_balances = self
-            .investment_starting_balances(pending.guild_id, state)
-            .unwrap_or_default();
+        let investment_starting_balances =
+            self.investment_starting_balances(pending.guild_id, state)?;
 
-        // Python deliberately treats automatic liquidity as a best-effort
-        // post-persistence hook.  A single wallet/DB candidate must not turn
-        // a durable draft into a failed completion, so each service seam is
-        // isolated and the pending state is updated only after the hooks have
-        // returned their summaries.
+        // Individual ineligible candidates are skipped by the repositories.
+        // Infrastructure failures must compensate the entire unpublished setup.
         let mut blind_result = json!({
             "created": 0,
             "total_radiant": 0,
@@ -4192,23 +4252,18 @@ impl DraftHandler {
                     });
                 }
                 Err(error) => {
-                    warn!(%error, pending_match_id = pending.pending_match_id, "draft blind-bet hook failed");
+                    return Err(format!("draft blind-bet setup: {error}"));
                 }
             }
         }
 
-        let investment_result = match self.create_investment_bets(
-            pending,
-            state,
-            now,
-            &investment_starting_balances,
-        ) {
-            Ok(result) => Some(result),
-            Err(error) => {
-                warn!(%error, pending_match_id = pending.pending_match_id, "draft configured-investment hook failed");
-                None
-            }
-        };
+        let investment_result =
+            match self.create_investment_bets(pending, state, now, &investment_starting_balances) {
+                Ok(result) => Some(result),
+                Err(error) => {
+                    return Err(format!("draft configured-investment setup: {error}"));
+                }
+            };
 
         let spectator_result = self
             .create_spectator_bets(pending, state, now)
@@ -4216,7 +4271,7 @@ impl DraftHandler {
                 warn!(%error, pending_match_id = pending.pending_match_id, "draft spectator auto-wager hook failed");
                 error
             })
-            .ok();
+            .map(Some)?;
 
         if let Some(result) = investment_result {
             blind_result["investment_bets"] = result;
@@ -4241,15 +4296,17 @@ impl DraftHandler {
                 .and_then(Value::as_i64)
                 .unwrap_or_default()
                 > 0;
-        if has_automatic_bets
-            && let Err(error) = self.pending.mutate_pending_match(
-                pending.guild_id,
-                pending.pending_match_id,
-                |state| state.blind_bets_result = Some(blind_result),
-            )
-        {
-            warn!(%error, pending_match_id = pending.pending_match_id, "draft automatic-bet result persistence failed");
-        }
+        self.pending
+            .mutate_pending_match(pending.guild_id, pending.pending_match_id, |state| {
+                if has_automatic_bets {
+                    state.blind_bets_result = Some(blind_result);
+                }
+                state
+                    .extra
+                    .insert("draft_setup_complete".into(), json!(true));
+            })
+            .map_err(|e| e.to_string())?
+            .ok_or("draft was aborted during setup")?;
         Ok(())
     }
 
@@ -4260,7 +4317,7 @@ impl DraftHandler {
         now: i64,
         starting_balances: &BTreeMap<i64, i64>,
     ) -> Result<Value, String> {
-        let target_ids = state
+        let targets = state
             .radiant_player_ids
             .iter()
             .chain(&state.dire_player_ids)
@@ -4268,176 +4325,49 @@ impl DraftHandler {
             .collect::<Vec<_>>();
         let positions = self
             .investments
-            .for_targets(Some(pending.guild_id), &target_ids)
-            .map_err(|error| error.to_string())?;
-        if positions.is_empty() {
-            return Ok(json!({
-                "created": 0,
-                "total_radiant": 0,
-                "total_dire": 0,
-                "bets": [],
-                "skipped": [],
-            }));
-        }
-        let investor_ids = positions
-            .iter()
-            .map(|position| position.investor_id)
-            .collect::<Vec<_>>();
-        // Python prepares the shuffle-start gate before blind bets, then
-        // sizes each investment from the post-blind wallet snapshot.
-        let current_balances = self
-            .players
-            .get_balances_bulk(&investor_ids, Some(pending.guild_id))
-            .map_err(|error| error.to_string())?;
-        let team_by_player = state
-            .radiant_player_ids
-            .iter()
-            .map(|id| (*id, BettingTeam::Radiant))
-            .chain(
-                state
-                    .dire_player_ids
-                    .iter()
-                    .map(|id| (*id, BettingTeam::Dire)),
-            )
-            .collect::<BTreeMap<_, _>>();
-        let timestamp = pending.state.shuffle_timestamp.unwrap_or(now);
-        let mut totals = self
+            .for_targets(Some(pending.guild_id), &targets)
+            .map_err(|e| e.to_string())?;
+        let outcome = self
             .bets
-            .get_pending_totals(
-                Some(pending.guild_id),
-                timestamp,
-                Some(pending.pending_match_id),
+            .create_configured_investment_bets_for_shuffle(
+                cama_db::betting_service_repository::ConfiguredInvestmentRequest {
+                    guild_id: Some(pending.guild_id),
+                    pending_match_id: Some(pending.pending_match_id),
+                    bet_time: pending.state.shuffle_timestamp.unwrap_or(now),
+                    radiant_ids: state.radiant_player_ids.clone(),
+                    dire_ids: state.dire_player_ids.clone(),
+                    max_debt: self.config.max_debt,
+                    starting_balances: starting_balances.clone(),
+                },
             )
-            .map_err(|error| error.to_string())?;
-        let mut investment_total_radiant = 0_i64;
-        let mut investment_total_dire = 0_i64;
-        let mut created = Vec::new();
-        let mut skipped = Vec::new();
-        for position in positions {
-            let Some(target_team) = team_by_player.get(&position.target_id).copied() else {
-                continue;
-            };
-            let starting_balance = starting_balances
-                .get(&position.investor_id)
-                .copied()
-                .unwrap_or_default();
-            if starting_balance < 50 {
-                skipped.push(json!({
-                    "investor_id": position.investor_id,
-                    "target_id": position.target_id,
-                    "reason": format!("shuffle-start balance {starting_balance} < 50"),
-                }));
-                continue;
-            }
-            let balance = current_balances
-                .get(&position.investor_id)
-                .copied()
-                .unwrap_or_default();
-            if balance <= 0 {
-                skipped.push(json!({
-                    "investor_id": position.investor_id,
-                    "target_id": position.target_id,
-                    "reason": format!("balance {balance} is not positive"),
-                }));
-                continue;
-            }
-            if position.direction == "short" && position.investor_id == position.target_id {
-                skipped.push(json!({
-                    "investor_id": position.investor_id,
-                    "target_id": position.target_id,
-                    "reason": "cannot short yourself",
-                }));
-                continue;
-            }
-            let team = if position.direction == "long" {
-                target_team
-            } else {
-                match target_team {
-                    BettingTeam::Radiant => BettingTeam::Dire,
-                    BettingTeam::Dire => BettingTeam::Radiant,
-                }
-            };
-            if team_by_player
-                .get(&position.investor_id)
-                .is_some_and(|investor_team| *investor_team != team)
-            {
-                skipped.push(json!({
-                    "investor_id": position.investor_id,
-                    "target_id": position.target_id,
-                    "reason": "investment would bet against the investor's team",
-                }));
-                continue;
-            }
-            let amount = balance
-                .checked_mul(position.percentage)
-                .ok_or_else(|| "investment amount overflow".to_owned())?
-                / 100;
-            if amount < 1 {
-                skipped.push(json!({
-                    "investor_id": position.investor_id,
-                    "target_id": position.target_id,
-                    "reason": format!("investment amount {amount} < 1"),
-                }));
-                continue;
-            }
-            let total_pool = totals.total();
-            let team_total = match team {
-                BettingTeam::Radiant => totals.radiant,
-                BettingTeam::Dire => totals.dire,
-            };
-            let request = PlaceBetRequest {
-                guild_id: Some(pending.guild_id),
-                pending_match_id: pending.pending_match_id,
-                discord_id: position.investor_id,
-                team,
-                amount,
-                bet_time: timestamp,
-                leverage: 1,
-                max_debt: self.config.max_debt,
-                is_blind: true,
-                odds_at_placement: (total_pool > 0 && team_total > 0)
-                    .then_some(total_pool as f64 / team_total as f64),
-            };
-            match self.bets.place_investment_bet_atomic(
-                request,
-                position.target_id,
-                &position.direction,
-            ) {
-                Ok(record) => {
-                    match team {
-                        BettingTeam::Radiant => {
-                            totals.radiant = totals.radiant.saturating_add(amount);
-                            investment_total_radiant =
-                                investment_total_radiant.saturating_add(amount);
-                        }
-                        BettingTeam::Dire => {
-                            totals.dire = totals.dire.saturating_add(amount);
-                            investment_total_dire = investment_total_dire.saturating_add(amount);
-                        }
-                    }
-                    created.push(json!({
-                        "investor_id": record.discord_id,
-                        "target_id": position.target_id,
-                        "direction": position.direction,
-                        "percentage": position.percentage,
-                        "team": betting_team_name(team),
-                        "amount": amount,
-                    }));
-                }
-                Err(error) => skipped.push(json!({
-                    "investor_id": position.investor_id,
-                    "target_id": position.target_id,
-                    "reason": error.to_string(),
-                })),
-            }
-        }
-        Ok(json!({
-            "created": created.len(),
-            "total_radiant": investment_total_radiant,
-            "total_dire": investment_total_dire,
-            "bets": created,
-            "skipped": skipped,
-        }))
+            .map_err(|e| e.to_string())?;
+        let mut radiant = 0_i64;
+        let mut dire = 0_i64;
+        let created = outcome
+            .created
+            .iter()
+            .map(|record| {
+                match record.team {
+                    BettingTeam::Radiant => radiant = radiant.saturating_add(record.amount),
+                    BettingTeam::Dire => dire = dire.saturating_add(record.amount),
+                };
+                let percentage = positions
+                    .iter()
+                    .find(|p| {
+                        p.investor_id == record.discord_id
+                            && Some(p.target_id) == record.investment_target_id
+                            && Some(p.direction.as_str()) == record.investment_direction.as_deref()
+                    })
+                    .map(|p| p.percentage);
+                json!({"investor_id":record.discord_id,"target_id":record.investment_target_id,
+                "direction":record.investment_direction,"percentage":percentage,
+                "team":betting_team_name(record.team),"amount":record.amount})
+            })
+            .collect::<Vec<_>>();
+        Ok(
+            json!({"created":created.len(),"total_radiant":radiant,"total_dire":dire,
+            "bets":created,"skipped":outcome.skipped}),
+        )
     }
 
     fn investment_starting_balances(
@@ -5063,6 +4993,11 @@ fn draft_options() -> Vec<CommandOptionSpec> {
             ],
         ),
         subcommand(
+            "resume",
+            "[Admin] Retry saved Draft match finalization",
+            Vec::new(),
+        ),
+        subcommand(
             "restart",
             "Restart the current Immortal Draft (preserves lobby)",
             Vec::new(),
@@ -5483,6 +5418,23 @@ fn completion_embed(state: &DraftState, pending: &PendingMatchRecord) -> Interac
             inline: false,
         },
     ];
+    if let Ok(options) =
+        cama_domain::dota_hosting::DotaHostingOptions::from_extra(&pending.state.extra)
+    {
+        let bot_busy = pending
+            .state
+            .extra
+            .get("dota_hosting_fallback_reason")
+            .and_then(Value::as_str)
+            == Some("bot_busy");
+        if let Some(instructions) = options.lobby_instructions(bot_busy) {
+            fields.push(DraftEmbedField {
+                name: "🎮 Dota Lobby".into(),
+                value: instructions,
+                inline: false,
+            });
+        }
+    }
     if let Some(blind) = pending.state.blind_bets_result.as_ref()
         && blind
             .get("created")
@@ -5798,6 +5750,7 @@ fn db_pending_state(
         shuffle_message_id: state.draft_message_id,
         shuffle_channel_id: state.draft_channel_id,
         origin_channel_id: state.draft_channel_id,
+        extra: BTreeMap::from([("draft_setup_complete".to_owned(), json!(false))]),
         ..PendingMatchState::default()
     })
 }
@@ -6114,7 +6067,7 @@ async fn financial_setup_retry_response(
     deferred: bool,
 ) -> Result<(), String> {
     let response = InteractionResponse::message(format!(
-        "⚠️ Draft complete — Match #{pending_match_id} is safely retained, but its financial setup did not finish. Retry finalization before playing or recording the match. No financial effects were partially applied."
+        "⚠️ Draft complete — Match #{pending_match_id} is safely retained, but its financial setup did not finish. An admin can run `/draft resume` to retry finalization before playing or recording the match. No financial effects were partially applied."
     ))
     .ephemeral()
     .without_mentions();

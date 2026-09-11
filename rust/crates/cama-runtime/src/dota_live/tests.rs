@@ -12,11 +12,13 @@ use crate::{Secret, dota_host_config::DotaHostConfig};
 
 fn config(live_bind: Option<SocketAddr>) -> DotaHostConfig {
     DotaHostConfig {
+        test_mode: crate::dota_host_config::DotaHostTestMode::Off,
         guild_ids: vec![7],
         username: Secret::new("bot".to_owned()),
+        password: None,
+        guard_code: None,
         account_id: 900,
         session_path: PathBuf::from("session.json"),
-        start_after: 1,
         server_region: 1,
         game_mode: 2,
         tv_delay: 3,
@@ -29,9 +31,6 @@ fn config(live_bind: Option<SocketAddr>) -> DotaHostConfig {
         gsi_token: Some(Secret::new(
             "gsi-token-with-at-least-32-bytes-long".to_owned(),
         )),
-        replay_directory: PathBuf::from("replays"),
-        replay_max_bytes: 1_024,
-        replay_retention_days: 30,
     }
 }
 
@@ -555,6 +554,54 @@ async fn polling_uses_realtime_stats_then_normalizes_the_response_once() {
     assert_eq!(snapshot.dire_score, Some(4));
     assert_eq!(snapshot.delay_seconds, Some(300));
     assert_eq!(snapshot.delay_source, Some(LiveDelaySource::Configured));
+}
+
+#[test]
+fn spectator_events_use_complete_frames_and_preserve_missing_fields() {
+    let mut payload = json!({"result": {
+        "match": {"match_id": 123, "game_time": 145},
+        "teams": [
+            {"team_number": 2, "score": 0, "net_worth": 24000},
+            {"team_number": 3, "score": 3}
+        ],
+        "buildings": [
+            {"team": 2, "x": 12, "y": 34, "destroyed": false},
+            {"team": 3, "x": 56, "y": 78, "destroyed": true},
+            {"team": 3, "x": 90, "y": 12},
+            {"team": 0, "x": 90, "y": 12, "destroyed": true}
+        ]
+    }});
+    let snapshot = normalize_realtime_stats(&payload, 7, 1, 123, 200).unwrap();
+    let frame = snapshot.announcement_frame.unwrap();
+    assert_eq!(frame.game_time, 145);
+    assert_eq!(frame.radiant_score, Some(0));
+    assert_eq!(frame.dire_score, Some(3));
+    assert_eq!(frame.radiant_net_worth, Some(24000));
+    assert_eq!(frame.dire_net_worth, None);
+    assert_eq!(frame.buildings.len(), 2);
+    assert!(!frame.buildings[0].destroyed);
+    assert!(frame.buildings[1].destroyed);
+    payload["result"]["delta_frame"] = json!(true);
+    assert!(
+        normalize_realtime_stats(&payload, 7, 1, 123, 200)
+            .unwrap()
+            .announcement_frame
+            .is_none()
+    );
+    payload["result"]
+        .as_object_mut()
+        .unwrap()
+        .remove("delta_frame");
+    payload["result"]["match"]
+        .as_object_mut()
+        .unwrap()
+        .remove("game_time");
+    assert!(
+        normalize_realtime_stats(&payload, 7, 1, 123, 200)
+            .unwrap()
+            .announcement_frame
+            .is_none()
+    );
 }
 
 #[tokio::test]

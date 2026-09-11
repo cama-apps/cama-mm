@@ -741,6 +741,12 @@ impl MatchCorrectionRepository {
         let guild_id = Self::normalize_guild_id(guild_id);
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if transaction.query_row(
+            "SELECT 1 FROM matches m JOIN pending_matches p ON p.guild_id=m.guild_id AND p.pending_match_id=m.pending_match_id WHERE m.match_id=?1 AND m.guild_id=?2",
+            params![match_id,guild_id], |_| Ok(()),
+        ).optional()?.is_some() {
+            return Err(MatchCorrectionError::Invariant("original match finalization is incomplete; finish recording before correcting"));
+        }
         let current_winner = transaction
             .query_row(
                 "SELECT winning_team FROM matches WHERE match_id=?1 AND guild_id=?2",

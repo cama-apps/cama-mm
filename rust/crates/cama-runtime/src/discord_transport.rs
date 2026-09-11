@@ -318,6 +318,50 @@ pub enum DiscordDestinationStatus {
 
 #[async_trait]
 pub trait DiscordTransport: Send + Sync {
+    /// Recover and delete owned channels after an unacknowledged create request.
+    async fn delete_spectator_channels_by_marker(
+        &self,
+        _guild_id: u64,
+        _marker: &str,
+    ) -> Result<(), String> {
+        Err("Private spectator channel recovery cleanup is unavailable on this transport.".into())
+    }
+
+    /// Create/reconcile an owned private text channel for non-player spectators.
+    async fn ensure_spectator_channel(
+        &self,
+        _guild_id: u64,
+        _marker: &str,
+        _name: &str,
+        _participants: &[u64],
+        _viewers: &[u64],
+        _known_channel: Option<u64>,
+    ) -> Result<u64, String> {
+        Err("Private spectator channels are unavailable on this transport.".into())
+    }
+
+    /// Revalidate ownership and current REST permissions before a live batch.
+    async fn audit_spectator_channel(
+        &self,
+        _guild_id: u64,
+        _marker: &str,
+        _participants: &[u64],
+        _viewers: &[u64],
+        _channel_id: u64,
+    ) -> Result<(), String> {
+        Err("Private spectator channel auditing is unavailable on this transport.".into())
+    }
+
+    /// Delete only a guild text channel bearing this exact ownership marker.
+    async fn delete_spectator_channel(
+        &self,
+        _guild_id: u64,
+        _channel_id: u64,
+        _marker: &str,
+    ) -> Result<(), String> {
+        Err("Private spectator channel cleanup is unavailable on this transport.".into())
+    }
+
     async fn fetch_message(
         &self,
         channel_id: u64,

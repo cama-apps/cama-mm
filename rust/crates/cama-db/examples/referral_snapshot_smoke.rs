@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use cama_db::audit_database;
 use cama_db::core_repositories::{CoreMatchRecord, MatchRecord, MatchRepository};
+use cama_db::match_runtime::{PendingMatchRepository, PendingMatchState};
 use cama_db::referrals::ReferralRepository;
 use rusqlite::{Connection, params};
 use serde_json::Value;
@@ -17,7 +18,6 @@ const REFERRAL_OTHER_GUILD_ID: i64 = -8_888_888_888_888_863;
 const REFERRER_ID: i64 = -8_888_888_888_888_866;
 const REFERRED_ID: i64 = -8_888_888_888_888_865;
 const REFERRAL_OPPONENT_ID: i64 = -8_888_888_888_888_864;
-const REFERRAL_PENDING_MATCH_ID: i64 = 8_888_888_888_888_001;
 const REFERRAL_REWARDED_AT: i64 = 1_800_000_000;
 
 fn seed_players(path: &PathBuf) -> Result<(), Box<dyn Error>> {
@@ -82,6 +82,16 @@ where
         REFERRED_ID,
         Some(REFERRAL_GUILD_ID),
     )?;
+    let pending_repository = PendingMatchRepository::new(&path);
+    let pending = pending_repository.create_pending_match(
+        REFERRAL_GUILD_ID,
+        &PendingMatchState {
+            radiant_team_ids: vec![REFERRED_ID],
+            dire_team_ids: vec![REFERRAL_OPPONENT_ID],
+            ..PendingMatchState::default()
+        },
+    )?;
+    let pending_match_id = pending.pending_match_id;
     let matches = MatchRepository::new(&path);
     let mut core = CoreMatchRecord::new(
         MatchRecord::new(
@@ -92,7 +102,7 @@ where
         ),
         "2026-08-07T00:00:00+00:00",
     );
-    core.pending_match_id = Some(REFERRAL_PENDING_MATCH_ID);
+    core.pending_match_id = Some(pending_match_id);
     core.winning_ids = vec![REFERRED_ID];
     core.losing_ids = vec![REFERRAL_OPPONENT_ID];
     core.settle_referrals_at = Some(REFERRAL_REWARDED_AT);
@@ -153,7 +163,7 @@ where
               WHERE guild_id = ?1 AND pending_match_id = ?2),
              (SELECT COUNT(*) FROM economy_ledger_entries
               WHERE guild_id = ?1 AND source = 'referral_reward')",
-        params![REFERRAL_OTHER_GUILD_ID, REFERRAL_PENDING_MATCH_ID],
+        params![REFERRAL_OTHER_GUILD_ID, pending_match_id],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
     if other_guild_counts != (0, 0, 0) {
@@ -165,7 +175,7 @@ where
     let jc_changes: String = connection.query_row(
         "SELECT jc_changes FROM matches
          WHERE guild_id = ?1 AND pending_match_id = ?2",
-        params![REFERRAL_GUILD_ID, REFERRAL_PENDING_MATCH_ID],
+        params![REFERRAL_GUILD_ID, pending_match_id],
         |row| row.get(0),
     )?;
     let expected_jc_changes: Value = serde_json::json!({
@@ -184,7 +194,7 @@ where
              (SELECT COUNT(*) FROM economy_ledger_entries
               WHERE guild_id = ?1 AND source = 'referral_reward'),
              (SELECT COUNT(*) FROM economy_ledger_context)",
-        params![REFERRAL_GUILD_ID, REFERRAL_PENDING_MATCH_ID, match_id],
+        params![REFERRAL_GUILD_ID, pending_match_id, match_id],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     )?;
     if counts != (1, 2, 2, 0) {
@@ -231,6 +241,8 @@ where
             return Err(format!("referral ledger metadata mismatch: {metadata}").into());
         }
     }
+
+    pending_repository.delete_pending_match(REFERRAL_GUILD_ID, pending_match_id)?;
 
     println!(
         "referral_snapshot_smoke=ok guild_id={} match_id={} retry_same=true ledgers=2 balances=exact",

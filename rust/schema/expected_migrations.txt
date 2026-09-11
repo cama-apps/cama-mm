@@ -243,3 +243,6 @@ converge_legacy_push_notification_targets
 add_pet_death_activated_pet_id
 create_match_draft_analysis
 create_dota_sessions_table
+add_guild_dota_hosting_options
+create_match_gc_statistics
+create_dota_spectators

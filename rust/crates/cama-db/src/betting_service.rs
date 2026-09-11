@@ -10,14 +10,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::dota_bet_seed_repository::{
     BettingMode, BettingTeam, DotaBetSeedRepositoryError, SeedSettlement,
-    settle_seed_with_player_pool_in_transaction,
+    abort_seed_in_transaction, settle_seed_with_player_pool_in_transaction,
 };
 use crate::open_runtime_connection;
 use cama_db_core::profit_deductions::penalty_games_remaining;
+use cama_domain::dota_hosting::BETTING_OBSERVATION_TTL_SECONDS;
 
 // These markers live in the existing pending-match JSON payload so the
 // betting crate can enforce hosted-window semantics without coupling to the
@@ -39,6 +41,12 @@ pub enum BettingServiceRepositoryError {
     },
     #[error("pending match payload is missing a valid betting lock")]
     InvalidPendingPayload,
+    #[error("pending match {0} has already been recorded")]
+    MatchAlreadyRecorded(i64),
+    #[error(
+        "Draft finalization for match {0} is unfinished; an admin must run /draft resume before recording or aborting"
+    )]
+    DraftFinalizationInProgress(i64),
     #[error("betting is closed")]
     BettingClosed,
     #[error("participant {discord_id} may only bet on {required_team}")]
@@ -156,13 +164,13 @@ impl Default for BlindBetPolicy {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BlindBetSkip {
     pub discord_id: i64,
     pub reason: String,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BlindBetOutcome {
     pub created: Vec<PendingBetRecord>,
     pub skipped: Vec<BlindBetSkip>,
@@ -172,7 +180,7 @@ pub struct BlindBetOutcome {
     pub is_bomb_pot: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PendingBetRecord {
     pub bet_id: i64,
     pub guild_id: i64,
@@ -913,7 +921,7 @@ impl BettingServiceRepository {
             let result = payload
                 .as_deref()
                 .map_or(Ok(()), |payload| {
-                    validate_pending_bet(&transaction, payload, request)
+                    validate_setup_bet(&transaction, payload, request)
                 })
                 .and_then(|()| {
                     insert_bet_in_transaction_with_attribution(
@@ -982,6 +990,15 @@ impl BettingServiceRepository {
                     })
             })
             .transpose()?;
+        if let Some(receipt) = payload.as_deref().and_then(|payload| {
+            serde_json::from_str::<serde_json::Value>(payload)
+                .ok()
+                .and_then(|value| value.get("automatic_blind_batch_receipt").cloned())
+        }) {
+            return serde_json::from_value(receipt).map_err(|error| {
+                BettingServiceRepositoryError::InvalidSnapshot(error.to_string())
+            });
+        }
         let balance_snapshot = balance_snapshot(
             &transaction,
             guild_id,
@@ -1000,6 +1017,20 @@ impl BettingServiceRepository {
         };
 
         for candidate in candidates {
+            if automatic_bet_already_exists(
+                &transaction,
+                guild_id,
+                pending_match_id,
+                bet_time,
+                candidate.discord_id,
+            )? {
+                outcome.skipped.push(BlindBetSkip {
+                    discord_id: candidate.discord_id,
+                    reason: "automatic wager already exists".to_owned(),
+                });
+                continue;
+            }
+
             let Some(balance) = outcome.balance_snapshot.get(&candidate.discord_id).copied() else {
                 outcome.skipped.push(BlindBetSkip {
                     discord_id: candidate.discord_id,
@@ -1049,7 +1080,7 @@ impl BettingServiceRepository {
             let result = payload
                 .as_deref()
                 .map_or(Ok(()), |payload| {
-                    validate_pending_bet(&transaction, payload, request)
+                    validate_setup_bet(&transaction, payload, request)
                 })
                 .and_then(|()| {
                     insert_bet_in_transaction(
@@ -1085,6 +1116,17 @@ impl BettingServiceRepository {
                 }
                 Err(error) => return Err(error),
             }
+        }
+        if let Some(pending_match_id) = pending_match_id {
+            let receipt = serde_json::to_string(&outcome).map_err(|error| {
+                BettingServiceRepositoryError::InvalidSnapshot(error.to_string())
+            })?;
+            transaction.execute(
+                "UPDATE pending_matches SET payload=json_set(payload,
+                    '$.automatic_blind_batch_receipt',json(?1)), updated_at=CURRENT_TIMESTAMP
+                 WHERE guild_id=?2 AND pending_match_id=?3",
+                params![receipt, guild_id, pending_match_id],
+            )?;
         }
         transaction.commit()?;
         Ok(outcome)
@@ -1223,6 +1265,148 @@ impl BettingServiceRepository {
         Ok(totals)
     }
 
+    /// Close admission, return every tagged wager and reserve, and consume the
+    /// pending identity under one writer lock. Record and wager transactions
+    /// therefore see either the complete live match or the complete abort.
+    pub fn abort_pending_match_atomic(
+        &self,
+        guild_id: Option<i64>,
+        pending_match_id: i64,
+        participant_ids: &[i64],
+    ) -> Result<bool, BettingServiceRepositoryError> {
+        self.abort_pending_match_inner(guild_id, pending_match_id, participant_ids, None)
+    }
+
+    /// Recover only a still-expired preparing stage; a stale worker cannot
+    /// refund a shuffle that another process has since prepared or published.
+    pub fn abort_expired_shuffle_setup_atomic(
+        &self,
+        guild_id: Option<i64>,
+        pending_match_id: i64,
+        now_unix: i64,
+    ) -> Result<bool, BettingServiceRepositoryError> {
+        self.abort_pending_match_inner(guild_id, pending_match_id, &[], Some(now_unix))
+    }
+
+    fn abort_pending_match_inner(
+        &self,
+        guild_id: Option<i64>,
+        pending_match_id: i64,
+        participant_ids: &[i64],
+        expired_setup_at: Option<i64>,
+    ) -> Result<bool, BettingServiceRepositoryError> {
+        let guild_id = Self::normalize_guild_id(guild_id);
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if transaction
+            .query_row(
+                "SELECT 1 FROM matches WHERE guild_id=?1 AND pending_match_id=?2 LIMIT 1",
+                params![guild_id, pending_match_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some()
+        {
+            return Err(BettingServiceRepositoryError::MatchAlreadyRecorded(
+                pending_match_id,
+            ));
+        }
+        let payload = transaction
+            .query_row(
+                "SELECT payload FROM pending_matches WHERE guild_id=?1 AND pending_match_id=?2",
+                params![guild_id, pending_match_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(payload) = payload else {
+            return Ok(false);
+        };
+        if let Some(now) = expired_setup_at {
+            let document: serde_json::Value = serde_json::from_str(&payload)
+                .map_err(|_| BettingServiceRepositoryError::InvalidPendingPayload)?;
+            let journal = &document["_cama_shuffle_setup"];
+            if document["shuffle_setup_complete"].as_bool() != Some(false)
+                || journal["phase"].as_str() != Some("preparing")
+                || journal["lease_until"]
+                    .as_i64()
+                    .is_none_or(|until| until > now)
+            {
+                return Ok(false);
+            }
+        }
+        if transaction.query_row(
+            "SELECT 1 FROM draft_finalization_jobs WHERE guild_id=?1 AND pending_match_id=?2 AND stage<>'complete' LIMIT 1",
+            params![guild_id,pending_match_id],|_|Ok(())
+        ).optional()?.is_some() {
+            return Err(BettingServiceRepositoryError::DraftFinalizationInProgress(pending_match_id));
+        }
+        let participants = json_i64_array(&payload, "radiant_team_ids")
+            .into_iter()
+            .chain(json_i64_array(&payload, "dire_team_ids"))
+            .collect::<BTreeSet<_>>();
+        // Failed setup passes no participants; ordinary abort credits only
+        // requested users that are still in the authoritative roster.
+        let requested_participants = participant_ids.iter().copied().collect::<BTreeSet<_>>();
+        let bets = {
+            let mut statement = transaction.prepare(
+                "SELECT bet_id,guild_id,discord_id,team_bet_on,amount,bet_time,
+                    COALESCE(leverage,1),COALESCE(is_blind,0),odds_at_placement,
+                    pending_match_id,investment_target_id,investment_direction
+                 FROM bets WHERE guild_id=?1 AND pending_match_id=?2 AND match_id IS NULL
+                 ORDER BY bet_id",
+            )?;
+            statement
+                .query_map(params![guild_id, pending_match_id], pending_bet_from_row)?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        set_ledger_context(
+            &transaction,
+            "bet_refund",
+            Some(pending_match_id),
+            "match aborted",
+        )?;
+        for bet in &bets {
+            transaction.execute(
+                "UPDATE players SET jopacoin_balance=COALESCE(jopacoin_balance,0)+?1,
+                  updated_at=CURRENT_TIMESTAMP WHERE guild_id=?2 AND discord_id=?3",
+                params![bet.effective_amount(), guild_id, bet.discord_id],
+            )?;
+        }
+        clear_ledger_context(&transaction)?;
+        transaction.execute(
+            "DELETE FROM bets WHERE guild_id=?1 AND pending_match_id=?2 AND match_id IS NULL",
+            params![guild_id, pending_match_id],
+        )?;
+        abort_seed_in_transaction(&transaction, guild_id, pending_match_id)?;
+        let grant_exclusions = json_bool(&payload, "shuffle_setup_complete") != Some(false)
+            && !json_bool(&payload, "is_draft").unwrap_or(false);
+        for discord_id in participants
+            .intersection(&requested_participants)
+            .filter(|_| grant_exclusions)
+        {
+            transaction.execute(
+                "UPDATE players SET exclusion_count=COALESCE(exclusion_count,0)+1,
+                    updated_at=CURRENT_TIMESTAMP WHERE guild_id=?1 AND discord_id=?2",
+                params![guild_id, discord_id],
+            )?;
+        }
+        transaction.execute(
+            "INSERT INTO app_kv(guild_id,key,value) VALUES (?1,?2,?3)
+             ON CONFLICT(guild_id,key) DO NOTHING",
+            params![
+                guild_id,
+                format!("pending-abort:{pending_match_id}"),
+                payload
+            ],
+        )?;
+        transaction.execute(
+            "DELETE FROM pending_matches WHERE guild_id=?1 AND pending_match_id=?2",
+            params![guild_id, pending_match_id],
+        )?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
     pub fn refund_pending_bets_atomic(
         &self,
         guild_id: Option<i64>,
@@ -1294,6 +1478,24 @@ impl BettingServiceRepository {
         let guild_id = Self::normalize_guild_id(guild_id);
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let committed = transaction.query_row(
+            "SELECT winning_team,pending_match_id FROM matches WHERE guild_id=?1 AND match_id=?2",
+            params![guild_id,match_id],
+            |row| Ok((row.get::<_,i64>(0)?,row.get::<_,Option<i64>>(1)?)),
+        ).optional()?;
+        // Modern records bind settlement to their immutable pending identity.
+        // Untagged historical imports retain the standalone settlement contract.
+        if let Some((winner, Some(committed_pending_id))) = committed {
+            let requested_winner = match winning_team {
+                BettingTeam::Radiant => 1,
+                BettingTeam::Dire => 2,
+            };
+            if Some(committed_pending_id) != pending_match_id || winner != requested_winner {
+                return Err(BettingServiceRepositoryError::InvalidSnapshot(
+                    "settlement disagrees with the committed match identity or winner".to_owned(),
+                ));
+            }
+        }
         let bets =
             pending_bets_in_transaction(&transaction, guild_id, None, since_ts, pending_match_id)?;
         let winning_pool = bets
@@ -2128,7 +2330,7 @@ fn exact_automatic_candidate(
         )?,
     };
     if let Some(payload) = payload {
-        validate_pending_bet(transaction, payload, request)?;
+        validate_setup_bet(transaction, payload, request)?;
     }
     // Spectator automatic bets preserve Python's allow_negative=False rule.
     // `max_debt` remains part of the typed seam for the shared wager policy,
@@ -2226,7 +2428,7 @@ fn automatic_candidate(
         odds_at_placement: None,
     };
     if let Some(payload) = payload {
-        validate_pending_bet(transaction, payload, request)?;
+        validate_setup_bet(transaction, payload, request)?;
     }
     insert_bet_in_transaction(transaction, guild_id, request, true, false)
 }
@@ -2441,10 +2643,36 @@ fn validate_pending_bet(
     payload: &str,
     request: PlaceBetRequest,
 ) -> Result<(), BettingServiceRepositoryError> {
+    validate_pending_bet_with_setup(transaction, payload, request, false)
+}
+
+fn validate_setup_bet(
+    transaction: &Transaction<'_>,
+    payload: &str,
+    request: PlaceBetRequest,
+) -> Result<(), BettingServiceRepositoryError> {
+    validate_pending_bet_with_setup(transaction, payload, request, true)
+}
+
+fn validate_pending_bet_with_setup(
+    transaction: &Transaction<'_>,
+    payload: &str,
+    request: PlaceBetRequest,
+    allow_setup: bool,
+) -> Result<(), BettingServiceRepositoryError> {
+    if json_bool(payload, "dota_betting_suspended") == Some(true) {
+        return Err(BettingServiceRepositoryError::BettingClosed);
+    }
+    if !allow_setup
+        && (json_bool(payload, "shuffle_setup_complete") == Some(false)
+            || json_bool(payload, "draft_setup_complete") == Some(false))
+    {
+        return Err(BettingServiceRepositoryError::BettingClosed);
+    }
     // A hosted record can briefly leave its pending row behind if the core
     // match commit succeeds before the cleanup retry.  The hosted marker is
-    // deliberately allowed to ignore the historical deadline, so the
-    // completed-match identity must be checked in this same transaction
+    // allowed past the historical deadline only while freshly observed. The
+    // completed-match identity must also be checked in this same transaction
     // before any wallet or bet writes can proceed.
     let guild_id = BettingServiceRepository::normalize_guild_id(request.guild_id);
     let already_recorded = transaction
@@ -2467,7 +2695,17 @@ fn validate_pending_bet(
         if extension_until.is_none_or(|extension_until| request.bet_time >= extension_until) {
             return Err(BettingServiceRepositoryError::BettingClosed);
         }
-    } else if !json_bool(payload, DOTA_HOSTED_BETTING_MARKER).unwrap_or(false) {
+    } else if json_bool(payload, DOTA_HOSTED_BETTING_MARKER).unwrap_or(false) {
+        let explicit_extension = json_i64(payload, DOTA_BETTING_EXTENDED_UNTIL)
+            .is_some_and(|until| request.bet_time < until);
+        let fresh = json_i64(payload, "dota_hosted_betting_observed_at").is_some_and(|observed| {
+            observed <= request.bet_time
+                && request.bet_time.saturating_sub(observed) < BETTING_OBSERVATION_TTL_SECONDS
+        });
+        if !explicit_extension && !fresh {
+            return Err(BettingServiceRepositoryError::BettingClosed);
+        }
+    } else {
         let lock_until = json_i64(payload, "bet_lock_until")
             .ok_or(BettingServiceRepositoryError::InvalidPendingPayload)?;
         if request.bet_time >= lock_until {

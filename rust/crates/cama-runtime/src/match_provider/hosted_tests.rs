@@ -21,8 +21,15 @@ async fn hosted_draft_replaces_timed_reminders_and_countdown_with_gameplay_start
             .contains_key(&key)
     );
     let repository = PendingMatchRepository::new(fixture.database.path());
-    let mut managed = repository
+    repository
         .begin_hosted_betting(GUILD, pending.pending_match_id, unix_seconds())
+        .unwrap();
+    repository
+        .observe_hosted_betting(GUILD, pending.pending_match_id, unix_seconds())
+        .unwrap();
+    let mut managed = repository
+        .pending_match(GUILD, pending.pending_match_id)
+        .unwrap()
         .unwrap();
     fixture
         .provider
@@ -171,7 +178,10 @@ async fn admin_extension_during_hosted_draft_keeps_the_gameplay_cutoff() {
         .pending_match(GUILD, pending.pending_match_id)
         .unwrap()
         .unwrap();
-    assert!(extended.state.betting_open(extension.new_bet_lock_until));
+    assert!(
+        !extended.state.betting_open(extension.new_bet_lock_until),
+        "expired extension must not bypass a missing live observation"
+    );
     let embed = fixture
         .provider
         .handler
@@ -238,6 +248,7 @@ fn linked_hosted_result(
         winning_team: winner.to_owned(),
         expected_roster,
         players,
+        postgame_statistics: None,
     }
 }
 
@@ -314,7 +325,15 @@ async fn hosted_finalization_guard_excludes_manual_abort() {
 async fn hosted_record_defers_to_abort_before_reading_pending_state() {
     let fixture = MatchRuntimeFixture::new();
     let pending = fixture.pending(unix_seconds() + 120);
-    let result = linked_hosted_result(&fixture, &pending, 8_123_456_789, "radiant");
+    let mut result = linked_hosted_result(&fixture, &pending, 8_123_456_789, "radiant");
+    result.postgame_statistics = Some(json!({
+        "match_id": result.valve_match_id, "radiant_win": true, "duration": 1800,
+        "players": result.players.iter().enumerate().map(|(index, player)| json!({
+            "account_id": player.account32,
+            "player_slot": if player.radiant {index % 5} else {128 + index % 5},
+            "kills": 0, "gold_per_min": 450,
+        })).collect::<Vec<_>>()
+    }));
     let guard = fixture
         .provider
         .handler
@@ -350,7 +369,15 @@ async fn hosted_record_defers_to_abort_before_reading_pending_state() {
 async fn hosted_record_uses_production_saga_and_is_idempotent() {
     let fixture = MatchRuntimeFixture::new();
     let pending = fixture.pending(unix_seconds() + 120);
-    let result = linked_hosted_result(&fixture, &pending, 8_123_456_789, "radiant");
+    let mut result = linked_hosted_result(&fixture, &pending, 8_123_456_789, "radiant");
+    result.postgame_statistics = Some(json!({
+        "match_id": result.valve_match_id, "radiant_win": true, "duration": 1800,
+        "players": result.players.iter().enumerate().map(|(index, player)| json!({
+            "account_id": player.account32,
+            "player_slot": if player.radiant {index % 5} else {128 + index % 5},
+            "kills": 0, "gold_per_min": 450,
+        })).collect::<Vec<_>>()
+    }));
     let steam = OpenDotaPlayerRepository::new(fixture.database.path());
     let first = &result.expected_roster[0];
     steam
@@ -377,6 +404,14 @@ async fn hosted_record_uses_production_saga_and_is_idempotent() {
         .expect("read hosted match")
         .expect("hosted match exists");
     assert_eq!(summary.valve_match_id, Some(8_123_456_789));
+    let saved_stats = MatchRecordingRepository::new(fixture.database.path())
+        .gc_statistics(match_id, Some(GUILD))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&saved_stats).unwrap(),
+        result.postgame_statistics.clone().unwrap()
+    );
     assert_eq!(summary.team1_players, radiant);
     assert_eq!(summary.team2_players, dire);
     // A stale pending payload (including an unexpired admin override) must
@@ -558,4 +593,39 @@ async fn hosted_record_rejects_account32_steam64_owner_conflict() {
         .await
         .expect_err("equivalent account forms owned by different players must fail");
     assert!(error.contains("owned by a different Discord player"));
+}
+
+#[test]
+fn hosted_statistics_validate_identity_and_preserve_missing_fields() {
+    let fixture = MatchRuntimeFixture::new();
+    let pending = fixture.pending(unix_seconds() + 120);
+    let mut result = linked_hosted_result(&fixture, &pending, 8_123_456_799, "radiant");
+    assert!(validate_hosted_statistics(&result).is_ok());
+    result.postgame_statistics = Some(json!({
+        "match_id": result.valve_match_id, "radiant_win": true,
+        "players": result.players.iter().enumerate().map(|(index, player)| json!({
+            "account_id": player.account32,
+            "player_slot": if player.radiant {index % 5} else {128 + index % 5},
+            "kills": 0
+        })).collect::<Vec<_>>()
+    }));
+    assert!(validate_hosted_statistics(&result).is_ok());
+    let mut wrong_match = result.clone();
+    wrong_match.postgame_statistics.as_mut().unwrap()["match_id"] = json!(1);
+    assert!(validate_hosted_statistics(&wrong_match).is_err());
+    let mut wrong_winner = result.clone();
+    wrong_winner.postgame_statistics.as_mut().unwrap()["radiant_win"] = json!(false);
+    assert!(validate_hosted_statistics(&wrong_winner).is_err());
+    let mut wrong_side = result.clone();
+    wrong_side.postgame_statistics.as_mut().unwrap()["players"][0]["player_slot"] = json!(128);
+    assert!(validate_hosted_statistics(&wrong_side).is_err());
+    let mut duplicate = result.clone();
+    duplicate.postgame_statistics.as_mut().unwrap()["players"][1]["account_id"] =
+        json!(result.players[0].account32);
+    assert!(validate_hosted_statistics(&duplicate).is_err());
+    result.postgame_statistics.as_mut().unwrap()["players"]
+        .as_array_mut()
+        .unwrap()
+        .pop();
+    assert!(validate_hosted_statistics(&result).is_err());
 }

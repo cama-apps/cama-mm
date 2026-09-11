@@ -9,6 +9,8 @@ chrono.workspace = true
 chrono-tz.workspace = true
 fastrand.workspace = true
 libm.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

@@ -126,6 +126,11 @@ pub enum DotaSessionRepositoryError {
         expected: i64,
         actual: i64,
     },
+    #[error("pending match {guild_id}/{pending_match_id} no longer reserves this Dota account")]
+    ReservationUnavailable {
+        guild_id: i64,
+        pending_match_id: i64,
+    },
     #[error("Dota session account key must not be empty")]
     EmptyAccountKey,
     #[error("Dota session account key is immutable")]
@@ -179,6 +184,30 @@ impl DotaSessionRepository {
         payload: Value,
         now: i64,
     ) -> Result<DotaSessionClaim, DotaSessionRepositoryError> {
+        self.claim_session_inner(guild_id, pending_match_id, account_key, payload, now, false)
+    }
+
+    pub fn claim_reserved_session(
+        &self,
+        guild_id: i64,
+        pending_match_id: i64,
+        account_key: &str,
+        payload: Value,
+        now: i64,
+    ) -> Result<DotaSessionClaim, DotaSessionRepositoryError> {
+        self.claim_session_inner(guild_id, pending_match_id, account_key, payload, now, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn claim_session_inner(
+        &self,
+        guild_id: i64,
+        pending_match_id: i64,
+        account_key: &str,
+        payload: Value,
+        now: i64,
+        reserved: bool,
+    ) -> Result<DotaSessionClaim, DotaSessionRepositoryError> {
         if account_key.trim().is_empty() {
             return Err(DotaSessionRepositoryError::EmptyAccountKey);
         }
@@ -191,6 +220,25 @@ impl DotaSessionRepository {
             return Ok(DotaSessionClaim::Existing(existing));
         }
 
+        if reserved {
+            let eligible: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM pending_matches p
+                WHERE p.guild_id=?1 AND p.pending_match_id=?2
+                  AND json_extract(p.payload,'$.dota_host_account_key')=?3
+                  AND NOT EXISTS(SELECT 1 FROM app_kv k WHERE k.guild_id=0 AND k.key='dota_host_withdrawn:'||p.guild_id||':'||p.pending_match_id)
+                  AND EXISTS(SELECT 1 FROM app_kv policy WHERE policy.guild_id=0 AND policy.key='dota_host_routing'
+                    AND json_extract(policy.value,'$.account_key')=?3
+                    AND EXISTS(SELECT 1 FROM json_each(policy.value,'$.guild_ids') WHERE value=?1))
+                  AND COALESCE(json_extract(p.payload,'$.dota_hosting.hosting'),'bot')!='manual'
+                  AND COALESCE(json_extract(p.payload,'$.shuffle_setup_complete'),1)!=0
+                  AND COALESCE(json_extract(p.payload,'$.draft_setup_complete'),1)!=0
+                  AND NOT EXISTS(SELECT 1 FROM matches m WHERE m.guild_id=?1 AND m.pending_match_id=?2))", params![guild_id,pending_match_id,account_key], |r|r.get(0))?;
+            if !eligible {
+                return Err(DotaSessionRepositoryError::ReservationUnavailable {
+                    guild_id,
+                    pending_match_id,
+                });
+            }
+        }
         if let Some(busy) = query_active_account(&transaction, account_key)? {
             transaction.commit()?;
             return Ok(DotaSessionClaim::Busy(busy));
@@ -249,6 +297,28 @@ impl DotaSessionRepository {
             .map_err(Into::into)
     }
 
+    /// Durable terminal notification outbox, independent of status history limits.
+    pub fn terminal_status_pending(
+        &self,
+        account_key: &str,
+    ) -> Result<Vec<DotaSessionRecord>, DotaSessionRepositoryError> {
+        let connection = open_runtime_connection(&self.path)?;
+        let mut statement = connection.prepare(
+            "SELECT guild_id, pending_match_id, account_key, phase,
+                    lobby_id, valve_match_id, payload, revision,
+                    created_at, updated_at, last_error
+             FROM dota_sessions
+             WHERE account_key=?1 AND phase IN ('recorded','cancelled','failed')
+               AND json_type(payload,'$.pending_status')='text'
+               AND json_type(payload,'$.channel_id')='integer'
+             ORDER BY updated_at, guild_id, pending_match_id",
+        )?;
+        statement
+            .query_map([account_key], row_to_session)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     /// Load the most recently updated sessions, including terminal rows.
     ///
     /// This bounded history is used by operator status and replay recovery;
@@ -272,6 +342,35 @@ impl DotaSessionRepository {
         )?;
         statement
             .query_map([i64::try_from(limit).unwrap_or(1_000)], row_to_session)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Apply guild isolation before the history limit so busy other guilds
+    /// cannot hide this guild's current or recently completed sessions.
+    pub fn recent_sessions_for_guild(
+        &self,
+        guild_id: i64,
+        limit: usize,
+    ) -> Result<Vec<DotaSessionRecord>, DotaSessionRepositoryError> {
+        if limit > 1_000 {
+            return Err(DotaSessionRepositoryError::InvalidHistoryLimit(limit));
+        }
+        let connection = open_runtime_connection(&self.path)?;
+        let mut statement = connection.prepare(
+            "SELECT guild_id, pending_match_id, account_key, phase,
+                    lobby_id, valve_match_id, payload, revision,
+                    created_at, updated_at, last_error
+               FROM dota_sessions
+              WHERE guild_id=?1
+              ORDER BY updated_at DESC, pending_match_id DESC
+              LIMIT ?2",
+        )?;
+        statement
+            .query_map(
+                params![guild_id, i64::try_from(limit).unwrap_or(1_000)],
+                row_to_session,
+            )?
             .collect::<Result<Vec<_>, _>>()
             .map_err(Into::into)
     }

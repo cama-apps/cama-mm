@@ -233,6 +233,516 @@ fn migrated_concurrent_fixture() -> NamedTempFile {
     file
 }
 
+// Regression tests retain the adversarial interleavings as safety invariants.
+#[test]
+fn atomic_abort_refunds_every_wager_and_rejects_late_admission() {
+    use cama_db_match::match_runtime::PendingMatchRepository;
+    let file = migrated_concurrent_fixture();
+    let bets = repo(file.path());
+    let pending = PendingMatchRepository::new(file.path());
+    bets.place_bet_atomic(request(11, 3_001, BettingTeam::Radiant, 20))
+        .unwrap();
+    assert!(
+        bets.abort_pending_match_atomic(Some(GUILD), 11, &[])
+            .unwrap()
+    );
+    assert!(pending.pending_match(GUILD, 11).unwrap().is_none());
+    assert_eq!(balance(file.path(), 3_001), 200);
+    assert!(matches!(
+        bets.place_bet_atomic(request(11, 3_001, BettingTeam::Radiant, 30)),
+        Err(BettingServiceRepositoryError::MissingPendingMatch { .. })
+    ));
+    assert!(
+        !bets
+            .abort_pending_match_atomic(Some(GUILD), 11, &[])
+            .unwrap()
+    );
+    assert_eq!(balance(file.path(), 3_001), 200);
+    assert!(
+        bets.get_pending_bets(Some(GUILD), None, 0, Some(11))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn expired_setup_abort_rechecks_current_stage_and_lease_inside_financial_transaction() {
+    let file = migrated_concurrent_fixture();
+    let connection = Connection::open(file.path()).unwrap();
+    let bets = repo(file.path());
+    bets.place_bet_atomic(request(11, 3001, BettingTeam::Radiant, 30))
+        .unwrap();
+    for (phase, complete, until) in [
+        ("ready", true, NOW - 1),
+        ("prepared", false, NOW - 1),
+        ("preparing", false, NOW + 1),
+    ] {
+        connection.execute("UPDATE pending_matches SET payload=json_set(payload,'$.shuffle_setup_complete',json(?1),'$._cama_shuffle_setup',json(?2)) WHERE pending_match_id=11",
+            params![serde_json::to_string(&complete).unwrap(),serde_json::json!({"phase":phase,"lease_until":until}).to_string()]).unwrap();
+        assert!(
+            !bets
+                .abort_expired_shuffle_setup_atomic(Some(GUILD), 11, NOW)
+                .unwrap()
+        );
+        assert_eq!(balance(file.path(), 3001), 170);
+    }
+    connection.execute("UPDATE pending_matches SET payload=json_set(payload,'$._cama_shuffle_setup.lease_until',?1) WHERE pending_match_id=11",[NOW]).unwrap();
+    assert!(
+        bets.abort_expired_shuffle_setup_atomic(Some(GUILD), 11, NOW)
+            .unwrap()
+    );
+    assert_eq!(balance(file.path(), 3001), 200);
+    assert!(
+        !bets
+            .abort_expired_shuffle_setup_atomic(Some(GUILD), 11, NOW)
+            .unwrap()
+    );
+}
+
+#[test]
+fn abort_and_wager_race_has_no_orphan_or_lost_balance() {
+    use std::sync::{Arc, Barrier};
+    let file = migrated_concurrent_fixture();
+    let barrier = Arc::new(Barrier::new(2));
+    let path = file.path().to_path_buf();
+    let abort_barrier = barrier.clone();
+    let abort = std::thread::spawn(move || {
+        abort_barrier.wait();
+        repo(&path)
+            .abort_pending_match_atomic(Some(GUILD), 11, &[])
+            .unwrap()
+    });
+    barrier.wait();
+    let wager = repo(file.path()).place_bet_atomic(request(11, 3_001, BettingTeam::Radiant, 30));
+    assert!(
+        wager.is_ok()
+            || matches!(
+                wager,
+                Err(BettingServiceRepositoryError::MissingPendingMatch { .. })
+            )
+    );
+    assert!(abort.join().unwrap());
+    assert_eq!(balance(file.path(), 3_001), 200);
+    assert!(
+        repo(file.path())
+            .get_pending_bets(Some(GUILD), None, NOW, Some(11))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn abort_seed_failure_rolls_back_refund_and_preserves_match_for_retry() {
+    use crate::dota_bet_seed_repository::DotaBetSeedRepository;
+    use cama_db_match::match_runtime::PendingMatchRepository;
+    let file = migrated_concurrent_fixture();
+    let connection = Connection::open(file.path()).unwrap();
+    connection
+        .execute(
+            "UPDATE nonprofit_fund SET total_collected=100 WHERE guild_id=?1",
+            [GUILD],
+        )
+        .unwrap();
+    let seed = DotaBetSeedRepository::new(file.path());
+    seed.reserve_seed_atomic(Some(GUILD), 11, 60, 0, BettingMode::Pool)
+        .unwrap();
+    let bets = repo(file.path());
+    bets.place_bet_atomic(request(11, 3_001, BettingTeam::Radiant, 30))
+        .unwrap();
+    bets.place_bet_atomic(request(12, 3_002, BettingTeam::Dire, 25))
+        .unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_abort_seed BEFORE UPDATE OF total_collected ON nonprofit_fund BEGIN SELECT RAISE(ABORT,'injected seed return failure'); END").unwrap();
+    assert!(
+        bets.abort_pending_match_atomic(Some(GUILD), 11, &[])
+            .is_err()
+    );
+    assert_eq!(balance(file.path(), 3_001), 170);
+    assert!(
+        PendingMatchRepository::new(file.path())
+            .pending_match(GUILD, 11)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(seed.seed_state(Some(GUILD), 11).unwrap().reserved, 60);
+    connection
+        .execute_batch("DROP TRIGGER reject_abort_seed")
+        .unwrap();
+    assert!(
+        bets.abort_pending_match_atomic(Some(GUILD), 11, &[])
+            .unwrap()
+    );
+    assert_eq!(balance(file.path(), 3_001), 200);
+    assert_eq!(balance(file.path(), 3_002), 175);
+    assert_eq!(seed.nonprofit_balance(Some(GUILD)).unwrap(), 100);
+    assert_eq!(
+        bets.get_pending_bets(Some(GUILD), None, NOW, Some(12))
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn settlement_rejects_disagreement_with_committed_winner_before_any_money_changes() {
+    let file = migrated_concurrent_fixture();
+    let bets = repo(file.path());
+    bets.place_bet_atomic(request(11, 3_001, BettingTeam::Radiant, 30))
+        .unwrap();
+    let connection = Connection::open(file.path()).unwrap();
+    connection
+        .execute(
+            "UPDATE matches SET pending_match_id=11 WHERE match_id=5041 AND guild_id=?1",
+            [GUILD],
+        )
+        .unwrap();
+    for (pending_id, winner) in [(11, BettingTeam::Dire), (12, BettingTeam::Radiant)] {
+        assert!(matches!(
+            bets.settle_pending_bets_atomic(
+                5041,
+                Some(GUILD),
+                NOW,
+                Some(pending_id),
+                winner,
+                BettingMode::Pool
+            ),
+            Err(BettingServiceRepositoryError::InvalidSnapshot(_))
+        ));
+    }
+    assert_eq!(balance(file.path(), 3_001), 170);
+    assert_eq!(
+        bets.get_pending_bets(Some(GUILD), None, NOW, Some(11))
+            .unwrap()
+            .len(),
+        1
+    );
+    bets.settle_pending_bets_atomic(
+        5041,
+        Some(GUILD),
+        NOW,
+        Some(11),
+        BettingTeam::Radiant,
+        BettingMode::Pool,
+    )
+    .unwrap();
+    assert_eq!(balance(file.path(), 3_001), 200);
+}
+
+#[test]
+fn incomplete_setup_blocks_public_wagers_but_can_place_and_replay_automatic_batch() {
+    let file = fixture();
+    add_pending(file.path(), 11, false);
+    add_player(file.path(), 1, 200);
+    Connection::open(file.path()).unwrap().execute(
+        "UPDATE pending_matches SET payload=json_set(payload,'$.shuffle_setup_complete',json('false')) WHERE pending_match_id=11",[]).unwrap();
+    let bets = repo(file.path());
+    assert!(matches!(
+        bets.place_bet_atomic(request(11, 1, BettingTeam::Radiant, 10)),
+        Err(BettingServiceRepositoryError::BettingClosed)
+    ));
+    let candidates = [BlindBetCandidate {
+        discord_id: 1,
+        team: BettingTeam::Radiant,
+        ante_override: None,
+    }];
+    let first = bets
+        .create_auto_blind_bets_atomic(
+            Some(GUILD),
+            Some(11),
+            NOW,
+            &candidates,
+            BlindBetPolicy::default(),
+        )
+        .unwrap();
+    let retry = bets
+        .create_auto_blind_bets_atomic(
+            Some(GUILD),
+            Some(11),
+            NOW,
+            &candidates,
+            BlindBetPolicy::default(),
+        )
+        .unwrap();
+    assert_eq!(first, retry);
+    assert_eq!(first.created.len(), 1);
+    assert_eq!(balance(file.path(), 1), 180);
+}
+
+#[test]
+fn hosted_betting_requires_fresh_observation_and_explicit_extensions_remain_deliberate() {
+    use cama_db_match::match_runtime::PendingMatchRepository;
+    let file = migrated_concurrent_fixture();
+    let pending = PendingMatchRepository::new(file.path());
+    let bets = repo(file.path());
+    pending.begin_hosted_betting(GUILD, 11, NOW).unwrap();
+    let wager = request(11, 3_001, BettingTeam::Radiant, 30);
+    assert!(matches!(
+        bets.place_bet_atomic(wager),
+        Err(BettingServiceRepositoryError::BettingClosed)
+    ));
+    assert!(pending.observe_hosted_betting(GUILD, 11, NOW).unwrap());
+    bets.place_bet_atomic(wager).unwrap();
+    for bet_time in [NOW - 1, NOW + 90, NOW + 86_400] {
+        assert!(matches!(
+            bets.place_bet_atomic(PlaceBetRequest { bet_time, ..wager }),
+            Err(BettingServiceRepositoryError::BettingClosed)
+        ));
+    }
+    pending.suspend_hosted_betting(GUILD, 11).unwrap();
+    assert!(matches!(
+        bets.place_bet_atomic(wager),
+        Err(BettingServiceRepositoryError::BettingClosed)
+    ));
+    let extension = pending
+        .extend_betting_atomic(GUILD, 11, NOW + 100, 60)
+        .unwrap();
+    bets.place_bet_atomic(PlaceBetRequest {
+        bet_time: extension.new_lock_until - 1,
+        ..wager
+    })
+    .unwrap();
+    assert!(matches!(
+        bets.place_bet_atomic(PlaceBetRequest {
+            bet_time: extension.new_lock_until,
+            ..wager
+        }),
+        Err(BettingServiceRepositoryError::BettingClosed)
+    ));
+    assert_eq!(balance(file.path(), 3_001), 140);
+}
+
+#[test]
+fn explicit_operator_suspension_overrides_even_an_admin_extension() {
+    use cama_db_match::match_runtime::PendingMatchRepository;
+    let file = migrated_concurrent_fixture();
+    let pending = PendingMatchRepository::new(file.path());
+    pending.begin_hosted_betting(GUILD, 11, NOW).unwrap();
+    pending.extend_betting_atomic(GUILD, 11, NOW, 60).unwrap();
+    assert!(pending.set_betting_suspended(GUILD, 11, true).unwrap());
+    pending.observe_hosted_betting(GUILD, 11, NOW).unwrap();
+    let state = pending.pending_match(GUILD, 11).unwrap().unwrap().state;
+    assert!(!state.betting_open(NOW));
+    let wager = request(11, 3_001, BettingTeam::Radiant, 30);
+    assert!(matches!(
+        repo(file.path()).place_bet_atomic(wager),
+        Err(BettingServiceRepositoryError::BettingClosed)
+    ));
+    assert!(pending.set_betting_suspended(GUILD, 11, false).unwrap());
+    repo(file.path()).place_bet_atomic(wager).unwrap();
+    assert_eq!(balance(file.path(), 3_001), 170);
+}
+
+#[test]
+fn failed_setup_abort_restores_unreserved_daily_claim_without_exclusion_credit() {
+    use crate::dota_bet_seed_repository::{DotaBetSeedRepository, FirstGameLobby};
+    let file = migrated_concurrent_fixture();
+    let connection = Connection::open(file.path()).unwrap();
+    connection
+        .execute(
+            "UPDATE nonprofit_fund SET first_game_open_pool=100 WHERE guild_id=?1",
+            [GUILD],
+        )
+        .unwrap();
+    connection.execute("UPDATE pending_matches SET payload=json_set(payload,'$.shuffle_setup_complete',json('false'),'$.radiant_team_ids',json('[3001]')) WHERE pending_match_id=11",[]).unwrap();
+    let seed = DotaBetSeedRepository::new(file.path());
+    assert_eq!(
+        seed.claim_first_game_pool(Some(GUILD), FirstGameLobby::Open, "2026-09-11", 11)
+            .unwrap(),
+        100
+    );
+    let bets = repo(file.path());
+    assert!(
+        bets.abort_pending_match_atomic(Some(GUILD), 11, &[3001])
+            .unwrap()
+    );
+    assert_eq!(seed.pool_balances(Some(GUILD)).unwrap().open, 100);
+    assert!(
+        !bets
+            .abort_pending_match_atomic(Some(GUILD), 11, &[3001])
+            .unwrap()
+    );
+    let exclusion: i64 = connection
+        .query_row(
+            "SELECT exclusion_count FROM players WHERE guild_id=?1 AND discord_id=3001",
+            [GUILD],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(exclusion, 0);
+}
+
+#[test]
+fn automatic_blind_receipt_failure_rolls_back_entire_batch_before_retry() {
+    let file = fixture();
+    add_pending(file.path(), 11, false);
+    add_player(file.path(), 1, 200);
+    let candidates = [BlindBetCandidate {
+        discord_id: 1,
+        team: BettingTeam::Radiant,
+        ante_override: None,
+    }];
+    let connection = Connection::open(file.path()).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_blind_receipt BEFORE UPDATE OF payload ON pending_matches BEGIN SELECT RAISE(ABORT,'injected receipt failure'); END").unwrap();
+    let bets = repo(file.path());
+    assert!(
+        bets.create_auto_blind_bets_atomic(
+            Some(GUILD),
+            Some(11),
+            NOW,
+            &candidates,
+            BlindBetPolicy::default()
+        )
+        .is_err()
+    );
+    assert_eq!(balance(file.path(), 1), 200);
+    assert!(
+        bets.get_pending_bets(Some(GUILD), None, NOW, Some(11))
+            .unwrap()
+            .is_empty()
+    );
+    connection
+        .execute_batch("DROP TRIGGER reject_blind_receipt")
+        .unwrap();
+    let first = bets
+        .create_auto_blind_bets_atomic(
+            Some(GUILD),
+            Some(11),
+            NOW,
+            &candidates,
+            BlindBetPolicy::default(),
+        )
+        .unwrap();
+    assert_eq!(first.created.len(), 1);
+    assert_eq!(balance(file.path(), 1), 180);
+}
+
+#[test]
+fn concurrent_blind_batches_share_one_durable_receipt_and_one_debit() {
+    use std::sync::{Arc, Barrier};
+    let file = migrated_concurrent_fixture();
+    let barrier = Arc::new(Barrier::new(2));
+    let other_barrier = barrier.clone();
+    let path = file.path().to_path_buf();
+    let candidates = [BlindBetCandidate {
+        discord_id: 3_001,
+        team: BettingTeam::Radiant,
+        ante_override: None,
+    }];
+    let other = std::thread::spawn(move || {
+        other_barrier.wait();
+        repo(&path)
+            .create_auto_blind_bets_atomic(
+                Some(GUILD),
+                Some(11),
+                NOW,
+                &candidates,
+                BlindBetPolicy::default(),
+            )
+            .unwrap()
+    });
+    barrier.wait();
+    let first = repo(file.path())
+        .create_auto_blind_bets_atomic(
+            Some(GUILD),
+            Some(11),
+            NOW,
+            &candidates,
+            BlindBetPolicy::default(),
+        )
+        .unwrap();
+    assert_eq!(first, other.join().unwrap());
+    assert_eq!(balance(file.path(), 3_001), 180);
+}
+
+#[test]
+fn automatic_blind_batch_retry_returns_original_receipt_without_second_debit() {
+    let file = fixture();
+    add_pending(file.path(), 11, false);
+    add_player(file.path(), 1, 200);
+    let candidates = [BlindBetCandidate {
+        discord_id: 1,
+        team: BettingTeam::Radiant,
+        ante_override: None,
+    }];
+    let policy = BlindBetPolicy {
+        normal_threshold: 1,
+        normal_percentage: 10,
+        ..BlindBetPolicy::default()
+    };
+    let first = repo(file.path())
+        .create_auto_blind_bets_atomic(Some(GUILD), Some(11), NOW, &candidates, policy)
+        .unwrap();
+    let second = repo(file.path())
+        .create_auto_blind_bets_atomic(Some(GUILD), Some(11), NOW + 100, &candidates, policy)
+        .unwrap();
+    assert_eq!(first, second);
+    assert_eq!(first.created.len(), 1);
+    assert_eq!(balance(file.path(), 1), 180);
+}
+
+#[test]
+fn retry_after_core_preserves_deciding_win_low_priority_tax_snapshot() {
+    use cama_db_match::core_repositories::{CoreMatchRecord, MatchRecord, MatchRepository};
+
+    let file = migrated_concurrent_fixture();
+    let connection = Connection::open(file.path()).unwrap();
+    connection.execute(
+        "INSERT INTO low_priority_state(discord_id,guild_id,wins_required,wins_remaining,active,set_by)
+         VALUES (3001,?1,1,1,1,901)", [GUILD],
+    ).unwrap();
+    let taxable = || -> BTreeSet<i64> {
+        // Same query as LowPriorityRepository::active_taxable_ids.
+        connection.prepare("SELECT discord_id FROM low_priority_state WHERE guild_id=?1 AND active=1 AND wins_remaining>0")
+            .unwrap().query_map([GUILD], |row| row.get(0)).unwrap()
+            .collect::<Result<_, _>>().unwrap()
+    };
+    assert!(taxable().contains(&3001));
+    let bets = repo(file.path());
+    bets.place_bet_atomic(request(11, 3001, BettingTeam::Radiant, 20))
+        .unwrap();
+    bets.place_bet_atomic(request(11, 3002, BettingTeam::Dire, 20))
+        .unwrap();
+    connection.execute("UPDATE pending_matches SET payload=json_set(payload,'$.radiant_team_ids',json('[3001]'),'$.dire_team_ids',json('[3002]')) WHERE guild_id=?1 AND pending_match_id=11",[GUILD]).unwrap();
+    let record = MatchRecord::new(vec![3001], vec![3002], 1, Some(GUILD));
+    let mut core = CoreMatchRecord::new(record, "2026-09-11T00:00:00+00:00");
+    core.pending_match_id = Some(11);
+    core.winning_ids = vec![3001];
+    core.losing_ids = vec![3002];
+    let matches = MatchRepository::new(file.path());
+    let match_id = matches.record_match_core_atomic(&core).unwrap();
+    // Crash boundary: runtime's in-memory pre-core taxable set is lost.
+    assert!(!taxable().contains(&3001));
+    let raw: String = connection
+        .query_row(
+            "SELECT payload FROM pending_matches WHERE guild_id=?1 AND pending_match_id=11",
+            [GUILD],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let retry_taxable: BTreeSet<i64> =
+        serde_json::from_value(payload["recording_policy"]["low_priority_taxable_ids"].clone())
+            .unwrap();
+    assert!(retry_taxable.contains(&3001));
+    assert_eq!(matches.record_match_core_atomic(&core).unwrap(), match_id);
+    let settled = bets
+        .settle_pending_bets_with_adjustments_atomic(
+            match_id,
+            Some(GUILD),
+            NOW,
+            Some(11),
+            BettingTeam::Radiant,
+            BettingMode::Pool,
+            &BetSettlementAdjustments {
+                low_priority_tax_rate: Some(0.5),
+                low_priority_taxable_ids: retry_taxable,
+                ..BetSettlementAdjustments::default()
+            },
+        )
+        .unwrap();
+    assert!(!settled.low_priority_taxes.is_empty());
+    assert_eq!(balance(file.path(), 3001), 210);
+}
+
 fn migrated_request(
     pending_match_id: i64,
     discord_id: i64,
@@ -2374,7 +2884,7 @@ fn test_hosted_betting_stays_open_after_original_deadline() {
         file.path(),
         1,
         &format!(
-            "{{\"radiant_team_ids\":[1,2,3,4,5],\"dire_team_ids\":[6,7,8,9,10],\"bet_lock_until\":{},\"dota_hosted_betting\":true}}",
+            "{{\"radiant_team_ids\":[1,2,3,4,5],\"dire_team_ids\":[6,7,8,9,10],\"bet_lock_until\":{},\"dota_hosted_betting\":true,\"dota_hosted_betting_observed_at\":{NOW}}}",
             NOW - 1
         ),
     );
@@ -2384,7 +2894,7 @@ fn test_hosted_betting_stays_open_after_original_deadline() {
 
     repository
         .place_bet_atomic(PlaceBetRequest {
-            bet_time: NOW + 10_000,
+            bet_time: NOW + 10,
             ..request(1, 1001, BettingTeam::Radiant, 5)
         })
         .expect("hosted match remains open past its timed deadline");
@@ -2392,7 +2902,7 @@ fn test_hosted_betting_stays_open_after_original_deadline() {
         .place_automatic_amount_bets_atomic(
             Some(GUILD),
             Some(1),
-            NOW + 10_001,
+            NOW + 11,
             &[AutomaticAmountBetRequest {
                 discord_id: 1002,
                 team: BettingTeam::Dire,
@@ -2411,7 +2921,7 @@ fn test_completed_hosted_match_rejects_bets_and_keeps_sibling_guild_open() {
         file.path(),
         1,
         &format!(
-            "{{\"radiant_team_ids\":[1,2,3,4,5],\"dire_team_ids\":[6,7,8,9,10],\"bet_lock_until\":{},\"dota_hosted_betting\":true}}",
+            "{{\"radiant_team_ids\":[1,2,3,4,5],\"dire_team_ids\":[6,7,8,9,10],\"bet_lock_until\":{},\"dota_hosted_betting\":true,\"dota_hosted_betting_observed_at\":{NOW}}}",
             NOW - 1
         ),
     );
@@ -2471,7 +2981,7 @@ fn test_completed_hosted_match_rejects_bets_and_keeps_sibling_guild_open() {
                 2,
                 sibling_guild,
                 format!(
-                    "{{\"radiant_team_ids\":[1,2,3,4,5],\"dire_team_ids\":[6,7,8,9,10],\"bet_lock_until\":{},\"dota_hosted_betting\":true}}",
+                    "{{\"radiant_team_ids\":[1,2,3,4,5],\"dire_team_ids\":[6,7,8,9,10],\"bet_lock_until\":{},\"dota_hosted_betting\":true,\"dota_hosted_betting_observed_at\":{NOW}}}",
                     NOW - 1
                 )
             ],

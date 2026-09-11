@@ -1265,3 +1265,85 @@ async fn guild_name_reports_a_missing_guild_as_absent_rather_than_an_error() {
     server.join().expect("capture server completes");
     assert_eq!(name, None);
 }
+
+#[tokio::test]
+async fn spectator_cleanup_refuses_a_foreign_marker_and_treats_missing_channel_as_done() {
+    let (proxy, server) = canned_discord_reply("200 OK",serde_json::json!({"id":"55","guild_id":"100","type":0,"name":"foreign","topic":"someone-elses-marker","position":0,"permission_overwrites":[]}).to_string());
+    let http = Arc::new(
+        HttpBuilder::new("test-token")
+            .proxy(proxy)
+            .ratelimiter_disabled(true)
+            .build(),
+    );
+    let error = spectator::delete(&http, 100, 55, "our-marker")
+        .await
+        .unwrap_err();
+    assert!(error.contains("does not match"), "{error}");
+    server.join().unwrap();
+    let (proxy, server) = canned_discord_reply(
+        "404 Not Found",
+        serde_json::json!({"code":10003,"message":"Unknown Channel"}).to_string(),
+    );
+    let http = Arc::new(
+        HttpBuilder::new("test-token")
+            .proxy(proxy)
+            .ratelimiter_disabled(true)
+            .build(),
+    );
+    spectator::delete(&http, 100, 55, "our-marker")
+        .await
+        .unwrap();
+    server.join().unwrap();
+}
+
+#[tokio::test]
+async fn spectator_marker_cleanup_finds_unacknowledged_create_and_skips_foreign_channels() {
+    let owned = serde_json::json!({"id":"55","guild_id":"100","type":0,"name":"owned","topic":"our-marker","position":0,"permission_overwrites":[]});
+    let mut foreign = owned.clone();
+    foreign["id"] = "56".into();
+    foreign["topic"] = "foreign-marker".into();
+    let mut voice = owned.clone();
+    voice["id"] = "57".into();
+    voice["type"] = 2.into();
+    let replies = vec![
+        (
+            "GET",
+            "/guilds/100/channels",
+            serde_json::json!([owned.clone(), foreign, voice]).to_string(),
+        ),
+        ("GET", "/channels/55", owned.to_string()),
+        ("DELETE", "/channels/55", owned.to_string()),
+    ];
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        for (method, path, body) in replies {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0; 4096];
+            loop {
+                let count = stream.read(&mut chunk).unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&chunk[..count]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8(request).unwrap();
+            let first = request.lines().next().unwrap();
+            assert!(first.starts_with(method), "{first}");
+            assert!(first.contains(path), "{first}");
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        }
+    });
+    let http = Arc::new(
+        HttpBuilder::new("test-token")
+            .proxy(proxy)
+            .ratelimiter_disabled(true)
+            .build(),
+    );
+    spectator::delete_by_marker(&http, 100, "our-marker")
+        .await
+        .unwrap();
+    server.join().unwrap();
+}

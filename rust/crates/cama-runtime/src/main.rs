@@ -471,6 +471,33 @@ async fn run_serve() -> ExitCode {
         "Rust database schema initialization and integrity check complete"
     );
 
+    // Freeze hosting admission when a shuffle/draft creates its pending row.
+    // Existing sessions recover separately; historical pending rows stay manual.
+    let routing_path = config.db_path.clone();
+    let routing =
+        application_config
+            .dota_host
+            .as_ref()
+            .map(|host| cama_db::match_runtime::DotaHostRouting {
+                account_key: host.account_id.to_string(),
+                guild_ids: host.guild_ids.clone(),
+            });
+    match tokio::task::spawn_blocking(move || {
+        cama_db::match_runtime::PendingMatchRepository::new(routing_path)
+            .configure_dota_host_routing(routing)
+    })
+    .await
+    {
+        Ok(Ok(())) => {}
+        result => {
+            error!(
+                ?result,
+                "Dota hosting admission configuration refused startup"
+            );
+            return ExitCode::from(1);
+        }
+    }
+
     // Build the concrete OpenDota transport before any gateway connection.
     // Construction is offline, but a TLS/executor failure is fatal because
     // serving without this production dependency would silently regress the
@@ -1095,6 +1122,7 @@ async fn run_serve() -> ExitCode {
         lobby_provider.curfew_lobby_display(),
         discord_transport.clone(),
     );
+    let match_setup_recovery_worker = match_provider.setup_recovery_worker();
     let survey_recovery_worker = survey_provider.recovery_worker_spec();
     let mafia_phase_worker = mafia_provider.worker_spec(discord_transport.clone());
     let betting_view_timeout_worker = betting_provider.timeout_worker();
@@ -1115,6 +1143,14 @@ async fn run_serve() -> ExitCode {
             }
         };
         dota_workers.extend(live.clone().workers());
+        dota_workers.push(cama_runtime::dota_spectator::worker_spec(
+            cama_runtime::dota_spectator::SpectatorWorker::new(
+                &config.db_path,
+                host_config.guild_ids.clone(),
+                discord_transport.clone(),
+                live.clone(),
+            ),
+        ));
         dota_workers.push(cama_runtime::dota_host::worker_spec(
             cama_runtime::dota_host::DotaHostWorker::new(
                 &config.db_path,
@@ -1151,6 +1187,7 @@ async fn run_serve() -> ExitCode {
     .with_worker(mafia_phase_worker)
     .with_worker(betting_view_timeout_worker)
     .with_worker(survey_recovery_worker)
+    .with_worker(match_setup_recovery_worker)
     .with_worker(curfew_sweep_worker);
     if let Some(first_game_pool_worker) = first_game_pool_worker {
         runtime = runtime.with_worker(first_game_pool_worker);
