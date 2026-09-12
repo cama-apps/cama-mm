@@ -31,6 +31,7 @@ cama-runtime-core = { path = "../cama-runtime-core", default-features = false }
 cama-steam = { path = "../cama-steam" }
 chrono.workspace = true
 fastrand.workspace = true
+flate2.workspace = true
 fs2.workspace = true
 fontdue.workspace = true
 getrandom.workspace = true

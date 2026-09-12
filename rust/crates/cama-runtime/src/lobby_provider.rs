@@ -447,6 +447,7 @@ struct LobbyRuntimeState {
     service: Arc<LiveLobbyService>,
     readycheck_persistence: Arc<SqliteLobbyPersistence>,
     spectators: cama_db::dota_spectator_repository::DotaSpectatorRepository,
+    spectator_matches: cama_db::match_runtime::PendingMatchRepository,
     commands: Arc<LiveLobbyRuntime>,
     readychecks: ReadycheckService,
     drafts: Arc<DraftStateManager>,
@@ -1797,6 +1798,7 @@ impl LobbyRegistrationProvider {
             spectators: cama_db::dota_spectator_repository::DotaSpectatorRepository::new(
                 database_path,
             ),
+            spectator_matches: cama_db::match_runtime::PendingMatchRepository::new(database_path),
             commands,
             readychecks,
             drafts,
@@ -4311,41 +4313,105 @@ impl RawReactionObserver for LobbyRawReactionObserver {
             return Ok(());
         }
 
+        if event.emoji.id.is_none() && event.emoji.name == SPECTATOR_EMOJI {
+            if event.actor_is_bot == Some(true) {
+                return Ok(());
+            }
+            let Some(guild) = event
+                .guild_id
+                .and_then(|id| i64::try_from(id).ok())
+                .filter(|id| *id > 0)
+            else {
+                return Ok(());
+            };
+            let Some(message) = i64::try_from(event.message_id).ok().filter(|id| *id > 0) else {
+                return Ok(());
+            };
+            let user = i64::try_from(event.user_id).map_err(|_| "spectator user ID overflow")?;
+            let subscribed = event.kind == RawReactionKind::Add;
+            let open_lobby = self
+                .state
+                .scope_for_lobby_message(event.guild_id, event.message_id)
+                .is_some();
+            let repository = self.state.spectators.clone();
+            let pending = self.state.spectator_matches.clone();
+            // The lobby closes after shuffling, but its radio remains the
+            // subscription control for the resulting match. Interest is not
+            // admission: the worker excludes the finalized playing roster.
+            tokio::task::spawn_blocking(move || -> Result<(), String> {
+                let permitted = if open_lobby {
+                    true
+                } else {
+                    let games = pending.pending_matches(guild).map_err(|e| e.to_string())?;
+                    let matches = games
+                        .iter()
+                        .filter(|game| {
+                            game.state
+                                .extra
+                                .get("spectator_lobby_message_id")
+                                .and_then(serde_json::Value::as_i64)
+                                == Some(message)
+                        })
+                        .collect::<Vec<_>>();
+                    match matches.as_slice() {
+                        [game] => {
+                            !subscribed
+                                || cama_domain::dota_hosting::DotaHostingOptions::from_extra(
+                                    &game.state.extra,
+                                )
+                                .is_ok_and(|options| {
+                                    options.hosting
+                                        != Some(cama_domain::dota_hosting::HostingMode::Manual)
+                                        && (options.hosting
+                                            == Some(cama_domain::dota_hosting::HostingMode::Bot)
+                                            || game
+                                                .state
+                                                .extra
+                                                .get("dota_host_account_key")
+                                                .and_then(serde_json::Value::as_str)
+                                                .and_then(|id| id.parse::<u32>().ok())
+                                                .is_some_and(|id| id > 0))
+                                })
+                        }
+                        [] if !subscribed => repository
+                            .list()
+                            .map_err(|e| e.to_string())?
+                            .iter()
+                            .any(|record| {
+                                record.guild_id == guild
+                                    && record
+                                        .payload
+                                        .get("lobby_message_id")
+                                        .and_then(serde_json::Value::as_i64)
+                                        == Some(message)
+                            }),
+                        _ => false,
+                    }
+                };
+                if permitted {
+                    repository
+                        .update_subscription(
+                            guild,
+                            message,
+                            user,
+                            subscribed,
+                            chrono::Utc::now().timestamp(),
+                        )
+                        .map_err(|e| e.to_string())?;
+                }
+                Ok(())
+            })
+            .await
+            .map_err(|e| e.to_string())??;
+            return Ok(());
+        }
+
         let Some(scope) = self
             .state
             .scope_for_lobby_message(event.guild_id, event.message_id)
         else {
             return Ok(());
         };
-        if event.emoji.id.is_none() && event.emoji.name == SPECTATOR_EMOJI {
-            if event.actor_is_bot == Some(true) {
-                return Ok(());
-            }
-            let Some(lobby) = self.state.service.get_lobby(scope) else {
-                return Ok(());
-            };
-            let Some(message) = lobby.message_ids.message_id else {
-                return Ok(());
-            };
-            // Subscription is an intent, not admission. The spectator worker
-            // subtracts the final shuffled roster before granting any access.
-            let repository = self.state.spectators.clone();
-            let user = i64::try_from(event.user_id).map_err(|_| "spectator user ID overflow")?;
-            let subscribed = event.kind == RawReactionKind::Add;
-            tokio::task::spawn_blocking(move || {
-                repository.update_subscription(
-                    scope.guild_id.0,
-                    message.0,
-                    user,
-                    subscribed,
-                    chrono::Utc::now().timestamp(),
-                )
-            })
-            .await
-            .map_err(|error| error.to_string())?
-            .map_err(|error| error.to_string())?;
-            return Ok(());
-        }
         if event.emoji.id == Some(LEGACY_FROGLING_EMOJI_ID) {
             if event.kind == RawReactionKind::Add {
                 let _ = self

@@ -103,6 +103,10 @@ pub struct LivePlayerSnapshot {
 pub struct LiveMapFrame {
     pub match_id: u64,
     pub game_time: i64,
+    #[serde(default)]
+    pub radiant_net_worth: Option<i64>,
+    #[serde(default)]
+    pub dire_net_worth: Option<i64>,
     pub heroes: Vec<LiveMapHero>,
     pub buildings: Vec<LiveMapBuilding>,
     pub roshan_respawn_seconds: Option<i64>,
@@ -114,6 +118,27 @@ pub struct LiveMapHero {
     pub x: Option<f64>,
     pub y: Option<f64>,
     pub respawn_seconds: Option<i64>,
+    #[serde(default)]
+    pub player_name: Option<String>,
+    #[serde(default)]
+    pub ultimate_state: Option<i64>,
+    #[serde(default)]
+    pub ultimate_cooldown: Option<i64>,
+    #[serde(default)]
+    pub kills: Option<i64>,
+    #[serde(default)]
+    pub deaths: Option<i64>,
+    #[serde(default)]
+    pub assists: Option<i64>,
+    #[serde(default)]
+    pub level: Option<i64>,
+    #[serde(default)]
+    pub gold_per_min: Option<i64>,
+    #[serde(default)]
+    pub net_worth: Option<i64>,
+    /// Six known slots (None = reported empty), or no slots if unavailable.
+    #[serde(default)]
+    pub items: Vec<Option<u32>>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LiveMapBuilding {
@@ -1192,12 +1217,14 @@ fn map_frame(
     if frame.players.len() != 10 {
         return None;
     }
+    let personas = value.get("players").and_then(Value::as_array);
     let scoreboard = value.get("scoreboard").unwrap_or(value);
     let mut heroes = Vec::new();
     for number in [2, 3] {
         let team = announcement_team(scoreboard, number)?;
         for value in team.get("players")?.as_array()? {
-            let hero_id = parse_player(value, None).hero_id?;
+            let player = parse_player(value, None);
+            let hero_id = player.hero_id?;
             if !frame
                 .players
                 .iter()
@@ -1219,6 +1246,55 @@ fn map_frame(
                     .get("respawn_timer")
                     .and_then(value_i64)
                     .filter(|n| (0..=600).contains(n)),
+                player_name: player.account_id.and_then(|account| {
+                    let candidates = personas?
+                        .iter()
+                        .filter(|persona| {
+                            persona.get("account_id").and_then(Value::as_u64)
+                                == Some(u64::from(account))
+                                && persona.get("hero_id").and_then(Value::as_u64)
+                                    == Some(u64::from(hero_id))
+                                && persona.get("team").and_then(Value::as_i64) == Some(number - 2)
+                        })
+                        .collect::<Vec<_>>();
+                    if candidates.len() != 1 {
+                        return None;
+                    }
+                    let name = candidates[0].get("name")?.as_str()?.trim();
+                    (!name.is_empty())
+                        .then(|| name.chars().filter(|c| !c.is_control()).take(128).collect())
+                }),
+                ultimate_state: value
+                    .get("ultimate_state")
+                    .and_then(value_i64)
+                    .filter(|n| (0..=3).contains(n)),
+                ultimate_cooldown: value
+                    .get("ultimate_cooldown")
+                    .and_then(value_i64)
+                    .filter(|n| (0..=1200).contains(n)),
+                kills: player.kills.filter(|n| (0..=10_000).contains(n)),
+                deaths: player.deaths.filter(|n| (0..=10_000).contains(n)),
+                assists: player.assists.filter(|n| (0..=10_000).contains(n)),
+                level: value
+                    .get("level")
+                    .and_then(value_i64)
+                    .filter(|n| (1..=30).contains(n)),
+                gold_per_min: value
+                    .get("gold_per_min")
+                    .and_then(value_i64)
+                    .filter(|n| (0..=100_000).contains(n)),
+                net_worth: player.net_worth.filter(|value| *value >= 0),
+                items: (0..6)
+                    .map(|slot| {
+                        let id = value.get(format!("item{slot}"))?.as_i64()?;
+                        match id {
+                            -1 | 0 => Some(None),
+                            1.. => u32::try_from(id).ok().map(Some),
+                            _ => None,
+                        }
+                    })
+                    .collect::<Option<Vec<_>>>()
+                    .unwrap_or_default(),
             });
         }
     }
@@ -1237,8 +1313,8 @@ fn map_frame(
             radiant: building.radiant,
             name: building.name.clone().unwrap_or_else(|| "structure".into()),
             destroyed: building.destroyed,
-            // League status bits have no positions. Keep identity/status in the
-            // map legend until this source supplies verified world coordinates.
+            // League status bits have no positions. The renderer independently
+            // uses the documented static layout for known building identities.
             x: None,
             y: None,
         })
@@ -1246,6 +1322,8 @@ fn map_frame(
     Some(LiveMapFrame {
         match_id: frame.match_id,
         game_time: frame.game_time,
+        radiant_net_worth: frame.radiant_net_worth,
+        dire_net_worth: frame.dire_net_worth,
         heroes,
         buildings,
         roshan_respawn_seconds: scoreboard

@@ -1133,3 +1133,87 @@ fn every_single_team_building_bit_has_the_documented_lane_and_tier() {
         assert_eq!(league_building_name("barracks_state", bit as u32), name);
     }
 }
+
+#[test]
+fn map_roster_details_preserve_names_stats_items_and_ultimate_with_missing_fallbacks() {
+    let mut payload = positioned_roster_payload();
+    let player = &mut payload["teams"][0]["players"][0];
+    let account = player["accountid"].clone();
+    let hero = player["heroid"].clone();
+    player["level"] = json!(15);
+    player["gold_per_min"] = json!(564);
+    player["ultimate_state"] = json!(3);
+    player["ultimate_cooldown"] = json!(0);
+    for (slot, id) in [108, 1, -1, 0, 119, 117].iter().enumerate() {
+        player[format!("item{slot}")] = json!(id);
+    }
+    payload["players"] =
+        json!([{"account_id": account, "hero_id":hero, "team":0,"name":"  WindTouch  "}]);
+    let normalize = |value: &Value| {
+        normalize_realtime_stats(value, 7, 1, 123, 200)
+            .unwrap()
+            .map_frame
+            .unwrap()
+    };
+    let map = normalize(&payload);
+    let hero = &map.heroes[0];
+    assert_eq!(hero.player_name.as_deref(), Some("WindTouch"));
+    assert_eq!(
+        (
+            hero.level,
+            hero.gold_per_min,
+            hero.ultimate_state,
+            hero.ultimate_cooldown
+        ),
+        (Some(15), Some(564), Some(3), Some(0))
+    );
+    assert_eq!(
+        hero.items,
+        vec![Some(108), Some(1), None, None, Some(119), Some(117)]
+    );
+    assert!(map.heroes[1].player_name.is_none());
+    assert!(map.heroes[1].items.is_empty());
+    payload["players"][0]["team"] = json!(1);
+    payload["teams"][0]["players"][0]["item2"] = json!(null);
+    payload["teams"][0]["players"][0]["ultimate_state"] = json!(99);
+    let map = normalize(&payload);
+    assert!(map.heroes[0].player_name.is_none());
+    assert!(map.heroes[0].items.is_empty());
+    assert!(map.heroes[0].ultimate_state.is_none());
+    let legacy: LiveMapHero =
+        serde_json::from_value(json!({"hero_id":1,"radiant":true,"x":1,"y":2,"respawn_seconds":0}))
+            .unwrap();
+    assert!(legacy.player_name.is_none());
+    assert!(legacy.net_worth.is_none());
+    assert!(legacy.items.is_empty());
+}
+
+#[test]
+fn map_net_worth_requires_complete_observed_player_values() {
+    let mut payload = positioned_roster_payload();
+    for (team, rate) in [(0, 400), (1, 350)] {
+        for player in payload["teams"][team]["players"].as_array_mut().unwrap() {
+            player["net_worth"] = json!(rate * 20);
+        }
+    }
+    let normalize = |value: &Value| {
+        normalize_realtime_stats(value, 7, 1, 123, 200)
+            .unwrap()
+            .map_frame
+            .unwrap()
+    };
+    let map = normalize(&payload);
+    assert_eq!(
+        (map.radiant_net_worth, map.dire_net_worth),
+        (Some(40000), Some(35000))
+    );
+    assert_eq!(map.heroes[0].net_worth, Some(8000));
+    assert_eq!(map.heroes[5].net_worth, Some(7000));
+    payload["teams"][0]["players"][4]["net_worth"] = json!(null);
+    let map = normalize(&payload);
+    assert!(map.radiant_net_worth.is_none());
+    assert_eq!(map.dire_net_worth, Some(35000));
+    let legacy: LiveMapFrame = serde_json::from_value(json!({"match_id":123,"game_time":100,"heroes":[],"buildings":[],"roshan_respawn_seconds":null})).unwrap();
+    assert!(legacy.radiant_net_worth.is_none());
+    assert!(legacy.dire_net_worth.is_none());
+}

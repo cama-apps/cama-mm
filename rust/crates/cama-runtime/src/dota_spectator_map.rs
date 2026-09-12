@@ -3,12 +3,15 @@
 //! The bundled 7.40 map and projection provenance are documented in
 //! `assets/dota_spectator/README.md`. No image or network request is made here.
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use cama_app::dotabase_sqlite::DotabaseSqliteSource;
 use cama_app::font_assets::{DejaVuFace, load_dejavu_font};
 use cama_app::hero_lookup::{HeroImageSize, HeroLookup, hero_name, hero_short_name};
 use cama_app::pet_assets::{RasterImage, Rgba, decode_png_raster};
+use cama_app::trivia_data::{TriviaDataSource, item_icon_url};
 use cama_app::trivia_image_cache::{TriviaImageCache, production_steam_image_cache_root};
 use fontdue::{Font, FontSettings};
 
@@ -16,9 +19,12 @@ use crate::dota_live::{LiveMapFrame, LiveMapHero};
 
 const MAP_SIZE: i32 = 640;
 const MAP_X: i32 = 16;
-const MAP_Y: i32 = 68;
-const WIDTH: usize = 920;
-const HEIGHT: usize = 758;
+#[path = "dota_spectator_map/buildings.rs"]
+mod buildings;
+
+const MAP_Y: i32 = 48;
+const WIDTH: usize = 1240;
+const HEIGHT: usize = 704;
 const BG: Rgba = Rgba(15, 21, 29, 255);
 const PANEL: Rgba = Rgba(23, 32, 42, 255);
 const WHITE: Rgba = Rgba(235, 241, 245, 255);
@@ -41,27 +47,44 @@ fn render_with_cache(frame: &LiveMapFrame, cache: &Path) -> Result<Vec<u8>, Stri
         .as_ref()
         .ok_or_else(|| "bundled spectator map could not be decoded".to_owned())?;
     let mut canvas = Canvas(RasterImage::new(WIDTH, HEIGHT, BG));
-    canvas.text(16, 17, "SPECTATOR MAP", 25.0, WHITE);
-    canvas.text(285, 22, &format!("MATCH {}", frame.match_id), 15.0, MUTED);
-    canvas.text(797, 15, &clock(frame.game_time), 28.0, WHITE);
+    canvas.text(16, 14, &format!("MATCH {}", frame.match_id), 14.0, MUTED);
+    canvas.day_night(532, 23, is_day(frame.game_time));
+    canvas.text(561, 6, &clock(frame.game_time), 28.0, WHITE);
+    let (text, color) = gold_lead_label(frame.radiant_net_worth, frame.dire_net_worth);
+    canvas.text(686, 17, &text, 15.0, color);
     canvas.blit(map, MAP_X, MAP_Y, MAP_SIZE, MAP_SIZE, false);
-    canvas.rect(672, MAP_Y, 232, MAP_SIZE, PANEL);
-    canvas.text(16, 43, "15-second snapshots", 13.0, MUTED);
-    canvas.text(678, 46, "GREEN Radiant / RED Dire", 13.0, MUTED);
+    canvas.rect(672, MAP_Y, 552, MAP_SIZE, PANEL);
 
-    for building in &frame.buildings {
-        if let Some((x, y)) = building.x.zip(building.y).and_then(|(x, y)| project(x, y)) {
-            let color = if building.destroyed {
-                MUTED
-            } else {
-                team_color(building.radiant)
-            };
-            canvas.rect(x - 5, y - 5, 11, 11, BG);
-            canvas.rect(x - 3, y - 3, 7, 7, color);
-            if building.destroyed {
-                canvas.line(x - 5, y - 5, x + 5, y + 5, DIRE);
-                canvas.line(x - 5, y + 5, x + 5, y - 5, DIRE);
-            }
+    // The league feed has no Ancient health/status bit. Keep each Ancient as
+    // a static base landmark, but honor an explicit destruction record when
+    // another qualified source supplies one. Never imply live health here.
+    for radiant in [true, false] {
+        let ancient = frame
+            .buildings
+            .iter()
+            .find(|building| building.radiant == radiant && building.name == "Ancient");
+        if ancient.is_some_and(|building| building.destroyed) {
+            continue;
+        }
+        let position = ancient
+            .and_then(|building| building.x.zip(building.y))
+            .or_else(|| buildings::position("Ancient", radiant));
+        if let Some((x, y)) = position.and_then(|(x, y)| project(x, y)) {
+            canvas.building_icon(x, y, "Ancient", team_color(radiant));
+        }
+    }
+
+    for building in frame
+        .buildings
+        .iter()
+        .filter(|building| !building.destroyed && building.name != "Ancient")
+    {
+        let location = building
+            .x
+            .zip(building.y)
+            .or_else(|| buildings::position(&building.name, building.radiant));
+        if let Some((x, y)) = location.and_then(|(x, y)| project(x, y)) {
+            canvas.building_icon(x, y, &building.name, team_color(building.radiant));
         }
     }
 
@@ -85,8 +108,15 @@ fn render_with_cache(frame: &LiveMapFrame, cache: &Path) -> Result<Vec<u8>, Stri
         canvas.hero_icon(hero, portrait, x, y, 17, false);
     }
 
+    let items = frame
+        .heroes
+        .iter()
+        .take(10)
+        .flat_map(|hero| hero.items.iter().take(6).flatten().copied())
+        .map(|id| (id, cached_item(cache, id)))
+        .collect::<BTreeMap<_, _>>();
     for (side, radiant) in [true, false].into_iter().enumerate() {
-        let top = 82 + side as i32 * 191;
+        let top = 58 + side as i32 * 320;
         canvas.text(
             686,
             top,
@@ -101,123 +131,62 @@ fn render_with_cache(frame: &LiveMapFrame, cache: &Path) -> Result<Vec<u8>, Stri
             .take(5)
             .enumerate()
         {
-            let y = top + 39 + index as i32 * 29;
+            let y = top + 28 + index as i32 * 56;
             let portrait = portraits
                 .iter()
                 .find(|(id, _)| *id == hero.hero_id)
                 .and_then(|(_, image)| image.as_ref());
             let dead = hero.respawn_seconds.is_some_and(|seconds| seconds > 0);
-            canvas.hero_icon(hero, portrait, 697, y, 11, dead);
-            canvas.text(
-                715,
-                y - 10,
-                &truncate(&hero_name(i64::from(hero.hero_id)), 21),
-                13.0,
-                if dead { MUTED } else { WHITE },
-            );
-            if let Some(seconds) = hero.respawn_seconds.filter(|seconds| *seconds > 0) {
-                canvas.text(715, y + 3, &format!("respawn {seconds}s"), 10.0, DIRE);
-            } else if let Some(label) = position_status(hero) {
-                canvas.text(715, y + 3, label, 10.0, MUTED);
-            }
-        }
-    }
-
-    canvas.text(686, 466, "OBJECTIVES", 17.0, WHITE);
-    // League masks contain reliable identity/status but no coordinates.
-    // Keep those in a lane/tier ledger instead of guessing map positions.
-    canvas.text(778, 493, "RAD", 12.0, RADIANT);
-    canvas.text(842, 493, "DIRE", 12.0, DIRE);
-    for (row, lane) in ["top", "mid", "bottom"].into_iter().enumerate() {
-        let y = 514 + row as i32 * 29;
-        canvas.text(686, y, &lane.to_uppercase(), 12.0, MUTED);
-        for (side, radiant) in [true, false].into_iter().enumerate() {
-            for tier in 1..=3 {
-                let expected = format!("{lane} tier {tier} tower");
-                let state = frame
-                    .buildings
-                    .iter()
-                    .find(|b| b.radiant == radiant && b.name.eq_ignore_ascii_case(&expected))
-                    .map(|b| b.destroyed);
-                let x = 779 + side as i32 * 64 + (tier - 1) * 17;
-                canvas.status(x, y, &tier.to_string(), state, team_color(radiant));
-            }
-            for (index, (kind, label)) in [("melee", "M"), ("ranged", "R")].into_iter().enumerate()
-            {
-                let expected = format!("{lane} {kind} barracks");
-                let state = frame
-                    .buildings
-                    .iter()
-                    .find(|b| b.radiant == radiant && b.name.eq_ignore_ascii_case(&expected))
-                    .map(|b| b.destroyed);
-                canvas.status(
-                    779 + side as i32 * 64 + index as i32 * 17,
-                    y + 13,
-                    label,
-                    state,
-                    team_color(radiant),
+            canvas.hero_icon(hero, portrait, 700, y + 20, 17, dead);
+            let name = hero
+                .player_name
+                .as_deref()
+                .map(player_label)
+                .filter(|name| !name.is_empty());
+            if let Some(name) = name {
+                canvas.fitted_text(725, y, &name, 204.0, 13.0, if dead { MUTED } else { WHITE });
+                canvas.text(
+                    725,
+                    y + 16,
+                    &truncate(&hero_name(i64::from(hero.hero_id)), 24),
+                    11.0,
+                    MUTED,
                 );
+                canvas.text(725, y + 33, &hero_stats(hero), 11.0, MUTED);
+            } else {
+                canvas.text(
+                    725,
+                    y,
+                    &truncate(&hero_name(i64::from(hero.hero_id)), 24),
+                    14.0,
+                    if dead { MUTED } else { WHITE },
+                );
+                canvas.text(725, y + 20, &hero_stats(hero), 11.0, MUTED);
             }
+            let (ultimate, color) = ultimate_status(hero);
+            canvas.text(680, y + 40, &ultimate, 9.0, color);
+            if let Some(seconds) = hero.respawn_seconds.filter(|seconds| *seconds > 0) {
+                canvas.rect(684, y + 21, 33, 14, BG);
+                canvas.text(687, y + 21, &format!("{seconds}s"), 10.0, DIRE);
+            }
+            for slot in 0..6 {
+                let x = 934 + slot as i32 * 46;
+                canvas.rect(x, y + 7, 43, 33, BG);
+                match hero.items.get(slot) {
+                    Some(Some(id)) => {
+                        if let Some(image) = items.get(id).and_then(Option::as_ref) {
+                            canvas.blit(image, x + 1, y + 8, 41, 31, false);
+                        } else {
+                            canvas.text(x + 17, y + 17, "?", 10.0, MUTED);
+                        }
+                    }
+                    Some(None) => {}
+                    None => canvas.text(x + 18, y + 15, "?", 12.0, MUTED),
+                }
+            }
+            canvas.text(935, y + 42, &net_worth_label(hero.net_worth), 10.0, MUTED);
         }
     }
-    canvas.text(686, 643, "M/R = melee/ranged barracks", 10.0, MUTED);
-    for (row, radiant) in [true, false].into_iter().enumerate() {
-        let y = 609 + row as i32 * 19;
-        let towers = frame
-            .buildings
-            .iter()
-            .filter(|b| b.radiant == radiant && b.name.contains("tower"))
-            .collect::<Vec<_>>();
-        let racks = frame
-            .buildings
-            .iter()
-            .filter(|b| b.radiant == radiant && b.name.contains("barracks"))
-            .collect::<Vec<_>>();
-        let count = |items: &[&crate::dota_live::LiveMapBuilding]| {
-            if items.is_empty() {
-                "?".to_owned()
-            } else {
-                format!(
-                    "{}/{}",
-                    items.iter().filter(|b| !b.destroyed).count(),
-                    items.len()
-                )
-            }
-        };
-        canvas.text(
-            686,
-            y,
-            &format!(
-                "{} towers {}  racks {}",
-                if radiant { "R" } else { "D" },
-                count(&towers),
-                count(&racks)
-            ),
-            12.0,
-            team_color(radiant),
-        );
-    }
-    let roshan = match frame.roshan_respawn_seconds {
-        Some(seconds) if seconds > 0 => format!("Roshan respawn {}", clock(seconds)),
-        Some(0) => "Roshan timer 0s".to_owned(),
-        _ => "Roshan status unavailable".to_owned(),
-    };
-    canvas.text(686, 659, &roshan, 12.0, MUTED);
-    canvas.text(686, 685, "Crossed = down / ? = unknown", 11.0, MUTED);
-    canvas.text(
-        16,
-        722,
-        "Wards and vision are unavailable in this feed.",
-        13.0,
-        MUTED,
-    );
-    canvas.text(
-        16,
-        741,
-        "7.40 static terrain: Valve / OpenDota. Objective icons in terrain are not live status.",
-        11.0,
-        MUTED,
-    );
     Ok(canvas.0.encode_png())
 }
 
@@ -240,13 +209,104 @@ fn project(x: f64, y: f64) -> Option<(i32, i32)> {
     ))
 }
 
-fn position_status(hero: &LiveMapHero) -> Option<&'static str> {
-    match hero.x.zip(hero.y) {
-        Some((x, y)) if x.is_finite() && y.is_finite() => {
-            project(x, y).is_none().then_some("outside terrain crop")
-        }
-        _ => Some("position unavailable"),
+fn player_label(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '\'' | '.'))
+        .take(24)
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+fn is_day(game_time: i64) -> bool {
+    game_time.max(0) % 600 < 300
+}
+
+fn ultimate_status(hero: &LiveMapHero) -> (String, Rgba) {
+    if let Some(seconds) = hero.ultimate_cooldown.filter(|seconds| *seconds > 0) {
+        return (format!("R {seconds}s"), MUTED);
     }
+    // Valve DOTAUltimateState in dota_gcmessages_server.proto:
+    // https://github.com/SteamTracking/GameTracking-Dota2/blob/master/Protobufs/dota_gcmessages_server.proto
+    match hero.ultimate_state {
+        Some(0) => ("R -".into(), MUTED),
+        Some(1) => ("R CD".into(), MUTED),
+        Some(2) => ("R MP".into(), Rgba(115, 174, 250, 255)),
+        Some(3) => ("R UP".into(), RADIANT),
+        _ => ("R ?".into(), MUTED),
+    }
+}
+
+fn compact_number(value: i64) -> String {
+    if value >= 1000 {
+        format!("{:.1}k", value as f64 / 1000.0)
+    } else {
+        value.to_string()
+    }
+}
+
+fn net_worth_label(value: Option<i64>) -> String {
+    let value = value
+        .filter(|value| *value >= 0)
+        .map(compact_number)
+        .unwrap_or_else(|| "?".into());
+    format!("NW {value}")
+}
+
+fn gold_lead_label(radiant: Option<i64>, dire: Option<i64>) -> (String, Rgba) {
+    let Some((radiant, dire)) = radiant.zip(dire).filter(|(r, d)| *r >= 0 && *d >= 0) else {
+        return ("GOLD  ?".into(), MUTED);
+    };
+    if radiant == dire {
+        return ("GOLD  EVEN".into(), MUTED);
+    }
+    let difference = radiant.abs_diff(dire);
+    let amount = compact_number(difference.min(i64::MAX as u64) as i64);
+    let side = if radiant > dire { "RADIANT" } else { "DIRE" };
+    (
+        format!("GOLD  {side} +{amount}"),
+        team_color(radiant > dire),
+    )
+}
+
+fn hero_stats(hero: &LiveMapHero) -> String {
+    let value = |stat: Option<i64>| {
+        stat.map(|v| v.to_string())
+            .unwrap_or_else(|| "?".to_owned())
+    };
+    format!(
+        "{}/{}/{}  LV {}  GPM {}",
+        value(hero.kills),
+        value(hero.deaths),
+        value(hero.assists),
+        value(hero.level),
+        value(hero.gold_per_min)
+    )
+}
+
+fn cached_item(cache: &Path, item_id: u32) -> Option<RasterImage> {
+    static ITEM_URLS: OnceLock<BTreeMap<u32, String>> = OnceLock::new();
+    let urls = ITEM_URLS.get_or_init(|| {
+        DotabaseSqliteSource::production()
+            .items()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|item| {
+                Some((
+                    u32::try_from(item.id).ok()?,
+                    item_icon_url(item.icon_path.as_deref())?,
+                ))
+            })
+            .collect()
+    });
+    let mut paths = Vec::new();
+    if let Some(url) = urls.get(&item_id)
+        && let Ok(trivia) = TriviaImageCache::new(cache.join("trivia"))
+    {
+        paths.push(trivia.path_for_url(url));
+    }
+    paths.push(cache.join("scout/items").join(format!("{item_id}.png")));
+    cached_png(paths)
 }
 
 fn cached_portrait(cache: &Path, hero_id: u32) -> Option<RasterImage> {
@@ -261,6 +321,10 @@ fn cached_portrait(cache: &Path, hero_id: u32) -> Option<RasterImage> {
         }
     }
     paths.push(cache.join("scout/heroes").join(format!("{hero_id}.png")));
+    cached_png(paths)
+}
+
+fn cached_png(paths: Vec<PathBuf>) -> Option<RasterImage> {
     paths.into_iter().find_map(|path| {
         let metadata = std::fs::metadata(&path).ok()?;
         if metadata.len() > 4 * 1024 * 1024 {
@@ -409,25 +473,138 @@ impl Canvas {
             self.line(x - radius, y - radius, x + radius, y + radius, DIRE);
         }
     }
-    fn status(&mut self, x: i32, y: i32, label: &str, down: Option<bool>, color: Rgba) {
-        self.text(
-            x,
-            y,
-            if down.is_none() { "?" } else { label },
-            12.0,
-            if down == Some(false) { color } else { MUTED },
-        );
-        if down == Some(true) {
-            self.line(x - 1, y + 11, x + 9, y, DIRE);
+    fn day_night(&mut self, x: i32, y: i32, day: bool) {
+        if day {
+            let sun = Rgba(255, 209, 87, 255);
+            self.circle(x, y, 6, sun);
+            for (dx, dy) in [
+                (0, -1),
+                (1, -1),
+                (1, 0),
+                (1, 1),
+                (0, 1),
+                (-1, 1),
+                (-1, 0),
+                (-1, -1),
+            ] {
+                self.line(x + dx * 9, y + dy * 9, x + dx * 12, y + dy * 12, sun);
+            }
+        } else {
+            self.circle(x, y, 10, Rgba(186, 206, 245, 255));
+            self.circle(x + 5, y - 4, 9, BG);
         }
     }
+    fn building_icon(&mut self, x: i32, y: i32, name: &str, color: Rgba) {
+        // Draw only the silhouette. Spaces (including doors and windows)
+        // preserve the terrain underneath instead of painting a black tile.
+        let rows: &[&str] = if name == "Ancient" {
+            &[
+                "          +          ",
+                "         ++#         ",
+                "         ++#         ",
+                "        +++##        ",
+                "   +    +++##    +   ",
+                "  ++#   +++##   ++#  ",
+                "  ++#  ++++###  ++#  ",
+                " +++## ++++### +++## ",
+                " +++## ++++### +++## ",
+                "  ++## ++++### ++##  ",
+                "  ++##  +++##  ++##  ",
+                "   ###  +++##  ###   ",
+                "    ##   ++#   ##    ",
+                "    ###  ++#  ###    ",
+                "     ####+######     ",
+                "   +++++++++++++++   ",
+                "  #################  ",
+                "   ###############   ",
+            ]
+        } else if name.contains("tower") {
+            &[
+                " +++  +++  +++ ",
+                " ###  ###  ### ",
+                " ###  ###  ### ",
+                " ############# ",
+                " +++++++++++++ ",
+                "  ###########  ",
+                "  ###########  ",
+                "  ###########  ",
+                "  ####   ####  ",
+                "  ####   ####  ",
+                "  ####   ####  ",
+                "  ####   ####  ",
+                "  ####   ####  ",
+                "++++++   ++++++",
+                "###############",
+            ]
+        } else if name.contains("ranged barracks") {
+            &[
+                "      +++++      ",
+                "     +++####     ",
+                "    +++######    ",
+                "   +++########   ",
+                "  +++##########  ",
+                " +++++++++++++++ ",
+                "  #############  ",
+                "  ##  #####  ##  ",
+                "  ##  #####  ##  ",
+                "  ##  #####  ##  ",
+                "  #############  ",
+                "  #############  ",
+            ]
+        } else if name.contains("barracks") {
+            &[
+                "      +++++      ",
+                "     +++####     ",
+                "    +++######    ",
+                "   +++########   ",
+                "  +++##########  ",
+                " +++++++++++++++ ",
+                "  #############  ",
+                "  #####   #####  ",
+                "  #####   #####  ",
+                "  #####   #####  ",
+                "  #####   #####  ",
+                "  #####   #####  ",
+            ]
+        } else {
+            return;
+        };
+        let highlight = Rgba(
+            color.0.saturating_add(45),
+            color.1.saturating_add(45),
+            color.2.saturating_add(45),
+            255,
+        );
+        let left = x - rows[0].len() as i32 / 2;
+        let top = y - rows.len() as i32 / 2;
+        for (dy, row) in rows.iter().enumerate() {
+            for (dx, pixel) in row.bytes().enumerate() {
+                let fill = match pixel {
+                    b'#' => color,
+                    b'+' => highlight,
+                    _ => continue,
+                };
+                self.pixel(left + dx as i32, top + dy as i32, fill);
+            }
+        }
+    }
+    fn fitted_text(&mut self, x: i32, y: i32, text: &str, width: f32, size: f32, color: Rgba) {
+        let mut used = 0.0;
+        let mut fitted = String::new();
+        for character in text.chars() {
+            let advance = font()
+                .map(|font| font.metrics(character, size).advance_width)
+                .unwrap_or(6.0);
+            if used + advance > width {
+                break;
+            }
+            used += advance;
+            fitted.push(character);
+        }
+        self.text(x, y, &fitted, size, color);
+    }
     fn text(&mut self, x: i32, y: i32, text: &str, size: f32, color: Rgba) {
-        static FONT: OnceLock<Option<Font>> = OnceLock::new();
-        let font = FONT.get_or_init(|| {
-            load_dejavu_font(DejaVuFace::Sans)
-                .ok()
-                .and_then(|bytes| Font::from_bytes(bytes, FontSettings::default()).ok())
-        });
+        let font = font();
         if let Some(font) = font {
             let mut cursor = x as f32;
             for character in text.chars() {
@@ -464,6 +641,16 @@ impl Canvas {
             }
         }
     }
+}
+
+fn font() -> Option<&'static Font> {
+    static FONT: OnceLock<Option<Font>> = OnceLock::new();
+    FONT.get_or_init(|| {
+        load_dejavu_font(DejaVuFace::Sans)
+            .ok()
+            .and_then(|bytes| Font::from_bytes(bytes, FontSettings::default()).ok())
+    })
+    .as_ref()
 }
 
 fn glyph(c: char) -> [u8; 7] {
@@ -523,12 +710,24 @@ mod tests {
         LiveMapFrame {
             match_id: 42,
             game_time: 91,
+            radiant_net_worth: None,
+            dire_net_worth: None,
             heroes: vec![LiveMapHero {
                 hero_id: 1,
                 radiant: true,
                 x: Some(0.0),
                 y: Some(0.0),
                 respawn_seconds: None,
+                kills: None,
+                deaths: None,
+                assists: None,
+                level: None,
+                gold_per_min: None,
+                net_worth: None,
+                items: vec![],
+                player_name: None,
+                ultimate_state: None,
+                ultimate_cooldown: None,
             }],
             buildings: vec![],
             roshan_respawn_seconds: None,
@@ -540,7 +739,7 @@ mod tests {
         assert_eq!(project(-8192.0, 8064.0), Some((MAP_X, MAP_Y)));
         assert_eq!(project(8064.0, -8192.0), Some((MAP_X + 639, MAP_Y + 639)));
         let (x, y) = project(0.0, 0.0).unwrap();
-        assert_eq!((x, y), (338, 385));
+        assert_eq!((x, y), (338, 365));
         assert!(project(1.0, 1.0).unwrap().0 >= x);
         assert!(project(f64::NAN, 0.0).is_none());
         assert!(project(0.0, f64::INFINITY).is_none());
@@ -552,7 +751,8 @@ mod tests {
         let bytes = render_with_cache(&frame(), cache.path()).unwrap();
         let image = decode_png_raster(&bytes).unwrap();
         assert_eq!((image.width, image.height), (WIDTH, HEIGHT));
-        assert!(bytes.len() < 3 * 1024 * 1024);
+        // The expanded roster is 1240x704; the shared encoder uses stored RGBA.
+        assert!(bytes.len() < 4 * 1024 * 1024);
     }
     #[test]
     fn dead_heroes_do_not_leave_false_map_positions() {
@@ -577,16 +777,6 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         let mut missing = frame();
         missing.heroes[0].x = None;
-        assert_eq!(
-            position_status(&missing.heroes[0]),
-            Some("position unavailable")
-        );
-        let mut outside = missing.clone();
-        outside.heroes[0].x = Some(9000.0);
-        assert_eq!(
-            position_status(&outside.heroes[0]),
-            Some("outside terrain crop")
-        );
         let mut absent = missing.clone();
         absent.heroes.clear();
         let image = decode_png_raster(&render_with_cache(&missing, cache.path()).unwrap()).unwrap();
@@ -603,29 +793,194 @@ mod tests {
     }
 
     #[test]
-    fn known_building_coordinates_change_map_but_masks_only_change_ledger() {
+    fn standing_buildings_use_fixed_positions_and_destroyed_buildings_disappear() {
         let cache = tempfile::tempdir().unwrap();
         let base = frame();
-        let mut masks = base.clone();
-        masks.buildings.push(LiveMapBuilding {
+        let blank = decode_png_raster(&render_with_cache(&base, cache.path()).unwrap()).unwrap();
+        let mut state = base.clone();
+        state.buildings.push(LiveMapBuilding {
             radiant: true,
             name: "top tier 2 tower".into(),
+            destroyed: false,
+            x: None,
+            y: None,
+        });
+        let standing =
+            decode_png_raster(&render_with_cache(&state, cache.path()).unwrap()).unwrap();
+        let (wx, wy) = buildings::position("top tier 2 tower", true).unwrap();
+        let (x, y) = project(wx, wy).unwrap();
+        assert_ne!(
+            standing.pixel(x as usize, y as usize),
+            blank.pixel(x as usize, y as usize)
+        );
+        state.buildings[0].destroyed = true;
+        assert_eq!(
+            decode_png_raster(&render_with_cache(&state, cache.path()).unwrap()).unwrap(),
+            blank
+        );
+        state.buildings[0].destroyed = false;
+        state.buildings[0].x = Some(-5000.0);
+        state.buildings[0].y = Some(5000.0);
+        let explicit =
+            decode_png_raster(&render_with_cache(&state, cache.path()).unwrap()).unwrap();
+        let (x, y) = project(-5000.0, 5000.0).unwrap();
+        assert_ne!(
+            explicit.pixel(x as usize, y as usize),
+            blank.pixel(x as usize, y as usize)
+        );
+    }
+    #[test]
+    fn gold_lead_labels_distinguish_sides_ties_and_missing_data() {
+        assert_eq!(
+            gold_lead_label(Some(50_400), Some(44_900)),
+            ("GOLD  RADIANT +5.5k".into(), RADIANT)
+        );
+        assert_eq!(
+            gold_lead_label(Some(2000), Some(2300)),
+            ("GOLD  DIRE +300".into(), DIRE)
+        );
+        assert_eq!(net_worth_label(Some(13531)), "NW 13.5k");
+        assert_eq!(net_worth_label(None), "NW ?");
+        assert_eq!(gold_lead_label(Some(1000), Some(1000)).0, "GOLD  EVEN");
+        assert_eq!(gold_lead_label(None, Some(2300)).0, "GOLD  ?");
+        assert_eq!(gold_lead_label(Some(-1), Some(1)).0, "GOLD  ?");
+    }
+
+    #[test]
+    fn building_silhouettes_preserve_terrain_in_background_and_openings() {
+        let terrain = Rgba(80, 130, 90, 255);
+        for name in [
+            "mid tier 3 tower",
+            "mid melee barracks",
+            "mid ranged barracks",
+            "Ancient",
+        ] {
+            let mut canvas = Canvas(RasterImage::new(48, 48, terrain));
+            canvas.building_icon(24, 24, name, RADIANT);
+            assert_eq!(canvas.0.pixel(14, 14), Some(terrain));
+            assert!(
+                canvas
+                    .0
+                    .pixels
+                    .chunks_exact(4)
+                    .all(|pixel| pixel != [BG.0, BG.1, BG.2, BG.3])
+            );
+            assert!(
+                canvas
+                    .0
+                    .pixels
+                    .chunks_exact(4)
+                    .any(|pixel| pixel == [RADIANT.0, RADIANT.1, RADIANT.2, 255])
+            );
+            if name.contains("tower") || name.contains("melee barracks") {
+                assert_eq!(
+                    canvas.0.pixel(24, 27),
+                    Some(terrain),
+                    "door opening preserves terrain"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ancient_landmarks_honor_explicit_destruction_and_source_position() {
+        let cache = tempfile::tempdir().unwrap();
+        let mut state = frame();
+        state.heroes.clear();
+        let both = decode_png_raster(&render_with_cache(&state, cache.path()).unwrap()).unwrap();
+        let (wx, wy) = buildings::position("Ancient", true).unwrap();
+        let (x, y) = project(wx, wy).unwrap();
+        state.buildings.push(LiveMapBuilding {
+            radiant: true,
+            name: "Ancient".into(),
             destroyed: true,
             x: None,
             y: None,
         });
-        let a = decode_png_raster(&render_with_cache(&base, cache.path()).unwrap()).unwrap();
-        let b = decode_png_raster(&render_with_cache(&masks, cache.path()).unwrap()).unwrap();
-        assert_ne!(a, b);
-        assert_eq!(a.pixel(100, 100), b.pixel(100, 100));
-        masks.buildings[0].x = Some(-5000.0);
-        masks.buildings[0].y = Some(5000.0);
-        let c = decode_png_raster(&render_with_cache(&masks, cache.path()).unwrap()).unwrap();
-        let (x, y) = project(-5000.0, 5000.0).unwrap();
+        let destroyed =
+            decode_png_raster(&render_with_cache(&state, cache.path()).unwrap()).unwrap();
         assert_ne!(
-            b.pixel(x as usize, y as usize),
-            c.pixel(x as usize, y as usize)
+            both.pixel(x as usize, y as usize),
+            destroyed.pixel(x as usize, y as usize)
         );
+        state.buildings[0].destroyed = false;
+        state.buildings[0].x = Some(0.0);
+        state.buildings[0].y = Some(0.0);
+        let moved = decode_png_raster(&render_with_cache(&state, cache.path()).unwrap()).unwrap();
+        assert_eq!(
+            moved.pixel(x as usize, y as usize),
+            destroyed.pixel(x as usize, y as usize)
+        );
+        let (x, y) = project(0.0, 0.0).unwrap();
+        assert_ne!(
+            moved.pixel(x as usize, y as usize),
+            destroyed.pixel(x as usize, y as usize)
+        );
+    }
+
+    #[test]
+    fn cached_items_and_unknown_inventory_are_distinct_from_empty_slots() {
+        let cache = tempfile::tempdir().unwrap();
+        let directory = cache.path().join("scout/items");
+        std::fs::create_dir_all(&directory).unwrap();
+        let item = RasterImage::new(32, 32, Rgba(20, 40, 250, 255));
+        std::fs::write(directory.join("1.png"), item.encode_png()).unwrap();
+        assert_eq!(cached_item(cache.path(), 1), Some(item));
+        let mut state = frame();
+        let unknown = render_with_cache(&state, cache.path()).unwrap();
+        state.heroes[0].items = vec![None; 6];
+        let empty = render_with_cache(&state, cache.path()).unwrap();
+        assert_ne!(unknown, empty);
+        state.heroes[0].items[0] = Some(1);
+        let equipped =
+            decode_png_raster(&render_with_cache(&state, cache.path()).unwrap()).unwrap();
+        assert_eq!(equipped.pixel(940, 100), Some(Rgba(20, 40, 250, 255)));
+        state.heroes[0].items[0] = Some(99999);
+        assert_ne!(render_with_cache(&state, cache.path()).unwrap(), empty);
+    }
+    #[test]
+    fn ultimate_requires_confirmed_ready_and_respects_cooldown() {
+        let mut state = frame();
+        let hero = &mut state.heroes[0];
+        assert_eq!(ultimate_status(hero).0, "R ?");
+        for (value, label) in [
+            (0, "R -"),
+            (1, "R CD"),
+            (2, "R MP"),
+            (3, "R UP"),
+            (4, "R ?"),
+        ] {
+            hero.ultimate_state = Some(value);
+            assert_eq!(ultimate_status(hero).0, label);
+        }
+        hero.ultimate_state = Some(3);
+        hero.ultimate_cooldown = Some(42);
+        assert_eq!(ultimate_status(hero).0, "R 42s");
+        hero.ultimate_cooldown = Some(0);
+        assert_eq!(ultimate_status(hero), ("R UP".into(), RADIANT));
+    }
+    #[test]
+    fn clock_cycle_and_names_are_bounded() {
+        assert!(is_day(-1));
+        assert!(is_day(0));
+        assert!(is_day(299));
+        assert!(!is_day(300));
+        assert!(!is_day(599));
+        assert!(is_day(600));
+        assert_eq!(player_label(" @everyone **jaso7** "), "everyone jaso7");
+        assert_eq!(player_label(&"x".repeat(100)).len(), 24);
+    }
+    #[test]
+    fn missing_stats_are_unknown_and_observed_zero_is_zero() {
+        let mut state = frame();
+        assert_eq!(hero_stats(&state.heroes[0]), "?/?/?  LV ?  GPM ?");
+        let hero = &mut state.heroes[0];
+        hero.kills = Some(0);
+        hero.deaths = Some(1);
+        hero.assists = Some(2);
+        hero.level = Some(3);
+        hero.gold_per_min = Some(234);
+        assert_eq!(hero_stats(hero), "0/1/2  LV 3  GPM 234");
     }
     #[test]
     fn cached_portraits_are_used_and_invalid_sizes_are_rejected() {

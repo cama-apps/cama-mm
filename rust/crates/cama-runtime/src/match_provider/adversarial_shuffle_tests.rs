@@ -300,4 +300,5 @@ async fn busy_bot_shuffle_result_explains_manual_creation_and_recording() {
     assert!(text.contains("hosting another match"));
     assert!(text.contains("create the Dota lobby yourself"));
     assert!(text.contains("`/record`"));
+    assert!(text.contains("Live map and commentary are unavailable"));
 }

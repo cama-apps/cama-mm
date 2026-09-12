@@ -216,3 +216,6 @@ docs/
 data/steam/
 data/replays/
 *.dem.bz2
+
+# Temporary spectator screenshots and recap delivery checkpoints
+*.spectator-recaps/

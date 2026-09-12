@@ -31,6 +31,16 @@ struct FakeDiscord {
     delivered: Mutex<std::collections::BTreeMap<String, String>>,
     maps: Mutex<BTreeMap<String, DiscordMessage>>,
     map_edits: Mutex<Vec<DiscordMessage>>,
+    thread: Mutex<Option<u64>>,
+    thread_creates: AtomicUsize,
+    fail_thread_audit: AtomicBool,
+    lose_thread_reply: AtomicBool,
+    joins: Mutex<BTreeMap<String, DiscordMessage>>,
+    join_attempts: Mutex<Vec<(u64, String, String)>>,
+    lose_join_reply: AtomicBool,
+    fail_join_history: AtomicBool,
+    join_lookups: Mutex<Vec<(u64, String, i64)>>,
+    deleted_thread: AtomicBool,
     lose_map_reply: AtomicBool,
     map_message_deleted: AtomicBool,
     render_names: Mutex<BTreeMap<(u64, u64), String>>,
@@ -113,6 +123,56 @@ impl DiscordTransport for FakeDiscord {
         }
         Ok(())
     }
+    async fn ensure_spectator_thread(
+        &self,
+        guild: u64,
+        parent: u64,
+        map: u64,
+        marker: &str,
+        _: &str,
+        participants: &[u64],
+        viewers: &[u64],
+        known: Option<u64>,
+    ) -> Result<u64, String> {
+        self.audit_spectator_channel(guild, marker, participants, viewers, parent)
+            .await?;
+        if known.is_some_and(|id| id != map) || parent != 500 || map != 700 {
+            return Err("foreign commentary thread".into());
+        }
+        if self.deleted_thread.swap(false, Ordering::SeqCst) {
+            *self.thread.lock().unwrap() = None;
+            return Err(crate::discord_transport::SPECTATOR_THREAD_DELETED.into());
+        }
+        if self.thread.lock().unwrap().is_none() {
+            *self.thread.lock().unwrap() = Some(map);
+            self.thread_creates.fetch_add(1, Ordering::SeqCst);
+        }
+        if self.lose_thread_reply.swap(false, Ordering::SeqCst) {
+            return Err("thread create reply lost".into());
+        }
+        Ok(map)
+    }
+    async fn audit_spectator_thread(
+        &self,
+        guild: u64,
+        parent: u64,
+        map: u64,
+        thread: u64,
+        marker: &str,
+        participants: &[u64],
+        viewers: &[u64],
+    ) -> Result<(), String> {
+        self.audit_spectator_channel(guild, marker, participants, viewers, parent)
+            .await?;
+        if self.fail_thread_audit.load(Ordering::SeqCst)
+            || *self.thread.lock().unwrap() != Some(thread)
+            || thread != map
+            || thread != 700
+        {
+            return Err("unsafe commentary thread".into());
+        }
+        Ok(())
+    }
     async fn delete_spectator_channels_by_marker(
         &self,
         guild: u64,
@@ -149,6 +209,8 @@ impl DiscordTransport for FakeDiscord {
             .unwrap()
             .push((guild, channel, marker.into()));
         *current = None;
+        *self.thread.lock().unwrap() = None;
+        self.maps.lock().unwrap().clear();
         Ok(())
     }
     async fn send_message_with_delivery_key(
@@ -157,9 +219,16 @@ impl DiscordTransport for FakeDiscord {
         key: &str,
         message: DiscordMessage,
     ) -> Result<DiscordMessageReceipt, String> {
-        assert_eq!(channel, 500, "live content escaped the private channel");
+        assert!(
+            [500, 700].contains(&channel),
+            "content escaped spectator surfaces"
+        );
         assert!(key.len() <= 25);
-        if !message.response.attachments.is_empty() {
+        if channel == 500 {
+            assert!(
+                message.response.content.is_empty(),
+                "commentary must not scroll the map channel"
+            );
             self.maps
                 .lock()
                 .unwrap()
@@ -171,6 +240,31 @@ impl DiscordTransport for FakeDiscord {
             return Ok(DiscordMessageReceipt {
                 channel_id: channel,
                 message_id: 700,
+                jump_url: String::new(),
+            });
+        }
+        assert_eq!(*self.thread.lock().unwrap(), Some(channel));
+        if message.response.content.starts_with("📻 Subscribed:") {
+            assert_eq!(
+                message.allowed_mentions,
+                crate::discord_transport::DiscordAllowedMentions::None
+            );
+            self.join_attempts.lock().unwrap().push((
+                channel,
+                key.into(),
+                message.response.content.clone(),
+            ));
+            self.joins
+                .lock()
+                .unwrap()
+                .entry(key.into())
+                .or_insert(message);
+            if self.lose_join_reply.swap(false, Ordering::SeqCst) {
+                return Err("join response lost".into());
+            }
+            return Ok(DiscordMessageReceipt {
+                channel_id: channel,
+                message_id: 601,
                 jump_url: String::new(),
             });
         }
@@ -194,10 +288,21 @@ impl DiscordTransport for FakeDiscord {
     }
     async fn fetch_message(
         &self,
-        _: u64,
-        _: u64,
+        channel: u64,
+        id: u64,
     ) -> Result<Option<DiscordMessageSnapshot>, String> {
-        Ok(None)
+        Ok(
+            (channel == 500 && id == 700 && !self.maps.lock().unwrap().is_empty()).then_some(
+                DiscordMessageSnapshot {
+                    receipt: DiscordMessageReceipt {
+                        channel_id: channel,
+                        message_id: id,
+                        jump_url: String::new(),
+                    },
+                    reactions: Vec::new(),
+                },
+            ),
+        )
     }
     async fn send_message(
         &self,
@@ -219,6 +324,9 @@ impl DiscordTransport for FakeDiscord {
                 return Err("unknown message".into());
             }
             self.map_edits.lock().unwrap().push(message);
+            if self.lose_map_reply.swap(false, Ordering::SeqCst) {
+                return Err("map edit response lost".into());
+            }
             return Ok(());
         }
         self.public_calls.fetch_add(1, Ordering::SeqCst);
@@ -228,19 +336,26 @@ impl DiscordTransport for FakeDiscord {
         &self,
         channel: u64,
         key: &str,
-        _: i64,
+        after: i64,
         _: usize,
     ) -> Result<Option<DiscordMessageReceipt>, String> {
-        Ok(self
-            .maps
-            .lock()
-            .unwrap()
-            .contains_key(key)
-            .then_some(DiscordMessageReceipt {
-                channel_id: channel,
-                message_id: 700,
-                jump_url: String::new(),
-            }))
+        let found = if channel == 700 {
+            self.join_lookups
+                .lock()
+                .unwrap()
+                .push((channel, key.into(), after));
+            if self.fail_join_history.load(Ordering::SeqCst) {
+                return Err("history recovery incomplete".into());
+            }
+            self.joins.lock().unwrap().contains_key(key)
+        } else {
+            self.maps.lock().unwrap().contains_key(key)
+        };
+        Ok(found.then_some(DiscordMessageReceipt {
+            channel_id: channel,
+            message_id: if channel == 700 { 601 } else { 700 },
+            jump_url: String::new(),
+        }))
     }
     async fn delete_message(&self, _: u64, _: u64) -> Result<(), String> {
         Ok(())
@@ -324,6 +439,8 @@ impl Fixture {
             bet_lock_until: Some(100),
             extra: std::collections::BTreeMap::from([
                 ("spectator_lobby_message_id".into(), 55.into()),
+                ("dota_hosting".into(), serde_json::json!({"hosting":"bot"})),
+                ("dota_host_account_key".into(), "99".into()),
                 (DOTA_BETTING_CLOSED_MARKER.into(), true.into()),
             ]),
             ..Default::default()
@@ -976,7 +1093,7 @@ async fn same_tick_delivery_reaudits_after_persistence_and_blocks_reopened_betti
     poll_frame(&f, &listener, &frame(115, 1, 0)).await;
     let path = f.db.path().to_owned();
     let pending_id = f.pending;
-    f.discord.audit_hook_after.store(1, Ordering::SeqCst);
+    f.discord.audit_hook_after.store(3, Ordering::SeqCst);
     *f.discord.audit_hook.lock().unwrap() = Some(Box::new(move || {
         let row = DotaSpectatorRepository::new(&path)
             .get(1, pending_id)
@@ -1001,7 +1118,7 @@ async fn same_tick_delivery_reaudits_after_persistence_and_blocks_reopened_betti
     f.worker.tick(1015).await.unwrap();
     assert!(
         f.discord.audit_hook.lock().unwrap().is_none(),
-        "second audit must run"
+        "post-persistence audit must run"
     );
     assert_eq!(f.discord.attempts.lock().unwrap().len(), 1);
     assert!(f.state().queued.is_none());
@@ -1021,7 +1138,7 @@ async fn spectator_map_reuses_one_message_on_quiet_fifteen_second_ticks() {
     assert_eq!(f.discord.maps.lock().unwrap().len(), 1);
     poll_frame_with_map(&f, &listener, &frame(115, 0, 0), true).await;
     f.worker.tick(1014).await.unwrap();
-    assert!(f.discord.map_edits.lock().unwrap().is_empty());
+    assert_eq!(f.discord.map_edits.lock().unwrap().len(), 1);
     f.worker.tick(1015).await.unwrap();
     assert_eq!(
         f.discord.delivered.lock().unwrap().len(),
@@ -1031,15 +1148,15 @@ async fn spectator_map_reuses_one_message_on_quiet_fifteen_second_ticks() {
     assert_eq!(f.discord.maps.lock().unwrap().len(), 1);
     {
         let edits = f.discord.map_edits.lock().unwrap();
-        assert_eq!(edits.len(), 1);
-        assert_eq!(edits[0].response.attachments[0].filename, "map-123-115.png");
+        assert_eq!(edits.len(), 2);
+        assert_eq!(edits[1].response.attachments[0].filename, "map-123-115.png");
         assert!(
-            edits[0].response.attachments[0]
+            edits[1].response.attachments[0]
                 .bytes
                 .starts_with(b"\x89PNG")
         );
         assert_eq!(
-            edits[0].response.embeds[0].title.as_deref(),
+            edits[1].response.embeds[0].title.as_deref(),
             Some("Last received map · 1:55")
         );
     }
@@ -1049,7 +1166,7 @@ async fn spectator_map_reuses_one_message_on_quiet_fifteen_second_ticks() {
     f.worker.tick(1030).await.unwrap();
     poll_frame_with_map(&f, &listener, &frame(130, 0, 0), false).await;
     f.worker.tick(1045).await.unwrap();
-    assert_eq!(f.discord.map_edits.lock().unwrap().len(), 1);
+    assert_eq!(f.discord.map_edits.lock().unwrap().len(), 2);
     assert_eq!(f.discord.public_calls.load(Ordering::SeqCst), 0);
 }
 
@@ -1062,7 +1179,7 @@ async fn spectator_map_recovers_lost_create_receipt_by_nonce_after_restart() {
     f.discord.lose_map_reply.store(true, Ordering::SeqCst);
     f.worker.tick(1000).await.unwrap();
     assert!(f.state().map_message_id.is_none());
-    assert!(f.state().pending_map.is_some());
+    assert!(f.state().pending_map.is_none());
     let restarted = SpectatorWorker::new(f.db.path(), vec![1], f.discord.clone(), f.live.clone());
     restarted.tick(1015).await.unwrap();
     assert_eq!(f.discord.maps.lock().unwrap().len(), 1);
@@ -1076,10 +1193,11 @@ async fn spectator_map_reaudits_betting_after_render_and_withholds_private_image
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let f = Fixture::with_upstream(Some(&format!("http://{}", listener.local_addr().unwrap())));
     f.subscribe(20, true);
+    f.worker.tick(990).await.unwrap();
     poll_frame_with_map(&f, &listener, &frame(100, 0, 0), true).await;
     // The greeting audit comes first; change policy during the map audit,
     // after rendering, to prove a fresh DB check blocks image publication.
-    f.discord.audit_hook_after.store(1, Ordering::SeqCst);
+    f.discord.audit_hook_after.store(3, Ordering::SeqCst);
     let path = f.db.path().to_owned();
     let id = f.pending;
     *f.discord.audit_hook.lock().unwrap() = Some(Box::new(move || {
@@ -1101,13 +1219,14 @@ async fn spectator_map_retry_drops_expired_frame_without_blocking_text() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let f = Fixture::with_upstream(Some(&format!("http://{}", listener.local_addr().unwrap())));
     f.subscribe(20, true);
+    f.worker.tick(990).await.unwrap();
     poll_frame_with_map(&f, &listener, &frame(100, 0, 0), true).await;
     f.discord.lose_map_reply.store(true, Ordering::SeqCst);
     f.worker.tick(1000).await.unwrap();
     assert!(f.state().pending_map.is_some());
     f.worker.tick(1091).await.unwrap();
     assert!(f.state().pending_map.is_none());
-    assert!(f.discord.map_edits.lock().unwrap().is_empty());
+    assert_eq!(f.discord.map_edits.lock().unwrap().len(), 1);
     poll_frame_with_map(&f, &listener, &frame(115, 1, 0), false).await;
     f.worker.tick(1106).await.unwrap();
     assert_eq!(f.discord.delivered.lock().unwrap().len(), 2);
@@ -1134,7 +1253,9 @@ async fn spectator_map_recreates_a_confirmed_deleted_message_with_a_new_nonce() 
     f.worker.tick(1015).await.unwrap();
     assert!(f.state().map_message_id.is_none());
     assert_eq!(f.state().map_generation, 1);
-    assert!(f.state().pending_map.is_some());
+    assert!(f.state().pending_map.is_none());
+    assert!(f.state().commentary_thread_id.is_none());
+    assert!(f.discord.thread.lock().unwrap().is_none());
     f.worker.tick(1030).await.unwrap();
     assert_eq!(f.state().map_message_id, Some(700));
     let maps = f.discord.maps.lock().unwrap();
@@ -1158,4 +1279,250 @@ async fn spectator_map_does_not_publish_after_channel_permissions_fail() {
     assert!(f.row().channel_id.is_none());
     assert!(f.state().map_message_id.is_none());
     assert!(f.state().pending_map.is_none());
+}
+
+#[test]
+fn map_names_prefer_current_discord_alias_and_preserve_unlinked_persona() {
+    let mut current = frame(100, 0, 0);
+    current.players[0].display_name = Some("current server alias".into());
+    let mut map: LiveMapFrame = serde_json::from_value(serde_json::json!({
+        "match_id":current.match_id,"game_time":100,"buildings":[],"roshan_respawn_seconds":null,
+        "heroes":current.players.iter().take(2).map(|hero| serde_json::json!({
+            "hero_id":hero.hero_id,"radiant":hero.radiant,"x":1,"y":2,
+            "respawn_seconds":0,"player_name":"Steam persona"
+        })).collect::<Vec<_>>()
+    }))
+    .unwrap();
+    apply_map_display_names(&mut map, &current);
+    assert_eq!(
+        map.heroes[0].player_name.as_deref(),
+        Some("current server alias")
+    );
+    assert_eq!(map.heroes[1].player_name.as_deref(), Some("Steam persona"));
+}
+
+#[tokio::test]
+async fn radio_subscribes_both_surfaces_without_scrolling_the_map_parent() {
+    let f = Fixture::new();
+    f.subscribe(1, true);
+    f.subscribe(20, true);
+    f.worker.tick(1000).await.unwrap();
+    assert_eq!(f.state().map_message_id, Some(700));
+    assert_eq!(f.state().commentary_thread_id, Some(700));
+    assert_eq!(f.state().joined_viewers, vec![20]);
+    assert_eq!(f.discord.maps.lock().unwrap().len(), 1);
+    assert_eq!(f.discord.thread_creates.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        f.discord.join_attempts.lock().unwrap()[0].2,
+        "📻 Subscribed: <@20>"
+    );
+    assert!(
+        f.discord
+            .attempts
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(channel, _, _)| *channel == 700)
+    );
+    f.subscribe(21, true);
+    f.worker.tick(1015).await.unwrap();
+    assert_eq!(f.state().joined_viewers, vec![20, 21]);
+    assert_eq!(
+        f.discord.join_attempts.lock().unwrap()[1].2,
+        "📻 Subscribed: <@21>"
+    );
+    assert_eq!(f.discord.maps.lock().unwrap().len(), 1);
+    assert_eq!(f.discord.thread_creates.load(Ordering::SeqCst), 1);
+    f.pending_edit(|pending| pending.radiant_team_ids[0] = 20);
+    f.worker.tick(1030).await.unwrap();
+    assert_eq!(f.state().joined_viewers, vec![21]);
+    assert_eq!(
+        f.discord
+            .channel
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .1
+            .viewers,
+        vec![21]
+    );
+    assert!(
+        f.discord
+            .channel
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .1
+            .participants
+            .contains(&20)
+    );
+    f.subscribe(21, false);
+    f.worker.tick(1045).await.unwrap();
+    assert!(f.discord.channel.lock().unwrap().is_none());
+    assert!(f.discord.thread.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn attached_thread_lost_create_response_recovers_from_same_map_after_restart() {
+    let f = Fixture::new();
+    f.subscribe(20, true);
+    f.discord.lose_thread_reply.store(true, Ordering::SeqCst);
+    f.worker.tick(1000).await.unwrap();
+    assert_eq!(f.state().map_message_id, Some(700));
+    assert!(f.state().commentary_thread_id.is_none());
+    assert!(f.discord.attempts.lock().unwrap().is_empty());
+    assert!(f.discord.joins.lock().unwrap().is_empty());
+    SpectatorWorker::new(f.db.path(), vec![1], f.discord.clone(), f.live.clone())
+        .tick(1015)
+        .await
+        .unwrap();
+    assert_eq!(f.state().commentary_thread_id, Some(700));
+    assert_eq!(f.discord.thread_creates.load(Ordering::SeqCst), 1);
+    assert_eq!(f.discord.maps.lock().unwrap().len(), 1);
+    assert_eq!(f.discord.delivered.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn silent_thread_join_retries_exact_nonce_without_duplicate_subscription() {
+    let f = Fixture::new();
+    f.subscribe(20, true);
+    f.discord.lose_join_reply.store(true, Ordering::SeqCst);
+    f.worker.tick(1000).await.unwrap();
+    assert!(f.state().subscription_batch.is_some());
+    assert!(f.state().joined_viewers.is_empty());
+    SpectatorWorker::new(f.db.path(), vec![1], f.discord.clone(), f.live.clone())
+        .tick(2000)
+        .await
+        .unwrap();
+    let attempts = f.discord.join_attempts.lock().unwrap();
+    assert_eq!(
+        attempts.len(),
+        1,
+        "history recovers beyond the nonce window without resending"
+    );
+    let lookups = f.discord.join_lookups.lock().unwrap();
+    assert_eq!(lookups.len(), 2);
+    assert_eq!(lookups[0], lookups[1]);
+    assert_eq!(lookups[0].2, 999);
+    assert_eq!(f.discord.joins.lock().unwrap().len(), 1);
+    assert_eq!(f.state().joined_viewers, vec![20]);
+    assert!(f.state().subscription_batch.is_none());
+}
+
+#[tokio::test]
+async fn failed_thread_audit_blocks_commentary_and_revokes_both_spaces() {
+    let f = Fixture::new();
+    f.subscribe(20, true);
+    f.worker.tick(1000).await.unwrap();
+    f.fresh_feed();
+    f.queue_live(1010).await;
+    f.discord.fail_thread_audit.store(true, Ordering::SeqCst);
+    f.worker.tick(1015).await.unwrap();
+    assert!(f.discord.channel.lock().unwrap().is_none());
+    assert!(f.discord.thread.lock().unwrap().is_none());
+    assert!(f.state().queued.is_none());
+    assert_eq!(f.discord.delivered.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn manual_and_legacy_lobbies_do_not_create_empty_spectator_rooms() {
+    for mode in ["manual", "legacy", "unreserved"] {
+        let f = Fixture::new();
+        f.subscribe(20, true);
+        f.pending_edit(|pending| match mode {
+            "manual" => {
+                pending.extra.insert(
+                    "dota_hosting".into(),
+                    serde_json::json!({"hosting":"manual"}),
+                );
+            }
+            "legacy" => {
+                pending.extra.remove("dota_hosting");
+                pending.extra.remove("dota_host_account_key");
+            }
+            _ => {
+                pending.extra.remove("dota_host_account_key");
+            }
+        });
+        f.worker.tick(1000).await.unwrap();
+        assert!(f.discord.ensure_calls.lock().unwrap().is_empty(), "{mode}");
+        assert!(f.discord.maps.lock().unwrap().is_empty());
+        assert!(f.discord.thread.lock().unwrap().is_none());
+    }
+}
+
+#[tokio::test]
+async fn bot_manual_handoff_revokes_existing_map_and_commentary() {
+    let f = Fixture::new();
+    f.subscribe(20, true);
+    f.worker.tick(1000).await.unwrap();
+    f.pending_edit(|pending| {
+        pending.extra.insert(
+            "dota_hosting".into(),
+            serde_json::json!({"hosting":"manual"}),
+        );
+    });
+    f.worker.tick(1015).await.unwrap();
+    assert!(f.discord.channel.lock().unwrap().is_none());
+    assert!(f.discord.thread.lock().unwrap().is_none());
+    assert!(f.state().map_message_id.is_none());
+    assert!(f.state().commentary_thread_id.is_none());
+    assert!(f.state().queued.is_none());
+    f.worker.tick(1030).await.unwrap();
+    assert_eq!(f.discord.ensure_calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn legacy_mixed_channel_is_replaced_once_with_clean_split_layout() {
+    let f = Fixture::new();
+    f.subscribe(20, true);
+    f.worker.tick(1000).await.unwrap();
+    let mut row = f.row();
+    let mut state = f.state();
+    state.split_layout = false;
+    f.worker.save(&mut row, &state, 1001).await.unwrap();
+    f.worker.tick(1015).await.unwrap();
+    assert!(f.state().split_layout);
+    assert_eq!(f.discord.deleted.lock().unwrap().len(), 1);
+    assert_eq!(f.discord.maps.lock().unwrap().len(), 1);
+    assert_eq!(f.state().commentary_thread_id, Some(700));
+    f.worker.tick(1030).await.unwrap();
+    assert_eq!(f.discord.deleted.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn deleted_commentary_thread_rebuilds_map_pair_and_rejoins_viewers() {
+    let f = Fixture::new();
+    f.subscribe(20, true);
+    f.worker.tick(1000).await.unwrap();
+    f.discord.deleted_thread.store(true, Ordering::SeqCst);
+    f.worker.tick(1015).await.unwrap();
+    assert!(f.state().map_message_id.is_none());
+    assert!(f.state().commentary_thread_id.is_none());
+    assert!(f.discord.channel.lock().unwrap().is_none());
+    f.worker.tick(1030).await.unwrap();
+    assert_eq!(f.state().joined_viewers, vec![20]);
+    assert_eq!(f.discord.thread_creates.load(Ordering::SeqCst), 2);
+    assert_eq!(f.discord.join_attempts.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn incomplete_join_history_does_not_duplicate_subscriptions_or_block_commentary() {
+    let f = Fixture::new();
+    f.subscribe(20, true);
+    f.discord.lose_join_reply.store(true, Ordering::SeqCst);
+    f.worker.tick(1000).await.unwrap();
+    f.fresh_feed();
+    f.queue_live(1010).await;
+    f.discord.fail_join_history.store(true, Ordering::SeqCst);
+    f.worker.tick(1015).await.unwrap();
+    assert_eq!(f.discord.join_attempts.lock().unwrap().len(), 1);
+    assert!(f.state().subscription_batch.is_some());
+    assert_eq!(f.discord.delivered.lock().unwrap().len(), 2);
+    f.discord.fail_join_history.store(false, Ordering::SeqCst);
+    f.worker.tick(1030).await.unwrap();
+    assert_eq!(f.state().joined_viewers, vec![20]);
+    assert_eq!(f.discord.join_attempts.lock().unwrap().len(), 1);
 }

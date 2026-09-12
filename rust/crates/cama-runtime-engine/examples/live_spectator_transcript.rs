@@ -238,8 +238,48 @@ async fn main() -> Result<(), String> {
     if args.len() == 2 && args[0] == "--replay" {
         return replay(Path::new(&args[1]));
     }
+    if args.len() == 3 && args[0] == "--details" {
+        let key = api_key(&args[1])?;
+        let out = Path::new(&args[2]);
+        let journal = fs::read_to_string(out.join("frames.jsonl"))
+            .map_err(|_| "cannot read capture journal")?;
+        let first: Value =
+            serde_json::from_str(journal.lines().next().ok_or("empty capture journal")?)
+                .map_err(|_| "invalid capture journal")?;
+        let match_id = first["frame"]["match_id"]
+            .as_u64()
+            .ok_or("missing capture match ID")?;
+        let client = Client::builder()
+            .redirect(Policy::none())
+            .timeout(Duration::from_secs(12))
+            .build()
+            .map_err(|_| "HTTP client setup failed")?;
+        let data = fetch(
+            &client,
+            "IDOTA2Match_570/GetMatchDetails",
+            &key,
+            &[("match_id", match_id.to_string())],
+        )
+        .await?;
+        fs::write(
+            out.join("match-details.json"),
+            serde_json::to_vec_pretty(&data).map_err(|_| "cannot encode match details")?,
+        )
+        .map_err(|_| "cannot save match details")?;
+        let result = data.get("result").unwrap_or(&data);
+        if result.get("match_id").and_then(num) == Some(match_id) {
+            println!(
+                "Valve match details: match {match_id}, duration {:?}, radiant_win {:?}",
+                result.get("duration").and_then(Value::as_i64),
+                result.get("radiant_win").and_then(Value::as_bool)
+            );
+        } else {
+            println!("Valve has not returned final match details for {match_id}");
+        }
+        return Ok(());
+    }
     if args.len() != 3 {
-        return Err("usage: live_spectator_transcript ENV_FILE OUTPUT_DIR SAMPLE_COUNT".into());
+        return Err("usage: live_spectator_transcript ENV_FILE OUTPUT_DIR SAMPLE_COUNT; or --details ENV_FILE CAPTURE_DIR".into());
     }
     let count: usize = args[2].parse().map_err(|_| "invalid sample count")?;
     if count != 0 && !(2..=120).contains(&count) {
@@ -325,6 +365,16 @@ async fn main() -> Result<(), String> {
             println!("Candidate {match_id}: missing/mismatched identity");
             continue;
         };
+        if snapshot.map_frame.as_ref().is_none_or(|map| {
+            map.heroes
+                .iter()
+                .filter(|hero| hero.x.zip(hero.y).is_some())
+                .count()
+                < 8
+        }) {
+            println!("Candidate {match_id}: no usable hero map positions");
+            continue;
+        }
         let Some(frame) = snapshot.announcement_frame else {
             println!("Candidate {match_id}: no complete frame");
             continue;
@@ -356,7 +406,14 @@ async fn main() -> Result<(), String> {
             .flatten()
             .collect();
         games.sort_by_key(|game| {
-            std::cmp::Reverse(game.get("spectators").and_then(num).unwrap_or(0))
+            let clock = game
+                .pointer("/scoreboard/duration")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0) as i64;
+            (
+                (clock - 1500).unsigned_abs(),
+                std::cmp::Reverse(game.get("spectators").and_then(num).unwrap_or(0)),
+            )
         });
         for game in games {
             let Some(match_id) = game.get("match_id").and_then(num) else {
@@ -365,6 +422,15 @@ async fn main() -> Result<(), String> {
             let Some(snapshot) = normalize(&data, match_id, 0) else {
                 continue;
             };
+            if snapshot.map_frame.as_ref().is_none_or(|map| {
+                map.heroes
+                    .iter()
+                    .filter(|hero| hero.x.zip(hero.y).is_some())
+                    .count()
+                    < 8
+            }) {
+                continue;
+            }
             let Some(frame) = snapshot.announcement_frame else {
                 continue;
             };

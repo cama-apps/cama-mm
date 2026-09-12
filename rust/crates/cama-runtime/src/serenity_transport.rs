@@ -3840,6 +3840,56 @@ impl DiscordTransport for SerenityDiscordTransport {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn ensure_spectator_thread(
+        &self,
+        guild_id: u64,
+        parent_channel_id: u64,
+        map_message_id: u64,
+        marker: &str,
+        name: &str,
+        participants: &[u64],
+        viewers: &[u64],
+        known_thread_id: Option<u64>,
+    ) -> Result<u64, String> {
+        spectator::ensure_thread(
+            &self.context()?.http,
+            guild_id,
+            parent_channel_id,
+            map_message_id,
+            marker,
+            name,
+            participants,
+            viewers,
+            known_thread_id,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn audit_spectator_thread(
+        &self,
+        guild_id: u64,
+        parent_channel_id: u64,
+        map_message_id: u64,
+        thread_id: u64,
+        marker: &str,
+        participants: &[u64],
+        viewers: &[u64],
+    ) -> Result<(), String> {
+        spectator::audit_thread(
+            &self.context()?.http,
+            guild_id,
+            parent_channel_id,
+            map_message_id,
+            thread_id,
+            marker,
+            participants,
+            viewers,
+        )
+        .await
+    }
+
     async fn delete_spectator_channel(
         &self,
         guild_id: u64,

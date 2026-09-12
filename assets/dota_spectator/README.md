@@ -30,6 +30,57 @@ This is a static **7.40 terrain reference**, not a live rendering of trees,
 terrain changes, wards, vision, runes, or neutral camps. Terrain can differ on
 future patches; update the pinned asset and revalidate alignment when it does.
 Static objective artwork in the background does not indicate live status.
-Only source-provided building coordinates are overlaid. League tower/barracks
-bitmasks have identity and state, but no coordinates, so they appear in the
-lane/tier ledger. No guessed tower or ward positions are overlaid.
+Standing towers and barracks are overlaid only when their identity and state
+are present in the current feed. Explicit building coordinates take precedence.
+League bitmasks supply identity/state but no coordinates; those entries use
+the static OpenDota building layout described below. Destroyed and unknown
+structures do not receive a standing-building marker. No ward positions are
+inferred.
+
+## Static building marker layout
+
+Lane tower/barracks anchors come from the same pinned OpenDota revision:
+[buildingData733.ts](https://github.com/odota/web/blob/1b7ce1ca467403ed6d0ca871e7802924d91a31f5/src/components/Match/BuildingMap/buildingData733.ts).
+Despite that filename, the revision's
+[BuildingMap.tsx](https://github.com/odota/web/blob/1b7ce1ca467403ed6d0ca871e7802924d91a31f5/src/components/Match/BuildingMap/BuildingMap.tsx)
+selects this layout for all matches from 7.33 onward, including 7.40. Its
+[DotaMap.tsx](https://github.com/odota/web/blob/1b7ce1ca467403ed6d0ca871e7802924d91a31f5/src/components/DotaMap/DotaMap.tsx)
+selects the same `detailed_740.jpg` image bundled here for 7.40 games.
+
+The upstream values are CSS top-left percentages. On its 300px building map,
+OpenDota displays square tower sprites at 16px and barracks sprites at 12px.
+Our centered lane geometry therefore adds half the original sprite size in each
+axis: `8 / 300` of map width/height for towers and `6 / 300` for barracks.
+The normalized marker center is converted through the inverse projection
+above so the renderer uses a single coordinate transform at every image size.
+
+These are **approximate static UI positions**, not coordinates measured from
+the current match. The upstream layout predates minor subsequent tower moves;
+it communicates side, lane, and tier rather than exact attack range. Revalidate
+it when updating terrain. Live masks determine presence; static coordinates
+never establish health, visibility, a destruction time, or whether a building
+exists in a custom map. The source code is covered by the bundled OpenDota MIT
+notice; no additional map or marker images are downloaded at runtime.
+
+### Ancient and tier 4 landmarks
+
+The older upstream core layout placed tier 4 markers near the outer base wall
+on this asset. Six core centers are therefore manually aligned to the bundled
+640×640 terrain reference instead. Coordinates below are marker-center pixels
+from the image's upper-left, before rendering or scaling:
+
+| Team | Ancient | Upper tier 4 | Lower tier 4 |
+|---|---|---|---|
+| Radiant | (82, 526) | (99, 501) | (124, 525) |
+| Dire | (546, 112) | (514, 117) | (538, 141) |
+
+These are reviewed **map-aligned approximations**, not Valve entity coordinates
+or values attributed to OpenDota. Each tier 4 pair is inside the base, on the
+mid-lane side of its Ancient and closer than the mid barracks. Lane tower and
+barracks anchors retain the sourced layout. Explicit live coordinates continue
+to take precedence.
+
+The league feed has no Ancient status bit. An Ancient icon is a static map
+landmark unless an explicit source entry provides its state; its presence must
+not be interpreted as proof of current health, invulnerability, or survival.
+The tier 4 masks still independently determine whether each tier 4 is drawn.
