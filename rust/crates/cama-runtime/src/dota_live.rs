@@ -97,6 +97,58 @@ pub struct LivePlayerSnapshot {
     pub items: Option<Vec<LiveItemSnapshot>>,
 }
 
+/// Map samples contain only positions explicitly supplied by the current feed.
+/// League masks carry building identity/status, but no world coordinates.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LiveMapFrame {
+    pub match_id: u64,
+    pub game_time: i64,
+    #[serde(default)]
+    pub radiant_net_worth: Option<i64>,
+    #[serde(default)]
+    pub dire_net_worth: Option<i64>,
+    pub heroes: Vec<LiveMapHero>,
+    pub buildings: Vec<LiveMapBuilding>,
+    pub roshan_respawn_seconds: Option<i64>,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LiveMapHero {
+    pub hero_id: u32,
+    pub radiant: bool,
+    pub x: Option<f64>,
+    pub y: Option<f64>,
+    pub respawn_seconds: Option<i64>,
+    #[serde(default)]
+    pub player_name: Option<String>,
+    #[serde(default)]
+    pub ultimate_state: Option<i64>,
+    #[serde(default)]
+    pub ultimate_cooldown: Option<i64>,
+    #[serde(default)]
+    pub kills: Option<i64>,
+    #[serde(default)]
+    pub deaths: Option<i64>,
+    #[serde(default)]
+    pub assists: Option<i64>,
+    #[serde(default)]
+    pub level: Option<i64>,
+    #[serde(default)]
+    pub gold_per_min: Option<i64>,
+    #[serde(default)]
+    pub net_worth: Option<i64>,
+    /// Six known slots (None = reported empty), or no slots if unavailable.
+    #[serde(default)]
+    pub items: Vec<Option<u32>>,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LiveMapBuilding {
+    pub radiant: bool,
+    pub name: String,
+    pub destroyed: bool,
+    pub x: Option<f64>,
+    pub y: Option<f64>,
+}
+
 /// Normalized, public-safe snapshot returned to a live viewer.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -121,6 +173,7 @@ pub struct LiveMatchSnapshot {
     pub dire_score: Option<i64>,
     pub players: Option<Vec<LivePlayerSnapshot>>,
     pub announcement_frame: Option<cama_domain::live_announcements::LiveAnnouncementFrame>,
+    pub map_frame: Option<LiveMapFrame>,
 }
 
 impl Default for LiveMatchSnapshot {
@@ -140,6 +193,7 @@ impl Default for LiveMatchSnapshot {
             dire_score: None,
             players: None,
             announcement_frame: None,
+            map_frame: None,
         }
     }
 }
@@ -512,6 +566,7 @@ impl DotaLiveFeed {
         let Some(key) = self.web_api_key.as_deref() else {
             return Ok(None);
         };
+        let mut partial_realtime = None;
         if let Some(server_id) = target.server_id {
             let response = self
                 .client
@@ -535,38 +590,50 @@ impl DotaLiveFeed {
                     now_unix(),
                 )
             {
-                return Ok(Some(
-                    self.apply_configured_delay(snapshot, target.delay_seconds),
-                ));
+                let snapshot = self.apply_configured_delay(snapshot, target.delay_seconds);
+                if snapshot.announcement_frame.is_some() {
+                    return Ok(Some(snapshot));
+                }
+                // A partial realtime frame can still serve other live consumers,
+                // but must not prevent the independent complete league fallback.
+                partial_realtime = Some(snapshot);
             }
         }
 
-        let response = self
-            .client
-            .get(format!(
-                "{}/IDOTA2Match_570/GetLiveLeagueGames/v1/",
-                self.upstream_base
-            ))
-            .query(&[
-                ("key", key),
-                ("league_id", &target.league.to_string()),
-                ("match_id", &target.match_id.to_string()),
-            ])
-            .send()
-            .await
-            .map_err(|_| UpstreamError::Unavailable)?;
-        if !response.status().is_success() {
-            return Err(UpstreamError::Unavailable);
+        let league_result = async {
+            let response = self
+                .client
+                .get(format!(
+                    "{}/IDOTA2Match_570/GetLiveLeagueGames/v1/",
+                    self.upstream_base
+                ))
+                .query(&[
+                    ("key", key),
+                    ("league_id", &target.league.to_string()),
+                    ("match_id", &target.match_id.to_string()),
+                ])
+                .send()
+                .await
+                .map_err(|_| UpstreamError::Unavailable)?;
+            if !response.status().is_success() {
+                return Err(UpstreamError::Unavailable);
+            }
+            let body = read_limited_json(response).await?;
+            Ok(normalize_live_league_games(
+                &body,
+                target.guild_id,
+                target.pending_match_id,
+                target.match_id,
+                now_unix(),
+            )
+            .map(|snapshot| self.apply_configured_delay(snapshot, target.delay_seconds)))
         }
-        let body = read_limited_json(response).await?;
-        Ok(normalize_live_league_games(
-            &body,
-            target.guild_id,
-            target.pending_match_id,
-            target.match_id,
-            now_unix(),
-        )
-        .map(|snapshot| self.apply_configured_delay(snapshot, target.delay_seconds)))
+        .await;
+        match league_result {
+            Ok(Some(snapshot)) => Ok(Some(snapshot)),
+            _ if partial_realtime.is_some() => Ok(partial_realtime),
+            result => result,
+        }
     }
 
     fn apply_configured_delay(
@@ -707,6 +774,7 @@ impl DotaLiveFeed {
             dire_score: optional_i64(map, "dire_score"),
             players,
             announcement_frame: None,
+            map_frame: None,
         })
     }
 }
@@ -866,15 +934,10 @@ pub fn normalize_realtime_stats(
     observed_at: i64,
 ) -> Option<LiveMatchSnapshot> {
     let result = payload.get("result").unwrap_or(payload);
-    let match_result = result.get("match").filter(|value| value.is_object());
-    let match_id = object_value(result, "match_id")
-        .or_else(|| object_value(result, "matchid"))
-        .or_else(|| match_result.and_then(|value| object_value(value, "match_id")))
-        .or_else(|| match_result.and_then(|value| object_value(value, "matchid")))
-        .and_then(value_u64)?;
-    if match_id != expected_match_id {
+    if !live_match_identity_matches(result, expected_match_id) {
         return None;
     }
+    let match_id = expected_match_id;
     Some(snapshot_from_scoreboard(
         result,
         guild_id,
@@ -895,29 +958,29 @@ pub fn normalize_live_league_games(
 ) -> Option<LiveMatchSnapshot> {
     let result = payload.get("result").unwrap_or(payload);
     let games = result.get("games")?.as_array()?;
-    let game = games.iter().find(|game| {
-        object_value(game, "match_id")
-            .or_else(|| object_value(game, "matchid"))
-            .or_else(|| {
-                game.get("match")
-                    .and_then(|value| object_value(value, "match_id"))
-            })
-            .or_else(|| {
-                game.get("match")
-                    .and_then(|value| object_value(value, "matchid"))
-            })
-            .and_then(value_u64)
-            == Some(expected_match_id)
-    })?;
-    let scoreboard = game.get("scoreboard").unwrap_or(game);
+    let game = games
+        .iter()
+        .find(|game| live_match_identity_matches(game, expected_match_id))?;
     Some(snapshot_from_scoreboard(
-        scoreboard,
+        game,
         guild_id,
         pending_match_id,
         expected_match_id,
         LiveSnapshotSource::LiveLeagueGames,
         observed_at,
     ))
+}
+
+// Alias/nested identities must agree: accepting the first matching alias
+// could attach another match's scoreboard to this spectator channel.
+fn live_match_identity_matches(value: &Value, expected: u64) -> bool {
+    let mut identities = [Some(value), value.get("match"), value.get("scoreboard")]
+        .into_iter()
+        .flatten()
+        .flat_map(|value| [value.get("match_id"), value.get("matchid")])
+        .flatten()
+        .peekable();
+    identities.peek().is_some() && identities.all(|value| value_u64(value) == Some(expected))
 }
 
 fn snapshot_from_scoreboard(
@@ -958,12 +1021,9 @@ fn snapshot_from_scoreboard(
                 .and_then(|value| value.get("players"))
                 .and_then(parse_player_collection)
         });
-    let game_time_seconds = first_i64(scoreboard, &["game_time", "duration", "game_time_seconds"])
-        .or_else(|| first_i64(value, &["game_time", "duration", "game_time_seconds"]))
-        .or_else(|| {
-            match_result
-                .and_then(|value| first_i64(value, &["game_time", "duration", "game_time_seconds"]))
-        });
+    let game_time_seconds = first_game_time(scoreboard)
+        .or_else(|| first_game_time(value))
+        .or_else(|| match_result.and_then(first_game_time));
     let radiant_score = first_i64(scoreboard, &["radiant_score", "radiant_team_score"])
         .or_else(|| first_i64(value, &["radiant_score", "radiant_team_score"]))
         .or_else(|| nested_i64(scoreboard, "radiant", "score"))
@@ -976,6 +1036,16 @@ fn snapshot_from_scoreboard(
         .or_else(|| nested_i64(value, "dire", "score"))
         .or_else(|| team_array_score(scoreboard.get("teams"), 3))
         .or_else(|| team_array_score(value.get("teams"), 3));
+    let announcement_frame = announcement_frame(
+        value,
+        match_id,
+        game_time_seconds,
+        radiant_score,
+        dire_score,
+    );
+    let map_frame = announcement_frame
+        .as_ref()
+        .and_then(|frame| map_frame(value, frame));
     LiveMatchSnapshot {
         guild_id,
         pending_match_id,
@@ -990,13 +1060,8 @@ fn snapshot_from_scoreboard(
         radiant_score,
         dire_score,
         players,
-        announcement_frame: announcement_frame(
-            value,
-            match_id,
-            game_time_seconds,
-            radiant_score,
-            dire_score,
-        ),
+        announcement_frame,
+        map_frame,
     }
 }
 
@@ -1009,21 +1074,74 @@ fn announcement_frame(
 ) -> Option<cama_domain::live_announcements::LiveAnnouncementFrame> {
     use cama_domain::live_announcements::{LiveAnnouncementFrame, LiveBuilding};
     // Delta frames require reconstruction before any event analysis.
-    if value.get("delta_frame").and_then(Value::as_bool) == Some(true) {
+    if value
+        .get("delta_frame")
+        .is_some_and(|delta| delta.as_bool() != Some(false))
+    {
         return None;
     }
-    let team_worth = |team_number| {
-        value
-            .get("teams")
+    let scoreboard = value.get("scoreboard").unwrap_or(value);
+    if scoreboard
+        .get("delta_frame")
+        .is_some_and(|delta| delta.as_bool() != Some(false))
+    {
+        return None;
+    }
+    let teams = [
+        announcement_team(scoreboard, 2),
+        announcement_team(scoreboard, 3),
+    ];
+    let mut players = Vec::new();
+    let mut worth = [None, None];
+    for (index, team) in teams.into_iter().enumerate() {
+        let Some(team) = team else { continue };
+        let team_players = announcement_players(team, index == 0);
+        // A supplied but invalid aggregate is not permission to substitute a
+        // different metric. Never sum a partial roster or missing player gold.
+        worth[index] = match team.get("net_worth") {
+            Some(value) => value_i64(value).filter(|worth| *worth >= 0),
+            None if team_players.len() == 5 => team
+                .get("players")
+                .and_then(Value::as_array)
+                .and_then(|players| {
+                    players.iter().try_fold(0_i64, |sum, player| {
+                        let worth = player.get("net_worth").and_then(value_i64)?;
+                        (worth >= 0).then_some(())?;
+                        sum.checked_add(worth)
+                    })
+                }),
+            None => None,
+        };
+        players.extend(team_players);
+    }
+    // Duplicate hero/account identities must not manufacture a complete
+    // ten-player baseline for first blood. Invalidate ambiguous rosters.
+    let mut hero_ids = BTreeSet::new();
+    let mut account_ids = BTreeSet::new();
+    let duplicate_accounts = teams.into_iter().flatten().any(|team| {
+        team.get("players")
             .and_then(Value::as_array)
-            .and_then(|teams| {
-                teams
+            .is_some_and(|players| {
+                players
                     .iter()
-                    .find(|team| first_i64(team, &["team_number", "team"]) == Some(team_number))
+                    .filter_map(|player| parse_player(player, None).account_id)
+                    .any(|account| !account_ids.insert(account))
             })
-            .and_then(|team| first_i64(team, &["net_worth"]))
-    };
-    let buildings = value
+    });
+    if duplicate_accounts
+        || players
+            .iter()
+            .any(|player| !hero_ids.insert(player.hero_id))
+    {
+        players.clear();
+        // Explicit team totals stand independently of the individual roster.
+        for (index, team) in teams.into_iter().enumerate() {
+            if team.is_some_and(|team| team.get("net_worth").is_none()) {
+                worth[index] = None;
+            }
+        }
+    }
+    let mut buildings: Vec<LiveBuilding> = value
         .get("buildings")
         .and_then(Value::as_array)
         .map(|buildings| {
@@ -1042,20 +1160,298 @@ fn announcement_frame(
                         key: format!("{team}:{x}:{y}"),
                         radiant: team == 2,
                         destroyed,
+                        name: announcement_building_name(building),
                     })
                 })
                 .collect()
         })
         .unwrap_or_default();
+    if buildings.is_empty() {
+        // League scoreboards report surviving towers/barracks as bitmasks.
+        // Decode the documented single-team masks (not the combined mask).
+        // Missing/malformed masks are not zero (all destroyed).
+        for (index, team) in teams.into_iter().enumerate() {
+            let Some(team) = team else { continue };
+            for (field, bits) in [("tower_state", 11), ("barracks_state", 6)] {
+                let Some(mask) = team
+                    .get(field)
+                    .and_then(value_u64)
+                    .filter(|mask| *mask < (1 << bits))
+                else {
+                    continue;
+                };
+                for bit in 0..bits {
+                    buildings.push(LiveBuilding {
+                        key: format!("league:{index}:{field}:{bit}"),
+                        radiant: index == 0,
+                        destroyed: mask & (1 << bit) == 0,
+                        name: Some(league_building_name(field, bit)),
+                    });
+                }
+            }
+        }
+    }
     Some(LiveAnnouncementFrame {
         match_id,
         game_time: game_time?,
         radiant_score,
         dire_score,
-        radiant_net_worth: team_worth(2),
-        dire_net_worth: team_worth(3),
+        radiant_net_worth: worth[0],
+        dire_net_worth: worth[1],
         buildings,
+        players,
+        // GetRealtimeStats' terse schema and LiveLeagueGames provide no
+        // verified first-blood/fight/Roshan log or winner. Do not accept a
+        // made-up `events` or `radiant_win` field from a compatible proxy.
+        events: Vec::new(),
+        radiant_win: None,
     })
+}
+
+fn map_frame(
+    value: &Value,
+    frame: &cama_domain::live_announcements::LiveAnnouncementFrame,
+) -> Option<LiveMapFrame> {
+    // The normalizer must establish an unambiguous complete roster first.
+    // Never place unknown players, merge sources, or carry old locations ahead.
+    if frame.players.len() != 10 {
+        return None;
+    }
+    let personas = value.get("players").and_then(Value::as_array);
+    let scoreboard = value.get("scoreboard").unwrap_or(value);
+    let mut heroes = Vec::new();
+    for number in [2, 3] {
+        let team = announcement_team(scoreboard, number)?;
+        for value in team.get("players")?.as_array()? {
+            let player = parse_player(value, None);
+            let hero_id = player.hero_id?;
+            if !frame
+                .players
+                .iter()
+                .any(|hero| hero.hero_id == hero_id && hero.radiant == (number == 2))
+            {
+                return None;
+            }
+            // Captured GetLiveLeagueGames uses world-space position_x/y.
+            // Do not assume other sources' x/y use this coordinate system.
+            let position =
+                coordinate(value.get("position_x")).zip(coordinate(value.get("position_y")));
+            let (x, y) = position.map_or((None, None), |(x, y)| (Some(x), Some(y)));
+            heroes.push(LiveMapHero {
+                hero_id,
+                radiant: number == 2,
+                x,
+                y,
+                respawn_seconds: value
+                    .get("respawn_timer")
+                    .and_then(value_i64)
+                    .filter(|n| (0..=600).contains(n)),
+                player_name: player.account_id.and_then(|account| {
+                    let candidates = personas?
+                        .iter()
+                        .filter(|persona| {
+                            persona.get("account_id").and_then(Value::as_u64)
+                                == Some(u64::from(account))
+                                && persona.get("hero_id").and_then(Value::as_u64)
+                                    == Some(u64::from(hero_id))
+                                && persona.get("team").and_then(Value::as_i64) == Some(number - 2)
+                        })
+                        .collect::<Vec<_>>();
+                    if candidates.len() != 1 {
+                        return None;
+                    }
+                    let name = candidates[0].get("name")?.as_str()?.trim();
+                    (!name.is_empty())
+                        .then(|| name.chars().filter(|c| !c.is_control()).take(128).collect())
+                }),
+                ultimate_state: value
+                    .get("ultimate_state")
+                    .and_then(value_i64)
+                    .filter(|n| (0..=3).contains(n)),
+                ultimate_cooldown: value
+                    .get("ultimate_cooldown")
+                    .and_then(value_i64)
+                    .filter(|n| (0..=1200).contains(n)),
+                kills: player.kills.filter(|n| (0..=10_000).contains(n)),
+                deaths: player.deaths.filter(|n| (0..=10_000).contains(n)),
+                assists: player.assists.filter(|n| (0..=10_000).contains(n)),
+                level: value
+                    .get("level")
+                    .and_then(value_i64)
+                    .filter(|n| (1..=30).contains(n)),
+                gold_per_min: value
+                    .get("gold_per_min")
+                    .and_then(value_i64)
+                    .filter(|n| (0..=100_000).contains(n)),
+                net_worth: player.net_worth.filter(|value| *value >= 0),
+                items: (0..6)
+                    .map(|slot| {
+                        let id = value.get(format!("item{slot}"))?.as_i64()?;
+                        match id {
+                            -1 | 0 => Some(None),
+                            1.. => u32::try_from(id).ok().map(Some),
+                            _ => None,
+                        }
+                    })
+                    .collect::<Option<Vec<_>>>()
+                    .unwrap_or_default(),
+            });
+        }
+    }
+    // An all-zero frame is a common upstream placeholder, not ten heroes mid.
+    if heroes.is_empty()
+        || heroes
+            .iter()
+            .all(|hero| hero.x.zip(hero.y).is_none_or(|(x, y)| x == 0.0 && y == 0.0))
+    {
+        return None;
+    }
+    let buildings = frame
+        .buildings
+        .iter()
+        .map(|building| LiveMapBuilding {
+            radiant: building.radiant,
+            name: building.name.clone().unwrap_or_else(|| "structure".into()),
+            destroyed: building.destroyed,
+            // League status bits have no positions. The renderer independently
+            // uses the documented static layout for known building identities.
+            x: None,
+            y: None,
+        })
+        .collect();
+    Some(LiveMapFrame {
+        match_id: frame.match_id,
+        game_time: frame.game_time,
+        radiant_net_worth: frame.radiant_net_worth,
+        dire_net_worth: frame.dire_net_worth,
+        heroes,
+        buildings,
+        roshan_respawn_seconds: scoreboard
+            .get("roshan_respawn_timer")
+            .and_then(value_i64)
+            .filter(|n| (1..=660).contains(n)),
+    })
+}
+fn coordinate(value: Option<&Value>) -> Option<f64> {
+    value
+        .and_then(Value::as_f64)
+        .filter(|v| v.is_finite() && (-16384.0..=16384.0).contains(v))
+}
+
+// Single-team wire layout, documented by the API library's own reference:
+// https://demodota2api.readthedocs.io/en/latest/responses.html#single-team-tower-status
+// Bits 0..8 are top/middle/bottom T1..T3. Bits 9/10 guard the Ancient.
+fn league_building_name(field: &str, bit: u32) -> String {
+    if field == "tower_state" {
+        if bit < 9 {
+            let lane = ["top", "mid", "bottom"][(bit / 3) as usize];
+            format!("{lane} tier {} tower", bit % 3 + 1)
+        } else {
+            format!(
+                "{} tier 4 tower",
+                if bit == 9 {
+                    "upper Ancient"
+                } else {
+                    "lower Ancient"
+                }
+            )
+        }
+    } else {
+        let lane = ["top", "mid", "bottom"][(bit / 2) as usize];
+        format!(
+            "{lane} {} barracks",
+            if bit.is_multiple_of(2) {
+                "melee"
+            } else {
+                "ranged"
+            }
+        )
+    }
+}
+
+fn announcement_team(value: &Value, number: i64) -> Option<&Value> {
+    if let Some(teams) = value.get("teams").and_then(Value::as_array) {
+        let mut matches = teams
+            .iter()
+            .filter(|team| first_i64(team, &["team_number", "team"]) == Some(number));
+        let team = matches.next()?;
+        return matches.next().is_none().then_some(team);
+    }
+    value
+        .get(if number == 2 { "radiant" } else { "dire" })
+        .filter(|team| team.is_object())
+}
+
+fn announcement_players(
+    team: &Value,
+    radiant: bool,
+) -> Vec<cama_domain::live_announcements::LiveHero> {
+    use cama_domain::live_announcements::LiveHero;
+    let Some(players) = team.get("players").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    if players.len() > 5 {
+        return Vec::new();
+    }
+    let mut slots = BTreeSet::new();
+    let mut player_slots = BTreeSet::new();
+    players
+        .iter()
+        .filter_map(|value| {
+            let number = if radiant { 2 } else { 3 };
+            if value
+                .get("team")
+                .is_some_and(|team| value_i64(team) != Some(number))
+            {
+                return None;
+            }
+            if let Some(slot) = value.get("team_slot") {
+                let slot = value_i64(slot)?;
+                if !(0..=4).contains(&slot) || !slots.insert(slot) {
+                    return None;
+                }
+            }
+            if let Some(slot) = value.get("player_slot") {
+                let slot = value_i64(slot)?;
+                let base = if radiant { 0 } else { 128 };
+                if !(base..=base + 4).contains(&slot) || !player_slots.insert(slot) {
+                    return None;
+                }
+            }
+            let player = parse_player(value, None);
+            let hero_id = player.hero_id?;
+            Some(LiveHero {
+                hero_id,
+                account_id: player.account_id,
+                display_name: None,
+                // Source `name` is a player's Steam name, not a hero identity.
+                // Resolve the trusted local hero table to avoid mentions/markup.
+                name: cama_app::hero_lookup::hero_name(i64::from(hero_id)),
+                radiant,
+                kills: player.kills.filter(|kills| *kills >= 0),
+                deaths: player.deaths.filter(|deaths| *deaths >= 0),
+            })
+        })
+        .collect()
+}
+
+fn announcement_building_name(building: &Value) -> Option<String> {
+    // Terse type IDs: tower=0, barracks=1, Ancient=2. Cross-checked against
+    // 13k/night-stalker, fe78ce7ec036, protobuf/protocol/enums.proto.
+    // The wire schema does not distinguish melee/ranged barracks. Its lane
+    // numbers are not the hero-role ELaneType enum: do not guess a lane or
+    // identify a destroyed zeroed tombstone from coordinates/array position.
+    match first_i64(building, &["type"])? {
+        0 => {
+            let tier = first_i64(building, &["tier"])?;
+            (1..=4)
+                .contains(&tier)
+                .then(|| format!("tier {tier} tower"))
+        }
+        1 => Some("barracks".to_owned()),
+        2 => Some("Ancient".to_owned()),
+        _ => None,
+    }
 }
 
 fn parse_team_scoreboard_players(value: &Value) -> Option<Vec<LivePlayerSnapshot>> {
@@ -1155,7 +1551,8 @@ fn parse_player(value: &Value, account_hint: Option<u32>) -> LivePlayerSnapshot 
         kills: optional_i64_from_value(stats, "kills")
             .or_else(|| optional_i64_from_value(stats, "kill_count")),
         deaths: optional_i64_from_value(stats, "deaths")
-            .or_else(|| optional_i64_from_value(stats, "death_count")),
+            .or_else(|| optional_i64_from_value(stats, "death_count"))
+            .or_else(|| optional_i64_from_value(stats, "death")),
         assists: optional_i64_from_value(stats, "assists")
             .or_else(|| optional_i64_from_value(stats, "assists_count")),
         last_hits: optional_i64_from_value(stats, "last_hits")
@@ -1277,6 +1674,21 @@ fn nested_i64(value: &Value, parent: &str, key: &str) -> Option<i64> {
 fn first_i64(value: &Value, keys: &[&str]) -> Option<i64> {
     keys.iter()
         .find_map(|key| object_value(value, key).and_then(value_i64))
+}
+
+// Valve's league scoreboard duration is a floating-point seconds value.
+// Floor only clock fields; identities and counters must remain exact integers.
+fn first_game_time(value: &Value) -> Option<i64> {
+    ["game_time", "duration", "game_time_seconds"]
+        .iter()
+        .find_map(|key| {
+            let value = object_value(value, key)?;
+            value_i64(value).or_else(|| {
+                let seconds = value.as_f64()?;
+                (seconds.is_finite() && (-86_400.0..=86_400.0).contains(&seconds))
+                    .then(|| seconds.floor() as i64)
+            })
+        })
 }
 
 fn value_i64(value: &Value) -> Option<i64> {

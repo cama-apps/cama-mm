@@ -1,4 +1,7 @@
-//! Owned private text channels. All safety inputs come from current HTTP reads.
+//! Owned spectator channels and attached threads. Safety inputs use current HTTP reads.
+
+mod threads;
+pub(super) use threads::{audit_thread, ensure_thread};
 
 use super::*;
 use serenity::all::{
@@ -9,6 +12,10 @@ fn read_permissions() -> Permissions {
     Permissions::VIEW_CHANNEL | Permissions::READ_MESSAGE_HISTORY
 }
 
+fn viewer_permissions() -> Permissions {
+    read_permissions() | Permissions::SEND_MESSAGES_IN_THREADS
+}
+
 fn bot_permissions() -> Permissions {
     read_permissions()
         | Permissions::SEND_MESSAGES
@@ -17,6 +24,9 @@ fn bot_permissions() -> Permissions {
         | Permissions::MANAGE_CHANNELS
         | Permissions::MANAGE_ROLES
         | Permissions::MANAGE_MESSAGES
+        | Permissions::CREATE_PUBLIC_THREADS
+        | Permissions::MANAGE_THREADS
+        | Permissions::SEND_MESSAGES_IN_THREADS
 }
 
 fn validate_identity(guild: u64, marker: &str) -> Result<(), String> {
@@ -85,8 +95,8 @@ fn overwrites(
         kind: PermissionOverwriteType::Member(UserId::new(*id)),
     }));
     result.extend(viewers.iter().map(|id| PermissionOverwrite {
-        allow: read_permissions(),
-        deny: Permissions::all() & !read_permissions(),
+        allow: viewer_permissions(),
+        deny: Permissions::all() & !viewer_permissions(),
         kind: PermissionOverwriteType::Member(UserId::new(*id)),
     }));
     result
@@ -398,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn individual_player_deny_beats_guild_role_view_allow_and_viewers_are_read_only() {
+    fn players_are_hidden_and_viewers_can_only_chat_in_attached_threads() {
         let (guild, channel, player, viewer) = fixture();
         assert!(
             !guild
@@ -406,14 +416,14 @@ mod tests {
                 .contains(Permissions::VIEW_CHANNEL)
         );
         let permissions = guild.user_permissions_in(&channel, &viewer);
-        assert!(permissions.contains(read_permissions()));
+        assert!(permissions.contains(viewer_permissions()));
         assert!(!permissions.intersects(
             Permissions::SEND_MESSAGES
                 | Permissions::CREATE_INSTANT_INVITE
                 | Permissions::MANAGE_WEBHOOKS
                 | Permissions::CREATE_PUBLIC_THREADS
                 | Permissions::CREATE_PRIVATE_THREADS
-                | Permissions::SEND_MESSAGES_IN_THREADS
+                | Permissions::MANAGE_THREADS
         ));
         let mut uninvited = viewer;
         uninvited.user.id = UserId::new(4);

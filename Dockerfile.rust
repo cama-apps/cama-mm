@@ -17,6 +17,7 @@ COPY --chown=appuser:appuser .cama-build/dotabase.version /app/assets/dotabase.v
 COPY --chown=appuser:appuser .cama-build/fonts/ /app/assets/fonts/
 COPY --chown=appuser:appuser assets/pets/ /app/assets/pets/
 COPY --chown=appuser:appuser assets/dig/ /app/assets/dig/
+COPY --chown=appuser:appuser assets/dota_spectator/ /app/assets/dota_spectator/
 COPY --chown=root:root scripts/runtime-entrypoint /usr/local/bin/cama-runtime-entrypoint
 
 WORKDIR /app
@@ -44,6 +45,7 @@ WORKDIR /build/rust
 
 COPY .cama-build/fonts/ /app/assets/fonts/
 COPY rust/ ./
+COPY assets/dota_spectator/ /build/assets/dota_spectator/
 RUN cargo build --locked --release --package cama-runtime --bin cama-rust
 
 FROM runtime-base AS runtime

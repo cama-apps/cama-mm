@@ -19,6 +19,8 @@ use tempfile::NamedTempFile;
 
 #[path = "hosted_tests.rs"]
 mod hosted_tests;
+#[path = "recap_tests.rs"]
+mod recap_tests;
 
 use crate::discord_transport::{DiscordAllowedMentions, DiscordIdPlayerNameResolver};
 use crate::push_notification_provider::{PushNotificationRegistrationProvider, PushPublisher};
@@ -4898,6 +4900,13 @@ impl RecordedMatchDiscovery for StaticRecordedDiscovery {
 #[derive(Default)]
 struct PublicationDiscord {
     sent: Mutex<Vec<(u64, DiscordMessage)>>,
+    fail_summary: bool,
+    recap_manifest: Option<PathBuf>,
+    recap_delivery: bool,
+    recap_receipts: Mutex<BTreeMap<String, crate::discord_transport::DiscordMessageReceipt>>,
+    lose_recap_reply: AtomicBool,
+    fail_recap_history: AtomicBool,
+    recap_attempts: AtomicUsize,
 }
 
 #[async_trait]
@@ -4914,10 +4923,73 @@ impl DiscordTransport for PublicationDiscord {
 
     async fn fetch_message(
         &self,
-        _channel_id: u64,
-        _message_id: u64,
+        channel_id: u64,
+        message_id: u64,
     ) -> Result<Option<crate::discord_transport::DiscordMessageSnapshot>, String> {
+        if self.recap_delivery
+            && self
+                .sent
+                .lock()
+                .expect("publication capture")
+                .iter()
+                .enumerate()
+                .any(|(index, (channel, _))| {
+                    *channel == channel_id && index as u64 + 1 == message_id
+                })
+        {
+            return Ok(Some(crate::discord_transport::DiscordMessageSnapshot {
+                receipt: crate::discord_transport::DiscordMessageReceipt {
+                    channel_id,
+                    message_id,
+                    jump_url: "https://discord.invalid/publication".into(),
+                },
+                reactions: Vec::new(),
+            }));
+        }
         Ok(None)
+    }
+
+    async fn send_message_with_delivery_key(
+        &self,
+        channel_id: u64,
+        delivery_key: &str,
+        message: DiscordMessage,
+    ) -> Result<crate::discord_transport::DiscordMessageReceipt, String> {
+        if !self.recap_delivery {
+            return self.send_message(channel_id, message).await;
+        }
+        self.recap_attempts.fetch_add(1, Ordering::SeqCst);
+        let receipt = self.send_message(channel_id, message).await?;
+        self.recap_receipts
+            .lock()
+            .expect("recap receipts")
+            .insert(delivery_key.to_owned(), receipt.clone());
+        if self.lose_recap_reply.swap(false, Ordering::SeqCst) {
+            return Err("recap accepted but upload response lost".into());
+        }
+        Ok(receipt)
+    }
+
+    async fn find_message_by_delivery_key(
+        &self,
+        channel_id: u64,
+        delivery_key: &str,
+        _after_unix_seconds: i64,
+        limit: usize,
+    ) -> Result<Option<crate::discord_transport::DiscordMessageReceipt>, String> {
+        if self.recap_delivery {
+            assert_eq!(limit, 500);
+        }
+        if self.fail_recap_history.load(Ordering::SeqCst) {
+            return Err("recap message history unavailable".into());
+        }
+        Ok(self
+            .recap_receipts
+            .lock()
+            .expect("recap receipts")
+            .get(delivery_key)
+            .filter(|receipt| receipt.channel_id == channel_id)
+            .cloned())
     }
 
     async fn send_message(
@@ -4925,13 +4997,30 @@ impl DiscordTransport for PublicationDiscord {
         channel_id: u64,
         message: DiscordMessage,
     ) -> Result<crate::discord_transport::DiscordMessageReceipt, String> {
-        self.sent
-            .lock()
-            .expect("publication capture")
-            .push((channel_id, message));
+        if let Some(path) = &self.recap_manifest
+            && message.response.attachments.is_empty()
+        {
+            let manifest: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(path).expect("read recap before summary publication"),
+            )
+            .expect("parse recap before summary publication");
+            assert!(manifest.get("job").is_none_or(serde_json::Value::is_null));
+        }
+        if self.fail_summary {
+            return Err("summary publication unavailable".to_owned());
+        }
+        let message_id = {
+            let mut sent = self.sent.lock().expect("publication capture");
+            sent.push((channel_id, message));
+            if self.recap_delivery {
+                sent.len() as u64
+            } else {
+                1
+            }
+        };
         Ok(crate::discord_transport::DiscordMessageReceipt {
             channel_id,
-            message_id: 1,
+            message_id,
             jump_url: "https://discord.invalid/publication".to_owned(),
         })
     }
@@ -8157,6 +8246,7 @@ async fn discovered_recorded_match_is_published_once_to_the_persisted_origin_cha
         Some(77_001),
         GUILD,
         MATCH_ID,
+        None,
     )
     .await;
 
@@ -8168,6 +8258,92 @@ async fn discovered_recorded_match_is_published_once_to_the_persisted_origin_cha
         sent[0].1.allowed_mentions,
         crate::discord_transport::DiscordAllowedMentions::None
     );
+}
+
+#[tokio::test]
+async fn recorded_spectator_recap_requires_published_summary_and_matching_valve_match() {
+    use cama_app::match_discovery::{
+        DiscoveryResult, DiscoveryStatus, InternalMatchId, ValveMatchId,
+    };
+
+    // A real summary receipt is the prerequisite: failed publication, a missing
+    // destination, and an unknown/mismatched Valve match must leave no recap job.
+    for (fail_summary, channel_id, valve_id, expect_job) in [
+        (false, Some(77_001), Some(92_001), true),
+        (true, Some(77_001), Some(92_001), false),
+        (false, None, Some(92_001), false),
+        (false, Some(77_001), None, false),
+        (false, Some(77_001), Some(0), false),
+        (false, Some(77_001), Some(92_002), false),
+    ] {
+        let directory = tempfile::tempdir().expect("recap fixture directory");
+        let database_path = directory.path().join("cama.db");
+        let pending_id = 81_001;
+        let manifest_path = database_path
+            .with_extension("spectator-recaps")
+            .join(format!("{GUILD}-{pending_id}"))
+            .join("manifest.json");
+        let png =
+            cama_app::pet_assets::RasterImage::new(2, 2, cama_app::pet_assets::Rgba(0, 0, 0, 255))
+                .encode_png();
+        for game_time in [0, 15] {
+            crate::dota_spectator_recap::capture(
+                database_path.clone(),
+                GUILD,
+                pending_id,
+                92_001,
+                game_time,
+                png.clone(),
+                unix_seconds(),
+            )
+            .await
+            .expect("capture recap fixture");
+        }
+        let discord = Arc::new(PublicationDiscord {
+            fail_summary,
+            recap_manifest: Some(manifest_path.clone()),
+            ..Default::default()
+        });
+        let discovery = Arc::new(StaticRecordedDiscovery {
+            outcome: RecordedMatchDiscoveryOutcome::Discovered {
+                result: DiscoveryResult {
+                    match_id: InternalMatchId(MATCH_ID),
+                    status: DiscoveryStatus::Discovered,
+                    valve_match_id: valve_id.map(ValveMatchId),
+                    confidence: Some(1.0),
+                    player_count: 10,
+                    total_players: 10,
+                    players_with_steam_id: 10,
+                    validation_error: None,
+                },
+                response: InteractionResponse::message("Match summary")
+                    .embed(InteractionEmbed::titled("Enriched match")),
+            },
+        });
+        MatchHandler::run_recorded_match_discovery(
+            discovery,
+            discord.clone(),
+            channel_id,
+            GUILD,
+            MATCH_ID,
+            Some((database_path, pending_id)),
+        )
+        .await;
+
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&manifest_path).expect("read recap after publication"),
+        )
+        .expect("parse recap after publication");
+        let job = manifest.get("job").filter(|job| !job.is_null());
+        assert_eq!(job.is_some(), expect_job);
+        if let Some(job) = job {
+            assert_eq!(job["summary_message_id"], 1);
+        }
+        assert_eq!(
+            discord.sent.lock().expect("summary capture").len(),
+            usize::from(channel_id.is_some() && !fail_summary),
+        );
+    }
 }
 
 fn activate_low_priority(database: &NamedTempFile, discord_id: i64) {

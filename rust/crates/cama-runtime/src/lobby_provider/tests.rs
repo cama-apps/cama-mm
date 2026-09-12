@@ -4773,3 +4773,164 @@ async fn radio_on_foreign_or_non_lobby_messages_does_not_subscribe() {
             .is_empty()
     );
 }
+
+fn pending_radio_match(
+    database: &NamedTempFile,
+    message: i64,
+    hosting: Option<&str>,
+) -> cama_db::match_runtime::PendingMatchRecord {
+    let mut state = cama_db::match_runtime::PendingMatchState {
+        radiant_team_ids: vec![10, 11, 12, 13, 14],
+        dire_team_ids: vec![15, 16, 17, 18, 19],
+        ..Default::default()
+    };
+    state.extra.insert(
+        "spectator_lobby_message_id".into(),
+        serde_json::json!(message),
+    );
+    if let Some(hosting) = hosting {
+        state.extra.insert(
+            "dota_hosting".into(),
+            serde_json::json!({"hosting":hosting}),
+        );
+    }
+    cama_db::match_runtime::PendingMatchRepository::new(database.path())
+        .create_pending_match(42, &state)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn radio_after_shuffle_keeps_subscriptions_working_before_match_id_and_during_game() {
+    let database = database_with_players(&[]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    pending_radio_match(&database, 901, Some("bot"));
+    assert!(provider.handler.state.service.open_lobbies().is_empty());
+    let mut reaction = raw_sword(RawReactionKind::Add, 901, 20, "Viewer");
+    reaction.emoji = RawReactionEmoji::unicode(SPECTATOR_EMOJI);
+    let observer = provider.raw_reaction_observer();
+    observer.observe(reaction.clone()).await.unwrap();
+    observer.observe(reaction.clone()).await.unwrap();
+    assert_eq!(
+        provider
+            .handler
+            .state
+            .spectators
+            .subscribers(42, 901)
+            .unwrap(),
+        vec![20]
+    );
+    reaction.kind = RawReactionKind::Remove;
+    observer.observe(reaction).await.unwrap();
+    assert!(
+        provider
+            .handler
+            .state
+            .spectators
+            .subscribers(42, 901)
+            .unwrap()
+            .is_empty()
+    );
+    let state = transport.state.lock().unwrap();
+    assert!(state.sent.is_empty());
+    assert!(state.direct_messages.is_empty());
+    assert!(state.thread_members.is_empty());
+}
+
+#[tokio::test]
+async fn radio_after_shuffle_rejects_manual_legacy_unknown_and_cross_guild_messages() {
+    let database = database_with_players(&[]);
+    let provider = provider_for(&database, Arc::new(RecordingTransport::default()));
+    for (message, hosting) in [
+        (901, Some("manual")),
+        (902, None),
+        (903, Some("invalid")),
+        (904, Some("bot")),
+    ] {
+        pending_radio_match(&database, message, hosting);
+    }
+    for (guild, message) in [(42, 901), (42, 902), (42, 903), (43, 904), (42, 999)] {
+        let mut reaction = raw_sword(RawReactionKind::Add, message, 20, "Viewer");
+        reaction.guild_id = Some(guild);
+        reaction.emoji = RawReactionEmoji::unicode(SPECTATOR_EMOJI);
+        provider
+            .raw_reaction_observer()
+            .observe(reaction)
+            .await
+            .unwrap();
+        assert!(
+            provider
+                .handler
+                .state
+                .spectators
+                .subscribers(guild as i64, message as i64)
+                .unwrap()
+                .is_empty()
+        );
+    }
+    // A manual handoff still permits withdrawing previously registered intent.
+    provider
+        .handler
+        .state
+        .spectators
+        .update_subscription(42, 901, 20, true, 1)
+        .unwrap();
+    let mut reaction = raw_sword(RawReactionKind::Remove, 901, 20, "Viewer");
+    reaction.emoji = RawReactionEmoji::unicode(SPECTATOR_EMOJI);
+    provider
+        .raw_reaction_observer()
+        .observe(reaction)
+        .await
+        .unwrap();
+    assert!(
+        provider
+            .handler
+            .state
+            .spectators
+            .subscribers(42, 901)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn radio_retained_spectator_record_allows_unsubscribe_but_not_new_admission() {
+    let database = database_with_players(&[]);
+    let provider = provider_for(&database, Arc::new(RecordingTransport::default()));
+    let repository = &provider.handler.state.spectators;
+    repository
+        .create_or_get(
+            42,
+            7,
+            "owned-test-spectators",
+            serde_json::json!({"lobby_message_id":901}),
+            1,
+        )
+        .unwrap();
+    repository
+        .update_subscription(42, 901, 20, true, 1)
+        .unwrap();
+    let mut reaction = raw_sword(RawReactionKind::Remove, 901, 20, "Viewer");
+    reaction.emoji = RawReactionEmoji::unicode(SPECTATOR_EMOJI);
+    reaction.guild_id = Some(43);
+    provider
+        .raw_reaction_observer()
+        .observe(reaction.clone())
+        .await
+        .unwrap();
+    assert_eq!(repository.subscribers(42, 901).unwrap(), vec![20]);
+    reaction.guild_id = Some(42);
+    provider
+        .raw_reaction_observer()
+        .observe(reaction.clone())
+        .await
+        .unwrap();
+    assert!(repository.subscribers(42, 901).unwrap().is_empty());
+    reaction.kind = RawReactionKind::Add;
+    provider
+        .raw_reaction_observer()
+        .observe(reaction)
+        .await
+        .unwrap();
+    assert!(repository.subscribers(42, 901).unwrap().is_empty());
+}

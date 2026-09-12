@@ -3184,7 +3184,12 @@ impl MatchHandler {
             .or(pending.state.shuffle_channel_id)
             .and_then(|channel_id| u64::try_from(channel_id).ok());
         tokio::spawn(Self::run_recorded_match_discovery(
-            discovery, discord, channel_id, guild_id, match_id,
+            discovery,
+            discord,
+            channel_id,
+            guild_id,
+            match_id,
+            Some((self.database_path.clone(), pending.pending_match_id)),
         ));
     }
 
@@ -3194,15 +3199,38 @@ impl MatchHandler {
         channel_id: Option<u64>,
         guild_id: i64,
         match_id: i64,
+        recap_context: Option<(PathBuf, i64)>,
     ) {
         match discovery.discover_recorded_match(guild_id, match_id).await {
             Ok(RecordedMatchDiscoveryOutcome::Discovered { result, response }) => {
-                if let Some(channel_id) = channel_id
-                    && let Err(error) = discord
+                if let Some(channel_id) = channel_id {
+                    match discord
                         .send_message(channel_id, DiscordMessage::silent(response))
                         .await
-                {
-                    warn!(%error, channel_id, match_id, "auto-enrichment publication failed");
+                    {
+                        Ok(summary) => {
+                            if let Some((database_path, pending_match_id)) = recap_context
+                                && let Some(valve_match_id) =
+                                    result.valve_match_id.map(|id| id.0).filter(|id| *id > 0)
+                                && let Err(error) =
+                                    crate::dota_spectator_recap::queue_after_summary(
+                                        database_path,
+                                        guild_id,
+                                        pending_match_id,
+                                        match_id,
+                                        Some(valve_match_id),
+                                        channel_id,
+                                        summary.message_id,
+                                    )
+                                    .await
+                            {
+                                warn!(%error, guild_id, match_id, "spectator recap queue failed after summary publication");
+                            }
+                        }
+                        Err(error) => {
+                            warn!(%error, channel_id, match_id, "auto-enrichment publication failed");
+                        }
+                    }
                 }
                 debug!(
                     match_id,

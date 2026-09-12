@@ -13,6 +13,11 @@ use crate::registration::InteractionResponse;
 
 pub type DiscordGuildMemberRenderNames = BTreeMap<u64, String>;
 
+/// A confirmed deleted attached thread requires a new map/thread pair, because
+/// attached thread IDs reuse their starter and old join receipts are invalid.
+pub const SPECTATOR_THREAD_DELETED: &str =
+    "Previously confirmed spectator commentary thread was deleted.";
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct GuildPlayerNameDirectory {
     members: Option<BTreeMap<i64, String>>,
@@ -350,6 +355,38 @@ pub trait DiscordTransport: Send + Sync {
         _channel_id: u64,
     ) -> Result<(), String> {
         Err("Private spectator channel auditing is unavailable on this transport.".into())
+    }
+
+    /// Reconcile a bot-owned commentary thread attached to the stationary map.
+    /// Visibility is inherited from the audited spectator parent channel.
+    #[allow(clippy::too_many_arguments)]
+    async fn ensure_spectator_thread(
+        &self,
+        _guild_id: u64,
+        _parent_channel_id: u64,
+        _map_message_id: u64,
+        _marker: &str,
+        _name: &str,
+        _participants: &[u64],
+        _viewers: &[u64],
+        _known_thread_id: Option<u64>,
+    ) -> Result<u64, String> {
+        Err("Spectator commentary threads are unavailable on this transport.".into())
+    }
+
+    /// Freshly verify both parent isolation and the attached thread's ownership.
+    #[allow(clippy::too_many_arguments)]
+    async fn audit_spectator_thread(
+        &self,
+        _guild_id: u64,
+        _parent_channel_id: u64,
+        _map_message_id: u64,
+        _thread_id: u64,
+        _marker: &str,
+        _participants: &[u64],
+        _viewers: &[u64],
+    ) -> Result<(), String> {
+        Err("Spectator commentary thread auditing is unavailable on this transport.".into())
     }
 
     /// Delete only a guild text channel bearing this exact ownership marker.

@@ -259,7 +259,7 @@ pub fn create_lobby_embed(
     let mut embed = EmbedModel {
         title: Some(request.kind.label().to_owned()),
         description: Some(format!(
-            "{}\nJoin to play!\n📻 React to follow spectator updates. Players selected for the match are excluded.\n{timestamp}",
+            "{}\nJoin to play!\n📻 React for the live map and commentary on bot-hosted matches. Players selected for the match are excluded.\n{timestamp}",
             request.kind.eligibility_text()
         )),
         ..EmbedModel::default()
@@ -820,6 +820,27 @@ mod tests {
                 .as_deref()
                 .is_some_and(|description| description.starts_with("Open to all ratings\n"))
         );
+    }
+
+    #[test]
+    fn test_lobby_radio_describes_bot_hosted_coverage_and_player_exclusion() {
+        for kind in [LobbyKind::Open, LobbyKind::LowSkill] {
+            let embed = create_lobby_embed(
+                LobbyEmbedRequest {
+                    kind,
+                    ..LobbyEmbedRequest::default()
+                },
+                &[],
+                &[],
+                None,
+            );
+            let description = embed.description.unwrap();
+            assert!(
+                description
+                    .contains("📻 React for the live map and commentary on bot-hosted matches")
+            );
+            assert!(description.contains("Players selected for the match are excluded"));
+        }
     }
 
     #[test]

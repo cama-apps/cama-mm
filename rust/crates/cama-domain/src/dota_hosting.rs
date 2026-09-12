@@ -52,7 +52,7 @@ impl DotaHostingOptions {
     pub fn lobby_instructions(&self, bot_busy: bool) -> Option<String> {
         match self.hosting {
             Some(HostingMode::Manual) => Some(format!(
-                "{}Manual hosting: create the Dota lobby yourself using the teams above, then use `/record` to submit the result.",
+                "{}Manual hosting: create the Dota lobby yourself using the teams above, then use `/record` to submit the result.\n📻 Live map and commentary are unavailable for this manually hosted match.",
                 if bot_busy {
                     "The bot is hosting another match. "
                 } else {
@@ -182,6 +182,38 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn manual_hosting_explains_spectator_unavailability_without_changing_recording() {
+        let options = DotaHostingOptions {
+            hosting: Some(HostingMode::Manual),
+            ..Default::default()
+        };
+        for busy in [false, true] {
+            let instructions = options.lobby_instructions(busy).unwrap();
+            assert!(instructions.contains("create the Dota lobby yourself"));
+            assert!(instructions.contains("`/record`"));
+            assert!(instructions.contains("Live map and commentary are unavailable"));
+            assert_eq!(instructions.contains("hosting another match"), busy);
+        }
+    }
+
+    #[test]
+    fn bot_hosting_with_manual_start_does_not_claim_spectators_are_unavailable() {
+        let options = DotaHostingOptions {
+            hosting: Some(HostingMode::Bot),
+            start: Some(StartMode::Manual),
+            ..Default::default()
+        };
+        let instructions = options.lobby_instructions(false).unwrap();
+        assert!(instructions.contains("An admin starts the game"));
+        assert!(!instructions.contains("unavailable"));
+        assert!(
+            DotaHostingOptions::default()
+                .lobby_instructions(false)
+                .is_none()
+        );
     }
 
     #[test]
