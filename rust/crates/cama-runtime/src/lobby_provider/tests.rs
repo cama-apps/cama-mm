@@ -3991,6 +3991,7 @@ async fn test_join_blocked_during_active_curfew_window() {
             end_minute: end.minute(),
             timezone: Some("UTC".to_owned()),
             days: None,
+            mode: cama_domain::curfew::CurfewMode::Default,
         })
         .expect("seed an always-active curfew window");
 
@@ -4135,6 +4136,7 @@ async fn test_curfew_sweep_refreshes_the_lobby_display_after_removing_a_player()
             end_minute: end.minute(),
             timezone: Some("UTC".to_owned()),
             days: None,
+            mode: cama_domain::curfew::CurfewMode::Default,
         })
         .expect("seed an always-active curfew window");
 
@@ -4216,6 +4218,7 @@ async fn test_curfew_sweep_removes_the_kicked_players_sword_reaction() {
             end_minute: end.minute(),
             timezone: Some("UTC".to_owned()),
             days: None,
+            mode: cama_domain::curfew::CurfewMode::Default,
         })
         .expect("seed an always-active curfew window");
 
@@ -4225,9 +4228,9 @@ async fn test_curfew_sweep_removes_the_kicked_players_sword_reaction() {
     for kick in &kicks {
         provider
             .curfew_lobby_display()
-            .remove_curfew_lobby_reaction(kick.guild_id, kick.lobby_kind, kick.discord_id)
+            .publish_curfew_leave(kick.guild_id, kick.lobby_kind, kick.discord_id)
             .await
-            .expect("remove sword reaction after curfew kick");
+            .expect("publish leave after curfew kick");
     }
 
     let state = transport.state.lock().expect("transport state");
@@ -4239,6 +4242,29 @@ async fn test_curfew_sweep_removes_the_kicked_players_sword_reaction() {
                 *message_id == lobby_message_id && emoji.name == SWORD_EMOJI && *user_id == 1
             }),
         "curfew kick must remove the kicked player's own sword reaction"
+    );
+    // Privacy: the thread sees an ordinary leave line (falling back to the
+    // stored name when the member cache has nothing), and nothing public
+    // says the word curfew.
+    let leave_line = state
+        .sent
+        .iter()
+        .rev()
+        .find(|sent| sent.message.response.content.contains("left."))
+        .expect("the sweep must post the normal leave line");
+    assert!(
+        leave_line.message.response.content.contains("Sleepy"),
+        "{}",
+        leave_line.message.response.content
+    );
+    assert!(
+        !state.sent.iter().any(|sent| sent
+            .message
+            .response
+            .content
+            .to_lowercase()
+            .contains("curfew")),
+        "a curfew removal must never be announced publicly"
     );
 }
 
@@ -4306,6 +4332,7 @@ async fn test_curfew_sweep_removes_the_kicked_player_from_the_active_readycheck(
             end_minute: end.minute(),
             timezone: Some("UTC".to_owned()),
             days: None,
+            mode: cama_domain::curfew::CurfewMode::Default,
         })
         .expect("seed an always-active curfew window");
 
@@ -4381,6 +4408,7 @@ async fn test_auto_join_blocked_during_active_curfew_window() {
             end_minute: end.minute(),
             timezone: Some("UTC".to_owned()),
             days: None,
+            mode: cama_domain::curfew::CurfewMode::Default,
         })
         .expect("seed an always-active curfew window");
 
@@ -4427,6 +4455,7 @@ async fn test_lobby_creation_blocked_during_active_curfew_window() {
             end_minute: end.minute(),
             timezone: Some("UTC".to_owned()),
             days: None,
+            mode: cama_domain::curfew::CurfewMode::Default,
         })
         .expect("seed an always-active curfew window");
 
@@ -4505,6 +4534,7 @@ async fn test_sword_reaction_join_blocked_during_active_curfew_window() {
             end_minute: end.minute(),
             timezone: Some("UTC".to_owned()),
             days: None,
+            mode: cama_domain::curfew::CurfewMode::Default,
         })
         .expect("seed an always-active curfew window");
 
@@ -4533,25 +4563,36 @@ async fn test_sword_reaction_join_blocked_during_active_curfew_window() {
                 *message_id == lobby_message_id && emoji.name == SWORD_EMOJI && *user_id == 1
             })
     );
-    // The window's name, times, and timezone are private. The public channel
-    // message must stay generic; the specifics go out by DM.
-    let public = &state.sent.last().expect("public curfew rejection").message;
-    assert_eq!(
-        public.response.content,
-        "<@1> ❌ You're inside one of your curfew windows. Check your DMs, or use `/player curfew list`."
-    );
-    let lowered = public.response.content.to_lowercase();
-    assert!(!lowered.contains("sleep"), "window name leaked publicly");
-    assert!(!lowered.contains("utc"), "window timezone leaked publicly");
-
-    let (recipient, direct) = state.direct_messages.last().expect("curfew DM");
-    assert_eq!(*recipient, 1);
+    // Privacy: nothing about the refusal goes into the channel. The reason
+    // (which names the window) reaches the player by DM only.
     assert!(
-        direct.response.content.contains("\"sleep\""),
-        "the DM should name the window: {}",
-        direct.response.content
+        !state.sent.iter().any(|sent| sent
+            .message
+            .response
+            .content
+            .to_lowercase()
+            .contains("curfew")),
+        "a curfew refusal must never be posted publicly: {:?}",
+        state
+            .sent
+            .iter()
+            .map(|sent| &sent.message.response.content)
+            .collect::<Vec<_>>()
     );
-    assert!(direct.response.content.contains("/player curfew remove"));
+    let (dm_user, dm) = state
+        .direct_messages
+        .last()
+        .expect("private curfew rejection");
+    assert_eq!(*dm_user, 1);
+    assert!(
+        dm.response.content.to_lowercase().contains("sleep"),
+        "{}",
+        dm.response.content
+    );
+    assert!(
+        dm.response.components.is_empty(),
+        "a hard block offers no buttons"
+    );
 }
 
 #[tokio::test]

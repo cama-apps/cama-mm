@@ -1742,17 +1742,38 @@ impl CurfewLobbyDisplayPort for CurfewLobbyDisplay {
         self.handler.state.sync_lobby_display(scope).await
     }
 
-    async fn remove_curfew_lobby_reaction(
+    async fn publish_curfew_leave(
         &self,
         guild_id: i64,
         lobby_kind: LobbyKind,
         discord_id: i64,
     ) -> Result<(), String> {
         let scope = LobbyScope::new(AppGuildId(guild_id), lobby_kind);
-        self.handler
+        let player_id = AppUserId(discord_id);
+        // Privacy: a curfew removal looks exactly like the player leaving —
+        // the thread gets the ordinary "left" line under their live display
+        // name, the sword reaction comes off, and nothing public mentions
+        // curfew. The reason goes to them by DM only. There's no interaction
+        // here to carry a display name, so it's the guild-member cache, then
+        // the stored name — never a bare Discord ID.
+        let display_name = match self
+            .handler
             .state
-            .remove_lobby_reaction(scope, AppUserId(discord_id))
-            .await
+            .cached_player_name(scope.guild_id, player_id)
+        {
+            Some(display_name) => display_name,
+            None => self
+                .handler
+                .load_player(player_id, scope.guild_id)
+                .await
+                .ok()
+                .flatten()
+                .map_or_else(|| player_id.0.to_string(), |player| player.name),
+        };
+        self.handler
+            .best_effort_leave_publication(scope, player_id, &display_name)
+            .await;
+        Ok(())
     }
 }
 
@@ -4747,23 +4768,25 @@ impl LobbyRawReactionObserver {
             .await;
     }
 
-    /// Curfew window names, times, and timezones are private. Reject publicly
-    /// in generic terms and send the specifics by DM.
+    /// Privacy: a curfew refusal never goes into the channel, unlike other
+    /// join failures. The sword comes off silently and the reason — which
+    /// names the window — is DMed to the player alone.
     async fn reject_curfew_sword_reaction(
         &self,
         event: &RawReactionEvent,
         window_description: &str,
     ) {
-        self.reject_sword_reaction(
-            event,
-            &raw_rejection_message(
-                LobbyKind::Open,
-                &JoinRejection::Curfew(window_description.to_owned()),
-            ),
-            RAW_REJECTION_TTL,
-        )
-        .await;
         let _ = self
+            .state
+            .transport
+            .remove_reaction(
+                event.channel_id,
+                event.message_id,
+                &DiscordEmoji::unicode(SWORD_EMOJI),
+                event.user_id,
+            )
+            .await;
+        if let Err(error) = self
             .state
             .transport
             .send_direct_message(
@@ -4775,7 +4798,10 @@ impl LobbyRawReactionObserver {
                     .without_mentions(),
                 ),
             )
-            .await;
+            .await
+        {
+            debug!(%error, "failed to DM curfew rejection after sword reaction");
+        }
     }
 }
 
@@ -4809,11 +4835,11 @@ fn raw_rejection_message(kind: LobbyKind, rejection: &JoinRejection) -> String {
             "You are temporarily restricted from this matchmaking lobby.".to_owned()
         }
         // A window's name, exact times, and timezone are private to the
-        // player. This message is posted publicly in the channel, so it stays
-        // generic and the details go out by DM — the same split the
-        // suspension path uses.
+        // player, so this in-channel wording stays generic. The sword path
+        // never posts it — a curfew refusal is DM-only — but the arm keeps
+        // the match exhaustive for any surface that does.
         JoinRejection::Curfew(_) => {
-            "You're inside one of your curfew windows. Check your DMs, or use `/player curfew list`."
+            "You're inside one of your curfew windows. Use `/player curfew list` to check which one."
                 .to_owned()
         }
         JoinRejection::RateLimited {

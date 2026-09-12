@@ -246,3 +246,5 @@ create_dota_sessions_table
 add_guild_dota_hosting_options
 create_match_gc_statistics
 create_dota_spectators
+add_curfew_window_mode_column
+create_curfew_pending_changes_table

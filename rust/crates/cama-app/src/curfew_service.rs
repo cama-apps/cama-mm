@@ -1,14 +1,26 @@
 //! Curfew-window management and enforcement.
 //!
 //! A player can register any number of named windows (e.g. "work", "night
-//! shift" — the name and purpose are entirely up to them). Each independently
+//! shift" — the name and purpose are entirely up to them). Each window
 //! blocks a fresh lobby join and gets swept out of any lobby they're already
-//! queued in once the window starts. Ports `services/curfew_service.py`.
+//! queued in once the window starts, and picks one of two modes:
+//!
+//! - `default` — the window can be edited or removed at any time.
+//! - `strict` — an edit that reduces the window (or deletes it) is staged
+//!   rather than applied immediately: it never takes effect the same
+//!   calendar day it's made, only at the window's next local morning.
+//!   Extending the window applies right away. This closes the "loosen it
+//!   right before it fires tonight" bypass.
+//!
+//! Ports `services/curfew_service.py`.
 
 use std::collections::BTreeMap;
 
-use cama_db::curfew::CurfewRepository;
-use cama_domain::curfew::{CurfewWindow, find_active_window, is_valid_timezone};
+use cama_db::curfew::{AppliedPendingCurfewChange, CurfewRepository, PendingCurfewChange};
+use cama_domain::curfew::{
+    CurfewWindow, effective_timezone, find_active_window, is_valid_timezone, next_local_morning,
+    parse_mode, retains_coverage,
+};
 use chrono::{DateTime, Utc};
 use thiserror::Error;
 
@@ -36,6 +48,8 @@ pub enum CurfewServiceError {
     InvalidTimezone(String),
     #[error("{0}")]
     InvalidDays(String),
+    #[error("{0}")]
+    InvalidMode(String),
     #[error("curfew SQLite operation failed: {0}")]
     Sqlite(String),
 }
@@ -54,6 +68,25 @@ pub struct CurfewKick {
     pub window_name: String,
 }
 
+/// Outcome of `/player curfew add` — either the window took effect right
+/// away, or (a reducing edit of a strict-mode window) it was staged.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CurfewWindowChange {
+    Applied(CurfewWindow),
+    Staged {
+        window: CurfewWindow,
+        effective_at: DateTime<Utc>,
+    },
+}
+
+/// Outcome of `/player curfew remove`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CurfewRemoveOutcome {
+    Removed,
+    Staged { effective_at: DateTime<Utc> },
+    NotFound,
+}
+
 #[derive(Clone)]
 pub struct CurfewService {
     repository: CurfewRepository,
@@ -65,7 +98,13 @@ impl CurfewService {
         Self { repository }
     }
 
-    /// Create a window, or overwrite it if the player already has one by that name.
+    /// Create a window, or overwrite/stage-an-edit-to it if the player
+    /// already has one by that name. An edit that reduces an existing
+    /// `strict`-mode window never applies today — it's staged to
+    /// take effect at that window's next local morning instead, so the
+    /// currently-committed version keeps enforcing through the rest of
+    /// today. Brand-new windows and edits that only extend coverage apply
+    /// immediately.
     #[allow(clippy::too_many_arguments)]
     pub fn add_window(
         &self,
@@ -78,7 +117,9 @@ impl CurfewService {
         end_minute: u32,
         timezone: Option<&str>,
         days: Option<&str>,
-    ) -> Result<CurfewWindow, CurfewServiceError> {
+        mode: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<CurfewWindowChange, CurfewServiceError> {
         if !self.repository.player_exists(discord_id, guild_id)? {
             return Err(CurfewServiceError::PlayerNotRegistered);
         }
@@ -109,6 +150,11 @@ impl CurfewService {
             .map(cama_domain::curfew::parse_weekdays)
             .transpose()
             .map_err(CurfewServiceError::InvalidDays)?;
+        let mode = mode
+            .map(parse_mode)
+            .transpose()
+            .map_err(CurfewServiceError::InvalidMode)?
+            .unwrap_or_default();
         let window = CurfewWindow {
             discord_id,
             guild_id,
@@ -119,19 +165,68 @@ impl CurfewService {
             end_minute,
             timezone: timezone.map(str::to_owned),
             days,
+            mode,
         };
+        let existing = self.repository.get_window(discord_id, guild_id, name)?;
+        if let Some(existing) = &existing
+            && existing.mode.stages_changes()
+        {
+            let general_timezone = self.repository.general_timezone(discord_id, guild_id)?;
+            // Extending the window without freeing any curfewed minute
+            // tightens enforcement, so it can land right away. Anything
+            // that frees up time the committed window would have covered —
+            // or drops out of strict mode — waits for the next morning.
+            let extends = window.mode.stages_changes()
+                && retains_coverage(&window, existing, general_timezone.as_deref(), now);
+            if !extends {
+                let effective_at = self.staged_effective_at(existing, general_timezone, now);
+                self.repository
+                    .stage_pending_upsert(&window, effective_at)?;
+                return Ok(CurfewWindowChange::Staged {
+                    window,
+                    effective_at,
+                });
+            }
+        }
         self.repository.add_or_replace(&window)?;
-        Ok(window)
+        Ok(CurfewWindowChange::Applied(window))
     }
 
-    /// Delete a named window. Returns `true` if it existed.
+    /// Delete a named window, or stage its removal if it's currently in
+    /// strict mode (see [`Self::add_window`]).
     pub fn remove_window(
         &self,
         discord_id: i64,
         guild_id: i64,
         name: &str,
-    ) -> Result<bool, CurfewServiceError> {
-        Ok(self.repository.remove(discord_id, guild_id, name.trim())?)
+        now: DateTime<Utc>,
+    ) -> Result<CurfewRemoveOutcome, CurfewServiceError> {
+        let name = name.trim();
+        let Some(existing) = self.repository.get_window(discord_id, guild_id, name)? else {
+            return Ok(CurfewRemoveOutcome::NotFound);
+        };
+        if existing.mode.stages_changes() {
+            let general_timezone = self.repository.general_timezone(discord_id, guild_id)?;
+            let effective_at = self.staged_effective_at(&existing, general_timezone, now);
+            self.repository
+                .stage_pending_delete(discord_id, guild_id, name, effective_at)?;
+            return Ok(CurfewRemoveOutcome::Staged { effective_at });
+        }
+        self.repository.remove(discord_id, guild_id, name)?;
+        Ok(CurfewRemoveOutcome::Removed)
+    }
+
+    /// When a staged change to `existing` lands: the next local morning in
+    /// the timezone the *currently enforced* window runs under, so a
+    /// timezone edit can't pull the landing time earlier.
+    fn staged_effective_at(
+        &self,
+        existing: &CurfewWindow,
+        general_timezone: Option<String>,
+        now: DateTime<Utc>,
+    ) -> DateTime<Utc> {
+        let tz = effective_timezone(existing, general_timezone.as_deref());
+        next_local_morning(tz, now)
     }
 
     pub fn list_windows(
@@ -140,6 +235,26 @@ impl CurfewService {
         guild_id: i64,
     ) -> Result<Vec<CurfewWindow>, CurfewServiceError> {
         Ok(self.repository.list_for_player(discord_id, guild_id)?)
+    }
+
+    /// Strict-mode edits/deletes staged for this player, keyed by window name.
+    pub fn pending_changes(
+        &self,
+        discord_id: i64,
+        guild_id: i64,
+    ) -> Result<BTreeMap<String, PendingCurfewChange>, CurfewServiceError> {
+        Ok(self
+            .repository
+            .pending_changes_for_player(discord_id, guild_id)?)
+    }
+
+    /// Commit every staged strict-mode change whose effective time has
+    /// arrived. Meant to be called on the same cadence as [`Self::sweep`].
+    pub fn apply_due_pending_changes(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<AppliedPendingCurfewChange>, CurfewServiceError> {
+        Ok(self.repository.apply_due_pending_changes(now)?)
     }
 
     /// The player's general `/player timezone` setting, for display purposes.
