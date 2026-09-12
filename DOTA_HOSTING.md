@@ -117,21 +117,44 @@ React with 📻 on the **lobby message** to subscribe to that lobby's spectator 
 
 The destination is a temporary private **text channel**, rather than the shared match thread: everyone is denied access, opted-in nonparticipants receive read-only access, and all match participants receive explicit denies. Private threads cannot provide the same isolation from thread-management roles. The bot verifies current guild membership, roles, ownership, and exact channel permissions before delivery. Discord server owners and Administrator members bypass channel denies; if any participant has either privilege, delivery is withheld and an existing owned channel is deleted. There is no shared-thread fallback. The bot needs permission to manage channels and permission overwrites. Up to 80 viewers are supported. The channel is deleted 15 minutes after the pending Cama match disappears; permission drift or unsafe membership changes can remove it sooner.
 
-Text announcements are a scaffold over fresh, complete Valve snapshots: at least three additional scoreboard kills, a relative team net-worth change of at least 3,000, and explicitly reported building destruction. Samples are compared at most every 45 seconds; gaps above 90 game-clock seconds establish a new baseline. A kill burst is not presented as a reconstructed teamfight. Missing values, delta frames, stale snapshots, reopened betting, and unavailable upstream data suppress live announcements. The ordinary match thread now shows betting status without live scores. No extra Steam connection, observer, minimap, or third-party spectator stream is started.
+Text announcements compare fresh, complete Valve snapshots every 15 seconds and deliver qualifying changes in the same worker tick after persisting the outbox and rechecking access and betting policy. The upstream poll also runs every 15 seconds; source refresh times and feed delay still determine latency. Quiet or cached frames produce no filler. Gaps above 90 game-clock seconds establish a new baseline. Missing values, delta frames, stale snapshots, reopened betting, and unavailable upstream data suppress live announcements. The ordinary match thread shows betting status without live scores. No extra Steam connection or observer is started.
 
-Updates use a game-clock headline, compact net-worth totals, event lines, and the current score. Headlines distinguish taking the lead, extending it, and closing a deficit. Structure losses are grouped by team. Zero configured delay adds no footer noise; a positive or unknown feed delay is shown. For example:
+Any additional scoreboard point can trigger an update. A complete, matching ten-hero roster allows named kill/death counter changes; killer–victim pairs are named only when a single credited killer accounts for all opposing deaths and the matching score increase in the interval. Ambiguous intervals remain grouped; snapshot counters do not establish full teamfight boundaries. Linked match participants use their current cached Discord server nickname/display name plus hero, falling back to hero when unavailable; stored registration names are never used. The first credited hero kill is identified separately from an authoritative first-blood event, because scoreboard points can include uncredited deaths. Economy updates announce new lead milestones in 1,000-gold steps through 10:00, 2,000 through 20:00, and 5,000 thereafter, plus lead flips of at least 1,000 and interval swings of at least 1,000 in lanes or 2,000 later. Persisted milestones avoid repeating a threshold when the lead fluctuates around it. Net worth requires authoritative team totals or all five valid player net-worth values per team; missing gold is never treated as zero.
 
-> 📻 **23:15 — Radiant takes the lead**
-> ⚔️ **Radiant 4–1 Dire** in kills over the last 45s
-> 💰 **3.5k swing to Radiant** — Radiant leads by **2.5k**
-> 🏰 **Dire** lost a structure
-> _Score: Radiant 9–7 Dire_
+Updates use a game clock, casual commentary and current score, for example:
+
+> **5:15** Windranger finds a kill; Visage finds a kill. Skywrath Mage and Crystal Maiden go down.
+> _Radiant 2–6 Dire_
+
+> **7:30** Radiant hit a 1.1k gold lead in lanes. That's starting to add up.
+> _Radiant 3–4 Dire_
+
+Building destruction requires a stable identity across samples. Available type/tier labels replace generic “structure”; league tower/barracks bitmasks also report losses using stable bit identities, with documented top/mid/bottom, tier, and melee/ranged labels. Anonymous zeroed realtime tombstones cannot identify a destroyed building, and those realtime lane labels are not guessed. The formatter also supports explicit first blood, parsed fight recaps (kill result and separately labeled segment gold changes), Roshan, Aegis and confirmed winners, but **the current Valve snapshot adapter does not supply these explicit events or a winner**. It cannot promise every fight or objective live. The historical example supplies them from parsed postgame records; those richer recaps demonstrate formatting, not additional live coverage. Zero feed delay adds no footer; positive or unknown delay is shown once per match, with that decision persisted across restart.
+
+For a local-only reconstruction using the included historical fixture:
+
+```bash
+cargo run --locked --manifest-path rust/Cargo.toml -p cama-domain --example spectator_transcript -- rust/crates/cama-domain/tests/fixtures/spectator-8991226826.json > /tmp/spectator-8991226826-transcript.md
+```
+
+This runs the production formatter without Steam, Discord, or database writes. The transcript explains source reconciliation and unavailable historical net worth; it does not substitute cumulative earned gold for net worth.
+
+For an actual public live-game capture, the local helper discovers games directly through Valve, prefers complete realtime frames, and falls back to the league-game feed. It reads only `STEAM_API_KEY` from the supplied env file; it never starts Steam, Discord or the runtime. The sample count is bounded to 2–120 at a 15-second interval. Raw responses, receive timestamps and SHA-256 hashes are saved locally:
+
+```bash
+cargo run --locked --manifest-path rust/Cargo.toml -p cama-runtime-engine --example live_spectator_transcript -- .env /tmp/cama-live-spectator-capture 32
+cargo run --locked --manifest-path rust/Cargo.toml -p cama-runtime-engine --example live_spectator_transcript -- --replay /tmp/cama-live-spectator-capture
+```
+
+The second command is offline: it verifies saved response hashes and generates `transcript-verified.md`, a normalized map journal, and `map-GAME_TIME.png` previews using the current production normalizer, formatter, and renderer. Live qualification identified fractional league-game clocks, source delay on the outer game object, partial realtime responses blocking the league fallback, and unhandled league tower/barracks flags; these cases now have regression coverage. A public game's feed availability and delay do not establish equivalent availability for custom lobbies.
 
 **The current live-announcement implementation requires `STEAM_API_KEY`.** Without a key, no Valve polling worker starts. GC lobby state and player-perspective GSI do not supply accepted announcement frames. A simultaneously manually hosted JV match is not registered with this feed and receives no live announcements; adding the key alone does not change that. Its manual result recording and existing postgame API enrichment remain available.
 
 Hosting alone does not supply these statistics. The feed must be independently available and qualified; without it the private channel only receives its introduction. GSI remains useful for game-phase confirmation, but a player-perspective GSI payload is not accepted as a complete match-announcement frame.
 
-Minimap research is deferred until text delivery is qualified. [Noxville/datdota Broodmother](https://github.com/datdota/broodmother) publishes an AGPL frontend, but its backend is private and its hosted-service terms restrict redistribution. No Broodmother code, assets, or service is integrated. Other public projects such as [MiniDota](https://github.com/AdamJo/dota2-minimap-spectator) and [dota2-tracker](https://github.com/Miroscyer/dota2-tracker) still need license, maintenance, and feed-compatibility review.
+The spectator channel also has one map embed, edited in place on advancing 15-second samples, including quiet commentary intervals. Hero world positions and respawn timers come from the current Valve sample, never interpolation or old locations. Missing/invalid coordinates are omitted, all-zero placeholder rosters are rejected, and stale/cached clocks do not advance the map. The image carries its game timestamp. Rendering runs off Tokio's worker threads; map publication independently rechecks spectator access, current roster, closed betting, and feed freshness. Map failures do not block text updates. Message identity is retained for recovery and replacement PNG attachments do not accumulate.
+
+The renderer uses a bundled static map and existing cached Steam hero images with readable fallback markers. League tower/barracks masks supply lane/tier status in a legend; they do not supply world coordinates, so this source does not invent precise building locations. Positive source-provided Roshan respawn timers can be displayed, but zero/missing is not evidence that Roshan is alive. Ward positions, ward vision, creeps, courier movement, Tormentor state, and runes are not supplied by the qualified league feed and are not drawn. No observer client, additional API key, or external map service is introduced. See the map asset attribution for its pinned map version and coordinate transform; map-art updates are required when terrain changes.
 
 The bot's GC connection supplies lobby state, server ID and match ID. It does not itself receive a full scoreboard. To try Valve's published league/realtime feeds, set `STEAM_API_KEY`. Public visibility and a league ID do not guarantee that Valve publishes a custom lobby to these feeds. Requests are shared and cached rather than issued for each viewer. Saved match/server IDs restore the live registration after restart, even if the lobby object has disappeared while the result is pending.
 

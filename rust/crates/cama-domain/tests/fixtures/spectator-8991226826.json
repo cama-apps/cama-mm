@@ -1,0 +1,1208 @@
+{
+  "match_id": 8991226826,
+  "duration": 1961,
+  "radiant_win": false,
+  "radiant_score": 11,
+  "dire_score": 44,
+  "score_events": [
+    {
+      "time": 157,
+      "radiant": true
+    },
+    {
+      "time": 158,
+      "radiant": false
+    },
+    {
+      "time": 242,
+      "radiant": false
+    },
+    {
+      "time": 257,
+      "radiant": false
+    },
+    {
+      "time": 261,
+      "radiant": false
+    },
+    {
+      "time": 291,
+      "radiant": true
+    },
+    {
+      "time": 304,
+      "radiant": false
+    },
+    {
+      "time": 313,
+      "radiant": false
+    },
+    {
+      "time": 360,
+      "radiant": false
+    },
+    {
+      "time": 362,
+      "radiant": true
+    },
+    {
+      "time": 424,
+      "radiant": false
+    },
+    {
+      "time": 429,
+      "radiant": false
+    },
+    {
+      "time": 467,
+      "radiant": false
+    },
+    {
+      "time": 504,
+      "radiant": false
+    },
+    {
+      "time": 526,
+      "radiant": false
+    },
+    {
+      "time": 556,
+      "radiant": false
+    },
+    {
+      "time": 692,
+      "radiant": false
+    },
+    {
+      "time": 696,
+      "radiant": true
+    },
+    {
+      "time": 739,
+      "radiant": false
+    },
+    {
+      "time": 745,
+      "radiant": false
+    },
+    {
+      "time": 802,
+      "radiant": false
+    },
+    {
+      "time": 826,
+      "radiant": true
+    },
+    {
+      "time": 840,
+      "radiant": false
+    },
+    {
+      "time": 942,
+      "radiant": false
+    },
+    {
+      "time": 946,
+      "radiant": true
+    },
+    {
+      "time": 948,
+      "radiant": false
+    },
+    {
+      "time": 1003,
+      "radiant": true
+    },
+    {
+      "time": 1004,
+      "radiant": true
+    },
+    {
+      "time": 1049,
+      "radiant": false
+    },
+    {
+      "time": 1053,
+      "radiant": false
+    },
+    {
+      "time": 1090,
+      "radiant": false
+    },
+    {
+      "time": 1149,
+      "radiant": false
+    },
+    {
+      "time": 1153,
+      "radiant": false
+    },
+    {
+      "time": 1153,
+      "radiant": false
+    },
+    {
+      "time": 1155,
+      "radiant": false
+    },
+    {
+      "time": 1224,
+      "radiant": false
+    },
+    {
+      "time": 1237,
+      "radiant": false
+    },
+    {
+      "time": 1258,
+      "radiant": true
+    },
+    {
+      "time": 1280,
+      "radiant": false
+    },
+    {
+      "time": 1290,
+      "radiant": false
+    },
+    {
+      "time": 1359,
+      "radiant": false
+    },
+    {
+      "time": 1362,
+      "radiant": false
+    },
+    {
+      "time": 1368,
+      "radiant": false
+    },
+    {
+      "time": 1467,
+      "radiant": false
+    },
+    {
+      "time": 1527,
+      "radiant": false
+    },
+    {
+      "time": 1528,
+      "radiant": false
+    },
+    {
+      "time": 1532,
+      "radiant": false
+    },
+    {
+      "time": 1659,
+      "radiant": false
+    },
+    {
+      "time": 1781,
+      "radiant": true
+    },
+    {
+      "time": 1884,
+      "radiant": true
+    },
+    {
+      "time": 1917,
+      "radiant": false
+    },
+    {
+      "time": 1921,
+      "radiant": false
+    },
+    {
+      "time": 1926,
+      "radiant": false
+    },
+    {
+      "time": 1930,
+      "radiant": false
+    },
+    {
+      "time": 1938,
+      "radiant": false
+    }
+  ],
+  "building_events": [
+    {
+      "time": 757,
+      "key": "npc_dota_goodguys_tower1_bot",
+      "radiant": true,
+      "name": "bottom tier 1 tower"
+    },
+    {
+      "time": 814,
+      "key": "npc_dota_goodguys_tower1_mid",
+      "radiant": true,
+      "name": "middle tier 1 tower"
+    },
+    {
+      "time": 874,
+      "key": "npc_dota_goodguys_tower1_top",
+      "radiant": true,
+      "name": "top tier 1 tower"
+    },
+    {
+      "time": 1211,
+      "key": "npc_dota_goodguys_tower2_mid",
+      "radiant": true,
+      "name": "middle tier 2 tower"
+    },
+    {
+      "time": 1268,
+      "key": "npc_dota_badguys_tower1_top",
+      "radiant": false,
+      "name": "top tier 1 tower"
+    },
+    {
+      "time": 1312,
+      "key": "npc_dota_goodguys_tower2_bot",
+      "radiant": true,
+      "name": "bottom tier 2 tower"
+    },
+    {
+      "time": 1405,
+      "key": "npc_dota_goodguys_tower2_top",
+      "radiant": true,
+      "name": "top tier 2 tower"
+    },
+    {
+      "time": 1940,
+      "key": "npc_dota_goodguys_tower3_mid",
+      "radiant": true,
+      "name": "middle tier 3 tower"
+    },
+    {
+      "time": 1951,
+      "key": "npc_dota_goodguys_melee_rax_mid",
+      "radiant": true,
+      "name": "middle melee barracks"
+    },
+    {
+      "time": 1957,
+      "key": "npc_dota_goodguys_range_rax_mid",
+      "radiant": true,
+      "name": "middle ranged barracks"
+    },
+    {
+      "time": 1961,
+      "key": "npc_dota_goodguys_fort",
+      "radiant": true,
+      "name": "Ancient"
+    }
+  ],
+  "net_worth_samples": [],
+  "notes": [
+    "Historical reconstruction from postgame OpenDota parsing and STRATZ timestamps, not a captured Valve live feed. The seven parsed fight recaps and named kill credits are richer than the currently available live snapshots.",
+    "All ten Steam account IDs, hero IDs and sides match across both sources. Score changes and hero deaths use STRATZ death timestamps; kill credits use OpenDota kill logs. The sources sometimes differ by one second, and Radiant has 9 hero kill credits versus 11 scoreboard points. No missing credits are invented.",
+    "OpenDota first_blood_time is 157s, matching a Centaur death with no Radiant hero kill credit. The first credited hero kill is Oracle on Enigma at 158s. With no explicit first-blood objective to resolve the discrepancy, this historical preview does not attribute first blood.",
+    "Each fight recap uses an explicit OpenDota teamfight segment and its per-player kill/death counts. Segment gold deltas are the sum of all five player gold_delta values per side, not bounty totals, net worth, or proof that combat caused every gold change. All seven segments are included; this is not a claim that every skirmish was parsed.",
+    "Building names come from explicit npc_dota building identities. Roshan (Dire, 1744s) and Aegis (Visage, 1745s) come from explicit OpenDota objectives. Courier and Tormentor events are outside this formatter schema and omitted.",
+    "Historical net worth is unavailable in these cached responses. OpenDota gold_t is not substituted. Teamfight segment gold changes remain labeled separately from net-worth measurements.",
+    "Frames sample every 15 seconds, so messages can trail an event by up to 14 seconds. The exact-duration final frame reports the actual winner; no earlier frame exposes the final result. No Valve delivery or terminal-frame availability is implied."
+  ],
+  "sources": [
+    {
+      "name": "OpenDota cached match response",
+      "url": "https://api.opendota.com/api/matches/8991226826",
+      "sha256": "5704eeab86b6706a7a9e0240bfb5dab90c042d22774646d1dbbf3b3c73cd62fe"
+    },
+    {
+      "name": "STRATZ cached match response with deathEvents",
+      "url": "https://stratz.com/matches/8991226826",
+      "sha256": "945a4c45821bda98c88bd503232c9c80d8e65c44fe7189d8b58c4c50f01ef74c"
+    },
+    {
+      "name": "Repository hero display-name map",
+      "url": "https://github.com/cama-apps/cama-mm/blob/HEAD/rust/crates/cama-app/data/heroes.json",
+      "sha256": "808b5f07364ea0886f39f52a01dad263f48fe0eeb4a3458a2aa45008634b42b7"
+    }
+  ],
+  "first_blood_time": 157,
+  "players": [
+    {
+      "account_id": 69576061,
+      "hero_id": 101,
+      "name": "Skywrath Mage",
+      "radiant": true,
+      "player_slot": 0,
+      "final_kills": 2,
+      "final_deaths": 7,
+      "kill_events": [
+        {
+          "time": 1004,
+          "victim_hero_id": 96
+        },
+        {
+          "time": 1782,
+          "victim_hero_id": 67
+        }
+      ],
+      "death_times": [
+        304,
+        467,
+        692,
+        1153,
+        1368,
+        1527,
+        1921
+      ]
+    },
+    {
+      "account_id": 154390881,
+      "hero_id": 54,
+      "name": "Lifestealer",
+      "radiant": true,
+      "player_slot": 1,
+      "final_kills": 0,
+      "final_deaths": 5,
+      "kill_events": [],
+      "death_times": [
+        261,
+        526,
+        745,
+        1532,
+        1930
+      ]
+    },
+    {
+      "account_id": 862668582,
+      "hero_id": 2,
+      "name": "Axe",
+      "radiant": true,
+      "player_slot": 2,
+      "final_kills": 3,
+      "final_deaths": 7,
+      "kill_events": [
+        {
+          "time": 827,
+          "victim_hero_id": 67
+        },
+        {
+          "time": 1259,
+          "victim_hero_id": 67
+        },
+        {
+          "time": 1884,
+          "victim_hero_id": 21
+        }
+      ],
+      "death_times": [
+        360,
+        556,
+        840,
+        1053,
+        1153,
+        1290,
+        1938
+      ]
+    },
+    {
+      "account_id": 123736773,
+      "hero_id": 33,
+      "name": "Enigma",
+      "radiant": true,
+      "player_slot": 3,
+      "final_kills": 3,
+      "final_deaths": 11,
+      "kill_events": [
+        {
+          "time": 292,
+          "victim_hero_id": 96
+        },
+        {
+          "time": 696,
+          "victim_hero_id": 92
+        },
+        {
+          "time": 1004,
+          "victim_hero_id": 111
+        }
+      ],
+      "death_times": [
+        158,
+        257,
+        424,
+        942,
+        1090,
+        1149,
+        1224,
+        1280,
+        1362,
+        1467,
+        1926
+      ]
+    },
+    {
+      "account_id": 156404497,
+      "hero_id": 5,
+      "name": "Crystal Maiden",
+      "radiant": true,
+      "player_slot": 4,
+      "final_kills": 1,
+      "final_deaths": 14,
+      "kill_events": [
+        {
+          "time": 947,
+          "victim_hero_id": 92
+        }
+      ],
+      "death_times": [
+        242,
+        313,
+        429,
+        504,
+        739,
+        802,
+        948,
+        1049,
+        1155,
+        1237,
+        1359,
+        1528,
+        1659,
+        1917
+      ]
+    },
+    {
+      "account_id": 33293249,
+      "hero_id": 21,
+      "name": "Windranger",
+      "radiant": false,
+      "player_slot": 128,
+      "final_kills": 14,
+      "final_deaths": 1,
+      "kill_events": [
+        {
+          "time": 243,
+          "victim_hero_id": 5
+        },
+        {
+          "time": 314,
+          "victim_hero_id": 5
+        },
+        {
+          "time": 425,
+          "victim_hero_id": 33
+        },
+        {
+          "time": 527,
+          "victim_hero_id": 54
+        },
+        {
+          "time": 693,
+          "victim_hero_id": 101
+        },
+        {
+          "time": 949,
+          "victim_hero_id": 5
+        },
+        {
+          "time": 1054,
+          "victim_hero_id": 2
+        },
+        {
+          "time": 1091,
+          "victim_hero_id": 33
+        },
+        {
+          "time": 1154,
+          "victim_hero_id": 101
+        },
+        {
+          "time": 1237,
+          "victim_hero_id": 5
+        },
+        {
+          "time": 1291,
+          "victim_hero_id": 2
+        },
+        {
+          "time": 1360,
+          "victim_hero_id": 5
+        },
+        {
+          "time": 1659,
+          "victim_hero_id": 5
+        },
+        {
+          "time": 1917,
+          "victim_hero_id": 5
+        }
+      ],
+      "death_times": [
+        1884
+      ]
+    },
+    {
+      "account_id": 177837390,
+      "hero_id": 92,
+      "name": "Visage",
+      "radiant": false,
+      "player_slot": 129,
+      "final_kills": 12,
+      "final_deaths": 2,
+      "kill_events": [
+        {
+          "time": 304,
+          "victim_hero_id": 101
+        },
+        {
+          "time": 429,
+          "victim_hero_id": 5
+        },
+        {
+          "time": 468,
+          "victim_hero_id": 101
+        },
+        {
+          "time": 557,
+          "victim_hero_id": 2
+        },
+        {
+          "time": 745,
+          "victim_hero_id": 54
+        },
+        {
+          "time": 803,
+          "victim_hero_id": 5
+        },
+        {
+          "time": 841,
+          "victim_hero_id": 2
+        },
+        {
+          "time": 1049,
+          "victim_hero_id": 5
+        },
+        {
+          "time": 1224,
+          "victim_hero_id": 33
+        },
+        {
+          "time": 1280,
+          "victim_hero_id": 33
+        },
+        {
+          "time": 1467,
+          "victim_hero_id": 33
+        },
+        {
+          "time": 1527,
+          "victim_hero_id": 101
+        }
+      ],
+      "death_times": [
+        696,
+        946
+      ]
+    },
+    {
+      "account_id": 11758567,
+      "hero_id": 96,
+      "name": "Centaur Warrunner",
+      "radiant": false,
+      "player_slot": 130,
+      "final_kills": 4,
+      "final_deaths": 4,
+      "kill_events": [
+        {
+          "time": 361,
+          "victim_hero_id": 2
+        },
+        {
+          "time": 1363,
+          "victim_hero_id": 33
+        },
+        {
+          "time": 1926,
+          "victim_hero_id": 33
+        },
+        {
+          "time": 1930,
+          "victim_hero_id": 54
+        }
+      ],
+      "death_times": [
+        157,
+        291,
+        362,
+        1004
+      ]
+    },
+    {
+      "account_id": 87584299,
+      "hero_id": 111,
+      "name": "Oracle",
+      "radiant": false,
+      "player_slot": 131,
+      "final_kills": 7,
+      "final_deaths": 1,
+      "kill_events": [
+        {
+          "time": 158,
+          "victim_hero_id": 33
+        },
+        {
+          "time": 258,
+          "victim_hero_id": 33
+        },
+        {
+          "time": 740,
+          "victim_hero_id": 5
+        },
+        {
+          "time": 942,
+          "victim_hero_id": 33
+        },
+        {
+          "time": 1153,
+          "victim_hero_id": 2
+        },
+        {
+          "time": 1369,
+          "victim_hero_id": 101
+        },
+        {
+          "time": 1939,
+          "victim_hero_id": 2
+        }
+      ],
+      "death_times": [
+        1003
+      ]
+    },
+    {
+      "account_id": 87626955,
+      "hero_id": 67,
+      "name": "Spectre",
+      "radiant": false,
+      "player_slot": 132,
+      "final_kills": 7,
+      "final_deaths": 3,
+      "kill_events": [
+        {
+          "time": 262,
+          "victim_hero_id": 54
+        },
+        {
+          "time": 504,
+          "victim_hero_id": 5
+        },
+        {
+          "time": 1150,
+          "victim_hero_id": 33
+        },
+        {
+          "time": 1156,
+          "victim_hero_id": 5
+        },
+        {
+          "time": 1528,
+          "victim_hero_id": 5
+        },
+        {
+          "time": 1533,
+          "victim_hero_id": 54
+        },
+        {
+          "time": 1922,
+          "victim_hero_id": 101
+        }
+      ],
+      "death_times": [
+        826,
+        1258,
+        1781
+      ]
+    }
+  ],
+  "team_fights": [
+    {
+      "id": "opendota-fight-0",
+      "started_at": 228,
+      "ended_at": 277,
+      "players": [
+        {
+          "hero_id": 101,
+          "deaths": 0,
+          "kills": 0,
+          "gold_delta": 0
+        },
+        {
+          "hero_id": 54,
+          "deaths": 1,
+          "kills": 0,
+          "gold_delta": 5
+        },
+        {
+          "hero_id": 2,
+          "deaths": 0,
+          "kills": 0,
+          "gold_delta": 390
+        },
+        {
+          "hero_id": 33,
+          "deaths": 1,
+          "kills": 0,
+          "gold_delta": -28
+        },
+        {
+          "hero_id": 5,
+          "deaths": 1,
+          "kills": 0,
+          "gold_delta": -20
+        },
+        {
+          "hero_id": 21,
+          "deaths": 0,
+          "kills": 1,
+          "gold_delta": 276
+        },
+        {
+          "hero_id": 92,
+          "deaths": 0,
+          "kills": 0,
+          "gold_delta": 193
+        },
+        {
+          "hero_id": 96,
+          "deaths": 0,
+          "kills": 0,
+          "gold_delta": 294
+        },
+        {
+          "hero_id": 111,
+          "deaths": 0,
+          "kills": 1,
+          "gold_delta": 230
+        },
+        {
+          "hero_id": 67,
+          "deaths": 0,
+          "kills": 1,
+          "gold_delta": 486
+        }
+      ]
+    },
+    {
+      "id": "opendota-fight-1",
+      "started_at": 277,
+      "ended_at": 329,
+      "players": [
+        {
+          "hero_id": 101,
+          "deaths": 1,
+          "kills": 0,
+          "gold_delta": 90
+        },
+        {
+          "hero_id": 54,
+          "deaths": 0,
+          "kills": 0,
+          "gold_delta": 108
+        },
+        {
+          "hero_id": 2,
+          "deaths": 0,
+          "kills": 0,
+          "gold_delta": 305
+        },
+        {
+          "hero_id": 33,
+          "deaths": 0,
+          "kills": 1,
+          "gold_delta": 260
+        },
+        {
+          "hero_id": 5,
+          "deaths": 1,
+          "kills": 0,
+          "gold_delta": -22
+        },
+        {
+          "hero_id": 21,
+          "deaths": 0,
+          "kills": 1,
+          "gold_delta": 201
+        },
+        {
+          "hero_id": 92,
+          "deaths": 0,
+          "kills": 1,
+          "gold_delta": 480
+        },
+        {
+          "hero_id": 96,
+          "deaths": 1,
+          "kills": 0,
+          "gold_delta": 231
+        },
+        {
+          "hero_id": 111,
+          "deaths": 0,
+          "kills": 0,
+          "gold_delta": 44
+        },
+        {
+          "hero_id": 67,
+          "deaths": 0,
+          "kills": 0,
+          "gold_delta": 194
+        }
+      ]
+    },
+    {
+      "id": "opendota-fight-2",
+      "started_at": 927,
+      "ended_at": 964,
+      "players": [
+        {
+          "hero_id": 101,
+          "deaths": 0,
+          "kills": 0,
+          "gold_delta": 229
+        },
+        {
+          "hero_id": 54,
+          "deaths": 0,
+          "kills": 0,
+          "gold_delta": 295
+        },
+        {
+          "hero_id": 2,
+          "deaths": 0,
+          "kills": 0,
+          "gold_delta": 112
+        },
+        {
+          "hero_id": 33,
+          "deaths": 1,
+          "kills": 0,
+          "gold_delta": 26
+        },
+        {
+          "hero_id": 5,
+          "deaths": 1,
+          "kills": 1,
+          "gold_delta": 575
+        },
+        {
+          "hero_id": 21,
+          "deaths": 0,
+          "kills": 1,
+          "gold_delta": 486
+        },
+        {
+          "hero_id": 92,
+          "deaths": 1,
+          "kills": 0,
+          "gold_delta": -7
+        },
+        {
+          "hero_id": 96,
+          "deaths": 0,
+          "kills": 0,
+          "gold_delta": 387
+        },
+        {
+          "hero_id": 111,
+          "deaths": 0,
+          "kills": 1,
+          "gold_delta": 323
+        },
+        {
+          "hero_id": 67,
+          "deaths": 0,
+          "kills": 0,
+          "gold_delta": 355
+        }
+      ]
+    },
+    {
+      "id": "opendota-fight-3",
+      "started_at": 1135,
+      "ended_at": 1171,
+      "players": [
+        {
+          "hero_id": 101,
+          "deaths": 1,
+          "kills": 0,
+          "gold_delta": -115
+        },
+        {
+          "hero_id": 54,
+          "deaths": 0,
+          "kills": 0,
+          "gold_delta": 160
+        },
+        {
+          "hero_id": 2,
+          "deaths": 1,
+          "kills": 0,
+          "gold_delta": -180
+        },
+        {
+          "hero_id": 33,
+          "deaths": 1,
+          "kills": 0,
+          "gold_delta": -126
+        },
+        {
+          "hero_id": 5,
+          "deaths": 1,
+          "kills": 0,
+          "gold_delta": -72
+        },
+        {
+          "hero_id": 21,
+          "deaths": 0,
+          "kills": 1,
+          "gold_delta": 424
+        },
+        {
+          "hero_id": 92,
+          "deaths": 0,
+          "kills": 0,
+          "gold_delta": 187
+        },
+        {
+          "hero_id": 96,
+          "deaths": 0,
+          "kills": 0,
+          "gold_delta": 211
+        },
+        {
+          "hero_id": 111,
+          "deaths": 0,
+          "kills": 1,
+          "gold_delta": 694
+        },
+        {
+          "hero_id": 67,
+          "deaths": 0,
+          "kills": 2,
+          "gold_delta": 1134
+        }
+      ]
+    },
+    {
+      "id": "opendota-fight-4",
+      "started_at": 1345,
+      "ended_at": 1384,
+      "players": [
+        {
+          "hero_id": 101,
+          "deaths": 1,
+          "kills": 0,
+          "gold_delta": -192
+        },
+        {
+          "hero_id": 54,
+          "deaths": 0,
+          "kills": 0,
+          "gold_delta": 182
+        },
+        {
+          "hero_id": 2,
+          "deaths": 0,
+          "kills": 0,
+          "gold_delta": 230
+        },
+        {
+          "hero_id": 33,
+          "deaths": 1,
+          "kills": 0,
+          "gold_delta": -133
+        },
+        {
+          "hero_id": 5,
+          "deaths": 1,
+          "kills": 0,
+          "gold_delta": -82
+        },
+        {
+          "hero_id": 21,
+          "deaths": 0,
+          "kills": 1,
+          "gold_delta": 624
+        },
+        {
+          "hero_id": 92,
+          "deaths": 0,
+          "kills": 0,
+          "gold_delta": 236
+        },
+        {
+          "hero_id": 96,
+          "deaths": 0,
+          "kills": 1,
+          "gold_delta": 433
+        },
+        {
+          "hero_id": 111,
+          "deaths": 0,
+          "kills": 1,
+          "gold_delta": 457
+        },
+        {
+          "hero_id": 67,
+          "deaths": 0,
+          "kills": 0,
+          "gold_delta": 539
+        }
+      ]
+    },
+    {
+      "id": "opendota-fight-5",
+      "started_at": 1512,
+      "ended_at": 1548,
+      "players": [
+        {
+          "hero_id": 101,
+          "deaths": 1,
+          "kills": 0,
+          "gold_delta": -116
+        },
+        {
+          "hero_id": 54,
+          "deaths": 1,
+          "kills": 0,
+          "gold_delta": 104
+        },
+        {
+          "hero_id": 2,
+          "deaths": 0,
+          "kills": 0,
+          "gold_delta": 317
+        },
+        {
+          "hero_id": 33,
+          "deaths": 0,
+          "kills": 0,
+          "gold_delta": 374
+        },
+        {
+          "hero_id": 5,
+          "deaths": 1,
+          "kills": 0,
+          "gold_delta": 96
+        },
+        {
+          "hero_id": 21,
+          "deaths": 0,
+          "kills": 0,
+          "gold_delta": 114
+        },
+        {
+          "hero_id": 92,
+          "deaths": 0,
+          "kills": 1,
+          "gold_delta": 447
+        },
+        {
+          "hero_id": 96,
+          "deaths": 0,
+          "kills": 0,
+          "gold_delta": 229
+        },
+        {
+          "hero_id": 111,
+          "deaths": 0,
+          "kills": 0,
+          "gold_delta": 96
+        },
+        {
+          "hero_id": 67,
+          "deaths": 0,
+          "kills": 2,
+          "gold_delta": 904
+        }
+      ]
+    },
+    {
+      "id": "opendota-fight-6",
+      "started_at": 1902,
+      "ended_at": 1954,
+      "players": [
+        {
+          "hero_id": 101,
+          "deaths": 1,
+          "kills": 0,
+          "gold_delta": -209
+        },
+        {
+          "hero_id": 54,
+          "deaths": 1,
+          "kills": 0,
+          "gold_delta": -225
+        },
+        {
+          "hero_id": 2,
+          "deaths": 1,
+          "kills": 0,
+          "gold_delta": -352
+        },
+        {
+          "hero_id": 33,
+          "deaths": 1,
+          "kills": 0,
+          "gold_delta": -225
+        },
+        {
+          "hero_id": 5,
+          "deaths": 1,
+          "kills": 0,
+          "gold_delta": -133
+        },
+        {
+          "hero_id": 21,
+          "deaths": 0,
+          "kills": 1,
+          "gold_delta": 1144
+        },
+        {
+          "hero_id": 92,
+          "deaths": 0,
+          "kills": 0,
+          "gold_delta": 1031
+        },
+        {
+          "hero_id": 96,
+          "deaths": 0,
+          "kills": 2,
+          "gold_delta": 1327
+        },
+        {
+          "hero_id": 111,
+          "deaths": 0,
+          "kills": 1,
+          "gold_delta": 910
+        },
+        {
+          "hero_id": 67,
+          "deaths": 0,
+          "kills": 1,
+          "gold_delta": 1519
+        }
+      ]
+    }
+  ],
+  "objective_events": [
+    {
+      "id": "opendota-roshan-1744",
+      "game_time": 1744,
+      "kind": "roshan",
+      "radiant": false
+    },
+    {
+      "id": "opendota-aegis-1745",
+      "game_time": 1745,
+      "kind": "aegis",
+      "hero": "Visage"
+    }
+  ]
+}
