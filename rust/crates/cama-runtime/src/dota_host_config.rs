@@ -4,9 +4,9 @@ use std::{net::SocketAddr, path::PathBuf};
 
 use crate::{ConfigError, Secret};
 
-/// Dota's USSouthCentral/dfw lobby region (not its matchmaking group 1).
-/// Verified in scripts/regions.txt from client build 25219194 (2026-09-10).
-pub const US_SOUTH_CENTRAL_REGION: u32 = 31;
+/// Dota's USNorthCentral/ord lobby region (not its matchmaking group 1).
+/// Verified in scripts/regions.txt from client build 25265195 (2026-09-12).
+pub const US_NORTH_CENTRAL_REGION: u32 = 27;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -103,7 +103,7 @@ impl DotaHostConfig {
         let server_region = number(
             &mut lookup,
             "DOTA_SERVER_REGION",
-            u64::from(US_SOUTH_CENTRAL_REGION),
+            u64::from(US_NORTH_CENTRAL_REGION),
         )?;
         let server_region = u32::try_from(server_region)
             .ok()
@@ -216,9 +216,27 @@ mod tests {
         );
         assert!(!format!("{config:?}").contains("existing-api-key-fixture"));
         assert_eq!(config.game_mode, 2);
-        assert_eq!(config.server_region, 31);
+        assert_eq!(config.server_region, 27);
         assert_eq!(config.tv_delay, 3);
         assert_eq!(config.test_mode, DotaHostTestMode::Off);
+    }
+
+    #[test]
+    fn explicit_server_region_overrides_north_central_default() {
+        let config = DotaHostConfig::from_lookup(|key| {
+            match key {
+                "DOTA_HOST_ENABLED" => Some("true"),
+                "DOTA_HOST_GUILD_IDS" => Some("123"),
+                "DOTA_STEAM_USERNAME" => Some("bot"),
+                "DOTA_BOT_ACCOUNT_ID" => Some("345"),
+                "DOTA_SERVER_REGION" => Some("31"),
+                _ => None,
+            }
+            .map(str::to_owned)
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(config.server_region, 31);
     }
 
     #[test]

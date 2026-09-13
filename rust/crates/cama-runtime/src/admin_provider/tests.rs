@@ -41,6 +41,7 @@ fn production_admin_tree_preserves_legacy_leaves_and_adds_dota_controls() {
     let actual = leaf_paths(&admin_options(3_000.0));
     let expected = [
         "dota settings",
+        "dota configure",
         "dota reset",
         "dota status",
         "dota start",
@@ -81,7 +82,7 @@ fn production_admin_tree_preserves_legacy_leaves_and_adds_dota_controls() {
         "setprimarysteam",
         "seedherogrid",
     ];
-    assert_eq!(actual.len(), 40);
+    assert_eq!(actual.len(), 41);
     assert_eq!(
         actual.keys().cloned().collect::<BTreeSet<_>>(),
         expected.into_iter().map(str::to_owned).collect()
@@ -94,7 +95,7 @@ fn dota_admin_schema_stays_within_discord_limits_and_constrains_values() {
     assert!(options.len() <= 25);
     let dota = options.iter().find(|option| option.name == "dota").unwrap();
     assert_eq!(dota.kind, CommandOptionKind::SubcommandGroup);
-    assert_eq!(dota.options.len(), 9);
+    assert_eq!(dota.options.len(), 10);
     // Discord integer options use signed int53 bounds, not SQLite's i64.
     for command in &dota.options {
         for option in &command.options {
@@ -138,6 +139,44 @@ fn dota_admin_schema_stays_within_discord_limits_and_constrains_values() {
         .find(|option| option.name == "tv_delay")
         .unwrap();
     assert_eq!((delay.min_integer, delay.max_integer), (Some(0), Some(4)));
+    let configure = dota
+        .options
+        .iter()
+        .find(|option| option.name == "configure")
+        .unwrap();
+    assert!(
+        configure
+            .description
+            .contains("existing prelaunch bot lobby")
+    );
+    assert!(configure.description.contains("future defaults unchanged"));
+    assert!(configure.options.iter().all(|option| !option.required));
+    assert_eq!(configure.options.len(), 8);
+    assert!(
+        !configure
+            .options
+            .iter()
+            .any(|option| option.name == "hosting")
+    );
+    for setting in settings
+        .options
+        .iter()
+        .filter(|option| option.name != "hosting")
+    {
+        assert_eq!(
+            configure
+                .options
+                .iter()
+                .find(|option| option.name == setting.name),
+            Some(setting)
+        );
+    }
+    assert!(
+        configure
+            .options
+            .iter()
+            .any(|option| option.name == "pending_match")
+    );
 }
 
 #[tokio::test]
@@ -227,7 +266,16 @@ async fn dota_settings_reject_unauthorized_invalid_and_unacknowledged_writes() {
     let fixture = ProviderFixture::new();
     let repository = GuildConfigRepository::new(fixture.database.path(), false);
     for action in [
-        "settings", "reset", "status", "start", "cancel", "resume", "manual", "resolve", "betting",
+        "settings",
+        "configure",
+        "reset",
+        "status",
+        "start",
+        "cancel",
+        "resume",
+        "manual",
+        "resolve",
+        "betting",
     ] {
         let response = fixture
             .dispatch_request(admin_group_command(
@@ -298,6 +346,222 @@ async fn dota_settings_reject_unauthorized_invalid_and_unacknowledged_writes() {
     }
     let response = fixture.dispatch_request(request).await;
     assert_eq!(response.last().content, GUILD_ONLY);
+}
+
+#[tokio::test]
+async fn dota_configure_rejects_empty_invalid_and_non_guild_requests_before_deferral() {
+    let fixture = ProviderFixture::new();
+    for options in [
+        vec![],
+        vec![integer_option("pending_match", 604)],
+        vec![integer_option("server_region", 0)],
+        vec![integer_option("game_mode", 999)],
+        vec![integer_option("tv_delay", 5)],
+        vec![integer_option("league_id", 0)],
+        vec![integer_option("visibility", 1)],
+        vec![string_option("first_pick", "unknown")],
+        vec![string_option("start", "unknown")],
+        vec![string_option("hosting", "manual")],
+        vec![
+            integer_option("server_region", 31),
+            integer_option("pending_match", -1),
+        ],
+        vec![
+            integer_option("server_region", 31),
+            string_option("pending_match", "604"),
+        ],
+    ] {
+        let response = fixture
+            .dispatch_request(admin_group_command(
+                "dota",
+                "configure",
+                options,
+                820,
+                ADMIN,
+                Some(MANAGE_GUILD),
+            ))
+            .await;
+        assert!(
+            response.defers.lock().unwrap().is_empty(),
+            "{}",
+            response.last().content
+        );
+        assert!(response.last().ephemeral);
+        assert!(!response.last().content.contains("queued"));
+    }
+    let mut request = admin_group_command(
+        "dota",
+        "configure",
+        vec![integer_option("server_region", 31)],
+        821,
+        ADMIN,
+        Some(MANAGE_GUILD),
+    );
+    if let InteractionRequest::Command { guild_id, .. } = &mut request {
+        *guild_id = Some(0);
+    }
+    let response = fixture.dispatch_request(request).await;
+    assert_eq!(response.last().content, GUILD_ONLY);
+    assert!(response.defers.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn dota_configure_defers_valid_requests_and_keeps_future_defaults_unchanged() {
+    use cama_db::guild_config_repository::GuildConfigRepository;
+    use cama_domain::dota_hosting::DotaHostingOptions;
+
+    let fixture = ProviderFixture::new();
+    let defaults = DotaHostingOptions {
+        region: Some(31),
+        ..Default::default()
+    };
+    let repository = GuildConfigRepository::new(fixture.database.path(), false);
+    repository
+        .update_dota_hosting_options(GUILD as i64, &defaults)
+        .unwrap();
+    let response = fixture
+        .dispatch_request(admin_group_command(
+            "dota",
+            "configure",
+            vec![integer_option("server_region", 2)],
+            822,
+            ADMIN,
+            Some(MANAGE_GUILD),
+        ))
+        .await;
+    assert_eq!(*response.defers.lock().unwrap(), vec![true]);
+    assert!(response.last().ephemeral);
+    // There is no hosted lobby, so the request fails instead of changing the
+    // guild defaults or creating a new lobby.
+    assert!(response.last().content.starts_with("Dota hosting:"));
+    assert!(!response.last().content.contains("queued"));
+    assert_eq!(
+        repository.dota_hosting_options(GUILD as i64).unwrap(),
+        defaults
+    );
+}
+
+#[tokio::test]
+async fn dota_configure_requires_acknowledgement_before_queueing_active_settings() {
+    use cama_db::dota_session_repository::{DotaSessionPhase, DotaSessionRepository};
+    use cama_db::guild_config_repository::GuildConfigRepository;
+    use cama_db::match_runtime::{PendingMatchRepository, PendingMatchState};
+    use serde_json::json;
+
+    let fixture = ProviderFixture::new();
+    let pending_repo = PendingMatchRepository::new(fixture.database.path());
+    let pending = pending_repo
+        .create_pending_match(
+            GUILD as i64,
+            &PendingMatchState {
+                radiant_team_ids: (1..=5).collect(),
+                dire_team_ids: (6..=10).collect(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let repository = DotaSessionRepository::new(fixture.database.path());
+    let roster: Vec<_> = (1..=10)
+        .map(|id| {
+            json!({
+                "discord_id": id, "steam_account_id": id, "radiant": id <= 5,
+            })
+        })
+        .collect();
+    repository
+        .claim_session(
+            GUILD as i64,
+            pending.pending_match_id,
+            "99",
+            json!({
+                "settings": {
+                    "name": "Provider test lobby", "password": "fixture-only", "visibility": 2,
+                    "league_id": 19144, "game_mode": 2, "server_region": 1,
+                    "first_pick_radiant": true, "tv_delay": 0,
+                },
+                "roster": roster, "channel_id": null,
+            }),
+            100,
+        )
+        .unwrap();
+    let mut session = repository
+        .session(GUILD as i64, pending.pending_match_id)
+        .unwrap()
+        .unwrap();
+    session.phase = DotaSessionPhase::Gathering;
+    session.lobby_id = Some("123".to_owned());
+    let before = repository.update(&session, session.revision, 101).unwrap();
+    let request = || {
+        admin_group_command(
+            "dota",
+            "configure",
+            vec![
+                integer_option("pending_match", pending.pending_match_id),
+                integer_option("server_region", 2),
+                string_option("first_pick", "dire"),
+                string_option("start", "manual"),
+            ],
+            823,
+            ADMIN,
+            Some(MANAGE_GUILD),
+        )
+    };
+    let responder = Arc::new(RecordingResponder::default());
+    responder.fail_defer.store(true, Ordering::Release);
+    assert!(
+        fixture
+            .registry()
+            .command_handler("admin")
+            .unwrap()
+            .handle(request(), responder)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        repository
+            .session(GUILD as i64, pending.pending_match_id)
+            .unwrap()
+            .unwrap(),
+        before
+    );
+
+    let response = fixture.dispatch_request(request()).await;
+    assert_eq!(*response.defers.lock().unwrap(), vec![true]);
+    assert!(response.last().ephemeral);
+    assert!(
+        response.last().content.contains("queued"),
+        "{}",
+        response.last().content
+    );
+    assert!(
+        response
+            .last()
+            .content
+            .contains("not yet confirmed applied")
+    );
+    assert!(response.last().content.contains("/admin dota status"));
+    let after = repository
+        .session(GUILD as i64, pending.pending_match_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.revision, before.revision + 1);
+    // Requested changes must be durable while applied settings keep describing
+    // the lobby that the worker has actually observed.
+    assert_ne!(after.payload, before.payload);
+    assert_eq!(after.payload["settings"], before.payload["settings"]);
+    assert_eq!(
+        GuildConfigRepository::new(fixture.database.path(), false)
+            .dota_hosting_options(GUILD as i64)
+            .unwrap(),
+        Default::default()
+    );
+    assert_eq!(
+        pending_repo
+            .pending_match(GUILD as i64, pending.pending_match_id)
+            .unwrap()
+            .unwrap(),
+        pending
+    );
 }
 
 #[test]

@@ -1,10 +1,49 @@
 use super::*;
+mod configuration_tests;
 use std::sync::{
     Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 
+#[tokio::test]
+async fn steam_lobby_slots_allow_any_order_on_the_correct_team_without_kicks() {
+    let f = Fixture::new(false);
+    f.worker.tick(&f.port, 100).await.unwrap();
+    {
+        let mut lobby = f.port.lobby.lock().unwrap();
+        for member in &mut lobby.as_mut().unwrap().members {
+            // Reverse the shuffle order using real GC slot numbers, including
+            // slot 5 on each side, which previously triggered a team kick.
+            *member = steam::lobby_seat(cama_steam::LobbyMember {
+                steam_id: dota_lobby::STEAM_INDIVIDUAL_BASE + u64::from(member.account_id),
+                account_id: member.account_id,
+                hero_id: 0,
+                team: if member.side == Some(Side::Radiant) {
+                    cama_steam::Team::Radiant
+                } else {
+                    cama_steam::Team::Dire
+                },
+                name: String::new(),
+                slot: 5 - (member.account_id - 1) % 5,
+                party_id: None,
+                coach_team: None,
+            });
+        }
+    }
+    f.worker.tick(&f.port, 101).await.unwrap();
+    f.worker.tick(&f.port, 111).await.unwrap();
+    assert_eq!(f.session().phase, Phase::Launching);
+    let calls = f.port.calls.lock().unwrap();
+    assert!(calls.iter().any(|call| call == "launch"));
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.starts_with("pool:") || call.starts_with("kick:"))
+    );
+}
+
 struct FakePort {
+    configure_behavior: Mutex<&'static str>,
     lobby: Mutex<Option<HostLobby>>,
     snapshot_error: Mutex<Option<String>>,
     observation_stale: std::sync::atomic::AtomicBool,
@@ -43,6 +82,26 @@ impl DotaHostPort for FakePort {
     }
     async fn invite(&self, _: u64, account: u32) -> Result<(), String> {
         self.calls.lock().unwrap().push(format!("invite:{account}"));
+        Ok(())
+    }
+    async fn configure(&self, lobby_id: u64, settings: &LobbySettings) -> Result<(), String> {
+        self.calls.lock().unwrap().push("configure".into());
+        let behavior = *self.configure_behavior.lock().unwrap();
+        if behavior == "ignore" {
+            return Ok(());
+        }
+        let mut current = self.lobby.lock().unwrap();
+        let current = current.as_mut().unwrap();
+        assert_eq!(current.id, lobby_id);
+        current.server_region = settings.server_region;
+        current.game_mode = settings.game_mode;
+        current.first_pick_radiant = settings.first_pick_radiant;
+        current.tv_delay = settings.tv_delay;
+        current.league_id = settings.league_id;
+        current.visibility = settings.visibility;
+        if behavior == "lost_reply" {
+            return Err("configuration reply lost".into());
+        }
         Ok(())
     }
     async fn move_host_to_pool(&self, _: u64) -> Result<(), String> {
@@ -221,6 +280,8 @@ impl Fixture {
             .unwrap()
             .pending_match_id;
         let state = SessionState {
+            configuration: None,
+            last_configuration: None,
             test_mode: DotaHostTestMode::Off,
             fake_roster: Vec::new(),
             simulated_winner: None,
@@ -297,6 +358,7 @@ impl Fixture {
             live,
         );
         let port = FakePort {
+            configure_behavior: Mutex::new("normal"),
             lobby: Mutex::new(None),
             snapshot_error: Mutex::new(None),
             observation_stale: std::sync::atomic::AtomicBool::new(false),
@@ -663,7 +725,7 @@ async fn real_lobby_preview_invites_only_real_player_and_never_launches_or_settl
     assert_eq!(saved.fake_roster.len(), 9);
     assert_eq!(saved.settings.visibility, 2);
     assert_eq!(saved.settings.league_id, 123);
-    assert_eq!(saved.settings.server_region, 31);
+    assert_eq!(saved.settings.server_region, 27);
     f.port.lobby.lock().unwrap().as_mut().unwrap().members = vec![LobbySeat {
         account_id: 99,
         side: Some(Side::Radiant),
@@ -1464,11 +1526,11 @@ async fn discovery_persists_public_lobby_settings() {
     let state: SessionState = serde_json::from_value(f.session().payload).unwrap();
     assert_eq!(state.settings.password, "");
     assert_eq!(state.settings.visibility, 0);
-    assert_eq!(state.settings.server_region, 31);
+    assert_eq!(state.settings.server_region, 27);
     let lobby = f.port.lobby.lock().unwrap();
     let lobby = lobby.as_ref().unwrap();
     assert_eq!(lobby.visibility, 0);
-    assert_eq!(lobby.server_region, 31);
+    assert_eq!(lobby.server_region, 27);
 }
 
 #[tokio::test]

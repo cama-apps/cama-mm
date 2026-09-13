@@ -3,6 +3,7 @@
 //! Persist intent before remote mutations. A lost response is reconciled from
 //! the GC cache; it never authorizes a second lobby or an inferred match win.
 
+mod configuration;
 mod simulated;
 mod steam;
 mod test_mode;
@@ -39,6 +40,7 @@ use crate::match_provider::{
 };
 use crate::{BackgroundWorker, BackgroundWorkerSpec, InteractionResponse, WorkerContext};
 
+pub use configuration::guild_configure_command;
 pub use steam::bootstrap_steam_login;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -139,6 +141,9 @@ pub trait DotaHostPort: Send + Sync {
         true
     }
     async fn create(&self, settings: &LobbySettings) -> Result<(), String>;
+    async fn configure(&self, _lobby_id: u64, _settings: &LobbySettings) -> Result<(), String> {
+        Err("this transport does not support lobby configuration".into())
+    }
     async fn invite(&self, lobby_id: u64, account_id: u32) -> Result<(), String>;
     async fn move_host_to_pool(&self, lobby_id: u64) -> Result<(), String>;
     async fn kick_from_team(&self, lobby_id: u64, account_id: u32) -> Result<(), String>;
@@ -186,6 +191,10 @@ struct OperatorResolution {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct SessionState {
+    #[serde(default)]
+    configuration: Option<configuration::LobbyConfigurationRequest>,
+    #[serde(default)]
+    last_configuration: Option<configuration::LobbyConfigurationRequest>,
     #[serde(default)]
     test_mode: DotaHostTestMode,
     /// Negative Discord IDs created by /admin addfake, with their frozen side.
@@ -353,6 +362,7 @@ impl DotaHostWorker {
         }
         if record.phase == Phase::NeedsReview {
             if state.resume_requested {
+                configuration::reset_retry(&mut state);
                 state.resume_requested = false;
                 state.cancel_requested = false;
                 state.recording_failures = 0;
@@ -528,6 +538,11 @@ impl DotaHostWorker {
         }
         if server_launched && pending.is_none() && self.recorded_id(&record).await?.is_none() {
             return self.review(&mut record,&mut state,"the Cama pending match was removed without a recorded result after Dota launch; inspect the manual abort before proceeding",now).await;
+        }
+        if state.configuration.is_some() {
+            return self
+                .configure_session(port, &mut record, &mut state, lobby.as_ref(), now)
+                .await;
         }
         if !state.betting_closed
             && let Some(pending) = &pending
@@ -1413,6 +1428,7 @@ impl DotaHostWorker {
                     }
                 }
                 let state = SessionState {
+                    configuration: None, last_configuration: None,
                     test_mode: config.test_mode, fake_roster, simulated_winner: None,
                     start_mode: options.start.unwrap_or_default(), manual_start_requested: false,
                     settings: LobbySettings { name:if config.test_mode == DotaHostTestMode::Off {format!("Cama {}:{}",pending.guild_id,pending.pending_match_id)} else {format!("Cama TEST {}:{}",pending.guild_id,pending.pending_match_id)},
@@ -1750,7 +1766,7 @@ pub async fn guild_operator_command(
                     let betting = if pending.as_ref().is_some_and(|p| p.state.extra.get("dota_betting_suspended") == Some(&serde_json::Value::Bool(true))) { "suspended by operator" }
                         else if pending.as_ref().is_some_and(|p| p.state.betting_open(chrono::Utc::now().timestamp())) { "open" }
                         else { "closed" };
-                    Ok(format!("Pending #{}: {} · {:?} · region {} · mode {} · {:?} start\nLobby {} · Dota {} · Cama {} · updated <t:{}:R> · betting {}\n{}", s.pending_match_id, s.phase.as_str(), state.test_mode, state.settings.server_region, state.settings.game_mode, state.start_mode,
+                    Ok(format!("Pending #{}: {} · {:?}\n{}\nLobby {} · Dota {} · Cama {} · updated <t:{}:R> · betting {}\n{}", s.pending_match_id, s.phase.as_str(), state.test_mode, configuration::status(&state),
                         s.lobby_id.as_deref().unwrap_or("unassigned"), s.valve_match_id.as_deref().unwrap_or("unassigned"), state.recorded_match_id.map_or("unrecorded".into(), |id| id.to_string()), s.updated_at,
                         betting,
                         s.last_error.map_or_else(|| "No saved error.".to_owned(), |e| format!("Attention: {}", e.chars().take(300).collect::<String>()))))
@@ -1790,6 +1806,7 @@ pub async fn guild_operator_command(
         let mut state: SessionState = serde_json::from_value(session.payload.clone()).map_err(|_| "Invalid saved hosting state.")?;
         match action.as_str() {
             "start" => {
+                if state.configuration.is_some() { return Err("Lobby settings are still being applied; check `/admin dota status` before starting.".into()); }
                 if state.test_mode == DotaHostTestMode::RealLobby { return Err("Real-lobby preview never launches. Use simulated mode for launch tests.".into()); }
                 if session.phase != Phase::Gathering || state.cancel_requested || state.launch_requested_at.is_some() || session.valve_match_id.is_some() { return Err("Start is available only while an uncancelled lobby is gathering players.".into()); }
                 state.manual_start_requested = true;

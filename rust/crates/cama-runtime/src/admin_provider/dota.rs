@@ -18,8 +18,13 @@ impl AdminHandler {
             return respond_ephemeral(&responder, GUILD_ONLY).await;
         }
         let action = context.path.get(1).map_or("", String::as_str);
-        let patch = if action == "settings" {
-            match parse_settings(&context.options) {
+        let patch = if matches!(action, "settings" | "configure") {
+            let parsed = if action == "configure" {
+                parse_active_settings(&context.options)
+            } else {
+                parse_settings(&context.options)
+            };
+            match parsed {
                 Ok(value) => Some(value),
                 Err(error) => return respond_ephemeral(&responder, error).await,
             }
@@ -65,6 +70,11 @@ impl AdminHandler {
                 .await
                 .map_err(|error| format!("Dota settings task failed: {error}"))?
             }
+            "configure" => crate::dota_host::guild_configure_command(
+                path, guild_id, pending, context.actor_id, patch.expect("configure parsed above"),
+            ).await.map(|message| format!(
+                "{message}\nChanges are queued, not yet confirmed applied. Use `/admin dota status` to check. Future-shuffle defaults are unchanged."
+            )),
             "reset" => tokio::task::spawn_blocking(move || {
                 GuildConfigRepository::new(path, false)
                     .reset_dota_hosting_options(guild_id)
@@ -116,6 +126,21 @@ impl AdminHandler {
         )
         .await
     }
+}
+
+fn parse_active_settings(options: &[InteractionOption]) -> Result<DotaHostingOptions, String> {
+    if options.iter().any(|option| option.name == "hosting") {
+        return Err("Use `/admin dota manual` to hand hosting to a human.".to_owned());
+    }
+    let settings: Vec<_> = options
+        .iter()
+        .filter(|option| option.name != "pending_match")
+        .cloned()
+        .collect();
+    if settings.is_empty() {
+        return Err("Choose at least one setting to change in the active lobby.".to_owned());
+    }
+    parse_settings(&settings)
 }
 
 fn parse_settings(options: &[InteractionOption]) -> Result<DotaHostingOptions, String> {
@@ -292,6 +317,23 @@ pub(super) fn options() -> Vec<CommandOptionSpec> {
             vec![],
         ),
     ];
+    let mut active_settings: Vec<_> = result[0]
+        .options
+        .iter()
+        .filter(|option| option.name != "hosting")
+        .cloned()
+        .collect();
+    active_settings.push(bounded_integer(
+        "pending_match",
+        "Pending ID; omit when this server has exactly one active bot lobby",
+        1,
+        9_007_199_254_740_991,
+    ));
+    result.push(subcommand(
+        "configure",
+        "Queue settings for an existing prelaunch bot lobby; future defaults unchanged",
+        active_settings,
+    ));
     result.push(subcommand(
         "betting",
         "Suspend or resume wager admission with an audit reason",
