@@ -1347,3 +1347,126 @@ async fn spectator_marker_cleanup_finds_unacknowledged_create_and_skips_foreign_
         .unwrap();
     server.join().unwrap();
 }
+
+#[test]
+fn draft_delivery_nonce_fits_discord_without_changing_saved_keys() {
+    let mut distinct = BTreeSet::new();
+    for guild in [806299990791159808_i64, i64::MAX] {
+        for session in [1_u64, u64::MAX] {
+            for kind in ["lobby", "origin", "thread_embed", "thread_ping"] {
+                let key = format!("draft:{guild}:{session}:{kind}");
+                assert!(
+                    key.len() > 25,
+                    "real guild IDs reproduce the production error"
+                );
+                let payload = serde_json::to_value(channel_response_with_delivery_key(
+                    InteractionResponse::message("Draft complete"),
+                    &key,
+                ))
+                .unwrap();
+                let nonce = payload["nonce"].as_str().unwrap();
+                assert_eq!(nonce.len(), 25);
+                assert_eq!(nonce, message_delivery_nonce(&key));
+                assert_eq!(payload["enforce_nonce"], true);
+                assert!(distinct.insert(nonce.to_owned()));
+                assert!(message_nonce_matches(
+                    &Nonce::String(nonce.to_owned()),
+                    &key
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+fn delivery_nonce_recovery_preserves_legacy_keys_and_rejects_other_deliveries() {
+    for key in [
+        "1234",
+        "m00000000000000000010000",
+        "q0123456789abcdef01234567",
+    ] {
+        assert_eq!(message_delivery_nonce(key), key);
+        assert!(message_nonce_matches(&Nonce::String(key.into()), key));
+    }
+    assert!(message_nonce_matches(&Nonce::Number(1234), "1234"));
+    let key = "draft:806299990791159808:1:lobby";
+    assert!(message_nonce_matches(&Nonce::String(key.into()), key));
+    let nonce = Nonce::String(message_delivery_nonce(key));
+    assert!(message_nonce_matches(&nonce, key));
+    assert!(!message_nonce_matches(
+        &nonce,
+        "draft:806299990791159808:1:origin"
+    ));
+    for key in ["", &"📻".repeat(26)] {
+        assert_eq!(message_delivery_nonce(key).len(), 25);
+    }
+}
+
+#[tokio::test]
+async fn draft_delivery_nonce_passes_discord_http_length_validation() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy = format!("http://{}", listener.local_addr().unwrap());
+    let key = "draft:806299990791159808:1:thread_embed";
+    let expected = message_delivery_nonce(key);
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        let header_end = loop {
+            let count = stream.read(&mut chunk).unwrap();
+            assert!(count > 0);
+            request.extend_from_slice(&chunk[..count]);
+            if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                break end + 4;
+            }
+        };
+        let headers = String::from_utf8_lossy(&request[..header_end]);
+        let length: usize = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse().unwrap())
+            })
+            .unwrap();
+        while request.len() < header_end + length {
+            let count = stream.read(&mut chunk).unwrap();
+            assert!(count > 0);
+            request.extend_from_slice(&chunk[..count]);
+        }
+        let body: serde_json::Value =
+            serde_json::from_slice(&request[header_end..header_end + length]).unwrap();
+        let nonce = body["nonce"].as_str().unwrap();
+        let (status, reply) = if nonce.len() > 25 {
+            (
+                "400 Bad Request",
+                serde_json::json!({"code":50035,"message":"Invalid Form Body","errors":{"nonce":{"_errors":[{"code":"BASE_TYPE_MAX_LENGTH","message":"Must be 25 or fewer characters long."}]}}}),
+            )
+        } else {
+            assert_eq!(nonce, expected);
+            assert_eq!(body["enforce_nonce"], true);
+            let mut reply = serde_json::to_value(Message::default()).unwrap();
+            reply["nonce"] = body["nonce"].clone();
+            ("200 OK", reply)
+        };
+        let reply = serde_json::to_vec(&reply).unwrap();
+        write!(stream,"HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",reply.len()).unwrap();
+        stream.write_all(&reply).unwrap();
+    });
+    let http = HttpBuilder::new("test-token")
+        .proxy(proxy)
+        .ratelimiter_disabled(true)
+        .build();
+    let message = ChannelId::new(77)
+        .send_message(
+            &http,
+            channel_response_with_delivery_key(InteractionResponse::message("Draft complete"), key),
+        )
+        .await
+        .expect("realistic draft delivery key passes Discord wire validation");
+    assert!(message_nonce_matches(message.nonce.as_ref().unwrap(), key));
+    server.join().unwrap();
+}

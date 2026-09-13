@@ -2729,6 +2729,43 @@ fn is_component_only_edit(response: &InteractionResponse) -> bool {
         && !response.components.is_empty()
 }
 
+/// Persistence keys are not Discord wire nonces: Draft keys include full guild
+/// IDs and routinely exceed Discord's 25-character limit. Preserve existing
+/// short nonces and deterministically map longer keys without changing saved jobs.
+fn message_delivery_nonce(delivery_key: &str) -> String {
+    if !delivery_key.is_empty() && delivery_key.len() <= 25 {
+        return delivery_key.to_owned();
+    }
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(delivery_key.as_bytes());
+    format!(
+        "n{}",
+        digest[..12]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
+
+fn message_nonce_matches(nonce: &Nonce, delivery_key: &str) -> bool {
+    let value = match nonce {
+        Nonce::String(value) => value.clone(),
+        Nonce::Number(value) => value.to_string(),
+    };
+    // Accept a historical raw nonce as well, including formerly accepted
+    // Unicode keys. New sends and recovery must use the same deterministic map.
+    value == delivery_key || value == message_delivery_nonce(delivery_key)
+}
+
+fn channel_response_with_delivery_key(
+    response: InteractionResponse,
+    delivery_key: &str,
+) -> CreateMessage {
+    channel_response(response)
+        .nonce(Nonce::String(message_delivery_nonce(delivery_key)))
+        .enforce_nonce(true)
+}
+
 fn channel_response(response: InteractionResponse) -> CreateMessage {
     let include_attachments = include_response_attachments(&response);
     let mut message = CreateMessage::new();
@@ -3975,9 +4012,7 @@ impl DiscordTransport for SerenityDiscordTransport {
         let sent = channel_id
             .send_message(
                 (&context.cache, context.http.as_ref()),
-                channel_response(response)
-                    .nonce(Nonce::String(delivery_key.to_owned()))
-                    .enforce_nonce(true),
+                channel_response_with_delivery_key(response, delivery_key),
             )
             .await
             .map_err(|error| error.to_string())?;
@@ -4036,10 +4071,10 @@ impl DiscordTransport for SerenityDiscordTransport {
                 {
                     continue;
                 }
-                let nonce_matches = message.nonce.as_ref().is_some_and(|nonce| match nonce {
-                    Nonce::String(value) => value == delivery_key,
-                    Nonce::Number(value) => value.to_string() == delivery_key,
-                });
+                let nonce_matches = message
+                    .nonce
+                    .as_ref()
+                    .is_some_and(|nonce| message_nonce_matches(nonce, delivery_key));
                 if nonce_matches {
                     return Ok(Some(DiscordMessageReceipt {
                         channel_id: message.channel_id.get(),
