@@ -28,6 +28,7 @@ pub struct ExpectedPlayer {
 pub struct LobbySeat {
     pub account_id: u32,
     pub side: Option<Side>,
+    /// Zero-based player slot (0..5), normalized by the transport adapter.
     pub slot: u32,
 }
 
@@ -137,6 +138,34 @@ mod tests {
                 side: if id <= 5 { Side::Radiant } else { Side::Dire },
             })
             .collect()
+    }
+
+    #[test]
+    fn teammates_can_choose_any_playable_slot() {
+        let players = roster();
+        // Rotate each side independently so every player occupies every slot.
+        for radiant_offset in 0..5 {
+            for dire_offset in 0..5 {
+                let seats = players
+                    .iter()
+                    .enumerate()
+                    .map(|(index, player)| {
+                        let offset = match player.side {
+                            Side::Radiant => radiant_offset,
+                            Side::Dire => dire_offset,
+                        };
+                        LobbySeat {
+                            account_id: player.account_id,
+                            side: Some(player.side),
+                            slot: ((index + offset) % 5) as u32,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let admission = assess_admission(&players, &seats, 20);
+                assert!(admission.ready);
+                assert!(admission.wrong_side.is_empty());
+            }
+        }
     }
 
     #[test]

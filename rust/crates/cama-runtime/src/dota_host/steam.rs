@@ -73,6 +73,16 @@ fn playing_side(team: Team, coach_team: Option<Team>) -> Option<Side> {
     }
 }
 
+pub(super) fn lobby_seat(member: cama_steam::LobbyMember) -> LobbySeat {
+    LobbySeat {
+        account_id: member.account_id,
+        side: playing_side(member.team, member.coach_team),
+        // GC lobby player slots are 1..=5; admission uses 0..5. Keep an
+        // unset/invalid slot invalid instead of aliasing it to the first seat.
+        slot: member.slot.checked_sub(1).unwrap_or(u32::MAX),
+    }
+}
+
 fn lobby_config(settings: &LobbySettings) -> LobbyConfig {
     LobbyConfig {
         game_name: settings.name.clone(),
@@ -152,15 +162,7 @@ impl DotaHostPort for SteamHost {
                         LobbyOutcome::DireVictory => Some("dire".into()),
                         _ => None,
                     },
-                    members: s
-                        .members
-                        .into_iter()
-                        .map(|m| LobbySeat {
-                            account_id: m.account_id,
-                            side: playing_side(m.team, m.coach_team),
-                            slot: m.slot,
-                        })
-                        .collect(),
+                    members: s.members.into_iter().map(lobby_seat).collect(),
                 })
             })
             .transpose()
@@ -172,6 +174,13 @@ impl DotaHostPort for SteamHost {
             .await
             .map(|_| ())
             .map_err(|e| e.to_string())
+    }
+    async fn configure(&self, lobby: u64, settings: &LobbySettings) -> Result<(), String> {
+        self.0
+            .configure_lobby(lobby, &lobby_config(settings))
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
     async fn invite(&self, lobby: u64, account: u32) -> Result<(), String> {
         self.0
@@ -385,6 +394,30 @@ mod tests {
         assert_eq!(playing_side(Team::Dire, None), Some(Side::Dire));
         assert_eq!(playing_side(Team::Radiant, Some(Team::Radiant)), None);
         assert_eq!(playing_side(Team::Spectator, Some(Team::Dire)), None);
+    }
+
+    #[test]
+    fn lobby_slot_conversion_keeps_invalid_slots_and_coaches_out_of_playing_seats() {
+        for slot in [0, 1, 5, 6, u32::MAX] {
+            let member = cama_steam::LobbyMember {
+                steam_id: dota_lobby::STEAM_INDIVIDUAL_BASE + 1,
+                account_id: 1,
+                hero_id: 0,
+                team: Team::Radiant,
+                name: String::new(),
+                slot,
+                party_id: None,
+                coach_team: None,
+            };
+            let seat = lobby_seat(member.clone());
+            assert_eq!(seat.side, Some(Side::Radiant));
+            assert_eq!(seat.slot < 5, (1..=5).contains(&slot));
+            let coach = lobby_seat(cama_steam::LobbyMember {
+                coach_team: Some(Team::Radiant),
+                ..member
+            });
+            assert_eq!(coach.side, None);
+        }
     }
 
     #[test]

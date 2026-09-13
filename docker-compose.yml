@@ -20,7 +20,7 @@ services:
       # STEAM_IMAGE_CACHE_ROOT when deploying to another durable volume.
       STEAM_IMAGE_CACHE_ROOT: ${STEAM_IMAGE_CACHE_ROOT:-/app/data/image-cache}
       DOTA_STEAM_SESSION_PATH: ${DOTA_STEAM_SESSION_PATH:-/app/data/steam/session.json}
-      DOTA_SERVER_REGION: ${DOTA_SERVER_REGION:-31}
+      DOTA_SERVER_REGION: ${DOTA_SERVER_REGION:-27}
     command: ["serve"]
     user: "1001:1001"
     cap_add:

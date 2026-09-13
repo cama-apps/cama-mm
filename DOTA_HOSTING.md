@@ -21,9 +21,9 @@ DOTA_BOT_ACCOUNT_ID=123456789
 DOTA_TV_DELAY=0
 ```
 
-`DOTA_BOT_ACCOUNT_ID` is the 32-bit Dota account ID, not Steam64. The runtime checks that the authenticated account matches it. Compose persists the session at `/app/data/steam/session.json`; region defaults to 31, game mode to 2, and lobby timeout to 1800 seconds. Hosting eligibility is frozen transactionally when a new pending match is created. Historical pending matches without an explicit reservation stay manual, while existing hosted sessions retain restart recovery. No activation timestamp or deployment test-mode setting is required.
+`DOTA_BOT_ACCOUNT_ID` is the 32-bit Dota account ID, not Steam64. The runtime checks that the authenticated account matches it. Compose persists the session at `/app/data/steam/session.json`; region defaults to 27, game mode to 2, and lobby timeout to 1800 seconds. Hosting eligibility is frozen transactionally when a new pending match is created. Historical pending matches without an explicit reservation stay manual, while existing hosted sessions retain restart recovery. No activation timestamp or deployment test-mode setting is required.
 
-`DOTA_SERVER_REGION` defaults to **31: US South Central (`dfw`, Dallas)**. This was verified directly in `scripts/regions.txt` from installed Dota client build `25219194` on 2026-09-10; its matchmaking-group value `1` is not the lobby region ID. Supported game modes are 1 (All Pick), 2 (Captains Mode, default), and 22 (Ranked All Pick). Cama's saved first-pick side is applied to the lobby. TV delay uses Valve's [current wire enum](https://github.com/SteamTracking/GameTracking-Dota2/blob/master/Protobufs/dota_gcmessages_common_lobby.proto): 0 = 10 seconds, 1 = 60 seconds, 2 = 120 seconds, 3 = 300 seconds (default), 4 = 900 seconds. The bundled Rust protocol names predate the 60-second option; the adapter preserves current numeric values explicitly. Lobby safety settings disable cheats and bots and enable spectating.
+`DOTA_SERVER_REGION` defaults to **27: US North Central (`ord`, Chicago)**. This was verified directly in `scripts/regions.txt` from installed Dota client build `25265195` on 2026-09-12; its matchmaking-group value `1` is not the lobby region ID. An explicit environment value or saved guild override still takes precedence; update those to `27` if they currently select another region. Supported game modes are 1 (All Pick), 2 (Captains Mode, default), and 22 (Ranked All Pick). Cama's saved first-pick side is applied to the lobby. TV delay uses Valve's [current wire enum](https://github.com/SteamTracking/GameTracking-Dota2/blob/master/Protobufs/dota_gcmessages_common_lobby.proto): 0 = 10 seconds, 1 = 60 seconds, 2 = 120 seconds, 3 = 300 seconds (default), 4 = 900 seconds. The bundled Rust protocol names predate the 60-second option; the adapter preserves current numeric values explicitly. Lobby safety settings disable cheats and bots and enable spectating.
 
 Normal startup uses `DOTA_STEAM_PASSWORD` when no valid saved session exists. Start the bot normally with `docker compose up -d bot` or `cargo run --locked --manifest-path rust/Cargo.toml -p cama-runtime --bin cama-rust -- serve`. If Steam requests a Guard code, set `DOTA_STEAM_GUARD_CODE` to the current email or authenticator code and restart. Mobile approval can be completed in the Steam app when requested. Guard codes are temporary; remove the code after successful login. Later startups reuse the saved session.
 
@@ -40,7 +40,7 @@ Administrators can supply any of these optional `/shuffle` fields:
 | Option | Purpose |
 | --- | --- |
 | `hosting` | Bot hosting, or Manual to create and run Dota yourself |
-| `server_region` | Dota server-region ID; `31` is the tested local default |
+| `server_region` | Dota server-region ID; `27` is US North Central, the default |
 | `game_mode` | All Pick, Captains Mode, Random Draft, Single Draft, All Random, Least Played, Captains Draft, Ability Draft, All Random Deathmatch, Ranked All Pick, or Turbo |
 | `first_pick` | Radiant, Dire, or random draft first pick; does not swap players between teams |
 | `start` | Automatic when all ten are ready, or wait for an admin |
@@ -59,6 +59,20 @@ precedence; existing matches retain their saved settings. `/admin dota reset`
 clears these overrides and restores deployment defaults and the configured league.
 Regular players can shuffle using guild defaults; specifying hosting overrides
 requires an admin.
+
+`/admin dota configure pending_match:ID server_region:27` changes the **existing
+bot lobby**, while it is gathering players. It also accepts `game_mode`,
+`first_pick`, `start`, `tv_delay`, `league_id`, and `visibility`; omitted fields
+keep their current values. Use `start:manual` to wait for `/admin dota start`,
+or `start:automatic` to launch once everyone is seated after confirmation.
+The command queues an operator-stamped request; `/admin dota status` shows
+current settings and whether the change is pending or confirmed by Dota.
+Launch is blocked while applying changes. Requests survive restarts and lost
+replies; an unconfirmed change pauses for review after 90 seconds and can be
+retried with `/admin dota resume`. Changes are rejected once launch or
+cancellation is requested, and cannot move a running game to another server.
+This does not change guild defaults, teams, shuffle roles, or match identity.
+Manually hosted lobbies must be configured by their human host in Dota.
 
 `/admin dota status` shows this server's hosting sessions. `/admin dota start`
 requests launch for a lobby waiting on manual start; it retains all roster,

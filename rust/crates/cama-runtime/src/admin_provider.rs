@@ -699,8 +699,8 @@ impl AdminHandler {
     ) -> Result<(), InteractionHandlerError> {
         let route = context.path.join(" ");
         match route.as_str() {
-            "dota settings" | "dota reset" | "dota status" | "dota start" | "dota cancel"
-            | "dota resume" | "dota manual" | "dota resolve" | "dota betting" => {
+            "dota settings" | "dota configure" | "dota reset" | "dota status" | "dota start"
+            | "dota cancel" | "dota resume" | "dota manual" | "dota resolve" | "dota betting" => {
                 self.dota_command(context, responder).await
             }
             "adjust rating" => self.adjust_rating(context, responder).await,
