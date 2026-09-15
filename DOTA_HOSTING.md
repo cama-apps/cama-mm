@@ -87,6 +87,32 @@ Operator commands accept optional `pending_match`; omitting it is allowed only
 when the eligible match is unambiguous. They operate only in the invoking guild.
 Bot/manual selection is frozen per pending match. Automatic fallback does not alter the match already using the bot.
 
+## Recording a manually created replacement game
+
+If a bot lobby is stuck and the players play the same teams in a replacement
+lobby, an admin can record that game against the **existing pending match**:
+
+```text
+/record pending_match:607 result:radiant dotabuff_match_id:REPLACEMENT_MATCH_ID
+```
+
+Use `result:dire` if Dire won, and supply the positive numeric Dota match ID
+of the game actually played, not the old stuck game's ID. `pending_match` is
+an optional admin-only selector. No abort, reshuffle, or `/admin dota manual`
+handoff is needed. A different hosted match ID requires an admin override;
+normal recording votes otherwise retain their existing behavior.
+
+Recording preserves the pending identity, teams, and wagers and uses the
+normal once-only rating and payout pipeline. The replacement ID is retained
+across retries. The old hosting session is quarantined before recording;
+late results, statistics, and map recaps from it cannot be attached to the
+replacement. The bot keeps its account reserved while the old lobby remains
+active and only cleans up its own confirmed finished/reset lobby. Later
+shuffles use the existing manual fallback while that cleanup is pending.
+
+An already committed conflicting result is not overwritten by this command;
+use the existing match-correction controls in that case.
+
 ## Testing
 
 Unit and integration tests inject fake Dota transports directly; deployment always uses the real adapter when hosting is enabled. Fake Discord players do not represent Steam accounts and cannot launch a real hosted match. Keep automated local tests on a disposable database. To run a local Discord bot without making any Steam connection, leave hosting disabled.

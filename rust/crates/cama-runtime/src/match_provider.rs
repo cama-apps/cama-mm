@@ -51,6 +51,7 @@ use cama_db::core_repositories::{
 use cama_db::dota_bet_seed_repository::{
     BettingMode as SeedBettingMode, BettingTeam, DotaBetSeedRepository, FirstGameLobby,
 };
+use cama_db::dota_session_repository::DotaSessionRepository;
 use cama_db::dota_streak_repository::{DotaStreakCredit, DotaStreakRepository};
 use cama_db::gambling_stats_repository::{
     GamblingStatsPort, GamblingStatsRepository, GamblingStatsService,
@@ -826,6 +827,16 @@ fn record_options() -> Vec<CommandOptionSpec> {
             "Dotabuff match ID (optional)",
             CommandOptionKind::String,
         ),
+        {
+            let mut option = CommandOptionSpec::new(
+                "pending_match",
+                "Admin only: select the pending match to record",
+                CommandOptionKind::Integer,
+            );
+            option.min_integer = Some(1);
+            option.max_integer = Some(9_007_199_254_740_991);
+            option
+        },
     ]
 }
 
@@ -2105,6 +2116,27 @@ impl MatchHandler {
             ));
         };
 
+        // A replacement keeps the original session as a durable tombstone.
+        // Check it even after pending cleanup, before accepting old GC results
+        // or attaching statistics to the manually recorded replacement.
+        let sessions = DotaSessionRepository::new(&self.database_path);
+        let (guild, pending_id) = (result.guild_id, result.pending_match_id);
+        let replaced = tokio::task::spawn_blocking(move || {
+            sessions
+                .session(guild, pending_id)
+                .map(|session| {
+                    session.is_some_and(|session| {
+                        session.payload.get("manual_record_override").is_some()
+                    })
+                })
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| format!("hosted replacement lookup task failed: {error}"))??;
+        if replaced {
+            return Err("Hosted result rejected: this pending match was replaced by an admin's manual recording.".to_owned());
+        }
+
         let matches = MatchRepository::new(&self.database_path);
         let existing_match_id = tokio::task::spawn_blocking({
             let matches = matches.clone();
@@ -2655,9 +2687,51 @@ impl MatchHandler {
         if !matches!(result.as_str(), "radiant" | "dire" | "abort") {
             return followup_ephemeral(&responder, "❌ Invalid match result.").await;
         }
-        let pending = self
-            .select_pending_for_record(context.guild_id, context.user_id, &result)
-            .await?;
+        let is_admin = self.is_admin(&context);
+        let selected = context
+            .options
+            .iter()
+            .find(|option| option.name == "pending_match");
+        let pending = if let Some(selected) = selected {
+            if !is_admin {
+                return followup_ephemeral(
+                    &responder,
+                    "❌ Only an admin can select pending_match.",
+                )
+                .await;
+            }
+            let crate::registration::InteractionValue::Integer(id) = &selected.value else {
+                return followup_ephemeral(
+                    &responder,
+                    "❌ Pending match ID must be a positive integer.",
+                )
+                .await;
+            };
+            if *id <= 0 {
+                return followup_ephemeral(
+                    &responder,
+                    "❌ Pending match ID must be a positive integer.",
+                )
+                .await;
+            }
+            let repository = self.pending.clone();
+            let (guild, id) = (context.guild_id, *id);
+            let found = tokio::task::spawn_blocking(move || repository.pending_match(guild, id))
+                .await
+                .map_err(|error| format!("pending-match selection task failed: {error}"))?
+                .map_err(|error| error.to_string())?;
+            if found.is_none() {
+                return followup_ephemeral(
+                    &responder,
+                    "❌ That pending match was not found in this server.",
+                )
+                .await;
+            }
+            found
+        } else {
+            self.select_pending_for_record(context.guild_id, context.user_id, &result)
+                .await?
+        };
         let Some(pending) = pending else {
             let all = self.pending_matches(context.guild_id).await?;
             if all.is_empty() {
@@ -2687,7 +2761,6 @@ impl MatchHandler {
             )
             .await;
         };
-        let is_admin = self.is_admin(&context);
         if result == "abort" {
             if is_admin {
                 return self.finalize_abort(&pending, responder).await;
@@ -2726,6 +2799,14 @@ impl MatchHandler {
             return self.finalize_abort(&pending, responder).await;
         }
 
+        let dotabuff_match_id =
+            string_option(&context.options, "dotabuff_match_id").map(str::to_owned);
+        if let Err(error) = self
+            .manual_replacement_candidate(&pending, dotabuff_match_id.as_deref(), is_admin)
+            .await
+        {
+            return followup_ephemeral(&responder, &format!("❌ {error}")).await;
+        }
         let voting = self.voting.clone();
         let key = PendingVoteKey {
             guild_id: Some(context.guild_id),
@@ -2773,8 +2854,6 @@ impl MatchHandler {
         let winning_result = submission
             .result
             .ok_or("ready record vote did not contain a winning result")?;
-        let dotabuff_match_id =
-            string_option(&context.options, "dotabuff_match_id").map(str::to_owned);
         self.finalize_record(
             pending,
             context,
@@ -2786,6 +2865,62 @@ impl MatchHandler {
             dotabuff_match_id,
         )
         .await
+    }
+
+    async fn manual_replacement_candidate(
+        &self,
+        pending: &PendingMatchRecord,
+        supplied_match_id: Option<&str>,
+        is_admin: bool,
+    ) -> Result<Option<i64>, String> {
+        let sessions = DotaSessionRepository::new(&self.database_path);
+        let (guild, pending_id) = (pending.guild_id, pending.pending_match_id);
+        let session = tokio::task::spawn_blocking(move || sessions.session(guild, pending_id))
+            .await
+            .map_err(|error| format!("hosted session lookup task failed: {error}"))?
+            .map_err(|error| error.to_string())?;
+        let Some(session) = session else {
+            return Ok(None);
+        };
+        let overridden = session.payload.get("manual_record_override").is_some();
+        let launched_without_id = session
+            .payload
+            .get("launch_requested_at")
+            .is_some_and(|value| !value.is_null())
+            || matches!(
+                session.phase,
+                cama_db::dota_session_repository::DotaSessionPhase::Launching
+                    | cama_db::dota_session_repository::DotaSessionPhase::Running
+                    | cama_db::dota_session_repository::DotaSessionPhase::Finishing
+            );
+        if !overridden
+            && (!session.phase.is_active()
+                || (session.valve_match_id.is_none() && !launched_without_id))
+        {
+            return Ok(None);
+        }
+        let Some(supplied) = supplied_match_id else {
+            if overridden {
+                return Err("Provide the replacement Dota match ID in dotabuff_match_id to retry this recording.".into());
+            }
+            return Ok(None);
+        };
+        let parsed = supplied.parse::<i64>().ok().filter(|id| *id > 0).ok_or(
+            "A hosted replacement requires a positive numeric Dota match ID in dotabuff_match_id.",
+        )?;
+        if !overridden
+            && session
+                .valve_match_id
+                .as_deref()
+                .and_then(|id| id.parse::<i64>().ok())
+                == Some(parsed)
+        {
+            return Ok(None);
+        }
+        if !is_admin {
+            return Err("Only an admin can record a replacement Dota match.".into());
+        }
+        Ok(Some(parsed))
     }
 
     async fn pending_matches(
@@ -2986,6 +3121,53 @@ impl MatchHandler {
                 ),
             )
             .await;
+        };
+        // Re-read under the same guard that excludes hosted completion and
+        // abort. Detach only the stuck Dota identity; retain teams and wagers.
+        let replacement = match self
+            .manual_replacement_candidate(
+                &pending,
+                dotabuff_match_id.as_deref(),
+                self.is_admin(&context),
+            )
+            .await
+        {
+            Ok(replacement) => replacement,
+            Err(error) => return followup_ephemeral(&responder, &format!("❌ {error}")).await,
+        };
+        if let Some(replacement_match_id) = replacement {
+            let sessions = DotaSessionRepository::new(&self.database_path);
+            let (guild, pending_id) = (pending.guild_id, pending.pending_match_id);
+            let actor = u64::try_from(context.user_id).map_err(|_| "Admin ID is invalid")?;
+            let task_guard = guard.clone();
+            let detached = tokio::task::spawn_blocking(move || {
+                let _guard = task_guard;
+                sessions
+                    .replace_hosted_match_for_manual_record(
+                        guild,
+                        pending_id,
+                        replacement_match_id,
+                        actor,
+                        unix_seconds(),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .await
+            .map_err(|error| format!("manual replacement task failed: {error}"))?;
+            if let Err(error) = detached {
+                return followup_ephemeral(&responder, &format!("❌ {error}")).await;
+            }
+        }
+        let pending = if replacement.is_some() {
+            let repository = self.pending.clone();
+            let (guild, id) = (pending.guild_id, pending.pending_match_id);
+            tokio::task::spawn_blocking(move || repository.pending_match(guild, id))
+                .await
+                .map_err(|error| format!("replacement pending reload failed: {error}"))?
+                .map_err(|error| error.to_string())?
+                .ok_or("Pending match disappeared during replacement recording")?
+        } else {
+            pending
         };
         let pending = match self.prepare_recording_effects(&pending).await {
             Ok(pending) => pending,
@@ -3819,6 +4001,22 @@ impl MatchHandler {
         {
             return Err("pending match roster changed; retry recording".to_owned());
         }
+        let replacement = fresh
+            .state
+            .extra
+            .get("manual_record_override")
+            .map(|value| {
+                value
+                    .get("replacement_match_id")
+                    .and_then(serde_json::Value::as_i64)
+                    .filter(|id| *id > 0)
+                    .ok_or("Invalid saved manual replacement match ID")
+            })
+            .transpose()?;
+        if replacement.is_some() && valve_match_id.is_some() && replacement != valve_match_id {
+            return Err("Valve match ID conflicts with the saved manual replacement.".into());
+        }
+        let valve_match_id = replacement.or(valve_match_id);
         let mut worker = self.clone();
         if let Some(config) = fresh
             .state

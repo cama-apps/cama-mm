@@ -1,5 +1,6 @@
 use super::*;
 mod configuration_tests;
+mod manual_replacement_tests;
 use std::sync::{
     Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -280,6 +281,7 @@ impl Fixture {
             .unwrap()
             .pending_match_id;
         let state = SessionState {
+            manual_record_override: None,
             configuration: None,
             last_configuration: None,
             test_mode: DotaHostTestMode::Off,

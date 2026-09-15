@@ -192,6 +192,8 @@ struct OperatorResolution {
 #[derive(Clone, Serialize, Deserialize)]
 struct SessionState {
     #[serde(default)]
+    manual_record_override: Option<serde_json::Value>,
+    #[serde(default)]
     configuration: Option<configuration::LobbyConfigurationRequest>,
     #[serde(default)]
     last_configuration: Option<configuration::LobbyConfigurationRequest>,
@@ -313,6 +315,11 @@ impl DotaHostWorker {
         };
         let mut state: SessionState = serde_json::from_value(record.payload.clone())
             .map_err(|_| "invalid durable Dota session payload")?;
+        if state.manual_record_override.is_some() {
+            return self
+                .reconcile_replaced_lobby(port, &mut record, &mut state, now)
+                .await;
+        }
         if let Some(content) = state.pending_status.clone() {
             self.announce(&mut record, &mut state, &content, now)
                 .await?;
@@ -1363,6 +1370,52 @@ impl DotaHostWorker {
         }
     }
 
+    /// A manual replacement records against the same Cama identity. The old
+    /// Steam game is cleanup-only forever, even after the pending row is gone.
+    async fn reconcile_replaced_lobby(
+        &self,
+        port: &dyn DotaHostPort,
+        record: &mut DotaSessionRecord,
+        state: &mut SessionState,
+        now: i64,
+    ) -> Result<(), String> {
+        if self.config.test_mode != DotaHostTestMode::Off
+            || state.test_mode != DotaHostTestMode::Off
+        {
+            return Err("manual replacement cleanup requires a production hosting session".into());
+        }
+        self.live
+            .finish_match(record.guild_id, record.pending_match_id)
+            .await;
+        let lobby = port.snapshot().await?;
+        if let Some(lobby) = lobby {
+            if !owns_lobby(record, state, &lobby, self.config.account_id)
+                || lobby
+                    .match_id
+                    .is_some_and(|id| record.valve_match_id.as_deref() != Some(&id.to_string()))
+                || !port.betting_observation_fresh().await
+            {
+                return Ok(());
+            }
+            if lobby.stage == LobbyStage::Postgame
+                || (lobby.stage == LobbyStage::Gathering
+                    && lobby.match_id.is_none()
+                    && lobby.server_id.is_none())
+            {
+                // Never settle/void the replacement while cleaning up the old
+                // lobby. Keep the account leased until disappearance is seen.
+                port.destroy(lobby.id).await?;
+            }
+            return Ok(());
+        }
+        record.phase = Phase::Cancelled;
+        record.last_error = Some(
+            "Old lobby released after manual replacement; its result will not be recorded.".into(),
+        );
+        state.pending_status = None;
+        self.save(record, state, now).await
+    }
+
     async fn save(
         &self,
         record: &mut DotaSessionRecord,
@@ -1428,6 +1481,7 @@ impl DotaHostWorker {
                     }
                 }
                 let state = SessionState {
+                    manual_record_override: None,
                     configuration: None, last_configuration: None,
                     test_mode: config.test_mode, fake_roster, simulated_winner: None,
                     start_mode: options.start.unwrap_or_default(), manual_start_requested: false,
@@ -1762,12 +1816,15 @@ pub async fn guild_operator_command(
                 .take(3)
                 .map(|s| {
                     let state: SessionState = serde_json::from_value(s.payload).map_err(|_| "Invalid saved hosting state.")?;
+                    let recorded_id = if state.manual_record_override.is_some() {
+                        MatchRepository::new(&path).match_id_for_pending_match(guild, s.pending_match_id).map_err(|error| error.to_string())?
+                    } else { state.recorded_match_id };
                     let pending = PendingMatchRepository::new(&path).pending_match(guild, s.pending_match_id).map_err(|e|e.to_string())?;
                     let betting = if pending.as_ref().is_some_and(|p| p.state.extra.get("dota_betting_suspended") == Some(&serde_json::Value::Bool(true))) { "suspended by operator" }
                         else if pending.as_ref().is_some_and(|p| p.state.betting_open(chrono::Utc::now().timestamp())) { "open" }
                         else { "closed" };
                     Ok(format!("Pending #{}: {} · {:?}\n{}\nLobby {} · Dota {} · Cama {} · updated <t:{}:R> · betting {}\n{}", s.pending_match_id, s.phase.as_str(), state.test_mode, configuration::status(&state),
-                        s.lobby_id.as_deref().unwrap_or("unassigned"), s.valve_match_id.as_deref().unwrap_or("unassigned"), state.recorded_match_id.map_or("unrecorded".into(), |id| id.to_string()), s.updated_at,
+                        s.lobby_id.as_deref().unwrap_or("unassigned"), s.valve_match_id.as_deref().unwrap_or("unassigned"), recorded_id.map_or("unrecorded".into(), |id| id.to_string()), s.updated_at,
                         betting,
                         s.last_error.map_or_else(|| "No saved error.".to_owned(), |e| format!("Attention: {}", e.chars().take(300).collect::<String>()))))
                 }).collect::<Result<_, String>>()?;
@@ -1804,6 +1861,9 @@ pub async fn guild_operator_command(
         let mut session = sessions.session(guild, pending).map_err(|e| e.to_string())?.ok_or("No hosted session for that match in this server.")?;
         if !session.phase.is_active() { return Err("That hosting session has already finished.".into()); }
         let mut state: SessionState = serde_json::from_value(session.payload.clone()).map_err(|_| "Invalid saved hosting state.")?;
+        if state.manual_record_override.is_some() {
+            return Err("This hosted game was replaced through /record. Its old lobby is quarantined; automated results and hosting controls are disabled for it.".into());
+        }
         match action.as_str() {
             "start" => {
                 if state.configuration.is_some() { return Err("Lobby settings are still being applied; check `/admin dota status` before starting.".into()); }
@@ -1862,6 +1922,9 @@ pub async fn guild_resolution_command(
         let expected = (expected_valve_match_id != 0).then(|| expected_valve_match_id.to_string());
         if expected != session.valve_match_id { return Err("Dota match ID does not match the saved session. Inspect /admin dota status first.".into()); }
         let mut state: SessionState = serde_json::from_value(session.payload.clone()).map_err(|e| e.to_string())?;
+        if state.manual_record_override.is_some() {
+            return Err("This hosted game was replaced through /record. Do not resolve or void the replacement using the old Dota match ID.".into());
+        }
         if let Some(existing) = &state.resolution {
             if existing.outcome == outcome && existing.expected_valve_match_id == expected {
                 return Ok("That resolution is already queued; inspect /admin dota status for any remaining blocker.".into());

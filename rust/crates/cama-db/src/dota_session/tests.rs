@@ -11,6 +11,394 @@ const GUILD_A: i64 = 7;
 const GUILD_B: i64 = 8;
 const ACCOUNT: &str = "steam-bot-main";
 
+fn manual_override_fixture() -> (NamedTempFile, DotaSessionRepository, DotaSessionRecord) {
+    let file = NamedTempFile::new().unwrap();
+    crate::schema_manager::initialize_or_migrate(file.path()).unwrap();
+    let repository = DotaSessionRepository::new(file.path());
+    let mut session = claim_created(&repository, GUILD_A, 604, ACCOUNT, 10);
+    session.phase = DotaSessionPhase::Running;
+    session.lobby_id = Some("old-lobby".into());
+    session.valve_match_id = Some("1000".into());
+    session.payload = json!({
+        "roster":[{"account_id":11,"is_radiant":true},{"account_id":22,"is_radiant":false}],
+        "settings":{"region":27},"opaque":{"keep":[1,2,3]},
+        "launch_requested_at":15,"resolution":{"outcome":"aborted"},
+        "configuration":{"server_region":31},"pending_status":"old result",
+        "cancel_requested":true,"resume_requested":true,"manual_start_requested":true
+    });
+    let session = repository.update(&session, session.revision, 20).unwrap();
+    let connection = open_runtime_connection(file.path()).unwrap();
+    connection
+        .execute(
+            "INSERT INTO pending_matches(pending_match_id,guild_id,payload) VALUES (604,?1,?2)",
+            params![
+                GUILD_A,
+                json!({
+                    "team1_players":[11],"team2_players":[22],"betting_deadline":300,
+                    "dota_betting_extended_until":400,"dota_betting_closed":true,
+                    "dota_betting_closed_at":200,"shuffle_setup_complete":true,
+                    "draft_setup_complete":true,"dota_host_account_key":ACCOUNT,
+                    "dota_hosting":{"hosting":"bot","server_region":27},
+                    "dota_hosted_betting":true,"dota_hosted_betting_started_at":10,
+                    "dota_hosted_betting_observed_at":200,"seed_reservations":{"pool":500},
+                    "dota_betting_control_audit":[{"action":"resume","actor_id":99}],
+                    "opaque":{"future_field":"keep"}
+                })
+                .to_string()
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO bets(guild_id,pending_match_id,discord_id,team_bet_on,amount,bet_time)
+        VALUES (?1,604,11,'radiant',100,12)",
+            [GUILD_A],
+        )
+        .unwrap();
+    (file, repository, session)
+}
+
+fn override_pending(connection: &Connection) -> Value {
+    let raw: String = connection
+        .query_row(
+            "SELECT payload FROM pending_matches WHERE guild_id=?1 AND pending_match_id=604",
+            [GUILD_A],
+            |row| row.get(0),
+        )
+        .unwrap();
+    serde_json::from_str(&raw).unwrap()
+}
+
+#[test]
+fn manual_override_reserves_replacement_before_core_recording() {
+    let (file, repository, _) = manual_override_fixture();
+    let mut other = claim_created(&repository, GUILD_A, 605, "second-host", 20);
+    other.phase = DotaSessionPhase::Running;
+    other.valve_match_id = Some("1001".into());
+    let other = repository.update(&other, other.revision, 21).unwrap();
+    let connection = open_runtime_connection(file.path()).unwrap();
+    connection
+        .execute(
+            "INSERT INTO pending_matches(pending_match_id,guild_id,payload)
+         SELECT 605,guild_id,payload FROM pending_matches WHERE pending_match_id=604",
+            [],
+        )
+        .unwrap();
+    let original_pending: String = connection
+        .query_row(
+            "SELECT payload FROM pending_matches WHERE pending_match_id=605",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        repository
+            .replace_hosted_match_for_manual_record(GUILD_A, 604, 2000, 99, 250)
+            .unwrap()
+    );
+    assert!(matches!(
+        repository.replace_hosted_match_for_manual_record(GUILD_A,605,2000,99,251),
+        Err(DotaSessionRepositoryError::InvalidManualOverride(message))
+            if message.contains("reserved by another pending match")
+    ));
+    assert_eq!(repository.session(GUILD_A, 605).unwrap().unwrap(), other);
+    let after_pending: String = connection
+        .query_row(
+            "SELECT payload FROM pending_matches WHERE pending_match_id=605",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(after_pending, original_pending);
+    let committed: i64 = connection
+        .query_row("SELECT COUNT(*) FROM matches", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(committed, 0);
+    assert!(
+        repository
+            .replace_hosted_match_for_manual_record(GUILD_A, 604, 2000, 99, 252)
+            .unwrap()
+    );
+}
+
+#[test]
+fn manual_override_quarantines_old_game_preserving_roster_money_and_deadlines() {
+    let (file, repository, original) = manual_override_fixture();
+    let connection = open_runtime_connection(file.path()).unwrap();
+    let original_pending = override_pending(&connection);
+    assert!(
+        repository
+            .replace_hosted_match_for_manual_record(GUILD_A, 604, 2000, 99, 250)
+            .unwrap()
+    );
+    let updated = repository.session(GUILD_A, 604).unwrap().unwrap();
+    assert_eq!(updated.phase, DotaSessionPhase::NeedsReview);
+    assert_eq!(updated.lobby_id, original.lobby_id);
+    assert_eq!(updated.valve_match_id, original.valve_match_id);
+    assert_eq!(updated.account_key, original.account_key);
+    assert_eq!(updated.revision, original.revision + 1);
+    assert_eq!(updated.payload["roster"], original.payload["roster"]);
+    assert_eq!(updated.payload["opaque"], original.payload["opaque"]);
+    assert_eq!(updated.payload["settings"], original.payload["settings"]);
+    assert_eq!(updated.payload["launch_requested_at"], json!(15));
+    for key in ["resolution", "configuration", "pending_status"] {
+        assert!(updated.payload.get(key).is_none());
+    }
+    for key in [
+        "cancel_requested",
+        "resume_requested",
+        "manual_start_requested",
+    ] {
+        assert_eq!(updated.payload[key], json!(false));
+    }
+    let pending = override_pending(&connection);
+    assert_eq!(
+        pending["manual_record_override"],
+        updated.payload["manual_record_override"]
+    );
+    assert_eq!(
+        pending["manual_record_override"],
+        json!({"replacement_match_id":2000,
+        "previous_valve_match_id":"1000","actor_id":99,"requested_at":250})
+    );
+    assert_eq!(pending["dota_hosting"]["hosting"], json!("manual"));
+    assert_eq!(pending["dota_hosting"]["server_region"], json!(27));
+    assert_eq!(pending["dota_betting_suspended"], json!(true));
+    assert_eq!(
+        pending["dota_betting_control_audit"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    for key in [
+        "team1_players",
+        "team2_players",
+        "betting_deadline",
+        "dota_betting_extended_until",
+        "dota_betting_closed",
+        "dota_betting_closed_at",
+        "seed_reservations",
+        "opaque",
+    ] {
+        assert_eq!(pending[key], original_pending[key], "{key}");
+    }
+    for key in [
+        "dota_host_account_key",
+        "dota_hosted_betting",
+        "dota_hosted_betting_started_at",
+        "dota_hosted_betting_observed_at",
+    ] {
+        assert!(pending.get(key).is_none());
+    }
+    let bet: (i64, Option<i64>, Option<i64>) = connection
+        .query_row(
+            "SELECT amount,payout,match_id FROM bets WHERE guild_id=?1 AND pending_match_id=604",
+            [GUILD_A],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(bet, (100, None, None));
+    assert!(matches!(
+        repository
+            .claim_session(GUILD_B, 605, ACCOUNT, json!({}), 251)
+            .unwrap(),
+        DotaSessionClaim::Busy(_)
+    ));
+    assert!(matches!(
+        repository.update(&original, original.revision, 252),
+        Err(DotaSessionRepositoryError::StaleRevision { .. })
+    ));
+}
+
+#[test]
+fn manual_override_retries_without_mutation_even_after_pending_consumption() {
+    let (file, repository, _) = manual_override_fixture();
+    assert!(
+        repository
+            .replace_hosted_match_for_manual_record(GUILD_A, 604, 2000, 99, 250)
+            .unwrap()
+    );
+    let first = repository.session(GUILD_A, 604).unwrap().unwrap();
+    assert!(
+        repository
+            .replace_hosted_match_for_manual_record(GUILD_A, 604, 2000, 100, 300)
+            .unwrap()
+    );
+    assert_eq!(repository.session(GUILD_A, 604).unwrap().unwrap(), first);
+    assert!(
+        repository
+            .replace_hosted_match_for_manual_record(GUILD_A, 604, 3000, 100, 300)
+            .is_err()
+    );
+    let connection = open_runtime_connection(file.path()).unwrap();
+    connection.execute("INSERT INTO matches(guild_id,pending_match_id,valve_match_id,team1_players,team2_players)
+        VALUES (?1,604,NULL,'[11]','[22]')",[GUILD_A]).unwrap();
+    assert!(
+        repository
+            .replace_hosted_match_for_manual_record(GUILD_A, 604, 2000, 100, 350)
+            .unwrap()
+    );
+    assert_eq!(repository.session(GUILD_A, 604).unwrap().unwrap(), first);
+    connection
+        .execute(
+            "UPDATE matches SET valve_match_id=2000 WHERE guild_id=?1",
+            [GUILD_A],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "DELETE FROM pending_matches WHERE guild_id=?1 AND pending_match_id=604",
+            [GUILD_A],
+        )
+        .unwrap();
+    assert!(
+        repository
+            .replace_hosted_match_for_manual_record(GUILD_A, 604, 2000, 100, 400)
+            .unwrap()
+    );
+    assert_eq!(repository.session(GUILD_A, 604).unwrap().unwrap(), first);
+    connection
+        .execute(
+            "UPDATE matches SET valve_match_id=3000 WHERE guild_id=?1",
+            [GUILD_A],
+        )
+        .unwrap();
+    assert!(
+        repository
+            .replace_hosted_match_for_manual_record(GUILD_A, 604, 2000, 100, 400)
+            .is_err()
+    );
+    assert_eq!(repository.session(GUILD_A, 604).unwrap().unwrap(), first);
+}
+
+#[test]
+fn manual_override_validates_guild_setup_committed_matches_and_terminal_state() {
+    let (file, repository, original) = manual_override_fixture();
+    let connection = open_runtime_connection(file.path()).unwrap();
+    let pending = override_pending(&connection);
+    for (guild, pending_id, valve_id, actor) in [
+        (0, 604, 2000, 99),
+        (GUILD_A, 0, 2000, 99),
+        (GUILD_A, 604, 0, 99),
+        (GUILD_A, 604, 2000, 0),
+    ] {
+        assert!(
+            repository
+                .replace_hosted_match_for_manual_record(guild, pending_id, valve_id, actor, 250)
+                .is_err()
+        );
+        assert_eq!(repository.session(GUILD_A, 604).unwrap().unwrap(), original);
+        assert_eq!(override_pending(&connection), pending);
+    }
+    assert!(
+        !repository
+            .replace_hosted_match_for_manual_record(GUILD_B, 604, 2000, 99, 250)
+            .unwrap()
+    );
+    assert!(
+        !repository
+            .replace_hosted_match_for_manual_record(GUILD_A, 604, 1000, 99, 250)
+            .unwrap()
+    );
+    for flag in ["shuffle_setup_complete", "draft_setup_complete"] {
+        let mut incomplete = pending.clone();
+        incomplete[flag] = json!(false);
+        connection
+            .execute(
+                "UPDATE pending_matches SET payload=?1 WHERE pending_match_id=604",
+                [incomplete.to_string()],
+            )
+            .unwrap();
+        assert!(matches!(
+            repository.replace_hosted_match_for_manual_record(GUILD_A, 604, 2000, 99, 250),
+            Err(DotaSessionRepositoryError::PendingMatch(
+                PendingMatchRepositoryError::SetupIncomplete(604)
+            ))
+        ));
+        assert_eq!(repository.session(GUILD_A, 604).unwrap().unwrap(), original);
+    }
+    connection
+        .execute(
+            "UPDATE pending_matches SET payload=?1 WHERE pending_match_id=604",
+            [pending.to_string()],
+        )
+        .unwrap();
+    connection.execute("INSERT INTO matches(guild_id,pending_match_id,valve_match_id,team1_players,team2_players)
+        VALUES (?1,604,1000,'[11]','[22]')",[GUILD_A]).unwrap();
+    assert!(
+        repository
+            .replace_hosted_match_for_manual_record(GUILD_A, 604, 2000, 99, 250)
+            .is_err()
+    );
+    connection
+        .execute(
+            "UPDATE matches SET pending_match_id=605,valve_match_id=2000",
+            [],
+        )
+        .unwrap();
+    assert!(
+        repository
+            .replace_hosted_match_for_manual_record(GUILD_A, 604, 2000, 99, 250)
+            .is_err()
+    );
+    connection.execute("DELETE FROM matches", []).unwrap();
+    let terminal = repository
+        .transition_phase(
+            &original,
+            DotaSessionPhase::Recorded,
+            original.revision,
+            250,
+        )
+        .unwrap();
+    assert!(
+        repository
+            .replace_hosted_match_for_manual_record(GUILD_A, 604, 2000, 99, 251)
+            .is_err()
+    );
+    assert_eq!(repository.session(GUILD_A, 604).unwrap().unwrap(), terminal);
+    assert_eq!(override_pending(&connection), pending);
+}
+
+#[test]
+fn manual_override_rolls_back_both_rows_when_pending_write_fails() {
+    let (file, repository, original) = manual_override_fixture();
+    let connection = open_runtime_connection(file.path()).unwrap();
+    let pending = override_pending(&connection);
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_pending_override BEFORE UPDATE ON pending_matches
+        BEGIN SELECT RAISE(ABORT,'simulated pending write failure'); END;",
+        )
+        .unwrap();
+    assert!(matches!(
+        repository.replace_hosted_match_for_manual_record(GUILD_A, 604, 2000, 99, 250),
+        Err(DotaSessionRepositoryError::Sqlite(_))
+    ));
+    assert_eq!(repository.session(GUILD_A, 604).unwrap().unwrap(), original);
+    assert_eq!(override_pending(&connection), pending);
+}
+
+#[test]
+fn manual_override_handles_launched_game_without_assigned_valve_id() {
+    let (_file, repository, mut original) = manual_override_fixture();
+    original.valve_match_id = None;
+    original.phase = DotaSessionPhase::Launching;
+    let original = repository.update(&original, original.revision, 21).unwrap();
+    assert!(
+        repository
+            .replace_hosted_match_for_manual_record(GUILD_A, 604, 2000, 99, 250)
+            .unwrap()
+    );
+    let updated = repository.session(GUILD_A, 604).unwrap().unwrap();
+    assert_eq!(updated.valve_match_id, None);
+    assert_eq!(updated.lobby_id, original.lobby_id);
+    assert_eq!(
+        updated.payload["manual_record_override"]["previous_valve_match_id"],
+        Value::Null
+    );
+}
+
 #[test]
 fn guild_history_filters_before_limit_and_orders_only_its_own_rows() {
     let (_file, repository) = fixture();
