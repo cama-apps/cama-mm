@@ -26,6 +26,7 @@ use tempfile::NamedTempFile;
 
 #[derive(Default)]
 struct CapturedResponses {
+    initial: Vec<InteractionResponse>,
     deferred: Vec<bool>,
     followups: Vec<InteractionResponse>,
 }
@@ -163,10 +164,12 @@ struct CapturingResponder {
 
 #[async_trait]
 impl InteractionResponder for CapturingResponder {
-    async fn respond(
-        &self,
-        _response: InteractionResponse,
-    ) -> Result<(), InteractionResponseError> {
+    async fn respond(&self, response: InteractionResponse) -> Result<(), InteractionResponseError> {
+        self.captured
+            .lock()
+            .expect("responses")
+            .initial
+            .push(response);
         Ok(())
     }
 
@@ -3913,7 +3916,7 @@ async fn live_readycheck_reconciles_raw_join_and_leave_against_the_active_genera
         transport
             .sent_messages()
             .iter()
-            .any(|sent| sent.message.response.content == "🚪 Recent Join left.")
+            .any(|sent| sent.message.response.content == "🚪 <@20> left.")
     );
     assert!(
         transport
@@ -4243,19 +4246,18 @@ async fn test_curfew_sweep_removes_the_kicked_players_sword_reaction() {
             }),
         "curfew kick must remove the kicked player's own sword reaction"
     );
-    // Privacy: the thread sees an ordinary leave line (falling back to the
-    // stored name when the member cache has nothing), and nothing public
-    // says the word curfew.
+    // Privacy: the thread sees the ordinary silent mention even when the
+    // member cache is empty, and nothing public says the word curfew.
     let leave_line = state
         .sent
         .iter()
         .rev()
         .find(|sent| sent.message.response.content.contains("left."))
         .expect("the sweep must post the normal leave line");
-    assert!(
-        leave_line.message.response.content.contains("Sleepy"),
-        "{}",
-        leave_line.message.response.content
+    assert_eq!(leave_line.message.response.content, "🚪 <@1> left.");
+    assert_eq!(
+        leave_line.message.allowed_mentions,
+        DiscordAllowedMentions::None
     );
     assert!(
         !state.sent.iter().any(|sent| sent
@@ -4933,4 +4935,520 @@ async fn radio_retained_spectator_record_allows_unsubscribe_but_not_new_admissio
         .await
         .unwrap();
     assert!(repository.subscribers(42, 901).unwrap().is_empty());
+}
+
+// ---- lobby Join/Leave buttons ----------------------------------------------
+
+fn button_ids(response: &InteractionResponse) -> Vec<&str> {
+    response
+        .components
+        .iter()
+        .flat_map(|row| row.buttons.iter())
+        .map(|button| button.custom_id.as_str())
+        .collect()
+}
+
+fn button_labels(response: &InteractionResponse) -> Vec<&str> {
+    response
+        .components
+        .iter()
+        .flat_map(|row| row.buttons.iter())
+        .map(|button| button.label.as_str())
+        .collect()
+}
+
+fn join_button_id(kind: LobbyKind) -> String {
+    lobby_button_id(
+        LobbyScope::new(AppGuildId(42), kind),
+        LobbyButtonAction::Join,
+    )
+}
+
+fn leave_button_id(kind: LobbyKind) -> String {
+    lobby_button_id(
+        LobbyScope::new(AppGuildId(42), kind),
+        LobbyButtonAction::Leave,
+    )
+}
+
+/// Click a button on a lobby message.
+async fn dispatch_component(
+    provider: &LobbyRegistrationProvider,
+    custom_id: &str,
+    user_id: u64,
+    display_name: &str,
+) -> Arc<CapturingResponder> {
+    let responder = Arc::new(CapturingResponder::default());
+    registry_for(provider)
+        .component_handler(custom_id)
+        .expect("registered lobby button route")
+        .handle(
+            InteractionRequest::Component {
+                interaction_id: user_id + 1_000,
+                custom_id: custom_id.to_owned(),
+                user_id,
+                user_display_name: display_name.to_owned(),
+                guild_id: Some(42),
+                channel_id: Some(700),
+                member_permissions: None,
+                values: Vec::new(),
+            },
+            responder.clone(),
+        )
+        .await
+        .expect("dispatch lobby button");
+    responder
+}
+
+/// A failed button click explains the refusal privately.
+fn only_ephemeral_followup(responder: &CapturingResponder) -> String {
+    let captured = responder.captured.lock().expect("responses");
+    assert_eq!(
+        captured.deferred.len(),
+        1,
+        "a button click must be acknowledged exactly once before any work"
+    );
+    assert_eq!(
+        captured.followups.len(),
+        1,
+        "expected one follow-up, got {:?}",
+        captured
+            .followups
+            .iter()
+            .map(|response| &response.content)
+            .collect::<Vec<_>>()
+    );
+    let followup = &captured.followups[0];
+    assert!(followup.ephemeral, "button replies must be private");
+    followup.content.clone()
+}
+
+fn assert_silent_button_success(responder: &CapturingResponder) {
+    let captured = responder.captured.lock().expect("responses");
+    assert_eq!(captured.deferred.len(), 1, "acknowledge the button once");
+    assert!(
+        captured.initial.is_empty(),
+        "success must not create a reply"
+    );
+    assert!(
+        captured.followups.is_empty(),
+        "success must not create a follow-up"
+    );
+}
+
+fn assert_silent_thread_update(
+    provider: &LobbyRegistrationProvider,
+    transport: &RecordingTransport,
+    content: &str,
+) {
+    let lobby = lobby_snapshot(provider, LobbyKind::Open);
+    let thread_id = to_u64(lobby.message_ids.thread_id.expect("lobby thread").0).unwrap();
+    let state = transport.state.lock().expect("transport state");
+    let updates: Vec<_> = state
+        .sent
+        .iter()
+        .filter(|sent| sent.channel_id == thread_id && sent.message.response.content == content)
+        .collect();
+    assert_eq!(updates.len(), 1, "keep one thread update for the action");
+    assert_eq!(
+        updates[0].message.allowed_mentions,
+        DiscordAllowedMentions::None
+    );
+    let message_id = to_u64(lobby.message_ids.message_id.unwrap().0).unwrap();
+    assert!(
+        state
+            .edits
+            .iter()
+            .any(|(_, id, message)| *id == message_id && !message.response.embeds.is_empty()),
+        "the lobby roster must still repaint"
+    );
+}
+
+fn lobby_message_id(provider: &LobbyRegistrationProvider, kind: LobbyKind) -> u64 {
+    to_u64(
+        lobby_snapshot(provider, kind)
+            .message_ids
+            .message_id
+            .expect("lobby message")
+            .0,
+    )
+    .expect("Discord message id")
+}
+
+#[test]
+fn test_lobby_button_ids_round_trip_and_reject_garbage() {
+    for kind in [LobbyKind::Open, LobbyKind::LowSkill] {
+        let scope = LobbyScope::new(AppGuildId(42), kind);
+        for action in [LobbyButtonAction::Join, LobbyButtonAction::Leave] {
+            assert_eq!(
+                parse_lobby_button_id(&lobby_button_id(scope, action)),
+                Some((action, scope))
+            );
+        }
+    }
+    for bad in [
+        "lobby_button:join:42",
+        "lobby_button:kick:42:open",
+        "lobby_button:join:x:open",
+        "lobby_button:join:42:ranked",
+        "lobby_button:join:42:open:extra",
+        "other:join:42:open",
+    ] {
+        assert_eq!(parse_lobby_button_id(bad), None, "{bad}");
+    }
+}
+
+#[tokio::test]
+async fn test_lobby_registers_the_button_component_route() {
+    let database = database_with_players(&[(99, "Creator")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport);
+    let registry = registry_for(&provider);
+    assert!(
+        registry
+            .component_handler(&join_button_id(LobbyKind::Open))
+            .is_some()
+    );
+    assert!(
+        registry
+            .component_handler(&leave_button_id(LobbyKind::LowSkill))
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn test_lobby_message_carries_join_and_leave_buttons() {
+    let database = database_with_players(&[(99, "Creator")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        99,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    let state = transport.state.lock().expect("transport state");
+    let lobby_message = &state
+        .sent
+        .iter()
+        .find(|sent| sent.channel_id == 700 && !sent.message.response.embeds.is_empty())
+        .expect("lobby message posted to the lobby channel")
+        .message
+        .response;
+    assert_eq!(
+        button_ids(lobby_message),
+        vec![
+            join_button_id(LobbyKind::Open).as_str(),
+            leave_button_id(LobbyKind::Open).as_str()
+        ]
+    );
+    assert_eq!(button_labels(lobby_message), vec!["⚔️ Join", "Leave"]);
+}
+
+#[tokio::test]
+async fn test_lobby_display_repaint_keeps_the_buttons() {
+    let database = database_with_players(&[(99, "Creator"), (1, "Player")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        99,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    dispatch_command(
+        &provider,
+        "join",
+        1,
+        "Player",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    let message_id = lobby_message_id(&provider, LobbyKind::Open);
+    let state = transport.state.lock().expect("transport state");
+    let repaint = state
+        .edits
+        .iter()
+        .rev()
+        .find(|(_, edited, _)| *edited == message_id)
+        .map(|(_, _, message)| &message.response)
+        .expect("the join must repaint the lobby message");
+    assert!(
+        !repaint.embeds.is_empty(),
+        "the repaint carries the roster embed"
+    );
+    assert_eq!(
+        button_ids(repaint),
+        vec![
+            join_button_id(LobbyKind::Open).as_str(),
+            leave_button_id(LobbyKind::Open).as_str()
+        ],
+        "a Discord edit replaces the component rows, so every repaint must re-attach the buttons"
+    );
+}
+
+#[tokio::test]
+async fn test_join_button_seats_a_registered_player() {
+    let database = database_with_players(&[(99, "Creator"), (1, "Player")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        99,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    let responder =
+        dispatch_component(&provider, &join_button_id(LobbyKind::Open), 1, "Player").await;
+
+    assert!(
+        lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(1))
+    );
+    assert_silent_button_success(&responder);
+    assert_silent_thread_update(&provider, &transport, "✅ <@1> joined.");
+}
+
+#[tokio::test]
+async fn test_join_button_twice_reports_already_joined() {
+    let database = database_with_players(&[(99, "Creator"), (1, "Player")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        99,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    dispatch_component(&provider, &join_button_id(LobbyKind::Open), 1, "Player").await;
+
+    let responder =
+        dispatch_component(&provider, &join_button_id(LobbyKind::Open), 1, "Player").await;
+
+    let content = only_ephemeral_followup(&responder);
+    assert!(!content.starts_with("✅"), "{content}");
+    assert_eq!(
+        lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .iter()
+            .filter(|id| **id == AppUserId(1))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn test_join_button_rejects_an_unregistered_player() {
+    let database = database_with_players(&[(99, "Creator")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        99,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    let responder =
+        dispatch_component(&provider, &join_button_id(LobbyKind::Open), 5, "Stranger").await;
+
+    assert!(
+        !lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(5))
+    );
+    assert!(
+        only_ephemeral_followup(&responder).contains("not registered"),
+        "unregistered players are told to register"
+    );
+}
+
+#[tokio::test]
+async fn test_join_button_without_a_lobby_explains_how_to_open_one() {
+    let database = database_with_players(&[(1, "Player")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+
+    let responder =
+        dispatch_component(&provider, &join_button_id(LobbyKind::Open), 1, "Player").await;
+
+    let content = only_ephemeral_followup(&responder);
+    assert!(content.contains("No active"), "{content}");
+    assert!(content.contains("/lobby"), "{content}");
+}
+
+#[tokio::test]
+async fn test_join_button_blocked_during_active_curfew_window_stays_private() {
+    let database = database_with_players(&[(99, "Creator"), (1, "Sleepy")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        99,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let now = chrono::Utc::now();
+    let start = now - chrono::Duration::minutes(30);
+    let end = now + chrono::Duration::minutes(30);
+    CurfewRepository::new(database.path())
+        .add_or_replace(&CurfewWindow {
+            discord_id: 1,
+            guild_id: 42,
+            name: "sleep".to_owned(),
+            start_hour: start.hour(),
+            start_minute: start.minute(),
+            end_hour: end.hour(),
+            end_minute: end.minute(),
+            timezone: Some("UTC".to_owned()),
+            days: None,
+            mode: cama_domain::curfew::CurfewMode::Default,
+        })
+        .expect("seed an always-active curfew window");
+    let sent_before = transport.state.lock().expect("transport state").sent.len();
+
+    let responder =
+        dispatch_component(&provider, &join_button_id(LobbyKind::Open), 1, "Sleepy").await;
+
+    assert!(
+        !lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(1))
+    );
+    let content = only_ephemeral_followup(&responder);
+    assert!(content.contains("curfew"), "{content}");
+    assert!(
+        content.contains("sleep"),
+        "the private reply names the window: {content}"
+    );
+    let state = transport.state.lock().expect("transport state");
+    assert_eq!(
+        state.sent.len(),
+        sent_before,
+        "a button refusal is ephemeral: nothing is posted to the channel"
+    );
+    assert!(
+        state.direct_messages.is_empty(),
+        "no DM is needed when the reply itself is private"
+    );
+}
+
+#[tokio::test]
+async fn test_leave_button_removes_the_player() {
+    let database = database_with_players(&[(99, "Creator"), (1, "Player")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        99,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    dispatch_component(&provider, &join_button_id(LobbyKind::Open), 1, "Player").await;
+    assert!(
+        lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(1))
+    );
+
+    let responder =
+        dispatch_component(&provider, &leave_button_id(LobbyKind::Open), 1, "Player").await;
+
+    assert!(
+        !lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(1))
+    );
+    assert_silent_button_success(&responder);
+    assert_silent_thread_update(&provider, &transport, "🚪 <@1> left.");
+}
+
+#[tokio::test]
+async fn test_leave_button_when_not_in_that_lobby_is_a_private_warning() {
+    let database = database_with_players(&[(99, "Creator"), (1, "Player")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        99,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    let responder =
+        dispatch_component(&provider, &leave_button_id(LobbyKind::Open), 1, "Player").await;
+
+    let content = only_ephemeral_followup(&responder);
+    assert!(content.contains("not in"), "{content}");
+}
+
+#[tokio::test]
+async fn test_leave_button_only_leaves_its_own_lobby() {
+    let database = database_with_players(&[(99, "Creator"), (1, "Player")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    for kind in [LobbyKind::Open, LobbyKind::LowSkill] {
+        dispatch_command(&provider, "lobby", 99, "Creator", vec![lobby_option(kind)]).await;
+        dispatch_component(&provider, &join_button_id(kind), 1, "Player").await;
+    }
+
+    dispatch_component(&provider, &leave_button_id(LobbyKind::Open), 1, "Player").await;
+
+    assert!(
+        !lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(1))
+    );
+    assert!(
+        lobby_snapshot(&provider, LobbyKind::LowSkill)
+            .players
+            .contains(&AppUserId(1)),
+        "the Leave button on one lobby message must not touch the other lobby"
+    );
+}
+
+#[tokio::test]
+async fn test_lobby_button_with_malformed_custom_id_is_an_error() {
+    let database = database_with_players(&[(1, "Player")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    let responder = Arc::new(CapturingResponder::default());
+    let result = registry_for(&provider)
+        .component_handler("lobby_button:join:42:open")
+        .expect("registered lobby button route")
+        .handle(
+            InteractionRequest::Component {
+                interaction_id: 1,
+                custom_id: "lobby_button:kick:42:open".to_owned(),
+                user_id: 1,
+                user_display_name: "Player".to_owned(),
+                guild_id: Some(42),
+                channel_id: Some(700),
+                member_permissions: None,
+                values: Vec::new(),
+            },
+            responder.clone(),
+        )
+        .await;
+    assert!(result.is_err());
 }
