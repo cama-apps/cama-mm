@@ -691,10 +691,6 @@ impl FirstGamePoolPreviewPort for LoadedFirstGamePoolPreviews {
 }
 
 impl LobbyRuntimeState {
-    async fn resolve_player_name(&self, guild_id: AppGuildId, player_id: AppUserId) -> String {
-        self.render_player_name(guild_id, player_id)
-    }
-
     fn cached_player_name(&self, guild_id: AppGuildId, player_id: AppUserId) -> Option<String> {
         let user_id = u64::try_from(player_id.0).ok()?;
         let guild_id = u64::try_from(guild_id.0)
@@ -1818,28 +1814,10 @@ impl CurfewLobbyDisplayPort for CurfewLobbyDisplay {
     ) -> Result<(), String> {
         let scope = LobbyScope::new(AppGuildId(guild_id), lobby_kind);
         let player_id = AppUserId(discord_id);
-        // Privacy: a curfew removal looks exactly like the player leaving —
-        // the thread gets the ordinary "left" line under their live display
-        // name, the sword reaction comes off, and nothing public mentions
-        // curfew. The reason goes to them by DM only. There's no interaction
-        // here to carry a display name, so it's the guild-member cache, then
-        // the stored name — never a bare Discord ID.
-        let display_name = match self
-            .handler
-            .state
-            .cached_player_name(scope.guild_id, player_id)
-        {
-            Some(display_name) => display_name,
-            None => self
-                .handler
-                .load_player(player_id, scope.guild_id)
-                .await
-                .ok()
-                .flatten()
-                .map_or_else(|| player_id.0.to_string(), |player| player.name),
-        };
+        // Curfew removals use the same silent mention as ordinary leaves;
+        // only the private notification explains the reason.
         self.handler
-            .best_effort_leave_publication(scope, player_id, &display_name)
+            .best_effort_leave_publication(scope, player_id)
             .await;
         Ok(())
     }
@@ -3293,20 +3271,21 @@ impl LobbyInteractionHandler {
             command.user_id,
             &command.user_display_name,
             responder,
+            true,
         )
         .await
     }
 
-    /// Seat `player_id` in `scope`'s lobby and tell them how it went, in
-    /// private. Shared by `/join` and the Join button, so both surfaces
-    /// make the same checks and say the same things. The interaction must
-    /// already be acknowledged.
+    /// Seat the player with shared checks and thread/roster publication.
+    /// Commands confirm success; buttons only explain failures privately.
+    /// The interaction must already be acknowledged.
     async fn join_lobby_for_user(
         &self,
         scope: LobbyScope,
         player_id: AppUserId,
         user_display_name: &str,
         responder: Arc<dyn InteractionResponder>,
+        confirm_success: bool,
     ) -> Result<(), InteractionHandlerError> {
         let Some(player) = self.load_player(player_id, scope.guild_id).await? else {
             return followup_ephemeral(
@@ -3358,7 +3337,9 @@ impl LobbyInteractionHandler {
                     .expect("successful join has commit time"),
             )
             .await;
-        followup_ephemeral(&responder, &format!("✅ Joined {}!", scope.kind.label())).await?;
+        if confirm_success {
+            followup_ephemeral(&responder, &format!("✅ Joined {}!", scope.kind.label())).await?;
+        }
         if let Some(event) = event {
             self.best_effort_explicit_lobby_join_neon(event).await;
         }
@@ -3367,8 +3348,8 @@ impl LobbyInteractionHandler {
 
     /// A Join or Leave button on a lobby message. Acknowledges with a
     /// deferred update (the lobby message itself is repainted by the join
-    /// and leave paths as usual) and answers the player with an ephemeral
-    /// follow-up, so every refusal — curfew included — stays private.
+    /// and leave paths as usual). Successful clicks need no follow-up;
+    /// every refusal, including curfew, stays private.
     async fn handle_lobby_button(
         &self,
         custom_id: &str,
@@ -3390,7 +3371,7 @@ impl LobbyInteractionHandler {
             .map_err(|error| error.to_string())?;
         match action {
             LobbyButtonAction::Join => {
-                self.join_lobby_for_user(scope, player_id, user_display_name, responder)
+                self.join_lobby_for_user(scope, player_id, user_display_name, responder, false)
                     .await
             }
             LobbyButtonAction::Leave => {
@@ -3408,9 +3389,9 @@ impl LobbyInteractionHandler {
                 self.leave_lobbies(
                     scope.guild_id,
                     player_id,
-                    user_display_name.to_owned(),
                     vec![scope.kind],
                     responder,
+                    false,
                 )
                 .await
             }
@@ -3437,31 +3418,21 @@ impl LobbyInteractionHandler {
         if memberships.is_empty() {
             return followup_ephemeral(&responder, "⚠️ You're not in a lobby.").await;
         }
-        let display_name = self
-            .state
-            .resolve_player_name(guild_id, command.user_id)
-            .await;
-        self.leave_lobbies(
-            guild_id,
-            command.user_id,
-            display_name,
-            memberships,
-            responder,
-        )
-        .await
+        self.leave_lobbies(guild_id, command.user_id, memberships, responder, true)
+            .await
     }
 
     /// Remove `player_id` from each of `memberships` (lobby kinds they're
-    /// known to be in) and report the result privately. Shared by `/leave`,
+    /// known to be in). Commands confirm success; buttons only report refusals. Shared by `/leave`,
     /// which passes every membership, and the Leave button, which passes
     /// just its own lobby. The interaction must already be acknowledged.
     async fn leave_lobbies(
         &self,
         guild_id: AppGuildId,
         player_id: AppUserId,
-        display_name: String,
         memberships: Vec<LobbyKind>,
         responder: Arc<dyn InteractionResponder>,
+        confirm_success: bool,
     ) -> Result<(), InteractionHandlerError> {
         let rate_limit_claim = match self.state.claim_membership_change(guild_id, player_id)? {
             LobbyMembershipRateLimitDecision::Allowed(claim) => claim,
@@ -3498,8 +3469,7 @@ impl LobbyInteractionHandler {
             };
             if removed {
                 left.push(kind);
-                self.best_effort_leave_publication(scope, player_id, &display_name)
-                    .await;
+                self.best_effort_leave_publication(scope, player_id).await;
             } else if self
                 .state
                 .service
@@ -3511,6 +3481,9 @@ impl LobbyInteractionHandler {
         }
         if left.is_empty() {
             self.state.refund_membership_change(rate_limit_claim);
+        }
+        if !confirm_success && !left.is_empty() && pinned.is_empty() {
+            return Ok(());
         }
         let content = if left.is_empty() {
             if pinned.is_empty() {
@@ -3847,12 +3820,7 @@ impl LobbyInteractionHandler {
         }
     }
 
-    async fn best_effort_leave_publication(
-        &self,
-        scope: LobbyScope,
-        player_id: AppUserId,
-        display_name: &str,
-    ) {
+    async fn best_effort_leave_publication(&self, scope: LobbyScope, player_id: AppUserId) {
         if let Err(error) = self.state.sync_lobby_display(scope).await {
             warn!(%error, ?scope, "lobby display sync after leave failed");
         }
@@ -3869,7 +3837,7 @@ impl LobbyInteractionHandler {
             return;
         };
         if let Ok(thread_id) = to_u64(thread_id.0) {
-            let content = format!("🚪 {display_name} left.");
+            let content = format!("🚪 <@{}> left.", player_id.0);
             let _ = self
                 .state
                 .transport
@@ -4840,17 +4808,7 @@ impl RawReactionObserver for LobbyRawReactionObserver {
                     }
                 };
                 if left {
-                    let display_name = match resolved_display_name {
-                        Some(display_name) => display_name,
-                        None => {
-                            self.state
-                                .resolve_player_name(scope.guild_id, user_id)
-                                .await
-                        }
-                    };
-                    handler
-                        .best_effort_leave_publication(scope, user_id, &display_name)
-                        .await;
+                    handler.best_effort_leave_publication(scope, user_id).await;
                 } else {
                     self.state.refund_membership_change(rate_limit_claim);
                 }

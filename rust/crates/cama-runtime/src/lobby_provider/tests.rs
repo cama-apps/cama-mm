@@ -26,6 +26,7 @@ use tempfile::NamedTempFile;
 
 #[derive(Default)]
 struct CapturedResponses {
+    initial: Vec<InteractionResponse>,
     deferred: Vec<bool>,
     followups: Vec<InteractionResponse>,
 }
@@ -163,10 +164,12 @@ struct CapturingResponder {
 
 #[async_trait]
 impl InteractionResponder for CapturingResponder {
-    async fn respond(
-        &self,
-        _response: InteractionResponse,
-    ) -> Result<(), InteractionResponseError> {
+    async fn respond(&self, response: InteractionResponse) -> Result<(), InteractionResponseError> {
+        self.captured
+            .lock()
+            .expect("responses")
+            .initial
+            .push(response);
         Ok(())
     }
 
@@ -3913,7 +3916,7 @@ async fn live_readycheck_reconciles_raw_join_and_leave_against_the_active_genera
         transport
             .sent_messages()
             .iter()
-            .any(|sent| sent.message.response.content == "🚪 Recent Join left.")
+            .any(|sent| sent.message.response.content == "🚪 <@20> left.")
     );
     assert!(
         transport
@@ -4243,19 +4246,18 @@ async fn test_curfew_sweep_removes_the_kicked_players_sword_reaction() {
             }),
         "curfew kick must remove the kicked player's own sword reaction"
     );
-    // Privacy: the thread sees an ordinary leave line (falling back to the
-    // stored name when the member cache has nothing), and nothing public
-    // says the word curfew.
+    // Privacy: the thread sees the ordinary silent mention even when the
+    // member cache is empty, and nothing public says the word curfew.
     let leave_line = state
         .sent
         .iter()
         .rev()
         .find(|sent| sent.message.response.content.contains("left."))
         .expect("the sweep must post the normal leave line");
-    assert!(
-        leave_line.message.response.content.contains("Sleepy"),
-        "{}",
-        leave_line.message.response.content
+    assert_eq!(leave_line.message.response.content, "🚪 <@1> left.");
+    assert_eq!(
+        leave_line.message.allowed_mentions,
+        DiscordAllowedMentions::None
     );
     assert!(
         !state.sent.iter().any(|sent| sent
@@ -4998,7 +5000,7 @@ async fn dispatch_component(
     responder
 }
 
-/// The one ephemeral follow-up a button click is expected to produce.
+/// A failed button click explains the refusal privately.
 fn only_ephemeral_followup(responder: &CapturingResponder) -> String {
     let captured = responder.captured.lock().expect("responses");
     assert_eq!(
@@ -5019,6 +5021,47 @@ fn only_ephemeral_followup(responder: &CapturingResponder) -> String {
     let followup = &captured.followups[0];
     assert!(followup.ephemeral, "button replies must be private");
     followup.content.clone()
+}
+
+fn assert_silent_button_success(responder: &CapturingResponder) {
+    let captured = responder.captured.lock().expect("responses");
+    assert_eq!(captured.deferred.len(), 1, "acknowledge the button once");
+    assert!(
+        captured.initial.is_empty(),
+        "success must not create a reply"
+    );
+    assert!(
+        captured.followups.is_empty(),
+        "success must not create a follow-up"
+    );
+}
+
+fn assert_silent_thread_update(
+    provider: &LobbyRegistrationProvider,
+    transport: &RecordingTransport,
+    content: &str,
+) {
+    let lobby = lobby_snapshot(provider, LobbyKind::Open);
+    let thread_id = to_u64(lobby.message_ids.thread_id.expect("lobby thread").0).unwrap();
+    let state = transport.state.lock().expect("transport state");
+    let updates: Vec<_> = state
+        .sent
+        .iter()
+        .filter(|sent| sent.channel_id == thread_id && sent.message.response.content == content)
+        .collect();
+    assert_eq!(updates.len(), 1, "keep one thread update for the action");
+    assert_eq!(
+        updates[0].message.allowed_mentions,
+        DiscordAllowedMentions::None
+    );
+    let message_id = to_u64(lobby.message_ids.message_id.unwrap().0).unwrap();
+    assert!(
+        state
+            .edits
+            .iter()
+            .any(|(_, id, message)| *id == message_id && !message.response.embeds.is_empty()),
+        "the lobby roster must still repaint"
+    );
 }
 
 fn lobby_message_id(provider: &LobbyRegistrationProvider, kind: LobbyKind) -> u64 {
@@ -5172,8 +5215,8 @@ async fn test_join_button_seats_a_registered_player() {
             .players
             .contains(&AppUserId(1))
     );
-    let content = only_ephemeral_followup(&responder);
-    assert!(content.starts_with("✅ Joined "), "{content}");
+    assert_silent_button_success(&responder);
+    assert_silent_thread_update(&provider, &transport, "✅ <@1> joined.");
 }
 
 #[tokio::test]
@@ -5334,8 +5377,8 @@ async fn test_leave_button_removes_the_player() {
             .players
             .contains(&AppUserId(1))
     );
-    let content = only_ephemeral_followup(&responder);
-    assert!(content.starts_with("✅ Left "), "{content}");
+    assert_silent_button_success(&responder);
+    assert_silent_thread_update(&provider, &transport, "🚪 <@1> left.");
 }
 
 #[tokio::test]
