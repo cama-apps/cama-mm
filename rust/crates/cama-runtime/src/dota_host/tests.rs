@@ -728,6 +728,7 @@ async fn real_lobby_preview_invites_only_real_player_and_never_launches_or_settl
     f.worker.tick(&f.port, 100).await.unwrap();
     let saved: SessionState = serde_json::from_value(f.session().payload).unwrap();
     assert_eq!(saved.test_mode, DotaHostTestMode::RealLobby);
+    assert_eq!(saved.settings.name, format!("Cama TEST #{}", f.pending));
     assert_eq!(saved.roster.len(), 1);
     assert_eq!(saved.fake_roster.len(), 9);
     assert_eq!(saved.settings.visibility, 2);
@@ -1532,11 +1533,13 @@ async fn discovery_persists_public_lobby_settings() {
     f.worker.tick(&f.port, 100).await.unwrap();
     let state: SessionState = serde_json::from_value(f.session().payload).unwrap();
     assert_eq!(state.settings.password, "");
+    assert_eq!(state.settings.name, format!("Cama #{}", f.pending));
     assert_eq!(state.settings.visibility, 0);
     assert_eq!(state.settings.server_region, 27);
     let lobby = f.port.lobby.lock().unwrap();
     let lobby = lobby.as_ref().unwrap();
     assert_eq!(lobby.visibility, 0);
+    assert_eq!(lobby.name, format!("Cama #{}", f.pending));
     assert_eq!(lobby.server_region, 27);
 }
 

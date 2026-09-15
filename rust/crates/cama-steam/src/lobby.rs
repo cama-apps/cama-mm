@@ -716,14 +716,7 @@ impl DotaSteamClient {
             return Err(DotaSteamError::AlreadyInLobby(snapshot.lobby_id));
         }
 
-        let details = build_lobby_details(config, None)?;
-        let mut request = CMsgPracticeLobbyCreate::new();
-        request.set_client_version(config.client_version);
-        request.set_search_key(config.game_name.clone());
-        if let Some(pass_key) = config.pass_key.clone() {
-            request.set_pass_key(pass_key);
-        }
-        request.lobby_details = MessageField::some(details);
+        let request = build_create_request(config)?;
         self.send(request).await?;
 
         self.wait_for_lobby(config.timeout, |snapshot| {
@@ -973,6 +966,20 @@ impl DotaSteamClient {
         .await
         .map_err(|_| DotaSteamError::Timeout)?
     }
+}
+
+fn build_create_request(config: &LobbyConfig) -> Result<CMsgPracticeLobbyCreate, DotaSteamError> {
+    let details = build_lobby_details(config, None)?;
+    let mut request = CMsgPracticeLobbyCreate::new();
+    request.set_client_version(config.client_version);
+    // Leave search_key unset. It is a server-search restriction, not the lobby
+    // display name; using our name here leaves launch stuck in SERVERSETUP.
+    // The visible name belongs exclusively in lobby_details.game_name.
+    if let Some(pass_key) = config.pass_key.clone() {
+        request.set_pass_key(pass_key);
+    }
+    request.lobby_details = MessageField::some(details);
+    Ok(request)
 }
 
 fn build_lobby_details(
@@ -1894,6 +1901,27 @@ mod tests {
 
         assert_eq!(state.read().await.status, CacheStatus::Disconnected);
         assert!(state.read().await.lobby.is_none());
+    }
+
+    #[test]
+    fn lobby_name_is_not_a_server_search_key() {
+        let config = LobbyConfig {
+            game_name: "Cama pending 607".into(),
+            pass_key: Some("private-lobby-password".into()),
+            server_region: 27,
+            ..LobbyConfig::default()
+        };
+        let request = CMsgPracticeLobbyCreate::parse_from_bytes(
+            &build_create_request(&config)
+                .unwrap()
+                .write_to_bytes()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(request.search_key, None);
+        assert_eq!(request.lobby_details.game_name(), "Cama pending 607");
+        assert_eq!(request.lobby_details.server_region(), 27);
+        assert_eq!(request.pass_key(), "private-lobby-password");
     }
 
     #[test]

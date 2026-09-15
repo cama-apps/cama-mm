@@ -1514,7 +1514,7 @@ impl DotaHostWorker {
                     configuration: None, last_configuration: None,
                     test_mode: config.test_mode, fake_roster, simulated_winner: None,
                     start_mode: options.start.unwrap_or_default(), manual_start_requested: false,
-                    settings: LobbySettings { name:if config.test_mode == DotaHostTestMode::Off {format!("Cama {}:{}",pending.guild_id,pending.pending_match_id)} else {format!("Cama TEST {}:{}",pending.guild_id,pending.pending_match_id)},
+                    settings: LobbySettings { name:if config.test_mode == DotaHostTestMode::Off {format!("Cama #{}",pending.pending_match_id)} else {format!("Cama TEST #{}",pending.pending_match_id)},
                         password:String::new(), visibility:if config.test_mode == DotaHostTestMode::Off {options.visibility.map(|value| value as i32).unwrap_or(PUBLIC_LOBBY_VISIBILITY)} else {2}, league_id:league,
                         game_mode:options.game_mode.unwrap_or(config.game_mode), server_region:options.region.unwrap_or(config.server_region),
                         first_pick_radiant:match options.first_pick { Some(FirstPick::Radiant) => Some(true), Some(FirstPick::Dire) => Some(false), _ => pending.state.first_pick_team.as_deref().and_then(|s| match s.to_ascii_lowercase().as_str() { "radiant" => Some(true),"dire"=>Some(false),_=>None }) },
