@@ -4,7 +4,7 @@ Current scope (2026-09-10): proceed with hosting; defer bot spectating and live-
 
 Research date: 2026-09-10. Repository baseline: `main` at `ec6fb1a3`.
 
-Current-region verification: Valve's installed Dota client build `25219194` contains `scripts/regions.txt` in `game/dota/pak01_dir.vpk`. Its `USSouthCentral` entry has lobby region **31**, location code `dfw` (Dallas), and matchmaking group `1`. Cama uses region 31 for new lobbies; the matchmaking group is a separate field. This was a read-only inspection of game assets, without logging into Steam. Older public region tables omit this newly added location.
+Current-region verification: Valve's installed Dota client build `25219194` contains `scripts/regions.txt` in `game/dota/pak01_dir.vpk`. Its `USSouthCentral` entry has lobby region **31**, location code `dfw` (Dallas), and matchmaking group `1`. This earlier test used region 31; new lobbies now default to US North Central, region 27 (`ord`/Chicago); the matchmaking group is a separate field. This was a read-only inspection of game assets, without logging into Steam. Older public region tables omit this newly added location.
 
 The [current lobby protobuf](https://github.com/SteamTracking/GameTracking-Dota2/blob/master/Protobufs/dota_gcmessages_common_lobby.proto) also adds a 60-second TV-delay option: wire values 0–4 now mean 10, 60, 120, 300, and 900 seconds. The bundled Rust enum predates that addition, so Cama validates and preserves the numeric values directly. The default is 3 (300 seconds); live labels use each session's saved delay.
 

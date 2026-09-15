@@ -117,7 +117,7 @@ use the existing match-correction controls in that case.
 
 Unit and integration tests inject fake Dota transports directly; deployment always uses the real adapter when hosting is enabled. Fake Discord players do not represent Steam accounts and cannot launch a real hosted match. Keep automated local tests on a disposable database. To run a local Discord bot without making any Steam connection, leave hosting disabled.
 
-The tested account uses league `19144`, region `31`, game mode `2`, and `DOTA_TV_DELAY=0`. The league is stored using `/enrich setleague`, not an environment variable.
+The original account test used league `19144`, region `31` (new lobbies default to `27`), game mode `2`, and `DOTA_TV_DELAY=0`. The league is stored using `/enrich setleague`, not an environment variable.
 
 ## Lifecycle and recovery
 
@@ -280,3 +280,24 @@ The last local Docker smoke test restarted healthy with 46 Discord commands sync
 Production qualification still needs a complete match with ten linked real players: verify invitations, visitor handling, sides, automatic launch, betting closure at pregame, settlement, and actual optional live-feed availability/latency. The text scaffold is not yet qualified on a real inhouse match. Hosting alone does not supply the live statistics, and actual live-feed availability still requires a real-match test. Owner/Administrator participants prevent private delivery. These external behaviors cannot be verified using offline fixtures.
 
 See [the research and source links](DOTA_LOBBY_AUTOMATION_RESEARCH.md) for Valve/Steam interfaces, existing host implementations, and account/league guidance.
+
+## Diagnosing a launch stuck on Finding lobby
+
+A lobby ID and Dota match ID confirm identity, not that a game server is ready.
+The 1800-second lobby timeout is for prelaunch gathering. Server allocation
+has a separate five-minute watchdog, including GC-observed launches without
+an original bot launch timestamp; its fallback clock survives worker restarts.
+Timeout pauses hosting for review and suspends bets. It does not destroy the
+lobby or discard the pending teams/wagers.
+
+Logs now include the launch request, allocation progress once per minute
+(with region, lobby/match/server IDs, game state and observation freshness),
+and a warning for review transitions. Discord gateway reconnect messages
+alone cannot identify a Dota allocation failure.
+
+To use North Central for future lobbies, set `DOTA_SERVER_REGION=27` in the
+production `.env` and recreate the container with
+`./scripts/runtime-compose up -d --no-deps --force-recreate bot`.
+A saved guild setting takes precedence; set `/admin dota settings server_region:27`
+if that override selects another region. Already pending lobbies retain their
+saved settings. A plain Docker restart does not reload container environment.

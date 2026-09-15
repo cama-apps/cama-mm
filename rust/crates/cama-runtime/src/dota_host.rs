@@ -233,6 +233,10 @@ struct SessionState {
     #[serde(default)]
     launch_requested_at: Option<i64>,
     #[serde(default)]
+    allocation_observed_at: Option<i64>,
+    #[serde(default)]
+    last_allocation_log_at: Option<i64>,
+    #[serde(default)]
     betting_closed: bool,
     #[serde(default)]
     betting_window_announced: bool,
@@ -687,18 +691,34 @@ impl DotaHostWorker {
             return Ok(());
         }
         if lobby.stage == LobbyStage::Allocating {
-            if state
-                .launch_requested_at
-                .is_some_and(|t| now.saturating_sub(t) > 300)
+            // A captain or recovered GC session may have launched without our
+            // durable intent. Start a fallback clock once, never on every tick.
+            let first_observation = state.allocation_observed_at.is_none();
+            let observed_at = *state.allocation_observed_at.get_or_insert(now);
+            let started_at = state.launch_requested_at.unwrap_or(observed_at);
+            let elapsed_seconds = now.saturating_sub(started_at);
+            if first_observation
+                || state
+                    .last_allocation_log_at
+                    .is_none_or(|last| now.saturating_sub(last) >= 60)
             {
-                return self
-                    .review(
-                        &mut record,
-                        &mut state,
-                        "Dota server allocation has not completed after five minutes",
-                        now,
-                    )
-                    .await;
+                state.last_allocation_log_at = Some(now);
+                self.save(&mut record, &state, now).await?;
+                let gc_observation_fresh = port.betting_observation_fresh().await;
+                tracing::info!(
+                    guild_id = record.guild_id, pending_match_id = record.pending_match_id,
+                    lobby_id = lobby.id, match_id = ?lobby.match_id,
+                    server_id = ?lobby.server_id, server_region = lobby.server_region,
+                    game_mode = lobby.game_mode, league_id = lobby.league_id,
+                    game_state = ?lobby.game_state, elapsed_seconds,
+                    gc_observation_fresh,
+                    "Dota lobby waiting for server allocation"
+                );
+            }
+            if elapsed_seconds >= 300 {
+                return self.review(&mut record, &mut state,
+                    "Dota server allocation has not completed after five minutes; preserve this pending match and use /record with the actual game ID if playing a manual replacement",
+                    now).await;
             }
             return Ok(());
         }
@@ -836,6 +856,15 @@ impl DotaHostWorker {
         record.phase = Phase::Launching;
         state.launch_requested_at = Some(now);
         self.save(&mut record, &state, now).await?;
+        tracing::info!(
+            guild_id = record.guild_id,
+            pending_match_id = record.pending_match_id,
+            lobby_id = lobby.id,
+            server_region = state.settings.server_region,
+            game_mode = state.settings.game_mode,
+            league_id = state.settings.league_id,
+            "Requesting Dota lobby launch"
+        );
         port.launch(lobby.id).await?;
         self.announce(&mut record,&mut state,"All ten players are on the correct sides. Dota server launch requested; betting remains open through the hero draft.",now).await
     }
@@ -1491,7 +1520,7 @@ impl DotaHostWorker {
                         first_pick_radiant:match options.first_pick { Some(FirstPick::Radiant) => Some(true), Some(FirstPick::Dire) => Some(false), _ => pending.state.first_pick_team.as_deref().and_then(|s| match s.to_ascii_lowercase().as_str() { "radiant" => Some(true),"dire"=>Some(false),_=>None }) },
                         tv_delay:options.tv_delay.unwrap_or(config.tv_delay) },
                     roster, channel_id:pending_channel(&pending),message_id:None,last_message:String::new(),last_message_at:0,pending_status:None,resolution:None,resolution_history:Vec::new(),betting_control_audit:Vec::new(),
-                    last_invite_at:0,create_requested_at:None,launch_requested_at:None,betting_closed:false,betting_window_announced:false,betting_notification_sent:false,last_betting_notification_at:0,cancel_requested:false,
+                    last_invite_at:0,create_requested_at:None,launch_requested_at:None,allocation_observed_at:None,last_allocation_log_at:None,betting_closed:false,betting_window_announced:false,betting_notification_sent:false,last_betting_notification_at:0,cancel_requested:false,
                     resume_requested:false,recorded_match_id:None,server_id:None,replay:None,postgame_statistics:None,archive:None,replay_last_attempt:0,replay_error:None,last_result_poll:0,lobby_deadline:0,recording_failures:0,
                 };
                 let valid_roster = if config.test_mode == DotaHostTestMode::Off {
@@ -1552,6 +1581,11 @@ impl DotaHostWorker {
         record.phase = Phase::NeedsReview;
         record.last_error = Some(reason.to_owned());
         self.save(record, state, now).await?;
+        tracing::warn!(guild_id = record.guild_id, pending_match_id = record.pending_match_id,
+            lobby_id = ?record.lobby_id, match_id = ?record.valve_match_id,
+            server_id = ?state.server_id, server_region = state.settings.server_region,
+            game_mode = state.settings.game_mode, league_id = state.settings.league_id,
+            reason, "Dota hosting requires review");
         self.announce(record,state,&format!("Hosting paused: {reason}. Use `/admin dota status` to inspect the saved identities and `/admin dota resolve` for terminal recovery."),now).await
     }
 
@@ -1645,7 +1679,7 @@ impl DotaHostWorker {
 #[async_trait]
 impl BackgroundWorker for DotaHostWorker {
     async fn run(&self, mut context: WorkerContext) -> Result<(), String> {
-        tracing::info!(test_mode = ?self.config.test_mode, guild_ids = ?self.config.guild_ids, "starting Dota hosting worker");
+        tracing::info!(test_mode = ?self.config.test_mode, guild_ids = ?self.config.guild_ids, default_server_region = self.config.server_region, "starting Dota hosting worker");
         let port = if self.config.test_mode == DotaHostTestMode::Simulated {
             simulated::connect(&self.config)
         } else {
