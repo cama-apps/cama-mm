@@ -251,6 +251,16 @@ fn settings_summary(settings: &LobbySettings, start: StartMode) -> String {
 
 pub(super) fn status(state: &SessionState) -> String {
     let current = settings_summary(&state.settings, state.start_mode);
+    if let Some(replacement) = state
+        .manual_record_override
+        .as_ref()
+        .and_then(|value| value.get("replacement_match_id"))
+        .and_then(serde_json::Value::as_i64)
+    {
+        return format!(
+            "Manual replacement Dota {replacement}. Old bot lobby is cleanup-only; automatic recording is disabled.\nOld lobby settings: {current}"
+        );
+    }
     if let Some(request) = &state.configuration {
         format!(
             "Current: {current}\nSettings change pending: {}",

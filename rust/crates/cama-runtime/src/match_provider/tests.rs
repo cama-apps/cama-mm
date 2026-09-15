@@ -8911,3 +8911,372 @@ async fn result_delivery_failure_retains_work_and_recovery_finishes_without_doub
         1
     );
 }
+
+fn claim_stuck_replacement_session(fixture: &MatchRuntimeFixture, pending: &PendingMatchRecord) {
+    use cama_db::dota_session_repository::{DotaSessionClaim, DotaSessionPhase};
+    let sessions = DotaSessionRepository::new(fixture.database.path());
+    let DotaSessionClaim::Created(session) = sessions
+        .claim_session(
+            pending.guild_id,
+            pending.pending_match_id,
+            "replacement-test-bot",
+            json!({"launch_requested_at": 100, "server_id": 123}),
+            unix_seconds(),
+        )
+        .unwrap()
+    else {
+        panic!("expected session");
+    };
+    let session = sessions
+        .attach_valve_match_id(&session, "987654321", session.revision, unix_seconds())
+        .unwrap();
+    sessions
+        .transition_phase(
+            &session,
+            DotaSessionPhase::NeedsReview,
+            session.revision,
+            unix_seconds(),
+        )
+        .unwrap();
+}
+
+fn replacement_record_context(
+    user: i64,
+    admin: bool,
+    pending: Option<i64>,
+    match_id: &str,
+) -> MatchCommandContext {
+    let mut context = record_context(user, GUILD, "radiant", admin);
+    context.options.push(InteractionOption {
+        name: "dotabuff_match_id".into(),
+        value: InteractionValue::String(match_id.into()),
+    });
+    if let Some(pending) = pending {
+        context.options.push(InteractionOption {
+            name: "pending_match".into(),
+            value: InteractionValue::Integer(pending),
+        });
+    }
+    context
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn manual_replacement_keeps_pending_teams_wagers_and_retries_without_old_gc_enrichment() {
+    assert_manual_replacement_retry(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn manual_replacement_recovers_committed_core_without_valve_id_once() {
+    assert_manual_replacement_retry(true).await;
+}
+
+async fn assert_manual_replacement_retry(fail_after_core: bool) {
+    let fixture = MatchRuntimeFixture::new();
+    let pending = fixture.pending(unix_seconds() + 120);
+    claim_stuck_replacement_session(&fixture, &pending);
+    BettingServiceRepository::new(fixture.database.path())
+        .place_bet_atomic(PlaceBetRequest {
+            guild_id: Some(GUILD),
+            pending_match_id: pending.pending_match_id,
+            discord_id: pending.state.radiant_team_ids[0],
+            team: BettingTeam::Radiant,
+            amount: 1,
+            bet_time: unix_seconds(),
+            leverage: 1,
+            max_debt: 1_000,
+            is_blind: false,
+            odds_at_placement: None,
+        })
+        .unwrap();
+    let connection = Connection::open(fixture.database.path()).unwrap();
+    connection.execute_batch(if fail_after_core {
+        "CREATE TRIGGER fail_replacement_core BEFORE UPDATE OF valve_match_id ON matches BEGIN SELECT RAISE(ABORT, 'replacement retry fixture'); END;"
+    } else {
+        "CREATE TRIGGER fail_replacement_core BEFORE INSERT ON matches BEGIN SELECT RAISE(ABORT, 'replacement retry fixture'); END;"
+    }).unwrap();
+    let first = Arc::new(RecordingMatchResponder::default());
+    fixture
+        .provider
+        .handler
+        .handle_record(
+            replacement_record_context(99_001, true, None, "987654322"),
+            first.clone(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        first
+            .contents()
+            .iter()
+            .any(|text| text.contains("replacement retry fixture")),
+        "{:?}",
+        first.contents()
+    );
+    let saved = PendingMatchRepository::new(fixture.database.path())
+        .pending_match(GUILD, pending.pending_match_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.state.radiant_team_ids, pending.state.radiant_team_ids);
+    assert_eq!(saved.state.dire_team_ids, pending.state.dire_team_ids);
+    assert_eq!(
+        saved.state.extra["manual_record_override"]["replacement_match_id"],
+        json!(987654322)
+    );
+    let core_before_retry = MatchRepository::new(fixture.database.path())
+        .match_id_for_pending_match(GUILD, pending.pending_match_id)
+        .unwrap();
+    assert_eq!(core_before_retry.is_some(), fail_after_core);
+    if let Some(id) = core_before_retry {
+        assert!(
+            MatchRepository::new(fixture.database.path())
+                .get_match(id, Some(GUILD))
+                .unwrap()
+                .unwrap()
+                .valve_match_id
+                .is_none()
+        );
+        let histories: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM rating_history WHERE match_id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(histories, 10);
+    }
+    let old_result = HostedMatchResult {
+        guild_id: GUILD,
+        pending_match_id: pending.pending_match_id,
+        valve_match_id: 987654321,
+        winning_team: "radiant".into(),
+        expected_roster: vec![],
+        players: vec![],
+        postgame_statistics: None,
+    };
+    assert!(
+        fixture
+            .provider
+            .record_hosted_match(old_result.clone())
+            .await
+            .unwrap_err()
+            .contains("replaced")
+    );
+    connection
+        .execute_batch("DROP TRIGGER fail_replacement_core;")
+        .unwrap();
+    let retry = Arc::new(RecordingMatchResponder::default());
+    fixture
+        .provider
+        .handler
+        .handle_record(
+            replacement_record_context(99_001, true, Some(pending.pending_match_id), "987654322"),
+            retry.clone(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        retry
+            .contents()
+            .iter()
+            .any(|text| text.contains("Match recorded")),
+        "{:?}",
+        retry.contents()
+    );
+    let matches = MatchRepository::new(fixture.database.path());
+    let id = matches
+        .match_id_for_pending_match(GUILD, pending.pending_match_id)
+        .unwrap()
+        .unwrap();
+    if let Some(core_id) = core_before_retry {
+        assert_eq!(core_id, id);
+    }
+    let histories: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM rating_history WHERE match_id=?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        histories, 10,
+        "retry must not duplicate player rating history"
+    );
+    let summary = matches.get_match(id, Some(GUILD)).unwrap().unwrap();
+    assert_eq!(summary.team1_players, pending.state.radiant_team_ids);
+    assert_eq!(summary.team2_players, pending.state.dire_team_ids);
+    let (valve, dotabuff, settled, count): (i64, String, i64, i64) = connection.query_row(
+        "SELECT valve_match_id, dotabuff_match_id, (SELECT COUNT(*) FROM bets WHERE guild_id=?1 AND pending_match_id=?2 AND match_id=?3), (SELECT COUNT(*) FROM matches WHERE guild_id=?1 AND pending_match_id=?2) FROM matches WHERE match_id=?3",
+        params![GUILD, pending.pending_match_id, id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    ).unwrap();
+    assert_eq!(
+        (valve, dotabuff, settled, count),
+        (987654322, "987654322".to_owned(), 1, 1)
+    );
+    assert!(
+        PendingMatchRepository::new(fixture.database.path())
+            .pending_match(GUILD, pending.pending_match_id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        fixture
+            .provider
+            .record_hosted_match(old_result)
+            .await
+            .unwrap_err()
+            .contains("replaced")
+    );
+    assert_eq!(
+        matches.get_match(id, Some(GUILD)).unwrap().unwrap(),
+        summary
+    );
+    let again = fixture.dispatch_record_command(99_001, "radiant").await;
+    assert_eq!(again.contents(), ["❌ No pending match to record."]);
+}
+
+#[tokio::test]
+async fn manual_replacement_requires_admin_and_numeric_id_before_mutation() {
+    let fixture = MatchRuntimeFixture::new();
+    let pending = fixture.pending(unix_seconds() + 120);
+    claim_stuck_replacement_session(&fixture, &pending);
+    let sessions = DotaSessionRepository::new(fixture.database.path());
+    let original = sessions
+        .session(GUILD, pending.pending_match_id)
+        .unwrap()
+        .unwrap();
+    for (admin, value, expected) in [
+        (false, "987654322", "Only an admin"),
+        (true, "0", "positive numeric"),
+        (true, "-3", "positive numeric"),
+        (
+            true,
+            "https://dotabuff.com/matches/987654322",
+            "positive numeric",
+        ),
+        (true, "9223372036854775808", "positive numeric"),
+    ] {
+        let response = Arc::new(RecordingMatchResponder::default());
+        fixture
+            .provider
+            .handler
+            .handle_record(
+                replacement_record_context(pending.state.radiant_team_ids[0], admin, None, value),
+                response.clone(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            response
+                .contents()
+                .iter()
+                .any(|text| text.contains(expected)),
+            "{:?}",
+            response.contents()
+        );
+        assert_eq!(
+            sessions
+                .session(GUILD, pending.pending_match_id)
+                .unwrap()
+                .unwrap(),
+            original
+        );
+    }
+    // Supplying the original hosted ID keeps the existing participant-vote path.
+    let response = Arc::new(RecordingMatchResponder::default());
+    fixture
+        .provider
+        .handler
+        .handle_record(
+            replacement_record_context(pending.state.radiant_team_ids[0], false, None, "987654321"),
+            response.clone(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        response
+            .contents()
+            .iter()
+            .any(|text| text.contains("Requires 3 confirmations"))
+    );
+    assert_eq!(
+        sessions
+            .session(GUILD, pending.pending_match_id)
+            .unwrap()
+            .unwrap(),
+        original
+    );
+}
+
+#[tokio::test]
+async fn record_pending_selector_is_admin_only_and_scoped_to_the_current_guild() {
+    let fixture = MatchRuntimeFixture::new();
+    let pending = fixture.pending(unix_seconds() + 120);
+    let other = PendingMatchRepository::new(fixture.database.path())
+        .create_pending_match(GUILD, &pending.state)
+        .unwrap();
+    for (admin, id, guild, expected) in [
+        (false, pending.pending_match_id, GUILD, "Only an admin"),
+        (true, 0, GUILD, "positive integer"),
+        (
+            true,
+            pending.pending_match_id,
+            GUILD + 1,
+            "not found in this server",
+        ),
+    ] {
+        let mut context = replacement_record_context(99_001, admin, Some(id), "987654322");
+        context.guild_id = guild;
+        let response = Arc::new(RecordingMatchResponder::default());
+        fixture
+            .provider
+            .handler
+            .handle_record(context, response.clone())
+            .await
+            .unwrap();
+        assert!(
+            response
+                .contents()
+                .iter()
+                .any(|text| text.contains(expected)),
+            "{:?}",
+            response.contents()
+        );
+    }
+    let response = Arc::new(RecordingMatchResponder::default());
+    fixture
+        .provider
+        .handler
+        .handle_record(
+            replacement_record_context(99_001, true, Some(other.pending_match_id), "987654322"),
+            response.clone(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        response
+            .contents()
+            .iter()
+            .any(|text| text.contains("Match recorded")),
+        "{:?}",
+        response.contents()
+    );
+    let repo = PendingMatchRepository::new(fixture.database.path());
+    assert!(
+        repo.pending_match(GUILD, pending.pending_match_id)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        repo.pending_match(GUILD, other.pending_match_id)
+            .unwrap()
+            .is_none()
+    );
+    let schema = record_options();
+    let selector = schema
+        .iter()
+        .find(|option| option.name == "pending_match")
+        .unwrap();
+    assert!(!selector.required);
+    assert_eq!(selector.kind, CommandOptionKind::Integer);
+    assert_eq!(selector.min_integer, Some(1));
+}

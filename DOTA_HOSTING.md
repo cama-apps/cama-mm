@@ -87,11 +87,37 @@ Operator commands accept optional `pending_match`; omitting it is allowed only
 when the eligible match is unambiguous. They operate only in the invoking guild.
 Bot/manual selection is frozen per pending match. Automatic fallback does not alter the match already using the bot.
 
+## Recording a manually created replacement game
+
+If a bot lobby is stuck and the players play the same teams in a replacement
+lobby, an admin can record that game against the **existing pending match**:
+
+```text
+/record pending_match:607 result:radiant dotabuff_match_id:REPLACEMENT_MATCH_ID
+```
+
+Use `result:dire` if Dire won, and supply the positive numeric Dota match ID
+of the game actually played, not the old stuck game's ID. `pending_match` is
+an optional admin-only selector. No abort, reshuffle, or `/admin dota manual`
+handoff is needed. A different hosted match ID requires an admin override;
+normal recording votes otherwise retain their existing behavior.
+
+Recording preserves the pending identity, teams, and wagers and uses the
+normal once-only rating and payout pipeline. The replacement ID is retained
+across retries. The old hosting session is quarantined before recording;
+late results, statistics, and map recaps from it cannot be attached to the
+replacement. The bot keeps its account reserved while the old lobby remains
+active and only cleans up its own confirmed finished/reset lobby. Later
+shuffles use the existing manual fallback while that cleanup is pending.
+
+An already committed conflicting result is not overwritten by this command;
+use the existing match-correction controls in that case.
+
 ## Testing
 
 Unit and integration tests inject fake Dota transports directly; deployment always uses the real adapter when hosting is enabled. Fake Discord players do not represent Steam accounts and cannot launch a real hosted match. Keep automated local tests on a disposable database. To run a local Discord bot without making any Steam connection, leave hosting disabled.
 
-The tested account uses league `19144`, region `31`, game mode `2`, and `DOTA_TV_DELAY=0`. The league is stored using `/enrich setleague`, not an environment variable.
+The original account test used league `19144`, region `31` (new lobbies default to `27`), game mode `2`, and `DOTA_TV_DELAY=0`. The league is stored using `/enrich setleague`, not an environment variable.
 
 ## Lifecycle and recovery
 
@@ -254,3 +280,24 @@ The last local Docker smoke test restarted healthy with 46 Discord commands sync
 Production qualification still needs a complete match with ten linked real players: verify invitations, visitor handling, sides, automatic launch, betting closure at pregame, settlement, and actual optional live-feed availability/latency. The text scaffold is not yet qualified on a real inhouse match. Hosting alone does not supply the live statistics, and actual live-feed availability still requires a real-match test. Owner/Administrator participants prevent private delivery. These external behaviors cannot be verified using offline fixtures.
 
 See [the research and source links](DOTA_LOBBY_AUTOMATION_RESEARCH.md) for Valve/Steam interfaces, existing host implementations, and account/league guidance.
+
+## Diagnosing a launch stuck on Finding lobby
+
+A lobby ID and Dota match ID confirm identity, not that a game server is ready.
+The 1800-second lobby timeout is for prelaunch gathering. Server allocation
+has a separate five-minute watchdog, including GC-observed launches without
+an original bot launch timestamp; its fallback clock survives worker restarts.
+Timeout pauses hosting for review and suspends bets. It does not destroy the
+lobby or discard the pending teams/wagers.
+
+Logs now include the launch request, allocation progress once per minute
+(with region, lobby/match/server IDs, game state and observation freshness),
+and a warning for review transitions. Discord gateway reconnect messages
+alone cannot identify a Dota allocation failure.
+
+To use North Central for future lobbies, set `DOTA_SERVER_REGION=27` in the
+production `.env` and recreate the container with
+`./scripts/runtime-compose up -d --no-deps --force-recreate bot`.
+A saved guild setting takes precedence; set `/admin dota settings server_region:27`
+if that override selects another region. Already pending lobbies retain their
+saved settings. A plain Docker restart does not reload container environment.

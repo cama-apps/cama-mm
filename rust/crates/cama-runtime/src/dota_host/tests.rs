@@ -1,5 +1,6 @@
 use super::*;
 mod configuration_tests;
+mod manual_replacement_tests;
 use std::sync::{
     Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -280,6 +281,7 @@ impl Fixture {
             .unwrap()
             .pending_match_id;
         let state = SessionState {
+            manual_record_override: None,
             configuration: None,
             last_configuration: None,
             test_mode: DotaHostTestMode::Off,
@@ -315,6 +317,8 @@ impl Fixture {
             last_invite_at: 0,
             create_requested_at: None,
             launch_requested_at: None,
+            allocation_observed_at: None,
+            last_allocation_log_at: None,
             betting_closed: false,
             betting_window_announced: false,
             betting_notification_sent: false,
@@ -383,6 +387,9 @@ impl Fixture {
             .session(1, self.pending)
             .unwrap()
             .unwrap()
+    }
+    fn state(&self) -> SessionState {
+        serde_json::from_value(self.session().payload).unwrap()
     }
     fn update_state(&self, apply: impl FnOnce(&mut DotaSessionRecord, &mut SessionState)) {
         let mut record = self.session();
@@ -2335,4 +2342,75 @@ async fn incomplete_shuffle_setup_cannot_claim_or_create_a_dota_lobby() {
         1
     );
     assert_eq!(*f.port.calls.lock().unwrap(), vec!["create".to_owned()]);
+}
+
+#[tokio::test]
+async fn allocation_watchdog_preserves_launched_identity_and_does_not_relaunch() {
+    let f = Fixture::new(false);
+    f.launch().await;
+    f.port.lobby.lock().unwrap().as_mut().unwrap().match_id = Some(888);
+    f.port.calls.lock().unwrap().clear();
+    let started = f.state().launch_requested_at.unwrap();
+    f.worker.tick(&f.port, started + 299).await.unwrap();
+    assert_eq!(f.session().phase, Phase::Launching);
+    f.worker.tick(&f.port, started + 300).await.unwrap();
+    let session = f.session();
+    assert_eq!(session.phase, Phase::NeedsReview);
+    assert!(session.last_error.unwrap().contains("five minutes"));
+    assert_eq!(session.valve_match_id.as_deref(), Some("888"));
+    let pending = PendingMatchRepository::new(&f.worker.path)
+        .pending_match(1, f.pending)
+        .unwrap()
+        .unwrap();
+    assert!(!pending.state.betting_open(started + 300));
+    assert!(
+        !pending
+            .state
+            .extra
+            .contains_key("dota_hosted_betting_observed_at")
+    );
+    assert!(f.port.calls.lock().unwrap().is_empty());
+    assert_eq!(f.recorder.count.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn allocation_watchdog_recovers_missing_launch_timestamp_without_resetting_clock() {
+    let f = Fixture::new(false);
+    f.launch().await;
+    f.update_state(|_, state| {
+        state.launch_requested_at = None;
+        state.allocation_observed_at = None;
+        state.last_allocation_log_at = None;
+    });
+    f.port.calls.lock().unwrap().clear();
+    f.worker.tick(&f.port, 200).await.unwrap();
+    assert_eq!(f.state().allocation_observed_at, Some(200));
+    assert_eq!(f.state().last_allocation_log_at, Some(200));
+    f.worker.tick(&f.port, 205).await.unwrap();
+    assert_eq!(f.state().last_allocation_log_at, Some(200));
+    // A new worker must use the durable first observation, not a fresh timer.
+    let worker = DotaHostWorker::new(
+        &f.worker.path,
+        f.worker.config.clone(),
+        f.worker.recorder.clone(),
+        f.worker.discord.clone(),
+        f.worker.live.clone(),
+    );
+    worker.tick(&f.port, 499).await.unwrap();
+    assert_eq!(f.session().phase, Phase::Launching);
+    worker.tick(&f.port, 500).await.unwrap();
+    assert_eq!(f.session().phase, Phase::NeedsReview);
+    assert_eq!(f.state().allocation_observed_at, Some(200));
+    assert!(f.port.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn allocation_watchdog_does_not_timeout_a_running_game() {
+    let f = Fixture::new(false);
+    f.launch().await;
+    f.worker.tick(&f.port, 150).await.unwrap();
+    f.running(None);
+    f.worker.tick(&f.port, 1000).await.unwrap();
+    assert_eq!(f.session().phase, Phase::Running);
+    assert!(f.session().last_error.is_none());
 }

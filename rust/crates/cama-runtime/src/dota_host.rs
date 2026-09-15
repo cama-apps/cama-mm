@@ -192,6 +192,8 @@ struct OperatorResolution {
 #[derive(Clone, Serialize, Deserialize)]
 struct SessionState {
     #[serde(default)]
+    manual_record_override: Option<serde_json::Value>,
+    #[serde(default)]
     configuration: Option<configuration::LobbyConfigurationRequest>,
     #[serde(default)]
     last_configuration: Option<configuration::LobbyConfigurationRequest>,
@@ -230,6 +232,10 @@ struct SessionState {
     create_requested_at: Option<i64>,
     #[serde(default)]
     launch_requested_at: Option<i64>,
+    #[serde(default)]
+    allocation_observed_at: Option<i64>,
+    #[serde(default)]
+    last_allocation_log_at: Option<i64>,
     #[serde(default)]
     betting_closed: bool,
     #[serde(default)]
@@ -313,6 +319,11 @@ impl DotaHostWorker {
         };
         let mut state: SessionState = serde_json::from_value(record.payload.clone())
             .map_err(|_| "invalid durable Dota session payload")?;
+        if state.manual_record_override.is_some() {
+            return self
+                .reconcile_replaced_lobby(port, &mut record, &mut state, now)
+                .await;
+        }
         if let Some(content) = state.pending_status.clone() {
             self.announce(&mut record, &mut state, &content, now)
                 .await?;
@@ -680,18 +691,34 @@ impl DotaHostWorker {
             return Ok(());
         }
         if lobby.stage == LobbyStage::Allocating {
-            if state
-                .launch_requested_at
-                .is_some_and(|t| now.saturating_sub(t) > 300)
+            // A captain or recovered GC session may have launched without our
+            // durable intent. Start a fallback clock once, never on every tick.
+            let first_observation = state.allocation_observed_at.is_none();
+            let observed_at = *state.allocation_observed_at.get_or_insert(now);
+            let started_at = state.launch_requested_at.unwrap_or(observed_at);
+            let elapsed_seconds = now.saturating_sub(started_at);
+            if first_observation
+                || state
+                    .last_allocation_log_at
+                    .is_none_or(|last| now.saturating_sub(last) >= 60)
             {
-                return self
-                    .review(
-                        &mut record,
-                        &mut state,
-                        "Dota server allocation has not completed after five minutes",
-                        now,
-                    )
-                    .await;
+                state.last_allocation_log_at = Some(now);
+                self.save(&mut record, &state, now).await?;
+                let gc_observation_fresh = port.betting_observation_fresh().await;
+                tracing::info!(
+                    guild_id = record.guild_id, pending_match_id = record.pending_match_id,
+                    lobby_id = lobby.id, match_id = ?lobby.match_id,
+                    server_id = ?lobby.server_id, server_region = lobby.server_region,
+                    game_mode = lobby.game_mode, league_id = lobby.league_id,
+                    game_state = ?lobby.game_state, elapsed_seconds,
+                    gc_observation_fresh,
+                    "Dota lobby waiting for server allocation"
+                );
+            }
+            if elapsed_seconds >= 300 {
+                return self.review(&mut record, &mut state,
+                    "Dota server allocation has not completed after five minutes; preserve this pending match and use /record with the actual game ID if playing a manual replacement",
+                    now).await;
             }
             return Ok(());
         }
@@ -829,6 +856,15 @@ impl DotaHostWorker {
         record.phase = Phase::Launching;
         state.launch_requested_at = Some(now);
         self.save(&mut record, &state, now).await?;
+        tracing::info!(
+            guild_id = record.guild_id,
+            pending_match_id = record.pending_match_id,
+            lobby_id = lobby.id,
+            server_region = state.settings.server_region,
+            game_mode = state.settings.game_mode,
+            league_id = state.settings.league_id,
+            "Requesting Dota lobby launch"
+        );
         port.launch(lobby.id).await?;
         self.announce(&mut record,&mut state,"All ten players are on the correct sides. Dota server launch requested; betting remains open through the hero draft.",now).await
     }
@@ -1363,6 +1399,52 @@ impl DotaHostWorker {
         }
     }
 
+    /// A manual replacement records against the same Cama identity. The old
+    /// Steam game is cleanup-only forever, even after the pending row is gone.
+    async fn reconcile_replaced_lobby(
+        &self,
+        port: &dyn DotaHostPort,
+        record: &mut DotaSessionRecord,
+        state: &mut SessionState,
+        now: i64,
+    ) -> Result<(), String> {
+        if self.config.test_mode != DotaHostTestMode::Off
+            || state.test_mode != DotaHostTestMode::Off
+        {
+            return Err("manual replacement cleanup requires a production hosting session".into());
+        }
+        self.live
+            .finish_match(record.guild_id, record.pending_match_id)
+            .await;
+        let lobby = port.snapshot().await?;
+        if let Some(lobby) = lobby {
+            if !owns_lobby(record, state, &lobby, self.config.account_id)
+                || lobby
+                    .match_id
+                    .is_some_and(|id| record.valve_match_id.as_deref() != Some(&id.to_string()))
+                || !port.betting_observation_fresh().await
+            {
+                return Ok(());
+            }
+            if lobby.stage == LobbyStage::Postgame
+                || (lobby.stage == LobbyStage::Gathering
+                    && lobby.match_id.is_none()
+                    && lobby.server_id.is_none())
+            {
+                // Never settle/void the replacement while cleaning up the old
+                // lobby. Keep the account leased until disappearance is seen.
+                port.destroy(lobby.id).await?;
+            }
+            return Ok(());
+        }
+        record.phase = Phase::Cancelled;
+        record.last_error = Some(
+            "Old lobby released after manual replacement; its result will not be recorded.".into(),
+        );
+        state.pending_status = None;
+        self.save(record, state, now).await
+    }
+
     async fn save(
         &self,
         record: &mut DotaSessionRecord,
@@ -1428,6 +1510,7 @@ impl DotaHostWorker {
                     }
                 }
                 let state = SessionState {
+                    manual_record_override: None,
                     configuration: None, last_configuration: None,
                     test_mode: config.test_mode, fake_roster, simulated_winner: None,
                     start_mode: options.start.unwrap_or_default(), manual_start_requested: false,
@@ -1437,7 +1520,7 @@ impl DotaHostWorker {
                         first_pick_radiant:match options.first_pick { Some(FirstPick::Radiant) => Some(true), Some(FirstPick::Dire) => Some(false), _ => pending.state.first_pick_team.as_deref().and_then(|s| match s.to_ascii_lowercase().as_str() { "radiant" => Some(true),"dire"=>Some(false),_=>None }) },
                         tv_delay:options.tv_delay.unwrap_or(config.tv_delay) },
                     roster, channel_id:pending_channel(&pending),message_id:None,last_message:String::new(),last_message_at:0,pending_status:None,resolution:None,resolution_history:Vec::new(),betting_control_audit:Vec::new(),
-                    last_invite_at:0,create_requested_at:None,launch_requested_at:None,betting_closed:false,betting_window_announced:false,betting_notification_sent:false,last_betting_notification_at:0,cancel_requested:false,
+                    last_invite_at:0,create_requested_at:None,launch_requested_at:None,allocation_observed_at:None,last_allocation_log_at:None,betting_closed:false,betting_window_announced:false,betting_notification_sent:false,last_betting_notification_at:0,cancel_requested:false,
                     resume_requested:false,recorded_match_id:None,server_id:None,replay:None,postgame_statistics:None,archive:None,replay_last_attempt:0,replay_error:None,last_result_poll:0,lobby_deadline:0,recording_failures:0,
                 };
                 let valid_roster = if config.test_mode == DotaHostTestMode::Off {
@@ -1498,6 +1581,11 @@ impl DotaHostWorker {
         record.phase = Phase::NeedsReview;
         record.last_error = Some(reason.to_owned());
         self.save(record, state, now).await?;
+        tracing::warn!(guild_id = record.guild_id, pending_match_id = record.pending_match_id,
+            lobby_id = ?record.lobby_id, match_id = ?record.valve_match_id,
+            server_id = ?state.server_id, server_region = state.settings.server_region,
+            game_mode = state.settings.game_mode, league_id = state.settings.league_id,
+            reason, "Dota hosting requires review");
         self.announce(record,state,&format!("Hosting paused: {reason}. Use `/admin dota status` to inspect the saved identities and `/admin dota resolve` for terminal recovery."),now).await
     }
 
@@ -1591,7 +1679,7 @@ impl DotaHostWorker {
 #[async_trait]
 impl BackgroundWorker for DotaHostWorker {
     async fn run(&self, mut context: WorkerContext) -> Result<(), String> {
-        tracing::info!(test_mode = ?self.config.test_mode, guild_ids = ?self.config.guild_ids, "starting Dota hosting worker");
+        tracing::info!(test_mode = ?self.config.test_mode, guild_ids = ?self.config.guild_ids, default_server_region = self.config.server_region, "starting Dota hosting worker");
         let port = if self.config.test_mode == DotaHostTestMode::Simulated {
             simulated::connect(&self.config)
         } else {
@@ -1762,12 +1850,15 @@ pub async fn guild_operator_command(
                 .take(3)
                 .map(|s| {
                     let state: SessionState = serde_json::from_value(s.payload).map_err(|_| "Invalid saved hosting state.")?;
+                    let recorded_id = if state.manual_record_override.is_some() {
+                        MatchRepository::new(&path).match_id_for_pending_match(guild, s.pending_match_id).map_err(|error| error.to_string())?
+                    } else { state.recorded_match_id };
                     let pending = PendingMatchRepository::new(&path).pending_match(guild, s.pending_match_id).map_err(|e|e.to_string())?;
                     let betting = if pending.as_ref().is_some_and(|p| p.state.extra.get("dota_betting_suspended") == Some(&serde_json::Value::Bool(true))) { "suspended by operator" }
                         else if pending.as_ref().is_some_and(|p| p.state.betting_open(chrono::Utc::now().timestamp())) { "open" }
                         else { "closed" };
                     Ok(format!("Pending #{}: {} · {:?}\n{}\nLobby {} · Dota {} · Cama {} · updated <t:{}:R> · betting {}\n{}", s.pending_match_id, s.phase.as_str(), state.test_mode, configuration::status(&state),
-                        s.lobby_id.as_deref().unwrap_or("unassigned"), s.valve_match_id.as_deref().unwrap_or("unassigned"), state.recorded_match_id.map_or("unrecorded".into(), |id| id.to_string()), s.updated_at,
+                        s.lobby_id.as_deref().unwrap_or("unassigned"), s.valve_match_id.as_deref().unwrap_or("unassigned"), recorded_id.map_or("unrecorded".into(), |id| id.to_string()), s.updated_at,
                         betting,
                         s.last_error.map_or_else(|| "No saved error.".to_owned(), |e| format!("Attention: {}", e.chars().take(300).collect::<String>()))))
                 }).collect::<Result<_, String>>()?;
@@ -1804,6 +1895,9 @@ pub async fn guild_operator_command(
         let mut session = sessions.session(guild, pending).map_err(|e| e.to_string())?.ok_or("No hosted session for that match in this server.")?;
         if !session.phase.is_active() { return Err("That hosting session has already finished.".into()); }
         let mut state: SessionState = serde_json::from_value(session.payload.clone()).map_err(|_| "Invalid saved hosting state.")?;
+        if state.manual_record_override.is_some() {
+            return Err("This hosted game was replaced through /record. Its old lobby is quarantined; automated results and hosting controls are disabled for it.".into());
+        }
         match action.as_str() {
             "start" => {
                 if state.configuration.is_some() { return Err("Lobby settings are still being applied; check `/admin dota status` before starting.".into()); }
@@ -1862,6 +1956,9 @@ pub async fn guild_resolution_command(
         let expected = (expected_valve_match_id != 0).then(|| expected_valve_match_id.to_string());
         if expected != session.valve_match_id { return Err("Dota match ID does not match the saved session. Inspect /admin dota status first.".into()); }
         let mut state: SessionState = serde_json::from_value(session.payload.clone()).map_err(|e| e.to_string())?;
+        if state.manual_record_override.is_some() {
+            return Err("This hosted game was replaced through /record. Do not resolve or void the replacement using the old Dota match ID.".into());
+        }
         if let Some(existing) = &state.resolution {
             if existing.outcome == outcome && existing.expected_valve_match_id == expected {
                 return Ok("That resolution is already queued; inspect /admin dota status for any remaining blocker.".into());
