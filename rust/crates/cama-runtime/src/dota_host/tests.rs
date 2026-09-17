@@ -1,6 +1,7 @@
 use super::*;
 mod configuration_tests;
 mod manual_replacement_tests;
+mod recorded_cleanup_tests;
 use std::sync::{
     Mutex,
     atomic::{AtomicUsize, Ordering},

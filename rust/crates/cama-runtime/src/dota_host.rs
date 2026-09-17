@@ -371,7 +371,18 @@ impl DotaHostWorker {
                 )
                 .await;
         }
-        if record.phase == Phase::NeedsReview {
+        // Manual recording settles and removes the pending match independently
+        // of hosting. Review must not prevent cleanup of that completed result
+        // or leave this account permanently reserved for it.
+        if record.phase == Phase::NeedsReview
+            && state.recorded_match_id.is_none()
+            && self.pending(&record).await?.is_none()
+            && let Some(id) = self.recorded_id(&record).await?
+        {
+            state.recorded_match_id = Some(id);
+            self.save(&mut record, &state, now).await?;
+        }
+        if record.phase == Phase::NeedsReview && state.recorded_match_id.is_none() {
             if state.resume_requested {
                 configuration::reset_retry(&mut state);
                 state.resume_requested = false;
@@ -488,7 +499,10 @@ impl DotaHostWorker {
         }
         if state.recorded_match_id.is_some() {
             if let Some(lobby) = lobby {
-                if lobby.stage != LobbyStage::Postgame {
+                let unlaunched = lobby.stage == LobbyStage::Gathering
+                    && !server_launched
+                    && state.server_id.is_none();
+                if lobby.stage != LobbyStage::Postgame && !unlaunched {
                     // Match details may reach us before the lobby's final
                     // update. Never destroy a server still reported active.
                     return Ok(());
@@ -500,20 +514,16 @@ impl DotaHostWorker {
                 return Ok(());
             }
             record.phase = Phase::Recorded;
-            state.pending_status = Some(format!(
-                "Dota match {} recorded automatically as Cama match {}.",
-                record.valve_match_id.as_deref().unwrap_or("unknown"),
+            record.last_error = None;
+            let content = format!(
+                "Dota hosting finished for recorded Cama match {}.",
                 state.recorded_match_id.unwrap_or_default()
-            ));
+            );
+            state.pending_status = Some(content.clone());
             self.save(&mut record, &state, now).await?;
             self.live
                 .finish_match(record.guild_id, record.pending_match_id)
                 .await;
-            let content = format!(
-                "Dota match {} recorded automatically as Cama match {}.",
-                record.valve_match_id.as_deref().unwrap_or("unknown"),
-                state.recorded_match_id.unwrap_or_default()
-            );
             return self.announce(&mut record, &mut state, &content, now).await;
         }
         if state.cancel_requested {
