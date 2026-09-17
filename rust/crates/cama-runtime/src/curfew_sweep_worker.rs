@@ -7,12 +7,12 @@
 //! could be tightened to 15 seconds or some other value later if there's a
 //! reason to.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use cama_app::curfew_service::CurfewService;
+use cama_app::curfew_service::{CurfewKick, CurfewService};
 use cama_app::embeds::LobbyKind;
 use chrono::Utc;
 use tracing::{debug, info};
@@ -93,22 +93,16 @@ impl CurfewSweepWorker {
         let kicks = tokio::task::spawn_blocking(move || curfew.sweep(&lobby, &guild_ids, now))
             .await
             .map_err(|error| format!("curfew sweep blocking task failed: {error}"))?;
-        for kick in &kicks {
-            let Ok(user_id) = u64::try_from(kick.discord_id) else {
+        for (discord_id, content) in curfew_kick_notices(&kicks) {
+            let Ok(user_id) = u64::try_from(discord_id) else {
                 continue;
             };
-            let message = DiscordMessage::silent(InteractionResponse::message(format!(
-                "🔒 You've been removed from {} — your \"{}\" curfew window started. Use `/player curfew remove` if you'd rather queue through it.",
-                kick.lobby_kind.label(),
-                kick.window_name,
-            )));
+            let message = DiscordMessage::silent(InteractionResponse::message(content));
             if let Err(error) = self.discord.send_direct_message(user_id, message).await {
-                debug!(
-                    discord_id = kick.discord_id,
-                    %error,
-                    "failed to DM user about curfew kick"
-                );
+                debug!(discord_id, %error, "failed to DM user about curfew kick");
             }
+        }
+        for kick in &kicks {
             if let Err(error) = self
                 .display
                 .publish_curfew_leave(kick.guild_id, kick.lobby_kind, kick.discord_id)
@@ -191,6 +185,41 @@ impl CurfewSweepWorker {
     }
 }
 
+/// One DM per player per sweep, with no "remove the window" hint: strict
+/// windows can't be lifted the same night anyway. A player sitting in both lobbies when their
+/// window starts is kicked from each, but two near-identical DMs read as a
+/// bug, so the lobbies are listed together instead. Grouped by window name
+/// as well as player so the (unusual) case of different windows firing in
+/// different guilds still names the right one.
+fn curfew_kick_notices(kicks: &[CurfewKick]) -> Vec<(i64, String)> {
+    let mut grouped: BTreeMap<(i64, &str), Vec<&'static str>> = BTreeMap::new();
+    for kick in kicks {
+        let labels = grouped
+            .entry((kick.discord_id, kick.window_name.as_str()))
+            .or_default();
+        let label = kick.lobby_kind.label();
+        if !labels.contains(&label) {
+            labels.push(label);
+        }
+    }
+    grouped
+        .into_iter()
+        .map(|((discord_id, window_name), labels)| {
+            let lobbies = match labels.as_slice() {
+                [only] => (*only).to_owned(),
+                [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+                [] => unreachable!("a grouped kick names at least one lobby"),
+            };
+            (
+                discord_id,
+                format!(
+                    "🔒 Your \"{window_name}\" curfew window started, so you've been removed from {lobbies}."
+                ),
+            )
+        })
+        .collect()
+}
+
 /// Build the production worker specification retained by [`crate::Runtime`].
 #[must_use]
 pub fn curfew_sweep_worker_spec(
@@ -235,3 +264,7 @@ impl BackgroundWorker for CurfewSweepWorker {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "curfew_sweep_worker/tests.rs"]
+mod tests;
