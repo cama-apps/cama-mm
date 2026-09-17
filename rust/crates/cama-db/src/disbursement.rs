@@ -215,6 +215,13 @@ impl DisbursementRepository {
             "Jopacoin Reserve funds locked for allocation vote",
             || set_nonprofit_total(&transaction, guild_id, updated),
         )?;
+        // `guild_id` is the table primary key, so a completed or reset row still
+        // occupies the slot. Drop it only after confirming there is no active vote.
+        transaction.execute(
+            "DELETE FROM disburse_proposals
+             WHERE guild_id = ?1 AND status != 'active'",
+            [guild_id],
+        )?;
         transaction.execute(
             "INSERT INTO disburse_proposals
                  (guild_id, proposal_id, fund_amount, quorum_required, status)
@@ -712,5 +719,110 @@ mod tests {
             repository.complete_and_disburse_atomic(Some(7), "even", &[(1, 1)]),
             Err(DisbursementRepositoryError::NoActiveProposal)
         ));
+    }
+
+    #[test]
+    fn create_proposal_succeeds_after_completed_row_still_occupies_guild() {
+        let database = NamedTempFile::new().expect("temporary database");
+        copy_migrated_database(database.path()).expect("schema");
+        let players = PlayerRepository::new(database.path());
+        players
+            .add(&NewPlayer::new(1, "one", Some(7)))
+            .expect("player");
+        players
+            .update_balance(1, Some(7), -20)
+            .expect("debt balance");
+        let loans = crate::loan_repository::LoanRepository::new(database.path());
+        loans
+            .add_to_nonprofit_fund(Some(7), 50, None)
+            .expect("reserve");
+        let repository = DisbursementRepository::new(database.path());
+        repository
+            .create_proposal_atomic(Some(7), 100, 10, 1)
+            .expect("proposal");
+        repository
+            .complete_and_disburse_atomic(Some(7), "even", &[(1, 20)])
+            .expect("complete");
+        assert!(
+            repository
+                .get_active_proposal(Some(7))
+                .expect("read proposal")
+                .is_none()
+        );
+
+        let proposal = repository
+            .create_proposal_atomic(Some(7), 200, 10, 1)
+            .expect("second proposal");
+        assert_eq!(proposal.proposal_id, 200);
+        assert_eq!(proposal.fund_amount, 30);
+        assert_eq!(proposal.status, "active");
+        assert_eq!(loans.get_nonprofit_fund(Some(7)).unwrap(), 0);
+        assert_eq!(
+            repository
+                .get_active_proposal(Some(7))
+                .expect("read proposal")
+                .expect("active")
+                .proposal_id,
+            200
+        );
+    }
+
+    #[test]
+    fn create_proposal_succeeds_after_reset_row_still_occupies_guild() {
+        let database = NamedTempFile::new().expect("temporary database");
+        copy_migrated_database(database.path()).expect("schema");
+        let loans = crate::loan_repository::LoanRepository::new(database.path());
+        loans
+            .add_to_nonprofit_fund(Some(7), 50, None)
+            .expect("reserve");
+        let repository = DisbursementRepository::new(database.path());
+        repository
+            .create_proposal_atomic(Some(7), 100, 10, 1)
+            .expect("proposal");
+        assert!(
+            repository
+                .reset_and_return_fund_atomic(Some(7), "cancel")
+                .expect("reset")
+        );
+        assert!(
+            repository
+                .get_active_proposal(Some(7))
+                .expect("read proposal")
+                .is_none()
+        );
+
+        let proposal = repository
+            .create_proposal_atomic(Some(7), 200, 10, 1)
+            .expect("second proposal");
+        assert_eq!(proposal.proposal_id, 200);
+        assert_eq!(proposal.fund_amount, 50);
+        assert_eq!(loans.get_nonprofit_fund(Some(7)).unwrap(), 0);
+    }
+
+    #[test]
+    fn create_proposal_still_rejects_an_active_vote() {
+        let database = NamedTempFile::new().expect("temporary database");
+        copy_migrated_database(database.path()).expect("schema");
+        let loans = crate::loan_repository::LoanRepository::new(database.path());
+        loans
+            .add_to_nonprofit_fund(Some(7), 50, None)
+            .expect("reserve");
+        let repository = DisbursementRepository::new(database.path());
+        repository
+            .create_proposal_atomic(Some(7), 100, 10, 1)
+            .expect("proposal");
+        assert!(matches!(
+            repository.create_proposal_atomic(Some(7), 200, 10, 1),
+            Err(DisbursementRepositoryError::ActiveProposal)
+        ));
+        assert_eq!(
+            repository
+                .get_active_proposal(Some(7))
+                .expect("read proposal")
+                .expect("active")
+                .proposal_id,
+            100
+        );
+        assert_eq!(loans.get_nonprofit_fund(Some(7)).unwrap(), 0);
     }
 }
