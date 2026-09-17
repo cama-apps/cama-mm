@@ -2126,7 +2126,10 @@ impl MatchHandler {
                 .session(guild, pending_id)
                 .map(|session| {
                     session.is_some_and(|session| {
-                        session.payload.get("manual_record_override").is_some()
+                        session
+                            .payload
+                            .get("manual_record_override")
+                            .is_some_and(|value| !value.is_null())
                     })
                 })
                 .map_err(|error| error.to_string())
@@ -2882,7 +2885,10 @@ impl MatchHandler {
         let Some(session) = session else {
             return Ok(None);
         };
-        let overridden = session.payload.get("manual_record_override").is_some();
+        let overridden = session
+            .payload
+            .get("manual_record_override")
+            .is_some_and(|value| !value.is_null());
         let launched_without_id = session
             .payload
             .get("launch_requested_at")
@@ -4005,6 +4011,7 @@ impl MatchHandler {
             .state
             .extra
             .get("manual_record_override")
+            .filter(|value| !value.is_null())
             .map(|value| {
                 value
                     .get("replacement_match_id")

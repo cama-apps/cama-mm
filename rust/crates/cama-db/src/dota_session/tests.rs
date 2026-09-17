@@ -24,7 +24,8 @@ fn manual_override_fixture() -> (NamedTempFile, DotaSessionRepository, DotaSessi
         "settings":{"region":27},"opaque":{"keep":[1,2,3]},
         "launch_requested_at":15,"resolution":{"outcome":"aborted"},
         "configuration":{"server_region":31},"pending_status":"old result",
-        "cancel_requested":true,"resume_requested":true,"manual_start_requested":true
+        "cancel_requested":true,"resume_requested":true,"manual_start_requested":true,
+        "manual_record_override":null
     });
     let session = repository.update(&session, session.revision, 20).unwrap();
     let connection = open_runtime_connection(file.path()).unwrap();
@@ -42,7 +43,7 @@ fn manual_override_fixture() -> (NamedTempFile, DotaSessionRepository, DotaSessi
                     "dota_hosted_betting":true,"dota_hosted_betting_started_at":10,
                     "dota_hosted_betting_observed_at":200,"seed_reservations":{"pool":500},
                     "dota_betting_control_audit":[{"action":"resume","actor_id":99}],
-                    "opaque":{"future_field":"keep"}
+                    "opaque":{"future_field":"keep"},"manual_record_override":null
                 })
                 .to_string()
             ],
@@ -67,6 +68,21 @@ fn override_pending(connection: &Connection) -> Value {
         )
         .unwrap();
     serde_json::from_str(&raw).unwrap()
+}
+
+#[test]
+fn null_manual_override_does_not_replace_an_unlaunched_session() {
+    let (_file, repository, mut session) = manual_override_fixture();
+    session.phase = DotaSessionPhase::NeedsReview;
+    session.valve_match_id = None;
+    session.payload["launch_requested_at"] = Value::Null;
+    let session = repository.update(&session, session.revision, 21).unwrap();
+    assert!(
+        !repository
+            .replace_hosted_match_for_manual_record(GUILD_A, 604, 2000, 99, 250)
+            .unwrap()
+    );
+    assert_eq!(repository.session(GUILD_A, 604).unwrap().unwrap(), session);
 }
 
 #[test]

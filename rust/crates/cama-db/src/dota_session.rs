@@ -570,7 +570,10 @@ impl DotaSessionRepository {
             return Ok(false);
         };
         let replacement = replacement_match_id.to_string();
-        let existing_override = session.payload.get("manual_record_override");
+        let existing_override = session
+            .payload
+            .get("manual_record_override")
+            .filter(|value| !value.is_null());
         if existing_override.is_none()
             && session.valve_match_id.as_deref() == Some(replacement.as_str())
         {
@@ -668,7 +671,10 @@ impl DotaSessionRepository {
                 return Err(PendingMatchRepositoryError::SetupIncomplete(pending_match_id).into());
             }
         }
-        if pending.contains_key("manual_record_override") {
+        if pending
+            .get("manual_record_override")
+            .is_some_and(|value| !value.is_null())
+        {
             return Err(invalid(
                 "pending match already has a conflicting manual override",
             ));

@@ -973,6 +973,45 @@ async fn removing_pending_match_cleans_up_real_preview_without_recording() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn absent_manual_override_is_not_serialized_as_a_replacement() {
+    let f = Fixture::new(false);
+    assert!(f.session().payload.get("manual_record_override").is_none());
+    let mut payload = f.session().payload;
+    payload["manual_record_override"] = serde_json::Value::Null;
+    let state: SessionState = serde_json::from_value(payload).unwrap();
+    assert!(state.manual_record_override.is_none());
+    assert!(
+        serde_json::to_value(state)
+            .unwrap()
+            .get("manual_record_override")
+            .is_none()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn idle_host_disconnect_restarts_without_waiting_for_another_match() {
+    let f = Fixture::new(false);
+    f.update_state(|record, _| record.phase = Phase::Recorded);
+    PendingMatchRepository::new(&f.worker.path)
+        .delete_pending_match(1, f.pending)
+        .unwrap();
+    *f.port.snapshot_error.lock().unwrap() = Some("GC disconnected".into());
+    let before = f.session();
+    let (_shutdown, receiver) = tokio::sync::watch::channel(false);
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(6),
+        f.worker
+            .run_connected(&f.port, WorkerContext::new(receiver)),
+    )
+    .await
+    .expect("an idle worker must propagate disconnects to its supervisor");
+    assert_eq!(result.unwrap_err(), "GC disconnected");
+    assert!(f.port.calls.lock().unwrap().is_empty());
+    assert_eq!(f.session().revision, before.revision);
+}
+
+#[tokio::test(start_paused = true)]
 async fn connected_worker_does_not_refetch_or_archive_recorded_match_replays() {
     let now = chrono::Utc::now().timestamp();
     let f = Fixture::new_at(false, now);
