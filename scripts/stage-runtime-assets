@@ -16,11 +16,11 @@ for required_command in curl unzip; do
   }
 done
 
-# Dotabase 8.0.0 removed the facets table required by our catalog adapter.
-# Upgrade this pin only after validating the new schema with catalog-check.
-dotabase_version=7.8.12
-dotabase_url=https://files.pythonhosted.org/packages/6f/d6/5008442084a78a057b66cdac1abd6b3b788d28823bae0413bcd6bb99cb6d/dotabase-7.8.12.tar.gz
-dotabase_sha=29d779f56723a72cbe67cb7531b20b83a88bac89a1359acdfc24db9be70deb40
+# Keep upgrades explicit and checksum-pinned; validate with catalog-check.
+# Dotabase 8 omits facets, which the catalog adapter now treats as optional.
+dotabase_version=8.0.0
+dotabase_url=https://files.pythonhosted.org/packages/e8/69/c93107ad84094ce7cb1c54c41d529619185dc23971f40b55deee719a5603/dotabase-8.0.0.tar.gz
+dotabase_sha=f4e954bd03858b027a9695afc065b8fd1bf79567442f6f7fcc1e9e91bf4609cc
 
 dotabase_archive="$temporary_dir/dotabase.tar.gz"
 curl -fsSL "$dotabase_url" -o "$dotabase_archive"

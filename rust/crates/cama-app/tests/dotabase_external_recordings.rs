@@ -34,6 +34,46 @@ fn materialize_catalog() -> (TempDir, PathBuf) {
 }
 
 #[test]
+fn dotabase_8_without_facets_preserves_hero_and_trivia_readers() {
+    let (_directory, path) = materialize_catalog();
+    Connection::open(&path)
+        .unwrap()
+        .execute("DROP TABLE facets", [])
+        .unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let source = DotabaseSqliteSource::new(&path);
+    let hero = source.hero_by_name("Anti-Mage").unwrap().unwrap();
+    assert!(hero.facets.is_empty());
+    assert!(!hero.abilities.is_empty());
+    assert!(!hero.talents.is_empty());
+    let registry = TriviaDataRegistry::new(source.clone());
+    assert!(registry.load_facets().unwrap().is_empty());
+    let catalog = registry.question_catalog().unwrap();
+    assert!(!catalog.heroes.is_empty());
+    assert!(!catalog.abilities.is_empty());
+    assert!(!catalog.items.is_empty());
+    assert!(!catalog.voicelines.is_empty());
+    let embed = cama_app::dota_info::DotaInfoService::new(source)
+        .hero("Anti-Mage")
+        .unwrap()
+        .unwrap();
+    assert!(!embed.fields.iter().any(|field| field.name == "Facets"));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn malformed_facets_still_fail_instead_of_being_treated_as_dotabase_8() {
+    let (_directory, path) = materialize_catalog();
+    Connection::open(&path)
+        .unwrap()
+        .execute("ALTER TABLE facets DROP COLUMN description", [])
+        .unwrap();
+    let source = DotabaseSqliteSource::new(&path);
+    assert!(source.facets().is_err());
+    assert!(source.hero_by_name("Anti-Mage").is_err());
+}
+
+#[test]
 fn dotabase_fixture_manifest_is_hashed_and_redacted() {
     let manifest: Value = serde_json::from_str(FIXTURE_MANIFEST).expect("fixture manifest JSON");
     assert_eq!(manifest["schema"], "cama.external-service-recording/v1");

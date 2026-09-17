@@ -968,6 +968,8 @@ impl DotaHostWorker {
             }
             let never_launched = record.valve_match_id.is_none()
                 && state.launch_requested_at.is_none()
+                && state.server_id.is_none()
+                && lobby.server_id.is_none()
                 && !matches!(record.phase, Phase::Running | Phase::Finishing);
             if lobby.stage != LobbyStage::Postgame
                 && !(lobby.stage == LobbyStage::Gathering && never_launched)
@@ -1028,15 +1030,31 @@ impl DotaHostWorker {
                     .filter(|p| !p.radiant)
                     .map(|p| p.discord_id)
                     .collect::<std::collections::BTreeSet<_>>();
+                // A failed prelaunch host can be replaced by a human lobby.
+                // Its recorded Dota ID must not be compared with an ID that
+                // this host never acquired. Do not adopt that ID as our lobby.
+                let unlaunched_replacement = record.valve_match_id.is_none()
+                    && state.launch_requested_at.is_none()
+                    && state.server_id.is_none()
+                    && !matches!(record.phase, Phase::Running | Phase::Finishing)
+                    && lobby.as_ref().is_none_or(|lobby| {
+                        lobby.stage == LobbyStage::Gathering
+                            && lobby.match_id.is_none()
+                            && lobby.server_id.is_none()
+                    });
                 if committed
                     .valve_match_id
                     .is_some_and(|id| Some(id.to_string()) != record.valve_match_id)
-                    || committed
-                        .team1_players
-                        .iter()
-                        .copied()
-                        .collect::<std::collections::BTreeSet<_>>()
-                        != radiant
+                    && !unlaunched_replacement
+                {
+                    return self.review(record, state, "the committed Cama result has a different Dota identity; resolve that conflict first", now).await;
+                }
+                if committed
+                    .team1_players
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    != radiant
                     || committed
                         .team2_players
                         .iter()
@@ -1044,7 +1062,7 @@ impl DotaHostWorker {
                         .collect::<std::collections::BTreeSet<_>>()
                         != dire
                 {
-                    return self.review(record, state, "the committed Cama result has a different Dota identity or roster; resolve that conflict first", now).await;
+                    return self.review(record, state, "the committed Cama result has a different roster; resolve that conflict first", now).await;
                 }
                 state.recorded_match_id = Some(id);
             }

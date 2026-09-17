@@ -118,3 +118,99 @@ async fn manual_recording_waits_for_reconnection_and_fresh_ownership() {
     assert!(f.port.calls.lock().unwrap().is_empty());
     assert_eq!(f.session().phase, Phase::NeedsReview);
 }
+
+#[tokio::test]
+async fn recorded_resolution_accepts_manual_replacement_of_unassigned_host() {
+    for owned_lobby in [false, true] {
+        let f = reviewed_fixture();
+        commit_manual_result(&f, true);
+        rusqlite::Connection::open(&f.worker.path)
+            .unwrap()
+            .execute(
+                "UPDATE matches SET valve_match_id=9002542581 WHERE match_id=321",
+                [],
+            )
+            .unwrap();
+        if owned_lobby {
+            *f.port.lobby.lock().unwrap() = Some(lobby(&f.state().settings));
+        }
+        guild_resolution_command(
+            f.worker.path.clone(),
+            1,
+            f.pending,
+            42,
+            "recorded".into(),
+            0,
+            "Manually recorded replacement".into(),
+        )
+        .await
+        .unwrap();
+        f.worker.tick(&f.port, 200).await.unwrap();
+        f.worker.tick(&f.port, 205).await.unwrap();
+        assert_eq!(f.session().phase, Phase::Recorded);
+        assert!(f.session().valve_match_id.is_none());
+        assert_eq!(f.state().recorded_match_id, Some(321));
+        assert_eq!(f.recorder.count.load(Ordering::SeqCst), 0);
+        assert_eq!(f.port.calls.lock().unwrap().len(), usize::from(owned_lobby));
+    }
+}
+
+#[tokio::test]
+async fn recorded_resolution_rejects_replacement_conflicts() {
+    for conflict in [
+        "roster",
+        "dota_identity",
+        "launch_requested",
+        "server_assigned",
+    ] {
+        let f = reviewed_fixture();
+        commit_manual_result(&f, true);
+        let connection = rusqlite::Connection::open(&f.worker.path).unwrap();
+        connection
+            .execute(
+                "UPDATE matches SET valve_match_id=9002542581 WHERE match_id=321",
+                [],
+            )
+            .unwrap();
+        match conflict {
+            "roster" => {
+                connection
+                    .execute(
+                        "UPDATE matches SET team1_players='[11,2,3,4,5]' WHERE match_id=321",
+                        [],
+                    )
+                    .unwrap();
+            }
+            "dota_identity" => {
+                f.update_state(|record, _| record.valve_match_id = Some("888".into()))
+            }
+            "launch_requested" => f.update_state(|_, state| state.launch_requested_at = Some(150)),
+            "server_assigned" => f.update_state(|_, state| state.server_id = Some(999)),
+            _ => unreachable!(),
+        }
+        guild_resolution_command(
+            f.worker.path.clone(),
+            1,
+            f.pending,
+            42,
+            "recorded".into(),
+            if conflict == "dota_identity" { 888 } else { 0 },
+            "Inspect replacement".into(),
+        )
+        .await
+        .unwrap();
+        f.worker.tick(&f.port, 200).await.unwrap();
+        assert_eq!(f.session().phase, Phase::NeedsReview, "{conflict}");
+        assert!(f.port.calls.lock().unwrap().is_empty(), "{conflict}");
+        assert!(
+            f.session()
+                .last_error
+                .unwrap()
+                .contains(if conflict == "roster" {
+                    "different roster"
+                } else {
+                    "different Dota identity"
+                })
+        );
+    }
+}

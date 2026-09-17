@@ -1398,9 +1398,35 @@ fn print_inventory() {
 }
 
 fn run_catalog_check(path: PathBuf) -> ExitCode {
-    match DotaInfoRegistrationProvider::from_path(&path) {
-        Ok(_) => {
-            println!("compatible Dotabase catalog: {}", path.display());
+    let check = || -> Result<_, String> {
+        DotaInfoRegistrationProvider::from_path(&path)?;
+        let registry = cama_app::trivia_data::TriviaDataRegistry::new(
+            cama_app::dotabase_sqlite::DotabaseSqliteSource::new(&path),
+        );
+        let catalog = registry
+            .question_catalog()
+            .map_err(|error| error.to_string())?;
+        let facets = registry
+            .load_facets()
+            .map_err(|error| error.to_string())?
+            .len();
+        let counts = [
+            catalog.heroes.len(),
+            catalog.abilities.len(),
+            catalog.items.len(),
+            catalog.voicelines.len(),
+        ];
+        if counts.contains(&0) {
+            return Err("bundled Dotabase catalog has an empty required trivia collection".into());
+        }
+        Ok((counts, facets))
+    };
+    match check() {
+        Ok(([heroes, abilities, items, voicelines], facets)) => {
+            println!(
+                "compatible Dotabase catalog: {} (heroes={heroes}, abilities={abilities}, items={items}, voicelines={voicelines}, facets={facets})",
+                path.display()
+            );
             ExitCode::SUCCESS
         }
         Err(error) => {

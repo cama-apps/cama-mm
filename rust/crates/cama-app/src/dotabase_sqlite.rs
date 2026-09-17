@@ -186,6 +186,9 @@ impl TriviaDataSource for DotabaseSqliteSource {
 
     fn facets(&self) -> Result<Vec<RawFacet>, TriviaDataError> {
         let connection = self.connection()?;
+        if !has_facets(&connection).map_err(source_error)? {
+            return Ok(Vec::new());
+        }
         let mut statement = connection
             .prepare(
                 "SELECT f.id,f.localized_name,f.hero_id,h.localized_name,f.description
@@ -296,6 +299,16 @@ impl DotaInfoSource for DotabaseSqliteSource {
     }
 }
 
+// Dotabase 8 intentionally removed facets. Older pinned catalogs still expose
+// them; only absence is optional, while malformed tables remain an error.
+fn has_facets(connection: &Connection) -> rusqlite::Result<bool> {
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='facets' AND type='table')",
+        [],
+        |row| row.get(0),
+    )
+}
+
 fn load_dota_hero(connection: &Connection, hero_id: i64) -> Result<DotaHero, DotaInfoError> {
     let mut hero = connection
         .query_row(
@@ -350,6 +363,9 @@ fn load_dota_hero(connection: &Connection, hero_id: i64) -> Result<DotaHero, Dot
          WHERE t.hero_id=?1 AND a.localized_name IS NOT NULL ORDER BY t.slot,a.id",
         hero_id,
     )?;
+    if !has_facets(connection).map_err(dota_source_error)? {
+        return Ok(hero);
+    }
     let mut statement = connection
         .prepare(
             "SELECT localized_name,description FROM facets
