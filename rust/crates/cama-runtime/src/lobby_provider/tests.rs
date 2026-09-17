@@ -1079,7 +1079,11 @@ async fn live_slash_creation_persists_and_restart_reuses_the_existing_discord_me
     assert_eq!(transport.thread_count(), 1);
     {
         let captured = responder.captured.lock().expect("responses");
-        assert_eq!(captured.deferred, [false]);
+        assert_eq!(
+            captured.deferred,
+            [true],
+            "the lobby message is the public announcement; the command's own reply is private"
+        );
         assert!(captured.followups.iter().all(|response| {
             response.ephemeral && response.allowed_mentions == InteractionAllowedMentions::None
         }));
@@ -4744,6 +4748,104 @@ async fn test_join_button_without_a_lobby_explains_how_to_open_one() {
     let content = only_ephemeral_followup(&responder);
     assert!(content.contains("No active"), "{content}");
     assert!(content.contains("/lobby"), "{content}");
+}
+
+#[tokio::test]
+async fn test_lobby_command_join_refusal_is_private_and_still_links_the_lobby() {
+    // `/lobby` on an existing lobby is a view plus a join. The join's
+    // refusal names the curfew window, so it must stay ephemeral and never
+    // touch the channel or DMs.
+    let database = database_with_players(&[(99, "Creator"), (1, "Sleepy")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        99,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let now = chrono::Utc::now();
+    let start = now - chrono::Duration::minutes(30);
+    let end = now + chrono::Duration::minutes(30);
+    CurfewRepository::new(database.path())
+        .add_or_replace(&CurfewWindow {
+            discord_id: 1,
+            guild_id: 42,
+            name: "sleep".to_owned(),
+            start_hour: start.hour(),
+            start_minute: start.minute(),
+            end_hour: end.hour(),
+            end_minute: end.minute(),
+            timezone: Some("UTC".to_owned()),
+            days: None,
+            mode: cama_domain::curfew::CurfewMode::Default,
+        })
+        .expect("seed an always-active curfew window");
+    let sent_before = transport.state.lock().expect("transport state").sent.len();
+
+    let responder = dispatch_command(
+        &provider,
+        "lobby",
+        1,
+        "Sleepy",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    assert!(
+        !lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(1))
+    );
+    let content = only_ephemeral_followup(&responder);
+    assert!(content.contains("curfew"), "{content}");
+    assert!(content.contains("sleep"), "{content}");
+    assert!(
+        content.contains("[View 🍽️ All You Can Feed]("),
+        "the lobby link still comes back: {content}"
+    );
+    let state = transport.state.lock().expect("transport state");
+    assert_eq!(state.sent.len(), sent_before, "nothing is posted publicly");
+    assert!(state.direct_messages.is_empty());
+}
+
+#[tokio::test]
+async fn test_lobby_command_creates_publicly_then_reports_a_refused_join_privately() {
+    // A creator without roles still gets the lobby created (the public
+    // message and thread) and hears about the join refusal privately.
+    let database = database_with_players(&[]);
+    PlayerRepository::new(database.path())
+        .add(&NewPlayer::new(99, "Creator", Some(42)))
+        .expect("register a player with no preferred roles");
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+
+    let responder = dispatch_command(
+        &provider,
+        "lobby",
+        99,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    let lobby = lobby_snapshot(&provider, LobbyKind::Open);
+    assert!(
+        lobby.message_ids.thread_id.is_some(),
+        "the lobby was created"
+    );
+    assert!(lobby.players.is_empty(), "the creator was not seated");
+    let content = only_ephemeral_followup(&responder);
+    assert!(
+        content.starts_with("✅ 🍽️ All You Can Feed created! [View]("),
+        "{content}"
+    );
+    assert!(
+        content.ends_with("\n❌ Set your preferred roles first! Use `/player roles`."),
+        "{content}"
+    );
 }
 
 #[tokio::test]

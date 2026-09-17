@@ -2890,8 +2890,12 @@ impl LobbyInteractionHandler {
         command: CommandContext,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
+        // Two procedures back to back: create the lobby, whose message and
+        // thread are the public announcement, then seat the caller exactly
+        // like `/join`. Everything the command itself says is private, so a
+        // curfew or suspension refusal never reaches the channel.
         responder
-            .defer(false)
+            .defer(true)
             .await
             .map_err(|error| error.to_string())?;
         let Some((guild_id, channel_id)) = guild_channel(&command) else {
@@ -3216,10 +3220,7 @@ impl LobbyInteractionHandler {
         };
         let operation_lock = self.state.commands.scope_operation_lock(scope);
         let _guard = operation_lock.lock().await;
-        match self
-            .seat_registered_player(scope, &joiner, JoinSurface::Explicit, None)
-            .await?
-        {
+        match self.seat_registered_player(scope, &joiner, None).await? {
             SeatOutcome::Refused { warning, .. } => followup_ephemeral(&responder, &warning).await,
             SeatOutcome::Joined { event } => {
                 if confirm_success {
@@ -3473,7 +3474,6 @@ impl LobbyInteractionHandler {
         &self,
         scope: LobbyScope,
         joiner: &LobbyJoiner<'_>,
-        surface: JoinSurface,
         rate_limit_lease: Option<&mut LobbyMembershipRateLimitLease>,
     ) -> Result<SeatOutcome, InteractionHandlerError> {
         let player_id = joiner.id;
@@ -3484,24 +3484,16 @@ impl LobbyInteractionHandler {
             .as_ref()
             .is_none_or(Vec::is_empty)
         {
-            let warning = match surface {
-                JoinSurface::Explicit => {
-                    "❌ Set your preferred roles first! Use `/player roles`.".to_owned()
-                }
-                JoinSurface::LobbyAutoJoin => {
-                    "⚠️ Set your preferred roles with `/player roles` to auto-join.".to_owned()
-                }
-            };
-            return Ok(SeatOutcome::refused(warning, JoinRejection::MissingRoles));
+            return Ok(SeatOutcome::refused(
+                "❌ Set your preferred roles first! Use `/player roles`.".to_owned(),
+                JoinRejection::MissingRoles,
+            ));
         }
         if self.state.service.get_lobby(scope).is_none() {
-            let warning = match surface {
-                JoinSurface::Explicit => {
-                    format!("⚠️ No active {label} lobby. Use `/lobby` to create one.")
-                }
-                JoinSurface::LobbyAutoJoin => format!("⚠️ No active {label} lobby."),
-            };
-            return Ok(SeatOutcome::refused(warning, JoinRejection::NoLobby));
+            return Ok(SeatOutcome::refused(
+                format!("⚠️ No active {label} lobby. Use `/lobby` to create one."),
+                JoinRejection::NoLobby,
+            ));
         }
         if let Some(window_description) = self.active_curfew_window(scope, player_id).await? {
             return Ok(SeatOutcome::refused(
@@ -3609,11 +3601,10 @@ impl LobbyInteractionHandler {
         Ok(SeatOutcome::refused(warning, rejection))
     }
 
-    /// The tacit join at the end of `/lobby`, whether the lobby already
-    /// existed or was just created. The reply always links the lobby
-    /// message; a soft refusal rides along as an aside instead of failing
-    /// the command, and a hard one is dropped because the lobby view is the
-    /// point.
+    /// The join at the end of `/lobby`, whether the lobby already existed or
+    /// was just created. The private reply links the lobby message and then
+    /// reports the join the same way `/join` would, except that viewing a
+    /// lobby you are already in is not an error worth mentioning.
     async fn finish_lobby_auto_join(
         &self,
         scope: LobbyScope,
@@ -3623,7 +3614,7 @@ impl LobbyInteractionHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
         let seat = self
-            .seat_registered_player(scope, joiner, JoinSurface::LobbyAutoJoin, rate_limit_lease)
+            .seat_registered_player(scope, joiner, rate_limit_lease)
             .await?;
         let joined = matches!(seat, SeatOutcome::Joined { .. });
         if !joined
@@ -3634,7 +3625,14 @@ impl LobbyInteractionHandler {
         }
         let label = scope.kind.label();
         let jump_url = reply.jump_url;
-        let warning = lobby_command_auto_join_warning(scope.kind, &seat);
+        let warning = match &seat {
+            SeatOutcome::Joined { .. }
+            | SeatOutcome::Refused {
+                rejection: JoinRejection::AlreadyJoined,
+                ..
+            } => None,
+            SeatOutcome::Refused { warning, .. } => Some(warning.as_str()),
+        };
         let content = match (reply.created, joined, warning) {
             (false, true, _) => format!(
                 "✅ Joined {label}! [View {}]({jump_url})",
@@ -3644,7 +3642,7 @@ impl LobbyInteractionHandler {
             (false, false, None) => format!("[View {label}]({jump_url})"),
             (true, true, _) => format!("✅ {label} created and joined! [View]({jump_url})"),
             (true, false, Some(warning)) => {
-                format!("✅ {label} created! {warning} [View]({jump_url})")
+                format!("✅ {label} created! [View]({jump_url})\n{warning}")
             }
             (true, false, None) => format!("✅ {label} created! [View]({jump_url})"),
         };
@@ -3796,15 +3794,6 @@ struct LobbyJoiner<'a> {
     display_name: &'a str,
 }
 
-/// Which entry point is seating the player. Only the wording of the two
-/// soft refusals differs: an explicit join is told how to fix it, while the
-/// tacit `/lobby` auto-join reports it as an aside.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum JoinSurface {
-    Explicit,
-    LobbyAutoJoin,
-}
-
 /// What `/lobby` needs to phrase its reply after the auto-join.
 struct LobbyAutoJoinReply<'a> {
     jump_url: &'a str,
@@ -3844,33 +3833,6 @@ enum JoinRejection {
 
 fn membership_rate_limit_message(retry_after_seconds: u64) -> String {
     format!("Slow down! Try joining or leaving again in {retry_after_seconds}s.")
-}
-
-/// Soften a refused `/lobby` auto-join into an aside on the lobby link, or
-/// drop it when the lobby view already answers it.
-fn lobby_command_auto_join_warning(kind: LobbyKind, seat: &SeatOutcome) -> Option<String> {
-    let SeatOutcome::Refused { warning, rejection } = seat else {
-        return None;
-    };
-    match rejection {
-        JoinRejection::RatingTooHigh => Some(format!(
-            "ℹ️ You can view {}, but only players below 1400 Glicko can join.",
-            kind.label()
-        )),
-        JoinRejection::InFlight => Some(
-            "ℹ️ You can’t switch lobbies while your current shuffle or draft is in progress."
-                .to_owned(),
-        ),
-        JoinRejection::MissingRoles
-        | JoinRejection::NoLobby
-        | JoinRejection::Suspended
-        | JoinRejection::Curfew
-        | JoinRejection::RateLimited => Some(warning.clone()),
-        JoinRejection::PendingMatch
-        | JoinRejection::LobbyFull
-        | JoinRejection::AlreadyJoined
-        | JoinRejection::Storage => None,
-    }
 }
 
 struct ReadycheckRunResult {
