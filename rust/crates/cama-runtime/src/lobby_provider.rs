@@ -2898,13 +2898,16 @@ impl LobbyInteractionHandler {
             return followup_ephemeral(&responder, "This command can only be used in a server.")
                 .await;
         };
-        let player = self.load_player(command.user_id, guild_id).await?;
-        let Some(player) = player else {
-            return followup_ephemeral(
-                &responder,
-                "❌ You're not registered! Use `/player register` first.",
-            )
-            .await;
+        let Some(player) = self
+            .require_registered_player(command.user_id, guild_id, &responder)
+            .await?
+        else {
+            return Ok(());
+        };
+        let joiner = LobbyJoiner {
+            id: command.user_id,
+            player: &player,
+            display_name: &command.user_display_name,
         };
         let kind = selected_lobby_kind(&command.options).unwrap_or(LobbyKind::Open);
         let scope = LobbyScope::new(guild_id, kind);
@@ -2993,44 +2996,18 @@ impl LobbyInteractionHandler {
             .fetch_message(to_u64(existing_channel.0)?, to_u64(existing_message.0)?)
             .await
         {
-            let join = self
-                .join_registered_player_with_rate_limit_lease(
+            return self
+                .finish_lobby_auto_join(
                     scope,
-                    command.user_id,
-                    &player,
+                    &joiner,
                     rate_limit_lease.as_mut(),
-                )
-                .await?;
-            if join.joined {
-                self.best_effort_join_publication(
-                    scope,
-                    command.user_id,
-                    &player.name,
-                    Some(&command.user_display_name),
-                    join.joined_at_ns.expect("successful join has commit time"),
+                    LobbyAutoJoinReply {
+                        jump_url: &message.receipt.jump_url,
+                        created: false,
+                    },
+                    responder,
                 )
                 .await;
-            } else if let Err(error) = self.state.sync_lobby_display(scope).await {
-                warn!(%error, ?scope, "failed to refresh existing lobby display");
-            }
-            let warning = lobby_command_auto_join_warning(kind, &join);
-            let content = if join.joined {
-                format!(
-                    "✅ Joined {}! [View {}]({})",
-                    kind.label(),
-                    kind.display_name(),
-                    message.receipt.jump_url
-                )
-            } else if let Some(warning) = warning {
-                format!(
-                    "{warning} [View {}]({})",
-                    kind.label(),
-                    message.receipt.jump_url
-                )
-            } else {
-                format!("[View {}]({})", kind.label(), message.receipt.jump_url)
-            };
-            return followup_ephemeral(&responder, &content).await;
         }
 
         let state = Arc::clone(&self.state);
@@ -3177,41 +3154,17 @@ impl LobbyInteractionHandler {
             }
         }
 
-        let join = self
-            .join_registered_player_with_rate_limit_lease(
-                scope,
-                command.user_id,
-                &player,
-                rate_limit_lease.as_mut(),
-            )
-            .await?;
-        if join.joined {
-            self.best_effort_join_publication(
-                scope,
-                command.user_id,
-                &player.name,
-                Some(&command.user_display_name),
-                join.joined_at_ns.expect("successful join has commit time"),
-            )
-            .await;
-        }
-        let warning = lobby_command_auto_join_warning(kind, &join);
-        let content = if join.joined {
-            format!(
-                "✅ {} created and joined! [View]({})",
-                kind.label(),
-                receipt.jump_url
-            )
-        } else if let Some(warning) = warning {
-            format!(
-                "✅ {} created! {warning} [View]({})",
-                kind.label(),
-                receipt.jump_url
-            )
-        } else {
-            format!("✅ {} created! [View]({})", kind.label(), receipt.jump_url)
-        };
-        followup_ephemeral(&responder, &content).await
+        self.finish_lobby_auto_join(
+            scope,
+            &joiner,
+            rate_limit_lease.as_mut(),
+            LobbyAutoJoinReply {
+                jump_url: &receipt.jump_url,
+                created: true,
+            },
+            responder,
+        )
+        .await
     }
 
     async fn handle_join(
@@ -3239,9 +3192,9 @@ impl LobbyInteractionHandler {
         .await
     }
 
-    /// Seat the player with shared checks and thread/roster publication.
-    /// Commands confirm success; buttons only explain failures privately.
-    /// The interaction must already be acknowledged.
+    /// `/join` and the Join button: seat the player through the shared core
+    /// and publication. Commands confirm success; buttons only explain
+    /// failures privately. The interaction must already be acknowledged.
     async fn join_lobby_for_user(
         &self,
         scope: LobbyScope,
@@ -3250,63 +3203,35 @@ impl LobbyInteractionHandler {
         responder: Arc<dyn InteractionResponder>,
         confirm_success: bool,
     ) -> Result<(), InteractionHandlerError> {
-        let Some(player) = self.load_player(player_id, scope.guild_id).await? else {
-            return followup_ephemeral(
-                &responder,
-                "❌ You're not registered! Use `/player register` first.",
-            )
-            .await;
+        let Some(player) = self
+            .require_registered_player(player_id, scope.guild_id, &responder)
+            .await?
+        else {
+            return Ok(());
         };
-        if player.preferred_roles.as_ref().is_none_or(Vec::is_empty) {
-            return followup_ephemeral(
-                &responder,
-                "❌ Set your preferred roles first! Use `/player roles`.",
-            )
-            .await;
-        }
-        if self.state.service.get_lobby(scope).is_none() {
-            return followup_ephemeral(
-                &responder,
-                &format!(
-                    "⚠️ No active {} lobby. Use `/lobby` to create one.",
-                    scope.kind.label()
-                ),
-            )
-            .await;
-        }
+        let joiner = LobbyJoiner {
+            id: player_id,
+            player: &player,
+            display_name: user_display_name,
+        };
         let operation_lock = self.state.commands.scope_operation_lock(scope);
         let _guard = operation_lock.lock().await;
-        let result = self
-            .join_registered_player(scope, player_id, &player)
-            .await?;
-        if !result.joined {
-            return followup_ephemeral(
-                &responder,
-                result
-                    .warning
-                    .as_deref()
-                    .unwrap_or("❌ Could not join lobby."),
-            )
-            .await;
+        match self
+            .seat_registered_player(scope, &joiner, JoinSurface::Explicit, None)
+            .await?
+        {
+            SeatOutcome::Refused { warning, .. } => followup_ephemeral(&responder, &warning).await,
+            SeatOutcome::Joined { event } => {
+                if confirm_success {
+                    followup_ephemeral(&responder, &format!("✅ Joined {}!", scope.kind.label()))
+                        .await?;
+                }
+                if let Some(event) = event {
+                    self.best_effort_explicit_lobby_join_neon(event).await;
+                }
+                Ok(())
+            }
         }
-        let event = self
-            .best_effort_join_publication(
-                scope,
-                player_id,
-                &player.name,
-                Some(user_display_name),
-                result
-                    .joined_at_ns
-                    .expect("successful join has commit time"),
-            )
-            .await;
-        if confirm_success {
-            followup_ephemeral(&responder, &format!("✅ Joined {}!", scope.kind.label())).await?;
-        }
-        if let Some(event) = event {
-            self.best_effort_explicit_lobby_join_neon(event).await;
-        }
-        Ok(())
     }
 
     /// A Join or Leave button on a lobby message. Acknowledges with a
@@ -3520,50 +3445,71 @@ impl LobbyInteractionHandler {
         )))
     }
 
-    async fn join_registered_player(
+    /// Load the player, replying "not registered" and returning `None` when
+    /// there is no registration to seat.
+    async fn require_registered_player(
         &self,
-        scope: LobbyScope,
         player_id: AppUserId,
-        player: &cama_domain::player::Player,
-    ) -> Result<JoinPresentation, InteractionHandlerError> {
-        self.join_registered_player_with_rate_limit_lease(scope, player_id, player, None)
-            .await
+        guild_id: AppGuildId,
+        responder: &Arc<dyn InteractionResponder>,
+    ) -> Result<Option<cama_domain::player::Player>, InteractionHandlerError> {
+        let player = self.load_player(player_id, guild_id).await?;
+        if player.is_none() {
+            followup_ephemeral(
+                responder,
+                "❌ You're not registered! Use `/player register` first.",
+            )
+            .await?;
+        }
+        Ok(player)
     }
 
-    async fn join_registered_player_with_rate_limit_lease(
+    /// The one join path behind `/lobby` auto-join, `/join`, and the Join
+    /// button: eligibility, curfew, rate limit, the durable join, and on
+    /// success the shared publication (display repaint, ready-check sync,
+    /// thread line, join observer). Every refusal carries the warning to
+    /// show. Callers hold the scope operation lock.
+    async fn seat_registered_player(
         &self,
         scope: LobbyScope,
-        player_id: AppUserId,
-        player: &cama_domain::player::Player,
+        joiner: &LobbyJoiner<'_>,
+        surface: JoinSurface,
         rate_limit_lease: Option<&mut LobbyMembershipRateLimitLease>,
-    ) -> Result<JoinPresentation, InteractionHandlerError> {
-        if player.preferred_roles.as_ref().is_none_or(Vec::is_empty) {
-            return Ok(JoinPresentation {
-                joined: false,
-                warning: Some(
-                    "⚠️ Set your preferred roles with `/player roles` to auto-join.".to_owned(),
-                ),
-                rejection: None,
-                joined_at_ns: None,
-            });
-        }
-        if let Some(window_description) = self.active_curfew_window(scope, player_id).await? {
-            return Ok(JoinPresentation {
-                joined: false,
-                warning: Some(format!(
-                    "❌ You're inside your {window_description} curfew window. Use `/player curfew remove` if you'd rather queue through it."
-                )),
-                rejection: Some(JoinRejection::Curfew),
-                joined_at_ns: None,
-            });
+    ) -> Result<SeatOutcome, InteractionHandlerError> {
+        let player_id = joiner.id;
+        let label = scope.kind.label();
+        if joiner
+            .player
+            .preferred_roles
+            .as_ref()
+            .is_none_or(Vec::is_empty)
+        {
+            let warning = match surface {
+                JoinSurface::Explicit => {
+                    "❌ Set your preferred roles first! Use `/player roles`.".to_owned()
+                }
+                JoinSurface::LobbyAutoJoin => {
+                    "⚠️ Set your preferred roles with `/player roles` to auto-join.".to_owned()
+                }
+            };
+            return Ok(SeatOutcome::refused(warning, JoinRejection::MissingRoles));
         }
         if self.state.service.get_lobby(scope).is_none() {
-            return Ok(JoinPresentation {
-                joined: false,
-                warning: Some(format!("⚠️ No active {} lobby.", scope.kind.label())),
-                rejection: None,
-                joined_at_ns: None,
-            });
+            let warning = match surface {
+                JoinSurface::Explicit => {
+                    format!("⚠️ No active {label} lobby. Use `/lobby` to create one.")
+                }
+                JoinSurface::LobbyAutoJoin => format!("⚠️ No active {label} lobby."),
+            };
+            return Ok(SeatOutcome::refused(warning, JoinRejection::NoLobby));
+        }
+        if let Some(window_description) = self.active_curfew_window(scope, player_id).await? {
+            return Ok(SeatOutcome::refused(
+                format!(
+                    "❌ You're inside your {window_description} curfew window. Use `/player curfew remove` if you'd rather queue through it."
+                ),
+                JoinRejection::Curfew,
+            ));
         }
         let rate_limit_claim = if let Some(lease) = rate_limit_lease {
             let Some(claim) = lease.take_claim() else {
@@ -3577,12 +3523,10 @@ impl LobbyInteractionHandler {
             {
                 LobbyMembershipRateLimitDecision::Allowed(claim) => claim,
                 LobbyMembershipRateLimitDecision::RetryAfter(retry_after) => {
-                    return Ok(JoinPresentation {
-                        joined: false,
-                        warning: Some(membership_rate_limit_message(retry_after)),
-                        rejection: Some(JoinRejection::RateLimited),
-                        joined_at_ns: None,
-                    });
+                    return Ok(SeatOutcome::refused(
+                        membership_rate_limit_message(retry_after),
+                        JoinRejection::RateLimited,
+                    ));
                 }
             }
         };
@@ -3603,12 +3547,16 @@ impl LobbyInteractionHandler {
                 .expect("successful lobby join has a durable commit")
                 .joined_at_ns;
             self.state.sync_ready_lobby(scope);
-            return Ok(JoinPresentation {
-                joined: true,
-                warning: None,
-                rejection: None,
-                joined_at_ns: Some(joined_at_ns),
-            });
+            let event = self
+                .best_effort_join_publication(
+                    scope,
+                    player_id,
+                    &joiner.player.name,
+                    Some(joiner.display_name),
+                    joined_at_ns,
+                )
+                .await;
+            return Ok(SeatOutcome::Joined { event });
         }
         self.state.refund_membership_change(rate_limit_claim);
         let (warning, rejection) = match (outcome.failure, outcome.context) {
@@ -3626,10 +3574,9 @@ impl LobbyInteractionHandler {
                 }
                 (message, JoinRejection::PendingMatch)
             }
-            (Some(JoinFailure::LobbyFull), _) => (
-                format!("❌ {} is full.", scope.kind.label()),
-                JoinRejection::LobbyFull,
-            ),
+            (Some(JoinFailure::LobbyFull), _) => {
+                (format!("❌ {label} is full."), JoinRejection::LobbyFull)
+            }
             (Some(JoinFailure::RatingTooHigh), _) => (
                 "❌ Whine & Cheese is limited to players below 1400 Glicko.".to_owned(),
                 JoinRejection::RatingTooHigh,
@@ -3655,19 +3602,53 @@ impl LobbyInteractionHandler {
                 JoinRejection::Storage,
             ),
             _ => (
-                format!(
-                    "❌ Already in {}, or that lobby is closed.",
-                    scope.kind.label()
-                ),
+                format!("❌ Already in {label}, or that lobby is closed."),
                 JoinRejection::AlreadyJoined,
             ),
         };
-        Ok(JoinPresentation {
-            joined: false,
-            warning: Some(warning),
-            rejection: Some(rejection),
-            joined_at_ns: None,
-        })
+        Ok(SeatOutcome::refused(warning, rejection))
+    }
+
+    /// The tacit join at the end of `/lobby`, whether the lobby already
+    /// existed or was just created. The reply always links the lobby
+    /// message; a soft refusal rides along as an aside instead of failing
+    /// the command, and a hard one is dropped because the lobby view is the
+    /// point.
+    async fn finish_lobby_auto_join(
+        &self,
+        scope: LobbyScope,
+        joiner: &LobbyJoiner<'_>,
+        rate_limit_lease: Option<&mut LobbyMembershipRateLimitLease>,
+        reply: LobbyAutoJoinReply<'_>,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), InteractionHandlerError> {
+        let seat = self
+            .seat_registered_player(scope, joiner, JoinSurface::LobbyAutoJoin, rate_limit_lease)
+            .await?;
+        let joined = matches!(seat, SeatOutcome::Joined { .. });
+        if !joined
+            && !reply.created
+            && let Err(error) = self.state.sync_lobby_display(scope).await
+        {
+            warn!(%error, ?scope, "failed to refresh existing lobby display");
+        }
+        let label = scope.kind.label();
+        let jump_url = reply.jump_url;
+        let warning = lobby_command_auto_join_warning(scope.kind, &seat);
+        let content = match (reply.created, joined, warning) {
+            (false, true, _) => format!(
+                "✅ Joined {label}! [View {}]({jump_url})",
+                scope.kind.display_name()
+            ),
+            (false, false, Some(warning)) => format!("{warning} [View {label}]({jump_url})"),
+            (false, false, None) => format!("[View {label}]({jump_url})"),
+            (true, true, _) => format!("✅ {label} created and joined! [View]({jump_url})"),
+            (true, false, Some(warning)) => {
+                format!("✅ {label} created! {warning} [View]({jump_url})")
+            }
+            (true, false, None) => format!("✅ {label} created! [View]({jump_url})"),
+        };
+        followup_ephemeral(&responder, &content).await
     }
 
     async fn best_effort_join_publication(
@@ -3807,14 +3788,49 @@ impl LobbyInteractionHandler {
     }
 }
 
-struct JoinPresentation {
-    joined: bool,
-    warning: Option<String>,
-    rejection: Option<JoinRejection>,
-    joined_at_ns: Option<i64>,
+/// The registered player being seated, with the live Discord display name
+/// from the interaction so the thread line and join event can use it.
+struct LobbyJoiner<'a> {
+    id: AppUserId,
+    player: &'a cama_domain::player::Player,
+    display_name: &'a str,
 }
 
+/// Which entry point is seating the player. Only the wording of the two
+/// soft refusals differs: an explicit join is told how to fix it, while the
+/// tacit `/lobby` auto-join reports it as an aside.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum JoinSurface {
+    Explicit,
+    LobbyAutoJoin,
+}
+
+/// What `/lobby` needs to phrase its reply after the auto-join.
+struct LobbyAutoJoinReply<'a> {
+    jump_url: &'a str,
+    created: bool,
+}
+
+enum SeatOutcome {
+    /// Seated and published; the event is `None` only if the lobby vanished
+    /// between the join and the publication.
+    Joined { event: Option<ConfirmedLobbyJoin> },
+    Refused {
+        warning: String,
+        rejection: JoinRejection,
+    },
+}
+
+impl SeatOutcome {
+    fn refused(warning: String, rejection: JoinRejection) -> Self {
+        Self::Refused { warning, rejection }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum JoinRejection {
+    MissingRoles,
+    NoLobby,
     PendingMatch,
     LobbyFull,
     AlreadyJoined,
@@ -3830,29 +3846,30 @@ fn membership_rate_limit_message(retry_after_seconds: u64) -> String {
     format!("Slow down! Try joining or leaving again in {retry_after_seconds}s.")
 }
 
-fn lobby_command_auto_join_warning(
-    kind: LobbyKind,
-    presentation: &JoinPresentation,
-) -> Option<String> {
-    match presentation.rejection.as_ref() {
-        Some(JoinRejection::RatingTooHigh) => Some(format!(
+/// Soften a refused `/lobby` auto-join into an aside on the lobby link, or
+/// drop it when the lobby view already answers it.
+fn lobby_command_auto_join_warning(kind: LobbyKind, seat: &SeatOutcome) -> Option<String> {
+    let SeatOutcome::Refused { warning, rejection } = seat else {
+        return None;
+    };
+    match rejection {
+        JoinRejection::RatingTooHigh => Some(format!(
             "ℹ️ You can view {}, but only players below 1400 Glicko can join.",
             kind.label()
         )),
-        Some(JoinRejection::InFlight) => Some(
+        JoinRejection::InFlight => Some(
             "ℹ️ You can’t switch lobbies while your current shuffle or draft is in progress."
                 .to_owned(),
         ),
-        Some(JoinRejection::Suspended | JoinRejection::Curfew | JoinRejection::RateLimited) => {
-            presentation.warning.clone()
-        }
-        None => presentation.warning.clone(),
-        Some(
-            JoinRejection::PendingMatch
-            | JoinRejection::LobbyFull
-            | JoinRejection::AlreadyJoined
-            | JoinRejection::Storage,
-        ) => None,
+        JoinRejection::MissingRoles
+        | JoinRejection::NoLobby
+        | JoinRejection::Suspended
+        | JoinRejection::Curfew
+        | JoinRejection::RateLimited => Some(warning.clone()),
+        JoinRejection::PendingMatch
+        | JoinRejection::LobbyFull
+        | JoinRejection::AlreadyJoined
+        | JoinRejection::Storage => None,
     }
 }
 

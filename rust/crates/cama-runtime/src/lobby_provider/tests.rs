@@ -3973,7 +3973,7 @@ async fn test_auto_join_blocked_during_active_curfew_window() {
         .expect("seed an always-active curfew window");
 
     // `/lobby` on an already-created lobby takes the auto-join path
-    // (`join_registered_player`), not the explicit `/join` command's own
+    // (`seat_registered_player`), not the explicit `/join` command's own
     // curfew check — this must be blocked too.
     let slash = dispatch_command(
         &provider,
