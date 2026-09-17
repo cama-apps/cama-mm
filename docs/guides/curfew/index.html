@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Curfew</title>
+<meta name="description" content="Lock yourself out of the lobby on a schedule you set. Named nightly windows that block queueing and quietly remove you from any lobby you are in.">
+<link rel="canonical" href="https://t4n1o.github.io/cama-mm/guides/curfew/">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🌙%3C/text%3E%3C/svg%3E">
+<meta name="theme-color" content="#0f1220">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Cama Balanced Shuffle">
+<meta property="og:title" content="Curfew">
+<meta property="og:description" content="Lock yourself out of the lobby on a schedule you set. Named nightly windows that block queueing and quietly remove you from any lobby you are in.">
+<meta property="og:url" content="https://t4n1o.github.io/cama-mm/guides/curfew/">
+<meta property="og:image" content="https://t4n1o.github.io/cama-mm/assets/og/curfew.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Curfew — Cama Balanced Shuffle guide">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Curfew">
+<meta name="twitter:description" content="Lock yourself out of the lobby on a schedule you set.">
+<meta name="twitter:image" content="https://t4n1o.github.io/cama-mm/assets/og/curfew.png">
+<link rel="stylesheet" href="../../assets/fonts/curfew.css">
+<style>
+  :root {
+    --bg: #f1f1f7; --surface: #ffffff; --surface-2: #f6f6fb;
+    --ink: #15162b; --dim: #5c5d78; --faint: #8a8ba6;
+    --accent: #5b4bd6; --accent-ink: #ffffff; --accent-tint: #e7e4fb;
+    --locked: #9c3c6b; --locked-tint: #fae3ee;
+    --open: #2f7d4f; --open-tint: #e2f0e5;
+    --line: #dcdce9; --line-strong: #c2c2d6;
+    --shadow: 0 1px 2px rgba(21,22,43,.06), 0 8px 24px -12px rgba(21,22,43,.16);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1220; --surface: #171a2c; --surface-2: #1d2135;
+      --ink: #e9e9f5; --dim: #a0a2c0; --faint: #74769a;
+      --accent: #9d90ff; --accent-ink: #14112c; --accent-tint: #241f4a;
+      --locked: #f090bb; --locked-tint: #2e1a2a;
+      --open: #6bc292; --open-tint: #16281f;
+      --line: #282c44; --line-strong: #3a3f5c;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 12px 32px -16px rgba(0,0,0,.65);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f1220; --surface: #171a2c; --surface-2: #1d2135;
+    --ink: #e9e9f5; --dim: #a0a2c0; --faint: #74769a;
+    --accent: #9d90ff; --accent-ink: #14112c; --accent-tint: #241f4a;
+    --locked: #f090bb; --locked-tint: #2e1a2a;
+    --open: #6bc292; --open-tint: #16281f;
+    --line: #282c44; --line-strong: #3a3f5c;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 12px 32px -16px rgba(0,0,0,.65);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 16.5px; line-height: 1.6; -webkit-font-smoothing: antialiased;
+  }
+  ::selection { background: var(--accent-tint); color: var(--ink); }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+  .page { max-width: 760px; margin: 0 auto; padding: 56px 24px 96px; }
+  h1, h2, h3 { font-family: "Fraunces", Georgia, serif; font-weight: 600; text-wrap: balance; margin: 0; }
+  code, .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+  code {
+    font-size: .88em; background: var(--surface-2); border: 1px solid var(--line);
+    border-radius: 5px; padding: .1em .4em; color: var(--accent);
+  }
+
+  .masthead { padding-bottom: 36px; border-bottom: 1px solid var(--line); margin-bottom: 48px; }
+  .eyebrow {
+    font-family: "IBM Plex Mono", monospace; font-size: 12.5px; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--accent);
+    display: flex; align-items: center; gap: 8px; margin-bottom: 14px;
+  }
+  .eyebrow i { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); display: block; }
+  .masthead h1 { font-size: clamp(2.2rem, 5.5vw, 3rem); line-height: 1.08; margin-bottom: 14px; }
+  .dek { font-size: 1.06rem; color: var(--dim); max-width: 58ch; margin: 0; }
+  .dek strong { color: var(--ink); font-weight: 600; }
+
+  section { margin-bottom: 54px; }
+  .section-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 20px; }
+  .section-head .index { font-family: "IBM Plex Mono", monospace; font-size: 13px; color: var(--faint); letter-spacing: .08em; }
+  .section-head h2 { font-size: 1.42rem; }
+  .lede { color: var(--dim); max-width: 64ch; margin: -6px 0 22px; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+    padding: 18px; box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 8px;
+  }
+  .card .kicker {
+    font-family: "IBM Plex Mono", monospace; font-size: 11.5px; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--accent);
+  }
+  .card h3 { font-family: "IBM Plex Sans", sans-serif; font-weight: 700; font-size: 16px; }
+  .card p { margin: 0; color: var(--dim); font-size: 14.5px; }
+
+  table.opts { width: 100%; border-collapse: collapse; margin: 0 0 18px; font-size: 14.5px; }
+  table.opts th, table.opts td { text-align: left; padding: 11px 12px 11px 0; border-top: 1px solid var(--line); vertical-align: top; }
+  table.opts th { font-family: "IBM Plex Mono", monospace; font-size: 12.5px; letter-spacing: .04em; color: var(--ink); white-space: nowrap; width: 108px; }
+  table.opts td { color: var(--dim); }
+  table.opts .req { display: block; font-family: "IBM Plex Mono", monospace; font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); font-weight: 400; }
+
+  .example {
+    background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px 16px; font-family: "IBM Plex Mono", monospace; font-size: 13.5px;
+    color: var(--ink); overflow-x: auto; white-space: pre; margin: 0 0 12px;
+  }
+  .example .c { color: var(--faint); }
+  .caption { font-size: 13.5px; color: var(--dim); margin: 0 0 22px; }
+
+  .timeline { display: flex; flex-direction: column; gap: 14px; margin: 0 0 8px; }
+  .track { display: grid; grid-template-columns: 74px 1fr; gap: 12px; align-items: center; }
+  .track .label { font-family: "IBM Plex Mono", monospace; font-size: 12px; color: var(--dim); text-align: right; }
+  .bar { position: relative; height: 34px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .bar .seg { position: absolute; top: 0; bottom: 0; background: var(--accent-tint); border-left: 2px solid var(--accent); }
+  .bar .seg span {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--accent); letter-spacing: .04em;
+  }
+  .bar .tick { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--line); }
+  .bar .seg-label {
+    position: absolute; top: 50%; transform: translate(-100%, -50%); padding-right: 10px;
+    font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--accent); white-space: nowrap;
+  }
+  .hours { display: grid; grid-template-columns: 74px 1fr; gap: 12px; }
+  .hours .scale {
+    display: flex; justify-content: space-between; font-family: "IBM Plex Mono", monospace;
+    font-size: 10.5px; color: var(--faint); letter-spacing: .04em;
+  }
+
+  .modes { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 16px; }
+  .mode { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 20px; box-shadow: var(--shadow); }
+  .mode .badge {
+    display: inline-block; font-family: "IBM Plex Mono", monospace; font-size: 11px;
+    letter-spacing: .08em; text-transform: uppercase; border-radius: 999px;
+    padding: 3px 10px; margin-bottom: 10px; border: 1px solid var(--line-strong); color: var(--dim);
+  }
+  .mode.strict .badge { background: var(--locked-tint); color: var(--locked); border-color: transparent; }
+  .mode h3 { font-family: "IBM Plex Sans", sans-serif; font-weight: 700; font-size: 16px; margin-bottom: 8px; }
+  .mode p { margin: 0 0 10px; color: var(--dim); font-size: 14.5px; }
+  .mode ul { margin: 0; padding-left: 18px; color: var(--dim); font-size: 14px; display: flex; flex-direction: column; gap: 6px; }
+  .mode li::marker { color: var(--faint); }
+
+  .note {
+    display: flex; gap: 12px; align-items: flex-start; background: var(--accent-tint);
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    border-radius: 10px; padding: 14px 16px; font-size: 14.5px; color: var(--dim); margin: 18px 0 0;
+  }
+  .note strong { color: var(--ink); }
+  .note .tag {
+    flex: none; font-family: "IBM Plex Mono", monospace; font-size: 10.5px; letter-spacing: .06em;
+    text-transform: uppercase; color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+    border-radius: 5px; padding: 2px 6px; margin-top: 2px; background: var(--surface);
+  }
+
+  dl.faq { display: flex; flex-direction: column; margin: 0; }
+  .faq-item { padding: 17px 0; border-top: 1px solid var(--line); display: grid; grid-template-columns: minmax(150px, 210px) 1fr; gap: 20px; }
+  .faq-item:last-child { border-bottom: 1px solid var(--line); }
+  .faq-item dt { font-weight: 700; font-size: 15px; color: var(--ink); }
+  .faq-item dd { margin: 0; color: var(--dim); font-size: 15px; max-width: 58ch; }
+  @media (max-width: 600px) { .faq-item { grid-template-columns: 1fr; gap: 6px; } }
+
+  footer { margin-top: 60px; padding-top: 24px; border-top: 1px solid var(--line); font-size: 13px; color: var(--faint); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="masthead">
+    <div class="eyebrow"><i></i>Cama · Player Guide</div>
+    <h1>Curfew</h1>
+    <p class="dek">Lock yourself out of the lobby on a schedule you set. A curfew window <strong>blocks you from queueing</strong> and <strong>quietly removes you from any lobby you're in</strong> — so "one more game" at 2am isn't a decision you have to keep making.</p>
+  </div>
+
+  <section>
+    <div class="section-head"><span class="index">01</span><h2>What a window actually does</h2></div>
+    <p class="lede">Every window is a daily span of wall-clock time that you name yourself. While you're inside one, three things are true.</p>
+    <div class="cards">
+      <div class="card">
+        <div class="kicker">Blocked</div>
+        <h3>You can't queue</h3>
+        <p>Joining a lobby is refused — by command, by the ⚔️ reaction, and opening a new lobby too. You're told which window did it.</p>
+      </div>
+      <div class="card">
+        <div class="kicker">Removed</div>
+        <h3>You're taken out</h3>
+        <p>Already sitting in a lobby when the window starts? The bot removes you within a minute and DMs you to say why.</p>
+      </div>
+      <div class="card">
+        <div class="kicker">Private</div>
+        <h3>Nobody else sees it</h3>
+        <p>To the thread it looks like an ordinary leave. Your window's name, hours and timezone are never posted in channel.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-head"><span class="index">02</span><h2>Setting one up</h2></div>
+    <p class="lede">Entirely self-service — no admin involved, and every reply is private to you.</p>
+
+    <div class="example"><span class="c">/player curfew add</span>  name:sleep  start:23:30  end:08:00</div>
+    <p class="caption">That's the whole thing. The remaining options are optional.</p>
+
+    <table class="opts">
+      <tr><th>name <span class="req">required</span></th><td>Yours to choose — <code>sleep</code>, <code>work</code>, <code>exams</code>. Up to 40 characters. Reusing an existing name updates that window instead of making a second one.</td></tr>
+      <tr><th>start <span class="req">required</span></th><td>24-hour <code>HH:MM</code>, e.g. <code>23:30</code>. When the lockout begins.</td></tr>
+      <tr><th>end <span class="req">required</span></th><td>24-hour <code>HH:MM</code>. When queueing unlocks again.</td></tr>
+      <tr><th>timezone</th><td>An IANA name like <code>Europe/Berlin</code>. Leave blank and the window uses your <code>/player timezone</code> setting.</td></tr>
+      <tr><th>days</th><td>Which nights it runs, e.g. <code>Sa,Su</code> or <code>Mon,Wed,Fri</code>. Blank means every day. Short forms M / T / W / Th / F / Sa / Su and full names both work.</td></tr>
+      <tr><th>mode</th><td><code>default</code> or <code>strict</code>. See section 04 — strict is the one that stops you from talking yourself out of it.</td></tr>
+    </table>
+
+    <p class="caption">You can have as many windows as you like. They're per-server and per-player, and they stack — if any one of them is active, you're locked.</p>
+  </section>
+
+  <section>
+    <div class="section-head"><span class="index">03</span><h2>Overnight windows pick the night, not the morning</h2></div>
+    <p class="lede">A window whose end time is earlier than its start time runs past midnight into the next day. When you use <code>days</code> with one of those, the day you choose is the day it <em>starts</em>.</p>
+
+    <div class="timeline">
+      <div class="track">
+        <div class="label">Fri</div>
+        <div class="bar">
+          <div class="tick" style="left:25%"></div><div class="tick" style="left:50%"></div><div class="tick" style="left:75%"></div>
+          <div class="seg" style="left:91.6%; right:0"></div>
+          <div class="seg-label" style="left:91.6%">22:00 — locked</div>
+        </div>
+      </div>
+      <div class="track">
+        <div class="label">Sat</div>
+        <div class="bar">
+          <div class="tick" style="left:25%"></div><div class="tick" style="left:50%"></div><div class="tick" style="left:75%"></div>
+          <div class="seg" style="left:0; width:25%"><span>locked until 06:00</span></div>
+        </div>
+      </div>
+      <div class="hours"><div></div><div class="scale"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div></div>
+    </div>
+    <p class="caption"><code>days:Fri</code> on a <code>22:00 – 06:00</code> window covers <strong>Friday night through Saturday morning</strong> — not Saturday night. Pick the evening you want to stop playing, not the morning you want to wake up.</p>
+
+    <div class="note">
+      <span class="tag">Heads up</span>
+      <span>A window where <strong>start and end are the same time</strong> is treated as zero-length and never fires, rather than locking you out for a full 24 hours. If a window seems to do nothing, check that first.</span>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-head"><span class="index">04</span><h2>Default or strict</h2></div>
+    <p class="lede">Both enforce identically while active. They differ only in how easily you can back out of one.</p>
+    <div class="modes">
+      <div class="mode">
+        <span class="badge">default</span>
+        <h3>Edit it whenever</h3>
+        <p>Add, shrink, extend or delete a window at any moment, and the change is live immediately.</p>
+        <ul>
+          <li>Good for a schedule you're still tuning</li>
+          <li>Nothing stops you lifting it at 1am</li>
+        </ul>
+      </div>
+      <div class="mode strict">
+        <span class="badge">strict</span>
+        <h3>Loosening waits for morning</h3>
+        <p>Anything that frees up time — shrinking the window, switching it back to default, deleting it — doesn't take effect today. It's staged until <strong>08:00 the next day</strong>, and the version committed this morning keeps enforcing tonight.</p>
+        <ul>
+          <li><strong>Extending</strong> a window still applies instantly</li>
+          <li>A brand-new strict window applies instantly too</li>
+          <li>The staged change lands on its own; you get a DM when it does</li>
+        </ul>
+      </div>
+    </div>
+    <div class="note">
+      <span class="tag">Why</span>
+      <span>Strict mode exists to close the obvious bypass: deciding at 23:29 that tonight's curfew was a bad idea. Because a reduction is always staged to the next morning — even one made at 3am — whatever you committed as of this morning is what fires tonight.</span>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-head"><span class="index">05</span><h2>Checking and clearing</h2></div>
+    <div class="example"><span class="c">/player curfew list</span>
+
+Your curfew windows:
+- "sleep": 23:30 - 08:00 Europe/Berlin
+- "weekends": 02:00 - 10:00 Europe/Berlin starting Fri, Sa (runs into the next morning)
+  [strict: edits/removal take effect the next morning]</div>
+    <p class="caption"><code>/player curfew list</code> shows every window you have, in its effective timezone, and flags any change that's staged and waiting. <code>/player curfew remove name:sleep</code> deletes one — instantly in default mode, next morning in strict.</p>
+  </section>
+
+  <section>
+    <div class="section-head"><span class="index">06</span><h2>Good to know</h2></div>
+    <dl class="faq">
+      <div class="faq-item">
+        <dt>Which timezone does it use?</dt>
+        <dd>The window's own <code>timezone</code> if you set one, otherwise your <code>/player timezone</code> setting, otherwise <code>America/New_York</code>. Set <code>/player timezone</code> once and every window follows it.</dd>
+      </div>
+      <div class="faq-item">
+        <dt>What about daylight saving?</dt>
+        <dd>Handled. Windows are stored as wall-clock times in a named zone, so 23:30 stays 23:30 across a clock change instead of drifting by an hour.</dd>
+      </div>
+      <div class="faq-item">
+        <dt>My match already started — will it kick me?</dt>
+        <dd>No. Once you're locked into a forming match, the sweep leaves you alone. Curfew takes you out of a <em>lobby</em>, never out of a game that's already being made.</dd>
+      </div>
+      <div class="faq-item">
+        <dt>How fast is the removal?</dt>
+        <dd>The sweep runs about once a minute, so expect to be out within a minute of the window opening. Queueing is blocked the instant the window starts — that check is live, not swept.</dd>
+      </div>
+      <div class="faq-item">
+        <dt>Will people know I'm curfewed?</dt>
+        <dd>Not from the bot. The removal shows up in the thread as an ordinary leave, and the in-channel wording for a blocked join never names your window. Only you see the details, in a DM or a private reply.</dd>
+      </div>
+      <div class="faq-item">
+        <dt>Can I have different rules for weekdays and weekends?</dt>
+        <dd>Yes — that's what multiple named windows are for. A strict <code>schoolnight</code> on Mon–Thu and a looser <code>weekend</code> on Fri, Sa is a normal setup.</dd>
+      </div>
+      <div class="faq-item">
+        <dt>Does an admin have to do anything?</dt>
+        <dd>No. Curfew is entirely self-service, per player, per server.</dd>
+      </div>
+      <div class="faq-item">
+        <dt>I want out right now</dt>
+        <dd><code>/player curfew remove</code>. In default mode you're free immediately. In strict mode you're not — that's the point of strict mode, and the reply will tell you when it lifts.</dd>
+      </div>
+    </dl>
+  </section>
+
+  <footer>
+    <span>Cama Balanced Shuffle</span>
+    <span>Curfew · player guide</span>
+  </footer>
+
+</div>
+</body>
+</html>
