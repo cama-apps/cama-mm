@@ -72,7 +72,7 @@ jobs:
           mkdir -p .cama-build
           cp rust/target/release/cama-rust .cama-build/cama-rust
 
-      - name: Stage latest runtime data
+      - name: Stage pinned runtime data
         run: ./scripts/stage-runtime-assets
 
       - name: Set up Docker Buildx
