@@ -9,28 +9,24 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-for required_command in curl jq unzip; do
+for required_command in curl unzip; do
   command -v "$required_command" >/dev/null 2>&1 || {
     echo "$required_command is required to stage runtime assets" >&2
     exit 69
   }
 done
 
-metadata="$temporary_dir/dotabase.json"
-curl -fsSL https://pypi.org/pypi/dotabase/json -o "$metadata"
-dotabase_version=$(jq -er '.info.version' "$metadata")
-dotabase_url=$(jq -er --arg version "$dotabase_version" \
-  'first(.releases[$version][] | select(.packagetype == "sdist") | .url)' \
-  "$metadata")
-dotabase_sha=$(jq -er --arg version "$dotabase_version" \
-  'first(.releases[$version][] | select(.packagetype == "sdist") | .digests.sha256)' \
-  "$metadata")
+# Dotabase 8.0.0 removed the facets table required by our catalog adapter.
+# Upgrade this pin only after validating the new schema with catalog-check.
+dotabase_version=7.8.12
+dotabase_url=https://files.pythonhosted.org/packages/6f/d6/5008442084a78a057b66cdac1abd6b3b788d28823bae0413bcd6bb99cb6d/dotabase-7.8.12.tar.gz
+dotabase_sha=29d779f56723a72cbe67cb7531b20b83a88bac89a1359acdfc24db9be70deb40
 
 dotabase_archive="$temporary_dir/dotabase.tar.gz"
 curl -fsSL "$dotabase_url" -o "$dotabase_archive"
 printf '%s  %s\n' "$dotabase_sha" "$dotabase_archive" | sha256sum -c -
 dotabase_member=$(tar -tzf "$dotabase_archive" \
-  | awk '/\/dotabase\/dotabase[.]db$/ { print; exit }')
+  | awk '/\/dotabase\/dotabase[.]db$/ && !found { print; found=1 }')
 case "$dotabase_member" in
   ""|/*|*../*) echo "Dotabase archive has no safe database member" >&2; exit 65 ;;
 esac
