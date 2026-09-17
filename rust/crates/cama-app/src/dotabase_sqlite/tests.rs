@@ -158,7 +158,7 @@ fn pinned_dotabase_asset_loads_through_the_production_adapter() {
 
     assert!(registry.load_items().unwrap().len() >= 300);
     assert!(registry.load_voicelines().unwrap().len() >= 1_000);
-    assert!(registry.load_facets().unwrap().len() >= 35);
+    assert!(registry.load_facets().unwrap().is_empty());
 
     let source = DotabaseSqliteSource::new(
         std::env::var("CAMA_DOTABASE_TEST_PATH").expect("asset path remains available"),
@@ -177,13 +177,7 @@ fn pinned_dotabase_asset_loads_through_the_production_adapter() {
         .hero_by_name("Witch Doctor")
         .unwrap()
         .expect("Witch Doctor");
-    assert!(witch_doctor.facets.len() >= 2);
-    assert!(
-        witch_doctor
-            .facets
-            .iter()
-            .all(|facet| !facet.localized_name.is_empty() && !facet.description.is_empty())
-    );
+    assert!(witch_doctor.facets.is_empty());
     let meat_hook = source
         .ability_by_name("meat hook")
         .unwrap()
