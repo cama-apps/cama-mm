@@ -3662,7 +3662,7 @@ async fn registered_admin_record_settles_an_active_hosted_match_once() {
             GUILD,
             pending.pending_match_id,
             "hosted-record-test-bot",
-            json!({"test": "active hosted session"}),
+            json!({"test": "active hosted session", "manual_record_override": null}),
             unix_seconds(),
         )
         .expect("claim active hosted session")
@@ -8920,7 +8920,7 @@ fn claim_stuck_replacement_session(fixture: &MatchRuntimeFixture, pending: &Pend
             pending.guild_id,
             pending.pending_match_id,
             "replacement-test-bot",
-            json!({"launch_requested_at": 100, "server_id": 123}),
+            json!({"launch_requested_at": 100, "server_id": 123, "manual_record_override": null}),
             unix_seconds(),
         )
         .unwrap()
@@ -8958,6 +8958,48 @@ fn replacement_record_context(
         });
     }
     context
+}
+
+#[tokio::test]
+async fn null_override_allows_manual_record_after_failed_lobby_creation() {
+    let fixture = MatchRuntimeFixture::new();
+    let pending = fixture.pending(unix_seconds() + 120);
+    DotaSessionRepository::new(fixture.database.path())
+        .claim_session(
+            GUILD,
+            pending.pending_match_id,
+            "failed-create-bot",
+            json!({"manual_record_override": null, "create_requested_at": 100}),
+            unix_seconds(),
+        )
+        .unwrap();
+    PendingMatchRepository::new(fixture.database.path())
+        .request_manual_dota_hosting(GUILD, pending.pending_match_id)
+        .unwrap();
+    let responder = Arc::new(RecordingMatchResponder::default());
+    fixture
+        .provider
+        .handler
+        .handle_record(
+            replacement_record_context(99_001, true, Some(pending.pending_match_id), "987654322"),
+            responder.clone(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        responder
+            .contents()
+            .iter()
+            .any(|text| text.contains("Match recorded")),
+        "{:?}",
+        responder.contents()
+    );
+    assert!(
+        PendingMatchRepository::new(fixture.database.path())
+            .pending_match(GUILD, pending.pending_match_id)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -191,7 +191,7 @@ struct OperatorResolution {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct SessionState {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     manual_record_override: Option<serde_json::Value>,
     #[serde(default)]
     configuration: Option<configuration::LobbyConfigurationRequest>,
@@ -1578,14 +1578,18 @@ impl DotaHostWorker {
         now: i64,
     ) -> Result<(), String> {
         self.suspend_betting(record).await?;
+        let changed =
+            record.phase != Phase::NeedsReview || record.last_error.as_deref() != Some(reason);
         record.phase = Phase::NeedsReview;
         record.last_error = Some(reason.to_owned());
         self.save(record, state, now).await?;
-        tracing::warn!(guild_id = record.guild_id, pending_match_id = record.pending_match_id,
+        if changed {
+            tracing::warn!(guild_id = record.guild_id, pending_match_id = record.pending_match_id,
             lobby_id = ?record.lobby_id, match_id = ?record.valve_match_id,
             server_id = ?state.server_id, server_region = state.settings.server_region,
             game_mode = state.settings.game_mode, league_id = state.settings.league_id,
             reason, "Dota hosting requires review");
+        }
         self.announce(record,state,&format!("Hosting paused: {reason}. Use `/admin dota status` to inspect the saved identities and `/admin dota resolve` for terminal recovery."),now).await
     }
 
@@ -1667,7 +1671,13 @@ impl DotaHostWorker {
         loop {
             tokio::select! {
                 _ = context.cancelled() => return Ok(()),
-                result = self.tick(port, chrono::Utc::now().timestamp()) => result?,
+                result = async {
+                    self.tick(port, chrono::Utc::now().timestamp()).await?;
+                    // Idle and held sessions can return before reading Steam.
+                    // A closed transport must restart the worker even without
+                    // a new match triggering an external command.
+                    port.snapshot().await.map(|_| ())
+                } => result?,
             }
             if !context.sleep(Duration::from_secs(5)).await {
                 return Ok(());

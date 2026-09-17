@@ -1074,55 +1074,55 @@ async fn spawn_watchers(
         if watcher_start.await.is_err() {
             return;
         }
-        loop {
+        let reason = loop {
             tokio::select! {
                 message = subscribed.next() => {
                     match message {
                         Some(Ok(message)) => apply_subscribed(message, &state, &events).await,
-                        Some(Err(error)) => emit_disconnect(&state, &events, error),
-                        None => break,
+                        Some(Err(error)) => break error.to_string(),
+                        None => break "Dota coordinator message stream closed".to_owned(),
                     }
                 }
                 message = up_to_date.next() => {
                     match message {
                         Some(Ok(_message)) => apply_cache_up_to_date(&state, &events).await,
-                        Some(Err(error)) => emit_disconnect(&state, &events, error),
-                        None => break,
+                        Some(Err(error)) => break error.to_string(),
+                        None => break "Dota coordinator message stream closed".to_owned(),
                     }
                 }
                 message = multiple.next() => {
                     match message {
                         Some(Ok(message)) => apply_multiple(message, &state, &events).await,
-                        Some(Err(error)) => emit_disconnect(&state, &events, error),
-                        None => break,
+                        Some(Err(error)) => break error.to_string(),
+                        None => break "Dota coordinator message stream closed".to_owned(),
                     }
                 }
                 message = single_create.next() => {
                     match message {
                         Some(Ok(message)) => apply_single(message.0, &state, &events).await,
-                        Some(Err(error)) => emit_disconnect(&state, &events, error),
-                        None => break,
+                        Some(Err(error)) => break error.to_string(),
+                        None => break "Dota coordinator message stream closed".to_owned(),
                     }
                 }
                 message = single_update.next() => {
                     match message {
                         Some(Ok(message)) => apply_single(message.0, &state, &events).await,
-                        Some(Err(error)) => emit_disconnect(&state, &events, error),
-                        None => break,
+                        Some(Err(error)) => break error.to_string(),
+                        None => break "Dota coordinator message stream closed".to_owned(),
                     }
                 }
                 message = single_destroy.next() => {
                     match message {
                         Some(Ok(message)) => apply_single(message.0, &state, &events).await,
-                        Some(Err(error)) => emit_disconnect(&state, &events, error),
-                        None => break,
+                        Some(Err(error)) => break error.to_string(),
+                        None => break "Dota coordinator message stream closed".to_owned(),
                     }
                 }
                 message = unsubscribed.next() => {
                     match message {
                         Some(Ok(message)) => apply_unsubscribed(message, &state, &events).await,
-                        Some(Err(error)) => emit_disconnect(&state, &events, error),
-                        None => break,
+                        Some(Err(error)) => break error.to_string(),
+                        None => break "Dota coordinator message stream closed".to_owned(),
                     }
                 }
                 message = scoreboard.next() => {
@@ -1131,28 +1131,26 @@ async fn spawn_watchers(
                             let scoreboard = map_live_scoreboard(&message.0);
                             let _ = events.send(DotaSteamEvent::LiveScoreboard(scoreboard));
                         }
-                        Some(Err(error)) => emit_disconnect(&state, &events, error),
-                        None => break,
+                        Some(Err(error)) => break error.to_string(),
+                        None => break "Dota coordinator message stream closed".to_owned(),
                     }
                 }
             }
-        }
+        };
+        emit_disconnect(&state, &events, reason).await;
     });
     WatcherTask(task)
 }
 
-fn emit_disconnect(
+async fn emit_disconnect(
     state: &Arc<RwLock<ClientState>>,
     events: &broadcast::Sender<DotaSteamEvent>,
-    error: NetworkError,
+    reason: String,
 ) {
-    let reason = format!("{error}");
-    let state = Arc::clone(state);
-    let events = events.clone();
-    tokio::spawn(async move {
-        state.write().await.status = CacheStatus::Disconnected;
-        let _ = events.send(DotaSteamEvent::TransportDisconnected { reason });
-    });
+    // Stream EOF is a disconnect too. Invalidate before notifying waiters;
+    // leaving a Ready cache behind can authorize commands on a dead socket.
+    state.write().await.status = CacheStatus::Disconnected;
+    let _ = events.send(DotaSteamEvent::TransportDisconnected { reason });
 }
 
 async fn apply_subscribed(
@@ -1780,6 +1778,26 @@ mod tests {
             lobby: Some(map_lobby(&lobby)),
             lobby_observed_at: Some(Instant::now()),
         }))
+    }
+
+    #[tokio::test]
+    async fn watcher_exit_invalidates_cached_lobby_before_notifying_waiters() {
+        let state = ready_lobby_state();
+        let (events, mut receiver) = broadcast::channel(EVENT_BUFFER);
+        emit_disconnect(&state, &events, "stream closed".into()).await;
+
+        assert_eq!(state.read().await.status, CacheStatus::Disconnected);
+        assert!(state.read().await.lobby.is_some());
+        assert!(
+            !state
+                .read()
+                .await
+                .lobby_observation_is_fresh(Duration::from_secs(45))
+        );
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            DotaSteamEvent::TransportDisconnected { reason } if reason == "stream closed"
+        ));
     }
 
     #[tokio::test]
