@@ -28,8 +28,7 @@ pub const CURFEW_SWEEP_WAKE_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Re-render a lobby's live Discord embed after curfew removed members from
 /// it, and make each removal look like an ordinary leave — the thread's
-/// usual "left" line and the sword reaction coming off — without any public
-/// mention of curfew. Implemented by
+/// usual "left" line — without any public mention of curfew. Implemented by
 /// [`crate::lobby_provider::LobbyRegistrationProvider`].
 #[async_trait]
 pub trait CurfewLobbyDisplayPort: Send + Sync {

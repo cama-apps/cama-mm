@@ -361,7 +361,6 @@ pub enum MessageAccess {
 pub enum MessageMutationKind {
     EditLobbyEmbed,
     EditThreadEmbed,
-    RemoveSwordReaction,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1195,23 +1194,6 @@ pub fn plan_sync_lobby_display(
 }
 
 #[must_use]
-pub fn plan_remove_lobby_reaction(
-    scope: LobbyScope,
-    ids: &LobbyMessageIds,
-) -> Option<MessageMutation> {
-    ids.channel_id
-        .zip(ids.message_id)
-        .map(|(channel_id, message_id)| MessageMutation {
-            channel_id,
-            message_id,
-            access: MessageAccess::Partial,
-            kind: MessageMutationKind::RemoveSwordReaction,
-            guild_id: scope.guild_id,
-            lobby_kind: scope.kind,
-        })
-}
-
-#[must_use]
 pub fn plan_update_thread_embed(
     scope: LobbyScope,
     ids: &LobbyMessageIds,
@@ -1897,16 +1879,6 @@ mod tests {
         first.join().unwrap();
         second.join().unwrap();
         assert_eq!(*edits.lock().unwrap(), ["old", "new"]);
-    }
-
-    #[test]
-    fn test_remove_lobby_reaction_uses_partial_message_without_fetch() {
-        let mutation =
-            plan_remove_lobby_reaction(LobbyScope::new(GUILD, LobbyKind::Open), &metadata())
-                .unwrap();
-        assert_eq!(mutation.access, MessageAccess::Partial);
-        assert_eq!(mutation.kind, MessageMutationKind::RemoveSwordReaction);
-        assert_eq!(mutation.message_id, MessageId(789));
     }
 
     #[test]

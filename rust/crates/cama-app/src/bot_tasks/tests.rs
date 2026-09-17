@@ -490,9 +490,6 @@ fn reaction_input(kind: ReactionKind) -> ReactionInput {
         lobby_open: true,
         already_in_lobby: false,
         lobby_kind: LobbyKind::Open,
-        join_result: JoinResult::Joined,
-        post_join_lobby_exists: true,
-        lobby_ready: false,
         has_thread: false,
     }
 }
@@ -502,55 +499,21 @@ fn test_retired_frogling_reaction_is_removed_from_active_lobby_message() {
     let plan = route_reaction_add(&reaction_input(ReactionKind::LegacyFrogling));
     assert!(plan.use_partial_message);
     assert!(plan.remove_reaction);
-    assert!(!plan.join_lobby);
     assert!(!plan.use_full_message_fetch);
 }
 
 #[test]
-fn test_sword_reaction_uses_gateway_member_and_partial_message() {
+fn test_sword_reaction_is_a_thread_shout_out_not_a_join() {
     let mut input = reaction_input(ReactionKind::Sword);
-    input.lobby_kind = LobbyKind::LowSkill;
+    input.has_thread = true;
     let plan = route_reaction_add(&input);
-    assert_eq!(
-        resolve_raw_user_source(true, true, true),
-        RawUserSource::PayloadMember
-    );
-    assert!(plan.use_partial_message);
-    assert!(plan.join_lobby);
-    assert!(plan.update_lobby_message);
-    assert!(plan.sync_readycheck);
-    assert!(plan.notify_rally);
-    assert!(plan.retain_target_notification);
+    assert!(plan.send_ready_thread_message);
+    assert!(!plan.remove_reaction);
+    assert!(!plan.send_gamba_thread_message);
     assert!(!plan.use_full_message_fetch);
-}
 
-#[test]
-fn test_sword_join_retains_target_notification_when_lobby_refetch_disappears() {
-    let mut input = reaction_input(ReactionKind::Sword);
-    input.post_join_lobby_exists = false;
-    let plan = route_reaction_add(&input);
-    assert!(plan.retain_target_notification);
-    assert!(!plan.update_lobby_message);
-
-    let mut tasks = BackgroundTaskRegistry::default();
-    tasks.retain(1);
-    assert!(tasks.contains(1));
-    tasks.finish(1);
-    assert!(!tasks.contains(1));
-}
-
-#[test]
-fn test_sword_reaction_explains_in_flight_lobby_switch() {
-    let mut input = reaction_input(ReactionKind::Sword);
-    input.join_result = JoinResult::Rejected(JoinRejection::InFlight);
-    let plan = route_reaction_add(&input);
-    assert!(plan.remove_reaction);
-    assert!(
-        plan.explanation
-            .unwrap()
-            .contains("can't switch lobbies while your current shuffle or draft is in progress")
-    );
-    assert!(!plan.retain_target_notification);
+    input.has_thread = false;
+    assert!(!route_reaction_add(&input).send_ready_thread_message);
 }
 
 #[test]
@@ -569,11 +532,12 @@ fn test_jopacoin_reaction_uses_gateway_member_without_message_get() {
 
 #[test]
 fn test_lobby_reaction_wrong_message_returns_before_discord_lookups() {
-    let mut input = reaction_input(ReactionKind::Sword);
+    let mut input = reaction_input(ReactionKind::Jopacoin);
+    input.has_thread = true;
     input.message_matches_current_lobby = false;
     let plan = route_reaction_add(&input);
     assert!(plan.returned_before_discord_lookups);
-    assert!(!plan.join_lobby);
+    assert!(!plan.send_gamba_thread_message);
     assert!(!plan.use_partial_message);
 }
 
@@ -591,16 +555,6 @@ fn test_raw_reaction_user_checks_caches_before_rest() {
         resolve_raw_user_source(false, false, false),
         RawUserSource::Rest
     );
-}
-
-#[test]
-fn test_sword_reaction_remove_uses_partial_message_without_get() {
-    let plan = route_sword_reaction_remove(true, true, true);
-    assert!(plan.use_partial_message);
-    assert!(!plan.use_full_message_fetch);
-    assert!(plan.leave_lobby);
-    assert!(plan.update_lobby_message);
-    assert!(plan.sync_readycheck);
 }
 
 fn player(id: i64, recently_joined: bool) -> LiveReadycheckPlayer {

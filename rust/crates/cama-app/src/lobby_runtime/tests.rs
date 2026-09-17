@@ -131,7 +131,6 @@ struct ThreadMessage {
 #[derive(Debug, Default)]
 struct TransportState {
     display_syncs: Vec<LobbyScope>,
-    reactions: Vec<(LobbyScope, UserId)>,
     thread_messages: Vec<ThreadMessage>,
     closes: Vec<LobbyScope>,
     archives: Vec<(LobbyScope, ChannelId)>,
@@ -175,15 +174,6 @@ impl LobbyRuntimeTransport for RecordingTransport {
         } else {
             Ok(())
         }
-    }
-
-    async fn remove_lobby_reaction(
-        &self,
-        scope: LobbyScope,
-        player_id: UserId,
-    ) -> Result<(), String> {
-        self.state().reactions.push((scope, player_id));
-        Ok(())
     }
 
     async fn send_thread_message(

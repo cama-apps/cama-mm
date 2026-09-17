@@ -87,8 +87,6 @@ const SPECTATOR_EMOJI: &str = "📻";
 const ADMINISTRATOR_PERMISSION: u64 = 1 << 3;
 const MANAGE_GUILD_PERMISSION: u64 = 1 << 5;
 const RECONCILE_ATTEMPTS: usize = 3;
-const RAW_REJECTION_TTL: Duration = Duration::from_secs(10);
-const RAW_LONG_REJECTION_TTL: Duration = Duration::from_secs(15);
 const LOBBY_MEMBERSHIP_RATE_LIMIT: usize = 3;
 const LOBBY_MEMBERSHIP_RATE_LIMIT_WINDOW: u64 = 30;
 const LOBBY_MEMBERSHIP_RATE_LIMIT_SCOPE: &str = "lobby-membership";
@@ -1198,29 +1196,6 @@ impl LobbyRuntimeState {
             )
             .await
     }
-
-    async fn remove_lobby_reaction(
-        &self,
-        scope: LobbyScope,
-        player_id: AppUserId,
-    ) -> Result<(), String> {
-        let Some(lobby) = self.service.get_lobby(scope) else {
-            return Ok(());
-        };
-        let (Some(channel_id), Some(message_id)) =
-            (lobby.message_ids.channel_id, lobby.message_ids.message_id)
-        else {
-            return Ok(());
-        };
-        self.transport
-            .remove_reaction(
-                to_u64(channel_id.0)?,
-                to_u64(message_id.0)?,
-                &DiscordEmoji::unicode(SWORD_EMOJI),
-                to_u64(player_id.0)?,
-            )
-            .await
-    }
 }
 
 fn to_u64(value: i64) -> Result<u64, String> {
@@ -1323,9 +1298,6 @@ impl AdminLobbyControl for LobbyAdminControl {
             result.evicted_lobbies.push(kind.label().to_owned());
             self.state.sync_readycheck_with_lobby(scope).await;
             self.best_effort_display_refresh(scope, "suspension").await;
-            if let Err(error) = self.state.remove_lobby_reaction(scope, player_id).await {
-                debug!(%error, ?scope, "suspension lobby reaction cleanup failed");
-            }
             if let Some(thread_id) = self
                 .state
                 .service
@@ -1947,7 +1919,7 @@ impl LobbyRegistrationProvider {
 
     /// Attach the registration extension's lobby-notification side effects.
     /// Calling this after provider construction also affects recovered lobbies
-    /// and raw-reaction joins because every path shares the same runtime state.
+    /// and button joins because every path shares the same runtime state.
     pub fn set_join_observer(&self, observer: Arc<dyn LobbyJoinObserver>) -> Result<(), String> {
         *self
             .handler
@@ -2363,14 +2335,6 @@ impl LobbyInteractionHandler {
                 .map_or_else(BTreeSet::new, |lobby| lobby.players);
             player_data.retain(|player_id, _| retained_players.contains(player_id));
             mentionable.retain(|player_id| retained_players.contains(player_id));
-            // Pruned players are durably out of the lobby, so their sword
-            // reactions have to go too -- the kick, leave and suspension paths
-            // all clean up the same way, and a stale reaction re-joins them.
-            for player_id in &plan.pruned_players {
-                if let Err(error) = self.state.remove_lobby_reaction(scope, *player_id).await {
-                    debug!(%error, ?scope, player = player_id.0, "stale-prune reaction cleanup failed");
-                }
-            }
         }
         let result = self
             .execute_readycheck_plan(
@@ -2763,7 +2727,6 @@ impl LobbyInteractionHandler {
             if let Err(error) = self.state.sync_lobby_display(scope).await {
                 warn!(%error, ?scope, "lobby display sync after kick failed");
             }
-            let _ = self.state.remove_lobby_reaction(scope, target_id).await;
             if let Some(thread_id) = self
                 .state
                 .service
@@ -3521,8 +3484,8 @@ impl LobbyInteractionHandler {
 
     /// Format the player's currently-active curfew window, if any, for
     /// display. Shared by every join surface (`/lobby` auto-join, `/lobby
-    /// join`, and the sword-reaction join) so none of them can slip a player
-    /// into a lobby during their own curfew.
+    /// join`, and the Join button) so none of them can slip a player into a
+    /// lobby during their own curfew.
     async fn active_curfew_window(
         &self,
         scope: LobbyScope,
@@ -3531,9 +3494,8 @@ impl LobbyInteractionHandler {
         let curfew = self.state.curfew.clone();
         let signed_guild_id = scope.guild_id.0;
         let signed_user_id = player_id.0;
-        // Both reads are blocking SQLite and this runs on every join surface,
-        // including the raw-reaction handler that has no interaction deferral
-        // behind it — keep the whole lookup inside the one blocking task.
+        // Both reads are blocking SQLite and this runs on every join surface
+        // — keep the whole lookup inside the one blocking task.
         let resolved = tokio::task::spawn_blocking(move || {
             let active_window =
                 curfew.active_window(signed_user_id, signed_guild_id, chrono::Utc::now())?;
@@ -3591,7 +3553,7 @@ impl LobbyInteractionHandler {
                 warning: Some(format!(
                     "❌ You're inside your {window_description} curfew window. Use `/player curfew remove` if you'd rather queue through it."
                 )),
-                rejection: Some(JoinRejection::Curfew(window_description)),
+                rejection: Some(JoinRejection::Curfew),
                 joined_at_ns: None,
             });
         }
@@ -3618,9 +3580,7 @@ impl LobbyInteractionHandler {
                     return Ok(JoinPresentation {
                         joined: false,
                         warning: Some(membership_rate_limit_message(retry_after)),
-                        rejection: Some(JoinRejection::RateLimited {
-                            retry_after_seconds: retry_after,
-                        }),
+                        rejection: Some(JoinRejection::RateLimited),
                         joined_at_ns: None,
                     });
                 }
@@ -3664,7 +3624,7 @@ impl LobbyInteractionHandler {
                 } else {
                     message.push_str(" Use `/record` to complete it first.");
                 }
-                (message, JoinRejection::PendingMatch(pending))
+                (message, JoinRejection::PendingMatch)
             }
             (Some(JoinFailure::LobbyFull), _) => (
                 format!("❌ {} is full.", scope.kind.label()),
@@ -3681,7 +3641,7 @@ impl LobbyInteractionHandler {
             ),
             (Some(JoinFailure::Suspended), Some(JoinContext::Suspension(suspension))) => (
                 format!("❌ {}", private_suspension_message(&suspension)),
-                JoinRejection::Suspended(*suspension),
+                JoinRejection::Suspended,
             ),
             (
                 Some(
@@ -3729,7 +3689,7 @@ impl LobbyInteractionHandler {
             .or_else(|| discord_display_name.map(str::to_owned))
             .unwrap_or_else(|| stored_player_name.to_owned());
         if let Some(thread_id) = lobby.message_ids.thread_id {
-            // A joiner clicked the button/reacted/ran a command themselves,
+            // A joiner clicked the button or ran a command themselves,
             // so pinging them about their own action would just be noise --
             // mentioning them with the ping suppressed still subscribes them
             // to the thread (Discord only does that silently for an organic
@@ -3825,9 +3785,6 @@ impl LobbyInteractionHandler {
             warn!(%error, ?scope, "lobby display sync after leave failed");
         }
         self.state.sync_readycheck_with_lobby(scope).await;
-        if let Err(error) = self.state.remove_lobby_reaction(scope, player_id).await {
-            debug!(%error, ?scope, "lobby reaction cleanup after leave failed");
-        }
         let Some(thread_id) = self
             .state
             .service
@@ -3858,14 +3815,14 @@ struct JoinPresentation {
 }
 
 enum JoinRejection {
-    PendingMatch(PendingMatchState),
+    PendingMatch,
     LobbyFull,
     AlreadyJoined,
     RatingTooHigh,
     InFlight,
-    Suspended(LobbySuspension),
-    Curfew(String),
-    RateLimited { retry_after_seconds: u64 },
+    Suspended,
+    Curfew,
+    RateLimited,
     Storage,
 }
 
@@ -3886,14 +3843,12 @@ fn lobby_command_auto_join_warning(
             "ℹ️ You can’t switch lobbies while your current shuffle or draft is in progress."
                 .to_owned(),
         ),
-        Some(
-            JoinRejection::Suspended(_)
-            | JoinRejection::Curfew(_)
-            | JoinRejection::RateLimited { .. },
-        ) => presentation.warning.clone(),
+        Some(JoinRejection::Suspended | JoinRejection::Curfew | JoinRejection::RateLimited) => {
+            presentation.warning.clone()
+        }
         None => presentation.warning.clone(),
         Some(
-            JoinRejection::PendingMatch(_)
+            JoinRejection::PendingMatch
             | JoinRejection::LobbyFull
             | JoinRejection::AlreadyJoined
             | JoinRejection::Storage,
@@ -4135,14 +4090,6 @@ struct InteractionLobbyTransport {
 impl LobbyRuntimeTransport for InteractionLobbyTransport {
     async fn sync_lobby_display(&self, scope: LobbyScope) -> Result<(), String> {
         self.state.sync_lobby_display(scope).await
-    }
-
-    async fn remove_lobby_reaction(
-        &self,
-        scope: LobbyScope,
-        player_id: AppUserId,
-    ) -> Result<(), String> {
-        self.state.remove_lobby_reaction(scope, player_id).await
     }
 
     async fn send_thread_message(
@@ -4685,134 +4632,37 @@ impl RawReactionObserver for LobbyRawReactionObserver {
             }
             return Ok(());
         }
-        if event.emoji.name != SWORD_EMOJI {
+        if event.emoji.name == SWORD_EMOJI && event.kind == RawReactionKind::Add {
+            // The sword no longer seats anyone -- a reaction can't get an
+            // ephemeral reply, so joining moved to the Join button. Like the
+            // jopacoin react it is now a shout-out into the lobby thread,
+            // which also silently subscribes the reactor to the thread.
+            let Some(thread_id) = self
+                .state
+                .service
+                .get_lobby(scope)
+                .and_then(|lobby| lobby.message_ids.thread_id)
+            else {
+                return Ok(());
+            };
+            if let Err(error) = self
+                .state
+                .transport
+                .send_message(
+                    to_u64(thread_id.0)?,
+                    DiscordMessage::mentioning(
+                        InteractionResponse::message(format!(
+                            "{SWORD_EMOJI} <@{}> is ready to play a 5v5 Dota Challenge!",
+                            event.user_id
+                        )),
+                        BTreeSet::from([event.user_id]),
+                    ),
+                )
+                .await
+            {
+                warn!(%error, ?scope, "sword shout-out thread message failed");
+            }
             return Ok(());
-        }
-        let user_id = AppUserId(
-            i64::try_from(event.user_id).map_err(|_| "raw reaction user id overflow".to_owned())?,
-        );
-        let resolved_display_name = self.resolve_actor_display_name(&event).await;
-        let operation_lock = self.state.commands.scope_operation_lock(scope);
-        let _guard = operation_lock.lock().await;
-        match event.kind {
-            RawReactionKind::Add => {
-                // A blocked raw-reaction leave keeps the durable membership,
-                // but Discord has already removed that user's sword reaction.
-                // Let an already-seated player re-add it as an idempotent UI
-                // repair so they can retry the removal after the cooldown.
-                if self
-                    .state
-                    .service
-                    .get_lobby(scope)
-                    .is_some_and(|lobby| lobby.players.contains(&user_id))
-                {
-                    return Ok(());
-                }
-                let Some(player) = handler
-                    .load_player(user_id, scope.guild_id)
-                    .await
-                    .map_err(|error| error.to_string())?
-                else {
-                    self.reject_sword_reaction(
-                        &event,
-                        "You're not registered! Use `/player register` first to join the lobby.",
-                        RAW_REJECTION_TTL,
-                    )
-                    .await;
-                    return Ok(());
-                };
-                if player.preferred_roles.as_ref().is_none_or(Vec::is_empty) {
-                    self.reject_sword_reaction(
-                        &event,
-                        "Set your preferred roles first! Use `/player roles` (e.g., `/player roles 123`).",
-                        RAW_REJECTION_TTL,
-                    )
-                    .await;
-                    return Ok(());
-                }
-                let outcome = handler
-                    .join_registered_player(scope, user_id, &player)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                if !outcome.joined {
-                    if let Some(JoinRejection::Suspended(suspension)) = &outcome.rejection {
-                        self.reject_suspended_sword_reaction(&event, suspension)
-                            .await;
-                        return Ok(());
-                    }
-                    if let Some(JoinRejection::Curfew(window_description)) = &outcome.rejection {
-                        self.reject_curfew_sword_reaction(&event, window_description)
-                            .await;
-                        return Ok(());
-                    }
-                    let rejection = outcome.rejection.as_ref().map_or_else(
-                        || "Could not join lobby.".to_owned(),
-                        |rejection| raw_rejection_message(scope.kind, rejection),
-                    );
-                    let ttl = if matches!(outcome.rejection, Some(JoinRejection::PendingMatch(_))) {
-                        RAW_LONG_REJECTION_TTL
-                    } else {
-                        RAW_REJECTION_TTL
-                    };
-                    self.reject_sword_reaction(&event, &rejection, ttl).await;
-                    return Ok(());
-                }
-                handler
-                    .best_effort_join_publication(
-                        scope,
-                        user_id,
-                        &player.name,
-                        resolved_display_name.as_deref(),
-                        outcome
-                            .joined_at_ns
-                            .expect("successful join has commit time"),
-                    )
-                    .await;
-            }
-            RawReactionKind::Remove => {
-                let rate_limit_claim = match self
-                    .state
-                    .claim_membership_change(scope.guild_id, user_id)?
-                {
-                    LobbyMembershipRateLimitDecision::Allowed(claim) => claim,
-                    LobbyMembershipRateLimitDecision::RetryAfter(retry_after) => {
-                        // Discord emits a remove event after the user's
-                        // reaction is already gone. Do not issue another
-                        // removal here: the user may have re-added the sword
-                        // while this event was in flight, and the Add path
-                        // deliberately treats an existing member as a UI
-                        // repair.
-                        self.notify_sword_reaction_rejection(
-                            &event,
-                            &membership_rate_limit_message(retry_after),
-                            RAW_REJECTION_TTL,
-                        )
-                        .await;
-                        return Ok(());
-                    }
-                };
-                let state = Arc::clone(&self.state);
-                let removal = tokio::task::spawn_blocking(move || {
-                    state.service.try_leave_lobby(user_id, scope)
-                })
-                .await;
-                let left = match removal {
-                    Ok(Ok(left)) => left,
-                    Ok(Err(error)) => {
-                        self.state.refund_membership_change(rate_limit_claim);
-                        return Err(error.to_string());
-                    }
-                    Err(error) => {
-                        self.state.refund_membership_change(rate_limit_claim);
-                        return Err(error.to_string());
-                    }
-                };
-                if left {
-                    handler.best_effort_leave_publication(scope, user_id).await;
-                } else {
-                    self.state.refund_membership_change(rate_limit_claim);
-                }
-            }
         }
         Ok(())
     }
@@ -4836,170 +4686,6 @@ impl LobbyRawReactionObserver {
             .flatten()
             .map(|user| user.display_name)
     }
-
-    async fn reject_sword_reaction(&self, event: &RawReactionEvent, reason: &str, ttl: Duration) {
-        let _ = self
-            .state
-            .transport
-            .remove_reaction(
-                event.channel_id,
-                event.message_id,
-                &DiscordEmoji::unicode(SWORD_EMOJI),
-                event.user_id,
-            )
-            .await;
-        self.notify_sword_reaction_rejection(event, reason, ttl)
-            .await;
-    }
-
-    async fn notify_sword_reaction_rejection(
-        &self,
-        event: &RawReactionEvent,
-        reason: &str,
-        ttl: Duration,
-    ) {
-        let users = BTreeSet::from([event.user_id]);
-        let receipt = self
-            .state
-            .transport
-            .send_message(
-                event.channel_id,
-                DiscordMessage::mentioning(
-                    InteractionResponse::message(format!("<@{}> ❌ {reason}", event.user_id)),
-                    users,
-                ),
-            )
-            .await;
-        if let Ok(receipt) = receipt {
-            schedule_message_delete(Arc::clone(&self.state.transport), receipt, ttl);
-        }
-    }
-
-    async fn reject_suspended_sword_reaction(
-        &self,
-        event: &RawReactionEvent,
-        suspension: &LobbySuspension,
-    ) {
-        self.reject_sword_reaction(
-            event,
-            "You are temporarily restricted from this matchmaking lobby. Check your DMs or use `/player lobby status`.",
-            RAW_LONG_REJECTION_TTL,
-        )
-        .await;
-        let private_reason = &suspension.reason;
-        let _ = self
-            .state
-            .transport
-            .send_direct_message(
-                event.user_id,
-                DiscordMessage::silent(
-                    InteractionResponse::message(format!(
-                        "You are temporarily suspended from this matchmaking lobby.\nReason: {private_reason}\nUse `/player lobby status` in the server for the exact remaining term."
-                    ))
-                    .without_mentions(),
-                ),
-            )
-            .await;
-    }
-
-    /// Privacy: a curfew refusal never goes into the channel, unlike other
-    /// join failures. The sword comes off silently and the reason — which
-    /// names the window — is DMed to the player alone.
-    async fn reject_curfew_sword_reaction(
-        &self,
-        event: &RawReactionEvent,
-        window_description: &str,
-    ) {
-        let _ = self
-            .state
-            .transport
-            .remove_reaction(
-                event.channel_id,
-                event.message_id,
-                &DiscordEmoji::unicode(SWORD_EMOJI),
-                event.user_id,
-            )
-            .await;
-        if let Err(error) = self
-            .state
-            .transport
-            .send_direct_message(
-                event.user_id,
-                DiscordMessage::silent(
-                    InteractionResponse::message(format!(
-                        "You're inside your {window_description} curfew window, so you weren't added to the lobby.\nUse `/player curfew remove` if you'd rather queue through it."
-                    ))
-                    .without_mentions(),
-                ),
-            )
-            .await
-        {
-            debug!(%error, "failed to DM curfew rejection after sword reaction");
-        }
-    }
-}
-
-fn raw_rejection_message(kind: LobbyKind, rejection: &JoinRejection) -> String {
-    match rejection {
-        JoinRejection::PendingMatch(pending) => {
-            let mut message = format!(
-                "You're in a pending match (Match #{})!",
-                pending.pending_match_id
-            );
-            if let Some(jump_url) = &pending.shuffle_message_jump_url {
-                message.push_str(&format!(
-                    " [View your match]({jump_url}) and use `/record` to complete it first."
-                ));
-            } else {
-                message.push_str(" Use `/record` to complete it first.");
-            }
-            message
-        }
-        JoinRejection::LobbyFull => "Lobby is full.".to_owned(),
-        JoinRejection::AlreadyJoined => "Already in lobby.".to_owned(),
-        JoinRejection::RatingTooHigh => format!(
-            "{} is limited to glicko below 1400.",
-            LobbyKind::LowSkill.label()
-        ),
-        JoinRejection::InFlight => {
-            "You can't switch lobbies while your current shuffle or draft is in progress."
-                .to_owned()
-        }
-        JoinRejection::Suspended(_) => {
-            "You are temporarily restricted from this matchmaking lobby.".to_owned()
-        }
-        // A window's name, exact times, and timezone are private to the
-        // player, so this in-channel wording stays generic. The sword path
-        // never posts it — a curfew refusal is DM-only — but the arm keeps
-        // the match exhaustive for any surface that does.
-        JoinRejection::Curfew(_) => {
-            "You're inside one of your curfew windows. Use `/player curfew list` to check which one."
-                .to_owned()
-        }
-        JoinRejection::RateLimited {
-            retry_after_seconds,
-        } => membership_rate_limit_message(*retry_after_seconds),
-        JoinRejection::Storage => {
-            let _ = kind;
-            "Could not join lobby.".to_owned()
-        }
-    }
-}
-
-fn schedule_message_delete(
-    transport: Arc<dyn DiscordTransport>,
-    receipt: crate::discord_transport::DiscordMessageReceipt,
-    delay: Duration,
-) {
-    tokio::spawn(async move {
-        tokio::time::sleep(delay).await;
-        if let Err(error) = transport
-            .delete_message(receipt.channel_id, receipt.message_id)
-            .await
-        {
-            debug!(%error, "temporary lobby message cleanup failed");
-        }
-    });
 }
 
 #[cfg(all(test, feature = "runtime-test-dig"))]
