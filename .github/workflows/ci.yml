@@ -217,7 +217,7 @@ jobs:
       - name: Verify main-only runtime image contract
         run: |
           test -f .github/workflows/release.yml
-          grep -Fq 'Stage latest runtime data' .github/workflows/release.yml
+          grep -Fq 'run: ./scripts/stage-runtime-assets' .github/workflows/release.yml
           grep -Fq 'target: runtime-prebuilt' .github/workflows/release.yml
           grep -Fq 'push: true' .github/workflows/release.yml
           grep -Fq 'workflows: [Release]' .github/workflows/deploy.yml
