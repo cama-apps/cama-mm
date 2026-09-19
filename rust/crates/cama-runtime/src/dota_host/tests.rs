@@ -311,6 +311,8 @@ impl Fixture {
             message_id: None,
             last_message: String::new(),
             last_message_at: 0,
+            status_failures: 0,
+            status_retry_at: 0,
             pending_status: None,
             resolution: None,
             resolution_history: Vec::new(),
@@ -2270,6 +2272,14 @@ async fn review_status_ignores_throttle_and_terminal_failure_retries_after_resta
         .await
         .unwrap();
     assert_eq!(discord.sent.lock().unwrap().len(), 1);
+    assert_eq!(record.last_error.as_deref(), Some("identity conflict"));
+    assert_eq!(
+        state.last_message,
+        format!(
+            "Bot hosting is paused for match #{}. An admin can check `/admin dota status pending_match:{}` for details before resuming bot hosting.",
+            f.pending, f.pending
+        )
+    );
     discord.failures.store(1, Ordering::SeqCst);
     record.phase = Phase::Cancelled;
     state.pending_status = Some("Terminal resolution complete".into());
@@ -2280,10 +2290,64 @@ async fn review_status_ignores_throttle_and_terminal_failure_retries_after_resta
         .unwrap();
     assert!(state.pending_status.is_some());
     f.worker.tick(&f.port, 110).await.unwrap();
+    assert!(f.state().pending_status.is_some());
+    assert_eq!(discord.sent.lock().unwrap().len(), 1);
+    f.worker.tick(&f.port, 131).await.unwrap();
     let state: SessionState = serde_json::from_value(f.session().payload).unwrap();
     assert!(state.pending_status.is_none());
+    assert_eq!(state.status_failures, 0);
+    assert_eq!(state.status_retry_at, 0);
     assert_eq!(state.last_message, "Terminal resolution complete");
     assert_eq!(discord.sent.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn failed_status_delivery_backs_off_across_reload_and_keeps_latest_content() {
+    for phase in [Phase::NeedsReview, Phase::Recorded] {
+        let mut f = Fixture::new(false);
+        let discord = Arc::new(TestDiscord::default());
+        discord.failures.store(100, Ordering::SeqCst);
+        f.worker.discord = discord.clone();
+        f.update_state(|record, state| {
+            record.phase = phase;
+            state.channel_id = Some(55);
+        });
+        let mut now = 100;
+        for (index, delay) in [30, 60, 120, 240, 300, 300].into_iter().enumerate() {
+            let mut record = f.session();
+            let mut state = f.state();
+            f.worker
+                .announce(&mut record, &mut state, "Earlier status", now)
+                .await
+                .unwrap();
+            assert_eq!(state.status_retry_at, now + delay);
+            assert_eq!(discord.failures.load(Ordering::SeqCst), 99 - index);
+            // Reload the durable outbox as a restarted worker would. A new
+            // status must not bypass the failed destination's retry deadline.
+            let mut record = f.session();
+            let mut state = f.state();
+            f.worker
+                .announce(&mut record, &mut state, "Latest status", now + delay - 1)
+                .await
+                .unwrap();
+            assert_eq!(discord.failures.load(Ordering::SeqCst), 99 - index);
+            assert_eq!(f.state().pending_status.as_deref(), Some("Latest status"));
+            now += delay;
+        }
+        discord.failures.store(0, Ordering::SeqCst);
+        let mut record = f.session();
+        let mut state = f.state();
+        let content = state.pending_status.clone().unwrap();
+        f.worker
+            .announce(&mut record, &mut state, &content, now)
+            .await
+            .unwrap();
+        assert_eq!(state.last_message, "Latest status");
+        assert!(state.pending_status.is_none());
+        assert_eq!(state.status_retry_at, 0);
+        assert_eq!(state.status_failures, 0);
+        assert_eq!(discord.sent.lock().unwrap().len(), 1);
+    }
 }
 
 #[tokio::test]

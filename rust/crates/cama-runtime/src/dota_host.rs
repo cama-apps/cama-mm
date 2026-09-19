@@ -219,6 +219,10 @@ struct SessionState {
     #[serde(default)]
     last_message_at: i64,
     #[serde(default)]
+    status_failures: u32,
+    #[serde(default)]
+    status_retry_at: i64,
+    #[serde(default)]
     pending_status: Option<String>,
     #[serde(default)]
     resolution: Option<OperatorResolution>,
@@ -1547,7 +1551,7 @@ impl DotaHostWorker {
                         game_mode:options.game_mode.unwrap_or(config.game_mode), server_region:options.region.unwrap_or(config.server_region),
                         first_pick_radiant:match options.first_pick { Some(FirstPick::Radiant) => Some(true), Some(FirstPick::Dire) => Some(false), _ => pending.state.first_pick_team.as_deref().and_then(|s| match s.to_ascii_lowercase().as_str() { "radiant" => Some(true),"dire"=>Some(false),_=>None }) },
                         tv_delay:options.tv_delay.unwrap_or(config.tv_delay) },
-                    roster, channel_id:pending_channel(&pending),message_id:None,last_message:String::new(),last_message_at:0,pending_status:None,resolution:None,resolution_history:Vec::new(),betting_control_audit:Vec::new(),
+                    roster, channel_id:pending_channel(&pending),message_id:None,last_message:String::new(),last_message_at:0,status_failures:0,status_retry_at:0,pending_status:None,resolution:None,resolution_history:Vec::new(),betting_control_audit:Vec::new(),
                     last_invite_at:0,create_requested_at:None,launch_requested_at:None,allocation_observed_at:None,last_allocation_log_at:None,betting_closed:false,betting_window_announced:false,betting_notification_sent:false,last_betting_notification_at:0,cancel_requested:false,
                     resume_requested:false,recorded_match_id:None,server_id:None,replay:None,postgame_statistics:None,archive:None,replay_last_attempt:0,replay_error:None,last_result_poll:0,lobby_deadline:0,recording_failures:0,
                 };
@@ -1618,7 +1622,7 @@ impl DotaHostWorker {
             game_mode = state.settings.game_mode, league_id = state.settings.league_id,
             reason, "Dota hosting requires review");
         }
-        self.announce(record,state,&format!("Hosting paused: {reason}. Use `/admin dota status` to inspect the saved identities and `/admin dota resolve` for terminal recovery."),now).await
+        self.announce(record,state,&format!("Bot hosting is paused for match #{}. An admin can check `/admin dota status pending_match:{}` for details before resuming bot hosting.", record.pending_match_id, record.pending_match_id),now).await
     }
 
     async fn announce(
@@ -1637,6 +1641,11 @@ impl DotaHostWorker {
         if state.pending_status.as_deref() != Some(content) {
             state.pending_status = Some(content.to_owned());
             self.save(record, state, now).await?;
+        }
+        // Failed destinations back off even for review/terminal updates and
+        // across restarts. Keep the latest content queued during that wait.
+        if now < state.status_retry_at {
+            return Ok(());
         }
         if record.phase.is_active()
             && record.phase != Phase::NeedsReview
@@ -1668,10 +1677,13 @@ impl DotaHostWorker {
                 state.message_id = Some(id);
                 state.last_message = content.to_owned();
                 state.last_message_at = now;
+                state.status_failures = 0;
+                state.status_retry_at = 0;
                 state.pending_status = None;
                 self.save(record, state, now).await?;
             }
-            Err(_) => {
+            Err(error) => {
+                let failed_message_id = state.message_id;
                 // Recreate an externally deleted status message only after a
                 // successful read proves absence. Permission/network errors
                 // remain durable retries against the same destination.
@@ -1679,11 +1691,19 @@ impl DotaHostWorker {
                     && matches!(self.discord.fetch_message(channel, id).await, Ok(None))
                 {
                     state.message_id = None;
-                    self.save(record, state, now).await?;
                 }
+                state.status_failures = state.status_failures.saturating_add(1);
+                let retry_seconds =
+                    (30_i64 << state.status_failures.saturating_sub(1).min(4)).min(300);
+                state.status_retry_at = now.saturating_add(retry_seconds);
+                self.save(record, state, now).await?;
                 tracing::warn!(
                     guild_id = record.guild_id,
                     pending_match_id = record.pending_match_id,
+                    channel_id = channel,
+                    message_id = ?failed_message_id,
+                    %error,
+                    retry_seconds,
                     "could not update Dota lobby status in Discord"
                 );
             }
