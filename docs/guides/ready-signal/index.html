@@ -1,0 +1,720 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ready Signal</title>
+<meta name="description" content="Get a push notification or a Discord DM the moment a readycheck launches with a full lobby, or your shuffled match starts. Set it up yourself with /notify.">
+<link rel="canonical" href="https://t4n1o.github.io/cama-mm/guides/ready-signal/">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🔔%3C/text%3E%3C/svg%3E">
+<meta name="theme-color" content="#10141b">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Cama Balanced Shuffle">
+<meta property="og:title" content="Ready Signal">
+<meta property="og:description" content="Get a push notification or a Discord DM the moment a readycheck launches with a full lobby, or your shuffled match starts. Set it up yourself with /notify.">
+<meta property="og:url" content="https://t4n1o.github.io/cama-mm/guides/ready-signal/">
+<meta property="og:image" content="https://t4n1o.github.io/cama-mm/assets/og/ready-signal.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Ready Signal — Cama Balanced Shuffle guide">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Ready Signal">
+<meta name="twitter:description" content="Get a push notification or a Discord DM the moment a readycheck launches with a full lobby, or your shuffled match starts. Set it up yourself with /notify.">
+<meta name="twitter:image" content="https://t4n1o.github.io/cama-mm/assets/og/ready-signal.png">
+<link rel="stylesheet" href="../../assets/fonts/ready-signal.css">
+</head>
+<body>
+<style>
+  :root {
+    --bg: #eef1f5;
+    --surface: #ffffff;
+    --surface-2: #f6f8fa;
+    --ink: #161b22;
+    --ink-dim: #5b6472;
+    --ink-faint: #8892a0;
+    --accent: #ff6a2b;
+    --accent-ink: #ffffff;
+    --success: #21895e;
+    --success-bg: #e4f4ec;
+    --off-bg: #eceff3;
+    --off-ink: #6b7684;
+    --line: #dce1e8;
+    --line-strong: #c3cad3;
+    --shadow: 0 1px 2px rgba(22, 27, 34, 0.06), 0 8px 24px -12px rgba(22, 27, 34, 0.12);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #10141b;
+      --surface: #171d27;
+      --surface-2: #1d2430;
+      --ink: #e9edf2;
+      --ink-dim: #9aa5b3;
+      --ink-faint: #6b7583;
+      --accent: #ff7a3d;
+      --accent-ink: #171208;
+      --success: #3fbe87;
+      --success-bg: #163025;
+      --off-bg: #232b37;
+      --off-ink: #8b95a3;
+      --line: #2a323f;
+      --line-strong: #3a4453;
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 32px -16px rgba(0, 0, 0, 0.6);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --bg: #10141b;
+    --surface: #171d27;
+    --surface-2: #1d2430;
+    --ink: #e9edf2;
+    --ink-dim: #9aa5b3;
+    --ink-faint: #6b7583;
+    --accent: #ff7a3d;
+    --accent-ink: #171208;
+    --success: #3fbe87;
+    --success-bg: #163025;
+    --off-bg: #232b37;
+    --off-ink: #8b95a3;
+    --line: #2a323f;
+    --line-strong: #3a4453;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 32px -16px rgba(0, 0, 0, 0.6);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::selection { background: var(--accent); color: var(--accent-ink); }
+
+  .page {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 56px 24px 96px;
+  }
+
+  h1, h2, h3 {
+    font-family: "Big Shoulders Display", "Arial Narrow", sans-serif;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.01em;
+    text-wrap: balance;
+    margin: 0;
+    color: var(--ink);
+  }
+
+  code, .mono {
+    font-family: "IBM Plex Mono", ui-monospace, "SFMono-Regular", monospace;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ---------- Masthead ---------- */
+
+  .masthead {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding-bottom: 40px;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 48px;
+  }
+
+  .eyebrow {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 12.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .eyebrow .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    flex: none;
+  }
+
+  .masthead h1 {
+    font-size: clamp(40px, 7vw, 58px);
+    line-height: 0.96;
+  }
+
+  .masthead .dek {
+    max-width: 54ch;
+    font-size: 18px;
+    color: var(--ink-dim);
+  }
+
+  .masthead .dek strong { color: var(--ink); font-weight: 600; }
+
+  /* ---------- Section scaffolding ---------- */
+
+  section { margin-bottom: 56px; }
+  section:last-of-type { margin-bottom: 0; }
+
+  .section-head {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    margin-bottom: 22px;
+  }
+
+  .section-head .index {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 13px;
+    color: var(--ink-faint);
+    letter-spacing: 0.08em;
+  }
+
+  .section-head h2 {
+    font-size: 26px;
+  }
+
+  .lede {
+    color: var(--ink-dim);
+    max-width: 62ch;
+    margin: -8px 0 24px;
+  }
+
+  /* ---------- Channel comparison cards ---------- */
+
+  .channels {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 16px;
+  }
+
+  .channel-card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 20px;
+    box-shadow: var(--shadow);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    transition: border-color 0.15s ease, transform 0.15s ease;
+  }
+
+  .channel-card:hover {
+    border-color: var(--line-strong);
+    transform: translateY(-2px);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .channel-card { transition: none; }
+    .channel-card:hover { transform: none; }
+  }
+
+  .channel-kicker {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+
+  .channel-card h3 {
+    font-size: 17px;
+    text-transform: none;
+    letter-spacing: 0;
+    font-family: "IBM Plex Sans", sans-serif;
+    font-weight: 700;
+  }
+
+  .channel-card p {
+    margin: 0;
+    color: var(--ink-dim);
+    font-size: 14.5px;
+  }
+
+  .channel-card ul {
+    margin: 4px 0 0;
+    padding-left: 18px;
+    color: var(--ink-dim);
+    font-size: 13.5px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  /* ---------- Numbered steps ---------- */
+
+  .steps {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    counter-reset: step;
+  }
+
+  .step {
+    display: grid;
+    grid-template-columns: 44px 1fr;
+    gap: 18px;
+    padding: 20px 0;
+    border-top: 1px solid var(--line);
+  }
+  .step:last-child { padding-bottom: 0; }
+
+  .step .num {
+    font-family: "Big Shoulders Display", sans-serif;
+    font-weight: 800;
+    font-size: 32px;
+    line-height: 1;
+    color: var(--line-strong);
+  }
+
+  .step h3 {
+    font-size: 16px;
+    text-transform: none;
+    letter-spacing: 0;
+    font-family: "IBM Plex Sans", sans-serif;
+    font-weight: 700;
+    margin-bottom: 6px;
+  }
+
+  .step p {
+    margin: 0;
+    color: var(--ink-dim);
+    font-size: 15px;
+    max-width: 58ch;
+  }
+
+  .step p + p { margin-top: 8px; }
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 13px;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 2px 8px;
+    color: var(--ink);
+  }
+
+  /* ---------- Two setup tracks ---------- */
+
+  .tracks {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 28px;
+    margin-top: 24px;
+    padding-top: 24px;
+    border-top: 1px solid var(--line);
+  }
+
+  .track-head {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    margin-bottom: 14px;
+  }
+
+  .track-head .badge {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 3px 10px;
+    color: var(--ink-dim);
+    flex: none;
+  }
+
+  .track-head h3 {
+    font-size: 15px;
+    text-transform: none;
+    letter-spacing: 0;
+    font-family: "IBM Plex Sans", sans-serif;
+    font-weight: 700;
+  }
+
+  .track ol {
+    margin: 0;
+    padding-left: 20px;
+    color: var(--ink-dim);
+    font-size: 14.5px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .track li::marker {
+    font-family: "IBM Plex Mono", monospace;
+    color: var(--ink-faint);
+  }
+
+  /* ---------- Control panel mock ---------- */
+
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+    padding: 22px 22px 8px;
+  }
+
+  .panel-title {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 12.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin-bottom: 4px;
+  }
+
+  .panel-status {
+    font-size: 14.5px;
+    color: var(--ink-dim);
+    margin-bottom: 18px;
+    padding-bottom: 18px;
+    border-bottom: 1px dashed var(--line);
+  }
+
+  .panel-status code { color: var(--ink); }
+
+  .control-group { margin-bottom: 20px; }
+  .control-group:last-child { margin-bottom: 0; }
+
+  .control-group-label {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin-bottom: 10px;
+  }
+
+  .control-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 14px;
+  }
+
+  .control {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .btn-demo {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    font-family: "IBM Plex Sans", sans-serif;
+    font-weight: 600;
+    font-size: 13.5px;
+    padding: 9px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--line-strong);
+    background: var(--surface-2);
+    color: var(--ink);
+    width: fit-content;
+  }
+
+  .btn-demo.on {
+    background: var(--success-bg);
+    border-color: color-mix(in srgb, var(--success) 45%, var(--line-strong));
+    color: var(--success);
+  }
+
+  .btn-demo.off {
+    background: var(--off-bg);
+    color: var(--off-ink);
+  }
+
+  .btn-demo.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-ink);
+  }
+
+  .btn-demo.danger {
+    color: #c9432f;
+    border-color: color-mix(in srgb, #c9432f 40%, var(--line-strong));
+    background: color-mix(in srgb, #c9432f 8%, var(--surface-2));
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .btn-demo.danger { color: #ff9683; }
+  }
+  :root[data-theme="dark"] .btn-demo.danger { color: #ff9683; }
+
+  .control .caption {
+    font-size: 13px;
+    color: var(--ink-dim);
+  }
+
+  .dot-status {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 6px;
+  }
+  .btn-demo.on .dot-status { background: var(--success); }
+  .btn-demo.off .dot-status { background: var(--off-ink); }
+
+  /* ---------- FAQ ---------- */
+
+  .faq {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .faq-item {
+    padding: 18px 0;
+    border-top: 1px solid var(--line);
+    display: grid;
+    grid-template-columns: minmax(160px, 220px) 1fr;
+    gap: 20px;
+  }
+
+  .faq-item:last-child { border-bottom: 1px solid var(--line); }
+
+  .faq-item dt {
+    font-weight: 700;
+    font-size: 15px;
+    color: var(--ink);
+  }
+
+  .faq-item dd {
+    margin: 0;
+    color: var(--ink-dim);
+    font-size: 15px;
+    max-width: 56ch;
+  }
+
+  @media (max-width: 600px) {
+    .faq-item { grid-template-columns: 1fr; gap: 6px; }
+  }
+
+  footer {
+    margin-top: 64px;
+    padding-top: 24px;
+    border-top: 1px solid var(--line);
+    font-size: 13px;
+    color: var(--ink-faint);
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+</style>
+
+
+
+
+<div class="page">
+
+  <div class="masthead">
+    <div class="eyebrow"><span class="dot"></span>Cama &middot; Player Guide</div>
+    <h1>Ready Signal</h1>
+    <p class="dek">Cama can alert you the instant a <strong>readycheck launches with a full lobby</strong>, or <strong>your shuffled match starts</strong> &mdash; as a dedicated push notification, a Discord DM, or both.</p>
+  </div>
+
+  <section>
+    <div class="section-head">
+      <span class="index">01</span>
+      <h2>Two ways to get it</h2>
+    </div>
+    <p class="lede">Same two triggers &mdash; a full-lobby readycheck, a shuffled match starting &mdash; delivered however you'd rather hear about them. Turn on one channel, the other, or both.</p>
+
+    <div class="channels">
+      <div class="channel-card">
+        <div class="channel-kicker">Push notification</div>
+        <h3>ntfy.sh</h3>
+        <p>Delivers to a dedicated app on your phone, completely independent of Discord &mdash; it still buzzes if Discord itself is muted, backgrounded, or signed out.</p>
+        <ul>
+          <li>Needs the free ntfy app, installed once</li>
+          <li>Cama generates your topic; nothing to type or make up</li>
+        </ul>
+      </div>
+      <div class="channel-card">
+        <div class="channel-kicker">Discord DM</div>
+        <h3>A message from Cama</h3>
+        <p>Arrives as a normal direct message, right inside Discord &mdash; nothing to install. It follows whatever notification settings you already have for Discord DMs.</p>
+        <ul>
+          <li>Zero setup &mdash; flip a toggle and you're done</li>
+          <li>Handy if Discord already pushes DMs to your phone or desktop</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <span class="index">02</span>
+      <h2>Set it up</h2>
+    </div>
+    <p class="lede">No admin involved &mdash; every player configures their own alerts from one panel.</p>
+
+    <div class="steps">
+      <div class="step">
+        <div class="num">1</div>
+        <div>
+          <h3>Run <span class="mono" style="text-transform:none;">/notify</span> in Discord</h3>
+          <p>Pick whichever channel(s) you want from the panel that comes up &mdash; both tracks below live in the same place.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="tracks">
+      <div class="track">
+        <div class="track-head">
+          <span class="badge">Track A</span>
+          <h3>ntfy.sh push notification</h3>
+        </div>
+        <ol>
+          <li>Click <strong>Create ntfy Topic</strong>. Cama generates a long, private topic on the spot and shows it back to you &mdash; there's no field to fill in.</li>
+          <li>Install the free <strong>ntfy</strong> app from the Play Store or F-Droid.</li>
+          <li>In the app, subscribe to that exact topic, e.g. <span class="pill">cama-8f2e91ab3c&hellip;</span>. Keep it private &mdash; anyone who has it can publish to it.</li>
+        </ol>
+      </div>
+      <div class="track">
+        <div class="track-head">
+          <span class="badge">Track B</span>
+          <h3>Discord DM</h3>
+        </div>
+        <ol>
+          <li>Click either <strong>(DM)</strong> toggle for the alert(s) you want.</li>
+          <li>That's it &mdash; no app, no topic, nothing else to set up.</li>
+        </ol>
+      </div>
+    </div>
+
+    <p class="lede" style="margin: 24px 0 0;">Whichever you pick, hit <strong>Send Test</strong> afterward to confirm delivery before you rely on it.</p>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <span class="index">03</span>
+      <h2>Your controls</h2>
+    </div>
+    <p class="lede">Run <span class="mono" style="text-transform:none;">/notify</span> again any time to bring this panel back up. It only shows the ntfy row once you've actually created a topic &mdash; before that, it's just the two DM toggles.</p>
+
+    <div class="panel">
+      <div class="panel-title">/notify</div>
+      <div class="panel-status">ntfy topic: <code>cama-8f2e91ab3c&hellip;</code> on <code>ntfy.sh</code></div>
+
+      <div class="control-group">
+        <div class="control-group-label">ntfy.sh</div>
+        <div class="control-grid">
+          <div class="control">
+            <span class="btn-demo">Regenerate Topic</span>
+            <span class="caption">Get a new private topic &mdash; the old one stops working</span>
+          </div>
+          <div class="control">
+            <span class="btn-demo on"><span class="dot-status"></span>Readycheck (ntfy): ON</span>
+            <span class="caption">Push alert when a readycheck launches with a full lobby</span>
+          </div>
+          <div class="control">
+            <span class="btn-demo on"><span class="dot-status"></span>Match Started (ntfy): ON</span>
+            <span class="caption">Push alert when your shuffled match starts</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="control-group">
+        <div class="control-group-label">Discord DM</div>
+        <div class="control-grid">
+          <div class="control">
+            <span class="btn-demo off"><span class="dot-status"></span>Readycheck (DM): OFF</span>
+            <span class="caption">DM when a readycheck launches with a full lobby</span>
+          </div>
+          <div class="control">
+            <span class="btn-demo on"><span class="dot-status"></span>Match Started (DM): ON</span>
+            <span class="caption">DM when your shuffled match starts</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="control-group">
+        <div class="control-grid">
+          <div class="control">
+            <span class="btn-demo">Send Test</span>
+            <span class="caption">Tests every channel you currently have on</span>
+          </div>
+          <div class="control">
+            <span class="btn-demo danger">Unsubscribe</span>
+            <span class="caption">Clear your topic and every DM toggle &mdash; stop all alerts</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <span class="index">04</span>
+      <h2>Good to know</h2>
+    </div>
+
+    <dl class="faq">
+      <div class="faq-item">
+        <dt>Is this instead of Discord notifications?</dt>
+        <dd>No &mdash; it's in addition. Ready Signal exists because a normal Discord ping can get lost under mute settings, Do Not Disturb, or a phone that's asleep. This is a separate, dedicated channel just for these two moments.</dd>
+      </div>
+      <div class="faq-item">
+        <dt>Why a full lobby, not any readycheck?</dt>
+        <dd>A readycheck run against a half-empty lobby isn't the "everyone's here, go respond" moment worth a phone buzz. The alert only fires once the lobby has actually reached its ready threshold.</dd>
+      </div>
+      <div class="faq-item">
+        <dt>Do I need the ntfy app to use this?</dt>
+        <dd>No. The app is only for the ntfy push channel. Discord DM needs nothing installed &mdash; just toggle it on.</dd>
+      </div>
+      <div class="faq-item">
+        <dt>Can I use both channels at once?</dt>
+        <dd>Yes. Turn on, say, Match Started on both ntfy and DM and you'll get a push notification and a DM for the same event &mdash; useful if you're not sure which one you'll actually notice.</dd>
+      </div>
+      <div class="faq-item">
+        <dt>Can I turn off just one alert?</dt>
+        <dd>Yes, at the level of event <em>and</em> channel. Readycheck and Match Started toggle independently, and so do ntfy and DM for each &mdash; four switches total, any combination.</dd>
+      </div>
+      <div class="faq-item">
+        <dt>What if I don't need to react?</dt>
+        <dd>The readycheck alert only reaches players who still need to react &mdash; not someone who already confirmed or just joined.</dd>
+      </div>
+      <div class="faq-item">
+        <dt>Why can't I pick my own topic or server?</dt>
+        <dd>For safety, Cama generates your ntfy topic for you and only ever talks to the official <span class="mono">ntfy.sh</span>. A self-typed topic is easy to guess and a custom server is easy to abuse &mdash; taking both off the table closes that off.</dd>
+      </div>
+      <div class="faq-item">
+        <dt>Does an admin need to set anything up?</dt>
+        <dd>No. It's entirely self-service &mdash; each player configures their own alerts with <span class="mono" style="text-transform:none;">/notify</span>.</dd>
+      </div>
+      <div class="faq-item">
+        <dt>I want to stop entirely</dt>
+        <dd>Click <strong>Unsubscribe</strong>. Your ntfy topic and both DM toggles are cleared, and nothing more is sent until you run <span class="mono" style="text-transform:none;">/notify</span> again.</dd>
+      </div>
+    </dl>
+  </section>
+
+  <footer>
+    <span>Cama Balanced Shuffle</span>
+    <span>Ready Signal &middot; player guide</span>
+  </footer>
+
+</div>
+</body>
+</html>

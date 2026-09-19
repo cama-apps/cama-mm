@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cama Bot Guides</title>
+<meta name="description" content="Player guides for the Cama Balanced Shuffle Discord bot — how the lobby, ready check, and notification systems actually behave.">
+<link rel="canonical" href="https://t4n1o.github.io/cama-mm/">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E📘%3C/text%3E%3C/svg%3E">
+<meta name="theme-color" content="#10141b">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Cama Balanced Shuffle">
+<meta property="og:title" content="Cama Bot Guides">
+<meta property="og:description" content="Player guides for the Cama Balanced Shuffle Discord bot — how the lobby, ready check, and notification systems actually behave.">
+<meta property="og:url" content="https://t4n1o.github.io/cama-mm/">
+<meta property="og:image" content="https://t4n1o.github.io/cama-mm/assets/og/index.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="stylesheet" href="assets/fonts/ready-signal.css">
+<style>
+  :root {
+    --bg: #eef1f5; --surface: #fff; --ink: #161b22; --dim: #5b6472; --faint: #8892a0;
+    --accent: #ff6a2b; --line: #dce1e8; --line-strong: #c3cad3;
+    --shadow: 0 1px 2px rgba(22,27,34,.06), 0 8px 24px -12px rgba(22,27,34,.12);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #10141b; --surface: #171d27; --ink: #e9edf2; --dim: #9aa5b3; --faint: #6b7583;
+      --accent: #ff7a3d; --line: #2a323f; --line-strong: #3a4453;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 12px 32px -16px rgba(0,0,0,.6);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 16px; line-height: 1.6; -webkit-font-smoothing: antialiased;
+  }
+  .page { max-width: 760px; margin: 0 auto; padding: 56px 24px 96px; }
+  .eyebrow {
+    font-family: "IBM Plex Mono", monospace; font-size: 12.5px; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--accent);
+    display: flex; align-items: center; gap: 8px; margin-bottom: 14px;
+  }
+  .eyebrow i { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); display: block; }
+  h1 {
+    font-family: "Big Shoulders Display", "Arial Narrow", sans-serif; font-weight: 800;
+    text-transform: uppercase; font-size: clamp(40px, 7vw, 58px); line-height: .96; margin: 0 0 14px;
+  }
+  .dek { font-size: 18px; color: var(--dim); max-width: 54ch; margin: 0 0 48px; padding-bottom: 40px; border-bottom: 1px solid var(--line); }
+  .guides { display: flex; flex-direction: column; gap: 16px; }
+  a.card {
+    display: block; text-decoration: none; color: inherit; background: var(--surface);
+    border: 1px solid var(--line); border-radius: 12px; padding: 22px 24px;
+    box-shadow: var(--shadow); transition: border-color .15s ease, transform .15s ease;
+  }
+  a.card:hover { border-color: var(--line-strong); transform: translateY(-2px); }
+  @media (prefers-reduced-motion: reduce) { a.card { transition: none; } a.card:hover { transform: none; } }
+  a.card h2 { font-family: "IBM Plex Sans", sans-serif; font-weight: 700; font-size: 19px; margin: 0 0 6px; text-transform: none; }
+  a.card p { margin: 0; color: var(--dim); font-size: 14.5px; }
+  a.card .cmd {
+    display: inline-block; margin-top: 12px; font-family: "IBM Plex Mono", monospace; font-size: 12.5px;
+    color: var(--accent); letter-spacing: .04em;
+  }
+  footer {
+    margin-top: 56px; padding-top: 24px; border-top: 1px solid var(--line);
+    font-size: 13px; color: var(--faint);
+  }
+  footer a { color: var(--dim); }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="eyebrow"><i></i>Cama Balanced Shuffle</div>
+  <h1>Bot Guides</h1>
+  <p class="dek">How the Cama inhouse bot actually behaves — written for players, kept alongside the code so it can't quietly drift out of date.</p>
+
+  <div class="guides">
+    <a class="card" href="guides/lobby/">
+      <h2>⚔️ The Lobby Message</h2>
+      <p>What the Join and Leave buttons do, what each of the five reactions on the lobby message actually triggers, and every reason a join can come back refused.</p>
+      <span class="cmd">/lobby · /join · /leave</span>
+    </a>
+    <a class="card" href="guides/ready-signal/">
+      <h2>🔔 Ready Signal — notifications</h2>
+      <p>Get a push notification or a Discord DM the moment a readycheck launches with a full lobby, or your shuffled match starts. Self-service, no admin needed.</p>
+      <span class="cmd">/notify</span>
+    </a>
+    <a class="card" href="guides/curfew/">
+      <h2>🌙 Curfew</h2>
+      <p>Lock yourself out of the lobby on a schedule you set — named nightly windows that block queueing and quietly remove you from any lobby you're in.</p>
+      <span class="cmd">/player curfew</span>
+    </a>
+    <a class="card" href="guides/ready-check/">
+      <h2>✅ How Ready Check Works</h2>
+      <p>Who counts as active, who gets confirmed without reacting, quorum, and the 30-minute sweep that quietly removes AFK players — plus the open questions up for a vote.</p>
+      <span class="cmd">/readycheck</span>
+    </a>
+  </div>
+
+  <footer>
+    Source: <a href="https://github.com/t4n1o/cama-mm">github.com/t4n1o/cama-mm</a> · Something wrong or out of date? Say so in the Discord guides channel.
+  </footer>
+</div>
+</body>
+</html>

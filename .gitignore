@@ -208,8 +208,14 @@ scripts/*
 !scripts/stage-runtime-assets
 !scripts/test-runtime-selector
 docs/stats.md
-docs/
+docs/*
 !docs/server-setup.md
+# Published player guides site (GitHub Pages) - see docs/README.md
+!docs/index.html
+!docs/README.md
+!docs/.nojekyll
+!docs/guides/
+!docs/assets/
 .beads/
 
 # Dedicated Steam credentials and archived Dota replays
