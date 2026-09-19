@@ -113,6 +113,26 @@ shuffles use the existing manual fallback while that cleanup is pending.
 An already committed conflicting result is not overwritten by this command;
 use the existing match-correction controls in that case.
 
+If creation paused before a lobby or Dota ID was observed and launch was never
+requested, keep that pending match when playing a manual replacement. A Dota
+match ID is optional in this case: an admin can use
+`/record pending_match:610 result:radiant` (or `result:dire`). This uses normal
+recording and settlement; the worker releases the reviewed session once the
+result is finalized and the bot account has no lobby requiring cleanup.
+Do not resume bot hosting while using the replacement lobby. The bot cannot
+observe that human-hosted game's start: if betting is still open, use
+`/admin dota betting pending_match:ID action:suspend reason:Manual game started`
+when gameplay starts.
+
+Hosting pause messages are posted by the worker to the saved shuffle thread
+(falling back to the shuffle channel, then the originating channel). They
+describe the bot's lobby attempt, not a human-created replacement. Detailed
+failure reasons remain in `/admin dota status` and the host logs. A Discord
+status-delivery warning for an already recorded pending ID is a separate
+notification retry, not another attempt to record that match. Failed status
+deliveries retry after 30 seconds, doubling up to five minutes; the delay
+survives restarts. Logs include the Discord error and destination IDs.
+
 ## Testing
 
 Unit and integration tests inject fake Dota transports directly; deployment always uses the real adapter when hosting is enabled. Fake Discord players do not represent Steam accounts and cannot launch a real hosted match. Keep automated local tests on a disposable database. To run a local Discord bot without making any Steam connection, leave hosting disabled.
