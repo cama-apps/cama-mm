@@ -516,20 +516,6 @@ pub enum ReactionKind {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum JoinResult {
-    Joined,
-    Rejected(JoinRejection),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum JoinRejection {
-    InFlight,
-    AlreadyJoined,
-    Full,
-    Other,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RawUserSource {
     PayloadMember,
     GuildMemberCache,
@@ -561,9 +547,6 @@ pub struct ReactionInput {
     pub lobby_open: bool,
     pub already_in_lobby: bool,
     pub lobby_kind: LobbyKind,
-    pub join_result: JoinResult,
-    pub post_join_lobby_exists: bool,
-    pub lobby_ready: bool,
     pub has_thread: bool,
 }
 
@@ -573,15 +556,8 @@ pub struct ReactionPlan {
     pub use_partial_message: bool,
     pub use_full_message_fetch: bool,
     pub remove_reaction: bool,
-    pub join_lobby: bool,
-    pub leave_lobby: bool,
-    pub update_lobby_message: bool,
-    pub sync_readycheck: bool,
-    pub retain_target_notification: bool,
     pub send_gamba_thread_message: bool,
-    pub notify_rally: bool,
-    pub notify_ready: bool,
-    pub explanation: Option<String>,
+    pub send_ready_thread_message: bool,
 }
 
 #[must_use]
@@ -605,64 +581,15 @@ pub fn route_reaction_add(input: &ReactionInput) -> ReactionPlan {
             send_gamba_thread_message: input.has_thread,
             ..ReactionPlan::default()
         },
-        ReactionKind::Sword => {
-            let mut plan = ReactionPlan {
-                use_partial_message: true,
-                join_lobby: true,
-                ..ReactionPlan::default()
-            };
-            match input.join_result {
-                JoinResult::Joined => {
-                    // The one-shot notification belongs to the committed join,
-                    // not the later lobby refetch, so retain it immediately.
-                    plan.retain_target_notification = true;
-                    if input.post_join_lobby_exists {
-                        plan.update_lobby_message = true;
-                        plan.sync_readycheck = true;
-                        plan.notify_ready = input.lobby_ready;
-                        plan.notify_rally = !input.lobby_ready;
-                    }
-                }
-                JoinResult::Rejected(reason) => {
-                    plan.remove_reaction = true;
-                    plan.explanation = Some(match reason {
-                        JoinRejection::InFlight => concat!(
-                            "You can't switch lobbies while your current shuffle or draft ",
-                            "is in progress."
-                        )
-                        .to_owned(),
-                        JoinRejection::AlreadyJoined => "Already in lobby.".to_owned(),
-                        JoinRejection::Full => "Lobby is full.".to_owned(),
-                        JoinRejection::Other => "Could not join lobby.".to_owned(),
-                    });
-                }
-            }
-            plan
-        }
+        // A sword is a shout-out, never a join: reactions can't be answered
+        // ephemerally, so seating moved to the Join button.
+        ReactionKind::Sword => ReactionPlan {
+            send_ready_thread_message: input.has_thread,
+            ..ReactionPlan::default()
+        },
         ReactionKind::Bell | ReactionKind::Ready | ReactionKind::Other | ReactionKind::Jopacoin => {
             ReactionPlan::default()
         }
-    }
-}
-
-#[must_use]
-pub fn route_sword_reaction_remove(
-    message_matches_current_lobby: bool,
-    lobby_open: bool,
-    leave_succeeded: bool,
-) -> ReactionPlan {
-    if !message_matches_current_lobby {
-        return ReactionPlan {
-            returned_before_discord_lookups: true,
-            ..ReactionPlan::default()
-        };
-    }
-    ReactionPlan {
-        use_partial_message: lobby_open,
-        leave_lobby: lobby_open,
-        update_lobby_message: lobby_open && leave_succeeded,
-        sync_readycheck: lobby_open && leave_succeeded,
-        ..ReactionPlan::default()
     }
 }
 

@@ -989,24 +989,7 @@ async fn create_lobby_and_join_player(
         vec![lobby_option(kind)],
     )
     .await;
-    let message_id = to_u64(
-        lobby_snapshot(provider, kind)
-            .message_ids
-            .message_id
-            .expect("lobby message")
-            .0,
-    )
-    .expect("Discord message id");
-    provider
-        .raw_reaction_observer()
-        .observe(raw_sword(
-            RawReactionKind::Add,
-            message_id,
-            player_id,
-            player_name,
-        ))
-        .await
-        .expect("player joins lobby");
+    join_via_button(provider, kind, player_id, player_name).await;
 }
 
 fn lobby_snapshot(provider: &LobbyRegistrationProvider, kind: LobbyKind) -> LobbySnapshot {
@@ -1027,7 +1010,8 @@ fn fake_request(count: usize, interaction_id: u64) -> AdminFakeLobbyRequest {
     }
 }
 
-fn raw_sword(
+/// A 📻 spectator reaction on a lobby (or shuffle) message.
+fn raw_radio(
     kind: RawReactionKind,
     message_id: u64,
     user_id: u64,
@@ -1041,8 +1025,36 @@ fn raw_sword(
         user_id,
         actor_is_bot: Some(false),
         actor_display_name: Some(display_name.to_owned()),
-        emoji: RawReactionEmoji::unicode(SWORD_EMOJI),
+        emoji: RawReactionEmoji::unicode(SPECTATOR_EMOJI),
     }
+}
+
+/// A ⚔️ reaction on a lobby message: a shout-out, never a join.
+fn raw_sword(kind: RawReactionKind, message_id: u64, user_id: u64) -> RawReactionEvent {
+    RawReactionEvent {
+        emoji: RawReactionEmoji::unicode(SWORD_EMOJI),
+        ..raw_radio(kind, message_id, user_id, "Reactor")
+    }
+}
+
+/// Seat a player through the lobby message's Join button.
+async fn join_via_button(
+    provider: &LobbyRegistrationProvider,
+    kind: LobbyKind,
+    user_id: u64,
+    display_name: &str,
+) -> Arc<CapturingResponder> {
+    dispatch_component(provider, &join_button_id(kind), user_id, display_name).await
+}
+
+/// Remove a player through the lobby message's Leave button.
+async fn leave_via_button(
+    provider: &LobbyRegistrationProvider,
+    kind: LobbyKind,
+    user_id: u64,
+    display_name: &str,
+) -> Arc<CapturingResponder> {
+    dispatch_component(provider, &leave_button_id(kind), user_id, display_name).await
 }
 
 #[tokio::test]
@@ -1067,7 +1079,11 @@ async fn live_slash_creation_persists_and_restart_reuses_the_existing_discord_me
     assert_eq!(transport.thread_count(), 1);
     {
         let captured = responder.captured.lock().expect("responses");
-        assert_eq!(captured.deferred, [false]);
+        assert_eq!(
+            captured.deferred,
+            [true],
+            "the lobby message is the public announcement; the command's own reply is private"
+        );
         assert!(captured.followups.iter().all(|response| {
             response.ephemeral && response.allowed_mentions == InteractionAllowedMentions::None
         }));
@@ -1094,7 +1110,7 @@ async fn live_slash_creation_persists_and_restart_reuses_the_existing_discord_me
 }
 
 #[tokio::test]
-async fn slash_join_posts_the_same_thread_line_as_a_sword_react() {
+async fn slash_join_posts_the_same_thread_line_as_a_button_join() {
     let database = database_with_players(&[(10, "Creator"), (20, "Joiner")]);
     let transport = Arc::new(RecordingTransport::default());
     let provider = provider_for(&database, transport.clone());
@@ -1131,7 +1147,7 @@ async fn slash_join_posts_the_same_thread_line_as_a_sword_react() {
     assert!(captured.followups[0].ephemeral);
     // /join still gets its private ephemeral confirmation, but now also
     // posts the same ping-suppressed "joined." mention into the thread as
-    // /lobby and a sword react do -- that mention is what silently
+    // /lobby and the Join button do -- that mention is what silently
     // subscribes the joiner to the thread, so no explicit thread-member
     // call is needed for any join path any more.
     let sent = transport.sent_messages();
@@ -1166,18 +1182,12 @@ async fn join_during_an_archived_thread_spell_still_subscribes_the_joiner() {
     let lobby = lobby_snapshot(&provider, LobbyKind::Open);
     let thread_id =
         to_u64(lobby.message_ids.thread_id.expect("lobby thread").0).expect("Discord thread id");
-    let message_id =
-        to_u64(lobby.message_ids.message_id.expect("lobby message").0).expect("Discord message id");
     transport
         .archive_thread(thread_id, "🍽️ All You Can Feed", false)
         .await
         .expect("archive lobby thread");
 
-    provider
-        .raw_reaction_observer()
-        .observe(raw_sword(RawReactionKind::Add, message_id, 20, "Joiner"))
-        .await
-        .expect("raw sword join");
+    join_via_button(&provider, LobbyKind::Open, 20, "Joiner").await;
 
     // The ping-suppressed @mention is both what auto-unarchives the thread
     // and what subscribes the joiner to it (Discord treats a mention as an
@@ -1186,7 +1196,7 @@ async fn join_during_an_archived_thread_spell_still_subscribes_the_joiner() {
     // rejected on an archived thread and would also print its own "X added
     // Y to the thread" system line.
     // /lobby already posted the creator's own "<@10> joined." line before
-    // the archive, so look specifically for the sword joiner's.
+    // the archive, so look specifically for the button joiner's.
     let join_lines = transport
         .sent_messages()
         .into_iter()
@@ -1215,7 +1225,7 @@ async fn join_during_an_archived_thread_spell_still_subscribes_the_joiner() {
 }
 
 #[tokio::test]
-async fn slash_and_raw_membership_changes_share_one_churn_cooldown() {
+async fn slash_and_button_membership_changes_share_one_churn_cooldown() {
     let database = database_with_players(&[(10, "Creator"), (20, "Churner")]);
     let transport = Arc::new(RecordingTransport::default());
     let provider = provider_for(&database, transport);
@@ -1227,14 +1237,6 @@ async fn slash_and_raw_membership_changes_share_one_churn_cooldown() {
         vec![lobby_option(LobbyKind::Open)],
     )
     .await;
-    let message_id = to_u64(
-        lobby_snapshot(&provider, LobbyKind::Open)
-            .message_ids
-            .message_id
-            .expect("lobby message")
-            .0,
-    )
-    .expect("Discord message id");
     let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
     assert!(
         provider
@@ -1245,16 +1247,7 @@ async fn slash_and_raw_membership_changes_share_one_churn_cooldown() {
             .success
     );
 
-    provider
-        .raw_reaction_observer()
-        .observe(raw_sword(
-            RawReactionKind::Remove,
-            message_id,
-            20,
-            "Churner",
-        ))
-        .await
-        .expect("raw sword leave");
+    leave_via_button(&provider, LobbyKind::Open, 20, "Churner").await;
     let joined = dispatch_command(
         &provider,
         "join",
@@ -1267,16 +1260,7 @@ async fn slash_and_raw_membership_changes_share_one_churn_cooldown() {
         joined.captured.lock().expect("responses").followups[0].content,
         "✅ Joined 🍽️ All You Can Feed!"
     );
-    provider
-        .raw_reaction_observer()
-        .observe(raw_sword(
-            RawReactionKind::Remove,
-            message_id,
-            20,
-            "Churner",
-        ))
-        .await
-        .expect("raw sword leave");
+    leave_via_button(&provider, LobbyKind::Open, 20, "Churner").await;
 
     let blocked = dispatch_command(
         &provider,
@@ -1314,14 +1298,6 @@ async fn churn_cooldown_is_shared_across_lobby_kinds_and_preserves_blocked_leave
             .join_lobby(AppUserId(20), open_scope)
             .success
     );
-    let open_message_id = to_u64(
-        lobby_snapshot(&provider, LobbyKind::Open)
-            .message_ids
-            .message_id
-            .expect("open lobby message")
-            .0,
-    )
-    .expect("Discord message id");
 
     dispatch_command(
         &provider,
@@ -1331,13 +1307,8 @@ async fn churn_cooldown_is_shared_across_lobby_kinds_and_preserves_blocked_leave
         vec![lobby_option(LobbyKind::LowSkill)],
     )
     .await;
-    for kind in [RawReactionKind::Remove, RawReactionKind::Add] {
-        provider
-            .raw_reaction_observer()
-            .observe(raw_sword(kind, open_message_id, 20, "Churner"))
-            .await
-            .expect("raw sword membership change");
-    }
+    leave_via_button(&provider, LobbyKind::Open, 20, "Churner").await;
+    join_via_button(&provider, LobbyKind::Open, 20, "Churner").await;
 
     let blocked = dispatch_command(&provider, "leave", 20, "Churner", Vec::new()).await;
     assert!(
@@ -1356,7 +1327,7 @@ async fn churn_cooldown_is_shared_across_lobby_kinds_and_preserves_blocked_leave
 }
 
 #[tokio::test]
-async fn raw_sword_churn_rejection_is_visible_and_does_not_rejoin() {
+async fn join_button_churn_rejection_is_private_and_does_not_rejoin() {
     let database = database_with_players(&[(10, "Creator"), (20, "Churner")]);
     let transport = Arc::new(RecordingTransport::default());
     let provider = provider_for(&database, transport.clone());
@@ -1368,14 +1339,6 @@ async fn raw_sword_churn_rejection_is_visible_and_does_not_rejoin() {
         vec![lobby_option(LobbyKind::Open)],
     )
     .await;
-    let message_id = to_u64(
-        lobby_snapshot(&provider, LobbyKind::Open)
-            .message_ids
-            .message_id
-            .expect("lobby message")
-            .0,
-    )
-    .expect("Discord message id");
     let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
     assert!(
         provider
@@ -1386,34 +1349,24 @@ async fn raw_sword_churn_rejection_is_visible_and_does_not_rejoin() {
             .success
     );
 
-    for kind in [
-        RawReactionKind::Remove,
-        RawReactionKind::Add,
-        RawReactionKind::Remove,
-    ] {
-        provider
-            .raw_reaction_observer()
-            .observe(raw_sword(kind, message_id, 20, "Churner"))
-            .await
-            .expect("raw sword membership change");
-    }
-    provider
-        .raw_reaction_observer()
-        .observe(raw_sword(RawReactionKind::Add, message_id, 20, "Churner"))
-        .await
-        .expect("rate-limited raw sword join");
+    leave_via_button(&provider, LobbyKind::Open, 20, "Churner").await;
+    join_via_button(&provider, LobbyKind::Open, 20, "Churner").await;
+    leave_via_button(&provider, LobbyKind::Open, 20, "Churner").await;
+    let sent_before = transport.sent_messages().len();
+    let blocked = join_via_button(&provider, LobbyKind::Open, 20, "Churner").await;
 
     assert!(
         !lobby_snapshot(&provider, LobbyKind::Open)
             .players
             .contains(&AppUserId(20))
     );
-    assert!(transport.sent_messages().iter().any(|sent| {
-        sent.message
-            .response
-            .content
-            .starts_with("<@20> ❌ Slow down!")
-    }));
+    let content = only_ephemeral_followup(&blocked);
+    assert!(content.starts_with("Slow down!"), "{content}");
+    assert_eq!(
+        transport.sent_messages().len(),
+        sent_before,
+        "a rate-limited button click is refused privately, never in the channel"
+    );
 }
 
 #[tokio::test]
@@ -1472,115 +1425,6 @@ async fn rate_limited_missing_lobby_does_not_create_an_empty_lobby() {
 }
 
 #[tokio::test]
-async fn blocked_raw_leave_keeps_membership_and_duplicate_add_repairs_the_retry_path() {
-    let database = database_with_players(&[(10, "Creator"), (20, "Churner")]);
-    let transport = Arc::new(RecordingTransport::default());
-    let provider = provider_for(&database, transport.clone());
-    for kind in [LobbyKind::Open, LobbyKind::LowSkill] {
-        dispatch_command(&provider, "lobby", 10, "Creator", vec![lobby_option(kind)]).await;
-    }
-    let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
-    let message_id = to_u64(
-        lobby_snapshot(&provider, LobbyKind::Open)
-            .message_ids
-            .message_id
-            .expect("lobby message")
-            .0,
-    )
-    .expect("Discord message id");
-    assert!(
-        provider
-            .handler
-            .state
-            .service
-            .join_lobby(AppUserId(20), scope)
-            .success
-    );
-
-    for kind in [RawReactionKind::Remove, RawReactionKind::Add] {
-        provider
-            .raw_reaction_observer()
-            .observe(raw_sword(kind, message_id, 20, "Churner"))
-            .await
-            .expect("raw sword membership change");
-    }
-    dispatch_command(
-        &provider,
-        "join",
-        20,
-        "Churner",
-        vec![lobby_option(LobbyKind::LowSkill)],
-    )
-    .await;
-    let removed_reactions_before = transport
-        .state
-        .lock()
-        .expect("transport state")
-        .removed_reactions
-        .len();
-    provider
-        .raw_reaction_observer()
-        .observe(raw_sword(
-            RawReactionKind::Remove,
-            message_id,
-            20,
-            "Churner",
-        ))
-        .await
-        .expect("rate-limited raw sword leave");
-
-    assert!(
-        lobby_snapshot(&provider, LobbyKind::Open)
-            .players
-            .contains(&AppUserId(20)),
-        "a blocked raw leave must preserve membership"
-    );
-    assert!(transport.sent_messages().iter().any(|sent| {
-        sent.message
-            .response
-            .content
-            .starts_with("<@20> ❌ Slow down!")
-    }));
-    assert_eq!(
-        transport
-            .state
-            .lock()
-            .expect("transport state")
-            .removed_reactions
-            .len(),
-        removed_reactions_before,
-        "a blocked remove must not remove a reaction that may have been re-added"
-    );
-
-    *provider
-        .handler
-        .state
-        .membership_rate_limiter
-        .lock()
-        .expect("membership limiter") = RateLimiter::new();
-    provider
-        .raw_reaction_observer()
-        .observe(raw_sword(RawReactionKind::Add, message_id, 20, "Churner"))
-        .await
-        .expect("idempotent raw sword repair");
-    provider
-        .raw_reaction_observer()
-        .observe(raw_sword(
-            RawReactionKind::Remove,
-            message_id,
-            20,
-            "Churner",
-        ))
-        .await
-        .expect("raw sword leave after cooldown");
-    assert!(
-        !lobby_snapshot(&provider, LobbyKind::Open)
-            .players
-            .contains(&AppUserId(20))
-    );
-}
-
-#[tokio::test]
 async fn test_lobby_state_restored_after_restart() {
     let database = database_with_players(&[
         (10, "Creator"),
@@ -1598,22 +1442,8 @@ async fn test_lobby_state_restored_after_restart() {
         vec![lobby_option(LobbyKind::Open)],
     )
     .await;
-    let initial_message = lobby_snapshot(&provider, LobbyKind::Open)
-        .message_ids
-        .message_id
-        .expect("persisted lobby message");
-    let message_id = to_u64(initial_message.0).expect("Discord lobby message id");
     for (player_id, player_name) in [(20, "Second"), (30, "Third"), (40, "Fourth")] {
-        provider
-            .raw_reaction_observer()
-            .observe(raw_sword(
-                RawReactionKind::Add,
-                message_id,
-                player_id,
-                player_name,
-            ))
-            .await
-            .expect("persist lobby member");
+        join_via_button(&provider, LobbyKind::Open, player_id, player_name).await;
     }
     let before = lobby_snapshot(&provider, LobbyKind::Open);
     assert_eq!(before.created_by, Some(AppUserId(10)));
@@ -1631,30 +1461,13 @@ async fn test_lobby_state_restored_after_restart() {
 }
 
 #[tokio::test]
-async fn raw_sword_routes_are_kind_scoped_dual_seat_persistent_and_mention_safe() {
+async fn join_button_routes_are_kind_scoped_dual_seat_persistent_and_mention_safe() {
     let database = database_with_players(&[(10, "Creator"), (20, "Dual Queue")]);
     let transport = Arc::new(RecordingTransport::default());
     let provider = provider_for(&database, transport.clone());
     for kind in [LobbyKind::Open, LobbyKind::LowSkill] {
         dispatch_command(&provider, "lobby", 10, "Creator", vec![lobby_option(kind)]).await;
-        let message_id = to_u64(
-            lobby_snapshot(&provider, kind)
-                .message_ids
-                .message_id
-                .expect("lobby message")
-                .0,
-        )
-        .expect("Discord message id");
-        provider
-            .raw_reaction_observer()
-            .observe(raw_sword(
-                RawReactionKind::Add,
-                message_id,
-                20,
-                "Dual Queue",
-            ))
-            .await
-            .expect("raw sword join");
+        join_via_button(&provider, kind, 20, "Dual Queue").await;
     }
 
     assert_eq!(
@@ -1665,24 +1478,7 @@ async fn raw_sword_routes_are_kind_scoped_dual_seat_persistent_and_mention_safe(
             .get_lobby_kinds_for_player(AppUserId(20), AppGuildId(42)),
         vec![LobbyKind::Open, LobbyKind::LowSkill]
     );
-    let open_message_id = to_u64(
-        lobby_snapshot(&provider, LobbyKind::Open)
-            .message_ids
-            .message_id
-            .expect("open message")
-            .0,
-    )
-    .expect("open message id");
-    provider
-        .raw_reaction_observer()
-        .observe(raw_sword(
-            RawReactionKind::Remove,
-            open_message_id,
-            20,
-            "Dual Queue",
-        ))
-        .await
-        .expect("raw sword leave");
+    leave_via_button(&provider, LobbyKind::Open, 20, "Dual Queue").await;
     assert_eq!(
         provider
             .handler
@@ -1700,7 +1496,7 @@ async fn raw_sword_routes_are_kind_scoped_dual_seat_persistent_and_mention_safe(
             .service
             .get_lobby_kinds_for_player(AppUserId(20), AppGuildId(42)),
         vec![LobbyKind::LowSkill],
-        "raw add/remove mutations must survive process restart"
+        "button join/leave mutations must survive process restart"
     );
     for sent in transport.sent_messages() {
         if sent.message.response.content.contains("<@") {
@@ -1787,7 +1583,108 @@ async fn raw_jopacoin_subscribes_the_thread_then_invokes_the_shared_neon_observe
 }
 
 #[tokio::test]
-async fn suspension_rejects_slash_and_raw_with_private_context_while_low_priority_still_joins() {
+async fn sword_reaction_is_a_thread_shout_out_and_never_seats_the_player() {
+    let database = database_with_players(&[(10, "Creator"), (20, "Eager")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let lobby = lobby_snapshot(&provider, LobbyKind::Open);
+    let message_id = to_u64(lobby.message_ids.message_id.expect("lobby message").0)
+        .expect("Discord lobby message");
+    let thread_id =
+        to_u64(lobby.message_ids.thread_id.expect("lobby thread").0).expect("Discord lobby thread");
+    // The bot still seeds the sword on every new lobby message so there is
+    // something to click.
+    assert!(
+        transport
+            .state
+            .lock()
+            .expect("transport state")
+            .messages
+            .get(&(700, message_id))
+            .expect("lobby message recorded")
+            .reactions
+            .contains(&DiscordEmoji::unicode(SWORD_EMOJI))
+    );
+    let sent_before = transport.sent_messages().len();
+
+    provider
+        .raw_reaction_observer()
+        .observe(raw_sword(RawReactionKind::Add, message_id, 20))
+        .await
+        .expect("sword shout-out");
+
+    assert!(
+        !lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(20)),
+        "a sword reaction must not seat the player -- that is the Join button's job"
+    );
+    let sent = transport.sent_messages();
+    assert_eq!(sent.len(), sent_before + 1);
+    let shout = sent.last().expect("shout-out");
+    assert_eq!(shout.channel_id, thread_id);
+    assert_eq!(
+        shout.message.response.content,
+        "⚔️ <@20> is ready to play a 5v5 Dota Challenge!"
+    );
+    assert_eq!(
+        shout.message.allowed_mentions,
+        DiscordAllowedMentions::Users(BTreeSet::from([20]))
+    );
+    assert!(
+        transport
+            .state
+            .lock()
+            .expect("transport state")
+            .removed_reactions
+            .is_empty(),
+        "the sword stays on the message"
+    );
+
+    provider
+        .raw_reaction_observer()
+        .observe(raw_sword(RawReactionKind::Remove, message_id, 20))
+        .await
+        .expect("sword removal is inert");
+    provider
+        .raw_reaction_observer()
+        .observe(raw_sword(RawReactionKind::Add, message_id + 999, 20))
+        .await
+        .expect("sword on a non-lobby message is inert");
+    assert_eq!(transport.sent_messages().len(), sent_before + 1);
+
+    // A seated player can still announce they are ready.
+    provider
+        .raw_reaction_observer()
+        .observe(raw_sword(RawReactionKind::Add, message_id, 10))
+        .await
+        .expect("creator shout-out");
+    assert_eq!(
+        transport
+            .sent_messages()
+            .last()
+            .expect("creator shout-out")
+            .message
+            .response
+            .content,
+        "⚔️ <@10> is ready to play a 5v5 Dota Challenge!"
+    );
+    assert_eq!(
+        lobby_snapshot(&provider, LobbyKind::Open).players,
+        BTreeSet::from([AppUserId(10)])
+    );
+}
+
+#[tokio::test]
+async fn suspension_rejects_slash_and_button_with_private_context_while_low_priority_still_joins() {
     let database =
         database_with_players(&[(10, "Creator"), (20, "Suspended"), (30, "Low Priority")]);
     let transport = Arc::new(RecordingTransport::default());
@@ -1800,14 +1697,6 @@ async fn suspension_rejects_slash_and_raw_with_private_context_while_low_priorit
         vec![lobby_option(LobbyKind::Open)],
     )
     .await;
-    let lobby_message_id = to_u64(
-        lobby_snapshot(&provider, LobbyKind::Open)
-            .message_ids
-            .message_id
-            .expect("lobby message")
-            .0,
-    )
-    .expect("Discord lobby message");
     let now = unix_time_now() as i64;
     ModerationService::new(ModerationRepository::new(database.path()))
         .create_suspension(CreateSuspension {
@@ -1834,45 +1723,29 @@ async fn suspension_rejects_slash_and_raw_with_private_context_while_low_priorit
         ))
         .expect("seed active low-priority state");
 
-    provider
-        .raw_reaction_observer()
-        .observe(raw_sword(
-            RawReactionKind::Add,
-            lobby_message_id,
-            20,
-            "Suspended",
-        ))
-        .await
-        .expect("raw suspension rejection");
+    let sent_before = transport.sent_messages().len();
+    let button = join_via_button(&provider, LobbyKind::Open, 20, "Suspended").await;
     assert!(
         !lobby_snapshot(&provider, LobbyKind::Open)
             .players
             .contains(&AppUserId(20))
     );
     {
-        let state = transport.state.lock().expect("transport state");
+        let content = only_ephemeral_followup(&button);
         assert!(
-            state
-                .removed_reactions
-                .iter()
-                .any(|(_, message_id, emoji, user_id)| {
-                    *message_id == lobby_message_id && emoji.name == SWORD_EMOJI && *user_id == 20
-                })
+            content.contains("suspended from 🍽️ All You Can Feed"),
+            "{content}"
         );
-        let (recipient, direct) = state.direct_messages.last().expect("suspension DM");
-        assert_eq!(*recipient, 20);
+        assert!(content.contains("Reason: Take a matchmaking break"));
+        let state = transport.state.lock().expect("transport state");
         assert_eq!(
-            direct.response.content,
-            "You are temporarily suspended from this matchmaking lobby.\nReason: Take a matchmaking break\nUse `/player lobby status` in the server for the exact remaining term."
+            state.sent.len(),
+            sent_before,
+            "a button refusal is ephemeral: nothing about the suspension is posted publicly"
         );
-        let public = state.sent.last().expect("public suspension rejection");
-        assert_eq!(
-            public.message.response.content,
-            "<@20> ❌ You are temporarily restricted from this matchmaking lobby. Check your DMs or use `/player lobby status`."
-        );
-        assert_eq!(
-            public.message.allowed_mentions,
-            DiscordAllowedMentions::Users(BTreeSet::from([20]))
+        assert!(
+            state.direct_messages.is_empty(),
+            "no DM is needed when the reply itself is private"
         );
     }
 
@@ -1901,16 +1774,7 @@ async fn suspension_rejects_slash_and_raw_with_private_context_while_low_priorit
         );
     }
 
-    provider
-        .raw_reaction_observer()
-        .observe(raw_sword(
-            RawReactionKind::Add,
-            lobby_message_id,
-            30,
-            "Low Priority",
-        ))
-        .await
-        .expect("low-priority raw join");
+    join_via_button(&provider, LobbyKind::Open, 30, "Low Priority").await;
     assert!(
         lobby_snapshot(&provider, LobbyKind::Open)
             .players
@@ -2041,15 +1905,12 @@ fn test_kick_reason_is_optional_and_privately_bounded() {
 }
 
 #[tokio::test]
-async fn test_kick_removes_reaction_and_updates_message() {
+async fn test_kick_updates_message() {
     let database = database_with_players(&[(1, "Admin"), (42, "Target")]);
     let transport = Arc::new(RecordingTransport::default());
     let provider = provider_for_admin(&database, transport.clone(), 1);
     create_lobby_and_join_player(&provider, LobbyKind::Open, 1, "Admin", 42, "Target").await;
-    let (edits_before, removals_before) = {
-        let state = transport.state.lock().expect("transport state");
-        (state.edits.len(), state.removed_reactions.len())
-    };
+    let edits_before = transport.state.lock().expect("transport state").edits.len();
 
     let responder = dispatch_command(
         &provider,
@@ -2062,7 +1923,6 @@ async fn test_kick_removes_reaction_and_updates_message() {
 
     let state = transport.state.lock().expect("transport state");
     assert!(state.edits.len() > edits_before);
-    assert!(state.removed_reactions.len() > removals_before);
     drop(state);
     let captured = responder.captured.lock().expect("responses");
     assert_eq!(captured.deferred, [true]);
@@ -2125,24 +1985,7 @@ async fn test_creator_kick_audits_optional_reason_without_posting_it_publicly() 
         vec![lobby_option(LobbyKind::Open)],
     )
     .await;
-    let lobby_message_id = to_u64(
-        lobby_snapshot(&provider, LobbyKind::Open)
-            .message_ids
-            .message_id
-            .expect("lobby message")
-            .0,
-    )
-    .expect("Discord lobby message");
-    provider
-        .raw_reaction_observer()
-        .observe(raw_sword(
-            RawReactionKind::Add,
-            lobby_message_id,
-            20,
-            "Target",
-        ))
-        .await
-        .expect("target joins");
+    join_via_button(&provider, LobbyKind::Open, 20, "Target").await;
 
     dispatch_command(
         &provider,
@@ -2281,19 +2124,7 @@ async fn test_non_creator_cannot_kick_from_either_lobby() {
     let provider = provider_for(&database, transport);
     for kind in [LobbyKind::Open, LobbyKind::LowSkill] {
         create_lobby_and_join_player(&provider, kind, 99, "Owner", 7, "Member").await;
-        let message_id = to_u64(
-            lobby_snapshot(&provider, kind)
-                .message_ids
-                .message_id
-                .expect("lobby message")
-                .0,
-        )
-        .expect("Discord message id");
-        provider
-            .raw_reaction_observer()
-            .observe(raw_sword(RawReactionKind::Add, message_id, 42, "Target"))
-            .await
-            .expect("target joins lobby");
+        join_via_button(&provider, kind, 42, "Target").await;
     }
 
     let responder = dispatch_command(
@@ -2333,24 +2164,7 @@ async fn live_readycheck_reaches_quorum_once_with_explicit_user_allowlists() {
         vec![lobby_option(LobbyKind::Open)],
     )
     .await;
-    let lobby_message_id = to_u64(
-        lobby_snapshot(&provider, LobbyKind::Open)
-            .message_ids
-            .message_id
-            .expect("lobby message")
-            .0,
-    )
-    .expect("message id");
-    provider
-        .raw_reaction_observer()
-        .observe(raw_sword(
-            RawReactionKind::Add,
-            lobby_message_id,
-            20,
-            "Second",
-        ))
-        .await
-        .expect("second player joins");
+    join_via_button(&provider, LobbyKind::Open, 20, "Second").await;
     for (user_id, display_name) in [(10, "Creator"), (20, "Second")] {
         transport.set_member(
             42,
@@ -2474,14 +2288,6 @@ async fn readycheck_explains_status_join_age_and_automatic_confirmations() {
     )
     .await;
     let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
-    let lobby_message_id = to_u64(
-        lobby_snapshot(&provider, LobbyKind::Open)
-            .message_ids
-            .message_id
-            .expect("lobby message")
-            .0,
-    )
-    .expect("Discord lobby message");
     for (player_id, name) in [
         (20, "Voice"),
         (30, "Dota"),
@@ -2489,16 +2295,7 @@ async fn readycheck_explains_status_join_age_and_automatic_confirmations() {
         (50, "Recent"),
         (60, "Legacy"),
     ] {
-        provider
-            .raw_reaction_observer()
-            .observe(raw_sword(
-                RawReactionKind::Add,
-                lobby_message_id,
-                player_id,
-                name,
-            ))
-            .await
-            .expect("player joins lobby");
+        join_via_button(&provider, LobbyKind::Open, player_id, name).await;
     }
 
     let repository = ReadycheckRepository::new(database.path());
@@ -2641,25 +2438,8 @@ async fn stale_readycheck_publicly_names_pruned_players_in_the_lobby_thread() {
     )
     .await;
     let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
-    let lobby_message_id = to_u64(
-        lobby_snapshot(&provider, LobbyKind::Open)
-            .message_ids
-            .message_id
-            .expect("lobby message")
-            .0,
-    )
-    .expect("Discord lobby message");
     for (player_id, name) in [(20, "Away One"), (30, "Away Two")] {
-        provider
-            .raw_reaction_observer()
-            .observe(raw_sword(
-                RawReactionKind::Add,
-                lobby_message_id,
-                player_id,
-                name,
-            ))
-            .await
-            .expect("player joins lobby");
+        join_via_button(&provider, LobbyKind::Open, player_id, name).await;
     }
 
     let repository = ReadycheckRepository::new(database.path());
@@ -2782,25 +2562,8 @@ async fn stale_readycheck_fixture(
     )
     .await;
     let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
-    let lobby_message_id = to_u64(
-        lobby_snapshot(&provider, LobbyKind::Open)
-            .message_ids
-            .message_id
-            .expect("lobby message")
-            .0,
-    )
-    .expect("Discord lobby message");
     for (player_id, name) in [(20, "Away One"), (30, "Away Two")] {
-        provider
-            .raw_reaction_observer()
-            .observe(raw_sword(
-                RawReactionKind::Add,
-                lobby_message_id,
-                player_id,
-                name,
-            ))
-            .await
-            .expect("player joins lobby");
+        join_via_button(&provider, LobbyKind::Open, player_id, name).await;
     }
 
     let repository = ReadycheckRepository::new(database.path());
@@ -3677,7 +3440,7 @@ async fn successful_bell_shortcut_advertises_in_the_persisted_origin_channel() {
 
 // The thread "joined." line is always a bare, ping-suppressed @mention now
 // (Discord resolves it to the live display name client-side -- see
-// slash_join_posts_the_same_thread_line_as_a_sword_react), so these
+// slash_join_posts_the_same_thread_line_as_a_button_join), so these
 // exercise the display-name fallback chain through the join observer's
 // ConfirmedLobbyJoin.player_display_name instead of the thread message text.
 #[tokio::test]
@@ -3705,20 +3468,9 @@ async fn lobby_command_join_uses_interaction_display_name_for_the_confirmed_join
 }
 
 #[tokio::test]
-async fn raw_sword_join_uses_server_nickname_for_the_confirmed_join_event() {
+async fn join_button_uses_the_interaction_display_name_for_the_confirmed_join_event() {
     let database = database_with_players(&[(10, "Creator"), (20, "leafael.")]);
     let transport = Arc::new(RecordingTransport::default());
-    transport.set_member(
-        42,
-        DiscordGuildMemberSnapshot {
-            user_id: 20,
-            display_name: "Leaf | Atharva".to_owned(),
-            presence: DiscordPresence::Online,
-            in_voice: false,
-            deafened: false,
-            activities: Vec::new(),
-        },
-    );
     let provider = provider_for(&database, transport.clone());
     let observer = Arc::new(RecordingJoinObserver::default());
     provider
@@ -3732,25 +3484,8 @@ async fn raw_sword_join_uses_server_nickname_for_the_confirmed_join_event() {
         vec![lobby_option(LobbyKind::Open)],
     )
     .await;
-    let lobby_message_id = to_u64(
-        lobby_snapshot(&provider, LobbyKind::Open)
-            .message_ids
-            .message_id
-            .expect("lobby message")
-            .0,
-    )
-    .expect("Discord lobby message");
 
-    provider
-        .raw_reaction_observer()
-        .observe(raw_sword(
-            RawReactionKind::Add,
-            lobby_message_id,
-            20,
-            "leafael.",
-        ))
-        .await
-        .expect("raw join");
+    join_via_button(&provider, LobbyKind::Open, 20, "Leaf | Atharva").await;
 
     let confirmed = observer.confirmed.lock().expect("join observer");
     assert_eq!(
@@ -3758,7 +3493,8 @@ async fn raw_sword_join_uses_server_nickname_for_the_confirmed_join_event() {
             .iter()
             .find(|event| event.player_id == 20)
             .map(|event| event.player_display_name.as_str()),
-        Some("Leaf | Atharva")
+        Some("Leaf | Atharva"),
+        "the live server nickname wins over the stored registration name"
     );
     assert!(
         transport
@@ -3769,51 +3505,7 @@ async fn raw_sword_join_uses_server_nickname_for_the_confirmed_join_event() {
 }
 
 #[tokio::test]
-async fn raw_sword_join_falls_back_to_stored_name_when_discord_name_is_unavailable() {
-    let database = database_with_players(&[(10, "Creator"), (20, "leafael.")]);
-    let transport = Arc::new(RecordingTransport::default());
-    let provider = provider_for(&database, transport.clone());
-    let observer = Arc::new(RecordingJoinObserver::default());
-    provider
-        .set_join_observer(observer.clone())
-        .expect("install join observer");
-    dispatch_command(
-        &provider,
-        "lobby",
-        10,
-        "Creator",
-        vec![lobby_option(LobbyKind::Open)],
-    )
-    .await;
-    let lobby_message_id = to_u64(
-        lobby_snapshot(&provider, LobbyKind::Open)
-            .message_ids
-            .message_id
-            .expect("lobby message")
-            .0,
-    )
-    .expect("Discord lobby message");
-    let mut reaction = raw_sword(RawReactionKind::Add, lobby_message_id, 20, "ignored");
-    reaction.actor_display_name = None;
-
-    provider
-        .raw_reaction_observer()
-        .observe(reaction)
-        .await
-        .expect("raw join");
-
-    let confirmed = observer.confirmed.lock().expect("join observer");
-    assert_eq!(
-        confirmed
-            .iter()
-            .find(|event| event.player_id == 20)
-            .map(|event| event.player_display_name.as_str()),
-        Some("leafael.")
-    );
-}
-
-#[tokio::test]
-async fn live_readycheck_reconciles_raw_join_and_leave_against_the_active_generation() {
+async fn live_readycheck_reconciles_button_join_and_leave_against_the_active_generation() {
     let database = database_with_players(&[(10, "Creator"), (20, "Recent Join")]);
     let transport = Arc::new(RecordingTransport::default());
     let provider = provider_for(&database, transport.clone());
@@ -3826,14 +3518,6 @@ async fn live_readycheck_reconciles_raw_join_and_leave_against_the_active_genera
     )
     .await;
     let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
-    let lobby_message_id = to_u64(
-        lobby_snapshot(&provider, LobbyKind::Open)
-            .message_ids
-            .message_id
-            .expect("lobby message")
-            .0,
-    )
-    .expect("Discord lobby message");
     dispatch_command(
         &provider,
         "readycheck",
@@ -3850,16 +3534,7 @@ async fn live_readycheck_reconciles_raw_join_and_leave_against_the_active_genera
         .expect("initial readycheck");
     assert_eq!(before.lobby_ids, BTreeSet::from([AppUserId(10)]));
 
-    provider
-        .raw_reaction_observer()
-        .observe(raw_sword(
-            RawReactionKind::Add,
-            lobby_message_id,
-            20,
-            "Recent Join",
-        ))
-        .await
-        .expect("raw join");
+    join_via_button(&provider, LobbyKind::Open, 20, "Recent Join").await;
     let joined = provider
         .handler
         .state
@@ -3894,16 +3569,7 @@ async fn live_readycheck_reconciles_raw_join_and_leave_against_the_active_genera
         1
     );
 
-    provider
-        .raw_reaction_observer()
-        .observe(raw_sword(
-            RawReactionKind::Remove,
-            lobby_message_id,
-            20,
-            "Recent Join",
-        ))
-        .await
-        .expect("raw leave");
+    leave_via_button(&provider, LobbyKind::Open, 20, "Recent Join").await;
     let left = provider
         .handler
         .state
@@ -4167,110 +3833,6 @@ async fn test_curfew_sweep_refreshes_the_lobby_display_after_removing_a_player()
 }
 
 #[tokio::test]
-async fn test_curfew_sweep_removes_the_kicked_players_sword_reaction() {
-    // Regression test: a curfew kick must also strip the removed player's
-    // own sword reaction from the lobby message — otherwise the reaction
-    // still implies they're queued even though the embed and roster agree
-    // they're gone.
-    let database = database_with_players(&[(99, "Creator"), (1, "Sleepy")]);
-    let transport = Arc::new(RecordingTransport::default());
-    let provider = provider_for(&database, transport.clone());
-    dispatch_command(
-        &provider,
-        "lobby",
-        99,
-        "Creator",
-        vec![lobby_option(LobbyKind::Open)],
-    )
-    .await;
-    let lobby_message_id = to_u64(
-        lobby_snapshot(&provider, LobbyKind::Open)
-            .message_ids
-            .message_id
-            .expect("lobby message")
-            .0,
-    )
-    .expect("Discord message id");
-    provider
-        .raw_reaction_observer()
-        .observe(raw_sword(
-            RawReactionKind::Add,
-            lobby_message_id,
-            1,
-            "Sleepy",
-        ))
-        .await
-        .expect("player joins via sword reaction");
-    assert!(
-        lobby_snapshot(&provider, LobbyKind::Open)
-            .players
-            .contains(&AppUserId(1))
-    );
-
-    let now = chrono::Utc::now();
-    let start = now - chrono::Duration::minutes(30);
-    let end = now + chrono::Duration::minutes(30);
-    CurfewRepository::new(database.path())
-        .add_or_replace(&CurfewWindow {
-            discord_id: 1,
-            guild_id: 42,
-            name: "sleep".to_owned(),
-            start_hour: start.hour(),
-            start_minute: start.minute(),
-            end_hour: end.hour(),
-            end_minute: end.minute(),
-            timezone: Some("UTC".to_owned()),
-            days: None,
-            mode: cama_domain::curfew::CurfewMode::Default,
-        })
-        .expect("seed an always-active curfew window");
-
-    let lobby = provider.live_lobby_service();
-    let kicks = provider.curfew_service().sweep(&lobby, &[42], now);
-    assert_eq!(kicks.len(), 1);
-    for kick in &kicks {
-        provider
-            .curfew_lobby_display()
-            .publish_curfew_leave(kick.guild_id, kick.lobby_kind, kick.discord_id)
-            .await
-            .expect("publish leave after curfew kick");
-    }
-
-    let state = transport.state.lock().expect("transport state");
-    assert!(
-        state
-            .removed_reactions
-            .iter()
-            .any(|(_, message_id, emoji, user_id)| {
-                *message_id == lobby_message_id && emoji.name == SWORD_EMOJI && *user_id == 1
-            }),
-        "curfew kick must remove the kicked player's own sword reaction"
-    );
-    // Privacy: the thread sees the ordinary silent mention even when the
-    // member cache is empty, and nothing public says the word curfew.
-    let leave_line = state
-        .sent
-        .iter()
-        .rev()
-        .find(|sent| sent.message.response.content.contains("left."))
-        .expect("the sweep must post the normal leave line");
-    assert_eq!(leave_line.message.response.content, "🚪 <@1> left.");
-    assert_eq!(
-        leave_line.message.allowed_mentions,
-        DiscordAllowedMentions::None
-    );
-    assert!(
-        !state.sent.iter().any(|sent| sent
-            .message
-            .response
-            .content
-            .to_lowercase()
-            .contains("curfew")),
-        "a curfew removal must never be announced publicly"
-    );
-}
-
-#[tokio::test]
 async fn test_curfew_sweep_removes_the_kicked_player_from_the_active_readycheck() {
     // Regression test: a curfew kick must also sweep the removed player out
     // of an in-flight readycheck — its roster and its confirmation reaction —
@@ -4415,7 +3977,7 @@ async fn test_auto_join_blocked_during_active_curfew_window() {
         .expect("seed an always-active curfew window");
 
     // `/lobby` on an already-created lobby takes the auto-join path
-    // (`join_registered_player`), not the explicit `/join` command's own
+    // (`seat_registered_player`), not the explicit `/join` command's own
     // curfew check — this must be blocked too.
     let slash = dispatch_command(
         &provider,
@@ -4497,103 +4059,6 @@ async fn test_lobby_creation_blocked_during_active_curfew_window() {
             .expect("transport state")
             .sent
             .is_empty()
-    );
-}
-
-#[tokio::test]
-async fn test_sword_reaction_join_blocked_during_active_curfew_window() {
-    let database = database_with_players(&[(99, "Creator"), (1, "Sleepy")]);
-    let transport = Arc::new(RecordingTransport::default());
-    let provider = provider_for(&database, transport.clone());
-    dispatch_command(
-        &provider,
-        "lobby",
-        99,
-        "Creator",
-        vec![lobby_option(LobbyKind::Open)],
-    )
-    .await;
-    let lobby_message_id = to_u64(
-        lobby_snapshot(&provider, LobbyKind::Open)
-            .message_ids
-            .message_id
-            .expect("lobby message")
-            .0,
-    )
-    .expect("Discord message id");
-
-    let now = chrono::Utc::now();
-    let start = now - chrono::Duration::minutes(30);
-    let end = now + chrono::Duration::minutes(30);
-    CurfewRepository::new(database.path())
-        .add_or_replace(&CurfewWindow {
-            discord_id: 1,
-            guild_id: 42,
-            name: "sleep".to_owned(),
-            start_hour: start.hour(),
-            start_minute: start.minute(),
-            end_hour: end.hour(),
-            end_minute: end.minute(),
-            timezone: Some("UTC".to_owned()),
-            days: None,
-            mode: cama_domain::curfew::CurfewMode::Default,
-        })
-        .expect("seed an always-active curfew window");
-
-    provider
-        .raw_reaction_observer()
-        .observe(raw_sword(
-            RawReactionKind::Add,
-            lobby_message_id,
-            1,
-            "Sleepy",
-        ))
-        .await
-        .expect("raw curfew rejection");
-
-    assert!(
-        !lobby_snapshot(&provider, LobbyKind::Open)
-            .players
-            .contains(&AppUserId(1))
-    );
-    let state = transport.state.lock().expect("transport state");
-    assert!(
-        state
-            .removed_reactions
-            .iter()
-            .any(|(_, message_id, emoji, user_id)| {
-                *message_id == lobby_message_id && emoji.name == SWORD_EMOJI && *user_id == 1
-            })
-    );
-    // Privacy: nothing about the refusal goes into the channel. The reason
-    // (which names the window) reaches the player by DM only.
-    assert!(
-        !state.sent.iter().any(|sent| sent
-            .message
-            .response
-            .content
-            .to_lowercase()
-            .contains("curfew")),
-        "a curfew refusal must never be posted publicly: {:?}",
-        state
-            .sent
-            .iter()
-            .map(|sent| &sent.message.response.content)
-            .collect::<Vec<_>>()
-    );
-    let (dm_user, dm) = state
-        .direct_messages
-        .last()
-        .expect("private curfew rejection");
-    assert_eq!(*dm_user, 1);
-    assert!(
-        dm.response.content.to_lowercase().contains("sleep"),
-        "{}",
-        dm.response.content
-    );
-    assert!(
-        dm.response.components.is_empty(),
-        "a hard block offers no buttons"
     );
 }
 
@@ -4710,8 +4175,7 @@ async fn radio_subscription_is_durable_lobby_intent_and_never_joins_playing_rost
     .await;
     let lobby = lobby_snapshot(&provider, LobbyKind::Open);
     let message = lobby.message_ids.message_id.unwrap().0;
-    let mut reaction = raw_sword(RawReactionKind::Add, message as u64, 20, "Viewer");
-    reaction.emoji = RawReactionEmoji::unicode(SPECTATOR_EMOJI);
+    let mut reaction = raw_radio(RawReactionKind::Add, message as u64, 20, "Viewer");
     provider
         .raw_reaction_observer()
         .observe(reaction.clone())
@@ -4750,8 +4214,7 @@ async fn radio_on_foreign_or_non_lobby_messages_does_not_subscribe() {
         .message_id
         .unwrap()
         .0;
-    let mut reaction = raw_sword(RawReactionKind::Add, message as u64, 20, "Viewer");
-    reaction.emoji = RawReactionEmoji::unicode(SPECTATOR_EMOJI);
+    let mut reaction = raw_radio(RawReactionKind::Add, message as u64, 20, "Viewer");
     reaction.guild_id = Some(43);
     provider
         .raw_reaction_observer()
@@ -4808,8 +4271,7 @@ async fn radio_after_shuffle_keeps_subscriptions_working_before_match_id_and_dur
     let provider = provider_for(&database, transport.clone());
     pending_radio_match(&database, 901, Some("bot"));
     assert!(provider.handler.state.service.open_lobbies().is_empty());
-    let mut reaction = raw_sword(RawReactionKind::Add, 901, 20, "Viewer");
-    reaction.emoji = RawReactionEmoji::unicode(SPECTATOR_EMOJI);
+    let mut reaction = raw_radio(RawReactionKind::Add, 901, 20, "Viewer");
     let observer = provider.raw_reaction_observer();
     observer.observe(reaction.clone()).await.unwrap();
     observer.observe(reaction.clone()).await.unwrap();
@@ -4852,9 +4314,8 @@ async fn radio_after_shuffle_rejects_manual_legacy_unknown_and_cross_guild_messa
         pending_radio_match(&database, message, hosting);
     }
     for (guild, message) in [(42, 901), (42, 902), (42, 903), (43, 904), (42, 999)] {
-        let mut reaction = raw_sword(RawReactionKind::Add, message, 20, "Viewer");
+        let mut reaction = raw_radio(RawReactionKind::Add, message, 20, "Viewer");
         reaction.guild_id = Some(guild);
-        reaction.emoji = RawReactionEmoji::unicode(SPECTATOR_EMOJI);
         provider
             .raw_reaction_observer()
             .observe(reaction)
@@ -4877,8 +4338,7 @@ async fn radio_after_shuffle_rejects_manual_legacy_unknown_and_cross_guild_messa
         .spectators
         .update_subscription(42, 901, 20, true, 1)
         .unwrap();
-    let mut reaction = raw_sword(RawReactionKind::Remove, 901, 20, "Viewer");
-    reaction.emoji = RawReactionEmoji::unicode(SPECTATOR_EMOJI);
+    let reaction = raw_radio(RawReactionKind::Remove, 901, 20, "Viewer");
     provider
         .raw_reaction_observer()
         .observe(reaction)
@@ -4912,8 +4372,7 @@ async fn radio_retained_spectator_record_allows_unsubscribe_but_not_new_admissio
     repository
         .update_subscription(42, 901, 20, true, 1)
         .unwrap();
-    let mut reaction = raw_sword(RawReactionKind::Remove, 901, 20, "Viewer");
-    reaction.emoji = RawReactionEmoji::unicode(SPECTATOR_EMOJI);
+    let mut reaction = raw_radio(RawReactionKind::Remove, 901, 20, "Viewer");
     reaction.guild_id = Some(43);
     provider
         .raw_reaction_observer()
@@ -5289,6 +4748,104 @@ async fn test_join_button_without_a_lobby_explains_how_to_open_one() {
     let content = only_ephemeral_followup(&responder);
     assert!(content.contains("No active"), "{content}");
     assert!(content.contains("/lobby"), "{content}");
+}
+
+#[tokio::test]
+async fn test_lobby_command_join_refusal_is_private_and_still_links_the_lobby() {
+    // `/lobby` on an existing lobby is a view plus a join. The join's
+    // refusal names the curfew window, so it must stay ephemeral and never
+    // touch the channel or DMs.
+    let database = database_with_players(&[(99, "Creator"), (1, "Sleepy")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        99,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let now = chrono::Utc::now();
+    let start = now - chrono::Duration::minutes(30);
+    let end = now + chrono::Duration::minutes(30);
+    CurfewRepository::new(database.path())
+        .add_or_replace(&CurfewWindow {
+            discord_id: 1,
+            guild_id: 42,
+            name: "sleep".to_owned(),
+            start_hour: start.hour(),
+            start_minute: start.minute(),
+            end_hour: end.hour(),
+            end_minute: end.minute(),
+            timezone: Some("UTC".to_owned()),
+            days: None,
+            mode: cama_domain::curfew::CurfewMode::Default,
+        })
+        .expect("seed an always-active curfew window");
+    let sent_before = transport.state.lock().expect("transport state").sent.len();
+
+    let responder = dispatch_command(
+        &provider,
+        "lobby",
+        1,
+        "Sleepy",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    assert!(
+        !lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(1))
+    );
+    let content = only_ephemeral_followup(&responder);
+    assert!(content.contains("curfew"), "{content}");
+    assert!(content.contains("sleep"), "{content}");
+    assert!(
+        content.contains("[View 🍽️ All You Can Feed]("),
+        "the lobby link still comes back: {content}"
+    );
+    let state = transport.state.lock().expect("transport state");
+    assert_eq!(state.sent.len(), sent_before, "nothing is posted publicly");
+    assert!(state.direct_messages.is_empty());
+}
+
+#[tokio::test]
+async fn test_lobby_command_creates_publicly_then_reports_a_refused_join_privately() {
+    // A creator without roles still gets the lobby created (the public
+    // message and thread) and hears about the join refusal privately.
+    let database = database_with_players(&[]);
+    PlayerRepository::new(database.path())
+        .add(&NewPlayer::new(99, "Creator", Some(42)))
+        .expect("register a player with no preferred roles");
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+
+    let responder = dispatch_command(
+        &provider,
+        "lobby",
+        99,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    let lobby = lobby_snapshot(&provider, LobbyKind::Open);
+    assert!(
+        lobby.message_ids.thread_id.is_some(),
+        "the lobby was created"
+    );
+    assert!(lobby.players.is_empty(), "the creator was not seated");
+    let content = only_ephemeral_followup(&responder);
+    assert!(
+        content.starts_with("✅ 🍽️ All You Can Feed created! [View]("),
+        "{content}"
+    );
+    assert!(
+        content.ends_with("\n❌ Set your preferred roles first! Use `/player roles`."),
+        "{content}"
+    );
 }
 
 #[tokio::test]

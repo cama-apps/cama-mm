@@ -80,7 +80,6 @@ pub enum AllowedMentions {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PublicationStage {
     Display,
-    Reaction,
     Thread,
     Close,
     Archive,
@@ -101,14 +100,6 @@ pub struct PublicationFailure {
 #[async_trait]
 pub trait LobbyRuntimeTransport: Send + Sync {
     async fn sync_lobby_display(&self, _scope: LobbyScope) -> Result<(), String> {
-        Ok(())
-    }
-
-    async fn remove_lobby_reaction(
-        &self,
-        _scope: LobbyScope,
-        _player_id: UserId,
-    ) -> Result<(), String> {
         Ok(())
     }
 
@@ -363,19 +354,6 @@ where
             }
             if confirmed < self.service.ready_threshold() {
                 self.ready_notifications().remove(&other_scope);
-            }
-
-            for player_id in &removed {
-                if let Err(message) = transport
-                    .remove_lobby_reaction(other_scope, *player_id)
-                    .await
-                {
-                    report.publication_failures.push(PublicationFailure {
-                        scope: other_scope,
-                        stage: PublicationStage::Reaction,
-                        message,
-                    });
-                }
             }
 
             let Some(thread_id) = self

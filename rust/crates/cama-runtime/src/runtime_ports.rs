@@ -210,8 +210,8 @@ pub struct LobbyGambaSpectator {
 pub trait LobbyJoinObserver: Send + Sync {
     async fn confirmed_lobby_join(&self, event: ConfirmedLobbyJoin) -> Result<(), String>;
 
-    /// Python invokes this only after the successful `/join` follow-up. Lobby
-    /// creation auto-join and raw sword joins deliberately never call it.
+    /// Python invoked this only after the successful `/join` follow-up. Lobby
+    /// creation auto-join deliberately never calls it.
     async fn explicit_lobby_join_neon(&self, _event: ConfirmedLobbyJoin) -> Result<(), String> {
         Ok(())
     }
