@@ -37,7 +37,7 @@ async fn failed_connection_recreates_then_invites_and_launches_same_roster() {
     let repo = PendingMatchRepository::new(&f.worker.path);
     let original = repo.pending_match(1, f.pending).unwrap().unwrap();
     use cama_db::betting_service_repository::{BettingServiceRepository, PlaceBetRequest};
-    let connection = rusqlite::Connection::open(&f.worker.path).unwrap();
+    let connection = cama_db::open_runtime_connection(&f.worker.path).unwrap();
     connection.execute("INSERT INTO players(discord_id,guild_id,discord_username,jopacoin_balance) VALUES(33,1,'viewer',200)", []).unwrap();
     BettingServiceRepository::new(&f.worker.path)
         .place_bet_atomic(PlaceBetRequest {
