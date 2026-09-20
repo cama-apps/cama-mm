@@ -4,6 +4,8 @@
 //! the GC cache; it never authorizes a second lobby or an inferred match win.
 
 mod configuration;
+mod failed_launch;
+mod recorded_cleanup;
 mod simulated;
 mod steam;
 mod test_mode;
@@ -237,6 +239,12 @@ struct SessionState {
     #[serde(default)]
     launch_requested_at: Option<i64>,
     #[serde(default)]
+    lobby_recreation: Option<failed_launch::LobbyRecreation>,
+    #[serde(default)]
+    failed_launches: Vec<failed_launch::LobbyRecreation>,
+    #[serde(default)]
+    lobby_cleanup: recorded_cleanup::LobbyCleanup,
+    #[serde(default)]
     allocation_observed_at: Option<i64>,
     #[serde(default)]
     last_allocation_log_at: Option<i64>,
@@ -435,6 +443,21 @@ impl DotaHostWorker {
             }
         };
         let pending = self.pending(&record).await?;
+        if state.lobby_recreation.is_some() {
+            if pending.is_none()
+                && let Some(id) = self.recorded_id(&record).await?
+            {
+                // Recording wins a race with recreation. Retain the old
+                // identities for cleanup; never create its replacement.
+                state.recorded_match_id = Some(id);
+                state.lobby_recreation = None;
+                self.save(&mut record, &state, now).await?;
+            } else {
+                return self
+                    .recreate_failed_lobby(port, &mut record, &mut state, now)
+                    .await;
+            }
+        }
         let server_launched = record.valve_match_id.is_some()
             || state.launch_requested_at.is_some()
             || matches!(record.phase, Phase::Running | Phase::Finishing)
@@ -453,6 +476,17 @@ impl DotaHostWorker {
             self.save(&mut record, &state, now).await?;
         }
         if let Some(lobby) = &lobby {
+            if state.recorded_match_id.is_none()
+                && state.failed_launches.iter().any(|attempt| {
+                    attempt.lobby_id == lobby.id
+                        || lobby
+                            .match_id
+                            .is_some_and(|id| attempt.match_id == Some(id))
+                })
+            {
+                return self.review(&mut record, &mut state,
+                    "a retired lobby reappeared after failed-launch cleanup; no action was taken", now).await;
+            }
             if !owns_lobby(&record, &state, lobby, self.config.account_id) {
                 return self
                     .review(
@@ -503,19 +537,21 @@ impl DotaHostWorker {
         }
         if state.recorded_match_id.is_some() {
             if let Some(lobby) = lobby {
-                let unlaunched = lobby.stage == LobbyStage::Gathering
-                    && !server_launched
-                    && state.server_id.is_none();
-                if lobby.stage != LobbyStage::Postgame && !unlaunched {
-                    // Match details may reach us before the lobby's final
-                    // update. Never destroy a server still reported active.
+                if !self
+                    .fresh_cleanup_observation(port, &mut record, &mut state, now)
+                    .await?
+                {
                     return Ok(());
                 }
-                if !port.betting_observation_fresh().await {
-                    return Err("refreshing stale GC ownership before lobby cleanup".into());
+                if !recorded_cleanup::can_release_lobby(&record, &state, &lobby) {
+                    // Match details may reach us before the lobby's final
+                    // update. Never destroy a server still reported active.
+                    return self.review(&mut record, &mut state,
+                        "Cama result recorded; waiting for the owned Dota lobby to finish or return to idle before releasing the host", now).await;
                 }
-                port.destroy(lobby.id).await?;
-                return Ok(());
+                return self
+                    .destroy_recorded_lobby(port, &mut record, &mut state, lobby.id, now)
+                    .await;
             }
             record.phase = Phase::Recorded;
             record.last_error = None;
@@ -529,6 +565,12 @@ impl DotaHostWorker {
                 .finish_match(record.guild_id, record.pending_match_id)
                 .await;
             return self.announce(&mut record, &mut state, &content, now).await;
+        }
+        if self
+            .begin_failed_launch_recovery(port, &mut record, &mut state, lobby.as_ref(), now)
+            .await?
+        {
+            return Ok(());
         }
         if state.cancel_requested {
             if record.valve_match_id.is_some()
@@ -948,12 +990,12 @@ impl DotaHostWorker {
                 .await;
         }
         let lobby = port.snapshot().await?;
-        if lobby.is_some() && !port.betting_observation_fresh().await {
-            self.review(record, state, "resolution needs a fresh GC lobby observation; reconnecting before any destructive action", now).await?;
-            // A new coordinator welcome provides fresh ownership evidence.
-            // This refresh is only for an explicit destructive resolution;
-            // ordinary quiet-lobby betting suspension never reconnects.
-            return Err("refreshing stale GC ownership before operator resolution".into());
+        if lobby.is_some()
+            && !self
+                .fresh_cleanup_observation(port, record, state, now)
+                .await?
+        {
+            return Ok(());
         }
         if let Some(lobby) = &lobby {
             if !owns_lobby(record, state, lobby, self.config.account_id)
@@ -970,14 +1012,7 @@ impl DotaHostWorker {
                     )
                     .await;
             }
-            let never_launched = record.valve_match_id.is_none()
-                && state.launch_requested_at.is_none()
-                && state.server_id.is_none()
-                && lobby.server_id.is_none()
-                && !matches!(record.phase, Phase::Running | Phase::Finishing);
-            if lobby.stage != LobbyStage::Postgame
-                && !(lobby.stage == LobbyStage::Gathering && never_launched)
-            {
+            if !recorded_cleanup::can_release_lobby(record, state, lobby) {
                 // Explicit recovery may bypass stale lifecycle cache only with
                 // independent, complete Valve evidence for this exact game.
                 let finished = if let Some(id) = record
@@ -1037,10 +1072,14 @@ impl DotaHostWorker {
                 // A failed prelaunch host can be replaced by a human lobby.
                 // Its recorded Dota ID must not be compared with an ID that
                 // this host never acquired. Do not adopt that ID as our lobby.
+                // Finishing can also mean an approved cleanup is awaiting
+                // removal confirmation, including after a worker restart.
                 let unlaunched_replacement = record.valve_match_id.is_none()
                     && state.launch_requested_at.is_none()
                     && state.server_id.is_none()
-                    && !matches!(record.phase, Phase::Running | Phase::Finishing)
+                    && (!matches!(record.phase, Phase::Running | Phase::Finishing)
+                        || (record.phase == Phase::Finishing
+                            && state.lobby_cleanup.destroy_attempts > 0))
                     && lobby.as_ref().is_none_or(|lobby| {
                         lobby.stage == LobbyStage::Gathering
                             && lobby.match_id.is_none()
@@ -1093,6 +1132,11 @@ impl DotaHostWorker {
         }
         if let Some(lobby) = lobby {
             // Confirm removal in the next snapshot before releasing the account.
+            if resolution.outcome == "recorded" {
+                return self
+                    .destroy_recorded_lobby(port, record, state, lobby.id, now)
+                    .await;
+            }
             port.destroy(lobby.id).await?;
             return Ok(());
         }
@@ -1347,7 +1391,9 @@ impl DotaHostWorker {
                         && settings_match(&state.settings, lobby)
                 });
                 let Some(lobby) = fallback else {
-                    return Err(reason);
+                    return self
+                        .defer_match_details(record, state, match_id, &reason, now)
+                        .await;
                 };
                 let players = lobby
                     .members
@@ -1360,7 +1406,9 @@ impl DotaHostWorker {
                     })
                     .collect::<Vec<_>>();
                 if !result_matches_roster(&players, &state.roster) {
-                    return Err(reason);
+                    return self
+                        .defer_match_details(record, state, match_id, &reason, now)
+                        .await;
                 }
                 HostMatchDetails {
                     match_id,
@@ -1373,6 +1421,9 @@ impl DotaHostWorker {
                 }
             }
         };
+        if record.last_error.take().is_some() {
+            self.save(record, state, now).await?;
+        }
         if !details.finished {
             return Ok(());
         }
@@ -1552,7 +1603,7 @@ impl DotaHostWorker {
                         first_pick_radiant:match options.first_pick { Some(FirstPick::Radiant) => Some(true), Some(FirstPick::Dire) => Some(false), _ => pending.state.first_pick_team.as_deref().and_then(|s| match s.to_ascii_lowercase().as_str() { "radiant" => Some(true),"dire"=>Some(false),_=>None }) },
                         tv_delay:options.tv_delay.unwrap_or(config.tv_delay) },
                     roster, channel_id:pending_channel(&pending),message_id:None,last_message:String::new(),last_message_at:0,status_failures:0,status_retry_at:0,pending_status:None,resolution:None,resolution_history:Vec::new(),betting_control_audit:Vec::new(),
-                    last_invite_at:0,create_requested_at:None,launch_requested_at:None,allocation_observed_at:None,last_allocation_log_at:None,betting_closed:false,betting_window_announced:false,betting_notification_sent:false,last_betting_notification_at:0,cancel_requested:false,
+                    last_invite_at:0,create_requested_at:None,launch_requested_at:None,lobby_recreation:None,failed_launches:Vec::new(),lobby_cleanup:Default::default(),allocation_observed_at:None,last_allocation_log_at:None,betting_closed:false,betting_window_announced:false,betting_notification_sent:false,last_betting_notification_at:0,cancel_requested:false,
                     resume_requested:false,recorded_match_id:None,server_id:None,replay:None,postgame_statistics:None,archive:None,replay_last_attempt:0,replay_error:None,last_result_poll:0,lobby_deadline:0,recording_failures:0,
                 };
                 let valid_roster = if config.test_mode == DotaHostTestMode::Off {
@@ -2026,6 +2077,7 @@ pub async fn guild_resolution_command(
         state.resolution = Some(OperatorResolution { outcome: outcome.clone(), actor_id, reason,
             expected_valve_match_id: expected, requested_at: chrono::Utc::now().timestamp() });
         state.manual_start_requested = false;
+        session.last_error = Some("Resolution queued; waiting for the hosting worker to verify and release the old Dota lobby.".into());
         session.payload = serde_json::to_value(state).map_err(|e| e.to_string())?;
         repo.update(&session, session.revision, chrono::Utc::now().timestamp()).map_err(|e| e.to_string())?;
         Ok(format!("Audited {outcome} resolution queued for pending #{pending}. The worker will verify Dota has ended, reconcile funds, and confirm the owned lobby is gone before releasing the account."))

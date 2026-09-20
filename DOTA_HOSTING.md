@@ -161,6 +161,22 @@ Status omits Steam credentials and lobby passwords. Resume acknowledges the repo
 
 ## Interrupted setup, recording, and operator resolution
 
+If a launch reaches server allocation/loading and Dota then returns to the
+owned lobby before gameplay, the host can replace that failed lobby. It
+requires a fresh GC observation of the returned lobby, no active server or
+winner, and no observed gameplay. It saves the old identities, removes only
+that lobby, confirms the account is out of it, then creates a fresh lobby and
+invites the same teams. The pending match and wagers are preserved; betting
+is suspended until fresh hosting observation resumes.
+
+Automatic recovery is limited to **three replacement lobbies per pending
+match**, persisted across restarts. Cleanup sends at most three destroy
+requests and pauses for admin review after 90 seconds without confirmed
+removal. An ambiguous create is never blindly repeated. A stale, foreign,
+still-running, or played lobby cannot authorize recreation. An unavailable
+match-details response (including GC result 2) is polled again without
+restarting a healthy Steam connection.
+
 New shuffles save an incomplete setup marker before reserving money. Public betting, hosting adoption, and recording reject that marker. A failed financial setup refunds its pending wagers and seed reservations in the same transaction that removes the pending match. A crash during setup is compensated after its five-minute setup lease expires; the recovery worker checks every 30 seconds. A successfully prepared shuffle instead retries missing Discord destinations from saved receipts and stable delivery nonces. An expired interaction confirmation does not undo a published shuffle. Database participant claims prevent overlapping new shuffles across processes. Captain drafts retain their existing durable finalization job; an additional draft setup marker blocks betting, hosting, and recording until the durable financial and publication job completes. An unfinished linked draft job also blocks abort, preserving its recoverable financial plan; `/draft resume` lets an admin retry it before recording or aborting.
 
 Abort checks the canonical record, refunds outstanding wagers and seed reservations, and deletes pending state in one immediate transaction. A simultaneous wager is either included in the refund or rejected after deletion. A recorded match cannot be aborted. Automatic blind batches store their original result atomically and return it on retry without another debit.
@@ -170,6 +186,24 @@ Recording verifies the pending identity, roster, and winner on every entry, incl
 Use `/admin dota status` to see pending/Cama/Dota identities, progress, betting suspension, and the saved error. Critical and terminal status messages have a durable retry outbox. Removing a server from the hosting allowlist pauses its prelaunch actions while retaining safe cancellation and reconciliation for games already launched.
 
 Use `/admin dota resolve pending_match:ID outcome:recorded dota_match:VALVE_ID reason:...` to finish a session whose Cama result has been recorded and finalized, or `outcome:void` to refund and close an abandoned result. Supply the exact Dota ID displayed by status (`0` only when unassigned). The command records an audited intent; the worker verifies account/lobby ownership and terminal evidence before releasing the account reservation. A foreign lobby or a still-active game prevents destructive cleanup. An independently verified completed GC result can resolve a stale running phase. A conflicting recorded result must be corrected through the supported recording tools first. Resume is still appropriate for a transient fault; resolve is the explicit terminal recovery route.
+
+Recording and releasing the Steam host are separate steps. After settlement,
+automatic cleanup and `resolve` both accept a fresh observation of the owned
+lobby returning to idle after allocation, even when it retains the failed
+game's match ID. Historical launch/server markers do not block this cleanup;
+a current server or gameplay state does. Cleanup confirms the lobby has gone
+before releasing the account, without recording or settling again. A result
+recorded while lobby recreation is pending cancels recreation and enters
+cleanup instead.
+
+`Resolution queued` means the request was saved, not that cleanup finished.
+Status reports the current cleanup blocker instead of the old launch error.
+Cleanup permits at most three reconnects to refresh stale GC observations and
+three removal requests, spaced at least ten seconds apart, with a 90-second
+removal deadline. These budgets survive restarts. Exhaustion retains the host
+reservation; a later fresh observation or confirmed disappearance can still
+complete cleanup. Wait for the session to show `recorded` before expecting
+the next shuffle to use the bot account.
 
 ## Spectator text updates and optional live statistics
 

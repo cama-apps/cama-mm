@@ -282,10 +282,8 @@ async fn external_launch_during_configuration_keeps_tracking_known_settings() {
         );
         // The in-progress match has no result in this fixture yet; tracking
         // reaches the normal result poll rather than getting stuck in review.
-        assert_eq!(
-            f.worker.tick(&f.port, 121).await.unwrap_err(),
-            "unavailable"
-        );
+        f.worker.tick(&f.port, 121).await.unwrap();
+        assert_eq!(f.session().last_error.as_deref(), Some("unavailable"));
         assert_eq!(f.session().phase, Phase::Running);
         f.complete(Some("radiant"));
         f.worker.tick(&f.port, 160).await.unwrap();
