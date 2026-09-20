@@ -1072,10 +1072,14 @@ impl DotaHostWorker {
                 // A failed prelaunch host can be replaced by a human lobby.
                 // Its recorded Dota ID must not be compared with an ID that
                 // this host never acquired. Do not adopt that ID as our lobby.
+                // Finishing can also mean an approved cleanup is awaiting
+                // removal confirmation, including after a worker restart.
                 let unlaunched_replacement = record.valve_match_id.is_none()
                     && state.launch_requested_at.is_none()
                     && state.server_id.is_none()
-                    && !matches!(record.phase, Phase::Running | Phase::Finishing)
+                    && (!matches!(record.phase, Phase::Running | Phase::Finishing)
+                        || (record.phase == Phase::Finishing
+                            && state.lobby_cleanup.destroy_attempts > 0))
                     && lobby.as_ref().is_none_or(|lobby| {
                         lobby.stage == LobbyStage::Gathering
                             && lobby.match_id.is_none()

@@ -359,7 +359,10 @@ async fn recorded_resolution_accepts_manual_replacement_of_unassigned_host() {
         .await
         .unwrap();
         f.worker.tick(&f.port, 200).await.unwrap();
-        f.worker.tick(&f.port, 205).await.unwrap();
+        if owned_lobby {
+            assert_eq!(f.session().phase, Phase::Finishing);
+        }
+        tick_after_restart(&f, 205).await.unwrap();
         assert_eq!(f.session().phase, Phase::Recorded);
         assert!(f.session().valve_match_id.is_none());
         assert_eq!(f.state().recorded_match_id, Some(321));
