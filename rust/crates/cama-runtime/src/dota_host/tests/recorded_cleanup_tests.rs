@@ -371,23 +371,151 @@ async fn recorded_resolution_accepts_manual_replacement_of_unassigned_host() {
     }
 }
 
+fn record_replacement_identity(f: &Fixture) {
+    cama_db::open_runtime_connection(&f.worker.path)
+        .unwrap()
+        .execute(
+            "UPDATE matches SET valve_match_id=9002542581 WHERE match_id=321",
+            [],
+        )
+        .unwrap();
+}
+
+async fn queue_recorded_resolution(f: &Fixture) {
+    guild_resolution_command(
+        f.worker.path.clone(),
+        1,
+        f.pending,
+        42,
+        "recorded".into(),
+        888,
+        "Replacement result recorded by players; release the old lobby".into(),
+    )
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
-async fn recorded_resolution_rejects_replacement_conflicts() {
-    for conflict in [
-        "roster",
-        "dota_identity",
-        "launch_requested",
-        "server_assigned",
-    ] {
-        let f = reviewed_fixture();
-        commit_manual_result(&f, true);
-        let connection = rusqlite::Connection::open(&f.worker.path).unwrap();
-        connection
-            .execute(
-                "UPDATE matches SET valve_match_id=9002542581 WHERE match_id=321",
+async fn recorded_replacement_releases_old_host_without_changing_either_game_identity() {
+    for old_lobby in ["reset", "postgame", "missing", "finished_details"] {
+        let f = returned_recorded_fixture();
+        record_replacement_identity(&f);
+        // Reproduce #615: an already recorded result, a different old hosted
+        // match ID, and an exhausted refresh budget from the previous process.
+        f.update_state(|_, state| {
+            state.recorded_match_id = Some(321);
+            state.lobby_cleanup = serde_json::from_value(serde_json::json!({
+                "refresh_attempts": 3,
+            }))
+            .unwrap();
+        });
+        match old_lobby {
+            "postgame" => f.complete(Some("radiant")),
+            "missing" => *f.port.lobby.lock().unwrap() = None,
+            "finished_details" => {
+                f.complete(Some("radiant"));
+                f.port.lobby.lock().unwrap().as_mut().unwrap().stage = LobbyStage::Running;
+            }
+            _ => {}
+        }
+        queue_recorded_resolution(&f).await;
+        tick_after_restart(&f, 200).await.unwrap();
+        tick_after_restart(&f, 205).await.unwrap();
+        assert_eq!(f.session().phase, Phase::Recorded, "{old_lobby}");
+        assert_eq!(f.session().valve_match_id.as_deref(), Some("888"));
+        assert_eq!(f.session().lobby_id.as_deref(), Some("777"));
+        assert_eq!(f.state().recorded_match_id, Some(321));
+        assert_eq!(f.recorder.count.load(Ordering::SeqCst), 0);
+        assert!(
+            DotaSessionRepository::new(&f.worker.path)
+                .active_sessions()
+                .unwrap()
+                .is_empty()
+        );
+        let committed: (i64, i64) = cama_db::open_runtime_connection(&f.worker.path)
+            .unwrap()
+            .query_row(
+                "SELECT valve_match_id,winning_team FROM matches WHERE match_id=321",
                 [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
+        assert_eq!(
+            committed,
+            (9002542581, 2),
+            "old Radiant result must not replace recorded Dire result"
+        );
+        let calls = f.port.calls.lock().unwrap();
+        assert_eq!(
+            calls.iter().filter(|c| *c == "destroy").count(),
+            usize::from(old_lobby != "missing")
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|c| c == "create" || c == "launch" || c == "details:9002542581")
+        );
+    }
+}
+
+#[tokio::test]
+async fn replacement_result_does_not_authorize_destroying_an_active_or_foreign_old_lobby() {
+    for blocked in [
+        "active",
+        "foreign",
+        "replacement_lobby",
+        "stale",
+        "changed_intent",
+    ] {
+        let f = returned_recorded_fixture();
+        record_replacement_identity(&f);
+        queue_recorded_resolution(&f).await;
+        match blocked {
+            "active" => f.running(Some(5)),
+            "foreign" => {
+                f.port
+                    .lobby
+                    .lock()
+                    .unwrap()
+                    .as_mut()
+                    .unwrap()
+                    .owner_account_id = 42
+            }
+            "replacement_lobby" => {
+                f.port.lobby.lock().unwrap().as_mut().unwrap().match_id = Some(9002542581)
+            }
+            "stale" => f.port.observation_stale.store(true, Ordering::SeqCst),
+            "changed_intent" => {
+                f.update_state(|record, _| record.valve_match_id = Some("999".into()))
+            }
+            _ => unreachable!(),
+        }
+        let outcome = f.worker.tick(&f.port, 200).await;
+        if blocked == "stale" {
+            assert!(outcome.is_err());
+        } else {
+            outcome.unwrap();
+        }
+        assert_eq!(f.session().phase, Phase::NeedsReview, "{blocked}");
+        assert!(
+            !f.port.calls.lock().unwrap().iter().any(|c| c == "destroy"),
+            "{blocked}"
+        );
+        assert_eq!(f.recorder.count.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn recording_conflicts_are_reported_before_stale_gc_without_consuming_refresh_budget() {
+    for conflict in [
+        "roster",
+        "other_pending",
+        "other_guild",
+        "unfinished_settlement",
+    ] {
+        let f = returned_recorded_fixture();
+        record_replacement_identity(&f);
+        let connection = cama_db::open_runtime_connection(&f.worker.path).unwrap();
         match conflict {
             "roster" => {
                 connection
@@ -397,36 +525,40 @@ async fn recorded_resolution_rejects_replacement_conflicts() {
                     )
                     .unwrap();
             }
-            "dota_identity" => {
-                f.update_state(|record, _| record.valve_match_id = Some("888".into()))
+            "other_pending" => {
+                connection
+                    .execute(
+                        "UPDATE matches SET pending_match_id=999 WHERE match_id=321",
+                        [],
+                    )
+                    .unwrap();
             }
-            "launch_requested" => f.update_state(|_, state| state.launch_requested_at = Some(150)),
-            "server_assigned" => f.update_state(|_, state| state.server_id = Some(999)),
+            "other_guild" => {
+                connection
+                    .execute("UPDATE matches SET guild_id=2 WHERE match_id=321", [])
+                    .unwrap();
+            }
+            "unfinished_settlement" => {
+                connection.execute("INSERT INTO pending_matches(pending_match_id,guild_id,payload) VALUES(?1,1,'{}')", [f.pending]).unwrap();
+            }
             _ => unreachable!(),
         }
-        guild_resolution_command(
-            f.worker.path.clone(),
-            1,
-            f.pending,
-            42,
-            "recorded".into(),
-            if conflict == "dota_identity" { 888 } else { 0 },
-            "Inspect replacement".into(),
-        )
-        .await
-        .unwrap();
-        f.worker.tick(&f.port, 200).await.unwrap();
+        f.port.observation_stale.store(true, Ordering::SeqCst);
+        queue_recorded_resolution(&f).await;
+        for now in [200, 205, 300] {
+            tick_after_restart(&f, now).await.unwrap();
+        }
         assert_eq!(f.session().phase, Phase::NeedsReview, "{conflict}");
-        assert!(f.port.calls.lock().unwrap().is_empty(), "{conflict}");
+        let error = f.session().last_error.unwrap();
         assert!(
-            f.session()
-                .last_error
-                .unwrap()
-                .contains(if conflict == "roster" {
-                    "different roster"
-                } else {
-                    "different Dota identity"
-                })
+            error.contains(match conflict {
+                "roster" => "different roster",
+                "unfinished_settlement" => "settlement is incomplete",
+                _ => "record the verified winner",
+            }),
+            "{conflict}: {error}"
         );
+        assert_eq!(f.session().payload["lobby_cleanup"]["refresh_attempts"], 0);
+        assert!(f.port.calls.lock().unwrap().is_empty());
     }
 }
