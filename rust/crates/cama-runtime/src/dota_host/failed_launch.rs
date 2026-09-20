@@ -13,7 +13,7 @@ pub(super) struct LobbyRecreation {
     last_destroy_at: Option<i64>,
 }
 
-fn returned_to_lobby(lobby: &HostLobby) -> bool {
+pub(super) fn returned_to_lobby(lobby: &HostLobby) -> bool {
     lobby.stage == LobbyStage::Gathering
         && lobby.server_id.is_none()
         && lobby.winner.is_none()

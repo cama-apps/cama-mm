@@ -334,6 +334,7 @@ impl Fixture {
             launch_requested_at: None,
             lobby_recreation: None,
             failed_launches: Vec::new(),
+            lobby_cleanup: Default::default(),
             allocation_observed_at: None,
             last_allocation_log_at: None,
             betting_closed: false,

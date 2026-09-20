@@ -187,6 +187,24 @@ Use `/admin dota status` to see pending/Cama/Dota identities, progress, betting 
 
 Use `/admin dota resolve pending_match:ID outcome:recorded dota_match:VALVE_ID reason:...` to finish a session whose Cama result has been recorded and finalized, or `outcome:void` to refund and close an abandoned result. Supply the exact Dota ID displayed by status (`0` only when unassigned). The command records an audited intent; the worker verifies account/lobby ownership and terminal evidence before releasing the account reservation. A foreign lobby or a still-active game prevents destructive cleanup. An independently verified completed GC result can resolve a stale running phase. A conflicting recorded result must be corrected through the supported recording tools first. Resume is still appropriate for a transient fault; resolve is the explicit terminal recovery route.
 
+Recording and releasing the Steam host are separate steps. After settlement,
+automatic cleanup and `resolve` both accept a fresh observation of the owned
+lobby returning to idle after allocation, even when it retains the failed
+game's match ID. Historical launch/server markers do not block this cleanup;
+a current server or gameplay state does. Cleanup confirms the lobby has gone
+before releasing the account, without recording or settling again. A result
+recorded while lobby recreation is pending cancels recreation and enters
+cleanup instead.
+
+`Resolution queued` means the request was saved, not that cleanup finished.
+Status reports the current cleanup blocker instead of the old launch error.
+Cleanup permits at most three reconnects to refresh stale GC observations and
+three removal requests, spaced at least ten seconds apart, with a 90-second
+removal deadline. These budgets survive restarts. Exhaustion retains the host
+reservation; a later fresh observation or confirmed disappearance can still
+complete cleanup. Wait for the session to show `recorded` before expecting
+the next shuffle to use the bot account.
+
 ## Spectator text updates and optional live statistics
 
 React with 📻 on the **lobby message** to subscribe to both the live map and its commentary thread. The original lobby message continues accepting radio changes after shuffle while its bot-hosted match is pending. This does not join the playing roster. Final match participants are excluded even if they subscribed earlier; former participants stay excluded through roster corrections. Removing the reaction revokes access to both spaces on the next reconciliation (normally 15 seconds), including the postgame retention period.
