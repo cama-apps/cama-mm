@@ -4,7 +4,7 @@ use super::*;
 #[serde(default)]
 pub(super) struct LobbyCleanup {
     refresh_attempts: u8,
-    pub(super) destroy_attempts: u8,
+    destroy_attempts: u8,
     first_destroy_at: Option<i64>,
     last_destroy_at: Option<i64>,
 }

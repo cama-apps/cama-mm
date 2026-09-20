@@ -989,6 +989,63 @@ impl DotaHostWorker {
                 )
                 .await;
         }
+        let recorded = self.recorded_id(record).await?;
+        let pending = self.pending(record).await?;
+        // Validate settlement before GC freshness so transport retries
+        // cannot hide a missing/incomplete or conflicting Cama result.
+        if resolution.outcome == "recorded" {
+            let Some(id) = recorded else {
+                return self
+                    .review(
+                        record,
+                        state,
+                        "record the verified winner with /record before resolving as recorded",
+                        now,
+                    )
+                    .await;
+            };
+            if pending.is_some() {
+                return self.review(record, state, "recording settlement is incomplete; retry /record with the committed winner first", now).await;
+            }
+            let repo = MatchRepository::new(&self.path);
+            let guild = record.guild_id;
+            let committed =
+                blocking(move || repo.get_match(id, Some(guild)).map_err(|e| e.to_string()))
+                    .await?
+                    .ok_or("Committed Cama result disappeared")?;
+            let radiant = state
+                .roster
+                .iter()
+                .filter(|p| p.radiant)
+                .map(|p| p.discord_id)
+                .collect::<std::collections::BTreeSet<_>>();
+            let dire = state
+                .roster
+                .iter()
+                .filter(|p| !p.radiant)
+                .map(|p| p.discord_id)
+                .collect::<std::collections::BTreeSet<_>>();
+            if committed
+                .team1_players
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                != radiant
+                || committed
+                    .team2_players
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    != dire
+            {
+                return self.review(record, state, "the committed Cama result has a different roster; resolve that conflict first", now).await;
+            }
+            // This canonical result belongs to the same pending match and
+            // roster, but may describe a manually played replacement. Its
+            // Dota ID is not the identity of the old lobby being released.
+            // Retain both identities; never re-record or rewrite the result.
+            state.recorded_match_id = Some(id);
+        }
         let lobby = port.snapshot().await?;
         if lobby.is_some()
             && !self
@@ -1034,81 +1091,8 @@ impl DotaHostWorker {
                 }
             }
         }
-        let recorded = self.recorded_id(record).await?;
-        let pending = self.pending(record).await?;
         match resolution.outcome.as_str() {
-            "recorded" => {
-                let Some(id) = recorded else {
-                    return self
-                        .review(
-                            record,
-                            state,
-                            "record the verified winner with /record before resolving as recorded",
-                            now,
-                        )
-                        .await;
-                };
-                if pending.is_some() {
-                    return self.review(record, state, "recording settlement is incomplete; retry /record with the committed winner first", now).await;
-                }
-                let repo = MatchRepository::new(&self.path);
-                let guild = record.guild_id;
-                let committed =
-                    blocking(move || repo.get_match(id, Some(guild)).map_err(|e| e.to_string()))
-                        .await?
-                        .ok_or("Committed Cama result disappeared")?;
-                let radiant = state
-                    .roster
-                    .iter()
-                    .filter(|p| p.radiant)
-                    .map(|p| p.discord_id)
-                    .collect::<std::collections::BTreeSet<_>>();
-                let dire = state
-                    .roster
-                    .iter()
-                    .filter(|p| !p.radiant)
-                    .map(|p| p.discord_id)
-                    .collect::<std::collections::BTreeSet<_>>();
-                // A failed prelaunch host can be replaced by a human lobby.
-                // Its recorded Dota ID must not be compared with an ID that
-                // this host never acquired. Do not adopt that ID as our lobby.
-                // Finishing can also mean an approved cleanup is awaiting
-                // removal confirmation, including after a worker restart.
-                let unlaunched_replacement = record.valve_match_id.is_none()
-                    && state.launch_requested_at.is_none()
-                    && state.server_id.is_none()
-                    && (!matches!(record.phase, Phase::Running | Phase::Finishing)
-                        || (record.phase == Phase::Finishing
-                            && state.lobby_cleanup.destroy_attempts > 0))
-                    && lobby.as_ref().is_none_or(|lobby| {
-                        lobby.stage == LobbyStage::Gathering
-                            && lobby.match_id.is_none()
-                            && lobby.server_id.is_none()
-                    });
-                if committed
-                    .valve_match_id
-                    .is_some_and(|id| Some(id.to_string()) != record.valve_match_id)
-                    && !unlaunched_replacement
-                {
-                    return self.review(record, state, "the committed Cama result has a different Dota identity; resolve that conflict first", now).await;
-                }
-                if committed
-                    .team1_players
-                    .iter()
-                    .copied()
-                    .collect::<std::collections::BTreeSet<_>>()
-                    != radiant
-                    || committed
-                        .team2_players
-                        .iter()
-                        .copied()
-                        .collect::<std::collections::BTreeSet<_>>()
-                        != dire
-                {
-                    return self.review(record, state, "the committed Cama result has a different roster; resolve that conflict first", now).await;
-                }
-                state.recorded_match_id = Some(id);
-            }
+            "recorded" => {}
             "void" => {
                 if recorded.is_some() {
                     return self.review(record, state, "a committed result cannot be voided by hosting recovery; use the match correction workflow", now).await;

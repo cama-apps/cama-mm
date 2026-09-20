@@ -187,6 +187,14 @@ Use `/admin dota status` to see pending/Cama/Dota identities, progress, betting 
 
 Use `/admin dota resolve pending_match:ID outcome:recorded dota_match:VALVE_ID reason:...` to finish a session whose Cama result has been recorded and finalized, or `outcome:void` to refund and close an abandoned result. Supply the exact Dota ID displayed by status (`0` only when unassigned). The command records an audited intent; the worker verifies account/lobby ownership and terminal evidence before releasing the account reservation. A foreign lobby or a still-active game prevents destructive cleanup. An independently verified completed GC result can resolve a stale running phase. A conflicting recorded result must be corrected through the supported recording tools first. Resume is still appropriate for a transient fault; resolve is the explicit terminal recovery route.
 
+For a recorded manual replacement, `outcome:recorded` validates the committed
+Cama result against the same pending match and teams. Its replacement Dota ID
+may differ from the old host's ID: that difference alone is not a conflict.
+The `dota_match` argument still identifies the **old hosted game** to clean up.
+Cleanup retains both identities and never changes the recorded winner,
+ratings, or payouts. Incomplete settlement or different teams remain blockers
+and are reported before attempting to refresh the GC cache.
+
 Recording and releasing the Steam host are separate steps. After settlement,
 automatic cleanup and `resolve` both accept a fresh observation of the owned
 lobby returning to idle after allocation, even when it retains the failed
