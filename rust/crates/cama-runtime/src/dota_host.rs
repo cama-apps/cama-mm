@@ -4,6 +4,7 @@
 //! the GC cache; it never authorizes a second lobby or an inferred match win.
 
 mod configuration;
+mod failed_launch;
 mod simulated;
 mod steam;
 mod test_mode;
@@ -237,6 +238,10 @@ struct SessionState {
     #[serde(default)]
     launch_requested_at: Option<i64>,
     #[serde(default)]
+    lobby_recreation: Option<failed_launch::LobbyRecreation>,
+    #[serde(default)]
+    failed_launches: Vec<failed_launch::LobbyRecreation>,
+    #[serde(default)]
     allocation_observed_at: Option<i64>,
     #[serde(default)]
     last_allocation_log_at: Option<i64>,
@@ -435,6 +440,11 @@ impl DotaHostWorker {
             }
         };
         let pending = self.pending(&record).await?;
+        if state.lobby_recreation.is_some() {
+            return self
+                .recreate_failed_lobby(port, &mut record, &mut state, now)
+                .await;
+        }
         let server_launched = record.valve_match_id.is_some()
             || state.launch_requested_at.is_some()
             || matches!(record.phase, Phase::Running | Phase::Finishing)
@@ -453,6 +463,15 @@ impl DotaHostWorker {
             self.save(&mut record, &state, now).await?;
         }
         if let Some(lobby) = &lobby {
+            if state.failed_launches.iter().any(|attempt| {
+                attempt.lobby_id == lobby.id
+                    || lobby
+                        .match_id
+                        .is_some_and(|id| attempt.match_id == Some(id))
+            }) {
+                return self.review(&mut record, &mut state,
+                    "a retired lobby reappeared after failed-launch cleanup; no action was taken", now).await;
+            }
             if !owns_lobby(&record, &state, lobby, self.config.account_id) {
                 return self
                     .review(
@@ -529,6 +548,12 @@ impl DotaHostWorker {
                 .finish_match(record.guild_id, record.pending_match_id)
                 .await;
             return self.announce(&mut record, &mut state, &content, now).await;
+        }
+        if self
+            .begin_failed_launch_recovery(port, &mut record, &mut state, lobby.as_ref(), now)
+            .await?
+        {
+            return Ok(());
         }
         if state.cancel_requested {
             if record.valve_match_id.is_some()
@@ -1347,7 +1372,9 @@ impl DotaHostWorker {
                         && settings_match(&state.settings, lobby)
                 });
                 let Some(lobby) = fallback else {
-                    return Err(reason);
+                    return self
+                        .defer_match_details(record, state, match_id, &reason, now)
+                        .await;
                 };
                 let players = lobby
                     .members
@@ -1360,7 +1387,9 @@ impl DotaHostWorker {
                     })
                     .collect::<Vec<_>>();
                 if !result_matches_roster(&players, &state.roster) {
-                    return Err(reason);
+                    return self
+                        .defer_match_details(record, state, match_id, &reason, now)
+                        .await;
                 }
                 HostMatchDetails {
                     match_id,
@@ -1373,6 +1402,9 @@ impl DotaHostWorker {
                 }
             }
         };
+        if record.last_error.take().is_some() {
+            self.save(record, state, now).await?;
+        }
         if !details.finished {
             return Ok(());
         }
@@ -1552,7 +1584,7 @@ impl DotaHostWorker {
                         first_pick_radiant:match options.first_pick { Some(FirstPick::Radiant) => Some(true), Some(FirstPick::Dire) => Some(false), _ => pending.state.first_pick_team.as_deref().and_then(|s| match s.to_ascii_lowercase().as_str() { "radiant" => Some(true),"dire"=>Some(false),_=>None }) },
                         tv_delay:options.tv_delay.unwrap_or(config.tv_delay) },
                     roster, channel_id:pending_channel(&pending),message_id:None,last_message:String::new(),last_message_at:0,status_failures:0,status_retry_at:0,pending_status:None,resolution:None,resolution_history:Vec::new(),betting_control_audit:Vec::new(),
-                    last_invite_at:0,create_requested_at:None,launch_requested_at:None,allocation_observed_at:None,last_allocation_log_at:None,betting_closed:false,betting_window_announced:false,betting_notification_sent:false,last_betting_notification_at:0,cancel_requested:false,
+                    last_invite_at:0,create_requested_at:None,launch_requested_at:None,lobby_recreation:None,failed_launches:Vec::new(),allocation_observed_at:None,last_allocation_log_at:None,betting_closed:false,betting_window_announced:false,betting_notification_sent:false,last_betting_notification_at:0,cancel_requested:false,
                     resume_requested:false,recorded_match_id:None,server_id:None,replay:None,postgame_statistics:None,archive:None,replay_last_attempt:0,replay_error:None,last_result_poll:0,lobby_deadline:0,recording_failures:0,
                 };
                 let valid_roster = if config.test_mode == DotaHostTestMode::Off {

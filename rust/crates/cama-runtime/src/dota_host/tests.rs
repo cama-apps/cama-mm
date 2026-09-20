@@ -1,5 +1,6 @@
 use super::*;
 mod configuration_tests;
+mod failed_launch_tests;
 mod manual_replacement_tests;
 mod recorded_cleanup_tests;
 use std::sync::{
@@ -46,12 +47,14 @@ async fn steam_lobby_slots_allow_any_order_on_the_correct_team_without_kicks() {
 
 struct FakePort {
     configure_behavior: Mutex<&'static str>,
+    destroy_behavior: Mutex<&'static str>,
     lobby: Mutex<Option<HostLobby>>,
     snapshot_error: Mutex<Option<String>>,
     observation_stale: std::sync::atomic::AtomicBool,
     snapshot_calls: AtomicUsize,
     fail_snapshot_at: AtomicUsize,
     details: Mutex<Option<HostMatchDetails>>,
+    details_error: Mutex<Option<String>>,
     calls: Mutex<Vec<String>>,
     lose_create_reply: bool,
     path: PathBuf,
@@ -152,7 +155,13 @@ impl DotaHostPort for FakePort {
     }
     async fn destroy(&self, _: u64) -> Result<(), String> {
         self.calls.lock().unwrap().push("destroy".into());
+        if *self.destroy_behavior.lock().unwrap() == "ignore" {
+            return Ok(());
+        }
         *self.lobby.lock().unwrap() = None;
+        if *self.destroy_behavior.lock().unwrap() == "lost_reply" {
+            return Err("destroy reply lost".into());
+        }
         Ok(())
     }
     async fn match_details(&self, match_id: u64) -> Result<HostMatchDetails, String> {
@@ -160,6 +169,9 @@ impl DotaHostPort for FakePort {
             .lock()
             .unwrap()
             .push(format!("details:{match_id}"));
+        if let Some(error) = self.details_error.lock().unwrap().clone() {
+            return Err(error);
+        }
         self.details
             .lock()
             .unwrap()
@@ -320,6 +332,8 @@ impl Fixture {
             last_invite_at: 0,
             create_requested_at: None,
             launch_requested_at: None,
+            lobby_recreation: None,
+            failed_launches: Vec::new(),
             allocation_observed_at: None,
             last_allocation_log_at: None,
             betting_closed: false,
@@ -366,12 +380,14 @@ impl Fixture {
         );
         let port = FakePort {
             configure_behavior: Mutex::new("normal"),
+            destroy_behavior: Mutex::new("normal"),
             lobby: Mutex::new(None),
             snapshot_error: Mutex::new(None),
             observation_stale: std::sync::atomic::AtomicBool::new(false),
             snapshot_calls: AtomicUsize::new(0),
             fail_snapshot_at: AtomicUsize::new(0),
             details: Mutex::new(None),
+            details_error: Mutex::new(None),
             calls: Mutex::new(Vec::new()),
             lose_create_reply,
             path: db.path().into(),
@@ -1359,10 +1375,8 @@ async fn restart_restores_live_match_from_saved_ids_without_a_lobby() {
         lobby.match_id = Some(888);
         lobby.server_id = Some(999);
     }
-    assert_eq!(
-        f.worker.tick(&f.port, 150).await.unwrap_err(),
-        "unavailable"
-    );
+    f.worker.tick(&f.port, 150).await.unwrap();
+    assert_eq!(f.session().last_error.as_deref(), Some("unavailable"));
     assert_eq!(f.session().phase, Phase::Running);
 
     // A new process has no live cache. Its GC may no longer have the lobby,
@@ -1380,10 +1394,7 @@ async fn restart_restores_live_match_from_saved_ids_without_a_lobby() {
         Arc::new(crate::SerenityDiscordTransport::new()),
         live.clone(),
     );
-    assert_eq!(
-        restarted.tick(&f.port, 180).await.unwrap_err(),
-        "unavailable"
-    );
+    restarted.tick(&f.port, 180).await.unwrap();
     live.ingest_gsi(
         serde_json::json!({
             "auth": {"token": "restart-test-token-at-least-32-bytes"},
@@ -1767,7 +1778,9 @@ async fn manual_abort_after_launch_preserves_the_game_for_review() {
 #[tokio::test]
 async fn lost_launch_is_reviewed_even_if_a_player_leaves_before_allocation() {
     let f = Fixture::new(false);
-    f.launch().await;
+    f.worker.tick(&f.port, 100).await.unwrap();
+    f.worker.tick(&f.port, 101).await.unwrap();
+    assert!(f.state().allocation_observed_at.is_none());
     {
         let mut lobby = f.port.lobby.lock().unwrap();
         let lobby = lobby.as_mut().unwrap();
