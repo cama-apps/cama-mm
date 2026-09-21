@@ -5,7 +5,7 @@ mod manual_replacement_tests;
 mod recorded_cleanup_tests;
 use std::sync::{
     Mutex,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 #[tokio::test]
