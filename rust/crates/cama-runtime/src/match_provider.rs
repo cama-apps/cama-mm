@@ -3420,7 +3420,8 @@ impl MatchHandler {
                         }
                     }
                 }
-                debug!(
+                tracing::info!(
+                    guild_id,
                     match_id,
                     valve_match_id = ?result.valve_match_id.map(|id| id.0),
                     confidence = ?result.confidence,
@@ -3428,7 +3429,11 @@ impl MatchHandler {
                 );
             }
             Ok(RecordedMatchDiscoveryOutcome::Disabled) => {
-                debug!(match_id, guild_id, "match auto-enrichment disabled");
+                tracing::info!(
+                    match_id,
+                    guild_id,
+                    "match auto-enrichment disabled; map recap requires an enriched summary"
+                );
             }
             Ok(RecordedMatchDiscoveryOutcome::Exhausted { last_result }) => {
                 warn!(
@@ -3439,7 +3444,7 @@ impl MatchHandler {
                 );
             }
             Ok(RecordedMatchDiscoveryOutcome::Stopped(result)) => {
-                debug!(
+                tracing::info!(
                     match_id,
                     guild_id,
                     status = ?result.status,

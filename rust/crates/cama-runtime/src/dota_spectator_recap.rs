@@ -113,7 +113,50 @@ fn thin(archive: &mut Archive) -> Vec<String> {
     removed
 }
 
-/// Store only fresh, policy-qualified PNGs already rendered for live delivery.
+/// Render advancing qualified frames even when no spectator is subscribed.
+/// Publication remains gated on the canonical completed match and summary.
+pub(crate) async fn capture_map(
+    database: PathBuf,
+    guild: i64,
+    pending: i64,
+    frame: crate::dota_live::LiveMapFrame,
+    now: i64,
+) -> Result<bool, String> {
+    tokio::task::spawn_blocking(move || {
+        {
+            let _lock = FILES.lock().map_err(|e| e.to_string())?;
+            if let Some(archive) = load(&directory(&database, guild, pending)?)? {
+                if archive.valve_id != frame.match_id {
+                    return Err("recap Valve match identity changed".into());
+                }
+                if archive.job.is_some()
+                    || archive
+                        .frames
+                        .last()
+                        .is_some_and(|last| frame.game_time.saturating_sub(last.clock) < 15)
+                {
+                    return Ok(false);
+                }
+            }
+        }
+        let png = crate::dota_spectator_map::render_map(&frame)?;
+        capture_sync(
+            &database,
+            guild,
+            pending,
+            frame.match_id,
+            frame.game_time,
+            &png,
+            now,
+        )?;
+        Ok(true)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Store fresh, policy-qualified PNGs for postgame publication.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn capture(
     database: PathBuf,
@@ -214,6 +257,12 @@ pub(crate) async fn queue_after_summary(
         let _lock = FILES.lock().map_err(|e| e.to_string())?;
         let dir = directory(&database, guild, pending)?;
         let Some(mut archive) = load(&dir)? else {
+            tracing::info!(
+                guild_id = guild,
+                pending_match_id = pending,
+                match_id,
+                "map recap skipped: no captured frames"
+            );
             return Ok(());
         };
         if match_id <= 0
@@ -231,6 +280,13 @@ pub(crate) async fn queue_after_summary(
             };
         }
         if archive.frames.len() < 2 {
+            tracing::info!(
+                guild_id = guild,
+                pending_match_id = pending,
+                match_id,
+                frames = archive.frames.len(),
+                "map recap skipped: fewer than two frames"
+            );
             return Ok(());
         }
         let now = chrono::Utc::now().timestamp();
@@ -243,7 +299,16 @@ pub(crate) async fn queue_after_summary(
             delivered: None,
         });
         archive.updated_at = now;
-        save(&dir, &archive)
+        save(&dir, &archive)?;
+        tracing::info!(
+            guild_id = guild,
+            pending_match_id = pending,
+            match_id,
+            frames = archive.frames.len(),
+            channel_id,
+            "map recap queued"
+        );
+        Ok(())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -504,7 +569,17 @@ async fn deliver(
     let expected = archive.clone();
     tokio::task::spawn_blocking(move || checkpoint(&path, &expected, now, Some(message_id)))
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())??;
+    tracing::info!(
+        guild_id = archive.guild_id,
+        pending_match_id = archive.pending_id,
+        match_id = job.match_id,
+        channel_id = job.channel_id,
+        message_id,
+        frames = archive.frames.len(),
+        "map recap delivered"
+    );
+    Ok(())
 }
 
 #[cfg(all(test, feature = "runtime-test-match"))]

@@ -425,6 +425,12 @@ struct Fixture {
     live: Arc<DotaLiveFeed>,
     worker: SpectatorWorker,
 }
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(self.db.path().with_extension("spectator-recaps"));
+    }
+}
+
 impl Fixture {
     fn new() -> Self {
         Self::with_upstream(None)
@@ -1525,4 +1531,99 @@ async fn incomplete_join_history_does_not_duplicate_subscriptions_or_block_comme
     f.worker.tick(1030).await.unwrap();
     assert_eq!(f.state().joined_viewers, vec![20]);
     assert_eq!(f.discord.join_attempts.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn recap_captures_without_viewers_or_discord_and_survives_restart() {
+    for failed_discord in [false, true] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let f = Fixture::with_upstream(Some(&format!("http://{}", listener.local_addr().unwrap())));
+        if failed_discord {
+            f.subscribe(20, true);
+            f.discord.fail_ensure.store(true, Ordering::SeqCst);
+        }
+        poll_frame_with_map(&f, &listener, &frame(100, 0, 0), true).await;
+        f.worker.tick(1000).await.unwrap();
+        let manifest =
+            f.db.path()
+                .with_extension("spectator-recaps")
+                .join(format!("1-{}", f.pending))
+                .join("manifest.json");
+        let first = std::fs::read(&manifest).unwrap();
+        // Duplicate samples, including after restart, do not render/rewrite frames.
+        let restarted =
+            SpectatorWorker::new(f.db.path(), vec![1], f.discord.clone(), f.live.clone());
+        restarted.tick(1015).await.unwrap();
+        assert_eq!(std::fs::read(&manifest).unwrap(), first);
+        poll_frame_with_map(&f, &listener, &frame(115, 1, 0), true).await;
+        restarted.tick(1030).await.unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+        assert_eq!(saved["frames"].as_array().unwrap().len(), 2);
+        assert_eq!(saved["valve_id"], 123);
+        assert!(f.discord.maps.lock().unwrap().is_empty());
+        assert!(f.discord.delivered.lock().unwrap().is_empty());
+        assert_eq!(f.discord.public_calls.load(Ordering::SeqCst), 0);
+        // The captured archive is usable by the existing post-summary outbox.
+        crate::dota_spectator_recap::queue_after_summary(
+            f.db.path().to_owned(),
+            1,
+            f.pending,
+            717,
+            Some(123),
+            800,
+            801,
+        )
+        .await
+        .unwrap();
+        let queued: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(manifest).unwrap()).unwrap();
+        assert_eq!(queued["job"]["match_id"], 717);
+        assert!(queued["job"]["delivered"].is_null());
+    }
+}
+
+#[tokio::test]
+async fn recap_capture_requires_bot_match_closed_betting_valid_roster_and_fresh_map() {
+    for scenario in [
+        "manual",
+        "open_betting",
+        "extended_betting",
+        "invalid_roster",
+        "stale",
+        "no_map",
+        "other_guild",
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut f =
+            Fixture::with_upstream(Some(&format!("http://{}", listener.local_addr().unwrap())));
+        poll_frame_with_map(&f, &listener, &frame(100, 0, 0), scenario != "no_map").await;
+        match scenario {
+            "manual" => f.pending_edit(|state| {
+                state.extra.insert(
+                    "dota_hosting".into(),
+                    serde_json::json!({"hosting":"manual"}),
+                );
+            }),
+            "open_betting" => f.pending_edit(|state| {
+                state.extra.remove(DOTA_BETTING_CLOSED_MARKER);
+            }),
+            "extended_betting" => f.pending_edit(|state| {
+                state
+                    .extra
+                    .insert(DOTA_BETTING_EXTENDED_UNTIL.into(), 2000.into());
+            }),
+            "invalid_roster" => f.pending_edit(|state| {
+                state.radiant_team_ids.clear();
+            }),
+            "stale" => f.live.finish_match(1, f.pending).await,
+            "other_guild" => f.worker.guilds = vec![2],
+            _ => {}
+        }
+        f.worker.tick(1000).await.unwrap();
+        assert!(
+            !f.db.path().with_extension("spectator-recaps").exists(),
+            "{scenario}"
+        );
+    }
 }

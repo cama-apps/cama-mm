@@ -1718,6 +1718,21 @@ impl DotaHostWorker {
                 self.save(record, state, now).await?;
             }
             Err(error) => {
+                // Completed threads are deliberately archived by recording.
+                // Retire this cosmetic outbox item without reopening the thread
+                // or claiming the edit succeeded. Active/review sessions retry.
+                if !record.phase.is_active() && error == "Thread is archived" {
+                    state.pending_status = None;
+                    state.status_retry_at = 0;
+                    self.save(record, state, now).await?;
+                    tracing::info!(
+                        guild_id = record.guild_id,
+                        pending_match_id = record.pending_match_id,
+                        channel_id = channel,
+                        "retired Dota status update for archived completed thread"
+                    );
+                    return Ok(());
+                }
                 let failed_message_id = state.message_id;
                 // Recreate an externally deleted status message only after a
                 // successful read proves absence. Permission/network errors

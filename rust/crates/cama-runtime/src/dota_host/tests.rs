@@ -5,7 +5,7 @@ mod manual_replacement_tests;
 mod recorded_cleanup_tests;
 use std::sync::{
     Mutex,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 #[tokio::test]
@@ -1805,6 +1805,8 @@ async fn lost_launch_is_reviewed_even_if_a_player_leaves_before_allocation() {
 #[derive(Default)]
 struct TestDiscord {
     failures: AtomicUsize,
+    archived: AtomicBool,
+    archived_attempts: AtomicUsize,
     sent: Mutex<Vec<(u64, DiscordMessage)>>,
 }
 
@@ -1843,6 +1845,10 @@ impl DiscordTransport for TestDiscord {
         channel_id: u64,
         message: DiscordMessage,
     ) -> Result<crate::discord_transport::DiscordMessageReceipt, String> {
+        if self.archived.load(Ordering::SeqCst) {
+            self.archived_attempts.fetch_add(1, Ordering::SeqCst);
+            return Err("Thread is archived".into());
+        }
         if self
             .failures
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
@@ -1867,6 +1873,10 @@ impl DiscordTransport for TestDiscord {
         _message_id: u64,
         message: DiscordMessage,
     ) -> Result<(), String> {
+        if self.archived.load(Ordering::SeqCst) {
+            self.archived_attempts.fetch_add(1, Ordering::SeqCst);
+            return Err("Thread is archived".into());
+        }
         if self
             .failures
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
@@ -2534,4 +2544,59 @@ async fn allocation_watchdog_does_not_timeout_a_running_game() {
     f.worker.tick(&f.port, 1000).await.unwrap();
     assert_eq!(f.session().phase, Phase::Running);
     assert!(f.session().last_error.is_none());
+}
+
+#[tokio::test]
+async fn archived_terminal_status_is_retired_durably_but_review_still_retries() {
+    for phase in [
+        Phase::Recorded,
+        Phase::Cancelled,
+        Phase::Failed,
+        Phase::NeedsReview,
+    ] {
+        let mut f = Fixture::new(false);
+        let discord = Arc::new(TestDiscord::default());
+        discord.archived.store(true, Ordering::SeqCst);
+        f.worker.discord = discord.clone();
+        f.update_state(|record, state| {
+            record.phase = phase;
+            state.channel_id = Some(55);
+            state.message_id = Some(66);
+        });
+        let mut record = f.session();
+        let mut state = f.state();
+        f.worker
+            .announce(&mut record, &mut state, "Final status", 100)
+            .await
+            .unwrap();
+        assert_eq!(f.state().pending_status.is_some(), phase.is_active());
+        assert_eq!(f.session().phase, phase);
+        assert_ne!(
+            f.state().last_message,
+            "Final status",
+            "failed edit is not a receipt"
+        );
+        assert_eq!(
+            f.state().message_id,
+            if phase.is_active() { None } else { Some(66) }
+        );
+        let restarted = DotaHostWorker::new(
+            f.worker.path.clone(),
+            f.worker.config.clone(),
+            f.worker.recorder.clone(),
+            f.worker.discord.clone(),
+            f.worker.live.clone(),
+        );
+        restarted.retry_terminal_status(1000).await.unwrap();
+        assert_eq!(discord.archived_attempts.load(Ordering::SeqCst), 1);
+        if phase.is_active() {
+            let mut record = f.session();
+            let mut state = f.state();
+            restarted
+                .announce(&mut record, &mut state, "Final status", 1000)
+                .await
+                .unwrap();
+            assert_eq!(discord.archived_attempts.load(Ordering::SeqCst), 2);
+        }
+    }
 }

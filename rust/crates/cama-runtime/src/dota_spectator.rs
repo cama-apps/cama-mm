@@ -24,6 +24,8 @@ use std::{
     time::Duration,
 };
 
+mod observation;
+
 const RETENTION_SECONDS: i64 = 15 * 60;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -86,6 +88,7 @@ pub struct SpectatorWorker {
     discord: Arc<dyn DiscordTransport>,
     live: Arc<DotaLiveFeed>,
     lease: tokio::sync::Mutex<()>,
+    diagnostics: std::sync::Mutex<observation::Diagnostics>,
 }
 impl SpectatorWorker {
     pub fn new(
@@ -100,6 +103,7 @@ impl SpectatorWorker {
             discord,
             live,
             lease: tokio::sync::Mutex::new(()),
+            diagnostics: Default::default(),
         }
     }
     /// Resolve only this match's linked players, using current guild cache names.
@@ -185,7 +189,8 @@ impl SpectatorWorker {
         let _lease = self.lease.lock().await;
         let path = self.path.clone();
         let guilds = self.guilds.clone();
-        let rows = tokio::task::spawn_blocking(move || -> Result<_, String> {
+        let (games, rows) = tokio::task::spawn_blocking(move || -> Result<_, String> {
+            let mut games = Vec::new();
             let pending = PendingMatchRepository::new(&path);
             let repository = DotaSpectatorRepository::new(&path);
             for guild in &guilds {
@@ -193,6 +198,7 @@ impl SpectatorWorker {
                     if !bot_hosted(&game) {
                         continue;
                     }
+                    games.push((game.clone(), 0));
                     let Some(message) = lobby_message(&game) else {
                         continue;
                     };
@@ -205,6 +211,7 @@ impl SpectatorWorker {
                             .map_err(|e| e.to_string())?,
                         &participants,
                     );
+                    games.last_mut().expect("current game").1 = viewers.len();
                     if viewers.is_empty() {
                         continue;
                     }
@@ -229,13 +236,15 @@ impl SpectatorWorker {
                         .map_err(|e| e.to_string())?;
                 }
             }
-            repository.list().map_err(|e| e.to_string())
+            Ok((games, repository.list().map_err(|e| e.to_string())?))
         })
         .await
         .map_err(|e| e.to_string())??;
+        self.observe_games(&games, now).await;
         for row in rows {
+            let identity = (row.guild_id, row.pending_match_id);
             if let Err(error) = self.reconcile(row, now).await {
-                tracing::debug!(%error,"spectator delivery withheld; reconciliation will retry");
+                self.log_status(identity, "delivery", &format!("withheld: {error}"), now);
             }
         }
         if let Err(error) =
@@ -522,6 +531,14 @@ impl SpectatorWorker {
                 state.sequence += 1;
             }
             self.save(&mut record, &state, now).await?;
+            tracing::info!(
+                guild_id = record.guild_id,
+                pending_match_id = record.pending_match_id,
+                channel_id = channel,
+                viewers = state.viewers.len(),
+                created,
+                "Dota spectator channel ready"
+            );
         }
         // A failed thread setup never falls back to posting commentary in the
         // map channel or shared lobby thread.
@@ -533,7 +550,12 @@ impl SpectatorWorker {
             if record.channel_id.is_none() {
                 return Err(error);
             }
-            tracing::debug!(%error, "spectator thread subscription will retry; existing viewers keep receiving updates");
+            self.log_status(
+                (record.guild_id, record.pending_match_id),
+                "subscription",
+                &format!("retrying: {error}"),
+                now,
+            );
         }
         if !self
             .deliver_queued(&mut record, &mut state, &pending, now)
@@ -838,7 +860,12 @@ impl SpectatorWorker {
         if let Err(error) = self.deliver_map(record, state, now).await {
             // A missing icon/render or Discord image failure must not suppress
             // the independent text commentary outbox.
-            tracing::debug!(%error, "spectator map withheld; text delivery remains available");
+            self.log_status(
+                (record.guild_id, record.pending_match_id),
+                "map",
+                &format!("withheld: {error}"),
+                now,
+            );
         }
     }
 
@@ -925,7 +952,6 @@ impl SpectatorWorker {
             state.pending_map = None;
             return self.save(record, state, now).await;
         }
-        let recap_png = bytes.clone();
         let clock = map.frame.game_time;
         let filename = format!("map-{}-{clock}.png", map.frame.match_id);
         let embed = InteractionEmbed::titled(format!(
@@ -955,19 +981,12 @@ impl SpectatorWorker {
                 .await?
                 .message_id
         };
-        if let Err(error) = crate::dota_spectator_recap::capture(
-            self.path.clone(),
-            record.guild_id,
-            record.pending_match_id,
-            map.frame.match_id,
-            map.frame.game_time,
-            recap_png,
+        self.log_status(
+            (record.guild_id, record.pending_match_id),
+            "map",
+            "delivered",
             now,
-        )
-        .await
-        {
-            tracing::warn!(%error, "optional spectator screenshot archive failed");
-        }
+        );
         state.map_message_id = Some(message_id);
         state.pending_map = None;
         self.save(record, state, now).await
@@ -1050,6 +1069,14 @@ impl SpectatorWorker {
                         DiscordMessage::silent(InteractionResponse::message(&queued.content)),
                     )
                     .await?;
+            }
+            if publish {
+                self.log_status(
+                    (record.guild_id, record.pending_match_id),
+                    "commentary",
+                    "delivered",
+                    now,
+                );
             }
             state.queued = None;
             self.save(record, state, now).await?;
