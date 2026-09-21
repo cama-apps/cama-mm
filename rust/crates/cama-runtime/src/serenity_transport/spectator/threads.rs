@@ -96,6 +96,16 @@ pub(in super::super) async fn ensure_thread(
     viewers: &[u64],
     known: Option<u64>,
 ) -> Result<u64, String> {
+    if channel(http, parent)
+        .await?
+        .is_some_and(|c| c.kind == ChannelType::PrivateThread)
+    {
+        if known.is_some_and(|id| id != parent) {
+            return Err("Spectator commentary identity changed.".into());
+        }
+        audit_parent_and_starter(http, guild, parent, map, marker, participants, viewers).await?;
+        return Ok(parent);
+    }
     validate_thread_ids(parent, map, known)?;
     if !(2..=100).contains(&name.chars().count()) || name.chars().any(char::is_control) {
         return Err("Invalid spectator commentary thread name.".into());
@@ -156,6 +166,16 @@ pub(in super::super) async fn audit_thread(
     participants: &[u64],
     viewers: &[u64],
 ) -> Result<(), String> {
+    if thread_id == parent {
+        let room = channel(http, parent)
+            .await?
+            .ok_or("Spectator room no longer exists.")?;
+        if room.kind != ChannelType::PrivateThread {
+            return Err("Shared spectator surface must be a private thread.".into());
+        }
+        audit_parent_and_starter(http, guild, parent, map, marker, participants, viewers).await?;
+        return Ok(());
+    }
     validate_thread_ids(parent, map, Some(thread_id))?;
     let bot =
         audit_parent_and_starter(http, guild, parent, map, marker, participants, viewers).await?;

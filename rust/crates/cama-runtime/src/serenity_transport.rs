@@ -3837,9 +3837,11 @@ impl DiscordTransport for SerenityDiscordTransport {
         spectator::delete_by_marker(&self.context()?.http, guild_id, marker).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn ensure_spectator_channel(
         &self,
         guild_id: u64,
+        source_channel_id: u64,
         marker: &str,
         name: &str,
         participants: &[u64],
@@ -3849,6 +3851,7 @@ impl DiscordTransport for SerenityDiscordTransport {
         spectator::ensure(
             &self.context()?.http,
             guild_id,
+            source_channel_id,
             marker,
             name,
             participants,

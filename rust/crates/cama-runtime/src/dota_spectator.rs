@@ -491,6 +491,14 @@ impl SpectatorWorker {
                 .discord
                 .ensure_spectator_channel(
                     guild,
+                    pending
+                        .state
+                        .shuffle_channel_id
+                        .or(pending.state.origin_channel_id)
+                        .or(pending.state.cmd_shuffle_channel_id)
+                        .or(pending.state.thread_shuffle_thread_id)
+                        .and_then(|id| u64::try_from(id).ok())
+                        .ok_or("spectator match source channel unavailable")?,
                     &record.marker,
                     &format!("match-{}-spectators", record.pending_match_id),
                     &state.participants,
@@ -524,7 +532,7 @@ impl SpectatorWorker {
                     &record,
                     state.sequence,
                     format!(
-                        "📻 **Match #{} · Commentary**\nThe live map stays in the parent channel. Follow kills, gold swings, and objectives here once betting closes and the live feed arrives.\n_Players can’t see either space. Both close 15 minutes after the Cama match ends._",
+                        "📻 **Match #{} · Commentary**\nFollow the live map, kills, gold swings, and objectives once betting closes and the live feed arrives.\n_Only eligible spectators are invited. This room closes 15 minutes after the Cama match ends._",
                         record.pending_match_id
                     ),
                 ));
@@ -540,8 +548,8 @@ impl SpectatorWorker {
                 "Dota spectator channel ready"
             );
         }
-        // A failed thread setup never falls back to posting commentary in the
-        // map channel or shared lobby thread.
+        // Both layouts require an audited private destination; never fall back
+        // to the shared match lobby.
         self.ensure_surface(&mut record, &mut state, now).await?;
         if let Err(error) = self
             .subscribe_thread_viewers(&mut record, &mut state, now)
@@ -712,11 +720,21 @@ impl SpectatorWorker {
             }
             let id = match existing {
                 Some(receipt) => receipt.message_id,
-                None => self.discord.send_message_with_delivery_key(channel, &key,
-                    DiscordMessage::silent(InteractionResponse::message("").embed(
-                        InteractionEmbed::titled("Live map").description("Waiting for live match coverage. Open the attached commentary thread for updates.")
-                    )),
-                ).await?.message_id,
+                None => {
+                    self.discord
+                        .send_message_with_delivery_key(
+                            channel,
+                            &key,
+                            DiscordMessage::silent(
+                                InteractionResponse::message("").embed(
+                                    InteractionEmbed::titled("Live map")
+                                        .description("Waiting for live match coverage."),
+                                ),
+                            ),
+                        )
+                        .await?
+                        .message_id
+                }
             };
             state.map_message_id = Some(id);
             self.save(record, state, now).await?;
@@ -760,9 +778,9 @@ impl SpectatorWorker {
                 return Err(error);
             }
         };
-        if thread != map {
+        if thread != map && thread != channel {
             self.remove_surface(record, state, now).await?;
-            return Err("spectator thread is not attached to its map".into());
+            return Err("spectator commentary is outside its audited room".into());
         }
         if !self.delivery_is_current(record, state, now, false).await? {
             self.remove_surface(record, state, now).await?;
