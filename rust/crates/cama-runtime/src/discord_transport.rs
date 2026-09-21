@@ -332,10 +332,12 @@ pub trait DiscordTransport: Send + Sync {
         Err("Private spectator channel recovery cleanup is unavailable on this transport.".into())
     }
 
-    /// Create/reconcile an owned private text channel for non-player spectators.
+    /// Create/reconcile an owned private spectator thread under the match source.
+    #[allow(clippy::too_many_arguments)]
     async fn ensure_spectator_channel(
         &self,
         _guild_id: u64,
+        _source_channel_id: u64,
         _marker: &str,
         _name: &str,
         _participants: &[u64],
@@ -357,8 +359,8 @@ pub trait DiscordTransport: Send + Sync {
         Err("Private spectator channel auditing is unavailable on this transport.".into())
     }
 
-    /// Reconcile a bot-owned commentary thread attached to the stationary map.
-    /// Visibility is inherited from the audited spectator parent channel.
+    /// Return the private room itself for commentary, or the attached thread
+    /// for an existing legacy private-channel layout.
     #[allow(clippy::too_many_arguments)]
     async fn ensure_spectator_thread(
         &self,
@@ -374,7 +376,7 @@ pub trait DiscordTransport: Send + Sync {
         Err("Spectator commentary threads are unavailable on this transport.".into())
     }
 
-    /// Freshly verify both parent isolation and the attached thread's ownership.
+    /// Freshly verify the private room and its bot-authored map message.
     #[allow(clippy::too_many_arguments)]
     async fn audit_spectator_thread(
         &self,
@@ -389,7 +391,7 @@ pub trait DiscordTransport: Send + Sync {
         Err("Spectator commentary thread auditing is unavailable on this transport.".into())
     }
 
-    /// Delete only a guild text channel bearing this exact ownership marker.
+    /// Delete only an owned spectator room bearing this exact marker.
     async fn delete_spectator_channel(
         &self,
         _guild_id: u64,

@@ -1,5 +1,6 @@
 //! Owned spectator channels and attached threads. Safety inputs use current HTTP reads.
 
+mod private_threads;
 mod threads;
 pub(super) use threads::{audit_thread, ensure_thread};
 
@@ -239,7 +240,29 @@ async fn channel(http: &Http, id: u64) -> Result<Option<GuildChannel>, String> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn ensure(
+    http: &Arc<Http>,
+    guild: u64,
+    source: u64,
+    marker: &str,
+    name: &str,
+    participants: &[u64],
+    viewers: &[u64],
+    known: Option<u64>,
+) -> Result<u64, String> {
+    // Existing private channels retain their original audited layout until cleanup.
+    if let Some(id) = known
+        && channel(http, id)
+            .await?
+            .is_some_and(|c| c.kind == ChannelType::Text)
+    {
+        return ensure_legacy(http, guild, marker, name, participants, viewers, known).await;
+    }
+    private_threads::ensure(http, guild, source, marker, participants, viewers, known).await
+}
+
+async fn ensure_legacy(
     http: &Arc<Http>,
     guild: u64,
     marker: &str,
@@ -322,6 +345,12 @@ pub(super) async fn audit(
     id: u64,
 ) -> Result<(), String> {
     validate_identity(guild, marker)?;
+    let destination = channel(http, id)
+        .await?
+        .ok_or("Spectator room no longer exists.")?;
+    if destination.kind == ChannelType::PrivateThread {
+        return private_threads::audit(http, guild, marker, participants, viewers, id).await;
+    }
     let expected = current_policy(http, guild, participants, viewers).await?;
     let channel = channel(http, id)
         .await?
@@ -335,6 +364,7 @@ pub(super) async fn delete_by_marker(
     marker: &str,
 ) -> Result<(), String> {
     validate_identity(guild, marker)?;
+    private_threads::delete_by_marker(http, guild, marker).await?;
     let channels = http
         .get_channels(GuildId::new(guild))
         .await
@@ -359,7 +389,17 @@ pub(super) async fn delete(
     let Some(channel) = channel(http, id).await? else {
         return Ok(());
     };
-    owned(&channel, guild, marker)?;
+    if channel.kind == ChannelType::PrivateThread {
+        let bot = http
+            .get_current_user()
+            .await
+            .map_err(|e| e.to_string())?
+            .id
+            .get();
+        private_threads::owned(&channel, guild, marker, bot)?;
+    } else {
+        owned(&channel, guild, marker)?;
+    }
     match http
         .delete_channel(channel.id, Some("Remove owned Cama spectator channel"))
         .await
