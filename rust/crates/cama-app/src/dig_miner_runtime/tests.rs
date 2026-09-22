@@ -389,3 +389,55 @@ fn respec_errors_match_python_and_preserve_state() {
     let profile = service.profile(USER, GUILD, NOW).unwrap();
     assert_eq!((profile.stats.strength, profile.stats.smarts), (3, 2));
 }
+
+#[test]
+fn default_boss_risk_creates_profile_persists_and_can_be_cleared() {
+    let database = fixture(100);
+    let service = DigMinerRuntimeService::sqlite(database.path());
+    assert_eq!(service.default_boss_risk(USER, GUILD).unwrap(), None);
+    assert!(
+        service
+            .repository
+            .snapshot(USER, GUILD)
+            .unwrap()
+            .tunnel
+            .is_none()
+    );
+    assert!(matches!(
+        service.set_default_boss_risk(USER + 1, GUILD, Some(RiskTier::Bold), NOW),
+        Err(DigMinerRuntimeError::MissingPlayer),
+    ));
+    for risk in [RiskTier::Cautious, RiskTier::Bold, RiskTier::Reckless] {
+        let profile = service
+            .set_default_boss_risk(USER, GUILD, Some(risk), NOW)
+            .unwrap();
+        assert_eq!(profile.default_boss_risk, Some(risk));
+        assert_eq!(profile.stats.stat_points, 5);
+        assert_eq!(
+            DigMinerRuntimeService::sqlite(database.path())
+                .default_boss_risk(USER, GUILD)
+                .unwrap(),
+            Some(risk)
+        );
+        assert_eq!(service.default_boss_risk(USER, GUILD + 1).unwrap(), None);
+    }
+    let profile = service
+        .set_auto_buy(
+            USER,
+            GUILD,
+            DigMinerAutoBuyUpdate {
+                torch: Some(true),
+                hard_hat: None,
+                grappling_hook: None,
+            },
+            NOW,
+        )
+        .unwrap();
+    assert_eq!(profile.default_boss_risk, Some(RiskTier::Reckless));
+    let profile = service
+        .set_default_boss_risk(USER, GUILD, None, NOW)
+        .unwrap();
+    assert_eq!(profile.default_boss_risk, None);
+    assert!(profile.auto_buy.torch);
+    assert_eq!(service.default_boss_risk(USER, GUILD).unwrap(), None);
+}

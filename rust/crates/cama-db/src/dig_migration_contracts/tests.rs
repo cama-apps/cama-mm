@@ -21,6 +21,7 @@ fn compatible_fixture() -> NamedTempFile {
                 auto_buy_torch INTEGER NOT NULL DEFAULT 0,
                 auto_buy_hard_hat INTEGER NOT NULL DEFAULT 0,
                 auto_buy_grappling_hook INTEGER NOT NULL DEFAULT 0,
+                default_boss_risk TEXT,
                 PRIMARY KEY (discord_id, guild_id)
             );
             CREATE TABLE dig_actions (

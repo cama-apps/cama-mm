@@ -2107,3 +2107,64 @@ fn test_low_priority_reason_visibility_is_set_for_assignments_written_by_rust() 
         "a reason typed under the new option description is the player's to read"
     );
 }
+
+#[test]
+fn default_boss_risk_supports_fresh_upgrade_and_idempotent_retry() {
+    for upgrade in [false, true] {
+        let database = empty_database();
+        if upgrade {
+            initialize_or_migrate(database.path()).unwrap();
+            let connection = Connection::open(database.path()).unwrap();
+            connection
+                .execute_batch(
+                    "INSERT INTO tunnels(discord_id,guild_id,depth,auto_buy_torch)
+                 VALUES (4242,77,15,1);
+                 ALTER TABLE tunnels DROP COLUMN default_boss_risk;
+                 DELETE FROM schema_migrations WHERE name='add_dig_default_boss_risk';",
+                )
+                .unwrap();
+        }
+        let report = initialize_or_migrate(database.path()).unwrap();
+        assert!(
+            report
+                .newly_applied
+                .iter()
+                .any(|name| name == "add_dig_default_boss_risk")
+        );
+        let connection = Connection::open(database.path()).unwrap();
+        if !upgrade {
+            connection.execute_batch("INSERT INTO tunnels(discord_id,guild_id,depth,auto_buy_torch) VALUES (4242,77,15,1);").unwrap();
+        }
+        let state: (Option<String>, i64, i64) = connection.query_row(
+            "SELECT default_boss_risk,depth,auto_buy_torch FROM tunnels WHERE discord_id=4242 AND guild_id=77",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(state, (None, 15, 1));
+        for risk in ["cautious", "bold", "reckless"] {
+            connection
+                .execute("UPDATE tunnels SET default_boss_risk=?1", [risk])
+                .unwrap();
+        }
+        assert!(
+            connection
+                .execute("UPDATE tunnels SET default_boss_risk='invalid'", [])
+                .is_err()
+        );
+        drop(connection);
+        assert!(
+            initialize_or_migrate(database.path())
+                .unwrap()
+                .newly_applied
+                .is_empty()
+        );
+        let stored: Option<String> = Connection::open(database.path())
+            .unwrap()
+            .query_row(
+                "SELECT default_boss_risk FROM tunnels WHERE discord_id=4242 AND guild_id=77",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some("reckless"));
+    }
+}

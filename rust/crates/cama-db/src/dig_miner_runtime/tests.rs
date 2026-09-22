@@ -420,3 +420,120 @@ fn concurrent_respec_charges_and_resets_exactly_once() {
     assert_eq!(snapshot.balance, Some(50));
     assert_eq!(snapshot.tunnel.unwrap().stat_strength, 0);
 }
+
+#[test]
+fn default_boss_risk_persists_and_is_validated_and_guild_isolated() {
+    let database = fixture(100);
+    let repository = repository(&database);
+    assert_eq!(
+        repository
+            .set_default_boss_risk(USER, GUILD, Some("bold"))
+            .unwrap()
+            .status,
+        DigMinerMutationStatus::MissingTunnel,
+    );
+    assert!(
+        ensure(&database)
+            .tunnel
+            .unwrap()
+            .default_boss_risk
+            .is_none()
+    );
+    let connection = Connection::open(database.path()).unwrap();
+    connection
+        .execute(
+            "INSERT INTO tunnels(discord_id,guild_id,tunnel_name) VALUES (?1,?2,'Other guild')",
+            params![USER, GUILD + 1],
+        )
+        .unwrap();
+    for risk in ["cautious", "bold", "reckless"] {
+        let outcome = repository
+            .set_default_boss_risk(USER, GUILD, Some(risk))
+            .unwrap();
+        assert_eq!(outcome.status, DigMinerMutationStatus::Applied);
+        assert_eq!(
+            outcome
+                .snapshot
+                .tunnel
+                .unwrap()
+                .default_boss_risk
+                .as_deref(),
+            Some(risk)
+        );
+    }
+    assert!(matches!(
+        repository.set_default_boss_risk(USER, GUILD, Some("unknown")),
+        Err(DigMinerRuntimeRepositoryError::InvalidMutation),
+    ));
+    assert!(
+        repository
+            .snapshot(USER, GUILD + 1)
+            .unwrap()
+            .tunnel
+            .unwrap()
+            .default_boss_risk
+            .is_none()
+    );
+    assert_eq!(
+        DigMinerRuntimeRepository::new(database.path())
+            .snapshot(USER, GUILD)
+            .unwrap()
+            .tunnel
+            .unwrap()
+            .default_boss_risk
+            .as_deref(),
+        Some("reckless")
+    );
+    repository.set_default_boss_risk(USER, GUILD, None).unwrap();
+    assert!(
+        repository
+            .snapshot(USER, GUILD)
+            .unwrap()
+            .tunnel
+            .unwrap()
+            .default_boss_risk
+            .is_none()
+    );
+}
+
+#[test]
+fn default_boss_risk_survives_prestige() {
+    use crate::dig_prestige_runtime::{
+        AtomicDigPrestigeSettlement, DigPrestigeKey, DigPrestigeRuntimeRepository,
+        DigPrestigeSettlementOutcome,
+    };
+
+    let database = fixture(100);
+    ensure(&database);
+    let miner = repository(&database);
+    miner
+        .set_default_boss_risk(USER, GUILD, Some("bold"))
+        .unwrap();
+    let prestige = DigPrestigeRuntimeRepository::new(database.path());
+    let snapshot = prestige
+        .snapshot(DigPrestigeKey {
+            discord_id: USER,
+            guild_id: GUILD,
+        })
+        .unwrap()
+        .unwrap();
+    let outcome = prestige
+        .atomic_settle(AtomicDigPrestigeSettlement {
+            expected: &snapshot,
+            next_prestige_level: 1,
+            prestige_perks_json: "[]",
+            boss_progress_json: "{}",
+            mutations_json: None,
+            stat_boss_awards_json: r#"{"prestige_level":1,"awards":[]}"#,
+            best_run_score: 0,
+            total_prestige_score: 0,
+            balance_delta: 0,
+            relic_artifact_id: None,
+            created_at: NOW,
+        })
+        .unwrap();
+    assert!(matches!(outcome, DigPrestigeSettlementOutcome::Applied(_)));
+    let tunnel = miner.snapshot(USER, GUILD).unwrap().tunnel.unwrap();
+    assert_eq!(tunnel.prestige_level, 1);
+    assert_eq!(tunnel.default_boss_risk.as_deref(), Some("bold"));
+}

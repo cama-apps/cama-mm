@@ -96,10 +96,10 @@ const REQUIRED_TRIGGERS: [&str; 6] = [
     "trg_package_deals_games_remaining_update_cap",
 ];
 
-/// Columns accepted by Python's `DigRepository.update_tunnel`.
+/// Tunnel columns with an application repository writer.
 ///
-/// This duplicate is intentional: a schema migration that adds a tunnel
-/// column must remain writable from both runtimes or be explicitly excluded.
+/// This independent registry makes schema additions declare their writer or
+/// explicitly exclude fields managed outside ordinary tunnel updates.
 pub const TUNNEL_UPDATABLE_COLUMNS: &[&str] = &[
     "auto_buy_grappling_hook",
     "auto_buy_hard_hat",
@@ -112,6 +112,7 @@ pub const TUNNEL_UPDATABLE_COLUMNS: &[&str] = &[
     "current_run_artifacts",
     "current_run_events",
     "current_run_jc",
+    "default_boss_risk", // DigMinerRuntimeRepository::set_default_boss_risk
     "depth",
     "grappling_hook_charges",
     "hard_hat_charges",

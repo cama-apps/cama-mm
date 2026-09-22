@@ -14,10 +14,11 @@ use thiserror::Error;
 
 pub const BOSS_BOUNDARIES: [i64; 7] = [25, 50, 75, 100, 150, 200, 275];
 
-const REQUIRED_DIG_MIGRATIONS: [&str; 8] = [
+const REQUIRED_DIG_MIGRATIONS: [&str; 9] = [
     "add_dig_action_history_indexes",
     "add_dig_action_type_history_index",
     "add_dig_auto_buy_settings",
+    "add_dig_default_boss_risk",
     "backfill_missing_dig_weapon_gear",
     "clear_active_boss_ids_for_pool_reroll",
     "create_dig_gear_system",
@@ -102,6 +103,12 @@ fn audit_connection(connection: &Connection) -> Result<DigMigrationAudit, rusqli
                 .push(format!("tunnels.{required}:default={default}")),
             None => audit.missing_columns.push(format!("tunnels.{required}")),
         }
+    }
+
+    if !tunnel_columns.contains_key("default_boss_risk") {
+        audit
+            .missing_columns
+            .push("tunnels.default_boss_risk".to_owned());
     }
 
     for required in [
