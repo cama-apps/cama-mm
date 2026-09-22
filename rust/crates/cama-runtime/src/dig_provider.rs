@@ -1526,9 +1526,8 @@ impl InteractionHandler for DigInteractionHandler {
     ) -> InteractionAcknowledgementPolicy {
         match request {
             InteractionRequest::Component { custom_id, .. }
-                if custom_id
-                    .strip_prefix("dig:boss:fight:")
-                    .is_some_and(|action| !action.starts_with("carried:")) =>
+                if custom_id.starts_with("dig:boss:select:wager:")
+                    || custom_id.starts_with("dig:boss:default:wager:") =>
             {
                 InteractionAcknowledgementPolicy::Modal
             }
@@ -1580,17 +1579,39 @@ impl DigInteractionHandler {
         self.project_player_name(user_id, guild_id, &stored_name)
     }
 
-    fn render_delivery_responses(
+    async fn render_delivery_responses(
         &self,
         delivery: &DigRuntimeDeliverySnapshot,
-    ) -> (InteractionResponse, Option<InteractionResponse>) {
+    ) -> Result<(InteractionResponse, Option<InteractionResponse>), String> {
         let mut projected = delivery.clone();
         projected.context.display_name = self.project_player_name(
             delivery.discord_id,
             delivery.guild_id,
             &delivery.context.display_name,
         );
-        dig_delivery_responses(&projected, &self.state.media, &self.state.view_nonce)
+        let (mut main, event) =
+            dig_delivery_responses(&projected, &self.state.media, &self.state.view_nonce);
+        if projected.render.kind == DigRuntimeRenderKind::Boss {
+            let risk = self
+                .default_boss_risk(delivery.discord_id, delivery.guild_id)
+                .await?;
+            apply_default_boss_risk(&mut main, risk);
+        }
+        Ok((main, event))
+    }
+
+    async fn default_boss_risk(
+        &self,
+        user_id: i64,
+        guild_id: i64,
+    ) -> Result<Option<RiskTier>, String> {
+        let path = self.state.database_path.clone();
+        blocking(move || {
+            DigMinerRuntimeService::sqlite(path)
+                .default_boss_risk(user_id, guild_id)
+                .map_err(|error| error.to_string())
+        })
+        .await
     }
 
     fn force_event_pending(&self, user_id: i64, guild_id: i64) -> Result<bool, String> {
@@ -2413,6 +2434,37 @@ impl DigInteractionHandler {
         };
         let guild_id = signed_id(guild_id, "guild")?;
         let channel_id = channel_id.map(|id| signed_id(id, "channel")).transpose()?;
+        // The saved risk is captured in the rendered Fight button so opening
+        // its wager modal never waits for a database read.
+        if let Some(raw) = custom_id.strip_prefix("dig:boss:default:") {
+            let Some((mode, rest)) = raw.split_once(':') else {
+                return expired_dig_component(&responder).await;
+            };
+            let Some((risk, owner)) = rest.split_once(':') else {
+                return expired_dig_component(&responder).await;
+            };
+            return self
+                .handle_boss_selection(
+                    &format!("{mode}:{owner}"),
+                    &[risk.to_owned()],
+                    user_id,
+                    guild_id,
+                    channel_id,
+                    responder,
+                )
+                .await;
+        }
+        if let Some(owner) = custom_id.strip_prefix("dig:miner:bossrisk:") {
+            return self
+                .set_boss_risk_preference(owner, &values, user_id, guild_id, responder)
+                .await;
+        }
+        // Risk selections that open a wager modal must not wait on SQLite.
+        if let Some(raw) = custom_id.strip_prefix("dig:boss:select:") {
+            return self
+                .handle_boss_selection(raw, &values, user_id, guild_id, channel_id, responder)
+                .await;
+        }
         if !self.registered(user_id, guild_id).await? {
             return respond(
                 &responder,
@@ -2914,7 +2966,7 @@ impl DigInteractionHandler {
             };
             let bonus_outcome = result.outcome.clone();
             let (stats, event) = if let Some(delivery) = delivery.as_ref() {
-                self.render_delivery_responses(delivery)
+                self.render_delivery_responses(delivery).await?
             } else if result.boss_boundary.is_some() {
                 (
                     self.render_boss_encounter(user_id, guild_id, unix_now())
@@ -3378,6 +3430,103 @@ impl DigInteractionHandler {
         expired_dig_component(&responder).await
     }
 
+    async fn set_boss_risk_preference(
+        &self,
+        owner: &str,
+        values: &[String],
+        user_id: i64,
+        guild_id: i64,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        if parse_boss_owner(owner)? != (user_id, guild_id) {
+            return respond(
+                &responder,
+                InteractionResponse::message("This isn't your miner profile.").ephemeral(),
+            )
+            .await;
+        }
+        let [value] = values else {
+            return expired_dig_component(&responder).await;
+        };
+        let risk = if value == "ask" {
+            None
+        } else if let Some(risk) = parse_risk_tier(value) {
+            Some(risk)
+        } else {
+            return expired_dig_component(&responder).await;
+        };
+        responder
+            .defer(true)
+            .await
+            .map_err(|error| error.to_string())?;
+        let path = self.state.database_path.clone();
+        let result = blocking(move || {
+            Ok(DigMinerRuntimeService::sqlite(path).set_default_boss_risk(
+                user_id,
+                guild_id,
+                risk,
+                unix_now(),
+            ))
+        })
+        .await?;
+        let profile = match result {
+            Ok(profile) => profile,
+            Err(error) => {
+                return responder
+                    .followup(InteractionResponse::message(error.to_string()).ephemeral())
+                    .await
+                    .map_err(|error| error.to_string());
+            }
+        };
+        let display_name = self.render_player_name(user_id, guild_id).await;
+        responder
+            .edit_original(miner_profile_response(
+                &display_name,
+                &profile,
+                user_id,
+                guild_id,
+            ))
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_boss_selection(
+        &self,
+        raw: &str,
+        values: &[String],
+        user_id: i64,
+        guild_id: i64,
+        channel_id: Option<i64>,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        let Some((mode, owner)) = raw.split_once(':') else {
+            return expired_dig_component(&responder).await;
+        };
+        if !matches!(mode, "wager" | "risk") {
+            return expired_dig_component(&responder).await;
+        }
+        let (owner_id, expected_guild) = parse_boss_owner(owner)?;
+        if owner_id != user_id || expected_guild != guild_id {
+            return respond(
+                &responder,
+                InteractionResponse::message("Only the tunnel owner can fight.").ephemeral(),
+            )
+            .await;
+        }
+        let [risk] = values else {
+            return expired_dig_component(&responder).await;
+        };
+        let Some(risk_tier) = parse_risk_tier(risk) else {
+            return expired_dig_component(&responder).await;
+        };
+        if mode == "wager" {
+            return show_boss_wager_modal(responder.as_ref(), owner_id, guild_id, risk_tier).await;
+        }
+        self.submit_boss_fight(user_id, guild_id, channel_id, risk_tier, 0, responder)
+            .await
+    }
+
     async fn handle_boss_component(
         &self,
         action: &str,
@@ -3405,11 +3554,9 @@ impl DigInteractionHandler {
                 .await;
             }
             if matches!(mode, Some("wager" | "risk")) {
-                return show_boss_modal(
-                    responder.as_ref(),
-                    owner_id,
-                    guild_id,
-                    mode == Some("wager"),
+                return respond(
+                    &responder,
+                    boss_risk_response(owner_id, guild_id, mode == Some("wager")),
                 )
                 .await;
             }
@@ -3486,8 +3633,11 @@ impl DigInteractionHandler {
                     .await
                     .map_err(|error| error.to_string());
             }
-            return show_boss_modal(responder.as_ref(), owner_id, guild_id, info.wager_allowed)
-                .await;
+            return respond(
+                &responder,
+                boss_risk_response(owner_id, guild_id, info.wager_allowed),
+            )
+            .await;
         }
         if let Some(raw) = action.strip_prefix("boss:duel:") {
             let mut parts = raw.split(':');
@@ -3671,6 +3821,10 @@ impl DigInteractionHandler {
                 (None, false)
             };
         if let Some(raw_owner) = raw_owner {
+            let (raw_owner, selected_risk) = match raw_owner.rsplit_once(':') {
+                Some((owner, risk)) if owner.matches(':').count() == 1 => (owner, Some(risk)),
+                _ => (raw_owner, None),
+            };
             let (owner_id, expected_guild) = parse_boss_owner(raw_owner)?;
             if owner_id != user_id || expected_guild != guild_id {
                 return respond(
@@ -3679,9 +3833,9 @@ impl DigInteractionHandler {
                 )
                 .await;
             }
-            let Some(risk_tier) = fields
-                .get("risk_tier")
-                .and_then(|value| parse_risk_tier(value))
+            let Some(risk_tier) = selected_risk
+                .or_else(|| fields.get("risk_tier").map(String::as_str))
+                .and_then(parse_risk_tier)
             else {
                 return respond(
                     &responder,
@@ -3724,49 +3878,9 @@ impl DigInteractionHandler {
             } else {
                 0
             };
-            responder
-                .defer(false)
-                .await
-                .map_err(|error| error.to_string())?;
-            let now = unix_now();
-            let result = match self
-                .start_boss(user_id, guild_id, risk_tier, wager, now)
-                .await
-            {
-                Ok(result) => result,
-                Err(error) => {
-                    return responder
-                        .followup(boss_error_response(error))
-                        .await
-                        .map_err(|error| error.to_string());
-                }
-            };
-            if boss_start_is_resolved(&result) {
-                self.reconcile_resolved_boss(user_id, guild_id, now).await;
-            }
-            let action_id = result.action_id;
-            let neon_victory = boss_start_neon_victory(&result);
-            let next_phase = boss_start_has_next_phase(&result);
-            let media = Arc::clone(&self.state.media);
-            let response =
-                blocking(move || Ok(boss_start_response(&result, user_id, guild_id, &media)))
-                    .await?;
-            responder
-                .followup(response)
-                .await
-                .map_err(|error| error.to_string())?;
-            self.post_boss_neon(action_id, user_id, guild_id, channel_id, neon_victory)
+            return self
+                .submit_boss_fight(user_id, guild_id, channel_id, risk_tier, wager, responder)
                 .await;
-            if next_phase {
-                responder
-                    .followup(
-                        self.render_boss_encounter(user_id, guild_id, unix_now())
-                            .await?,
-                    )
-                    .await
-                    .map_err(|error| error.to_string())?;
-            }
-            return Ok(());
         }
         respond(
             &responder,
@@ -3774,6 +3888,60 @@ impl DigInteractionHandler {
                 .ephemeral(),
         )
         .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn submit_boss_fight(
+        &self,
+        user_id: i64,
+        guild_id: i64,
+        channel_id: Option<i64>,
+        risk_tier: RiskTier,
+        wager: i64,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        responder
+            .defer(false)
+            .await
+            .map_err(|error| error.to_string())?;
+        let now = unix_now();
+        let result = match self
+            .start_boss(user_id, guild_id, risk_tier, wager, now)
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                return responder
+                    .followup(boss_error_response(error))
+                    .await
+                    .map_err(|error| error.to_string());
+            }
+        };
+        if boss_start_is_resolved(&result) {
+            self.reconcile_resolved_boss(user_id, guild_id, now).await;
+        }
+        let action_id = result.action_id;
+        let neon_victory = boss_start_neon_victory(&result);
+        let next_phase = boss_start_has_next_phase(&result);
+        let media = Arc::clone(&self.state.media);
+        let response =
+            blocking(move || Ok(boss_start_response(&result, user_id, guild_id, &media))).await?;
+        responder
+            .followup(response)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.post_boss_neon(action_id, user_id, guild_id, channel_id, neon_victory)
+            .await;
+        if next_phase {
+            responder
+                .followup(
+                    self.render_boss_encounter(user_id, guild_id, unix_now())
+                        .await?,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     fn take_rate_limit(
@@ -4001,7 +4169,7 @@ impl DigInteractionHandler {
         }
         let reaction_outcome = result.outcome.clone();
         let (response, event_response) = if let Some(delivery) = delivery.as_ref() {
-            self.render_delivery_responses(delivery)
+            self.render_delivery_responses(delivery).await?
         } else if result.boss_boundary.is_some() {
             (
                 self.render_boss_encounter(user_id, guild_id, now).await?,
@@ -4282,7 +4450,13 @@ impl DigInteractionHandler {
             .await
             .map_err(|error| error.to_string())?;
         let media = Arc::clone(&self.state.media);
-        blocking(move || Ok(boss_encounter_response(&info, user_id, guild_id, &media))).await
+        let default_risk = self.default_boss_risk(user_id, guild_id).await?;
+        blocking(move || {
+            let mut response = boss_encounter_response(&info, user_id, guild_id, &media);
+            apply_default_boss_risk(&mut response, default_risk);
+            Ok(response)
+        })
+        .await
     }
 
     async fn start_boss(
@@ -5884,7 +6058,10 @@ impl DigInteractionHandler {
             delivery.context.channel_id,
         )
         .await;
-        let (main, event) = self.render_delivery_responses(&delivery);
+        let (main, event) = self
+            .render_delivery_responses(&delivery)
+            .await
+            .map_err(DigDeliveryFailure::Ambiguous)?;
         if delivery.main_delivered_at.is_none() {
             self.deliver_part_once_with_failure(&delivery, DigRuntimeDeliveryPart::Main, main)
                 .await?;
@@ -6952,9 +7129,9 @@ impl DigInteractionHandler {
                     })
                     .await?;
                 let response = match result {
-                    Ok(profile) => InteractionResponse::message("")
-                        .embed(miner_profile_embed(&display_name, &profile))
-                        .ephemeral(),
+                    Ok(profile) => {
+                        miner_profile_response(&display_name, &profile, user_id, guild_id)
+                    }
                     Err(error) => InteractionResponse::message(error.to_string()).ephemeral(),
                 };
                 responder
@@ -7611,39 +7788,45 @@ fn parse_boss_owner(raw: &str) -> Result<(i64, i64), String> {
     Ok((owner_id, guild_id))
 }
 
-async fn show_boss_modal(
+fn boss_risk_select(owner_id: i64, guild_id: i64, wager_allowed: bool) -> InteractionActionRow {
+    let mode = if wager_allowed { "wager" } else { "risk" };
+    InteractionActionRow::string_select(InteractionStringSelect::new(
+        format!("dig:boss:select:{mode}:{owner_id}:{guild_id}"),
+        "Fight — choose a risk tier",
+        vec![
+            InteractionStringSelectOption::new("Cautious", "cautious"),
+            InteractionStringSelectOption::new("Bold", "bold"),
+            InteractionStringSelectOption::new("Reckless", "reckless"),
+        ],
+    ))
+}
+
+fn boss_risk_response(owner_id: i64, guild_id: i64, wager_allowed: bool) -> InteractionResponse {
+    InteractionResponse::message("Choose your risk tier to fight.")
+        .action_row(boss_risk_select(owner_id, guild_id, wager_allowed))
+        .ephemeral()
+}
+
+async fn show_boss_wager_modal(
     responder: &dyn InteractionResponder,
     owner_id: i64,
     guild_id: i64,
-    wager_allowed: bool,
+    risk_tier: RiskTier,
 ) -> Result<(), String> {
-    let mut risk =
-        InteractionTextInput::short("risk_tier", "Risk Tier (cautious / bold / reckless)");
-    risk.placeholder = Some("bold".to_owned());
-    risk.min_length = Some(1);
-    risk.max_length = Some(10);
-    let (custom_id, title, inputs) = if wager_allowed {
-        let mut wager = InteractionTextInput::short("wager", "Wager Amount (max 1,000 JC)");
-        wager.placeholder = Some("0-1000".to_owned());
-        wager.min_length = Some(1);
-        wager.max_length = Some(10);
-        (
-            format!("dig:boss:wager:{owner_id}:{guild_id}"),
-            "Boss Fight Wager",
-            vec![risk, wager],
-        )
-    } else {
-        (
-            format!("dig:boss:risk:{owner_id}:{guild_id}"),
-            "Boss Phase Risk",
-            vec![risk],
-        )
+    let risk = match risk_tier {
+        RiskTier::Cautious => "cautious",
+        RiskTier::Bold => "bold",
+        RiskTier::Reckless => "reckless",
     };
+    let mut wager = InteractionTextInput::short("wager", "Wager Amount (max 1,000 JC)");
+    wager.placeholder = Some("0-1000".to_owned());
+    wager.min_length = Some(1);
+    wager.max_length = Some(10);
     responder
         .show_modal(InteractionModal {
-            custom_id,
-            title: title.to_owned(),
-            inputs,
+            custom_id: format!("dig:boss:wager:{owner_id}:{guild_id}:{risk}"),
+            title: format!("Boss Fight Wager ({risk})"),
+            inputs: vec![wager],
         })
         .await
         .map_err(|error| error.to_string())
@@ -7788,12 +7971,85 @@ async fn expired_dig_component(responder: &Arc<dyn InteractionResponder>) -> Res
     .await
 }
 
+fn miner_profile_response(
+    display_name: &str,
+    profile: &DigMinerProfile,
+    owner_id: i64,
+    guild_id: i64,
+) -> InteractionResponse {
+    InteractionResponse::message("")
+        .embed(miner_profile_embed(display_name, profile))
+        .action_row(InteractionActionRow::string_select(
+            InteractionStringSelect::new(
+                format!("dig:miner:bossrisk:{owner_id}:{guild_id}"),
+                "Set your default boss risk",
+                vec![
+                    InteractionStringSelectOption::new("Ask every time", "ask"),
+                    InteractionStringSelectOption::new("Cautious", "cautious"),
+                    InteractionStringSelectOption::new("Bold", "bold"),
+                    InteractionStringSelectOption::new("Reckless", "reckless"),
+                ],
+            ),
+        ))
+        .ephemeral()
+}
+
+fn risk_tier_label(risk: RiskTier) -> &'static str {
+    match risk {
+        RiskTier::Cautious => "Cautious",
+        RiskTier::Bold => "Bold",
+        RiskTier::Reckless => "Reckless",
+    }
+}
+
+fn apply_default_boss_risk(response: &mut InteractionResponse, risk: Option<RiskTier>) {
+    let Some(risk) = risk else {
+        return;
+    };
+    for row in &mut response.components {
+        let Some(select) = &row.string_select else {
+            continue;
+        };
+        let Some(raw) = select.custom_id.strip_prefix("dig:boss:select:") else {
+            continue;
+        };
+        let Some((mode, owner)) = raw.split_once(':') else {
+            continue;
+        };
+        let label = risk_tier_label(risk);
+        *row = InteractionActionRow::buttons(vec![
+            InteractionButton::new(
+                format!(
+                    "dig:boss:default:{mode}:{}:{owner}",
+                    label.to_ascii_lowercase()
+                ),
+                format!("Fight ({label})"),
+            )
+            .emoji("⚔️")
+            .style(InteractionButtonStyle::Danger),
+        ]);
+    }
+}
+
 fn miner_profile_embed(display_name: &str, profile: &DigMinerProfile) -> InteractionEmbed {
     InteractionEmbed::titled(format!("{display_name} - Miner Profile"))
         .description(miner_backstory(profile))
         .color(PUBLIC_COLOR)
         .field("S Stats", format_miner_stats(profile), false)
         .field("Auto-Buy", format_miner_auto_buy(profile), false)
+        .field(
+            "Default Boss Risk",
+            match profile.default_boss_risk {
+                Some(risk) => format!(
+                    "**{}** — skips risk selection on new boss encounters. Change below.",
+                    risk_tier_label(risk)
+                ),
+                None => {
+                    "Ask every time. Choose a default below to skip boss risk selection.".to_owned()
+                }
+            },
+            false,
+        )
         .footer("Backstory locks after you set it. Boss first clears grant one extra S point.")
 }
 
@@ -9376,10 +9632,24 @@ fn dig_delivery_responses(
             luminosity: boss.luminosity,
             encounter_key: boss.encounter_key.clone().unwrap_or_default(),
         };
-        return (
-            boss_encounter_response(&info, delivery.discord_id, delivery.guild_id, media),
-            None,
-        );
+        let mut response =
+            boss_encounter_response(&info, delivery.discord_id, delivery.guild_id, media);
+        // Delivery snapshots retain the carried wager but not its risk. The
+        // carried Fight route reads both from the active encounter at submit.
+        if boss.carried_wager > 0 {
+            response.components[0] = InteractionActionRow::buttons(vec![
+                InteractionButton::new(
+                    format!(
+                        "dig:boss:fight:carried:{}:{}",
+                        delivery.discord_id, delivery.guild_id
+                    ),
+                    "Fight",
+                )
+                .emoji("⚔️")
+                .style(InteractionButtonStyle::Danger),
+            ]);
+        }
+        return (response, None);
     }
     let projected = dig_blood_pact_projected_outcome(delivery);
     let callback_reference = match &delivery.flavor {
@@ -9867,32 +10137,34 @@ fn boss_encounter_response_with_roll(
     if let Some(display) = luminosity_combat_display(info.luminosity) {
         embed = embed.field("\u{200b}", display, false);
     }
-    let fight_mode = if info.carried_wager.is_some() && info.carried_risk_tier.is_some() {
-        "carried"
-    } else if info.wager_allowed {
-        "wager"
-    } else {
-        "risk"
-    };
-    let mut response =
-        InteractionResponse::message("").action_row(InteractionActionRow::buttons(vec![
+    let carried = info.carried_wager.is_some() && info.carried_risk_tier.is_some();
+    let mut response = InteractionResponse::message("");
+    let mut buttons = vec![
+        InteractionButton::new(format!("dig:boss:retreat:{owner_id}:{guild_id}"), "Retreat")
+            .emoji("🏃")
+            .style(InteractionButtonStyle::Secondary),
+        InteractionButton::new(format!("dig:boss:scout:{owner_id}:{guild_id}"), "Scout")
+            .emoji("🔦")
+            .style(InteractionButtonStyle::Primary)
+            .disabled(!info.has_scout_lantern),
+        InteractionButton::new(format!("dig:boss:cheer:{owner_id}:{guild_id}"), "Cheer")
+            .emoji("📣")
+            .style(InteractionButtonStyle::Success),
+    ];
+    if carried {
+        buttons.insert(
+            0,
             InteractionButton::new(
-                format!("dig:boss:fight:{fight_mode}:{owner_id}:{guild_id}"),
+                format!("dig:boss:fight:carried:{owner_id}:{guild_id}"),
                 "Fight",
             )
             .emoji("⚔️")
             .style(InteractionButtonStyle::Danger),
-            InteractionButton::new(format!("dig:boss:retreat:{owner_id}:{guild_id}"), "Retreat")
-                .emoji("🏃")
-                .style(InteractionButtonStyle::Secondary),
-            InteractionButton::new(format!("dig:boss:scout:{owner_id}:{guild_id}"), "Scout")
-                .emoji("🔦")
-                .style(InteractionButtonStyle::Primary)
-                .disabled(!info.has_scout_lantern),
-            InteractionButton::new(format!("dig:boss:cheer:{owner_id}:{guild_id}"), "Cheer")
-                .emoji("📣")
-                .style(InteractionButtonStyle::Success),
-        ]));
+        );
+    } else {
+        response = response.action_row(boss_risk_select(owner_id, guild_id, info.wager_allowed));
+    }
+    response = response.action_row(InteractionActionRow::buttons(buttons));
     if let Some(art) = art {
         embed = embed.image(format!("attachment://{}", art.filename));
         response = response.attachment(interaction_attachment(art));

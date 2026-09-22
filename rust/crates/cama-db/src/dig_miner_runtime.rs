@@ -22,6 +22,7 @@ pub struct DigMinerTunnelSnapshot {
     pub auto_buy_torch: bool,
     pub auto_buy_hard_hat: bool,
     pub auto_buy_grappling_hook: bool,
+    pub default_boss_risk: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -284,6 +285,31 @@ impl DigMinerRuntimeRepository {
         Ok(outcome(status, snapshot))
     }
 
+    pub fn set_default_boss_risk(
+        &self,
+        discord_id: i64,
+        guild_id: i64,
+        risk: Option<&str>,
+    ) -> Result<DigMinerMutationOutcome, DigMinerRuntimeRepositoryError> {
+        if risk.is_some_and(|risk| !matches!(risk, "cautious" | "bold" | "reckless")) {
+            return Err(DigMinerRuntimeRepositoryError::InvalidMutation);
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = transaction.execute(
+            "UPDATE tunnels SET default_boss_risk=?1 WHERE discord_id=?2 AND guild_id=?3",
+            params![risk, discord_id, guild_id],
+        )?;
+        let status = if changed == 1 {
+            DigMinerMutationStatus::Applied
+        } else {
+            DigMinerMutationStatus::MissingTunnel
+        };
+        let snapshot = snapshot_in(&transaction, discord_id, guild_id)?;
+        transaction.commit()?;
+        Ok(outcome(status, snapshot))
+    }
+
     pub fn respec(
         &self,
         discord_id: i64,
@@ -483,7 +509,7 @@ fn tunnel_in(
                     COALESCE(stat_stamina,0),COALESCE(stat_points,5),
                     COALESCE(prestige_level,0),stat_boss_awards,
                     COALESCE(auto_buy_torch,0),COALESCE(auto_buy_hard_hat,0),
-                    COALESCE(auto_buy_grappling_hook,0)
+                    COALESCE(auto_buy_grappling_hook,0),default_boss_risk
              FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
             params![discord_id, guild_id],
             |row| {
@@ -499,6 +525,7 @@ fn tunnel_in(
                     auto_buy_torch: row.get::<_, i64>(8)? != 0,
                     auto_buy_hard_hat: row.get::<_, i64>(9)? != 0,
                     auto_buy_grappling_hook: row.get::<_, i64>(10)? != 0,
+                    default_boss_risk: row.get(11)?,
                 })
             },
         )

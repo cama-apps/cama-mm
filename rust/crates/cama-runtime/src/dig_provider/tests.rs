@@ -494,7 +494,11 @@ async fn durable_dig_delivery_keeps_stored_username_while_rendering_server_nickn
     let delivery = execution.delivery.expect("durable delivery snapshot");
 
     assert_eq!(delivery.context.display_name, "dig-test-miner");
-    let (main, _event) = provider.handler.render_delivery_responses(&delivery);
+    let (main, _event) = provider
+        .handler
+        .render_delivery_responses(&delivery)
+        .await
+        .expect("render delivery");
     assert_eq!(main.embeds[0].author_name.as_deref(), Some("Server Miner"));
     assert_eq!(delivery.context.display_name, "dig-test-miner");
 }
@@ -819,16 +823,23 @@ fn boss_encounter_embed_surfaces_the_carried_wager() {
         phase: 2,
         wager_allowed: true,
         carried_wager: Some(1_500),
-        carried_risk_tier: None,
+        carried_risk_tier: Some(cama_app::boss_duel::RiskTier::Bold),
         has_scout_lantern: false,
         luminosity: 100,
         encounter_key: "carried-wager".to_owned(),
     };
-    let response = super::boss_encounter_response(
+    let mut response = super::boss_encounter_response(
         &info,
         USER as i64,
         GUILD as i64,
         &provider.handler.state.media,
+    );
+    super::apply_default_boss_risk(&mut response, Some(cama_app::boss_duel::RiskTier::Reckless));
+    assert_eq!(response.components.len(), 1);
+    assert!(response.components[0].string_select.is_none());
+    assert_eq!(
+        response.components[0].buttons[0].custom_id,
+        format!("dig:boss:fight:carried:{USER}:{GUILD}")
     );
     let field = response.embeds[0]
         .fields
@@ -4328,17 +4339,38 @@ async fn boss_encounter_modal_and_durable_duel_execute_live_policy() {
         encounter.embeds[0].title.as_deref(),
         Some("Boss Encountered: Grothak the Unbreakable!")
     );
-    assert_eq!(encounter.components.len(), 1);
+    assert_eq!(encounter.components.len(), 2);
+    let select = encounter.components[0]
+        .string_select
+        .as_ref()
+        .expect("risk dropdown");
     assert_eq!(
-        encounter.components[0]
+        select.custom_id,
+        format!("dig:boss:select:wager:{USER}:{GUILD}")
+    );
+    assert_eq!((select.min_values, select.max_values), (1, 1));
+    assert_eq!(
+        select
+            .options
+            .iter()
+            .map(|option| (option.label.as_str(), option.value.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("Cautious", "cautious"),
+            ("Bold", "bold"),
+            ("Reckless", "reckless")
+        ]
+    );
+    assert_eq!(
+        encounter.components[1]
             .buttons
             .iter()
             .map(|button| button.label.as_str())
             .collect::<Vec<_>>(),
-        vec!["Fight", "Retreat", "Scout", "Cheer"]
+        vec!["Retreat", "Scout", "Cheer"]
     );
     assert!(
-        encounter.components[0]
+        encounter.components[1]
             .buttons
             .iter()
             .find(|button| button.label == "Scout")
@@ -4417,30 +4449,31 @@ async fn boss_encounter_modal_and_durable_duel_execute_live_policy() {
     provider
         .handler
         .handle(
-            component_request(format!("dig:boss:fight:{USER}:{GUILD}"), Vec::new()),
+            component_request(select.custom_id.clone(), vec!["bold".to_owned()]),
             fight.clone(),
         )
         .await
         .expect("fight opens modal");
     let modal = fight.modals.lock().expect("fight modals")[0].clone();
-    assert_eq!(modal.title, "Boss Fight Wager");
+    assert_eq!(modal.title, "Boss Fight Wager (bold)");
+    assert_eq!(
+        modal.custom_id,
+        format!("dig:boss:wager:{USER}:{GUILD}:bold")
+    );
     assert_eq!(
         modal
             .inputs
             .iter()
             .map(|input| (input.custom_id.as_str(), input.label.as_str()))
             .collect::<Vec<_>>(),
-        vec![
-            ("risk_tier", "Risk Tier (cautious / bold / reckless)"),
-            ("wager", "Wager Amount (max 1,000 JC)"),
-        ]
+        vec![("wager", "Wager Amount (max 1,000 JC)")]
     );
 
     let submitted = Arc::new(TestResponder::default());
     provider
         .handler
         .handle(
-            modal_request(modal.custom_id, [("risk_tier", "bold"), ("wager", "10")]),
+            modal_request(modal.custom_id, [("wager", "10")]),
             submitted.clone(),
         )
         .await
@@ -5899,7 +5932,7 @@ async fn boss_neon_miss_and_delivery_failure_remain_terminal() {
 }
 
 #[tokio::test]
-async fn boss_modal_and_resume_live_path_sends_neon_after_primary_result() {
+async fn boss_default_risk_and_resume_live_path_sends_neon_after_primary_result() {
     let lifecycle = Arc::new(StdMutex::new(Vec::new()));
     let discord = Arc::new(TestDiscord::default().with_lifecycle(Arc::clone(&lifecycle)));
     let (database, provider, discord) =
@@ -5928,14 +5961,14 @@ async fn boss_modal_and_resume_live_path_sends_neon_after_primary_result() {
     provider
         .handler
         .handle(
-            modal_request(
-                format!("dig:boss:wager:{USER}:{GUILD}"),
-                [("risk_tier", "cautious"), ("wager", "0")],
+            component_request(
+                format!("dig:boss:default:risk:cautious:{USER}:{GUILD}"),
+                Vec::new(),
             ),
             response.clone(),
         )
         .await
-        .expect("live boss modal path");
+        .expect("live boss selection path");
 
     // Resolve any authored mechanic prompt through its actual namespaced
     // component route. A terminal result is the only result allowed to
@@ -8129,4 +8162,336 @@ async fn pending_boss_delivery_for_the_current_boss_still_opens_the_encounter() 
             .any(|(_, _, emoji)| emoji == "💀"),
         "a live boss row keeps the boss reaction"
     );
+}
+
+#[tokio::test]
+async fn boss_wager_dropdown_opens_amount_only_modal_for_each_risk() {
+    let (_database, provider, _discord) = fixture();
+    for risk in ["cautious", "bold", "reckless"] {
+        let request = component_request(
+            format!("dig:boss:select:wager:{USER}:{GUILD}"),
+            vec![risk.to_owned()],
+        );
+        assert_eq!(
+            provider.handler.acknowledgement_policy(&request),
+            crate::registration::InteractionAcknowledgementPolicy::Modal,
+        );
+        let responder = Arc::new(TestResponder::default());
+        provider
+            .handler
+            .handle(request, responder.clone())
+            .await
+            .expect("risk selected");
+        assert!(responder.defers.lock().unwrap().is_empty());
+        let modals = responder.modals.lock().unwrap();
+        assert_eq!(modals.len(), 1);
+        assert_eq!(
+            modals[0].custom_id,
+            format!("dig:boss:wager:{USER}:{GUILD}:{risk}")
+        );
+        assert_eq!(modals[0].inputs.len(), 1);
+        assert_eq!(modals[0].inputs[0].custom_id, "wager");
+    }
+}
+
+#[tokio::test]
+async fn boss_dropdown_rejects_wrong_owner_guild_and_invalid_selections() {
+    let (_database, provider, _discord) = fixture();
+    for (owner, guild, values) in [
+        (USER + 1, GUILD, vec!["bold".to_owned()]),
+        (USER, GUILD + 1, vec!["bold".to_owned()]),
+        (USER, GUILD, Vec::new()),
+        (USER, GUILD, vec!["invalid".to_owned()]),
+        (USER, GUILD, vec!["bold".to_owned(), "reckless".to_owned()]),
+    ] {
+        let responder = Arc::new(TestResponder::default());
+        provider
+            .handler
+            .handle(
+                component_request(format!("dig:boss:select:wager:{owner}:{guild}"), values),
+                responder.clone(),
+            )
+            .await
+            .expect("invalid selection handled");
+        assert!(responder.modals.lock().unwrap().is_empty());
+        assert!(responder.defers.lock().unwrap().is_empty());
+        assert!(responder.responses.lock().unwrap()[0].ephemeral);
+    }
+}
+
+#[tokio::test]
+async fn legacy_boss_fight_buttons_offer_risk_dropdown() {
+    let (_database, provider, _discord) = fixture();
+    for mode in ["wager", "risk"] {
+        let responder = Arc::new(TestResponder::default());
+        provider
+            .handler
+            .handle(
+                component_request(format!("dig:boss:fight:{mode}:{USER}:{GUILD}"), Vec::new()),
+                responder.clone(),
+            )
+            .await
+            .expect("legacy button handled");
+        assert!(responder.modals.lock().unwrap().is_empty());
+        let responses = responder.responses.lock().unwrap();
+        assert!(responses[0].ephemeral);
+        assert_eq!(
+            responses[0].components[0]
+                .string_select
+                .as_ref()
+                .unwrap()
+                .custom_id,
+            format!("dig:boss:select:{mode}:{USER}:{GUILD}")
+        );
+    }
+}
+
+#[tokio::test]
+async fn boss_default_profile_dropdown_saves_all_risks_and_can_restore_asking() {
+    use cama_app::boss_duel::RiskTier;
+    use cama_app::dig_miner_runtime::DigMinerRuntimeService;
+
+    let (database, provider, _discord) = fixture();
+    let responder = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(
+            grouped_command_request(24, "miner", "profile", Vec::new()),
+            responder.clone(),
+        )
+        .await
+        .expect("miner profile");
+    let profile = responder.followups.lock().unwrap()[0].clone();
+    let select = profile.components[0]
+        .string_select
+        .as_ref()
+        .expect("default setting");
+    assert_eq!(
+        select
+            .options
+            .iter()
+            .map(|option| option.value.as_str())
+            .collect::<Vec<_>>(),
+        vec!["ask", "cautious", "bold", "reckless"]
+    );
+
+    for (value, expected) in [
+        ("cautious", Some(RiskTier::Cautious)),
+        ("bold", Some(RiskTier::Bold)),
+        ("reckless", Some(RiskTier::Reckless)),
+        ("ask", None),
+    ] {
+        let responder = Arc::new(TestResponder::default());
+        provider
+            .handler
+            .handle(
+                component_request(select.custom_id.clone(), vec![value.to_owned()]),
+                responder.clone(),
+            )
+            .await
+            .expect("save default risk");
+        assert_eq!(*responder.defers.lock().unwrap(), vec![true]);
+        let updated = responder.original_edits.lock().unwrap()[0].clone();
+        let field = updated.embeds[0]
+            .fields
+            .iter()
+            .find(|field| field.name == "Default Boss Risk")
+            .unwrap();
+        assert!(
+            field
+                .value
+                .contains(expected.map_or("Ask every time", super::risk_tier_label))
+        );
+        assert_eq!(
+            DigMinerRuntimeService::sqlite(database.path())
+                .default_boss_risk(USER as i64, GUILD as i64)
+                .unwrap(),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn boss_default_setting_rejects_foreign_profiles_and_invalid_choices() {
+    let (database, provider, _discord) = fixture();
+    for (owner, guild, values) in [
+        (USER + 1, GUILD, vec!["bold".to_owned()]),
+        (USER, GUILD + 1, vec!["bold".to_owned()]),
+        (USER, GUILD, vec!["invalid".to_owned()]),
+        (USER, GUILD, Vec::new()),
+        (USER, GUILD, vec!["bold".to_owned(), "reckless".to_owned()]),
+    ] {
+        let responder = Arc::new(TestResponder::default());
+        provider
+            .handler
+            .handle(
+                component_request(format!("dig:miner:bossrisk:{owner}:{guild}"), values),
+                responder.clone(),
+            )
+            .await
+            .expect("invalid preference handled");
+        assert!(responder.responses.lock().unwrap()[0].ephemeral);
+        assert!(responder.original_edits.lock().unwrap().is_empty());
+    }
+    assert_eq!(
+        cama_app::dig_miner_runtime::DigMinerRuntimeService::sqlite(database.path())
+            .default_boss_risk(USER as i64, GUILD as i64)
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn boss_saved_default_bypasses_dropdown_after_restart_and_clear_restores_it() {
+    use cama_app::boss_duel::RiskTier;
+    use cama_app::dig_miner_runtime::DigMinerRuntimeService;
+
+    let (database, provider, _discord) = fixture();
+    let now = 1_700_000_000_i64;
+    let _delivery = committed_boss_delivery(&database, &provider, now).await;
+    let service = DigMinerRuntimeService::sqlite(database.path());
+    service
+        .set_default_boss_risk(USER as i64, GUILD as i64, Some(RiskTier::Bold), now)
+        .unwrap();
+    let restarted = DigRegistrationProvider::with_media(
+        database.path(),
+        &config(),
+        Arc::new(TestDiscord::default()),
+        None,
+        Arc::clone(&provider.handler.state.media),
+    );
+    let encounter = restarted
+        .handler
+        .render_boss_encounter(USER as i64, GUILD as i64, now)
+        .await
+        .unwrap();
+    assert!(
+        encounter
+            .components
+            .iter()
+            .all(|row| row.string_select.is_none())
+    );
+    let fight = &encounter.components[0].buttons[0];
+    assert_eq!(fight.label, "Fight (Bold)");
+    assert_eq!(
+        fight.custom_id,
+        format!("dig:boss:default:wager:bold:{USER}:{GUILD}")
+    );
+    let request = component_request(fight.custom_id.clone(), Vec::new());
+    assert_eq!(
+        restarted.handler.acknowledgement_policy(&request),
+        crate::registration::InteractionAcknowledgementPolicy::Modal
+    );
+    let responder = Arc::new(TestResponder::default());
+    restarted
+        .handler
+        .handle(request, responder.clone())
+        .await
+        .unwrap();
+    assert!(responder.defers.lock().unwrap().is_empty());
+    let modal = responder.modals.lock().unwrap()[0].clone();
+    assert_eq!(modal.inputs.len(), 1);
+    assert_eq!(modal.inputs[0].custom_id, "wager");
+    assert_eq!(
+        modal.custom_id,
+        format!("dig:boss:wager:{USER}:{GUILD}:bold")
+    );
+
+    service
+        .set_default_boss_risk(USER as i64, GUILD as i64, None, now)
+        .unwrap();
+    let encounter = restarted
+        .handler
+        .render_boss_encounter(USER as i64, GUILD as i64, now)
+        .await
+        .unwrap();
+    assert!(encounter.components[0].string_select.is_some());
+}
+
+#[tokio::test]
+async fn boss_durable_delivery_uses_saved_default() {
+    let (database, provider, discord) = fixture();
+    let now = 1_700_000_000_i64;
+    let delivery = committed_boss_delivery(&database, &provider, now).await;
+    cama_app::dig_miner_runtime::DigMinerRuntimeService::sqlite(database.path())
+        .set_default_boss_risk(
+            USER as i64,
+            GUILD as i64,
+            Some(cama_app::boss_duel::RiskTier::Reckless),
+            now,
+        )
+        .unwrap();
+    provider
+        .handler
+        .deliver_to_channel(&delivery)
+        .await
+        .unwrap();
+    let public = discord.public.lock().unwrap();
+    assert!(
+        public[0]
+            .components
+            .iter()
+            .all(|row| row.string_select.is_none())
+    );
+    assert_eq!(
+        public[0].components[0].buttons[0].custom_id,
+        format!("dig:boss:default:wager:reckless:{USER}:{GUILD}")
+    );
+}
+
+#[tokio::test]
+async fn boss_default_never_replaces_carried_wager_in_delivery() {
+    let (database, provider, _discord) = fixture();
+    let now = 1_700_000_000_i64;
+    let delivery = committed_boss_delivery(&database, &provider, now).await;
+    let mut delivery = provider.handler.prepare_delivery(&delivery).await.unwrap();
+    delivery.render.boss.as_mut().unwrap().carried_wager = 100;
+    cama_app::dig_miner_runtime::DigMinerRuntimeService::sqlite(database.path())
+        .set_default_boss_risk(
+            USER as i64,
+            GUILD as i64,
+            Some(cama_app::boss_duel::RiskTier::Reckless),
+            now,
+        )
+        .unwrap();
+    let (response, _) = provider
+        .handler
+        .render_delivery_responses(&delivery)
+        .await
+        .unwrap();
+    assert!(
+        response
+            .components
+            .iter()
+            .all(|row| row.string_select.is_none())
+    );
+    assert_eq!(
+        response.components[0].buttons[0].custom_id,
+        format!("dig:boss:fight:carried:{USER}:{GUILD}")
+    );
+}
+
+#[tokio::test]
+async fn boss_default_fight_rejects_wrong_owner_guild_and_invalid_risk() {
+    let (_database, provider, _discord) = fixture();
+    for (owner, guild, risk) in [
+        (USER + 1, GUILD, "bold"),
+        (USER, GUILD + 1, "bold"),
+        (USER, GUILD, "invalid"),
+    ] {
+        let responder = Arc::new(TestResponder::default());
+        provider
+            .handler
+            .handle(
+                component_request(
+                    format!("dig:boss:default:wager:{risk}:{owner}:{guild}"),
+                    Vec::new(),
+                ),
+                responder.clone(),
+            )
+            .await
+            .unwrap();
+        assert!(responder.responses.lock().unwrap()[0].ephemeral);
+        assert!(responder.modals.lock().unwrap().is_empty());
+    }
 }

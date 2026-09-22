@@ -11,6 +11,7 @@ use cama_domain::dig_stats::{MinerStats, miner_stat_effects};
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::boss_duel::RiskTier;
 use crate::dig_service::DIG_STARTING_STAT_POINTS;
 use crate::dig_social_runtime::FastrandDigSocialEntropy;
 use crate::dig_tunnel_naming::{DigTunnelNamingService, TunnelNameEntropy};
@@ -52,6 +53,7 @@ pub struct DigMinerProfile {
     pub effects: DigMinerEffects,
     pub awarded_bosses: Vec<i64>,
     pub auto_buy: DigMinerAutoBuy,
+    pub default_boss_risk: Option<RiskTier>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -263,6 +265,43 @@ impl DigMinerRuntimeService {
         }
     }
 
+    pub fn set_default_boss_risk(
+        &self,
+        discord_id: i64,
+        guild_id: i64,
+        risk: Option<RiskTier>,
+        now: i64,
+    ) -> Result<DigMinerProfile, DigMinerRuntimeError> {
+        let mut entropy = FastrandDigSocialEntropy::default();
+        self.ensure_profile(discord_id, guild_id, now, &mut entropy)?;
+        let stored_risk = risk.map(|risk| match risk {
+            RiskTier::Cautious => "cautious",
+            RiskTier::Bold => "bold",
+            RiskTier::Reckless => "reckless",
+        });
+        let outcome = self
+            .repository
+            .set_default_boss_risk(discord_id, guild_id, stored_risk)?;
+        match outcome.status {
+            DigMinerMutationStatus::Applied => profile_from_snapshot(&outcome.snapshot),
+            status => Err(unexpected_status("default boss risk", status)),
+        }
+    }
+
+    pub fn default_boss_risk(
+        &self,
+        discord_id: i64,
+        guild_id: i64,
+    ) -> Result<Option<RiskTier>, DigMinerRuntimeError> {
+        let snapshot = self.repository.snapshot(discord_id, guild_id)?;
+        parse_default_boss_risk(
+            snapshot
+                .tunnel
+                .as_ref()
+                .and_then(|tunnel| tunnel.default_boss_risk.as_deref()),
+        )
+    }
+
     pub fn respec(
         &self,
         discord_id: i64,
@@ -351,12 +390,25 @@ fn profile_from_snapshot(
         stats,
         effects: effects_from_stats(stats),
         awarded_bosses: stat_boss_awards(tunnel),
+        default_boss_risk: parse_default_boss_risk(tunnel.default_boss_risk.as_deref())?,
         auto_buy: DigMinerAutoBuy {
             torch: tunnel.auto_buy_torch,
             hard_hat: tunnel.auto_buy_hard_hat,
             grappling_hook: tunnel.auto_buy_grappling_hook,
         },
     })
+}
+
+fn parse_default_boss_risk(raw: Option<&str>) -> Result<Option<RiskTier>, DigMinerRuntimeError> {
+    match raw {
+        None => Ok(None),
+        Some("cautious") => Ok(Some(RiskTier::Cautious)),
+        Some("bold") => Ok(Some(RiskTier::Bold)),
+        Some("reckless") => Ok(Some(RiskTier::Reckless)),
+        Some(_) => Err(DigMinerRuntimeError::InvalidState(
+            "invalid default boss risk".to_owned(),
+        )),
+    }
 }
 
 fn stats_from_tunnel(tunnel: &DigMinerTunnelSnapshot) -> DigMinerStats {
