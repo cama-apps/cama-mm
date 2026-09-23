@@ -424,7 +424,10 @@ pub fn infer_lobby_kind(
     explicit.or_else(|| (memberships.len() == 1).then(|| memberships[0]))
 }
 
-pub const LOBBY_REACTIONS: [&str; 4] = ["⚔️", "jopacoin", "📋", "🔔"];
+/// Reactions that may be added to the lobby starter message for optional
+/// features. Seating is handled by the Join/Leave components; the old sword
+/// reaction was a legacy join/shout-out affordance and is intentionally gone.
+pub const LOBBY_REACTIONS: [&str; 3] = ["jopacoin", "📋", "🔔"];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NewLobbyBranchOutcomes {
@@ -1335,7 +1338,8 @@ mod tests {
         assert_eq!(lobby.created_by, Some(UserId(1)));
         assert!(lobby.contains(UserId(1)));
         assert!(result.followup.content.contains("created and joined"));
-        assert_eq!(LOBBY_REACTIONS[2], "📋");
+        assert_eq!(LOBBY_REACTIONS[1], "📋");
+        assert!(LOBBY_REACTIONS.iter().all(|reaction| *reaction != "⚔️"));
         assert!(
             LOBBY_REACTIONS
                 .iter()
@@ -1376,7 +1380,7 @@ mod tests {
                 thread_result: Ok(ChannelId(999)),
             },
         );
-        assert_eq!(report.reactions_attempted, ["⚔️", "jopacoin"]);
+        assert_eq!(report.reactions_attempted, ["jopacoin", "📋"]);
         assert_eq!(report.persisted_thread_id, Some(ChannelId(999)));
         assert!(report.auto_join_allowed);
         assert!(report.followup.content.contains("created!"));

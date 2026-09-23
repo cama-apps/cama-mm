@@ -558,6 +558,13 @@ pub trait DiscordTransport: Send + Sync {
 
     async fn archive_thread(&self, thread_id: u64, name: &str, locked: bool) -> Result<(), String>;
 
+    /// Reopen an archived thread without changing its name, lock state, or
+    /// any other thread metadata. This is used by recovery before editing a
+    /// bot-authored message in a lobby thread.
+    async fn unarchive_thread(&self, _thread_id: u64) -> Result<(), String> {
+        Err("Discord transport does not support unarchiving threads".to_owned())
+    }
+
     /// Edit a thread's live lifecycle state without forcing archival.
     ///
     /// The legacy boundary only exposed `archive_thread`, so alternate/test

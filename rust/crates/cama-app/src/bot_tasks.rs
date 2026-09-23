@@ -507,6 +507,9 @@ pub fn reconcile_lobby_message(script: &[ReconcileAttempt]) -> ReconcileReport {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReactionKind {
+    /// Retained so old gateway payloads can still be classified. Sword
+    /// reactions no longer have a lobby action; seating uses Join/Leave
+    /// components.
     Sword,
     Jopacoin,
     Bell,
@@ -557,7 +560,6 @@ pub struct ReactionPlan {
     pub use_full_message_fetch: bool,
     pub remove_reaction: bool,
     pub send_gamba_thread_message: bool,
-    pub send_ready_thread_message: bool,
 }
 
 #[must_use]
@@ -581,15 +583,13 @@ pub fn route_reaction_add(input: &ReactionInput) -> ReactionPlan {
             send_gamba_thread_message: input.has_thread,
             ..ReactionPlan::default()
         },
-        // A sword is a shout-out, never a join: reactions can't be answered
-        // ephemerally, so seating moved to the Join button.
-        ReactionKind::Sword => ReactionPlan {
-            send_ready_thread_message: input.has_thread,
-            ..ReactionPlan::default()
-        },
-        ReactionKind::Bell | ReactionKind::Ready | ReactionKind::Other | ReactionKind::Jopacoin => {
-            ReactionPlan::default()
-        }
+        // Sword reactions are a retired seating/shout-out affordance. Keep
+        // the legacy kind for decoding, but leave the event inert.
+        ReactionKind::Sword
+        | ReactionKind::Bell
+        | ReactionKind::Ready
+        | ReactionKind::Other
+        | ReactionKind::Jopacoin => ReactionPlan::default(),
     }
 }
 

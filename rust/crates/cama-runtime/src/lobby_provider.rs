@@ -79,7 +79,7 @@ pub use crate::runtime_ports::{
 };
 
 const LEGACY_FROGLING_EMOJI_ID: u64 = 1_463_270_458_848_842_003;
-const SWORD_EMOJI: &str = "⚔️";
+const LEGACY_SWORD_EMOJI: &str = "⚔️";
 const READY_EMOJI: &str = "✅";
 const BELL_EMOJI: &str = "🔔";
 const CLIPBOARD_EMOJI: &str = "📋";
@@ -424,11 +424,8 @@ fn parse_lobby_button_id(custom_id: &str) -> Option<(LobbyButtonAction, LobbySco
 
 fn lobby_buttons(scope: LobbyScope) -> InteractionActionRow {
     InteractionActionRow::buttons(vec![
-        InteractionButton::new(
-            lobby_button_id(scope, LobbyButtonAction::Join),
-            format!("{SWORD_EMOJI} Join"),
-        )
-        .style(InteractionButtonStyle::Success),
+        InteractionButton::new(lobby_button_id(scope, LobbyButtonAction::Join), "Join")
+            .style(InteractionButtonStyle::Success),
         InteractionButton::new(lobby_button_id(scope, LobbyButtonAction::Leave), "Leave")
             .style(InteractionButtonStyle::Secondary),
     ])
@@ -526,6 +523,7 @@ struct LobbyRuntimeState {
     join_observer: RwLock<Option<Arc<dyn LobbyJoinObserver>>>,
     push_notifications: RwLock<Option<PushNotificationHooks>>,
     membership_rate_limiter: StdMutex<RateLimiter>,
+    display_locks: StdMutex<BTreeMap<LobbyScope, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 #[derive(Debug, Error)]
@@ -1163,38 +1161,218 @@ impl LobbyRuntimeState {
             })
     }
 
+    fn display_lock(&self, scope: LobbyScope) -> Arc<tokio::sync::Mutex<()>> {
+        self.display_locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(scope)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
     async fn sync_lobby_display(&self, scope: LobbyScope) -> Result<(), String> {
+        let lock = self.display_lock(scope);
+        let _guard = lock.lock().await;
         let lobby = self
             .service
             .get_lobby(scope)
             .ok_or_else(|| "lobby no longer exists".to_owned())?;
-        let channel_id = lobby
-            .message_ids
-            .channel_id
-            .ok_or_else(|| "lobby has no channel id".to_owned())?;
-        let message_id = lobby
-            .message_ids
-            .message_id
-            .ok_or_else(|| "lobby has no message id".to_owned())?;
         let service = Arc::clone(&self.service);
         let previews = self.first_game_previews.clone();
         let name_overrides = self.player_name_overrides(scope.guild_id, &lobby.players);
+        let lobby_for_embed = lobby.clone();
         let embed = tokio::task::spawn_blocking(move || {
             interaction_embed(service.build_lobby_embed_with_name_overrides(
-                &lobby,
+                &lobby_for_embed,
                 Some(&previews),
                 Some(&name_overrides),
             ))
         })
         .await
         .map_err(|error| format!("lobby display render task failed: {error}"))?;
-        self.transport
+        self.publish_lobby_display(
+            &lobby,
+            DiscordMessage::silent(lobby_display_response(scope, embed)),
+        )
+        .await
+    }
+
+    /// Caller holds the display lock. Discord's thread starter is a preview of
+    /// the parent message, so its buttons cannot be clicked inside the thread.
+    /// Persist a separate bot-authored message there and repaint both surfaces.
+    async fn publish_lobby_display(
+        &self,
+        lobby: &LobbySnapshot,
+        message: DiscordMessage,
+    ) -> Result<(), String> {
+        let ids = &lobby.message_ids;
+        let channel_id = ids.channel_id.ok_or("lobby has no channel id")?;
+        let message_id = ids.message_id.ok_or("lobby has no message id")?;
+        let parent_result = self
+            .transport
             .edit_message(
                 to_u64(channel_id.0)?,
                 to_u64(message_id.0)?,
-                DiscordMessage::silent(lobby_display_response(scope, embed)).preserving_content(),
+                message.clone().preserving_content(),
             )
-            .await
+            .await;
+        // A deleted parent must not prevent the thread controls from refreshing.
+        let thread_result = self.publish_thread_display(lobby, message).await;
+        parent_result.and(thread_result)
+    }
+
+    async fn publish_thread_display(
+        &self,
+        lobby: &LobbySnapshot,
+        message: DiscordMessage,
+    ) -> Result<(), String> {
+        let Some(thread_id) = lobby.message_ids.thread_id else {
+            return Ok(());
+        };
+        let channel_id = to_u64(thread_id.0)?;
+        if let Some(message_id) = lobby
+            .message_ids
+            .embed_message_id
+            .filter(|id| Some(*id) != lobby.message_ids.message_id)
+        {
+            let result = self
+                .edit_thread_display(
+                    channel_id,
+                    to_u64(message_id.0)?,
+                    message.clone().preserving_content(),
+                )
+                .await;
+            // Only replace a message when Discord confirms it is missing.
+            if result.is_ok()
+                || self
+                    .transport
+                    .fetch_message(channel_id, to_u64(message_id.0)?)
+                    .await?
+                    .is_some()
+            {
+                return result;
+            }
+        }
+        let parent_id = lobby
+            .message_ids
+            .message_id
+            .ok_or("lobby has no message id")?;
+        let delivery_key = format!("lobby:{}", parent_id.0);
+        let receipt = match self
+            .transport
+            .find_message_by_delivery_key(
+                channel_id,
+                &delivery_key,
+                lobby.created_at_ns / 1_000_000_000,
+                100,
+            )
+            .await?
+        {
+            Some(receipt) => {
+                self.edit_thread_display(
+                    channel_id,
+                    receipt.message_id,
+                    message.preserving_content(),
+                )
+                .await?;
+                receipt
+            }
+            None => {
+                self.transport
+                    .send_message_with_delivery_key(channel_id, &delivery_key, message)
+                    .await?
+            }
+        };
+        let mut ids = lobby.message_ids.clone();
+        ids.embed_message_id = Some(AppMessageId(
+            i64::try_from(receipt.message_id).map_err(|_| "thread lobby message id overflow")?,
+        ));
+        let service = Arc::clone(&self.service);
+        let scope = lobby.scope;
+        let saved =
+            tokio::task::spawn_blocking(move || service.try_set_lobby_message_ids(scope, ids))
+                .await
+                .map_err(|error| format!("thread lobby persistence task failed: {error}"))?
+                .map_err(|error| error.to_string())?;
+        if !saved {
+            let _ = self
+                .transport
+                .delete_message(channel_id, receipt.message_id)
+                .await;
+            return Err("lobby closed before thread controls were saved".to_owned());
+        }
+        Ok(())
+    }
+
+    async fn edit_thread_display(
+        &self,
+        thread_id: u64,
+        message_id: u64,
+        message: DiscordMessage,
+    ) -> Result<(), String> {
+        let result = self
+            .transport
+            .edit_message(thread_id, message_id, message.clone())
+            .await;
+        if result.is_err() && self.transport.unarchive_thread(thread_id).await.is_ok() {
+            // Existing controls can survive a restart in an idle, archived
+            // thread. Reopen it without changing its name or lock settings.
+            return self
+                .transport
+                .edit_message(thread_id, message_id, message)
+                .await;
+        }
+        result
+    }
+
+    async fn close_lobby_display(
+        &self,
+        scope: LobbyScope,
+        ids: &LobbyMessageIds,
+        reason: &str,
+    ) -> Result<(), String> {
+        let lock = self.display_lock(scope);
+        let _guard = lock.lock().await;
+        let message = DiscordMessage::silent(
+            InteractionResponse::message("").embed(
+                InteractionEmbed::titled(format!("{} — {reason}", scope.kind.label()))
+                    .description("This lobby is closed.")
+                    .color(0xe7_4c_3c),
+            ),
+        )
+        .preserving_content();
+        let mut errors = Vec::new();
+        for (channel_id, message_id) in ids.channel_id.zip(ids.message_id).into_iter().chain(
+            ids.thread_id.zip(
+                ids.embed_message_id
+                    .filter(|id| Some(*id) != ids.message_id),
+            ),
+        ) {
+            let result = if Some(channel_id) == ids.thread_id {
+                self.edit_thread_display(
+                    to_u64(channel_id.0)?,
+                    to_u64(message_id.0)?,
+                    message.clone(),
+                )
+                .await
+            } else {
+                self.transport
+                    .edit_message(
+                        to_u64(channel_id.0)?,
+                        to_u64(message_id.0)?,
+                        message.clone(),
+                    )
+                    .await
+            };
+            if let Err(error) = result {
+                errors.push(error);
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
     }
 }
 
@@ -1640,6 +1818,14 @@ impl MatchLobbyPort {
         lobby_kind: LobbyKind,
     ) -> Result<bool, String> {
         let scope = LobbyScope::new(AppGuildId(guild_id), lobby_kind);
+        if let Some(lobby) = self.state.service.get_lobby(scope)
+            && let Err(error) = self
+                .state
+                .close_lobby_display(scope, &lobby.message_ids, "Match Created")
+                .await
+        {
+            warn!(%error, ?scope, "failed to retire shuffled lobby controls");
+        }
         let state = Arc::clone(&self.state);
         let reset = tokio::task::spawn_blocking(move || state.service.try_reset_lobby(scope))
             .await
@@ -1695,6 +1881,8 @@ impl FirstGamePoolDisplayPort for FirstGamePoolLobbyDisplay {
             let scope = LobbyScope::new(guild_id, kind);
             let operation_lock = self.state.commands.scope_operation_lock(scope);
             let _guard = operation_lock.lock().await;
+            let display_lock = self.state.display_lock(scope);
+            let _display_guard = display_lock.lock().await;
             let player_ids = self
                 .state
                 .service
@@ -1707,11 +1895,10 @@ impl FirstGamePoolDisplayPort for FirstGamePoolLobbyDisplay {
                 let Some(lobby) = state.service.get_lobby(scope) else {
                     return Ok(None);
                 };
-                let (Some(channel_id), Some(message_id)) =
-                    (lobby.message_ids.channel_id, lobby.message_ids.message_id)
-                else {
+                if lobby.message_ids.channel_id.is_none() || lobby.message_ids.message_id.is_none()
+                {
                     return Ok(None);
-                };
+                }
                 let previews = LoadedFirstGamePoolPreviews(state.first_game_previews.load(
                     guild_id,
                     DOTA_BET_SEED_AMOUNT,
@@ -1723,23 +1910,16 @@ impl FirstGamePoolDisplayPort for FirstGamePoolLobbyDisplay {
                     Some(&name_overrides),
                 ));
                 Ok::<_, String>(Some((
-                    to_u64(channel_id.0)?,
-                    to_u64(message_id.0)?,
-                    DiscordMessage::silent(lobby_display_response(scope, embed))
-                        .preserving_content(),
+                    lobby,
+                    DiscordMessage::silent(lobby_display_response(scope, embed)),
                 )))
             })
             .await
             .map_err(|error| format!("first-game lobby render task failed: {error}"))??;
-            let Some((channel_id, message_id, message)) = prepared else {
+            let Some((lobby, message)) = prepared else {
                 continue;
             };
-            if let Err(error) = self
-                .state
-                .transport
-                .edit_message(channel_id, message_id, message)
-                .await
-            {
+            if let Err(error) = self.state.publish_lobby_display(&lobby, message).await {
                 failures.push(format!("{}: {error}", lobby_kind_value(kind)));
             }
         }
@@ -1849,6 +2029,7 @@ impl LobbyRegistrationProvider {
             join_observer: RwLock::new(None),
             push_notifications: RwLock::new(None),
             membership_rate_limiter: StdMutex::new(RateLimiter::new()),
+            display_locks: StdMutex::default(),
         });
         Ok(Self {
             handler: Arc::new(LobbyInteractionHandler {
@@ -3090,11 +3271,7 @@ impl LobbyInteractionHandler {
                     value: thread_id.to_string(),
                 }
             })?)),
-            embed_message_id: Some(AppMessageId(i64::try_from(receipt.message_id).map_err(
-                |_| InteractionHandlerError::Transformer {
-                    value: receipt.message_id.to_string(),
-                },
-            )?)),
+            embed_message_id: None,
             origin_channel_id: Some(channel_id),
         };
         let state = Arc::clone(&self.state);
@@ -3108,14 +3285,6 @@ impl LobbyInteractionHandler {
             self.state
                 .transport
                 .pin_message(receipt.channel_id, receipt.message_id)
-                .await,
-            self.state
-                .transport
-                .add_reaction(
-                    receipt.channel_id,
-                    receipt.message_id,
-                    &DiscordEmoji::unicode(SWORD_EMOJI),
-                )
                 .await,
             self.state
                 .transport
@@ -3617,10 +3786,7 @@ impl LobbyInteractionHandler {
             .seat_registered_player(scope, joiner, rate_limit_lease)
             .await?;
         let joined = matches!(seat, SeatOutcome::Joined { .. });
-        if !joined
-            && !reply.created
-            && let Err(error) = self.state.sync_lobby_display(scope).await
-        {
+        if !joined && let Err(error) = self.state.sync_lobby_display(scope).await {
             warn!(%error, ?scope, "failed to refresh existing lobby display");
         }
         let label = scope.kind.label();
@@ -3657,10 +3823,6 @@ impl LobbyInteractionHandler {
         discord_display_name: Option<&str>,
         joined_at_ns: i64,
     ) -> Option<ConfirmedLobbyJoin> {
-        if let Err(error) = self.state.sync_lobby_display(scope).await {
-            warn!(%error, ?scope, "lobby display sync after join failed");
-        }
-        self.state.sync_readycheck_with_lobby(scope).await;
         let lobby = self.state.service.get_lobby(scope)?;
         let player_display_name = self
             .state
@@ -3695,6 +3857,13 @@ impl LobbyInteractionHandler {
                 );
             }
         }
+
+        // Posting the join line reopens an automatically archived thread before
+        // editing its roster message (Discord rejects edits while archived).
+        if let Err(error) = self.state.sync_lobby_display(scope).await {
+            warn!(%error, ?scope, "lobby display sync after join failed");
+        }
+        self.state.sync_readycheck_with_lobby(scope).await;
 
         let (Ok(guild_id), Ok(player_snowflake)) =
             (u64::try_from(scope.guild_id.0), u64::try_from(player_id.0))
@@ -3760,19 +3929,13 @@ impl LobbyInteractionHandler {
     }
 
     async fn best_effort_leave_publication(&self, scope: LobbyScope, player_id: AppUserId) {
-        if let Err(error) = self.state.sync_lobby_display(scope).await {
-            warn!(%error, ?scope, "lobby display sync after leave failed");
-        }
-        self.state.sync_readycheck_with_lobby(scope).await;
-        let Some(thread_id) = self
+        if let Some(thread_id) = self
             .state
             .service
             .get_lobby(scope)
             .and_then(|lobby| lobby.message_ids.thread_id)
-        else {
-            return;
-        };
-        if let Ok(thread_id) = to_u64(thread_id.0) {
+            && let Ok(thread_id) = to_u64(thread_id.0)
+        {
             let content = format!("🚪 <@{}> left.", player_id.0);
             let _ = self
                 .state
@@ -3783,6 +3946,10 @@ impl LobbyInteractionHandler {
                 )
                 .await;
         }
+        if let Err(error) = self.state.sync_lobby_display(scope).await {
+            warn!(%error, ?scope, "lobby display sync after leave failed");
+        }
+        self.state.sync_readycheck_with_lobby(scope).await;
     }
 }
 
@@ -4098,24 +4265,8 @@ impl LobbyRuntimeTransport for InteractionLobbyTransport {
         message_ids: &LobbyMessageIds,
         reason: &str,
     ) -> Result<(), String> {
-        let (Some(channel_id), Some(message_id)) = (message_ids.channel_id, message_ids.message_id)
-        else {
-            return Ok(());
-        };
         self.state
-            .transport
-            .edit_message(
-                to_u64(channel_id.0)?,
-                to_u64(message_id.0)?,
-                DiscordMessage::silent(
-                    InteractionResponse::message("").embed(
-                        InteractionEmbed::titled(format!("{} — {reason}", scope.kind.label()))
-                            .description("This lobby is closed.")
-                            .color(0xe7_4c_3c),
-                    ),
-                )
-                .preserving_content(),
-            )
+            .close_lobby_display(scope, message_ids, reason)
             .await
     }
 
@@ -4249,6 +4400,14 @@ impl GatewayEventObserver for LobbyGatewayObserver {
         for attempt in 0..RECONCILE_ATTEMPTS {
             let mut failed = Vec::new();
             for lobby in pending {
+                let operation_lock = self.state.commands.scope_operation_lock(lobby.scope);
+                let _guard = operation_lock.lock().await;
+                let Some(current) = self.state.service.get_lobby(lobby.scope) else {
+                    continue;
+                };
+                if current.message_ids.message_id != lobby.message_ids.message_id {
+                    continue;
+                }
                 let channel_id = lobby.message_ids.channel_id.expect("filtered channel id");
                 let message_id = lobby.message_ids.message_id.expect("filtered message id");
                 let result = async {
@@ -4270,6 +4429,20 @@ impl GatewayEventObserver for LobbyGatewayObserver {
                                 to_u64(channel_id.0)?,
                                 to_u64(message_id.0)?,
                                 &DiscordEmoji::unicode(SPECTATOR_EMOJI),
+                            )
+                            .await?;
+                    }
+                    if message
+                        .reactions
+                        .iter()
+                        .any(|emoji| emoji.id.is_none() && emoji.name == LEGACY_SWORD_EMOJI)
+                    {
+                        self.state
+                            .transport
+                            .clear_reaction(
+                                to_u64(channel_id.0)?,
+                                to_u64(message_id.0)?,
+                                &DiscordEmoji::unicode(LEGACY_SWORD_EMOJI),
                             )
                             .await?;
                     }
@@ -4608,38 +4781,6 @@ impl RawReactionObserver for LobbyRawReactionObserver {
                 {
                     debug!(%error, "gamba spectator Neon hook failed");
                 }
-            }
-            return Ok(());
-        }
-        if event.emoji.name == SWORD_EMOJI && event.kind == RawReactionKind::Add {
-            // The sword no longer seats anyone -- a reaction can't get an
-            // ephemeral reply, so joining moved to the Join button. Like the
-            // jopacoin react it is now a shout-out into the lobby thread,
-            // which also silently subscribes the reactor to the thread.
-            let Some(thread_id) = self
-                .state
-                .service
-                .get_lobby(scope)
-                .and_then(|lobby| lobby.message_ids.thread_id)
-            else {
-                return Ok(());
-            };
-            if let Err(error) = self
-                .state
-                .transport
-                .send_message(
-                    to_u64(thread_id.0)?,
-                    DiscordMessage::mentioning(
-                        InteractionResponse::message(format!(
-                            "{SWORD_EMOJI} <@{}> is ready to play a 5v5 Dota Challenge!",
-                            event.user_id
-                        )),
-                        BTreeSet::from([event.user_id]),
-                    ),
-                )
-                .await
-            {
-                warn!(%error, ?scope, "sword shout-out thread message failed");
             }
             return Ok(());
         }

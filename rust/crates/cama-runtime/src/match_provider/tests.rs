@@ -6537,7 +6537,16 @@ async fn test_execute_shuffle_refreshes_pool_exactly_once_on_later_failure() {
         result.is_err(),
         "publication failure retains work for retry"
     );
-    assert_eq!(discord.message_edits().len(), baseline_edits + 1);
+    let edits = discord.message_edits();
+    let updates = &edits[baseline_edits..];
+    let refreshes = updates
+        .iter()
+        .filter(|(_, _, message)| !message.response.components.is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(refreshes.len(), 2, "one pool refresh on each lobby surface");
+    assert_ne!(refreshes[0].0, refreshes[1].0, "parent and thread");
+    assert_eq!(refreshes[0].2, refreshes[1].2);
+    assert_eq!(updates.len() - refreshes.len(), 0, "closed source controls");
     let pending = PendingMatchRepository::new(fixture.database.path())
         .pending_matches(GUILD)
         .expect("read failed-finalize shuffle")
@@ -6570,7 +6579,16 @@ async fn test_execute_shuffle_refreshes_pool_exactly_once_after_finalize() {
         .await
         .expect("finalize source shuffle");
 
-    assert_eq!(discord.message_edits().len(), baseline_edits + 1);
+    let edits = discord.message_edits();
+    let updates = &edits[baseline_edits..];
+    let refreshes = updates
+        .iter()
+        .filter(|(_, _, message)| !message.response.components.is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(refreshes.len(), 2, "one pool refresh on each lobby surface");
+    assert_ne!(refreshes[0].0, refreshes[1].0, "parent and thread");
+    assert_eq!(refreshes[0].2, refreshes[1].2);
+    assert_eq!(updates.len() - refreshes.len(), 2, "closed source controls");
     assert!(
         fixture
             .provider
