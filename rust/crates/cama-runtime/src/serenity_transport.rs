@@ -4377,6 +4377,18 @@ impl DiscordTransport for SerenityDiscordTransport {
             .map_err(|error| error.to_string())
     }
 
+    async fn unarchive_thread(&self, thread_id: u64) -> Result<(), String> {
+        let context = self.context()?;
+        ChannelId::new(thread_id)
+            .edit_thread(
+                (&context.cache, context.http.as_ref()),
+                thread_unarchive_edit(),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
     async fn edit_thread(
         &self,
         thread_id: u64,
@@ -4888,6 +4900,10 @@ fn thread_lifecycle_edit(name: &str, archived: bool, locked: bool) -> EditThread
         .name(name)
         .archived(archived)
         .locked(locked)
+}
+
+fn thread_unarchive_edit() -> EditThread<'static> {
+    EditThread::new().archived(false)
 }
 
 /// Project cached voice states into the domain Go Live decision.

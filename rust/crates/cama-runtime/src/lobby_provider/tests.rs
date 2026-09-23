@@ -131,7 +131,7 @@ async fn test_addfake_refreshes_partial_lobby_message_without_fetch() {
         .expect("add fake user and refresh");
 
     assert_eq!(transport.fetch_count(), fetches_before);
-    assert_eq!(transport.edit_count(), edits_before + 1);
+    assert_eq!(transport.edit_count(), edits_before + 2);
 }
 
 #[tokio::test]
@@ -154,7 +154,7 @@ async fn test_filllobby_refreshes_partial_lobby_message_without_fetch() {
         runtime_config().ready_threshold
     );
     assert_eq!(transport.fetch_count(), fetches_before);
-    assert_eq!(transport.edit_count(), edits_before + 1);
+    assert_eq!(transport.edit_count(), edits_before + 2);
 }
 
 #[derive(Default)]
@@ -216,6 +216,7 @@ struct RecordingState {
     /// archived thread, while sending a message auto-unarchives it; mirror
     /// both so tests can assert join-publication ordering.
     archived_threads: BTreeSet<u64>,
+    unarchived: Vec<u64>,
     unpinned: Vec<(u64, u64)>,
     removed_reactions: Vec<(u64, u64, DiscordEmoji, u64)>,
     cleared_reactions: Vec<(u64, u64, DiscordEmoji)>,
@@ -241,6 +242,7 @@ impl Default for RecordingState {
             thread_members: Vec::new(),
             archived: Vec::new(),
             archived_threads: BTreeSet::new(),
+            unarchived: Vec::new(),
             unpinned: Vec::new(),
             removed_reactions: Vec::new(),
             cleared_reactions: Vec::new(),
@@ -458,11 +460,11 @@ impl DiscordTransport for RecordingTransport {
         if self.fail_edits.load(std::sync::atomic::Ordering::SeqCst) {
             return Err("message edit refused".to_owned());
         }
-        self.state
-            .lock()
-            .expect("transport state")
-            .edits
-            .push((channel_id, message_id, message));
+        let mut state = self.state.lock().expect("transport state");
+        if state.archived_threads.contains(&channel_id) {
+            return Err("cannot edit a message in an archived thread".to_owned());
+        }
+        state.edits.push((channel_id, message_id, message));
         Ok(())
     }
 
@@ -487,6 +489,13 @@ impl DiscordTransport for RecordingTransport {
             thread_id,
         ));
         Ok(thread_id)
+    }
+
+    async fn unarchive_thread(&self, thread_id: u64) -> Result<(), String> {
+        let mut state = self.state.lock().unwrap();
+        state.archived_threads.remove(&thread_id);
+        state.unarchived.push(thread_id);
+        Ok(())
     }
 
     async fn add_thread_member(&self, thread_id: u64, member_id: u64) -> Result<(), String> {
@@ -1029,10 +1038,10 @@ fn raw_radio(
     }
 }
 
-/// A ⚔️ reaction on a lobby message: a shout-out, never a join.
+/// A retired sword reaction: no seating and no thread shout-out.
 fn raw_sword(kind: RawReactionKind, message_id: u64, user_id: u64) -> RawReactionEvent {
     RawReactionEvent {
-        emoji: RawReactionEmoji::unicode(SWORD_EMOJI),
+        emoji: RawReactionEmoji::unicode(LEGACY_SWORD_EMOJI),
         ..raw_radio(kind, message_id, user_id, "Reactor")
     }
 }
@@ -1221,6 +1230,29 @@ async fn join_during_an_archived_thread_spell_still_subscribes_the_joiner() {
     assert!(
         state.thread_members.is_empty(),
         "subscription rides on the mention; no explicit thread-member call may be made"
+    );
+    let thread_message_id = to_u64(
+        lobby_snapshot(&provider, LobbyKind::Open)
+            .message_ids
+            .embed_message_id
+            .unwrap()
+            .0,
+    )
+    .unwrap();
+    let repaint = &state
+        .edits
+        .iter()
+        .rev()
+        .find(|(channel, message, _)| *channel == thread_id && *message == thread_message_id)
+        .expect("repaint the reopened thread")
+        .2
+        .response;
+    assert!(
+        repaint.embeds[0]
+            .fields
+            .iter()
+            .any(|field| field.value.contains("<@20>")),
+        "the reopened thread roster includes its new member"
     );
 }
 
@@ -1583,27 +1615,14 @@ async fn raw_jopacoin_subscribes_the_thread_then_invokes_the_shared_neon_observe
 }
 
 #[tokio::test]
-async fn sword_reaction_is_a_thread_shout_out_and_never_seats_the_player() {
+async fn legacy_sword_reaction_is_not_seeded_and_is_inert() {
     let database = database_with_players(&[(10, "Creator"), (20, "Eager")]);
     let transport = Arc::new(RecordingTransport::default());
     let provider = provider_for(&database, transport.clone());
-    dispatch_command(
-        &provider,
-        "lobby",
-        10,
-        "Creator",
-        vec![lobby_option(LobbyKind::Open)],
-    )
-    .await;
-    let lobby = lobby_snapshot(&provider, LobbyKind::Open);
-    let message_id = to_u64(lobby.message_ids.message_id.expect("lobby message").0)
-        .expect("Discord lobby message");
-    let thread_id =
-        to_u64(lobby.message_ids.thread_id.expect("lobby thread").0).expect("Discord lobby thread");
-    // The bot still seeds the sword on every new lobby message so there is
-    // something to click.
+    dispatch_command(&provider, "lobby", 10, "Creator", Vec::new()).await;
+    let message_id = lobby_message_id(&provider, LobbyKind::Open);
     assert!(
-        transport
+        !transport
             .state
             .lock()
             .expect("transport state")
@@ -1611,72 +1630,22 @@ async fn sword_reaction_is_a_thread_shout_out_and_never_seats_the_player() {
             .get(&(700, message_id))
             .expect("lobby message recorded")
             .reactions
-            .contains(&DiscordEmoji::unicode(SWORD_EMOJI))
+            .contains(&DiscordEmoji::unicode(LEGACY_SWORD_EMOJI))
     );
     let sent_before = transport.sent_messages().len();
-
-    provider
-        .raw_reaction_observer()
-        .observe(raw_sword(RawReactionKind::Add, message_id, 20))
-        .await
-        .expect("sword shout-out");
-
-    assert!(
-        !lobby_snapshot(&provider, LobbyKind::Open)
-            .players
-            .contains(&AppUserId(20)),
-        "a sword reaction must not seat the player -- that is the Join button's job"
-    );
-    let sent = transport.sent_messages();
-    assert_eq!(sent.len(), sent_before + 1);
-    let shout = sent.last().expect("shout-out");
-    assert_eq!(shout.channel_id, thread_id);
-    assert_eq!(
-        shout.message.response.content,
-        "⚔️ <@20> is ready to play a 5v5 Dota Challenge!"
-    );
-    assert_eq!(
-        shout.message.allowed_mentions,
-        DiscordAllowedMentions::Users(BTreeSet::from([20]))
-    );
-    assert!(
-        transport
-            .state
-            .lock()
-            .expect("transport state")
-            .removed_reactions
-            .is_empty(),
-        "the sword stays on the message"
-    );
-
-    provider
-        .raw_reaction_observer()
-        .observe(raw_sword(RawReactionKind::Remove, message_id, 20))
-        .await
-        .expect("sword removal is inert");
-    provider
-        .raw_reaction_observer()
-        .observe(raw_sword(RawReactionKind::Add, message_id + 999, 20))
-        .await
-        .expect("sword on a non-lobby message is inert");
-    assert_eq!(transport.sent_messages().len(), sent_before + 1);
-
-    // A seated player can still announce they are ready.
-    provider
-        .raw_reaction_observer()
-        .observe(raw_sword(RawReactionKind::Add, message_id, 10))
-        .await
-        .expect("creator shout-out");
-    assert_eq!(
-        transport
-            .sent_messages()
-            .last()
-            .expect("creator shout-out")
-            .message
-            .response
-            .content,
-        "⚔️ <@10> is ready to play a 5v5 Dota Challenge!"
-    );
+    for (kind, id, user_id) in [
+        (RawReactionKind::Add, message_id, 20),
+        (RawReactionKind::Remove, message_id, 20),
+        (RawReactionKind::Add, message_id + 999, 20),
+        (RawReactionKind::Add, message_id, 10),
+    ] {
+        provider
+            .raw_reaction_observer()
+            .observe(raw_sword(kind, id, user_id))
+            .await
+            .expect("legacy sword is inert");
+    }
+    assert_eq!(transport.sent_messages().len(), sent_before);
     assert_eq!(
         lobby_snapshot(&provider, LobbyKind::Open).players,
         BTreeSet::from([AppUserId(10)])
@@ -1784,7 +1753,7 @@ async fn suspension_rejects_slash_and_button_with_private_context_while_low_prio
 }
 
 #[tokio::test]
-async fn ready_recovery_repaints_persisted_lobbies_and_removes_the_legacy_reaction() {
+async fn ready_recovery_repaints_persisted_lobbies_and_removes_legacy_reactions() {
     let database = database_with_players(&[(10, "Creator")]);
     let transport = Arc::new(RecordingTransport::default());
     let provider = provider_for(&database, transport.clone());
@@ -1807,6 +1776,11 @@ async fn ready_recovery_repaints_persisted_lobbies_and_removes_the_legacy_reacti
             id: Some(LEGACY_FROGLING_EMOJI_ID),
         },
     );
+    transport.seed_reaction(
+        channel_id,
+        message_id,
+        DiscordEmoji::unicode(LEGACY_SWORD_EMOJI),
+    );
     let edits_before = transport.edit_count();
 
     let report = provider
@@ -1828,6 +1802,11 @@ async fn ready_recovery_repaints_persisted_lobbies_and_removes_the_legacy_reacti
             .iter()
             .any(|(_, _, emoji)| { emoji.id == Some(LEGACY_FROGLING_EMOJI_ID) })
     );
+    assert!(state.cleared_reactions.iter().any(|(channel, id, emoji)| {
+        *channel == channel_id
+            && *id == message_id
+            && *emoji == DiscordEmoji::unicode(LEGACY_SWORD_EMOJI)
+    }));
 }
 
 #[tokio::test]
@@ -4437,6 +4416,16 @@ async fn dispatch_component(
     user_id: u64,
     display_name: &str,
 ) -> Arc<CapturingResponder> {
+    dispatch_component_in_channel(provider, custom_id, user_id, display_name, 700).await
+}
+
+async fn dispatch_component_in_channel(
+    provider: &LobbyRegistrationProvider,
+    custom_id: &str,
+    user_id: u64,
+    display_name: &str,
+    channel_id: u64,
+) -> Arc<CapturingResponder> {
     let responder = Arc::new(CapturingResponder::default());
     registry_for(provider)
         .component_handler(custom_id)
@@ -4448,7 +4437,7 @@ async fn dispatch_component(
                 user_id,
                 user_display_name: display_name.to_owned(),
                 guild_id: Some(42),
-                channel_id: Some(700),
+                channel_id: Some(channel_id),
                 member_permissions: None,
                 values: Vec::new(),
             },
@@ -4604,7 +4593,36 @@ async fn test_lobby_message_carries_join_and_leave_buttons() {
             leave_button_id(LobbyKind::Open).as_str()
         ]
     );
-    assert_eq!(button_labels(lobby_message), vec!["⚔️ Join", "Leave"]);
+    assert_eq!(button_labels(lobby_message), vec!["Join", "Leave"]);
+    let lobby = lobby_snapshot(&provider, LobbyKind::Open);
+    let thread_id = to_u64(lobby.message_ids.thread_id.unwrap().0).unwrap();
+    let thread_message_id = to_u64(lobby.message_ids.embed_message_id.unwrap().0).unwrap();
+    assert_ne!(
+        lobby.message_ids.embed_message_id,
+        lobby.message_ids.message_id
+    );
+    let thread_message = &state
+        .sent
+        .iter()
+        .find(|sent| sent.channel_id == thread_id && sent.message_id == thread_message_id)
+        .expect("a real bot-authored message in the thread")
+        .message;
+    assert_eq!(
+        button_ids(&thread_message.response),
+        button_ids(lobby_message)
+    );
+    assert!(
+        thread_message
+            .response
+            .components
+            .iter()
+            .flat_map(|row| &row.buttons)
+            .all(|button| !button.disabled)
+    );
+    assert_eq!(
+        thread_message.allowed_mentions,
+        DiscordAllowedMentions::None
+    );
 }
 
 #[tokio::test]
@@ -4650,6 +4668,18 @@ async fn test_lobby_display_repaint_keeps_the_buttons() {
         ],
         "a Discord edit replaces the component rows, so every repaint must re-attach the buttons"
     );
+    let lobby = lobby_snapshot(&provider, LobbyKind::Open);
+    let thread_id = to_u64(lobby.message_ids.thread_id.unwrap().0).unwrap();
+    let thread_message_id = to_u64(lobby.message_ids.embed_message_id.unwrap().0).unwrap();
+    let thread_repaint = &state
+        .edits
+        .iter()
+        .rev()
+        .find(|(channel, id, _)| *channel == thread_id && *id == thread_message_id)
+        .expect("join refreshes the thread roster")
+        .2
+        .response;
+    assert_eq!(thread_repaint, repaint);
 }
 
 #[tokio::test]
@@ -5008,4 +5038,251 @@ async fn test_lobby_button_with_malformed_custom_id_is_an_error() {
         )
         .await;
     assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn thread_join_and_leave_buttons_update_both_rosters() {
+    let database = database_with_players(&[(99, "Creator"), (1, "Player")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(&provider, "lobby", 99, "Creator", Vec::new()).await;
+    let lobby = lobby_snapshot(&provider, LobbyKind::Open);
+    let thread_id = to_u64(lobby.message_ids.thread_id.unwrap().0).unwrap();
+    let edits_before = transport.edit_count();
+    let joined = dispatch_component_in_channel(
+        &provider,
+        &join_button_id(LobbyKind::Open),
+        1,
+        "Player",
+        thread_id,
+    )
+    .await;
+    assert_silent_button_success(&joined);
+    assert!(
+        lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(1))
+    );
+    assert_eq!(transport.edit_count(), edits_before + 2);
+    let left = dispatch_component_in_channel(
+        &provider,
+        &leave_button_id(LobbyKind::Open),
+        1,
+        "Player",
+        thread_id,
+    )
+    .await;
+    assert_silent_button_success(&left);
+    assert!(
+        !lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(1))
+    );
+    assert_eq!(transport.edit_count(), edits_before + 4);
+}
+
+#[tokio::test]
+async fn recovery_upgrades_legacy_thread_preview_and_reuses_controls_after_restart() {
+    let database = database_with_players(&[(99, "Creator")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(&provider, "lobby", 99, "Creator", Vec::new()).await;
+    let lobby = lobby_snapshot(&provider, LobbyKind::Open);
+    let thread_id = to_u64(lobby.message_ids.thread_id.unwrap().0).unwrap();
+    let thread_message_id = to_u64(lobby.message_ids.embed_message_id.unwrap().0).unwrap();
+    // Simulate a lobby persisted by the previous release: only the parent ID.
+    transport
+        .delete_message(thread_id, thread_message_id)
+        .await
+        .unwrap();
+    transport.state.lock().unwrap().delivery_keys.clear();
+    let mut ids = lobby.message_ids.clone();
+    ids.embed_message_id = ids.message_id;
+    provider
+        .handler
+        .state
+        .service
+        .try_set_lobby_message_ids(lobby.scope, ids)
+        .unwrap();
+    drop(provider);
+    let provider = provider_for(&database, transport.clone());
+    let before = transport.sent_messages().len();
+    for _ in 0..2 {
+        let report = provider
+            .gateway_observer()
+            .ready_recovery(ReadyRecoveryContext::new(
+                Arc::<[u64]>::from([42]),
+                Arc::new(NoMembers),
+            ))
+            .await;
+        assert!(report.failures.is_empty(), "{report:?}");
+    }
+    let updated = lobby_snapshot(&provider, LobbyKind::Open);
+    assert_ne!(
+        updated.message_ids.embed_message_id,
+        updated.message_ids.message_id
+    );
+    assert_eq!(transport.sent_messages().len(), before + 1);
+    drop(provider);
+    let restored = provider_for(&database, transport.clone());
+    restored
+        .handler
+        .state
+        .sync_lobby_display(lobby.scope)
+        .await
+        .unwrap();
+    assert_eq!(
+        lobby_snapshot(&restored, LobbyKind::Open).message_ids,
+        updated.message_ids
+    );
+    assert_eq!(transport.sent_messages().len(), before + 1);
+}
+
+#[tokio::test]
+async fn reset_removes_controls_from_parent_and_thread() {
+    let database = database_with_players(&[(99, "Creator")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(&provider, "lobby", 99, "Creator", Vec::new()).await;
+    let lobby = lobby_snapshot(&provider, LobbyKind::Open);
+    dispatch_command(&provider, "resetlobby", 99, "Creator", Vec::new()).await;
+    let state = transport.state.lock().unwrap();
+    for (channel, id) in [
+        (
+            lobby.message_ids.channel_id.unwrap(),
+            lobby.message_ids.message_id.unwrap(),
+        ),
+        (
+            lobby.message_ids.thread_id.unwrap(),
+            lobby.message_ids.embed_message_id.unwrap(),
+        ),
+    ] {
+        let response = &state
+            .edits
+            .iter()
+            .rev()
+            .find(|(c, m, _)| *c == to_u64(channel.0).unwrap() && *m == to_u64(id.0).unwrap())
+            .expect("closed lobby message")
+            .2
+            .response;
+        assert!(response.components.is_empty());
+        assert_eq!(
+            response.embeds[0].description.as_deref(),
+            Some("This lobby is closed.")
+        );
+    }
+}
+
+#[tokio::test]
+async fn shuffle_retires_both_controls_and_keeps_the_match_thread_open() {
+    let database = database_with_players(&[(99, "Creator")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(&provider, "lobby", 99, "Creator", Vec::new()).await;
+    let lobby = lobby_snapshot(&provider, LobbyKind::Open);
+    assert!(
+        provider
+            .match_lobby_port()
+            .reset_after_shuffle(42, LobbyKind::Open)
+            .await
+            .unwrap()
+    );
+    let state = transport.state.lock().unwrap();
+    for id in [
+        lobby.message_ids.message_id.unwrap(),
+        lobby.message_ids.embed_message_id.unwrap(),
+    ] {
+        let response = &state
+            .edits
+            .iter()
+            .rev()
+            .find(|(_, edited, _)| *edited == to_u64(id.0).unwrap())
+            .expect("retired lobby controls")
+            .2
+            .response;
+        assert!(response.components.is_empty());
+        assert!(
+            response.embeds[0]
+                .title
+                .as_deref()
+                .unwrap()
+                .contains("Match Created")
+        );
+    }
+    assert!(
+        state.archived.is_empty(),
+        "the thread is still used by the match"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_refreshes_recover_a_thread_send_without_duplicate_controls() {
+    let database = database_with_players(&[(99, "Creator")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(&provider, "lobby", 99, "Creator", Vec::new()).await;
+    let lobby = lobby_snapshot(&provider, LobbyKind::Open);
+    let mut ids = lobby.message_ids.clone();
+    ids.embed_message_id = None; // Send succeeded, receipt was not persisted before restart.
+    provider
+        .handler
+        .state
+        .service
+        .try_set_lobby_message_ids(lobby.scope, ids)
+        .unwrap();
+    let before = transport.sent_messages().len();
+    let (first, second) = tokio::join!(
+        provider.handler.state.sync_lobby_display(lobby.scope),
+        provider.handler.state.sync_lobby_display(lobby.scope),
+    );
+    first.unwrap();
+    second.unwrap();
+    assert_eq!(transport.sent_messages().len(), before);
+    assert_eq!(
+        lobby_snapshot(&provider, LobbyKind::Open).message_ids,
+        lobby.message_ids
+    );
+}
+
+#[tokio::test]
+async fn recovery_reopens_an_idle_thread_and_reuses_its_controls() {
+    let database = database_with_players(&[(99, "Creator")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(&provider, "lobby", 99, "Creator", Vec::new()).await;
+    let lobby = lobby_snapshot(&provider, LobbyKind::Open);
+    let thread_id = to_u64(lobby.message_ids.thread_id.unwrap().0).unwrap();
+    transport
+        .archive_thread(thread_id, "Idle lobby", false)
+        .await
+        .unwrap();
+    drop(provider);
+    let restored = provider_for(&database, transport.clone());
+    let sent_before = transport.sent_messages().len();
+    let report = restored
+        .gateway_observer()
+        .ready_recovery(ReadyRecoveryContext::new(
+            Arc::<[u64]>::from([42]),
+            Arc::new(NoMembers),
+        ))
+        .await;
+    assert!(report.failures.is_empty(), "{report:?}");
+    assert_eq!(report.guilds_refreshed, 1);
+    assert_eq!(
+        lobby_snapshot(&restored, LobbyKind::Open).message_ids,
+        lobby.message_ids
+    );
+    let state = transport.state.lock().unwrap();
+    assert_eq!(state.unarchived, [thread_id]);
+    assert!(!state.archived_threads.contains(&thread_id));
+    assert_eq!(state.sent.len(), sent_before, "reuse the existing controls");
+    let response = &state
+        .edits
+        .iter()
+        .rev()
+        .find(|(channel, _, _)| *channel == thread_id)
+        .expect("refreshed thread controls")
+        .2
+        .response;
+    assert_eq!(button_labels(response), ["Join", "Leave"]);
 }

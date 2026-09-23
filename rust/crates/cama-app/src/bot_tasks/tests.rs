@@ -503,17 +503,11 @@ fn test_retired_frogling_reaction_is_removed_from_active_lobby_message() {
 }
 
 #[test]
-fn test_sword_reaction_is_a_thread_shout_out_not_a_join() {
+fn test_sword_reaction_is_inert() {
     let mut input = reaction_input(ReactionKind::Sword);
     input.has_thread = true;
     let plan = route_reaction_add(&input);
-    assert!(plan.send_ready_thread_message);
-    assert!(!plan.remove_reaction);
-    assert!(!plan.send_gamba_thread_message);
-    assert!(!plan.use_full_message_fetch);
-
-    input.has_thread = false;
-    assert!(!route_reaction_add(&input).send_ready_thread_message);
+    assert_eq!(plan, ReactionPlan::default());
 }
 
 #[test]
