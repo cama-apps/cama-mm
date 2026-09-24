@@ -39,6 +39,8 @@ const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_UPSTREAM_BASE: &str = "https://api.steampowered.com";
 const GSI_FRESHNESS_SECONDS: i64 = 30;
 
+mod poll_observation;
+
 type MatchKey = (i64, i64);
 
 /// Where a normalized live snapshot came from.
@@ -221,10 +223,11 @@ struct MatchRegistration {
     /// The registration can collect private Valve/GSI samples while betting
     /// remains open, but public snapshot access stays gated until this flips.
     betting_closed: bool,
-    /// Monotonic evidence from a validated GSI game-rules state.  This is
+    /// Monotonic evidence from validated Valve or GSI gameplay samples.  This is
     /// intentionally separate from the public snapshot so a pre-close sample
     /// cannot disclose the detailed scoreboard.
     gameplay_started: bool,
+    poll_observation: poll_observation::PollObservation,
     active: bool,
     published_at: i64,
     snapshot: Option<LiveMatchSnapshot>,
@@ -258,6 +261,10 @@ enum LiveIngestError {
 enum UpstreamError {
     #[error("live source unavailable")]
     Unavailable,
+    #[error("live source request timed out")]
+    Timeout,
+    #[error("live source returned HTTP {0}")]
+    HttpStatus(u16),
     #[error("live source body exceeded the configured limit")]
     BodyTooLarge,
     #[error("live source returned invalid JSON")]
@@ -408,6 +415,7 @@ impl DotaLiveFeed {
                     expected_account_ids,
                     betting_closed,
                     gameplay_started: false,
+                    poll_observation: Default::default(),
                     active: true,
                     published_at: now_unix(),
                     snapshot: None,
@@ -446,8 +454,7 @@ impl DotaLiveFeed {
         Some(snapshot)
     }
 
-    /// Return whether a validated GSI update has observed the match in a
-    /// playable game-rules state. The evidence remains true for the lifetime
+    /// Return whether validated Valve or GSI data has confirmed gameplay. The evidence remains true for the lifetime
     /// of this registration, including after it is marked inactive.
     #[must_use]
     pub fn gameplay_started(&self, guild_id: i64, pending_match_id: i64, match_id: u64) -> bool {
@@ -568,71 +575,167 @@ impl DotaLiveFeed {
         };
         let mut partial_realtime = None;
         if let Some(server_id) = target.server_id {
-            let response = self
-                .client
-                .get(format!(
-                    "{}/IDOTA2MatchStats_570/GetRealtimeStats/v1/",
-                    self.upstream_base
-                ))
-                .query(&[("key", key), ("server_steam_id", &server_id.to_string())])
-                .send()
-                .await;
-            // Unpublished private matches, outages, and malformed responses
-            // must all leave the independent league feed available.
-            if let Ok(response) = response
-                && response.status().is_success()
-                && let Ok(body) = read_limited_json(response).await
-                && let Some(snapshot) = normalize_realtime_stats(
+            let result = self
+                .fetch_json(
+                    "IDOTA2MatchStats_570/GetRealtimeStats/v1/",
+                    &[("key", key), ("server_steam_id", &server_id.to_string())],
+                )
+                .await
+                .map(|body| {
+                    let snapshot = normalize_realtime_stats(
+                        &body,
+                        target.guild_id,
+                        target.pending_match_id,
+                        target.match_id,
+                        now_unix(),
+                    );
+                    if let Some(snapshot) = &snapshot {
+                        self.observe_valve_start(
+                            target,
+                            body.get("result").unwrap_or(&body),
+                            snapshot,
+                        );
+                    }
+                    snapshot
+                        .map(|snapshot| self.apply_configured_delay(snapshot, target.delay_seconds))
+                });
+            self.observe_poll(target, LiveSnapshotSource::RealtimeStats, &result);
+            if let Ok(Some(snapshot)) = result {
+                if snapshot.announcement_frame.is_some() {
+                    return Ok(Some(snapshot));
+                }
+                // Keep partial data, but try the independent league feed too.
+                partial_realtime = Some(snapshot);
+            }
+        }
+        let league_result = self
+            .fetch_json(
+                "IDOTA2Match_570/GetLiveLeagueGames/v1/",
+                &[
+                    ("key", key),
+                    ("league_id", &target.league.to_string()),
+                    ("match_id", &target.match_id.to_string()),
+                ],
+            )
+            .await
+            .map(|body| {
+                let snapshot = normalize_live_league_games(
                     &body,
                     target.guild_id,
                     target.pending_match_id,
                     target.match_id,
                     now_unix(),
-                )
-            {
-                let snapshot = self.apply_configured_delay(snapshot, target.delay_seconds);
-                if snapshot.announcement_frame.is_some() {
-                    return Ok(Some(snapshot));
+                );
+                if let Some(snapshot) = &snapshot
+                    && let Some(game) = body
+                        .get("result")
+                        .unwrap_or(&body)
+                        .get("games")
+                        .and_then(Value::as_array)
+                        .and_then(|games| {
+                            games
+                                .iter()
+                                .find(|game| live_match_identity_matches(game, target.match_id))
+                        })
+                {
+                    self.observe_valve_start(target, game, snapshot);
                 }
-                // A partial realtime frame can still serve other live consumers,
-                // but must not prevent the independent complete league fallback.
-                partial_realtime = Some(snapshot);
-            }
-        }
-
-        let league_result = async {
-            let response = self
-                .client
-                .get(format!(
-                    "{}/IDOTA2Match_570/GetLiveLeagueGames/v1/",
-                    self.upstream_base
-                ))
-                .query(&[
-                    ("key", key),
-                    ("league_id", &target.league.to_string()),
-                    ("match_id", &target.match_id.to_string()),
-                ])
-                .send()
-                .await
-                .map_err(|_| UpstreamError::Unavailable)?;
-            if !response.status().is_success() {
-                return Err(UpstreamError::Unavailable);
-            }
-            let body = read_limited_json(response).await?;
-            Ok(normalize_live_league_games(
-                &body,
-                target.guild_id,
-                target.pending_match_id,
-                target.match_id,
-                now_unix(),
-            )
-            .map(|snapshot| self.apply_configured_delay(snapshot, target.delay_seconds)))
-        }
-        .await;
+                snapshot.map(|snapshot| self.apply_configured_delay(snapshot, target.delay_seconds))
+            });
+        self.observe_poll(target, LiveSnapshotSource::LiveLeagueGames, &league_result);
         match league_result {
             Ok(Some(snapshot)) => Ok(Some(snapshot)),
             _ if partial_realtime.is_some() => Ok(partial_realtime),
             result => result,
+        }
+    }
+
+    async fn fetch_json(
+        &self,
+        endpoint: &str,
+        query: &[(&str, &str)],
+    ) -> Result<Value, UpstreamError> {
+        let response = self
+            .client
+            .get(format!("{}/{endpoint}", self.upstream_base))
+            .query(query)
+            .send()
+            .await
+            .map_err(|error| {
+                // reqwest errors contain URLs, including the API key. Never log them.
+                if error.is_timeout() {
+                    UpstreamError::Timeout
+                } else {
+                    UpstreamError::Unavailable
+                }
+            })?;
+        if !response.status().is_success() {
+            return Err(UpstreamError::HttpStatus(response.status().as_u16()));
+        }
+        read_limited_json(response).await
+    }
+
+    fn observe_poll(
+        &self,
+        target: &PollTarget,
+        source: LiveSnapshotSource,
+        result: &Result<Option<LiveMatchSnapshot>, UpstreamError>,
+    ) {
+        let status = match result {
+            Ok(Some(snapshot)) if snapshot.map_frame.is_some() => "live map available".to_owned(),
+            Ok(Some(snapshot)) if snapshot.announcement_frame.is_some() => {
+                "live scoreboard without map".to_owned()
+            }
+            Ok(Some(_)) => "partial live data".to_owned(),
+            Ok(None) => "no matching live match".to_owned(),
+            Err(error) => error.to_string(),
+        };
+        if let Ok(mut matches) = self.matches.write()
+            && let Some(current) = matches.get_mut(&target.key())
+            && current.active
+            && current.match_id == target.match_id
+            && current
+                .poll_observation
+                .observe(source, &status, now_unix())
+        {
+            tracing::info!(guild_id = target.guild_id, pending_match_id = target.pending_match_id,
+                match_id = target.match_id, source = source.as_str(), %status, "Dota live polling status");
+        }
+    }
+
+    fn observe_valve_start(&self, target: &PollTarget, game: &Value, snapshot: &LiveMatchSnapshot) {
+        if !valve_gameplay_started(game, target.match_id) {
+            return;
+        }
+        if let Ok(mut matches) = self.matches.write()
+            && let Some(current) = matches.get_mut(&target.key())
+            && current.active
+            && current.match_id == target.match_id
+            && !current.gameplay_started
+        {
+            // A matching ID plus a clock must not let unknown or substituted
+            // players supply the signal. Partial rosters are allowed as in GSI.
+            let Some(players) = &snapshot.players else {
+                return;
+            };
+            let mut seen = BTreeSet::new();
+            if players.is_empty()
+                || !players.iter().all(|player| {
+                    player.account_id.is_some_and(|id| {
+                        current.expected_account_ids.contains(&id) && seen.insert(id)
+                    })
+                })
+            {
+                return;
+            }
+            current.gameplay_started = true;
+            tracing::info!(
+                guild_id = target.guild_id,
+                pending_match_id = target.pending_match_id,
+                match_id = target.match_id,
+                source = snapshot.source.as_str(),
+                "Dota gameplay confirmed by live feed"
+            );
         }
     }
 
@@ -981,6 +1084,50 @@ fn live_match_identity_matches(value: &Value, expected: u64) -> bool {
         .flatten()
         .peekable();
     identities.peek().is_some() && identities.all(|value| value_u64(value) == Some(expected))
+}
+
+// Valve may omit game_state while exposing a running scoreboard clock.
+// Do not infer play from lobby RUN, match allocation, or elapsed wall time.
+fn valve_gameplay_started(game: &Value, expected_match_id: u64) -> bool {
+    if !live_match_identity_matches(game, expected_match_id) {
+        return false;
+    }
+    let scopes: Vec<_> = [Some(game), game.get("scoreboard"), game.get("match")]
+        .into_iter()
+        .flatten()
+        .collect();
+    if scopes.iter().any(|scope| {
+        scope
+            .get("delta_frame")
+            .is_some_and(|delta| delta.as_bool() != Some(false))
+    }) {
+        return false;
+    }
+    let phases: Vec<_> = scopes
+        .iter()
+        .filter_map(|scope| scope.as_object())
+        .filter(|scope| scope.contains_key("game_state"))
+        .collect();
+    if !phases.is_empty() {
+        // Explicit draft, unknown, or malformed phases override a positive
+        // clock; failed parsing is never treated as an absent phase.
+        return phases
+            .iter()
+            .all(|phase| parse_gsi_game_state(phase).is_some_and(gameplay_has_started));
+    }
+    let mut clocks = scopes
+        .iter()
+        .flat_map(|scope| {
+            ["game_time", "duration", "game_time_seconds"]
+                .into_iter()
+                .filter_map(move |key| scope.get(key).map(|value| (key, value)))
+        })
+        .peekable();
+    clocks.peek().is_some()
+        && clocks.all(|(key, value)| {
+            let clock = serde_json::json!({key: value});
+            first_game_time(&clock).is_some_and(|seconds| (1..=86_400).contains(&seconds))
+        })
 }
 
 fn snapshot_from_scoreboard(

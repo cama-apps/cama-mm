@@ -1255,6 +1255,78 @@ async fn spectator_game_state_can_close_betting_without_a_gc_game_phase() {
 }
 
 #[tokio::test]
+async fn valve_game_clock_closes_hosted_betting_without_gc_phase_or_gsi() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let players = |ids: std::ops::RangeInclusive<u32>| {
+        ids.map(|id| {
+            serde_json::json!({
+                "account_id": id,
+                "hero_id": id,
+                "kills": 0,
+                "deaths": 0
+            })
+        })
+        .collect::<Vec<_>>()
+    };
+    let body = serde_json::json!({
+        "match_id": 888,
+        "scoreboard": {
+            "duration": 91.75,
+            "radiant": {"score": 0, "players": players(1..=5)},
+            "dire": {"score": 0, "players": players(6..=10)}
+        }
+    })
+    .to_string();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0_u8; 4096];
+        let length = socket.read(&mut request).await.unwrap();
+        let request = String::from_utf8_lossy(&request[..length]);
+        assert!(request.contains("/IDOTA2MatchStats_570/GetRealtimeStats/"));
+        assert!(request.contains("server_steam_id=999"));
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+    let mut f = Fixture::new(false);
+    f.worker.config.web_api_key = Some(crate::Secret::new("fixture-api-key".into()));
+    assert!(f.worker.config.gsi_token.is_none());
+    f.worker.live = crate::dota_live::DotaLiveFeed::new_with_upstream_base(
+        &f.worker.config,
+        format!("http://{address}"),
+    )
+    .unwrap();
+    f.launch().await;
+    f.running(None);
+    f.worker.tick(&f.port, 150).await.unwrap();
+    assert!(f.betting_open(150));
+    assert!(!f.worker.live.gameplay_started(1, f.pending, 888));
+
+    tokio::time::timeout(Duration::from_secs(5), f.worker.live.poll_once())
+        .await
+        .unwrap();
+    server.await.unwrap();
+    assert!(f.worker.live.gameplay_started(1, f.pending, 888));
+    // Start evidence stays private until the host commits betting closure.
+    assert!(f.betting_open(155));
+    assert!(f.worker.live.snapshot(1, f.pending).is_none());
+
+    *f.port.snapshot_error.lock().unwrap() = Some("GC offline".into());
+    assert_eq!(f.worker.tick(&f.port, 160).await.unwrap_err(), "GC offline");
+    assert!(!f.betting_open(160));
+    assert!(f.state().betting_closed);
+    assert_eq!(f.recorder.betting_attempts.load(Ordering::SeqCst), 1);
+    let snapshot = f.worker.live.snapshot(1, f.pending).unwrap();
+    assert_eq!(snapshot.match_id, 888);
+    assert_eq!(snapshot.game_time_seconds, Some(91));
+}
+
+#[tokio::test]
 async fn gameplay_confirmation_closes_betting_even_when_gc_lobby_stage_lags() {
     for stage in [LobbyStage::Gathering, LobbyStage::Allocating] {
         for spectator in [false, true] {
