@@ -1158,6 +1158,16 @@ fn active_match_thread_edit_locks_without_archiving() {
 }
 
 #[test]
+fn thread_unarchive_edit_preserves_thread_metadata() {
+    let serialized =
+        serde_json::to_value(thread_unarchive_edit()).expect("serialize thread unarchive edit");
+
+    assert_eq!(serialized["archived"], false);
+    assert!(serialized.get("name").is_none());
+    assert!(serialized.get("locked").is_none());
+}
+
+#[test]
 fn streaming_bonus_follows_voice_go_live_not_twitch_presence() {
     // 10 is screen-sharing, 20 is in voice without Go Live, 30 is not in voice
     // at all (a Twitch "Streaming" rich presence looks exactly like this).
