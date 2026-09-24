@@ -167,6 +167,12 @@ impl DotaHostPort for SteamHost {
             })
             .transpose()
     }
+    async fn prepare_lobby_creation(&self) -> Result<(), String> {
+        self.0
+            .prepare_lobby_creation()
+            .await
+            .map_err(|e| format!("Dota coordinator check failed before lobby creation: {e}"))
+    }
     async fn create(&self, settings: &LobbySettings) -> Result<(), String> {
         let config = lobby_config(settings);
         self.0

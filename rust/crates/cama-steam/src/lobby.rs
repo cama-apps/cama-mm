@@ -18,7 +18,8 @@ use steam_vent::{ConnectionTrait, GameCoordinator, NetMessage, NetMessageHeader,
 use steam_vent_proto_common::protobuf::{Enum, EnumOrUnknown, Message, MessageField};
 use steam_vent_proto_dota2::base_gcmessages::CMsgInviteToLobby;
 use steam_vent_proto_dota2::dota_gcmessages_client::{
-    CMsgDOTADestroyLobbyRequest, CMsgGCMatchDetailsRequest, CMsgGCMatchDetailsResponse,
+    CMsgClientSuspended, CMsgDOTADestroyLobbyRequest, CMsgGCMatchDetailsRequest,
+    CMsgGCMatchDetailsResponse,
 };
 use steam_vent_proto_dota2::dota_gcmessages_client_match_management::{
     CMsgPracticeLobbyCreate, CMsgPracticeLobbyKick, CMsgPracticeLobbyKickFromTeam,
@@ -33,10 +34,10 @@ use steam_vent_proto_dota2::dota_gcmessages_server::{
 };
 use steam_vent_proto_dota2::dota_shared_enums::{DOTA_CM_PICK, DOTA_GC_TEAM, DOTALobbyVisibility};
 use steam_vent_proto_dota2::gcsdk_gcmessages::{
-    CMsgClientWelcome, CMsgSOCacheSubscribed, CMsgSOCacheSubscribedUpToDate,
-    CMsgSOCacheUnsubscribed, CMsgSOSingleObject,
+    CMsgClientHello, CMsgClientWelcome, CMsgConnectionStatus, CMsgSOCacheSubscribed,
+    CMsgSOCacheSubscribedUpToDate, CMsgSOCacheUnsubscribed, CMsgSOSingleObject, GCConnectionStatus,
 };
-use steam_vent_proto_dota2::gcsystemmsgs::ESOMsg;
+use steam_vent_proto_dota2::gcsystemmsgs::{EGCBaseClientMsg, ESOMsg};
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, broadcast, oneshot};
 use tokio::task::JoinHandle;
@@ -46,6 +47,7 @@ use tracing::warn;
 const EVENT_BUFFER: usize = 128;
 const INITIAL_CACHE_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+const CREATION_SESSION_MAX_AGE: Duration = Duration::from_secs(5);
 const ERESULT_OK: u32 = 1;
 const SO_OWNER_ACCOUNT: u32 = 1;
 const SO_OWNER_LOBBY: u32 = 3;
@@ -557,6 +559,8 @@ struct ClientState {
     status: CacheStatus,
     lobby: Option<LobbySnapshot>,
     lobby_observed_at: Option<Instant>,
+    welcome_generation: u64,
+    welcome_observed_at: Option<tokio::time::Instant>,
 }
 
 impl ClientState {
@@ -633,6 +637,8 @@ impl DotaSteamClient {
             own_steam_id,
             status: CacheStatus::Hydrating,
             lobby: None,
+            welcome_generation: 0,
+            welcome_observed_at: None,
             lobby_observed_at: None,
         }));
         let gc = Arc::new(Mutex::new(gc));
@@ -704,6 +710,27 @@ impl DotaSteamClient {
             .snapshot()
             .await?
             .and_then(|snapshot| snapshot.server_steam_id))
+    }
+
+    /// Revalidate the GC session before persisting an intent to create a lobby.
+    /// This sends only ClientHello: failure cannot have created a lobby.
+    pub async fn prepare_lobby_creation(&self) -> Result<(), DotaSteamError> {
+        let events = self.subscribe();
+        let generation = {
+            let state = self.state.read().await;
+            // A fresh admission already proves readiness. This also lets a
+            // restarted worker progress if an idle GC ignores repeated Hello.
+            if creation_session_is_fresh(&state)? {
+                return Ok(());
+            }
+            state.welcome_generation
+        };
+        timeout(self.command_timeout, async {
+            self.send(CMsgClientHello::new()).await?;
+            wait_for_creation_preflight(&self.state, events, generation).await
+        })
+        .await
+        .map_err(|_| DotaSteamError::Timeout)?
     }
 
     /// Create a practice lobby and wait for its matching SOCache object.
@@ -900,33 +927,15 @@ impl DotaSteamClient {
     }
 
     async fn wait_for_initial_cache(&self) -> Result<(), DotaSteamError> {
-        if self.state.read().await.status == CacheStatus::Ready {
-            return Ok(());
-        }
-        let mut events = self.subscribe();
-        timeout(INITIAL_CACHE_TIMEOUT, async {
-            loop {
-                if self.state.read().await.status == CacheStatus::Ready {
-                    return Ok(());
-                }
-                match events.recv().await {
-                    Ok(DotaSteamEvent::CacheHydrated)
-                    | Ok(DotaSteamEvent::LobbyUpdated(_))
-                    | Ok(DotaSteamEvent::LobbyCleared { .. }) => {}
-                    Ok(DotaSteamEvent::TransportDisconnected { .. }) => {
-                        return Err(DotaSteamError::NotReady);
-                    }
-                    Ok(DotaSteamEvent::LiveScoreboard(_)) => {}
-                    Err(broadcast::error::RecvError::Lagged(_)) => {}
-                    Err(broadcast::error::RecvError::Closed) => {
-                        return Err(DotaSteamError::EventSubscriptionClosed);
-                    }
-                }
-            }
-        })
+        // Register before checking readiness, including an already-disconnected
+        // state whose notification may have preceded this wait.
+        let events = self.subscribe();
+        timeout(
+            INITIAL_CACHE_TIMEOUT,
+            wait_for_initial_cache_state(&self.state, events),
+        )
         .await
-        .map_err(|_| DotaSteamError::Timeout)??;
-        Ok(())
+        .map_err(|_| DotaSteamError::Timeout)?
     }
 
     async fn wait_for_lobby<F>(
@@ -937,34 +946,93 @@ impl DotaSteamClient {
     where
         F: Fn(&LobbySnapshot) -> bool,
     {
-        if let Some(snapshot) = self.snapshot().await?
-            && predicate(&snapshot)
-        {
-            return Ok(snapshot);
-        }
-        let mut events = self.subscribe();
-        timeout(wait_timeout, async {
-            loop {
-                match events.recv().await {
-                    Ok(DotaSteamEvent::LobbyUpdated(snapshot)) if predicate(&snapshot) => {
-                        return Ok(snapshot);
-                    }
-                    Ok(DotaSteamEvent::TransportDisconnected { .. }) => {
-                        return Err(DotaSteamError::NotReady);
-                    }
-                    Ok(DotaSteamEvent::LobbyCleared { .. })
-                    | Ok(DotaSteamEvent::CacheHydrated)
-                    | Ok(DotaSteamEvent::LiveScoreboard(_)) => {}
-                    Ok(DotaSteamEvent::LobbyUpdated(_)) => {}
-                    Err(broadcast::error::RecvError::Lagged(_)) => {}
-                    Err(broadcast::error::RecvError::Closed) => {
-                        return Err(DotaSteamError::EventSubscriptionClosed);
-                    }
-                }
-            }
-        })
+        // Subscribe before reading state so an update cannot fall between the
+        // snapshot and registration. Re-read after every wake, including lag.
+        let events = self.subscribe();
+        timeout(
+            wait_timeout,
+            wait_for_state(&self.state, events, |state| {
+                Ok(state
+                    .lobby
+                    .as_ref()
+                    .filter(|lobby| predicate(lobby))
+                    .cloned())
+            }),
+        )
         .await
         .map_err(|_| DotaSteamError::Timeout)?
+    }
+}
+
+fn creation_session_is_fresh(state: &ClientState) -> Result<bool, DotaSteamError> {
+    if state.status != CacheStatus::Ready {
+        return Err(DotaSteamError::NotReady);
+    }
+    if let Some(lobby) = &state.lobby {
+        return Err(DotaSteamError::AlreadyInLobby(lobby.lobby_id));
+    }
+    Ok(state
+        .welcome_observed_at
+        .is_some_and(|at| at.elapsed() <= CREATION_SESSION_MAX_AGE))
+}
+
+async fn wait_for_initial_cache_state(
+    state: &Arc<RwLock<ClientState>>,
+    mut events: broadcast::Receiver<DotaSteamEvent>,
+) -> Result<(), DotaSteamError> {
+    loop {
+        match state.read().await.status {
+            CacheStatus::Ready => return Ok(()),
+            CacheStatus::Disconnected => return Err(DotaSteamError::NotReady),
+            CacheStatus::Hydrating => {}
+        }
+        match events.recv().await {
+            Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+            Err(broadcast::error::RecvError::Closed) => {
+                return Err(DotaSteamError::EventSubscriptionClosed);
+            }
+        }
+    }
+}
+
+async fn wait_for_creation_preflight(
+    state: &Arc<RwLock<ClientState>>,
+    events: broadcast::Receiver<DotaSteamEvent>,
+    generation: u64,
+) -> Result<(), DotaSteamError> {
+    wait_for_state(state, events, |state| {
+        if state.welcome_generation == generation {
+            return Ok(None);
+        }
+        if let Some(lobby) = &state.lobby {
+            return Err(DotaSteamError::AlreadyInLobby(lobby.lobby_id));
+        }
+        Ok(Some(()))
+    })
+    .await
+}
+
+async fn wait_for_state<T>(
+    state: &Arc<RwLock<ClientState>>,
+    mut events: broadcast::Receiver<DotaSteamEvent>,
+    predicate: impl Fn(&ClientState) -> Result<Option<T>, DotaSteamError>,
+) -> Result<T, DotaSteamError> {
+    loop {
+        {
+            let state = state.read().await;
+            if state.status != CacheStatus::Ready {
+                return Err(DotaSteamError::NotReady);
+            }
+            if let Some(result) = predicate(&state)? {
+                return Ok(result);
+            }
+        }
+        match events.recv().await {
+            Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+            Err(broadcast::error::RecvError::Closed) => {
+                return Err(DotaSteamError::EventSubscriptionClosed);
+            }
+        }
     }
 }
 
@@ -1047,6 +1115,9 @@ async fn spawn_watchers(
     // prevents a post-welcome SOCache update from being lost between the
     // handshake and watcher task startup.
     let (
+        mut welcomes,
+        mut connection_status,
+        mut suspended,
         mut subscribed,
         mut up_to_date,
         mut multiple,
@@ -1058,6 +1129,9 @@ async fn spawn_watchers(
     ) = {
         let gc = gc.lock().await;
         (
+            gc.on::<CMsgClientWelcome>(),
+            gc.on::<ConnectionStatusWire>(),
+            gc.on::<CMsgClientSuspended>(),
             gc.on::<CMsgSOCacheSubscribed>(),
             gc.on::<CMsgSOCacheSubscribedUpToDate>(),
             gc.on::<SOMultipleObjectsWire>(),
@@ -1076,6 +1150,33 @@ async fn spawn_watchers(
         }
         let reason = loop {
             tokio::select! {
+                message = welcomes.next() => {
+                    match message {
+                        Some(Ok(message)) => apply_welcome(message, &state, &events).await,
+                        Some(Err(error)) => break error.to_string(),
+                        None => break "Dota coordinator message stream closed".to_owned(),
+                    }
+                }
+                message = connection_status.next() => {
+                    match message {
+                        Some(Ok(message)) => {
+                            if let Some(reason) = lost_session_reason(&message.0) {
+                                break reason;
+                            }
+                        }
+                        Some(Err(error)) => break error.to_string(),
+                        None => break "Dota coordinator message stream closed".to_owned(),
+                    }
+                }
+                message = suspended.next() => {
+                    break match message {
+                        Some(Ok(message)) => DotaSteamError::SessionSuspended {
+                            time_end: message.time_end,
+                        }.to_string(),
+                        Some(Err(error)) => error.to_string(),
+                        None => "Dota coordinator message stream closed".to_owned(),
+                    };
+                }
                 message = subscribed.next() => {
                     match message {
                         Some(Ok(message)) => apply_subscribed(message, &state, &events).await,
@@ -1142,6 +1243,12 @@ async fn spawn_watchers(
     WatcherTask(task)
 }
 
+fn lost_session_reason(message: &CMsgConnectionStatus) -> Option<String> {
+    let status = message.status.map(|status| status.value());
+    (status != Some(GCConnectionStatus::GCConnectionStatus_HAVE_SESSION as i32))
+        .then(|| format!("Dota coordinator session unavailable (status: {status:?})"))
+}
+
 async fn emit_disconnect(
     state: &Arc<RwLock<ClientState>>,
     events: &broadcast::Sender<DotaSteamEvent>,
@@ -1150,6 +1257,7 @@ async fn emit_disconnect(
     // Stream EOF is a disconnect too. Invalidate before notifying waiters;
     // leaving a Ready cache behind can authorize commands on a dead socket.
     state.write().await.status = CacheStatus::Disconnected;
+    warn!(%reason, "Dota coordinator connection invalidated");
     let _ = events.send(DotaSteamEvent::TransportDisconnected { reason });
 }
 
@@ -1202,6 +1310,8 @@ async fn apply_welcome(
     state: &Arc<RwLock<ClientState>>,
     events: &broadcast::Sender<DotaSteamEvent>,
 ) {
+    let hydrated = !welcome.outofdate_subscribed_caches.is_empty()
+        || !welcome.uptodate_subscribed_caches.is_empty();
     for cache in welcome.outofdate_subscribed_caches {
         apply_subscribed(cache, state, events).await;
     }
@@ -1211,6 +1321,13 @@ async fn apply_welcome(
     // an out-of-date cache processed above takes precedence for lobby contents.
     if !welcome.uptodate_subscribed_caches.is_empty() {
         apply_cache_up_to_date(state, events).await;
+    }
+    if hydrated {
+        let mut state = state.write().await;
+        state.welcome_generation = state.welcome_generation.wrapping_add(1);
+        state.welcome_observed_at = Some(tokio::time::Instant::now());
+        drop(state);
+        let _ = events.send(DotaSteamEvent::CacheHydrated);
     }
 }
 
@@ -1742,6 +1859,13 @@ proto_wire!(
 );
 
 proto_wire!(
+    ConnectionStatusWire,
+    CMsgConnectionStatus,
+    EGCBaseClientMsg,
+    EGCBaseClientMsg::k_EMsgGCClientConnectionStatus
+);
+
+proto_wire!(
     LiveScoreboardWire,
     CMsgDOTALiveScoreboardUpdate,
     EDOTAGCMsg,
@@ -1776,8 +1900,201 @@ mod tests {
             own_steam_id: TEST_STEAM_ID,
             status: CacheStatus::Ready,
             lobby: Some(map_lobby(&lobby)),
+            welcome_generation: 0,
+            welcome_observed_at: None,
             lobby_observed_at: Some(Instant::now()),
         }))
+    }
+
+    #[tokio::test]
+    async fn initial_cache_wait_rejects_disconnect_that_precedes_subscription() {
+        let state = ready_lobby_state();
+        let (events, _) = broadcast::channel(EVENT_BUFFER);
+        emit_disconnect(&state, &events, "connection lost".into()).await;
+        assert!(matches!(
+            wait_for_initial_cache_state(&state, events.subscribe()).await,
+            Err(DotaSteamError::NotReady)
+        ));
+    }
+
+    #[tokio::test]
+    async fn subscribed_wait_reads_an_update_delivered_before_waiting() {
+        let state = ready_lobby_state();
+        let (events, receiver) = broadcast::channel(EVENT_BUFFER);
+        // The authoritative update lands after subscription but before the
+        // first read, exactly the window that previously lost create replies.
+        let mut lobby = state.read().await.lobby.clone().unwrap();
+        lobby.game_name = "new lobby".into();
+        apply_lobby(lobby, &state, &events).await;
+        let result = wait_for_state(&state, receiver, |state| {
+            Ok(state
+                .lobby
+                .as_ref()
+                .filter(|lobby| lobby.game_name == "new lobby")
+                .cloned())
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.game_name, "new lobby");
+    }
+
+    #[tokio::test]
+    async fn lagged_wait_recovers_the_authoritative_lobby() {
+        let state = ready_lobby_state();
+        let (events, receiver) = broadcast::channel(1);
+        let waiter = wait_for_state(&state, receiver, |state| {
+            Ok(state
+                .lobby
+                .as_ref()
+                .filter(|lobby| lobby.game_name == "new lobby")
+                .cloned())
+        });
+        let update = async {
+            tokio::task::yield_now().await;
+            let mut lobby = state.read().await.lobby.clone().unwrap();
+            lobby.game_name = "new lobby".into();
+            apply_lobby(lobby, &state, &events).await;
+            for _ in 0..3 {
+                let _ = events.send(DotaSteamEvent::CacheHydrated);
+            }
+        };
+        let (result, ()) = tokio::join!(waiter, update);
+        assert_eq!(result.unwrap().game_name, "new lobby");
+    }
+
+    fn fresh_welcome() -> CMsgClientWelcome {
+        CMsgClientWelcome {
+            outofdate_subscribed_caches: vec![CMsgSOCacheSubscribed::new()],
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recent_admission_can_prepare_creation_but_idle_cache_cannot() {
+        let state = ready_lobby_state();
+        state.write().await.lobby = None;
+        let (events, _) = broadcast::channel(EVENT_BUFFER);
+        assert!(!creation_session_is_fresh(&*state.read().await).unwrap());
+        apply_welcome(fresh_welcome(), &state, &events).await;
+        assert!(creation_session_is_fresh(&*state.read().await).unwrap());
+        tokio::time::advance(CREATION_SESSION_MAX_AGE + Duration::from_secs(1)).await;
+        // Incidental SOCache traffic must not renew session admission freshness.
+        apply_subscribed(CMsgSOCacheSubscribed::new(), &state, &events).await;
+        assert!(!creation_session_is_fresh(&*state.read().await).unwrap());
+    }
+
+    #[tokio::test]
+    async fn fresh_admission_never_bypasses_existing_lobby_or_disconnect() {
+        let state = ready_lobby_state();
+        let (events, _) = broadcast::channel(EVENT_BUFFER);
+        apply_welcome(fresh_welcome(), &state, &events).await;
+        assert!(matches!(
+            creation_session_is_fresh(&*state.read().await),
+            Err(DotaSteamError::AlreadyInLobby(7001))
+        ));
+        state.write().await.lobby = None;
+        emit_disconnect(&state, &events, "connection lost".into()).await;
+        assert!(matches!(
+            creation_session_is_fresh(&*state.read().await),
+            Err(DotaSteamError::NotReady)
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn creation_preflight_rejects_stale_ready_cache_and_incidental_updates() {
+        let state = ready_lobby_state();
+        state.write().await.lobby = None;
+        let (events, receiver) = broadcast::channel(EVENT_BUFFER);
+        apply_subscribed(CMsgSOCacheSubscribed::new(), &state, &events).await;
+        let result = timeout(
+            Duration::from_secs(1),
+            wait_for_creation_preflight(&state, receiver, 0),
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn empty_welcome_does_not_prove_creation_readiness() {
+        let state = ready_lobby_state();
+        state.write().await.lobby = None;
+        let (events, receiver) = broadcast::channel(EVENT_BUFFER);
+        apply_welcome(CMsgClientWelcome::new(), &state, &events).await;
+        assert_eq!(state.read().await.welcome_generation, 0);
+        assert!(
+            timeout(
+                Duration::from_secs(1),
+                wait_for_creation_preflight(&state, receiver, 0),
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_lobby_wait_observes_disconnect_instead_of_timing_out() {
+        let state = ready_lobby_state();
+        state.write().await.lobby = None;
+        let (events, receiver) = broadcast::channel(EVENT_BUFFER);
+        let waiter = wait_for_state(&state, receiver, |state| Ok(state.lobby.clone()));
+        let disconnect = async {
+            tokio::task::yield_now().await;
+            emit_disconnect(&state, &events, "connection lost".into()).await;
+        };
+        let (result, ()) = tokio::join!(waiter, disconnect);
+        assert!(matches!(result, Err(DotaSteamError::NotReady)));
+    }
+
+    #[tokio::test]
+    async fn creation_preflight_requires_fresh_welcome_and_no_existing_lobby() {
+        for existing_lobby in [false, true] {
+            let state = ready_lobby_state();
+            if !existing_lobby {
+                state.write().await.lobby = None;
+            }
+            let (events, receiver) = broadcast::channel(EVENT_BUFFER);
+            apply_welcome(fresh_welcome(), &state, &events).await;
+            let result = wait_for_creation_preflight(&state, receiver, 0).await;
+            if existing_lobby {
+                assert!(matches!(result, Err(DotaSteamError::AlreadyInLobby(7001))));
+            } else {
+                result.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn creation_preflight_fails_on_disconnect_before_a_welcome() {
+        let state = ready_lobby_state();
+        state.write().await.lobby = None;
+        let (events, receiver) = broadcast::channel(EVENT_BUFFER);
+        emit_disconnect(&state, &events, "connection lost".into()).await;
+        assert!(matches!(
+            wait_for_creation_preflight(&state, receiver, 0).await,
+            Err(DotaSteamError::NotReady)
+        ));
+    }
+
+    #[test]
+    fn losing_gc_session_invalidates_readiness_even_when_steam_stays_connected() {
+        let healthy = CMsgConnectionStatus {
+            status: Some(GCConnectionStatus::GCConnectionStatus_HAVE_SESSION.into()),
+            ..Default::default()
+        };
+        assert!(lost_session_reason(&healthy).is_none());
+        for status in [
+            None,
+            Some(EnumOrUnknown::from_i32(1)),
+            Some(EnumOrUnknown::from_i32(999)),
+        ] {
+            assert!(
+                lost_session_reason(&CMsgConnectionStatus {
+                    status,
+                    ..Default::default()
+                })
+                .is_some()
+            );
+        }
     }
 
     #[tokio::test]
@@ -2126,6 +2443,8 @@ mod tests {
             own_steam_id: 76561197960287930,
             status: CacheStatus::Hydrating,
             lobby: None,
+            welcome_generation: 0,
+            welcome_observed_at: None,
             lobby_observed_at: None,
         }));
         let (events, _events_rx) = broadcast::channel(EVENT_BUFFER);

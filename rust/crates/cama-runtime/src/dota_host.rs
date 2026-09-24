@@ -142,6 +142,14 @@ pub trait DotaHostPort: Send + Sync {
     async fn betting_observation_fresh(&self) -> bool {
         true
     }
+    /// Check the live coordinator before persisting creation intent. Failure
+    /// here guarantees that no create was sent and can safely be retried.
+    async fn prepare_lobby_creation(&self) -> Result<(), String> {
+        match self.snapshot().await? {
+            None => Ok(()),
+            Some(_) => Err("the account already has a Dota lobby".into()),
+        }
+    }
     async fn create(&self, settings: &LobbySettings) -> Result<(), String>;
     async fn configure(&self, _lobby_id: u64, _settings: &LobbySettings) -> Result<(), String> {
         Err("this transport does not support lobby configuration".into())
@@ -694,6 +702,7 @@ impl DotaHostWorker {
                 }
                 return Ok(());
             }
+            port.prepare_lobby_creation().await?;
             state.create_requested_at = Some(now);
             self.save(&mut record, &state, now).await?;
             port.create(&state.settings).await?;
