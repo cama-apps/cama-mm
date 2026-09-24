@@ -46,6 +46,8 @@ async fn steam_lobby_slots_allow_any_order_on_the_correct_team_without_kicks() {
 }
 
 struct FakePort {
+    prepare_create_error: Mutex<Option<String>>,
+    manual_during_prepare: AtomicBool,
     configure_behavior: Mutex<&'static str>,
     destroy_behavior: Mutex<&'static str>,
     lobby: Mutex<Option<HostLobby>>,
@@ -63,6 +65,15 @@ struct FakePort {
 
 #[async_trait]
 impl DotaHostPort for FakePort {
+    async fn prepare_lobby_creation(&self) -> Result<(), String> {
+        if let Some(error) = self.prepare_create_error.lock().unwrap().clone() {
+            return Err(error);
+        }
+        if self.manual_during_prepare.swap(false, Ordering::SeqCst) {
+            guild_operator_command(self.path.clone(), "manual", 1, Some(self.pending)).await?;
+        }
+        Ok(())
+    }
     async fn betting_observation_fresh(&self) -> bool {
         !self.observation_stale.load(Ordering::SeqCst)
     }
@@ -380,6 +391,8 @@ impl Fixture {
             live,
         );
         let port = FakePort {
+            prepare_create_error: Mutex::new(None),
+            manual_during_prepare: AtomicBool::new(false),
             configure_behavior: Mutex::new("normal"),
             destroy_behavior: Mutex::new("normal"),
             lobby: Mutex::new(None),
@@ -1645,6 +1658,85 @@ async fn mismatched_league_or_roster_never_launches() {
     f.worker.tick(&f.port, 101).await.unwrap();
     assert_eq!(f.session().phase, Phase::NeedsReview);
     assert!(!f.port.calls.lock().unwrap().iter().any(|s| s == "launch"));
+}
+
+#[tokio::test]
+async fn unavailable_coordinator_before_create_retries_without_ambiguous_intent() {
+    let f = Fixture::new(false);
+    *f.port.prepare_create_error.lock().unwrap() = Some("GC session unavailable".into());
+    for now in [100, 150, 200] {
+        assert_eq!(
+            f.worker.tick(&f.port, now).await.unwrap_err(),
+            "GC session unavailable"
+        );
+        let record = f.session();
+        let state: SessionState = serde_json::from_value(record.payload).unwrap();
+        assert_eq!(state.create_requested_at, None);
+        assert_ne!(record.phase, Phase::NeedsReview);
+        assert!(f.port.calls.lock().unwrap().is_empty());
+    }
+
+    // A recovered connection may now create and invite normally, even after
+    // the old 90-second ambiguous-creation deadline would have elapsed.
+    *f.port.prepare_create_error.lock().unwrap() = None;
+    f.worker.tick(&f.port, 205).await.unwrap();
+    f.port
+        .lobby
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .members
+        .clear();
+    f.worker.tick(&f.port, 210).await.unwrap();
+    assert_eq!(f.session().phase, Phase::Gathering);
+    let calls = f.port.calls.lock().unwrap();
+    assert_eq!(calls.iter().filter(|call| *call == "create").count(), 1);
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.starts_with("invite:"))
+            .count(),
+        10
+    );
+}
+
+#[tokio::test]
+async fn manual_handoff_during_coordinator_preflight_prevents_creation() {
+    let f = Fixture::new(false);
+    f.port.manual_during_prepare.store(true, Ordering::SeqCst);
+    assert!(f.worker.tick(&f.port, 100).await.is_err());
+    assert!(f.port.calls.lock().unwrap().is_empty());
+    let state: SessionState = serde_json::from_value(f.session().payload).unwrap();
+    assert_eq!(state.create_requested_at, None);
+    f.worker.tick(&f.port, 105).await.unwrap();
+    assert_eq!(f.session().phase, Phase::Cancelled);
+}
+
+#[tokio::test]
+async fn real_lobby_preview_preflight_failure_does_not_save_creation_intent() {
+    let f = Fixture::preview(DotaHostTestMode::RealLobby, true);
+    *f.port.prepare_create_error.lock().unwrap() = Some("GC session unavailable".into());
+    for now in [100, 140] {
+        assert!(f.worker.tick(&f.port, now).await.is_err());
+        let record = f.session();
+        let state: SessionState = serde_json::from_value(record.payload).unwrap();
+        assert_eq!(state.create_requested_at, None);
+        assert_ne!(record.phase, Phase::NeedsReview);
+    }
+    assert!(f.port.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn coordinator_preflight_does_not_resume_a_reviewed_manual_replacement() {
+    let f = Fixture::new(false);
+    f.update_state(|record, state| {
+        record.phase = Phase::NeedsReview;
+        state.create_requested_at = Some(100);
+    });
+    f.worker.tick(&f.port, 200).await.unwrap();
+    assert_eq!(f.session().phase, Phase::NeedsReview);
+    assert!(f.port.calls.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

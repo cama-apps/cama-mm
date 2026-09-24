@@ -198,6 +198,7 @@ impl DotaHostWorker {
                 }
                 return Ok(());
             }
+            port.prepare_lobby_creation().await?;
             record.phase = Phase::Creating;
             state.create_requested_at = Some(now);
             // The in-memory simulation can be reconstructed after a restart.

@@ -124,6 +124,15 @@ observe that human-hosted game's start: if betting is still open, use
 `/admin dota betting pending_match:ID action:suspend reason:Manual game started`
 when gameplay starts.
 
+Before saving a new lobby-creation request, the host requires a freshly
+confirmed Game Coordinator session and an empty lobby cache. Admission is
+reused for five seconds; an idle session is probed again. A failed connection
+check sends no create request and can retry after reconnecting. Once creation
+has been sent, a timeout remains ambiguous: the host reconciles the existing
+lobby and pauses for review if it cannot confirm the result, rather than
+automatically sending another create. This also preserves matches already
+paused for a manually hosted replacement.
+
 Hosting pause messages are posted by the worker to the saved shuffle thread
 (falling back to the shuffle channel, then the originating channel). They
 describe the bot's lobby attempt, not a human-created replacement. Detailed
