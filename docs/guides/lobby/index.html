@@ -174,12 +174,12 @@
   <div class="masthead">
     <div class="eyebrow"><i></i>Cama · Player Guide</div>
     <h1>The Lobby Message</h1>
-    <p class="dek">Every inhouse night starts with one pinned message in the matchmaking channel. It has <strong>two buttons</strong> that seat you and unseat you, and a row of <strong>reactions that each do something different</strong> — none of which is "join". This is what each one does.</p>
+    <p class="dek">Every inhouse night starts with one pinned message in the matchmaking channel. It has <strong>two buttons</strong> that seat you and unseat you, and a row of <strong>reactions that each do something different</strong> — none of which is "join". The lobby thread carries a working copy of the same card. This is what each one does.</p>
   </div>
 
   <section>
     <div class="section-head"><span class="index">01</span><h2>What you're looking at</h2></div>
-    <p class="lede">The bot posts one message per lobby and pins it. It opens a public thread named after the lobby, where joins, leaves and ready checks get logged.</p>
+    <p class="lede">The bot posts one message per lobby and pins it. It opens a public thread named after the lobby, where joins, leaves and ready checks get logged. The thread also gets its own copy of the card with live Join and Leave buttons, kept in step with the pinned one, so you can act from inside the thread.</p>
 
     <div class="mock">
       <div class="title">🍽️ All You Can Feed</div>
@@ -188,8 +188,8 @@ Join to play!
 📻 React for the live map and commentary on bot-hosted matches. Players selected for the match are excluded.
 Opened at 8:02 PM</div>
       <div class="field"><b>Players (3) ⚔️</b>Crystal · Tide · Rubick</div>
-      <div class="buttons"><span class="btn join">⚔️ Join</span><span class="btn leave">Leave</span></div>
-      <div class="reacts"><span class="react">⚔️</span><span class="react">jopacoin</span><span class="react">📋</span><span class="react">🔔</span><span class="react">📻</span></div>
+      <div class="buttons"><span class="btn join">Join</span><span class="btn leave">Leave</span></div>
+      <div class="reacts"><span class="react">jopacoin</span><span class="react">📋</span><span class="react">🔔</span><span class="react">📻</span></div>
     </div>
     <p class="caption">Two lobbies can be open at once: <strong>🍽️ All You Can Feed</strong>, open to everyone, and <strong>🧀 Whine &amp; Cheese</strong>, limited to players below 1400 Glicko. You can sit in both.</p>
 
@@ -202,11 +202,11 @@ Opened at 8:02 PM</div>
 
   <section>
     <div class="section-head"><span class="index">02</span><h2>Join and Leave</h2></div>
-    <p class="lede">The buttons are the way in and out. A successful click is quiet: the only trace is a line in the lobby thread.</p>
+    <p class="lede">The buttons are the way in and out — on the pinned message or on its copy in the thread. A successful click is quiet: the only trace is a line in the lobby thread.</p>
 
     <div class="cards">
       <div class="card">
-        <div class="kicker">⚔️ Join</div>
+        <div class="kicker">Join</div>
         <h3>Seats you</h3>
         <p>You appear in the player list, the thread gets <code>✅ @you joined.</code>, and you're subscribed to the thread so you see what happens next. No ping, no public reply.</p>
       </div>
@@ -239,18 +239,9 @@ Opened at 8:02 PM</div>
 
   <section>
     <div class="section-head"><span class="index">03</span><h2>What each reaction does</h2></div>
-    <p class="lede">The bot pre-adds five reactions to every lobby message so they're one click away. Adding your own copy of a reaction triggers it. <strong>None of them joins the lobby</strong> — that's the button's job.</p>
+    <p class="lede">The bot pre-adds four reactions to every lobby message so they're one click away. Adding your own copy of a reaction triggers it. <strong>None of them joins the lobby</strong> — that's the button's job.</p>
 
     <div class="reactions">
-      <div class="reaction">
-        <div class="emoji">⚔️</div>
-        <div>
-          <h3>Ready to play <small>shout-out</small></h3>
-          <p>Posts a line in the lobby thread saying you're up for a game. Think of it as raising your hand in the channel without joining yet — or as hype once you have.</p>
-          <span class="says">⚔️ @you is ready to play a 5v5 Dota Challenge!</span>
-          <p>It does <strong>not</strong> seat you, and removing it does nothing. The sword used to be the join; the button replaced it because a reaction can't get a private reply, so refusals had to be posted publicly.</p>
-        </div>
-      </div>
 
       <div class="reaction">
         <div class="emoji word">jopacoin</div>
@@ -296,7 +287,7 @@ Opened at 8:02 PM</div>
     </div>
     <div class="note warn">
       <span class="tag">Old habit</span>
-      <span>If you've been reacting ⚔️ to join for years: it stopped seating people when the Join button arrived. Reacting now just posts the shout-out. <strong>Click Join.</strong></span>
+      <span>If you've been reacting ⚔️ to join for years: the sword is gone. It stopped seating people when the Join button arrived, and it's no longer on the message at all — the bot clears it if someone adds one. <strong>Click Join.</strong></span>
     </div>
   </section>
 
@@ -304,8 +295,8 @@ Opened at 8:02 PM</div>
     <div class="section-head"><span class="index">04</span><h2>Good to know</h2></div>
     <dl class="faq">
       <div class="faq-item">
-        <dt>Why buttons instead of the reaction?</dt>
-        <dd>Discord lets a button answer you privately. A reaction can't — the only way to explain a refused reaction-join was to post it in the channel and delete it seconds later, which meant a curfew or suspension got announced to everyone.</dd>
+        <dt>What happened to the ⚔️ reaction?</dt>
+        <dd>It was the join for years, then briefly a shout-out, and now it's retired. Discord lets a button answer you privately; a reaction can't — the only way to explain a refused reaction-join was to post it in the channel and delete it seconds later, which meant a curfew or suspension got announced to everyone. The sword still marks the player count on the card, nothing more.</dd>
       </div>
       <div class="faq-item">
         <dt>Can I be in both lobbies?</dt>
