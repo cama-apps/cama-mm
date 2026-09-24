@@ -665,11 +665,15 @@ async fn invalid_realtime_stats_falls_back_to_live_league_games() {
 
     let feed = DotaLiveFeed::new_with_upstream_base(&config(None), format!("http://{address}"))
         .expect("feed");
-    feed.publish_match(7, 8, 123, Some(99), 5, 3, true, vec![1])
+    feed.publish_match(7, 8, 123, Some(99), 5, 3, false, vec![1])
         .await;
     feed.poll_once().await;
     server.await.expect("server");
 
+    assert!(feed.gameplay_started(7, 8, 123));
+    assert!(feed.snapshot(7, 8).is_none());
+    feed.publish_match(7, 8, 123, Some(99), 5, 3, true, vec![1])
+        .await;
     let snapshot = feed.snapshot(7, 8).expect("fallback snapshot");
     assert_eq!(snapshot.source, LiveSnapshotSource::LiveLeagueGames);
     assert_eq!(snapshot.game_time_seconds, Some(91));
@@ -1216,4 +1220,78 @@ fn map_net_worth_requires_complete_observed_player_values() {
     let legacy: LiveMapFrame = serde_json::from_value(json!({"match_id":123,"game_time":100,"heroes":[],"buildings":[],"roshan_respawn_seconds":null})).unwrap();
     assert!(legacy.radiant_net_worth.is_none());
     assert!(legacy.dire_net_worth.is_none());
+}
+
+#[test]
+fn valve_start_requires_unambiguous_phase_or_positive_clock() {
+    for payload in [
+        json!({"match_id":123,"game_state":4}),
+        json!({"match":{"match_id":123,"game_state":5}}),
+        json!({"match_id":123,"scoreboard":{"duration":91.75}}),
+        json!({"match":{"match_id":123,"game_time":1}}),
+    ] {
+        assert!(valve_gameplay_started(&payload, 123), "{payload}");
+    }
+    for payload in [
+        json!({"match_id":124,"game_time":90}),
+        json!({"match_id":123,"match":{"match_id":124},"game_time":90}),
+        json!({"match_id":123}),
+        json!({"match_id":123,"game_time":0}),
+        json!({"match_id":123,"game_time":-60}),
+        json!({"match_id":123,"duration":0.5}),
+        json!({"match_id":123,"duration":1e100}),
+        json!({"match_id":123,"duration":86401}),
+        json!({"match_id":123,"game_time":90,"scoreboard":{"duration":null}}),
+        json!({"match_id":123,"game_time":90,"delta_frame":true}),
+        json!({"match_id":123,"game_time":90,"match":{"delta_frame":true}}),
+        json!({"match_id":123,"game_state":5,"scoreboard":{"game_state":2}}),
+    ] {
+        assert!(!valve_gameplay_started(&payload, 123), "{payload}");
+    }
+    for phase in [
+        json!(null),
+        json!(true),
+        json!("invalid"),
+        json!(2),
+        json!(3),
+        json!(127),
+    ] {
+        let payload = json!({"match_id":123,"game_time":90,"game_state":phase});
+        assert!(!valve_gameplay_started(&payload, 123), "{payload}");
+    }
+}
+
+#[tokio::test]
+async fn valve_start_validates_roster_and_stays_private_and_monotonic() {
+    let feed = DotaLiveFeed::new(&config(None)).unwrap();
+    feed.publish_match(7, 8, 123, None, 5, 3, false, vec![1, 2])
+        .await;
+    let target = feed.poll_targets().pop().unwrap();
+    for players in [
+        json!([]),
+        json!([{}]),
+        json!([{"account_id":99}]),
+        json!([{"account_id":1},{"account_id":1}]),
+    ] {
+        let game = json!({"match_id":123,"game_time":90,"players":players});
+        let snapshot = normalize_realtime_stats(&game, 7, 8, 123, now_unix()).unwrap();
+        feed.observe_valve_start(&target, &game, &snapshot);
+        assert!(!feed.gameplay_started(7, 8, 123));
+    }
+    let game = json!({"match_id":123,"game_time":90,"players":[{"account_id":1}]});
+    let snapshot = normalize_realtime_stats(&game, 7, 8, 123, now_unix()).unwrap();
+    feed.observe_valve_start(&target, &game, &snapshot);
+    feed.store_snapshot(target.key(), snapshot.clone());
+    assert!(feed.gameplay_started(7, 8, 123));
+    assert!(feed.snapshot(7, 8).is_none());
+    feed.observe_valve_start(&target, &json!({"match_id":123,"game_state":2}), &snapshot);
+    feed.mark_stale(target.key());
+    feed.publish_match(7, 8, 123, None, 5, 3, true, vec![1, 2])
+        .await;
+    assert!(feed.gameplay_started(7, 8, 123));
+    assert!(feed.snapshot(7, 8).is_some());
+    feed.publish_match(7, 8, 124, None, 5, 3, false, vec![1, 2])
+        .await;
+    feed.observe_valve_start(&target, &game, &snapshot);
+    assert!(!feed.gameplay_started(7, 8, 124));
 }
