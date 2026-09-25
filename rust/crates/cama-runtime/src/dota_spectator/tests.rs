@@ -1145,7 +1145,7 @@ async fn same_tick_delivery_reaudits_after_persistence_and_blocks_reopened_betti
     poll_frame(&f, &listener, &frame(115, 1, 0)).await;
     let path = f.db.path().to_owned();
     let pending_id = f.pending;
-    f.discord.audit_hook_after.store(3, Ordering::SeqCst);
+    f.discord.audit_hook_after.store(1, Ordering::SeqCst);
     *f.discord.audit_hook.lock().unwrap() = Some(Box::new(move || {
         let row = DotaSpectatorRepository::new(&path)
             .get(1, pending_id)
@@ -1190,7 +1190,7 @@ async fn spectator_map_reuses_one_message_on_quiet_fifteen_second_ticks() {
     assert_eq!(f.discord.maps.lock().unwrap().len(), 1);
     poll_frame_with_map(&f, &listener, &frame(115, 0, 0), true).await;
     f.worker.tick(1014).await.unwrap();
-    assert_eq!(f.discord.map_edits.lock().unwrap().len(), 1);
+    assert_eq!(f.discord.map_edits.lock().unwrap().len(), 2);
     f.worker.tick(1015).await.unwrap();
     assert_eq!(
         f.discord.delivered.lock().unwrap().len(),
@@ -1231,7 +1231,7 @@ async fn spectator_map_recovers_lost_create_receipt_by_nonce_after_restart() {
     f.discord.lose_map_reply.store(true, Ordering::SeqCst);
     f.worker.tick(1000).await.unwrap();
     assert!(f.state().map_message_id.is_none());
-    assert!(f.state().pending_map.is_none());
+    assert!(f.state().pending_map.is_some());
     let restarted = SpectatorWorker::new(f.db.path(), vec![1], f.discord.clone(), f.live.clone());
     restarted.tick(1015).await.unwrap();
     assert_eq!(f.discord.maps.lock().unwrap().len(), 1);
@@ -1247,9 +1247,9 @@ async fn spectator_map_reaudits_betting_after_render_and_withholds_private_image
     f.subscribe(20, true);
     f.worker.tick(990).await.unwrap();
     poll_frame_with_map(&f, &listener, &frame(100, 0, 0), true).await;
-    // The greeting audit comes first; change policy during the map audit,
+    // Surface validation comes first; change policy during the map audit,
     // after rendering, to prove a fresh DB check blocks image publication.
-    f.discord.audit_hook_after.store(3, Ordering::SeqCst);
+    f.discord.audit_hook_after.store(1, Ordering::SeqCst);
     let path = f.db.path().to_owned();
     let id = f.pending;
     *f.discord.audit_hook.lock().unwrap() = Some(Box::new(move || {
@@ -1351,6 +1351,125 @@ fn map_names_prefer_current_discord_alias_and_preserve_unlinked_persona() {
         Some("current server alias")
     );
     assert_eq!(map.heroes[1].player_name.as_deref(), Some("Steam persona"));
+}
+
+#[tokio::test]
+async fn spectator_map_survives_a_newer_positionless_feed_during_discord_audit() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let f = Fixture::with_upstream(Some(&format!("http://{}", listener.local_addr().unwrap())));
+    f.subscribe(20, true);
+    f.worker.tick(990).await.unwrap();
+    poll_frame_with_map(&f, &listener, &frame(100, 0, 0), true).await;
+    let live = f.live.clone();
+    *f.discord.audit_hook.lock().unwrap() = Some(Box::new(move || {
+        let players: serde_json::Map<String, serde_json::Value> = (1..=10)
+            .map(|id| {
+                (
+                    id.to_string(),
+                    serde_json::json!({"steamid": id.to_string()}),
+                )
+            })
+            .collect();
+        live.ingest_gsi(serde_json::json!({
+            "auth":{"token":"fixture-gsi-token-at-least-32-characters"},
+            "map":{"matchid":"123","game_time":115,"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS"},
+            "allplayers":players
+        }), chrono::Utc::now().timestamp()).unwrap();
+    }));
+    f.worker.tick(1000).await.unwrap();
+    assert!(f.live.snapshot(1, f.pending).unwrap().map_frame.is_none());
+    assert_eq!(f.discord.map_edits.lock().unwrap().len(), 1);
+    assert_eq!(f.state().last_delivered_map, Some((123, 100)));
+}
+
+#[tokio::test]
+async fn spectator_map_accepts_advancing_feed_without_requiring_exact_clock_equality() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let f = Fixture::with_upstream(Some(&format!("http://{}", listener.local_addr().unwrap())));
+    f.subscribe(20, true);
+    f.worker.tick(990).await.unwrap();
+    poll_frame_with_map(&f, &listener, &frame(100, 0, 0), true).await;
+    let captured = PendingMap {
+        frame: f.live.snapshot(1, f.pending).unwrap().map_frame.unwrap(),
+        created_at: 1000,
+        source_fetched_at: Some(chrono::Utc::now().timestamp()),
+    };
+    poll_frame_with_map(&f, &listener, &frame(115, 0, 0), true).await;
+    assert!(
+        f.worker
+            .map_rejection_reason(&f.row(), &captured, 1015)
+            .is_none()
+    );
+    poll_frame(&f, &listener, &frame(130, 0, 0)).await;
+    assert!(
+        f.worker
+            .map_rejection_reason(&f.row(), &captured, 1030)
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn spectator_map_same_clock_or_lagging_commentary_is_delivered_once() {
+    for previous_clock in [100, 115] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let f = Fixture::with_upstream(Some(&format!("http://{}", listener.local_addr().unwrap())));
+        f.subscribe(20, true);
+        poll_frame(&f, &listener, &frame(previous_clock, 0, 0)).await;
+        f.worker.tick(1000).await.unwrap();
+        assert!(f.discord.map_edits.lock().unwrap().is_empty());
+        poll_frame_with_map(&f, &listener, &frame(100, 0, 0), true).await;
+        f.worker.tick(1015).await.unwrap();
+        assert_eq!(f.state().previous.unwrap().game_time, previous_clock);
+        assert_eq!(f.state().last_delivered_map, Some((123, 100)));
+        assert_eq!(f.discord.map_edits.lock().unwrap().len(), 1);
+        poll_frame_with_map(&f, &listener, &frame(90, 0, 0), true).await;
+        f.worker.tick(1030).await.unwrap();
+        poll_frame_with_map(&f, &listener, &frame(100, 0, 0), true).await;
+        SpectatorWorker::new(f.db.path(), vec![1], f.discord.clone(), f.live.clone())
+            .tick(1045)
+            .await
+            .unwrap();
+        assert_eq!(f.discord.map_edits.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn spectator_map_rejects_expired_mismatched_or_inactive_frames() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let f = Fixture::with_upstream(Some(&format!("http://{}", listener.local_addr().unwrap())));
+    f.subscribe(20, true);
+    f.worker.tick(990).await.unwrap();
+    poll_frame_with_map(&f, &listener, &frame(100, 0, 0), true).await;
+    let captured = PendingMap {
+        frame: f.live.snapshot(1, f.pending).unwrap().map_frame.unwrap(),
+        created_at: 1000,
+        source_fetched_at: Some(chrono::Utc::now().timestamp()),
+    };
+    assert!(
+        f.worker
+            .map_rejection_reason(&f.row(), &captured, 1091)
+            .is_some()
+    );
+    let mut expired_source = captured.clone();
+    expired_source.source_fetched_at = Some(chrono::Utc::now().timestamp() - 91);
+    assert!(
+        f.worker
+            .map_rejection_reason(&f.row(), &expired_source, 1000)
+            .is_some()
+    );
+    let mut wrong_match = captured.clone();
+    wrong_match.frame.match_id = 999;
+    assert!(
+        f.worker
+            .map_rejection_reason(&f.row(), &wrong_match, 1000)
+            .is_some()
+    );
+    f.live.finish_match(1, f.pending).await;
+    assert!(
+        f.worker
+            .map_rejection_reason(&f.row(), &captured, 1000)
+            .is_some()
+    );
 }
 
 #[tokio::test]

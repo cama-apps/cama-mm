@@ -47,6 +47,7 @@ struct State {
     joined_viewers: Vec<u64>,
     subscription_batch: Option<SubscriptionBatch>,
     pending_map: Option<PendingMap>,
+    last_delivered_map: Option<(u64, i64)>,
     map_create_started_at: Option<i64>,
     map_generation: u64,
 }
@@ -55,6 +56,7 @@ impl State {
         self.map_message_id = None;
         self.map_create_started_at = None;
         self.pending_map = None;
+        self.last_delivered_map = None;
         self.commentary_thread_id = None;
         self.joined_viewers.clear();
         self.subscription_batch = None;
@@ -72,6 +74,8 @@ struct SubscriptionBatch {
 struct PendingMap {
     frame: LiveMapFrame,
     created_at: i64,
+    #[serde(default)]
+    source_fetched_at: Option<i64>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Batch {
@@ -480,6 +484,10 @@ impl SpectatorWorker {
             self.save(&mut record, &state, now).await?;
             return Ok(());
         }
+        // Preserve the available map before slow Discord setup/audits let a
+        // thinner or newer scoreboard replace the shared feed snapshot.
+        self.queue_available_map(&mut record, &mut state, &pending, &roster, now)
+            .await?;
         if record.channel_id.is_none() {
             if state.creating_until > now {
                 self.log_status(
@@ -596,9 +604,11 @@ impl SpectatorWorker {
             .snapshot(record.guild_id, record.pending_match_id)
             .filter(|s| !s.stale)
         else {
+            self.try_deliver_map(&mut record, &mut state, now).await;
             return Ok(());
         };
         let Some(mut frame) = snapshot.announcement_frame else {
+            self.try_deliver_map(&mut record, &mut state, now).await;
             return Ok(());
         };
         // Cached or regressed game clocks must not replace the last distinct
@@ -617,16 +627,6 @@ impl SpectatorWorker {
             snapshot.delay_seconds,
             &mut state.announcement_memory,
         );
-        state.pending_map = snapshot
-            .map_frame
-            .filter(|map| map.match_id == frame.match_id && map.game_time == frame.game_time)
-            .map(|mut map| {
-                apply_map_display_names(&mut map, &frame);
-                PendingMap {
-                    frame: map,
-                    created_at: now,
-                }
-            });
         state.previous = Some(frame);
         state.last_sample_at = now;
         if let Some(message) = message {
@@ -960,6 +960,54 @@ impl SpectatorWorker {
         Ok(())
     }
 
+    async fn queue_available_map(
+        &self,
+        record: &mut DotaSpectatorRecord,
+        state: &mut State,
+        pending: &PendingMatchRecord,
+        roster: &[u64],
+        now: i64,
+    ) -> Result<(), String> {
+        if !pending.state.betting_closed() || pending.state.betting_open(now) {
+            return Ok(());
+        }
+        let Some(snapshot) = self
+            .live
+            .snapshot(record.guild_id, record.pending_match_id)
+            .filter(|snapshot| !snapshot.stale)
+        else {
+            return Ok(());
+        };
+        let Some(mut map) = snapshot
+            .map_frame
+            .filter(|map| map.match_id == snapshot.match_id)
+        else {
+            return Ok(());
+        };
+        if state
+            .last_delivered_map
+            .is_some_and(|(id, clock)| id == map.match_id && clock >= map.game_time)
+            || state.pending_map.as_ref().is_some_and(|pending| {
+                pending.frame.match_id == map.match_id && pending.frame.game_time >= map.game_time
+            })
+        {
+            return Ok(());
+        }
+        if let Some(mut frame) = snapshot
+            .announcement_frame
+            .filter(|frame| frame.match_id == map.match_id && frame.game_time == map.game_time)
+        {
+            self.enrich_names(&mut frame, record.guild_id, roster).await;
+            apply_map_display_names(&mut map, &frame);
+        }
+        state.pending_map = Some(PendingMap {
+            frame: map,
+            created_at: now,
+            source_fetched_at: Some(snapshot.fetched_at),
+        });
+        self.save(record, state, now).await
+    }
+
     async fn try_deliver_map(&self, record: &mut DotaSpectatorRecord, state: &mut State, now: i64) {
         if let Err(error) = self.deliver_map(record, state, now).await {
             // A missing icon/render or Discord image failure must not suppress
@@ -973,16 +1021,23 @@ impl SpectatorWorker {
         }
     }
 
-    fn map_is_fresh(&self, record: &DotaSpectatorRecord, map: &PendingMap, now: i64) -> bool {
-        now.saturating_sub(map.created_at) <= 90
-            && self
-                .live
-                .snapshot(record.guild_id, record.pending_match_id)
-                .filter(|snapshot| !snapshot.stale)
-                .and_then(|snapshot| snapshot.map_frame)
-                .is_some_and(|latest| {
-                    latest.match_id == map.frame.match_id && latest.game_time == map.frame.game_time
-                })
+    fn map_rejection_reason(
+        &self,
+        record: &DotaSpectatorRecord,
+        map: &PendingMap,
+        now: i64,
+    ) -> Option<&'static str> {
+        if now.saturating_sub(map.created_at) > 90
+            || !map
+                .source_fetched_at
+                .is_some_and(|at| chrono::Utc::now().timestamp().saturating_sub(at) <= 90)
+        {
+            return Some("pending map expired or lacks a trusted capture time");
+        }
+        match self.live.snapshot(record.guild_id, record.pending_match_id) {
+            Some(snapshot) if !snapshot.stale && snapshot.match_id == map.frame.match_id => None,
+            _ => Some("pending map belongs to an unavailable, stale, or different live match"),
+        }
     }
 
     async fn deliver_map(
@@ -994,7 +1049,13 @@ impl SpectatorWorker {
         let Some(map) = state.pending_map.clone() else {
             return Ok(());
         };
-        if !self.map_is_fresh(record, &map, now) {
+        if let Some(reason) = self.map_rejection_reason(record, &map, now) {
+            self.log_status(
+                (record.guild_id, record.pending_match_id),
+                "map",
+                reason,
+                now,
+            );
             state.pending_map = None;
             return self.save(record, state, now).await;
         }
@@ -1052,7 +1113,13 @@ impl SpectatorWorker {
             self.save(record, state, now).await?;
             return Ok(());
         }
-        if !self.map_is_fresh(record, &map, now) {
+        if let Some(reason) = self.map_rejection_reason(record, &map, now) {
+            self.log_status(
+                (record.guild_id, record.pending_match_id),
+                "map",
+                reason,
+                now,
+            );
             state.pending_map = None;
             return self.save(record, state, now).await;
         }
@@ -1092,6 +1159,7 @@ impl SpectatorWorker {
             now,
         );
         state.map_message_id = Some(message_id);
+        state.last_delivered_map = Some((map.frame.match_id, map.frame.game_time));
         state.pending_map = None;
         self.save(record, state, now).await
     }
@@ -1105,6 +1173,9 @@ impl SpectatorWorker {
         pending: &PendingMatchRecord,
         now: i64,
     ) -> Result<bool, String> {
+        if state.queued.is_none() {
+            return Ok(true);
+        }
         let guild = u64::try_from(record.guild_id).map_err(|_| "invalid spectator guild")?;
         let channel = record.channel_id.ok_or("spectator channel unavailable")? as u64;
         if let Err(error) = self
