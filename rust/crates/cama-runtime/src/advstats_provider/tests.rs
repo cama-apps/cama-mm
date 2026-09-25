@@ -170,7 +170,7 @@ async fn validation_preserves_dm_self_and_unregistered_visibility() {
         .expect("missing response");
     assert_eq!(
         missing.followups.lock().expect("followups")[0].content,
-        "2 is not registered."
+        "Unknown player is not registered."
     );
 }
 
@@ -213,7 +213,7 @@ async fn test_unregistered_player1() {
         .expect("missing player response");
     assert_eq!(
         responder.followups.lock().expect("followups")[0].content,
-        "1 is not registered."
+        "Unknown player is not registered."
     );
 }
 
@@ -237,7 +237,7 @@ async fn test_unregistered_player2() {
         .expect("missing player response");
     assert_eq!(
         responder.followups.lock().expect("followups")[0].content,
-        "2 is not registered."
+        "Unknown player is not registered."
     );
 }
 
@@ -258,14 +258,29 @@ async fn assert_migrated_pairing_renders_canonical_wins_in_either_argument_order
             [GUILD],
         )
         .expect("insert pairing");
-    let provider = AdvancedStatsRegistrationProvider::new(database.path());
+    let provider = AdvancedStatsRegistrationProvider::new(database.path()).with_player_names(
+        Arc::new(FixedPlayerNames(BTreeMap::from([
+            (1, "Alice Server".to_owned()),
+            (2, "Bob Server".to_owned()),
+        ]))),
+    );
     let handler = registry(&provider)
         .command_handler("matchup")
         .expect("handler");
 
     for (first, second, expected_first, expected_second) in [
-        ((1, "Alice"), (2, "Bob"), "1: 2 wins", "2: 3 wins"),
-        ((2, "Bob"), (1, "Alice"), "2: 3 wins", "1: 2 wins"),
+        (
+            (1, "Alice"),
+            (2, "Bob"),
+            "Alice Server: 2 wins",
+            "Bob Server: 3 wins",
+        ),
+        (
+            (2, "Bob"),
+            (1, "Alice"),
+            "Bob Server: 3 wins",
+            "Alice Server: 2 wins",
+        ),
     ] {
         let responder = Arc::new(Responder::default());
         handler
@@ -278,8 +293,10 @@ async fn assert_migrated_pairing_renders_canonical_wins_in_either_argument_order
         let followups = responder.followups.lock().expect("followups");
         let embed = &followups[0].embeds[0];
         assert_eq!(embed.fields[0].value, "4 games, 3 wins (75%)");
-        assert!(embed.fields[1].value.contains(expected_first));
-        assert!(embed.fields[1].value.contains(expected_second));
+        assert_eq!(
+            embed.fields[1].value,
+            format!("5 games\n{expected_first}\n{expected_second}")
+        );
     }
 }
 

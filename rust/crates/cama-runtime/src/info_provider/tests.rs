@@ -1234,8 +1234,11 @@ fn command_cooldown_storage_purges_cold_keys_at_python_threshold() {
 async fn calibration_runs_live_sqlite_analytics_and_emits_real_png_bytes() {
     let (_directory, path) = migrated_database();
     seed_leaderboard_data(&path);
-    let provider =
-        InfoRegistrationProvider::new(path, &config(), Arc::new(RecordingDiscord::default()));
+    let provider = InfoRegistrationProvider::new(
+        path,
+        &config(),
+        Arc::new(RecordingDiscord::with_members([(ALICE, "Alice Server")])),
+    );
     let handler = registry(&provider)
         .command_handler("calibration")
         .expect("calibration handler");
@@ -1301,7 +1304,7 @@ async fn calibration_runs_live_sqlite_analytics_and_emits_real_png_bytes() {
     assert!(response.ephemeral);
     assert_eq!(
         response.embeds[0].title.as_deref(),
-        Some("Calibration Stats: 101")
+        Some("Calibration Stats: Alice Server")
     );
     let profile = response.embeds[0]
         .fields

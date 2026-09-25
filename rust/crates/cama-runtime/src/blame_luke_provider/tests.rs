@@ -386,7 +386,10 @@ async fn test_button_charges_clicker_and_posts_public_result_on_migrated_sqlite(
         result.embeds[0].description.as_deref(),
         Some("**Luke deleted his messages**")
     );
-    assert_eq!(result.embeds[0].footer.as_deref(), Some("Filed by 42"));
+    assert_eq!(
+        result.embeds[0].footer.as_deref(),
+        Some("Filed by Unknown player")
+    );
     assert_eq!(
         result.embeds[0].image_url.as_deref(),
         Some("attachment://blame_luke.gif")
