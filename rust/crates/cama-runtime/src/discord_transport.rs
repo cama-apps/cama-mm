@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use cama_domain::discord_content::readable_player_name;
 
 use crate::registration::InteractionResponse;
 
@@ -31,6 +32,7 @@ impl GuildPlayerNameDirectory {
                 members
                     .into_iter()
                     .filter_map(|(discord_id, render_name)| {
+                        let render_name = readable_player_name(&render_name)?.to_owned();
                         i64::try_from(discord_id)
                             .ok()
                             .map(|discord_id| (discord_id, render_name))
@@ -43,20 +45,17 @@ impl GuildPlayerNameDirectory {
     #[must_use]
     pub fn resolve(&self, discord_id: i64) -> String {
         self.cached_name(discord_id)
-            .unwrap_or_else(|| discord_id.to_string())
+            .unwrap_or_else(|| "Unknown player".to_owned())
     }
 
-    /// Resolve with a caller-supplied stored player name filling the gap
-    /// between the member cache and the bare Discord ID: cached render name
-    /// first, then the stored name, then the numeric ID as the last resort.
+    /// Prefer a live name, then a readable supplied name. Never expose an ID
+    /// or depend on the Discord client to resolve mention markup.
     #[must_use]
     pub fn resolve_or(&self, discord_id: i64, stored_name: &str) -> String {
         self.cached_name(discord_id).unwrap_or_else(|| {
-            if stored_name.is_empty() {
-                discord_id.to_string()
-            } else {
-                stored_name.to_owned()
-            }
+            readable_player_name(stored_name)
+                .unwrap_or("Unknown player")
+                .to_owned()
         })
     }
 
@@ -84,6 +83,70 @@ impl GuildPlayerNameDirectory {
             .as_ref()
             .is_some_and(|members| members.contains_key(&discord_id))
     }
+}
+
+/// Resolve display text on the server, including members absent from a partial
+/// gateway cache. A failed lookup never becomes a numeric name or a mention.
+pub async fn resolve_guild_player_names(
+    transport: &dyn DiscordTransport,
+    guild_id: Option<u64>,
+    discord_ids: &[i64],
+) -> GuildPlayerNameDirectory {
+    let user_ids = discord_ids
+        .iter()
+        .filter_map(|id| u64::try_from(*id).ok().filter(|id| *id != 0))
+        .collect::<BTreeSet<_>>();
+    let guild_id = guild_id.filter(|id| *id != 0);
+    let cached = guild_id.and_then(|guild_id| {
+        transport
+            .cached_guild_member_render_names(
+                guild_id,
+                &user_ids.iter().copied().collect::<Vec<_>>(),
+            )
+            .ok()
+            .flatten()
+    });
+    let mut names = GuildPlayerNameDirectory::new(cached);
+    for user_id in user_ids {
+        let discord_id = i64::try_from(user_id).expect("converted from i64 above");
+        if names.contains(discord_id) {
+            continue;
+        }
+        let member_name = if let Some(guild_id) = guild_id {
+            match transport.guild_member(guild_id, user_id).await {
+                Ok(member) => member.and_then(|member| {
+                    readable_player_name(&member.display_name).map(str::to_owned)
+                }),
+                Err(error) => {
+                    tracing::warn!(%error, guild_id, user_id, "player display name lookup failed");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let name = if member_name.is_some() {
+            member_name
+        } else {
+            transport
+                .user(user_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|user| {
+                    readable_player_name(&user.display_name)
+                        .or_else(|| readable_player_name(&user.account_username))
+                        .map(str::to_owned)
+                })
+        };
+        if let Some(name) = name {
+            names
+                .members
+                .get_or_insert_with(BTreeMap::new)
+                .insert(discord_id, name);
+        }
+    }
+    names
 }
 
 pub trait GuildPlayerNameResolver: Send + Sync {
@@ -701,12 +764,20 @@ pub trait DiscordTransport: Send + Sync {
         user_id: u64,
     ) -> Result<Option<DiscordGuildMemberSnapshot>, String>;
 
+    /// Return an authoritative member-ID snapshot only when the entire guild
+    /// member cache is available. A missing or partial cache is `None`; an
+    /// empty complete guild is `Some(empty)`. This avoids REST lookups for
+    /// departed members without treating an incomplete cache as absence.
+    fn cached_guild_member_ids(&self, _guild_id: u64) -> Result<Option<BTreeSet<u64>>, String> {
+        Ok(None)
+    }
+
     /// Snapshot render names for the requested cached guild members. Each name
     /// uses the guild-specific nickname first, then the Discord display name.
     ///
     /// `Ok(None)` means the guild itself is unavailable from this transport's
-    /// cache. Callers must fall back to Discord IDs instead of issuing HTTP
-    /// requests solely to render names.
+    /// cache. Use `resolve_guild_player_names` for player-facing rosters so
+    /// cache misses are fetched and never become numeric display names.
     fn cached_guild_member_render_names(
         &self,
         _guild_id: u64,
@@ -747,26 +818,26 @@ mod player_render_name_tests {
     use super::GuildPlayerNameDirectory;
 
     #[test]
-    fn cached_render_name_wins_and_missing_member_uses_discord_id() {
+    fn cached_render_name_wins_and_missing_member_uses_readable_placeholder() {
         let names = GuildPlayerNameDirectory::new(Some(BTreeMap::from([(
             7,
             "Server Nickname".to_owned(),
         )])));
 
         assert_eq!(names.resolve(7), "Server Nickname");
-        assert_eq!(names.resolve(8), "8");
-        assert_eq!(names.resolve(9), "9");
+        assert_eq!(names.resolve(8), "Unknown player");
+        assert_eq!(names.resolve(9), "Unknown player");
     }
 
     #[test]
-    fn unavailable_member_cache_uses_discord_id() {
+    fn unavailable_member_cache_uses_readable_placeholder() {
         let names = GuildPlayerNameDirectory::new(None);
 
-        assert_eq!(names.resolve(7), "7");
+        assert_eq!(names.resolve(7), "Unknown player");
     }
 
     #[test]
-    fn stored_name_fills_the_gap_between_cache_and_discord_id() {
+    fn readable_stored_name_fills_the_gap_when_cache_is_missing() {
         let names = GuildPlayerNameDirectory::new(Some(BTreeMap::from([(
             7,
             "Server Nickname".to_owned(),
@@ -774,10 +845,32 @@ mod player_render_name_tests {
 
         assert_eq!(names.resolve_or(7, "stored-seven"), "Server Nickname");
         assert_eq!(names.resolve_or(8, "stored-eight"), "stored-eight");
-        assert_eq!(names.resolve_or(9, ""), "9");
+        assert_eq!(names.resolve_or(9, ""), "Unknown player");
 
         let unavailable = GuildPlayerNameDirectory::new(None);
         assert_eq!(unavailable.resolve_or(7, "stored-seven"), "stored-seven");
+    }
+
+    #[test]
+    fn corrupt_cached_and_stored_names_never_render_identifiers() {
+        for value in [
+            "",
+            "   ",
+            "123456789012345678",
+            "@123456789012345678",
+            "<@123456789012345678>",
+            "<@!123456789012345678>",
+        ] {
+            let names =
+                GuildPlayerNameDirectory::new(Some(BTreeMap::from([(7, value.to_owned())])));
+            assert!(!names.contains(7), "{value:?}");
+            assert_eq!(names.resolve(7), "Unknown player");
+            assert_eq!(names.resolve_or(7, value), "Unknown player");
+            assert_eq!(
+                names.resolve_or(7, "Readable fallback"),
+                "Readable fallback"
+            );
+        }
     }
 
     #[test]

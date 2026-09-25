@@ -5,6 +5,19 @@ use std::fmt::{Display, Formatter};
 
 pub const DISCORD_MESSAGE_MAX_CHARS: usize = 2_000;
 
+/// Names are text, never Discord mention markup or a serialized identifier.
+/// Apply this at rendering boundaries too: historical stored names may contain
+/// the ID/mention fallbacks used by older versions of the bot.
+#[must_use]
+pub fn readable_player_name(name: &str) -> Option<&str> {
+    let name = name.trim();
+    let identifier = name.trim_start_matches('@').trim_start_matches('!');
+    (!name.is_empty()
+        && !name.contains("<@")
+        && !identifier.chars().all(|character| character.is_numeric()))
+    .then_some(name)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvalidMaxChars;
 
@@ -116,6 +129,25 @@ mod tests {
         AnnouncementFollowup, AnnouncementSender, DISCORD_MESSAGE_MAX_CHARS,
         chunk_default_discord_content, send_record_announcement,
     };
+
+    #[test]
+    fn player_names_reject_legacy_identifiers_but_allow_unicode_and_digits_in_names() {
+        for invalid in [
+            "",
+            "  ",
+            "123456789",
+            "@123456789",
+            "<@123456789>",
+            "<@!123456789>",
+            "name <@123>",
+        ] {
+            assert_eq!(super::readable_player_name(invalid), None, "{invalid:?}");
+        }
+        for name in ["Player 2", "玩家", "🎮", "7up"] {
+            assert_eq!(super::readable_player_name(name), Some(name));
+        }
+        assert_eq!(super::readable_player_name(" Name "), Some("Name"));
+    }
 
     #[derive(Default)]
     struct RecordingSender {

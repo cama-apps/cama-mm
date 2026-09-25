@@ -1535,10 +1535,16 @@ fn member_server_nickname(member: &Member) -> Option<String> {
 }
 
 fn member_render_name(member: &Member) -> String {
-    member
-        .nick
-        .clone()
-        .unwrap_or_else(|| member.user.display_name().to_owned())
+    [
+        member.nick.as_deref(),
+        member.user.global_name.as_deref(),
+        Some(member.user.name.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(cama_domain::discord_content::readable_player_name)
+    .unwrap_or("Unknown player")
+    .to_owned()
 }
 
 fn requested_member_render_names(
@@ -1554,6 +1560,13 @@ fn requested_member_render_names(
                 .map(|member| (user_id.get(), member_render_name(member)))
         })
         .collect::<BTreeMap<_, _>>()
+}
+
+fn complete_guild_member_ids(guild: &Guild) -> Option<BTreeSet<u64>> {
+    if guild.unavailable || u64::try_from(guild.members.len()).ok()? != guild.member_count {
+        return None;
+    }
+    Some(guild.members.keys().map(|id| id.get()).collect())
 }
 
 fn gateway_member(member: &Member) -> GatewayMember {
@@ -4715,6 +4728,14 @@ impl DiscordTransport for SerenityDiscordTransport {
             deafened,
             activities,
         }))
+    }
+
+    fn cached_guild_member_ids(&self, guild_id: u64) -> Result<Option<BTreeSet<u64>>, String> {
+        let context = self.context()?;
+        Ok(context
+            .cache
+            .guild(GuildId::new(guild_id))
+            .and_then(|guild| complete_guild_member_ids(&guild)))
     }
 
     fn cached_guild_member_render_names(

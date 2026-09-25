@@ -607,9 +607,15 @@ fn serenity_render_name_uses_server_nickname_then_discord_display_then_username(
         GatewayMember::new(42, 7, Some("Server Nickname".to_owned()))
     );
 
+    for invalid in ["", "   ", "123456789012345678", "<@7>", "@7"] {
+        member.nick = Some(invalid.to_owned());
+        assert_eq!(member_render_name(&member), "Global Display Name");
+    }
     member.nick = None;
     member.user.global_name = None;
     assert_eq!(member_render_name(&member), "Account Username");
+    member.user.name = "123456789012345678".to_owned();
+    assert_eq!(member_render_name(&member), "Unknown player");
 }
 
 #[test]
@@ -632,6 +638,25 @@ fn nickname_snapshot_includes_only_requested_cached_members() {
         requested_member_render_names(&members, &[7]),
         DiscordGuildMemberRenderNames::from([(7, "Requested Display Name".to_owned())])
     );
+}
+
+#[test]
+fn complete_member_snapshot_requires_available_and_fully_cached_guild() {
+    let mut guild = Guild::default();
+    assert_eq!(complete_guild_member_ids(&guild), Some(BTreeSet::new()));
+
+    guild.member_count = 2;
+    guild.members.insert(UserId::new(7), Member::default());
+    assert_eq!(complete_guild_member_ids(&guild), None);
+
+    guild.members.insert(UserId::new(8), Member::default());
+    assert_eq!(
+        complete_guild_member_ids(&guild),
+        Some(BTreeSet::from([7, 8]))
+    );
+
+    guild.unavailable = true;
+    assert_eq!(complete_guild_member_ids(&guild), None);
 }
 
 #[test]

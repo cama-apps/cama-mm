@@ -85,7 +85,8 @@ use cama_domain::dota_hosting::DotaHostingOptions;
 use cama_domain::dota_lobby::{STEAM_INDIVIDUAL_BASE, account_id as dota_account_id};
 use cama_domain::economy_scaling::scale_minigame_jc_delta;
 use cama_domain::formatting::{
-    BettingDisplayOptions, JOPACOIN_EMOTE, ROLE_EMOJIS, ROLE_NAMES, format_betting_display,
+    BettingDisplayOptions, JOPACOIN_EMOTE, ROLE_EMOJIS, ROLE_NAMES, escape_discord_text,
+    format_betting_display,
 };
 use cama_domain::guild_config::GuildConfigStore;
 use cama_domain::openskill::{CamaOpenSkillSystem, OpenSkillError, Rating as OpenSkillRating};
@@ -119,7 +120,7 @@ use tracing::{debug, warn};
 
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{
-    DiscordMessage, DiscordTransport, GuildPlayerNameDirectory, GuildPlayerNameResolver,
+    DiscordMessage, DiscordTransport, GuildPlayerNameResolver, resolve_guild_player_names,
 };
 use crate::embed_colors::{DISCORD_BLUE, DISCORD_ORANGE};
 use crate::gateway_events::{
@@ -2553,32 +2554,16 @@ impl MatchHandler {
             .filter(|player_id| pending_ids.contains(player_id))
             .collect::<Vec<_>>();
         if !blocked.is_empty() {
-            let players = self.players.clone();
-            let blocked_lookup = blocked.clone();
-            let loaded = tokio::task::spawn_blocking(move || {
-                players.get_by_ids(&blocked_lookup, Some(guild_id))
-            })
-            .await
-            .map_err(|error| format!("blocked-player lookup task failed: {error}"))?
-            .map_err(|error| error.to_string())?;
-            let blocked_discord_ids = blocked
-                .iter()
-                .filter_map(|player_id| u64::try_from(*player_id).ok())
-                .collect::<Vec<_>>();
-            let player_names = u64::try_from(guild_id)
-                .ok()
-                .filter(|guild_id| *guild_id != 0)
-                .and_then(|guild_id| {
-                    self.discord
-                        .cached_guild_member_render_names(guild_id, &blocked_discord_ids)
-                        .ok()
-                })
-                .flatten();
-            let player_names = GuildPlayerNameDirectory::new(player_names);
-            let names = loaded
+            let player_names = resolve_guild_player_names(
+                self.discord.as_ref(),
+                u64::try_from(guild_id).ok(),
+                &blocked,
+            )
+            .await;
+            let names = blocked
                 .iter()
                 .take(5)
-                .filter_map(|player| Some(player_names.resolve(player.discord_id?)))
+                .map(|player_id| escape_discord_text(&player_names.resolve(*player_id)))
                 .collect::<Vec<_>>()
                 .join(", ");
             let remainder = if blocked.len() > 5 {
@@ -5172,30 +5157,15 @@ impl MatchHandler {
             .iter()
             .filter_map(|player| player.discord_id.map(|id| (id, player)))
             .collect::<BTreeMap<_, _>>();
-        let discord_player_ids = player_ids
-            .iter()
-            .filter_map(|player_id| u64::try_from(*player_id).ok())
-            .collect::<Vec<_>>();
-        let player_names = if let Some(guild_id) = u64::try_from(pending.guild_id)
-            .ok()
-            .filter(|guild_id| *guild_id != 0)
-        {
-            match self
-                .discord
-                .cached_guild_member_render_names(guild_id, &discord_player_ids)
-            {
-                Ok(nicknames) => GuildPlayerNameDirectory::new(nicknames),
-                Err(error) => {
-                    debug!(%error, guild_id, "shuffle player name lookup failed");
-                    GuildPlayerNameDirectory::default()
-                }
-            }
-        } else {
-            GuildPlayerNameDirectory::default()
-        };
+        let player_names = resolve_guild_player_names(
+            self.discord.as_ref(),
+            u64::try_from(pending.guild_id).ok(),
+            &player_ids,
+        )
+        .await;
         let line = |player_id: i64, role: &str| {
             let player = players_by_id.get(&player_id);
-            let name = player_names.resolve(player_id);
+            let name = escape_discord_text(&player_names.resolve(player_id));
             let on_role = player
                 .and_then(|player| player.preferred_roles.as_ref())
                 .is_some_and(|roles| roles.iter().any(|preferred| preferred == role));
@@ -5391,7 +5361,7 @@ impl MatchHandler {
                 .state
                 .excluded_player_ids
                 .iter()
-                .map(|player_id| player_names.resolve(*player_id))
+                .map(|player_id| escape_discord_text(&player_names.resolve(*player_id)))
                 .collect::<Vec<_>>()
                 .join(", ");
             balance_info.push_str(&format!("\n**Excluded:** {names}"));

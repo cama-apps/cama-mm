@@ -1393,6 +1393,7 @@ fn render_wheel_attachment(
     display_name: Option<&str>,
 ) -> Result<InteractionAttachment, String> {
     static CACHE: OnceLock<Mutex<WheelAttachmentCache>> = OnceLock::new();
+    let started = Instant::now();
     let key = WheelAttachmentCacheKey::new(wedges, target_index, golden, display_name);
     let cache = CACHE.get_or_init(|| Mutex::new(WheelAttachmentCache::default()));
     if let Some(attachment) = cache
@@ -1400,6 +1401,12 @@ fn render_wheel_attachment(
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .get(&key)
     {
+        tracing::debug!(
+            cache_hit = true,
+            elapsed_ms = started.elapsed().as_millis(),
+            bytes = attachment.bytes.len(),
+            "gamba wheel media ready"
+        );
         return Ok(attachment);
     }
     let attachment = render_wheel_attachment_uncached(wedges, target_index, golden, display_name)?;
@@ -1407,6 +1414,12 @@ fn render_wheel_attachment(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .insert(key, attachment.clone());
+    tracing::debug!(
+        cache_hit = false,
+        elapsed_ms = started.elapsed().as_millis(),
+        bytes = attachment.bytes.len(),
+        "gamba wheel media ready"
+    );
     Ok(attachment)
 }
 
@@ -2617,6 +2630,56 @@ impl WheelPlayerNameSource for BTreeMap<i64, String> {
 struct CachedDiscordWheelPlayerNames {
     discord: Arc<dyn DiscordTransport>,
     guild_id: i64,
+}
+
+const WHEEL_MEMBER_LOOKUP_CONCURRENCY: usize = 8;
+
+async fn resolve_wheel_member_snapshot<F, Fut>(
+    ids: Vec<i64>,
+    cached_members: Option<BTreeSet<u64>>,
+    synthetic_members_enabled: bool,
+    lookup: F,
+) -> Result<BTreeSet<i64>, String>
+where
+    F: Fn(u64) -> Fut,
+    Fut: std::future::Future<Output = Result<bool, String>> + Send + 'static,
+{
+    let mut visible = BTreeSet::new();
+    let mut lookups = tokio::task::JoinSet::new();
+    for id in ids {
+        if is_enabled_synthetic_wheel_member(id, synthetic_members_enabled) {
+            visible.insert(id);
+            continue;
+        }
+        let Ok(user_id) = u64::try_from(id) else {
+            continue;
+        };
+        if let Some(members) = &cached_members {
+            if members.contains(&user_id) {
+                visible.insert(id);
+            }
+            continue;
+        }
+        if lookups.len() == WHEEL_MEMBER_LOOKUP_CONCURRENCY {
+            let (id, present) = lookups
+                .join_next()
+                .await
+                .expect("member lookup batch is nonempty")
+                .map_err(|error| error.to_string())?;
+            if present? {
+                visible.insert(id);
+            }
+        }
+        let lookup = lookup(user_id);
+        lookups.spawn(async move { (id, lookup.await) });
+    }
+    while let Some(result) = lookups.join_next().await {
+        let (id, present) = result.map_err(|error| error.to_string())?;
+        if present? {
+            visible.insert(id);
+        }
+    }
+    Ok(visible)
 }
 
 impl CachedDiscordWheelPlayerNames {
@@ -4610,6 +4673,7 @@ impl BettingInteractionHandler {
         responder: &Arc<dyn InteractionResponder>,
         bonus_spin: bool,
     ) -> Result<(), String> {
+        let started = Instant::now();
         let Some(guild_id) = guild_id else {
             return respond_ephemeral(responder, GUILD_ONLY_MESSAGE).await;
         };
@@ -4672,8 +4736,9 @@ impl BettingInteractionHandler {
             }
         }
         let response_route = begin_gamba_response(responder, bonus_spin).await?;
+        let preflight_ms = started.elapsed().as_millis() as u64;
+        let preparation_started = Instant::now();
         let user_display_name = self.render_player_name(user_id, Some(guild_id)).await;
-        let member_snapshot = self.guild_member_snapshot(guild_id).await;
         let player_names = CachedDiscordWheelPlayerNames::new(Arc::clone(&self.discord), guild_id);
         let config = self.config.clone();
         let path = self.database_path.clone();
@@ -4681,7 +4746,10 @@ impl BettingInteractionHandler {
         let event_path = self.database_path.clone();
         let vanity_taxable_ids = self.vanity_tax.taxable_ids(guild_id);
         let wheel_display_name = user_display_name.clone();
-        let (event_win_multiplier, event_loss_multiplier) =
+        // Membership may need Discord I/O; daily effects are independent SQLite
+        // work and can finish while those requests are in flight.
+        let (member_snapshot, event_multipliers) = tokio::join!(
+            self.guild_member_snapshot(guild_id),
             sqlite("gamba economy-event effects", move || {
                 let service = SqliteEconomyEventService::new(event_path, event_config);
                 service
@@ -4689,8 +4757,10 @@ impl BettingInteractionHandler {
                     .map(|effects| (effects.gamba_win_multiplier, effects.gamba_loss_multiplier))
                     .map_err(|error| error.to_string())
             })
-            .await
-            .unwrap_or((1.0, 1.0));
+        );
+        let (event_win_multiplier, event_loss_multiplier) = event_multipliers.unwrap_or((1.0, 1.0));
+        let preparation_ms = preparation_started.elapsed().as_millis() as u64;
+        let spin_started = Instant::now();
         let outcome = sqlite("gamba spin", move || {
             // Low-priority eligibility is a SQLite read, so it resolves on the
             // blocking side with the rest of the spin.
@@ -4715,6 +4785,8 @@ impl BettingInteractionHandler {
             )
         })
         .await?;
+        let spin_ms = spin_started.elapsed().as_millis() as u64;
+        let delivery_started = Instant::now();
         let completion_message = outcome.completion_message.clone();
         let completion_embed = outcome.completion_embed.clone();
         let completion_delay = outcome.completion_delay;
@@ -4760,6 +4832,19 @@ impl BettingInteractionHandler {
         )
         .await;
         let attachment_delivered = delivery.as_ref().copied().unwrap_or(false);
+        tracing::info!(
+            user_id,
+            guild_id,
+            bonus_spin,
+            preflight_ms,
+            preparation_ms,
+            spin_ms,
+            delivery_ms = delivery_started.elapsed().as_millis() as u64,
+            total_ms = started.elapsed().as_millis() as u64,
+            delivered = delivery.is_ok(),
+            attachment_delivered,
+            "gamba initial delivery completed"
+        );
         if delivery.is_ok()
             && let Some(pending_key) = pending_key
             && let Ok(mut interactions) = self.wheel_interactions.lock()
@@ -4838,27 +4923,29 @@ impl BettingInteractionHandler {
         })
         .await
         .ok()?;
-        let mut visible = BTreeSet::new();
-        for id in ids {
-            if is_enabled_synthetic_wheel_member(id, self.config.synthetic_members_enabled) {
-                visible.insert(id);
-                continue;
-            }
-            let Ok(user_id) = u64::try_from(id) else {
-                continue;
-            };
-            match self.discord.guild_member(guild, user_id).await {
-                Ok(Some(_)) => {
-                    visible.insert(id);
+        let cached_members = self.discord.cached_guild_member_ids(guild).ok().flatten();
+        let result = resolve_wheel_member_snapshot(
+            ids,
+            cached_members,
+            self.config.synthetic_members_enabled,
+            |user_id| {
+                let discord = Arc::clone(&self.discord);
+                async move {
+                    discord
+                        .guild_member(guild, user_id)
+                        .await
+                        .map(|member| member.is_some())
                 }
-                Ok(None) => {}
-                Err(error) => {
-                    tracing::debug!(%error, guild_id, user_id, "gamba member snapshot unavailable");
-                    return None;
-                }
+            },
+        )
+        .await;
+        match result {
+            Ok(visible) => Some(visible),
+            Err(error) => {
+                tracing::debug!(%error, guild_id, "gamba member snapshot unavailable");
+                None
             }
         }
-        Some(visible)
     }
 
     async fn tip(

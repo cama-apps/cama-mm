@@ -262,6 +262,7 @@ struct RecordingTransport {
     /// a transient Discord error during a repaint.
     fail_edits: std::sync::atomic::AtomicBool,
     fail_next_pruned_notice: std::sync::atomic::AtomicBool,
+    cold_member_cache: std::sync::atomic::AtomicBool,
 }
 
 impl RecordingTransport {
@@ -608,6 +609,12 @@ impl DiscordTransport for RecordingTransport {
         guild_id: u64,
         user_ids: &[u64],
     ) -> Result<Option<BTreeMap<u64, String>>, String> {
+        if self
+            .cold_member_cache
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Ok(None);
+        }
         let state = self.state.lock().expect("transport state");
         Ok(Some(
             state
@@ -1162,7 +1169,7 @@ async fn slash_join_posts_the_same_thread_line_as_a_button_join() {
     let sent = transport.sent_messages();
     assert_eq!(sent.len(), messages_before_join + 1);
     let join_message = &sent[messages_before_join].message;
-    assert_eq!(join_message.response.content, "✅ <@20> joined.");
+    assert_eq!(join_message.response.content, "✅ Joiner joined. <@20>");
     assert_eq!(join_message.allowed_mentions, DiscordAllowedMentions::None);
     assert!(
         transport
@@ -1210,7 +1217,8 @@ async fn join_during_an_archived_thread_spell_still_subscribes_the_joiner() {
         .sent_messages()
         .into_iter()
         .filter(|sent| {
-            sent.channel_id == thread_id && sent.message.response.content == "✅ <@20> joined."
+            sent.channel_id == thread_id
+                && sent.message.response.content == "✅ Joiner joined. <@20>"
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -1251,7 +1259,7 @@ async fn join_during_an_archived_thread_spell_still_subscribes_the_joiner() {
         repaint.embeds[0]
             .fields
             .iter()
-            .any(|field| field.value.contains("<@20>")),
+            .any(|field| field.value.contains("Unknown player")),
         "the reopened thread roster includes its new member"
     );
 }
@@ -1602,7 +1610,8 @@ async fn raw_jopacoin_subscribes_the_thread_then_invokes_the_shared_neon_observe
     );
     let sent = transport.sent_messages();
     assert!(sent.iter().any(|sent| {
-        sent.message.response.content == format!("{JOPACOIN_EMOTE} <@20> is here for the gamba!")
+        sent.message.response.content
+            == format!("{JOPACOIN_EMOTE} Fetched Spectator is here for the gamba! <@20>")
             && sent.message.allowed_mentions == DiscordAllowedMentions::Users(BTreeSet::from([20]))
     }));
 
@@ -1907,7 +1916,7 @@ async fn test_kick_updates_message() {
     assert_eq!(captured.deferred, [true]);
     assert!(captured.followups.iter().any(|response| {
         response.ephemeral
-            && response.content == format!("✅ Kicked <@42> from {}.", LobbyKind::Open.label())
+            && response.content == format!("✅ Kicked Target from {}.", LobbyKind::Open.label())
     }));
 }
 
@@ -2395,11 +2404,11 @@ async fn readycheck_explains_status_join_age_and_automatic_confirmations() {
     );
     assert_eq!(
         field("⚠️ Possibly AFK (1)").value,
-        "<@40> 🔴 (joined 20m ago)"
+        "Away 🔴 (joined 20m ago)"
     );
     assert_eq!(
         field("✅ Confirmed Ready (2)").value,
-        "<@10> 🟢 (joined 1h ago)\n<@50> 🆕🔴 (joined 5m ago)"
+        "Creator 🟢 (joined 1h ago)\nRecent 🆕🔴 (joined 5m ago)"
     );
 }
 
@@ -2492,7 +2501,7 @@ async fn stale_readycheck_publicly_names_pruned_players_in_the_lobby_thread() {
     assert_eq!(notice.channel_id, thread_id);
     assert_eq!(
         notice.message.response.content,
-        "🧹 Removed (didn't confirm the last ready check): <@20> <@30> — rejoin All You Can Feed with `/join`."
+        "🧹 Removed (didn't confirm the last ready check): Away One (<@20>) Away Two (<@30>) — rejoin All You Can Feed with `/join`."
     );
     assert_eq!(
         notice.message.allowed_mentions,
@@ -3417,11 +3426,8 @@ async fn successful_bell_shortcut_advertises_in_the_persisted_origin_channel() {
     );
 }
 
-// The thread "joined." line is always a bare, ping-suppressed @mention now
-// (Discord resolves it to the live display name client-side -- see
-// slash_join_posts_the_same_thread_line_as_a_button_join), so these
-// exercise the display-name fallback chain through the join observer's
-// ConfirmedLobbyJoin.player_display_name instead of the thread message text.
+// Join announcements carry a resolved name independently of their silent
+// subscription mention. The observer receives the same human-readable name.
 #[tokio::test]
 async fn lobby_command_join_uses_interaction_display_name_for_the_confirmed_join_event() {
     let database = database_with_players(&[(10, ".pf")]);
@@ -3479,7 +3485,7 @@ async fn join_button_uses_the_interaction_display_name_for_the_confirmed_join_ev
         transport
             .sent_messages()
             .iter()
-            .any(|sent| sent.message.response.content == "✅ <@20> joined.")
+            .any(|sent| sent.message.response.content == "✅ Leaf \\| Atharva joined. <@20>")
     );
 }
 
@@ -3561,7 +3567,7 @@ async fn live_readycheck_reconciles_button_join_and_leave_against_the_active_gen
         transport
             .sent_messages()
             .iter()
-            .any(|sent| sent.message.response.content == "🚪 <@20> left.")
+            .any(|sent| sent.message.response.content == "🚪 Recent Join left.")
     );
     assert!(
         transport
@@ -4705,7 +4711,7 @@ async fn test_join_button_seats_a_registered_player() {
             .contains(&AppUserId(1))
     );
     assert_silent_button_success(&responder);
-    assert_silent_thread_update(&provider, &transport, "✅ <@1> joined.");
+    assert_silent_thread_update(&provider, &transport, "✅ Player joined. <@1>");
 }
 
 #[tokio::test]
@@ -4965,7 +4971,7 @@ async fn test_leave_button_removes_the_player() {
             .contains(&AppUserId(1))
     );
     assert_silent_button_success(&responder);
-    assert_silent_thread_update(&provider, &transport, "🚪 <@1> left.");
+    assert_silent_thread_update(&provider, &transport, "🚪 Player left.");
 }
 
 #[tokio::test]
@@ -5285,4 +5291,190 @@ async fn recovery_reopens_an_idle_thread_and_reuses_its_controls() {
         .2
         .response;
     assert_eq!(button_labels(response), ["Join", "Leave"]);
+}
+
+#[tokio::test]
+async fn lobby_rosters_resolve_cold_cache_names_and_reject_historical_identifiers() {
+    let database = database_with_players(&[(10, "<@10>"), (20, "20"), (30, "@30")]);
+    let transport = Arc::new(RecordingTransport::default());
+    transport
+        .cold_member_cache
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    transport.set_member(
+        42,
+        DiscordGuildMemberSnapshot {
+            user_id: 10,
+            display_name: "Live Server Nickname".to_owned(),
+            presence: DiscordPresence::Online,
+            in_voice: false,
+            deafened: false,
+            activities: Vec::new(),
+        },
+    );
+    transport.set_user(DiscordUserSnapshot {
+        user_id: 20,
+        display_name: "Global Display Name".to_owned(),
+        account_username: "account_username".to_owned(),
+        is_bot: false,
+    });
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(
+        &provider,
+        "lobby",
+        10,
+        "Live Server Nickname",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    join_via_button(&provider, LobbyKind::Open, 20, "Global Display Name").await;
+    join_via_button(&provider, LobbyKind::Open, 30, "@30").await;
+    let state = transport.state.lock().expect("transport state");
+    let response = &state.edits.last().expect("roster repaint").2.response;
+    let names = response
+        .embeds
+        .iter()
+        .flat_map(|embed| &embed.fields)
+        .map(|field| field.value.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(names.contains("Live Server Nickname"), "{names}");
+    assert!(names.contains("Global Display Name"), "{names}");
+    assert!(names.contains("Unknown player"), "{names}");
+    for identifier in ["<@", "@30", ". 20", ". 30"] {
+        assert!(!names.contains(identifier), "{names}");
+    }
+}
+
+#[tokio::test]
+async fn invalid_cached_lobby_name_is_replaced_by_live_member_lookup() {
+    let database = database_with_players(&[(10, "Stored Name")]);
+    let transport = Arc::new(RecordingTransport::default());
+    transport.set_member(
+        42,
+        DiscordGuildMemberSnapshot {
+            user_id: 10,
+            display_name: "Fresh Server Name".to_owned(),
+            presence: DiscordPresence::Online,
+            in_voice: false,
+            deafened: false,
+            activities: Vec::new(),
+        },
+    );
+    transport
+        .state
+        .lock()
+        .expect("transport state")
+        .server_nicknames
+        .insert((42, 10), Some("<@10>".to_owned()));
+    let provider = provider_for(&database, transport.clone());
+    let names = provider
+        .handler
+        .state
+        .player_name_overrides(
+            AppGuildId(42),
+            &BTreeSet::from([AppUserId(10), AppUserId(-1)]),
+        )
+        .await;
+    assert_eq!(names[&10], "Fresh Server Name");
+    assert!(
+        !names.contains_key(&-1),
+        "synthetic player names remain available to the renderer"
+    );
+}
+
+#[test]
+fn readycheck_renders_text_names_for_every_group_and_legacy_confirmation() {
+    let players = BTreeMap::from([
+        (
+            AppUserId(10),
+            ReadycheckPlayerData {
+                name: "Active *Name*".to_owned(),
+                group: ReadinessGroup::Ready,
+                signals: String::new(),
+                joined_at: None,
+            },
+        ),
+        (
+            AppUserId(20),
+            ReadycheckPlayerData {
+                name: "Away Name".to_owned(),
+                group: ReadinessGroup::Afk,
+                signals: String::new(),
+                joined_at: None,
+            },
+        ),
+        (
+            AppUserId(30),
+            ReadycheckPlayerData {
+                name: "Confirmed Name".to_owned(),
+                group: ReadinessGroup::Recent,
+                signals: String::new(),
+                joined_at: None,
+            },
+        ),
+        (
+            AppUserId(40),
+            ReadycheckPlayerData {
+                name: "<@40>".to_owned(),
+                group: ReadinessGroup::Ready,
+                signals: String::new(),
+                joined_at: None,
+            },
+        ),
+    ]);
+    let reacted = BTreeMap::from([
+        (AppUserId(30), "<@30>".to_owned()),
+        (AppUserId(50), "50".to_owned()),
+    ]);
+    let embed = readycheck_embed(LobbyKind::Open, &players, &reacted, 10);
+    let text = embed
+        .fields
+        .iter()
+        .map(|field| field.value.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for name in [
+        "Active \\*Name\\*",
+        "Away Name",
+        "Confirmed Name",
+        "Unknown player",
+    ] {
+        assert!(text.contains(name), "{text}");
+    }
+    for identifier in ["<@", "30", "40", "50"] {
+        assert!(!text.contains(identifier), "{text}");
+    }
+}
+
+#[tokio::test]
+async fn live_lobby_name_is_kept_when_the_registered_player_row_is_missing() {
+    let database = database_with_players(&[(10, "Creator")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport);
+    dispatch_command(
+        &provider,
+        "lobby",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let mut lobby = lobby_snapshot(&provider, LobbyKind::Open);
+    lobby.players.insert(AppUserId(99));
+    let names = BTreeMap::from([
+        (10, "Creator".to_owned()),
+        (99, "Unregistered Server Member".to_owned()),
+    ]);
+    let embed = provider
+        .handler
+        .state
+        .service
+        .build_lobby_embed_with_name_overrides(&lobby, None, Some(&names));
+    assert!(
+        embed
+            .fields
+            .iter()
+            .any(|field| field.value.contains("Unregistered Server Member"))
+    );
+    assert!(embed.fields.iter().all(|field| !field.value.contains("<@")));
 }

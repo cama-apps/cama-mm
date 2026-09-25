@@ -436,6 +436,128 @@ fn synthetic_wheel_members_require_explicit_opt_in_and_negative_ids() {
     assert!(!is_enabled_synthetic_wheel_member(101, true));
 }
 
+#[tokio::test]
+async fn wheel_member_snapshot_complete_cache_skips_member_requests() {
+    let visible = resolve_wheel_member_snapshot(
+        vec![1, 2, -101],
+        Some(BTreeSet::from([1, 99])),
+        true,
+        |_| async { panic!("complete cache must not request members") },
+    )
+    .await
+    .expect("complete cached snapshot");
+    assert_eq!(visible, BTreeSet::from([-101, 1]));
+
+    let empty =
+        resolve_wheel_member_snapshot(vec![1, -101], Some(BTreeSet::new()), false, |_| async {
+            panic!("empty complete cache must not request members")
+        })
+        .await
+        .expect("authoritative empty snapshot");
+    assert!(empty.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn wheel_member_snapshot_fallback_overlaps_requests_with_a_bound() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let active = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let started = tokio::time::Instant::now();
+    let visible = resolve_wheel_member_snapshot((1..=24).collect(), None, false, |user_id| {
+        let active = Arc::clone(&active);
+        let peak = Arc::clone(&peak);
+        async move {
+            let concurrent = active.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(concurrent, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            active.fetch_sub(1, Ordering::SeqCst);
+            Ok(user_id % 2 == 0)
+        }
+    })
+    .await
+    .expect("fallback member snapshot");
+
+    assert_eq!(visible, (1..=24).filter(|id| id % 2 == 0).collect());
+    assert_eq!(peak.load(Ordering::SeqCst), 8);
+    assert_eq!(started.elapsed(), Duration::from_secs(3));
+}
+
+#[tokio::test]
+async fn wheel_member_snapshot_fallback_preserves_unknown_and_synthetic_members() {
+    let error = resolve_wheel_member_snapshot(vec![1, 2], None, false, |user_id| async move {
+        if user_id == 2 {
+            Err("Discord unavailable".to_owned())
+        } else {
+            Ok(true)
+        }
+    })
+    .await;
+    assert_eq!(error, Err("Discord unavailable".to_owned()));
+
+    for enabled in [false, true] {
+        let visible =
+            resolve_wheel_member_snapshot(vec![-101, 1, 2], None, enabled, |id| async move {
+                assert!(id <= 2, "synthetic IDs must not reach Discord");
+                Ok(id == 1)
+            })
+            .await
+            .expect("synthetic member snapshot");
+        assert_eq!(
+            visible,
+            if enabled {
+                BTreeSet::from([-101, 1])
+            } else {
+                BTreeSet::from([1])
+            }
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn wheel_member_snapshot_failure_cancels_pending_requests() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct PendingLookupGuard {
+        dropped: Arc<AtomicBool>,
+        cancelled: Arc<tokio::sync::Notify>,
+    }
+
+    impl Drop for PendingLookupGuard {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+            self.cancelled.notify_one();
+        }
+    }
+
+    let started = Arc::new(tokio::sync::Notify::new());
+    let cancelled = Arc::new(tokio::sync::Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let result = resolve_wheel_member_snapshot(vec![1, 2], None, false, |user_id| {
+        let started = Arc::clone(&started);
+        let cancelled = Arc::clone(&cancelled);
+        let dropped = Arc::clone(&dropped);
+        async move {
+            if user_id == 1 {
+                let _guard = PendingLookupGuard { dropped, cancelled };
+                started.notify_one();
+                std::future::pending::<()>().await;
+                Ok(true)
+            } else {
+                started.notified().await;
+                Err("Discord unavailable".to_owned())
+            }
+        }
+    })
+    .await;
+
+    assert_eq!(result, Err("Discord unavailable".to_owned()));
+    tokio::time::timeout(Duration::from_secs(1), cancelled.notified())
+        .await
+        .expect("failed snapshot must cancel its pending lookup");
+    assert!(dropped.load(Ordering::SeqCst));
+}
+
 #[test]
 fn golden_wheel_member_snapshot_preserves_raw_order_when_unavailable() {
     let mut departed = Player::new("departed");
@@ -1227,7 +1349,10 @@ async fn balance_is_a_private_paginated_portfolio_with_tax_ledger_exposure() {
         assert!(response.components[0].buttons[0].disabled);
         assert!(!response.components[0].buttons[2].disabled);
         let overview = &response.embeds[0];
-        assert_eq!(overview.title.as_deref(), Some("💰 Jopacoin Portfolio — 7"));
+        assert_eq!(
+            overview.title.as_deref(),
+            Some("💰 Jopacoin Portfolio — Unknown player")
+        );
         assert!(overview.fields.iter().any(|field| {
             field.name == "Asset Breakdown"
                 && field.value.contains("Wallet")
