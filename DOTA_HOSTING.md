@@ -241,9 +241,26 @@ captures qualified maps after betting closes, even when nobody has subscribed.
 Postgame statistics enrichment is independent of this live feed and does not
 establish that any map frames were available during the game.
 
-Each supported match gets a temporary restricted **map channel** containing one bot map message. The bot edits that message's image in place; it never reposts maps to chase the bottom of chat. An attached **commentary thread** carries announcements and spectator chat. Open the thread from the map message on desktop to use Discord's split view. Viewers can send messages in the thread but cannot post in the parent channel or create/manage threads. The thread uses Discord's public-thread type inside an inaccessible-to-players parent; it inherits that parent's visibility. Thread membership never overrides parent access. New viewers are silently mentioned in the commentary thread to subscribe organically, with durable delivery keys preventing duplicate join messages after lost replies. No thread-member API is used to add spectators.
+New spectator spaces are private threads under the match's existing text
+channel. The bot edits one live map message in place and posts commentary in
+that same thread. Opted-in viewers need **View Channel** and **Read Message
+History** on the parent, but **Send Messages in Threads is optional**: a viewer
+without chat permission can still watch the map and read bot commentary. The
+bot does not change channel or role permissions. If read access is missing,
+delivery diagnostics identify the viewer, parent channel, and missing
+permissions. Thread membership never overrides parent visibility.
 
-Everyone is denied parent access, opted-in nonparticipants receive map read and thread chat access, and all match participants receive explicit denies. The bot verifies current guild membership, roles, ownership, exact parent permissions, and thread parent/type/starter ownership before delivery. Server owners and Administrator members bypass channel denies; if any participant has either privilege, delivery is withheld and existing owned spaces are removed. There is no shared-thread fallback. The bot needs channel/overwrite management, message management, public-thread creation, thread management, and thread-send permissions. Up to 80 viewers are supported. Deleting the parent removes the attached thread; both are removed 15 minutes after the pending Cama match disappears, or sooner if privacy cannot be verified. Legacy mixed map/commentary rooms are replaced once during migration. Accepted thread creates recover by their map-starter ID after lost replies; confirmed missing map/thread identities rebuild the pair and rejoin eligible viewers.
+New viewers are silently mentioned to subscribe, with durable delivery keys
+preventing duplicate join messages after lost replies. No thread-member API is
+used to add spectators. The bot audits current members, roles, parent access,
+thread ownership, and membership before delivery; unauthorized members are
+removed and player/moderator access that bypasses private membership blocks
+live delivery. The bot needs read/send, embed/attachment, private-thread
+creation, thread management, and thread-send permissions in the parent.
+Threads disallow member invites, support up to 80 viewers, and are removed
+15 minutes after the pending match disappears. Existing legacy spectator
+channels retain their audited map-channel/attached-commentary layout until
+cleanup.
 
 Manual hosting (including host-disabled or busy-bot fallback) has no registered game to spectate. Shuffle/draft instructions say live coverage is unavailable, the radio advertises bot-hosted coverage only, and no empty map channel or commentary thread is created. Pre-shuffle interest is preserved without granting access. A reserved bot-hosted lobby awaiting its Valve match ID is a normal waiting state: the map placeholder and commentary thread can exist, while live details still require closed betting and qualified telemetry. A switch to manual hosting removes previously created spectator spaces.
 
