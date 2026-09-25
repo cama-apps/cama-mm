@@ -1028,9 +1028,9 @@ impl SpectatorWorker {
         now: i64,
     ) -> Option<&'static str> {
         if now.saturating_sub(map.created_at) > 90
-            || !map
+            || map
                 .source_fetched_at
-                .is_some_and(|at| chrono::Utc::now().timestamp().saturating_sub(at) <= 90)
+                .is_none_or(|at| chrono::Utc::now().timestamp().saturating_sub(at) > 90)
         {
             return Some("pending map expired or lacks a trusted capture time");
         }
