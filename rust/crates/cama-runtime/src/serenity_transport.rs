@@ -704,11 +704,10 @@ impl SurveyDiscordPort for SerenityDiscordTransport {
                 kind: SurveyDmErrorKind::Unavailable,
                 message: "survey recipient id is negative".to_owned(),
             })?;
-        let response = apply_discord_mentions(message.response.clone(), &message);
         discord_id
             .direct_message(
                 (&context.cache, context.http.as_ref()),
-                channel_response(response)
+                discord_message(&message)
                     .nonce(Nonce::String(nonce.to_owned()))
                     .enforce_nonce(true),
             )
@@ -2766,6 +2765,33 @@ fn channel_response_with_delivery_key(
         .enforce_nonce(true)
 }
 
+fn discord_message(message: &DiscordMessage) -> CreateMessage {
+    let response = apply_discord_mentions(message.response.clone(), message);
+    suppress_message_notifications(channel_response(response), message)
+}
+
+fn discord_message_with_delivery_key(
+    message: &DiscordMessage,
+    delivery_key: &str,
+) -> CreateMessage {
+    let response = apply_discord_mentions(message.response.clone(), message);
+    suppress_message_notifications(
+        channel_response_with_delivery_key(response, delivery_key),
+        message,
+    )
+}
+
+fn suppress_message_notifications(
+    builder: CreateMessage,
+    message: &DiscordMessage,
+) -> CreateMessage {
+    if message.suppress_notifications {
+        builder.flags(serenity::all::MessageFlags::SUPPRESS_NOTIFICATIONS)
+    } else {
+        builder
+    }
+}
+
 fn channel_response(response: InteractionResponse) -> CreateMessage {
     let include_attachments = include_response_attachments(&response);
     let mut message = CreateMessage::new();
@@ -3166,11 +3192,10 @@ impl PetSweepDiscordPort for SerenityDiscordTransport {
                 "Discord pet channel ID is outside the supported range".to_owned(),
             )
         })?;
-        let response = apply_discord_mentions(message.response.clone(), &message);
         match ChannelId::new(channel_id)
             .send_message(
                 (&context.cache, context.http.as_ref()),
-                channel_response(response),
+                discord_message(&message),
             )
             .await
         {
@@ -3266,11 +3291,10 @@ impl PredictionDiscordPort for SerenityDiscordTransport {
         })?;
         let channel_id = ChannelId::new(thread_id);
         ensure_prediction_thread_writable(&context, channel_id).await?;
-        let response = apply_discord_mentions(message.response.clone(), &message);
         channel_id
             .send_message(
                 (&context.cache, context.http.as_ref()),
-                channel_response(response),
+                discord_message(&message),
             )
             .await
             .map(drop)
@@ -3375,11 +3399,10 @@ impl PredictionCommandDiscordPort for SerenityDiscordTransport {
             u64::try_from(channel_id)
                 .map_err(|_| "Discord prediction channel ID is outside the supported range")?,
         );
-        let announcement = apply_discord_mentions(announcement.response.clone(), &announcement);
         let channel_message = channel_id
             .send_message(
                 (&context.cache, context.http.as_ref()),
-                channel_response(announcement),
+                discord_message(&announcement),
             )
             .await
             .map_err(|error| error.to_string())?;
@@ -3391,13 +3414,11 @@ impl PredictionCommandDiscordPort for SerenityDiscordTransport {
             )
             .await
             .map_err(|error| error.to_string())?;
-        let market_response =
-            apply_discord_mentions(market_message.response.clone(), &market_message);
         let market_message = thread
             .id
             .send_message(
                 (&context.cache, context.http.as_ref()),
-                channel_response(market_response),
+                discord_message(&market_message),
             )
             .await
             .map_err(|error| error.to_string())?;
@@ -3930,6 +3951,10 @@ impl DiscordTransport for SerenityDiscordTransport {
         .await
     }
 
+    async fn spectator_thread_members(&self, thread_id: u64) -> Result<BTreeSet<u64>, String> {
+        spectator::thread_members(&self.context()?.http, thread_id).await
+    }
+
     async fn delete_spectator_channel(
         &self,
         guild_id: u64,
@@ -3988,11 +4013,10 @@ impl DiscordTransport for SerenityDiscordTransport {
     ) -> Result<DiscordMessageReceipt, String> {
         let context = self.context()?;
         let channel_id = ChannelId::new(channel_id);
-        let response = apply_discord_mentions(message.response.clone(), &message);
         let sent = channel_id
             .send_message(
                 (&context.cache, context.http.as_ref()),
-                channel_response(response),
+                discord_message(&message),
             )
             .await
             .map_err(|error| error.to_string())?;
@@ -4011,11 +4035,10 @@ impl DiscordTransport for SerenityDiscordTransport {
     ) -> Result<DiscordMessageReceipt, String> {
         let context = self.context()?;
         let channel_id = ChannelId::new(channel_id);
-        let response = apply_discord_mentions(message.response.clone(), &message);
         let sent = channel_id
             .send_message(
                 (&context.cache, context.http.as_ref()),
-                channel_response_with_delivery_key(response, delivery_key),
+                discord_message_with_delivery_key(&message, delivery_key),
             )
             .await
             .map_err(|error| error.to_string())?;
@@ -4112,11 +4135,10 @@ impl DiscordTransport for SerenityDiscordTransport {
     ) -> Result<DiscordMessageReceipt, String> {
         let context = self.context()?;
         let channel_id = ChannelId::new(thread_id);
-        let response = apply_discord_mentions(message.response.clone(), &message);
         let sent = channel_id
             .send_message(
                 (&context.cache, context.http.as_ref()),
-                channel_response(response)
+                discord_message(&message)
                     .reference_message((channel_id, MessageId::new(parent_message_id))),
             )
             .await
@@ -4494,11 +4516,10 @@ impl DiscordTransport for SerenityDiscordTransport {
         message: DiscordMessage,
     ) -> Result<(), String> {
         let context = self.context()?;
-        let response = apply_discord_mentions(message.response.clone(), &message);
         UserId::new(user_id)
             .direct_message(
                 (&context.cache, context.http.as_ref()),
-                channel_response(response),
+                discord_message(&message),
             )
             .await
             .map(|_| ())
@@ -4513,11 +4534,10 @@ impl DiscordTransport for SerenityDiscordTransport {
         let context = self
             .context()
             .map_err(DiscordDirectMessageError::from_message)?;
-        let response = apply_discord_mentions(message.response.clone(), &message);
         UserId::new(user_id)
             .direct_message(
                 (&context.cache, context.http.as_ref()),
-                channel_response(response),
+                discord_message(&message),
             )
             .await
             .map(|sent| DiscordMessageReceipt {

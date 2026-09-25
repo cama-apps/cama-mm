@@ -27,6 +27,7 @@ use std::{
 mod observation;
 
 const RETENTION_SECONDS: i64 = 15 * 60;
+const SUBSCRIPTION_RETRY_SECONDS: i64 = 120;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -481,12 +482,24 @@ impl SpectatorWorker {
         }
         if record.channel_id.is_none() {
             if state.creating_until > now {
+                self.log_status(
+                    (record.guild_id, record.pending_match_id),
+                    "delivery",
+                    "waiting to retry spectator thread creation",
+                    now,
+                );
                 return Ok(());
             }
             state.creating_until = now.saturating_add(120);
             self.save(&mut record, &state, now).await?;
         }
         if record.channel_id.is_none() || changed {
+            self.log_status(
+                (record.guild_id, record.pending_match_id),
+                "delivery",
+                "checking or creating spectator thread",
+                now,
+            );
             let channel = match self
                 .discord
                 .ensure_spectator_channel(
@@ -801,6 +814,50 @@ impl SpectatorWorker {
         state: &mut State,
         now: i64,
     ) -> Result<(), String> {
+        let thread = state
+            .commentary_thread_id
+            .ok_or("spectator commentary unavailable")?;
+        // A message receipt is not proof of a Discord thread membership. This
+        // also repairs saved flags from older workers which assumed it was.
+        let members = self.discord.spectator_thread_members(thread).await?;
+        let joined = state
+            .viewers
+            .iter()
+            .copied()
+            .filter(|id| members.contains(id))
+            .collect::<Vec<_>>();
+        let membership_changed = joined != state.joined_viewers;
+        state.joined_viewers = joined;
+        let batch_finished = state
+            .subscription_batch
+            .as_ref()
+            .is_some_and(|batch| batch.viewers.iter().all(|id| members.contains(id)));
+        // Retry accepted mentions whose membership never appeared, using a new
+        // nonce after a bounded delay. Reusing their message receipt forever
+        // would strand spectators across every subsequent deployment.
+        let batch_expired = state.subscription_batch.as_ref().is_some_and(|batch| {
+            now.saturating_sub(batch.created_at) >= SUBSCRIPTION_RETRY_SECONDS
+        });
+        if batch_expired && !batch_finished {
+            let pending = state.subscription_batch.as_ref().expect("expired batch");
+            // An incomplete history lookup must not turn an ambiguous earlier
+            // send into a new invitation. Preserve the old durable batch until
+            // both membership and delivery history can be inspected.
+            self.discord
+                .find_message_by_delivery_key(
+                    thread,
+                    &pending.key,
+                    pending.created_at.saturating_sub(1),
+                    500,
+                )
+                .await?;
+        }
+        if batch_finished || batch_expired {
+            state.subscription_batch = None;
+        }
+        if membership_changed || batch_finished || batch_expired {
+            self.save(record, state, now).await?;
+        }
         if state.subscription_batch.is_none() {
             let viewers = state
                 .viewers
@@ -809,6 +866,15 @@ impl SpectatorWorker {
                 .filter(|id| !state.joined_viewers.contains(id))
                 .collect::<Vec<_>>();
             if viewers.is_empty() {
+                self.log_status(
+                    (record.guild_id, record.pending_match_id),
+                    "subscription",
+                    &format!(
+                        "{} spectator memberships verified",
+                        state.joined_viewers.len()
+                    ),
+                    now,
+                );
                 return Ok(());
             }
             let key = batch(record, state.sequence, String::new()).key;
@@ -824,9 +890,6 @@ impl SpectatorWorker {
             .subscription_batch
             .as_ref()
             .ok_or("spectator join missing")?;
-        let thread = state
-            .commentary_thread_id
-            .ok_or("spectator commentary unavailable")?;
         // A durable join can outlive Discord's short nonce deduplication window.
         // Search owned history first; a bounded/incomplete search fails closed.
         let delivered = self
@@ -861,17 +924,40 @@ impl SpectatorWorker {
                         .commentary_thread_id
                         .ok_or("spectator commentary unavailable")?,
                     &batch.key,
-                    DiscordMessage::silent(InteractionResponse::message(format!(
-                        "📻 Subscribed: {mentions}"
-                    ))),
+                    DiscordMessage::mentioning(
+                        InteractionResponse::message(format!("📻 Subscribed: {mentions}")),
+                        batch.viewers.iter().copied().collect(),
+                    )
+                    .suppressing_notifications(),
                 )
                 .await?;
         }
-        state.joined_viewers.extend(batch.viewers.iter().copied());
-        state.joined_viewers.sort_unstable();
-        state.joined_viewers.dedup();
-        state.subscription_batch = None;
-        self.save(record, state, now).await
+        let members = self.discord.spectator_thread_members(thread).await?;
+        state.joined_viewers = state
+            .viewers
+            .iter()
+            .copied()
+            .filter(|id| members.contains(id))
+            .collect();
+        if batch.viewers.iter().all(|id| members.contains(id)) {
+            state.subscription_batch = None;
+        }
+        self.save(record, state, now).await?;
+        if state.subscription_batch.is_some() {
+            return Err(
+                "spectator invitation sent; Discord membership is not yet confirmed".into(),
+            );
+        }
+        self.log_status(
+            (record.guild_id, record.pending_match_id),
+            "subscription",
+            &format!(
+                "{} spectator memberships verified",
+                state.joined_viewers.len()
+            ),
+            now,
+        );
+        Ok(())
     }
 
     async fn try_deliver_map(&self, record: &mut DotaSpectatorRecord, state: &mut State, now: i64) {

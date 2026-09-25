@@ -13,6 +13,10 @@ fn read_permissions() -> Permissions {
     Permissions::VIEW_CHANNEL | Permissions::READ_MESSAGE_HISTORY
 }
 
+pub(super) async fn thread_members(http: &Http, thread_id: u64) -> Result<BTreeSet<u64>, String> {
+    private_threads::members(http, ChannelId::new(thread_id)).await
+}
+
 fn viewer_permissions() -> Permissions {
     read_permissions() | Permissions::SEND_MESSAGES_IN_THREADS
 }

@@ -1248,6 +1248,7 @@ impl PredictionInteractionHandler {
             response,
             allowed_mentions: DiscordAllowedMentions::None,
             content_mode: Default::default(),
+            suppress_notifications: false,
         })
     }
 

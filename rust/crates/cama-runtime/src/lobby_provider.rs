@@ -4250,6 +4250,7 @@ impl LobbyRuntimeTransport for InteractionLobbyTransport {
                 response: InteractionResponse::message(content),
                 allowed_mentions: DiscordAllowedMentions::Users(BTreeSet::new()),
                 content_mode: crate::discord_transport::DiscordMessageContentMode::Replace,
+                suppress_notifications: false,
             },
         };
         self.state

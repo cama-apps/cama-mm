@@ -786,6 +786,7 @@ fn lifecycle_message(result: &DuelDueResult, flavor: &str) -> DiscordMessage {
             response,
             allowed_mentions: DiscordAllowedMentions::Users(mentioned_users),
             content_mode: crate::discord_transport::DiscordMessageContentMode::Replace,
+            suppress_notifications: false,
         }
     }
 }
