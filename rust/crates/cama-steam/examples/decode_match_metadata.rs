@@ -4,7 +4,7 @@
 //! Uses the same bounded Rust bzip2/zstd decoder as production.
 //! No Steam connection, HTTP requests, or key discovery.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 
@@ -61,6 +61,7 @@ fn validate_graph(graph: &[f32]) -> Result<(), Error> {
 
 #[cfg(unix)]
 fn private_output(path: &Path) -> std::io::Result<File> {
+    use std::fs::OpenOptions;
     use std::os::unix::fs::OpenOptionsExt;
     OpenOptions::new()
         .write(true)
