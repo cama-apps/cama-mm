@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Lobby Message</title>
+<meta name="description" content="What the Join and Leave buttons do, what each reaction on the lobby message actually triggers, and why a join can be refused.">
+<link rel="canonical" href="https://t4n1o.github.io/cama-mm/guides/lobby/">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E⚔️%3C/text%3E%3C/svg%3E">
+<meta name="theme-color" content="#0e1614">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Cama Balanced Shuffle">
+<meta property="og:title" content="The Lobby Message">
+<meta property="og:description" content="What the Join and Leave buttons do, what each reaction on the lobby message actually triggers, and why a join can be refused.">
+<meta property="og:url" content="https://t4n1o.github.io/cama-mm/guides/lobby/">
+<meta property="og:image" content="https://t4n1o.github.io/cama-mm/assets/og/lobby.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="The Lobby Message — Cama Balanced Shuffle guide">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="The Lobby Message">
+<meta name="twitter:description" content="Buttons, reactions, and why a join can be refused.">
+<meta name="twitter:image" content="https://t4n1o.github.io/cama-mm/assets/og/lobby.png">
+<link rel="stylesheet" href="../../assets/fonts/curfew.css">
+<style>
+  :root {
+    --bg: #eff4f2; --surface: #ffffff; --surface-2: #f4f8f6;
+    --ink: #13201c; --dim: #56665f; --faint: #86958e;
+    --accent: #0f7a6d; --accent-ink: #ffffff; --accent-tint: #dff1ec;
+    --warn: #a2552a; --warn-tint: #fbe9df;
+    --line: #d9e2de; --line-strong: #bfcbc6;
+    --shadow: 0 1px 2px rgba(19,32,28,.06), 0 8px 24px -12px rgba(19,32,28,.16);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0e1614; --surface: #151f1c; --surface-2: #1b2723;
+      --ink: #e7efeb; --dim: #9fb0a9; --faint: #6f7f78;
+      --accent: #3fd0b8; --accent-ink: #0b1a16; --accent-tint: #173630;
+      --warn: #f0a072; --warn-tint: #33221a;
+      --line: #263430; --line-strong: #36483f;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 12px 32px -16px rgba(0,0,0,.65);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0e1614; --surface: #151f1c; --surface-2: #1b2723;
+    --ink: #e7efeb; --dim: #9fb0a9; --faint: #6f7f78;
+    --accent: #3fd0b8; --accent-ink: #0b1a16; --accent-tint: #173630;
+    --warn: #f0a072; --warn-tint: #33221a;
+    --line: #263430; --line-strong: #36483f;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 12px 32px -16px rgba(0,0,0,.65);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 16.5px; line-height: 1.6; -webkit-font-smoothing: antialiased;
+  }
+  ::selection { background: var(--accent-tint); color: var(--ink); }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+  .page { max-width: 760px; margin: 0 auto; padding: 56px 24px 96px; }
+  h1, h2, h3 { font-family: "Fraunces", Georgia, serif; font-weight: 600; text-wrap: balance; margin: 0; }
+  code, .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+  code {
+    font-size: .88em; background: var(--surface-2); border: 1px solid var(--line);
+    border-radius: 5px; padding: .1em .4em; color: var(--accent);
+  }
+  a { color: var(--accent); }
+
+  .masthead { padding-bottom: 36px; border-bottom: 1px solid var(--line); margin-bottom: 48px; }
+  .eyebrow {
+    font-family: "IBM Plex Mono", monospace; font-size: 12.5px; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--accent);
+    display: flex; align-items: center; gap: 8px; margin-bottom: 14px;
+  }
+  .eyebrow i { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); display: block; }
+  .masthead h1 { font-size: clamp(2.2rem, 5.5vw, 3rem); line-height: 1.08; margin-bottom: 14px; }
+  .dek { font-size: 1.06rem; color: var(--dim); max-width: 58ch; margin: 0; }
+  .dek strong { color: var(--ink); font-weight: 600; }
+
+  section { margin-bottom: 54px; }
+  .section-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 20px; }
+  .section-head .index { font-family: "IBM Plex Mono", monospace; font-size: 13px; color: var(--faint); letter-spacing: .08em; }
+  .section-head h2 { font-size: 1.42rem; }
+  .lede { color: var(--dim); max-width: 64ch; margin: -6px 0 22px; }
+
+  /* mock of the lobby message */
+  .mock {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+    padding: 18px 20px; box-shadow: var(--shadow); margin: 0 0 14px;
+  }
+  .mock .title { font-family: "IBM Plex Sans", sans-serif; font-weight: 700; font-size: 16px; margin-bottom: 6px; }
+  .mock .body { color: var(--dim); font-size: 14.5px; white-space: pre-line; }
+  .mock .field { margin-top: 12px; font-size: 14.5px; }
+  .mock .field b { display: block; font-size: 13px; color: var(--ink); margin-bottom: 4px; }
+  .mock .buttons { display: flex; gap: 8px; margin-top: 14px; }
+  .mock .btn {
+    font-family: "IBM Plex Sans", sans-serif; font-weight: 600; font-size: 13.5px;
+    border-radius: 6px; padding: 7px 14px; border: 1px solid transparent;
+  }
+  .mock .btn.join { background: var(--accent); color: var(--accent-ink); }
+  .mock .btn.leave { background: var(--surface-2); color: var(--ink); border-color: var(--line-strong); }
+  .mock .reacts { display: flex; gap: 6px; margin-top: 12px; flex-wrap: wrap; }
+  .mock .react {
+    font-size: 13px; background: var(--surface-2); border: 1px solid var(--line);
+    border-radius: 6px; padding: 3px 8px; color: var(--dim);
+  }
+  .caption { font-size: 13.5px; color: var(--dim); margin: 0 0 22px; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+    padding: 18px; box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 8px;
+  }
+  .card .kicker {
+    font-family: "IBM Plex Mono", monospace; font-size: 11.5px; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--accent);
+  }
+  .card h3 { font-family: "IBM Plex Sans", sans-serif; font-weight: 700; font-size: 16px; }
+  .card p { margin: 0; color: var(--dim); font-size: 14.5px; }
+
+  /* one row per reaction */
+  .reactions { display: flex; flex-direction: column; gap: 12px; }
+  .reaction {
+    display: grid; grid-template-columns: 58px 1fr; gap: 16px; align-items: start;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+    padding: 16px 18px; box-shadow: var(--shadow);
+  }
+  .reaction .emoji {
+    font-size: 30px; line-height: 1; text-align: center; padding-top: 4px;
+  }
+  .reaction .emoji.word { font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--accent); word-break: break-all; padding-top: 10px; letter-spacing: .04em; }
+  .reaction h3 { font-family: "IBM Plex Sans", sans-serif; font-weight: 700; font-size: 16px; margin-bottom: 4px; }
+  .reaction h3 small { font-family: "IBM Plex Mono", monospace; font-weight: 400; font-size: 11.5px; color: var(--faint); letter-spacing: .06em; text-transform: uppercase; margin-left: 8px; }
+  .reaction p { margin: 0; color: var(--dim); font-size: 14.5px; }
+  .reaction p + p { margin-top: 6px; }
+  .reaction .says {
+    display: inline-block; margin-top: 8px; font-family: "IBM Plex Mono", monospace; font-size: 12.5px;
+    background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px; padding: 4px 9px; color: var(--ink);
+  }
+
+  table.opts { width: 100%; border-collapse: collapse; margin: 0 0 18px; font-size: 14.5px; }
+  table.opts th, table.opts td { text-align: left; padding: 11px 12px 11px 0; border-top: 1px solid var(--line); vertical-align: top; }
+  table.opts th { font-family: "IBM Plex Mono", monospace; font-size: 12.5px; letter-spacing: .04em; color: var(--ink); white-space: nowrap; width: 160px; font-weight: 600; }
+  table.opts td { color: var(--dim); }
+  @media (max-width: 600px) { table.opts th { width: 110px; white-space: normal; } }
+
+  .note {
+    display: flex; gap: 12px; align-items: flex-start; background: var(--accent-tint);
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    border-radius: 10px; padding: 14px 16px; font-size: 14.5px; color: var(--dim); margin: 18px 0 0;
+  }
+  .note strong { color: var(--ink); }
+  .note .tag {
+    flex: none; font-family: "IBM Plex Mono", monospace; font-size: 10.5px; letter-spacing: .06em;
+    text-transform: uppercase; color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+    border-radius: 5px; padding: 2px 6px; margin-top: 2px; background: var(--surface);
+  }
+  .note.warn { background: var(--warn-tint); border-color: color-mix(in srgb, var(--warn) 35%, transparent); }
+  .note.warn .tag { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
+
+  dl.faq { display: flex; flex-direction: column; margin: 0; }
+  .faq-item { padding: 17px 0; border-top: 1px solid var(--line); display: grid; grid-template-columns: minmax(150px, 210px) 1fr; gap: 20px; }
+  .faq-item:last-child { border-bottom: 1px solid var(--line); }
+  .faq-item dt { font-weight: 700; font-size: 15px; color: var(--ink); }
+  .faq-item dd { margin: 0; color: var(--dim); font-size: 15px; max-width: 58ch; }
+  @media (max-width: 600px) { .faq-item { grid-template-columns: 1fr; gap: 6px; } }
+
+  footer { margin-top: 60px; padding-top: 24px; border-top: 1px solid var(--line); font-size: 13px; color: var(--faint); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="masthead">
+    <div class="eyebrow"><i></i>Cama · Player Guide</div>
+    <h1>The Lobby Message</h1>
+    <p class="dek">Every inhouse night starts with one pinned message in the matchmaking channel. It has <strong>two buttons</strong> that seat you and unseat you, and a row of <strong>reactions that each do something different</strong> — none of which is "join". The lobby thread carries a working copy of the same card. This is what each one does.</p>
+  </div>
+
+  <section>
+    <div class="section-head"><span class="index">01</span><h2>What you're looking at</h2></div>
+    <p class="lede">The bot posts one message per lobby and pins it. It opens a public thread named after the lobby, where joins, leaves and ready checks get logged. The thread also gets its own copy of the card with live Join and Leave buttons, kept in step with the pinned one, so you can act from inside the thread.</p>
+
+    <div class="mock">
+      <div class="title">🍽️ All You Can Feed</div>
+      <div class="body">Open to all ratings
+Join to play!
+📻 React for the live map and commentary on bot-hosted matches. Players selected for the match are excluded.
+Opened at 8:02 PM</div>
+      <div class="field"><b>Players (3) ⚔️</b>Crystal · Tide · Rubick</div>
+      <div class="buttons"><span class="btn join">Join</span><span class="btn leave">Leave</span></div>
+      <div class="reacts"><span class="react">jopacoin</span><span class="react">📋</span><span class="react">🔔</span><span class="react">📻</span></div>
+    </div>
+    <p class="caption">Two lobbies can be open at once: <strong>🍽️ All You Can Feed</strong>, open to everyone, and <strong>🧀 Whine &amp; Cheese</strong>, limited to players below 1400 Glicko. You can sit in both.</p>
+
+    <table class="opts">
+      <tr><th>/lobby</th><td>Creates the lobby if there isn't one, or shows you the existing one. Creating a lobby also seats you in it. The message and thread are the public announcement; the reply you get back is private and links you to the message.</td></tr>
+      <tr><th>/join</th><td>Same as the Join button, for people who prefer typing. Pick the lobby with the <code>lobby</code> option.</td></tr>
+      <tr><th>/leave</th><td>Takes you out of <em>every</em> lobby you're in. The Leave button only leaves the one lobby whose message you clicked.</td></tr>
+    </table>
+  </section>
+
+  <section>
+    <div class="section-head"><span class="index">02</span><h2>Join and Leave</h2></div>
+    <p class="lede">The buttons are the way in and out — on the pinned message or on its copy in the thread. A successful click is quiet: the only trace is a line in the lobby thread.</p>
+
+    <div class="cards">
+      <div class="card">
+        <div class="kicker">Join</div>
+        <h3>Seats you</h3>
+        <p>You appear in the player list, the thread gets <code>✅ @you joined.</code>, and you're subscribed to the thread so you see what happens next. No ping, no public reply.</p>
+      </div>
+      <div class="card">
+        <div class="kicker">Leave</div>
+        <h3>Unseats you</h3>
+        <p>You come off the list and the thread gets <code>🚪 @you left.</code> If a ready check is running, your confirmation is dropped with you.</p>
+      </div>
+      <div class="card">
+        <div class="kicker">Refused</div>
+        <h3>Only you see why</h3>
+        <p>Every refusal is an ephemeral reply — a message only you can see. Nothing about it is posted in the channel or the thread.</p>
+      </div>
+    </div>
+
+    <p class="caption" style="margin-top:22px">Reasons a join comes back refused, and what to do about each:</p>
+    <table class="opts">
+      <tr><th>Not registered</th><td>Run <code>/player register</code> once. The bot needs a player record before it can seat you.</td></tr>
+      <tr><th>No roles set</th><td>Run <code>/player roles</code> with your preferred positions, e.g. <code>123</code>. The shuffle needs them.</td></tr>
+      <tr><th>Rating too high</th><td>🧀 Whine &amp; Cheese is for Glicko below 1400. You can still view it; you can't sit in it.</td></tr>
+      <tr><th>Lobby full</th><td>The lobby has hit its player cap. Try the other lobby or wait for a leave.</td></tr>
+      <tr><th>Already in</th><td>You're already seated. Clicking Join again does nothing more.</td></tr>
+      <tr><th>Curfew</th><td>One of your <a href="../curfew/">curfew windows</a> is active. The reply names it; nobody else sees that.</td></tr>
+      <tr><th>Suspended</th><td>An admin has restricted you from this lobby. The reply gives the reason and term; <code>/player lobby status</code> has the details.</td></tr>
+      <tr><th>Pending match</th><td>You're in a match that hasn't been recorded yet. Finish it with <code>/record</code>, then join.</td></tr>
+      <tr><th>Shuffle in progress</th><td>Your current lobby is mid-shuffle or mid-draft. You can't hop lobbies until it resolves.</td></tr>
+      <tr><th>Slow down</th><td>Three membership changes per 30 seconds, counting joins and leaves in both lobbies together. The reply says how long to wait.</td></tr>
+    </table>
+  </section>
+
+  <section>
+    <div class="section-head"><span class="index">03</span><h2>What each reaction does</h2></div>
+    <p class="lede">The bot pre-adds four reactions to every lobby message so they're one click away. Adding your own copy of a reaction triggers it. <strong>None of them joins the lobby</strong> — that's the button's job.</p>
+
+    <div class="reactions">
+
+      <div class="reaction">
+        <div class="emoji word">jopacoin</div>
+        <div>
+          <h3>Here for the gamba <small>spectator</small></h3>
+          <p>For people who aren't playing but want in on the betting. Posts a line in the thread and subscribes you to it, so you see the shuffle and the odds without joining.</p>
+          <span class="says">jopacoin @you is here for the gamba!</span>
+          <p>Ignored if you're already seated in that lobby.</p>
+        </div>
+      </div>
+
+      <div class="reaction">
+        <div class="emoji">📋</div>
+        <div>
+          <h3>Lobby alert <small>notification</small></h3>
+          <p>Subscribes you to a ping for <em>this</em> lobby. When it gets within one or two players of a ready check, the bot posts <strong>📢 Almost Ready!</strong> in the channel with a jump link, and mentions everyone who reacted 📋.</p>
+          <p>Want that for every lobby without reacting each time? <code>/player lobby autonotify</code> turns it on permanently. Players already in the lobby aren't pinged; they're the ones being waited on.</p>
+        </div>
+      </div>
+
+      <div class="reaction">
+        <div class="emoji">🔔</div>
+        <div>
+          <h3>Ring a ready check <small>same as /readycheck</small></h3>
+          <p>Launches a ready check for that lobby: a fresh message in the thread listing everyone, with ✅ to confirm. You have to be in the lobby, and there has to be enough players. One difference from the command: the bell does <strong>not</strong> auto-confirm you, so click ✅ on the check too.</p>
+          <p>If it can't start — too few players, one just went out, you're not a member — the bot removes your bell so it doesn't look like something is pending. Full rules in <a href="../ready-check/">How Ready Check Works</a>.</p>
+        </div>
+      </div>
+
+      <div class="reaction">
+        <div class="emoji">📻</div>
+        <div>
+          <h3>Radio <small>spectator map</small></h3>
+          <p>Subscribes you to the live map and commentary for bot-hosted matches that come out of this lobby. Remove the reaction to unsubscribe. Players picked for the match are excluded automatically, so you can't scout your own game.</p>
+          <p>The same reaction works on the shuffle message after teams are drawn.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="note">
+      <span class="tag">Not on this message</span>
+      <span>The <strong>✅ reaction lives on the ready-check message</strong> in the thread, not on the lobby message. Adding it confirms you're ready; removing it withdraws. That's the one covered in <a href="../ready-check/">How Ready Check Works</a>.</span>
+    </div>
+    <div class="note warn">
+      <span class="tag">Old habit</span>
+      <span>If you've been reacting ⚔️ to join for years: the sword is gone. It stopped seating people when the Join button arrived, and it's no longer on the message at all — the bot clears it if someone adds one. <strong>Click Join.</strong></span>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-head"><span class="index">04</span><h2>Good to know</h2></div>
+    <dl class="faq">
+      <div class="faq-item">
+        <dt>What happened to the ⚔️ reaction?</dt>
+        <dd>It was the join for years, then briefly a shout-out, and now it's retired. Discord lets a button answer you privately; a reaction can't — the only way to explain a refused reaction-join was to post it in the channel and delete it seconds later, which meant a curfew or suspension got announced to everyone. The sword still marks the player count on the card, nothing more.</dd>
+      </div>
+      <div class="faq-item">
+        <dt>Can I be in both lobbies?</dt>
+        <dd>Yes. Join each one's message. Whichever shuffles first takes you; you can't switch while that shuffle or draft is in progress.</dd>
+      </div>
+      <div class="faq-item">
+        <dt>Who gets pinged when I join?</dt>
+        <dd>Nobody, for an ordinary join. The thread line mentions you with the ping suppressed. When the lobby reaches the ready threshold, the bot posts <strong>🎮 Ready!</strong> in the channel; one or two short of that, it posts <strong>📢 Almost Ready!</strong> to the 📋 subscribers.</dd>
+      </div>
+      <div class="faq-item">
+        <dt>I left by accident</dt>
+        <dd>Click Join again. Just mind the limit of three changes per 30 seconds.</dd>
+      </div>
+      <div class="faq-item">
+        <dt>The bot removed me and I didn't click anything</dt>
+        <dd>Either a curfew window of yours started (you'll have a DM), a ready check swept you as unconfirmed, or an admin kicked you. The thread shows the leave; the reason, if it's private, comes to you directly.</dd>
+      </div>
+      <div class="faq-item">
+        <dt>What's the name shown next to me?</dt>
+        <dd>Your current server nickname, resolved live. Change it in Discord and the lobby follows.</dd>
+      </div>
+    </dl>
+  </section>
+
+  <footer>
+    <span>Cama Balanced Shuffle</span>
+    <span>The Lobby Message · player guide</span>
+  </footer>
+
+</div>
+</body>
+</html>

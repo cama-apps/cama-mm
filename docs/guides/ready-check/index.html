@@ -1,0 +1,658 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How Ready Check Works</title>
+<meta name="description" content="How /readycheck decides who counts as active, who gets confirmed automatically, and the 30-minute sweep that quietly removes AFK players — plus the open questions up for a vote.">
+<link rel="canonical" href="https://t4n1o.github.io/cama-mm/guides/ready-check/">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E✅%3C/text%3E%3C/svg%3E">
+<meta name="theme-color" content="#14181e">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Cama Balanced Shuffle">
+<meta property="og:title" content="How Ready Check Works">
+<meta property="og:description" content="How /readycheck decides who counts as active, who gets confirmed automatically, and the 30-minute sweep that quietly removes AFK players — plus the open questions up for a vote.">
+<meta property="og:url" content="https://t4n1o.github.io/cama-mm/guides/ready-check/">
+<meta property="og:image" content="https://t4n1o.github.io/cama-mm/assets/og/ready-check.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="How Ready Check Works — Cama Balanced Shuffle guide">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="How Ready Check Works">
+<meta name="twitter:description" content="How /readycheck decides who counts as active, who gets confirmed automatically, and the 30-minute sweep that quietly removes AFK players — plus the open questions up for a vote.">
+<meta name="twitter:image" content="https://t4n1o.github.io/cama-mm/assets/og/ready-check.png">
+<link rel="stylesheet" href="../../assets/fonts/ready-check.css">
+</head>
+<body>
+<style>
+  :root {
+    --bg: #f6f2e7;
+    --surface: #fffdf8;
+    --card: #efe7d3;
+    --card-border: #ddccA0;
+    --border: #ddd0ac;
+    --text: #211c12;
+    --text-dim: #6d6350;
+    --text-faint: #8b8069;
+    --accent: #9c6b12;
+    --accent-strong: #7a5209;
+    --accent-ink: #fffaf0;
+    --accent-tint: #f1e2bd;
+
+    --ready: #2f7d4f;
+    --ready-tint: #e2f0e2;
+    --playing: #9c6b12;
+    --playing-tint: #f1e2bd;
+    --recent: #2f5f9c;
+    --recent-tint: #e1eaf6;
+    --afk: #a3323a;
+    --afk-tint: #f6e2e1;
+
+    --pending: #9c4a12;
+    --pending-tint: #f4dfc3;
+    --pending-border: #d8ac6f;
+
+    --shadow: 0 1px 2px rgba(48, 38, 12, 0.06), 0 8px 24px -12px rgba(48, 38, 12, 0.18);
+    --radius: 14px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14181e;
+      --surface: #1a1f27;
+      --card: #1e2530;
+      --card-border: #313a49;
+      --border: #2c3543;
+      --text: #eae6da;
+      --text-dim: #a2aab8;
+      --text-faint: #7d8695;
+      --accent: #d7ab52;
+      --accent-strong: #e6c073;
+      --accent-ink: #241a06;
+      --accent-tint: #322a17;
+
+      --ready: #6bc292;
+      --ready-tint: #1c2c22;
+      --playing: #d7ab52;
+      --playing-tint: #322a17;
+      --recent: #7fadea;
+      --recent-tint: #1b2634;
+      --afk: #e08088;
+      --afk-tint: #33201f;
+
+      --pending: #e3a768;
+      --pending-tint: #332616;
+      --pending-border: #5c4526;
+
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 28px -14px rgba(0, 0, 0, 0.6);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --bg: #14181e;
+    --surface: #1a1f27;
+    --card: #1e2530;
+    --card-border: #313a49;
+    --border: #2c3543;
+    --text: #eae6da;
+    --text-dim: #a2aab8;
+    --text-faint: #7d8695;
+    --accent: #d7ab52;
+    --accent-strong: #e6c073;
+    --accent-ink: #241a06;
+    --accent-tint: #322a17;
+
+    --ready: #6bc292;
+    --ready-tint: #1c2c22;
+    --playing: #d7ab52;
+    --playing-tint: #322a17;
+    --recent: #7fadea;
+    --recent-tint: #1b2634;
+    --afk: #e08088;
+    --afk-tint: #33201f;
+
+    --pending: #e3a768;
+    --pending-tint: #332616;
+    --pending-border: #5c4526;
+
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 28px -14px rgba(0, 0, 0, 0.6);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Public Sans", -apple-system, "Segoe UI", sans-serif;
+    font-size: 16.5px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+
+  .page {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 56px 24px 96px;
+  }
+
+  h1, h2, h3 {
+    font-family: "Fraunces", Georgia, serif;
+    font-weight: 600;
+    text-wrap: balance;
+    color: var(--text);
+  }
+
+  header.top {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding-bottom: 32px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 40px;
+  }
+
+  .eyebrow {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 12.5px;
+    font-weight: 500;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--accent-strong);
+  }
+
+  h1 {
+    font-size: clamp(2rem, 4.5vw, 2.65rem);
+    font-optical-sizing: auto;
+    margin: 0;
+    line-height: 1.12;
+  }
+
+  .lede {
+    font-size: 1.05rem;
+    color: var(--text-dim);
+    max-width: 62ch;
+    margin: 0;
+  }
+
+  .lede strong { color: var(--text); font-weight: 600; }
+
+  code, .cmd {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.88em;
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-radius: 5px;
+    padding: 0.1em 0.4em;
+    color: var(--accent-strong);
+  }
+
+  /* ---- status glossary ---- */
+
+  .glossary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 10px;
+    margin: 0 0 44px;
+  }
+
+  .chip {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .chip-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 12.5px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+  }
+
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  .dot.ready { background: var(--ready); }
+  .dot.playing { background: var(--playing); }
+  .dot.recent { background: var(--recent); }
+  .dot.afk { background: var(--afk); }
+
+  .chip p {
+    margin: 0;
+    font-size: 13.5px;
+    color: var(--text-dim);
+    line-height: 1.45;
+  }
+
+  /* ---- scenario sections ---- */
+
+  section.scenario {
+    margin: 0 0 34px;
+  }
+
+  .scenario-number {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 12px;
+    color: var(--text-faint);
+    letter-spacing: 0.06em;
+  }
+
+  section.scenario h2 {
+    font-size: 1.32rem;
+    margin: 2px 0 12px;
+  }
+
+  section.scenario p, section.scenario li {
+    color: var(--text);
+    font-size: 15.5px;
+    max-width: 66ch;
+  }
+
+  section.scenario p { margin: 0 0 12px; }
+
+  section.scenario ul {
+    margin: 0 0 12px;
+    padding-left: 1.3em;
+  }
+  section.scenario li { margin-bottom: 6px; }
+
+  .note {
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-radius: 10px;
+    padding: 12px 16px;
+    font-size: 14px;
+    color: var(--text-dim);
+    margin: 14px 0 0;
+  }
+  .note strong { color: var(--text); }
+
+  .pending-note {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    background: var(--pending-tint);
+    border: 1px solid var(--pending-border);
+    border-radius: 10px;
+    padding: 12px 16px;
+    font-size: 14px;
+    color: var(--text-dim);
+    margin: 14px 0 0;
+  }
+  .pending-note strong { color: var(--text); }
+  .pending-note .pending-tag {
+    flex: none;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--pending);
+    background: var(--surface);
+    border: 1px solid var(--pending-border);
+    border-radius: 5px;
+    padding: 2px 6px;
+    margin-top: 1px;
+  }
+
+  hr.rule {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 48px 0;
+  }
+
+  /* ---- discussion points ---- */
+
+  .discuss-intro {
+    margin-bottom: 28px;
+  }
+
+  .discuss-intro h2 {
+    font-size: 1.6rem;
+    margin: 0 0 10px;
+  }
+
+  .discuss {
+    display: flex;
+    gap: 16px;
+    padding: 20px 20px 20px 0;
+    border-top: 1px solid var(--border);
+  }
+
+  .discuss:last-child { padding-bottom: 4px; }
+
+  .discuss-badge {
+    flex: none;
+    width: 34px;
+    height: 34px;
+    border-radius: 8px;
+    background: var(--accent-tint);
+    color: var(--accent-strong);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: "Fraunces", serif;
+    font-weight: 600;
+    font-size: 15px;
+    margin-top: 2px;
+  }
+
+  .discuss-badge.pending {
+    background: var(--pending-tint);
+    color: var(--pending);
+  }
+
+  .discuss-body h3 {
+    font-size: 1.05rem;
+    margin: 0 0 6px;
+    font-weight: 600;
+  }
+
+  .discuss-body .pending-tag {
+    display: inline-block;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--pending);
+    background: var(--pending-tint);
+    border: 1px solid var(--pending-border);
+    border-radius: 5px;
+    padding: 2px 6px;
+    margin: 0 0 8px;
+  }
+
+  .discuss-body p {
+    margin: 0 0 8px;
+    font-size: 14.8px;
+    color: var(--text-dim);
+    max-width: 64ch;
+  }
+
+  .discuss-body .current {
+    font-size: 13.5px;
+    color: var(--text-faint);
+  }
+  .discuss-body .current strong { color: var(--text-dim); font-weight: 600; }
+
+  footer.end {
+    margin-top: 56px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border);
+    font-size: 13.5px;
+    color: var(--text-faint);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  footer.end strong { color: var(--text-dim); }
+
+  ::selection {
+    background: var(--accent-tint);
+    color: var(--accent-strong);
+  }
+</style>
+
+<div class="page">
+
+  <header class="top">
+    <span class="eyebrow">Inhouse League · Lobby Systems</span>
+    <h1>How Ready Check Works</h1>
+  </header>
+
+  <div class="glossary">
+    <div class="chip">
+      <div class="chip-head"><span class="dot ready"></span>Ready</div>
+      <p>You're in the lobby's voice channel, or your Discord status is Online or Do Not Disturb.</p>
+    </div>
+    <div class="chip">
+      <div class="chip-head"><span class="dot playing"></span>Playing</div>
+      <p>Discord shows you as currently playing Dota 2.</p>
+    </div>
+    <div class="chip">
+      <div class="chip-head"><span class="dot recent"></span>Recent</div>
+      <p>You joined the lobby less than 10 minutes ago &mdash; benefit of the doubt.</p>
+    </div>
+    <div class="chip">
+      <div class="chip-head"><span class="dot afk"></span>Possibly AFK</div>
+      <p>None of the above. Idle, no voice, no game activity, joined a while ago.</p>
+    </div>
+  </div>
+
+  <p style="color:var(--text-dim); font-size: 14px; margin-top:-28px; margin-bottom: 40px;">
+    The bot assigns you one of these four labels automatically, every time it looks at the
+    lobby &mdash; you never opt in or out of the label. Everything below builds on it.
+  </p>
+
+  <section class="scenario">
+    <div class="scenario-number">01</div>
+    <h2>Starting a check</h2>
+    <p>
+      Anyone currently in the lobby can run <code>/readycheck</code>. It posts a message in the
+      lobby thread listing everyone in three groups: <strong>Likely Active</strong> (Ready,
+      Playing, or Recent), <strong>Possibly AFK</strong>, and <strong>Reacted to Ready Check</strong>
+      once people start confirming.
+    </p>
+    <p>
+      You can only run it once every <strong>2 minutes</strong> per lobby &mdash; running it again
+      sooner just tells you to wait.
+    </p>
+    <div class="pending-note">
+      <span class="pending-tag">Pending merge</span>
+      <span>
+        A branch not yet on <code>main</code> adds a floor: below <strong>8 players</strong> in
+        the lobby, <code>/readycheck</code> refuses to start at all and just replies with how many
+        more are needed. This is separate from the 10-player quorum in section 05 below &mdash; 8
+        gets you a check, 10 gets you the "go shuffle" announcement.
+      </span>
+    </div>
+  </section>
+
+  <section class="scenario">
+    <div class="scenario-number">02</div>
+    <h2>Getting counted without lifting a finger</h2>
+    <p>
+      Two groups are marked <strong>confirmed the instant the check is posted</strong>, with no
+      reaction required:
+    </p>
+    <ul>
+      <li>Whoever ran the command (if they chose to confirm themselves when running it)</li>
+      <li>Anyone labeled <strong>Recent</strong> &mdash; you joined less than 10 minutes ago, so the
+        bot assumes you're still paying attention</li>
+    </ul>
+    <p>Everyone else has to physically react with ✅ to be counted.</p>
+  </section>
+
+  <section class="scenario">
+    <div class="scenario-number">03</div>
+    <h2>Confirming, or backing out</h2>
+    <p>
+      React with ✅ on the message to confirm. Remove your reaction and you go back to
+      unconfirmed &mdash; and the bot remembers you explicitly opted out, so a later roster
+      refresh won't silently re-confirm you just because you still look "Recent."
+    </p>
+  </section>
+
+  <section class="scenario">
+    <div class="scenario-number">04</div>
+    <h2>Staying in sync while it's live</h2>
+    <p>
+      The ready check message updates itself in real time as the lobby changes &mdash; nobody
+      has to re-run the command. If someone joins, leaves, gets kicked, gets suspended, or gets
+      swept out for a curfew window, the roster and the ✅ counts update immediately, and any
+      reaction they left behind is removed.
+    </p>
+  </section>
+
+  <section class="scenario">
+    <div class="scenario-number">05</div>
+    <h2>Reaching quorum</h2>
+    <p>
+      Once enough players are confirmed &mdash; 10 by default, though a server can configure a
+      different number &mdash; the bot posts one announcement that <code>/shuffle</code> is
+      available. Extra players beyond that number are never required to confirm at all.
+    </p>
+  </section>
+
+  <section class="scenario">
+    <div class="scenario-number">06</div>
+    <h2>The 30-minute sweep</h2>
+    <p>
+      This is the part that surprises people. If a ready check has been sitting for
+      <strong>30 minutes or more</strong> and someone runs <code>/readycheck</code> again, the bot
+      treats it as stale, deletes it, and posts a fresh one &mdash; but first, it quietly removes
+      every player who meets <em>all</em> of these conditions:
+    </p>
+    <ul>
+      <li>Currently labeled <strong>Possibly AFK</strong></li>
+      <li>Joined the lobby more than 10 minutes ago</li>
+      <li>Never reacted ✅</li>
+      <li>Isn't the person running the command</li>
+      <li>Isn't already locked into a forming match</li>
+    </ul>
+    <p>
+      They're removed from the lobby outright, not just marked unconfirmed. There is no DM. There
+      is no message in the thread naming them. The only trace is a private note shown to whoever
+      ran the command &mdash; <span class="note" style="display:inline; padding:2px 6px; margin:0;">"Removed
+      2 away player(s); they can rejoin with <code>/join</code>."</span> &mdash; which doesn't even
+      say who.
+    </p>
+  </section>
+
+  <hr class="rule">
+
+  <div class="discuss-intro">
+    <span class="eyebrow">For discussion</span>
+    <h2>Where we want your opinion</h2>
+    <p class="lede">
+      Everything above is what the bot does today, not what it should do. These are the specific
+      calls worth putting to a vote &mdash; reference them by number.
+    </p>
+  </div>
+
+  <div class="discuss">
+    <div class="discuss-badge">1</div>
+    <div class="discuss-body">
+      <h3>Silent removal, no notification</h3>
+      <p>
+        A swept player finds out only by noticing they're no longer in the lobby. Should they get
+        a DM explaining why, the way a curfew removal or a kick already does?
+      </p>
+      <p class="current"><strong>Today:</strong> nothing sent to the removed player at all.</p>
+    </div>
+  </div>
+
+  <div class="discuss">
+    <div class="discuss-badge">2</div>
+    <div class="discuss-body">
+      <h3>No warning before it happens</h3>
+      <p>
+        The removal happens the moment someone re-runs the check past 30 minutes &mdash; there's no
+        "you'll be dropped in 5 minutes, react now" heads-up first.
+      </p>
+      <p class="current"><strong>Today:</strong> instant, no grace period.</p>
+    </div>
+  </div>
+
+  <div class="discuss">
+    <div class="discuss-badge">3</div>
+    <div class="discuss-body">
+      <h3>What actually counts as "AFK"</h3>
+      <p>
+        The AFK guess is built from voice presence, Online/DND status, and a detected "Dota 2"
+        activity. It has no way to see mobile status, a deliberately-set Invisible/DND, or someone
+        tabbed out reading a guide. Are these the right signals, or too blunt?
+      </p>
+      <p class="current"><strong>Today:</strong> three signals, all-or-nothing.</p>
+    </div>
+  </div>
+
+  <div class="discuss">
+    <div class="discuss-badge">4</div>
+    <div class="discuss-body">
+      <h3>The two timers</h3>
+      <p>
+        A join is "Recent" for 10 minutes. A ready check goes stale after 30. Both are fixed and
+        apply to every lobby. Do either need to change?
+      </p>
+      <p class="current"><strong>Today:</strong> 10-minute grace, 30-minute staleness.</p>
+    </div>
+  </div>
+
+  <div class="discuss">
+    <div class="discuss-badge">5</div>
+    <div class="discuss-body">
+      <h3>The 2-minute cooldown</h3>
+      <p>
+        Nobody can re-post a check for 2 minutes after the last one, even to fix a mistake or
+        chase a straggler. Right length?
+      </p>
+      <p class="current"><strong>Today:</strong> 2 minutes, per lobby, no exceptions.</p>
+    </div>
+  </div>
+
+  <div class="discuss">
+    <div class="discuss-badge">6</div>
+    <div class="discuss-body">
+      <h3>Extras never have to confirm</h3>
+      <p>
+        Once the quorum is hit, anyone still in the lobby beyond that number is never asked to
+        react at all &mdash; they just ride along. Should overflow players still have to confirm,
+        in case the shuffle needs to swap someone in?
+      </p>
+      <p class="current"><strong>Today:</strong> only the first N confirmations matter.</p>
+    </div>
+  </div>
+
+  <div class="discuss">
+    <div class="discuss-badge">7</div>
+    <div class="discuss-body">
+      <h3>Who gets pinged, and when</h3>
+      <p>
+        A brand-new check doesn't ping people who just joined (they're assumed to know). But
+        refreshing an existing check pings <em>everyone</em> still unconfirmed, recent joiners
+        included. Should that be consistent one way or the other?
+      </p>
+      <p class="current"><strong>Today:</strong> new checks and refreshes ping differently.</p>
+    </div>
+  </div>
+
+  <div class="discuss">
+    <div class="discuss-badge pending">8</div>
+    <div class="discuss-body">
+      <span class="pending-tag">New, not yet merged</span>
+      <h3>Is 8 the right floor to even start a check?</h3>
+      <p>
+        A check below 8 players now gets rejected outright &mdash; not "posted with fewer
+        confirmations required," just refused, with a reply telling you the shortfall. 8 was
+        picked as a reasonable-sounding number, not something the group weighed in on. Is it
+        right? Should it scale with the 10-player quorum instead of sitting at a fixed number,
+        and should it eventually be a per-server setting the way quorum already is?
+      </p>
+      <p class="current"><strong>Today:</strong> fixed at 8, hardcoded, no admin control.</p>
+    </div>
+  </div>
+
+  <footer class="end">
+    <span><strong>Reply in the Discord guides thread</strong> quoting the number of the point you're
+      answering &mdash; that's the fastest way to get it into the next revision.</span>
+    <span>Reflects <code>/readycheck</code> behavior on <code>cama-apps/cama-mm</code> main, plus one
+      change (marked <span class="pending-tag" style="display:inline-block; vertical-align: middle;">Pending merge</span>)
+      that's on an open branch but not merged yet.</span>
+  </footer>
+
+</div>
+</body>
+</html>
