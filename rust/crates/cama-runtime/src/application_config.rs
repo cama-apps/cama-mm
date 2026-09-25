@@ -205,7 +205,6 @@ pub struct Values {
     pub prediction_size_per_level: i64,
     pub prediction_spread_ticks: i64,
     pub prediction_tick_size: i64,
-    pub rating_spread_divisor: f64,
     pub rd_decay_constant: f64,
     pub rd_decay_grace_period_days: i64,
     pub rd_priority_weight: f64,
@@ -279,6 +278,8 @@ pub struct Values {
     pub wrapped_min_games: i64,
     /// Hard-coded shuffler value retained from Python's SHUFFLER_SETTINGS.
     pub recent_match_penalty_weight: f64,
+    /// Hard-coded shuffler weight on the selected lobby's rating spread.
+    pub rating_spread_multiplier: f64,
     /// Python compatibility alias; always follows `pingedash_cost`.
     pub pingedkevin_cost: i64,
     /// Python compatibility alias; always follows `pingedash_cooldown_seconds`.
@@ -509,9 +510,9 @@ impl ApplicationConfig {
                 neon_mvp_chance: p.f64("NEON_MVP_CHANCE", 0.35),
                 new_player_exclusion_boost: p.i64("NEW_PLAYER_EXCLUSION_BOOST", 5),
                 new_player_mmr_discount: i64::from(migration.new_player_mmr_discount),
-                off_role_flat_value_penalty: p.f64("OFF_ROLE_FLAT_VALUE_PENALTY", 100.0),
-                off_role_flat_penalty: p.f64("OFF_ROLE_FLAT_PENALTY", 740.0),
-                off_role_multiplier: p.f64("OFF_ROLE_MULTIPLIER", 0.95),
+                off_role_flat_value_penalty: p.f64("OFF_ROLE_FLAT_VALUE_PENALTY", 90.0),
+                off_role_flat_penalty: p.f64("OFF_ROLE_FLAT_PENALTY", 670.0),
+                off_role_multiplier: p.f64("OFF_ROLE_MULTIPLIER", 0.96),
                 openskill_calibration_sigma_threshold: migration.openskill.calibration_threshold,
                 openskill_performance_strength: migration.openskill.performance_strength,
                 openskill_shuffle_chance: p.f64("OPENSKILL_SHUFFLE_CHANCE", 0.05),
@@ -561,7 +562,6 @@ impl ApplicationConfig {
                 prediction_size_per_level: p.i64("PREDICTION_SIZE_PER_LEVEL", 50),
                 prediction_spread_ticks: p.i64("PREDICTION_SPREAD_TICKS", 2),
                 prediction_tick_size: p.i64("PREDICTION_TICK_SIZE", 1),
-                rating_spread_divisor: p.f64("RATING_SPREAD_DIVISOR", 10.0),
                 rd_decay_constant: p.f64("RD_DECAY_CONSTANT", 100.0),
                 rd_decay_grace_period_days: p.i64("RD_DECAY_GRACE_PERIOD_DAYS", 7),
                 rd_priority_weight: p.f64("RD_PRIORITY_WEIGHT", 0.2),
@@ -638,6 +638,7 @@ impl ApplicationConfig {
                 wrapped_min_bets: p.i64("WRAPPED_MIN_BETS", 3),
                 wrapped_min_games: p.i64("WRAPPED_MIN_GAMES", 3),
                 recent_match_penalty_weight: 280.0,
+                rating_spread_multiplier: 0.11,
                 pingedkevin_cost: p.i64("PINGEDASH_COST", 10),
                 pingedkevin_cooldown_seconds: p.i64("PINGEDASH_COOLDOWN_SECONDS", 86_400),
             },
@@ -927,8 +928,8 @@ mod tests {
     fn test_new_player_exclusion_boost_defaults_to_five() {
         let config = parse(&[("DISCORD_BOT_TOKEN", "token")]);
         assert_eq!(config.values.new_player_exclusion_boost, 5);
-        assert_eq!(config.values.off_role_flat_value_penalty, 100.0);
-        assert_eq!(config.values.off_role_flat_penalty, 740.0);
+        assert_eq!(config.values.off_role_flat_value_penalty, 90.0);
+        assert_eq!(config.values.off_role_flat_penalty, 670.0);
         assert_eq!(config.values.soft_avoid_penalty, 180.0);
         assert_eq!(config.values.package_deal_penalty, 90.0);
         assert_eq!(config.values.package_deal_split_penalty, 90.0);
@@ -1138,6 +1139,6 @@ mod tests {
     #[test]
     fn configuration_catalog_entries_are_unique() {
         let catalog = config_py_env_keys().collect::<BTreeSet<_>>();
-        assert_eq!(catalog.len(), 216, "catalog entries must remain unique");
+        assert_eq!(catalog.len(), 215, "catalog entries must remain unique");
     }
 }

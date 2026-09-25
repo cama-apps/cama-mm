@@ -3,10 +3,10 @@
 use crate::team::{ROLES, Team, TeamError};
 
 /// Weight applied to the role-adjusted absolute difference between team values.
-pub const ADJUSTED_VALUE_DIFF_WEIGHT: f64 = 1.4;
+pub const ADJUSTED_VALUE_DIFF_WEIGHT: f64 = 1.5;
 
 /// Weight applied to the summed lane-matchup and same-role parity deltas.
-pub const ROLE_MATCHUP_DELTA_WEIGHT: f64 = 0.18;
+pub const ROLE_MATCHUP_DELTA_WEIGHT: f64 = 0.16;
 
 /// Sum the five critical lane matchups from role-ordered effective values.
 ///
@@ -46,9 +46,9 @@ impl Default for TeamBalancingService {
     fn default() -> Self {
         Self {
             use_glicko: true,
-            off_role_multiplier: 0.95,
-            off_role_flat_value_penalty: 100.0,
-            off_role_flat_penalty: 740.0,
+            off_role_multiplier: 0.96,
+            off_role_flat_value_penalty: 90.0,
+            off_role_flat_penalty: 670.0,
             role_matchup_delta_weight: ROLE_MATCHUP_DELTA_WEIGHT,
         }
     }
@@ -267,7 +267,7 @@ mod tests {
             service
                 .calculate_matchup_score(&team1, &team2, false, false)
                 .expect("roles are assigned"),
-            2_860.0
+            2_900.0
         );
 
         let weighted_service =
@@ -282,7 +282,7 @@ mod tests {
             weighted_service
                 .calculate_matchup_score(&team1, &team2, false, false)
                 .expect("roles are assigned"),
-            1_710.0
+            1_750.0
         );
 
         let mut swapped_team1 = team1.clone();
@@ -333,7 +333,7 @@ mod tests {
         let score = service
             .calculate_matchup_score(&team1, &team2, false, false)
             .expect("roles are assigned");
-        assert!((score - 140.0).abs() < 1e-9, "{score}");
+        assert!((score - 150.0).abs() < 1e-9, "{score}");
     }
 
     #[test]
@@ -350,11 +350,11 @@ mod tests {
         let score = service
             .calculate_matchup_score(&team1, &team2, false, false)
             .expect("roles are assigned");
-        assert!((score - 974.0).abs() < 1e-9, "{score}");
+        assert!((score - 968.0).abs() < 1e-9, "{score}");
     }
 
     #[test]
-    fn test_default_off_role_goodness_adds_740_per_player() {
+    fn test_default_off_role_goodness_adds_670_per_player() {
         let (team1, _) = fixture_teams();
         let mut team1_with_swapped_cores = team1.clone();
         team1_with_swapped_cores.role_assignments =
@@ -371,7 +371,7 @@ mod tests {
             service
                 .calculate_matchup_score(&team1_with_swapped_cores, &team1, false, false)
                 .expect("roles are assigned"),
-            1_480.0
+            1_340.0
         );
     }
 
@@ -404,7 +404,7 @@ mod tests {
             service
                 .calculate_matchup_score(&team1, &team2, false, true)
                 .expect("roles are assigned"),
-            120.0
+            125.0
         );
     }
 

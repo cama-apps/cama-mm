@@ -355,7 +355,7 @@ pub struct BalancedShuffler {
     pub soft_avoid_penalty: f64,
     pub package_deal_penalty: f64,
     pub package_deal_split_penalty: f64,
-    pub rating_spread_divisor: f64,
+    pub rating_spread_multiplier: f64,
     pub region_split: bool,
     pub region_split_penalty: f64,
     role_assignment_provider: Arc<dyn RoleAssignmentProvider>,
@@ -383,7 +383,7 @@ impl Clone for BalancedShuffler {
             soft_avoid_penalty: self.soft_avoid_penalty,
             package_deal_penalty: self.package_deal_penalty,
             package_deal_split_penalty: self.package_deal_split_penalty,
-            rating_spread_divisor: self.rating_spread_divisor,
+            rating_spread_multiplier: self.rating_spread_multiplier,
             region_split: self.region_split,
             region_split_penalty: self.region_split_penalty,
             role_assignment_provider: Arc::clone(&self.role_assignment_provider),
@@ -400,9 +400,9 @@ impl Default for BalancedShuffler {
             consider_roles: true,
             use_openskill: false,
             use_jopacoin: false,
-            off_role_multiplier: 0.95,
-            off_role_flat_value_penalty: 100.0,
-            off_role_flat_penalty: 740.0,
+            off_role_multiplier: 0.96,
+            off_role_flat_value_penalty: 90.0,
+            off_role_flat_penalty: 670.0,
             role_matchup_delta_weight: ROLE_MATCHUP_DELTA_WEIGHT,
             exclusion_penalty_weight: 80.0,
             rd_priority_weight: 0.2,
@@ -410,7 +410,7 @@ impl Default for BalancedShuffler {
             soft_avoid_penalty: 180.0,
             package_deal_penalty: 90.0,
             package_deal_split_penalty: 90.0,
-            rating_spread_divisor: 10.0,
+            rating_spread_multiplier: 0.11,
             region_split: false,
             region_split_penalty: 500.0,
             role_assignment_provider: Arc::new(GlobalRoleAssignmentProvider),
@@ -528,7 +528,7 @@ impl BalancedShuffler {
         self.role_assignment_provider.get(&key)
     }
 
-    /// `(max - min) / rating_spread_divisor`, or zero for fewer than two values.
+    /// `(max - min) * rating_spread_multiplier`, or zero for fewer than two values.
     #[must_use]
     pub fn calculate_rating_spread_penalty(&self, player_values: &[f64]) -> f64 {
         if player_values.len() < 2 {
@@ -539,13 +539,13 @@ impl BalancedShuffler {
             .iter()
             .copied()
             .fold(f64::NEG_INFINITY, f64::max);
-        (maximum - minimum) / self.rating_spread_divisor
+        (maximum - minimum) * self.rating_spread_multiplier
     }
 
-    /// Twenty percent of the selected players' total active rating.
+    /// Twenty-two percent of the selected players' total active rating.
     #[must_use]
     pub fn calculate_lobby_rating_bonus(player_values: &[f64]) -> f64 {
-        player_values.iter().sum::<f64>() * 0.2
+        player_values.iter().sum::<f64>() * 0.22
     }
 
     /// Total whole minutes waited by selected players with Discord IDs.
@@ -2721,12 +2721,12 @@ mod tests {
         let roles = ["2", "1", "3", "4", "5"].map(str::to_owned);
         let metrics = shuffler.role_assignment_metrics(&[&player], &roles, &[3_000.0]);
 
-        assert_eq!(metrics.team_value, 2_750.0);
-        assert_eq!(metrics.role_values, [0.0, 2_750.0, 0.0, 0.0, 0.0]);
+        assert_eq!(metrics.team_value, 2_790.0);
+        assert_eq!(metrics.role_values, [0.0, 2_790.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]
-    fn test_default_off_role_goodness_adds_740_per_player() {
+    fn test_default_off_role_goodness_adds_670_per_player() {
         let team1_players = (0..5)
             .map(|index| {
                 player(
@@ -2766,7 +2766,7 @@ mod tests {
             super::ADJUSTED_VALUE_DIFF_WEIGHT,
         );
 
-        assert_eq!(score, 1_480.0);
+        assert_eq!(score, 1_340.0);
     }
 
     #[test]
@@ -3039,7 +3039,7 @@ mod tests {
             exclusion_penalty_weight: 100.0,
             rd_priority_weight: 0.08,
             recent_match_penalty_weight: 75.0,
-            rating_spread_divisor: 15.0,
+            rating_spread_multiplier: 1.0 / 15.0,
             ..BalancedShuffler::default()
         };
         let options = PoolOptions {
@@ -3109,7 +3109,7 @@ mod tests {
             exclusion_penalty_weight: 100.0,
             rd_priority_weight: 0.08,
             recent_match_penalty_weight: 75.0,
-            rating_spread_divisor: 15.0,
+            rating_spread_multiplier: 1.0 / 15.0,
             ..BalancedShuffler::default()
         };
         let options = PoolOptions {
@@ -3439,7 +3439,7 @@ mod tests {
             .score_role_assignments_for_matchup(&team1, &team2, 1, ShuffleConstraints::default())
             .expect("fixed matchup scores");
 
-        approx(score, 140.0);
+        approx(score, 150.0);
     }
 
     #[test]
@@ -3471,7 +3471,7 @@ mod tests {
             off_role_flat_penalty: 0.0,
             role_matchup_delta_weight: 0.0,
             rd_priority_weight: 0.0,
-            rating_spread_divisor: f64::INFINITY,
+            rating_spread_multiplier: 0.0,
             ..BalancedShuffler::default()
         };
 
@@ -3505,7 +3505,7 @@ mod tests {
         let shuffler = BalancedShuffler {
             use_glicko: false,
             rd_priority_weight: 0.0,
-            rating_spread_divisor: f64::INFINITY,
+            rating_spread_multiplier: 0.0,
             ..BalancedShuffler::default()
         };
 
@@ -3516,7 +3516,7 @@ mod tests {
             &mut super::ScoringContext::default(),
         );
 
-        approx(selection.preselection_score, -1_880.0);
+        approx(selection.preselection_score, -2_072.0);
     }
 
     #[test]
@@ -3543,7 +3543,7 @@ mod tests {
             exclusion_penalty_weight: 0.0,
             rd_priority_weight: 0.0,
             recent_match_penalty_weight: 0.0,
-            rating_spread_divisor: 10.0,
+            rating_spread_multiplier: 0.1,
             ..BalancedShuffler::default()
         };
 
@@ -3605,7 +3605,7 @@ mod tests {
                 ShuffleConstraints::default(),
             )
             .expect("fixed role matchup evaluates");
-        approx(matchup.total_score, -1_800.0);
+        approx(matchup.total_score, -2_026.0);
     }
 
     #[test]
@@ -3883,7 +3883,7 @@ mod tests {
         };
         approx(
             shuffler.calculate_rating_spread_penalty(&[1_000.0, 1_500.0, 2_000.0]),
-            100.0,
+            110.0,
         );
     }
 
@@ -3921,11 +3921,11 @@ mod tests {
     }
 
     #[test]
-    fn test_custom_divisor() {
+    fn test_custom_multiplier() {
         let shuffler = BalancedShuffler {
             use_glicko: false,
             consider_roles: false,
-            rating_spread_divisor: 5.0,
+            rating_spread_multiplier: 0.2,
             ..BalancedShuffler::default()
         };
         approx(
@@ -3935,13 +3935,13 @@ mod tests {
     }
 
     #[test]
-    fn test_default_divisor_from_config() {
+    fn test_default_multiplier_from_config() {
         let shuffler = BalancedShuffler {
             use_glicko: false,
             consider_roles: false,
             ..BalancedShuffler::default()
         };
-        assert_eq!(shuffler.rating_spread_divisor, 10.0);
+        assert_eq!(shuffler.rating_spread_multiplier, 0.11);
     }
 
     #[test]
@@ -3964,7 +3964,7 @@ mod tests {
         let result = BalancedShuffler {
             use_glicko: false,
             consider_roles: false,
-            rating_spread_divisor: 1.0,
+            rating_spread_multiplier: 1.0,
             ..BalancedShuffler::default()
         }
         .shuffle_from_pool(&players, PoolOptions::default())
@@ -4550,7 +4550,7 @@ mod tests {
             use_glicko: false,
             exclusion_penalty_weight: 0.0,
             recent_match_penalty_weight: 0.0,
-            rating_spread_divisor: 10.0,
+            rating_spread_multiplier: 0.1,
             rd_priority_weight: 0.0,
             ..BalancedShuffler::default()
         };
@@ -4674,7 +4674,7 @@ mod tests {
             exclusion_penalty_weight: 0.0,
             rd_priority_weight: 0.0,
             recent_match_penalty_weight: 0.0,
-            rating_spread_divisor: 10.0,
+            rating_spread_multiplier: 0.1,
             ..BalancedShuffler::default()
         };
         let result = shuffler
@@ -4706,7 +4706,7 @@ mod tests {
             exclusion_penalty_weight: 0.0,
             rd_priority_weight: 0.0,
             recent_match_penalty_weight: 0.0,
-            rating_spread_divisor: 10.0,
+            rating_spread_multiplier: 0.1,
             ..BalancedShuffler::default()
         };
 
@@ -5109,7 +5109,7 @@ mod tests {
     }
 
     #[test]
-    fn test_default_740_off_role_goodness_prefers_lower_off_role_roster() {
+    fn test_higher_off_role_goodness_prefers_lower_off_role_roster() {
         let configured_shuffler = |off_role_flat_penalty| {
             let mut shuffler = BalancedShuffler {
                 use_glicko: false,
@@ -5119,7 +5119,7 @@ mod tests {
                 exclusion_penalty_weight: 0.0,
                 rd_priority_weight: 0.0,
                 recent_match_penalty_weight: 0.0,
-                rating_spread_divisor: 1_000_000_000.0,
+                rating_spread_multiplier: 1e-9,
                 ..BalancedShuffler::default()
             };
             if let Some(value) = off_role_flat_penalty {
@@ -5151,9 +5151,9 @@ mod tests {
         let previous = configured_shuffler(Some(550.0))
             .shuffle_from_pool(&players, PoolOptions::default())
             .expect("550-point pool shuffle");
-        let actual = configured_shuffler(None)
+        let actual = configured_shuffler(Some(1_000.0))
             .shuffle_from_pool(&players, PoolOptions::default())
-            .expect("default pool shuffle");
+            .expect("1000-point pool shuffle");
         let excluded_ids = |result: &PoolResult| {
             result
                 .excluded
@@ -5172,7 +5172,7 @@ mod tests {
         assert_eq!(
             off_roles(&actual),
             0,
-            "the 740-point default should prefer the lower-off-role roster"
+            "a 1000-point penalty should prefer the lower-off-role roster"
         );
     }
 
@@ -5537,8 +5537,8 @@ mod tests {
     }
 
     #[test]
-    fn test_default_role_matchup_delta_weight_is_point_one_eight() {
-        approx(BalancedShuffler::default().role_matchup_delta_weight, 0.18);
+    fn test_default_role_matchup_delta_weight_is_point_one_six() {
+        approx(BalancedShuffler::default().role_matchup_delta_weight, 0.16);
     }
 
     fn role_delta_fixture() -> (Vec<Player>, Vec<Player>) {
@@ -5588,8 +5588,8 @@ mod tests {
             .expect("optimization succeeds")
             .2
         };
-        approx(score(1.0), 2_420.0);
-        approx(score(0.5), 1_420.0);
+        approx(score(1.0), 2_450.0);
+        approx(score(0.5), 1_450.0);
     }
 
     #[test]
@@ -5628,7 +5628,7 @@ mod tests {
         )
         .expect("matchup evaluates");
         approx(matchup.log_entry.parity_penalty, 1_200.0);
-        approx(matchup.total_score, 1_340.0);
+        approx(matchup.total_score, 1_350.0);
     }
 
     #[test]
@@ -5738,7 +5738,7 @@ mod tests {
                 },
             )
             .expect("fallback scoring succeeds");
-        approx(common.2, 1_710.0);
+        approx(common.2, 1_750.0);
         assert_eq!(common, fallback);
     }
 
@@ -6019,7 +6019,7 @@ mod tests {
             exclusion_penalty_weight: uniform(&mut random, 0.0, 100.0),
             rd_priority_weight: uniform(&mut random, 0.0, 0.3),
             recent_match_penalty_weight: uniform(&mut random, 0.0, 180.0),
-            rating_spread_divisor: uniform(&mut random, 5.0, 40.0),
+            rating_spread_multiplier: 1.0 / uniform(&mut random, 5.0, 40.0),
             ..BalancedShuffler::default()
         };
         let options = PoolOptions {
@@ -6083,7 +6083,7 @@ mod tests {
             exclusion_penalty_weight: 0.0,
             rd_priority_weight: 0.0,
             recent_match_penalty_weight: 0.0,
-            rating_spread_divisor: 1_000_000.0,
+            rating_spread_multiplier: 1e-6,
             ..BalancedShuffler::default()
         };
         let reference_shuffler = settings.clone();
@@ -6130,7 +6130,7 @@ mod tests {
             soft_avoid_penalty: if kind == "avoid" { -900.0 } else { 500.0 },
             package_deal_penalty: if kind == "deal" { -900.0 } else { 100.0 },
             rd_priority_weight: 0.09,
-            rating_spread_divisor: 20.0,
+            rating_spread_multiplier: 0.05,
             ..BalancedShuffler::default()
         };
         let recent: HashSet<String> = if kind == "recent" {
@@ -6569,7 +6569,7 @@ mod tests {
             .score_draft_pool(&captain_a, &captain_b, &pool)
             .expect("draft pool score");
 
-        approx(score, 133.0);
+        approx(score, 142.5);
     }
 
     #[test]
