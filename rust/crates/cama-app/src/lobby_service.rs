@@ -1145,10 +1145,21 @@ where
             .get_by_ids(&player_ids, lobby.scope.guild_id);
         if let Some(name_overrides) = name_overrides {
             for player in &mut players {
-                // Overrides carry cached guild render names; a miss keeps the
-                // stored player name instead of degrading to the numeric ID.
+                // Runtime callers supply live Discord names or a readable
+                // unavailable-name label for every player in the roster.
                 if let Some(name) = name_overrides.get(&player.discord_id) {
                     player.name.clone_from(name);
+                }
+            }
+            for player_id in &player_ids {
+                if !players
+                    .iter()
+                    .any(|player| player.discord_id == player_id.0)
+                    && let Some(name) = name_overrides.get(&player_id.0)
+                {
+                    let mut player = LobbyPlayer::new(player_id.0, name);
+                    player.guild_id = Some(lobby.scope.guild_id.0);
+                    players.push(player);
                 }
             }
         }

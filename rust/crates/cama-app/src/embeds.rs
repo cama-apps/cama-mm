@@ -2,9 +2,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use cama_domain::discord_content::readable_player_name;
 use cama_domain::draft_analysis::draft_winner;
 use cama_domain::embed_safety::{EmbedModel, FIELD_VALUE_LIMIT, truncate_field};
-use cama_domain::formatting::{JOPACOIN_EMOTE, ROLE_EMOJIS, TOMBSTONE_EMOJI};
+use cama_domain::formatting::{JOPACOIN_EMOTE, ROLE_EMOJIS, TOMBSTONE_EMOJI, escape_discord_text};
 use cama_domain::rating::CamaRatingSystem;
 use cama_domain::region::{PlayerRegionInput, summarize_region};
 
@@ -122,7 +123,7 @@ pub fn format_player_list(
     bankruptcy_source: Option<&dyn BankruptcyPenaltySource>,
     guild_id: Option<i64>,
 ) -> (String, usize) {
-    if players.is_empty() {
+    if player_ids.is_empty() {
         return ("No players yet".to_owned(), 0);
     }
 
@@ -181,19 +182,13 @@ pub fn format_player_list(
                 String::new()
             };
             let Some(player) = player else {
-                let display = if real_user {
-                    format!("{tombstone}<@{discord_id}>")
-                } else {
-                    "Unknown player".to_owned()
-                };
+                let display = format!("{tombstone}Unknown player");
                 return format!("{}. {display} *(unregistered)*", index + 1);
             };
 
-            let display = if real_user {
-                format!("{tombstone}<@{discord_id}>")
-            } else {
-                player.name.clone()
-            };
+            let name =
+                escape_discord_text(readable_player_name(&player.name).unwrap_or("Unknown player"));
+            let display = format!("{tombstone}{name}");
             let mut line = format!("{}. {display}", index + 1);
             if player.glicko_rating.is_some() {
                 line.push_str(&format!(" [{}]", rating_system.rating_to_display(rating)));
@@ -1300,8 +1295,13 @@ mod tests {
         );
         assert_eq!(count, 3);
         let line = |discord_id| {
+            let name = if discord_id == 2 {
+                "Unknown player".to_owned()
+            } else {
+                format!("Player {discord_id}")
+            };
             text.lines()
-                .find(|line| line.contains(&format!("<@{discord_id}>")))
+                .find(|line| line.contains(&name))
                 .expect("player line")
         };
         assert!(line(1).contains(&format!("[{}]", rating_system.rating_to_display(1_000.0))));
@@ -1314,8 +1314,43 @@ mod tests {
     fn test_missing_last_id_is_not_dropped() {
         let (text, count) = format_player_list(&[rated_player(1, 1_000.0)], &[1, 2], None, None);
         assert_eq!(count, 2);
-        assert!(text.contains("<@2>"));
+        assert!(text.contains("Unknown player"));
         assert!(text.contains("unregistered"));
+    }
+
+    #[test]
+    fn lobby_roster_keeps_missing_players_when_no_database_rows_exist() {
+        let (text, count) = format_player_list(&[], &[123456789012345678], None, None);
+        assert_eq!(count, 1);
+        assert!(text.contains("Unknown player"));
+        assert!(text.contains("unregistered"));
+        assert!(!text.contains("123456789012345678"));
+        assert!(!text.contains("<@"));
+    }
+
+    #[test]
+    fn lobby_roster_preserves_literal_markdown_in_display_names() {
+        let player = LobbyPlayer::new(123, "**Nickname**");
+        let (text, _) = format_player_list(&[player], &[123], None, None);
+        assert!(text.contains(r"\*\*Nickname\*\*"));
+    }
+
+    #[test]
+    fn lobby_roster_rejects_numeric_and_mention_names() {
+        for name in [
+            "123456789012345678",
+            "<@123456789012345678>",
+            "<@!123456789012345678>",
+            "@123456789012345678",
+            "",
+        ] {
+            let player = LobbyPlayer::new(123456789012345678, name);
+            let (text, count) = format_player_list(&[player], &[123456789012345678], None, None);
+            assert_eq!(count, 1);
+            assert!(text.contains("Unknown player"), "{name:?}: {text}");
+            assert!(!text.contains("123456789012345678"), "{name:?}: {text}");
+            assert!(!text.contains("<@"), "{name:?}: {text}");
+        }
     }
 
     #[derive(Default)]
@@ -1359,7 +1394,7 @@ mod tests {
         let source = RecordingPenaltySource::default();
         let (text, count) = format_player_list(&players, &ids, Some(&source), Some(77));
         assert_eq!(count, 14);
-        assert!(text.contains(&format!("{TOMBSTONE_EMOJI} <@4>")));
+        assert!(text.contains(&format!("{TOMBSTONE_EMOJI} Player 4")));
         assert_eq!(source.bulk_calls.borrow().as_slice(), &[(ids, Some(77))]);
         assert_eq!(source.point_calls.get(), 0);
     }
@@ -1432,7 +1467,7 @@ mod tests {
         let source = MutablePenaltySource::default();
         source.set(1_002, 5);
         let (text, _) = format_player_list(&[player], &[1_002], Some(&source), Some(77));
-        assert!(text.contains(&format!("{TOMBSTONE_EMOJI} <@1002>")));
+        assert!(text.contains(&format!("{TOMBSTONE_EMOJI} BankruptPlayer")));
     }
 
     #[test]
@@ -1462,8 +1497,8 @@ mod tests {
         source.set(1_005, 5);
         let (text, count) = format_player_list(&players, &[1_004, 1_005], Some(&source), Some(77));
         assert_eq!(count, 2);
-        assert!(text.contains(&format!("{TOMBSTONE_EMOJI} <@1005>")));
-        assert!(!text.contains(&format!("{TOMBSTONE_EMOJI} <@1004>")));
+        assert!(text.contains(&format!("{TOMBSTONE_EMOJI} BankruptPlayer")));
+        assert!(!text.contains(&format!("{TOMBSTONE_EMOJI} NormalPlayer")));
     }
 
     #[test]
@@ -1489,7 +1524,11 @@ mod tests {
             .iter()
             .find(|field| field.name.contains("Players"))
             .expect("lobby player field");
-        assert!(roster.value.contains(&format!("{TOMBSTONE_EMOJI} <@1011>")));
+        assert!(
+            roster
+                .value
+                .contains(&format!("{TOMBSTONE_EMOJI} BankruptPlayer"))
+        );
     }
 
     #[test]
@@ -1541,8 +1580,7 @@ mod tests {
         let ids = (2_000..2_005).collect::<Vec<_>>();
         let (text, count) = format_player_list(&players, &ids, Some(&source), Some(77));
         assert_eq!(count, 5);
-        assert!(text.contains(&format!("{TOMBSTONE_EMOJI} <@2001>")));
-        assert!(text.contains(&format!("{TOMBSTONE_EMOJI} <@2003>")));
+        assert_eq!(text.matches(TOMBSTONE_EMOJI).count(), 2);
     }
 
     #[test]
@@ -1550,7 +1588,7 @@ mod tests {
         let player = bankruptcy_display_player(3_000, "TestPlayer");
         let (text, count) = format_player_list(&[player], &[3_000], None, Some(77));
         assert_eq!(count, 1);
-        assert!(text.contains("<@3000>"));
+        assert!(text.contains("TestPlayer"));
         assert!(!text.contains(TOMBSTONE_EMOJI));
     }
 

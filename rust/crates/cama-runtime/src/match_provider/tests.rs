@@ -22,7 +22,9 @@ mod hosted_tests;
 #[path = "recap_tests.rs"]
 mod recap_tests;
 
-use crate::discord_transport::{DiscordAllowedMentions, DiscordIdPlayerNameResolver};
+use crate::discord_transport::{
+    DiscordAllowedMentions, DiscordIdPlayerNameResolver, GuildPlayerNameDirectory,
+};
 use crate::push_notification_provider::{PushNotificationRegistrationProvider, PushPublisher};
 use crate::registration::{InteractionAllowedMentions, InteractionResponseError, InteractionValue};
 use cama_db::push_notifications::PushNotificationRepository;
@@ -6885,7 +6887,10 @@ async fn test_shuffle_embed_uses_server_nicknames_without_http_lookup() {
     let discord = Arc::new(PublicationProbeDiscord::default());
     let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
     let player_ids = fixture.add_shuffle_pool(11, false);
-    let prepared = fixture.prepare_shuffle(player_ids, "glicko", Vec::new());
+    let prepared = fixture.prepare_shuffle(player_ids.clone(), "glicko", Vec::new());
+    for player_id in player_ids {
+        discord.set_member(GUILD as u64, player_id as u64, "Server Player");
+    }
     let participant_id = prepared.pending.state.radiant_team_ids[0];
     let excluded_id = prepared.pending.state.excluded_player_ids[0];
     discord.set_member(
@@ -6962,7 +6967,10 @@ async fn test_shuffle_embed_uses_cached_name_when_player_row_is_missing() {
     let discord = Arc::new(PublicationProbeDiscord::default());
     let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
     let player_ids = fixture.add_shuffle_pool(10, false);
-    let prepared = fixture.prepare_shuffle(player_ids, "glicko", Vec::new());
+    let prepared = fixture.prepare_shuffle(player_ids.clone(), "glicko", Vec::new());
+    for player_id in player_ids {
+        discord.set_member(GUILD as u64, player_id as u64, "Server Player");
+    }
     let participant_id = prepared.pending.state.radiant_team_ids[0];
     discord.set_member(
         u64::try_from(GUILD).expect("fixture guild ID"),
@@ -6993,7 +7001,74 @@ async fn test_shuffle_embed_uses_cached_name_when_player_row_is_missing() {
 }
 
 #[tokio::test]
-async fn test_shuffle_embed_falls_back_to_discord_id_on_cached_lookup_error() {
+async fn test_shuffle_embed_rejects_cached_mentions_and_numeric_names() {
+    let discord = Arc::new(PublicationProbeDiscord::default());
+    let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
+    let player_ids = fixture.add_shuffle_pool(11, false);
+    let prepared = fixture.prepare_shuffle(player_ids, "glicko", Vec::new());
+    let participant_id = prepared.pending.state.radiant_team_ids[0];
+    let excluded_id = prepared.pending.state.excluded_player_ids[0];
+    discord.set_member(GUILD as u64, participant_id as u64, "<@123456789012345678>");
+    discord.set_member(GUILD as u64, excluded_id as u64, "123456789012345678");
+
+    let embed = fixture
+        .provider
+        .handler
+        .render_shuffle_embed(&prepared.pending)
+        .await
+        .expect("render shuffle embed");
+    let text = embed
+        .fields
+        .iter()
+        .map(|field| field.value.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("Unknown player"));
+    assert!(!text.contains("123456789012345678"));
+    assert!(!text.contains("<@"));
+}
+
+#[tokio::test]
+async fn test_shuffle_embed_fetches_server_names_when_cache_is_unavailable() {
+    let discord = Arc::new(PublicationProbeDiscord::default());
+    let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
+    let player_ids = fixture.add_shuffle_pool(11, false);
+    let prepared = fixture.prepare_shuffle(player_ids, "glicko", Vec::new());
+    let participant_id = prepared.pending.state.radiant_team_ids[0];
+    let excluded_id = prepared.pending.state.excluded_player_ids[0];
+    discord.set_member(GUILD as u64, participant_id as u64, "Fetched Participant");
+    discord.set_member(GUILD as u64, excluded_id as u64, "Fetched Excluded");
+    discord.fail_nickname_snapshot(GUILD as u64);
+
+    let embed = fixture
+        .provider
+        .handler
+        .render_shuffle_embed(&prepared.pending)
+        .await
+        .expect("render shuffle embed");
+    let text = embed
+        .fields
+        .iter()
+        .map(|field| field.value.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("Fetched Participant"));
+    assert!(text.contains("Fetched Excluded"));
+    assert!(!text.contains("<@"));
+    assert!(
+        discord
+            .member_lookups()
+            .contains(&(GUILD as u64, participant_id as u64))
+    );
+    assert!(
+        discord
+            .member_lookups()
+            .contains(&(GUILD as u64, excluded_id as u64))
+    );
+}
+
+#[tokio::test]
+async fn test_shuffle_embed_never_renders_ids_on_lookup_failure() {
     let discord = Arc::new(PublicationProbeDiscord::default());
     let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
     let player_ids = fixture.add_shuffle_pool(10, false);
@@ -7013,14 +7088,16 @@ async fn test_shuffle_embed_falls_back_to_discord_id_on_cached_lookup_error() {
         .find(|field| field.name.contains("Radiant") && field.name.contains("Dire"))
         .expect("teams field");
 
-    assert!(teams.value.contains(&participant_id.to_string()));
+    assert!(teams.value.contains("Unknown player"));
+    assert!(!teams.value.contains(&participant_id.to_string()));
+    assert!(!teams.value.contains("<@"));
     assert!(!teams.value.contains(&format!("shuffle-{participant_id}")));
     assert!(!teams.value.contains(&format!("Unknown({participant_id})")));
-    assert!(discord.member_lookups().is_empty());
+    assert_eq!(discord.member_lookups().len(), 10);
 }
 
 #[tokio::test]
-async fn test_shuffle_embed_falls_back_to_discord_id_for_excluded_player() {
+async fn test_shuffle_embed_never_renders_ids_for_unresolved_excluded_player() {
     let discord = Arc::new(PublicationProbeDiscord::default());
     let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
     let player_ids = fixture.add_shuffle_pool(11, false);
@@ -7039,10 +7116,12 @@ async fn test_shuffle_embed_falls_back_to_discord_id_for_excluded_player() {
         .find(|field| field.name == "📊 Balance")
         .expect("balance field");
 
-    assert!(balance.value.contains(&excluded_id.to_string()));
+    assert!(balance.value.contains("**Excluded:** Unknown player"));
+    assert!(!balance.value.contains(&excluded_id.to_string()));
+    assert!(!balance.value.contains("<@"));
     assert!(!balance.value.contains(&format!("shuffle-{excluded_id}")));
     assert!(!balance.value.contains(&format!("Unknown({excluded_id})")));
-    assert!(discord.member_lookups().is_empty());
+    assert_eq!(discord.member_lookups().len(), 11);
 }
 
 #[tokio::test]
@@ -7072,12 +7151,16 @@ async fn test_shuffle_embed_skips_discord_lookup_for_invalid_excluded_ids() {
         .find(|field| field.name == "📊 Balance")
         .expect("balance field");
 
-    assert!(balance.value.contains("**Excluded:** 0, -1"));
-    assert!(discord.member_lookups().is_empty());
+    assert!(
+        balance
+            .value
+            .contains("**Excluded:** Unknown player, Unknown player")
+    );
+    assert!(discord.member_lookups().iter().all(|(_, id)| *id > 0));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_execute_shuffle_reuses_loaded_roster_for_pending_names() {
+async fn test_execute_shuffle_uses_readable_placeholder_for_unknown_pending_names() {
     let fixture = MatchRuntimeFixture::new();
     let player_ids = fixture.add_shuffle_pool(10, false);
     fixture.populate_lobby(&player_ids, LobbyKind::Open).await;
@@ -7104,7 +7187,8 @@ async fn test_execute_shuffle_reuses_loaded_roster_for_pending_names() {
 
     let content = responder.contents().join("\n");
     assert!(content.contains("Cannot shuffle: 1 players"));
-    assert!(content.contains(&player_ids[1].to_string()));
+    assert!(content.contains("Unknown player"));
+    assert!(!content.contains(&player_ids[1].to_string()));
     assert!(!content.contains(&format!("shuffle-{}", player_ids[1])));
 }
 
