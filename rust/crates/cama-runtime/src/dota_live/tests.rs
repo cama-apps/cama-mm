@@ -540,6 +540,15 @@ async fn polling_uses_realtime_stats_then_normalizes_the_response_once() {
             .write_all(response.as_bytes())
             .await
             .expect("write response");
+        // A scoreboard without positions also checks the independent map feed.
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0_u8; 4096];
+        let length = socket.read(&mut request).await.unwrap();
+        assert!(String::from_utf8_lossy(&request[..length]).contains("GetLiveLeagueGames"));
+        socket
+            .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
     });
 
     let feed = DotaLiveFeed::new_with_upstream_base(&config(None), format!("http://{address}"))
@@ -1045,6 +1054,120 @@ fn positioned_roster_payload() -> Value {
         team["barracks_state"] = json!(63);
     }
     payload
+}
+
+#[tokio::test]
+async fn realtime_scoreboard_checks_league_maps_without_losing_usable_fallback() {
+    let realtime = normalize_realtime_stats(&announcement_roster_payload(), 7, 8, 123, 200)
+        .expect("matching realtime scoreboard");
+    assert!(realtime.announcement_frame.is_some());
+    assert!(realtime.map_frame.is_none());
+    let mut league_map = positioned_roster_payload();
+    league_map["match"]["game_time"] = json!(160);
+    league_map["stream_delay_s"] = json!(120);
+    let cases = [
+        (
+            "map",
+            "200 OK",
+            json!({"result":{"games":[league_map]}}),
+            true,
+        ),
+        (
+            "scoreboard",
+            "200 OK",
+            json!({"result":{"games":[announcement_roster_payload()]}}),
+            false,
+        ),
+        (
+            "partial",
+            "200 OK",
+            json!({"result":{"games":[{"match_id":123,"duration":160}]}}),
+            false,
+        ),
+        ("absent", "200 OK", json!({"result":{"games":[]}}), false),
+        ("unavailable", "503 Service Unavailable", json!({}), false),
+    ];
+    for (case, status, league, expect_map) in cases {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for (path, status, body) in [
+                (
+                    "GetRealtimeStats",
+                    "200 OK",
+                    announcement_roster_payload().to_string(),
+                ),
+                ("GetLiveLeagueGames", status, league.to_string()),
+            ] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 4096];
+                let length = socket.read(&mut request).await.unwrap();
+                assert!(String::from_utf8_lossy(&request[..length]).contains(path));
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let feed = DotaLiveFeed::new_with_upstream_base(&config(None), format!("http://{address}"))
+            .unwrap();
+        feed.publish_match(7, 8, 123, Some(99), 5, 3, true, (100..110).collect())
+            .await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            feed.poll_once().await;
+            server.await.unwrap();
+        })
+        .await
+        .expect(case);
+        let snapshot = feed.snapshot(7, 8).unwrap();
+        assert!(snapshot.announcement_frame.is_some(), "{case}");
+        assert_eq!(snapshot.map_frame.is_some(), expect_map, "{case}");
+        assert!(!snapshot.stale, "{case}");
+        if expect_map {
+            assert_eq!(snapshot.source, LiveSnapshotSource::LiveLeagueGames);
+            assert_eq!(snapshot.game_time_seconds, Some(160));
+            assert_eq!(snapshot.map_frame.unwrap().game_time, 160);
+            assert_eq!(snapshot.delay_seconds, Some(120));
+        } else {
+            assert_eq!(snapshot.source, LiveSnapshotSource::RealtimeStats);
+            assert_eq!(snapshot.game_time_seconds, Some(157));
+            assert_eq!(snapshot.delay_source, Some(LiveDelaySource::Configured));
+        }
+    }
+}
+
+#[tokio::test]
+async fn realtime_map_does_not_request_the_league_fallback() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0_u8; 4096];
+        let length = socket.read(&mut request).await.unwrap();
+        assert!(String::from_utf8_lossy(&request[..length]).contains("GetRealtimeStats"));
+        let body = positioned_roster_payload().to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+        listener
+    });
+    let feed =
+        DotaLiveFeed::new_with_upstream_base(&config(None), format!("http://{address}")).unwrap();
+    feed.publish_match(7, 8, 123, Some(99), 5, 3, true, (100..110).collect())
+        .await;
+    // Keep the listener open: an unexpected second request cannot silently fail
+    // and return the same realtime sample through the error fallback.
+    tokio::time::timeout(std::time::Duration::from_secs(5), feed.poll_once())
+        .await
+        .expect("realtime map completes without waiting for league");
+    let listener = server.await.unwrap();
+    let snapshot = feed.snapshot(7, 8).unwrap();
+    assert_eq!(snapshot.source, LiveSnapshotSource::RealtimeStats);
+    assert!(snapshot.map_frame.is_some());
+    drop(listener);
 }
 
 #[test]

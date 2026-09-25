@@ -1292,6 +1292,15 @@ async fn valve_game_clock_closes_hosted_betting_without_gc_phase_or_gsi() {
             body.len()
         );
         socket.write_all(response.as_bytes()).await.unwrap();
+        // A scoreboard without positions also checks the independent map feed.
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0_u8; 4096];
+        let length = socket.read(&mut request).await.unwrap();
+        assert!(String::from_utf8_lossy(&request[..length]).contains("GetLiveLeagueGames"));
+        socket
+            .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
     });
     let mut f = Fixture::new(false);
     f.worker.config.web_api_key = Some(crate::Secret::new("fixture-api-key".into()));

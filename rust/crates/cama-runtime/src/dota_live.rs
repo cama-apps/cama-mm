@@ -601,10 +601,11 @@ impl DotaLiveFeed {
                 });
             self.observe_poll(target, LiveSnapshotSource::RealtimeStats, &result);
             if let Ok(Some(snapshot)) = result {
-                if snapshot.announcement_frame.is_some() {
+                if snapshot.map_frame.is_some() {
                     return Ok(Some(snapshot));
                 }
-                // Keep partial data, but try the independent league feed too.
+                // A complete scoreboard can still omit positions. Keep it as
+                // a fallback while checking the independent league map feed.
                 partial_realtime = Some(snapshot);
             }
         }
@@ -644,6 +645,13 @@ impl DotaLiveFeed {
             });
         self.observe_poll(target, LiveSnapshotSource::LiveLeagueGames, &league_result);
         match league_result {
+            Ok(Some(snapshot)) if snapshot.map_frame.is_some() => Ok(Some(snapshot)),
+            _ if partial_realtime
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.announcement_frame.is_some()) =>
+            {
+                Ok(partial_realtime)
+            }
             Ok(Some(snapshot)) => Ok(Some(snapshot)),
             _ if partial_realtime.is_some() => Ok(partial_realtime),
             result => result,
