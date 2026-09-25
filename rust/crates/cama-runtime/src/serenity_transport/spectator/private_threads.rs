@@ -59,6 +59,29 @@ fn participant_can_read(owner: u64, member: u64, permissions: Permissions) -> bo
         || permissions.contains(Permissions::VIEW_CHANNEL | Permissions::MANAGE_THREADS)
 }
 
+fn check_viewer_permissions(
+    permissions: Permissions,
+    viewer: u64,
+    parent: u64,
+) -> Result<(), String> {
+    // Watching the map and bot commentary does not require permission to chat.
+    // Keep Discord's actual visibility requirements; never change parent ACLs.
+    let missing = [
+        (Permissions::VIEW_CHANNEL, "View Channel"),
+        (Permissions::READ_MESSAGE_HISTORY, "Read Message History"),
+    ]
+    .into_iter()
+    .filter_map(|(permission, name)| (!permissions.contains(permission)).then_some(name))
+    .collect::<Vec<_>>()
+    .join(", ");
+    if !missing.is_empty() {
+        return Err(format!(
+            "Spectator {viewer} cannot read the spectator thread: missing {missing} in parent channel {parent}."
+        ));
+    }
+    Ok(())
+}
+
 async fn parent_channel(http: &Http, guild: u64, source: u64) -> Result<GuildChannel, String> {
     let mut parent = channel(http, source)
         .await?
@@ -151,12 +174,8 @@ async fn policy(
                 required_permissions() & !permissions
             ));
         }
-        if viewers.contains(&id)
-            && !permissions.contains(read_permissions() | Permissions::SEND_MESSAGES_IN_THREADS)
-        {
-            return Err(
-                "An opted-in spectator cannot read or chat in the match parent’s threads.".into(),
-            );
+        if viewers.contains(&id) {
+            check_viewer_permissions(permissions, id, parent.id.get())?;
         }
     }
     Ok((bot, viewers))
@@ -425,6 +444,73 @@ mod tests {
             Permissions::VIEW_CHANNEL | Permissions::CREATE_PRIVATE_THREADS
         ));
         assert!(!participant_can_read(9, 1, Permissions::MANAGE_THREADS));
+    }
+
+    #[test]
+    fn read_only_spectators_can_watch_without_chat_or_invite_permissions() {
+        let permissions = Permissions::VIEW_CHANNEL | Permissions::READ_MESSAGE_HISTORY;
+        assert!(!permissions.intersects(
+            Permissions::SEND_MESSAGES
+                | Permissions::SEND_MESSAGES_IN_THREADS
+                | Permissions::CREATE_PRIVATE_THREADS
+                | Permissions::MANAGE_THREADS
+        ));
+        assert!(check_viewer_permissions(permissions, 20, 400).is_ok());
+        assert!(check_members(&BTreeSet::from([3, 20]), 3, &BTreeSet::from([20])).is_ok());
+        // Read-only admission does not permit a player or uninvited account.
+        assert!(check_members(&BTreeSet::from([3, 20, 1]), 3, &BTreeSet::from([20])).is_err());
+    }
+
+    #[test]
+    fn parent_chat_deny_does_not_block_read_only_spectator_admission() {
+        let mut guild = Guild::default();
+        guild.id = GuildId::new(100);
+        guild.owner_id = UserId::new(999);
+        let mut everyone = serenity::all::Role::default();
+        everyone.id = RoleId::new(100);
+        everyone.permissions = read_permissions() | Permissions::SEND_MESSAGES_IN_THREADS;
+        guild.roles.insert(everyone.id, everyone);
+        let mut viewer = Member::default();
+        viewer.guild_id = guild.id;
+        viewer.user.id = UserId::new(20);
+        let mut parent = GuildChannel::default();
+        parent.id = ChannelId::new(400);
+        parent.guild_id = guild.id;
+        parent.kind = ChannelType::Text;
+        parent.permission_overwrites = vec![PermissionOverwrite {
+            allow: Permissions::empty(),
+            deny: Permissions::SEND_MESSAGES | Permissions::SEND_MESSAGES_IN_THREADS,
+            kind: PermissionOverwriteType::Member(viewer.user.id),
+        }];
+        let permissions = guild.user_permissions_in(&parent, &viewer);
+        assert!(!permissions.contains(Permissions::SEND_MESSAGES_IN_THREADS));
+        assert!(
+            check_viewer_permissions(permissions, viewer.user.id.get(), parent.id.get()).is_ok()
+        );
+        parent.permission_overwrites[0].deny |= Permissions::VIEW_CHANNEL;
+        let permissions = guild.user_permissions_in(&parent, &viewer);
+        assert!(
+            check_viewer_permissions(permissions, viewer.user.id.get(), parent.id.get()).is_err()
+        );
+    }
+
+    #[test]
+    fn spectator_read_denials_report_the_actual_parent_user_and_missing_permission() {
+        for (missing, name) in [
+            (Permissions::VIEW_CHANNEL, "View Channel"),
+            (Permissions::READ_MESSAGE_HISTORY, "Read Message History"),
+        ] {
+            let error = check_viewer_permissions(
+                (read_permissions() | Permissions::SEND_MESSAGES_IN_THREADS) & !missing,
+                20,
+                400,
+            )
+            .unwrap_err();
+            assert!(error.contains("Spectator 20"));
+            assert!(error.contains("parent channel 400"));
+            assert!(error.contains(name));
+            assert!(!error.contains("SEND_MESSAGES_IN_THREADS"));
+        }
     }
 
     #[test]
