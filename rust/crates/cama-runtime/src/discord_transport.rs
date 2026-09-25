@@ -154,6 +154,9 @@ pub struct DiscordMessage {
     pub response: InteractionResponse,
     pub allowed_mentions: DiscordAllowedMentions,
     pub content_mode: DiscordMessageContentMode,
+    /// Suppress push and desktop notifications on creation while retaining
+    /// explicitly allowed mentions. Discord may still show a mention badge.
+    pub suppress_notifications: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -174,6 +177,7 @@ impl DiscordMessage {
             response,
             allowed_mentions: DiscordAllowedMentions::Default,
             content_mode: DiscordMessageContentMode::Replace,
+            suppress_notifications: false,
         }
     }
 
@@ -183,6 +187,7 @@ impl DiscordMessage {
             response,
             allowed_mentions: DiscordAllowedMentions::None,
             content_mode: DiscordMessageContentMode::Replace,
+            suppress_notifications: false,
         }
     }
 
@@ -192,7 +197,17 @@ impl DiscordMessage {
             response,
             allowed_mentions: DiscordAllowedMentions::Users(users),
             content_mode: DiscordMessageContentMode::Replace,
+            suppress_notifications: false,
         }
+    }
+
+    /// Keep parsed mentions (including private-thread invitations) without
+    /// generating push or desktop notifications. This applies only to sends;
+    /// Discord does not allow this flag to be changed through a message edit.
+    #[must_use]
+    pub const fn suppressing_notifications(mut self) -> Self {
+        self.suppress_notifications = true;
+        self
     }
 
     /// Edit embeds/components without changing the message's existing text.
@@ -389,6 +404,11 @@ pub trait DiscordTransport: Send + Sync {
         _viewers: &[u64],
     ) -> Result<(), String> {
         Err("Spectator commentary thread auditing is unavailable on this transport.".into())
+    }
+
+    /// Read actual Discord membership before confirming spectator subscriptions.
+    async fn spectator_thread_members(&self, _thread_id: u64) -> Result<BTreeSet<u64>, String> {
+        Err("Spectator thread membership lookup is unavailable on this transport.".into())
     }
 
     /// Delete only an owned spectator room bearing this exact marker.

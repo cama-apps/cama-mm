@@ -1977,6 +1977,7 @@ fn render_message(session: &db::SurveySession) -> Result<DiscordMessage, String>
         response,
         allowed_mentions: DiscordAllowedMentions::None,
         content_mode: crate::discord_transport::DiscordMessageContentMode::Replace,
+        suppress_notifications: false,
     })
 }
 

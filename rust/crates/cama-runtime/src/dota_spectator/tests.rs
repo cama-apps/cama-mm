@@ -36,6 +36,9 @@ struct FakeDiscord {
     fail_thread_audit: AtomicBool,
     lose_thread_reply: AtomicBool,
     joins: Mutex<BTreeMap<String, DiscordMessage>>,
+    thread_members: Mutex<BTreeSet<u64>>,
+    defer_thread_join: AtomicBool,
+    fail_member_lookup: AtomicBool,
     join_attempts: Mutex<Vec<(u64, String, String)>>,
     lose_join_reply: AtomicBool,
     fail_join_history: AtomicBool,
@@ -88,6 +91,10 @@ impl DiscordTransport for FakeDiscord {
             return Err("foreign channel".into());
         }
         *self.channel.lock().unwrap() = Some((500, policy));
+        self.thread_members
+            .lock()
+            .unwrap()
+            .retain(|id| viewers.contains(id));
         if self.lose_create_reply.swap(false, Ordering::SeqCst) {
             return Err("create response lost after Discord accepted channel".into());
         }
@@ -187,6 +194,13 @@ impl DiscordTransport for FakeDiscord {
         }
         Ok(())
     }
+    async fn spectator_thread_members(&self, thread: u64) -> Result<BTreeSet<u64>, String> {
+        if self.fail_member_lookup.load(Ordering::SeqCst) {
+            return Err("thread membership unavailable".into());
+        }
+        assert_eq!(*self.thread.lock().unwrap(), Some(thread));
+        Ok(self.thread_members.lock().unwrap().clone())
+    }
     async fn delete_spectator_channels_by_marker(
         &self,
         guild: u64,
@@ -224,6 +238,7 @@ impl DiscordTransport for FakeDiscord {
             .push((guild, channel, marker.into()));
         *current = None;
         *self.thread.lock().unwrap() = None;
+        self.thread_members.lock().unwrap().clear();
         self.maps.lock().unwrap().clear();
         Ok(())
     }
@@ -262,15 +277,26 @@ impl DiscordTransport for FakeDiscord {
         }
         assert_eq!(*self.thread.lock().unwrap(), Some(channel));
         if message.response.content.starts_with("📻 Subscribed:") {
+            let mentioned = message
+                .response
+                .content
+                .split_whitespace()
+                .filter_map(|word| word.strip_prefix("<@").and_then(|id| id.strip_suffix('>')))
+                .filter_map(|id| id.parse::<u64>().ok())
+                .collect::<BTreeSet<_>>();
             assert_eq!(
                 message.allowed_mentions,
-                crate::discord_transport::DiscordAllowedMentions::None
+                crate::discord_transport::DiscordAllowedMentions::Users(mentioned.clone())
             );
+            assert!(message.suppress_notifications);
             self.join_attempts.lock().unwrap().push((
                 channel,
                 key.into(),
                 message.response.content.clone(),
             ));
+            if !self.defer_thread_join.load(Ordering::SeqCst) {
+                self.thread_members.lock().unwrap().extend(mentioned);
+            }
             self.joins
                 .lock()
                 .unwrap()
@@ -1429,8 +1455,11 @@ async fn silent_thread_join_retries_exact_nonce_without_duplicate_subscription()
         "history recovers beyond the nonce window without resending"
     );
     let lookups = f.discord.join_lookups.lock().unwrap();
-    assert_eq!(lookups.len(), 2);
-    assert_eq!(lookups[0], lookups[1]);
+    assert_eq!(
+        lookups.len(),
+        1,
+        "verified membership recovers the lost receipt"
+    );
     assert_eq!(lookups[0].2, 999);
     assert_eq!(f.discord.joins.lock().unwrap().len(), 1);
     assert_eq!(f.state().joined_viewers, vec![20]);
@@ -1450,6 +1479,111 @@ async fn failed_thread_audit_blocks_commentary_and_revokes_both_spaces() {
     assert!(f.discord.thread.lock().unwrap().is_none());
     assert!(f.state().queued.is_none());
     assert_eq!(f.discord.delivered.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn spectator_subscription_accepted_message_requires_membership_and_bounded_retry() {
+    let f = Fixture::new();
+    f.discord.private_thread_room.store(true, Ordering::SeqCst);
+    f.discord.defer_thread_join.store(true, Ordering::SeqCst);
+    f.subscribe(20, true);
+    f.worker.tick(1000).await.unwrap();
+    assert!(f.state().joined_viewers.is_empty());
+    let first_key = f.state().subscription_batch.unwrap().key;
+    assert_eq!(f.discord.join_attempts.lock().unwrap().len(), 1);
+
+    let restarted = SpectatorWorker::new(f.db.path(), vec![1], f.discord.clone(), f.live.clone());
+    restarted.tick(1015).await.unwrap();
+    assert!(f.state().joined_viewers.is_empty());
+    assert_eq!(f.state().subscription_batch.unwrap().key, first_key);
+    assert_eq!(f.discord.join_attempts.lock().unwrap().len(), 1);
+
+    f.discord.defer_thread_join.store(false, Ordering::SeqCst);
+    restarted.tick(1120).await.unwrap();
+    assert_eq!(f.state().joined_viewers, vec![20]);
+    assert!(f.state().subscription_batch.is_none());
+    let attempts = f.discord.join_attempts.lock().unwrap();
+    assert_eq!(attempts.len(), 2);
+    assert_ne!(attempts[0].1, attempts[1].1);
+}
+
+#[tokio::test]
+async fn spectator_subscription_delayed_membership_confirms_without_duplicate_invitation() {
+    let f = Fixture::new();
+    f.discord.defer_thread_join.store(true, Ordering::SeqCst);
+    f.subscribe(20, true);
+    f.worker.tick(1000).await.unwrap();
+    assert!(f.state().joined_viewers.is_empty());
+    f.discord.thread_members.lock().unwrap().insert(20);
+    f.worker.tick(1015).await.unwrap();
+    assert_eq!(f.state().joined_viewers, vec![20]);
+    assert!(f.state().subscription_batch.is_none());
+    assert_eq!(f.discord.join_attempts.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn spectator_subscription_restart_repairs_legacy_unverified_joined_flags() {
+    let f = Fixture::new();
+    f.discord.private_thread_room.store(true, Ordering::SeqCst);
+    f.subscribe(20, true);
+    f.worker.tick(1000).await.unwrap();
+    assert_eq!(f.state().joined_viewers, vec![20]);
+    f.discord.thread_members.lock().unwrap().clear();
+    f.discord.defer_thread_join.store(true, Ordering::SeqCst);
+    let restarted = SpectatorWorker::new(f.db.path(), vec![1], f.discord.clone(), f.live.clone());
+    restarted.tick(1015).await.unwrap();
+    assert!(f.state().joined_viewers.is_empty());
+    assert!(f.state().subscription_batch.is_some());
+    assert_eq!(f.discord.join_attempts.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn spectator_subscription_unavailable_membership_never_marks_invitation_confirmed() {
+    let f = Fixture::new();
+    f.subscribe(20, true);
+    f.discord.fail_member_lookup.store(true, Ordering::SeqCst);
+    f.worker.tick(1000).await.unwrap();
+    assert!(f.state().joined_viewers.is_empty());
+    assert!(f.discord.join_attempts.lock().unwrap().is_empty());
+    f.discord.fail_member_lookup.store(false, Ordering::SeqCst);
+    f.worker.tick(1015).await.unwrap();
+    assert_eq!(f.state().joined_viewers, vec![20]);
+}
+
+#[tokio::test]
+async fn spectator_subscription_creation_retry_survives_restart() {
+    let f = Fixture::new();
+    f.subscribe(20, true);
+    f.discord.fail_ensure.store(true, Ordering::SeqCst);
+    f.worker.tick(1000).await.unwrap();
+    assert_eq!(f.state().creating_until, 1120);
+    f.discord.fail_ensure.store(false, Ordering::SeqCst);
+    let restarted = SpectatorWorker::new(f.db.path(), vec![1], f.discord.clone(), f.live.clone());
+    restarted.tick(1015).await.unwrap();
+    assert_eq!(f.discord.ensure_calls.lock().unwrap().len(), 1);
+    assert!(f.state().joined_viewers.is_empty());
+    restarted.tick(1120).await.unwrap();
+    assert_eq!(f.discord.ensure_calls.lock().unwrap().len(), 2);
+    assert_eq!(f.state().joined_viewers, vec![20]);
+}
+
+#[tokio::test]
+async fn spectator_subscription_expired_retry_preserves_batch_if_history_is_incomplete() {
+    let f = Fixture::new();
+    f.subscribe(20, true);
+    f.discord.defer_thread_join.store(true, Ordering::SeqCst);
+    f.worker.tick(1000).await.unwrap();
+    let original_key = f.state().subscription_batch.unwrap().key;
+    f.discord.fail_join_history.store(true, Ordering::SeqCst);
+    f.worker.tick(1120).await.unwrap();
+    assert_eq!(f.state().subscription_batch.unwrap().key, original_key);
+    assert!(f.state().joined_viewers.is_empty());
+    assert_eq!(f.discord.join_attempts.lock().unwrap().len(), 1);
+    f.discord.fail_join_history.store(false, Ordering::SeqCst);
+    f.discord.defer_thread_join.store(false, Ordering::SeqCst);
+    f.worker.tick(1135).await.unwrap();
+    assert_eq!(f.state().joined_viewers, vec![20]);
+    assert_eq!(f.discord.join_attempts.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -1545,7 +1679,7 @@ async fn incomplete_join_history_does_not_duplicate_subscriptions_or_block_comme
     f.discord.fail_join_history.store(true, Ordering::SeqCst);
     f.worker.tick(1015).await.unwrap();
     assert_eq!(f.discord.join_attempts.lock().unwrap().len(), 1);
-    assert!(f.state().subscription_batch.is_some());
+    assert!(f.state().subscription_batch.is_none());
     assert_eq!(f.discord.delivered.lock().unwrap().len(), 2);
     f.discord.fail_join_history.store(false, Ordering::SeqCst);
     f.worker.tick(1030).await.unwrap();

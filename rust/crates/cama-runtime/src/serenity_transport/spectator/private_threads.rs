@@ -181,7 +181,7 @@ async fn policy(
     Ok((bot, viewers))
 }
 
-async fn members(http: &Http, thread: ChannelId) -> Result<BTreeSet<u64>, String> {
+pub(super) async fn members(http: &Http, thread: ChannelId) -> Result<BTreeSet<u64>, String> {
     // Serenity uses API v10 without with_member: the endpoint returns all members.
     // Fail closed at the pagination boundary as well, for future API changes.
     let members = thread

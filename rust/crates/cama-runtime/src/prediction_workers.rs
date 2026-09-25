@@ -878,6 +878,7 @@ fn prediction_digest_message(
         response,
         allowed_mentions: DiscordAllowedMentions::None,
         content_mode: Default::default(),
+        suppress_notifications: false,
     }
 }
 

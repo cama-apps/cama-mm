@@ -1188,6 +1188,14 @@ fn streaming_bonus_follows_voice_go_live_not_twitch_presence() {
 /// Serve one canned HTTP reply and return the proxy base URL plus the server
 /// thread, so a transport helper can be driven without a live gateway.
 fn canned_discord_reply(status: &'static str, body: String) -> (String, JoinHandle<()>) {
+    canned_discord_reply_with_request(status, body, None)
+}
+
+fn canned_discord_reply_with_request(
+    status: &'static str,
+    body: String,
+    expected_get_path: Option<&'static str>,
+) -> (String, JoinHandle<()>) {
     let listener =
         TcpListener::bind("127.0.0.1:0").expect("bind local Discord HTTP capture server");
     let proxy = format!("http://{}", listener.local_addr().expect("capture address"));
@@ -1202,6 +1210,11 @@ fn canned_discord_reply(status: &'static str, body: String) -> (String, JoinHand
             if request.windows(4).any(|window| window == b"\r\n\r\n") {
                 break;
             }
+        }
+        if let Some(path) = expected_get_path {
+            let request = String::from_utf8(request).expect("request is UTF-8");
+            let first = request.lines().next().expect("request line");
+            assert!(first.starts_with("GET ") && first.contains(path), "{first}");
         }
         write!(
             stream,
@@ -1277,6 +1290,52 @@ async fn guild_name_reports_a_missing_guild_as_absent_rather_than_an_error() {
 }
 
 #[tokio::test]
+async fn spectator_membership_reads_actual_discord_thread_members() {
+    let body = serde_json::json!([
+        {"id":"500","user_id":"3","join_timestamp":"2026-09-25T03:52:00Z","flags":0},
+        {"id":"500","user_id":"20","join_timestamp":"2026-09-25T03:52:01Z","flags":0}
+    ]);
+    let (proxy, server) = canned_discord_reply_with_request(
+        "200 OK",
+        body.to_string(),
+        Some("/channels/500/thread-members"),
+    );
+    let http = HttpBuilder::new("test-token")
+        .proxy(proxy)
+        .ratelimiter_disabled(true)
+        .build();
+    let members = spectator::thread_members(&http, 500).await.unwrap();
+    server.join().unwrap();
+    assert_eq!(members, BTreeSet::from([3, 20]));
+    assert!(
+        !members.contains(&21),
+        "an intended invite is not membership"
+    );
+}
+
+#[tokio::test]
+async fn spectator_membership_rejects_incomplete_or_wrong_thread_responses() {
+    let member = serde_json::json!({
+        "id":"500","user_id":"20","join_timestamp":"2026-09-25T03:52:00Z","flags":0
+    });
+    let mut foreign = member.clone();
+    foreign["id"] = "501".into();
+    for body in [
+        serde_json::json!([foreign]),
+        serde_json::json!(vec![member; 100]),
+    ] {
+        let (proxy, server) = canned_discord_reply("200 OK", body.to_string());
+        let http = HttpBuilder::new("test-token")
+            .proxy(proxy)
+            .ratelimiter_disabled(true)
+            .build();
+        let error = spectator::thread_members(&http, 500).await.unwrap_err();
+        server.join().unwrap();
+        assert!(error.contains("incomplete or oversized"), "{error}");
+    }
+}
+
+#[tokio::test]
 async fn spectator_cleanup_refuses_a_foreign_marker_and_treats_missing_channel_as_done() {
     let (proxy, server) = canned_discord_reply("200 OK",serde_json::json!({"id":"55","guild_id":"100","type":0,"name":"foreign","topic":"someone-elses-marker","position":0,"permission_overwrites":[]}).to_string());
     let http = Arc::new(
@@ -1304,6 +1363,44 @@ async fn spectator_cleanup_refuses_a_foreign_marker_and_treats_missing_channel_a
         .await
         .unwrap();
     server.join().unwrap();
+}
+
+#[test]
+fn thread_invitation_payload_mentions_only_viewers_without_push_notifications() {
+    let invitation = DiscordMessage::mentioning(
+        InteractionResponse::message("📻 Subscribed: <@20> <@21>"),
+        BTreeSet::from([20, 21]),
+    )
+    .suppressing_notifications();
+    let key = "spectator-invite-629";
+    for (builder, durable) in [
+        (discord_message(&invitation), false),
+        (discord_message_with_delivery_key(&invitation, key), true),
+    ] {
+        let payload = serde_json::to_value(builder).expect("serialize invitation payload");
+        assert_eq!(payload["content"], "📻 Subscribed: <@20> <@21>");
+        assert_eq!(payload["allowed_mentions"]["parse"], serde_json::json!([]));
+        assert_eq!(
+            payload["allowed_mentions"]["users"],
+            serde_json::json!(["20", "21"])
+        );
+        assert_eq!(payload["allowed_mentions"]["roles"], serde_json::json!([]));
+        assert_eq!(payload["flags"], 4096);
+        if durable {
+            assert_eq!(payload["nonce"], key);
+            assert_eq!(payload["enforce_nonce"], true);
+        }
+    }
+}
+
+#[test]
+fn ordinary_silent_messages_keep_mentions_disabled() {
+    let message = DiscordMessage::silent(InteractionResponse::message("Hello <@20>"));
+    let payload =
+        serde_json::to_value(discord_message(&message)).expect("serialize silent payload");
+    assert_eq!(payload["allowed_mentions"]["parse"], serde_json::json!([]));
+    assert_eq!(payload["allowed_mentions"]["users"], serde_json::json!([]));
+    assert_eq!(payload["flags"].as_u64().unwrap_or_default() & 4096, 0);
 }
 
 #[tokio::test]

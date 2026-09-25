@@ -250,9 +250,12 @@ bot does not change channel or role permissions. If read access is missing,
 delivery diagnostics identify the viewer, parent channel, and missing
 permissions. Thread membership never overrides parent visibility.
 
-New viewers are silently mentioned to subscribe, with durable delivery keys
-preventing duplicate join messages after lost replies. No thread-member API is
-used to add spectators. The bot audits current members, roles, parent access,
+New viewers receive an explicit user mention with push/desktop notifications
+suppressed. The worker checks Discord's thread membership before marking them
+joined, including after a restart. Delivery keys recover lost message replies;
+accepted invitations with unconfirmed membership retry after two minutes.
+Logs distinguish thread-creation retries from verified memberships. No
+thread-member API is used to add spectators. The bot audits current members, roles, parent access,
 thread ownership, and membership before delivery; unauthorized members are
 removed and player/moderator access that bypasses private membership blocks
 live delivery. The bot needs read/send, embed/attachment, private-thread
