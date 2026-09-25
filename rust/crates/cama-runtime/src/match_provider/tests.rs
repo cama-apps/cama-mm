@@ -4380,7 +4380,7 @@ fn soft_avoid_decrements_once_only_after_recording_opposite_teams() {
 #[test]
 fn production_goodness_weights_team_value_and_role_deltas() {
     let mut config = production_test_config();
-    config.values.rating_spread_divisor = f64::INFINITY;
+    config.values.rating_spread_multiplier = 0.0;
     config.values.rd_priority_weight = 0.0;
     let fixture = MatchRuntimeFixture::new_with_config_and_discord(
         config,
@@ -4393,8 +4393,8 @@ fn production_goodness_weights_team_value_and_role_deltas() {
     let goodness =
         extra_f64(&prepared.pending.state, "goodness_score").expect("stored goodness score");
 
-    // 95 value difference at 1.4 plus a 190 lane/parity delta at 0.18.
-    assert!((goodness - (-2_852.8)).abs() < 1e-9, "{goodness}");
+    // 95 value difference at 1.5 plus a 190 lane/parity delta at 0.16.
+    assert!((goodness - (-3_149.1)).abs() < 1e-9, "{goodness}");
 }
 
 #[test]
@@ -4652,7 +4652,7 @@ fn test_shuffle_display_uses_configured_flat_off_role_value_penalty() {
     // stacks on top of it. Radiant is fully on-role, so it is a flat 5% off
     // 13_000; Dire carries one off-role player who now takes both factors,
     // which is why it falls further than 5% from 11_300.
-    assert_eq!(configured, [12_350.0, 10_725.0]);
+    assert_eq!(configured, [12_350.0, 10_744.0]);
 }
 
 #[test]

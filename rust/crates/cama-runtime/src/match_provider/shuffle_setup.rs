@@ -150,7 +150,7 @@ impl MatchHandler {
         shuffler.soft_avoid_penalty = self.config.soft_avoid_penalty;
         shuffler.package_deal_penalty = self.config.package_deal_penalty;
         shuffler.package_deal_split_penalty = self.config.package_deal_split_penalty;
-        shuffler.rating_spread_divisor = self.config.rating_spread_divisor;
+        shuffler.rating_spread_multiplier = self.config.rating_spread_multiplier;
         shuffler.region_split = request.shuffle_mode == "region";
         shuffler.region_split_penalty = self.config.region_split_penalty;
 
