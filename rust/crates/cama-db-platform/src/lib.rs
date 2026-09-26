@@ -26,6 +26,8 @@ pub mod neon_events;
 pub mod notifications;
 #[path = "../../cama-db/src/opendota_player.rs"]
 pub mod opendota_player;
+#[path = "../../cama-db/src/player_display_names.rs"]
+pub mod player_display_names;
 #[path = "../../cama-db/src/player_trivia.rs"]
 pub mod player_trivia;
 #[path = "../../cama-db/src/push_notifications.rs"]

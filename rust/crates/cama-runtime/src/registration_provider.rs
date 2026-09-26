@@ -48,7 +48,7 @@ use tracing::{debug, error, warn};
 
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{
-    DiscordDirectMessageErrorKind, DiscordMessage, DiscordTransport, GuildPlayerNameDirectory,
+    DiscordDirectMessageErrorKind, DiscordMessage, DiscordTransport, cached_guild_player_names,
 };
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
@@ -828,13 +828,11 @@ impl PlayerRegistrationHandler {
     /// Best-effort push-notification fan-out for a lobby that just reached
     /// its ready threshold.
     fn render_player_name(&self, guild_id: u64, user_id: u64) -> String {
-        let names = self
-            .discord
-            .cached_guild_member_render_names(guild_id, &[user_id])
-            .map(GuildPlayerNameDirectory::new)
-            .unwrap_or_default();
-        i64::try_from(user_id)
-            .map_or_else(|_| user_id.to_string(), |user_id| names.resolve(user_id))
+        let names = cached_guild_player_names(self.discord.as_ref(), guild_id, &[user_id]);
+        i64::try_from(user_id).map_or_else(
+            |_| "Unknown player".to_owned(),
+            |user_id| names.resolve(user_id),
+        )
     }
 
     async fn deliver_lobby_ready(&self, event: &ConfirmedLobbyJoin) -> Result<(), String> {

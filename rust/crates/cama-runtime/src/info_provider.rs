@@ -86,7 +86,9 @@ pub fn read_info_analytics_snapshot(
 }
 
 use crate::application_config::ApplicationConfig;
-use crate::discord_transport::{DiscordTransport, GuildPlayerNameDirectory};
+use crate::discord_transport::{
+    DiscordTransport, GuildPlayerNameDirectory, resolve_guild_player_names,
+};
 use crate::embed_colors::{DISCORD_BLUE, DISCORD_GOLD};
 use crate::option_ext::{integer_option, string_option, user_option};
 use crate::registration::{
@@ -742,23 +744,14 @@ impl InfoHandler {
         guild_id: Option<u64>,
         user_id: u64,
     ) -> Result<String, InteractionHandlerError> {
-        let discord = Arc::clone(&self.discord);
-        tokio::task::spawn_blocking(move || -> Result<String, String> {
-            let signed_user_id = i64::try_from(user_id)
-                .map_err(|_| "target user id exceeds SQLite range".to_owned())?;
-            let Some(guild_id) = guild_id else {
-                return Ok(signed_user_id.to_string());
-            };
-            let names = GuildPlayerNameDirectory::new(
-                discord.cached_guild_member_render_names(guild_id, &[user_id])?,
-            );
-            Ok(names.resolve(signed_user_id))
-        })
-        .await
-        .map_err(|error| {
-            InteractionHandlerError::from(format!("player-name task failed: {error}"))
-        })?
-        .map_err(InteractionHandlerError::from)
+        let signed_user_id = i64::try_from(user_id).map_err(|_| {
+            InteractionHandlerError::from("target user id exceeds SQLite range".to_owned())
+        })?;
+        Ok(
+            resolve_guild_player_names(self.discord.as_ref(), guild_id, &[signed_user_id])
+                .await
+                .resolve(signed_user_id),
+        )
     }
 
     /// Delete the leaderboard `view_timeout` after the last interaction.

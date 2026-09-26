@@ -55,6 +55,7 @@ pub(crate) mod pet_flavor_runtime;
 pub mod pet_provider;
 pub mod pet_sweep_worker;
 pub mod pin_helpers;
+pub mod player_name_archive;
 pub mod player_trivia_provider;
 pub mod prediction_provider;
 pub mod prediction_workers;

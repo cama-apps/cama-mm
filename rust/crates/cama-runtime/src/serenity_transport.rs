@@ -13,7 +13,6 @@ use async_trait::async_trait;
 use cama_app::dig_bonus_events::GuildMember as DigBonusGuildMember;
 use cama_app::predictions::resolve_and_neutralize_discord_mentions;
 use serenity::Client;
-use serenity::all::ShardStageUpdateEvent;
 use serenity::all::{
     ActionRowComponent, AutoArchiveDuration, ButtonStyle, Channel, ChannelId, ChannelType, Command,
     CommandDataOption, CommandDataOptionValue, CommandInteraction, CommandOptionType,
@@ -28,6 +27,7 @@ use serenity::all::{
     MessageId, MessageInteractionMetadata, ModalInteraction, Nonce, OnlineStatus, Permissions,
     Reaction, ReactionType, Ready, UnavailableGuild, User, UserId,
 };
+use serenity::all::{ChunkGuildFilter, GuildMembersChunkEvent, ShardStageUpdateEvent};
 use serenity::cache::Cache;
 use serenity::gateway::{ConnectionStage, ShardManager};
 use serenity::http::Http;
@@ -60,6 +60,7 @@ use crate::gateway_events::{
 use crate::global_hooks::GlobalInteractionHooks;
 use crate::mana_provider::{ManaDiscordPort, ManaGuildMember};
 use crate::pet_sweep_worker::{PetSweepDeliveryError, PetSweepDiscordPort};
+use crate::player_name_archive::PlayerNameArchive;
 use crate::player_trivia_provider::PlayerTriviaDiscordPort;
 use crate::prediction_provider::{PredictionCommandDiscordPort, PredictionMarketSurface};
 use crate::prediction_workers::PredictionDiscordPort;
@@ -96,6 +97,7 @@ pub struct SerenityDiscordTransport {
     admin_registry: Arc<RwLock<Option<Arc<Registry>>>>,
     shard_manager: Arc<RwLock<Option<Arc<ShardManager>>>>,
     gamba_channel_id: Option<i64>,
+    player_names: Arc<PlayerNameArchive>,
 }
 
 #[derive(Clone)]
@@ -116,6 +118,17 @@ impl SerenityDiscordTransport {
             gamba_channel_id,
             ..Self::default()
         }
+    }
+
+    /// Persist and serve last-seen player names through `archive`.
+    #[must_use]
+    pub fn with_player_name_archive(mut self, archive: Arc<PlayerNameArchive>) -> Self {
+        self.player_names = archive;
+        self
+    }
+
+    fn record_player_names(&self, guild_id: u64, names: Vec<(u64, String)>) {
+        self.player_names.record(guild_id, names);
     }
 
     fn attach(&self, context: &Context) {
@@ -966,6 +979,7 @@ async fn run_serenity_session(
         discord_transport,
         bot_user_id: AtomicU64::new(0),
         guild_ids: Arc::new(RwLock::new(BTreeSet::new())),
+        request_member_chunks: session.intents.guild_members,
     };
     let intents = serenity_intents(session.intents);
     let mut client = Client::builder(session.token.expose(), intents)
@@ -1040,6 +1054,9 @@ struct SerenityHandler {
     discord_transport: Option<Arc<SerenityDiscordTransport>>,
     bot_user_id: AtomicU64,
     guild_ids: Arc<RwLock<BTreeSet<u64>>>,
+    /// Request every member after GUILD_CREATE, matching discord.py's
+    /// `chunk_guilds_at_startup`. Requires the privileged members intent.
+    request_member_chunks: bool,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -1188,6 +1205,22 @@ impl EventHandler for SerenityHandler {
 
     async fn guild_create(&self, context: Context, guild: Guild, _is_new: Option<bool>) {
         self.attach_discord_transport(&context);
+        self.record_player_names(guild.id, readable_member_names(guild.members.values()));
+        if guild_needs_member_chunk(&guild, self.request_member_chunks) {
+            // Discord sends large guilds (over 250 members) without their
+            // offline members, and Serenity does not chunk on its own. Without
+            // this the member cache misses those players, so rosters cannot
+            // render their names and wheel targeting falls back to REST.
+            info!(
+                guild_id = guild.id.get(),
+                cached = guild.members.len(),
+                member_count = guild.member_count,
+                "requesting guild member chunks"
+            );
+            context
+                .shard
+                .chunk_guild(guild.id, None, false, ChunkGuildFilter::None, None);
+        }
         let guild_id = guild.id.get();
         let inserted = self
             .guild_ids
@@ -1213,7 +1246,18 @@ impl EventHandler for SerenityHandler {
         }
     }
 
+    async fn guild_members_chunk(&self, _context: Context, chunk: GuildMembersChunkEvent) {
+        self.record_player_names(
+            chunk.guild_id,
+            readable_member_names(chunk.members.values()),
+        );
+    }
+
     async fn guild_member_addition(&self, _context: Context, member: Member) {
+        self.record_player_names(
+            member.guild_id,
+            readable_member_names(std::iter::once(&member)),
+        );
         self.log_observer_failures(
             "member join",
             self.observers.member_join(gateway_member(&member)).await,
@@ -1227,6 +1271,9 @@ impl EventHandler for SerenityHandler {
         _new: Option<Member>,
         event: GuildMemberUpdateEvent,
     ) {
+        if let Some(name) = readable_member_name(event.nick.as_deref(), &event.user) {
+            self.record_player_names(event.guild_id, vec![(event.user.id.get(), name)]);
+        }
         self.log_observer_failures(
             "member update",
             self.observers
@@ -1277,6 +1324,12 @@ impl SerenityHandler {
     fn attach_discord_transport(&self, context: &Context) {
         if let Some(discord_transport) = &self.discord_transport {
             discord_transport.attach(context);
+        }
+    }
+
+    fn record_player_names(&self, guild_id: GuildId, names: Vec<(u64, String)>) {
+        if let Some(discord_transport) = &self.discord_transport {
+            discord_transport.record_player_names(guild_id.get(), names);
         }
     }
     async fn dispatch_raw_reaction(&self, kind: RawReactionKind, reaction: Reaction) {
@@ -1535,16 +1588,28 @@ fn member_server_nickname(member: &Member) -> Option<String> {
 }
 
 fn member_render_name(member: &Member) -> String {
-    [
-        member.nick.as_deref(),
-        member.user.global_name.as_deref(),
-        Some(member.user.name.as_str()),
-    ]
-    .into_iter()
-    .flatten()
-    .find_map(cama_domain::discord_content::readable_player_name)
-    .unwrap_or("Unknown player")
-    .to_owned()
+    readable_member_name(member.nick.as_deref(), &member.user)
+        .unwrap_or_else(|| "Unknown player".to_owned())
+}
+
+/// Server nickname, then global display name, then account name; `None`
+/// when Discord supplied nothing readable.
+fn readable_member_name(nick: Option<&str>, user: &User) -> Option<String> {
+    [nick, user.global_name.as_deref(), Some(user.name.as_str())]
+        .into_iter()
+        .flatten()
+        .find_map(cama_domain::discord_content::readable_player_name)
+        .map(str::to_owned)
+}
+
+fn readable_member_names<'a>(members: impl IntoIterator<Item = &'a Member>) -> Vec<(u64, String)> {
+    members
+        .into_iter()
+        .filter_map(|member| {
+            readable_member_name(member.nick.as_deref(), &member.user)
+                .map(|name| (member.user.id.get(), name))
+        })
+        .collect()
 }
 
 fn requested_member_render_names(
@@ -1560,6 +1625,10 @@ fn requested_member_render_names(
                 .map(|member| (user_id.get(), member_render_name(member)))
         })
         .collect::<BTreeMap<_, _>>()
+}
+
+fn guild_needs_member_chunk(guild: &Guild, members_intent: bool) -> bool {
+    members_intent && complete_guild_member_ids(guild).is_none() && !guild.unavailable
 }
 
 fn complete_guild_member_ids(guild: &Guild) -> Option<BTreeSet<u64>> {
@@ -4695,6 +4764,10 @@ impl DiscordTransport for SerenityDiscordTransport {
             }
             Err(error) => return Err(error.to_string()),
         };
+        self.record_player_names(
+            guild_id.get(),
+            readable_member_names(std::iter::once(&member)),
+        );
         let (presence, in_voice, deafened, activities) = context.cache.guild(guild_id).map_or(
             (DiscordPresence::Unknown, false, member.deaf, Vec::new()),
             |guild| {
@@ -4751,6 +4824,14 @@ impl DiscordTransport for SerenityDiscordTransport {
             .cache
             .guild(GuildId::new(guild_id))
             .map(|guild| requested_member_render_names(&guild.members, user_ids)))
+    }
+
+    fn last_seen_player_names(
+        &self,
+        guild_id: u64,
+        user_ids: &[u64],
+    ) -> DiscordGuildMemberRenderNames {
+        self.player_names.names(guild_id, user_ids)
     }
 
     async fn channel_parent_id(

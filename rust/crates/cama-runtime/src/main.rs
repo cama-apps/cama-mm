@@ -19,6 +19,7 @@ use cama_runtime::gateway::{GatewayError, GatewaySession};
 use cama_runtime::herogrid_provider::HeroGridRegistrationProvider;
 use cama_runtime::inventory;
 use cama_runtime::match_provider::production_betting_flavor;
+use cama_runtime::player_name_archive::PlayerNameArchive;
 use cama_runtime::registration::InteractionResponseError;
 use cama_runtime::runtime_cli::{
     Command, acquire_runtime_lock, parse_command, verify_disposable_database,
@@ -556,9 +557,23 @@ async fn run_serve() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let discord_transport = Arc::new(SerenityDiscordTransport::with_gamba_channel_id(
-        application_config.channels.gamba,
-    ));
+    let archive_path = config.db_path.clone();
+    let player_names =
+        match tokio::task::spawn_blocking(move || PlayerNameArchive::load(archive_path))
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|loaded| loaded)
+        {
+            Ok(archive) => Arc::new(archive),
+            Err(error) => {
+                error!(%error, "could not load last-seen player names");
+                return ExitCode::from(1);
+            }
+        };
+    let discord_transport = Arc::new(
+        SerenityDiscordTransport::with_gamba_channel_id(application_config.channels.gamba)
+            .with_player_name_archive(player_names),
+    );
     let draft_states = Arc::new(DraftStateManager::default());
     let lobby_provider = match LobbyRegistrationProvider::new(
         &config.db_path,

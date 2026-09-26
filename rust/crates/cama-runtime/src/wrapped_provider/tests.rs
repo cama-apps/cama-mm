@@ -968,6 +968,6 @@ fn awards_match_python_tie_exclusions_hero_thresholds_and_flavor() {
         .cloned()
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(rendered_lines.contains("TOP PERFORMER - 1 -"));
+    assert!(rendered_lines.contains("TOP PERFORMER - Unknown player -"));
     assert!(!rendered_lines.contains("TOP PERFORMER - One -"));
 }

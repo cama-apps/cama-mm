@@ -22,24 +22,25 @@ pub const SPECTATOR_THREAD_DELETED: &str =
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct GuildPlayerNameDirectory {
     members: Option<BTreeMap<i64, String>>,
+    /// Last names stored for players Discord could not name live. They fill
+    /// rendering gaps only and never count as guild membership.
+    last_seen: BTreeMap<i64, String>,
 }
 
 impl GuildPlayerNameDirectory {
     #[must_use]
     pub fn new(members: Option<DiscordGuildMemberRenderNames>) -> Self {
         Self {
-            members: members.map(|members| {
-                members
-                    .into_iter()
-                    .filter_map(|(discord_id, render_name)| {
-                        let render_name = readable_player_name(&render_name)?.to_owned();
-                        i64::try_from(discord_id)
-                            .ok()
-                            .map(|discord_id| (discord_id, render_name))
-                    })
-                    .collect()
-            }),
+            members: members.map(readable_names),
+            last_seen: BTreeMap::new(),
         }
+    }
+
+    /// Layer stored last-seen names beneath the live ones.
+    #[must_use]
+    pub fn with_last_seen(mut self, names: DiscordGuildMemberRenderNames) -> Self {
+        self.last_seen = readable_names(names);
+        self
     }
 
     #[must_use]
@@ -74,6 +75,7 @@ impl GuildPlayerNameDirectory {
         self.members
             .as_ref()
             .and_then(|members| members.get(&discord_id))
+            .or_else(|| self.last_seen.get(&discord_id))
             .cloned()
     }
 
@@ -85,8 +87,41 @@ impl GuildPlayerNameDirectory {
     }
 }
 
+/// Names available without a Discord request: the live member cache, with
+/// stored last-seen names beneath it. For async rosters prefer
+/// [`resolve_guild_player_names`], which also fetches cache misses.
+#[must_use]
+pub fn cached_guild_player_names(
+    transport: &dyn DiscordTransport,
+    guild_id: u64,
+    user_ids: &[u64],
+) -> GuildPlayerNameDirectory {
+    if guild_id == 0 {
+        return GuildPlayerNameDirectory::default();
+    }
+    let live = transport
+        .cached_guild_member_render_names(guild_id, user_ids)
+        .ok()
+        .flatten();
+    GuildPlayerNameDirectory::new(live)
+        .with_last_seen(transport.last_seen_player_names(guild_id, user_ids))
+}
+
+fn readable_names(names: DiscordGuildMemberRenderNames) -> BTreeMap<i64, String> {
+    names
+        .into_iter()
+        .filter_map(|(discord_id, name)| {
+            let name = readable_player_name(&name)?.to_owned();
+            i64::try_from(discord_id)
+                .ok()
+                .map(|discord_id| (discord_id, name))
+        })
+        .collect()
+}
+
 /// Resolve display text on the server, including members absent from a partial
 /// gateway cache. A failed lookup never becomes a numeric name or a mention.
+/// Order: member cache, member fetch, stored last-seen name, global user.
 pub async fn resolve_guild_player_names(
     transport: &dyn DiscordTransport,
     guild_id: Option<u64>,
@@ -105,6 +140,10 @@ pub async fn resolve_guild_player_names(
             )
             .ok()
             .flatten()
+    });
+    let requested = user_ids.iter().copied().collect::<Vec<_>>();
+    let last_seen = guild_id.map_or_else(BTreeMap::new, |guild_id| {
+        readable_names(transport.last_seen_player_names(guild_id, &requested))
     });
     let mut names = GuildPlayerNameDirectory::new(cached);
     for user_id in user_ids {
@@ -127,6 +166,8 @@ pub async fn resolve_guild_player_names(
         };
         let name = if member_name.is_some() {
             member_name
+        } else if let Some(name) = last_seen.get(&discord_id) {
+            Some(name.clone())
         } else {
             transport
                 .user(user_id)
@@ -198,9 +239,10 @@ impl GuildPlayerNameResolver for DiscordGuildPlayerNameResolver {
             .iter()
             .filter_map(|player_id| u64::try_from(*player_id).ok())
             .collect::<Vec<_>>();
+        let last_seen = self.discord.last_seen_player_names(guild_id, &user_ids);
         self.discord
             .cached_guild_member_render_names(guild_id, &user_ids)
-            .map(GuildPlayerNameDirectory::new)
+            .map(|names| GuildPlayerNameDirectory::new(names).with_last_seen(last_seen))
     }
 }
 
@@ -786,6 +828,17 @@ pub trait DiscordTransport: Send + Sync {
         Ok(None)
     }
 
+    /// The last display name the bot saw for each requested player in this
+    /// guild, kept across restarts. A fallback beneath live names only: a
+    /// stored name does not mean the player is still a guild member.
+    fn last_seen_player_names(
+        &self,
+        _guild_id: u64,
+        _user_ids: &[u64],
+    ) -> DiscordGuildMemberRenderNames {
+        DiscordGuildMemberRenderNames::new()
+    }
+
     /// Resolve a channel's thread parent when the interaction happened in a
     /// thread. Older transports return `None`, preserving source compatibility.
     async fn channel_parent_id(
@@ -849,6 +902,26 @@ mod player_render_name_tests {
 
         let unavailable = GuildPlayerNameDirectory::new(None);
         assert_eq!(unavailable.resolve_or(7, "stored-seven"), "stored-seven");
+    }
+
+    #[test]
+    fn last_seen_names_fill_gaps_without_implying_membership() {
+        let names =
+            GuildPlayerNameDirectory::new(Some(BTreeMap::from([(7, "Live Seven".to_owned())])))
+                .with_last_seen(BTreeMap::from([
+                    (7, "Old Seven".to_owned()),
+                    (8, "Departed Eight".to_owned()),
+                    (9, "<@9>".to_owned()),
+                ]));
+
+        assert_eq!(names.resolve(7), "Live Seven");
+        assert_eq!(names.resolve(8), "Departed Eight");
+        assert_eq!(names.resolve(9), "Unknown player");
+        assert!(names.contains(7));
+        assert!(
+            !names.contains(8),
+            "a stored name must not keep a departed player on member-only lists"
+        );
     }
 
     #[test]

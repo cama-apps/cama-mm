@@ -300,6 +300,7 @@ fn wire_test_handler(registry: Arc<Registry>) -> SerenityHandler {
         discord_transport: None,
         bot_user_id: AtomicU64::new(0),
         guild_ids: Arc::new(RwLock::new(BTreeSet::new())),
+        request_member_chunks: true,
     }
 }
 
@@ -657,6 +658,26 @@ fn complete_member_snapshot_requires_available_and_fully_cached_guild() {
 
     guild.unavailable = true;
     assert_eq!(complete_guild_member_ids(&guild), None);
+}
+
+#[test]
+fn large_guild_create_without_offline_members_requests_member_chunks() {
+    let mut guild = Guild::default();
+    guild.member_count = 300;
+    guild.members.insert(UserId::new(7), Member::default());
+    assert!(guild_needs_member_chunk(&guild, true));
+    assert!(
+        !guild_needs_member_chunk(&guild, false),
+        "chunking requires the members intent"
+    );
+
+    guild.unavailable = true;
+    assert!(!guild_needs_member_chunk(&guild, true));
+
+    let mut complete = Guild::default();
+    complete.member_count = 1;
+    complete.members.insert(UserId::new(7), Member::default());
+    assert!(!guild_needs_member_chunk(&complete, true));
 }
 
 #[test]
