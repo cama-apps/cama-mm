@@ -45,7 +45,7 @@ use tracing::{debug, warn};
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{
     DiscordDestinationStatus, DiscordMessage, DiscordMessageReceipt, DiscordTransport,
-    GuildPlayerNameDirectory,
+    GuildPlayerNameDirectory, cached_guild_player_names,
 };
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
@@ -931,16 +931,12 @@ impl DraftHandler {
             .iter()
             .filter_map(|player_id| u64::try_from(*player_id).ok())
             .collect::<Vec<_>>();
-        let nicknames = u64::try_from(guild_id)
-            .ok()
-            .filter(|guild_id| *guild_id != 0)
-            .and_then(|guild_id| {
-                self.discord
-                    .cached_guild_member_render_names(guild_id, &discord_player_ids)
-                    .ok()
-            })
-            .flatten();
-        GuildPlayerNameDirectory::new(nicknames)
+        u64::try_from(guild_id).map_or_else(
+            |_| GuildPlayerNameDirectory::default(),
+            |guild_id| {
+                cached_guild_player_names(self.discord.as_ref(), guild_id, &discord_player_ids)
+            },
+        )
     }
 
     fn render_state(&self, state: &DraftState) -> DraftState {

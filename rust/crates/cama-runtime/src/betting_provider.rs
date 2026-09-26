@@ -82,7 +82,10 @@ use serde_json::json;
 use tracing::warn;
 
 use crate::application_config::ApplicationConfig;
-use crate::discord_transport::{DiscordMessage, DiscordTransport, GuildPlayerNameDirectory};
+use crate::discord_transport::{
+    DiscordMessage, DiscordTransport, GuildPlayerNameDirectory, cached_guild_player_names,
+    resolve_guild_player_names,
+};
 use crate::gateway_events::{GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryReport};
 use crate::ids::blocking as sqlite;
 use crate::match_provider::MatchRegistrationProvider;
@@ -2694,16 +2697,10 @@ impl WheelPlayerNameSource for CachedDiscordWheelPlayerNames {
             .iter()
             .filter_map(|player_id| u64::try_from(*player_id).ok())
             .collect::<Vec<_>>();
-        let render_names = u64::try_from(self.guild_id)
-            .ok()
-            .filter(|guild_id| *guild_id != 0)
-            .and_then(|guild_id| {
-                self.discord
-                    .cached_guild_member_render_names(guild_id, &discord_ids)
-                    .ok()
-            })
-            .flatten();
-        let names = GuildPlayerNameDirectory::new(render_names);
+        let names = u64::try_from(self.guild_id).map_or_else(
+            |_| GuildPlayerNameDirectory::default(),
+            |guild_id| cached_guild_player_names(self.discord.as_ref(), guild_id, &discord_ids),
+        );
         player_ids
             .iter()
             .map(|player_id| (*player_id, names.resolve(*player_id)))
@@ -2735,7 +2732,7 @@ impl BettingInteractionHandler {
         self.render_player_names(&[user_id], guild_id)
             .await
             .remove(&user_id)
-            .unwrap_or_else(|| user_id.to_string())
+            .unwrap_or_else(|| "Unknown player".to_owned())
     }
 
     async fn render_player_names(
@@ -2743,24 +2740,15 @@ impl BettingInteractionHandler {
         user_ids: &[i64],
         guild_id: Option<i64>,
     ) -> BTreeMap<i64, String> {
-        let user_ids = user_ids.to_vec();
-        let discord_user_ids = user_ids
-            .iter()
-            .filter_map(|user_id| u64::try_from(*user_id).ok())
-            .collect::<Vec<_>>();
-        let nicknames = guild_id
-            .and_then(|guild_id| u64::try_from(guild_id).ok())
-            .filter(|guild_id| *guild_id != 0)
-            .and_then(|guild_id| {
-                self.discord
-                    .cached_guild_member_render_names(guild_id, &discord_user_ids)
-                    .ok()
-            })
-            .flatten();
-        let names = GuildPlayerNameDirectory::new(nicknames);
+        let names = resolve_guild_player_names(
+            self.discord.as_ref(),
+            guild_id.and_then(|guild_id| u64::try_from(guild_id).ok()),
+            user_ids,
+        )
+        .await;
         user_ids
-            .into_iter()
-            .map(|user_id| (user_id, names.resolve(user_id)))
+            .iter()
+            .map(|user_id| (*user_id, names.resolve(*user_id)))
             .collect()
     }
 
@@ -4739,7 +4727,6 @@ impl BettingInteractionHandler {
         let preflight_ms = started.elapsed().as_millis() as u64;
         let preparation_started = Instant::now();
         let user_display_name = self.render_player_name(user_id, Some(guild_id)).await;
-        let player_names = CachedDiscordWheelPlayerNames::new(Arc::clone(&self.discord), guild_id);
         let config = self.config.clone();
         let path = self.database_path.clone();
         let event_config = economy_event_config(&config);
@@ -4748,6 +4735,7 @@ impl BettingInteractionHandler {
         let wheel_display_name = user_display_name.clone();
         // Membership may need Discord I/O; daily effects are independent SQLite
         // work and can finish while those requests are in flight.
+        let player_names = CachedDiscordWheelPlayerNames::new(Arc::clone(&self.discord), guild_id);
         let (member_snapshot, event_multipliers) = tokio::join!(
             self.guild_member_snapshot(guild_id),
             sqlite("gamba economy-event effects", move || {
@@ -5198,11 +5186,11 @@ impl BettingInteractionHandler {
                     let user_display_name = rendered_names
                         .get(&user_id)
                         .cloned()
-                        .unwrap_or_else(|| user_id.to_string());
+                        .unwrap_or_else(|| "Unknown player".to_owned());
                     let target_name = rendered_names
                         .get(&target)
                         .cloned()
-                        .unwrap_or_else(|| target.to_string());
+                        .unwrap_or_else(|| "Unknown player".to_owned());
                     self.emit_tip_neon(
                         channel_id,
                         user_id,
@@ -9362,7 +9350,7 @@ fn hostile_result_note(
         player_names
             .get(&player_id)
             .cloned()
-            .unwrap_or_else(|| player_id.to_string())
+            .unwrap_or_else(|| "Unknown player".to_owned())
     };
     let victim_name = outcome.victim_id.map(player_name);
     let note = match mechanic {

@@ -4161,7 +4161,7 @@ fn hostile_result_notes_preserve_python_detail_fields() {
     assert!(note.contains("**2** player(s)"));
     assert!(note.contains("27"));
     assert!(note.contains("Server Alice"));
-    assert!(note.contains("12"));
+    assert!(note.contains("Unknown player"));
     assert!(!note.contains("bob"));
     assert!(note.contains("White Mana Shields"));
 
@@ -4393,4 +4393,218 @@ fn lottery_draw_is_uniform_over_the_active_roster() {
 
     assert_eq!(seen.len(), candidates.len(), "every candidate can win");
     assert_eq!(draw_lottery_winner(&[]), None);
+}
+
+/// Discord stub with a partial member cache: cached members render from the
+/// gateway cache, everyone else needs a member fetch.
+#[derive(Default)]
+struct PartialMemberCacheDiscord {
+    cached: BTreeMap<u64, String>,
+    fetchable: BTreeMap<u64, String>,
+    last_seen: BTreeMap<u64, String>,
+    member_lookups: Mutex<Vec<u64>>,
+}
+
+#[async_trait]
+impl DiscordTransport for PartialMemberCacheDiscord {
+    async fn fetch_message(
+        &self,
+        _channel_id: u64,
+        _message_id: u64,
+    ) -> Result<Option<crate::discord_transport::DiscordMessageSnapshot>, String> {
+        Ok(None)
+    }
+
+    async fn send_message(
+        &self,
+        _channel_id: u64,
+        _message: DiscordMessage,
+    ) -> Result<crate::discord_transport::DiscordMessageReceipt, String> {
+        Err("unused transport".to_owned())
+    }
+
+    async fn edit_message(
+        &self,
+        _channel_id: u64,
+        _message_id: u64,
+        _message: DiscordMessage,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn delete_message(&self, _channel_id: u64, _message_id: u64) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn create_public_thread(
+        &self,
+        _channel_id: u64,
+        _message_id: u64,
+        _name: &str,
+    ) -> Result<u64, String> {
+        Err("unused transport".to_owned())
+    }
+
+    async fn pin_message(&self, _channel_id: u64, _message_id: u64) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn archive_thread(
+        &self,
+        _thread_id: u64,
+        _name: &str,
+        _locked: bool,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn add_reaction(
+        &self,
+        _channel_id: u64,
+        _message_id: u64,
+        _emoji: &crate::discord_transport::DiscordEmoji,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn remove_reaction(
+        &self,
+        _channel_id: u64,
+        _message_id: u64,
+        _emoji: &crate::discord_transport::DiscordEmoji,
+        _user_id: u64,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn clear_reaction(
+        &self,
+        _channel_id: u64,
+        _message_id: u64,
+        _emoji: &crate::discord_transport::DiscordEmoji,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn unpin_message(&self, _channel_id: u64, _message_id: u64) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn send_direct_message(
+        &self,
+        _user_id: u64,
+        _message: DiscordMessage,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn guild_member(
+        &self,
+        _guild_id: u64,
+        user_id: u64,
+    ) -> Result<Option<crate::discord_transport::DiscordGuildMemberSnapshot>, String> {
+        self.member_lookups.lock().unwrap().push(user_id);
+        Ok(self.fetchable.get(&user_id).map(|display_name| {
+            crate::discord_transport::DiscordGuildMemberSnapshot {
+                user_id,
+                display_name: display_name.clone(),
+                presence: crate::discord_transport::DiscordPresence::Unknown,
+                in_voice: false,
+                deafened: false,
+                activities: Vec::new(),
+            }
+        }))
+    }
+
+    fn cached_guild_member_render_names(
+        &self,
+        _guild_id: u64,
+        user_ids: &[u64],
+    ) -> Result<Option<BTreeMap<u64, String>>, String> {
+        Ok(Some(
+            user_ids
+                .iter()
+                .filter_map(|id| self.cached.get(id).map(|name| (*id, name.clone())))
+                .collect(),
+        ))
+    }
+
+    fn last_seen_player_names(&self, _guild_id: u64, user_ids: &[u64]) -> BTreeMap<u64, String> {
+        user_ids
+            .iter()
+            .filter_map(|id| self.last_seen.get(id).map(|name| (*id, name.clone())))
+            .collect()
+    }
+}
+
+fn partial_member_cache_provider(
+    database: &NamedTempFile,
+    discord: Arc<PartialMemberCacheDiscord>,
+) -> BettingRegistrationProvider {
+    let config = ApplicationConfig::from_lookup(|name| {
+        (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
+    })
+    .expect("partial member cache configuration");
+    BettingRegistrationProvider::new(database.path(), &config, discord)
+}
+
+#[tokio::test]
+async fn betting_names_fall_back_from_cache_to_fetch_to_last_seen_name() {
+    let database = NamedTempFile::new().expect("player name database");
+    initialize_or_migrate(database.path()).expect("player name schema");
+    let discord = Arc::new(PartialMemberCacheDiscord {
+        cached: BTreeMap::from([(7, "Cached Seven".to_owned())]),
+        fetchable: BTreeMap::from([(697_288_295_876_526_160, "Fetched Player".to_owned())]),
+        last_seen: BTreeMap::from([
+            (9, "Departed Nine".to_owned()),
+            (697_288_295_876_526_160, "Stale Name".to_owned()),
+        ]),
+        ..PartialMemberCacheDiscord::default()
+    });
+    let provider = partial_member_cache_provider(&database, Arc::clone(&discord));
+
+    let names = provider
+        .handler
+        .render_player_names(&[7, 697_288_295_876_526_160, 9, 10], Some(42))
+        .await;
+
+    assert_eq!(
+        names,
+        BTreeMap::from([
+            (7, "Cached Seven".to_owned()),
+            (697_288_295_876_526_160, "Fetched Player".to_owned()),
+            (9, "Departed Nine".to_owned()),
+            (10, "Unknown player".to_owned()),
+        ])
+    );
+    assert_eq!(
+        *discord.member_lookups.lock().unwrap(),
+        vec![9, 10, 697_288_295_876_526_160],
+        "only cache misses reach Discord"
+    );
+}
+
+#[tokio::test]
+async fn wheel_victim_names_use_last_seen_names_beneath_the_cache() {
+    let database = NamedTempFile::new().expect("wheel name database");
+    initialize_or_migrate(database.path()).expect("wheel name schema");
+    let discord = Arc::new(PartialMemberCacheDiscord {
+        cached: BTreeMap::from([(7, "Cached Seven".to_owned())]),
+        last_seen: BTreeMap::from([
+            (7, "Old Seven".to_owned()),
+            (8, "Departed Eight".to_owned()),
+        ]),
+        ..PartialMemberCacheDiscord::default()
+    });
+
+    let names = CachedDiscordWheelPlayerNames::new(discord, 42).names_for(&[7, 8, 9]);
+
+    assert_eq!(
+        names,
+        BTreeMap::from([
+            (7, "Cached Seven".to_owned()),
+            (8, "Departed Eight".to_owned()),
+            (9, "Unknown player".to_owned()),
+        ])
+    );
 }

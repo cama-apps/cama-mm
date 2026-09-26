@@ -1239,6 +1239,15 @@ CREATE TABLE player_curfew_pending_changes (
                 PRIMARY KEY (discord_id, guild_id, name)
             );
 
+-- table: player_display_names
+CREATE TABLE player_display_names (
+                discord_id   INTEGER NOT NULL,
+                guild_id     INTEGER NOT NULL DEFAULT 0,
+                display_name TEXT NOT NULL,
+                seen_at      INTEGER NOT NULL,
+                PRIMARY KEY (discord_id, guild_id)
+            );
+
 -- table: player_mana
 CREATE TABLE player_mana (
                 discord_id   INTEGER NOT NULL,

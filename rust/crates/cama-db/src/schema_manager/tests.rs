@@ -14,6 +14,54 @@ fn empty_database() -> NamedTempFile {
 }
 
 #[test]
+fn player_display_names_support_fresh_upgrade_and_idempotent_retry() {
+    for upgrade in [false, true] {
+        let database = empty_database();
+        if upgrade {
+            initialize_or_migrate(database.path()).unwrap();
+            open_runtime_connection(database.path())
+                .unwrap()
+                .execute_batch(
+                    "DROP TABLE player_display_names;
+                     DELETE FROM schema_migrations
+                     WHERE name='create_player_display_names_table';",
+                )
+                .unwrap();
+        }
+        let report = initialize_or_migrate(database.path()).unwrap();
+        assert!(
+            report
+                .newly_applied
+                .iter()
+                .any(|name| name == "create_player_display_names_table")
+        );
+        open_runtime_connection(database.path())
+            .unwrap()
+            .execute(
+                "INSERT INTO player_display_names(discord_id,guild_id,display_name,seen_at)
+                 VALUES(7,42,'Seven',1000)",
+                [],
+            )
+            .unwrap();
+        assert!(
+            initialize_or_migrate(database.path())
+                .unwrap()
+                .was_current()
+        );
+        let stored: String = open_runtime_connection(database.path())
+            .unwrap()
+            .query_row(
+                "SELECT display_name FROM player_display_names WHERE discord_id=7 AND guild_id=42",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "Seven");
+        assert!(audit_database(database.path()).unwrap().is_compatible());
+    }
+}
+
+#[test]
 fn spectator_schema_supports_fresh_upgrade_and_retry_with_durable_cleanup_intent() {
     for upgrade in [false, true] {
         let database = empty_database();
