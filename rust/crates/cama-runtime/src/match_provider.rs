@@ -154,6 +154,8 @@ const RECORD_RATE_LIMIT: usize = 3;
 const RATE_LIMIT_WINDOW: u64 = 30;
 const SHUFFLE_LOCK_TIMEOUT: Duration = Duration::from_millis(500);
 const PENDING_MATCH_EASTER_STREAKS_KEY: &str = "_rust_match_easter_streaks";
+/// Durable marker that a hosted result must also be summarized in the lobby channel.
+const HOSTED_CHANNEL_RESULT_KEY: &str = "record_channel_result_required";
 
 #[derive(Debug, Error)]
 pub enum MatchProviderBuildError {
@@ -2255,6 +2257,10 @@ impl MatchHandler {
         }
 
         let pending = self.prepare_recording_effects(&pending).await?;
+        // Persist before the core record so restart recovery keeps the channel summary.
+        let pending = self
+            .persist_recording_effect(&pending, HOSTED_CHANNEL_RESULT_KEY, json!(true))
+            .await?;
         let worker = self.clone();
         let pending_for_task = pending.clone();
         let winning_for_task = result.winning_team.clone();
@@ -3160,6 +3166,32 @@ impl MatchHandler {
         } else {
             pending
         };
+        // A failed automatic attempt may have left its channel-summary marker;
+        // this command's own reply already reports the result in the channel.
+        let pending = if pending.state.extra.contains_key(HOSTED_CHANNEL_RESULT_KEY) {
+            let repository = self.pending.clone();
+            let (guild, id) = (pending.guild_id, pending.pending_match_id);
+            let cleared = tokio::task::spawn_blocking(move || {
+                repository.mutate_pending_match(guild, id, |state| {
+                    state.extra.remove(HOSTED_CHANNEL_RESULT_KEY);
+                })
+            })
+            .await
+            .map_err(|error| format!("hosted summary marker task failed: {error}"))?
+            .map_err(|error| error.to_string())?;
+            match cleared {
+                Some((pending, ())) => pending,
+                None => {
+                    return followup_ephemeral(
+                        &responder,
+                        "❌ Pending match no longer exists; recording was cancelled.",
+                    )
+                    .await;
+                }
+            }
+        } else {
+            pending
+        };
         let pending = match self.prepare_recording_effects(&pending).await {
             Ok(pending) => pending,
             Err(error) => return followup_ephemeral(&responder, &format!("❌ {error}")).await,
@@ -3849,69 +3881,125 @@ impl MatchHandler {
         } else {
             "Dire"
         };
+        let body = format!(
+            "🏆 **{} Match Complete - {winner} Victory!**\nMatch #{}\n\n🪙 **JC Changes:**\n{}",
+            lobby.label(),
+            recorded.match_id,
+            recorded.jc_lines.join("\n")
+        );
         if let Some(channel) = destination {
-            if pending
+            self.deliver_record_result(
+                &pending,
+                channel,
+                &body,
+                "record_result",
+                'm',
+                recorded.match_id,
+            )
+            .await?;
+        }
+        if let Some(thread) = thread {
+            self.discord
+                .edit_thread(
+                    thread,
+                    &format!("✅ {} Match Complete - {winner} Won", lobby.label()),
+                    true,
+                    true,
+                )
+                .await?;
+        }
+        // Automatic hosting has no `/record` reply in the lobby channel, so the
+        // summary would otherwise live only in the archived match thread. This
+        // copy is supplementary: an undeliverable channel must not keep the
+        // recorded match from finalizing.
+        if let Some(thread) = thread
+            && pending.state.extra.get(HOSTED_CHANNEL_RESULT_KEY) == Some(&json!(true))
+            && let Some(channel) = pending
                 .state
-                .extra
-                .get("record_result_delivered")
-                .and_then(serde_json::Value::as_bool)
-                != Some(true)
-            {
-                let body = format!(
-                    "🏆 **{} Match Complete - {winner} Victory!**\nMatch #{}\n\n🪙 **JC Changes:**\n{}",
-                    lobby.label(),
+                .origin_channel_id
+                .or(pending.state.cmd_shuffle_channel_id)
+                .or(pending.state.shuffle_channel_id)
+                .and_then(|id| u64::try_from(id).ok())
+                .filter(|channel| *channel != thread)
+            && let Err(error) = self
+                .deliver_record_result(
+                    &pending,
+                    channel,
+                    &body,
+                    "record_channel_result",
+                    'c',
                     recorded.match_id,
-                    recorded.jc_lines.join("\n")
-                );
-                let saved = self
-                    .persist_recording_effect(
-                        &pending,
-                        "record_result_chunks",
-                        json!(chunk_default_discord_content(&body)),
-                    )
-                    .await?;
-                let chunks: Vec<String> =
-                    serde_json::from_value(saved.state.extra["record_result_chunks"].clone())
-                        .map_err(|error| error.to_string())?;
-                for (index, chunk) in chunks.into_iter().enumerate() {
-                    let key = format!("record_result_chunk_{index}");
-                    if saved
-                        .state
-                        .extra
-                        .get(&key)
-                        .and_then(serde_json::Value::as_bool)
-                        == Some(true)
-                    {
-                        continue;
-                    }
-                    let delivery_key = format!("m{:019}{index:04}", recorded.match_id);
-                    self.discord
-                        .send_message_with_delivery_key(
-                            channel,
-                            &delivery_key,
-                            DiscordMessage::silent(InteractionResponse::message(chunk)),
-                        )
-                        .await?;
-                    self.persist_recording_effect(&pending, &key, json!(true))
-                        .await?;
-                }
-                self.persist_recording_effect(&pending, "record_result_delivered", json!(true))
-                    .await?;
-            }
-            if let Some(thread) = thread {
-                self.discord
-                    .edit_thread(
-                        thread,
-                        &format!("✅ {} Match Complete - {winner} Won", lobby.label()),
-                        true,
-                        true,
-                    )
-                    .await?;
-            }
+                )
+                .await
+        {
+            warn!(
+                %error,
+                match_id = recorded.match_id,
+                channel,
+                "hosted result channel summary delivery failed"
+            );
         }
         self.spawn_moderation_completion_notifications(pending.guild_id, recorded.match_id);
         self.spawn_recorded_match_discovery(pending.guild_id, recorded.match_id, &pending);
         Ok(streaming)
+    }
+
+    /// Send the persisted result chunks to one destination. Per-chunk markers
+    /// and stable delivery keys make restart recovery resume without repeats.
+    async fn deliver_record_result(
+        &self,
+        pending: &PendingMatchRecord,
+        channel: u64,
+        body: &str,
+        key_prefix: &str,
+        nonce_prefix: char,
+        match_id: i64,
+    ) -> Result<(), String> {
+        let delivered_key = format!("{key_prefix}_delivered");
+        if pending
+            .state
+            .extra
+            .get(&delivered_key)
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        {
+            return Ok(());
+        }
+        let saved = self
+            .persist_recording_effect(
+                pending,
+                "record_result_chunks",
+                json!(chunk_default_discord_content(body)),
+            )
+            .await?;
+        let chunks: Vec<String> =
+            serde_json::from_value(saved.state.extra["record_result_chunks"].clone())
+                .map_err(|error| error.to_string())?;
+        for (index, chunk) in chunks.into_iter().enumerate() {
+            let key = format!("{key_prefix}_chunk_{index}");
+            if saved
+                .state
+                .extra
+                .get(&key)
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            {
+                continue;
+            }
+            let delivery_key = format!("{nonce_prefix}{match_id:019}{index:04}");
+            self.discord
+                .send_message_with_delivery_key(
+                    channel,
+                    &delivery_key,
+                    DiscordMessage::silent(InteractionResponse::message(chunk)),
+                )
+                .await?;
+            self.persist_recording_effect(pending, &key, json!(true))
+                .await?;
+        }
+        self.persist_recording_effect(pending, &delivered_key, json!(true))
+            .await?;
+        Ok(())
     }
 
     fn ensure_valve_match_id(

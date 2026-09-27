@@ -35,7 +35,8 @@ use steam_vent_proto_dota2::dota_gcmessages_server::{
 use steam_vent_proto_dota2::dota_shared_enums::{DOTA_CM_PICK, DOTA_GC_TEAM, DOTALobbyVisibility};
 use steam_vent_proto_dota2::gcsdk_gcmessages::{
     CMsgClientHello, CMsgClientWelcome, CMsgConnectionStatus, CMsgSOCacheSubscribed,
-    CMsgSOCacheSubscribedUpToDate, CMsgSOCacheUnsubscribed, CMsgSOSingleObject, GCConnectionStatus,
+    CMsgSOCacheSubscribedUpToDate, CMsgSOCacheSubscriptionRefresh, CMsgSOCacheUnsubscribed,
+    CMsgSOIDOwner, CMsgSOSingleObject, GCConnectionStatus,
 };
 use steam_vent_proto_dota2::gcsystemmsgs::{EGCBaseClientMsg, ESOMsg};
 use thiserror::Error;
@@ -48,6 +49,11 @@ const EVENT_BUFFER: usize = 128;
 const INITIAL_CACHE_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const CREATION_SESSION_MAX_AGE: Duration = Duration::from_secs(5);
+/// A quiet lobby receives no SOCache pushes, so ask for a resend well before
+/// callers' freshness windows lapse.
+const LOBBY_REFRESH_AFTER: Duration = Duration::from_secs(15);
+/// Minimum spacing between resend requests while the GC has not answered.
+const LOBBY_REFRESH_RETRY: Duration = Duration::from_secs(5);
 const ERESULT_OK: u32 = 1;
 const SO_OWNER_ACCOUNT: u32 = 1;
 const SO_OWNER_LOBBY: u32 = 3;
@@ -559,11 +565,28 @@ struct ClientState {
     status: CacheStatus,
     lobby: Option<LobbySnapshot>,
     lobby_observed_at: Option<Instant>,
+    lobby_refresh_requested_at: Option<Instant>,
     welcome_generation: u64,
     welcome_observed_at: Option<tokio::time::Instant>,
 }
 
 impl ClientState {
+    /// The lobby whose cache should be resent, when the current observation is
+    /// ageing. A disconnected or empty cache has nothing trustworthy to renew.
+    fn lobby_refresh_target(&self) -> Option<u64> {
+        if self.status != CacheStatus::Ready
+            || self
+                .lobby_observed_at
+                .is_some_and(|at| at.elapsed() < LOBBY_REFRESH_AFTER)
+            || self
+                .lobby_refresh_requested_at
+                .is_some_and(|at| at.elapsed() < LOBBY_REFRESH_RETRY)
+        {
+            return None;
+        }
+        self.lobby.as_ref().map(|lobby| lobby.lobby_id)
+    }
+
     fn lobby_observation_is_fresh(&self, max_age: Duration) -> bool {
         self.status == CacheStatus::Ready
             && self.lobby.is_some()
@@ -640,6 +663,7 @@ impl DotaSteamClient {
             welcome_generation: 0,
             welcome_observed_at: None,
             lobby_observed_at: None,
+            lobby_refresh_requested_at: None,
         }));
         let gc = Arc::new(Mutex::new(gc));
         let (watcher_ready, watcher_start) = oneshot::channel();
@@ -701,6 +725,35 @@ impl DotaSteamClient {
     /// Reading the cache does not refresh this observation.
     pub async fn lobby_observation_is_fresh(&self, max_age: Duration) -> bool {
         self.state.read().await.lobby_observation_is_fresh(max_age)
+    }
+
+    /// Like [`Self::lobby_observation_is_fresh`], but also asks the GC to
+    /// resend an ageing lobby cache. The GC pushes lobby objects only on
+    /// change, so an idle lobby would otherwise look stale. The request is not
+    /// awaited: callers act on the observation they already hold, and the
+    /// resent lobby object renews it well before `max_age` lapses. An ignored
+    /// or failed request leaves the observation to expire normally.
+    pub async fn refresh_lobby_observation(&self, max_age: Duration) -> bool {
+        let lobby_id = {
+            let mut state = self.state.write().await;
+            let Some(lobby_id) = state.lobby_refresh_target() else {
+                return state.lobby_observation_is_fresh(max_age);
+            };
+            state.lobby_refresh_requested_at = Some(Instant::now());
+            lobby_id
+        };
+        let request = CMsgSOCacheSubscriptionRefresh {
+            owner_soid: MessageField::some(CMsgSOIDOwner {
+                type_: Some(SO_OWNER_LOBBY),
+                id: Some(lobby_id),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        if let Err(error) = self.send(request).await {
+            warn!(%error, lobby_id, "Dota lobby cache refresh failed");
+        }
+        self.lobby_observation_is_fresh(max_age).await
     }
 
     /// Return the current game-server SteamID used by server-side realtime
@@ -1903,6 +1956,7 @@ mod tests {
             welcome_generation: 0,
             welcome_observed_at: None,
             lobby_observed_at: Some(Instant::now()),
+            lobby_refresh_requested_at: None,
         }))
     }
 
@@ -2135,6 +2189,55 @@ mod tests {
         assert!(!state.read().await.lobby_observation_is_fresh(max_age));
         clear_lobby(&state, &events).await;
         assert!(!state.read().await.lobby_observation_is_fresh(max_age));
+    }
+
+    #[tokio::test]
+    async fn quiet_lobby_refresh_resend_renews_observation() {
+        let state = ready_lobby_state();
+        let max_age = Duration::from_secs(45);
+        // A recently observed lobby needs no resend request.
+        assert_eq!(state.read().await.lobby_refresh_target(), None);
+
+        // An idle lobby receives no pushes; its ageing observation is refreshed.
+        let old = Instant::now() - Duration::from_secs(60);
+        state.write().await.lobby_observed_at = Some(old);
+        assert_eq!(state.read().await.lobby_refresh_target(), Some(7001));
+        assert!(!state.read().await.lobby_observation_is_fresh(max_age));
+        // An unanswered request is not repeated on every freshness check.
+        state.write().await.lobby_refresh_requested_at = Some(Instant::now());
+        assert_eq!(state.read().await.lobby_refresh_target(), None);
+        state.write().await.lobby_refresh_requested_at = Some(old);
+        assert_eq!(state.read().await.lobby_refresh_target(), Some(7001));
+
+        // The GC answers a lobby-owner refresh with a full cache resend.
+        let mut lobby = CSODOTALobby::new();
+        lobby.set_lobby_id(7001);
+        let mut subscribed_type =
+            steam_vent_proto_dota2::gcsdk_gcmessages::cmsg_socache_subscribed::SubscribedType::new(
+            );
+        subscribed_type.set_type_id(SO_TYPE_LOBBY);
+        subscribed_type
+            .object_data
+            .push(lobby.write_to_bytes().expect("encode lobby fixture"));
+        let mut cache = CMsgSOCacheSubscribed::new();
+        cache.objects.push(subscribed_type);
+        cache.owner_soid = MessageField::some(CMsgSOIDOwner {
+            type_: Some(SO_OWNER_LOBBY),
+            id: Some(7001),
+            ..Default::default()
+        });
+        let (events, _) = broadcast::channel(EVENT_BUFFER);
+        apply_subscribed(cache, &state, &events).await;
+        assert!(state.read().await.lobby_observation_is_fresh(max_age));
+        assert_eq!(state.read().await.lobby_refresh_target(), None);
+
+        // Nothing trustworthy to renew without a live cache and lobby.
+        state.write().await.lobby_observed_at = Some(old);
+        state.write().await.status = CacheStatus::Disconnected;
+        assert_eq!(state.read().await.lobby_refresh_target(), None);
+        state.write().await.status = CacheStatus::Ready;
+        state.write().await.lobby = None;
+        assert_eq!(state.read().await.lobby_refresh_target(), None);
     }
 
     fn unsubscribe(owner_type: u32, owner_id: u64) -> CMsgSOCacheUnsubscribed {
@@ -2446,6 +2549,7 @@ mod tests {
             welcome_generation: 0,
             welcome_observed_at: None,
             lobby_observed_at: None,
+            lobby_refresh_requested_at: None,
         }));
         let (events, _events_rx) = broadcast::channel(EVENT_BUFFER);
 

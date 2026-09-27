@@ -4903,6 +4903,7 @@ impl RecordedMatchDiscovery for StaticRecordedDiscovery {
 struct PublicationDiscord {
     sent: Mutex<Vec<(u64, DiscordMessage)>>,
     fail_summary: bool,
+    fail_channel: Option<u64>,
     recap_manifest: Option<PathBuf>,
     recap_delivery: bool,
     recap_receipts: Mutex<BTreeMap<String, crate::discord_transport::DiscordMessageReceipt>>,
@@ -5008,7 +5009,7 @@ impl DiscordTransport for PublicationDiscord {
             .expect("parse recap before summary publication");
             assert!(manifest.get("job").is_none_or(serde_json::Value::is_null));
         }
-        if self.fail_summary {
+        if self.fail_summary || self.fail_channel == Some(channel_id) {
             return Err("summary publication unavailable".to_owned());
         }
         let message_id = {
