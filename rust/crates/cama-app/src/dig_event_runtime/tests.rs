@@ -1231,7 +1231,7 @@ fn unique_gear_repair_preview_matches_prorated_debit() {
     );
     let preview =
         service.compute_repair_cost(GearSlot::Weapon, 3, Some("glassbreaker_pick"), 4, Some(8));
-    assert_eq!(preview, 10);
+    assert_eq!(preview, 5);
     let result = service.repair_gear(111, 0, gear_id);
     assert!(result.success);
     assert_eq!(result.cost, preview);
@@ -1546,4 +1546,20 @@ fn splash_replay_reuses_victims_debited_before_their_audit_row_was_written() {
         "the replay must not rob a victim the first execution never touched"
     );
     assert_eq!(fixture.count_actions(runner_up, "splash_victim"), 0);
+}
+
+#[test]
+fn event_loss_takes_the_balance_but_never_pushes_into_debt() {
+    for (balance, expected_jc) in [(3, -3), (0, 0), (-20, 0)] {
+        let fixture = Fixture::new();
+        fixture.seed_actor(ACTOR, balance, 50, 0);
+        let outcome = fixture
+            .service()
+            .resolve_event(request("grenths_tithe", "safe", "event:tithe:debt"))
+            .expect("tithe resolves");
+        let resolution = outcome.resolution.as_ref().expect("typed resolution");
+        assert!(outcome.success && outcome.applied_now);
+        assert_eq!(resolution.jc, expected_jc, "balance {balance}");
+        assert_eq!(fixture.balance(ACTOR), balance + expected_jc);
+    }
 }

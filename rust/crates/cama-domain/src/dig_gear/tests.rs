@@ -531,7 +531,7 @@ fn test_unique_gear_registry_matches_python_sidegrades() {
 }
 
 #[test]
-fn test_service_repair_charges_ten_percent_prorated_by_damage() {
+fn test_service_repair_charges_five_percent_prorated_by_damage() {
     let mut service = GearService::fixture();
     let id = service
         .buy_gear(PLAYER, GUILD, "armor", 3)
@@ -542,8 +542,8 @@ fn test_service_repair_charges_ten_percent_prorated_by_damage() {
     let before = service.store.balance(PLAYER, GUILD);
     let result = service.repair_gear(PLAYER, GUILD, id);
     assert!(result.success);
-    assert_eq!(result.cost, 14);
-    assert_eq!(service.store.balance(PLAYER, GUILD), before - 14);
+    assert_eq!(result.cost, 7);
+    assert_eq!(service.store.balance(PLAYER, GUILD), before - 7);
     assert_eq!(service.store.gear_by_id(id).expect("piece").durability, 20);
 }
 
@@ -578,8 +578,8 @@ fn test_service_repair_all_sums_costs() {
     let before = service.store.balance(PLAYER, GUILD);
     let result = service.repair_all_gear(PLAYER, GUILD);
     assert!(result.success);
-    assert_eq!((result.repaired, result.cost), (2, 7));
-    assert_eq!(service.store.balance(PLAYER, GUILD), before - 7);
+    assert_eq!((result.repaired, result.cost), (2, 4));
+    assert_eq!(service.store.balance(PLAYER, GUILD), before - 4);
 }
 
 #[test]
@@ -1219,7 +1219,7 @@ fn test_atomic_debit_repair_succeeds_when_just_funded() {
     service.store.repair_gear(id, 5);
     let result = service.repair_gear(PLAYER, GUILD, id);
     assert!(result.success);
-    assert_eq!(service.store.balance(PLAYER, GUILD), 14);
+    assert_eq!(service.store.balance(PLAYER, GUILD), 21);
 }
 
 #[test]
@@ -1437,8 +1437,8 @@ fn test_broken_gear_effects_weapon_has_no_active_pickaxe_effects() {
 }
 
 #[test]
-fn test_prorated_repair_full_repair_value_is_ten_percent() {
-    assert_close(GEAR_REPAIR_COST_PCT, 0.10);
+fn test_prorated_repair_full_repair_value_is_five_percent() {
+    assert_close(GEAR_REPAIR_COST_PCT, 0.05);
 }
 
 #[test]
@@ -1453,7 +1453,7 @@ fn test_prorated_repair_single_repair_prorates_cost_by_missing_durability() {
     let preview = service.compute_repair_cost(GearSlot::Armor, 3, None, 10, Some(20));
     let before = service.store.balance(PLAYER, GUILD);
     let result = service.repair_gear(PLAYER, GUILD, id);
-    assert_eq!(preview, 9);
+    assert_eq!(preview, 5);
     assert_eq!(result.cost, preview);
     assert_eq!(service.store.balance(PLAYER, GUILD), before - preview);
 }
@@ -1476,7 +1476,7 @@ fn test_prorated_repair_all_preview_matches_prorated_debit() {
     let preview = service.compute_repair_all_cost(PLAYER, GUILD);
     let before = service.store.balance(PLAYER, GUILD);
     let result = service.repair_all_gear(PLAYER, GUILD);
-    assert_eq!(preview, 14);
+    assert_eq!(preview, 8);
     assert_eq!(result.cost, preview);
     assert_eq!(service.store.balance(PLAYER, GUILD), before - preview);
 }

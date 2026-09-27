@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const GEAR_MAX_DURABILITY: i32 = 20;
-pub const GEAR_REPAIR_COST_PCT: f64 = 0.10;
+pub const GEAR_REPAIR_COST_PCT: f64 = 0.05;
 pub const GEAR_BOSS_DROP_RATE: f64 = 0.07;
 pub const PLAYER_HIT_FLOOR: f64 = 0.05;
 pub const PLAYER_HIT_CEILING: f64 = 0.90;

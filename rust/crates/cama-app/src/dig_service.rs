@@ -618,6 +618,44 @@ pub fn defeated_boundaries_from_json(raw: &str) -> BTreeSet<i64> {
     defeated
 }
 
+/// Boss-progress entry key marking that the player just fought or retreated
+/// from this boss. The next committed Dig is a breather: it still stops at
+/// `boundary - 1` but never opens the encounter, and it clears the mark, so a
+/// boss can never be engaged on two digs in a row.
+pub const BOSS_REST_PENDING_KEY: &str = "rest_pending";
+
+/// Whether the entry for `boundary` in raw `boss_progress` JSON carries the
+/// post-fight breather mark.
+#[must_use]
+pub fn boss_rest_pending_from_json(raw: &str, boundary: i64) -> bool {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|progress| {
+            progress
+                .get(boundary.to_string())
+                .and_then(|entry| entry.get(BOSS_REST_PENDING_KEY))
+                .and_then(serde_json::Value::as_bool)
+        })
+        .unwrap_or(false)
+}
+
+/// Raw `boss_progress` JSON with every breather mark removed, or `None` when
+/// there was nothing to clear (so an unmarked tunnel is written back byte for
+/// byte).
+#[must_use]
+pub fn clear_boss_rest_json(raw: &str) -> Option<String> {
+    let serde_json::Value::Object(mut progress) = serde_json::from_str(raw).ok()? else {
+        return None;
+    };
+    let mut cleared = false;
+    for entry in progress.values_mut() {
+        if let Some(entry) = entry.as_object_mut() {
+            cleared |= entry.remove(BOSS_REST_PENDING_KEY).is_some();
+        }
+    }
+    cleared.then(|| serde_json::Value::Object(progress).to_string())
+}
+
 /// The boss a tunnel at `depth` is parked on: the next undefeated boundary
 /// once the head is within one block of it. This is the single rule every
 /// "which boss am I at" reader must share with [`apply_boss_gate`].
@@ -703,6 +741,9 @@ pub struct TunnelState {
     pub artifacts: Vec<&'static str>,
     pub awarded_bosses: BTreeSet<i64>,
     pub defeated_bosses: BTreeSet<i64>,
+    /// The next boss was fought or retreated from on the previous action, so
+    /// this Dig stops short of it without opening the encounter.
+    pub boss_resting: bool,
     pub buff: Option<TempBuff>,
 }
 
@@ -723,6 +764,7 @@ impl Default for TunnelState {
             artifacts: Vec::new(),
             awarded_bosses: BTreeSet::new(),
             defeated_bosses: BTreeSet::new(),
+            boss_resting: false,
             buff: None,
         }
     }
@@ -855,7 +897,8 @@ pub fn apply_dig_outcome(state: &mut TunnelState, input: DigOutcomeInput, now: i
             )
         };
         let gated = apply_boss_gate(state.depth, raw, &state.defeated_bosses);
-        (gated.advance, gated.depth_after, gated.boss_encounter)
+        let encounter = gated.boss_encounter.filter(|_| !state.boss_resting);
+        (gated.advance, gated.depth_after, encounter)
     };
     state.depth = depth_after;
     state.max_depth = state.max_depth.max(depth_after);

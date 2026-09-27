@@ -151,15 +151,15 @@ fn dig_event_balance_dark_light_weights_harmful_events_and_reduces_risky_success
     assert_low_light_policy_vector(10, 1.25 * 1.25, 0.45);
 }
 
-// test_dig_event_balance.py::test_low_light_biases_harmful_events_and_risky_success[0-1.875-0.25]
+// Pitch black already forces the risky branch, so its accuracy penalty is
+// capped at ordinary darkness's 0.15.
 #[test]
 fn dig_event_balance_pitch_black_weights_harmful_events_and_reduces_risky_success() {
-    assert_low_light_policy_vector(0, 1.25 * 1.50, 0.35);
+    assert_low_light_policy_vector(0, 1.25 * 1.50, 0.45);
 }
 
-// test_dig_event_balance.py::test_negative_actor_event_is_strengthened_before_economy_scaling
 #[test]
-fn dig_event_balance_negative_actor_event_strengthens_before_economy_scaling() {
+fn dig_event_balance_negative_actor_event_scales_once_before_economy_scaling() {
     let result = resolve_canonical_event_with_policy(
         "hungering_dark",
         "risky",
@@ -168,10 +168,11 @@ fn dig_event_balance_negative_actor_event_strengthens_before_economy_scaling() {
     )
     .expect("negative actor event resolves");
     assert!(!result.succeeded);
-    // Authored -5 -> Python banker's-rounding negative-event multiplier -6,
-    // then the event loss scalar -9, then deflationary economy scaling -10.
-    assert_eq!(result.economy_gross_jc, -9);
-    assert_eq!(result.jc, -10);
+    // Authored -5 -> banker's-rounding negative-event multiplier -6, then
+    // deflationary economy scaling -7. Losses are no longer strengthened a
+    // second time.
+    assert_eq!(result.economy_gross_jc, -6);
+    assert_eq!(result.jc, -7);
 }
 
 // test_dig_event_balance.py::test_negative_depth_event_setback_is_quarter_harsher
@@ -272,4 +273,23 @@ fn dig_event_balance_burn_ratio_uses_strengthened_nominal_amount() {
         settlement.jc_after,
         (10.0 * expected_ratio).round_ties_even() as i64
     );
+}
+
+#[test]
+fn dig_event_balance_loss_jitter_never_exceeds_the_scaled_price() {
+    let resolve = |jc_jitter_multiplier| {
+        resolve_canonical_event_with_policy(
+            "hungering_dark",
+            "risky",
+            CanonicalEventRolls {
+                jc_jitter_multiplier,
+                ..rolls(0.99)
+            },
+            CanonicalEventPolicy::default(),
+        )
+        .expect("negative actor event resolves")
+        .jc
+    };
+    assert_eq!(resolve(1.5), resolve(1.0));
+    assert!(resolve(0.5) > resolve(1.0));
 }

@@ -838,14 +838,15 @@ pub fn resolve_canonical_event_with_policy(
     if jc < 0 {
         jc = round_i64(jc as f64 * CANONICAL_EVENT_NEGATIVE_JC_MULTIPLIER);
     }
-    if jc != 0 {
+    if jc > 0 {
         jc = round_i64(jc as f64 * rolls.jc_jitter_multiplier);
+    } else if jc < 0 {
+        // Losses jitter downward only, so an event never costs more than its
+        // scaled authored price.
+        jc = round_i64(jc as f64 * rolls.jc_jitter_multiplier.min(1.0));
     }
-    if jc < 0 {
-        jc = strengthen_event_penalty(jc);
-        if !succeeded && matches!(choice, "risky" | "desperate") && policy.ruinwager_edge {
-            jc = -((jc.unsigned_abs() as f64 * 1.25).ceil() as i64);
-        }
+    if jc < 0 && !succeeded && matches!(choice, "risky" | "desperate") && policy.ruinwager_edge {
+        jc = -((jc.unsigned_abs() as f64 * 1.25).ceil() as i64);
     }
     if policy.burning_ledger {
         jc = if jc > 0 {
@@ -1047,10 +1048,10 @@ fn luminosity_risky_penalty(luminosity: i64) -> f64 {
         0.0
     } else if luminosity >= 26 {
         0.05
-    } else if luminosity >= 1 {
-        0.15
     } else {
-        0.25
+        // Pitch black already forces the risky branch; it costs no more
+        // accuracy than ordinary darkness.
+        0.15
     }
 }
 

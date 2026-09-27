@@ -10206,7 +10206,16 @@ fn paused_boss_response(
         .options
         .iter()
         .enumerate()
-        .map(|(index, option)| format!("{}. {}", index + 1, option.label))
+        .map(|(index, option)| {
+            let line = format!("{}. {}", index + 1, option.label);
+            match cama_app::boss_multi_tier::mechanic_option_odds(
+                &paused.pending_prompt.mechanic_id,
+                option.option_index,
+            ) {
+                Some(odds) => format!("{line}\n-# {odds}"),
+                None => line,
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n");
     let buttons = paused
@@ -10300,7 +10309,11 @@ fn regular_boss_result_embed(
         format!(
             "Defeat! **{boss_name}** overpowered you. You lost **{}** {JOPACOIN_EMOTE} and were knocked back {} blocks.",
             result.jc_delta.unsigned_abs(),
-            result.boundary.saturating_sub(result.new_depth)
+            // The fight starts parked one block above the boundary.
+            result
+                .boundary
+                .saturating_sub(1)
+                .saturating_sub(result.new_depth)
         )
     };
     let mut embed = InteractionEmbed::titled(if phase_cleared {
@@ -10334,7 +10347,7 @@ fn regular_boss_result_embed(
         embed = embed.field(
             "The boss remembers",
             format!(
-                "You knocked {boss_name} from **{}/{} HP** to **{}/{} HP** before retreating.",
+                "You knocked {boss_name} from **{}/{} HP** to **{}/{} HP** before falling.",
                 result.starting_boss_hp,
                 result.boss_hp_max,
                 result.boss_hp_remaining,
@@ -10441,7 +10454,7 @@ fn pinnacle_boss_result_response(
         embed = embed.field(
             "The boss remembers",
             format!(
-                "You knocked {} from **{}/{} HP** to **{}/{} HP** before retreating.",
+                "You knocked {} from **{}/{} HP** to **{}/{} HP** before falling.",
                 result.boss_name,
                 result.starting_boss_hp,
                 result.boss_hp_max,

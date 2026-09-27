@@ -1764,6 +1764,8 @@ pub struct BossProgressEntry {
     pub first_meet_seen: bool,
     /// One-shot inter-phase event applied and cleared at the next fight.
     pub pending_phase_event_id: Option<String>,
+    /// The player just fought or retreated; the next Dig is a breather.
+    pub rest_pending: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

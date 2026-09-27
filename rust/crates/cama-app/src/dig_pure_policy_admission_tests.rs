@@ -178,8 +178,8 @@ fn dig_ring_effects_ruinwager_signet_makes_failed_jc_losses_one_quarter_harsher(
     )
     .expect("signet loss resolves");
     assert!(!baseline.succeeded && !with_signet.succeeded);
-    assert_eq!(baseline.jc, -24);
-    assert_eq!(with_signet.jc, -31);
+    assert_eq!(baseline.jc, -18);
+    assert_eq!(with_signet.jc, -22);
 }
 
 // test_dig_ring_effects.py::test_red_thread_band_rerolls_only_the_first_missed_attack
@@ -470,8 +470,8 @@ fn dig_new_relic_effects_burning_ledger_increases_event_gains_and_strengthened_l
     let ledger_loss = loss(true);
     assert_eq!(ordinary_gain.jc, 73);
     assert_eq!(ledger_gain.jc, 84);
-    assert_eq!(ordinary_loss.jc, -24);
-    assert_eq!(ledger_loss.jc, -31);
+    assert_eq!(ordinary_loss.jc, -18);
+    assert_eq!(ledger_loss.jc, -22);
 }
 
 // The Lantern Stub and Bone Abacus source nodes now have their unique active
