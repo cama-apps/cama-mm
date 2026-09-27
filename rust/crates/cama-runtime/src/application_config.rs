@@ -440,7 +440,7 @@ impl ApplicationConfig {
                 calibration_rd_threshold: p.f64("CALIBRATION_RD_THRESHOLD", 100.0),
                 dig_llm_enabled: p.bool("DIG_LLM_ENABLED", true),
                 disburse_min_fund: p.i64("DISBURSE_MIN_FUND", 250),
-                disburse_quorum_percentage: p.f64("DISBURSE_QUORUM_PERCENTAGE", 0.4),
+                disburse_quorum_percentage: 0.36,
                 dota_bet_seed_amount: p.i64("DOTA_BET_SEED_AMOUNT", 50),
                 double_or_nothing_cooldown_seconds: p
                     .i64("DOUBLE_OR_NOTHING_COOLDOWN_SECONDS", 2592000),
@@ -902,6 +902,16 @@ mod tests {
     fn soft_avoid_defaults_to_five_hundred() {
         let config = parse(&[("DISCORD_BOT_TOKEN", "token")]);
         assert_eq!(config.values.shop_soft_avoid_cost, 500);
+    }
+
+    #[test]
+    fn disburse_quorum_is_thirty_six_percent_and_ignores_environment() {
+        let config = parse(&[
+            ("DISCORD_BOT_TOKEN", "token"),
+            ("DISBURSE_QUORUM_PERCENTAGE", "0.9"),
+        ]);
+        assert_eq!(config.values.disburse_quorum_percentage, 0.36);
+        assert_eq!(config.values.disburse_min_fund, 250);
     }
 
     #[test]

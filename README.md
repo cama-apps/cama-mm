@@ -382,7 +382,7 @@ Additional settings can be configured in `.env` (see the Rust application config
 - `BANKRUPTCY_COOLDOWN_SECONDS`, `BANKRUPTCY_PENALTY_GAMES`, `BANKRUPTCY_PENALTY_RATE_PER_GAME` - Bankruptcy settings (default penalty: 3 games, 5% of profit withheld per outstanding game, capped at 100%)
 - `TIP_FEE_RATE` - Tipping fee (default: 1%)
 - `VANITY_TAX_RATE` - Profit tax on members without a server nickname (default: 10%)
-- `DISBURSE_MIN_FUND`, `DISBURSE_QUORUM_PERCENTAGE` - Disbursement voting
+- `DISBURSE_MIN_FUND` - Disbursement voting minimum fund
 - `PINGEDASH_TARGET_USER_ID`, `PINGEDKEVIN_TARGET_USER_ID` - Discord user IDs
   targeted by the paid `/shop pingedash` and `/shop pingedkevin` commands
 
