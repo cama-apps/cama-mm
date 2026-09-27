@@ -629,3 +629,138 @@ fn hosted_statistics_validate_identity_and_preserve_missing_fields() {
         .pop();
     assert!(validate_hosted_statistics(&result).is_err());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hosted_record_posts_result_summary_in_lobby_channel_and_thread() {
+    const THREAD: u64 = 77_002;
+    const CHANNEL: u64 = 77_001;
+    let discord = Arc::new(PublicationDiscord::default());
+    let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
+    let pending = fixture.pending(unix_seconds() + 120);
+    PendingMatchRepository::new(fixture.database.path())
+        .mutate_pending_match(GUILD, pending.pending_match_id, |state| {
+            state.thread_shuffle_thread_id = Some(i64::try_from(THREAD).unwrap());
+        })
+        .expect("attach shuffle thread")
+        .expect("pending match exists");
+    let result = linked_hosted_result(&fixture, &pending, 8_123_456_790, "dire");
+    let summaries = || {
+        discord
+            .sent
+            .lock()
+            .expect("publication capture")
+            .iter()
+            .filter(|(_, message)| {
+                message
+                    .response
+                    .content
+                    .contains("Match Complete - Dire Victory!")
+            })
+            .map(|(channel, message)| (*channel, message.response.content.clone()))
+            .collect::<Vec<_>>()
+    };
+
+    fixture
+        .provider
+        .record_hosted_match(result.clone())
+        .await
+        .expect("record hosted match");
+    let first = summaries();
+    let channels = first
+        .iter()
+        .map(|(channel, _)| *channel)
+        .collect::<Vec<_>>();
+    assert_eq!(channels, vec![THREAD, CHANNEL]);
+    assert!(
+        first
+            .iter()
+            .all(|(_, content)| content.contains("JC Changes"))
+    );
+    assert_eq!(first[0].1, first[1].1);
+
+    fixture
+        .provider
+        .record_hosted_match(result)
+        .await
+        .expect("idempotent hosted retry");
+    assert_eq!(summaries(), first);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hosted_record_finalizes_when_lobby_channel_summary_is_undeliverable() {
+    const THREAD: u64 = 77_002;
+    let discord = Arc::new(PublicationDiscord {
+        fail_channel: Some(77_001),
+        ..PublicationDiscord::default()
+    });
+    let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
+    let pending = fixture.pending(unix_seconds() + 120);
+    let repository = PendingMatchRepository::new(fixture.database.path());
+    repository
+        .mutate_pending_match(GUILD, pending.pending_match_id, |state| {
+            state.thread_shuffle_thread_id = Some(i64::try_from(THREAD).unwrap());
+        })
+        .expect("attach shuffle thread")
+        .expect("pending match exists");
+    let result = linked_hosted_result(&fixture, &pending, 8_123_456_791, "radiant");
+
+    fixture
+        .provider
+        .record_hosted_match(result)
+        .await
+        .expect("channel failure must not block hosted finalization");
+    assert!(
+        repository
+            .pending_match(GUILD, pending.pending_match_id)
+            .expect("read finalized pending match")
+            .is_none()
+    );
+    let sent = discord.sent.lock().expect("publication capture");
+    assert_eq!(
+        sent.iter().map(|(channel, _)| *channel).collect::<Vec<_>>(),
+        vec![THREAD]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_record_after_failed_hosted_attempt_skips_channel_summary() {
+    let discord = Arc::new(PublicationDiscord::default());
+    let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
+    let pending = fixture.pending(unix_seconds() + 120);
+    let pending = PendingMatchRepository::new(fixture.database.path())
+        .mutate_pending_match(GUILD, pending.pending_match_id, |state| {
+            state.thread_shuffle_thread_id = Some(77_002);
+            state
+                .extra
+                .insert(HOSTED_CHANNEL_RESULT_KEY.to_owned(), json!(true));
+        })
+        .expect("simulate failed hosted attempt")
+        .expect("pending match exists")
+        .0;
+    let responder = Arc::new(RecordingMatchResponder::default());
+
+    fixture
+        .provider
+        .handler
+        .finalize_record(
+            pending.clone(),
+            record_context(pending.state.radiant_team_ids[0], GUILD, "radiant", true),
+            responder,
+            "radiant",
+            3,
+            3,
+            0,
+            None,
+        )
+        .await
+        .expect("manual record");
+    let summaries = discord
+        .sent
+        .lock()
+        .expect("publication capture")
+        .iter()
+        .filter(|(_, message)| message.response.content.contains("Match Complete"))
+        .map(|(channel, _)| *channel)
+        .collect::<Vec<_>>();
+    assert_eq!(summaries, vec![77_002]);
+}

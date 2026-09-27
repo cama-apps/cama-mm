@@ -110,7 +110,7 @@ fn lobby_config(settings: &LobbySettings) -> LobbyConfig {
 impl DotaHostPort for SteamHost {
     async fn betting_observation_fresh(&self) -> bool {
         self.0
-            .lobby_observation_is_fresh(Duration::from_secs(45))
+            .refresh_lobby_observation(Duration::from_secs(45))
             .await
     }
     async fn snapshot(&self) -> Result<Option<HostLobby>, String> {
