@@ -6784,3 +6784,76 @@ fn torch_auto_buy_fires_on_low_light_or_the_boss_window() {
     assert!(!super::should_auto_buy_torch(47, 51));
     assert!(super::should_auto_buy_torch(48, 100));
 }
+
+#[test]
+fn test_boss_is_never_reopened_on_the_dig_right_after_a_fight() {
+    const ACTOR: i64 = 52_201;
+    const GUILD: i64 = 52_202;
+    const NOW: i64 = 1_700_000_000;
+    let database = fast_migrated_database();
+    PlayerRepository::new(database.path())
+        .add(&NewPlayer::new(ACTOR, "resting-boss", Some(GUILD)))
+        .expect("seed player");
+    let connection = Connection::open(database.path()).expect("resting boss connection");
+    connection
+        .execute(
+            "UPDATE players SET jopacoin_balance=100
+                 WHERE discord_id=?1 AND guild_id=?2",
+            params![ACTOR, GUILD],
+        )
+        .expect("seed balance");
+    connection
+        .execute(
+            "INSERT INTO tunnels(
+                     discord_id,guild_id,tunnel_name,depth,max_depth,total_digs,
+                     total_jc_earned,last_dig_at,luminosity,prestige_level,
+                     prestige_perks,boss_progress,boss_attempts
+                 ) VALUES(?1,?2,'Resting Boss',24,24,5,0,?3,100,0,'[]',?4,'{}')",
+            params![
+                ACTOR,
+                GUILD,
+                NOW - 2 * 86_400,
+                r#"{"25":{"status":"active","last_outcome":"retreat","rest_pending":true}}"#
+            ],
+        )
+        .expect("seed parked tunnel");
+    drop(connection);
+
+    let service = DigRuntimeService::sqlite(database.path());
+    let breather = service
+        .dig(DigRuntimeRequest {
+            discord_id: ACTOR,
+            guild_id: GUILD,
+            now: NOW,
+            paid: false,
+            forced_event: false,
+        })
+        .expect("breather dig");
+    assert!(breather.success, "{breather:?}");
+    assert_eq!(breather.boss_boundary, None);
+    assert_eq!(
+        (breather.depth_after, breather.event_id.as_deref()),
+        (24, None)
+    );
+    let progress: String = Connection::open(database.path())
+        .expect("reload resting boss")
+        .query_row(
+            "SELECT boss_progress FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
+            params![ACTOR, GUILD],
+            |row| row.get(0),
+        )
+        .expect("boss progress");
+    assert!(!progress.contains("rest_pending"), "{progress}");
+
+    // The breather consumed the mark, so a parked tunnel meets the boss again.
+    let reopened = service
+        .dig(DigRuntimeRequest {
+            discord_id: ACTOR,
+            guild_id: GUILD,
+            now: NOW + 2 * 86_400,
+            paid: false,
+            forced_event: false,
+        })
+        .expect("boss reopen");
+    assert_eq!(reopened.boss_boundary, Some(25));
+}

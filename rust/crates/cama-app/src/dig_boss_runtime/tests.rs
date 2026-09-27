@@ -3148,3 +3148,114 @@ fn retreating_mid_mechanic_still_settles_the_claimed_pinnacle_wager() {
         .expect("balance");
     assert_eq!(balance, 500 + resolved.outcome.jc_delta);
 }
+
+fn stored_progress(database: &FastTestDatabase) -> Value {
+    let raw = Connection::open(database.path())
+        .expect("progress DB")
+        .query_row(
+            "SELECT boss_progress FROM tunnels
+              WHERE discord_id=?1 AND guild_id=?2",
+            params![PLAYER, GUILD],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("boss progress");
+    serde_json::from_str(&raw).expect("progress JSON")
+}
+
+fn clear_prep_and_set_balance(database: &FastTestDatabase, balance: i64) {
+    let connection = Connection::open(database.path()).expect("fight DB");
+    connection
+        .execute(
+            "UPDATE tunnels SET boss_progress=?1,stinger_curse=NULL
+              WHERE discord_id=?2 AND guild_id=?3",
+            params![
+                r#"{"25":{"boss_id":"grothak","status":"active"}}"#,
+                PLAYER,
+                GUILD
+            ],
+        )
+        .expect("plain boss progress");
+    connection
+        .execute(
+            "UPDATE players SET jopacoin_balance=?1
+              WHERE discord_id=?2 AND guild_id=?3",
+            params![balance, PLAYER, GUILD],
+        )
+        .expect("balance");
+}
+
+#[test]
+fn retreat_marks_the_boss_resting_for_the_next_dig() {
+    let database = fixture();
+    pinnacle_runtime(&database)
+        .retreat(
+            pinnacle_request(1_700_000_000),
+            SequenceEntropy::new(Vec::new(), Vec::new(), vec![2]),
+        )
+        .expect("regular retreat");
+    let progress = stored_progress(&database);
+    assert_eq!(progress["25"]["rest_pending"], true);
+    assert_eq!(progress["25"]["future_field"], 17);
+}
+
+#[test]
+fn regular_loss_marks_the_boss_resting_for_the_next_dig() {
+    let database = fixture();
+    clear_prep_and_set_balance(&database, 100);
+    let result = pinnacle_runtime(&database)
+        .fight_regular(
+            pinnacle_request(1_700_000_000),
+            RiskTier::Cautious,
+            0,
+            SequenceEntropy::constant(0.99),
+        )
+        .expect("resolved loss");
+    assert!(!result.outcome.won);
+    assert_eq!(stored_progress(&database)["25"]["rest_pending"], true);
+}
+
+#[test]
+fn player_in_debt_can_still_take_a_free_boss_fight() {
+    let database = fixture();
+    clear_prep_and_set_balance(&database, -73);
+    assert!(matches!(
+        pinnacle_runtime(&database).start_regular(
+            pinnacle_request(1_700_000_000),
+            RiskTier::Cautious,
+            10,
+            SequenceEntropy::constant(0.99),
+        ),
+        Err(DigBossRuntimeError::Policy(
+            BossServiceError::InsufficientBalance {
+                wager: 10,
+                balance: -73
+            }
+        ))
+    ));
+    pinnacle_runtime(&database)
+        .start_regular(
+            pinnacle_request(1_700_000_000),
+            RiskTier::Cautious,
+            0,
+            SequenceEntropy::constant(0.99),
+        )
+        .expect("a free fight never needs a positive balance");
+}
+
+#[test]
+fn regular_boss_wager_is_capped_like_the_pinnacle() {
+    let database = fixture();
+    clear_prep_and_set_balance(&database, 5_000);
+    assert!(matches!(
+        pinnacle_runtime(&database).start_regular(
+            pinnacle_request(1_700_000_000),
+            RiskTier::Cautious,
+            MAX_NEW_BOSS_WAGER + 1,
+            SequenceEntropy::constant(0.99),
+        ),
+        Err(DigBossRuntimeError::WagerTooLarge {
+            requested: 1_001,
+            maximum: 1_000
+        })
+    ));
+}

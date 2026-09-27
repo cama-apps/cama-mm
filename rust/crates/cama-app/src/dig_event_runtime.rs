@@ -1191,6 +1191,11 @@ impl DigEventRuntimeService {
             .balance
             .checked_add(splash_execution.actor_transfer)
             .ok_or_else(|| DigEventRuntimeError::Policy("Event balance overflow.".to_owned()))?;
+        // Like cave-in medical bills, an event takes what the player has but
+        // never pushes them into debt.
+        if resolution.jc < 0 {
+            resolution.jc = resolution.jc.max(-expected.balance.max(0));
+        }
         let depth_after = expected.depth.saturating_add(resolution.advance).max(0);
         let streak_after = resolution.streak_days_after.unwrap_or(expected.streak_days);
         let buff_json = resolution.buff.as_ref().map(persisted_buff_json);

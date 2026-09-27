@@ -460,6 +460,64 @@ pub fn mechanic_by_id(mechanic_id: &str) -> Option<MechanicDefinition> {
     MECHANIC_CATALOG.get(mechanic_id).cloned()
 }
 
+/// The authored outcome odds of one mechanic option, e.g.
+/// `35%: you -2 HP, boss -3 HP · 15%: boss -4 HP`. The pre-fight win chance
+/// does not model the mechanic, so the prompt shows the gamble explicitly.
+#[must_use]
+pub fn mechanic_option_odds(mechanic_id: &str, option_index: usize) -> Option<String> {
+    let option = MECHANIC_CATALOG
+        .get(mechanic_id)?
+        .options
+        .get(option_index)?;
+    Some(
+        option
+            .outcome_rolls
+            .iter()
+            .map(describe_outcome_roll)
+            .collect::<Vec<_>>()
+            .join(" · "),
+    )
+}
+
+fn describe_outcome_roll(roll: &OutcomeRoll) -> String {
+    let mut effects = Vec::new();
+    if roll.player_hp_delta != 0 {
+        effects.push(format!("you {:+} HP", roll.player_hp_delta));
+    }
+    if roll.boss_hp_delta != 0 {
+        effects.push(format!("boss {:+} HP", roll.boss_hp_delta));
+    }
+    if let Some(effect) = roll.status_effect {
+        effects.push(
+            match effect {
+                MechanicStatusEffect::Burn => "burn",
+                MechanicStatusEffect::Silence => "silence",
+                MechanicStatusEffect::Bleed => "bleed",
+                MechanicStatusEffect::Frostbite => "frostbite",
+                MechanicStatusEffect::Reveal => "reveal",
+            }
+            .to_owned(),
+        );
+    }
+    if let Some(skipped) = roll.skip_next_round_for {
+        effects.push(
+            match skipped {
+                Combatant::Player => "you lose a turn",
+                Combatant::Boss => "boss loses a turn",
+            }
+            .to_owned(),
+        );
+    }
+    if effects.is_empty() {
+        effects.push("nothing happens".to_owned());
+    }
+    format!(
+        "{}%: {}",
+        (roll.probability * 100.0).round() as i64,
+        effects.join(", ")
+    )
+}
+
 /// Regular boss fights preserve one opening exchange and then surface the
 /// rolled mechanic before round two. Pinnacle phases retain their separate
 /// authored-timing engine and do not call this helper.
@@ -1664,6 +1722,7 @@ pub fn persist_boss_hp(
     entry.last_engaged_at = Some(now);
     entry.last_outcome = Some(outcome.to_owned());
     entry.first_meet_seen = true;
+    entry.rest_pending = true;
 }
 
 fn phase_after_win(status: BossStatus, boundary: i32, prestige: i32) -> Option<BossStatus> {
@@ -2463,6 +2522,7 @@ where
                     .id
                     .to_owned(),
                 );
+                entry.rest_pending = true;
                 next.boss_attempts = next.boss_attempts.saturating_add(1);
                 next.last_dig_at = now;
                 self.repository.commit(
@@ -3214,6 +3274,7 @@ where
         let entry = progress_entry_mut(&mut next.boss_progress, boundary);
         entry.last_outcome = Some("retreat".to_owned());
         entry.first_meet_seen = true;
+        entry.rest_pending = true;
         self.repository.commit(
             key,
             tunnel.revision,

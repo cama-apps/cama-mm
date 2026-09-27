@@ -1004,7 +1004,24 @@ fn boss_mechanic_prompt_shows_authored_copy_choices_and_live_hp() {
     );
     assert_eq!(
         boss_projection_field(embed, "Your choice").map(|field| field.value.as_str()),
-        Some("1. Slap the left head\n2. Confuse both heads\n3. Stand in front and grin")
+        Some(
+            "1. Slap the left head\n-# 50%: boss -2 HP · 50%: you -2 HP, silence\n2. Confuse both heads\n-# 60%: you -1 HP, boss -1 HP · 40%: you -2 HP, burn\n3. Stand in front and grin\n-# 25%: you +1 HP, boss -3 HP · 75%: you -3 HP, burn"
+        )
+    );
+}
+
+#[test]
+fn boss_defeat_reports_knockback_from_the_parked_depth() {
+    // Parked at 99 before the boundary-100 fight, knocked back to 95.
+    let embed =
+        super::regular_boss_result_embed(&regular_boss_projection_fixture(false), None, None, &[]);
+    assert!(
+        embed
+            .description
+            .as_deref()
+            .is_some_and(|text| text.ends_with("were knocked back 4 blocks.")),
+        "{:?}",
+        embed.description
     );
 }
 
@@ -1041,7 +1058,7 @@ fn boss_result_shows_selected_outcome_and_softened_hp() {
     assert_eq!(
         boss_projection_field(&embed, "The boss remembers").map(|field| field.value.as_str()),
         Some(
-            "You knocked Grothak the Unbreakable from **100/100 HP** to **40/100 HP** before retreating."
+            "You knocked Grothak the Unbreakable from **100/100 HP** to **40/100 HP** before falling."
         )
     );
 }

@@ -67,7 +67,7 @@ use crate::dig_bosses::{
 use crate::dig_carry_wager::{
     MAX_NEW_BOSS_WAGER, active_pinnacle_carry, current_boss_boundary, pinnacle_wager_profit,
 };
-use crate::dig_service::DIG_STARTING_STAT_POINTS;
+use crate::dig_service::{BOSS_REST_PENDING_KEY, DIG_STARTING_STAT_POINTS};
 use crate::economy_event_service::EconomyEventConfig;
 use crate::economy_event_sqlite::SqliteEconomyEventService;
 use crate::service_container::PersistentVanityTaxService;
@@ -961,6 +961,10 @@ fn parse_boss_progress(raw: Option<&str>) -> Result<BossProgress, String> {
                     .get("pending_phase_event_id")
                     .and_then(Value::as_str)
                     .map(str::to_owned),
+                rest_pending: entry
+                    .get(BOSS_REST_PENDING_KEY)
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
             })
         } else {
             BossProgressValue::Legacy(BossStatus::Active)
@@ -1012,6 +1016,11 @@ fn merge_boss_progress(raw: Option<&str>, progress: &BossProgress) -> Result<Str
                     "pending_phase_event_id",
                     entry.pending_phase_event_id.as_deref(),
                 );
+                if entry.rest_pending {
+                    object.insert(BOSS_REST_PENDING_KEY.to_owned(), Value::Bool(true));
+                } else {
+                    object.remove(BOSS_REST_PENDING_KEY);
+                }
                 root.insert(boundary.clone(), Value::Object(object));
             }
         }
@@ -2545,6 +2554,7 @@ impl DigBossRuntimeService {
                 Value::String("retreat".to_owned()),
             );
             entry.insert("first_meet_seen".to_owned(), Value::Bool(true));
+            entry.insert(BOSS_REST_PENDING_KEY.to_owned(), Value::Bool(true));
             entry.remove("carried_wager");
             entry.remove("carried_risk_tier");
             proposed.boss_progress_json = Some(Value::Object(progress).to_string());
@@ -3727,6 +3737,7 @@ impl DigBossRuntimeService {
                     "pending_phase_event_id".to_owned(),
                     Value::String(phase_event.id.to_owned()),
                 );
+                entry.insert(BOSS_REST_PENDING_KEY.to_owned(), Value::Bool(true));
                 if input.wager > 0 {
                     entry.insert("carried_wager".to_owned(), Value::from(input.wager));
                     entry.insert(
@@ -3847,6 +3858,7 @@ impl DigBossRuntimeService {
                 entry.insert("boss_id".to_owned(), Value::String(input.boss_id.clone()));
                 entry.insert("last_outcome".to_owned(), Value::String("loss".to_owned()));
                 entry.insert("first_meet_seen".to_owned(), Value::Bool(true));
+                entry.insert(BOSS_REST_PENDING_KEY.to_owned(), Value::Bool(true));
                 entry.remove("carried_wager");
                 entry.remove("carried_risk_tier");
                 entry.remove("active_prep");
@@ -4323,21 +4335,26 @@ impl DigBossRuntimeService {
         if wager < 0 {
             return Err(BossServiceError::NegativeWager.into());
         }
+        if wager > MAX_NEW_BOSS_WAGER {
+            return Err(DigBossRuntimeError::WagerTooLarge {
+                requested: wager,
+                maximum: MAX_NEW_BOSS_WAGER,
+            });
+        }
+        // A free fight stakes nothing, so a player in debt can always take
+        // it instead of being parked at the boss with only Retreat working.
+        if wager == 0 {
+            return Ok(0);
+        }
         loop {
             let mut repository = SqliteBossRepository::new(&self.config.database_path, request.now);
             let tunnel = repository
                 .load_tunnel(request.player_key())
                 .ok_or(BossServiceError::MissingTunnel)?;
-            if wager > 0
-                && !regular_boss_wager_allowed(
-                    &tunnel.boss_progress,
-                    boundary,
-                    tunnel.prestige_level,
-                )
-            {
+            if !regular_boss_wager_allowed(&tunnel.boss_progress, boundary, tunnel.prestige_level) {
                 return Err(BossServiceError::WagerNotAllowed.into());
             }
-            let cursed = wager > 0 && tunnel.stinger_curse.contains(CurseKind::HalveNextWager);
+            let cursed = tunnel.stinger_curse.contains(CurseKind::HalveNextWager);
             let effective = if cursed { wager / 2 + wager % 2 } else { wager };
             if tunnel.balance < effective {
                 return Err(BossServiceError::InsufficientBalance {

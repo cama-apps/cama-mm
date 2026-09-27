@@ -74,7 +74,8 @@ use crate::dig_routes::{
 use crate::dig_service::{
     DIG_REWARD_BASIS_POINTS, DIG_YIELD_MULTIPLIER_SCALE, DigOutcomeInput, DigProfitPolicy,
     MinerAllocation, TunnelState, apply_boss_gate, apply_dig_outcome, apply_first_dig,
-    cooldown_remaining, defeated_boundaries_from_json, layer_at, paid_dig_cost,
+    boss_rest_pending_from_json, clear_boss_rest_json, cooldown_remaining,
+    defeated_boundaries_from_json, layer_at, next_undefeated_boss, paid_dig_cost,
     scale_dig_minigame_jc, scale_dig_yield_once,
 };
 use crate::dig_tunnels::{
@@ -1912,8 +1913,12 @@ where
         // Re-open a boss that was already reached by a previous Dig before
         // applying cap/cooldown/paid gates.  This is presentation-only: no
         // new Dig is consumed, and Slow Drip (above) remains the one intended
-        // pre-boss side effect.
-        if !first_dig && let Some(boundary) = parked_boss_boundary(&tunnel) {
+        // pre-boss side effect. A boss fought or fled on the previous action
+        // is resting: this Dig proceeds normally and stops short of it.
+        if !first_dig
+            && let Some(boundary) = parked_boss_boundary(&tunnel)
+            && !boss_rest_pending_from_json(&tunnel.boss_progress, boundary)
+        {
             return Ok(DigRuntimeOutcome {
                 success: true,
                 error: None,
@@ -3976,6 +3981,8 @@ fn fingerprint<T: Hash>(value: &T) -> u64 {
 fn tunnel_state(snapshot: &DigRuntimeSnapshot, paid_cost: Option<i64>) -> TunnelState {
     let tunnel = snapshot.tunnel.as_ref().expect("staged tunnel exists");
     let defeated_bosses = defeated_boundaries_from_json(&tunnel.boss_progress);
+    let boss_resting = next_undefeated_boss(&defeated_bosses)
+        .is_some_and(|boundary| boss_rest_pending_from_json(&tunnel.boss_progress, boundary));
     let artifacts = snapshot
         .artifacts
         .iter()
@@ -4007,6 +4014,7 @@ fn tunnel_state(snapshot: &DigRuntimeSnapshot, paid_cost: Option<i64>) -> Tunnel
         artifacts,
         awarded_bosses: BTreeSet::new(),
         defeated_bosses,
+        boss_resting,
         buff: None,
     }
 }
@@ -4026,6 +4034,10 @@ fn apply_state(
         tunnel.total_digs = state.total_digs;
         tunnel.last_dig_at = state.last_dig_at;
         tunnel.luminosity = state.luminosity;
+        // Any committed Dig is the breather after a boss action.
+        if let Some(cleared) = clear_boss_rest_json(&tunnel.boss_progress) {
+            tunnel.boss_progress = cleared;
+        }
         tunnel.total_jc_earned = tunnel
             .total_jc_earned
             .max(0)
