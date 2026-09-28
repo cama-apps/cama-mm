@@ -350,11 +350,11 @@ mod tests {
         let score = service
             .calculate_matchup_score(&team1, &team2, false, false)
             .expect("roles are assigned");
-        assert!((score - 968.0).abs() < 1e-9, "{score}");
+        assert!((score - 922.0).abs() < 1e-9, "{score}");
     }
 
     #[test]
-    fn test_default_off_role_goodness_adds_670_per_player() {
+    fn test_default_off_role_goodness_adds_740_per_player() {
         let (team1, _) = fixture_teams();
         let mut team1_with_swapped_cores = team1.clone();
         team1_with_swapped_cores.role_assignments =
@@ -371,7 +371,7 @@ mod tests {
             service
                 .calculate_matchup_score(&team1_with_swapped_cores, &team1, false, false)
                 .expect("roles are assigned"),
-            1_340.0
+            1_480.0
         );
     }
 
