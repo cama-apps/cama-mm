@@ -400,9 +400,9 @@ impl Default for BalancedShuffler {
             consider_roles: true,
             use_openskill: false,
             use_jopacoin: false,
-            off_role_multiplier: 0.96,
-            off_role_flat_value_penalty: 90.0,
-            off_role_flat_penalty: 670.0,
+            off_role_multiplier: 0.97,
+            off_role_flat_value_penalty: 80.0,
+            off_role_flat_penalty: 740.0,
             role_matchup_delta_weight: ROLE_MATCHUP_DELTA_WEIGHT,
             exclusion_penalty_weight: 80.0,
             rd_priority_weight: 0.2,
@@ -410,7 +410,7 @@ impl Default for BalancedShuffler {
             soft_avoid_penalty: 180.0,
             package_deal_penalty: 90.0,
             package_deal_split_penalty: 90.0,
-            rating_spread_multiplier: 0.11,
+            rating_spread_multiplier: 0.12,
             region_split: false,
             region_split_penalty: 500.0,
             role_assignment_provider: Arc::new(GlobalRoleAssignmentProvider),
@@ -542,10 +542,10 @@ impl BalancedShuffler {
         (maximum - minimum) * self.rating_spread_multiplier
     }
 
-    /// Twenty-two percent of the selected players' total active rating.
+    /// Twenty-four percent of the selected players' total active rating.
     #[must_use]
     pub fn calculate_lobby_rating_bonus(player_values: &[f64]) -> f64 {
-        player_values.iter().sum::<f64>() * 0.22
+        player_values.iter().sum::<f64>() * 0.24
     }
 
     /// Total whole minutes waited by selected players with Discord IDs.
@@ -3941,7 +3941,7 @@ mod tests {
             consider_roles: false,
             ..BalancedShuffler::default()
         };
-        assert_eq!(shuffler.rating_spread_multiplier, 0.11);
+        assert_eq!(shuffler.rating_spread_multiplier, 0.12);
     }
 
     #[test]
