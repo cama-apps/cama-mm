@@ -4395,8 +4395,8 @@ fn production_goodness_weights_team_value_and_role_deltas() {
     let goodness =
         extra_f64(&prepared.pending.state, "goodness_score").expect("stored goodness score");
 
-    // 95 value difference at 1.5 plus a 190 lane/parity delta at 0.16.
-    assert!((goodness - (-3_149.1)).abs() < 1e-9, "{goodness}");
+    // 95 value difference at 1.5 plus a 190 lane/parity delta at 0.14.
+    assert!((goodness - (-3_454.9)).abs() < 1e-9, "{goodness}");
 }
 
 #[test]
@@ -4654,7 +4654,7 @@ fn test_shuffle_display_uses_configured_flat_off_role_value_penalty() {
     // stacks on top of it. Radiant is fully on-role, so it is a flat 5% off
     // 13_000; Dire carries one off-role player who now takes both factors,
     // which is why it falls further than 5% from 11_300.
-    assert_eq!(configured, [12_350.0, 10_744.0]);
+    assert_eq!(configured, [12_350.0, 10_763.0]);
 }
 
 #[test]

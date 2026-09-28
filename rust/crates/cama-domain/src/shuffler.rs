@@ -2721,12 +2721,12 @@ mod tests {
         let roles = ["2", "1", "3", "4", "5"].map(str::to_owned);
         let metrics = shuffler.role_assignment_metrics(&[&player], &roles, &[3_000.0]);
 
-        assert_eq!(metrics.team_value, 2_790.0);
-        assert_eq!(metrics.role_values, [0.0, 2_790.0, 0.0, 0.0, 0.0]);
+        assert_eq!(metrics.team_value, 2_830.0);
+        assert_eq!(metrics.role_values, [0.0, 2_830.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]
-    fn test_default_off_role_goodness_adds_670_per_player() {
+    fn test_default_off_role_goodness_adds_740_per_player() {
         let team1_players = (0..5)
             .map(|index| {
                 player(
@@ -2766,7 +2766,7 @@ mod tests {
             super::ADJUSTED_VALUE_DIFF_WEIGHT,
         );
 
-        assert_eq!(score, 1_340.0);
+        assert_eq!(score, 1_480.0);
     }
 
     #[test]
@@ -3516,7 +3516,7 @@ mod tests {
             &mut super::ScoringContext::default(),
         );
 
-        approx(selection.preselection_score, -2_072.0);
+        approx(selection.preselection_score, -2_274.0);
     }
 
     #[test]
@@ -3605,7 +3605,7 @@ mod tests {
                 ShuffleConstraints::default(),
             )
             .expect("fixed role matchup evaluates");
-        approx(matchup.total_score, -2_026.0);
+        approx(matchup.total_score, -2_282.0);
     }
 
     #[test]
@@ -3883,7 +3883,7 @@ mod tests {
         };
         approx(
             shuffler.calculate_rating_spread_penalty(&[1_000.0, 1_500.0, 2_000.0]),
-            110.0,
+            120.0,
         );
     }
 
@@ -5537,8 +5537,8 @@ mod tests {
     }
 
     #[test]
-    fn test_default_role_matchup_delta_weight_is_point_one_six() {
-        approx(BalancedShuffler::default().role_matchup_delta_weight, 0.16);
+    fn test_default_role_matchup_delta_weight_is_point_one_four() {
+        approx(BalancedShuffler::default().role_matchup_delta_weight, 0.14);
     }
 
     fn role_delta_fixture() -> (Vec<Player>, Vec<Player>) {
