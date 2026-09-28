@@ -245,12 +245,9 @@ impl MatchHandler {
                 .get_off_role_count()
                 .map_err(|error| error.to_string())?) as f64
             * shuffler.off_role_flat_penalty;
-        let weighted_parity_delta = (balancing
+        let weighted_parity_delta = balancing
             .calculate_role_matchup_delta(&radiant_team, &dire_team, use_openskill, use_jopacoin)
             .map_err(|error| error.to_string())?
-            + balancing
-                .calculate_role_parity_delta(&radiant_team, &dire_team, use_openskill, use_jopacoin)
-                .map_err(|error| error.to_string())?)
             * shuffler.role_matchup_delta_weight;
         let radiant_set = radiant_ids.iter().copied().collect::<HashSet<_>>();
         let dire_set = dire_ids.iter().copied().collect::<HashSet<_>>();

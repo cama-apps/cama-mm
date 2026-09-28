@@ -5,8 +5,8 @@ use crate::team::{ROLES, Team, TeamError};
 /// Weight applied to the role-adjusted absolute difference between team values.
 pub const ADJUSTED_VALUE_DIFF_WEIGHT: f64 = 1.5;
 
-/// Weight applied to the summed lane-matchup and same-role parity deltas.
-pub const ROLE_MATCHUP_DELTA_WEIGHT: f64 = 0.14;
+/// Weight applied to the summed lane-matchup deltas.
+pub const ROLE_MATCHUP_DELTA_WEIGHT: f64 = 0.16;
 
 /// Sum the five critical lane matchups from role-ordered effective values.
 ///
@@ -20,16 +20,6 @@ pub fn role_matchup_delta_from_values(team1_values: &[f64], team2_values: &[f64]
         + (team1_values[1] - team2_values[1]).abs()
         + (team1_values[3] - team2_values[4]).abs()
         + (team2_values[3] - team1_values[4]).abs()
-}
-
-/// Sum same-role effective-value differences for the two teams.
-#[must_use]
-pub fn role_parity_delta_from_values(team1_values: &[f64], team2_values: &[f64]) -> f64 {
-    team1_values
-        .iter()
-        .zip(team2_values)
-        .map(|(team1, team2)| (team1 - team2).abs())
-        .sum()
 }
 
 /// Configuration and operations for scoring a two-team matchup.
@@ -119,23 +109,10 @@ impl TeamBalancingService {
         Ok(role_matchup_delta_from_values(&team1_values, &team2_values))
     }
 
-    /// Calculate the five same-position differences.
-    pub fn calculate_role_parity_delta(
-        &self,
-        team1: &Team,
-        team2: &Team,
-        use_openskill: bool,
-        use_jopacoin: bool,
-    ) -> Result<f64, TeamError> {
-        let team1_values = self.role_values(team1, use_openskill, use_jopacoin)?;
-        let team2_values = self.role_values(team2, use_openskill, use_jopacoin)?;
-        Ok(role_parity_delta_from_values(&team1_values, &team2_values))
-    }
-
     /// Score a matchup; lower values represent closer teams.
     ///
-    /// Team-value difference, flat off-role penalties, lane matchup delta, and
-    /// same-role parity all use the same selected rating mode.
+    /// Team-value difference, flat off-role penalties, and lane matchup delta
+    /// all use the same selected rating mode.
     pub fn calculate_matchup_score(
         &self,
         team1: &Team,
@@ -151,12 +128,10 @@ impl TeamBalancingService {
         let off_role_penalty = off_role_count as f64 * self.off_role_flat_penalty;
         let role_matchup_delta =
             self.calculate_role_matchup_delta(team1, team2, use_openskill, use_jopacoin)?;
-        let role_parity_delta =
-            self.calculate_role_parity_delta(team1, team2, use_openskill, use_jopacoin)?;
 
         Ok(value_difference * ADJUSTED_VALUE_DIFF_WEIGHT
             + off_role_penalty
-            + (role_matchup_delta + role_parity_delta) * self.role_matchup_delta_weight)
+            + role_matchup_delta * self.role_matchup_delta_weight)
     }
 
     fn role_values(
@@ -189,9 +164,7 @@ impl TeamBalancingService {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        TeamBalancingService, role_matchup_delta_from_values, role_parity_delta_from_values,
-    };
+    use super::{TeamBalancingService, role_matchup_delta_from_values};
     use crate::player::Player;
     use crate::team::{ROLES, Team};
 
@@ -259,15 +232,9 @@ mod tests {
         );
         assert_eq!(
             service
-                .calculate_role_parity_delta(&team1, &team2, false, false)
-                .expect("roles are assigned"),
-            1_800.0
-        );
-        assert_eq!(
-            service
                 .calculate_matchup_score(&team1, &team2, false, false)
                 .expect("roles are assigned"),
-            2_900.0
+            1_100.0
         );
 
         let weighted_service =
@@ -282,7 +249,7 @@ mod tests {
             weighted_service
                 .calculate_matchup_score(&team1, &team2, false, false)
                 .expect("roles are assigned"),
-            1_750.0
+            850.0
         );
 
         let mut swapped_team1 = team1.clone();
@@ -350,7 +317,7 @@ mod tests {
         let score = service
             .calculate_matchup_score(&team1, &team2, false, false)
             .expect("roles are assigned");
-        assert!((score - 922.0).abs() < 1e-9, "{score}");
+        assert!((score - 680.0).abs() < 1e-9, "{score}");
     }
 
     #[test]
@@ -404,7 +371,7 @@ mod tests {
             service
                 .calculate_matchup_score(&team1, &team2, false, true)
                 .expect("roles are assigned"),
-            125.0
+            100.0
         );
     }
 
@@ -419,18 +386,10 @@ mod tests {
         let service_matchup = service
             .calculate_role_matchup_delta(&team1, &team2, false, false)
             .expect("roles are assigned");
-        let service_parity = service
-            .calculate_role_parity_delta(&team1, &team2, false, false)
-            .expect("roles are assigned");
         assert_eq!(service_matchup, 500.0);
-        assert_eq!(service_parity, 1_800.0);
         assert_eq!(
             role_matchup_delta_from_values(&team1_values, &team2_values),
             service_matchup
-        );
-        assert_eq!(
-            role_parity_delta_from_values(&team1_values, &team2_values),
-            service_parity
         );
     }
 }

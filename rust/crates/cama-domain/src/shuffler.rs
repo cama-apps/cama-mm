@@ -19,7 +19,6 @@ use crate::team::{
 };
 use crate::team_balancing::{
     ADJUSTED_VALUE_DIFF_WEIGHT, ROLE_MATCHUP_DELTA_WEIGHT, role_matchup_delta_from_values,
-    role_parity_delta_from_values,
 };
 
 /// Low-priority shoppers contribute half-strength penalties as actors.
@@ -931,11 +930,9 @@ impl BalancedShuffler {
                     * self.off_role_flat_penalty;
                 let matchup =
                     role_matchup_delta_from_values(&metric1.role_values, &metric2.role_values);
-                let parity =
-                    role_parity_delta_from_values(&metric1.role_values, &metric2.role_values);
                 let score = value_diff * value_diff_weight
                     + off_role_penalty
-                    + (matchup + parity) * self.role_matchup_delta_weight
+                    + matchup * self.role_matchup_delta_weight
                     - rd_priority;
                 if score < best_score {
                     best_score = score;
@@ -1013,11 +1010,9 @@ impl BalancedShuffler {
                     * self.off_role_flat_penalty;
                 let matchup =
                     role_matchup_delta_from_values(&metric1.role_values, &metric2.role_values);
-                let parity =
-                    role_parity_delta_from_values(&metric1.role_values, &metric2.role_values);
                 let score = value_diff * policy.value_diff_weight
                     + off_role_penalty
-                    + (matchup + parity) * self.role_matchup_delta_weight
+                    + matchup * self.role_matchup_delta_weight
                     - rd_priority
                     + avoid_penalty
                     + deal_penalty
@@ -1995,11 +1990,7 @@ impl BalancedShuffler {
             &scored.team1_metrics.role_values,
             &scored.team2_metrics.role_values,
         );
-        let parity = role_parity_delta_from_values(
-            &scored.team1_metrics.role_values,
-            &scored.team2_metrics.role_values,
-        );
-        let parity_penalty = (matchup + parity) * self.role_matchup_delta_weight;
+        let parity_penalty = matchup * self.role_matchup_delta_weight;
         let total_score = scored.score + combo_penalty + recent_penalty;
         Ok(PoolMatchup {
             team1: scored.team1,
@@ -3605,7 +3596,7 @@ mod tests {
                 ShuffleConstraints::default(),
             )
             .expect("fixed role matchup evaluates");
-        approx(matchup.total_score, -2_282.0);
+        approx(matchup.total_score, -2_537.0);
     }
 
     #[test]
@@ -5537,8 +5528,8 @@ mod tests {
     }
 
     #[test]
-    fn test_default_role_matchup_delta_weight_is_point_one_four() {
-        approx(BalancedShuffler::default().role_matchup_delta_weight, 0.14);
+    fn test_default_role_matchup_delta_weight_is_point_one_six() {
+        approx(BalancedShuffler::default().role_matchup_delta_weight, 0.16);
     }
 
     fn role_delta_fixture() -> (Vec<Player>, Vec<Player>) {
@@ -5588,8 +5579,8 @@ mod tests {
             .expect("optimization succeeds")
             .2
         };
-        approx(score(1.0), 2_450.0);
-        approx(score(0.5), 1_450.0);
+        approx(score(1.0), 950.0);
+        approx(score(0.5), 700.0);
     }
 
     #[test]
@@ -5627,8 +5618,8 @@ mod tests {
             no_rating_constraints(),
         )
         .expect("matchup evaluates");
-        approx(matchup.log_entry.parity_penalty, 1_200.0);
-        approx(matchup.total_score, 1_350.0);
+        approx(matchup.log_entry.parity_penalty, 350.0);
+        approx(matchup.total_score, 500.0);
     }
 
     #[test]
@@ -5679,12 +5670,6 @@ mod tests {
                 .expect("roles assigned"),
             500.0
         );
-        assert_eq!(
-            service
-                .calculate_role_parity_delta(&team1, &team2, false, false)
-                .expect("roles assigned"),
-            1_800.0
-        );
         let matchup = BalancedShuffler {
             use_glicko: false,
             off_role_multiplier: 1.0,
@@ -5703,7 +5688,7 @@ mod tests {
             no_rating_constraints(),
         )
         .expect("matchup evaluates");
-        approx(matchup.log_entry.parity_penalty, 2_300.0);
+        approx(matchup.log_entry.parity_penalty, 500.0);
     }
 
     #[test]
@@ -5738,7 +5723,7 @@ mod tests {
                 },
             )
             .expect("fallback scoring succeeds");
-        approx(common.2, 1_750.0);
+        approx(common.2, 850.0);
         assert_eq!(common, fallback);
     }
 
