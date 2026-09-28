@@ -392,8 +392,8 @@ Additional settings can be configured in `.env` (see the Rust application config
 **Rating:**
 - `OFF_ROLE_MULTIPLIER`, `OFF_ROLE_FLAT_VALUE_PENALTY` - Off-role effective
   value adjustments, applied on top of the role win-rate factor
-  (defaults: 0.96 and 90)
-- `OFF_ROLE_FLAT_PENALTY` - Goodness penalty per off-role player (default: 670)
+  (defaults: 0.97 and 80)
+- `OFF_ROLE_FLAT_PENALTY` - Goodness penalty per off-role player (default: 740)
 - `EXCLUSION_PENALTY_WEIGHT` - Goodness penalty per excluded player (default: 80)
 - `RECALIBRATION_COOLDOWN_SECONDS` - Time between rating resets
 

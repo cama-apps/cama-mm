@@ -6,7 +6,7 @@ use crate::team::{ROLES, Team, TeamError};
 pub const ADJUSTED_VALUE_DIFF_WEIGHT: f64 = 1.5;
 
 /// Weight applied to the summed lane-matchup and same-role parity deltas.
-pub const ROLE_MATCHUP_DELTA_WEIGHT: f64 = 0.16;
+pub const ROLE_MATCHUP_DELTA_WEIGHT: f64 = 0.14;
 
 /// Sum the five critical lane matchups from role-ordered effective values.
 ///
@@ -46,9 +46,9 @@ impl Default for TeamBalancingService {
     fn default() -> Self {
         Self {
             use_glicko: true,
-            off_role_multiplier: 0.96,
-            off_role_flat_value_penalty: 90.0,
-            off_role_flat_penalty: 670.0,
+            off_role_multiplier: 0.97,
+            off_role_flat_value_penalty: 80.0,
+            off_role_flat_penalty: 740.0,
             role_matchup_delta_weight: ROLE_MATCHUP_DELTA_WEIGHT,
         }
     }
