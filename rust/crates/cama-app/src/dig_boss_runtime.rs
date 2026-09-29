@@ -78,6 +78,20 @@ struct LoadedBossSnapshot {
     snapshot: DigBossRuntimeSnapshot,
     lantern_ids: Vec<i64>,
     has_great_lantern: bool,
+    has_free_scout: bool,
+}
+
+fn has_free_scout(
+    repository: &DigBossRuntimeRepository,
+    key: DigBossRuntimeKey,
+) -> Result<bool, String> {
+    let relics = repository
+        .equipped_relic_ids(key)
+        .map_err(|error| error.to_string())?;
+    Ok(relics.iter().any(|id| {
+        id.strip_prefix("pinnacle:")
+            .is_some_and(|rest| rest.split(':').skip(2).any(|stat| stat == "scout_free"))
+    }))
 }
 
 #[derive(Debug, Default)]
@@ -93,6 +107,7 @@ impl BossSnapshotCache {
             && prior.snapshot == loaded.snapshot
             && prior.lantern_ids == loaded.lantern_ids
             && prior.has_great_lantern == loaded.has_great_lantern
+            && prior.has_free_scout == loaded.has_free_scout
         {
             return *revision;
         }
@@ -167,6 +182,7 @@ impl SqliteBossRepository {
             .lantern_state(database_key)
             .map_err(|error| error.to_string())?;
         Ok(Some(LoadedBossSnapshot {
+            has_free_scout: has_free_scout(&self.repository, database_key)?,
             snapshot,
             lantern_ids,
             has_great_lantern,
@@ -889,6 +905,7 @@ fn tunnel_from_snapshot(
         stinger_curse: parse_stinger_curse(snapshot.stinger_curse_json.as_deref()),
         lanterns: u32::try_from(loaded.lantern_ids.len()).unwrap_or(u32::MAX),
         has_great_lantern: loaded.has_great_lantern,
+        has_free_scout: loaded.has_free_scout,
         boss_attempts: narrow_i32(snapshot.boss_attempts, "boss_attempts")?,
         last_dig_at: snapshot.last_dig_at.unwrap_or_default(),
         luminosity: narrow_i32(snapshot.luminosity, "luminosity")?,
@@ -2422,7 +2439,13 @@ impl DigBossRuntimeService {
                 ),
             carried_wager: carried.map(|value| value.wager),
             carried_risk_tier: carried.map(|value| value.risk_tier),
-            has_scout_lantern: has_great_lantern || !lantern_ids.is_empty(),
+            has_scout_lantern: has_great_lantern
+                || !lantern_ids.is_empty()
+                || has_free_scout(
+                    &DigBossRuntimeRepository::new(&self.config.database_path),
+                    database_key(request.player_key()),
+                )
+                .map_err(DigBossRuntimeError::Infrastructure)?,
             luminosity: snapshot.luminosity.clamp(0, 100),
             encounter_key,
         })
@@ -3287,6 +3310,8 @@ impl DigBossRuntimeService {
             .lantern_state(database_key(request.player_key()))
             .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?;
         let loaded = LoadedBossSnapshot {
+            has_free_scout: has_free_scout(&repository, database_key(request.player_key()))
+                .map_err(DigBossRuntimeError::Infrastructure)?,
             snapshot: snapshot.clone(),
             lantern_ids,
             has_great_lantern,
@@ -4005,10 +4030,13 @@ impl DigBossRuntimeService {
         let (lantern_ids, has_great_lantern) = repository
             .lantern_state(database_key(request.player_key()))
             .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?;
-        if !has_great_lantern && lantern_ids.is_empty() {
+        let free_scout = has_free_scout(&repository, database_key(request.player_key()))
+            .map_err(DigBossRuntimeError::Infrastructure)?;
+        if !has_great_lantern && !free_scout && lantern_ids.is_empty() {
             return Err(BossServiceError::LanternRequired.into());
         }
         let loaded = LoadedBossSnapshot {
+            has_free_scout: free_scout,
             snapshot: snapshot.clone(),
             lantern_ids: lantern_ids.clone(),
             has_great_lantern,
@@ -4161,7 +4189,7 @@ impl DigBossRuntimeService {
         let cautious = make_risk(RiskTier::Cautious, cautious_preparation)?;
         let bold = make_risk(RiskTier::Bold, preparation(RiskTier::Bold))?;
         let reckless = make_risk(RiskTier::Reckless, preparation(RiskTier::Reckless))?;
-        if !has_great_lantern {
+        if !has_great_lantern && !free_scout {
             let row_id = lantern_ids[0];
             if !repository
                 .consume_lantern(database_key(request.player_key()), row_id)

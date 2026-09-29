@@ -2016,6 +2016,65 @@ fn runtime_boss_loss_is_exempt_from_low_priority_tax() {
 }
 
 #[test]
+fn equipped_scouting_relic_enables_reusable_regular_and_pinnacle_scouts() {
+    for pinnacle in [false, true] {
+        let database = fixture();
+        if pinnacle {
+            set_pinnacle(&database, 1, "active", None);
+        }
+        let connection = Connection::open(database.path()).expect("relic DB");
+        connection.execute(
+            "INSERT INTO dig_artifacts (discord_id,guild_id,artifact_id,found_at,is_relic,equipped)
+             VALUES (?1,?2,'pinnacle:forgotten_king:Echoes:scout_free',100,1,1)",
+            params![PLAYER, GUILD],
+        ).expect("scouting relic");
+        let runtime = pinnacle_runtime(&database);
+        let request = pinnacle_request(1_700_000_000);
+        assert!(
+            runtime
+                .encounter(request, SequenceEntropy::constant(0.5))
+                .expect("encounter")
+                .has_scout_lantern
+        );
+        for _ in 0..2 {
+            runtime
+                .scout(request, SequenceEntropy::constant(0.5))
+                .expect("equipped relic provides reusable scouting");
+        }
+        connection
+            .execute(
+                "INSERT INTO dig_inventory (discord_id,guild_id,item_type,queued,created_at)
+             VALUES (?1,?2,'lantern',0,100)",
+                params![PLAYER, GUILD],
+            )
+            .expect("spare lantern");
+        runtime
+            .scout(request, SequenceEntropy::constant(0.5))
+            .expect("relic scout");
+        assert_eq!(
+            DigBossRuntimeRepository::new(database.path())
+                .lantern_state(database_key(key()))
+                .expect("lanterns")
+                .0
+                .len(),
+            1
+        );
+        connection
+            .execute("DELETE FROM dig_inventory", [])
+            .expect("remove spare");
+        connection
+            .execute("UPDATE dig_artifacts SET equipped=0", [])
+            .expect("unequip");
+        assert!(matches!(
+            runtime.scout(request, SequenceEntropy::constant(0.5)),
+            Err(DigBossRuntimeError::Policy(
+                BossServiceError::LanternRequired
+            ))
+        ));
+    }
+}
+
+#[test]
 fn runtime_scout_claims_lantern_and_restart_observes_the_consumption() {
     let database = fixture();
     Connection::open(database.path())

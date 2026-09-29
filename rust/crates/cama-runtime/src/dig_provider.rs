@@ -1134,7 +1134,7 @@ impl DigInteractionHandler {
         match self
             .deliver_event_to_channel_with_failure(
                 delivery,
-                event_resolution_response(&delivery.outcome),
+                event_resolution_response(&delivery.outcome, &self.state.view_nonce),
             )
             .await
         {
@@ -2295,6 +2295,7 @@ impl DigInteractionHandler {
             }
             [sub] if sub == "flex" => self.command_flex(user_id, guild_id, responder).await,
             [sub] if sub == "prestige" => self.command_prestige(user_id, guild_id, responder).await,
+            [sub] if sub == "perks" => self.command_perks(user_id, guild_id, responder).await,
             [sub] if sub == "abandon" => self.command_abandon(user_id, guild_id, responder).await,
             [sub] if sub == "trap" => self.command_trap(user_id, guild_id, responder).await,
             [sub] if sub == "insure" => self.command_insure(user_id, guild_id, responder).await,
@@ -3174,7 +3175,7 @@ impl DigInteractionHandler {
                         warn!(%error, "could not re-enable Dig event controls after a conflict");
                     }
                 }
-                let response = event_resolution_response(&result);
+                let response = event_resolution_response(&result, &self.state.view_nonce);
                 return responder
                     .followup(response)
                     .await
@@ -3187,15 +3188,28 @@ impl DigInteractionHandler {
                 .event_delivery_for_action(resolved_action_id, user_id, guild_id)
                 .await?
             else {
+                let pending = self
+                    .pending_event_delivery_recoveries(DigEventPendingDeliveryQuery {
+                        guild_id: Some(guild_id),
+                        discord_id: Some(user_id),
+                        limit: 100,
+                    })
+                    .await?
+                    .iter()
+                    .any(|delivery| delivery.action_id == resolved_action_id);
                 return responder
                     .followup(
-                        InteractionResponse::message("You've already resolved this event.")
+                        InteractionResponse::message(if pending {
+                            "Your event settled, but its reward is still pending. Use `/dig go` to retry."
+                        } else {
+                            "You've already resolved this event."
+                        })
                             .ephemeral(),
                     )
                     .await
                     .map_err(|error| error.to_string());
             };
-            let response = event_resolution_response(&delivery.outcome);
+            let response = event_resolution_response(&delivery.outcome, &self.state.view_nonce);
             if result.applied_now {
                 return self
                     .deliver_event_from_interaction(&delivery, response, responder)
@@ -5587,7 +5601,7 @@ impl DigInteractionHandler {
     ) -> Result<(), String> {
         self.deliver_event_to_channel_with_failure(
             delivery,
-            event_resolution_response(&delivery.outcome),
+            event_resolution_response(&delivery.outcome, &self.state.view_nonce),
         )
         .await
         .map_err(|failure| match failure {
@@ -5683,6 +5697,24 @@ impl DigInteractionHandler {
         now: i64,
     ) -> Result<usize, String> {
         let recovery_floor = self.pending_recovery_floor(now);
+        let query = DigEventPendingDeliveryQuery {
+            guild_id: Some(guild_id),
+            discord_id: Some(user_id),
+            limit: 10,
+        };
+        for pending in self.pending_event_delivery_recoveries(query).await? {
+            self.recover_event_delivery(pending.action_id).await?;
+        }
+        let events = self.pending_event_deliveries(query).await?;
+        let event_count = events.len();
+        for event in events {
+            if matches!(
+                self.recover_event_row(&event, recovery_floor, now).await,
+                PendingRowDisposition::Retained
+            ) {
+                return Err("An event result is still pending. Try `/dig go` again.".to_owned());
+            }
+        }
         let pending = self
             .pending_deliveries(DigRuntimePendingDeliveryQuery {
                 guild_id,
@@ -5691,7 +5723,7 @@ impl DigInteractionHandler {
                 limit: 10,
             })
             .await?;
-        let found = pending.len();
+        let found = pending.len() + event_count;
         for pending in pending {
             if pending.committed_at < recovery_floor {
                 if let PendingRowDisposition::Retained = self
@@ -6669,6 +6701,39 @@ impl DigInteractionHandler {
             .map_err(|error| error.to_string())
     }
 
+    async fn command_perks(
+        &self,
+        user_id: i64,
+        guild_id: i64,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        responder
+            .defer(true)
+            .await
+            .map_err(|error| error.to_string())?;
+        let path = self.state.database_path.clone();
+        let preview = blocking(move || {
+            DigPrestigeRuntimeService::sqlite(&path)
+                .preview(user_id, guild_id)
+                .map_err(|error| error.to_string())
+        })
+        .await?;
+        let mut embed = InteractionEmbed::titled("Prestige Perks")
+            .description("Perks apply automatically up to their stack limits. Each prestige adds one choice; repeatable bonuses add per stack.\nOwned stacks and limits are shown below.")
+            .color(GOLD_COLOR);
+        for mut perk in cama_app::dig_prestige_runtime::prestige_perk_catalog(&[]) {
+            if let Some(owned) = preview.owned_perks.iter().find(|owned| owned.id == perk.id) {
+                perk.owned_stacks = owned.owned_stacks;
+            }
+            let value = format!("{}\n{}", prestige_perk_ownership(&perk), perk.description);
+            embed = embed.field(perk.name, value, false);
+        }
+        responder
+            .followup(InteractionResponse::message("").ephemeral().embed(embed))
+            .await
+            .map_err(|error| error.to_string())
+    }
+
     async fn command_prestige(
         &self,
         user_id: i64,
@@ -7525,6 +7590,11 @@ fn dig_options() -> Vec<CommandOptionSpec> {
             Vec::new(),
         ),
         subcommand(
+            "perks",
+            "View prestige perk effects, owned stacks and limits",
+            Vec::new(),
+        ),
+        subcommand(
             "abandon",
             "Abandon your tunnel (partial refund)",
             Vec::new(),
@@ -8342,6 +8412,21 @@ fn prestige_mutation_response(
         .action_row(InteractionActionRow::buttons(buttons))
 }
 
+fn prestige_perk_ownership(perk: &cama_app::dig_prestige_runtime::PrestigePerkChoice) -> String {
+    let kind = if perk.max_stacks == 1 {
+        "One-time"
+    } else {
+        "Repeatable"
+    };
+    let active = perk.owned_stacks.min(perk.max_stacks);
+    let extra = if perk.owned_stacks > perk.max_stacks {
+        format!("; {} previously selected", perk.owned_stacks)
+    } else {
+        String::new()
+    };
+    format!("{kind} · {active}/{} active{extra}", perk.max_stacks)
+}
+
 fn prestige_perk_response(
     preview: &DigPrestigePreview,
     view_token: &str,
@@ -8350,10 +8435,17 @@ fn prestige_perk_response(
     let perk_lines = preview
         .offered_perks
         .iter()
-        .map(|perk| format!("**{}**", perk.name))
+        .map(|perk| {
+            format!(
+                "**{}** — {}\n{}",
+                perk.name,
+                prestige_perk_ownership(perk),
+                perk.description
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
-    let embed = if mutation_choice.is_some() {
+    let mut embed = if mutation_choice.is_some() {
         // Python sends a fresh, deliberately minimal perk picker after the
         // mutation click instead of carrying the mutation preview forward.
         InteractionEmbed::titled("Choose a Prestige Perk")
@@ -8362,6 +8454,18 @@ fn prestige_perk_response(
     } else {
         prestige_preview_embed(preview).field("Choose a Perk", perk_lines, false)
     };
+    if !preview.owned_perks.is_empty() {
+        embed = embed.field(
+            "Your Perks",
+            preview
+                .owned_perks
+                .iter()
+                .map(|perk| format!("{} — {}", perk.name, prestige_perk_ownership(perk)))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            false,
+        );
+    }
     let mutation = mutation_choice.unwrap_or("_");
     let buttons = preview
         .offered_perks
@@ -8386,7 +8490,7 @@ fn prestige_result_response(result: &DigPrestigeResult) -> InteractionResponse {
             "Run Score: **{}** (Best: {})",
             result.run_score, result.best_run_score
         ),
-        "Your tunnel has been reset. Dig deeper!".to_owned(),
+        "Your tunnel has been reset. View all your perks with `/dig perks`.".to_owned(),
     ];
     if let Some(relic) = result.prestige_grant.relic {
         description.push(format!(
@@ -8515,7 +8619,7 @@ const DIG_GUIDE_PAGES: [DigGuidePage; 4] = [
     },
     DigGuidePage {
         title: "Dig Guide — Prestige",
-        description: "**Prestige System**\nOnce you reach a deep enough depth, you can prestige. This resets your tunnel depth to zero but grants:\n- A permanent prestige level\n- A choice of prestige perks\n- Access to higher pickaxe tiers\n- Bragging rights\n\n**Perks**\nEach prestige lets you choose one perk that persists across resets. Choose wisely — they shape your digging strategy.\n\n**Relics**\nSome relics are only available at higher prestige levels.",
+        description: "**Prestige System**\nOnce you reach a deep enough depth, you can prestige. This resets your tunnel depth to zero but grants:\n- A permanent prestige level\n- A choice of prestige perks\n- Access to higher pickaxe tiers\n- Bragging rights\n\n**Perks**\nEach prestige lets you choose one perk that persists across resets. Use `/dig perks` to see every effect, your active stacks, and which perks are one-time or repeatable.\n\n**Relics**\nSome relics are only available at higher prestige levels.",
         color: 0xFF_45_00,
     },
 ];
@@ -10633,6 +10737,7 @@ fn boss_scout_response(result: &DigBossCallResult<DigBossScoutOutcome>) -> Inter
 
 fn event_resolution_response(
     outcome: &cama_app::dig_event_runtime::DigEventRuntimeOutcome,
+    view_nonce: &str,
 ) -> InteractionResponse {
     if !outcome.success {
         return InteractionResponse::message("").ephemeral().embed(
@@ -10775,7 +10880,18 @@ fn event_resolution_response(
             .first()
             .cloned()
             .unwrap_or_else(|| "Another event triggers!".to_owned());
-        embed = embed.field("\u{200b}", description, false);
+        embed = embed.field(
+            format!("Continue: {}", chain.event_name),
+            description,
+            false,
+        );
+        if let Some(hint) = outcome
+            .chain_prompt
+            .as_ref()
+            .and_then(|prompt| prompt.reading_the_stone_hint.as_deref())
+        {
+            embed = embed.field("The stone whispers", hint, false);
+        }
     }
     if let Some(splash) = &outcome.splash
         && !splash.victims.is_empty()
@@ -10823,9 +10939,25 @@ fn event_resolution_response(
         };
         embed = embed.field("Quest Finale", detail, false);
     }
-    InteractionResponse::message("")
+    let mut response = InteractionResponse::message("")
         .embed(embed)
-        .with_user_mentions(Vec::new())
+        .with_user_mentions(Vec::new());
+    if let (Some(chain), Some(action_id)) = (&outcome.chain_event, outcome.action_id)
+        && let Some(event) = cama_app::dig_loot::canonical_event(&chain.event_id)
+    {
+        let safe_disabled = outcome
+            .chain_prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.safe_disabled);
+        response = response.action_row(InteractionActionRow::buttons(event_action_buttons(
+            event,
+            view_nonce,
+            action_id,
+            safe_disabled,
+            false,
+        )));
+    }
+    response
 }
 
 fn paid_dig_response(result: &DigRuntimeResult, token: &str) -> InteractionResponse {

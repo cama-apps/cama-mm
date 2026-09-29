@@ -1186,6 +1186,7 @@ pub struct TunnelState {
     pub stinger_curse: StingerCurseState,
     pub lanterns: u32,
     pub has_great_lantern: bool,
+    pub has_free_scout: bool,
     pub boss_attempts: i32,
     pub last_dig_at: i64,
     pub luminosity: i32,
@@ -1203,6 +1204,7 @@ impl Default for TunnelState {
             stinger_curse: StingerCurseState::default(),
             lanterns: 0,
             has_great_lantern: false,
+            has_free_scout: false,
             boss_attempts: 0,
             last_dig_at: 0,
             luminosity: 100,
@@ -3123,7 +3125,7 @@ where
                 .ok_or(BossServiceError::MissingTunnel)?;
             let boundary = at_boss_boundary(tunnel.depth, &tunnel.boss_progress)
                 .ok_or(BossServiceError::NotAtBossBoundary)?;
-            if !tunnel.has_great_lantern && tunnel.lanterns == 0 {
+            if !tunnel.has_great_lantern && !tunnel.has_free_scout && tunnel.lanterns == 0 {
                 return Err(BossServiceError::LanternRequired);
             }
             if tunnel.stinger_curse.contains(CurseKind::NoScoutNextDig) {
@@ -3183,11 +3185,18 @@ where
                 echo_applied,
                 consume_phase_event: false,
             });
-            let details = |combat: &CombatState, risk: RiskTier| {
+            let mut details = |combat: &CombatState, risk: RiskTier| {
                 let win_chance = combat_win_probability(combat);
-                let mut free = combat.clone();
-                free.player_hit = (free.player_hit * FREE_FIGHT_ACCURACY_MULTIPLIER)
-                    .clamp(PLAYER_HIT_FLOOR, PLAYER_HIT_CEILING);
+                let (free, _, _, _) = self.build_combat(BuildCombatRequest {
+                    key,
+                    tunnel: &mut fresh.clone(),
+                    boss,
+                    boundary,
+                    risk,
+                    wager: 0,
+                    echo_applied,
+                    consume_phase_event: false,
+                });
                 ScoutRiskDetails {
                     win_chance,
                     free_fight_chance: combat_win_probability(&free),
@@ -3231,7 +3240,7 @@ where
                     cursed_status: definition.cursed_status,
                 });
             let mut next = fresh.clone();
-            if !next.has_great_lantern {
+            if !next.has_great_lantern && !next.has_free_scout {
                 next.lanterns = next.lanterns.saturating_sub(1);
             }
             match self.repository.commit(

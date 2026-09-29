@@ -8,6 +8,7 @@ use rusqlite::{Connection, params};
 use serde_json::json;
 
 use super::*;
+use crate::dig_tunnels::PRESTIGE_PERK_STACK_CAP;
 
 fn owned_perks(perks: &[&str]) -> Vec<String> {
     perks.iter().map(|perk| (*perk).to_owned()).collect()
@@ -45,6 +46,34 @@ fn every_at_cap_perk_is_hidden() {
     assert!(!eligible.contains(&"loot_multiplier"));
     assert!(!eligible.contains(&"advance_boost"));
     assert_eq!(eligible.len(), 10);
+}
+
+#[test]
+fn prestige_catalog_reports_effects_ownership_and_useful_stack_caps() {
+    let owned = owned_perks(&["reading_the_stone", "deep_sight", "deep_sight"]);
+    let catalog = prestige_perk_catalog(&owned);
+    assert_eq!(catalog.len(), PRESTIGE_PERKS.len());
+    assert!(catalog.iter().all(|perk| !perk.description.is_empty()));
+    let reading = catalog
+        .iter()
+        .find(|perk| perk.id == "reading_the_stone")
+        .unwrap();
+    assert_eq!((reading.owned_stacks, reading.max_stacks), (1, 1));
+    let sight = catalog.iter().find(|perk| perk.id == "deep_sight").unwrap();
+    assert_eq!((sight.owned_stacks, sight.max_stacks), (2, 4));
+    assert!(!eligible_prestige_perks(&owned).contains(&"reading_the_stone"));
+    assert!(!eligible_prestige_perks(&owned_perks(&["steady_hands"; 4])).contains(&"steady_hands"));
+}
+
+#[test]
+fn legacy_duplicate_perks_cannot_exceed_effect_caps() {
+    let mut owned = owned_perks(&["loot_multiplier"; 20]);
+    owned.extend(owned_perks(&["deep_sight"; 8]));
+    owned.extend(owned_perks(&["reading_the_stone"; 5]));
+    let effects = aggregate_prestige_perk_effects(&owned);
+    assert_eq!(effects["jc_bonus"], 5.0);
+    assert_eq!(effects["luminosity_drain_reduction"], 1.0);
+    assert_eq!(effects["event_choice_reveal"], 1.0);
 }
 
 #[test]
@@ -692,20 +721,31 @@ fn forged_unoffered_perk_is_rejected_without_any_sqlite_mutation() {
 
 #[test]
 fn capped_perk_rejection_is_atomic_on_migrated_sqlite() {
-    let fixture = SqliteFixture::new(0, &["loot_multiplier"; PRESTIGE_PERK_STACK_CAP]);
-    let mut service = fixture.service();
-    assert!(matches!(
-        service.prestige(DigPrestigeRequest {
-            discord_id: 123,
-            guild_id: 5,
-            perk_choice: "loot_multiplier",
-            mutation_choice: None,
-            now: 1_700_000_000,
-        }),
-        Err(DigPrestigeRuntimeError::PerkAtCap)
-    ));
-    assert_eq!(fixture.balance(), 500);
-    assert_eq!(service.preview(123, 5).unwrap().current_level, 0);
+    for (perk, cap) in [
+        ("loot_multiplier", 5),
+        ("dark_adaptation", 1),
+        ("reading_the_stone", 1),
+        ("deep_sight", 4),
+        ("steady_hands", 4),
+    ] {
+        let fixture = SqliteFixture::new(0, &vec![perk; cap]);
+        let mut service = fixture.service();
+        let before = service.preview(123, 5).unwrap();
+        assert!(!before.available_perks.iter().any(|id| id == perk));
+        assert_eq!(before.owned_perks[0].owned_stacks, cap);
+        assert!(matches!(
+            service.prestige(DigPrestigeRequest {
+                discord_id: 123,
+                guild_id: 5,
+                perk_choice: perk,
+                mutation_choice: None,
+                now: 1_700_000_000,
+            }),
+            Err(DigPrestigeRuntimeError::PerkAtCap)
+        ));
+        assert_eq!(fixture.balance(), 500);
+        assert_eq!(service.preview(123, 5).unwrap(), before);
+    }
 }
 
 #[test]

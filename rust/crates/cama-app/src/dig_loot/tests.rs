@@ -6,6 +6,91 @@ const USER: i64 = 10_001;
 const RECEIVER: i64 = 10_002;
 const GUILD: i64 = 12_345;
 
+#[test]
+fn authored_event_chains_are_finite_and_bounded() {
+    for event in canonical_event_catalog() {
+        let mut seen = BTreeSet::new();
+        let mut next = Some(event);
+        while let Some(current) = next {
+            assert!(
+                seen.insert(current.id.as_str()),
+                "cycle starting at {}",
+                event.id
+            );
+            assert!(seen.len() <= 3, "authored chains must fit three events");
+            next = current
+                .next_event_id
+                .as_deref()
+                .map(|id| canonical_event(id).expect("authored follow-up exists"));
+        }
+    }
+}
+
+#[test]
+fn veteran_miner_improves_risky_odds_without_multiplying_coins() {
+    for choice in ["risky", "desperate"] {
+        let event = canonical_event_catalog()
+            .iter()
+            .find(|event| {
+                let option = if choice == "risky" {
+                    &event.risky_option
+                } else {
+                    &event.desperate_option
+                };
+                option.as_ref().is_some_and(|option| {
+                    option.success_chance > 0.1
+                        && option.success_chance < 0.8
+                        && option.failure.is_some()
+                })
+            })
+            .expect("authored risky choice");
+        let option = if choice == "risky" {
+            event.risky_option.as_ref()
+        } else {
+            event.desperate_option.as_ref()
+        }
+        .unwrap();
+        let rolls = CanonicalEventRolls {
+            success_roll: option.success_chance + 0.025,
+            ..Default::default()
+        };
+        let plain = resolve_canonical_event_with_policy(
+            &event.id,
+            choice,
+            rolls,
+            CanonicalEventPolicy::default(),
+        )
+        .unwrap();
+        let veteran = resolve_canonical_event_with_policy(
+            &event.id,
+            choice,
+            rolls,
+            CanonicalEventPolicy {
+                risky_success_bonus: 0.05,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!plain.succeeded);
+        assert!(veteran.succeeded, "{choice} receives the chance bonus");
+        let winning_rolls = CanonicalEventRolls {
+            success_roll: 0.0,
+            ..Default::default()
+        };
+        let plain_win = resolve_canonical_event_with_policy(
+            &event.id,
+            choice,
+            winning_rolls,
+            CanonicalEventPolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            veteran.jc, plain_win.jc,
+            "chance perk does not scale payout"
+        );
+    }
+}
+
 type TestService = DigLootService<InMemoryLootRepository, ScriptedLootEntropy>;
 
 fn service(balance: i64) -> TestService {

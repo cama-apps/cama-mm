@@ -2207,7 +2207,7 @@ pub const PINNACLE_RELIC_STATS: [RelicStat; 15] = [
     },
     RelicStat {
         id: "scout_free",
-        label: "Scouting comes cheap",
+        label: "Scout bosses without using a lantern",
         title: "Scouting",
     },
     RelicStat {

@@ -710,6 +710,21 @@ impl DigBossRuntimeRepository {
         Ok(DigBossGearWearReceipt { broken_ids })
     }
 
+    pub fn equipped_relic_ids(
+        &self,
+        key: DigBossRuntimeKey,
+    ) -> Result<Vec<String>, DigBossRuntimeRepositoryError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT artifact_id FROM dig_artifacts
+              WHERE discord_id=?1 AND guild_id=?2 AND is_relic=1 AND equipped=1",
+        )?;
+        statement
+            .query_map(params![key.discord_id, key.guild_id], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn lantern_state(
         &self,
         key: DigBossRuntimeKey,

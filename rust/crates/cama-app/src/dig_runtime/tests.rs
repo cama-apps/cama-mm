@@ -3563,6 +3563,77 @@ fn seed_live_runtime_tunnel(
         .expect("seed tunnel");
 }
 
+fn run_prestige_perk_dig(depth: i64, perks: &[&str]) -> super::DigRuntimeOutcome {
+    let database = fast_migrated_database();
+    let actor = 61_011;
+    let guild = 61_012;
+    let now = find_dig_time_with_unit_between(actor, guild, 1_900_015_000, 0.95, 0.99);
+    seed_live_runtime_tunnel(&database, actor, guild, now, depth, 1, Some(now - 7_200));
+    let connection = Connection::open(database.path()).unwrap();
+    connection
+        .execute(
+            "UPDATE tunnels SET prestige_perks=?1 WHERE discord_id=?2 AND guild_id=?3",
+            params![serde_json::to_string(perks).unwrap(), actor, guild],
+        )
+        .unwrap();
+    drop(connection);
+    seed_two_weather_rows(
+        &database,
+        guild,
+        &game_date_for_timestamp(now as f64).unwrap(),
+        super::layer_at(depth).name,
+        "earthworm_migration",
+    );
+    let outcome = DigRuntimeService::sqlite(database.path())
+        .dig(DigRuntimeRequest {
+            discord_id: actor,
+            guild_id: guild,
+            now,
+            paid: false,
+            forced_event: false,
+        })
+        .unwrap();
+    assert!(outcome.success, "{:?}", outcome.error);
+    assert!(!outcome.cave_in);
+    outcome
+}
+
+#[test]
+fn sqlite_prestige_advance_perks_reach_the_actual_dig_roll() {
+    let boosted = run_prestige_perk_dig(10, &["advance_boost"; 5]);
+    assert!(
+        boosted.advance >= 6,
+        "five stacks raise Dirt's minimum from 1 to 6"
+    );
+    let mixed = run_prestige_perk_dig(10, &["mixed_bonus"; 5]);
+    assert!(
+        mixed.advance >= 4,
+        "2.5 minimum advance rounds half up to 3"
+    );
+    let control = run_prestige_perk_dig(280, &[]);
+    let endless = run_prestige_perk_dig(280, &["the_endless"; 3]);
+    assert_eq!(endless.advance, control.advance + 3);
+    assert_eq!(
+        run_prestige_perk_dig(10, &["the_endless"; 3]).advance,
+        run_prestige_perk_dig(10, &[]).advance,
+    );
+}
+
+#[test]
+fn sqlite_prestige_deep_sight_stacks_restore_light_and_stop_at_full_drain() {
+    let control = run_prestige_perk_dig(280, &[]);
+    let one = run_prestige_perk_dig(280, &["deep_sight"]);
+    let two = run_prestige_perk_dig(280, &["deep_sight"; 2]);
+    let four = run_prestige_perk_dig(280, &["deep_sight"; 4]);
+    assert!(one.luminosity_after > control.luminosity_after);
+    assert!(two.luminosity_after > one.luminosity_after);
+    assert_eq!(four.luminosity_after, 100);
+    assert_eq!(
+        run_prestige_perk_dig(280, &["deep_sight"; 9]).luminosity_after,
+        100
+    );
+}
+
 /// Boss progress a live tunnel must have reached the given depth with: every
 /// boundary at or above which the player stands has been defeated, because the
 /// boss gate parks the player one step short of any boss still standing.

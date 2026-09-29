@@ -64,7 +64,7 @@ impl GuildPlayerNameResolver for FixedPlayerNames {
 }
 
 #[test]
-fn prestige_picker_embeds_match_python_presentation() {
+fn prestige_picker_explains_effects_stack_limits_and_owned_counts() {
     use cama_app::dig_prestige_runtime::{
         DigPrestigePreview, PrestigeMutationChoice, PrestigeMutationPreview, PrestigePerkChoice,
     };
@@ -82,14 +82,21 @@ fn prestige_picker_embeds_match_python_presentation() {
         target_level: 8,
         run_score: 4_200,
         available_perks: vec!["steady_hands".to_owned()],
+        owned_perks: Vec::new(),
         offered_perks: vec![
             PrestigePerkChoice {
                 id: "steady_hands".to_owned(),
                 name: "Steady Hands".to_owned(),
+                description: "Reduce cave-in depth loss by 25% per stack.".to_owned(),
+                owned_stacks: 2,
+                max_stacks: 4,
             },
             PrestigePerkChoice {
                 id: "deep_pockets".to_owned(),
                 name: "Deep Pockets".to_owned(),
+                description: "+1 flat dig JC per stack.".to_owned(),
+                owned_stacks: 0,
+                max_stacks: 5,
             },
         ],
         mutation: Some(PrestigeMutationPreview {
@@ -116,7 +123,10 @@ fn prestige_picker_embeds_match_python_presentation() {
     let initial_embed = &initial_perks.embeds[0];
     assert_eq!(initial_embed.title.as_deref(), Some("Prestige to P8?"));
     assert!(initial_embed.fields.iter().any(|field| {
-        field.name == "Choose a Perk" && field.value == "**Steady Hands**\n**Deep Pockets**"
+        field.name == "Choose a Perk"
+            && field.value.contains("25%")
+            && field.value.contains("2/4")
+            && field.value.contains("Repeatable")
     }));
 
     let post_mutation = super::prestige_perk_response(&preview, "token", Some("bright"));
@@ -125,11 +135,153 @@ fn prestige_picker_embeds_match_python_presentation() {
         post_mutation_embed.title.as_deref(),
         Some("Choose a Prestige Perk")
     );
-    assert_eq!(
-        post_mutation_embed.description.as_deref(),
-        Some("**Steady Hands**\n**Deep Pockets**")
+    assert!(
+        post_mutation_embed
+            .description
+            .as_deref()
+            .unwrap()
+            .contains("25%")
     );
-    assert!(post_mutation_embed.fields.is_empty());
+}
+
+#[tokio::test]
+async fn perks_command_shows_owned_and_unowned_perks_before_prestige_is_available() {
+    let (database, provider, _) = fixture();
+    Connection::open(database.path())
+        .unwrap()
+        .execute(
+            "INSERT INTO tunnels (discord_id,guild_id,depth,prestige_perks) VALUES (?1,?2,1,?3)",
+            params![
+                USER as i64,
+                GUILD as i64,
+                r#"["dark_adaptation","veteran_miner","veteran_miner"]"#
+            ],
+        )
+        .unwrap();
+    let responder = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(command_request(901, "perks", Vec::new()), responder.clone())
+        .await
+        .unwrap();
+    let replies = responder.followups.lock().unwrap();
+    assert_eq!(replies.len(), 1);
+    assert!(replies[0].ephemeral);
+    let fields = &replies[0].embeds[0].fields;
+    assert_eq!(fields.len(), 12);
+    assert!(
+        fields
+            .iter()
+            .any(|field| field.name.contains("Dark Adaptation")
+                && field.value.contains("One-time")
+                && field.value.contains("1/1"))
+    );
+    assert!(
+        fields
+            .iter()
+            .any(|field| field.name.contains("Veteran Miner")
+                && field.value.contains("2/5")
+                && field.value.contains("success chance"))
+    );
+    assert!(
+        fields
+            .iter()
+            .any(|field| field.name.contains("Steady Hands") && field.value.contains("0/4"))
+    );
+}
+
+#[test]
+fn chained_result_contains_playable_followup_buttons() {
+    let (database, provider, _) = fixture();
+    Connection::open(database.path()).unwrap().execute(
+        "INSERT INTO tunnels (discord_id,guild_id,depth,prestige_level,luminosity,prestige_perks,boss_progress) VALUES (?1,?2,200,9,100,'[]','{}')",
+        params![USER as i64, GUILD as i64],
+    ).unwrap();
+    let outcome = cama_app::dig_event_runtime::DigEventRuntimeService::sqlite(database.path())
+        .resolve_event(cama_app::dig_runtime::DigRuntimeEventRequest {
+            discord_id: USER as i64,
+            guild_id: GUILD as i64,
+            event_id: "hollow_court_overture",
+            choice: "safe",
+            event_key: "chain-ui",
+            now: super::unix_now(),
+            chained: false,
+        })
+        .unwrap();
+    let response = super::event_resolution_response(&outcome, &provider.handler.state.view_nonce);
+    let buttons = response
+        .components
+        .iter()
+        .flat_map(|row| &row.buttons)
+        .collect::<Vec<_>>();
+    assert!(
+        !buttons.is_empty(),
+        "a chain must offer choices, not just flavor text"
+    );
+    let action_id = outcome.action_id.unwrap();
+    assert!(
+        buttons
+            .iter()
+            .all(|button| button.custom_id.contains(&format!(":{action_id}:")))
+    );
+    let _ = provider;
+}
+
+#[tokio::test]
+async fn player_backlog_recovers_pending_event_without_repaying_actor() {
+    let (database, provider, discord) = fixture();
+    let connection = Connection::open(database.path()).unwrap();
+    connection.execute(
+        "INSERT INTO tunnels (discord_id,guild_id,depth,luminosity,prestige_perks,boss_progress) VALUES (?1,?2,30,100,'[]','{}')",
+        params![USER as i64, GUILD as i64],
+    ).unwrap();
+    let now = super::unix_now();
+    let outcome = cama_app::dig_event_runtime::DigEventRuntimeService::sqlite(database.path())
+        .resolve_event_with_delivery(
+            cama_app::dig_runtime::DigRuntimeEventRequest {
+                discord_id: USER as i64,
+                guild_id: GUILD as i64,
+                event_id: "underground_stream",
+                choice: "safe",
+                event_key: "pending-player-event",
+                now,
+                chained: false,
+            },
+            cama_app::dig_event_runtime::DigEventDeliveryContext::new(
+                USER as i64,
+                GUILD as i64,
+                903,
+                CHANNEL as i64,
+            ),
+        )
+        .unwrap();
+    connection.execute("UPDATE dig_actions SET detail=json_set(detail, '$.event_delivery.state','pending', '$.event_delivery.outcome.action_id',NULL) WHERE id=?1", [outcome.action_id.unwrap()]).unwrap();
+    assert_eq!(
+        provider
+            .handler
+            .replay_player_backlog(USER as i64, GUILD as i64, Some(CHANNEL as i64), now)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(discord.public.lock().unwrap().len(), 1);
+    let balance: i64 = connection
+        .query_row(
+            "SELECT jopacoin_balance FROM players WHERE discord_id=?1 AND guild_id=?2",
+            params![USER as i64, GUILD as i64],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(balance, outcome.balance_after);
+    assert_eq!(
+        provider
+            .handler
+            .replay_player_backlog(USER as i64, GUILD as i64, Some(CHANNEL as i64), now)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(discord.public.lock().unwrap().len(), 1);
 }
 
 fn persistent_vanity_tax(
@@ -1246,11 +1398,12 @@ fn failed_event_uses_python_error_embed() {
         splash: None,
         guild_modifier: None,
         chain_event: None,
+        chain_prompt: None,
         quest_finale: None,
         retryable: false,
     };
 
-    let response = super::event_resolution_response(&outcome);
+    let response = super::event_resolution_response(&outcome, "test-nonce");
     assert!(response.ephemeral);
     assert!(response.content.is_empty());
     let embed = &response.embeds[0];
@@ -1319,11 +1472,12 @@ fn event_result_embed_surfaces_exact_unique_gear_drop_details() {
         splash: None,
         guild_modifier: None,
         chain_event: None,
+        chain_prompt: None,
         quest_finale: None,
         retryable: false,
     };
 
-    let response = super::event_resolution_response(&outcome);
+    let response = super::event_resolution_response(&outcome, "test-nonce");
     let field = response.embeds[0]
         .fields
         .iter()
@@ -2507,7 +2661,8 @@ async fn accepted_event_delivery_is_reconciled_after_restart_without_duplicate_s
         .expect("query event Ready projection")
         .expect("event Ready projection");
     assert_eq!(delivery.context.channel_id, CHANNEL as i64);
-    let response = super::event_resolution_response(&delivery.outcome);
+    let response =
+        super::event_resolution_response(&delivery.outcome, &provider.handler.state.view_nonce);
     discord
         .dig_send_public_once(CHANNEL as i64, response, &delivery.nonce())
         .await
@@ -7764,7 +7919,7 @@ fn find<'a>(options: &'a [CommandOptionSpec], name: &str) -> &'a CommandOptionSp
 #[test]
 fn command_tree_matches_python_surface() {
     let options = dig_options();
-    assert_eq!(options.len(), 22);
+    assert_eq!(options.len(), 23);
     for (name, description) in [
         ("go", "Dig deeper into your tunnel"),
         ("help", "Help another player's tunnel"),
@@ -7780,6 +7935,10 @@ fn command_tree_matches_python_surface() {
         ("shop", "Browse the mining shop"),
         ("buy", "Buy an item from the mining shop"),
         ("flex", "Show off your mining stats"),
+        (
+            "perks",
+            "View prestige perk effects, owned stacks and limits",
+        ),
         (
             "prestige",
             "Prestige your tunnel (reset depth, gain a perk)",

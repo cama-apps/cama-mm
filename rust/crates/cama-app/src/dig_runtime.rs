@@ -2386,8 +2386,12 @@ where
                 },
             );
             luminosity = lantern_stub.luminosity_after;
-            if prestige_perk_contains(&tunnel.prestige_perks, "deep_sight") && drained > 0 {
-                let restored = (drained / 4).max(1);
+            let reduction = perk_fx
+                .get("luminosity_drain_reduction")
+                .copied()
+                .unwrap_or(0.0);
+            if reduction > 0.0 && drained > 0 {
+                let restored = ((drained as f64 * reduction) as i64).max(1).min(drained);
                 luminosity = (luminosity + restored).min(LUMINOSITY_MAX);
             }
             luminosity
@@ -2434,8 +2438,17 @@ where
                 + weather_fx.advance_bonus
                 + curse_fx.advance_bonus
                 + gear_fx.advance_bonus
-                + buff_fx.advance_bonus,
-            advance_min: None,
+                + buff_fx.advance_bonus
+                + if layer_at(depth_before).name == "The Hollow" {
+                    perk_fx.get("hollow_advance_bonus").copied().unwrap_or(0.0) as i64
+                } else {
+                    0
+                },
+            advance_min: Some(layer_at(depth_before).advance_range.0.saturating_add(
+                round_prestige_perk_bonus_half_up(
+                    perk_fx.get("advance_min_bonus").copied().unwrap_or(0.0),
+                ),
+            )),
             advance_max: active_route
                 .and_then(|route| route_effect(route, "advance_max_penalty"))
                 .map(|penalty| (layer_at(depth_before).advance_range.1 - penalty as i64).max(1)),
@@ -2552,10 +2565,14 @@ where
             if lantern_stub.lantern_stub_date.is_some() {
                 next_tunnel.lantern_stub_date = lantern_stub.lantern_stub_date;
             }
-            if prestige_perk_contains(&tunnel.prestige_perks, "deep_sight")
-                && luminosity_drained > 0
-            {
-                let restored = (luminosity_drained / 4).max(1);
+            let reduction = perk_fx
+                .get("luminosity_drain_reduction")
+                .copied()
+                .unwrap_or(0.0);
+            if reduction > 0.0 && luminosity_drained > 0 {
+                let restored = ((luminosity_drained as f64 * reduction) as i64)
+                    .max(1)
+                    .min(luminosity_drained);
                 next_tunnel.luminosity = (next_tunnel.luminosity + restored).min(LUMINOSITY_MAX);
             }
             // Hard Hat is deliberately last in Python's luminosity pipeline:
@@ -3927,12 +3944,6 @@ fn tick_injury(tunnel: &mut DigRuntimeTunnel) -> bool {
     }
     tunnel.injury_state = Some(value.to_string());
     reduced
-}
-
-fn prestige_perk_contains(raw: &str, perk: &str) -> bool {
-    serde_json::from_str::<Vec<String>>(raw)
-        .ok()
-        .is_some_and(|perks| perks.iter().any(|candidate| candidate == perk))
 }
 
 const LUMINOSITY_MAX: i64 = 100;

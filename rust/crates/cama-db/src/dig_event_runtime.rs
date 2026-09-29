@@ -80,6 +80,7 @@ pub struct DigPendingEvent {
     pub guild_id: i64,
     pub event_id: String,
     pub created_at: i64,
+    pub chained: bool,
 }
 
 /// Identity needed to replay the application-owned follow-up for a resolved
@@ -95,6 +96,9 @@ pub struct DigResolvedEventIdentity {
     pub event_key: String,
     pub choice: String,
     pub created_at: i64,
+    pub chained: bool,
+    pub prestige_level: Option<i64>,
+    pub reward_row_id: Option<i64>,
 }
 
 /// Immutable public-delivery projection for one resolved event.
@@ -303,6 +307,13 @@ pub struct DigEventFinaleReceipt {
     pub applied_now: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DigEventFinaleRelicSnapshot {
+    pub artifact_id: String,
+    pub detail_json: String,
+    pub reward_row_id: i64,
+}
+
 /// One cooperative splash grant. Each victim is committed independently so
 /// an unavailable target cannot roll back already-settled targets.
 #[derive(Clone, Copy, Debug)]
@@ -464,7 +475,7 @@ impl DigEventRuntimeRepository {
 
     /// Resolve the event attached to one committed Dig action.
     ///
-    /// Only `dig` and `paid_dig` rows are admitted. The actor/guild guard is
+    /// Dig rows and settled events with an authored follow-up are admitted. The actor/guild guard is
     /// part of the query so a component copied to another user or server is
     /// indistinguishable from an expired interaction.
     pub fn pending_event(
@@ -478,12 +489,18 @@ impl DigEventRuntimeRepository {
         connection
             .query_row(
                 "SELECT id, actor_id, guild_id,
-                        json_extract(detail, '$.event'), created_at
+                        CASE WHEN action_type='event'
+                             THEN json_extract(detail, '$.chained_event_id')
+                             ELSE json_extract(detail, '$.event') END,
+                        CASE WHEN action_type='event'
+                             THEN COALESCE(json_extract(detail, '$.event_delivery.delivered_at'), created_at)
+                             ELSE created_at END,
+                        action_type='event'
                    FROM dig_actions
                   WHERE id = ?1 AND actor_id = ?2 AND guild_id = ?3
-                    AND action_type IN ('dig', 'paid_dig')
                     AND json_valid(detail)
-                    AND json_type(detail, '$.event') = 'text'",
+                    AND ((action_type IN ('dig', 'paid_dig') AND json_type(detail, '$.event') = 'text')
+                      OR (action_type='event' AND json_type(detail, '$.chained_event_id')='text'))",
                 params![action_id, actor_id, guild_id],
                 |row| {
                     Ok(DigPendingEvent {
@@ -492,6 +509,7 @@ impl DigEventRuntimeRepository {
                         guild_id: row.get(2)?,
                         event_id: row.get(3)?,
                         created_at: row.get(4)?,
+                        chained: row.get(5)?,
                     })
                 },
             )
@@ -500,8 +518,8 @@ impl DigEventRuntimeRepository {
     }
 
     /// Read the durable event request for a committed actor action. This is
-    /// deliberately separate from [`Self::pending_event`], which admits only
-    /// the pre-choice `dig` action that owns a Discord event component.
+    /// separate from [`Self::pending_event`], which reads the next prompt
+    /// owned by an action rather than the event that action already settled.
     pub fn resolved_event_identity(
         &self,
         action_id: i64,
@@ -514,7 +532,10 @@ impl DigEventRuntimeRepository {
                 "SELECT id, actor_id, guild_id,
                         json_extract(detail, '$.event_id'),
                         json_extract(detail, '$.event_key'),
-                        json_extract(detail, '$.choice'), created_at
+                        COALESCE(json_extract(detail, '$.requested_choice'), json_extract(detail, '$.choice')), created_at,
+                        COALESCE(json_extract(detail, '$.chained'), 0),
+                        json_extract(detail, '$.prestige_level'),
+                        json_extract(detail, '$.reward_row_id')
                    FROM dig_actions
                   WHERE id=?1 AND actor_id=?2 AND guild_id=?3
                     AND action_type='event' AND json_valid(detail)
@@ -531,6 +552,9 @@ impl DigEventRuntimeRepository {
                         event_key: row.get(4)?,
                         choice: row.get(5)?,
                         created_at: row.get(6)?,
+                        chained: row.get(7)?,
+                        prestige_level: row.get(8)?,
+                        reward_row_id: row.get(9)?,
                     })
                 },
             )
@@ -538,10 +562,52 @@ impl DigEventRuntimeRepository {
             .map_err(Into::into)
     }
 
+    /// Read a committed projection by its actor-scoped event key and reject
+    /// attempts to reuse that key for a different event or choice.
+    pub fn event_delivery_by_key(
+        &self,
+        key: DigEventActorKey,
+        event_key: &str,
+        event_id: &str,
+        choice: &str,
+    ) -> Result<Option<DigEventDeliverySnapshot>, DigEventRuntimeRepositoryError> {
+        let row = self
+            .connection()?
+            .query_row(
+                "SELECT id, detail FROM dig_actions
+              WHERE actor_id=?1 AND guild_id=?2 AND action_type='event'
+                AND json_valid(detail) AND json_extract(detail, '$.event_key')=?3
+              ORDER BY id LIMIT 1",
+                params![
+                    key.discord_id,
+                    Self::normalize_guild_id(key.guild_id),
+                    event_key
+                ],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let Some((action_id, raw)) = row else {
+            return Ok(None);
+        };
+        let detail: JsonValue = serde_json::from_str(&raw)?;
+        if detail.get("event_id").and_then(JsonValue::as_str) != Some(event_id)
+            || detail
+                .get("requested_choice")
+                .or_else(|| detail.get("choice"))
+                .and_then(JsonValue::as_str)
+                != Some(choice)
+        {
+            return Err(DigEventRuntimeRepositoryError::IdempotencyConflict);
+        }
+        detail
+            .get("event_delivery")
+            .map(|value| event_delivery_from_value(action_id, value))
+            .transpose()
+    }
+
     /// Attach the immutable event-result delivery projection to an already
-    /// committed event action.  Repeating the same projection is idempotent;
-    /// attempting to replace it is rejected so a retry cannot silently render
-    /// a different result after the actor settlement has committed.
+    /// committed event action. Repeating the same projection is idempotent;
+    /// attempting to replace it is rejected.
     pub fn attach_event_delivery(
         &self,
         action_id: i64,
@@ -1091,6 +1157,40 @@ impl DigEventRuntimeRepository {
             action_id,
             applied_now: true,
         })
+    }
+
+    /// Read the actual committed relic, including grants predating audit
+    /// artifact IDs. New audit identities survive later artifact recycling.
+    pub fn finale_relic_snapshot(
+        &self,
+        key: DigEventActorKey,
+        event_key: &str,
+    ) -> Result<Option<DigEventFinaleRelicSnapshot>, DigEventRuntimeRepositoryError> {
+        self.connection()?
+            .query_row(
+                "SELECT COALESCE(json_extract(a.detail, '$.artifact_id'), r.artifact_id),
+                    a.detail, json_extract(a.detail, '$.reward_row_id')
+               FROM dig_actions a
+               LEFT JOIN dig_artifacts r ON r.id=json_extract(a.detail, '$.reward_row_id')
+                    AND r.discord_id=a.actor_id AND r.guild_id=a.guild_id
+              WHERE a.actor_id=?1 AND a.guild_id=?2 AND a.action_type='quest_finale_relic'
+                AND json_valid(a.detail) AND json_extract(a.detail, '$.event_key')=?3
+              ORDER BY a.id LIMIT 1",
+                params![
+                    key.discord_id,
+                    Self::normalize_guild_id(key.guild_id),
+                    event_key
+                ],
+                |row| {
+                    Ok(DigEventFinaleRelicSnapshot {
+                        artifact_id: row.get(0)?,
+                        detail_json: row.get(1)?,
+                        reward_row_id: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     /// Grant a quest-final relic after durable quest completion. The audit
@@ -2079,6 +2179,10 @@ fn settlement_detail(
         JsonValue::from(request.expected.balance),
     );
     detail.insert("balance_after".to_owned(), JsonValue::from(balance_after));
+    detail.insert(
+        "prestige_level".to_owned(),
+        JsonValue::from(request.expected.prestige_level),
+    );
     detail.insert(
         "reward_row_id".to_owned(),
         reward_row_id.map_or(JsonValue::Null, JsonValue::from),

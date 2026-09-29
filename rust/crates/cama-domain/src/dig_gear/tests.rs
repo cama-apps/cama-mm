@@ -1442,6 +1442,65 @@ fn test_prorated_repair_full_repair_value_is_five_percent() {
 }
 
 #[test]
+fn high_end_repair_caps_upkeep_without_removing_the_coin_sink() {
+    for slot in [
+        GearSlot::Weapon,
+        GearSlot::Armor,
+        GearSlot::Boots,
+        GearSlot::Amulet,
+    ] {
+        let table = tier_table(slot).expect("regular gear");
+        for definition in table {
+            let old_full_cost = python_round(definition.shop_price as f64 * 0.05);
+            let full_cost = old_full_cost.min(20);
+            for durability in 0..=GEAR_MAX_DURABILITY {
+                let cost = repair_cost(slot, definition.tier, None, durability, None);
+                let missing = i64::from(GEAR_MAX_DURABILITY - durability);
+                assert_eq!(cost, (full_cost * missing + 19) / 20);
+                if definition.tier > 0 && missing > 0 {
+                    assert!(cost > 0);
+                }
+            }
+        }
+        assert_eq!(repair_cost(slot, 7, None, 0, None), 20);
+        assert_eq!(repair_cost(slot, 7, None, 10, None), 10);
+        assert_eq!(repair_cost(slot, 7, None, 19, None), 1);
+    }
+}
+
+#[test]
+fn unique_drop_repair_prices_remain_unchanged_at_every_durability() {
+    for definition in [
+        GLASSBREAKER_PICK,
+        NEEDLE_PICK,
+        BRIARPLATE,
+        NULLWEAVE_MANTLE,
+        SPRINGHEEL_BOOTS,
+        ANCHOR_BOOTS,
+        LOADED_DIE,
+        BLOOD_LOCKET,
+        SURVEYORS_LOOP,
+        RUINWAGER_SIGNET,
+        RED_THREAD_BAND,
+    ] {
+        for durability in 0..=definition.max_durability {
+            let maximum = i64::from(definition.max_durability);
+            let missing = maximum - i64::from(durability);
+            assert_eq!(
+                repair_cost(
+                    definition.slot,
+                    definition.reference_tier,
+                    Some(definition.item_id),
+                    durability,
+                    None
+                ),
+                (10 * missing + maximum - 1) / maximum,
+            );
+        }
+    }
+}
+
+#[test]
 fn test_prorated_repair_single_repair_prorates_cost_by_missing_durability() {
     let mut service = GearService::fixture();
     let id = service

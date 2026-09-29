@@ -780,6 +780,7 @@ pub fn resolve_canonical_event_with_policy(
         success_chance = (success_chance + 0.10).min(1.0);
     }
     if matches!(choice, "risky" | "desperate") {
+        success_chance = (success_chance + policy.risky_success_bonus.clamp(0.0, 0.25)).min(1.0);
         if policy.surveyors_loop {
             success_chance = (success_chance - 0.05).max(0.05);
         }
@@ -862,9 +863,6 @@ pub fn resolve_canonical_event_with_policy(
     }
     if policy.chained && jc > 0 && policy.expedition_reward_bonus > 0.0 {
         jc = (jc as f64 * (1.0 + policy.expedition_reward_bonus)) as i64;
-    }
-    if jc > 0 && event_has_negative_outcome(event) && policy.risky_success_bonus > 0.0 {
-        jc = (jc as f64 * (1.0 + policy.risky_success_bonus)) as i64;
     }
     let economy_gross_jc = jc;
     jc = if jc > 0 {

@@ -259,6 +259,59 @@ fn repair_all_insufficient_balance_changes_nothing() {
 }
 
 #[test]
+fn void_repair_quote_matches_atomic_bill_and_retry_never_mints_coins() {
+    let database = fixture(100, 275, 5);
+    let connection = Connection::open(database.path()).expect("fixture DB");
+    connection
+        .execute("UPDATE dig_gear SET tier=7, durability=0", [])
+        .expect("void gear");
+    let service = DigGearRuntimeService::sqlite(database.path());
+    let before = service.panel(USER, GUILD).expect("panel").expect("tunnel");
+    let quote: i64 = before
+        .pieces
+        .iter()
+        .map(|piece| {
+            cama_domain::dig_gear::repair_cost(
+                piece.slot,
+                piece.tier,
+                piece.item_id.as_deref(),
+                piece.durability,
+                Some(piece.max_durability),
+            )
+        })
+        .sum();
+    assert_eq!(quote, 80);
+    let outcome = service
+        .execute(USER, GUILD, DigGearRuntimeAction::RepairAll, 206)
+        .expect("repair");
+    assert!(outcome.success);
+    assert_eq!(outcome.cost, quote);
+    assert_eq!(outcome.balance_after, 20);
+    assert_eq!(outcome.repaired, 4);
+    assert!(
+        outcome
+            .panel
+            .as_ref()
+            .expect("panel")
+            .pieces
+            .iter()
+            .all(|piece| piece.durability == piece.max_durability)
+    );
+    let retry = service
+        .execute(USER, GUILD, DigGearRuntimeAction::RepairAll, 207)
+        .expect("retry");
+    assert_eq!(retry.cost, 0);
+    assert_eq!(
+        service
+            .panel(USER, GUILD)
+            .expect("panel")
+            .expect("tunnel")
+            .balance,
+        20
+    );
+}
+
+#[test]
 fn gear_purchase_enforces_depth_prestige_and_balance_then_inserts() {
     let database = fixture(1_000, 100, 1);
     let service = DigGearRuntimeService::sqlite(database.path());

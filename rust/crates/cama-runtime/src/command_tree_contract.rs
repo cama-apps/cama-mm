@@ -279,7 +279,7 @@ pub fn validate_production_registry(
     }
 
     for (path, expected) in [
-        ("/dig", 22),
+        ("/dig", 23),
         ("/player", 11),
         ("/player lobby", 2),
         ("/survey", 9),
@@ -406,6 +406,7 @@ mod tests {
                     option("buy"),
                     option("flex"),
                     option("prestige"),
+                    option("perks"),
                     option("abandon"),
                     option("trap"),
                     option("insure"),
@@ -612,7 +613,7 @@ mod tests {
                 .values()
                 .all(|count| *count <= DISCORD_COMMAND_OPTION_LIMIT)
         );
-        assert_eq!(snapshot.direct_option_counts["/dig"], 22);
+        assert_eq!(snapshot.direct_option_counts["/dig"], 23);
         assert_eq!(snapshot.direct_option_counts["/player"], 11);
         assert_eq!(snapshot.direct_option_counts["/player lobby"], 2);
         assert_eq!(snapshot.direct_option_counts["/survey"], 9);
