@@ -22,8 +22,8 @@ use crate::dig_bosses::{BOSS_BOUNDARIES, PINNACLE_DEPTH};
 use crate::dig_loot::{Rarity, artifact_catalog};
 use crate::dig_runtime::DigRuntimeConfig;
 use crate::dig_tunnels::{
-    MAX_PRESTIGE, MUTATIONS, MutationDefinition, PRESTIGE_GROSS_JC, PRESTIGE_PERK_STACK_CAP,
-    PRESTIGE_PERKS, RelicGrant, RelicRarity, prestige_mutation_seed,
+    MAX_PRESTIGE, MUTATIONS, MutationDefinition, PRESTIGE_GROSS_JC, PRESTIGE_PERKS, RelicGrant,
+    RelicRarity, prestige_mutation_seed, prestige_perk_stack_cap,
 };
 use crate::economy_event_sqlite::{SqliteEconomyEventError, SqliteEconomyEventService};
 use crate::python_random::PythonRandom;
@@ -40,6 +40,9 @@ pub const PRESTIGE_PICK_COUNT: usize = 4;
 pub struct PrestigePerkChoice {
     pub id: String,
     pub name: String,
+    pub description: String,
+    pub owned_stacks: usize,
+    pub max_stacks: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -90,6 +93,7 @@ pub struct DigPrestigePreview {
     pub run_score: i64,
     pub available_perks: Vec<String>,
     pub offered_perks: Vec<PrestigePerkChoice>,
+    pub owned_perks: Vec<PrestigePerkChoice>,
     pub mutation: Option<PrestigeMutationPreview>,
     pub ascension_unlock: Option<PrestigeAscensionUnlock>,
 }
@@ -218,6 +222,7 @@ where
                 run_score: 0,
                 available_perks: Vec::new(),
                 offered_perks: Vec::new(),
+                owned_perks: Vec::new(),
                 mutation: None,
                 ascension_unlock: ascension_unlock(1),
             });
@@ -253,7 +258,7 @@ where
             .iter()
             .filter(|perk| perk.as_str() == request.perk_choice)
             .count()
-            >= PRESTIGE_PERK_STACK_CAP
+            >= prestige_perk_stack_cap(request.perk_choice)
         {
             return Err(DigPrestigeRuntimeError::PerkAtCap);
         }
@@ -415,10 +420,7 @@ fn preview_from_snapshot(
     let eligible = eligible_prestige_perks(&perks);
     let offered = prestige_perk_choices(&eligible, snapshot.key.discord_id, target_level)
         .into_iter()
-        .map(|id| PrestigePerkChoice {
-            name: prestige_perk_display_name(&id),
-            id,
-        })
+        .map(|id| prestige_perk_choice(&id, &perks))
         .collect();
     let mutation = can_prestige
         .then(|| mutation_preview(snapshot.key, target_level))
@@ -435,6 +437,10 @@ fn preview_from_snapshot(
         },
         available_perks: eligible.into_iter().map(str::to_owned).collect(),
         offered_perks: offered,
+        owned_perks: prestige_perk_catalog(&perks)
+            .into_iter()
+            .filter(|perk| perk.owned_stacks > 0)
+            .collect(),
         mutation,
         ascension_unlock: ascension_unlock(target_level),
     })
@@ -662,6 +668,60 @@ pub fn prestige_perk_display_name(perk_id: &str) -> String {
         .join(" ")
 }
 
+/// Player-facing rules and ownership use the same caps as selection and effects.
+#[must_use]
+pub fn prestige_perk_catalog(owned: &[String]) -> Vec<PrestigePerkChoice> {
+    PRESTIGE_PERKS
+        .into_iter()
+        .map(|id| prestige_perk_choice(id, owned))
+        .collect()
+}
+
+fn prestige_perk_choice(id: &str, owned: &[String]) -> PrestigePerkChoice {
+    let description = match id {
+        "advance_boost" => "+1 minimum rolled dig advance per stack; the maximum rises if needed.",
+        "cave_in_resistance" => {
+            "-5 percentage points of cave-in chance per stack, before other hazard modifiers."
+        }
+        "loot_multiplier" => {
+            "+1 flat dig JC before reward scaling per stack; never multiplies your balance."
+        }
+        "mixed_bonus" => {
+            "+0.5 minimum rolled advance, -2 percentage points cave-in chance and +0.5 flat dig JC per stack. Sum fractional bonuses, then round halves up."
+        }
+        "deep_sight" => {
+            "Restore 25% of each dig's light drain per stack, rounded down (at least 1); up to 100%. Does not refund Hard Hat protection."
+        }
+        "veteran_miner" => {
+            "+5 percentage points of success chance on risky and desperate event choices per stack, up to 100% success."
+        }
+        "tunnel_mastery" => {
+            "+50% positive JC from the follow-up event in an expedition chain per stack; stacks add together."
+        }
+        "dark_adaptation" => {
+            "Ignore the extra cave-in chance from Dim light; Dark and Pitch Black still apply."
+        }
+        "the_endless" => {
+            "+1 dig advance per stack in The Hollow (depth 276+); boss gates still apply."
+        }
+        "patient_step" => "+50% daily streak JC bonus per stack; stacks add together.",
+        "steady_hands" => {
+            "Reduce ordinary cave-in depth loss by 25% per stack, up to 100%; catastrophic collapses still apply."
+        }
+        "reading_the_stone" => {
+            "Event prompts hint at the choice with the highest average authored JC reward; outcomes remain uncertain."
+        }
+        _ => "",
+    };
+    PrestigePerkChoice {
+        id: id.to_owned(),
+        name: prestige_perk_display_name(id),
+        description: description.to_owned(),
+        owned_stacks: owned.iter().filter(|perk| perk.as_str() == id).count(),
+        max_stacks: prestige_perk_stack_cap(id),
+    }
+}
+
 fn titlecase_ascii_word(word: &str) -> String {
     let mut characters = word.chars();
     let Some(first) = characters.next() else {
@@ -679,7 +739,7 @@ pub fn eligible_prestige_perks(owned: &[String]) -> Vec<&'static str> {
                 .iter()
                 .filter(|perk| perk.as_str() == *candidate)
                 .count()
-                < PRESTIGE_PERK_STACK_CAP
+                < prestige_perk_stack_cap(candidate)
         })
         .collect()
 }

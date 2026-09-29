@@ -15,6 +15,22 @@ const ACTOR: i64 = 91_001;
 const GUILD: i64 = 42;
 const NOW: i64 = 1_700_000_000;
 
+#[test]
+fn event_perk_bonuses_remain_bounded_for_legacy_duplicate_stacks() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 100, 200, 9);
+    let mut snapshot = fixture.snapshot();
+    snapshot.prestige_perks_json = serde_json::to_string(
+        &std::iter::repeat_n("veteran_miner", 100)
+            .chain(std::iter::repeat_n("tunnel_mastery", 100))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let policy = event_policy(&snapshot, true, 1.0);
+    assert_eq!(policy.risky_success_bonus, 0.25);
+    assert_eq!(policy.expedition_reward_bonus, 2.5);
+}
+
 struct Fixture {
     database: FastTestDatabase,
 }
@@ -1335,6 +1351,87 @@ fn deterministic_authored_chain_is_preserved_in_typed_outcome() {
 }
 
 #[test]
+fn chained_event_is_playable_owned_durable_and_finishes_authored_story() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 100, 200, 9);
+    let action_id = fixture.seed_event_dig_action("hollow_court_overture");
+    let first = fixture
+        .service()
+        .resolve_action_event(DigEventActionRequest {
+            discord_id: ACTOR,
+            guild_id: GUILD,
+            dig_action_id: action_id,
+            choice: "safe",
+            now: NOW,
+        })
+        .expect("first event");
+    let followup_id = first.action_id.expect("settled parent");
+    let prompt = fixture
+        .service()
+        .action_presentation(ACTOR, GUILD, followup_id, NOW)
+        .expect("reload chain after restart")
+        .expect("playable chain");
+    assert_eq!(prompt.event.event_id, "hollow_court_audience");
+    assert!(
+        fixture
+            .service()
+            .action_presentation(ACTOR + 1, GUILD, followup_id, NOW)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        fixture
+            .service()
+            .action_presentation(ACTOR, GUILD + 1, followup_id, NOW)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        fixture
+            .service()
+            .action_presentation(ACTOR, GUILD, followup_id, NOW + 60)
+            .unwrap()
+            .is_none()
+    );
+    let request = DigEventActionRequest {
+        discord_id: ACTOR,
+        guild_id: GUILD,
+        dig_action_id: followup_id,
+        choice: "safe",
+        now: NOW,
+    };
+    let second = fixture
+        .service()
+        .resolve_action_event(request)
+        .expect("play chain");
+    assert!(second.success);
+    assert_eq!(
+        second.chain_event.as_ref().unwrap().event_id,
+        "hollow_court_recess"
+    );
+    let balance = fixture.balance(ACTOR);
+    let replay = fixture
+        .service()
+        .resolve_action_event(request)
+        .expect("retry chain");
+    assert!(!replay.applied_now);
+    assert_eq!(fixture.balance(ACTOR), balance);
+    assert_eq!(fixture.count_actions(ACTOR, "event"), 2);
+    let finale = fixture
+        .service()
+        .resolve_action_event(DigEventActionRequest {
+            dig_action_id: second.action_id.unwrap(),
+            ..request
+        })
+        .expect("finish authored story");
+    assert!(finale.success);
+    assert!(
+        finale.chain_event.is_none(),
+        "authored stories cannot restart random chains"
+    );
+}
+
+#[test]
 fn completed_quest_finale_resumes_after_complete_first_failure() {
     let fixture = Fixture::new();
     fixture.seed_actor(ACTOR, 100, 100, 0);
@@ -1562,4 +1659,419 @@ fn event_loss_takes_the_balance_but_never_pushes_into_debt() {
         assert_eq!(resolution.jc, expected_jc, "balance {balance}");
         assert_eq!(fixture.balance(ACTOR), balance + expected_jc);
     }
+}
+
+#[test]
+fn durable_chain_retries_and_recovery_preserve_the_committed_prompt_after_actor_drift() {
+    for pending in [false, true] {
+        let fixture = Fixture::new();
+        fixture.seed_actor(ACTOR, 100, 200, 9);
+        let service = fixture.service();
+        let event_request = request("hollow_court_overture", "safe", "event:immutable-chain");
+        let first = service
+            .resolve_event_with_delivery(
+                event_request,
+                DigEventDeliveryContext::new(ACTOR, GUILD, 501, 601),
+            )
+            .expect("commit chain");
+        let resolved_id = first.action_id.expect("settled action");
+        assert_eq!(
+            first.chain_prompt.as_ref().unwrap().event.event_id,
+            "hollow_court_audience"
+        );
+        if pending {
+            fixture
+                .connection()
+                .execute(
+                    "UPDATE dig_actions SET detail=json_set(detail,
+                   '$.event_delivery.state','pending',
+                   '$.event_delivery.outcome.action_id',NULL) WHERE id=?1",
+                    [resolved_id],
+                )
+                .unwrap();
+        }
+        fixture
+            .connection()
+            .execute(
+                "UPDATE tunnels SET depth=5, luminosity=0, prestige_level=0, prestige_perks='[]'
+              WHERE discord_id=?1 AND guild_id=?2",
+                params![ACTOR, GUILD],
+            )
+            .unwrap();
+        let balance = fixture.balance(ACTOR);
+        let outcome = if pending {
+            service
+                .recover_event_delivery(resolved_id)
+                .expect("recover frozen result")
+                .unwrap()
+        } else {
+            service
+                .resolve_event_with_delivery(
+                    event_request,
+                    DigEventDeliveryContext::new(ACTOR, GUILD, 502, 601),
+                )
+                .expect("retry frozen result")
+        };
+        assert!(!outcome.applied_now);
+        assert_eq!(outcome.chain_event, first.chain_event);
+        assert_eq!(outcome.chain_prompt, first.chain_prompt);
+        assert_eq!(outcome.resolution, first.resolution);
+        assert_eq!(outcome.depth_after, first.depth_after);
+        assert_eq!(outcome.action_id, first.action_id);
+        assert_eq!(fixture.balance(ACTOR), balance);
+        assert_eq!(fixture.snapshot().depth, 5);
+        assert_eq!(fixture.count_actions(ACTOR, "event"), 1);
+        assert!(
+            service
+                .recover_event_delivery(resolved_id)
+                .unwrap()
+                .is_none()
+        );
+        let duplicate = service
+            .resolve_event_with_delivery(
+                event_request,
+                DigEventDeliveryContext::new(ACTOR, GUILD, 503, 601),
+            )
+            .expect("second retry");
+        assert_eq!(duplicate.chain_prompt, first.chain_prompt);
+        assert!(!duplicate.applied_now);
+        assert_eq!(fixture.balance(ACTOR), balance);
+    }
+}
+
+#[test]
+fn durable_event_retry_rejects_another_choice_and_keeps_owner_scope() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 100, 50, 0);
+    let service = fixture.service();
+    let event_request = request("underground_stream", "safe", "event:scoped-retry");
+    service
+        .resolve_event_with_delivery(
+            event_request,
+            DigEventDeliveryContext::new(ACTOR, GUILD, 504, 601),
+        )
+        .unwrap();
+    let balance = fixture.balance(ACTOR);
+    assert!(matches!(
+        service.resolve_event(DigRuntimeEventRequest {
+            choice: "risky",
+            ..event_request
+        }),
+        Err(DigEventRuntimeError::EventRepository(
+            DigEventRuntimeRepositoryError::IdempotencyConflict
+        ))
+    ));
+    let repository = DigEventRuntimeRepository::new(fixture.database.path());
+    for key in [
+        DigEventActorKey {
+            discord_id: ACTOR + 1,
+            guild_id: Some(GUILD),
+        },
+        DigEventActorKey {
+            discord_id: ACTOR,
+            guild_id: Some(GUILD + 1),
+        },
+    ] {
+        assert!(
+            repository
+                .event_delivery_by_key(
+                    key,
+                    event_request.event_key,
+                    event_request.event_id,
+                    event_request.choice
+                )
+                .unwrap()
+                .is_none()
+        );
+    }
+    assert_eq!(fixture.balance(ACTOR), balance);
+    assert_eq!(fixture.count_actions(ACTOR, "event"), 1);
+}
+
+#[test]
+fn pending_gear_event_recovers_original_reward_row_without_another_drop() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 100, 100, 0);
+    let key = key_for_outcome(&fixture.snapshot(), "collapsed_armory", "risky", true);
+    let service = fixture.service();
+    let first = service
+        .resolve_event_with_delivery(
+            request("collapsed_armory", "risky", &key),
+            DigEventDeliveryContext::new(ACTOR, GUILD, 505, 601),
+        )
+        .unwrap();
+    assert!(first.reward_row_id.is_some());
+    fixture
+        .connection()
+        .execute(
+            "UPDATE dig_actions SET detail=json_set(detail,
+        '$.event_delivery.state','pending', '$.event_delivery.outcome.action_id',NULL,
+        '$.event_delivery.outcome.reward_row_id',NULL) WHERE id=?1",
+            [first.action_id.unwrap()],
+        )
+        .unwrap();
+    let recovered = service
+        .recover_event_delivery(first.action_id.unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.reward_row_id, first.reward_row_id);
+    assert_eq!(recovered.resolution, first.resolution);
+    assert_eq!(
+        fixture
+            .connection()
+            .query_row("SELECT COUNT(*) FROM dig_gear", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn pending_quest_finale_uses_stable_relic_rolls_and_grants_exactly_once() {
+    let mut expected_finale = None;
+    for interrupted in [false, true] {
+        let fixture = Fixture::new();
+        fixture.seed_actor(ACTOR, 100, 100, 2);
+        fixture
+            .connection()
+            .execute(
+                "INSERT INTO dig_quests
+            (discord_id,guild_id,active_quest_id,active_quest_step,completed_quests,last_updated_at)
+            VALUES (?1,?2,'necropolis_below',5,'[]',?3)",
+                params![ACTOR, GUILD, NOW - 1],
+            )
+            .unwrap();
+        let key = key_for_outcome(&fixture.snapshot(), "necro_s5", "desperate", true);
+        if interrupted {
+            fixture
+                .connection()
+                .execute_batch(
+                    "CREATE TRIGGER reject_relic_finale
+                BEFORE INSERT ON dig_actions WHEN NEW.action_type='quest_finale_relic'
+                BEGIN SELECT RAISE(ABORT, 'stop before relic commit'); END;",
+                )
+                .unwrap();
+        }
+        let service = fixture.service();
+        let first = service
+            .resolve_event_with_delivery(
+                request("necro_s5", "desperate", &key),
+                DigEventDeliveryContext::new(ACTOR, GUILD, 506, 601),
+            )
+            .unwrap();
+        if !interrupted {
+            expected_finale = first.quest_finale;
+            assert!(expected_finale.is_some());
+            continue;
+        }
+        assert!(first.quest_finale.is_none());
+        let action_id = first.action_id.unwrap();
+        assert_eq!(
+            service
+                .pending_event_delivery_recoveries(DigEventPendingDeliveryQuery {
+                    guild_id: Some(GUILD),
+                    discord_id: Some(ACTOR),
+                    limit: 10,
+                })
+                .unwrap()
+                .len(),
+            1,
+            "failed finale stays pending without rewriting delivery state"
+        );
+        fixture
+            .connection()
+            .execute_batch(
+                "DROP TRIGGER reject_relic_finale;
+            UPDATE tunnels SET depth=0,prestige_level=0,luminosity=0;",
+            )
+            .unwrap();
+        let balance = fixture.balance(ACTOR);
+        let recovered = service.recover_event_delivery(action_id).unwrap().unwrap();
+        assert_eq!(recovered.quest_finale, expected_finale);
+        assert_eq!(fixture.count_actions(ACTOR, "quest_finale_relic"), 1);
+        assert_eq!(fixture.balance(ACTOR), balance);
+        assert!(service.recover_event_delivery(action_id).unwrap().is_none());
+        let retry = service
+            .resolve_event(request("necro_s5", "desperate", &key))
+            .unwrap();
+        assert_eq!(retry.quest_finale, expected_finale);
+        assert_eq!(fixture.count_actions(ACTOR, "quest_finale_relic"), 1);
+    }
+}
+
+#[test]
+fn frozen_retry_preserves_pitch_black_safe_choice_normalization() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 100, 50, 0);
+    fixture
+        .connection()
+        .execute("UPDATE tunnels SET luminosity=0", [])
+        .unwrap();
+    let service = fixture.service();
+    let event_request = request("underground_stream", "safe", "event:black-retry");
+    let first = service
+        .resolve_event_with_delivery(
+            event_request,
+            DigEventDeliveryContext::new(ACTOR, GUILD, 507, 601),
+        )
+        .unwrap();
+    assert_eq!(first.resolution.as_ref().unwrap().choice, "risky");
+    fixture
+        .connection()
+        .execute("UPDATE tunnels SET luminosity=100", [])
+        .unwrap();
+    let retry = service
+        .resolve_event_with_delivery(
+            event_request,
+            DigEventDeliveryContext::new(ACTOR, GUILD, 508, 601),
+        )
+        .unwrap();
+    assert_eq!(retry.resolution, first.resolution);
+    assert!(!retry.applied_now);
+    assert!(matches!(
+        service.resolve_event(DigRuntimeEventRequest {
+            choice: "risky",
+            ..event_request
+        }),
+        Err(DigEventRuntimeError::EventRepository(
+            DigEventRuntimeRepositoryError::IdempotencyConflict
+        ))
+    ));
+    assert_eq!(fixture.count_actions(ACTOR, "event"), 1);
+}
+
+#[test]
+fn pending_quest_start_recovers_failed_mutation_and_legacy_missing_prestige() {
+    for stored_prestige in [None, Some(0), Some(2)] {
+        let fixture = Fixture::new();
+        fixture.seed_actor(ACTOR, 100, 100, 2);
+        fixture
+            .connection()
+            .execute_batch(
+                "CREATE TRIGGER reject_quest_start
+            BEFORE INSERT ON dig_quests BEGIN SELECT RAISE(ABORT,'quest write unavailable'); END;",
+            )
+            .unwrap();
+        let key = key_for_outcome(&fixture.snapshot(), "necro_s1", "desperate", true);
+        let service = fixture.service();
+        let first = service
+            .resolve_event_with_delivery(
+                request("necro_s1", "desperate", &key),
+                DigEventDeliveryContext::new(ACTOR, GUILD, 509, 601),
+            )
+            .unwrap();
+        let action_id = first.action_id.unwrap();
+        assert_eq!(
+            service
+                .pending_event_delivery_recoveries(DigEventPendingDeliveryQuery {
+                    guild_id: Some(GUILD),
+                    discord_id: Some(ACTOR),
+                    limit: 10,
+                })
+                .unwrap()
+                .len(),
+            1,
+            "failed quest mutation stays pending"
+        );
+        match stored_prestige {
+            None => {
+                fixture.connection().execute("UPDATE dig_actions SET detail=json_remove(detail,'$.prestige_level') WHERE id=?1",[action_id]).unwrap();
+            }
+            Some(prestige) => {
+                fixture.connection().execute("UPDATE dig_actions SET detail=json_set(detail,'$.prestige_level',?2) WHERE id=?1",params![action_id,prestige]).unwrap();
+            }
+        }
+        fixture
+            .connection()
+            .execute_batch("DROP TRIGGER reject_quest_start;")
+            .unwrap();
+        let balance = fixture.balance(ACTOR);
+        service.recover_event_delivery(action_id).unwrap().unwrap();
+        let active: i64 = fixture
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM dig_quests WHERE active_quest_id='necropolis_below'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(active, i64::from(stored_prestige != Some(0)));
+        assert_eq!(fixture.balance(ACTOR), balance);
+        assert_eq!(fixture.count_actions(ACTOR, "event"), 1);
+        assert!(service.recover_event_delivery(action_id).unwrap().is_none());
+    }
+}
+
+#[test]
+fn pending_legacy_relic_finale_uses_already_granted_artifact_metadata() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 100, 100, 2);
+    fixture
+        .connection()
+        .execute(
+            "INSERT INTO dig_quests
+        (discord_id,guild_id,active_quest_id,active_quest_step,completed_quests,last_updated_at)
+        VALUES (?1,?2,'necropolis_below',5,'[]',?3)",
+            params![ACTOR, GUILD, NOW - 1],
+        )
+        .unwrap();
+    let key = key_for_outcome(&fixture.snapshot(), "necro_s5", "desperate", true);
+    let service = fixture.service();
+    let first = service
+        .resolve_event_with_delivery(
+            request("necro_s5", "desperate", &key),
+            DigEventDeliveryContext::new(ACTOR, GUILD, 510, 601),
+        )
+        .unwrap();
+    let DigEventQuestFinale::Relic {
+        reward_row_id: Some(relic_row),
+        ..
+    } = first.quest_finale.unwrap()
+    else {
+        panic!("relic finale");
+    };
+    let old_stats = vec!["streak_immunity".to_owned(), "boss_hp_minus_10".to_owned()];
+    let old_artifact =
+        "pinnacle:Cloak of the Necropolis:Long Silence:streak_immunity:boss_hp_minus_10";
+    fixture
+        .connection()
+        .execute(
+            "UPDATE dig_artifacts SET artifact_id=?2 WHERE id=?1",
+            params![relic_row, old_artifact],
+        )
+        .unwrap();
+    fixture
+        .connection()
+        .execute(
+            "UPDATE dig_actions SET detail=json_set(json_remove(detail,'$.artifact_id'),
+        '$.relic_stat_ids',json(?1)) WHERE action_type='quest_finale_relic'",
+            [serde_json::to_string(&old_stats).unwrap()],
+        )
+        .unwrap();
+    fixture
+        .connection()
+        .execute(
+            "UPDATE dig_actions SET detail=json_set(json_remove(detail,'$.prestige_level'),
+        '$.event_delivery.state','pending','$.event_delivery.outcome.quest_finale',NULL)
+        WHERE id=?1",
+            [first.action_id.unwrap()],
+        )
+        .unwrap();
+    let recovered = service
+        .recover_event_delivery(first.action_id.unwrap())
+        .unwrap()
+        .unwrap();
+    let DigEventQuestFinale::Relic {
+        artifact_id,
+        relic_stat_ids,
+        reward_row_id,
+        ..
+    } = recovered.quest_finale.unwrap()
+    else {
+        panic!("recovered relic");
+    };
+    assert_eq!(artifact_id, old_artifact);
+    assert_eq!(relic_stat_ids, old_stats);
+    assert_eq!(reward_row_id, Some(relic_row));
+    assert_eq!(fixture.count_actions(ACTOR, "quest_finale_relic"), 1);
 }

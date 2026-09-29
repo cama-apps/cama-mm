@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub const GEAR_MAX_DURABILITY: i32 = 20;
 pub const GEAR_REPAIR_COST_PCT: f64 = 0.05;
+pub const GEAR_REGULAR_REPAIR_COST_CAP: i64 = 20;
 pub const GEAR_BOSS_DROP_RATE: f64 = 0.07;
 pub const PLAYER_HIT_FLOOR: f64 = 0.05;
 pub const PLAYER_HIT_CEILING: f64 = 0.90;
@@ -2037,6 +2038,12 @@ pub fn repair_cost(
         (definition.shop_price, GEAR_MAX_DURABILITY)
     };
     let full_cost = python_round(repair_value as f64 * GEAR_REPAIR_COST_PCT);
+    let full_cost = if item_id.is_none() {
+        // Acquisition stays a progression sink; regular upkeep levels off at high tiers.
+        full_cost.min(GEAR_REGULAR_REPAIR_COST_CAP)
+    } else {
+        full_cost
+    };
     let maximum = max_durability.unwrap_or(authored_max).max(1);
     let missing = (maximum - durability.min(maximum)).max(0);
     if missing == 0 || full_cost == 0 {
@@ -2143,7 +2150,11 @@ const PINNACLE_STATS: [(&str, &str, &str); 15] = [
         "Persistence",
     ),
     ("extra_relic_slot", "Another relic finds room", "Communion"),
-    ("scout_free", "Scouting comes cheap", "Scouting"),
+    (
+        "scout_free",
+        "Scout bosses without using a lantern",
+        "Scouting",
+    ),
     ("cheer_buff", "Cheers ring louder", "Acclaim"),
 ];
 

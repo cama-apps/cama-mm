@@ -707,6 +707,31 @@ fn resolution_wear_ticks_snapshot_loadout_and_loss_armor_after_swap() {
 }
 
 #[test]
+fn scouting_relic_read_only_includes_equipped_relics_for_the_player_and_guild() {
+    let database = fixture();
+    let connection = Connection::open(database.path()).expect("artifact DB");
+    for (player, guild, relic, equipped, id) in [
+        (PLAYER, GUILD, 1, 1, "pinnacle:king:Echoes:scout_free"),
+        (PLAYER, GUILD, 1, 0, "unequipped"),
+        (PLAYER, GUILD, 0, 1, "not_relic"),
+        (PLAYER - 1, GUILD, 1, 1, "other_player"),
+        (PLAYER, GUILD + 1, 1, 1, "other_guild"),
+    ] {
+        connection.execute(
+            "INSERT INTO dig_artifacts (discord_id,guild_id,artifact_id,found_at,is_relic,equipped)
+             VALUES (?1,?2,?3,100,?4,?5)",
+            params![player, guild, id, relic, equipped],
+        ).expect("artifact");
+    }
+    assert_eq!(
+        DigBossRuntimeRepository::new(database.path())
+            .equipped_relic_ids(KEY)
+            .expect("equipped relics"),
+        ["pinnacle:king:Echoes:scout_free"]
+    );
+}
+
+#[test]
 fn base_lantern_is_claimed_once_while_great_lantern_remains_persistent() {
     let database = fixture();
     let connection = Connection::open(database.path()).expect("inventory DB");

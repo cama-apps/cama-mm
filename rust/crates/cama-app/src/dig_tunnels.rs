@@ -39,6 +39,17 @@ pub const PRESTIGE_PERKS: [&str; 12] = [
     "reading_the_stone",
 ];
 
+/// Limit picks to stacks that have an additional mechanical effect.
+#[must_use]
+pub fn prestige_perk_stack_cap(perk: &str) -> usize {
+    match perk {
+        "dark_adaptation" | "reading_the_stone" => 1,
+        "deep_sight" | "steady_hands" => 4,
+        _ if PRESTIGE_PERKS.contains(&perk) => PRESTIGE_PERK_STACK_CAP,
+        _ => 0,
+    }
+}
+
 const ADVANCE_BOOST_PERK_EFFECTS: &[(&str, f64)] = &[("advance_min_bonus", 1.0)];
 const CAVE_IN_RESISTANCE_PERK_EFFECTS: &[(&str, f64)] = &[("cave_in_reduction", 0.05)];
 const LOOT_MULTIPLIER_PERK_EFFECTS: &[(&str, f64)] = &[("jc_bonus", 1.0)];
@@ -79,11 +90,17 @@ pub fn prestige_perk_effects(perk: &str) -> &'static [(&'static str, f64)] {
     }
 }
 
-/// Sum every picked prestige perk additively, including duplicate stacks.
+/// Sum perk stacks additively within their useful caps, including legacy saves.
 #[must_use]
 pub fn aggregate_prestige_perk_effects(perks: &[String]) -> BTreeMap<&'static str, f64> {
     let mut effects = BTreeMap::new();
+    let mut counts = BTreeMap::new();
     for perk in perks {
+        let count = counts.entry(perk.as_str()).or_insert(0);
+        if *count >= prestige_perk_stack_cap(perk) {
+            continue;
+        }
+        *count += 1;
         for &(key, value) in prestige_perk_effects(perk) {
             *effects.entry(key).or_insert(0.0) += value;
         }
@@ -1464,7 +1481,7 @@ where
             .iter()
             .filter(|perk| perk.as_str() == perk_choice)
             .count()
-            >= PRESTIGE_PERK_STACK_CAP
+            >= prestige_perk_stack_cap(perk_choice)
         {
             return Err(TunnelError::PerkAtCap);
         }

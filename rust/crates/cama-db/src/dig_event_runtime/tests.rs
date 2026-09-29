@@ -328,6 +328,7 @@ fn pending_event_is_guarded_by_action_actor_guild_and_json_identity() {
             guild_id: GUILD,
             event_id: "underground_stream".to_owned(),
             created_at: 100,
+            chained: false,
         })
     );
     assert_eq!(
@@ -344,6 +345,26 @@ fn pending_event_is_guarded_by_action_actor_guild_and_json_identity() {
             .expect("wrong guild lookup"),
         None
     );
+}
+
+#[test]
+fn chained_prompt_timeout_uses_actual_result_delivery_time() {
+    let fixture = Fixture::new();
+    fixture.seed(ACTOR, GUILD, 20);
+    let connection = fixture.connection();
+    connection.execute(
+        "INSERT INTO dig_actions (guild_id,actor_id,action_type,depth_before,depth_after,jc_delta,detail,created_at)
+         VALUES (?1,?2,'event',100,100,1,?3,100)",
+        params![GUILD, ACTOR, r#"{"chained_event_id":"underground_stream","event_delivery":{"delivered_at":700}}"#],
+    ).unwrap();
+    let action_id = connection.last_insert_rowid();
+    let prompt = fixture
+        .repository
+        .pending_event(action_id, ACTOR, Some(GUILD))
+        .unwrap()
+        .unwrap();
+    assert!(prompt.chained);
+    assert_eq!(prompt.created_at, 700);
 }
 
 #[test]

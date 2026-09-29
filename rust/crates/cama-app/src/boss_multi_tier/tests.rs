@@ -757,6 +757,39 @@ fn test_resumed_duel_preserves_active_boss_max_hp() {
 }
 
 #[test]
+fn scout_free_odds_match_live_preparation_at_accuracy_floor_and_forced_phases() {
+    for status in [BossStatus::Active, BossStatus::PhaseOneDefeated] {
+        let mut service = test_service(0.99);
+        let mut current = tunnel(24, 10, 500);
+        current.lanterns = 1;
+        current
+            .boss_progress
+            .insert("25".to_owned(), wounded_entry(status, "grothak", 1, 10));
+        service.repository.insert_tunnel(key(), current);
+        let scouted = service.scout_boss(key()).expect("scout");
+        let fresh = service.repository.load_tunnel(key()).expect("tunnel");
+        let boss = boss_by_id("grothak").expect("boss");
+        for risk in [RiskTier::Cautious, RiskTier::Bold, RiskTier::Reckless] {
+            let (combat, _, _, _) = service.build_combat(BuildCombatRequest {
+                key: key(),
+                tunnel: &mut fresh.clone(),
+                boss,
+                boundary: 25,
+                risk,
+                wager: 0,
+                echo_applied: false,
+                consume_phase_event: false,
+            });
+            assert_eq!(
+                scouted.odds.for_risk(risk).free_fight_chance,
+                combat_win_probability(&combat),
+                "{status:?} {risk:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn test_scout_uses_active_boss_hp_for_every_risk_tier() {
     let mut service = test_service(0.99);
     seed_at_first_boss(&mut service);

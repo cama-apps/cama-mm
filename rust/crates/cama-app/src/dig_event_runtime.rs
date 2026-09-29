@@ -122,6 +122,8 @@ pub struct DigEventRuntimeOutcome {
     pub splash: Option<DigEventSplashOutcome>,
     pub guild_modifier: Option<DigEventGuildModifierOutcome>,
     pub chain_event: Option<CanonicalEventPresentation>,
+    #[serde(default)]
+    pub chain_prompt: Option<DigEventActionPresentation>,
     pub quest_finale: Option<DigEventQuestFinale>,
     /// The attempt lost a race but the pending event is still open, so the
     /// caller should leave its controls usable instead of ending the event.
@@ -151,6 +153,7 @@ impl DigEventRuntimeOutcome {
             splash: None,
             guild_modifier: None,
             chain_event: None,
+            chain_prompt: None,
             quest_finale: None,
             retryable: false,
         }
@@ -539,7 +542,7 @@ pub struct DigLegacyEventRequest<'a> {
 /// Durable event-prompt policy loaded from the same actor/action identity used
 /// by settlement. Discord never has to infer pitch-black controls or inspect
 /// prestige JSON itself, and retries select the same atmospheric hint.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct DigEventActionPresentation {
     pub event: CanonicalEventPresentation,
     pub luminosity: i64,
@@ -811,7 +814,7 @@ impl DigEventRuntimeService {
             choice: request.choice,
             event_key: &event_key,
             now: request.now,
-            chained: false,
+            chained: pending.chained,
         })
     }
 
@@ -849,7 +852,7 @@ impl DigEventRuntimeService {
                 choice: request.choice,
                 event_key: &event_key,
                 now: request.now,
-                chained: false,
+                chained: pending.chained,
             },
             context,
         )
@@ -944,35 +947,98 @@ impl DigEventRuntimeService {
         else {
             return Ok(None);
         };
+        self.resume_event_delivery(delivery).map(Some)
+    }
+
+    fn resume_event_delivery(
+        &self,
+        delivery: DbDigEventDeliverySnapshot,
+    ) -> Result<DigEventRuntimeOutcome, DigEventRuntimeError> {
+        let repository = DigEventRuntimeRepository::new(&self.path);
+        let mut outcome: DigEventRuntimeOutcome = serde_json::from_str(&delivery.outcome_json)
+            .map_err(|error| DigEventRuntimeError::Policy(error.to_string()))?;
+        outcome.action_id = Some(delivery.action_id);
+        if delivery.state != DbDigEventDeliveryState::Pending {
+            outcome.applied_now = false;
+            return Ok(outcome);
+        }
         let Some(identity) = repository.resolved_event_identity(
-            action_id,
+            delivery.action_id,
             delivery.discord_id,
             delivery.guild_id,
         )?
         else {
-            return Ok(None);
+            return Err(DigEventRuntimeRepositoryError::MalformedDelivery.into());
         };
-        let context = DigEventDeliveryContext::new(
+        let request = DigRuntimeEventRequest {
+            discord_id: identity.actor_id,
+            guild_id: identity.guild_id,
+            event_id: &identity.event_id,
+            choice: &identity.choice,
+            event_key: &identity.event_key,
+            now: delivery.committed_at,
+            chained: identity.chained,
+        };
+        let resolution = outcome
+            .resolution
+            .as_ref()
+            .ok_or(DigEventRuntimeRepositoryError::MalformedDelivery)?;
+        let quest_snapshot = repository.quest_snapshot(
+            DigEventActorKey {
+                discord_id: identity.actor_id,
+                guild_id: Some(identity.guild_id),
+            },
+            delivery.committed_at,
+        )?;
+        let mut entropy = quest_followup_entropy(request, self.config.entropy_secret);
+        let prestige_level = match identity.prestige_level {
+            Some(level) => level,
+            None => repository
+                .actor_snapshot_for_event(DigEventActorKey {
+                    discord_id: identity.actor_id,
+                    guild_id: Some(identity.guild_id),
+                })?
+                .map_or(0, |snapshot| snapshot.prestige_level),
+        };
+        let followup = self.resolve_quest_followup(
+            request,
+            &repository,
+            &quest_snapshot,
+            resolution,
+            outcome.depth_after,
+            prestige_level,
+            false,
+            &mut entropy,
+        );
+        outcome.reward_row_id = identity.reward_row_id;
+        outcome.quest_finale = followup?;
+        let outcome_json = serde_json::to_string(&outcome)
+            .map_err(|error| DigEventRuntimeError::Policy(error.to_string()))?;
+        let completed = repository.update_event_delivery_outcome(
+            delivery.action_id,
             delivery.discord_id,
             delivery.guild_id,
-            delivery.interaction_id,
-            delivery.channel_id,
+            &delivery.source_key,
+            &outcome_json,
         );
-        let outcome = self.resolve_event_with_delivery(
-            DigRuntimeEventRequest {
+        if matches!(
+            completed,
+            Err(DigEventRuntimeRepositoryError::IdempotencyConflict)
+        ) && let Some(winner) = repository.event_delivery_by_key(
+            DigEventActorKey {
                 discord_id: identity.actor_id,
-                guild_id: identity.guild_id,
-                event_id: &identity.event_id,
-                choice: &identity.choice,
-                event_key: &identity.event_key,
-                // Preserve the original policy date and economy window. A
-                // recovery after midnight must not roll a different outcome.
-                now: delivery.committed_at,
-                chained: false,
+                guild_id: Some(identity.guild_id),
             },
-            context,
-        )?;
-        Ok(outcome.success.then_some(outcome))
+            &identity.event_key,
+            &identity.event_id,
+            &identity.choice,
+        )? && winner.state != DbDigEventDeliveryState::Pending
+        {
+            return self.resume_event_delivery(winner);
+        }
+        completed?;
+        outcome.applied_now = false;
+        Ok(outcome)
     }
 
     pub fn mark_event_delivery_delivered(
@@ -1027,7 +1093,7 @@ impl DigEventRuntimeService {
                 choice: request.choice,
                 event_key: &event_key,
                 now: request.now,
-                chained: false,
+                chained: pending.chained,
             });
         }
         let event_key = format!("dig-action:{}", pending.action_id);
@@ -1081,6 +1147,14 @@ impl DigEventRuntimeService {
             guild_id: Some(request.guild_id),
         };
         let repository = DigEventRuntimeRepository::new(&self.path);
+        if let Some(delivery) = repository.event_delivery_by_key(
+            key,
+            request.event_key,
+            request.event_id,
+            request.choice,
+        )? {
+            return self.resume_event_delivery(delivery);
+        }
         let Some(snapshot) = repository.actor_snapshot_for_event(key)? else {
             return Ok(DigEventRuntimeOutcome::blocked("You don't have a tunnel."));
         };
@@ -1202,22 +1276,49 @@ impl DigEventRuntimeService {
         let curse_json = event_curse_replacement(&expected, &resolution);
         let reward = prepared_reward(&resolution)?;
         let reward_source = format!("event:{}", request.event_id);
-        let detail = event_detail(&resolution, splash_execution.outcome.as_ref());
         // Chain selection is part of the immutable event result, so consume
         // it before the actor transaction and include it in the same outbox
         // snapshot as the actor settlement.
-        let chain_event = resolve_chain(
-            &resolution,
-            depth_after,
-            expected.prestige_level,
-            &mut entropy,
-        )
+        let chain_event = if request.chained {
+            // Continue finite authored stories, but never roll another random chain.
+            canonical_chain_event(
+                &resolution.event_id,
+                depth_after,
+                expected.prestige_level,
+                None,
+                None,
+            )
+        } else {
+            resolve_chain(
+                &resolution,
+                depth_after,
+                expected.prestige_level,
+                &mut entropy,
+            )
+        }
         .map(|event| canonical_event_presentation(&event.id))
         .transpose()
         .map_err(DigEventRuntimeError::Policy)?;
         if let Some(chain) = &chain_event {
             resolution.chained_event_id = Some(chain.event_id.clone());
         }
+        let chain_prompt = chain_event
+            .as_ref()
+            .map(|chain| {
+                canonical_event_action_presentation(
+                    &chain.event_id,
+                    expected.luminosity,
+                    &expected.prestige_perks_json,
+                    0,
+                )
+            })
+            .transpose()?;
+        let detail = event_detail(
+            &resolution,
+            splash_execution.outcome.as_ref(),
+            request.chained,
+            request.choice,
+        );
         let delivery_source_key = format!("dig-event:{}", request.event_key);
         let delivery_outcome_json = delivery_context
             .as_ref()
@@ -1235,6 +1336,7 @@ impl DigEventRuntimeService {
                     splash: splash_execution.outcome.clone(),
                     guild_modifier: guild_modifier.clone(),
                     chain_event: chain_event.clone(),
+                    chain_prompt: chain_prompt.clone(),
                     quest_finale: None,
                     retryable: false,
                 })
@@ -1292,7 +1394,20 @@ impl DigEventRuntimeService {
             }
         };
 
-        let quest_finale = self.resolve_quest_followup(
+        // A concurrent winner may already have frozen this event while we
+        // resolved it. Its projection, including its chain, remains authoritative.
+        if !receipt.applied_now
+            && let Some(delivery) = repository.event_delivery_by_key(
+                key,
+                request.event_key,
+                request.event_id,
+                request.choice,
+            )?
+        {
+            return self.resume_event_delivery(delivery);
+        }
+        let mut quest_entropy = quest_followup_entropy(request, self.config.entropy_secret);
+        let quest_followup = self.resolve_quest_followup(
             request,
             &repository,
             &quest_snapshot,
@@ -1300,9 +1415,10 @@ impl DigEventRuntimeService {
             depth_after,
             expected.prestige_level,
             receipt.applied_now,
-            &mut entropy,
+            &mut quest_entropy,
         );
 
+        let followup_complete = quest_followup.is_ok();
         let outcome = DigEventRuntimeOutcome {
             success: true,
             error: None,
@@ -1316,21 +1432,36 @@ impl DigEventRuntimeService {
             splash: splash_execution.outcome,
             guild_modifier,
             chain_event,
-            quest_finale,
+            chain_prompt,
+            quest_finale: quest_followup.unwrap_or(None),
             retryable: false,
         };
         if let Some(context) = delivery_context.as_ref()
             && outcome.action_id.is_some()
+            && followup_complete
         {
             let outcome_json = serde_json::to_string(&outcome)
                 .map_err(|error| DigEventRuntimeError::Policy(error.to_string()))?;
-            repository.update_event_delivery_outcome(
+            let completed = repository.update_event_delivery_outcome(
                 outcome.action_id.expect("checked above"),
                 context.discord_id,
                 context.guild_id,
                 &delivery_source_key,
                 &outcome_json,
-            )?;
+            );
+            if matches!(
+                completed,
+                Err(DigEventRuntimeRepositoryError::IdempotencyConflict)
+            ) && let Some(winner) = repository.event_delivery_by_key(
+                key,
+                request.event_key,
+                request.event_id,
+                request.choice,
+            )? && winner.state != DbDigEventDeliveryState::Pending
+            {
+                return self.resume_event_delivery(winner);
+            }
+            completed?;
         }
         Ok(outcome)
     }
@@ -1473,7 +1604,7 @@ impl DigEventRuntimeService {
             boss_encounter,
             random_plan: Default::default(),
         };
-        let detail = event_detail(&resolution, None);
+        let detail = event_detail(&resolution, None, false, request.choice);
         let expected = snapshot.clone();
         let depth_after = expected.depth.saturating_add(advance).max(0);
         let settlement = repository.settle_actor_atomic_for_event(AtomicDigEventSettlement {
@@ -1521,6 +1652,7 @@ impl DigEventRuntimeService {
             splash: None,
             guild_modifier: None,
             chain_event: None,
+            chain_prompt: None,
             quest_finale: None,
             retryable: false,
         })
@@ -1767,12 +1899,12 @@ impl DigEventRuntimeService {
         prestige_level: i64,
         actor_applied_now: bool,
         entropy: &mut impl LootEntropy,
-    ) -> Option<DigEventQuestFinale> {
+    ) -> Result<Option<DigEventQuestFinale>, DigEventRuntimeError> {
         if resolution.quest_id.is_none()
             || resolution.choice != "desperate"
             || !resolution.succeeded
         {
-            return None;
+            return Ok(None);
         }
         let mut predicates = BTreeSet::new();
         if quest_snapshot.recent_bet {
@@ -1804,7 +1936,7 @@ impl DigEventRuntimeService {
             &predicates,
         );
         match progress {
-            CanonicalQuestProgress::Noop => None,
+            CanonicalQuestProgress::Noop => Ok(None),
             CanonicalQuestProgress::Activated {
                 quest_id,
                 next_step,
@@ -1813,7 +1945,7 @@ impl DigEventRuntimeService {
                 quest_id,
                 next_step,
             } => {
-                let _ = repository.apply_quest_mutation(
+                repository.apply_quest_mutation(
                     DigEventActorKey {
                         discord_id: request.discord_id,
                         guild_id: Some(request.guild_id),
@@ -1823,22 +1955,20 @@ impl DigEventRuntimeService {
                         next_step,
                     },
                     request.now,
-                );
-                None
+                )?;
+                Ok(None)
             }
             CanonicalQuestProgress::Completed { quest_id, finale } => {
-                let completion = repository
-                    .apply_quest_mutation(
-                        DigEventActorKey {
-                            discord_id: request.discord_id,
-                            guild_id: Some(request.guild_id),
-                        },
-                        DigEventQuestMutation::Complete {
-                            quest_id: &quest_id,
-                        },
-                        request.now,
-                    )
-                    .ok()?;
+                let completion = repository.apply_quest_mutation(
+                    DigEventActorKey {
+                        discord_id: request.discord_id,
+                        guild_id: Some(request.guild_id),
+                    },
+                    DigEventQuestMutation::Complete {
+                        quest_id: &quest_id,
+                    },
+                    request.now,
+                )?;
                 if !completion.applied_now {
                     return self.resolve_and_dispatch_quest_finale(
                         request, repository, &quest_id, &finale, entropy,
@@ -1858,15 +1988,16 @@ impl DigEventRuntimeService {
         quest_id: &str,
         finale: &CanonicalQuestFinale,
         entropy: &mut impl LootEntropy,
-    ) -> Option<DigEventQuestFinale> {
+    ) -> Result<Option<DigEventQuestFinale>, DigEventRuntimeError> {
         let roll_count = match finale {
             CanonicalQuestFinale::RelicGrant { roll_count, .. } => *roll_count,
             CanonicalQuestFinale::JcPlusGuildModifier { .. } => 0,
         };
         let rolls = (0..roll_count).map(|_| entropy.unit()).collect::<Vec<_>>();
-        let finale = resolve_canonical_quest_finale(finale, &rolls).ok()?;
+        let finale =
+            resolve_canonical_quest_finale(finale, &rolls).map_err(DigEventRuntimeError::Policy)?;
         self.dispatch_quest_finale(request, repository, quest_id, finale)
-            .ok()
+            .map(Some)
     }
 
     fn dispatch_quest_finale(
@@ -1949,24 +2080,45 @@ impl DigEventRuntimeService {
                 artifact_id,
                 relic_stat_ids,
             } => {
-                let receipt = repository.grant_finale_relic_atomic(DigEventFinaleRelicRequest {
+                let finale_key = format!("{}:quest-finale-relic", request.event_key);
+                repository.grant_finale_relic_atomic(DigEventFinaleRelicRequest {
                     key,
                     quest_id,
-                    event_key: &format!("{}:quest-finale-relic", request.event_key),
+                    event_key: &finale_key,
                     artifact_id: &artifact_id,
                     detail_json: &json!({
+                        "artifact_id": artifact_id,
                         "relic_name": relic_name,
                         "relic_stat_ids": relic_stat_ids,
                     })
                     .to_string(),
                     now: request.now,
                 })?;
+                // A pre-upgrade or concurrent grant may have used different
+                // rolls. Its persisted identity is authoritative on every replay.
+                let granted = repository
+                    .finale_relic_snapshot(key, &finale_key)?
+                    .ok_or(DigEventRuntimeRepositoryError::MalformedReceipt)?;
+                let detail: Value = serde_json::from_str(&granted.detail_json)
+                    .map_err(|error| DigEventRuntimeError::Policy(error.to_string()))?;
+                let relic_name = detail
+                    .get("relic_name")
+                    .and_then(Value::as_str)
+                    .ok_or(DigEventRuntimeRepositoryError::MalformedReceipt)?
+                    .to_owned();
+                let relic_stat_ids = serde_json::from_value(
+                    detail
+                        .get("relic_stat_ids")
+                        .cloned()
+                        .ok_or(DigEventRuntimeRepositoryError::MalformedReceipt)?,
+                )
+                .map_err(|error| DigEventRuntimeError::Policy(error.to_string()))?;
                 Ok(DigEventQuestFinale::Relic {
                     quest_id: quest_id.to_owned(),
                     relic_name,
-                    artifact_id,
+                    artifact_id: granted.artifact_id,
                     relic_stat_ids,
-                    reward_row_id: receipt.reward_row_id,
+                    reward_row_id: Some(granted.reward_row_id),
                 })
             }
         }
@@ -2198,7 +2350,13 @@ fn event_policy(
     };
     let perks =
         serde_json::from_str::<Vec<String>>(&snapshot.prestige_perks_json).unwrap_or_default();
-    let perk_count = |perk: &str| perks.iter().filter(|owned| *owned == perk).count() as f64;
+    let perk_count = |perk: &str| {
+        perks
+            .iter()
+            .filter(|owned| *owned == perk)
+            .count()
+            .min(crate::dig_tunnels::prestige_perk_stack_cap(perk)) as f64
+    };
     CanonicalEventPolicy {
         luminosity: snapshot.luminosity,
         current_streak: snapshot.streak_days,
@@ -2269,6 +2427,12 @@ fn resolution_as_outcome(
         consumable_reward_pool: resolution.consumable_reward_pool.clone(),
         artifact_reward_pool: resolution.artifact_reward_pool.clone(),
     }
+}
+
+fn quest_followup_entropy(request: DigRuntimeEventRequest<'_>, secret: u64) -> SeededLootEntropy {
+    // Keep finale rolls independent of reward ownership, splash candidates,
+    // and chain selection so replay needs no actor-side effects or random draws.
+    SeededLootEntropy::new(event_seed(request, secret) ^ 0x7175_6573_742d_726e)
 }
 
 /// Seed one event resolution.
@@ -2466,8 +2630,13 @@ fn canonical_gear_row(item_id: &str) -> Option<(&'static str, i64, i64)> {
 fn event_detail(
     resolution: &CanonicalEventResolution,
     splash: Option<&DigEventSplashOutcome>,
+    chained: bool,
+    requested_choice: &str,
 ) -> String {
     json!({
+        "requested_choice": requested_choice,
+        "chained": chained,
+        "chained_event_id": resolution.chained_event_id,
         "succeeded": resolution.succeeded,
         "advance": resolution.advance,
         "jc": resolution.jc,
