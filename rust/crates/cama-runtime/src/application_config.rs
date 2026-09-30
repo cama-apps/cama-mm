@@ -463,7 +463,7 @@ impl ApplicationConfig {
                 enrichment_refresh_interval_ms: p.i64("ENRICHMENT_REFRESH_INTERVAL_MS", 1250),
                 enrichment_retry_delays: p
                     .i64_list("ENRICHMENT_RETRY_DELAYS", &[1, 5, 20, 60, 180]),
-                exclusion_penalty_weight: p.f64("EXCLUSION_PENALTY_WEIGHT", 80.0),
+                exclusion_penalty_weight: p.f64("EXCLUSION_PENALTY_WEIGHT", 72.0),
                 first_game_pool_daily_amount: p.i64("FIRST_GAME_POOL_DAILY_AMOUNT", 100),
                 gamba_synthetic_members_enabled: p.bool("GAMBA_SYNTHETIC_MEMBERS_ENABLED", false),
                 garnishment_percentage: p.f64("GARNISHMENT_PERCENTAGE", 1.0),
@@ -638,7 +638,7 @@ impl ApplicationConfig {
                 wrapped_min_bets: p.i64("WRAPPED_MIN_BETS", 3),
                 wrapped_min_games: p.i64("WRAPPED_MIN_GAMES", 3),
                 recent_match_penalty_weight: 280.0,
-                rating_spread_multiplier: 0.12,
+                rating_spread_multiplier: 0.18,
                 pingedkevin_cost: p.i64("PINGEDASH_COST", 10),
                 pingedkevin_cooldown_seconds: p.i64("PINGEDASH_COOLDOWN_SECONDS", 86_400),
             },
