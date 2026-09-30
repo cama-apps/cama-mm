@@ -6283,8 +6283,17 @@ impl DigInteractionHandler {
             )
             .field("Pickaxe", pickaxe_name(info.pickaxe_tier), true)
             .field("Luminosity", format!("{}%", info.luminosity), true);
-        if let Some(route) = info.route_state.as_deref() {
-            embed = embed.field("Route", route, false);
+        if let Some(state) = parse_route_state(info.route_state.as_deref()) {
+            let location = format!(
+                "{} ({}–{} blocks)",
+                state.layer, state.start_depth, state.end_depth
+            );
+            let route = state.selected.as_deref().and_then(route_by_id);
+            let description = route.map_or_else(
+                || format!("Route choice pending — {location}"),
+                |route| format!("**{}** — {location}\n{}", route.name, route.description),
+            );
+            embed = embed.field("Route", description, false);
         }
         if info
             .last_dig_at
