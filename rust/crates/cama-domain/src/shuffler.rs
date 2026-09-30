@@ -403,13 +403,13 @@ impl Default for BalancedShuffler {
             off_role_flat_value_penalty: 80.0,
             off_role_flat_penalty: 740.0,
             role_matchup_delta_weight: ROLE_MATCHUP_DELTA_WEIGHT,
-            exclusion_penalty_weight: 80.0,
+            exclusion_penalty_weight: 72.0,
             rd_priority_weight: 0.2,
             recent_match_penalty_weight: 280.0,
             soft_avoid_penalty: 180.0,
             package_deal_penalty: 90.0,
             package_deal_split_penalty: 90.0,
-            rating_spread_multiplier: 0.12,
+            rating_spread_multiplier: 0.18,
             region_split: false,
             region_split_penalty: 500.0,
             role_assignment_provider: Arc::new(GlobalRoleAssignmentProvider),
@@ -3596,7 +3596,7 @@ mod tests {
                 ShuffleConstraints::default(),
             )
             .expect("fixed role matchup evaluates");
-        approx(matchup.total_score, -2_537.0);
+        approx(matchup.total_score, -2_477.0);
     }
 
     #[test]
@@ -3874,7 +3874,7 @@ mod tests {
         };
         approx(
             shuffler.calculate_rating_spread_penalty(&[1_000.0, 1_500.0, 2_000.0]),
-            120.0,
+            180.0,
         );
     }
 
@@ -3932,7 +3932,7 @@ mod tests {
             consider_roles: false,
             ..BalancedShuffler::default()
         };
-        assert_eq!(shuffler.rating_spread_multiplier, 0.12);
+        assert_eq!(shuffler.rating_spread_multiplier, 0.18);
     }
 
     #[test]
@@ -6435,7 +6435,7 @@ mod tests {
 
     #[test]
     fn test_default_weight_is_80() {
-        assert_eq!(BalancedShuffler::default().exclusion_penalty_weight, 80.0);
+        assert_eq!(BalancedShuffler::default().exclusion_penalty_weight, 72.0);
     }
 
     #[test]
