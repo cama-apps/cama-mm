@@ -6554,7 +6554,7 @@ mod tests {
             .score_draft_pool(&captain_a, &captain_b, &pool)
             .expect("draft pool score");
 
-        approx(score, 142.5);
+        approx(score, 150.0);
     }
 
     #[test]

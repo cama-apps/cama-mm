@@ -15,7 +15,7 @@ pub const MAX_GLICKO_RD: f64 = 250.0;
 pub const INITIAL_GLICKO_RD: f64 = MAX_GLICKO_RD;
 pub const MAX_RATING_SWING_PER_GAME: f64 = 400.0;
 pub const BASE_RATING_DELTA_MULTIPLIER: f64 = 0.98;
-pub const MAX_RD_CONTRACTION_PER_GAME: f64 = 0.065;
+pub const MAX_RD_CONTRACTION_PER_GAME: f64 = 0.059;
 pub const NEW_PLAYER_MMR_DISCOUNT: i32 = 500;
 pub const RD_DECAY_CONSTANT: f64 = 100.0;
 pub const RD_DECAY_GRACE_PERIOD_DAYS: i32 = 7;
@@ -1401,7 +1401,7 @@ mod tests {
         let updates = system
             .update_ratings_after_match(&team1, &team2, 1)
             .unwrap();
-        assert_close(updates.team1[0].rd, initial_rd * 0.935, 1e-10);
+        assert_close(updates.team1[0].rd, initial_rd * 0.941, 1e-10);
     }
 
     #[test]
