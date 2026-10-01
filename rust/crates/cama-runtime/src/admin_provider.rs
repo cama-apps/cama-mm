@@ -1097,7 +1097,7 @@ impl AdminHandler {
                          **Scanned:** {} match(es), {} unreadable, wrote {} gold sample(s) and {} last-hits sample(s).\n\
                          **Teams:** {} derived, {skipped} skipped ({} unparsed, {} ambiguous lanes, {} incomplete, {} tied farm, {} tied farm and wards).\n\
                          **Coverage:** {}/{} participants have a role ({coverage:.1}%), {} have 10-minute last hits (the metric that drives derivation), {} have 10-minute gold.\n\
-                         **Above minimum sample:** {} (player, role) pair(s) can move off the 1.0 default.",
+                         **Above minimum sample:** {} (player, role) pair(s) can move off the 0.95 default.",
                         result.matches_scanned,
                         result.unreadable_payloads,
                         result.gold_samples_written,

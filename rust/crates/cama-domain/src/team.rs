@@ -696,7 +696,7 @@ mod tests {
 
     #[test]
     fn test_role_performance_scales_the_value_of_an_on_role_player() {
-        // A proven carry is scaled up; an unproven one is left unadjusted. The
+        // A proven carry is scaled up; an unproven one takes the default. The
         // multiplier now applies on-role too, which the old off-role-only
         // multiplier never did.
         let mut proven = player("P1", 2_000, &["1"]);
@@ -731,7 +731,7 @@ mod tests {
             build(unproven)
                 .get_team_value(false, 1.0, false, false)
                 .expect("roles are assigned"),
-            2_000.0
+            1_900.0
         );
     }
 
