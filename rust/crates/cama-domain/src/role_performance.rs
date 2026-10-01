@@ -3,8 +3,8 @@
 //!
 //! Replaces the flat off-role multiplier with a continuous factor derived from
 //! the player's win rate in that specific role. A player assigned a role they
-//! rarely play falls to the floor on its own, because they will not have the
-//! minimum sample.
+//! rarely play is left unadjusted, because they will not have the minimum
+//! sample.
 //!
 //! Kept pure here (no database dependency) so the scale is unit-testable and
 //! usable from both the materialized team API and the shuffler's optimized
@@ -13,12 +13,15 @@
 /// Minimum games in a role before win rate is trusted at all.
 pub const MIN_GAMES_FOR_WINRATE: u32 = 3;
 
-/// Multiplier applied at a 0% win rate, and to anyone below
-/// [`MIN_GAMES_FOR_WINRATE`] games in the assigned role.
-pub const MIN_ROLE_FACTOR: f64 = 0.95;
+/// Multiplier applied to anyone below [`MIN_GAMES_FOR_WINRATE`] games in the
+/// assigned role.
+pub const UNPROVEN_ROLE_FACTOR: f64 = 1.0;
+
+/// Multiplier applied at a 0% win rate with a sufficient sample.
+pub const MIN_ROLE_FACTOR: f64 = 0.9;
 
 /// Multiplier applied at a 100% win rate with a sufficient sample.
-pub const MAX_ROLE_FACTOR: f64 = 1.05;
+pub const MAX_ROLE_FACTOR: f64 = 1.1;
 
 /// A player's win/loss record in one specific role.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -44,13 +47,13 @@ impl RoleRecord {
 ///
 /// A 50% win rate maps to exactly 1.0, leaving the rating untouched. Records
 /// below [`MIN_GAMES_FOR_WINRATE`] games — including a player who has never
-/// been assigned the role — take the floor, so an unproven assignment is
-/// discounted rather than assumed average.
+/// been assigned the role — take [`UNPROVEN_ROLE_FACTOR`], so an unproven
+/// assignment is assumed average until there is a sample to judge it by.
 #[must_use]
 pub fn role_factor(record: RoleRecord) -> f64 {
     let games = record.games();
     if games < MIN_GAMES_FOR_WINRATE {
-        return MIN_ROLE_FACTOR;
+        return UNPROVEN_ROLE_FACTOR;
     }
     let win_rate = f64::from(record.wins) / f64::from(games);
     MIN_ROLE_FACTOR + (MAX_ROLE_FACTOR - MIN_ROLE_FACTOR) * win_rate

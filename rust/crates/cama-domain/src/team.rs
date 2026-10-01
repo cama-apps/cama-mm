@@ -696,7 +696,7 @@ mod tests {
 
     #[test]
     fn test_role_performance_scales_the_value_of_an_on_role_player() {
-        // A proven carry is scaled up; an unproven one falls to the floor. The
+        // A proven carry is scaled up; an unproven one is left unadjusted. The
         // multiplier now applies on-role too, which the old off-role-only
         // multiplier never did.
         let mut proven = player("P1", 2_000, &["1"]);
@@ -725,13 +725,13 @@ mod tests {
             build(proven)
                 .get_team_value(false, 1.0, false, false)
                 .expect("roles are assigned"),
-            2_100.0
+            2_200.0
         );
         assert_eq!(
             build(unproven)
                 .get_team_value(false, 1.0, false, false)
                 .expect("roles are assigned"),
-            1_900.0
+            2_000.0
         );
     }
 
@@ -763,14 +763,14 @@ mod tests {
         let (_, as_carry) = team
             .get_player_by_role_with_off_role_value_penalty("1", false, 1.0, false, false, 0.0)
             .expect("roles are assigned");
-        assert_eq!(as_carry, 1_050.0);
+        assert_eq!(as_carry, 1_100.0);
 
         let mut swapped = team.clone();
         swapped.role_assignments = Some(["2", "1", "3", "4", "5"].map(str::to_owned).to_vec());
         let (_, as_mid) = swapped
             .get_player_by_role_with_off_role_value_penalty("2", false, 1.0, false, false, 0.0)
             .expect("roles are assigned");
-        assert_eq!(as_mid, 950.0);
+        assert_eq!(as_mid, 900.0);
     }
 
     #[test]

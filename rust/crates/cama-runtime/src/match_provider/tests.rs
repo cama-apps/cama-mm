@@ -4650,7 +4650,7 @@ fn test_shuffle_display_uses_configured_flat_off_role_value_penalty() {
         })
         .collect::<Vec<_>>();
     // These fixture players have no recorded role history, so every one takes
-    // the 0.95 role-performance floor, and the off-role multiplier still
+    // the 0.95 unproven-role default, and the off-role multiplier still
     // stacks on top of it. Radiant is fully on-role, so it is a flat 5% off
     // 13_000; Dire carries one off-role player who now takes both factors,
     // which is why it falls further than 5% from 11_300.

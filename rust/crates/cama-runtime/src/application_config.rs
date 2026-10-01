@@ -495,7 +495,7 @@ impl ApplicationConfig {
                 low_priority_profit_tax_rate: p.clamped_rate("LOW_PRIORITY_PROFIT_TAX_RATE", 0.10),
                 max_debt: p.i64("MAX_DEBT", 500),
                 max_rating_swing_per_game: p.f64("MAX_RATING_SWING_PER_GAME", 400.0),
-                max_rd_contraction_per_game: p.f64("MAX_RD_CONTRACTION_PER_GAME", 0.065),
+                max_rd_contraction_per_game: p.f64("MAX_RD_CONTRACTION_PER_GAME", 0.059),
                 minigame_jc_delta_scale: p.f64("MINIGAME_JC_DELTA_SCALE", 1.0),
                 mmr_modal_retry_limit: p.i64("MMR_MODAL_RETRY_LIMIT", 3),
                 mmr_modal_timeout_minutes: p.i64("MMR_MODAL_TIMEOUT_MINUTES", 5),
