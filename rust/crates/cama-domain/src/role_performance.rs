@@ -3,8 +3,8 @@
 //!
 //! Replaces the flat off-role multiplier with a continuous factor derived from
 //! the player's win rate in that specific role. A player assigned a role they
-//! rarely play is left unadjusted, because they will not have the minimum
-//! sample.
+//! rarely play takes the unproven discount on its own, because they will not
+//! have the minimum sample.
 //!
 //! Kept pure here (no database dependency) so the scale is unit-testable and
 //! usable from both the materialized team API and the shuffler's optimized
@@ -15,7 +15,7 @@ pub const MIN_GAMES_FOR_WINRATE: u32 = 3;
 
 /// Multiplier applied to anyone below [`MIN_GAMES_FOR_WINRATE`] games in the
 /// assigned role.
-pub const UNPROVEN_ROLE_FACTOR: f64 = 1.0;
+pub const UNPROVEN_ROLE_FACTOR: f64 = 0.95;
 
 /// Multiplier applied at a 0% win rate with a sufficient sample.
 pub const MIN_ROLE_FACTOR: f64 = 0.9;
@@ -48,7 +48,7 @@ impl RoleRecord {
 /// A 50% win rate maps to exactly 1.0, leaving the rating untouched. Records
 /// below [`MIN_GAMES_FOR_WINRATE`] games — including a player who has never
 /// been assigned the role — take [`UNPROVEN_ROLE_FACTOR`], so an unproven
-/// assignment is assumed average until there is a sample to judge it by.
+/// assignment is discounted rather than assumed average.
 #[must_use]
 pub fn role_factor(record: RoleRecord) -> f64 {
     let games = record.games();
