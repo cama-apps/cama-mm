@@ -898,7 +898,7 @@ fn tunnel_from_snapshot(
     let snapshot = &loaded.snapshot;
     Ok(crate::boss_multi_tier::TunnelState {
         depth: narrow_i32(snapshot.depth, "depth")?,
-        max_depth: narrow_i32(snapshot.max_depth, "max_depth")?,
+        max_depth: narrow_i32(snapshot.max_depth.max(snapshot.depth), "max_depth")?,
         prestige_level: narrow_i32(snapshot.prestige_level, "prestige_level")?,
         balance: snapshot.balance,
         boss_progress: parse_boss_progress(snapshot.boss_progress_json.as_deref())?,
@@ -2351,7 +2351,10 @@ impl DigBossRuntimeService {
             (boss_id, boss.name.to_owned(), true)
         } else {
             let mut service = self.compose(request.now, BorrowedBossEntropy(&mut entropy));
-            let boss = *service.ensure_boss_locked(request.player_key(), boundary_i32)?;
+            let outcome = service
+                .ensure_boss_locked(request.player_key(), boundary_i32)
+                .copied();
+            let boss = finish_composed(&mut service, outcome)?.outcome;
             (boss.boss_id.to_owned(), boss.name.to_owned(), false)
         };
 

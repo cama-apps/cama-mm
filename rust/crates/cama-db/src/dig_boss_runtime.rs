@@ -75,7 +75,10 @@ impl From<&DigBossRuntimeSnapshot> for DigBossRuntimeState {
     fn from(snapshot: &DigBossRuntimeSnapshot) -> Self {
         Self {
             depth: snapshot.depth,
-            max_depth: snapshot.max_depth,
+            // Older and depth-only writers can leave the historical maximum
+            // behind. Repair it in the proposed state, preserving the original
+            // snapshot for the guarded comparison in commit.
+            max_depth: snapshot.max_depth.max(snapshot.depth),
             balance: snapshot.balance,
             boss_progress_json: snapshot.boss_progress_json.clone(),
             stinger_curse_json: snapshot.stinger_curse_json.clone(),
