@@ -74,6 +74,7 @@ const MATCH_CORRECTION_REPLAY_PREFIX: &str = "match_correction:";
 
 mod coordinator;
 mod draft_views;
+mod parsed_refresh_worker;
 mod win_probability;
 
 type LiveEnrichment = MatchEnrichmentService<
@@ -285,6 +286,12 @@ impl EnrichmentRegistrationProvider {
                 admin_user_ids: config.identities.admin_user_ids.iter().copied().collect(),
             }),
         })
+    }
+
+    /// Supervised worker that picks up parsed replay data for recent matches.
+    #[must_use]
+    pub fn parsed_refresh_worker(&self) -> crate::BackgroundWorkerSpec {
+        parsed_refresh_worker::spec(Arc::clone(&self.handler))
     }
 
     /// Clone the existing provider state for post-record discovery.
@@ -678,6 +685,36 @@ fn parsed_stats_complete(coverage: ParsedStatsCoverage) -> bool {
     coverage.participants > 0
         && coverage.with_lane_role == coverage.participants
         && coverage.with_last_hits_at_10 == coverage.participants
+}
+
+/// Re-fetch a match that is already linked to its Valve id.
+fn refresh_linked_match(
+    enrichment: &LiveEnrichment,
+    matches: &MatchRepository,
+    guild_id: i64,
+    match_id: i64,
+    valve_match_id: i64,
+) -> cama_app::match_discovery::MatchEnrichmentServiceResult {
+    // Keep whatever provenance the match already carries: this is a data
+    // refresh, not a re-identification, and relabelling an auto-discovered
+    // match as manual would lose its confidence.
+    let (existing_source, existing_confidence) = matches
+        .enrichment_provenance(match_id, Some(guild_id))
+        .unwrap_or((None, None));
+    enrichment.enrich_match(EnrichMatchRequest {
+        internal_match_id: cama_app::match_discovery::InternalMatchId(match_id),
+        valve_match_id: cama_app::match_discovery::ValveMatchId(valve_match_id),
+        guild_id: Some(cama_app::dedicated_lobby_channel::GuildId(guild_id)),
+        source: existing_source
+            .as_deref()
+            .and_then(EnrichmentSource::from_stored)
+            .unwrap_or(EnrichmentSource::Manual),
+        confidence: existing_confidence,
+        // Already linked to this Valve id; re-running is a data refresh, not
+        // a re-identification.
+        skip_validation: true,
+        opendota_match_data: None,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1539,27 +1576,13 @@ impl EnrichmentHandler {
                         quota_stopped = true;
                         break;
                     }
-                    // Keep whatever provenance the match already carries: this
-                    // is a data refresh, not a re-identification, and
-                    // relabelling an auto-discovered match as manual would
-                    // lose its confidence.
-                    let (existing_source, existing_confidence) = matches
-                        .enrichment_provenance(match_id, Some(guild_id))
-                        .unwrap_or((None, None));
-                    let result = enrichment.enrich_match(EnrichMatchRequest {
-                        internal_match_id: cama_app::match_discovery::InternalMatchId(match_id),
-                        valve_match_id: cama_app::match_discovery::ValveMatchId(valve_match_id),
-                        guild_id: Some(cama_app::dedicated_lobby_channel::GuildId(guild_id)),
-                        source: existing_source
-                            .as_deref()
-                            .and_then(EnrichmentSource::from_stored)
-                            .unwrap_or(EnrichmentSource::Manual),
-                        confidence: existing_confidence,
-                        // Already linked to this Valve id; re-running is a data
-                        // refresh, not a re-identification.
-                        skip_validation: true,
-                        opendota_match_data: None,
-                    });
+                    let result = refresh_linked_match(
+                        &enrichment,
+                        &matches,
+                        guild_id,
+                        match_id,
+                        valve_match_id,
+                    );
                     chunk_processed += 1;
 
                     if let Err(error) =

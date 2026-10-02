@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use reqwest::{Client, Response, StatusCode};
+use reqwest::{Client, Method, Response, StatusCode};
 use serde_json::{Map, Value};
 use thiserror::Error;
 use tokio::runtime::{Builder, Runtime};
@@ -1038,6 +1038,29 @@ impl OpenDotaHttpClient {
         }
     }
 
+    /// Ask OpenDota to parse a match's replay, which is what fills lane and
+    /// per-minute data. OpenDota counts this as ten calls against the rate
+    /// limit; its response headers resync the shared limiter.
+    pub async fn request_parse(&self, match_id: i64) -> Result<(), String> {
+        let path = format!("/request/{match_id}");
+        let response = self
+            .send_request(Method::POST, &path, &[])
+            .await
+            .ok_or_else(|| {
+                format!(
+                    "OpenDota {path} produced no response (request deadline, local quota, or network failure)"
+                )
+            })?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "OpenDota {path} returned HTTP {}",
+                response.status().as_u16()
+            ))
+        }
+    }
+
     async fn get_projected_matches(&self, steam_id: i64, limit: usize) -> Option<Vec<Value>> {
         let mut params = vec![("limit".to_owned(), limit.to_string())];
         for field in [
@@ -1087,6 +1110,15 @@ impl OpenDotaHttpClient {
     }
 
     async fn make_request(&self, path: &str, params: &[(String, String)]) -> Option<Response> {
+        self.send_request(Method::GET, path, params).await
+    }
+
+    async fn send_request(
+        &self,
+        method: Method,
+        path: &str,
+        params: &[(String, String)],
+    ) -> Option<Response> {
         let started_at = Instant::now();
         let mut query = params.to_vec();
         if let Some(api_key) = &self.config.api_key {
@@ -1122,7 +1154,7 @@ impl OpenDotaHttpClient {
             }
             let response = self
                 .http
-                .get(&url)
+                .request(method.clone(), &url)
                 .query(&query)
                 .timeout(self.config.request_timeout.min(remaining))
                 .send()
@@ -1630,6 +1662,13 @@ impl OpenDotaDiscoveryPort for OpenDotaHttpClient {
                     .ok_or_else(|| format!("OpenDota match {} payload was incomplete", match_id.0))
             })
             .map(Some)
+            .map_err(DiscoveryPortError::new)
+    }
+
+    fn request_parse(&self, match_id: ValveMatchId) -> Result<(), DiscoveryPortError> {
+        let client = self.clone();
+        self.run_on_dedicated(async move { client.request_parse(match_id.0).await })
+            .map_err(|error| DiscoveryPortError::new(error.to_string()))?
             .map_err(DiscoveryPortError::new)
     }
 }

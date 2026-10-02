@@ -2171,6 +2171,116 @@ async fn refresh_parsed_drains_a_backlog_larger_than_one_chunk() {
     );
 }
 
+fn parsed_refresh_attempts(path: &std::path::Path, match_id: i64) -> i64 {
+    Connection::open(path)
+        .expect("inspect attempts")
+        .query_row(
+            "SELECT parsed_refresh_attempts FROM matches WHERE guild_id=?1 AND match_id=?2",
+            params![GUILD as i64, match_id],
+            |row| row.get(0),
+        )
+        .expect("attempt count")
+}
+
+fn mark_recorded_now(path: &std::path::Path, match_id: i64) {
+    Connection::open(path)
+        .expect("open stale fixture")
+        .execute(
+            "UPDATE matches SET match_date = datetime('now') WHERE match_id = ?1",
+            [match_id],
+        )
+        .expect("mark match as just recorded");
+}
+
+#[tokio::test]
+async fn automatic_refresh_completes_recent_matches_and_leaves_old_ones_alone() {
+    let (_directory, path) = migrated();
+    let catalog = dotabase();
+    seed_stale_parsed_matches(&path, 2);
+    mark_recorded_now(&path, 1_000);
+    let server = RouteServer::start(vec![parsed_match_payload()]);
+    let provider = EnrichmentRegistrationProvider::test_with_dotabase_path(
+        &path,
+        &application_config(),
+        services(&server),
+        catalog.path(),
+    )
+    .expect("compose enrichment provider");
+
+    let completed = provider
+        .handler
+        .refresh_recent_parsed_stats()
+        .await
+        .expect("automatic refresh");
+
+    assert_eq!(completed, 1);
+    let requests = server.requests(1);
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert!(requests[0].starts_with("GET /matches/9000"), "{requests:?}");
+    assert_eq!(parsed_refresh_attempts(&path, 1_000), 1);
+    assert_eq!(
+        parsed_refresh_attempts(&path, 1_001),
+        0,
+        "a match past the replay window is left to the manual refresh"
+    );
+    assert_eq!(
+        MatchRepository::new(&path)
+            .matches_missing_parsed_stats(Some(GUILD as i64), 100)
+            .expect("remaining candidates"),
+        vec![(1_001, 9_001)]
+    );
+}
+
+#[tokio::test]
+async fn automatic_refresh_requests_a_parse_for_an_unparsed_match() {
+    let (_directory, path) = migrated();
+    let catalog = dotabase();
+    seed_stale_parsed_matches(&path, 1);
+    mark_recorded_now(&path, 1_000);
+    let mut unparsed: serde_json::Value =
+        serde_json::from_str(&manual_match_payload()).expect("manual match fixture is JSON");
+    for player in unparsed["players"]
+        .as_array_mut()
+        .expect("manual match fixture has players")
+    {
+        player
+            .as_object_mut()
+            .expect("player object")
+            .remove("lane_role");
+    }
+    let server = RouteServer::start(vec![
+        unparsed.to_string(),
+        r#"{"job":{"jobId":1}}"#.to_owned(),
+    ]);
+    let provider = EnrichmentRegistrationProvider::test_with_dotabase_path(
+        &path,
+        &application_config(),
+        services(&server),
+        catalog.path(),
+    )
+    .expect("compose enrichment provider");
+
+    let completed = provider
+        .handler
+        .refresh_recent_parsed_stats()
+        .await
+        .expect("automatic refresh");
+
+    assert_eq!(completed, 0);
+    let requests = server.requests(2);
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert!(requests[0].starts_with("GET /matches/9000"), "{requests:?}");
+    assert!(
+        requests[1].starts_with("POST /request/9000"),
+        "{requests:?}"
+    );
+    assert_eq!(
+        parsed_refresh_attempts(&path, 1_000),
+        1,
+        "the attempt is counted so an unparseable match eventually stops retrying"
+    );
+}
+
 #[tokio::test]
 async fn refresh_parsed_keeps_partial_responses_eligible_for_a_later_run() {
     let (_directory, path) = migrated();

@@ -594,6 +594,35 @@ fn discovery_port_preserves_http_status_in_its_error() {
 }
 
 #[tokio::test]
+async fn test_request_parse_posts_to_the_request_endpoint() {
+    let server = ScriptedServer::start(vec![ScriptedResponse::json(200, r#"{"job":{"jobId":1}}"#)]);
+    let client = client_for(&server);
+
+    client.request_parse(42).await.expect("parse request");
+
+    let requests = server.request_lines();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].starts_with("POST /request/42?"),
+        "{}",
+        requests[0]
+    );
+}
+
+#[tokio::test]
+async fn test_request_parse_reports_a_rejected_request() {
+    let server = ScriptedServer::start(vec![ScriptedResponse::status(403)]);
+    let client = client_for(&server);
+
+    let error = client
+        .request_parse(42)
+        .await
+        .expect_err("HTTP 403 is not an accepted parse request");
+
+    assert!(error.contains("HTTP 403"), "{error}");
+}
+
+#[tokio::test]
 async fn test_get_player_matches_passes_limit_param() {
     let server = ScriptedServer::start(vec![ScriptedResponse::json(
         200,

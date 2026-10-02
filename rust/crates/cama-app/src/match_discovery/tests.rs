@@ -225,6 +225,7 @@ struct FakeOpenDota {
     details: Arc<Mutex<BTreeMap<ValveMatchId, VecDeque<DetailResponse>>>>,
     history_calls: Arc<Mutex<Vec<SteamId>>>,
     detail_calls: Arc<Mutex<Vec<ValveMatchId>>>,
+    parse_requests: Arc<Mutex<Vec<ValveMatchId>>>,
     gate: Arc<(Mutex<ApiGate>, Condvar)>,
 }
 
@@ -333,6 +334,14 @@ impl OpenDotaDiscoveryPort for FakeOpenDota {
                     (1..=10).map(|id| SteamId(id + 1_000)),
                 )))
             })
+    }
+
+    fn request_parse(&self, match_id: ValveMatchId) -> Result<(), DiscoveryPortError> {
+        self.parse_requests
+            .lock()
+            .expect("parse requests lock")
+            .push(match_id);
+        Ok(())
     }
 }
 
@@ -1397,6 +1406,64 @@ fn draft_hook_is_skipped_when_enrichment_validation_fails() {
     assert_eq!(result.draft_analysis_error, None);
     assert!(writer.writes.lock().unwrap().is_empty());
     assert!(hook.calls.lock().unwrap().is_empty());
+}
+
+#[test]
+fn test_unparsed_fetch_requests_a_parse_once_across_retries() {
+    let (matches, players, api, writer, _) = one_player_enrichment_fixture();
+    let unparsed = || Ok(Some(enrichment_details(vec![enrichment_player(12_345)])));
+    api.set_details(ValveMatchId(8_181_518_332), vec![unparsed(), unparsed()]);
+    let service =
+        MatchEnrichmentService::new(matches, players, api.clone(), writer, None::<FakeOpenSkill>);
+
+    assert!(service.enrich_match(service_request()).success);
+    assert!(service.enrich_match(service_request()).success);
+
+    assert_eq!(
+        *api.parse_requests.lock().expect("parse requests lock"),
+        [ValveMatchId(8_181_518_332)],
+        "the retry inside the cooldown must not spend a second parse request"
+    );
+}
+
+#[test]
+fn test_failed_fetch_still_requests_a_parse() {
+    let (matches, players, api, writer, _) = one_player_enrichment_fixture();
+    api.set_details(ValveMatchId(8_181_518_332), vec![Ok(None)]);
+    let service =
+        MatchEnrichmentService::new(matches, players, api.clone(), writer, None::<FakeOpenSkill>);
+
+    assert!(!service.enrich_match(service_request()).success);
+
+    assert_eq!(
+        *api.parse_requests.lock().expect("parse requests lock"),
+        [ValveMatchId(8_181_518_332)]
+    );
+}
+
+#[test]
+fn test_parsed_fetch_and_supplied_details_request_no_parse() {
+    let (matches, players, api, writer, _) = one_player_enrichment_fixture();
+    let mut parsed_player = enrichment_player(12_345);
+    parsed_player.wrapped.lane_role = Some(2);
+    api.set_details(
+        ValveMatchId(8_181_518_332),
+        vec![Ok(Some(enrichment_details(vec![parsed_player])))],
+    );
+    let service =
+        MatchEnrichmentService::new(matches, players, api.clone(), writer, None::<FakeOpenSkill>);
+
+    assert!(service.enrich_match(service_request()).success);
+    let mut supplied = service_request();
+    supplied.opendota_match_data = Some(enrichment_details(vec![enrichment_player(12_345)]));
+    assert!(service.enrich_match(supplied).success);
+
+    assert!(
+        api.parse_requests
+            .lock()
+            .expect("parse requests lock")
+            .is_empty()
+    );
 }
 
 #[test]
