@@ -344,6 +344,81 @@ fn encounter_opens_for_fresh_tunnel_without_progress_entries() {
 }
 
 #[test]
+fn encounters_repair_max_depth_lagging_behind_current_depth() {
+    for pinnacle in [false, true] {
+        let database = fixture();
+        let connection = Connection::open(database.path()).expect("encounter DB");
+        connection
+            .execute_batch("UPDATE tunnels SET boss_progress='{}';")
+            .expect("unassigned regular boss");
+        if pinnacle {
+            set_pinnacle(&database, 1, "active", None);
+        }
+        connection
+            .execute_batch("UPDATE tunnels SET max_depth=0, pinnacle_boss_id=NULL;")
+            .expect("depth advanced without updating historical maximum");
+
+        let info = pinnacle_runtime(&database)
+            .encounter(
+                pinnacle_request(1_700_000_000),
+                SequenceEntropy::constant(0.5),
+            )
+            .expect("a stale maximum must not block the boss encounter");
+        assert_eq!(info.is_pinnacle, pinnacle);
+        let (depth, max_depth, balance): (i64, i64, i64) = connection
+            .query_row(
+                "SELECT t.depth,t.max_depth,p.jopacoin_balance
+                 FROM tunnels t JOIN players p USING(discord_id,guild_id)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("repaired maximum");
+        assert_eq!(depth, i64::from(info.boundary - 1));
+        assert_eq!(max_depth, depth);
+        assert_eq!(balance, 100);
+    }
+}
+
+#[test]
+fn encounter_preserves_boss_assignment_database_error() {
+    let database = fixture();
+    let connection = Connection::open(database.path()).expect("encounter DB");
+    connection
+        .execute_batch(
+            "UPDATE tunnels SET boss_progress='{}';
+             CREATE TRIGGER fail_boss_assignment BEFORE UPDATE ON tunnels
+             BEGIN SELECT RAISE(ABORT, 'boss assignment write failed'); END;",
+        )
+        .expect("failing boss assignment");
+
+    let error = pinnacle_runtime(&database)
+        .encounter(
+            pinnacle_request(1_700_000_000),
+            SequenceEntropy::constant(0.5),
+        )
+        .expect_err("failed boss assignment must report its database error");
+    assert!(
+        matches!(&error, DigBossRuntimeError::Infrastructure(detail)
+            if detail.contains("boss assignment write failed")),
+        "the underlying error must survive the policy adapter: {error}"
+    );
+    let progress: String = connection
+        .query_row("SELECT boss_progress FROM tunnels", [], |row| row.get(0))
+        .expect("unchanged progress");
+    assert_eq!(progress, "{}");
+
+    connection
+        .execute_batch("DROP TRIGGER fail_boss_assignment;")
+        .expect("restore writes");
+    pinnacle_runtime(&database)
+        .encounter(
+            pinnacle_request(1_700_000_000),
+            SequenceEntropy::constant(0.5),
+        )
+        .expect("retry can assign the boss after the database recovers");
+}
+
+#[test]
 fn encounter_locks_and_marks_first_meet_without_losing_unknown_progress() {
     let database = fixture();
     let first = pinnacle_runtime(&database)

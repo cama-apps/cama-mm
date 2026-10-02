@@ -96,6 +96,23 @@ fn seed_queued_preparation(database: &NamedTempFile, item_type: &str) -> i64 {
 }
 
 #[test]
+fn boss_state_repairs_stale_maximum_without_reducing_historical_depth() {
+    let database = fixture();
+    let repository = DigBossRuntimeRepository::new(database.path());
+    let mut snapshot = repository.snapshot(KEY).expect("snapshot").expect("player");
+    for (stored, expected) in [(0, 24), (24, 24), (100, 100)] {
+        snapshot.max_depth = stored;
+        let proposed = DigBossRuntimeState::from(&snapshot);
+        assert_eq!(proposed.max_depth, expected);
+        assert_eq!(
+            snapshot.max_depth, stored,
+            "keep the CAS snapshot unchanged"
+        );
+        validate_state(&snapshot, &proposed).expect("valid proposed progression");
+    }
+}
+
+#[test]
 fn preparation_activation_consumes_exact_row_with_guarded_progress_update() {
     let database = fixture();
     let repository = DigBossRuntimeRepository::new(database.path());
