@@ -3648,14 +3648,10 @@ async fn registered_admin_record_settles_an_active_hosted_match_once() {
         .expect("place hosted-match wager before the close");
 
     let pending_repository = PendingMatchRepository::new(fixture.database.path());
-    let managed = pending_repository
-        .begin_hosted_betting(GUILD, pending.pending_match_id, unix_seconds())
-        .expect("adopt pending match for hosted betting");
-    assert!(managed.state.hosted_betting_managed());
-    let closed = pending_repository
-        .close_betting_now(GUILD, pending.pending_match_id, unix_seconds())
-        .expect("close hosted betting at gameplay start");
-    assert!(closed.pending_match.state.betting_closed());
+    let started = pending_repository
+        .close_betting_now(GUILD, pending.pending_match_id)
+        .expect("mark hosted gameplay start");
+    assert!(started.state.betting_closed());
 
     let sessions =
         cama_db::dota_session_repository::DotaSessionRepository::new(fixture.database.path());

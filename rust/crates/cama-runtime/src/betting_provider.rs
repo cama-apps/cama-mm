@@ -3638,14 +3638,9 @@ impl BettingInteractionHandler {
                     .await
                     .ok();
                     let lock_until = pending.state.lock_time.or(pending.state.bet_lock_until);
-                    let seconds_remaining = if pending.state.hosted_betting_managed() {
-                        // There is no fixed last-call countdown for a hosted draft.
-                        0
-                    } else {
-                        lock_until
-                            .map(|lock| lock.saturating_sub(now).max(0))
-                            .unwrap_or_default()
-                    };
+                    let seconds_remaining = lock_until
+                        .map(|lock| lock.saturating_sub(now).max(0))
+                        .unwrap_or_default();
                     self.emit_bet_neon(
                         channel_id,
                         user_id,
@@ -3934,7 +3929,6 @@ impl BettingInteractionHandler {
         })
         .await?;
         let lock_until = pending.state.bet_lock_until.or(pending.state.lock_time);
-        let managed_betting = !recorded && pending.state.hosted_betting_managed();
         let betting_open = !recorded
             && pending
                 .state
@@ -3968,18 +3962,6 @@ impl BettingInteractionHandler {
         let mut odds_text = overview.current_odds;
         if !betting_open {
             odds_text.push_str("\nBetting is closed.");
-        } else if managed_betting {
-            if let Some(deadline) = pending
-                .state
-                .betting_extension_until()
-                .filter(|deadline| *deadline > unix_seconds().unwrap_or_default())
-            {
-                odds_text.push_str(&format!(
-                    "\nBetting stays open through the hero draft and at least until <t:{deadline}:R> (admin extension)."
-                ));
-            } else {
-                odds_text.push_str("\nBetting closes when gameplay starts after the hero draft.");
-            }
         } else if let Some(lock) = lock_until {
             odds_text.push_str(&format!("\nBetting closes <t:{lock}:R>"));
         }

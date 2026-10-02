@@ -2091,13 +2091,6 @@ async fn financial_setup_failure_retains_live_draft_then_retry_completes_once() 
         .unwrap();
     assert_eq!(gated.state.extra["draft_setup_complete"], json!(false));
     assert!(!gated.state.betting_open(unix_now()));
-    assert!(matches!(
-        provider
-            .handler
-            .pending
-            .begin_hosted_betting(42, pending_match_id, unix_now()),
-        Err(cama_db::match_runtime::PendingMatchRepositoryError::SetupIncomplete(_))
-    ));
     assert!(matches!(provider.handler.bets.abort_pending_match_atomic(Some(42),pending_match_id,&[]),
         Err(cama_db::betting_service_repository::BettingServiceRepositoryError::DraftFinalizationInProgress(_))));
     let completion_key = cama_db::draft_finalization::draft_completion_key(42, state.session_id);

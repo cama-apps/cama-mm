@@ -138,7 +138,6 @@ impl DotaHostWorker {
                 .await;
         }
         if !port.betting_observation_fresh().await {
-            self.suspend_betting(record).await?;
             return Err("waiting for fresh GC observation before changing lobby settings".into());
         }
         if lobby.stage != LobbyStage::Gathering
@@ -151,7 +150,6 @@ impl DotaHostWorker {
             // An external launch can race a queued request (including a lost
             // configure reply). Reconcile known settings without sending any
             // mutation, then let normal match tracking/recording continue.
-            self.suspend_betting(record).await?;
             let applied = settings_match(&request.settings, lobby);
             if !applied && !settings_match(&state.settings, lobby) {
                 return self.review(record, state, "launched lobby matches neither saved nor requested settings; inspect before resuming", now).await;
@@ -217,7 +215,6 @@ impl DotaHostWorker {
                 )
                 .await;
         }
-        self.suspend_betting(record).await?;
         request.first_sent_at.get_or_insert(now);
         request.last_sent_at = Some(now);
         state.configuration = Some(request.clone());

@@ -58,7 +58,6 @@ fn busy_fallback_is_permanent_manual_and_keeps_timed_betting_after_restart() {
     assert_eq!(manual.state.bet_lock_until, Some(1000));
     assert!(manual.state.betting_open(999));
     assert!(!manual.state.betting_open(1000));
-    assert!(!manual.state.hosted_betting_managed());
     repo.delete_pending_match(1, bot.pending_match_id).unwrap();
     let restarted = PendingMatchRepository::new(file.path());
     config(&restarted);

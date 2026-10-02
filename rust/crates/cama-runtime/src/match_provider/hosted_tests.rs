@@ -3,14 +3,25 @@ use cama_db::opendota_player::OpenDotaPlayerRepository;
 use cama_domain::dota_lobby::STEAM_INDIVIDUAL_BASE;
 
 #[tokio::test]
-async fn hosted_draft_replaces_timed_reminders_and_countdown_with_gameplay_start() {
+async fn hosted_match_keeps_timed_reminders_and_countdown_through_gameplay_start() {
     let fixture = MatchRuntimeFixture::new();
-    let pending = fixture.pending(unix_seconds() + 900);
+    let lock_until = unix_seconds() + 900;
+    let pending = fixture.pending(lock_until);
     fixture
         .provider
         .handler
         .schedule_betting_reminders(&pending, false);
     let key = (GUILD, pending.pending_match_id);
+    let repository = PendingMatchRepository::new(fixture.database.path());
+    let started = repository
+        .close_betting_now(GUILD, pending.pending_match_id)
+        .unwrap();
+    fixture
+        .provider
+        .hosted_betting_window_changed(GUILD, pending.pending_match_id)
+        .await
+        .unwrap();
+
     assert!(
         fixture
             .provider
@@ -18,77 +29,37 @@ async fn hosted_draft_replaces_timed_reminders_and_countdown_with_gameplay_start
             .betting_tasks
             .lock()
             .unwrap()
-            .contains_key(&key)
+            .contains_key(&key),
+        "a hosted match keeps its timed betting reminders"
     );
-    let repository = PendingMatchRepository::new(fixture.database.path());
-    repository
-        .begin_hosted_betting(GUILD, pending.pending_match_id, unix_seconds())
-        .unwrap();
-    repository
-        .observe_hosted_betting(GUILD, pending.pending_match_id, unix_seconds())
-        .unwrap();
-    let mut managed = repository
-        .pending_match(GUILD, pending.pending_match_id)
-        .unwrap()
-        .unwrap();
-    fixture
+    assert!(started.state.betting_open(unix_seconds()));
+    let embed = fixture
         .provider
-        .hosted_betting_window_changed(GUILD, pending.pending_match_id)
+        .handler
+        .render_shuffle_embed(&started)
         .await
+        .unwrap();
+    let wager = embed
+        .fields
+        .iter()
+        .find(|field| field.name.contains("Betting"))
         .unwrap();
     assert!(
-        !fixture
-            .provider
-            .handler
-            .betting_tasks
-            .lock()
-            .unwrap()
-            .contains_key(&key)
+        wager.value.contains(&format!("Closes <t:{lock_until}:R>")),
+        "{}",
+        wager.value
     );
-    // Even a stale historical deadline must not be rendered as a close.
-    managed.state.bet_lock_until = Some(unix_seconds() - 1);
-    let embed = fixture
-        .provider
-        .handler
-        .render_shuffle_embed(&managed)
-        .await
-        .unwrap();
-    let wager = embed
-        .fields
-        .iter()
-        .find(|field| field.name.contains("Betting"))
-        .unwrap();
-    assert!(wager.value.contains("closes when gameplay starts"));
     assert!(!wager.value.contains("Betting closed"));
-    assert!(!wager.value.contains("Closes <t:"));
-    let closed = repository
-        .close_betting_now(GUILD, pending.pending_match_id, unix_seconds())
-        .unwrap();
-    let embed = fixture
-        .provider
-        .handler
-        .render_shuffle_embed(&closed.pending_match)
-        .await
-        .unwrap();
-    let wager = embed
-        .fields
-        .iter()
-        .find(|field| field.name.contains("Betting"))
-        .unwrap();
-    assert!(wager.value.contains("Betting closed"));
-    assert!(!wager.value.contains("through the hero draft"));
+    assert!(!wager.value.contains("hero draft"));
 }
 
 #[tokio::test]
-async fn admin_extension_reopens_hosted_betting_and_restores_timed_reminders() {
+async fn admin_extension_reopens_betting_after_gameplay_start() {
     let fixture = MatchRuntimeFixture::new();
     let pending = fixture.pending(unix_seconds() - 1);
     let repository = PendingMatchRepository::new(fixture.database.path());
     repository
-        .begin_hosted_betting(GUILD, pending.pending_match_id, unix_seconds())
-        .unwrap();
-    repository
-        .close_betting_now(GUILD, pending.pending_match_id, unix_seconds())
+        .close_betting_now(GUILD, pending.pending_match_id)
         .unwrap();
     let extension = fixture
         .provider
@@ -99,14 +70,6 @@ async fn admin_extension_reopens_hosted_betting_and_restores_timed_reminders() {
             minutes: 10,
             pending_match_id: pending.pending_match_id,
         })
-        .await
-        .unwrap();
-    assert!(!extension.waits_for_gameplay_start);
-    // A delayed host notification must neither cancel the override nor its
-    // replacement countdown/reminders.
-    fixture
-        .provider
-        .hosted_betting_closed(GUILD, pending.pending_match_id)
         .await
         .unwrap();
     assert!(
@@ -122,7 +85,6 @@ async fn admin_extension_reopens_hosted_betting_and_restores_timed_reminders() {
         .pending_match(GUILD, pending.pending_match_id)
         .unwrap()
         .unwrap();
-    assert!(reopened.state.betting_closed());
     assert!(reopened.state.betting_open(unix_seconds()));
     assert!(!reopened.state.betting_open(extension.new_bet_lock_until));
     let embed = fixture
@@ -142,74 +104,6 @@ async fn admin_extension_reopens_hosted_betting_and_restores_timed_reminders() {
             .contains(&format!("Closes <t:{}:R>", extension.new_bet_lock_until))
     );
     assert!(!wager.value.contains("Betting closed"));
-    assert!(!wager.value.contains("through the hero draft"));
-}
-
-#[tokio::test]
-async fn admin_extension_during_hosted_draft_keeps_the_gameplay_cutoff() {
-    let fixture = MatchRuntimeFixture::new();
-    let pending = fixture.pending(unix_seconds() - 1);
-    let repository = PendingMatchRepository::new(fixture.database.path());
-    repository
-        .begin_hosted_betting(GUILD, pending.pending_match_id, unix_seconds())
-        .unwrap();
-    let extension = fixture
-        .provider
-        .handler
-        .extend_betting(AdminExtendBettingRequest {
-            guild_id: GUILD,
-            actor_id: 99,
-            minutes: 10,
-            pending_match_id: pending.pending_match_id,
-        })
-        .await
-        .unwrap();
-    assert!(extension.waits_for_gameplay_start);
-    assert!(
-        !fixture
-            .provider
-            .handler
-            .betting_tasks
-            .lock()
-            .unwrap()
-            .contains_key(&(GUILD, pending.pending_match_id))
-    );
-    let extended = repository
-        .pending_match(GUILD, pending.pending_match_id)
-        .unwrap()
-        .unwrap();
-    assert!(
-        !extended.state.betting_open(extension.new_bet_lock_until),
-        "expired extension must not bypass a missing live observation"
-    );
-    let embed = fixture
-        .provider
-        .handler
-        .render_shuffle_embed(&extended)
-        .await
-        .unwrap();
-    assert!(embed.fields.iter().any(|field| {
-        field
-            .value
-            .contains("open through the hero draft and at least until")
-    }));
-    repository
-        .close_betting_now(GUILD, pending.pending_match_id, unix_seconds())
-        .unwrap();
-    fixture
-        .provider
-        .hosted_betting_closed(GUILD, pending.pending_match_id)
-        .await
-        .unwrap();
-    assert!(
-        fixture
-            .provider
-            .handler
-            .betting_tasks
-            .lock()
-            .unwrap()
-            .contains_key(&(GUILD, pending.pending_match_id))
-    );
 }
 
 fn linked_hosted_result(

@@ -159,7 +159,6 @@ impl DotaHostPort for FakePort {
             pending.state.extra.get("dota_betting_closed"),
             Some(&true.into())
         );
-        assert!(pending.state.hosted_betting_managed());
         self.calls.lock().unwrap().push("launch".into());
         self.lobby.lock().unwrap().as_mut().unwrap().stage = LobbyStage::Allocating;
         Ok(())
@@ -195,8 +194,6 @@ struct Recorder {
     statistics: Mutex<Option<serde_json::Value>>,
     count: AtomicUsize,
     failures: AtomicUsize,
-    betting_failures: AtomicUsize,
-    betting_attempts: AtomicUsize,
     path: PathBuf,
 }
 #[async_trait]
@@ -221,17 +218,6 @@ impl HostedMatchRecorder for Recorder {
             .delete_pending_match(result.guild_id, result.pending_match_id)
             .unwrap();
         Ok(123)
-    }
-    async fn betting_closed(&self, _: i64, _: i64) -> Result<(), String> {
-        self.betting_attempts.fetch_add(1, Ordering::SeqCst);
-        if self
-            .betting_failures
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-            .is_ok()
-        {
-            return Err("temporary display failure".into());
-        }
-        Ok(())
     }
 }
 
@@ -349,9 +335,6 @@ impl Fixture {
             allocation_observed_at: None,
             last_allocation_log_at: None,
             betting_closed: false,
-            betting_window_announced: false,
-            betting_notification_sent: false,
-            last_betting_notification_at: 0,
             cancel_requested: false,
             resume_requested: false,
             recorded_match_id: None,
@@ -378,8 +361,6 @@ impl Fixture {
             statistics: Mutex::new(None),
             count: AtomicUsize::new(0),
             failures: AtomicUsize::new(0),
-            betting_failures: AtomicUsize::new(0),
-            betting_attempts: AtomicUsize::new(0),
             path: db.path().into(),
         });
         let live = crate::dota_live::DotaLiveFeed::new(&config).unwrap();
@@ -595,14 +576,6 @@ async fn manual_hosting_snapshot_skips_discovery_and_steam_entirely() {
             .unwrap()
             .is_none()
     );
-    assert!(
-        !repo
-            .pending_match(1, f.pending)
-            .unwrap()
-            .unwrap()
-            .state
-            .hosted_betting_managed()
-    );
 }
 
 #[tokio::test]
@@ -806,11 +779,6 @@ async fn real_lobby_preview_invites_only_real_player_and_never_launches_or_settl
             .any(|c| c == "launch" || c.starts_with("details:"))
     );
     assert_eq!(f.recorder.count.load(Ordering::SeqCst), 0);
-    let pending = PendingMatchRepository::new(&f.worker.path)
-        .pending_match(1, f.pending)
-        .unwrap()
-        .unwrap();
-    assert!(!pending.state.hosted_betting_managed());
     f.update_state(|_, state| state.cancel_requested = true);
     f.worker.tick(&f.port, 190).await.unwrap();
     f.worker.tick(&f.port, 195).await.unwrap();
@@ -1138,11 +1106,11 @@ async fn complete_workflow_keeps_bets_open_at_launch_and_records_once() {
 }
 
 #[tokio::test]
-async fn betting_stays_open_through_draft_until_playable_pregame() {
+async fn gameplay_start_is_marked_only_at_playable_pregame_and_never_closes_betting() {
     let f = Fixture::new(false);
     f.launch().await;
-    // The old fixed deadline was 1000. Loading, hero selection, strategy,
-    // showcase and unknown states must not close a hosted betting window.
+    // Loading, hero selection, strategy, showcase and unknown states are not
+    // gameplay.
     for (index, state) in [
         Some(1),
         Some(2),
@@ -1156,24 +1124,24 @@ async fn betting_stays_open_through_draft_until_playable_pregame() {
     .into_iter()
     .enumerate()
     {
-        let now = 1100 + index as i64 * 30;
+        let now = 150 + index as i64 * 30;
         f.running(state);
         f.worker.tick(&f.port, now).await.unwrap();
         assert!(
-            f.betting_open(now),
-            "state {state:?} closed the draft window"
+            !f.state().betting_closed,
+            "state {state:?} was read as gameplay"
         );
-        assert_eq!(f.recorder.betting_attempts.load(Ordering::SeqCst), 0);
     }
     f.running(Some(4));
-    f.worker.tick(&f.port, 1400).await.unwrap();
-    assert!(!f.betting_open(1400));
-    assert_eq!(f.recorder.betting_attempts.load(Ordering::SeqCst), 1);
-    // A stale phase update and a process-style reload cannot reopen betting.
+    f.worker.tick(&f.port, 400).await.unwrap();
+    assert!(f.state().betting_closed);
+    // The fixed deadline of 1000 alone decides wagers.
+    assert!(f.betting_open(999));
+    assert!(!f.betting_open(1000));
+    // A stale phase update and a process-style reload cannot unmark it.
     f.running(Some(3));
-    f.worker.tick(&f.port, 1430).await.unwrap();
-    assert!(!f.betting_open(1430));
-    assert_eq!(f.recorder.betting_attempts.load(Ordering::SeqCst), 1);
+    f.worker.tick(&f.port, 430).await.unwrap();
+    assert!(f.state().betting_closed);
 }
 
 #[tokio::test]
@@ -1214,11 +1182,10 @@ async fn admin_extension_survives_gameplay_updates_and_expires_without_the_host(
     f.worker.tick(&f.port, 1830).await.unwrap();
     assert!(f.betting_open(1830));
     assert!(!f.betting_open(reopened.new_lock_until));
-    assert_eq!(f.recorder.betting_attempts.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
-async fn spectator_game_state_can_close_betting_without_a_gc_game_phase() {
+async fn spectator_game_state_can_confirm_gameplay_without_a_gc_game_phase() {
     let mut f = Fixture::new(false);
     let token = "observer-test-token-at-least-32-bytes";
     f.worker.config.gsi_token = Some(crate::Secret::new(token.into()));
@@ -1246,16 +1213,23 @@ async fn spectator_game_state_can_close_betting_without_a_gc_game_phase() {
         .live
         .ingest_gsi(sample("DOTA_GAMERULES_STATE_PRE_GAME"), 156)
         .unwrap();
-    // Observation remains internal until the atomic betting close completes.
     assert!(f.worker.live.snapshot(1, f.pending).is_none());
     *f.port.snapshot_error.lock().unwrap() = Some("GC offline".into());
     assert_eq!(f.worker.tick(&f.port, 160).await.unwrap_err(), "GC offline");
-    assert!(!f.betting_open(160));
+    assert!(f.state().betting_closed);
+    // A lost coordinator and a started game both leave the timed window
+    // alone, and live details stay private while it is open.
+    assert!(f.betting_open(160));
+    assert!(f.worker.live.snapshot(1, f.pending).is_none());
+    assert_eq!(
+        f.worker.tick(&f.port, 1000).await.unwrap_err(),
+        "GC offline"
+    );
     assert!(f.worker.live.snapshot(1, f.pending).is_some());
 }
 
 #[tokio::test]
-async fn valve_game_clock_closes_hosted_betting_without_gc_phase_or_gsi() {
+async fn valve_game_clock_confirms_gameplay_without_gc_phase_or_gsi() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1321,22 +1295,26 @@ async fn valve_game_clock_closes_hosted_betting_without_gc_phase_or_gsi() {
         .unwrap();
     server.await.unwrap();
     assert!(f.worker.live.gameplay_started(1, f.pending, 888));
-    // Start evidence stays private until the host commits betting closure.
-    assert!(f.betting_open(155));
+    // Start evidence stays private until the host records it and the timed
+    // betting window has run out.
     assert!(f.worker.live.snapshot(1, f.pending).is_none());
 
     *f.port.snapshot_error.lock().unwrap() = Some("GC offline".into());
     assert_eq!(f.worker.tick(&f.port, 160).await.unwrap_err(), "GC offline");
-    assert!(!f.betting_open(160));
+    assert!(f.betting_open(160));
     assert!(f.state().betting_closed);
-    assert_eq!(f.recorder.betting_attempts.load(Ordering::SeqCst), 1);
+    assert!(f.worker.live.snapshot(1, f.pending).is_none());
+    assert_eq!(
+        f.worker.tick(&f.port, 1000).await.unwrap_err(),
+        "GC offline"
+    );
     let snapshot = f.worker.live.snapshot(1, f.pending).unwrap();
     assert_eq!(snapshot.match_id, 888);
     assert_eq!(snapshot.game_time_seconds, Some(91));
 }
 
 #[tokio::test]
-async fn gameplay_confirmation_closes_betting_even_when_gc_lobby_stage_lags() {
+async fn gameplay_confirmation_is_recorded_even_when_gc_lobby_stage_lags() {
     for stage in [LobbyStage::Gathering, LobbyStage::Allocating] {
         for spectator in [false, true] {
             let mut f = Fixture::new(false);
@@ -1361,10 +1339,10 @@ async fn gameplay_confirmation_closes_betting_even_when_gc_lobby_stage_lags() {
             }
             f.worker.tick(&f.port, 155).await.unwrap();
             assert!(
-                !f.betting_open(155),
+                f.state().betting_closed,
                 "stage {stage:?}, spectator {spectator}"
             );
-            assert_eq!(f.recorder.betting_attempts.load(Ordering::SeqCst), 1);
+            assert!(f.betting_open(155));
             assert_eq!(
                 f.port
                     .calls
@@ -1393,7 +1371,7 @@ async fn prelaunch_cancellation_restores_the_original_betting_deadline() {
 }
 
 #[tokio::test]
-async fn eligible_queued_game_does_not_accept_bets_without_observation() {
+async fn queued_game_keeps_its_timed_window_while_the_host_is_busy() {
     let f = Fixture::new(false);
     cama_domain::guild_config::GuildConfigStore::set_league_id(
         &GuildConfigRepository::new(&f.worker.path, false),
@@ -1423,8 +1401,8 @@ async fn eligible_queued_game_does_not_accept_bets_without_observation() {
         .pending_match(1, queued.pending_match_id)
         .unwrap()
         .unwrap();
-    assert!(!queued.state.hosted_betting_managed());
-    assert!(!queued.state.betting_open(5000));
+    assert!(queued.state.betting_open(199));
+    assert!(!queued.state.betting_open(200));
     assert!(
         DotaSessionRepository::new(&f.worker.path)
             .session(1, queued.pending_match_id)
@@ -1444,7 +1422,7 @@ async fn eligible_queued_game_does_not_accept_bets_without_observation() {
 }
 
 #[tokio::test]
-async fn gameplay_still_closes_betting_while_hosting_needs_operator_review() {
+async fn gameplay_is_still_recorded_while_hosting_needs_operator_review() {
     let f = Fixture::new(false);
     f.launch().await;
     f.running(Some(2));
@@ -1453,7 +1431,8 @@ async fn gameplay_still_closes_betting_while_hosting_needs_operator_review() {
     f.update_state(|record, _| record.phase = Phase::NeedsReview);
     f.running(Some(4));
     f.worker.tick(&f.port, 160).await.unwrap();
-    assert!(!f.betting_open(160));
+    assert!(f.state().betting_closed);
+    assert!(f.betting_open(160));
     assert_eq!(f.session().phase, Phase::NeedsReview);
     assert_eq!(f.recorder.count.load(Ordering::SeqCst), 0);
 }
@@ -1475,7 +1454,8 @@ async fn restart_restores_live_match_from_saved_ids_without_a_lobby() {
     assert_eq!(f.session().phase, Phase::Running);
 
     // A new process has no live cache. Its GC may no longer have the lobby,
-    // while Valve has not published completed match details yet.
+    // while Valve has not published completed match details yet. Live
+    // details are shown once the timed betting window (1000) has run out.
     *f.port.lobby.lock().unwrap() = None;
     let mut config = f.worker.config.clone();
     config.gsi_token = Some(crate::Secret::new(
@@ -1489,7 +1469,7 @@ async fn restart_restores_live_match_from_saved_ids_without_a_lobby() {
         Arc::new(crate::SerenityDiscordTransport::new()),
         live.clone(),
     );
-    restarted.tick(&f.port, 180).await.unwrap();
+    restarted.tick(&f.port, 1000).await.unwrap();
     live.ingest_gsi(
         serde_json::json!({
             "auth": {"token": "restart-test-token-at-least-32-bytes"},
@@ -1909,24 +1889,20 @@ async fn unfinished_details_after_postgame_wait_for_the_verified_result() {
 }
 
 #[tokio::test]
-async fn transient_settlement_and_display_failures_retry_after_restart() {
+async fn transient_settlement_failure_retries_after_restart() {
     let f = Fixture::new(false);
-    f.recorder.betting_failures.store(1, Ordering::SeqCst);
     f.recorder.failures.store(1, Ordering::SeqCst);
     f.launch().await;
     f.complete(Some("radiant"));
     f.worker.tick(&f.port, 150).await.unwrap();
     assert_eq!(f.session().phase, Phase::Finishing);
     let state: SessionState = serde_json::from_value(f.session().payload).unwrap();
-    assert!(!state.betting_notification_sent);
-    assert_eq!(f.recorder.betting_attempts.load(Ordering::SeqCst), 1);
     assert_eq!(state.recording_failures, 1);
     // Every tick reloads durable state, as a restarted worker would.
     f.worker.tick(&f.port, 160).await.unwrap();
     assert_eq!(f.recorder.count.load(Ordering::SeqCst), 1);
     f.worker.tick(&f.port, 181).await.unwrap();
     assert_eq!(f.recorder.count.load(Ordering::SeqCst), 2);
-    assert_eq!(f.recorder.betting_attempts.load(Ordering::SeqCst), 2);
     assert!(
         serde_json::from_value::<SessionState>(f.session().payload)
             .unwrap()
@@ -2228,7 +2204,7 @@ async fn withdrawn_allowlist_pauses_prelaunch_actions_but_retains_account() {
 }
 
 #[tokio::test]
-async fn coordinator_disconnect_suspends_bets_and_review_propagates_reconnect_error() {
+async fn coordinator_disconnect_leaves_bets_open_and_review_propagates_reconnect_error() {
     let f = Fixture::new(false);
     f.launch().await;
     assert!(f.betting_open(120));
@@ -2237,7 +2213,7 @@ async fn coordinator_disconnect_suspends_bets_and_review_propagates_reconnect_er
         f.worker.tick(&f.port, 120).await.unwrap_err(),
         "GC disconnected"
     );
-    assert!(!f.betting_open(120));
+    assert!(f.betting_open(120));
     f.update_state(|record, _| {
         record.phase = Phase::NeedsReview;
         record.valve_match_id = Some("888".into());
@@ -2246,7 +2222,7 @@ async fn coordinator_disconnect_suspends_bets_and_review_propagates_reconnect_er
         f.worker.tick(&f.port, 125).await.unwrap_err(),
         "GC disconnected"
     );
-    assert!(!f.betting_open(125));
+    assert!(f.betting_open(125));
 }
 
 #[tokio::test]
@@ -2598,18 +2574,16 @@ async fn recorded_resolution_requires_completed_settlement_then_releases_account
 }
 
 #[tokio::test]
-async fn readable_but_stale_gc_cache_never_renews_betting_lease() {
+async fn stale_gc_cache_does_not_pause_betting() {
     let f = Fixture::new(false);
     f.launch().await;
     assert!(f.betting_open(115));
     f.port.observation_stale.store(true, Ordering::SeqCst);
     f.worker.tick(&f.port, 120).await.unwrap();
-    assert!(!f.betting_open(120));
+    assert!(f.betting_open(120));
     f.worker.tick(&f.port, 125).await.unwrap();
-    assert!(!f.betting_open(125));
-    f.port.observation_stale.store(false, Ordering::SeqCst);
-    f.worker.tick(&f.port, 130).await.unwrap();
-    assert!(f.betting_open(130));
+    assert!(f.betting_open(125));
+    assert!(!f.betting_open(1000));
 }
 
 #[tokio::test]
@@ -2666,12 +2640,9 @@ async fn allocation_watchdog_preserves_launched_identity_and_does_not_relaunch()
         .pending_match(1, f.pending)
         .unwrap()
         .unwrap();
-    assert!(!pending.state.betting_open(started + 300));
     assert!(
-        !pending
-            .state
-            .extra
-            .contains_key("dota_hosted_betting_observed_at")
+        pending.state.betting_open(started + 300),
+        "operator review must not pause the timed betting window"
     );
     assert!(f.port.calls.lock().unwrap().is_empty());
     assert_eq!(f.recorder.count.load(Ordering::SeqCst), 0);

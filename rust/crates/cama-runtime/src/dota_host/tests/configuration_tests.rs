@@ -273,12 +273,13 @@ async fn external_launch_during_configuration_keeps_tracking_known_settings() {
         assert_eq!(saved.settings.server_region, if applied { 27 } else { 1 });
         assert!(f.port.calls.lock().unwrap().is_empty());
         assert!(
-            !PendingMatchRepository::new(&f.worker.path)
+            PendingMatchRepository::new(&f.worker.path)
                 .pending_match(1, f.pending)
                 .unwrap()
                 .unwrap()
                 .state
-                .betting_open(120)
+                .betting_open(120),
+            "reconciling settings must not pause the timed betting window"
         );
         // The in-progress match has no result in this fixture yet; tracking
         // reaches the normal result poll rather than getting stuck in review.

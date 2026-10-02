@@ -468,32 +468,39 @@ fn incomplete_setup_blocks_public_wagers_but_can_place_and_replay_automatic_batc
 }
 
 #[test]
-fn hosted_betting_requires_fresh_observation_and_explicit_extensions_remain_deliberate() {
+fn dota_hosting_markers_do_not_change_the_timed_window() {
     use cama_db_match::match_runtime::PendingMatchRepository;
     let file = migrated_concurrent_fixture();
     let pending = PendingMatchRepository::new(file.path());
     let bets = repo(file.path());
-    pending.begin_hosted_betting(GUILD, 11, NOW).unwrap();
     let wager = request(11, 3_001, BettingTeam::Radiant, 30);
-    assert!(matches!(
-        bets.place_bet_atomic(wager),
-        Err(BettingServiceRepositoryError::BettingClosed)
-    ));
-    assert!(pending.observe_hosted_betting(GUILD, 11, NOW).unwrap());
+
+    // Neither a legacy adoption marker without a lobby observation nor a
+    // confirmed gameplay start pauses or closes the window.
+    pending
+        .mutate_pending_match(GUILD, 11, |state| {
+            state
+                .extra
+                .insert("dota_hosted_betting".to_owned(), true.into());
+        })
+        .unwrap();
     bets.place_bet_atomic(wager).unwrap();
-    for bet_time in [NOW - 1, NOW + 90, NOW + 86_400] {
-        assert!(matches!(
-            bets.place_bet_atomic(PlaceBetRequest { bet_time, ..wager }),
-            Err(BettingServiceRepositoryError::BettingClosed)
-        ));
-    }
-    pending.suspend_hosted_betting(GUILD, 11).unwrap();
+    pending.close_betting_now(GUILD, 11).unwrap();
+    bets.place_bet_atomic(PlaceBetRequest {
+        bet_time: NOW + 999,
+        ..wager
+    })
+    .unwrap();
     assert!(matches!(
-        bets.place_bet_atomic(wager),
+        bets.place_bet_atomic(PlaceBetRequest {
+            bet_time: NOW + 1_000,
+            ..wager
+        }),
         Err(BettingServiceRepositoryError::BettingClosed)
     ));
+
     let extension = pending
-        .extend_betting_atomic(GUILD, 11, NOW + 100, 60)
+        .extend_betting_atomic(GUILD, 11, NOW + 1_100, 60)
         .unwrap();
     bets.place_bet_atomic(PlaceBetRequest {
         bet_time: extension.new_lock_until - 1,
@@ -507,7 +514,7 @@ fn hosted_betting_requires_fresh_observation_and_explicit_extensions_remain_deli
         }),
         Err(BettingServiceRepositoryError::BettingClosed)
     ));
-    assert_eq!(balance(file.path(), 3_001), 140);
+    assert_eq!(balance(file.path(), 3_001), 110);
 }
 
 #[test]
@@ -515,10 +522,8 @@ fn explicit_operator_suspension_overrides_even_an_admin_extension() {
     use cama_db_match::match_runtime::PendingMatchRepository;
     let file = migrated_concurrent_fixture();
     let pending = PendingMatchRepository::new(file.path());
-    pending.begin_hosted_betting(GUILD, 11, NOW).unwrap();
     pending.extend_betting_atomic(GUILD, 11, NOW, 60).unwrap();
     assert!(pending.set_betting_suspended(GUILD, 11, true).unwrap());
-    pending.observe_hosted_betting(GUILD, 11, NOW).unwrap();
     let state = pending.pending_match(GUILD, 11).unwrap().unwrap().state;
     assert!(!state.betting_open(NOW));
     let wager = request(11, 3_001, BettingTeam::Radiant, 30);
@@ -2878,43 +2883,6 @@ fn test_bet_lock_enforced() {
 }
 
 #[test]
-fn test_hosted_betting_stays_open_after_original_deadline() {
-    let file = fixture();
-    add_pending_payload(
-        file.path(),
-        1,
-        &format!(
-            "{{\"radiant_team_ids\":[1,2,3,4,5],\"dire_team_ids\":[6,7,8,9,10],\"bet_lock_until\":{},\"dota_hosted_betting\":true,\"dota_hosted_betting_observed_at\":{NOW}}}",
-            NOW - 1
-        ),
-    );
-    add_player(file.path(), 1001, 50);
-    add_player(file.path(), 1002, 50);
-    let repository = repo(file.path());
-
-    repository
-        .place_bet_atomic(PlaceBetRequest {
-            bet_time: NOW + 10,
-            ..request(1, 1001, BettingTeam::Radiant, 5)
-        })
-        .expect("hosted match remains open past its timed deadline");
-    let automatic = repository
-        .place_automatic_amount_bets_atomic(
-            Some(GUILD),
-            Some(1),
-            NOW + 11,
-            &[AutomaticAmountBetRequest {
-                discord_id: 1002,
-                team: BettingTeam::Dire,
-                amount: 5,
-            }],
-            500,
-        )
-        .expect("automatic hosted wager remains open");
-    assert_eq!(automatic.created.len(), 1);
-}
-
-#[test]
 fn test_completed_hosted_match_rejects_bets_and_keeps_sibling_guild_open() {
     let file = fixture();
     add_pending_payload(
@@ -2981,8 +2949,8 @@ fn test_completed_hosted_match_rejects_bets_and_keeps_sibling_guild_open() {
                 2,
                 sibling_guild,
                 format!(
-                    "{{\"radiant_team_ids\":[1,2,3,4,5],\"dire_team_ids\":[6,7,8,9,10],\"bet_lock_until\":{},\"dota_hosted_betting\":true,\"dota_hosted_betting_observed_at\":{NOW}}}",
-                    NOW - 1
+                    "{{\"radiant_team_ids\":[1,2,3,4,5],\"dire_team_ids\":[6,7,8,9,10],\"bet_lock_until\":{}}}",
+                    NOW + 1_000
                 )
             ],
         )
@@ -2999,7 +2967,7 @@ fn test_completed_hosted_match_rejects_bets_and_keeps_sibling_guild_open() {
 }
 
 #[test]
-fn test_closed_marker_wins_over_hosted_betting_marker() {
+fn test_gameplay_start_marker_does_not_close_the_timed_window() {
     let file = fixture();
     add_pending_payload(
         file.path(),
@@ -3010,23 +2978,21 @@ fn test_closed_marker_wins_over_hosted_betting_marker() {
         ),
     );
     add_player(file.path(), 1001, 50);
-    assert!(matches!(
-        repo(file.path())
-            .place_bet_atomic(request(1, 1001, BettingTeam::Radiant, 5))
-            .expect_err("closed marker must win over hosted marker"),
-        BettingServiceRepositoryError::BettingClosed
-    ));
+    repo(file.path())
+        .place_bet_atomic(request(1, 1001, BettingTeam::Radiant, 5))
+        .expect("the timed window alone decides admission");
+    assert_eq!(balance(file.path(), 1001), 45);
 }
 
 #[test]
-fn test_dota_extension_reopens_closed_window_until_exact_deadline() {
+fn test_extension_after_gameplay_start_admits_until_exact_deadline() {
     let file = fixture();
     add_pending_payload(
         file.path(),
         1,
         &format!(
             "{{\"radiant_team_ids\":[1,2,3,4,5],\"dire_team_ids\":[6,7,8,9,10],\"bet_lock_until\":{},\"dota_hosted_betting\":true,\"dota_betting_closed\":true,\"dota_betting_extended_until\":{}}}",
-            NOW - 1,
+            NOW + 100,
             NOW + 100
         ),
     );
@@ -3084,8 +3050,7 @@ fn test_dota_extension_reopens_closed_window_until_exact_deadline() {
         BettingServiceRepositoryError::BettingClosed
     ));
 
-    // The closed marker remains authoritative after the host goes offline;
-    // an expired extension cannot be revived by the stale hosted marker.
+    // An expired extension stays expired whatever markers the host left.
     assert!(matches!(
         repository
             .place_bet_atomic(PlaceBetRequest {

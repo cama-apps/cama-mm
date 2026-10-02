@@ -38,7 +38,6 @@ impl DotaHostWorker {
         {
             return Ok(false);
         }
-        self.suspend_betting(record).await?;
         if !port.betting_observation_fresh().await {
             return Ok(true);
         }
@@ -119,7 +118,6 @@ impl DotaHostWorker {
         else {
             return Ok(());
         };
-        self.suspend_betting(record).await?;
         let Some(pending) = self.pending(record).await? else {
             return self.review(record, state, "the pending match was finalized during lobby recovery; automatic recreation is paused", now).await;
         };

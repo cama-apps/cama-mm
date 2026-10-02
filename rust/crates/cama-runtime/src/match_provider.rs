@@ -502,22 +502,8 @@ impl MatchRegistrationProvider {
             .cancel_betting_tasks(guild_id, Some(pending_match_id));
     }
 
-    /// Finish the runtime side of a worker-owned atomic betting close.
-    ///
-    /// The worker/session repository records the close marker first. Once
-    /// that succeeds, this method stops reminders and best-effort refreshes
-    /// the persisted shuffle wager message so players see the locked state.
-    pub async fn hosted_betting_closed(
-        &self,
-        guild_id: i64,
-        pending_match_id: i64,
-    ) -> Result<(), String> {
-        self.hosted_betting_window_changed(guild_id, pending_match_id)
-            .await
-    }
-
-    /// Refresh the wager display and reminders after hosted betting begins,
-    /// closes at gameplay start, or returns to manual timing on cancellation.
+    /// Refresh the wager display and reminders after a hosted match is
+    /// handed back to manual hosting.
     pub async fn hosted_betting_window_changed(
         &self,
         guild_id: i64,
@@ -5498,36 +5484,18 @@ impl MatchHandler {
         .await
         .map_err(|error| format!("bet totals task failed: {error}"))??;
         let betting_seed = participant_excluded_betting_seed(pending);
-        let managed_betting = !recorded && pending.state.hosted_betting_managed();
-        let (wager_name, mut wager_value) = format_betting_display(
+        let (wager_name, wager_value) = format_betting_display(
             totals.radiant,
             totals.dire,
             &pending.state.betting_mode,
             BettingDisplayOptions {
-                lock_until: (!managed_betting)
-                    .then_some(pending.state.bet_lock_until)
-                    .flatten(),
+                lock_until: pending.state.bet_lock_until,
                 locked: recorded || !pending.state.betting_open(unix_seconds()),
                 seed_radiant: betting_seed.radiant,
                 seed_dire: betting_seed.dire,
                 seed_bonus: betting_seed.bonus,
             },
         );
-        if managed_betting {
-            if let Some(deadline) = pending
-                .state
-                .betting_extension_until()
-                .filter(|deadline| *deadline > unix_seconds())
-            {
-                wager_value.push_str(&format!(
-                    "\nBetting stays open through the hero draft and at least until <t:{deadline}:R> (admin extension)."
-                ));
-            } else {
-                wager_value.push_str(
-                    "\nBetting stays open through the hero draft and closes when gameplay starts.",
-                );
-            }
-        }
         let lobby_bonus = pending.state.first_game_pool_reserved;
         if lobby_bonus > 0 {
             embed = embed.field("🎲 Lobby Bonus", format!("{lobby_bonus} {JOPACOIN_EMOTE} split equally among match players after the game. Spectator bets do not share this pool."), false);
@@ -5542,11 +5510,6 @@ impl MatchHandler {
 
     fn schedule_betting_reminders(&self, pending: &PendingMatchRecord, notify_subscribers: bool) {
         self.cancel_betting_tasks(pending.guild_id, Some(pending.pending_match_id));
-        if pending.state.hosted_betting_managed()
-            || (pending.state.betting_closed() && pending.state.betting_extension_until().is_none())
-        {
-            return;
-        }
         let Some(lock_until) = pending.state.bet_lock_until else {
             return;
         };
@@ -5674,10 +5637,7 @@ impl MatchHandler {
         let Some(pending) = pending else {
             return;
         };
-        if pending.state.hosted_betting_managed()
-            || (pending.state.betting_closed() && pending.state.betting_extension_until().is_none())
-            || pending.state.bet_lock_until != Some(expected_lock_until)
-        {
+        if pending.state.bet_lock_until != Some(expected_lock_until) {
             return;
         }
         let totals_repository = self.bets.clone();
@@ -6046,7 +6006,6 @@ impl AdminMatchControl for MatchHandler {
             pending_match_id: request.pending_match_id,
             old_bet_lock_until: extension.old_lock_until,
             new_bet_lock_until: extension.new_lock_until,
-            waits_for_gameplay_start: extension.pending_match.state.hosted_betting_managed(),
             lobby_label: parse_persisted_lobby_kind(
                 extension.pending_match.state.lobby_kind.as_deref(),
             )

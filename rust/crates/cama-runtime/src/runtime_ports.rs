@@ -34,7 +34,6 @@ pub struct AdminExtendBettingResult {
     pub new_bet_lock_until: i64,
     /// A hosted draft also stays open until gameplay starts, even if the
     /// explicit extension deadline expires first.
-    pub waits_for_gameplay_start: bool,
     pub lobby_label: String,
     pub jump_url: Option<String>,
     pub refreshed_routes: usize,

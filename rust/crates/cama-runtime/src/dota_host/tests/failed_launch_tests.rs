@@ -56,7 +56,7 @@ async fn failed_connection_recreates_then_invites_and_launches_same_roster() {
     return_to_lobby(&f);
     f.worker.tick(&f.port, 155).await.unwrap();
     assert_eq!(f.state().failed_launches.len(), 1);
-    assert!(!f.betting_open(155));
+    assert!(f.betting_open(155));
     restarted(&f).tick(&f.port, 160).await.unwrap(); // destroy old lobby
     assert_eq!(f.session().lobby_id.as_deref(), Some("777"));
     restarted(&f).tick(&f.port, 165).await.unwrap(); // confirm disappearance
