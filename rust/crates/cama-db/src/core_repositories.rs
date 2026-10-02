@@ -31,8 +31,8 @@ use crate::referrals::{
 const BULK_CHUNK_SIZE: usize = 900;
 const NEW_PLAYER_EXCLUSION_BOOST: i64 = 5;
 const OPENSKILL_ALGORITHM_VERSION: i64 = 5;
-const OPENSKILL_ALGORITHM_FINGERPRINT: &str = "ffdaf6752ef51115";
-const DEFAULT_STREAK_MULTIPLIER_PER_GAME: f64 = 0.30;
+const OPENSKILL_ALGORITHM_FINGERPRINT: &str = "1d0f22e19add165d";
+const DEFAULT_STREAK_MULTIPLIER_PER_GAME: f64 = 0.33;
 const DEFAULT_STREAK_THRESHOLD: i64 = 3;
 
 #[derive(Debug, Error)]
@@ -9862,7 +9862,7 @@ mod tests {
 
         let mut shuffler = BalancedShuffler::default();
         shuffler.use_glicko = true;
-        shuffler.off_role_flat_penalty = 50.0;
+        shuffler.off_role_flat_penalty = 100.0;
         let (team1, team2) = shuffler.shuffle(&players).unwrap();
         let team1_value = team1.get_team_value(true, 1.0, false, false).unwrap();
         let team2_value = team2.get_team_value(true, 1.0, false, false).unwrap();
