@@ -3430,7 +3430,7 @@ mod tests {
             .score_role_assignments_for_matchup(&team1, &team2, 1, ShuffleConstraints::default())
             .expect("fixed matchup scores");
 
-        approx(score, 150.0);
+        approx(score, 170.0);
     }
 
     #[test]
@@ -3507,7 +3507,7 @@ mod tests {
             &mut super::ScoringContext::default(),
         );
 
-        approx(selection.preselection_score, -2_274.0);
+        approx(selection.preselection_score, -2_254.0);
     }
 
     #[test]
@@ -3596,7 +3596,7 @@ mod tests {
                 ShuffleConstraints::default(),
             )
             .expect("fixed role matchup evaluates");
-        approx(matchup.total_score, -2_477.0);
+        approx(matchup.total_score, -2_417.0);
     }
 
     #[test]
@@ -3820,7 +3820,7 @@ mod tests {
         let shuffler = BalancedShuffler {
             consider_roles: false,
             rd_priority_weight: 0.0,
-            soft_avoid_penalty: 150.0,
+            soft_avoid_penalty: 200.0,
             ..BalancedShuffler::default()
         };
         let target_low_priority = HashSet::from([1001]);
@@ -5528,8 +5528,8 @@ mod tests {
     }
 
     #[test]
-    fn test_default_role_matchup_delta_weight_is_point_one_six() {
-        approx(BalancedShuffler::default().role_matchup_delta_weight, 0.16);
+    fn test_default_role_matchup_delta_weight_is_point_one_eight() {
+        approx(BalancedShuffler::default().role_matchup_delta_weight, 0.18);
     }
 
     fn role_delta_fixture() -> (Vec<Player>, Vec<Player>) {
@@ -5579,8 +5579,8 @@ mod tests {
             .expect("optimization succeeds")
             .2
         };
-        approx(score(1.0), 950.0);
-        approx(score(0.5), 700.0);
+        approx(score(1.0), 1_010.0);
+        approx(score(0.5), 760.0);
     }
 
     #[test]
@@ -5619,7 +5619,7 @@ mod tests {
         )
         .expect("matchup evaluates");
         approx(matchup.log_entry.parity_penalty, 350.0);
-        approx(matchup.total_score, 500.0);
+        approx(matchup.total_score, 520.0);
     }
 
     #[test]
@@ -5723,7 +5723,7 @@ mod tests {
                 },
             )
             .expect("fallback scoring succeeds");
-        approx(common.2, 850.0);
+        approx(common.2, 930.0);
         assert_eq!(common, fallback);
     }
 
@@ -6554,7 +6554,7 @@ mod tests {
             .score_draft_pool(&captain_a, &captain_b, &pool)
             .expect("draft pool score");
 
-        approx(score, 142.5);
+        approx(score, 161.5);
     }
 
     #[test]
