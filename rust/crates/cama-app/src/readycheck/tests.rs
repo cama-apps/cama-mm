@@ -630,7 +630,6 @@ fn request(now: f64) -> ReadycheckCommandRequest {
         now,
         confirm_invoker: true,
         existing_message: ExistingMessageState::Unknown,
-        reserved_players: BTreeSet::new(),
         minimum_players: 0,
     }
 }
@@ -702,7 +701,7 @@ fn stronger_concurrent_publication_reservation_is_atomic() {
 }
 
 #[test]
-fn stronger_stale_recovery_prunes_only_safe_no_shows_and_orders_transport() {
+fn stronger_stale_recovery_orders_transport_without_pruning() {
     let service = ReadycheckService::new();
     let mut lobby = lobby_with(1..=6);
     lobby.thread_id = Some(ChannelId(999));
@@ -721,14 +720,13 @@ fn stronger_stale_recovery_prunes_only_safe_no_shows_and_orders_transport() {
     classifications.get_mut(&player(6)).expect("player 6").group = ReadinessGroup::PlayingDota;
     let mut stale_request = request(10_000.0);
     stale_request.existing_message = ExistingMessageState::Available;
-    stale_request.reserved_players.insert(player(5));
 
     let plan = service
         .prepare_command(stale_request, classifications)
         .expect("stale replacement plan");
 
     assert_eq!(plan.mode, PublicationMode::ReplaceStale);
-    assert_eq!(plan.pruned_players, BTreeSet::from([player(2), player(6)]));
+    assert_eq!(service.lobby(scope()).expect("lobby").total_count(), 6);
     assert_eq!(
         plan.transport.operations,
         vec![
@@ -736,10 +734,6 @@ fn stronger_stale_recovery_prunes_only_safe_no_shows_and_orders_transport() {
                 channel_id: CHANNEL,
                 message_id: MESSAGE,
                 requirement: DeliveryRequirement::BestEffort,
-            },
-            ReadycheckTransportOperation::SyncLobbyDisplays {
-                scope: scope(),
-                requirement: DeliveryRequirement::Required,
             },
             ReadycheckTransportOperation::PostReadycheck {
                 thread_id: ChannelId(999),
@@ -751,7 +745,7 @@ fn stronger_stale_recovery_prunes_only_safe_no_shows_and_orders_transport() {
             },
             ReadycheckTransportOperation::MirrorPing {
                 channel_id: ChannelId(555),
-                mentioned_users: BTreeSet::from([player(3), player(4), player(5)]),
+                mentioned_users: (2..=6).map(player).collect(),
                 requirement: DeliveryRequirement::Required,
             },
         ]
@@ -1011,7 +1005,6 @@ fn test_fresh_refresh_edits_in_place_and_preserves_reacted() {
         .expect("fresh refresh");
 
     assert_eq!(plan.mode, PublicationMode::Refresh);
-    assert!(plan.pruned_players.is_empty());
     assert!(service.readycheck_reacted(scope()).contains_key(&player(2)));
     assert_eq!(
         plan.transport.operations,
@@ -1103,158 +1096,121 @@ fn test_stale_repost_deletes_old_and_resets_confirmations() {
 }
 
 #[test]
-fn test_stale_repost_keeps_afk_player_who_confirmed_old_check() {
-    let service = staleness_service([1, 2, 3, 4]);
-    set_generation(&service, [1, 2, 3, 4], 5_000.0);
-    assert!(service.add_readycheck_reaction(scope(), player(2), "<@2>", None));
-    let classifications = grouped_data(&[
-        (1, ReadinessGroup::Ready),
-        (2, ReadinessGroup::Afk),
-        (3, ReadinessGroup::Afk),
-        (4, ReadinessGroup::Ready),
-    ]);
-
-    let plan = service
-        .prepare_command(request(7_000.0), classifications)
-        .expect("stale sweep");
-
-    assert_eq!(plan.pruned_players, BTreeSet::from([player(3), player(4)]));
-    assert!(
-        service
-            .lobby(scope())
-            .expect("lobby")
-            .players
-            .contains(&player(2))
-    );
-}
-
-#[test]
-fn test_stale_repost_spares_players_signed_up_under_an_hour() {
-    let service = staleness_service([1, 2]);
-    let mut lobby = service.lobby(scope()).expect("lobby");
-    lobby.player_join_times.insert(player(1), 0.0);
-    lobby.player_join_times.insert(player(2), 5_200.0);
-    service.put_lobby(lobby);
-    set_generation(&service, [1, 2], 5_000.0);
-
-    let plan = service
-        .prepare_command(
-            request(7_000.0),
-            grouped_data(&[(1, ReadinessGroup::Ready), (2, ReadinessGroup::Afk)]),
-        )
-        .expect("stale recent-join sweep");
-
-    assert!(plan.pruned_players.is_empty());
-    assert!(
-        service
-            .lobby(scope())
-            .expect("lobby")
-            .players
-            .contains(&player(2))
-    );
-}
-
-#[test]
-fn test_stale_repost_prunes_no_shows_regardless_of_presence() {
-    let service = staleness_service(1..=6);
-    set_generation(&service, 1..=6, 5_000.0);
-    assert!(service.add_readycheck_reaction(scope(), player(4), "<@4>", None));
-    let classifications = grouped_data(&[
-        (1, ReadinessGroup::Afk),
-        (2, ReadinessGroup::Afk),
-        (3, ReadinessGroup::Afk),
-        (4, ReadinessGroup::Afk),
-        (5, ReadinessGroup::Ready),
-        (6, ReadinessGroup::PlayingDota),
-    ]);
-
-    let plan = service
-        .prepare_command(request(7_000.0), classifications)
-        .expect("stale sweep");
-
-    assert_eq!(
-        plan.pruned_players,
-        BTreeSet::from([player(2), player(3), player(5), player(6)])
-    );
-    assert!(
-        service
-            .lobby(scope())
-            .expect("lobby")
-            .players
-            .is_superset(&BTreeSet::from([player(1), player(4)]))
-    );
-}
-
-#[test]
-fn test_stale_sweep_spares_a_player_whose_signup_time_is_missing() {
-    // A lobby row with an undecodable player_join_times blob hydrates with
-    // players present and join times empty. An unknown sign-up time must
-    // spare the player rather than condemn them.
+fn test_stale_repost_removes_no_one() {
     let service = staleness_service(1..=3);
-    let mut lobby = service.lobby(scope()).expect("lobby");
-    lobby.player_join_times.remove(&player(2));
-    service.put_lobby(lobby);
     set_generation(&service, 1..=3, 5_000.0);
 
     let plan = service
         .prepare_command(request(7_000.0), data(1..=3))
-        .expect("stale sweep");
-
-    assert_eq!(plan.pruned_players, BTreeSet::from([player(3)]));
-    assert!(
-        service
-            .lobby(scope())
-            .expect("lobby")
-            .players
-            .contains(&player(2)),
-        "an unknown sign-up time must not make a player sweepable"
-    );
-}
-
-#[test]
-fn test_stale_sweep_removes_a_player_who_explicitly_unreadied() {
-    // Un-readying is still "not marked ready on the previous check", so the
-    // sweep takes them; only the wording of the notice stays reason-neutral.
-    let service = staleness_service([1, 2, 3]);
-    set_generation(&service, [1, 2, 3], 5_000.0);
-    assert!(service.add_readycheck_reaction(scope(), player(2), "<@2>", None));
-    assert!(service.remove_readycheck_reaction(scope(), player(2), None));
-
-    let plan = service
-        .prepare_command(request(7_000.0), data([1, 2, 3]))
-        .expect("stale sweep");
-
-    assert!(plan.pruned_players.contains(&player(2)));
-}
-
-#[test]
-fn test_stale_repost_skips_sweep_when_previous_check_is_older_than_an_hour() {
-    let service = staleness_service(1..=3);
-    set_generation(&service, 1..=3, 0.0);
-
-    let plan = service
-        .prepare_command(request(4_000.0), data(1..=3))
-        .expect("stale sweep");
+        .expect("stale repost");
 
     assert_eq!(plan.mode, PublicationMode::ReplaceStale);
-    assert!(plan.pruned_players.is_empty());
     assert_eq!(service.lobby(scope()).expect("lobby").total_count(), 3);
 }
 
 #[test]
-fn test_stale_prune_below_10_shows_shortfall_note() {
-    let service = staleness_service(1..=12);
-    set_generation(&service, 1..=12, 5_000.0);
-    for id in 1..=8 {
-        assert!(service.add_readycheck_reaction(scope(), player(id), format!("<@{id}>"), None));
-    }
-    let plan = service
-        .prepare_command(request(7_000.0), data(1..=12))
-        .expect("stale prune");
+fn test_sweep_is_not_due_before_five_minutes() {
+    let service = staleness_service([1, 2, 3]);
+    publish_new(&service, 1_000.0, data([1, 2, 3]));
 
-    assert_eq!(plan.pruned_players.len(), 4);
-    assert_eq!(service.lobby(scope()).expect("lobby").total_count(), 8);
-    assert!(readycheck_description(8, 10).contains("need 2 more for a full game"));
+    assert_eq!(
+        service.due_sweep(scope(), 1_000.0 + READYCHECK_SWEEP_SECONDS - 1.0),
+        None
+    );
+}
+
+#[test]
+fn test_due_sweep_names_unconfirmed_players_regardless_of_presence() {
+    let service = staleness_service(1..=5);
+    publish_new(
+        &service,
+        1_000.0,
+        grouped_data(&[
+            (1, ReadinessGroup::Afk),
+            (2, ReadinessGroup::Recent),
+            (3, ReadinessGroup::Ready),
+            (4, ReadinessGroup::PlayingDota),
+            (5, ReadinessGroup::Afk),
+        ]),
+    );
+    assert!(service.add_readycheck_reaction(scope(), player(5), "<@5>", None));
+
+    assert_eq!(
+        service.due_sweep(scope(), 1_000.0 + READYCHECK_SWEEP_SECONDS),
+        Some(ReadycheckSweep {
+            message_id: MESSAGE,
+            channel_id: CHANNEL,
+            unconfirmed: BTreeSet::from([player(3), player(4)]),
+        })
+    );
+}
+
+#[test]
+fn test_due_sweep_takes_a_player_who_explicitly_unreadied() {
+    let service = staleness_service([1, 2, 3]);
+    publish_new(&service, 1_000.0, data([1, 2, 3]));
+    assert!(service.add_readycheck_reaction(scope(), player(2), "<@2>", None));
+    assert!(service.add_readycheck_reaction(scope(), player(3), "<@3>", None));
+    assert!(service.remove_readycheck_reaction(scope(), player(2), None));
+
+    let sweep = service.due_sweep(scope(), 1_300.0).expect("due sweep");
+
+    assert_eq!(sweep.unconfirmed, BTreeSet::from([player(2)]));
+}
+
+#[test]
+fn test_due_sweep_only_names_live_lobby_members() {
+    let service = staleness_service([1, 2, 3]);
+    publish_new(&service, 1_000.0, data([1, 2, 3]));
+    assert!(service.leave_lobby(scope(), player(2)));
+
+    let sweep = service.due_sweep(scope(), 1_300.0).expect("due sweep");
+
+    assert_eq!(sweep.unconfirmed, BTreeSet::from([player(3)]));
+}
+
+#[test]
+fn test_completed_sweep_does_not_fire_again() {
+    let service = staleness_service([1, 2]);
+    publish_new(&service, 1_000.0, data([1, 2]));
+
+    assert!(!service.complete_sweep(scope(), MessageId(999)));
+    assert!(service.due_sweep(scope(), 1_300.0).is_some());
+    assert!(service.complete_sweep(scope(), MESSAGE));
+
+    assert_eq!(service.due_sweep(scope(), 9_000.0), None);
+    assert!(!service.complete_sweep(scope(), MESSAGE));
+}
+
+#[test]
+fn test_refresh_restarts_the_sweep_clock() {
+    let service = staleness_service([1, 2]);
+    publish_new(&service, 1_000.0, data([1, 2]));
+    let mut refresh = request(1_121.0);
+    refresh.existing_message = ExistingMessageState::Available;
+    service
+        .prepare_command(refresh, data([1, 2]))
+        .expect("fresh refresh");
+
+    assert_eq!(service.due_sweep(scope(), 1_300.0), None);
+    let sweep = service
+        .due_sweep(scope(), 1_121.0 + READYCHECK_SWEEP_SECONDS)
+        .expect("sweep due five minutes after the refresh");
+    assert_eq!(sweep.unconfirmed, BTreeSet::from([player(2)]));
+}
+
+#[test]
+fn test_refresh_rearms_a_completed_sweep() {
+    let service = staleness_service([1, 2]);
+    publish_new(&service, 1_000.0, data([1, 2]));
+    assert!(service.complete_sweep(scope(), MESSAGE));
+    let mut refresh = request(1_400.0);
+    refresh.existing_message = ExistingMessageState::Available;
+    service
+        .prepare_command(refresh, data([1, 2]))
+        .expect("fresh refresh");
+
+    assert!(service.due_sweep(scope(), 1_700.0).is_some());
 }
 
 #[test]
@@ -1339,32 +1295,6 @@ fn test_failed_reaction_removal_still_prunes_departed_confirmation() {
     assert_eq!(
         service.readycheck_reacted(scope()),
         BTreeMap::from([(player(1), "<@1>".to_owned())])
-    );
-}
-
-#[test]
-fn test_stale_prune_keeps_player_reserved_by_in_flight_match() {
-    let service = staleness_service([1, 2, 3]);
-    set_generation(&service, [1, 2, 3], 5_000.0);
-    let mut stale = request(7_000.0);
-    stale.reserved_players.insert(player(2));
-    let classifications = grouped_data(&[
-        (1, ReadinessGroup::Ready),
-        (2, ReadinessGroup::Afk),
-        (3, ReadinessGroup::Afk),
-    ]);
-
-    let plan = service
-        .prepare_command(stale, classifications)
-        .expect("reserved stale sweep");
-
-    assert_eq!(plan.pruned_players, BTreeSet::from([player(3)]));
-    assert!(
-        service
-            .lobby(scope())
-            .expect("lobby")
-            .players
-            .contains(&player(2))
     );
 }
 

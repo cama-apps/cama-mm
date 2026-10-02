@@ -62,6 +62,7 @@ pub mod prediction_workers;
 pub mod process_lock;
 pub(crate) mod profit_deductions;
 pub mod push_notification_provider;
+pub mod readycheck_sweep_worker;
 pub mod registration_provider;
 pub mod reminder_provider;
 #[doc(hidden)]
@@ -191,6 +192,10 @@ pub use push_notification_provider::{PushNotificationHooks, PushNotificationRegi
 pub use raw_reactions::{
     RawReactionEmoji, RawReactionEvent, RawReactionKind, RawReactionObserver,
     RawReactionObserverFailure, RawReactionObservers,
+};
+pub use readycheck_sweep_worker::{
+    READYCHECK_SWEEP_WAKE_INTERVAL, READYCHECK_SWEEP_WORKER_NAME, ReadycheckSweepPort,
+    ReadycheckSweepWorker, readycheck_sweep_worker_spec,
 };
 pub use registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,

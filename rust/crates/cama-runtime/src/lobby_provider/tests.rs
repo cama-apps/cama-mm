@@ -2413,64 +2413,13 @@ async fn readycheck_explains_status_join_age_and_automatic_confirmations() {
 }
 
 #[tokio::test]
-async fn stale_readycheck_publicly_names_pruned_players_in_the_lobby_thread() {
+async fn readycheck_sweep_publicly_names_removed_players_in_the_lobby_thread() {
     let database = database_with_players(&[(10, "Creator"), (20, "Away One"), (30, "Away Two")]);
     let transport = Arc::new(RecordingTransport::default());
-    let provider = provider_for(&database, transport.clone());
-    dispatch_command(
-        &provider,
-        "lobby",
-        10,
-        "Creator",
-        vec![lobby_option(LobbyKind::Open)],
-    )
-    .await;
+    let provider = unconfirmed_readycheck_fixture(&database, transport.clone()).await;
     let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
-    for (player_id, name) in [(20, "Away One"), (30, "Away Two")] {
-        join_via_button(&provider, LobbyKind::Open, player_id, name).await;
-    }
-
-    let repository = ReadycheckRepository::new(database.path());
-    let mut persisted = repository
-        .load(scope.lobby_id(), Some(42))
-        .expect("load lobby row")
-        .expect("persisted lobby");
-    let long_ago = unix_time_now() - 3_605.0;
-    let stale_check_at = unix_time_now() - 2_400.0;
-    persisted.player_join_times = BTreeMap::from([(10, long_ago), (20, long_ago), (30, long_ago)]);
-    repository.save(&persisted).expect("age lobby signups");
-
-    let restarted = provider_for(&database, transport.clone());
-    for (user_id, display_name, presence) in [
-        (10, "Creator", DiscordPresence::Online),
-        (20, "Away One", DiscordPresence::Offline),
-        (30, "Away Two", DiscordPresence::Offline),
-    ] {
-        transport.set_member(
-            42,
-            DiscordGuildMemberSnapshot {
-                user_id,
-                display_name: display_name.to_owned(),
-                presence,
-                in_voice: false,
-                deafened: false,
-                activities: Vec::new(),
-            },
-        );
-    }
-    restarted.handler.state.readychecks.set_readycheck_state(
-        scope,
-        cama_app::readycheck::ReadycheckStateInput {
-            message_id: AppMessageId(5_000),
-            channel_id: AppChannelId(9),
-            lobby_ids: BTreeSet::from([AppUserId(10), AppUserId(20), AppUserId(30)]),
-            player_data: BTreeMap::new(),
-            created_at: Some(stale_check_at),
-            initial_reacted: BTreeMap::new(),
-        },
-    );
     let thread_id = to_u64(
-        lobby_snapshot(&restarted, LobbyKind::Open)
+        lobby_snapshot(&provider, LobbyKind::Open)
             .message_ids
             .thread_id
             .expect("lobby thread")
@@ -2478,16 +2427,19 @@ async fn stale_readycheck_publicly_names_pruned_players_in_the_lobby_thread() {
     )
     .expect("Discord lobby thread");
     let sent_before = transport.sent_messages().len();
+    let edits_before = transport.edit_count();
 
-    dispatch_command(
-        &restarted,
-        "readycheck",
-        10,
-        "Creator",
-        vec![lobby_option(LobbyKind::Open)],
-    )
-    .await;
+    let removed = provider
+        .handler
+        .sweep_due_readychecks(unix_time_now())
+        .await;
 
+    assert_eq!(removed, 2);
+    assert_eq!(
+        lobby_snapshot(&provider, LobbyKind::Open).players,
+        BTreeSet::from([AppUserId(10)]),
+        "only the confirmed player stays in the lobby"
+    );
     let sent = transport.sent_messages();
     let notice = sent[sent_before..]
         .iter()
@@ -2497,7 +2449,7 @@ async fn stale_readycheck_publicly_names_pruned_players_in_the_lobby_thread() {
                 .content
                 .starts_with("🧹 Removed (didn't confirm the last ready check):")
         })
-        .expect("public stale-sweep notice");
+        .expect("public sweep notice");
     assert_eq!(notice.channel_id, thread_id);
     assert_eq!(
         notice.message.response.content,
@@ -2507,23 +2459,20 @@ async fn stale_readycheck_publicly_names_pruned_players_in_the_lobby_thread() {
         notice.message.allowed_mentions,
         DiscordAllowedMentions::Users(BTreeSet::from([20, 30]))
     );
-    let replacement_embed = sent[sent_before..]
-        .iter()
-        .flat_map(|sent| &sent.message.response.embeds)
-        .find(|embed| {
-            embed
-                .title
-                .as_deref()
-                .is_some_and(|title| title.ends_with("All You Can Feed Ready Check"))
-        })
-        .expect("replacement ready-check embed");
+    let generation = provider
+        .handler
+        .state
+        .readychecks
+        .readycheck_generation(scope)
+        .expect("ready check remains live");
+    assert_eq!(
+        generation.lobby_ids,
+        BTreeSet::from([AppUserId(10)]),
+        "swept players must leave the ready-check roster"
+    );
     assert!(
-        replacement_embed
-            .fields
-            .iter()
-            .all(|field| !field.value.contains("<@20>") && !field.value.contains("<@30>")),
-        "players removed by the sweep must not remain in the replacement embed: {:?}",
-        replacement_embed.fields
+        transport.edit_count() > edits_before,
+        "the lobby display must be repainted after the sweep"
     );
     assert!(
         transport
@@ -2532,11 +2481,88 @@ async fn stale_readycheck_publicly_names_pruned_players_in_the_lobby_thread() {
             .expect("transport state")
             .direct_messages
             .is_empty(),
-        "stale-sweep restoration is public-only"
+        "the sweep notice is public-only"
+    );
+
+    assert_eq!(
+        provider
+            .handler
+            .sweep_due_readychecks(unix_time_now() + 3_600.0)
+            .await,
+        0,
+        "one ready check sweeps once"
     );
 }
 
-async fn stale_readycheck_fixture(
+#[tokio::test]
+async fn readycheck_sweep_waits_for_the_five_minute_deadline() {
+    let database = database_with_players(&[(10, "Creator"), (20, "Away One"), (30, "Away Two")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = unconfirmed_readycheck_fixture(&database, transport).await;
+    dispatch_command(
+        &provider,
+        "readycheck",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let posted_at = provider
+        .handler
+        .state
+        .readychecks
+        .readycheck_created_at(LobbyScope::new(AppGuildId(42), LobbyKind::Open))
+        .expect("posted ready check");
+
+    assert_eq!(
+        provider
+            .handler
+            .sweep_due_readychecks(posted_at + 299.0)
+            .await,
+        0
+    );
+    assert_eq!(lobby_snapshot(&provider, LobbyKind::Open).players.len(), 3);
+
+    assert_eq!(
+        provider
+            .handler
+            .sweep_due_readychecks(posted_at + 300.0)
+            .await,
+        2
+    );
+    assert_eq!(
+        lobby_snapshot(&provider, LobbyKind::Open).players,
+        BTreeSet::from([AppUserId(10)])
+    );
+}
+
+#[tokio::test]
+async fn readycheck_sweep_keeps_players_reserved_by_an_in_flight_match() {
+    let database = database_with_players(&[(10, "Creator"), (20, "Away One"), (30, "Away Two")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = unconfirmed_readycheck_fixture(&database, transport).await;
+    let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
+    assert!(
+        provider
+            .handler
+            .state
+            .service
+            .reserve_lobby_players(&BTreeSet::from([AppUserId(20)]), scope)
+    );
+
+    let removed = provider
+        .handler
+        .sweep_due_readychecks(unix_time_now())
+        .await;
+
+    assert_eq!(removed, 1);
+    assert_eq!(
+        lobby_snapshot(&provider, LobbyKind::Open).players,
+        BTreeSet::from([AppUserId(10), AppUserId(20)])
+    );
+}
+
+async fn unconfirmed_readycheck_fixture(
     database: &NamedTempFile,
     transport: Arc<RecordingTransport>,
 ) -> LobbyRegistrationProvider {
@@ -2560,7 +2586,7 @@ async fn stale_readycheck_fixture(
         .expect("load lobby row")
         .expect("persisted lobby");
     let long_ago = unix_time_now() - 3_605.0;
-    let stale_check_at = unix_time_now() - 2_400.0;
+    let overdue_check_at = unix_time_now() - 301.0;
     persisted.player_join_times = BTreeMap::from([(10, long_ago), (20, long_ago), (30, long_ago)]);
     repository.save(&persisted).expect("age lobby signups");
 
@@ -2582,81 +2608,39 @@ async fn stale_readycheck_fixture(
             },
         );
     }
+    let thread_id = lobby_snapshot(&restarted, LobbyKind::Open)
+        .message_ids
+        .thread_id
+        .expect("lobby thread");
     restarted.handler.state.readychecks.set_readycheck_state(
         scope,
         cama_app::readycheck::ReadycheckStateInput {
             message_id: AppMessageId(5_000),
-            channel_id: AppChannelId(9),
+            channel_id: thread_id,
             lobby_ids: BTreeSet::from([AppUserId(10), AppUserId(20), AppUserId(30)]),
             player_data: BTreeMap::new(),
-            created_at: Some(stale_check_at),
-            initial_reacted: BTreeMap::new(),
+            created_at: Some(overdue_check_at),
+            initial_reacted: BTreeMap::from([(AppUserId(10), "<@10>".to_owned())]),
         },
     );
     restarted
 }
 
 #[tokio::test]
-async fn stale_sweep_tells_the_invoker_the_players_were_unconfirmed_not_away() {
-    // The sweep prunes on "did not confirm", not on presence, so the invoker
-    // receipt must not claim the removed players were away.
+async fn failed_sweep_notice_delivery_does_not_block_the_sweep_and_recovers_once() {
     let database = database_with_players(&[(10, "Creator"), (20, "Away One"), (30, "Away Two")]);
     let transport = Arc::new(RecordingTransport::default());
-    let provider = stale_readycheck_fixture(&database, transport.clone()).await;
-
-    let response = dispatch_command(
-        &provider,
-        "readycheck",
-        10,
-        "Creator",
-        vec![lobby_option(LobbyKind::Open)],
-    )
-    .await;
-
-    let captured = response.captured.lock().expect("readycheck responses");
-    let receipt = captured
-        .followups
-        .iter()
-        .find(|response| response.content.starts_with("✅"))
-        .expect("readycheck receipt");
-    assert!(
-        receipt.content.contains("Removed 2 unconfirmed player(s)"),
-        "invoker receipt must describe the sweep as unconfirmed, got: {}",
-        receipt.content
-    );
-    assert!(
-        !receipt.content.contains("away"),
-        "invoker receipt must not claim the players were away, got: {}",
-        receipt.content
-    );
-}
-
-#[tokio::test]
-async fn failed_stale_notice_delivery_does_not_block_readycheck_and_recovers_once() {
-    let database = database_with_players(&[(10, "Creator"), (20, "Away One"), (30, "Away Two")]);
-    let transport = Arc::new(RecordingTransport::default());
-    let provider = stale_readycheck_fixture(&database, transport.clone()).await;
+    let provider = unconfirmed_readycheck_fixture(&database, transport.clone()).await;
     transport.fail_next_pruned_notice();
     let sent_before = transport.sent_messages().len();
 
-    let response = dispatch_command(
-        &provider,
-        "readycheck",
-        10,
-        "Creator",
-        vec![lobby_option(LobbyKind::Open)],
-    )
-    .await;
-
-    assert!(
-        response
-            .captured
-            .lock()
-            .expect("readycheck responses")
-            .followups
-            .iter()
-            .any(|response| response.content.starts_with("✅")),
-        "the durable notice retry must not block the replacement ready check"
+    assert_eq!(
+        provider
+            .handler
+            .sweep_due_readychecks(unix_time_now())
+            .await,
+        2,
+        "the durable notice retry must not block the sweep"
     );
 
     assert_eq!(
@@ -2996,24 +2980,27 @@ async fn invalid_stale_notice_recovery_remains_fatal() {
 }
 
 #[tokio::test]
-async fn stale_readycheck_does_not_prune_without_the_durable_notice_outbox() {
+async fn readycheck_sweep_does_not_prune_without_the_durable_notice_outbox() {
     let database = database_with_players(&[(10, "Creator"), (20, "Away One"), (30, "Away Two")]);
     let transport = Arc::new(RecordingTransport::default());
-    let provider = stale_readycheck_fixture(&database, transport).await;
+    let provider = unconfirmed_readycheck_fixture(&database, transport).await;
     rusqlite::Connection::open(database.path())
         .expect("open lobby database")
         .execute("DROP TABLE app_kv", [])
         .expect("remove ready-check notice outbox");
+    let now = unix_time_now();
 
-    dispatch_command_allowing_failure(
-        &provider,
-        "readycheck",
-        10,
-        "Creator",
-        vec![lobby_option(LobbyKind::Open)],
-    )
-    .await;
+    assert_eq!(provider.handler.sweep_due_readychecks(now).await, 0);
 
+    assert!(
+        provider
+            .handler
+            .state
+            .readychecks
+            .due_sweep(LobbyScope::new(AppGuildId(42), LobbyKind::Open), now)
+            .is_some(),
+        "a failed sweep must stay armed for the next wake"
+    );
     let expected = BTreeSet::from([AppUserId(10), AppUserId(20), AppUserId(30)]);
     assert_eq!(
         lobby_snapshot(&provider, LobbyKind::Open).players,
