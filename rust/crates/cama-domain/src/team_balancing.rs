@@ -6,7 +6,7 @@ use crate::team::{ROLES, Team, TeamError};
 pub const ADJUSTED_VALUE_DIFF_WEIGHT: f64 = 1.7;
 
 /// Weight applied to the summed lane-matchup deltas.
-pub const ROLE_MATCHUP_DELTA_WEIGHT: f64 = 0.18;
+pub const ROLE_MATCHUP_DELTA_WEIGHT: f64 = 0.27;
 
 /// Sum the five critical lane matchups from role-ordered effective values.
 ///
@@ -317,7 +317,7 @@ mod tests {
         let score = service
             .calculate_matchup_score(&team1, &team2, false, false)
             .expect("roles are assigned");
-        assert!((score - 770.0).abs() < 1e-9, "{score}");
+        assert!((score - 815.0).abs() < 1e-9, "{score}");
     }
 
     #[test]

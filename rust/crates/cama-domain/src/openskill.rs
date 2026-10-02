@@ -117,7 +117,7 @@ impl Default for OpenSkillConfig {
             calibration_threshold: 4.0,
             performance_strength: 0.10,
             streak_threshold: 3,
-            streak_multiplier_per_game: 0.30,
+            streak_multiplier_per_game: 0.33,
             low_priority_gain_multiplier: 1.10,
             sigma_decay_grace_period_days: 7,
             sigma_decay_per_week: 2.0,
@@ -1421,7 +1421,7 @@ mod tests {
     #[test]
     fn default_algorithm_fingerprint_matches_python() {
         let system = CamaOpenSkillSystem::new();
-        assert_eq!(system.algorithm_fingerprint(), "ffdaf6752ef51115");
+        assert_eq!(system.algorithm_fingerprint(), "1d0f22e19add165d");
     }
 
     #[test]
