@@ -13,7 +13,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::match_runtime::{
-    PendingBettingClose, PendingMatchRepository, PendingMatchRepositoryError,
+    PendingMatchRecord, PendingMatchRepository, PendingMatchRepositoryError,
 };
 use crate::open_runtime_connection;
 
@@ -528,17 +528,16 @@ impl DotaSessionRepository {
         self.update(&next, expected_revision, now)
     }
 
-    /// Close betting and mark the pending payload in the same immediate
-    /// transaction used by the pending-match repository.  This wrapper keeps
-    /// lobby orchestration free to depend on its own repository boundary.
+    /// Mark the pending payload as having started gameplay. This wrapper
+    /// keeps lobby orchestration free to depend on its own repository
+    /// boundary.
     pub fn close_betting_now(
         &self,
         guild_id: i64,
         pending_match_id: i64,
-        now: i64,
-    ) -> Result<PendingBettingClose, DotaSessionRepositoryError> {
+    ) -> Result<PendingMatchRecord, DotaSessionRepositoryError> {
         PendingMatchRepository::new(&self.path)
-            .close_betting_now(guild_id, pending_match_id, now)
+            .close_betting_now(guild_id, pending_match_id)
             .map_err(Into::into)
     }
 

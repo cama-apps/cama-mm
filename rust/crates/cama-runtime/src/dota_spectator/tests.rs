@@ -5,9 +5,7 @@ use crate::{
     },
     dota_host_config::DotaHostConfig,
 };
-use cama_db::match_runtime::{
-    DOTA_BETTING_CLOSED_MARKER, DOTA_BETTING_EXTENDED_UNTIL, PendingMatchState,
-};
+use cama_db::match_runtime::{DOTA_BETTING_CLOSED_MARKER, PendingMatchState};
 use std::sync::{
     Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -727,9 +725,7 @@ async fn queued_live_delivery_retries_same_nonce_but_stale_or_reopened_betting_n
         let key = f.queue_live(1010).await;
         match blocked {
             "reopened" => f.pending_edit(|state| {
-                state
-                    .extra
-                    .insert(DOTA_BETTING_EXTENDED_UNTIL.into(), 2000.into());
+                state.bet_lock_until = Some(2000);
             }),
             "stale" => f.live.finish_match(1, f.pending).await,
             _ => {}
@@ -842,10 +838,7 @@ async fn betting_reopened_during_permission_audit_blocks_queued_delivery() {
     *f.discord.audit_hook.lock().unwrap() = Some(Box::new(move || {
         let repository = PendingMatchRepository::new(path);
         let mut pending = repository.pending_match(1, pending_id).unwrap().unwrap();
-        pending
-            .state
-            .extra
-            .insert(DOTA_BETTING_EXTENDED_UNTIL.into(), 2000.into());
+        pending.state.bet_lock_until = Some(2000);
         repository
             .update_pending_match(1, pending_id, &pending.state)
             .unwrap();
@@ -1159,10 +1152,7 @@ async fn same_tick_delivery_reaudits_after_persistence_and_blocks_reopened_betti
         assert!(state.announcement_memory.first_blood_announced);
         let repository = PendingMatchRepository::new(path);
         let mut pending = repository.pending_match(1, pending_id).unwrap().unwrap();
-        pending
-            .state
-            .extra
-            .insert(DOTA_BETTING_EXTENDED_UNTIL.into(), 2000.into());
+        pending.state.bet_lock_until = Some(2000);
         repository
             .update_pending_match(1, pending_id, &pending.state)
             .unwrap();
@@ -1882,9 +1872,7 @@ async fn recap_capture_requires_bot_match_closed_betting_valid_roster_and_fresh_
                 state.extra.remove(DOTA_BETTING_CLOSED_MARKER);
             }),
             "extended_betting" => f.pending_edit(|state| {
-                state
-                    .extra
-                    .insert(DOTA_BETTING_EXTENDED_UNTIL.into(), 2000.into());
+                state.bet_lock_until = Some(2000);
             }),
             "invalid_roster" => f.pending_edit(|state| {
                 state.radiant_team_ids.clear();

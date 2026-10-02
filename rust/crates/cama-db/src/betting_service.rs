@@ -19,14 +19,6 @@ use crate::dota_bet_seed_repository::{
 };
 use crate::open_runtime_connection;
 use cama_db_core::profit_deductions::penalty_games_remaining;
-use cama_domain::dota_hosting::BETTING_OBSERVATION_TTL_SECONDS;
-
-// These markers live in the existing pending-match JSON payload so the
-// betting crate can enforce hosted-window semantics without coupling to the
-// match-runtime crate (which is compiled as a separate database slice).
-const DOTA_HOSTED_BETTING_MARKER: &str = "dota_hosted_betting";
-const DOTA_BETTING_CLOSED_MARKER: &str = "dota_betting_closed";
-const DOTA_BETTING_EXTENDED_UNTIL: &str = "dota_betting_extended_until";
 
 #[derive(Debug, Error)]
 pub enum BettingServiceRepositoryError {
@@ -2670,10 +2662,9 @@ fn validate_pending_bet_with_setup(
         return Err(BettingServiceRepositoryError::BettingClosed);
     }
     // A hosted record can briefly leave its pending row behind if the core
-    // match commit succeeds before the cleanup retry.  The hosted marker is
-    // allowed past the historical deadline only while freshly observed. The
-    // completed-match identity must also be checked in this same transaction
-    // before any wallet or bet writes can proceed.
+    // match commit succeeds before the cleanup retry. The completed-match
+    // identity must be checked in this same transaction before any wallet or
+    // bet writes can proceed.
     let guild_id = BettingServiceRepository::normalize_guild_id(request.guild_id);
     let already_recorded = transaction
         .query_row(
@@ -2688,24 +2679,7 @@ fn validate_pending_bet_with_setup(
     if already_recorded {
         return Err(BettingServiceRepositoryError::BettingClosed);
     }
-    let betting_closed = json_bool(payload, DOTA_BETTING_CLOSED_MARKER).unwrap_or(false);
-    if betting_closed {
-        let extension_until = json_i64(payload, DOTA_BETTING_EXTENDED_UNTIL)
-            .filter(|extension_until| *extension_until > 0);
-        if extension_until.is_none_or(|extension_until| request.bet_time >= extension_until) {
-            return Err(BettingServiceRepositoryError::BettingClosed);
-        }
-    } else if json_bool(payload, DOTA_HOSTED_BETTING_MARKER).unwrap_or(false) {
-        let explicit_extension = json_i64(payload, DOTA_BETTING_EXTENDED_UNTIL)
-            .is_some_and(|until| request.bet_time < until);
-        let fresh = json_i64(payload, "dota_hosted_betting_observed_at").is_some_and(|observed| {
-            observed <= request.bet_time
-                && request.bet_time.saturating_sub(observed) < BETTING_OBSERVATION_TTL_SECONDS
-        });
-        if !explicit_extension && !fresh {
-            return Err(BettingServiceRepositoryError::BettingClosed);
-        }
-    } else {
+    {
         let lock_until = json_i64(payload, "bet_lock_until")
             .ok_or(BettingServiceRepositoryError::InvalidPendingPayload)?;
         if request.bet_time >= lock_until {

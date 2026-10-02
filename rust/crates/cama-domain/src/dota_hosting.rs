@@ -5,9 +5,6 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Maximum age of an authoritative owned-lobby observation for hosted wagers.
-pub const BETTING_OBSERVATION_TTL_SECONDS: i64 = 90;
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HostingMode {

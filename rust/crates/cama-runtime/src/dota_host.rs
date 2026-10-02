@@ -166,7 +166,6 @@ pub trait DotaHostPort: Send + Sync {
 #[async_trait]
 pub trait HostedMatchRecorder: Send + Sync {
     async fn record(&self, result: HostedMatchResult) -> Result<i64, String>;
-    async fn betting_closed(&self, guild: i64, pending: i64) -> Result<(), String>;
     async fn betting_window_changed(&self, guild: i64, pending: i64) -> Result<(), String>;
     /// Type-erased RAII lease shared with manual recording/abort. Holding it
     /// across the final checks and launch keeps those operations exclusive.
@@ -177,9 +176,6 @@ pub trait HostedMatchRecorder: Send + Sync {
 impl HostedMatchRecorder for MatchRegistrationProvider {
     async fn record(&self, result: HostedMatchResult) -> Result<i64, String> {
         self.record_hosted_match(result).await
-    }
-    async fn betting_closed(&self, guild: i64, pending: i64) -> Result<(), String> {
-        self.hosted_betting_closed(guild, pending).await
     }
     async fn betting_window_changed(&self, guild: i64, pending: i64) -> Result<(), String> {
         self.hosted_betting_window_changed(guild, pending).await
@@ -258,12 +254,6 @@ struct SessionState {
     last_allocation_log_at: Option<i64>,
     #[serde(default)]
     betting_closed: bool,
-    #[serde(default)]
-    betting_window_announced: bool,
-    #[serde(default)]
-    betting_notification_sent: bool,
-    #[serde(default)]
-    last_betting_notification_at: i64,
     #[serde(default)]
     cancel_requested: bool,
     #[serde(default)]
@@ -429,7 +419,6 @@ impl DotaHostWorker {
         let lobby = match port.snapshot().await {
             Ok(lobby) => lobby,
             Err(error) => {
-                self.suspend_betting(&record).await?;
                 // GC disconnection is not an authoritative empty lobby, but
                 // an already registered spectator can still confirm start.
                 if let Some(match_id) = record
@@ -437,14 +426,14 @@ impl DotaHostWorker {
                     .as_deref()
                     .and_then(|id| id.parse().ok())
                 {
-                    self.publish_live(&record, &state, match_id).await;
+                    self.publish_live(&record, &state, match_id, now).await;
                     if self.live.gameplay_started(
                         record.guild_id,
                         record.pending_match_id,
                         match_id,
                     ) {
                         self.close_betting(&mut record, &mut state, now).await?;
-                        self.publish_live(&record, &state, match_id).await;
+                        self.publish_live(&record, &state, match_id, now).await;
                     }
                 }
                 return Err(error);
@@ -624,33 +613,11 @@ impl DotaHostWorker {
             && lobby
                 .as_ref()
                 .is_some_and(|lobby| settings_match(&state.settings, lobby))
+            && (pending.state.betting_closed() || self.recorded_id(&record).await?.is_some())
         {
-            if pending.state.betting_closed() || self.recorded_id(&record).await?.is_some() {
-                // Restore the observed start without undoing any explicit
-                // admin extension stored alongside it.
-                state.betting_closed = true;
-                self.save(&mut record, &state, now).await?;
-            } else {
-                self.manage_betting_window(&mut record, &mut state, pending, now)
-                    .await?;
-                // An owned, matching GC snapshot is the only source of lease renewal.
-                // Discovery and connection failures never imply observation.
-                let gameplay_observed = lobby.as_ref().is_some_and(|lobby| {
-                    lobby.stage == LobbyStage::Postgame
-                        || lobby
-                            .game_state
-                            .is_some_and(dota_lobby::gameplay_has_started)
-                        || lobby.match_id.is_some_and(|id| {
-                            self.live
-                                .gameplay_started(record.guild_id, record.pending_match_id, id)
-                        })
-                });
-                if !gameplay_observed && port.betting_observation_fresh().await {
-                    self.observe_betting(&record, now).await?;
-                } else {
-                    self.suspend_betting(&record).await?;
-                }
-            }
+            // Restore the observed gameplay start after a restart.
+            state.betting_closed = true;
+            self.save(&mut record, &state, now).await?;
         }
         // The GC's lobby lifecycle can lag behind the game-rules state or
         // spectator feed. Observe known matches before allocation/launch
@@ -660,7 +627,7 @@ impl DotaHostWorker {
             .as_deref()
             .and_then(|id| id.parse().ok())
         {
-            self.publish_live(&record, &state, match_id).await;
+            self.publish_live(&record, &state, match_id, now).await;
             if state.betting_closed
                 || lobby.as_ref().is_some_and(|lobby| {
                     lobby.stage == LobbyStage::Postgame
@@ -673,7 +640,7 @@ impl DotaHostWorker {
                     .gameplay_started(record.guild_id, record.pending_match_id, match_id)
             {
                 self.close_betting(&mut record, &mut state, now).await?;
-                self.publish_live(&record, &state, match_id).await;
+                self.publish_live(&record, &state, match_id, now).await;
             }
         }
         let Some(lobby) = lobby else {
@@ -931,28 +898,12 @@ impl DotaHostWorker {
             "Requesting Dota lobby launch"
         );
         port.launch(lobby.id).await?;
-        self.announce(&mut record,&mut state,"All ten players are on the correct sides. Dota server launch requested; betting remains open through the hero draft.",now).await
-    }
-
-    async fn suspend_betting(&self, record: &DotaSessionRecord) -> Result<(), String> {
-        let repo = PendingMatchRepository::new(&self.path);
-        let (guild, pending) = (record.guild_id, record.pending_match_id);
-        blocking(move || {
-            repo.suspend_hosted_betting(guild, pending)
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-        })
-        .await
-    }
-
-    async fn observe_betting(&self, record: &DotaSessionRecord, now: i64) -> Result<(), String> {
-        let repo = PendingMatchRepository::new(&self.path);
-        let (guild, pending) = (record.guild_id, record.pending_match_id);
-        blocking(move || {
-            repo.observe_hosted_betting(guild, pending, now)
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-        })
+        self.announce(
+            &mut record,
+            &mut state,
+            "All ten players are on the correct sides. Dota server launch requested.",
+            now,
+        )
         .await
     }
 
@@ -1160,42 +1111,6 @@ impl DotaHostWorker {
         self.announce(record, state, &content, now).await
     }
 
-    async fn manage_betting_window(
-        &self,
-        record: &mut DotaSessionRecord,
-        state: &mut SessionState,
-        pending: &PendingMatchRecord,
-        now: i64,
-    ) -> Result<(), String> {
-        if !pending.state.hosted_betting_managed() {
-            let repo = PendingMatchRepository::new(&self.path);
-            let (guild, pending_id) = (record.guild_id, record.pending_match_id);
-            let adopted = blocking(move || {
-                repo.begin_hosted_betting(guild, pending_id, now)
-                    .map_err(|error| error.to_string())
-            })
-            .await?;
-            if adopted.state.betting_closed() {
-                state.betting_closed = true;
-                self.save(record, state, now).await?;
-            }
-        }
-        if !state.betting_window_announced {
-            match self
-                .recorder
-                .betting_window_changed(record.guild_id, record.pending_match_id)
-                .await
-            {
-                Ok(()) => {
-                    state.betting_window_announced = true;
-                    self.save(record, state, now).await?;
-                }
-                Err(error) => tracing::warn!(%error, "hosted betting window display will retry"),
-            }
-        }
-        Ok(())
-    }
-
     async fn monitor_review_betting(
         &self,
         port: &dyn DotaHostPort,
@@ -1214,10 +1129,9 @@ impl DotaHostWorker {
         if self.pending(record).await?.is_none() && self.recorded_id(record).await?.is_none() {
             return Ok(());
         }
-        self.publish_live(record, state, match_id).await;
-        // An orchestration problem must not leave betting open after known
-        // gameplay starts. Continue observing the original match while all
-        // lobby mutations and automatic result recording remain paused.
+        self.publish_live(record, state, match_id, now).await;
+        // Keep observing the original match's gameplay start while all lobby
+        // mutations and automatic result recording remain paused.
         let gc_started = snapshot.is_some_and(|lobby| {
             owns_lobby(record, state, &lobby, self.config.account_id)
                 && lobby.match_id == Some(match_id)
@@ -1233,7 +1147,7 @@ impl DotaHostWorker {
                 .gameplay_started(record.guild_id, record.pending_match_id, match_id)
         {
             self.close_betting(record, state, now).await?;
-            self.publish_live(record, state, match_id).await;
+            self.publish_live(record, state, match_id, now).await;
         }
         Ok(())
     }
@@ -1271,36 +1185,18 @@ impl DotaHostWorker {
     ) -> Result<(), String> {
         let (guild, pending) = (record.guild_id, record.pending_match_id);
         if !state.betting_closed {
-            // A manual settlement already rejects further wagers. Keep
-            // following its Valve game so final identity can be reconciled.
+            // Nothing to mark once the match is recorded. Keep following its
+            // Valve game so final identity can be reconciled.
             if self.recorded_id(record).await?.is_none() {
                 let repo = PendingMatchRepository::new(&self.path);
                 blocking(move || {
-                    repo.close_betting_now(guild, pending, now)
+                    repo.close_betting_now(guild, pending)
                         .map(|_| ())
                         .map_err(|e| e.to_string())
                 })
                 .await?;
             }
             state.betting_closed = true;
-            self.save(record, state, now).await?;
-        }
-        if state.betting_notification_sent
-            || now.saturating_sub(state.last_betting_notification_at) < 30
-        {
-            return Ok(());
-        }
-        state.last_betting_notification_at = now;
-        self.save(record, state, now).await?;
-        // Display/reminder delivery failure must not reopen a closed window.
-        if self.recorder.betting_closed(guild, pending).await.is_err() {
-            tracing::warn!(
-                guild_id = guild,
-                pending_match_id = pending,
-                "Dota bets closed; wager display refresh will retry"
-            );
-        } else {
-            state.betting_notification_sent = true;
             self.save(record, state, now).await?;
         }
         Ok(())
@@ -1314,25 +1210,11 @@ impl DotaHostWorker {
         if self.recorded_id(record).await?.is_some() {
             return Ok("Betting is closed.".to_owned());
         }
-        // The session's close flag records confirmed gameplay, while an admin
-        // can subsequently reopen a timed window in the pending-match row.
         if let Some(pending) = self.pending(record).await?
             && pending.state.betting_open(now)
         {
-            if pending.state.hosted_betting_managed() {
-                return Ok(match pending
-                    .state
-                    .betting_extension_until()
-                    .filter(|deadline| *deadline > now)
-                {
-                    Some(deadline) => format!(
-                        "Betting remains open through the draft and at least until <t:{deadline}:R> (admin extension)."
-                    ),
-                    None => "Betting remains open through the draft; waiting for confirmed gameplay start.".to_owned(),
-                });
-            }
             return Ok(format!(
-                "Betting is open until <t:{}:R> (admin extension).",
+                "Betting is open until <t:{}:R>.",
                 pending.state.bet_lock_until.unwrap_or_default()
             ));
         }
@@ -1341,7 +1223,21 @@ impl DotaHostWorker {
         Ok("Betting is closed.".to_owned())
     }
 
-    async fn publish_live(&self, record: &DotaSessionRecord, state: &SessionState, match_id: u64) {
+    async fn publish_live(
+        &self,
+        record: &DotaSessionRecord,
+        state: &SessionState,
+        match_id: u64,
+        now: i64,
+    ) {
+        // Live details stay private until gameplay has started and the timed
+        // betting window has also run out.
+        let wagers_open = self
+            .pending(record)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|pending| pending.state.betting_open(now));
         self.live
             .publish_match(
                 record.guild_id,
@@ -1350,7 +1246,7 @@ impl DotaHostWorker {
                 state.server_id,
                 state.settings.league_id,
                 state.settings.tv_delay,
-                state.betting_closed,
+                state.betting_closed && !wagers_open,
                 state.roster.iter().map(|p| p.steam_account_id).collect(),
             )
             .await;
@@ -1596,7 +1492,7 @@ impl DotaHostWorker {
                         first_pick_radiant:match options.first_pick { Some(FirstPick::Radiant) => Some(true), Some(FirstPick::Dire) => Some(false), _ => pending.state.first_pick_team.as_deref().and_then(|s| match s.to_ascii_lowercase().as_str() { "radiant" => Some(true),"dire"=>Some(false),_=>None }) },
                         tv_delay:options.tv_delay.unwrap_or(config.tv_delay) },
                     roster, channel_id:pending_channel(&pending),message_id:None,last_message:String::new(),last_message_at:0,status_failures:0,status_retry_at:0,pending_status:None,resolution:None,resolution_history:Vec::new(),betting_control_audit:Vec::new(),
-                    last_invite_at:0,create_requested_at:None,launch_requested_at:None,lobby_recreation:None,failed_launches:Vec::new(),lobby_cleanup:Default::default(),allocation_observed_at:None,last_allocation_log_at:None,betting_closed:false,betting_window_announced:false,betting_notification_sent:false,last_betting_notification_at:0,cancel_requested:false,
+                    last_invite_at:0,create_requested_at:None,launch_requested_at:None,lobby_recreation:None,failed_launches:Vec::new(),lobby_cleanup:Default::default(),allocation_observed_at:None,last_allocation_log_at:None,betting_closed:false,cancel_requested:false,
                     resume_requested:false,recorded_match_id:None,server_id:None,replay:None,postgame_statistics:None,archive:None,replay_last_attempt:0,replay_error:None,last_result_poll:0,lobby_deadline:0,recording_failures:0,
                 };
                 let valid_roster = if config.test_mode == DotaHostTestMode::Off {
@@ -1653,7 +1549,6 @@ impl DotaHostWorker {
         reason: &str,
         now: i64,
     ) -> Result<(), String> {
-        self.suspend_betting(record).await?;
         let changed =
             record.phase != Phase::NeedsReview || record.last_error.as_deref() != Some(reason);
         record.phase = Phase::NeedsReview;
