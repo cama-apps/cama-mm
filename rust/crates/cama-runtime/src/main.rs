@@ -45,7 +45,7 @@ use cama_runtime::{
     dig_weather_worker_spec, duel_challenges_worker_spec, economy_events_worker_spec,
     first_game_pool_worker_spec, mana_auto_assign_worker_spec, manashop_debt_worker_spec,
     pet_sweep_worker_spec_with_ai, prediction_digest_worker_spec, prediction_refresh_worker_spec,
-    validate_production_registry,
+    readycheck_sweep_worker_spec, validate_production_registry,
 };
 use cama_runtime::{
     BettingRegistrationProvider, BettingRuntimeConfig, match_post_match_debrief_port,
@@ -1137,6 +1137,7 @@ async fn run_serve() -> ExitCode {
         lobby_provider.curfew_lobby_display(),
         discord_transport.clone(),
     );
+    let readycheck_sweep_worker = readycheck_sweep_worker_spec(lobby_provider.readycheck_sweep());
     let match_setup_recovery_worker = match_provider.setup_recovery_worker();
     let survey_recovery_worker = survey_provider.recovery_worker_spec();
     let mafia_phase_worker = mafia_provider.worker_spec(discord_transport.clone());
@@ -1203,7 +1204,8 @@ async fn run_serve() -> ExitCode {
     .with_worker(betting_view_timeout_worker)
     .with_worker(survey_recovery_worker)
     .with_worker(match_setup_recovery_worker)
-    .with_worker(curfew_sweep_worker);
+    .with_worker(curfew_sweep_worker)
+    .with_worker(readycheck_sweep_worker);
     if let Some(first_game_pool_worker) = first_game_pool_worker {
         runtime = runtime.with_worker(first_game_pool_worker);
     }

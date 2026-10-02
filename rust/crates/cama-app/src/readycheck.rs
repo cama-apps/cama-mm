@@ -21,12 +21,9 @@ pub const FULL_LOBBY_SIZE: usize = 10;
 pub const MINIMUM_READYCHECK_PLAYERS: usize = 10;
 pub const READYCHECK_COOLDOWN_SECONDS: f64 = 120.0;
 pub const READYCHECK_STALE_SECONDS: f64 = 30.0 * 60.0;
-/// A stale sweep only trusts a previous check this recent; an older
-/// non-response says nothing about whether the player is still around.
-pub const SWEEP_PREVIOUS_CHECK_MAX_AGE_SECONDS: f64 = 60.0 * 60.0;
-/// Players who signed up more recently than this are never swept, as are
-/// players whose sign-up time is unknown.
-pub const SWEEP_SIGNUP_GRACE_SECONDS: f64 = 60.0 * 60.0;
+/// Lobby members still unconfirmed this long after a `/readycheck` (a new
+/// post or a refresh) are swept from the lobby.
+pub const READYCHECK_SWEEP_SECONDS: f64 = 5.0 * 60.0;
 pub const READY_LOBBY_RECOMMENDATION: &str = "Run `/readycheck` before `/shuffle`.";
 
 #[must_use]
@@ -346,6 +343,8 @@ pub struct ReadycheckGeneration {
     pub reacted: BTreeMap<UserId, String>,
     pub declined: BTreeSet<UserId>,
     pub created_at: f64,
+    /// When the unconfirmed sweep falls due; `None` once it has run.
+    pub sweep_due_at: Option<f64>,
     pub completion_notified: bool,
 }
 
@@ -370,6 +369,15 @@ pub struct LobbyReadycheckSnapshot {
     pub player_ids: Vec<UserId>,
     pub player_join_times: BTreeMap<UserId, f64>,
     pub readycheck: Option<ConfirmationSnapshot>,
+}
+
+/// A ready check whose sweep deadline has passed, with the live lobby members
+/// who never confirmed it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReadycheckSweep {
+    pub message_id: MessageId,
+    pub channel_id: ChannelId,
+    pub unconfirmed: BTreeSet<UserId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -408,10 +416,6 @@ pub enum ReadycheckTransportOperation {
         message_id: MessageId,
         player_id: UserId,
         emoji: &'static str,
-        requirement: DeliveryRequirement,
-    },
-    SyncLobbyDisplays {
-        scope: LobbyScope,
         requirement: DeliveryRequirement,
     },
     PostReadycheck {
@@ -454,8 +458,6 @@ pub struct ReadycheckCommandRequest {
     pub now: f64,
     pub confirm_invoker: bool,
     pub existing_message: ExistingMessageState,
-    /// A shuffle/draft reservation prevents destructive stale pruning.
-    pub reserved_players: BTreeSet<UserId>,
     /// A ready check against too small a lobby wastes everyone's react —
     /// callers supply the floor so production and tests can differ.
     pub minimum_players: usize,
@@ -486,7 +488,6 @@ pub struct ReadycheckCommandPlan {
     pub scope: LobbyScope,
     pub mode: PublicationMode,
     pub permit: Option<ReadycheckPermit>,
-    pub pruned_players: BTreeSet<UserId>,
     pub mention_ids: BTreeSet<UserId>,
     pub transport: ReadycheckTransportPlan,
 }
@@ -587,6 +588,7 @@ impl ReadycheckService {
             .into_iter()
             .filter(|(player_id, _)| input.lobby_ids.contains(player_id))
             .collect();
+        let created_at = input.created_at.unwrap_or_else(unix_time_now);
         let generation = ReadycheckGeneration {
             message_id: input.message_id,
             channel_id: input.channel_id,
@@ -594,7 +596,8 @@ impl ReadycheckService {
             player_data: input.player_data,
             reacted: initial_reacted,
             declined: BTreeSet::new(),
-            created_at: input.created_at.unwrap_or_else(unix_time_now),
+            created_at,
+            sweep_due_at: Some(created_at + READYCHECK_SWEEP_SECONDS),
             completion_notified: false,
         };
         let mut state = self.lock();
@@ -832,7 +835,7 @@ impl ReadycheckService {
             .ok_or(ReadycheckCommandFailure::NoLobby)?;
         let lobby = scoped
             .lobby
-            .as_mut()
+            .as_ref()
             .filter(|lobby| lobby.status == LobbyStatus::Open)
             .ok_or(ReadycheckCommandFailure::NoLobby)?;
         if lobby.players.len() < request.minimum_players {
@@ -881,6 +884,7 @@ impl ReadycheckService {
                 .collect::<BTreeSet<_>>();
             generation.lobby_ids = live_ids.clone();
             generation.player_data = player_data;
+            generation.sweep_due_at = Some(request.now + READYCHECK_SWEEP_SECONDS);
             generation
                 .reacted
                 .retain(|player_id, _| live_ids.contains(player_id));
@@ -919,37 +923,9 @@ impl ReadycheckService {
                 scope,
                 mode: PublicationMode::Refresh,
                 permit: None,
-                pruned_players: BTreeSet::new(),
                 mention_ids,
                 transport: ReadycheckTransportPlan { operations },
             });
-        }
-
-        let mut pruned_players = BTreeSet::new();
-        let sweepable = stale
-            && scoped.readycheck.as_ref().is_some_and(|generation| {
-                request.now - generation.created_at <= SWEEP_PREVIOUS_CHECK_MAX_AGE_SECONDS
-            });
-        if sweepable {
-            let generation = scoped.readycheck.as_ref().expect("stale generation");
-            let confirmed = generation.reacted.keys().copied().collect::<BTreeSet<_>>();
-            for player_id in lobby.players.iter().copied().collect::<Vec<_>>() {
-                // An unknown sign-up time fails safe: a lobby row whose
-                // join-time blob failed to decode must not make everyone
-                // sweepable.
-                let outside_grace = lobby
-                    .player_join_times
-                    .get(&player_id)
-                    .is_some_and(|joined_at| request.now - joined_at >= SWEEP_SIGNUP_GRACE_SECONDS);
-                if outside_grace
-                    && !confirmed.contains(&player_id)
-                    && player_id != request.invoker_id
-                    && !request.reserved_players.contains(&player_id)
-                    && lobby.remove_player(player_id)
-                {
-                    pruned_players.insert(player_id);
-                }
-            }
         }
 
         let mode = if stale {
@@ -984,12 +960,6 @@ impl ReadycheckService {
                 requirement: DeliveryRequirement::BestEffort,
             });
         }
-        if !pruned_players.is_empty() {
-            operations.push(ReadycheckTransportOperation::SyncLobbyDisplays {
-                scope,
-                requirement: DeliveryRequirement::Required,
-            });
-        }
         operations.push(ReadycheckTransportOperation::PostReadycheck {
             thread_id,
             requirement: DeliveryRequirement::Required,
@@ -1016,7 +986,6 @@ impl ReadycheckService {
                 invoker_id: request.invoker_id,
                 confirm_invoker: request.confirm_invoker,
             }),
-            pruned_players,
             mention_ids,
             transport: ReadycheckTransportPlan { operations },
         })
@@ -1070,10 +1039,54 @@ impl ReadycheckService {
             reacted,
             declined: BTreeSet::new(),
             created_at,
+            sweep_due_at: Some(created_at + READYCHECK_SWEEP_SECONDS),
             completion_notified: false,
         });
         scoped.pending_publication = None;
         CommitPublicationResult::Applied
+    }
+
+    /// The sweep owed by this scope's ready check, once its deadline has
+    /// passed. The deadline stays armed until [`Self::complete_sweep`] so a
+    /// failed removal is retried.
+    #[must_use]
+    pub fn due_sweep(&self, scope: LobbyScope, now: f64) -> Option<ReadycheckSweep> {
+        let state = self.lock();
+        let scoped = state.scopes.get(&scope)?;
+        let lobby = scoped
+            .lobby
+            .as_ref()
+            .filter(|lobby| lobby.status == LobbyStatus::Open)?;
+        let generation = scoped.readycheck.as_ref()?;
+        if generation.sweep_due_at.is_none_or(|due_at| now < due_at) {
+            return None;
+        }
+        Some(ReadycheckSweep {
+            message_id: generation.message_id,
+            channel_id: generation.channel_id,
+            unconfirmed: lobby
+                .players
+                .iter()
+                .copied()
+                .filter(|player_id| !generation.reacted.contains_key(player_id))
+                .collect(),
+        })
+    }
+
+    /// Disarm the sweep deadline of the generation it was read from.
+    pub fn complete_sweep(&self, scope: LobbyScope, expected_message_id: MessageId) -> bool {
+        let mut state = self.lock();
+        let Some(generation) = state
+            .scopes
+            .get_mut(&scope)
+            .and_then(|scoped| scoped.readycheck.as_mut())
+        else {
+            return false;
+        };
+        if generation.message_id != expected_message_id {
+            return false;
+        }
+        generation.sweep_due_at.take().is_some()
     }
 
     pub fn abort_publication(&self, permit: &ReadycheckPermit) -> bool {

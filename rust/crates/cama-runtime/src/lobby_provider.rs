@@ -66,6 +66,7 @@ use crate::gateway_events::{
 };
 use crate::push_notification_provider::PushNotificationHooks;
 use crate::raw_reactions::{RawReactionEvent, RawReactionKind, RawReactionObserver};
+use crate::readycheck_sweep_worker::ReadycheckSweepPort;
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
     InteractionActionRow, InteractionButton, InteractionButtonStyle, InteractionEmbed,
@@ -1974,6 +1975,18 @@ impl CurfewLobbyDisplayPort for CurfewLobbyDisplay {
     }
 }
 
+#[derive(Clone)]
+struct ReadycheckSweep {
+    handler: Arc<LobbyInteractionHandler>,
+}
+
+#[async_trait]
+impl ReadycheckSweepPort for ReadycheckSweep {
+    async fn sweep_due_readychecks(&self) -> usize {
+        self.handler.sweep_due_readychecks(unix_time_now()).await
+    }
+}
+
 impl LobbyRegistrationProvider {
     pub fn new(
         database_path: impl AsRef<Path>,
@@ -2084,6 +2097,14 @@ impl LobbyRegistrationProvider {
     #[must_use]
     pub fn curfew_lobby_display(&self) -> Arc<dyn CurfewLobbyDisplayPort> {
         Arc::new(CurfewLobbyDisplay {
+            handler: Arc::clone(&self.handler),
+        })
+    }
+
+    /// Let the ready-check sweep worker remove players who never confirmed.
+    #[must_use]
+    pub fn readycheck_sweep(&self) -> Arc<dyn ReadycheckSweepPort> {
+        Arc::new(ReadycheckSweep {
             handler: Arc::clone(&self.handler),
         })
     }
@@ -2362,17 +2383,11 @@ impl LobbyInteractionHandler {
                 } else {
                     "posted"
                 };
-                let mut content = format!(
+                let content = format!(
                     "✅ {} ready check {verb}! [View]({})",
                     kind.label(),
                     result.jump_url
                 );
-                if result.pruned_count != 0 {
-                    content.push_str(&format!(
-                        " Removed {} unconfirmed player(s); they can rejoin with `/join`.",
-                        result.pruned_count
-                    ));
-                }
                 followup_ephemeral(&responder, &content).await
             }
             Err(ReadycheckRunError::Policy(failure)) => {
@@ -2404,8 +2419,7 @@ impl LobbyInteractionHandler {
             .ok_or(ReadycheckRunError::Policy(
                 ReadycheckCommandFailure::NoLobby,
             ))?;
-        let (mut player_data, mut mentionable) =
-            self.state.classify_readycheck_players(&lobby).await;
+        let (player_data, mentionable) = self.state.classify_readycheck_players(&lobby).await;
         let existing_generation = self.state.readychecks.readycheck_generation(scope);
         let existing_message = if let Some(generation) = &existing_generation {
             match self
@@ -2427,17 +2441,6 @@ impl LobbyInteractionHandler {
         } else {
             ExistingMessageState::Missing
         };
-        let reserved_players = lobby
-            .players
-            .iter()
-            .copied()
-            .filter(|player_id| {
-                self.state
-                    .service
-                    .get_in_flight_lobby_kind_for_player(*player_id, scope.guild_id)
-                    == Some(scope.kind)
-            })
-            .collect();
         let plan = self
             .state
             .readychecks
@@ -2450,72 +2453,11 @@ impl LobbyInteractionHandler {
                     now: unix_time_now(),
                     confirm_invoker,
                     existing_message,
-                    reserved_players,
                     minimum_players: self.state.config.min_readycheck_players,
                 },
                 player_data.clone(),
             )
             .map_err(ReadycheckRunError::Policy)?;
-        if !plan.pruned_players.is_empty() {
-            let state = Arc::clone(&self.state);
-            let pruned = plan.pruned_players.clone();
-            let Some(thread_id) = lobby.message_ids.thread_id else {
-                if let Some(permit) = &plan.permit {
-                    self.state.readychecks.abort_publication(permit);
-                }
-                return Err(ReadycheckRunError::Policy(
-                    ReadycheckCommandFailure::NoThread,
-                ));
-            };
-            let persist_result = tokio::task::spawn_blocking(move || {
-                state
-                    .service
-                    .try_remove_players_from_lobby_with_readycheck_notice(&pruned, scope, thread_id)
-            })
-            .await;
-            let persisted = match persist_result {
-                Ok(Ok(persisted)) => persisted,
-                Ok(Err(error)) => {
-                    if let Some(permit) = &plan.permit {
-                        self.state.readychecks.abort_publication(permit);
-                    }
-                    return Err(ReadycheckRunError::Transport(error.to_string()));
-                }
-                Err(error) => {
-                    if let Some(permit) = &plan.permit {
-                        self.state.readychecks.abort_publication(permit);
-                    }
-                    return Err(ReadycheckRunError::Transport(error.to_string()));
-                }
-            };
-            if persisted != plan.pruned_players {
-                if let Some(permit) = &plan.permit {
-                    self.state.readychecks.abort_publication(permit);
-                }
-                self.state.sync_ready_lobby(scope);
-                return Err(ReadycheckRunError::Transport(
-                    "readycheck stale-prune persistence raced with lobby membership".to_owned(),
-                ));
-            }
-            if let Err(error) = self
-                .state
-                .publish_pending_readycheck_pruned_notices_for_scope(scope)
-                .await
-            {
-                if let Some(permit) = &plan.permit {
-                    self.state.readychecks.abort_publication(permit);
-                }
-                return Err(ReadycheckRunError::Transport(error));
-            }
-            self.state.sync_ready_lobby(scope);
-            let retained_players = self
-                .state
-                .service
-                .get_lobby(scope)
-                .map_or_else(BTreeSet::new, |lobby| lobby.players);
-            player_data.retain(|player_id, _| retained_players.contains(player_id));
-            mentionable.retain(|player_id| retained_players.contains(player_id));
-        }
         let result = self
             .execute_readycheck_plan(
                 plan,
@@ -2528,6 +2470,70 @@ impl LobbyInteractionHandler {
         self.state
             .notify_readycheck_launched(scope, &result.mention_ids);
         Ok(result)
+    }
+
+    /// Sweep every open lobby whose ready check has passed its deadline,
+    /// returning how many players were removed.
+    async fn sweep_due_readychecks(&self, now: f64) -> usize {
+        let mut removed = 0;
+        for lobby in self.state.service.open_lobbies() {
+            match self.sweep_due_readycheck(lobby.scope, now).await {
+                Ok(count) => removed += count,
+                Err(error) => {
+                    warn!(%error, scope = ?lobby.scope, "ready-check sweep failed; will retry");
+                }
+            }
+        }
+        removed
+    }
+
+    /// Remove the players who never confirmed a ready check whose deadline
+    /// has passed. Removal and its public notice commit together, and the
+    /// deadline is only disarmed afterwards, so a failure here is retried on
+    /// the next wake. Players reserved by an in-flight shuffle or draft stay.
+    async fn sweep_due_readycheck(&self, scope: LobbyScope, now: f64) -> Result<usize, String> {
+        let operation_lock = self.state.commands.scope_operation_lock(scope);
+        let _guard = operation_lock.lock().await;
+        self.state.sync_ready_lobby(scope);
+        let Some(sweep) = self.state.readychecks.due_sweep(scope, now) else {
+            return Ok(0);
+        };
+        let removed = if sweep.unconfirmed.is_empty() {
+            BTreeSet::new()
+        } else {
+            let state = Arc::clone(&self.state);
+            let unconfirmed = sweep.unconfirmed.clone();
+            tokio::task::spawn_blocking(move || {
+                state
+                    .service
+                    .try_remove_players_from_lobby_with_readycheck_notice(
+                        &unconfirmed,
+                        scope,
+                        sweep.channel_id,
+                    )
+            })
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?
+        };
+        self.state
+            .readychecks
+            .complete_sweep(scope, sweep.message_id);
+        if removed.is_empty() {
+            return Ok(0);
+        }
+        if let Err(error) = self
+            .state
+            .publish_pending_readycheck_pruned_notices_for_scope(scope)
+            .await
+        {
+            warn!(%error, ?scope, "ready-check sweep notice failed; retained for retry");
+        }
+        self.state.sync_readycheck_with_lobby(scope).await;
+        if let Err(error) = self.state.sync_lobby_display(scope).await {
+            warn!(%error, ?scope, "failed to refresh lobby display after ready-check sweep");
+        }
+        Ok(removed.len())
     }
 
     /// Runs the plan and guarantees the publication permit is released.
@@ -2606,12 +2612,6 @@ impl LobbyInteractionHandler {
                         )
                         .await;
                 }
-                ReadycheckTransportOperation::SyncLobbyDisplays { scope, .. } => {
-                    self.state
-                        .sync_lobby_display(*scope)
-                        .await
-                        .map_err(ReadycheckRunError::Transport)?;
-                }
                 _ => {}
             }
         }
@@ -2672,7 +2672,6 @@ impl LobbyInteractionHandler {
             return Ok(ReadycheckRunResult {
                 jump_url,
                 is_refresh: true,
-                pruned_count: 0,
                 mention_ids: plan
                     .mention_ids
                     .intersection(&mentionable)
@@ -2777,7 +2776,6 @@ impl LobbyInteractionHandler {
         Ok(ReadycheckRunResult {
             jump_url: receipt.jump_url,
             is_refresh: false,
-            pruned_count: plan.pruned_players.len(),
             mention_ids: plan
                 .mention_ids
                 .intersection(&mentionable)
@@ -4050,7 +4048,6 @@ fn membership_rate_limit_message(retry_after_seconds: u64) -> String {
 struct ReadycheckRunResult {
     jump_url: String,
     is_refresh: bool,
-    pruned_count: usize,
     mention_ids: BTreeSet<AppUserId>,
     readycheck_channel_id: AppChannelId,
 }
@@ -4141,7 +4138,7 @@ fn readycheck_embed(
     let mut embed = InteractionEmbed::titled(format!("{} Ready Check", kind.label()))
         .description(readycheck_description(player_data.len(), ready_threshold))
         .color(0x34_98_db)
-        .footer("React with ✅ to confirm you are ready");
+        .footer("React with ✅ within 5 minutes or be removed from the lobby");
     if !active.is_empty() {
         embed = embed.field(
             format!("✅ Likely Active ({})", active.len()),
