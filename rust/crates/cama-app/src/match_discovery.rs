@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cama_db::core_repositories::{
     MatchDiscoveryAttemptRecord as DbMatchDiscoveryAttemptRecord,
@@ -497,6 +497,10 @@ pub trait OpenDotaDiscoveryPort: Send + Sync {
         &self,
         match_id: ValveMatchId,
     ) -> Result<Option<OpenDotaMatchDetails>, DiscoveryPortError>;
+
+    /// Ask OpenDota to parse the match's replay. Lane and per-minute data
+    /// only exist once it has, and it does not parse every match unprompted.
+    fn request_parse(&self, match_id: ValveMatchId) -> Result<(), DiscoveryPortError>;
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -2232,6 +2236,18 @@ pub trait DraftEnrichmentPort: Send + Sync {
     ) -> Result<(), String>;
 }
 
+/// How long one parse request stands before the same match may be requested
+/// again.
+pub const PARSE_REQUEST_COOLDOWN: Duration = Duration::from_secs(60 * 60);
+
+/// OpenDota fills `lane_role` only from a parsed replay.
+fn replay_parsed(details: &OpenDotaMatchDetails) -> bool {
+    details
+        .players
+        .iter()
+        .any(|player| player.wrapped.lane_role.is_some())
+}
+
 pub struct MatchEnrichmentService<M, P, A, W, O> {
     match_repository: M,
     player_repository: P,
@@ -2240,6 +2256,9 @@ pub struct MatchEnrichmentService<M, P, A, W, O> {
     openskill: Option<O>,
     minimum_roster_matches: usize,
     draft_analysis: Option<Arc<dyn DraftEnrichmentPort>>,
+    /// When each match's parse was last requested, so the retries that follow
+    /// an enrichment do not each spend another ten-call parse request.
+    parse_requests: Mutex<BTreeMap<ValveMatchId, Instant>>,
 }
 
 impl<M, P, A, W, O> MatchEnrichmentService<M, P, A, W, O> {
@@ -2259,6 +2278,7 @@ impl<M, P, A, W, O> MatchEnrichmentService<M, P, A, W, O> {
             openskill,
             minimum_roster_matches: REQUIRED_DISCOVERY_ROSTER_MATCHES,
             draft_analysis: None,
+            parse_requests: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -2283,6 +2303,27 @@ where
     W: EnrichmentWritePort,
     O: OpenSkillEnrichmentPort,
 {
+    /// Request a replay parse unless one was requested within
+    /// [`PARSE_REQUEST_COOLDOWN`]. Best effort: the fetch that follows a later
+    /// retry or refresh is what picks the parsed data up.
+    fn request_parse_once(&self, match_id: ValveMatchId) {
+        {
+            let mut requests = self
+                .parse_requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let now = Instant::now();
+            if requests
+                .get(&match_id)
+                .is_some_and(|requested| now.duration_since(*requested) < PARSE_REQUEST_COOLDOWN)
+            {
+                return;
+            }
+            requests.insert(match_id, now);
+        }
+        let _ = self.opendota.request_parse(match_id);
+    }
+
     pub fn enrich_match(&self, request: EnrichMatchRequest) -> MatchEnrichmentServiceResult {
         let normalized_guild = request.guild_id.unwrap_or(GuildId(0));
         match self
@@ -2320,7 +2361,13 @@ where
         };
         let fetched = match request.opendota_match_data {
             Some(details) => Ok(Some(details)),
-            None => self.opendota.match_details(request.valve_match_id),
+            None => {
+                let fetched = self.opendota.match_details(request.valve_match_id);
+                if !matches!(&fetched, Ok(Some(details)) if replay_parsed(details)) {
+                    self.request_parse_once(request.valve_match_id);
+                }
+                fetched
+            }
         };
         let details = if let Some(gc) = gc {
             let previous = match self

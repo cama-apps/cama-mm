@@ -1138,6 +1138,7 @@ async fn run_serve() -> ExitCode {
         discord_transport.clone(),
     );
     let readycheck_sweep_worker = readycheck_sweep_worker_spec(lobby_provider.readycheck_sweep());
+    let parsed_refresh_worker = enrichment_provider.parsed_refresh_worker();
     let match_setup_recovery_worker = match_provider.setup_recovery_worker();
     let survey_recovery_worker = survey_provider.recovery_worker_spec();
     let mafia_phase_worker = mafia_provider.worker_spec(discord_transport.clone());
@@ -1205,7 +1206,8 @@ async fn run_serve() -> ExitCode {
     .with_worker(survey_recovery_worker)
     .with_worker(match_setup_recovery_worker)
     .with_worker(curfew_sweep_worker)
-    .with_worker(readycheck_sweep_worker);
+    .with_worker(readycheck_sweep_worker)
+    .with_worker(parsed_refresh_worker);
     if let Some(first_game_pool_worker) = first_game_pool_worker {
         runtime = runtime.with_worker(first_game_pool_worker);
     }

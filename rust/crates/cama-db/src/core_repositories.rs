@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cama_db_core::profit_deductions::OwnedProfitDeductionPolicy;
 use cama_domain::player::{OPENSKILL_DISPLAY_SCALE, Player};
@@ -2847,6 +2847,49 @@ impl MatchRepository {
             .query_map(
                 params![Self::normalize_guild_id(guild_id), limit as i64],
                 |row| Ok((row.get(0)?, row.get(1)?)),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Recently recorded matches, in every guild, still missing the parsed
+    /// lane or farm data positions are derived from, as
+    /// `(guild_id, match_id, valve_match_id)`.
+    ///
+    /// This is the automatic counterpart of
+    /// [`Self::matches_missing_parsed_stats`], so it is bounded twice over:
+    /// by age, because OpenDota can only parse a replay while Valve still
+    /// serves it, and by attempts, so a match that never parses stops costing
+    /// requests. Anything outside those bounds is left to the manual refresh.
+    pub fn recent_matches_missing_role_inputs(
+        &self,
+        max_age: Duration,
+        max_attempts: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, i64, i64)>, CoreRepositoryError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT m.guild_id, m.match_id, m.valve_match_id
+               FROM matches AS m
+              WHERE m.valve_match_id IS NOT NULL
+                AND m.parsed_refresh_attempts < ?1
+                AND datetime(m.match_date) >= datetime('now', ?2)
+                AND EXISTS (
+                    SELECT 1 FROM match_participants AS mp
+                     WHERE mp.match_id = m.match_id AND mp.guild_id = m.guild_id
+                       AND (mp.lane_role IS NULL OR mp.last_hits_at_10 IS NULL)
+                )
+              ORDER BY m.parsed_refresh_attempts ASC, m.match_id ASC
+              LIMIT ?3",
+        )?;
+        let rows = statement
+            .query_map(
+                params![
+                    max_attempts,
+                    format!("-{} seconds", max_age.as_secs()),
+                    limit as i64
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
@@ -6320,6 +6363,65 @@ mod tests {
             .matches_missing_parsed_stats(Some(TEST_GUILD_ID), 100)
             .expect("query");
         assert_eq!(candidates, vec![(stale, 222)]);
+    }
+
+    #[test]
+    fn test_recent_matches_missing_role_inputs_is_bounded_by_age_and_attempts() {
+        let fixture = Fixture::new();
+        let parsed = seed_enriched_match(&fixture, STANDARD_LANES);
+        let fresh = seed_enriched_match(&fixture, STANDARD_LANES);
+        let expired = seed_enriched_match(&fixture, STANDARD_LANES);
+        let exhausted = seed_enriched_match(&fixture, STANDARD_LANES);
+        let connection = fixture.connection();
+        for (match_id, valve) in [
+            (parsed, 111_i64),
+            (fresh, 222),
+            (expired, 333),
+            (exhausted, 444),
+        ] {
+            connection
+                .execute(
+                    "UPDATE matches SET valve_match_id = ?1 WHERE match_id = ?2",
+                    params![valve, match_id],
+                )
+                .expect("link valve id");
+        }
+        connection
+            .execute(
+                "UPDATE match_participants SET last_hits_at_10 = 100 WHERE match_id = ?1",
+                params![parsed],
+            )
+            .expect("parsed has farm data");
+        connection
+            .execute(
+                "UPDATE matches SET match_date = datetime('now', '-8 days') WHERE match_id = ?1",
+                params![expired],
+            )
+            .expect("age the expired match");
+        connection
+            .execute(
+                "UPDATE matches SET parsed_refresh_attempts = 3 WHERE match_id = ?1",
+                params![exhausted],
+            )
+            .expect("exhaust attempts");
+        drop(connection);
+        let week = Duration::from_secs(7 * 24 * 60 * 60);
+
+        assert_eq!(
+            fixture
+                .matches
+                .recent_matches_missing_role_inputs(week, 3, 100)
+                .expect("query"),
+            vec![(TEST_GUILD_ID, fresh, 222)]
+        );
+        assert_eq!(
+            fixture
+                .matches
+                .recent_matches_missing_role_inputs(week, 4, 1)
+                .expect("query"),
+            vec![(TEST_GUILD_ID, fresh, 222)],
+            "untried matches come first"
+        );
     }
 
     #[test]
