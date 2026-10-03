@@ -1,7 +1,7 @@
 //! Production worker that removes lobby members who have not confirmed a
-//! ready check five minutes after it was posted or refreshed. The policy and
-//! the removal live in [`crate::lobby_provider`]; this worker only supplies
-//! the wake-up.
+//! ready check five minutes after it was posted or refreshed, and retires
+//! that ready check. The policy and the removal live in
+//! [`crate::lobby_provider`]; this worker only supplies the wake-up.
 
 use std::sync::Arc;
 use std::time::Duration;

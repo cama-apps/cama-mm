@@ -1170,16 +1170,42 @@ fn test_due_sweep_only_names_live_lobby_members() {
 }
 
 #[test]
-fn test_completed_sweep_does_not_fire_again() {
+fn test_completed_sweep_retires_the_ready_check() {
     let service = staleness_service([1, 2]);
     publish_new(&service, 1_000.0, data([1, 2]));
 
-    assert!(!service.complete_sweep(scope(), MessageId(999)));
+    assert_eq!(service.complete_sweep(scope(), MessageId(999)), None);
     assert!(service.due_sweep(scope(), 1_300.0).is_some());
-    assert!(service.complete_sweep(scope(), MESSAGE));
+    let retired = service
+        .complete_sweep(scope(), MESSAGE)
+        .expect("the swept generation is handed back for its final repaint");
+    assert_eq!(retired.message_id, MESSAGE);
+    assert_eq!(
+        retired.reacted,
+        BTreeMap::from([(player(1), "<@1>".to_owned())])
+    );
 
+    assert_eq!(service.readycheck_generation(scope()), None);
+    assert_eq!(service.confirmation_snapshot(scope()), None);
     assert_eq!(service.due_sweep(scope(), 9_000.0), None);
-    assert!(!service.complete_sweep(scope(), MESSAGE));
+    assert_eq!(service.complete_sweep(scope(), MESSAGE), None);
+}
+
+#[test]
+fn test_retired_ready_check_ignores_reactions() {
+    let service = staleness_service([1, 2]);
+    publish_new(&service, 1_000.0, data([1, 2]));
+    assert!(service.complete_sweep(scope(), MESSAGE).is_some());
+
+    assert!(!service.add_readycheck_reaction(scope(), player(2), "<@2>", Some(MESSAGE)));
+    assert!(!service.remove_readycheck_reaction(scope(), player(1), Some(MESSAGE)));
+    assert_eq!(
+        service
+            .lobby_readycheck_snapshot(scope())
+            .expect("open lobby")
+            .readycheck,
+        None
+    );
 }
 
 #[test]
@@ -1200,17 +1226,37 @@ fn test_refresh_restarts_the_sweep_clock() {
 }
 
 #[test]
-fn test_refresh_rearms_a_completed_sweep() {
+fn test_readycheck_after_a_completed_sweep_posts_a_new_one() {
     let service = staleness_service([1, 2]);
     publish_new(&service, 1_000.0, data([1, 2]));
-    assert!(service.complete_sweep(scope(), MESSAGE));
-    let mut refresh = request(1_400.0);
-    refresh.existing_message = ExistingMessageState::Available;
-    service
-        .prepare_command(refresh, data([1, 2]))
-        .expect("fresh refresh");
+    assert!(service.complete_sweep(scope(), MESSAGE).is_some());
+    let mut repeat = request(1_400.0);
+    repeat.existing_message = ExistingMessageState::Available;
 
-    assert!(service.due_sweep(scope(), 1_700.0).is_some());
+    let plan = service
+        .prepare_command(repeat, data([1, 2]))
+        .expect("a retired ready check cannot be refreshed");
+
+    assert_eq!(plan.mode, PublicationMode::New);
+    assert!(matches!(
+        plan.transport.operations.first(),
+        Some(ReadycheckTransportOperation::PostReadycheck { .. })
+    ));
+    assert_eq!(
+        service.commit_publication(
+            plan.permit.expect("new publication permit"),
+            MessageId(222),
+            CHANNEL,
+            data([1, 2]),
+            1_400.0,
+        ),
+        CommitPublicationResult::Applied
+    );
+    assert!(
+        service
+            .due_sweep(scope(), 1_400.0 + READYCHECK_SWEEP_SECONDS)
+            .is_some()
+    );
 }
 
 #[test]

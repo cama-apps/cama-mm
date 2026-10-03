@@ -2459,16 +2459,14 @@ async fn readycheck_sweep_publicly_names_removed_players_in_the_lobby_thread() {
         notice.message.allowed_mentions,
         DiscordAllowedMentions::Users(BTreeSet::from([20, 30]))
     );
-    let generation = provider
-        .handler
-        .state
-        .readychecks
-        .readycheck_generation(scope)
-        .expect("ready check remains live");
     assert_eq!(
-        generation.lobby_ids,
-        BTreeSet::from([AppUserId(10)]),
-        "swept players must leave the ready-check roster"
+        provider
+            .handler
+            .state
+            .readychecks
+            .readycheck_generation(scope),
+        None,
+        "the sweep retires the ready check"
     );
     assert!(
         transport.edit_count() > edits_before,
@@ -2559,6 +2557,187 @@ async fn readycheck_sweep_keeps_players_reserved_by_an_in_flight_match() {
     assert_eq!(
         lobby_snapshot(&provider, LobbyKind::Open).players,
         BTreeSet::from([AppUserId(10), AppUserId(20)])
+    );
+}
+
+#[tokio::test]
+async fn swept_readycheck_expires_and_stops_updating() {
+    let database = database_with_players(&[(10, "Creator"), (20, "Away One"), (30, "Away Two")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = unconfirmed_readycheck_fixture(&database, transport.clone()).await;
+    let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
+    let thread_id = to_u64(
+        lobby_snapshot(&provider, LobbyKind::Open)
+            .message_ids
+            .thread_id
+            .expect("lobby thread")
+            .0,
+    )
+    .expect("Discord lobby thread");
+    let readycheck_edits = || {
+        transport
+            .state
+            .lock()
+            .expect("transport state")
+            .edits
+            .iter()
+            .filter(|(channel, message, _)| *channel == thread_id && *message == 5_000)
+            .map(|(_, _, message)| message.response.clone())
+            .collect::<Vec<_>>()
+    };
+
+    provider
+        .handler
+        .sweep_due_readychecks(unix_time_now())
+        .await;
+
+    let repaints = readycheck_edits();
+    assert_eq!(repaints.len(), 1, "the sweep repaints the ready check once");
+    let embed = &repaints[0].embeds[0];
+    assert_eq!(
+        embed.description.as_deref(),
+        Some("⌛ This ready check has expired. Run `/readycheck` to start a new one.")
+    );
+    assert_eq!(
+        embed.footer.as_deref(),
+        Some("Expired — reactions no longer count")
+    );
+    assert_eq!(
+        embed
+            .fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        ["✅ Confirmed Ready (1)"],
+        "an expired ready check lists only the players who confirmed"
+    );
+
+    // A late joiner and a late reaction must leave the expired message alone.
+    join_via_button(&provider, LobbyKind::Open, 20, "Away One").await;
+    for kind in [RawReactionKind::Add, RawReactionKind::Remove] {
+        provider
+            .raw_reaction_observer()
+            .observe(RawReactionEvent {
+                emoji: RawReactionEmoji::unicode(READY_EMOJI),
+                channel_id: thread_id,
+                ..raw_radio(kind, 5_000, 20, "Away One")
+            })
+            .await
+            .expect("reaction on an expired ready check is inert");
+    }
+    assert_eq!(
+        readycheck_edits().len(),
+        1,
+        "an expired ready check must stop updating"
+    );
+    assert_eq!(
+        provider
+            .handler
+            .state
+            .readychecks
+            .readycheck_generation(scope),
+        None
+    );
+    assert_eq!(
+        provider
+            .match_lobby_port()
+            .snapshot(42, LobbyKind::Open)
+            .expect("lobby snapshot")
+            .confirmed_player_ids,
+        None,
+        "an expired ready check no longer gates the shuffle roster"
+    );
+}
+
+#[tokio::test]
+async fn readycheck_after_expiry_posts_a_new_message() {
+    let database = database_with_players(&[(10, "Creator"), (20, "Away One"), (30, "Away Two")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = unconfirmed_readycheck_fixture(&database, transport.clone()).await;
+    let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
+    provider
+        .handler
+        .sweep_due_readychecks(unix_time_now())
+        .await;
+
+    let responder = dispatch_command(
+        &provider,
+        "readycheck",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+
+    let replies = responder
+        .captured
+        .lock()
+        .expect("responses")
+        .followups
+        .iter()
+        .map(|response| response.content.clone())
+        .collect::<Vec<_>>();
+    assert!(
+        replies
+            .iter()
+            .any(|content| content.contains("All You Can Feed ready check posted!")),
+        "an expired ready check is replaced, not refreshed: {replies:?}"
+    );
+    let generation = provider
+        .handler
+        .state
+        .readychecks
+        .readycheck_generation(scope)
+        .expect("new ready check");
+    assert_ne!(generation.message_id, AppMessageId(5_000));
+    assert!(
+        transport
+            .state
+            .lock()
+            .expect("transport state")
+            .deleted
+            .is_empty(),
+        "the expired ready check stays in the thread as a record"
+    );
+}
+
+#[tokio::test]
+async fn fully_confirmed_readycheck_still_expires_at_the_deadline() {
+    let database = database_with_players(&[(10, "Creator"), (20, "Away One"), (30, "Away Two")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = unconfirmed_readycheck_fixture(&database, transport.clone()).await;
+    let scope = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
+    for player_id in [20, 30] {
+        assert!(provider.handler.state.readychecks.add_readycheck_reaction(
+            scope,
+            AppUserId(player_id),
+            format!("<@{player_id}>"),
+            None,
+        ));
+    }
+    let edits_before = transport.edit_count();
+
+    assert_eq!(
+        provider
+            .handler
+            .sweep_due_readychecks(unix_time_now())
+            .await,
+        0
+    );
+
+    assert_eq!(lobby_snapshot(&provider, LobbyKind::Open).players.len(), 3);
+    assert_eq!(
+        provider
+            .handler
+            .state
+            .readychecks
+            .readycheck_generation(scope),
+        None
+    );
+    assert_eq!(
+        transport.edit_count(),
+        edits_before + 1,
+        "only the expired ready check is repainted when nobody is removed"
     );
 }
 

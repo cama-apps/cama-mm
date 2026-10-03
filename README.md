@@ -142,7 +142,9 @@ Leave every matchmaking lobby you're queued in. A lobby whose shuffle or draft h
 started keeps you until it finishes.
 
 #### `/readycheck`
-Check lobby players' online status and ping those who are away.
+Check lobby players' online status and ping those who are away. Players who have not
+confirmed after five minutes are removed from the lobby and the ready check expires; run
+`/readycheck` again to start a new one.
 
 **Options:**
 - `lobby` (optional): Which lobby to check (defaults to the lobby you're in)
