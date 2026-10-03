@@ -22,7 +22,9 @@ pub const MINIMUM_READYCHECK_PLAYERS: usize = 10;
 pub const READYCHECK_COOLDOWN_SECONDS: f64 = 120.0;
 pub const READYCHECK_STALE_SECONDS: f64 = 30.0 * 60.0;
 /// Lobby members still unconfirmed this long after a `/readycheck` (a new
-/// post or a refresh) are swept from the lobby.
+/// post or a refresh) are swept from the lobby. The sweep also retires the
+/// ready check: it stops tracking reactions and roster changes, and the next
+/// `/readycheck` posts a new one.
 pub const READYCHECK_SWEEP_SECONDS: f64 = 5.0 * 60.0;
 pub const READY_LOBBY_RECOMMENDATION: &str = "Run `/readycheck` before `/shuffle`.";
 
@@ -343,8 +345,8 @@ pub struct ReadycheckGeneration {
     pub reacted: BTreeMap<UserId, String>,
     pub declined: BTreeSet<UserId>,
     pub created_at: f64,
-    /// When the unconfirmed sweep falls due; `None` once it has run.
-    pub sweep_due_at: Option<f64>,
+    /// When the unconfirmed sweep falls due and retires this generation.
+    pub sweep_due_at: f64,
     pub completion_notified: bool,
 }
 
@@ -597,7 +599,7 @@ impl ReadycheckService {
             reacted: initial_reacted,
             declined: BTreeSet::new(),
             created_at,
-            sweep_due_at: Some(created_at + READYCHECK_SWEEP_SECONDS),
+            sweep_due_at: created_at + READYCHECK_SWEEP_SECONDS,
             completion_notified: false,
         };
         let mut state = self.lock();
@@ -884,7 +886,7 @@ impl ReadycheckService {
                 .collect::<BTreeSet<_>>();
             generation.lobby_ids = live_ids.clone();
             generation.player_data = player_data;
-            generation.sweep_due_at = Some(request.now + READYCHECK_SWEEP_SECONDS);
+            generation.sweep_due_at = request.now + READYCHECK_SWEEP_SECONDS;
             generation
                 .reacted
                 .retain(|player_id, _| live_ids.contains(player_id));
@@ -1039,7 +1041,7 @@ impl ReadycheckService {
             reacted,
             declined: BTreeSet::new(),
             created_at,
-            sweep_due_at: Some(created_at + READYCHECK_SWEEP_SECONDS),
+            sweep_due_at: created_at + READYCHECK_SWEEP_SECONDS,
             completion_notified: false,
         });
         scoped.pending_publication = None;
@@ -1047,7 +1049,7 @@ impl ReadycheckService {
     }
 
     /// The sweep owed by this scope's ready check, once its deadline has
-    /// passed. The deadline stays armed until [`Self::complete_sweep`] so a
+    /// passed. The ready check stays live until [`Self::complete_sweep`] so a
     /// failed removal is retried.
     #[must_use]
     pub fn due_sweep(&self, scope: LobbyScope, now: f64) -> Option<ReadycheckSweep> {
@@ -1058,7 +1060,7 @@ impl ReadycheckService {
             .as_ref()
             .filter(|lobby| lobby.status == LobbyStatus::Open)?;
         let generation = scoped.readycheck.as_ref()?;
-        if generation.sweep_due_at.is_none_or(|due_at| now < due_at) {
+        if now < generation.sweep_due_at {
             return None;
         }
         Some(ReadycheckSweep {
@@ -1073,20 +1075,19 @@ impl ReadycheckService {
         })
     }
 
-    /// Disarm the sweep deadline of the generation it was read from.
-    pub fn complete_sweep(&self, scope: LobbyScope, expected_message_id: MessageId) -> bool {
+    /// Retire the generation the sweep was read from, returning it for its
+    /// final repaint. A retired ready check no longer accepts reactions or
+    /// roster updates and cannot be refreshed.
+    pub fn complete_sweep(
+        &self,
+        scope: LobbyScope,
+        expected_message_id: MessageId,
+    ) -> Option<ReadycheckGeneration> {
         let mut state = self.lock();
-        let Some(generation) = state
-            .scopes
-            .get_mut(&scope)
-            .and_then(|scoped| scoped.readycheck.as_mut())
-        else {
-            return false;
-        };
-        if generation.message_id != expected_message_id {
-            return false;
-        }
-        generation.sweep_due_at.take().is_some()
+        let scoped = state.scopes.get_mut(&scope)?;
+        scoped
+            .readycheck
+            .take_if(|generation| generation.message_id == expected_message_id)
     }
 
     pub fn abort_publication(&self, permit: &ReadycheckPermit) -> bool {
