@@ -44,6 +44,107 @@ fn dota_tv_delay_enum_uses_current_lobby_wire_values() {
     assert_eq!(tv_delay_seconds(5), None);
 }
 
+#[tokio::test]
+async fn faster_polling_preserves_the_forty_five_second_freshness_window() {
+    let feed = DotaLiveFeed::new(&config(None)).unwrap();
+    feed.publish_match(7, 8, 123, None, 5, 3, true, vec![1])
+        .await;
+    let mut snapshot = normalize_realtime_stats(
+        &json!({"match_id":123,"game_time":90,"players":[{"account_id":1}]}),
+        7,
+        8,
+        123,
+        1000,
+    )
+    .unwrap();
+    snapshot.fetched_at = 1000;
+    feed.store_snapshot((7, 8), snapshot);
+    for now in [1005, 1016, 1030, 1045] {
+        assert!(
+            !feed.snapshot_at(7, 8, now).unwrap().stale,
+            "sample prematurely stale at {now}"
+        );
+    }
+    assert!(feed.snapshot_at(7, 8, 1046).unwrap().stale);
+    feed.finish_match(7, 8).await;
+    assert!(feed.snapshot_at(7, 8, 1005).unwrap().stale);
+}
+
+#[test]
+fn upstream_retry_after_accepts_seconds_and_http_dates_with_safe_fallback() {
+    assert_eq!(retry_deadline(Some("120"), 1000), 1120);
+    assert_eq!(
+        retry_deadline(Some("Thu, 01 Jan 1970 00:17:40 GMT"), 1000),
+        1060
+    );
+    for header in [
+        None,
+        Some("invalid"),
+        Some("0"),
+        Some("-1"),
+        Some("Thu, 01 Jan 1970 00:00:00 GMT"),
+    ] {
+        assert_eq!(retry_deadline(header, 1000), 1060);
+    }
+}
+
+#[tokio::test]
+async fn upstream_cooldown_covers_fallbacks_and_feed_clones_then_resumes() {
+    for status in [429, 500, 502, 503, 504] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let feed = DotaLiveFeed::new_with_upstream_base(
+            &config(None),
+            format!("http://{}", listener.local_addr().unwrap()),
+        )
+        .unwrap();
+        for (pending, match_id) in [(8, 123), (9, 124)] {
+            feed.publish_match(7, pending, match_id, Some(99), 5, 3, true, vec![1])
+                .await;
+            let mut snapshot = normalize_realtime_stats(
+                &json!({"match_id":match_id,"game_time":90,"players":[{"account_id":1}]}),
+                7,
+                pending,
+                match_id,
+                1000,
+            )
+            .unwrap();
+            snapshot.fetched_at = 1000;
+            feed.store_snapshot((7, pending), snapshot);
+        }
+        let server = tokio::spawn(async move {
+            for (status, headers) in [(status, "Retry-After: 120\r\n"), (200, "")] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let read = socket.read(&mut request).await.unwrap();
+                assert!(read > 0);
+                let response = format!(
+                    "HTTP/1.1 {status} Test\r\n{headers}Content-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        feed.poll_once().await;
+        assert!(feed.upstream_retry_at.load(Ordering::Relaxed) > now_unix());
+        let clone = feed.as_ref().clone();
+        assert_eq!(
+            clone.fetch_json("league-fallback", &[]).await,
+            Err(UpstreamError::RetryDeferred)
+        );
+        assert_eq!(
+            feed.fetch_json("another-match", &[]).await,
+            Err(UpstreamError::RetryDeferred)
+        );
+        feed.poll_once().await;
+        for pending in [8, 9] {
+            assert!(!feed.snapshot_at(7, pending, 1045).unwrap().stale);
+            assert!(feed.snapshot_at(7, pending, 1046).unwrap().stale);
+        }
+        feed.upstream_retry_at.store(0, Ordering::Relaxed);
+        assert_eq!(clone.fetch_json("realtime", &[]).await.unwrap(), json!({}));
+        server.await.unwrap();
+    }
+}
+
 #[test]
 fn parses_playable_gsi_game_states_from_symbolic_and_raw_values() {
     let cases = [
@@ -62,6 +163,35 @@ fn parses_playable_gsi_game_states_from_symbolic_and_raw_values() {
         let map = payload.as_object().expect("state object");
         assert_eq!(parse_gsi_game_state(map), Some(expected));
     }
+}
+
+#[tokio::test]
+async fn network_failure_keeps_the_old_retry_spacing_instead_of_five_second_retries() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let feed = DotaLiveFeed::new_with_upstream_base(
+        &config(None),
+        format!("http://{}", listener.local_addr().unwrap()),
+    )
+    .unwrap();
+    feed.publish_match(7, 8, 123, Some(99), 5, 3, true, vec![1])
+        .await;
+    let server = tokio::spawn(async move {
+        for _ in 0..2 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let read = socket.read(&mut request).await.unwrap();
+            assert!(read > 0);
+            // Both realtime and league connections fail without a response.
+        }
+    });
+    let before = now_unix();
+    feed.poll_once().await;
+    server.await.unwrap();
+    assert!(feed.upstream_retry_at.load(Ordering::Relaxed) >= before + 15);
+    assert_eq!(
+        feed.fetch_json("league-fallback", &[]).await,
+        Err(UpstreamError::RetryDeferred)
+    );
 }
 
 #[test]
@@ -1186,6 +1316,30 @@ fn live_map_preserves_world_positions_death_timers_and_mask_identities() {
     assert_eq!(map.buildings[1].name, "top tier 2 tower");
     assert!(map.buildings.iter().all(|b| b.x.is_none() && b.y.is_none()));
     assert!(map.roshan_respawn_seconds.is_none());
+}
+
+#[test]
+fn live_map_scores_are_observed_and_old_recap_frames_remain_readable() {
+    let mut payload = positioned_roster_payload();
+    payload["teams"][0]["score"] = json!(12);
+    payload["teams"][1]["score"] = json!(9);
+    let map = normalize_realtime_stats(&payload, 7, 1, 123, 200)
+        .unwrap()
+        .map_frame
+        .unwrap();
+    assert_eq!((map.radiant_score, map.dire_score), (Some(12), Some(9)));
+    payload["teams"][1]["score"] = Value::Null;
+    let map = normalize_realtime_stats(&payload, 7, 1, 123, 200)
+        .unwrap()
+        .map_frame
+        .unwrap();
+    assert_eq!((map.radiant_score, map.dire_score), (Some(12), None));
+    let legacy: LiveMapFrame = serde_json::from_value(json!({
+        "match_id": 123, "game_time": 100, "heroes": [],
+        "buildings": [], "roshan_respawn_seconds": null
+    }))
+    .unwrap();
+    assert_eq!((legacy.radiant_score, legacy.dire_score), (None, None));
 }
 
 #[test]

@@ -3,8 +3,6 @@
 //! This does not connect to Steam, Discord, or any HTTP service.
 #[path = "../../cama-runtime/src/dota_spectator_recap/encoder.rs"]
 mod recap_encoder;
-#[path = "../../cama-runtime/src/dota_spectator_recap/png.rs"]
-mod recap_png;
 
 use cama_app::pet_assets::{RasterImage, decode_png_raster};
 use cama_runtime_engine::{
@@ -328,7 +326,7 @@ fn generate_recap(directory: &Path, output: &Path) -> Result<(), String> {
     for (index, sample) in samples.iter().enumerate() {
         // Only one rendered screenshot is resident at a time. Temporary files
         // disappear even if encoding fails; no source capture is modified.
-        let png = recap_png::compress(&render_map(&sample.map)?)?;
+        let png = render_map(&sample.map)?;
         archive_bytes += png.len() as u64;
         let path = temporary.path().join(format!("frame-{index:06}.png"));
         fs::write(&path, png).map_err(|error| error.to_string())?;
@@ -396,6 +394,8 @@ mod tests {
             map: LiveMapFrame {
                 match_id,
                 game_time: clock,
+                radiant_score: None,
+                dire_score: None,
                 radiant_net_worth: None,
                 dire_net_worth: None,
                 heroes: vec![],

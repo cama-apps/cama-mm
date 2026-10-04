@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -30,7 +31,10 @@ use crate::{BackgroundWorker, BackgroundWorkerSpec, WorkerContext};
 
 /// Valve's API is intentionally sampled at a modest fixed rate.  Viewer
 /// traffic never changes this cadence or creates another upstream request.
-pub const DOTA_LIVE_POLL_INTERVAL: Duration = Duration::from_secs(15);
+pub const DOTA_LIVE_POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// Preserve the feed's tolerance of delayed responses independently of how
+/// often we poll. Faster map refreshes must not shorten commentary/recap coverage.
+const DOTA_LIVE_FRESHNESS_SECONDS: i64 = 45;
 /// Maximum accepted upstream or GSI JSON body size.
 pub const DOTA_LIVE_MAX_BODY_BYTES: usize = 1_048_576;
 /// Maximum number of match registrations retained by the in-memory feed.
@@ -38,6 +42,8 @@ pub const DOTA_LIVE_MAX_MATCHES: usize = 100;
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_UPSTREAM_BASE: &str = "https://api.steampowered.com";
 const GSI_FRESHNESS_SECONDS: i64 = 30;
+const UPSTREAM_BACKOFF_SECONDS: i64 = 60;
+const UPSTREAM_NETWORK_BACKOFF_SECONDS: i64 = 15;
 
 mod poll_observation;
 
@@ -105,6 +111,10 @@ pub struct LivePlayerSnapshot {
 pub struct LiveMapFrame {
     pub match_id: u64,
     pub game_time: i64,
+    #[serde(default)]
+    pub radiant_score: Option<i64>,
+    #[serde(default)]
+    pub dire_score: Option<i64>,
     #[serde(default)]
     pub radiant_net_worth: Option<i64>,
     #[serde(default)]
@@ -243,6 +253,7 @@ pub struct DotaLiveFeed {
     live_bind: Option<SocketAddr>,
     configured_delay_seconds: Option<i64>,
     matches: Arc<RwLock<BTreeMap<MatchKey, MatchRegistration>>>,
+    upstream_retry_at: Arc<AtomicI64>,
 }
 
 #[derive(Debug, Error, Eq, PartialEq)]
@@ -269,6 +280,8 @@ enum UpstreamError {
     BodyTooLarge,
     #[error("live source returned invalid JSON")]
     InvalidJson,
+    #[error("live source retry deferred after upstream rate limit or outage")]
+    RetryDeferred,
 }
 
 impl DotaLiveFeed {
@@ -308,6 +321,7 @@ impl DotaLiveFeed {
             live_bind: config.live_bind,
             configured_delay_seconds: tv_delay_seconds(config.tv_delay),
             matches: Arc::new(RwLock::new(BTreeMap::new())),
+            upstream_retry_at: Default::default(),
         }))
     }
 
@@ -439,6 +453,15 @@ impl DotaLiveFeed {
     /// Read the cached snapshot without making a network request.
     #[must_use]
     pub fn snapshot(&self, guild_id: i64, pending_match_id: i64) -> Option<LiveMatchSnapshot> {
+        self.snapshot_at(guild_id, pending_match_id, now_unix())
+    }
+
+    fn snapshot_at(
+        &self,
+        guild_id: i64,
+        pending_match_id: i64,
+        now: i64,
+    ) -> Option<LiveMatchSnapshot> {
         let matches = self.matches.read().ok()?;
         let registration = matches.get(&(guild_id, pending_match_id))?;
         if !registration.betting_closed {
@@ -446,9 +469,7 @@ impl DotaLiveFeed {
         }
         let mut snapshot = registration.snapshot.clone()?;
         snapshot.stale |= !registration.active;
-        if now_unix().saturating_sub(snapshot.fetched_at)
-            > i64::try_from(DOTA_LIVE_POLL_INTERVAL.as_secs().saturating_mul(3)).unwrap_or(i64::MAX)
-        {
+        if now.saturating_sub(snapshot.fetched_at) > DOTA_LIVE_FRESHNESS_SECONDS {
             snapshot.stale = true;
         }
         Some(snapshot)
@@ -528,12 +549,27 @@ impl DotaLiveFeed {
 
     /// Poll every currently active registration once.  This is public for a
     /// deterministic startup/recovery check and for tests; the worker calls
-    /// it at the configured 15-second cadence.
+    /// it at the configured five-second cadence.
     pub async fn poll_once(&self) {
         let targets = self.poll_targets();
         for target in targets {
             match self.fetch_target(&target).await {
                 Ok(Some(snapshot)) => self.store_snapshot(target.key(), snapshot),
+                // A cooldown is not evidence that a cached observation became
+                // invalid. Let it age through the independent freshness window,
+                // and stop before trying any other match with the shared key.
+                Err(UpstreamError::RetryDeferred | UpstreamError::HttpStatus(429 | 500..=599)) => {
+                    break;
+                }
+                Err(UpstreamError::Timeout | UpstreamError::Unavailable) => {
+                    // Give the independent league fallback a chance first.
+                    // Only a failed combined fetch slows the shared poller.
+                    self.upstream_retry_at.fetch_max(
+                        now_unix().saturating_add(UPSTREAM_NETWORK_BACKOFF_SECONDS),
+                        Ordering::Relaxed,
+                    );
+                    break;
+                }
                 Ok(None) | Err(_) => self.mark_stale(target.key()),
             }
         }
@@ -663,6 +699,11 @@ impl DotaLiveFeed {
         endpoint: &str,
         query: &[(&str, &str)],
     ) -> Result<Value, UpstreamError> {
+        // One cooldown covers both endpoints and all matches sharing this feed,
+        // so a fallback request cannot immediately bypass Valve's Retry-After.
+        if self.upstream_retry_at.load(Ordering::Relaxed) > now_unix() {
+            return Err(UpstreamError::RetryDeferred);
+        }
         let response = self
             .client
             .get(format!("{}/{endpoint}", self.upstream_base))
@@ -677,6 +718,19 @@ impl DotaLiveFeed {
                     UpstreamError::Unavailable
                 }
             })?;
+        if response.status().as_u16() == 429 || response.status().is_server_error() {
+            let now = now_unix();
+            self.upstream_retry_at.fetch_max(
+                retry_deadline(
+                    response
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|value| value.to_str().ok()),
+                    now,
+                ),
+                Ordering::Relaxed,
+            );
+        }
         if !response.status().is_success() {
             return Err(UpstreamError::HttpStatus(response.status().as_u16()));
         }
@@ -706,8 +760,28 @@ impl DotaLiveFeed {
                 .poll_observation
                 .observe(source, &status, now_unix())
         {
-            tracing::info!(guild_id = target.guild_id, pending_match_id = target.pending_match_id,
-                match_id = target.match_id, source = source.as_str(), %status, "Dota live polling status");
+            // Normal poll health is useful while diagnosing the feed, but it
+            // is too chatty for the default production log level. Upstream
+            // failures remain visible as warnings; lifecycle transitions such
+            // as validated gameplay start continue to use info below.
+            match result {
+                Ok(_) => tracing::debug!(
+                    guild_id = target.guild_id,
+                    pending_match_id = target.pending_match_id,
+                    match_id = target.match_id,
+                    source = source.as_str(),
+                    %status,
+                    "Dota live polling status"
+                ),
+                Err(error) => tracing::warn!(
+                    guild_id = target.guild_id,
+                    pending_match_id = target.pending_match_id,
+                    match_id = target.match_id,
+                    source = source.as_str(),
+                    %error,
+                    "Dota live polling failed"
+                ),
+            }
         }
     }
 
@@ -888,6 +962,24 @@ impl DotaLiveFeed {
             map_frame: None,
         })
     }
+}
+
+fn retry_deadline(header: Option<&str>, now: i64) -> i64 {
+    header
+        .and_then(|value| {
+            let value = value.trim();
+            value
+                .parse::<u64>()
+                .ok()
+                .map(|seconds| now.saturating_add(i64::try_from(seconds).unwrap_or(i64::MAX)))
+                .or_else(|| {
+                    chrono::DateTime::parse_from_rfc2822(value)
+                        .ok()
+                        .map(|date| date.timestamp())
+                })
+        })
+        .filter(|deadline| *deadline > now)
+        .unwrap_or_else(|| now.saturating_add(UPSTREAM_BACKOFF_SECONDS))
 }
 
 #[derive(Clone, Debug)]
@@ -1477,6 +1569,8 @@ fn map_frame(
     Some(LiveMapFrame {
         match_id: frame.match_id,
         game_time: frame.game_time,
+        radiant_score: frame.radiant_score,
+        dire_score: frame.dire_score,
         radiant_net_worth: frame.radiant_net_worth,
         dire_net_worth: frame.dire_net_worth,
         heroes,

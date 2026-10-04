@@ -1,4 +1,4 @@
-//! Lossless archival compression of the production renderer's RGBA PNGs.
+//! Bounded lossless PNG compression shared by live maps and their archive.
 use flate2::{Compression, Crc, read::ZlibDecoder, write::ZlibEncoder};
 use std::io::{Read, Write};
 
