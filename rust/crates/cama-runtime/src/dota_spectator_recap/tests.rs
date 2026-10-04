@@ -1,8 +1,112 @@
 use super::*;
+use crate::dota_live::{LiveMapBuilding, LiveMapFrame, LiveMapHero};
 use cama_app::pet_assets::{RasterImage, Rgba};
 
 fn picture() -> Vec<u8> {
-    RasterImage::new(4, 4, Rgba(10, 20, 30, 255)).encode_png()
+    crate::dota_spectator_png::compress(&RasterImage::new(4, 4, Rgba(10, 20, 30, 255)).encode_png())
+        .unwrap()
+}
+
+fn map_frame(game_time: i64) -> LiveMapFrame {
+    LiveMapFrame {
+        match_id: 999,
+        game_time,
+        radiant_score: Some(game_time / 15),
+        dire_score: Some(1),
+        radiant_net_worth: Some(20_000 + game_time * 50),
+        dire_net_worth: Some(20_000),
+        heroes: vec![LiveMapHero {
+            hero_id: 1,
+            radiant: true,
+            x: Some(-4000.0 + game_time as f64 * 100.0),
+            y: Some(1000.0),
+            respawn_seconds: None,
+            player_name: Some("Replay player".into()),
+            ultimate_state: Some(3),
+            ultimate_cooldown: None,
+            kills: Some(game_time / 15),
+            deaths: Some(0),
+            assists: Some(2),
+            level: Some(12),
+            gold_per_min: Some(400),
+            net_worth: Some(8000),
+            items: vec![None; 6],
+        }],
+        buildings: vec![LiveMapBuilding {
+            radiant: false,
+            name: "mid tier 1 tower".into(),
+            destroyed: game_time >= 30,
+            x: None,
+            y: None,
+        }],
+        roshan_respawn_seconds: Some(90 - game_time),
+    }
+}
+
+#[tokio::test]
+async fn capture_map_throttles_five_second_feed_and_keeps_recap_bounded() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("game.db");
+    let mut captured = Vec::new();
+    for clock in (0..=60).step_by(5) {
+        if capture_map(database.clone(), 42, 7, map_frame(clock), clock)
+            .await
+            .unwrap()
+        {
+            captured.push(clock);
+        }
+    }
+    assert_eq!(captured, vec![0, 15, 30, 45, 60]);
+
+    let dir = directory(&database, 42, 7).unwrap();
+    let archive = load(&dir).unwrap().unwrap();
+    assert_eq!(archive.interval, CAPTURE_INTERVAL_SECONDS);
+    assert_eq!(
+        archive
+            .frames
+            .iter()
+            .map(|frame| frame.clock)
+            .collect::<Vec<_>>(),
+        captured
+    );
+    assert!(
+        archive
+            .frames
+            .windows(2)
+            .all(|pair| pair[1].clock - pair[0].clock >= CAPTURE_INTERVAL_SECONDS)
+    );
+    assert!(archive.frames.len() <= MAX_FRAMES);
+    assert!(archive.frames.iter().map(|frame| frame.bytes).sum::<u64>() <= MAX_ARCHIVE_BYTES);
+    assert_eq!(
+        fs::read_dir(&dir).unwrap().count(),
+        archive.frames.len() + 1
+    );
+
+    let paths = archive
+        .frames
+        .iter()
+        .map(|frame| dir.join(&frame.file))
+        .collect::<Vec<_>>();
+    let replay = dir.join("recap.gif");
+    let info = encoder::encode(&paths, &replay).unwrap();
+    assert_eq!(info.frame_count, captured.len());
+    assert_eq!(info.bytes, fs::metadata(replay).unwrap().len());
+    assert!(info.bytes < 8 * 1024 * 1024);
+    assert_eq!(info.duration_cs, 300);
+
+    // Decode the actual production GIF, including delta frames, rather than
+    // trusting an encoder receipt. New scores, hero positions and destroyed
+    // building markers must survive the compressed-PNG archive path.
+    let mut decoder = gif::DecodeOptions::new()
+        .read_info(fs::File::open(dir.join("recap.gif")).unwrap())
+        .unwrap();
+    assert_eq!((decoder.width(), decoder.height()), (1240, 704));
+    let mut delays = Vec::new();
+    while let Some(frame) = decoder.read_next_frame().unwrap() {
+        assert!(!frame.buffer.is_empty());
+        delays.push(frame.delay);
+    }
+    assert_eq!(delays, vec![50, 50, 50, 50, 100]);
 }
 
 #[test]

@@ -33,8 +33,8 @@ Static objective artwork in the background does not indicate live status.
 Standing towers and barracks are overlaid only when their identity and state
 are present in the current feed. Explicit building coordinates take precedence.
 League bitmasks supply identity/state but no coordinates; those entries use
-the static OpenDota building layout described below. Destroyed and unknown
-structures do not receive a standing-building marker. No ward positions are
+the static OpenDota building layout described below. Destroyed structures receive a small cross; unknown structures do not receive
+a standing-building marker. No ward positions are
 inferred.
 
 ## Static building marker layout

@@ -1,7 +1,6 @@
 //! Bounded on-disk screenshot archive and optional post-summary recap outbox.
 //! Recaps never participate in settlement and never publish into a live channel.
 mod encoder;
-mod png;
 
 use crate::{
     InteractionAttachment, InteractionEmbed, InteractionResponse,
@@ -20,6 +19,9 @@ const MAX_FRAMES: usize = 240;
 const MAX_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_PNG_BYTES: usize = 4 * 1024 * 1024;
 const RETENTION: i64 = 24 * 60 * 60;
+// Feed polling may be faster, but recap playback keeps a 15-second game-time
+// sample cadence so its frame and disk bounds remain independent of polling.
+const CAPTURE_INTERVAL_SECONDS: i64 = 15;
 // All file mutations are short blocking operations. Encoding releases this lock.
 static FILES: Mutex<()> = Mutex::new(());
 
@@ -73,7 +75,7 @@ fn load(dir: &Path) -> Result<Option<Archive>, String> {
         || archive.pending_id <= 0
         || archive.valve_id == 0
         || archive.frames.len() > MAX_FRAMES
-        || archive.interval < 15
+        || archive.interval < CAPTURE_INTERVAL_SECONDS
         || archive.frames.iter().any(|frame| {
             frame.file != format!("frame-{}.png", frame.clock) || frame.bytes > MAX_PNG_BYTES as u64
         })
@@ -130,10 +132,9 @@ pub(crate) async fn capture_map(
                     return Err("recap Valve match identity changed".into());
                 }
                 if archive.job.is_some()
-                    || archive
-                        .frames
-                        .last()
-                        .is_some_and(|last| frame.game_time.saturating_sub(last.clock) < 15)
+                    || archive.frames.last().is_some_and(|last| {
+                        frame.game_time.saturating_sub(last.clock) < CAPTURE_INTERVAL_SECONDS
+                    })
                 {
                     return Ok(false);
                 }
@@ -168,6 +169,7 @@ pub(crate) async fn capture(
     now: i64,
 ) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
+        let png = crate::dota_spectator_png::compress(&png)?;
         capture_sync(&database, guild, pending, valve, clock, &png, now)
     })
     .await
@@ -186,7 +188,8 @@ fn capture_sync(
     if valve == 0 || png.len() > MAX_PNG_BYTES || !png.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Err("invalid or oversized recap screenshot".into());
     }
-    let png = png::compress(png)?;
+    // Production callers pass the renderer's validated, compressed PNG.
+    // Store it directly rather than running zlib a second time per capture.
     let _lock = FILES.lock().map_err(|e| e.to_string())?;
     let dir = directory(database, guild, pending)?;
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -195,7 +198,7 @@ fn capture_sync(
         pending_id: pending,
         valve_id: valve,
         updated_at: now,
-        interval: 15,
+        interval: CAPTURE_INTERVAL_SECONDS,
         frames: Vec::new(),
         job: None,
     });
@@ -222,7 +225,7 @@ fn capture_sync(
         removed.push(archive.frames.pop().expect("two frames").file);
     }
     let file = format!("frame-{clock}.png");
-    fs::write(dir.join("frame.tmp"), &png).map_err(|e| e.to_string())?;
+    fs::write(dir.join("frame.tmp"), png).map_err(|e| e.to_string())?;
     fs::rename(dir.join("frame.tmp"), dir.join(&file)).map_err(|e| e.to_string())?;
     archive.frames.push(Screenshot {
         clock,
