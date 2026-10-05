@@ -268,6 +268,7 @@ fn event_actor_snapshot(
         },
         depth,
         luminosity,
+        stat_survival: tunnel.stat_survival,
         prestige_level: tunnel.prestige_level,
         prestige_perks_json: tunnel.prestige_perks.clone(),
         boss_progress_json: tunnel.boss_progress.clone(),

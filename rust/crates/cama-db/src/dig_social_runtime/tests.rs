@@ -35,9 +35,9 @@ fn fixture() -> NamedTempFile {
         .execute(
             "INSERT INTO tunnels
                 (discord_id,guild_id,tunnel_name,depth,max_depth,last_dig_at,
-                 boss_progress,stat_stamina)
+                 boss_progress,stat_stamina,stat_survival)
              VALUES (?1,?2,'Target Descent',24,24,0,
-                     '{\"25\":\"active\"}',0)",
+                     '{\"25\":\"active\"}',0,0)",
             params![TARGET, GUILD],
         )
         .expect("target tunnel");
@@ -604,9 +604,9 @@ fn migrated_snapshot_includes_relics_and_full_help_revision() {
         .execute(
             "INSERT INTO tunnels
                 (discord_id,guild_id,tunnel_name,depth,max_depth,last_dig_at,
-                 stat_stamina,mutations,injury_state,temp_curses)
+                 stat_stamina,stat_survival,mutations,injury_state,temp_curses)
              VALUES (?1,?2,'Helper Hollow',10,10,123,4,
-                     '[\"restless\"]','{\"type\":\"slower_cooldown\"}',
+                     6,'[\"restless\"]','{\"type\":\"slower_cooldown\"}',
                      '{\"digs_remaining\":2}')",
             params![HELPER, GUILD],
         )
@@ -627,6 +627,7 @@ fn migrated_snapshot_includes_relics_and_full_help_revision() {
     let helper = snapshot.helper_tunnel.expect("helper tunnel snapshot");
     assert_eq!(helper.last_dig_at, Some(123));
     assert_eq!(helper.stat_stamina, 4);
+    assert_eq!(helper.stat_survival, 6);
     assert_eq!(helper.mutations_json.as_deref(), Some("[\"restless\"]"));
     assert_eq!(
         snapshot.helper_equipped_relic_ids,

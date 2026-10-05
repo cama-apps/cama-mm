@@ -16,6 +16,7 @@ pub struct DigMinerTunnelSnapshot {
     pub stat_strength: i64,
     pub stat_smarts: i64,
     pub stat_stamina: i64,
+    pub stat_survival: i64,
     pub stat_points: i64,
     pub prestige_level: i64,
     pub stat_boss_awards_json: Option<String>,
@@ -59,6 +60,7 @@ pub struct DigMinerAllocation {
     pub strength: i64,
     pub smarts: i64,
     pub stamina: i64,
+    pub survival: i64,
 }
 
 impl DigMinerAllocation {
@@ -67,6 +69,7 @@ impl DigMinerAllocation {
         self.strength
             .saturating_add(self.smarts)
             .saturating_add(self.stamina)
+            .saturating_add(self.survival)
     }
 }
 
@@ -186,6 +189,7 @@ impl DigMinerRuntimeRepository {
         if allocation.strength < 0
             || allocation.smarts < 0
             || allocation.stamina < 0
+            || allocation.survival < 0
             || allocation.total() <= 0
         {
             return Err(DigMinerRuntimeRepositoryError::InvalidMutation);
@@ -202,7 +206,8 @@ impl DigMinerRuntimeRepository {
                             .stat_strength
                             .max(0)
                             .saturating_add(current.stat_smarts.max(0))
-                            .saturating_add(current.stat_stamina.max(0)),
+                            .saturating_add(current.stat_stamina.max(0))
+                            .saturating_add(current.stat_survival.max(0)),
                     ) =>
             {
                 DigMinerMutationStatus::InsufficientPoints
@@ -212,19 +217,23 @@ impl DigMinerRuntimeRepository {
                     "UPDATE tunnels
                      SET stat_strength=stat_strength+?1,
                          stat_smarts=stat_smarts+?2,
-                         stat_stamina=stat_stamina+?3
-                     WHERE discord_id=?4 AND guild_id=?5
-                       AND stat_strength=?6 AND stat_smarts=?7 AND stat_stamina=?8
-                       AND stat_points=?9",
+                         stat_stamina=stat_stamina+?3,
+                         stat_survival=stat_survival+?4
+                     WHERE discord_id=?5 AND guild_id=?6
+                       AND stat_strength=?7 AND stat_smarts=?8
+                       AND stat_stamina=?9 AND stat_survival=?10
+                       AND stat_points=?11",
                     params![
                         allocation.strength,
                         allocation.smarts,
                         allocation.stamina,
+                        allocation.survival,
                         discord_id,
                         guild_id,
                         expected.stat_strength,
                         expected.stat_smarts,
                         expected.stat_stamina,
+                        expected.stat_survival,
                         expected.stat_points,
                     ],
                 )?;
@@ -342,7 +351,8 @@ impl DigMinerRuntimeRepository {
             .stat_strength
             .max(0)
             .saturating_add(tunnel.stat_smarts.max(0))
-            .saturating_add(tunnel.stat_stamina.max(0));
+            .saturating_add(tunnel.stat_stamina.max(0))
+            .saturating_add(tunnel.stat_survival.max(0));
         if returned_points <= 0 {
             let snapshot = snapshot_in(&transaction, discord_id, guild_id)?;
             transaction.commit()?;
@@ -364,6 +374,7 @@ impl DigMinerRuntimeRepository {
                 "strength": tunnel.stat_strength,
                 "smarts": tunnel.stat_smarts,
                 "stamina": tunnel.stat_stamina,
+                "survival": tunnel.stat_survival,
             },
         })
         .to_string();
@@ -392,15 +403,18 @@ impl DigMinerRuntimeRepository {
             params![discord_id, guild_id],
         )?;
         let changed = transaction.execute(
-            "UPDATE tunnels SET stat_strength=0,stat_smarts=0,stat_stamina=0
+            "UPDATE tunnels SET stat_strength=0,stat_smarts=0,stat_stamina=0,
+                    stat_survival=0
              WHERE discord_id=?1 AND guild_id=?2
-               AND stat_strength=?3 AND stat_smarts=?4 AND stat_stamina=?5",
+               AND stat_strength=?3 AND stat_smarts=?4 AND stat_stamina=?5
+               AND stat_survival=?6",
             params![
                 discord_id,
                 guild_id,
                 tunnel.stat_strength,
                 tunnel.stat_smarts,
                 tunnel.stat_stamina,
+                tunnel.stat_survival,
             ],
         )?;
         if changed != 1 {
@@ -450,6 +464,7 @@ fn same_stats(left: &DigMinerTunnelSnapshot, right: &DigMinerTunnelSnapshot) -> 
     left.stat_strength == right.stat_strength
         && left.stat_smarts == right.stat_smarts
         && left.stat_stamina == right.stat_stamina
+        && left.stat_survival == right.stat_survival
         && left.stat_points == right.stat_points
 }
 
@@ -506,7 +521,8 @@ fn tunnel_in(
         .query_row(
             "SELECT COALESCE(tunnel_name,'Unknown Tunnel'),COALESCE(miner_about,''),
                     COALESCE(stat_strength,0),COALESCE(stat_smarts,0),
-                    COALESCE(stat_stamina,0),COALESCE(stat_points,5),
+                    COALESCE(stat_stamina,0),COALESCE(stat_survival,0),
+                    COALESCE(stat_points,5),
                     COALESCE(prestige_level,0),stat_boss_awards,
                     COALESCE(auto_buy_torch,0),COALESCE(auto_buy_hard_hat,0),
                     COALESCE(auto_buy_grappling_hook,0),default_boss_risk
@@ -519,13 +535,14 @@ fn tunnel_in(
                     stat_strength: row.get(2)?,
                     stat_smarts: row.get(3)?,
                     stat_stamina: row.get(4)?,
-                    stat_points: row.get(5)?,
-                    prestige_level: row.get(6)?,
-                    stat_boss_awards_json: row.get(7)?,
-                    auto_buy_torch: row.get::<_, i64>(8)? != 0,
-                    auto_buy_hard_hat: row.get::<_, i64>(9)? != 0,
-                    auto_buy_grappling_hook: row.get::<_, i64>(10)? != 0,
-                    default_boss_risk: row.get(11)?,
+                    stat_survival: row.get(5)?,
+                    stat_points: row.get(6)?,
+                    prestige_level: row.get(7)?,
+                    stat_boss_awards_json: row.get(8)?,
+                    auto_buy_torch: row.get::<_, i64>(9)? != 0,
+                    auto_buy_hard_hat: row.get::<_, i64>(10)? != 0,
+                    auto_buy_grappling_hook: row.get::<_, i64>(11)? != 0,
+                    default_boss_risk: row.get(12)?,
                 })
             },
         )

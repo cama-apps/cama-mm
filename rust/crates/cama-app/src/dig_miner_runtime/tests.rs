@@ -77,6 +77,7 @@ fn profile_requires_registration_and_creates_an_exact_first_dig_tunnel() {
             strength: 0,
             smarts: 0,
             stamina: 0,
+            survival: 0,
             stat_points: 5,
             spent_points: 0,
             unspent_points: 5,
@@ -171,6 +172,7 @@ fn stat_allocation_returns_exact_budget_and_effect_formulas() {
                 strength: 2,
                 smarts: 2,
                 stamina: 1,
+                survival: 0,
             },
             NOW,
             &mut ScriptedNameEntropy::default(),
@@ -182,6 +184,7 @@ fn stat_allocation_returns_exact_budget_and_effect_formulas() {
             strength: 2,
             smarts: 2,
             stamina: 1,
+            survival: 0,
             stat_points: 5,
             spent_points: 5,
             unspent_points: 0,
@@ -192,6 +195,29 @@ fn stat_allocation_returns_exact_budget_and_effect_formulas() {
     assert!((profile.effects.cave_in_reduction - 0.04).abs() < 1e-12);
     assert!((profile.effects.cooldown_multiplier - 0.96).abs() < 1e-12);
     assert!((profile.effects.paid_cost_multiplier - 0.96).abs() < 1e-12);
+    assert_eq!(profile.effects.survival_roll_bonus, 0.0);
+}
+
+#[test]
+fn survival_allocation_updates_profile_and_roll_bonus() {
+    let database = fixture(100);
+    let profile = DigMinerRuntimeService::sqlite(database.path())
+        .allocate_stats_with_entropy(
+            USER,
+            GUILD,
+            DigMinerAllocation {
+                strength: 0,
+                smarts: 0,
+                stamina: 0,
+                survival: 5,
+            },
+            NOW,
+            &mut ScriptedNameEntropy::default(),
+        )
+        .unwrap();
+    assert_eq!(profile.stats.survival, 5);
+    assert_eq!(profile.stats.spent_points, 5);
+    assert!((profile.effects.survival_roll_bonus - 0.05).abs() < 1e-12);
 }
 
 #[test]
@@ -205,6 +231,7 @@ fn stat_allocation_errors_match_python_service_copy() {
                 strength: -1,
                 smarts: 0,
                 stamina: 0,
+                survival: 0,
             },
             "S stats cannot be negative.".to_owned(),
         ),
@@ -213,6 +240,7 @@ fn stat_allocation_errors_match_python_service_copy() {
                 strength: 0,
                 smarts: 0,
                 stamina: 0,
+                survival: 0,
             },
             "Spend at least one point.".to_owned(),
         ),
@@ -221,6 +249,7 @@ fn stat_allocation_errors_match_python_service_copy() {
                 strength: 5,
                 smarts: 1,
                 stamina: 0,
+                survival: 0,
             },
             "That spends 6 points, but you only have 5 unspent.".to_owned(),
         ),
@@ -345,8 +374,8 @@ fn respec_returns_allocated_and_total_unspent_separately() {
         .execute(
             "INSERT INTO tunnels
                 (discord_id,guild_id,tunnel_name,stat_strength,stat_smarts,
-                 stat_stamina,stat_points)
-             VALUES (?1,?2,'Deep Ledger',2,1,2,12)",
+                 stat_stamina,stat_survival,stat_points)
+             VALUES (?1,?2,'Deep Ledger',2,1,2,0,12)",
             params![USER, GUILD],
         )
         .unwrap();
@@ -377,6 +406,7 @@ fn respec_errors_match_python_and_preserve_state() {
                 strength: 3,
                 smarts: 2,
                 stamina: 0,
+                survival: 0,
             },
             NOW,
             &mut ScriptedNameEntropy::default(),

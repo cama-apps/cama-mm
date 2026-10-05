@@ -25,6 +25,7 @@ pub struct DigHelpTunnelSnapshot {
     pub max_depth: i64,
     pub last_dig_at: Option<i64>,
     pub stat_stamina: i64,
+    pub stat_survival: i64,
     pub mutations_json: Option<String>,
     pub injury_state_json: Option<String>,
     pub temp_curses_json: Option<String>,
@@ -1039,7 +1040,7 @@ fn help_tunnel(
         .query_row(
             "SELECT depth,max_depth,last_dig_at,COALESCE(stat_stamina,0),mutations,
                     injury_state,temp_curses,boss_progress,
-                    COALESCE(tunnel_name,'Unknown Tunnel')
+                    COALESCE(tunnel_name,'Unknown Tunnel'),COALESCE(stat_survival,0)
              FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
             params![key.discord_id, key.guild_id],
             |row| {
@@ -1054,6 +1055,7 @@ fn help_tunnel(
                     temp_curses_json: row.get(6)?,
                     boss_progress_json: row.get(7)?,
                     tunnel_name: row.get(8)?,
+                    stat_survival: row.get(9)?,
                 })
             },
         )
@@ -1069,6 +1071,7 @@ fn same_helper_revision(
         (Some(current), Some(expected)) => {
             current.last_dig_at == expected.last_dig_at
                 && current.stat_stamina == expected.stat_stamina
+                && current.stat_survival == expected.stat_survival
                 && current.mutations_json == expected.mutations_json
                 && current.injury_state_json == expected.injury_state_json
                 && current.temp_curses_json == expected.temp_curses_json

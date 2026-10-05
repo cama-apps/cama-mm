@@ -840,12 +840,15 @@ fn seed_complete_snapshot(fixture: &Fixture, guild_id: i64, base: i64) -> (i64, 
             params![prediction_id, first, stamp + 8],
         )
         .expect("insert prediction trade");
-    connection.execute(
-        "INSERT INTO tunnels (guild_id,discord_id,depth,max_depth,total_digs,total_jc_earned,
-             prestige_level,tunnel_name,miner_about,stat_strength,stat_smarts,stat_stamina,stat_points)
-         VALUES (?1,?2,12,50,90,200,3,'private tunnel','private profile',4,5,6,7)",
-        params![guild_id, first],
-    ).expect("insert tunnel");
+    connection
+        .execute(
+            "INSERT INTO tunnels (guild_id,discord_id,depth,max_depth,total_digs,total_jc_earned,
+             prestige_level,tunnel_name,miner_about,stat_strength,stat_smarts,stat_stamina,
+             stat_survival,stat_points)
+         VALUES (?1,?2,12,50,90,200,3,'private tunnel','private profile',4,5,6,8,7)",
+            params![guild_id, first],
+        )
+        .expect("insert tunnel");
     connection
         .execute(
             "INSERT INTO dig_artifacts (guild_id,discord_id,artifact_id,found_at,is_relic,equipped)

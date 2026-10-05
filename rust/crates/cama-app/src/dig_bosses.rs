@@ -247,11 +247,24 @@ pub fn duel_win_probability_with_damage_bonus(
     input: DuelOddsInput,
     player_damage_bonus_percent: i32,
 ) -> f64 {
-    if input.player_hp <= 0
-        || input.boss_hp <= 0
-        || input.player_damage <= 0
-        || input.boss_damage <= 0
-    {
+    if !valid_duel_input(input) {
+        return 0.0;
+    }
+    duel_win_probability_unclamped(input, player_damage_bonus_percent)
+        .clamp(WIN_CHANCE_FLOOR, WIN_CHANCE_CAP)
+}
+
+/// Return the absorbing-chain probability before the authored display floor
+/// and ceiling are applied.
+///
+/// Survival calibration needs this raw value: if both endpoints have already
+/// been clamped to the public 5%-95% display range, a midpoint target would
+/// lose the information needed to produce a real combat improvement.
+pub(crate) fn duel_win_probability_unclamped(
+    input: DuelOddsInput,
+    player_damage_bonus_percent: i32,
+) -> f64 {
+    if !valid_duel_input(input) {
         return 0.0;
     }
     let player_hit = input.player_hit.clamp(0.0, 1.0);
@@ -310,7 +323,79 @@ pub fn duel_win_probability_with_damage_bonus(
             };
         }
     }
-    odds[input.player_hp as usize][input.boss_hp as usize].clamp(WIN_CHANCE_FLOOR, WIN_CHANCE_CAP)
+    odds[input.player_hp as usize][input.boss_hp as usize].clamp(0.0, 1.0)
+}
+
+/// Tune a player's final hit chance so Survival grants half of the modeled
+/// overall win-rate improvement produced by its full raw hit bonus.
+///
+/// `input.player_hit` is the final hit chance with no Survival contribution;
+/// `full_survival_hit` is the same combat state after applying the full raw
+/// Survival bonus and all existing hit floors, ceilings, free-fight
+/// multipliers, and phase modifiers. The returned hit is found by inverting
+/// the uncapped absorbing-chain probability, so the public display clamp does
+/// not erase the benefit near 5% or 95%.
+#[must_use]
+pub fn calibrate_player_hit_for_survival(
+    input: DuelOddsInput,
+    full_survival_hit: f64,
+    player_damage_bonus_percent: i32,
+) -> f64 {
+    let baseline_hit = finite_unit(input.player_hit);
+    let full_survival_hit = finite_unit(full_survival_hit);
+    if full_survival_hit <= baseline_hit {
+        return baseline_hit;
+    }
+
+    let baseline_probability = duel_win_probability_unclamped(
+        DuelOddsInput {
+            player_hit: baseline_hit,
+            ..input
+        },
+        player_damage_bonus_percent,
+    );
+    let full_probability = duel_win_probability_unclamped(
+        DuelOddsInput {
+            player_hit: full_survival_hit,
+            ..input
+        },
+        player_damage_bonus_percent,
+    );
+    let probability_gain = full_probability - baseline_probability;
+    if probability_gain <= f64::EPSILON {
+        return baseline_hit;
+    }
+    let target_probability = baseline_probability + probability_gain * 0.5;
+    let mut low = baseline_hit;
+    let mut high = full_survival_hit;
+    for _ in 0..48 {
+        let midpoint = (low + high) * 0.5;
+        let midpoint_probability = duel_win_probability_unclamped(
+            DuelOddsInput {
+                player_hit: midpoint,
+                ..input
+            },
+            player_damage_bonus_percent,
+        );
+        if midpoint_probability < target_probability {
+            low = midpoint;
+        } else {
+            high = midpoint;
+        }
+    }
+    (low + high) * 0.5
+}
+
+fn finite_unit(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn valid_duel_input(input: DuelOddsInput) -> bool {
+    input.player_hp > 0 && input.boss_hp > 0 && input.player_damage > 0 && input.boss_damage > 0
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

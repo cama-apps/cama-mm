@@ -39,6 +39,7 @@ pub struct DigEventActorSnapshot {
     pub temp_buff_json: Option<String>,
     pub temp_curse_json: Option<String>,
     pub balance: i64,
+    pub stat_survival: i64,
     pub inventory_count: usize,
     pub owned_gear: BTreeSet<String>,
     pub equipped_gear: BTreeSet<String>,
@@ -2351,6 +2352,7 @@ fn query_actor_snapshot(
         Option<String>,
         i64,
         i64,
+        i64,
     );
     let sql = format!(
         "SELECT COALESCE(t.depth, 0), COALESCE(t.luminosity, 100),
@@ -2359,7 +2361,8 @@ fn query_actor_snapshot(
                 COALESCE(t.boss_progress, '{{}}'),
                 COALESCE(t.streak_days, 0), t.temp_buffs, t.temp_curses,
                 COALESCE(p.jopacoin_balance, 0),
-                {inventory_count_projection}
+                {inventory_count_projection},
+                COALESCE(t.stat_survival, 0)
            FROM tunnels AS t
            JOIN players AS p
              ON p.discord_id = t.discord_id AND p.guild_id = t.guild_id
@@ -2378,6 +2381,7 @@ fn query_actor_snapshot(
                 row.get(7)?,
                 row.get(8)?,
                 row.get::<_, i64>(9)?,
+                row.get::<_, i64>(10)?,
             ))
         })
         .optional()?;
@@ -2392,6 +2396,7 @@ fn query_actor_snapshot(
         temp_curse_json,
         balance,
         inventory_count,
+        stat_survival,
     )) = row
     else {
         return Ok(None);
@@ -2430,6 +2435,7 @@ fn query_actor_snapshot(
         temp_buff_json,
         temp_curse_json,
         balance,
+        stat_survival,
         inventory_count,
         owned_gear,
         equipped_gear: query_equipped_gear(connection, key.discord_id, guild_id)?,
@@ -2498,6 +2504,7 @@ fn event_policy_snapshot_matches(
         && current.temp_buff_json == expected.temp_buff_json
         && current.temp_curse_json == expected.temp_curse_json
         && current.balance == expected.balance
+        && current.stat_survival == expected.stat_survival
         && current.equipped_gear == expected.equipped_gear
         && current.equipped_relics == expected.equipped_relics
 }

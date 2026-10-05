@@ -118,6 +118,7 @@ pub struct TunnelRow {
     pub stat_strength: i64,
     pub stat_smarts: i64,
     pub stat_stamina: i64,
+    pub stat_survival: i64,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1130,7 +1131,8 @@ fn load_snapshot_from_connection(
         "SELECT discord_id, COALESCE(total_digs,0), COALESCE(max_depth,0),
                 COALESCE(total_jc_earned,0), COALESCE(prestige_level,0), COALESCE(best_run_score,0),
                 COALESCE(pickaxe_tier,0), COALESCE(stat_strength,0),
-                COALESCE(stat_smarts,0), COALESCE(stat_stamina,0)
+                COALESCE(stat_smarts,0), COALESCE(stat_stamina,0),
+                COALESCE(stat_survival,0)
          FROM tunnels WHERE guild_id=?1 ORDER BY discord_id",
         guild_id,
         |row| {
@@ -1145,6 +1147,7 @@ fn load_snapshot_from_connection(
                 stat_strength: row.get(7)?,
                 stat_smarts: row.get(8)?,
                 stat_stamina: row.get(9)?,
+                stat_survival: row.get(10)?,
             })
         },
     )?;
