@@ -30,8 +30,8 @@ fn fixture() -> NamedTempFile {
         .execute(
             "INSERT INTO tunnels
              (discord_id,guild_id,depth,max_depth,prestige_level,boss_progress,
-              boss_attempts,luminosity,stat_points,tunnel_name,cheer_data)
-             VALUES (?1,?2,24,24,0,?3,2,80,5,'Boss Runtime',?4)",
+              boss_attempts,luminosity,stat_points,stat_survival,tunnel_name,cheer_data)
+             VALUES (?1,?2,24,24,0,?3,2,80,5,6,'Boss Runtime',?4)",
             params![
                 PLAYER,
                 GUILD,
@@ -100,6 +100,7 @@ fn boss_state_repairs_stale_maximum_without_reducing_historical_depth() {
     let database = fixture();
     let repository = DigBossRuntimeRepository::new(database.path());
     let mut snapshot = repository.snapshot(KEY).expect("snapshot").expect("player");
+    assert_eq!(snapshot.stat_survival, 6);
     for (stored, expected) in [(0, 24), (24, 24), (100, 100)] {
         snapshot.max_depth = stored;
         let proposed = DigBossRuntimeState::from(&snapshot);

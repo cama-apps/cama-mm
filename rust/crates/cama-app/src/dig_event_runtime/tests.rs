@@ -16,6 +16,61 @@ const GUILD: i64 = 42;
 const NOW: i64 = 1_700_000_000;
 
 #[test]
+fn persisted_survival_changes_event_outcome_and_replay_keeps_the_result() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 100, 10, 0);
+    let snapshot = fixture.snapshot();
+    let base_policy = event_policy(&snapshot, false, 1.0);
+    let key = (0..10_000)
+        .map(|index| format!("survival-event:{index}"))
+        .find(|key| {
+            let mut entropy =
+                SeededLootEntropy::new(event_seed(request("underground_stream", "risky", key), 0));
+            let roll = entropy.unit();
+            (0.62..0.82).contains(&roll)
+        })
+        .expect("roll between the base and improved success thresholds");
+    let event_request = request("underground_stream", "risky", &key);
+    let mut entropy = SeededLootEntropy::new(event_seed(event_request, 0));
+    let rolls = CanonicalEventRolls {
+        success_roll: entropy.unit(),
+        ..Default::default()
+    };
+    assert!(
+        !resolve_canonical_event_with_policy("underground_stream", "risky", rolls, base_policy)
+            .unwrap()
+            .succeeded
+    );
+    fixture
+        .connection()
+        .execute(
+            "UPDATE tunnels SET stat_survival=20 WHERE discord_id=?1 AND guild_id=?2",
+            params![ACTOR, GUILD],
+        )
+        .unwrap();
+    assert_eq!(event_policy(&fixture.snapshot(), false, 1.0).survival, 20);
+    let runtime = fixture.service();
+    let outcome = runtime
+        .resolve_event_with_delivery(
+            event_request,
+            DigEventDeliveryContext::new(ACTOR, GUILD, 77_001, 77_002),
+        )
+        .unwrap();
+    assert!(outcome.applied_now);
+    assert!(outcome.resolution.as_ref().unwrap().succeeded);
+    fixture
+        .connection()
+        .execute(
+            "UPDATE tunnels SET stat_survival=0 WHERE discord_id=?1 AND guild_id=?2",
+            params![ACTOR, GUILD],
+        )
+        .unwrap();
+    let replay = runtime.resolve_event(event_request).unwrap();
+    assert!(!replay.applied_now);
+    assert_eq!(replay.resolution, outcome.resolution);
+}
+
+#[test]
 fn event_perk_bonuses_remain_bounded_for_legacy_duplicate_stacks() {
     let fixture = Fixture::new();
     fixture.seed_actor(ACTOR, 100, 200, 9);

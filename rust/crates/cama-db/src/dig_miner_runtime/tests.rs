@@ -123,6 +123,7 @@ fn allocation_uses_total_budget_without_decrementing_stat_points() {
                 strength: 2,
                 smarts: 2,
                 stamina: 1,
+                survival: 0,
             },
         )
         .unwrap();
@@ -133,9 +134,10 @@ fn allocation_uses_total_budget_without_decrementing_stat_points() {
             tunnel.stat_strength,
             tunnel.stat_smarts,
             tunnel.stat_stamina,
+            tunnel.stat_survival,
             tunnel.stat_points,
         ),
-        (2, 2, 1, 5)
+        (2, 2, 1, 0, 5)
     );
     assert_eq!(
         repository(&database)
@@ -147,11 +149,44 @@ fn allocation_uses_total_budget_without_decrementing_stat_points() {
                     strength: 1,
                     smarts: 0,
                     stamina: 0,
+                    survival: 0,
                 },
             )
             .unwrap()
             .status,
         DigMinerMutationStatus::InsufficientPoints
+    );
+}
+
+#[test]
+fn survival_allocation_roundtrips_and_respec_returns_survival_points() {
+    let database = fixture(100);
+    let expected = ensure(&database).tunnel.unwrap();
+    let allocated = repository(&database)
+        .allocate_stats(
+            USER,
+            GUILD,
+            &expected,
+            DigMinerAllocation {
+                strength: 0,
+                smarts: 0,
+                stamina: 0,
+                survival: 3,
+            },
+        )
+        .unwrap();
+    assert_eq!(allocated.status, DigMinerMutationStatus::Applied);
+    assert_eq!(allocated.snapshot.tunnel.as_ref().unwrap().stat_survival, 3);
+    assert_eq!(allocated.snapshot.tunnel.as_ref().unwrap().stat_points, 5);
+
+    let reset = repository(&database).respec(USER, GUILD, 0, NOW).unwrap();
+    assert_eq!(reset.status, DigMinerMutationStatus::Applied);
+    assert_eq!(reset.returned_points, 3);
+    let tunnel = reset.snapshot.tunnel.unwrap();
+    assert_eq!(tunnel.stat_survival, 0);
+    assert_eq!(
+        tunnel.stat_strength + tunnel.stat_smarts + tunnel.stat_stamina,
+        0
     );
 }
 
@@ -176,6 +211,7 @@ fn stale_or_concurrent_allocation_cannot_overspend() {
                         strength: 5,
                         smarts: 0,
                         stamina: 0,
+                        survival: 0,
                     },
                 )
             })
@@ -338,6 +374,7 @@ fn injected_respec_failure_rolls_back_wallet_stats_ledger_and_audit() {
                 strength: 5,
                 smarts: 0,
                 stamina: 0,
+                survival: 0,
             },
         )
         .unwrap();
@@ -382,6 +419,7 @@ fn concurrent_respec_charges_and_resets_exactly_once() {
                 strength: 5,
                 smarts: 0,
                 stamina: 0,
+                survival: 0,
             },
         )
         .unwrap();

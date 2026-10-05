@@ -42,6 +42,7 @@ impl Fixture {
                      prestige_perks TEXT NOT NULL DEFAULT '[]',
                      boss_progress TEXT NOT NULL DEFAULT '{}',
                      streak_days INTEGER NOT NULL DEFAULT 0,
+                     stat_survival INTEGER NOT NULL DEFAULT 0,
                      temp_buffs TEXT,
                      temp_curses TEXT,
                      PRIMARY KEY (discord_id, guild_id)
@@ -183,9 +184,9 @@ impl Fixture {
         connection
             .execute(
                 "INSERT INTO tunnels (
-                     discord_id, guild_id, depth, streak_days,
+                     discord_id, guild_id, depth, streak_days, stat_survival,
                      temp_buffs, temp_curses
-                 ) VALUES (?1, ?2, 50, 11, ?3, ?4)",
+                 ) VALUES (?1, ?2, 50, 11, 7, ?3, ?4)",
                 params![
                     discord_id,
                     guild_id,
@@ -886,6 +887,7 @@ fn missing_player_and_tunnel_are_reported_without_writes() {
         temp_buff_json: None,
         temp_curse_json: None,
         balance: 0,
+        stat_survival: 0,
         inventory_count: 0,
         owned_gear: BTreeSet::new(),
         equipped_gear: BTreeSet::new(),
@@ -1165,6 +1167,7 @@ fn actor_snapshot_includes_every_event_policy_input() {
         .unwrap();
     assert_eq!(snapshot.luminosity, 0);
     assert_eq!(snapshot.prestige_level, 9);
+    assert_eq!(snapshot.stat_survival, 7);
     assert_eq!(
         snapshot.prestige_perks_json,
         r#"["veteran_miner","veteran_miner","tunnel_mastery"]"#

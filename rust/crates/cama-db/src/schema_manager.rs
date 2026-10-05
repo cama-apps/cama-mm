@@ -944,6 +944,9 @@ fn run_consolidated_backfills(
                AND attempt_count > receipt_checked_attempt;",
         )?;
     }
+    if pending(pending_migrations, "add_survival_stat_to_tunnels") {
+        transaction.execute_batch("UPDATE tunnels SET stat_survival=COALESCE(stat_survival,0);")?;
+    }
     if pending(pending_migrations, "add_streak_threshold_to_rating_history") {
         transaction.execute(
             "UPDATE rating_history SET streak_threshold=?1",

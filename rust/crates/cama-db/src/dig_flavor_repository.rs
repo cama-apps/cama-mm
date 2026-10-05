@@ -121,6 +121,7 @@ pub struct DigFlavorTunnel {
     pub stat_strength: i64,
     pub stat_smarts: i64,
     pub stat_stamina: i64,
+    pub stat_survival: i64,
     pub stat_points: i64,
     pub equipped_relics: Vec<String>,
     pub temp_buffs: Vec<DigFlavorBuff>,
@@ -735,7 +736,8 @@ fn load_tunnel(
                     boss_progress, boss_attempts, COALESCE(best_run_score,0),
                     COALESCE(revenge_until,0), revenge_type,
                     COALESCE(trap_active,0), COALESCE(insured_until,0),
-                    COALESCE(reinforced_until,0), injury_state
+                    COALESCE(reinforced_until,0), injury_state,
+                    COALESCE(stat_survival,0)
              FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
             params![discord_id, guild_id],
             |row| {
@@ -766,6 +768,7 @@ fn load_tunnel(
                     row.get::<_, i64>(23)?,
                     row.get::<_, i64>(24)?,
                     row.get::<_, Option<String>>(25)?,
+                    row.get::<_, i64>(26)?,
                 ))
             },
         )
@@ -787,6 +790,7 @@ fn load_tunnel(
         stat_strength: raw.10,
         stat_smarts: raw.11,
         stat_stamina: raw.12,
+        stat_survival: raw.26,
         stat_points: raw.13,
         // Python passes the raw `tunnels` row to the prompt builder.  That
         // row has no `equipped_relics` key, so the Rust cutover intentionally
@@ -1309,6 +1313,7 @@ mod tests {
                          stat_strength INTEGER,
                          stat_smarts INTEGER,
                          stat_stamina INTEGER,
+                         stat_survival INTEGER,
                          stat_points INTEGER,
                          boss_progress TEXT,
                          boss_attempts TEXT,
@@ -1452,13 +1457,13 @@ mod tests {
                          discord_id,guild_id,depth,max_depth,total_digs,
                          total_jc_earned,streak_days,pickaxe_tier,prestige_level,
                          tunnel_name,luminosity,temp_buffs,mutations,cheer_data,
-                         miner_about,stat_strength,stat_smarts,stat_stamina,stat_points,
+                         miner_about,stat_strength,stat_smarts,stat_stamina,stat_survival,stat_points,
                          boss_progress,boss_attempts,best_run_score,revenge_until,
                          revenge_type,trap_active,insured_until,reinforced_until,injury_state
                      ) VALUES(
                          ?1,?2,?3,100,8,90,2,1,0,'test tunnel',88,
                          '[{\"name\":\"lamp\",\"digs_remaining\":2}]',
-                         '[\"moss\"]','[]','about',1,2,3,5,'{}','0',4,0,'',0,0,0,NULL
+                         '[\"moss\"]','[]','about',1,2,3,4,5,'{}','0',4,0,'',0,0,0,NULL
                      )",
                     params![discord_id, GUILD, depth],
                 )
@@ -1867,6 +1872,7 @@ mod tests {
         let gathered = fixture.repository.gather(ACTOR, GUILD, NOW).unwrap();
         let tunnel = gathered.tunnel.expect("tunnel projection");
         assert_eq!(tunnel.depth, 42);
+        assert_eq!(tunnel.stat_survival, 4);
         assert_eq!(tunnel.equipped_relics, Vec::<String>::new());
         assert_eq!(gathered.player_rank, 1);
         let missing = fixture.repository.gather(-99, GUILD, NOW).unwrap();

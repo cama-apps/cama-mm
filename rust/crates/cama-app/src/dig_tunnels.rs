@@ -1166,6 +1166,7 @@ fn is_integer_tunnel_column(column: &str) -> bool {
             | "stat_strength"
             | "stat_smarts"
             | "stat_stamina"
+            | "stat_survival"
             | "stat_points"
             | "last_lum_update_at"
             | "pinnacle_phase"

@@ -367,7 +367,8 @@ pub fn paid_dig_cost(paid_count: usize, stamina: i64, ascension_markup: f64) -> 
     let base = PAID_DIG_COSTS_PER_DAY[paid_count.min(PAID_DIG_COSTS_PER_DAY.len() - 1)];
     let marked_up = (base as f64 * (1.0 + ascension_markup.max(0.0))) as i64;
     let effects = miner_stat_effects(
-        MinerStats::new(0, 0, stamina.max(0)).expect("normalized stamina is non-negative"),
+        MinerStats::new(0, 0, stamina.max(0), 0)
+            .expect("normalized stamina and survival are non-negative"),
     );
     ((marked_up as f64 * effects.paid_cost_multiplier) as i64).max(1)
 }
@@ -390,7 +391,8 @@ pub fn cooldown_duration(
             }
     };
     let effects = miner_stat_effects(
-        MinerStats::new(0, 0, stamina.max(0)).expect("normalized stamina is non-negative"),
+        MinerStats::new(0, 0, stamina.max(0), 0)
+            .expect("normalized stamina and survival are non-negative"),
     );
     ((before_stamina as f64 * effects.cooldown_multiplier) as i64)
         .max(1)
@@ -447,6 +449,7 @@ pub struct MinerAllocation {
     pub strength: i64,
     pub smarts: i64,
     pub stamina: i64,
+    pub survival: i64,
     pub stat_points: i64,
 }
 
@@ -456,6 +459,7 @@ impl Default for MinerAllocation {
             strength: 0,
             smarts: 0,
             stamina: 0,
+            survival: 0,
             stat_points: DIG_STARTING_STAT_POINTS,
         }
     }
@@ -464,7 +468,7 @@ impl Default for MinerAllocation {
 impl MinerAllocation {
     #[must_use]
     pub const fn spent_points(self) -> i64 {
-        self.strength + self.smarts + self.stamina
+        self.strength + self.smarts + self.stamina + self.survival
     }
 
     #[must_use]
@@ -472,11 +476,17 @@ impl MinerAllocation {
         self.stat_points - self.spent_points()
     }
 
-    pub fn allocate(&mut self, strength: i64, smarts: i64, stamina: i64) -> Result<(), String> {
-        if strength < 0 || smarts < 0 || stamina < 0 {
+    pub fn allocate(
+        &mut self,
+        strength: i64,
+        smarts: i64,
+        stamina: i64,
+        survival: i64,
+    ) -> Result<(), String> {
+        if strength < 0 || smarts < 0 || stamina < 0 || survival < 0 {
             return Err("S stats cannot be negative.".to_owned());
         }
-        let spend = strength + smarts + stamina;
+        let spend = strength + smarts + stamina + survival;
         if spend == 0 {
             return Err("Spend at least one point.".to_owned());
         }
@@ -489,6 +499,7 @@ impl MinerAllocation {
         self.strength += strength;
         self.smarts += smarts;
         self.stamina += stamina;
+        self.survival += survival;
         Ok(())
     }
 
@@ -504,6 +515,7 @@ impl MinerAllocation {
         self.strength = 0;
         self.smarts = 0;
         self.stamina = 0;
+        self.survival = 0;
         Ok(returned)
     }
 }
@@ -567,7 +579,7 @@ pub fn auto_buy_item(
 #[must_use]
 pub fn dig_advance_cap(stats: MinerAllocation, dynamite: bool, depth_charge: bool) -> i64 {
     let stat_effects = miner_stat_effects(
-        MinerStats::new(stats.strength, stats.smarts, stats.stamina)
+        MinerStats::new(stats.strength, stats.smarts, stats.stamina, stats.survival)
             .expect("miner allocations are non-negative"),
     );
     if stat_effects.advance_min_bonus > 0

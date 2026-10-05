@@ -5099,6 +5099,11 @@ async fn guide_has_four_exact_owner_bound_pages_and_expires_at_180_seconds() {
             Some(0xFF_45_00),
         ]
     );
+    let boss_guide = pages[2].embeds[0].description.as_deref().unwrap();
+    assert!(boss_guide.contains(
+        "Each point adds 1pp to event success and improves boss win chance, with benefits capped at 20 points. Boss improvement varies by encounter and risk tier."
+    ));
+    assert!(!boss_guide.contains("free fights"));
     assert!(pages[0].components[0].buttons[0].disabled);
     assert!(pages[3].components[0].buttons[1].disabled);
     assert!(pages.iter().all(|response| {
@@ -7625,7 +7630,7 @@ async fn provider_miner_group_uses_typed_profile_allocation_respec_and_autobuy_s
     );
     assert_eq!(
         profile.embeds[0].fields[0].value,
-        "Strength **0** | Smarts **0** | Stamina **0**\nPoints: **5** total, **5** unspent\nEffects: +0/+0 advance range, -0% cave-in, -0% cooldown/paid costs"
+        "Strength **0** | Smarts **0** | Stamina **0** | Survival **0**\nPoints: **5** total, **5** unspent\nEffects: +0/+0 advance range, -0% cave-in, -0% cooldown/paid costs, +0pp event success, improves boss win chance (20-point cap)"
     );
     assert_eq!(
         profile.embeds[0].footer.as_deref(),
@@ -7679,10 +7684,14 @@ async fn provider_miner_group_uses_typed_profile_allocation_respec_and_autobuy_s
                     },
                     InteractionOption {
                         name: "smarts".to_owned(),
-                        value: InteractionValue::Integer(2),
+                        value: InteractionValue::Integer(1),
                     },
                     InteractionOption {
                         name: "stamina".to_owned(),
+                        value: InteractionValue::Integer(1),
+                    },
+                    InteractionOption {
+                        name: "survival".to_owned(),
                         value: InteractionValue::Integer(1),
                     },
                 ],
@@ -7697,7 +7706,7 @@ async fn provider_miner_group_uses_typed_profile_allocation_respec_and_autobuy_s
     assert_eq!(
         build.embeds[0].description.as_deref(),
         Some(
-            "Strength **2** | Smarts **2** | Stamina **1**\nPoints: **5** total, **0** unspent\nEffects: +0/+1 advance range, -4% cave-in, -4% cooldown/paid costs"
+            "Strength **2** | Smarts **1** | Stamina **1** | Survival **1**\nPoints: **5** total, **0** unspent\nEffects: +0/+1 advance range, -2% cave-in, -4% cooldown/paid costs, +1pp event success, improves boss win chance (20-point cap)"
         )
     );
 
@@ -7994,7 +8003,7 @@ fn command_tree_matches_python_surface() {
         ("about", "Set your miner backstory once"),
         (
             "build",
-            "Spend unallocated points on Strength, Smarts, and Stamina",
+            "Spend unallocated points on Strength, Smarts, Stamina, and Survival",
         ),
         ("respec", "Reset your allocated S points for 50 JC"),
         (
@@ -8025,6 +8034,10 @@ fn command_tree_matches_python_surface() {
         (
             "stamina",
             "Points to add. Keeps you digging longer between rests.",
+        ),
+        (
+            "survival",
+            "Adds 1pp to event success; improves boss win chance (20-point cap).",
         ),
     ] {
         let stat = find(&build.options, name);

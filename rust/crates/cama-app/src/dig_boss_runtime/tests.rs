@@ -54,6 +54,23 @@ fn fixture() -> FastTestDatabase {
     database
 }
 
+fn set_minimal_accuracy_encounter(database: &FastTestDatabase, survival: i64) {
+    Connection::open(database.path())
+        .expect("accuracy DB")
+        .execute(
+            "UPDATE tunnels
+                SET boss_progress=?1,cheer_data=NULL,stat_survival=?2
+              WHERE discord_id=?3 AND guild_id=?4",
+            params![
+                r#"{"25":{"boss_id":"grothak","status":"active","hp_remaining":1,"hp_max":1}}"#,
+                survival,
+                PLAYER,
+                GUILD,
+            ],
+        )
+        .expect("minimal accuracy encounter");
+}
+
 fn set_phase_two(database: &FastTestDatabase, pending_event_id: &str) {
     Connection::open(database.path())
         .expect("phase DB")
@@ -1202,6 +1219,142 @@ fn combat_preparation_composes_gear_mana_light_cheers_relics_pet_and_prep() {
         Some(12)
     );
     assert_eq!(adapter.take_error(), None);
+}
+
+#[test]
+fn survival_is_zero_parity_and_adds_a_capped_shared_accuracy_bonus() {
+    let database = fixture();
+    let repository = SqliteBossRepository::new(database.path(), 1_700_000_000);
+    let tunnel = repository.load_tunnel(key()).expect("tunnel");
+    let base = CombatState {
+        player_hp: 5,
+        boss_hp: 4,
+        player_hit: 0.50,
+        player_damage: 1,
+        boss_hit: 0.40,
+        boss_damage: 1,
+        critical_chance: 0.0,
+        critical_bonus: 0,
+        effects: CombatEffects::default(),
+    };
+    let adapter = SqliteBossCombatPreparation::new(database.path(), 20);
+    let prepare = || {
+        adapter.prepare(
+            BossCombatPreparationRequest {
+                key: key(),
+                tunnel: &tunnel,
+                boss: crate::dig_bosses::boss_by_id("grothak").expect("boss"),
+                boundary: 25,
+                risk_tier: RiskTier::Cautious,
+                wager: 10,
+                echo_applied: false,
+                now: 1_700_000_000,
+            },
+            base.clone(),
+        )
+    };
+    let zero = prepare();
+
+    Connection::open(database.path())
+        .expect("survival DB")
+        .execute(
+            "UPDATE tunnels SET stat_survival=?1 WHERE discord_id=?2 AND guild_id=?3",
+            params![10, PLAYER, GUILD],
+        )
+        .expect("ten Survival points");
+    let ten = prepare();
+    assert!((ten.survival_hit_bonus - zero.survival_hit_bonus - 0.10).abs() < 1e-12);
+
+    Connection::open(database.path())
+        .expect("survival cap DB")
+        .execute(
+            "UPDATE tunnels SET stat_survival=?1 WHERE discord_id=?2 AND guild_id=?3",
+            params![100, PLAYER, GUILD],
+        )
+        .expect("large Survival value");
+    let capped = prepare();
+    assert!((capped.survival_hit_bonus - zero.survival_hit_bonus - 0.20).abs() < 1e-12);
+}
+
+#[test]
+fn survival_can_turn_a_regular_boss_roll_from_miss_to_hit() {
+    let baseline_database = fixture();
+    set_minimal_accuracy_encounter(&baseline_database, 0);
+    let baseline = DigBossRuntimeService::sqlite({
+        let mut config = DigBossRuntimeConfig::new(baseline_database.path(), 20);
+        config.economy_event.enabled = false;
+        config
+    })
+    .fight_regular(
+        DigBossRuntimeRequest {
+            discord_id: PLAYER,
+            guild_id: GUILD,
+            now: 1_700_000_000,
+        },
+        RiskTier::Cautious,
+        0,
+        SequenceEntropy::new(vec![0.45, 0.99], vec![0], vec![]),
+    )
+    .expect("baseline fight");
+    assert!(!baseline.outcome.won);
+    assert!(!baseline.outcome.round_log[0].player_hit);
+
+    let survival_database = fixture();
+    set_minimal_accuracy_encounter(&survival_database, 20);
+    let survival = DigBossRuntimeService::sqlite({
+        let mut config = DigBossRuntimeConfig::new(survival_database.path(), 20);
+        config.economy_event.enabled = false;
+        config
+    })
+    .fight_regular(
+        DigBossRuntimeRequest {
+            discord_id: PLAYER,
+            guild_id: GUILD,
+            now: 1_700_000_000,
+        },
+        RiskTier::Cautious,
+        0,
+        SequenceEntropy::new(vec![0.45, 0.99], vec![0], vec![]),
+    )
+    .expect("Survival fight");
+    assert!(survival.outcome.won);
+    assert!(survival.outcome.round_log[0].player_hit);
+}
+
+#[test]
+fn regular_scout_preview_matches_the_live_survival_prepared_fight() {
+    let database = fixture();
+    set_minimal_accuracy_encounter(&database, 15);
+    Connection::open(database.path())
+        .expect("lantern DB")
+        .execute(
+            "INSERT INTO dig_inventory
+             (discord_id,guild_id,item_type,queued,created_at)
+             VALUES (?1,?2,'lantern',0,100)",
+            params![PLAYER, GUILD],
+        )
+        .expect("lantern");
+    let mut config = DigBossRuntimeConfig::new(database.path(), 20);
+    config.economy_event.enabled = false;
+    let runtime = DigBossRuntimeService::sqlite(config);
+    let request = DigBossRuntimeRequest {
+        discord_id: PLAYER,
+        guild_id: GUILD,
+        now: 1_700_000_000,
+    };
+    let preview = runtime
+        .scout_regular(request, SequenceEntropy::constant(0.99))
+        .expect("preview");
+    let fight = runtime
+        .fight_regular(
+            request,
+            RiskTier::Cautious,
+            1,
+            SequenceEntropy::new(vec![0.0, 0.99], vec![0], vec![]),
+        )
+        .expect("live fight");
+    assert!((fight.outcome.win_chance - preview.outcome.odds.cautious.win_chance).abs() < 1e-12);
+    assert!(fight.outcome.round_log[0].player_hit);
 }
 
 #[test]
@@ -3080,6 +3233,58 @@ fn wagered_pinnacle_attempt_keeps_ten_percent_hit_floor() {
         )
         .expect("paid attempt");
     assert!((paid.combat.player_hit - WAGERED_PLAYER_HIT_FLOOR).abs() < f64::EPSILON);
+}
+
+#[test]
+fn survival_preserves_the_pinnacle_accuracy_ceiling_and_twenty_point_cap() {
+    let database = fixture();
+    set_pinnacle(&database, 1, "active", None);
+    let connection = Connection::open(database.path()).expect("pinnacle accuracy DB");
+    connection
+        .execute(
+            "UPDATE tunnels SET stat_survival=?1,cheer_data=?2
+              WHERE discord_id=?3 AND guild_id=?4",
+            params![
+                100,
+                r#"[{"expires_at":9999999999},{"expires_at":9999999999},{"expires_at":9999999999}]"#,
+                PLAYER,
+                GUILD,
+            ],
+        )
+        .expect("pinnacle Survival and cheers");
+    connection
+        .execute(
+            "INSERT INTO dig_artifacts
+             (discord_id,guild_id,artifact_id,found_at,is_relic,equipped)
+             VALUES (?1,?2,'pinnacle:forgotten_king:Echoes:hit_plus_002',100,1,1)",
+            params![PLAYER, GUILD],
+        )
+        .expect("pinnacle accuracy relic");
+    let mut entropy = SequenceEntropy::constant(0.99);
+    let attempt = pinnacle_runtime(&database)
+        .prepare_pinnacle_attempt(
+            pinnacle_request(1_700_000_000),
+            RiskTier::Cautious,
+            1,
+            &mut entropy,
+        )
+        .expect("pinnacle attempt");
+    assert!(attempt.combat.player_hit <= PLAYER_HIT_CEILING);
+    connection
+        .execute(
+            "UPDATE tunnels SET stat_survival=20 WHERE discord_id=?1 AND guild_id=?2",
+            params![PLAYER, GUILD],
+        )
+        .expect("twenty Survival points");
+    let capped_attempt = pinnacle_runtime(&database)
+        .prepare_pinnacle_attempt(
+            pinnacle_request(1_700_000_000),
+            RiskTier::Cautious,
+            1,
+            &mut SequenceEntropy::constant(0.99),
+        )
+        .expect("capped pinnacle attempt");
+    assert_eq!(attempt.combat.player_hit, capped_attempt.combat.player_hit);
 }
 
 // tests/test_dig_pinnacle_combat.py::test_pinnacle_loss_never_credits_a_negative_balance

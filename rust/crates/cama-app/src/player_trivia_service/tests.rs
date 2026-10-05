@@ -1406,6 +1406,7 @@ fn every_live_python_candidate_family_is_representable_from_typed_snapshot() {
             stat_strength: player_id * 2,
             stat_smarts: player_id * 3,
             stat_stamina: player_id * 4,
+            stat_survival: player_id * 5,
         });
         for index in 0_i64..player_id + 4 {
             snapshot.tips.push(TipRow {

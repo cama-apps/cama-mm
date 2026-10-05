@@ -460,7 +460,8 @@ pub fn apply_lantern_stub_restore(
 #[must_use]
 pub fn relic_aware_paid_cost(post_ascension_cost: i64, stamina: i64, relics: &RelicSet) -> i64 {
     let effects = miner_stat_effects(
-        MinerStats::new(0, 0, stamina.max(0)).expect("normalized stamina is non-negative"),
+        MinerStats::new(0, 0, stamina.max(0), 0)
+            .expect("normalized stamina and survival are non-negative"),
     );
     let mut multiplier = effects.paid_cost_multiplier;
     if relics.contains("bone_abacus") {

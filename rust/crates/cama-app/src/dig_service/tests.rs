@@ -546,7 +546,7 @@ fn test_paid_dig_insufficient_funds() {
 fn test_set_profile_and_stats() {
     let story = sanitize_backstory("Former cartographer @everyone who fears ceilings.", 200);
     let mut stats = MinerAllocation::default();
-    stats.allocate(2, 2, 1).expect("allocation should fit");
+    stats.allocate(2, 2, 1, 0).expect("allocation should fit");
     assert!(story.contains("(at)everyone"));
     assert_eq!(stats.unspent_points(), 0);
 }
@@ -621,16 +621,18 @@ fn test_profile_created_tunnel_still_gets_first_dig() {
 #[test]
 fn test_stat_build_cannot_overspend() {
     let mut stats = MinerAllocation::default();
-    let error = stats.allocate(5, 1, 0).expect_err("six points must fail");
+    let error = stats
+        .allocate(5, 1, 0, 0)
+        .expect_err("six points must fail");
     assert!(error.contains("only have 5"));
 }
 
 #[test]
 fn test_stat_build_cannot_reduce_existing_allocations() {
     let mut stats = MinerAllocation::default();
-    stats.allocate(3, 2, 0).expect("first allocation fits");
+    stats.allocate(3, 2, 0, 0).expect("first allocation fits");
     let error = stats
-        .allocate(0, 1, 0)
+        .allocate(0, 1, 0, 0)
         .expect_err("no unspent points remain");
     assert!(error.contains("only have 0 unspent"));
 }
@@ -638,7 +640,7 @@ fn test_stat_build_cannot_reduce_existing_allocations() {
 #[test]
 fn test_respec_returns_all_points_and_charges_fifty_jc() {
     let mut stats = MinerAllocation::default();
-    stats.allocate(2, 2, 1).expect("allocation fits");
+    stats.allocate(2, 2, 1, 0).expect("allocation fits");
     let mut balance = 100;
     assert_eq!(stats.respec(&mut balance), Ok(5));
     assert_eq!(balance, 50);
@@ -651,6 +653,7 @@ fn test_respec_reports_returned_points_separately_from_total_unspent() {
         strength: 2,
         smarts: 1,
         stamina: 2,
+        survival: 0,
         stat_points: 12,
     };
     let mut balance = 100;
@@ -661,7 +664,7 @@ fn test_respec_reports_returned_points_separately_from_total_unspent() {
 #[test]
 fn test_respec_rejects_insufficient_balance_without_resetting_stats() {
     let mut stats = MinerAllocation::default();
-    stats.allocate(3, 2, 0).expect("allocation fits");
+    stats.allocate(3, 2, 0, 0).expect("allocation fits");
     let original = stats;
     let mut balance = 49;
     assert!(stats.respec(&mut balance).is_err());
@@ -681,17 +684,17 @@ fn test_respec_rejects_empty_build_without_charging() {
 fn test_respec_can_repeat_after_reallocating() {
     let mut stats = MinerAllocation::default();
     let mut balance = 100;
-    stats.allocate(5, 0, 0).expect("allocation fits");
+    stats.allocate(5, 0, 0, 0).expect("allocation fits");
     stats.respec(&mut balance).expect("first respec succeeds");
-    stats.allocate(0, 0, 5).expect("allocation fits");
+    stats.allocate(0, 0, 5, 0).expect("allocation fits");
     stats.respec(&mut balance).expect("second respec succeeds");
     assert_eq!(balance, 0);
 }
 
 #[test]
 fn test_strength_and_smarts_affect_preconditions() {
-    let strength = miner_stat_effects(MinerStats::new(5, 0, 0).expect("valid stats"));
-    let smarts = miner_stat_effects(MinerStats::new(0, 5, 0).expect("valid stats"));
+    let strength = miner_stat_effects(MinerStats::new(5, 0, 0, 0).expect("valid stats"));
+    let smarts = miner_stat_effects(MinerStats::new(0, 5, 0, 0).expect("valid stats"));
     assert_eq!(strength.advance_min_bonus, 1);
     assert_eq!(strength.advance_max_bonus, 2);
     assert_close((0.05 - smarts.cave_in_reduction).max(0.01), 0.01);
@@ -1878,7 +1881,7 @@ fn test_direct_dig_with_queued_dynamite_caps_at_twenty_blocks() {
 #[test]
 fn test_direct_dig_with_strength_caps_at_twenty_blocks() {
     let mut tunnel = started_tunnel(1);
-    tunnel.stats.allocate(5, 0, 0).expect("allocation fits");
+    tunnel.stats.allocate(5, 0, 0, 0).expect("allocation fits");
     let result = apply_dig_outcome(&mut tunnel, outcome(51, 0), 2_000_000);
     assert_eq!(result.advance, 20);
     assert_eq!(result.depth_after, 21);
@@ -1924,7 +1927,7 @@ fn test_dm_dig_caps_main_advance_at_10() {
 #[test]
 fn test_dm_dig_with_strength_bonus_caps_advance_at_20() {
     let mut tunnel = started_tunnel(1);
-    tunnel.stats.allocate(2, 0, 0).expect("allocation fits");
+    tunnel.stats.allocate(2, 0, 0, 0).expect("allocation fits");
     let result = apply_dig_outcome(&mut tunnel, outcome(50, 0), 2_000_000);
     assert_eq!(result.advance, 20);
     assert_eq!(result.depth_after, 21);
@@ -2025,7 +2028,7 @@ fn test_deterministic_dig_caps_advance_after_all_bonuses() {
 #[test]
 fn test_deterministic_dig_with_strength_bonus_caps_at_twenty_blocks() {
     let mut tunnel = started_tunnel(1);
-    tunnel.stats.allocate(2, 0, 0).expect("allocation fits");
+    tunnel.stats.allocate(2, 0, 0, 0).expect("allocation fits");
     let result = apply_dig_outcome(&mut tunnel, outcome(51, 0), 2_000_000);
     assert_eq!(result.advance, 20);
     assert_eq!(result.depth_after, 21);

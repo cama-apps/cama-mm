@@ -14,7 +14,7 @@ use thiserror::Error;
 
 pub const BOSS_BOUNDARIES: [i64; 7] = [25, 50, 75, 100, 150, 200, 275];
 
-const REQUIRED_DIG_MIGRATIONS: [&str; 9] = [
+const REQUIRED_DIG_MIGRATIONS: [&str; 10] = [
     "add_dig_action_history_indexes",
     "add_dig_action_type_history_index",
     "add_dig_auto_buy_settings",
@@ -24,6 +24,7 @@ const REQUIRED_DIG_MIGRATIONS: [&str; 9] = [
     "create_dig_gear_system",
     "reconcile_cumulative_prestige_boss_stat_points",
     "reconcile_post_prestige_boss_stat_points",
+    "add_survival_stat_to_tunnels",
 ];
 
 #[derive(Debug, Error)]
@@ -103,6 +104,19 @@ fn audit_connection(connection: &Connection) -> Result<DigMigrationAudit, rusqli
                 .push(format!("tunnels.{required}:default={default}")),
             None => audit.missing_columns.push(format!("tunnels.{required}")),
         }
+    }
+
+    match tunnel_columns.get("stat_survival") {
+        Some(Some(default)) if normalize_default(default) == "0" => {}
+        Some(None) => audit
+            .malformed_indexes
+            .push("tunnels.stat_survival:missing_default".to_owned()),
+        Some(Some(default)) => audit
+            .malformed_indexes
+            .push(format!("tunnels.stat_survival:default={default}")),
+        None => audit
+            .missing_columns
+            .push("tunnels.stat_survival".to_owned()),
     }
 
     if !tunnel_columns.contains_key("default_boss_risk") {

@@ -32,6 +32,7 @@ use cama_domain::dig_gear::{
     CombatStats as GearCombatStats, GEAR_BOSS_DROP_RATE, GEAR_MAX_DURABILITY, GearLoadout,
     GearSlot as DomainGearSlot, apply_gear_to_combat, drop_tier_at_depth, tier_table, unique_gear,
 };
+use cama_domain::dig_stats::survival_roll_bonus;
 use cama_domain::game_date::game_date_for_timestamp;
 use cama_domain::mana::ManaEffects;
 use cama_domain::pet::{PetMood as DomainPetMood, PetStage as DomainPetStage, get_species};
@@ -55,18 +56,19 @@ use crate::boss_multi_tier::{
     PausedBossDuel, PendingPrompt, PlayerKey, PromptOption, RepositoryCommit, RepositoryError,
     ResolvedFight, RoundEffectLog, RoundRecord, ScoutResult, StartBossDuelOutcome,
     StingerCurseState, WAGERED_PLAYER_HIT_FLOOR, apply_option_outcome, at_boss_boundary,
-    mechanic_by_id, regular_boss_wager_allowed, run_combat_round,
+    calibrate_combat_player_hit, mechanic_by_id, regular_boss_wager_allowed, run_combat_round,
 };
 use crate::dig_bosses::{
     BarkContext, CombatStats as BossCombatStats, DialogueSlots, DuelOddsInput, PINNACLE_DEPTH,
-    PINNACLE_POOL_IDS, PinnacleRelic, boss_by_id, dialogue_slots,
-    duel_win_probability_with_damage_bonus, luminosity_combat_penalty,
+    PINNACLE_POOL_IDS, PinnacleRelic, boss_by_id, calibrate_player_hit_for_survival,
+    dialogue_slots, duel_win_probability_with_damage_bonus, luminosity_combat_penalty,
     mechanic as pinnacle_mechanic, pinnacle_by_id, regular_phase, render_boss_bark,
     roll_pinnacle_relic, scale_boss_stats_for_archetype,
 };
 use crate::dig_carry_wager::{
     MAX_NEW_BOSS_WAGER, active_pinnacle_carry, current_boss_boundary, pinnacle_wager_profit,
 };
+use crate::dig_relic_rework::{SHIFTING_IDOL_PLAYER_HIT_CEILING, ShiftingIdolBonus};
 use crate::dig_service::{BOSS_REST_PENDING_KEY, DIG_STARTING_STAT_POINTS};
 use crate::economy_event_service::EconomyEventConfig;
 use crate::economy_event_sqlite::SqliteEconomyEventService;
@@ -761,6 +763,13 @@ impl BossCombatPreparationPort for SqliteBossCombatPreparation {
         let (luminosity_hit, luminosity_damage) = luminosity_combat_penalty(luminosity);
         prepared.player_hit_offset += luminosity_hit;
         prepared.boss_damage_delta += luminosity_damage;
+        // Keep the full Survival hit budget separate from ordinary hit
+        // offsets. Regular and pinnacle combat apply it after their complete
+        // hit construction so the shared odds model can turn it into half of
+        // the full overall win-rate gain.
+        prepared.survival_hit_bonus += snapshot
+            .as_ref()
+            .map_or(0.0, |snapshot| survival_roll_bonus(snapshot.stat_survival));
         let active_cheers = snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.cheer_data_json.as_deref())
@@ -3384,15 +3393,31 @@ impl DigBossRuntimeService {
             narrow_i32(snapshot.prestige_level, "prestige level")
                 .map_err(DigBossRuntimeError::Infrastructure)?,
         );
-        let mut player_hit = combat.player_hit + preparation.player_hit_offset
+        let raw_player_hit = combat.player_hit + preparation.player_hit_offset
             - PINNACLE_TIER_HIT_PENALTY
             - prestige_penalty
             - phase_penalty
             + phase_event.map_or(0.0, |event| event.player_hit_offset);
-        if wager == 0 {
-            player_hit *= FREE_FIGHT_ACCURACY_MULTIPLIER;
-        }
+        let raw_survival_player_hit = raw_player_hit + preparation.survival_hit_bonus;
+        let mut player_hit = if wager == 0 {
+            raw_player_hit * FREE_FIGHT_ACCURACY_MULTIPLIER
+        } else {
+            raw_player_hit
+        };
+        let mut full_survival_hit = if wager == 0 {
+            raw_survival_player_hit * FREE_FIGHT_ACCURACY_MULTIPLIER
+        } else {
+            raw_survival_player_hit
+        };
         player_hit = player_hit.clamp(
+            if wager > 0 {
+                WAGERED_PLAYER_HIT_FLOOR
+            } else {
+                PLAYER_HIT_FLOOR
+            },
+            PLAYER_HIT_CEILING,
+        );
+        full_survival_hit = full_survival_hit.clamp(
             if wager > 0 {
                 WAGERED_PLAYER_HIT_FLOOR
             } else {
@@ -3434,6 +3459,12 @@ impl DigBossRuntimeService {
         );
         player_hp = i32::try_from(shifting_idol.player_hp).unwrap_or(i32::MAX);
         player_hit = shifting_idol.player_hit;
+        full_survival_hit = match shifting_idol.bonus {
+            Some(ShiftingIdolBonus::Hit) => {
+                (full_survival_hit + 0.05).min(SHIFTING_IDOL_PLAYER_HIT_CEILING)
+            }
+            Some(ShiftingIdolBonus::Hp | ShiftingIdolBonus::Crit) | None => full_survival_hit,
+        };
         combat.critical_chance = shifting_idol.crit_chance;
         combat.effects.shifting_idol_bonus =
             shifting_idol.bonus.map(|bonus| bonus.as_str().to_owned());
@@ -3447,6 +3478,7 @@ impl DigBossRuntimeService {
         combat.boss_damage = boss_damage;
         combat.effects.pet_assist = preparation.pet_assist;
         combat.effects.boss_preparation = preparation.boss_preparation;
+        combat.player_hit = calibrate_combat_player_hit(&combat, full_survival_hit);
         if has_attempt_effect(&combat.effects) {
             combat.effects.trophy_start_hp = Some(player_hp);
         }
@@ -4100,8 +4132,13 @@ impl DigBossRuntimeService {
                 )
                 - phase_penalty
                 + pending_event.map_or(0.0, |event| event.player_hit_offset);
-            let paid_hit = raw_hit.clamp(WAGERED_PLAYER_HIT_FLOOR, PLAYER_HIT_CEILING);
-            let free_hit = (raw_hit * FREE_FIGHT_ACCURACY_MULTIPLIER)
+            let raw_survival_hit = raw_hit + preparation.survival_hit_bonus;
+            let paid_base_hit = raw_hit.clamp(WAGERED_PLAYER_HIT_FLOOR, PLAYER_HIT_CEILING);
+            let paid_full_hit =
+                raw_survival_hit.clamp(WAGERED_PLAYER_HIT_FLOOR, PLAYER_HIT_CEILING);
+            let free_base_hit = (raw_hit * FREE_FIGHT_ACCURACY_MULTIPLIER)
+                .clamp(PLAYER_HIT_FLOOR, PLAYER_HIT_CEILING);
+            let free_full_hit = (raw_survival_hit * FREE_FIGHT_ACCURACY_MULTIPLIER)
                 .clamp(PLAYER_HIT_FLOOR, PLAYER_HIT_CEILING);
             let boss_hit = (scaled.boss_hit
                 + pending_event.map_or(0.0, |event| event.boss_hit_offset))
@@ -4130,32 +4167,33 @@ impl DigBossRuntimeService {
                 .pet_assist
                 .as_ref()
                 .map_or(0, |assist| assist.bonus_percent);
+            let paid_input = DuelOddsInput {
+                player_hp,
+                boss_hp,
+                player_hit: paid_base_hit,
+                player_damage,
+                boss_hit,
+                boss_damage,
+                critical_chance: combat.critical_chance,
+                critical_bonus: combat.critical_bonus,
+            };
+            let paid_hit = calibrate_player_hit_for_survival(paid_input, paid_full_hit, pet_bonus);
             let paid = pinnacle_duel_win_probability(
                 DuelOddsInput {
-                    player_hp,
-                    boss_hp,
                     player_hit: paid_hit,
-                    player_damage,
-                    boss_hit,
-                    boss_damage,
-                    critical_chance: combat.critical_chance,
-                    critical_bonus: combat.critical_bonus,
+                    ..paid_input
                 },
                 pet_bonus,
             );
+            let free_input = DuelOddsInput {
+                player_hit: free_base_hit,
+                ..paid_input
+            };
+            let free_hit = calibrate_player_hit_for_survival(free_input, free_full_hit, pet_bonus);
             let free = pinnacle_duel_win_probability(
                 DuelOddsInput {
                     player_hit: free_hit,
-                    ..DuelOddsInput {
-                        player_hp,
-                        boss_hp,
-                        player_hit: paid_hit,
-                        player_damage,
-                        boss_hit,
-                        boss_damage,
-                        critical_chance: combat.critical_chance,
-                        critical_bonus: combat.critical_bonus,
-                    }
+                    ..free_input
                 },
                 pet_bonus,
             );

@@ -672,6 +672,53 @@ fn clean_database_is_initialized_without_python() {
 }
 
 #[test]
+fn survival_stat_migration_adds_default_and_preserves_existing_tunnel_stats() {
+    let file = empty_database();
+    initialize_or_migrate(file.path()).expect("initialize legacy-shaped fixture");
+    let connection = open_runtime_connection(file.path()).expect("open fixture");
+    connection
+        .execute_batch(
+            "ALTER TABLE tunnels DROP COLUMN stat_survival;
+             DELETE FROM schema_migrations WHERE name='add_survival_stat_to_tunnels';
+             INSERT INTO tunnels(
+                 discord_id,guild_id,depth,stat_strength,stat_smarts,stat_stamina,stat_points
+             ) VALUES(7101,42,18,2,3,4,12);",
+        )
+        .expect("model pre-survival database");
+    drop(connection);
+
+    let report = initialize_or_migrate(file.path()).expect("apply survival migration");
+    assert_eq!(
+        report.newly_applied,
+        ["add_survival_stat_to_tunnels".to_owned()]
+    );
+
+    let connection = open_runtime_connection(file.path()).expect("inspect migrated fixture");
+    let stats: (i64, i64, i64, i64, i64) = connection
+        .query_row(
+            "SELECT stat_strength,stat_smarts,stat_stamina,stat_survival,stat_points
+             FROM tunnels WHERE discord_id=7101 AND guild_id=42",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .expect("read migrated tunnel stats");
+    assert_eq!(stats, (2, 3, 4, 0, 12));
+    assert!(
+        audit_database(file.path())
+            .expect("audit migrated fixture")
+            .is_compatible()
+    );
+}
+
+#[test]
 fn initialize_is_idempotent_and_keeps_historical_ledger_rows() {
     let file = empty_database();
     initialize_or_migrate(file.path()).expect("initialize fixture");

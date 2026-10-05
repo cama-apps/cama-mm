@@ -107,6 +107,7 @@ pub struct TunnelRow {
     pub stat_strength: i64,
     pub stat_smarts: i64,
     pub stat_stamina: i64,
+    pub stat_survival: i64,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -2915,7 +2916,7 @@ fn build_dig_questions(
         &'static str,
         fn(&TunnelRow) -> i64,
     );
-    let profiles: [ProfileMetric; 9] = [
+    let profiles: [ProfileMetric; 10] = [
         ("total_digs", "total recorded dig count", "digs", |row| {
             row.total_digs
         }),
@@ -2948,6 +2949,9 @@ fn build_dig_questions(
         }),
         ("stat_stamina", "Dig Stamina stat", "points", |row| {
             row.stat_stamina
+        }),
+        ("stat_survival", "Dig Survival stat", "points", |row| {
+            row.stat_survival
         }),
     ];
     for (field, label, unit, value) in profiles {

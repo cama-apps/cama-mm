@@ -686,6 +686,8 @@ pub struct CanonicalEventPolicy {
     pub chain_jc_multiplier: f64,
     pub expedition_reward_bonus: f64,
     pub risky_success_bonus: f64,
+    /// Allocated Survival points, applied to every event choice's success roll.
+    pub survival: i64,
     pub chipped_compass: bool,
     pub event_chain_enabled: bool,
     pub minigame_jc_delta_scale: f64,
@@ -715,6 +717,7 @@ impl Default for CanonicalEventPolicy {
             chain_jc_multiplier: 1.0,
             expedition_reward_bonus: 0.0,
             risky_success_bonus: 0.0,
+            survival: 0,
             chipped_compass: false,
             event_chain_enabled: false,
             minigame_jc_delta_scale: 1.0,
@@ -792,6 +795,8 @@ pub fn resolve_canonical_event_with_policy(
         }
         success_chance = (success_chance - luminosity_risky_penalty(policy.luminosity)).max(0.05);
     }
+    success_chance =
+        (success_chance + cama_domain::dig_stats::survival_roll_bonus(policy.survival)).min(1.0);
     if choice == "safe" && option.failure.is_some() && policy.cruel_safe_failure > 0.0 {
         success_chance = success_chance.min(1.0 - policy.cruel_safe_failure);
     }
