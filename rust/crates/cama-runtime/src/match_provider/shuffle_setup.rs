@@ -1023,6 +1023,12 @@ impl MatchHandler {
         .ok_or("shuffle aborted during publication")?
         .0;
         self.schedule_betting_reminders(&ready, true);
+        // Publication renders while setup still gates wagers. Refresh every
+        // saved copy after opening betting, including copies saved by recovery.
+        let (_, failures) = self.refresh_shuffle_messages(&ready, false).await;
+        for error in failures {
+            warn!(%error, guild, id, "shuffle betting display refresh failed");
+        }
         self.notify_match_started(&ready);
         // Interaction expiry is not a failed shuffle. All receipts and ready
         // state are durable before attempting this disposable confirmation.
