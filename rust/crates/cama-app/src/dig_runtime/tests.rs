@@ -105,6 +105,7 @@ fn canonical_seed_for(
         },
         depth: tunnel.depth,
         luminosity: tunnel.luminosity,
+        stat_survival: tunnel.stat_survival,
         prestige_level: tunnel.prestige_level,
         prestige_perks_json: tunnel.prestige_perks.clone(),
         boss_progress_json: tunnel.boss_progress.clone(),
@@ -1641,9 +1642,9 @@ fn test_miner_respec_records_sink_context_and_action() {
     connection
         .execute(
             "INSERT INTO tunnels
-                 (discord_id,guild_id,stat_strength,stat_smarts,stat_stamina,stat_points)
-                 VALUES (?1,?2,?3,?4,?5,?6)",
-            params![-401_i64, 42_i64, 2_i64, 1_i64, 7_i64, 12_i64],
+                 (discord_id,guild_id,stat_strength,stat_smarts,stat_stamina,stat_survival,stat_points)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![-401_i64, 42_i64, 2_i64, 1_i64, 7_i64, 2_i64, 12_i64],
         )
         .expect("insert miner tunnel");
     connection
@@ -1674,7 +1675,7 @@ fn test_miner_respec_records_sink_context_and_action() {
     assert_eq!(
         connection
             .query_row(
-                "SELECT stat_strength,stat_smarts,stat_stamina,stat_points
+                "SELECT stat_strength,stat_smarts,stat_stamina,stat_survival,stat_points
                        FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
                 params![-401_i64, 42_i64],
                 |row| {
@@ -1683,11 +1684,12 @@ fn test_miner_respec_records_sink_context_and_action() {
                         row.get::<_, i64>(1)?,
                         row.get::<_, i64>(2)?,
                         row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
                     ))
                 },
             )
             .expect("miner stats"),
-        (0, 0, 0, 22)
+        (0, 0, 0, 0, 24)
     );
     let ledger = connection
         .query_row(
@@ -1717,8 +1719,8 @@ fn test_miner_respec_records_sink_context_and_action() {
         serde_json::from_str::<serde_json::Value>(&ledger.6).expect("ledger metadata"),
         serde_json::json!({
             "cost": 50,
-            "returned_points": 10,
-            "previous_stats": {"strength": 2, "smarts": 1, "stamina": 7},
+            "returned_points": 12,
+            "previous_stats": {"strength": 2, "smarts": 1, "stamina": 7, "survival": 2},
         })
     );
     let action = connection
@@ -1741,8 +1743,8 @@ fn test_miner_respec_records_sink_context_and_action() {
         serde_json::from_str::<serde_json::Value>(&action.2).expect("action detail"),
         serde_json::json!({
             "cost": 50,
-            "returned_points": 10,
-            "previous_stats": {"strength": 2, "smarts": 1, "stamina": 7},
+            "returned_points": 12,
+            "previous_stats": {"strength": 2, "smarts": 1, "stamina": 7, "survival": 2},
         })
     );
     assert_eq!(

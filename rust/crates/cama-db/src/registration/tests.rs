@@ -58,7 +58,7 @@ fn request(discord_id: i64, steam_id: i64) -> RegisterPlayerRequest<'static> {
         os_mu: 40.0,
         os_sigma: 8.333,
         os_rating_version: 5,
-        os_algorithm_fingerprint: "ffdaf6752ef51115",
+        os_algorithm_fingerprint: "1d0f22e19add165d",
         exclusion_count: 4,
         added_at: 1_700_000_000,
     }
@@ -299,7 +299,7 @@ fn test_register_persists_openskill_algorithm_identity() {
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
         )
         .expect("OpenSkill algorithm identity");
-    assert_eq!(identity, (5, "ffdaf6752ef51115".to_owned()));
+    assert_eq!(identity, (5, "1d0f22e19add165d".to_owned()));
 }
 
 #[test]

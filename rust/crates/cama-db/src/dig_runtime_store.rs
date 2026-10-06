@@ -69,6 +69,7 @@ pub struct DigRuntimeTunnel {
     pub stat_strength: i64,
     pub stat_smarts: i64,
     pub stat_stamina: i64,
+    pub stat_survival: i64,
     pub stat_points: i64,
     pub paid_digs_today: i64,
     pub paid_dig_date: Option<String>,
@@ -139,6 +140,7 @@ impl DigRuntimeTunnel {
             stat_strength: 0,
             stat_smarts: 0,
             stat_stamina: 0,
+            stat_survival: 0,
             stat_points: 5,
             paid_digs_today: 0,
             paid_dig_date: None,
@@ -375,7 +377,7 @@ const TUNNEL_SELECT: &str = "SELECT depth,max_depth,total_digs,total_jc_earned,l
         stinger_curse,last_lum_update_at,pinnacle_boss_id,pinnacle_phase,
         pinnacle_hp_remaining,pinnacle_last_engaged_at,retreat_cooldown_until,
         last_cheer_at,cavein_free_streak,relic_trim_notice,
-        auto_buy_grappling_hook
+        auto_buy_grappling_hook,COALESCE(stat_survival,0)
  FROM tunnels WHERE discord_id=?1 AND guild_id=?2";
 
 fn load_tunnel_row(
@@ -419,6 +421,7 @@ fn load_tunnel_row(
         auto_buy_torch: row.get::<_, i64>(30)? != 0,
         auto_buy_hard_hat: row.get::<_, i64>(31)? != 0,
         auto_buy_grappling_hook: row.get::<_, i64>(61)? != 0,
+        stat_survival: row.get(62)?,
         best_run_score: row.get(32)?,
         total_prestige_score: row.get(33)?,
         streak_last_date: row.get(34)?,
@@ -486,11 +489,11 @@ pub fn insert_tunnel(
           mutations,engine_mode,miner_origin,miner_about,stat_boss_awards,
           stinger_curse,last_lum_update_at,pinnacle_boss_id,pinnacle_phase,
           pinnacle_hp_remaining,pinnacle_last_engaged_at,retreat_cooldown_until,
-          last_cheer_at,cavein_free_streak,relic_trim_notice)
+          last_cheer_at,cavein_free_streak,relic_trim_notice,stat_survival)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,
                  ?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,
                  ?35,?36,?37,?38,?39,?40,?41,?42,?43,?44,?45,?46,?47,?48,?49,?50,
-                 ?51,?52,?53,?54,?55,?56,?57,?58,?59,?60,?61,?62,?63)",
+                 ?51,?52,?53,?54,?55,?56,?57,?58,?59,?60,?61,?62,?63,?64)",
         params![
             tunnel.discord_id,
             tunnel.guild_id,
@@ -555,6 +558,7 @@ pub fn insert_tunnel(
             tunnel.last_cheer_at,
             tunnel.cavein_free_streak,
             i64::from(tunnel.relic_trim_notice),
+            tunnel.stat_survival,
         ],
     )
 }
@@ -586,6 +590,7 @@ pub fn update_tunnel_cas(
             pinnacle_boss_id=?59,pinnacle_phase=?60,pinnacle_hp_remaining=?61,
             pinnacle_last_engaged_at=?62,retreat_cooldown_until=?63,
             last_cheer_at=?64,cavein_free_streak=?65,relic_trim_notice=?66
+            ,stat_survival=?67
          WHERE discord_id=?33 AND guild_id=?34
            AND depth=?35 AND total_digs=?36 AND last_dig_at IS ?37",
         params![
@@ -655,6 +660,7 @@ pub fn update_tunnel_cas(
             tunnel.last_cheer_at,
             tunnel.cavein_free_streak,
             i64::from(tunnel.relic_trim_notice),
+            tunnel.stat_survival,
         ],
     )
 }
@@ -747,15 +753,18 @@ pub fn set_tunnel_depth_reset_cooldown(
     )
 }
 
+/// Strength, Smarts, Stamina, Survival, and the stat-point pool, in storage order.
+pub type TunnelStatAllocation = (i64, i64, i64, i64, i64);
+
 /// Read the allocated miner stats and the free stat pool.
 pub fn tunnel_stat_allocation(
     connection: &Connection,
     discord_id: i64,
     guild_id: i64,
-) -> Result<Option<(i64, i64, i64, i64)>, rusqlite::Error> {
+) -> Result<Option<TunnelStatAllocation>, rusqlite::Error> {
     connection
         .query_row(
-            "SELECT stat_strength, stat_smarts, stat_stamina, stat_points
+            "SELECT stat_strength, stat_smarts, stat_stamina, stat_survival, stat_points
                FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
             params![discord_id, guild_id],
             |row| {
@@ -764,6 +773,7 @@ pub fn tunnel_stat_allocation(
                     row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
                     row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
                 ))
             },
         )
@@ -777,8 +787,8 @@ pub fn respec_tunnel_stats(
     guild_id: i64,
 ) -> Result<usize, rusqlite::Error> {
     connection.execute(
-        "UPDATE tunnels SET stat_points=stat_points+stat_strength+stat_smarts+stat_stamina,
-                stat_strength=0, stat_smarts=0, stat_stamina=0
+        "UPDATE tunnels SET stat_points=stat_points+stat_strength+stat_smarts+stat_stamina+stat_survival,
+                stat_strength=0, stat_smarts=0, stat_stamina=0, stat_survival=0
          WHERE discord_id=?1 AND guild_id=?2",
         params![discord_id, guild_id],
     )

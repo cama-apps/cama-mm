@@ -29,8 +29,11 @@ struct FakeDiscord {
     delivered: Mutex<std::collections::BTreeMap<String, String>>,
     maps: Mutex<BTreeMap<String, DiscordMessage>>,
     map_edits: Mutex<Vec<DiscordMessage>>,
+    map_status_edits: Mutex<Vec<DiscordMessage>>,
     thread: Mutex<Option<u64>>,
     thread_creates: AtomicUsize,
+    surface_refreshes: AtomicUsize,
+    membership_checks: AtomicUsize,
     fail_thread_audit: AtomicBool,
     lose_thread_reply: AtomicBool,
     joins: Mutex<BTreeMap<String, DiscordMessage>>,
@@ -143,6 +146,7 @@ impl DiscordTransport for FakeDiscord {
         viewers: &[u64],
         known: Option<u64>,
     ) -> Result<u64, String> {
+        self.surface_refreshes.fetch_add(1, Ordering::SeqCst);
         self.audit_spectator_channel(guild, marker, participants, viewers, parent)
             .await?;
         let destination = if self.private_thread_room.load(Ordering::SeqCst) {
@@ -193,6 +197,7 @@ impl DiscordTransport for FakeDiscord {
         Ok(())
     }
     async fn spectator_thread_members(&self, thread: u64) -> Result<BTreeSet<u64>, String> {
+        self.membership_checks.fetch_add(1, Ordering::SeqCst);
         if self.fail_member_lookup.load(Ordering::SeqCst) {
             return Err("thread membership unavailable".into());
         }
@@ -359,10 +364,18 @@ impl DiscordTransport for FakeDiscord {
         id: u64,
         message: DiscordMessage,
     ) -> Result<(), String> {
-        if channel == 500 && id == 700 && !message.response.attachments.is_empty() {
+        if channel == 500 && id == 700 {
             if self.map_message_deleted.swap(false, Ordering::SeqCst) {
                 self.maps.lock().unwrap().clear();
                 return Err("unknown message".into());
+            }
+            if message.response.attachments.is_empty() {
+                assert_eq!(
+                    message.response.attachment_policy,
+                    crate::registration::InteractionAttachmentPolicy::Preserve
+                );
+                self.map_status_edits.lock().unwrap().push(message);
+                return Ok(());
             }
             self.map_edits.lock().unwrap().push(message);
             if self.lose_map_reply.swap(false, Ordering::SeqCst) {
@@ -1169,6 +1182,168 @@ async fn same_tick_delivery_reaudits_after_persistence_and_blocks_reopened_betti
 }
 
 #[tokio::test]
+async fn five_second_maps_preserve_commentary_and_postgame_capture_cadence() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let f = Fixture::with_upstream(Some(&format!("http://{}", listener.local_addr().unwrap())));
+    f.subscribe(20, true);
+    for step in 0..=3 {
+        let elapsed = step * 5;
+        poll_frame_with_map(&f, &listener, &frame(100 + elapsed, step, 0), true).await;
+        f.worker.tick(1000 + elapsed).await.unwrap();
+        assert_eq!(f.discord.map_edits.lock().unwrap().len(), step as usize + 1);
+        assert_eq!(f.discord.maps.lock().unwrap().len(), 1);
+        assert_eq!(
+            f.discord.surface_refreshes.load(Ordering::SeqCst),
+            if step < 3 { 1 } else { 2 }
+        );
+        assert_eq!(
+            f.discord.membership_checks.load(Ordering::SeqCst),
+            if step < 3 { 2 } else { 3 }
+        );
+        let commentary_clock = if step < 3 { 100 } else { 115 };
+        assert_eq!(f.state().previous.unwrap().game_time, commentary_clock);
+        assert_eq!(
+            f.discord.delivered.lock().unwrap().len(),
+            if step < 3 { 1 } else { 2 }
+        );
+        assert_eq!(
+            f.worker.lease.lock().await.last_recap_at,
+            Some(if step < 3 { 1000 } else { 1015 })
+        );
+    }
+    let manifest =
+        f.db.path()
+            .with_extension("spectator-recaps")
+            .join(format!("1-{}", f.pending))
+            .join("manifest.json");
+    let archive: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(manifest).unwrap()).unwrap();
+    assert_eq!(
+        archive["frames"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|frame| frame["clock"].as_i64().unwrap())
+            .collect::<Vec<_>>(),
+        [100, 115]
+    );
+    assert_eq!(
+        f.discord
+            .map_edits
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .response
+            .attachments[0]
+            .filename,
+        "map-123-115.png"
+    );
+    assert_eq!(f.discord.public_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn stale_map_marks_last_image_once_and_resumes_without_replacing_attachment() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let f = Fixture::with_upstream(Some(&format!("http://{}", listener.local_addr().unwrap())));
+    f.subscribe(20, true);
+    poll_frame_with_map(&f, &listener, &frame(100, 0, 0), true).await;
+    f.worker.tick(1000).await.unwrap();
+    assert_eq!(f.discord.map_edits.lock().unwrap().len(), 1);
+    assert!(f.discord.map_status_edits.lock().unwrap().is_empty());
+
+    f.live.finish_match(1, f.pending).await;
+    f.worker.tick(1015).await.unwrap();
+    {
+        let edits = f.discord.map_status_edits.lock().unwrap();
+        assert_eq!(edits.len(), 1);
+        assert!(edits[0].response.attachments.is_empty());
+        assert_eq!(
+            edits[0].response.attachment_policy,
+            crate::registration::InteractionAttachmentPolicy::Preserve
+        );
+        assert_eq!(
+            edits[0].response.embeds[0].title.as_deref(),
+            Some("Latest map · 1:40 · feed stale")
+        );
+        let description = edits[0].response.embeds[0].description.as_deref().unwrap();
+        assert!(description.contains("Feed paused"));
+        assert!(description.contains("<t:"));
+        assert!(description.contains("Delay "));
+    }
+    assert_eq!(f.discord.map_edits.lock().unwrap().len(), 1);
+    assert_eq!(f.state().last_delivered_map, Some((123, 100)));
+
+    // Repeating the same stale observation edits neither the image nor the
+    // status embed a second time.
+    f.worker.tick(1030).await.unwrap();
+    assert_eq!(f.discord.map_status_edits.lock().unwrap().len(), 1);
+
+    // The feed can resume from its cached frame. The existing PNG remains in
+    // Discord while only the status embed is changed back to fresh.
+    f.live.publish_match_with_expected_accounts(
+        1,
+        f.pending,
+        123,
+        None,
+        19144,
+        (1..=10).collect(),
+        true,
+    );
+    f.worker.tick(1035).await.unwrap();
+    {
+        let edits = f.discord.map_status_edits.lock().unwrap();
+        assert_eq!(edits.len(), 2);
+        assert!(edits[1].response.attachments.is_empty());
+        assert_eq!(
+            edits[1].response.embeds[0].title.as_deref(),
+            Some("Latest map · 1:40")
+        );
+    }
+    assert_eq!(f.discord.map_edits.lock().unwrap().len(), 1);
+    assert_eq!(
+        f.state().map_status.unwrap().phase,
+        MapFreshnessPhase::Fresh
+    );
+    assert_eq!(f.discord.public_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn different_live_match_marks_retained_map_unavailable_without_relabeling_it_fresh() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let f = Fixture::with_upstream(Some(&format!("http://{}", listener.local_addr().unwrap())));
+    f.subscribe(20, true);
+    poll_frame_with_map(&f, &listener, &frame(100, 0, 0), true).await;
+    f.worker.tick(1000).await.unwrap();
+    let original = f.state().map_status.unwrap();
+    f.live.publish_match_with_expected_accounts(
+        1,
+        f.pending,
+        999,
+        None,
+        19144,
+        (1..=10).collect(),
+        true,
+    );
+    f.worker.tick(1015).await.unwrap();
+    let edits = f.discord.map_status_edits.lock().unwrap();
+    assert_eq!(edits.len(), 1);
+    assert_eq!(
+        edits[0].response.embeds[0].title.as_deref(),
+        Some("Latest map · 1:40 · feed unavailable")
+    );
+    let description = edits[0].response.embeds[0].description.as_deref().unwrap();
+    assert!(description.starts_with("Feed unavailable · Last update <t:"));
+    assert!(!description.contains("999"));
+    assert_eq!(
+        f.state().map_status.unwrap().source_fetched_at,
+        original.source_fetched_at
+    );
+    assert_eq!(f.state().last_delivered_map, Some((123, 100)));
+    assert_eq!(f.discord.map_edits.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn spectator_map_reuses_one_message_on_quiet_fifteen_second_ticks() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let f = Fixture::with_upstream(Some(&format!("http://{}", listener.local_addr().unwrap())));
@@ -1179,7 +1354,8 @@ async fn spectator_map_reuses_one_message_on_quiet_fifteen_second_ticks() {
     assert!(f.state().pending_map.is_none());
     assert_eq!(f.discord.maps.lock().unwrap().len(), 1);
     poll_frame_with_map(&f, &listener, &frame(115, 0, 0), true).await;
-    f.worker.tick(1014).await.unwrap();
+    let restarted = SpectatorWorker::new(f.db.path(), vec![1], f.discord.clone(), f.live.clone());
+    restarted.tick(1014).await.unwrap();
     assert_eq!(f.discord.map_edits.lock().unwrap().len(), 2);
     f.worker.tick(1015).await.unwrap();
     assert_eq!(
@@ -1191,15 +1367,23 @@ async fn spectator_map_reuses_one_message_on_quiet_fifteen_second_ticks() {
     {
         let edits = f.discord.map_edits.lock().unwrap();
         assert_eq!(edits.len(), 2);
+        assert_eq!(edits[0].response.attachments[0].filename, "map-123-100.png");
         assert_eq!(edits[1].response.attachments[0].filename, "map-123-115.png");
         assert!(
             edits[1].response.attachments[0]
                 .bytes
-                .starts_with(b"\x89PNG")
+                .starts_with(b"\x89PNG\r\n\x1a\n")
         );
         assert_eq!(
             edits[1].response.embeds[0].title.as_deref(),
-            Some("Last received map · 1:55")
+            Some("Latest map · 1:55")
+        );
+        assert!(
+            edits[1].response.embeds[0]
+                .description
+                .as_deref()
+                .unwrap()
+                .starts_with("Updated <t:")
         );
     }
     // A repeated clock and a later position-less sample cannot turn the old
@@ -1237,9 +1421,9 @@ async fn spectator_map_reaudits_betting_after_render_and_withholds_private_image
     f.subscribe(20, true);
     f.worker.tick(990).await.unwrap();
     poll_frame_with_map(&f, &listener, &frame(100, 0, 0), true).await;
-    // Surface validation comes first; change policy during the map audit,
-    // after rendering, to prove a fresh DB check blocks image publication.
-    f.discord.audit_hook_after.store(1, Ordering::SeqCst);
+    // The surface was recently checked; change policy in the fast map-only
+    // audit after rendering to prove it still rechecks the database policy.
+    f.discord.audit_hook_after.store(0, Ordering::SeqCst);
     let path = f.db.path().to_owned();
     let id = f.pending;
     *f.discord.audit_hook.lock().unwrap() = Some(Box::new(move || {
@@ -1272,6 +1456,35 @@ async fn spectator_map_retry_drops_expired_frame_without_blocking_text() {
     poll_frame_with_map(&f, &listener, &frame(115, 1, 0), false).await;
     f.worker.tick(1106).await.unwrap();
     assert_eq!(f.discord.delivered.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn latest_map_rechecks_betting_before_publishing() {
+    for elapsed in [5, 15] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let f = Fixture::with_upstream(Some(&format!("http://{}", listener.local_addr().unwrap())));
+        f.subscribe(20, true);
+        poll_frame_with_map(&f, &listener, &frame(100, 0, 0), true).await;
+        f.worker.tick(1000).await.unwrap();
+        poll_frame_with_map(&f, &listener, &frame(100 + elapsed, 0, 0), true).await;
+        f.discord
+            .audit_hook_after
+            .store(if elapsed == 5 { 0 } else { 1 }, Ordering::SeqCst);
+        let path = f.db.path().to_owned();
+        let id = f.pending;
+        *f.discord.audit_hook.lock().unwrap() = Some(Box::new(move || {
+            let repository = PendingMatchRepository::new(path);
+            let mut pending = repository.pending_match(1, id).unwrap().unwrap();
+            pending.state.extra.remove(DOTA_BETTING_CLOSED_MARKER);
+            repository
+                .update_pending_match(1, id, &pending.state)
+                .unwrap();
+        }));
+        f.worker.tick(1000 + elapsed).await.unwrap();
+        assert_eq!(f.discord.map_edits.lock().unwrap().len(), 1);
+        assert!(f.row().channel_id.is_none());
+        assert_eq!(f.discord.public_calls.load(Ordering::SeqCst), 0);
+    }
 }
 
 #[tokio::test]

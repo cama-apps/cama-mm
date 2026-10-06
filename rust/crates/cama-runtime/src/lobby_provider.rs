@@ -32,7 +32,7 @@ use cama_app::moderation::{ModerationService, RecordKick};
 use cama_app::readycheck::{
     CommitPublicationResult, ExistingMessageState, MINIMUM_READYCHECK_PLAYERS, PublicationMode,
     ReadinessGroup, ReadyLobby, ReadycheckCommandFailure, ReadycheckCommandPlan,
-    ReadycheckCommandRequest, ReadycheckPlayerData, ReadycheckService,
+    ReadycheckCommandRequest, ReadycheckGeneration, ReadycheckPlayerData, ReadycheckService,
     ReadycheckTransportOperation, ready_announcement, readycheck_description,
 };
 use cama_db::core_repositories::{CoreRepositoryError, NewPlayer, PlayerRepository};
@@ -85,6 +85,9 @@ pub use crate::runtime_ports::{
 const LEGACY_FROGLING_EMOJI_ID: u64 = 1_463_270_458_848_842_003;
 const LEGACY_SWORD_EMOJI: &str = "⚔️";
 const READY_EMOJI: &str = "✅";
+const READYCHECK_EXPIRED_DESCRIPTION: &str =
+    "⌛ This ready check has expired. Run `/readycheck` to start a new one.";
+const READYCHECK_EXPIRED_FOOTER: &str = "Expired — reactions no longer count";
 const BELL_EMOJI: &str = "🔔";
 const CLIPBOARD_EMOJI: &str = "📋";
 const SPECTATOR_EMOJI: &str = "📻";
@@ -1041,6 +1044,50 @@ impl LobbyRuntimeState {
         }
         self.notify_readycheck_completion(scope, generation.message_id)
             .await;
+    }
+
+    /// Repaint a retired ready check so its message stops inviting reactions
+    /// that no longer count. Only the players who confirmed are kept.
+    async fn publish_expired_readycheck(
+        &self,
+        scope: LobbyScope,
+        generation: &ReadycheckGeneration,
+    ) {
+        let confirmed = generation
+            .player_data
+            .iter()
+            .filter(|(player_id, _)| generation.reacted.contains_key(player_id))
+            .map(|(player_id, data)| (*player_id, data.clone()))
+            .collect();
+        let embed = readycheck_embed(
+            scope.kind,
+            &confirmed,
+            &generation.reacted,
+            self.config.ready_threshold,
+        )
+        .description(READYCHECK_EXPIRED_DESCRIPTION)
+        .color(0x95_a5_a6)
+        .footer(READYCHECK_EXPIRED_FOOTER);
+        match (
+            to_u64(generation.channel_id.0),
+            to_u64(generation.message_id.0),
+        ) {
+            (Ok(channel_id), Ok(message_id)) => {
+                if let Err(error) = self
+                    .transport
+                    .edit_message(
+                        channel_id,
+                        message_id,
+                        DiscordMessage::silent(InteractionResponse::message("").embed(embed))
+                            .preserving_content(),
+                    )
+                    .await
+                {
+                    warn!(%error, ?scope, "expired readycheck repaint failed");
+                }
+            }
+            _ => warn!(?scope, "expired readycheck repaint has invalid Discord IDs"),
+        }
     }
 
     /// Best-effort push-notification fan-out for a freshly launched
@@ -2488,9 +2535,10 @@ impl LobbyInteractionHandler {
     }
 
     /// Remove the players who never confirmed a ready check whose deadline
-    /// has passed. Removal and its public notice commit together, and the
-    /// deadline is only disarmed afterwards, so a failure here is retried on
-    /// the next wake. Players reserved by an in-flight shuffle or draft stay.
+    /// has passed, then retire that ready check. Removal and its public
+    /// notice commit together, and the ready check is only retired
+    /// afterwards, so a failure here is retried on the next wake. Players
+    /// reserved by an in-flight shuffle or draft stay.
     async fn sweep_due_readycheck(&self, scope: LobbyScope, now: f64) -> Result<usize, String> {
         let operation_lock = self.state.commands.scope_operation_lock(scope);
         let _guard = operation_lock.lock().await;
@@ -2516,9 +2564,15 @@ impl LobbyInteractionHandler {
             .map_err(|error| error.to_string())?
             .map_err(|error| error.to_string())?
         };
-        self.state
+        if let Some(generation) = self
+            .state
             .readychecks
-            .complete_sweep(scope, sweep.message_id);
+            .complete_sweep(scope, sweep.message_id)
+        {
+            self.state
+                .publish_expired_readycheck(scope, &generation)
+                .await;
+        }
         if removed.is_empty() {
             return Ok(0);
         }
@@ -2529,7 +2583,7 @@ impl LobbyInteractionHandler {
         {
             warn!(%error, ?scope, "ready-check sweep notice failed; retained for retry");
         }
-        self.state.sync_readycheck_with_lobby(scope).await;
+        self.state.sync_ready_lobby(scope);
         if let Err(error) = self.state.sync_lobby_display(scope).await {
             warn!(%error, ?scope, "failed to refresh lobby display after ready-check sweep");
         }

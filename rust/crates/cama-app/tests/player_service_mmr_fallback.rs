@@ -113,7 +113,7 @@ fn test_register_player_fallback_to_current_mmr() {
     assert!((added.glicko_rating - 1_175.0).abs() < f64::EPSILON);
     assert!((added.os_mu - 48.5).abs() < f64::EPSILON);
     assert_eq!(added.os_rating_version, OPENSKILL_ALGORITHM_VERSION);
-    assert_eq!(added.os_algorithm_fingerprint, "ffdaf6752ef51115");
+    assert_eq!(added.os_algorithm_fingerprint, "1d0f22e19add165d");
     assert_eq!(result.mmr, 5_200);
     assert_eq!((api.player_data_calls, api.mmr_from_data_calls), (1, 1));
 }

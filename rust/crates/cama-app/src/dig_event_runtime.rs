@@ -2375,6 +2375,7 @@ fn event_policy(
         chain_jc_multiplier: number("chain_jc_multiplier").max(1.0),
         expedition_reward_bonus: perk_count("tunnel_mastery") * 0.50,
         risky_success_bonus: perk_count("veteran_miner") * 0.05,
+        survival: snapshot.stat_survival,
         chipped_compass: snapshot.equipped_relics.contains("chipped_compass"),
         event_chain_enabled: boolean("event_chain"),
         // Application applies central/daily/Dig economy after protected

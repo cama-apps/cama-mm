@@ -272,6 +272,7 @@ fn miner_allocation(tunnel: &DigRuntimeTunnel) -> MinerAllocation {
         strength: tunnel.stat_strength.max(0),
         smarts: tunnel.stat_smarts.max(0),
         stamina: tunnel.stat_stamina.max(0),
+        survival: tunnel.stat_survival.max(0),
         stat_points: tunnel.stat_points.max(0),
     }
 }
@@ -1520,11 +1521,14 @@ impl DigRuntimeService<SqliteDigRuntimeStore> {
         };
         let tunnel_stats =
             dig_runtime_store::tunnel_stat_allocation(&transaction, discord_id, guild_id)?;
-        let Some((strength, smarts, stamina, _stat_points)) = tunnel_stats else {
+        let Some((strength, smarts, stamina, survival, _stat_points)) = tunnel_stats else {
             transaction.commit()?;
             return Ok("You don't have any allocated S points to reset.".to_owned());
         };
-        let returned_points = strength.saturating_add(smarts).saturating_add(stamina);
+        let returned_points = strength
+            .saturating_add(smarts)
+            .saturating_add(stamina)
+            .saturating_add(survival);
         if returned_points <= 0 {
             transaction.commit()?;
             return Ok("You don't have any allocated S points to reset.".to_owned());
@@ -1543,6 +1547,7 @@ impl DigRuntimeService<SqliteDigRuntimeStore> {
                 "strength": strength,
                 "smarts": smarts,
                 "stamina": stamina,
+                "survival": survival,
             },
         })
         .to_string();
@@ -2006,8 +2011,8 @@ where
             3_600_i64.saturating_add(restless_bonus)
         };
         let stat_fx = miner_stat_effects(
-            MinerStats::new(0, 0, tunnel.stat_stamina.max(0))
-                .expect("normalized persisted stamina is non-negative"),
+            MinerStats::new(0, 0, tunnel.stat_stamina.max(0), 0)
+                .expect("normalized persisted stamina and survival are non-negative"),
         );
         let after_stamina = (before_stamina as f64 * stat_fx.cooldown_multiplier) as i64;
         let cooldown_seconds = (after_stamina.max(1) as f64

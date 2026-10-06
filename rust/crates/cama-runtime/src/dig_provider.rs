@@ -7242,6 +7242,7 @@ impl DigInteractionHandler {
                 let strength = integer_option(options, "strength")?.unwrap_or_default();
                 let smarts = integer_option(options, "smarts")?.unwrap_or_default();
                 let stamina = integer_option(options, "stamina")?.unwrap_or_default();
+                let survival = integer_option(options, "survival")?.unwrap_or_default();
                 responder
                     .defer(true)
                     .await
@@ -7255,6 +7256,7 @@ impl DigInteractionHandler {
                             strength,
                             smarts,
                             stamina,
+                            survival,
                         },
                         unix_now(),
                     ))
@@ -7691,7 +7693,7 @@ fn dig_options() -> Vec<CommandOptionSpec> {
             ),
             subcommand(
                 "build",
-                "Spend unallocated points on Strength, Smarts, and Stamina",
+                "Spend unallocated points on Strength, Smarts, Stamina, and Survival",
                 vec![
                     CommandOptionSpec::new(
                         "strength",
@@ -7706,6 +7708,11 @@ fn dig_options() -> Vec<CommandOptionSpec> {
                     CommandOptionSpec::new(
                         "stamina",
                         "Points to add. Keeps you digging longer between rests.",
+                        CommandOptionKind::Integer,
+                    ),
+                    CommandOptionSpec::new(
+                        "survival",
+                        "Adds 1pp to event success; improves boss win chance (20-point cap).",
                         CommandOptionKind::Integer,
                     ),
                 ],
@@ -8150,11 +8157,13 @@ fn format_miner_stat_values(
 ) -> String {
     let cave_in_percent = (effects.cave_in_reduction.max(0.0) * 100.0).round();
     let cooldown_percent = ((1.0 - effects.cooldown_multiplier).max(0.0) * 100.0).round();
+    let survival_event_percent = effects.survival_roll_bonus.max(0.0) * 100.0;
     format!(
-        "Strength **{}** | Smarts **{}** | Stamina **{}**\nPoints: **{}** total, **{}** unspent\nEffects: +{}/+{} advance range, -{cave_in_percent:.0}% cave-in, -{cooldown_percent:.0}% cooldown/paid costs",
+        "Strength **{}** | Smarts **{}** | Stamina **{}** | Survival **{}**\nPoints: **{}** total, **{}** unspent\nEffects: +{}/+{} advance range, -{cave_in_percent:.0}% cave-in, -{cooldown_percent:.0}% cooldown/paid costs, +{survival_event_percent:.0}pp event success, improves boss win chance (20-point cap)",
         stats.strength,
         stats.smarts,
         stats.stamina,
+        stats.survival,
         stats.stat_points,
         stats.unspent_points,
         effects.advance_min_bonus,
@@ -8623,7 +8632,7 @@ const DIG_GUIDE_PAGES: [DigGuidePage; 4] = [
     },
     DigGuidePage {
         title: "Dig Guide — Bosses",
-        description: "**Boss Encounters**\nBosses guard layer transitions. When you encounter one, you can:\n- **Fight**: Wager JC and choose a risk tier (Cautious/Bold/Reckless)\n- **Retreat**: Back away safely, keeping your depth\n- **Scout**: Use a lantern to reveal boss stats first\n\n**Cheering**\nOther players can cheer for you during boss fights, boosting your success chance. Rally your friends!\n\n**Risk Tiers**\n- **Cautious**: Lower wager multiplier, higher success chance\n- **Bold**: Balanced risk and reward\n- **Reckless**: Huge payoff potential, but high failure risk",
+        description: "**Boss Encounters**\nBosses guard layer transitions. When you encounter one, you can:\n- **Fight**: Wager JC and choose a risk tier (Cautious/Bold/Reckless)\n- **Retreat**: Back away safely, keeping your depth\n- **Scout**: Use a lantern to reveal boss stats first\n\n**Survival**\nEach point adds 1pp to event success and improves boss win chance, with benefits capped at 20 points. Boss improvement varies by encounter and risk tier.\n\n**Cheering**\nOther players can cheer for you during boss fights, boosting your success chance. Rally your friends!\n\n**Risk Tiers**\n- **Cautious**: Lower wager multiplier, higher success chance\n- **Bold**: Balanced risk and reward\n- **Reckless**: Huge payoff potential, but high failure risk",
         color: 0x00_CE_D1,
     },
     DigGuidePage {

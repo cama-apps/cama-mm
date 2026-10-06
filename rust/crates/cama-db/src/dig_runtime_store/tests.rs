@@ -44,6 +44,7 @@ fn tunnel_roundtrips_through_insert_and_full_select() {
     row.max_depth = 20;
     row.total_digs = 3;
     row.last_dig_at = Some(1_699_999_000);
+    row.stat_survival = 7;
     row.auto_buy_torch = true;
     row.mutations = Some("[\"gills\"]".to_owned());
     assert_eq!(insert_tunnel(&connection, &row).expect("insert"), 1);

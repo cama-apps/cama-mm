@@ -24,6 +24,7 @@ pub struct DigMinerStats {
     pub strength: i64,
     pub smarts: i64,
     pub stamina: i64,
+    pub survival: i64,
     pub stat_points: i64,
     pub spent_points: i64,
     pub unspent_points: i64,
@@ -36,6 +37,7 @@ pub struct DigMinerEffects {
     pub cave_in_reduction: f64,
     pub cooldown_multiplier: f64,
     pub paid_cost_multiplier: f64,
+    pub survival_roll_bonus: f64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -196,7 +198,11 @@ impl DigMinerRuntimeService {
         entropy: &mut impl TunnelNameEntropy,
     ) -> Result<DigMinerProfile, DigMinerRuntimeError> {
         let snapshot = self.ensure_profile(discord_id, guild_id, now, entropy)?;
-        if allocation.strength < 0 || allocation.smarts < 0 || allocation.stamina < 0 {
+        if allocation.strength < 0
+            || allocation.smarts < 0
+            || allocation.stamina < 0
+            || allocation.survival < 0
+        {
             return Err(DigMinerRuntimeError::NegativeStats);
         }
         let requested = allocation.total();
@@ -415,12 +421,17 @@ fn stats_from_tunnel(tunnel: &DigMinerTunnelSnapshot) -> DigMinerStats {
     let strength = tunnel.stat_strength.max(0);
     let smarts = tunnel.stat_smarts.max(0);
     let stamina = tunnel.stat_stamina.max(0);
+    let survival = tunnel.stat_survival.max(0);
     let stat_points = tunnel.stat_points.max(DIG_STARTING_STAT_POINTS);
-    let spent_points = strength.saturating_add(smarts).saturating_add(stamina);
+    let spent_points = strength
+        .saturating_add(smarts)
+        .saturating_add(stamina)
+        .saturating_add(survival);
     DigMinerStats {
         strength,
         smarts,
         stamina,
+        survival,
         stat_points,
         spent_points,
         unspent_points: stat_points.saturating_sub(spent_points).max(0),
@@ -429,7 +440,7 @@ fn stats_from_tunnel(tunnel: &DigMinerTunnelSnapshot) -> DigMinerStats {
 
 fn effects_from_stats(stats: DigMinerStats) -> DigMinerEffects {
     let effects = miner_stat_effects(
-        MinerStats::new(stats.strength, stats.smarts, stats.stamina)
+        MinerStats::new(stats.strength, stats.smarts, stats.stamina, stats.survival)
             .expect("normalized miner stats are non-negative"),
     );
     DigMinerEffects {
@@ -438,6 +449,7 @@ fn effects_from_stats(stats: DigMinerStats) -> DigMinerEffects {
         cave_in_reduction: effects.cave_in_reduction,
         cooldown_multiplier: effects.cooldown_multiplier,
         paid_cost_multiplier: effects.paid_cost_multiplier,
+        survival_roll_bonus: effects.survival_roll_bonus,
     }
 }
 

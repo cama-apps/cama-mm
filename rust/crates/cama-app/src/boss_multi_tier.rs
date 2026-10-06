@@ -28,10 +28,12 @@ pub use crate::dig_bosses::{
 };
 use crate::dig_bosses::{
     CombatStats, DuelOddsInput, PINNACLE_DEPTH, boss_by_id, boss_pool_for_tier,
-    duel_win_probability_with_damage_bonus, regular_phase, scale_boss_stats,
+    calibrate_player_hit_for_survival, duel_win_probability_with_damage_bonus, regular_phase,
+    scale_boss_stats,
 };
 use crate::dig_relic_rework::{
-    RelicEntropy, RelicSet, ShiftingIdolStats, apply_shifting_idol_stats,
+    RelicEntropy, RelicSet, SHIFTING_IDOL_PLAYER_HIT_CEILING, ShiftingIdolBonus, ShiftingIdolStats,
+    apply_shifting_idol_stats,
 };
 
 pub const PHASE_TWO_MIN_PRESTIGE: i32 = 2;
@@ -605,6 +607,7 @@ pub trait GearRepairPort {
 pub struct BossCombatPreparation {
     pub base_combat: CombatState,
     pub player_hit_offset: f64,
+    pub survival_hit_bonus: f64,
     pub boss_damage_delta: i32,
     pub boss_hp_multiplier: f64,
     pub player_damage_multiplier: f64,
@@ -622,6 +625,7 @@ impl BossCombatPreparation {
         Self {
             base_combat,
             player_hit_offset: 0.0,
+            survival_hit_bonus: 0.0,
             boss_damage_delta: 0,
             boss_hp_multiplier: 1.0,
             player_damage_multiplier: 1.0,
@@ -1095,6 +1099,30 @@ fn combat_win_probability(combat: &CombatState) -> f64 {
             critical_chance: combat.critical_chance,
             critical_bonus: combat.critical_bonus,
         },
+        combat
+            .effects
+            .pet_assist
+            .as_ref()
+            .map_or(0, |assist| assist.bonus_percent),
+    )
+}
+
+/// Calibrate the final player hit chance against the same absorbing-chain
+/// model used by scout and live-fight odds. The caller supplies the full-hit
+/// endpoint after all ordinary modifiers and caps have been applied.
+pub(crate) fn calibrate_combat_player_hit(combat: &CombatState, full_survival_hit: f64) -> f64 {
+    calibrate_player_hit_for_survival(
+        DuelOddsInput {
+            player_hp: combat.player_hp,
+            boss_hp: combat.boss_hp,
+            player_hit: combat.player_hit,
+            player_damage: combat.player_damage,
+            boss_hit: combat.boss_hit,
+            boss_damage: combat.boss_damage,
+            critical_chance: combat.critical_chance,
+            critical_bonus: combat.critical_bonus,
+        },
+        full_survival_hit,
         combat
             .effects
             .pet_assist
@@ -2315,8 +2343,18 @@ where
         } else {
             (wager as f64 / 500.0).min(1.0) * 0.03
         };
+        let raw_player_hit =
+            base.player_hit + preparation.player_hit_offset + wager_skin_bonus - phase_hit_penalty;
+        let raw_survival_player_hit = raw_player_hit + preparation.survival_hit_bonus;
         let mut player_hit = effective_player_hit(
-            base.player_hit + preparation.player_hit_offset + wager_skin_bonus - phase_hit_penalty,
+            raw_player_hit,
+            boundary,
+            tunnel.prestige_level,
+            wager,
+            forced,
+        );
+        let mut full_survival_hit = effective_player_hit(
+            raw_survival_player_hit,
             boundary,
             tunnel.prestige_level,
             wager,
@@ -2324,6 +2362,14 @@ where
         );
         if let Some(event) = phase_event {
             player_hit = (player_hit + event.player_hit_offset).clamp(
+                if wager > 0 {
+                    WAGERED_PLAYER_HIT_FLOOR
+                } else {
+                    PLAYER_HIT_FLOOR
+                },
+                PLAYER_HIT_CEILING,
+            );
+            full_survival_hit = (full_survival_hit + event.player_hit_offset).clamp(
                 if wager > 0 {
                     WAGERED_PLAYER_HIT_FLOOR
                 } else {
@@ -2377,6 +2423,12 @@ where
         );
         player_hp = i32::try_from(shifting_idol.player_hp).unwrap_or(i32::MAX);
         player_hit = shifting_idol.player_hit;
+        let full_survival_hit = match shifting_idol.bonus {
+            Some(ShiftingIdolBonus::Hit) => {
+                (full_survival_hit + 0.05).min(SHIFTING_IDOL_PLAYER_HIT_CEILING)
+            }
+            Some(ShiftingIdolBonus::Hp | ShiftingIdolBonus::Crit) | None => full_survival_hit,
+        };
         base.critical_chance = shifting_idol.crit_chance;
         base.effects.shifting_idol_bonus =
             shifting_idol.bonus.map(|bonus| bonus.as_str().to_owned());
@@ -2390,22 +2442,18 @@ where
             let entry = progress_entry_mut(&mut tunnel.boss_progress, boundary);
             entry.pending_phase_event_id = None;
         }
-        (
-            CombatState {
-                player_hp,
-                boss_hp,
-                player_hit,
-                player_damage,
-                boss_hit: (scaled.boss_hit
-                    + phase_event.map_or(0.0, |event| event.boss_hit_offset))
+        let mut combat = CombatState {
+            player_hp,
+            boss_hp,
+            player_hit,
+            player_damage,
+            boss_hit: (scaled.boss_hit + phase_event.map_or(0.0, |event| event.boss_hit_offset))
                 .clamp(0.05, 0.95),
-                boss_damage,
-                ..base
-            },
-            boss_hp_max,
-            forced,
-            consumed_phase_event,
-        )
+            boss_damage,
+            ..base
+        };
+        combat.player_hit = calibrate_combat_player_hit(&combat, full_survival_hit);
+        (combat, boss_hp_max, forced, consumed_phase_event)
     }
 
     fn economy_for_victory(

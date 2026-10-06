@@ -728,6 +728,7 @@ pub struct TunnelFlavorState {
     pub strength: i64,
     pub smarts: i64,
     pub stamina: i64,
+    pub survival: i64,
     pub stat_points: i64,
     pub relics: Vec<String>,
     pub buffs: Vec<FlavorBuff>,
@@ -761,6 +762,7 @@ impl Default for TunnelFlavorState {
             strength: 0,
             smarts: 0,
             stamina: 0,
+            survival: 0,
             stat_points: 5,
             relics: Vec::new(),
             buffs: Vec::new(),
@@ -787,7 +789,7 @@ pub fn build_player_state_context(tunnel: &TunnelFlavorState, balance: i64) -> S
         .and_then(|tier| PICKAXE_TIER_NAMES.get(tier))
         .copied()
         .unwrap_or("Wooden");
-    let spent = tunnel.strength + tunnel.smarts + tunnel.stamina;
+    let spent = tunnel.strength + tunnel.smarts + tunnel.stamina + tunnel.survival;
     let mut lines = vec![
         format!("Tunnel: {}", tunnel.tunnel_name),
         format!("Depth: {} ({})", tunnel.depth, layer_name(tunnel.depth)),
@@ -798,10 +800,11 @@ pub fn build_player_state_context(tunnel: &TunnelFlavorState, balance: i64) -> S
         format!("Total digs: {}", tunnel.total_digs),
         format!("Balance: {balance} JC"),
         format!(
-            "S stats: Strength {}, Smarts {}, Stamina {} ({} unspent)",
+            "S stats: Strength {}, Smarts {}, Stamina {}, Survival {} ({} unspent)",
             tunnel.strength,
             tunnel.smarts,
             tunnel.stamina,
+            tunnel.survival,
             (tunnel.stat_points - spent).max(0)
         ),
     ];
@@ -2254,6 +2257,7 @@ fn map_db_tunnel(tunnel: cama_db::dig_flavor_repository::DigFlavorTunnel) -> Tun
         strength: tunnel.stat_strength,
         smarts: tunnel.stat_smarts,
         stamina: tunnel.stat_stamina,
+        survival: tunnel.stat_survival,
         stat_points: tunnel.stat_points,
         relics: tunnel.equipped_relics,
         buffs: tunnel

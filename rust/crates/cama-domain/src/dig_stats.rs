@@ -1,6 +1,6 @@
 //! Pure miner-stat and wager-skin policies for `/dig`.
 //!
-//! Persistence normalizes the three miner stats before this arithmetic runs.
+//! Persistence normalizes the four miner stats before this arithmetic runs.
 //! This module makes that boundary explicit while preserving the exact Python
 //! thresholds used by advancement, cave-ins, cooldowns, paid costs, and the
 //! silent wager-size combat bonus.
@@ -18,12 +18,16 @@ pub const SMARTS_CAVE_IN_REDUCTION: f64 = 0.02;
 pub const STAMINA_COOLDOWN_REDUCTION: f64 = 0.04;
 /// Maximum cooldown and paid-cost reduction contributed by Stamina.
 pub const STAMINA_MAX_REDUCTION: f64 = 0.50;
+/// Roll bonus contributed by each Survival point.
+pub const SURVIVAL_ROLL_BONUS_PER_POINT: f64 = 0.01;
+/// Largest event roll bonus granted by Survival.
+pub const SURVIVAL_ROLL_BONUS_MAX: f64 = 0.20;
 /// Stake that reaches the full wager-skin hit bonus.
 pub const WAGER_SKIN_BONUS_DENOMINATOR: i64 = 500;
 /// Largest silent hit-chance bonus granted for a wager.
 pub const WAGER_SKIN_BONUS_MAX: f64 = 0.03;
 
-/// Identifies one of the three miner stats at an input boundary.
+/// Identifies one of the four miner stats at an input boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MinerStat {
     /// Controls minimum and maximum advancement bonuses.
@@ -32,6 +36,8 @@ pub enum MinerStat {
     Smarts,
     /// Controls cooldown and paid-cost multipliers.
     Stamina,
+    /// Controls event and boss success rolls.
+    Survival,
 }
 
 impl Display for MinerStat {
@@ -40,6 +46,7 @@ impl Display for MinerStat {
             Self::Strength => "strength",
             Self::Smarts => "smarts",
             Self::Stamina => "stamina",
+            Self::Survival => "survival",
         };
         formatter.write_str(name)
     }
@@ -72,15 +79,22 @@ pub struct MinerStats {
     strength: u64,
     smarts: u64,
     stamina: u64,
+    survival: u64,
 }
 
 impl MinerStats {
     /// Validate signed values read from storage and construct miner stats.
-    pub fn new(strength: i64, smarts: i64, stamina: i64) -> Result<Self, MinerStatsInputError> {
+    pub fn new(
+        strength: i64,
+        smarts: i64,
+        stamina: i64,
+        survival: i64,
+    ) -> Result<Self, MinerStatsInputError> {
         Ok(Self {
             strength: non_negative(MinerStat::Strength, strength)?,
             smarts: non_negative(MinerStat::Smarts, smarts)?,
             stamina: non_negative(MinerStat::Stamina, stamina)?,
+            survival: non_negative(MinerStat::Survival, survival)?,
         })
     }
 
@@ -101,6 +115,12 @@ impl MinerStats {
     pub const fn stamina(self) -> u64 {
         self.stamina
     }
+
+    /// Return the normalized Survival point count.
+    #[must_use]
+    pub const fn survival(self) -> u64 {
+        self.survival
+    }
 }
 
 fn non_negative(stat: MinerStat, value: i64) -> Result<u64, MinerStatsInputError> {
@@ -120,6 +140,8 @@ pub struct MinerStatEffects {
     pub cooldown_multiplier: f64,
     /// Multiplier applied to paid action costs.
     pub paid_cost_multiplier: f64,
+    /// Absolute bonus applied to event success rolls.
+    pub survival_roll_bonus: f64,
 }
 
 /// Translate normalized miner stats into the exact Python service modifiers.
@@ -135,7 +157,23 @@ pub fn miner_stat_effects(stats: MinerStats) -> MinerStatEffects {
         cave_in_reduction: stats.smarts() as f64 * SMARTS_CAVE_IN_REDUCTION,
         cooldown_multiplier: stamina_multiplier,
         paid_cost_multiplier: stamina_multiplier,
+        survival_roll_bonus: survival_roll_bonus(stats.survival() as i64),
     }
+}
+
+/// Return the absolute event success bonus contributed by Survival.
+///
+/// The signed input mirrors persisted stat values at service boundaries. A
+/// negative value is treated as zero, and the resulting contribution is
+/// capped so a malformed or very large database value cannot exceed the
+/// authored bonus.
+#[must_use]
+pub fn survival_roll_bonus(survival: i64) -> f64 {
+    if survival <= 0 {
+        return 0.0;
+    }
+
+    (survival as f64 * SURVIVAL_ROLL_BONUS_PER_POINT).min(SURVIVAL_ROLL_BONUS_MAX)
 }
 
 /// Return the silent hit-chance bonus contributed by a wager.
@@ -156,12 +194,14 @@ pub fn wager_skin_bonus(wager: i64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        MinerStat, MinerStats, MinerStatsInputError, miner_stat_effects, wager_skin_bonus,
+        MinerStat, MinerStats, MinerStatsInputError, miner_stat_effects, survival_roll_bonus,
+        wager_skin_bonus,
     };
 
-    fn effects(strength: i64, smarts: i64, stamina: i64) -> super::MinerStatEffects {
+    fn effects(strength: i64, smarts: i64, stamina: i64, survival: i64) -> super::MinerStatEffects {
         miner_stat_effects(
-            MinerStats::new(strength, smarts, stamina).expect("parity fixture has valid stats"),
+            MinerStats::new(strength, smarts, stamina, survival)
+                .expect("parity fixture has valid stats"),
         )
     }
 
@@ -173,7 +213,7 @@ mod tests {
     }
 
     fn assert_strength(strength: i64, expected_min: u64, expected_max: u64) {
-        let actual = effects(strength, 0, 0);
+        let actual = effects(strength, 0, 0, 0);
         assert_eq!(actual.advance_min_bonus, expected_min);
         assert_eq!(actual.advance_max_bonus, expected_max);
     }
@@ -209,7 +249,7 @@ mod tests {
     }
 
     fn assert_smarts(smarts: i64, expected: f64) {
-        assert_close(effects(0, smarts, 0).cave_in_reduction, expected);
+        assert_close(effects(0, smarts, 0, 0).cave_in_reduction, expected);
     }
 
     #[test]
@@ -228,7 +268,7 @@ mod tests {
     }
 
     fn assert_stamina(stamina: i64, expected: f64) {
-        let actual = effects(0, 0, stamina);
+        let actual = effects(0, 0, stamina, 0);
         assert_close(actual.cooldown_multiplier, expected);
         assert_close(actual.paid_cost_multiplier, expected);
     }
@@ -256,6 +296,28 @@ mod tests {
     #[test]
     fn test_stamina_reduces_costs_four_percent_per_point_with_half_cap_100_0_5() {
         assert_stamina(100, 0.50);
+    }
+
+    fn assert_survival(survival: i64, expected: f64) {
+        assert_close(effects(0, 0, 0, survival).survival_roll_bonus, expected);
+    }
+
+    #[test]
+    fn test_survival_adds_one_percent_per_point() {
+        assert_survival(1, 0.01);
+        assert_survival(7, 0.07);
+    }
+
+    #[test]
+    fn test_survival_bonus_caps_at_twenty_percent() {
+        assert_survival(20, 0.20);
+        assert_survival(100, 0.20);
+    }
+
+    #[test]
+    fn test_survival_bonus_rejects_negative_values_defensively() {
+        assert_eq!(survival_roll_bonus(-4), 0.0);
+        assert_eq!(survival_roll_bonus(-1), 0.0);
     }
 
     #[test]
@@ -292,9 +354,10 @@ mod tests {
     #[test]
     fn normalized_miner_stats_reject_negative_storage_values() {
         for (actual, stat, value) in [
-            (MinerStats::new(-1, 0, 0), MinerStat::Strength, -1),
-            (MinerStats::new(0, -2, 0), MinerStat::Smarts, -2),
-            (MinerStats::new(0, 0, -3), MinerStat::Stamina, -3),
+            (MinerStats::new(-1, 0, 0, 0), MinerStat::Strength, -1),
+            (MinerStats::new(0, -2, 0, 0), MinerStat::Smarts, -2),
+            (MinerStats::new(0, 0, -3, 0), MinerStat::Stamina, -3),
+            (MinerStats::new(0, 0, 0, -4), MinerStat::Survival, -4),
         ] {
             assert_eq!(actual, Err(MinerStatsInputError { stat, value }));
         }

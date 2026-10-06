@@ -20,7 +20,7 @@ pub const NEW_PLAYER_MMR_DISCOUNT: i32 = 500;
 pub const RD_DECAY_CONSTANT: f64 = 100.0;
 pub const RD_DECAY_GRACE_PERIOD_DAYS: i32 = 7;
 pub const STREAK_THRESHOLD: i64 = 3;
-pub const STREAK_MULTIPLIER_PER_GAME: f64 = 0.30;
+pub const STREAK_MULTIPLIER_PER_GAME: f64 = 0.33;
 
 pub const LEGACY_STREAK_MULTIPLIER_PER_GAME: f64 = 0.20;
 pub const LEGACY_STREAK_THRESHOLD: i64 = 3;
@@ -1614,38 +1614,38 @@ mod tests {
     }
 
     #[test]
-    fn test_three_game_streak_returns_multiplier_1_30() {
+    fn test_three_game_streak_returns_multiplier_1_33() {
         let adjustment = streak(&[true, true], true);
         assert_eq!(adjustment.streak_length, 3);
-        assert_close(adjustment.multiplier, 1.30, 1e-12);
+        assert_close(adjustment.multiplier, 1.33, 1e-12);
     }
 
     #[test]
-    fn test_four_game_streak_returns_multiplier_1_60() {
+    fn test_four_game_streak_returns_multiplier_1_66() {
         let adjustment = streak(&[true, true, true], true);
         assert_eq!(adjustment.streak_length, 4);
-        assert_close(adjustment.multiplier, 1.60, 1e-12);
+        assert_close(adjustment.multiplier, 1.66, 1e-12);
     }
 
     #[test]
-    fn test_five_game_streak_returns_multiplier_1_90() {
+    fn test_five_game_streak_returns_multiplier_1_99() {
         let adjustment = streak(&[true, true, true, true], true);
         assert_eq!(adjustment.streak_length, 5);
-        assert_close(adjustment.multiplier, 1.90, 1e-12);
+        assert_close(adjustment.multiplier, 1.99, 1e-12);
     }
 
     #[test]
-    fn test_ten_game_streak_returns_multiplier_3_40() {
+    fn test_ten_game_streak_returns_multiplier_3_64() {
         let adjustment = streak(&[true; 9], true);
         assert_eq!(adjustment.streak_length, 10);
-        assert_close(adjustment.multiplier, 3.40, 1e-12);
+        assert_close(adjustment.multiplier, 3.64, 1e-12);
     }
 
     #[test]
     fn test_loss_streak_works_same_as_win_streak() {
         let adjustment = streak(&[false, false, false], false);
         assert_eq!(adjustment.streak_length, 4);
-        assert_close(adjustment.multiplier, 1.60, 1e-12);
+        assert_close(adjustment.multiplier, 1.66, 1e-12);
     }
 
     #[test]
@@ -1679,7 +1679,7 @@ mod tests {
     fn test_continuing_streak_from_history() {
         let adjustment = streak(&[true, true, true, false, false], true);
         assert_eq!(adjustment.streak_length, 4);
-        assert_close(adjustment.multiplier, 1.60, 1e-12);
+        assert_close(adjustment.multiplier, 1.66, 1e-12);
     }
 
     #[test]
@@ -1690,7 +1690,7 @@ mod tests {
     #[test]
     fn test_config_constants_have_expected_values() {
         assert_eq!(STREAK_THRESHOLD, 3);
-        assert_close(STREAK_MULTIPLIER_PER_GAME, 0.30, 1e-12);
+        assert_close(STREAK_MULTIPLIER_PER_GAME, 0.33, 1e-12);
     }
 
     #[test]
@@ -1714,7 +1714,7 @@ mod tests {
             Some(3),
         );
         assert_eq!(adjustment.streak_length, 3);
-        assert_close(adjustment.multiplier, 1.30, 1e-12);
+        assert_close(adjustment.multiplier, 1.33, 1e-12);
     }
 
     #[test]

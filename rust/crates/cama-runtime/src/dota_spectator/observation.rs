@@ -7,8 +7,8 @@ pub(super) struct Diagnostics {
 }
 
 impl SpectatorWorker {
-    // State transitions are immediate; unchanged health is logged at most once
-    // per five minutes. Never log live positions, scores, or player identities.
+    // State transitions remain visible at INFO; unchanged health is DEBUG only,
+    // at most once per five minutes. Never log live positions or player details.
     pub(super) fn log_status(
         &self,
         identity: (i64, i64),
@@ -30,13 +30,27 @@ impl SpectatorWorker {
         {
             return;
         }
-        tracing::info!(
-            guild_id = identity.0,
-            pending_match_id = identity.1,
-            component,
-            status,
-            "Dota spectator status"
-        );
+        if diagnostics
+            .entries
+            .get(&key)
+            .is_some_and(|(previous, _)| previous == status)
+        {
+            tracing::debug!(
+                guild_id = identity.0,
+                pending_match_id = identity.1,
+                component,
+                status,
+                "Dota spectator status"
+            );
+        } else {
+            tracing::info!(
+                guild_id = identity.0,
+                pending_match_id = identity.1,
+                component,
+                status,
+                "Dota spectator status"
+            );
+        }
         diagnostics.entries.insert(key, (status.to_owned(), now));
     }
 

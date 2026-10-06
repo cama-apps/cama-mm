@@ -28,6 +28,14 @@ mod observation;
 
 const RETENTION_SECONDS: i64 = 15 * 60;
 const SUBSCRIPTION_RETRY_SECONDS: i64 = 120;
+const MAP_UPDATE_INTERVAL: Duration = Duration::from_secs(5);
+const SURFACE_REFRESH_INTERVAL_SECONDS: i64 = 15;
+const RECAP_MAINTENANCE_INTERVAL_SECONDS: i64 = 15;
+
+#[derive(Default)]
+struct WorkerSchedule {
+    last_recap_at: Option<i64>,
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -50,18 +58,42 @@ struct State {
     last_delivered_map: Option<(u64, i64)>,
     map_create_started_at: Option<i64>,
     map_generation: u64,
+    last_surface_refresh_at: Option<i64>,
+    map_status: Option<MapFreshness>,
 }
 impl State {
     fn reset_surface(&mut self) {
         self.map_message_id = None;
         self.map_create_started_at = None;
         self.pending_map = None;
+        self.last_surface_refresh_at = None;
         self.last_delivered_map = None;
+        self.map_status = None;
         self.commentary_thread_id = None;
         self.joined_viewers.clear();
         self.subscription_batch = None;
         self.map_generation = self.map_generation.saturating_add(1);
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MapFreshnessPhase {
+    #[default]
+    Waiting,
+    Fresh,
+    Stale,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+struct MapFreshness {
+    phase: MapFreshnessPhase,
+    match_id: Option<u64>,
+    game_time: Option<i64>,
+    source_fetched_at: Option<i64>,
+    delay_seconds: Option<i64>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct SubscriptionBatch {
@@ -92,7 +124,7 @@ pub struct SpectatorWorker {
     guilds: Vec<i64>,
     discord: Arc<dyn DiscordTransport>,
     live: Arc<DotaLiveFeed>,
-    lease: tokio::sync::Mutex<()>,
+    lease: tokio::sync::Mutex<WorkerSchedule>,
     diagnostics: std::sync::Mutex<observation::Diagnostics>,
 }
 impl SpectatorWorker {
@@ -107,7 +139,7 @@ impl SpectatorWorker {
             guilds,
             discord,
             live,
-            lease: tokio::sync::Mutex::new(()),
+            lease: Default::default(),
             diagnostics: Default::default(),
         }
     }
@@ -191,7 +223,7 @@ impl SpectatorWorker {
         Ok(())
     }
     async fn tick(&self, now: i64) -> Result<(), String> {
-        let _lease = self.lease.lock().await;
+        let mut schedule = self.lease.lock().await;
         let path = self.path.clone();
         let guilds = self.guilds.clone();
         let (games, rows) = tokio::task::spawn_blocking(move || -> Result<_, String> {
@@ -252,11 +284,22 @@ impl SpectatorWorker {
                 self.log_status(identity, "delivery", &format!("withheld: {error}"), now);
             }
         }
-        if let Err(error) =
-            crate::dota_spectator_recap::tick(&self.path, &self.guilds, self.discord.as_ref(), now)
-                .await
-        {
-            tracing::warn!(%error, "optional map recap maintenance failed");
+        // A faster live map must not multiply postgame scans, encodes or retries.
+        // Keep the lease through maintenance so slow work never overlaps ticks.
+        if schedule.last_recap_at.is_none_or(|last| {
+            now < last || now.saturating_sub(last) >= RECAP_MAINTENANCE_INTERVAL_SECONDS
+        }) {
+            schedule.last_recap_at = Some(now);
+            if let Err(error) = crate::dota_spectator_recap::tick(
+                &self.path,
+                &self.guilds,
+                self.discord.as_ref(),
+                now,
+            )
+            .await
+            {
+                tracing::warn!(%error, "optional map recap maintenance failed");
+            }
         }
         Ok(())
     }
@@ -571,20 +614,32 @@ impl SpectatorWorker {
         }
         // Both layouts require an audited private destination; never fall back
         // to the shared match lobby.
-        self.ensure_surface(&mut record, &mut state, now).await?;
-        if let Err(error) = self
-            .subscribe_thread_viewers(&mut record, &mut state, now)
-            .await
-        {
-            if record.channel_id.is_none() {
-                return Err(error);
+        let refresh_surface = changed
+            || state.map_message_id.is_none()
+            || state.commentary_thread_id.is_none()
+            || state.last_surface_refresh_at.is_none_or(|last| {
+                now < last || now.saturating_sub(last) >= SURFACE_REFRESH_INTERVAL_SECONDS
+            });
+        // Reuse established surfaces between the normal membership checks.
+        // Each map delivery still performs its own fresh permission/policy audit.
+        if refresh_surface {
+            self.ensure_surface(&mut record, &mut state, now).await?;
+            if let Err(error) = self
+                .subscribe_thread_viewers(&mut record, &mut state, now)
+                .await
+            {
+                if record.channel_id.is_none() {
+                    return Err(error);
+                }
+                self.log_status(
+                    (record.guild_id, record.pending_match_id),
+                    "subscription",
+                    &format!("retrying: {error}"),
+                    now,
+                );
             }
-            self.log_status(
-                (record.guild_id, record.pending_match_id),
-                "subscription",
-                &format!("retrying: {error}"),
-                now,
-            );
+            state.last_surface_refresh_at = Some(now);
+            self.save(&mut record, &state, now).await?;
         }
         if !self
             .deliver_queued(&mut record, &mut state, &pending, now)
@@ -739,10 +794,10 @@ impl SpectatorWorker {
                             channel,
                             &key,
                             DiscordMessage::silent(
-                                InteractionResponse::message("").embed(
-                                    InteractionEmbed::titled("Live map")
-                                        .description("Waiting for live match coverage."),
-                                ),
+                                InteractionResponse::message("")
+                                    .embed(InteractionEmbed::titled("Latest map").description(
+                                        "Waiting for the first live map observation.",
+                                    )),
                             ),
                         )
                         .await?
@@ -969,6 +1024,10 @@ impl SpectatorWorker {
         now: i64,
     ) -> Result<(), String> {
         if !pending.state.betting_closed() || pending.state.betting_open(now) {
+            if state.pending_map.is_some() {
+                state.pending_map = None;
+                self.save(record, state, now).await?;
+            }
             return Ok(());
         }
         let Some(snapshot) = self
@@ -1000,11 +1059,12 @@ impl SpectatorWorker {
             self.enrich_names(&mut frame, record.guild_id, roster).await;
             apply_map_display_names(&mut map, &frame);
         }
-        state.pending_map = Some(PendingMap {
+        let map = PendingMap {
             frame: map,
             created_at: now,
             source_fetched_at: Some(snapshot.fetched_at),
-        });
+        };
+        state.pending_map = Some(map);
         self.save(record, state, now).await
     }
 
@@ -1040,6 +1100,162 @@ impl SpectatorWorker {
         }
     }
 
+    fn current_map_status(&self, record: &DotaSpectatorRecord, state: &State) -> MapFreshness {
+        let previous = state.map_status.as_ref();
+        let image = state
+            .last_delivered_map
+            .or_else(|| previous.and_then(|status| Some((status.match_id?, status.game_time?))));
+        let source_fetched_at = previous
+            .and_then(|status| status.source_fetched_at)
+            .filter(|timestamp| *timestamp > 0);
+        let delay_seconds = previous.and_then(|status| status.delay_seconds);
+        let Some(snapshot) = self.live.snapshot(record.guild_id, record.pending_match_id) else {
+            return if let Some((match_id, game_time)) = image {
+                MapFreshness {
+                    phase: MapFreshnessPhase::Unavailable,
+                    match_id: Some(match_id),
+                    game_time: Some(game_time),
+                    source_fetched_at,
+                    delay_seconds,
+                }
+            } else {
+                MapFreshness::default()
+            };
+        };
+        let Some((match_id, game_time)) = image else {
+            // A pending render or first surface creation will publish the
+            // first image. Keep the placeholder honest until that succeeds.
+            return MapFreshness::default();
+        };
+        let same_match = snapshot.match_id == match_id
+            && snapshot
+                .map_frame
+                .as_ref()
+                .is_some_and(|map| map.match_id == match_id);
+        let same_frame = same_match
+            && snapshot
+                .map_frame
+                .as_ref()
+                .is_some_and(|map| map.game_time == game_time);
+        // A new source sample must not make an older displayed image look
+        // newly observed. Only take source metadata from a sample carrying
+        // the displayed frame; otherwise keep the last published metadata.
+        let source_fetched_at = if same_frame {
+            source_fetched_at.or_else(|| (snapshot.fetched_at > 0).then_some(snapshot.fetched_at))
+        } else {
+            source_fetched_at
+        };
+        let delay_seconds = if same_frame {
+            snapshot.delay_seconds.or(delay_seconds)
+        } else {
+            delay_seconds
+        };
+        let phase = if !same_match {
+            MapFreshnessPhase::Unavailable
+        } else if snapshot.stale {
+            MapFreshnessPhase::Stale
+        } else if snapshot.map_frame.is_some() {
+            MapFreshnessPhase::Fresh
+        } else {
+            MapFreshnessPhase::Unavailable
+        };
+        MapFreshness {
+            phase,
+            match_id: Some(match_id),
+            game_time: Some(game_time),
+            source_fetched_at,
+            delay_seconds,
+        }
+    }
+
+    async fn refresh_map_status(
+        &self,
+        record: &mut DotaSpectatorRecord,
+        state: &mut State,
+        now: i64,
+    ) -> Result<(), String> {
+        let Some(map_message_id) = state.map_message_id else {
+            return Ok(());
+        };
+        let candidate = self.current_map_status(record, state);
+        if !map_status_changed(state.map_status.as_ref(), &candidate) {
+            return Ok(());
+        }
+        // The initial placeholder already communicates this state. Persisting
+        // it avoids treating every five-second tick as a first transition.
+        if state.map_status.is_none() && candidate.phase == MapFreshnessPhase::Waiting {
+            state.map_status = Some(candidate);
+            return self.save(record, state, now).await;
+        }
+        let channel = record.channel_id.ok_or("spectator channel unavailable")? as u64;
+        let guild = u64::try_from(record.guild_id).map_err(|_| "invalid spectator guild")?;
+        let audit = self
+            .discord
+            .audit_spectator_channel(
+                guild,
+                &record.marker,
+                &state.participants,
+                &state.viewers,
+                channel,
+            )
+            .await;
+        if audit.is_err() || !self.delivery_is_current(record, state, now, true).await? {
+            self.discord
+                .delete_spectator_channel(guild, channel, &record.marker)
+                .await?;
+            record.channel_id = None;
+            state.reset_surface();
+            state.map_create_started_at = None;
+            state.pending_map = None;
+            state.queued = None;
+            state.previous = None;
+            self.save(record, state, now).await?;
+            return Ok(());
+        }
+        // The audit itself can race a feed transition. Re-read status after
+        // the policy gate so the edit never describes an older lifecycle.
+        let candidate = self.current_map_status(record, state);
+        if !map_status_changed(state.map_status.as_ref(), &candidate) {
+            return Ok(());
+        }
+        let image = state.last_delivered_map;
+        let message = DiscordMessage::silent(
+            InteractionResponse::message("")
+                .embed(map_embed(&candidate, image))
+                .preserve_attachments(),
+        );
+        if let Err(error) = self
+            .discord
+            .edit_message(channel, map_message_id, message)
+            .await
+        {
+            // A status-only edit preserves the upload. Only a confirmed
+            // deletion is allowed to discard the persisted surface identity.
+            if self
+                .discord
+                .fetch_message(channel, map_message_id)
+                .await?
+                .is_none()
+            {
+                self.remove_surface(record, state, now).await?;
+            }
+            return Err(error);
+        }
+        state.map_status = Some(candidate);
+        self.log_status(
+            (record.guild_id, record.pending_match_id),
+            "map",
+            match state.map_status.as_ref().map(|status| status.phase) {
+                Some(MapFreshnessPhase::Stale) => "feed stale",
+                Some(MapFreshnessPhase::Unavailable) => "feed unavailable",
+                Some(MapFreshnessPhase::Fresh) => "feed resumed",
+                _ => "waiting for feed",
+            },
+            now,
+        );
+        self.save(record, state, now).await
+    }
+
     async fn deliver_map(
         &self,
         record: &mut DotaSpectatorRecord,
@@ -1047,7 +1263,7 @@ impl SpectatorWorker {
         now: i64,
     ) -> Result<(), String> {
         let Some(map) = state.pending_map.clone() else {
-            return Ok(());
+            return self.refresh_map_status(record, state, now).await;
         };
         if let Some(reason) = self.map_rejection_reason(record, &map, now) {
             self.log_status(
@@ -1057,7 +1273,8 @@ impl SpectatorWorker {
                 now,
             );
             state.pending_map = None;
-            return self.save(record, state, now).await;
+            self.save(record, state, now).await?;
+            return self.refresh_map_status(record, state, now).await;
         }
         let channel = record.channel_id.ok_or("spectator channel unavailable")? as u64;
         let guild = u64::try_from(record.guild_id).map_err(|_| "invalid spectator guild")?;
@@ -1066,7 +1283,7 @@ impl SpectatorWorker {
             self.save(record, state, now).await?;
         }
         let frame = map.frame.clone();
-        let bytes =
+        let rendered =
             tokio::task::spawn_blocking(move || crate::dota_spectator_map::render_map(&frame))
                 .await
                 .map_err(|error| error.to_string())??;
@@ -1086,7 +1303,7 @@ impl SpectatorWorker {
                 .await?
                 .map(|receipt| receipt.message_id),
         };
-        // Rendering and history lookup can take time. Audit after both, then
+        // Rendering can take time. Audit after it, then
         // re-read betting/roster/subscription policy immediately before publish.
         let audit = self
             .discord
@@ -1121,20 +1338,27 @@ impl SpectatorWorker {
                 now,
             );
             state.pending_map = None;
-            return self.save(record, state, now).await;
+            self.save(record, state, now).await?;
+            return self.refresh_map_status(record, state, now).await;
         }
         let clock = map.frame.game_time;
         let filename = format!("map-{}-{clock}.png", map.frame.match_id);
-        let embed = InteractionEmbed::titled(format!(
-            "Last received map · {}:{:02}",
-            clock.div_euclid(60),
-            clock.rem_euclid(60),
-        ))
-        .image(format!("attachment://{filename}"));
+        let delay_seconds = self
+            .live
+            .snapshot(record.guild_id, record.pending_match_id)
+            .and_then(|snapshot| snapshot.delay_seconds);
+        let status = MapFreshness {
+            phase: MapFreshnessPhase::Fresh,
+            match_id: Some(map.frame.match_id),
+            game_time: Some(clock),
+            source_fetched_at: map.source_fetched_at,
+            delay_seconds,
+        };
+        let embed = map_embed(&status, Some((map.frame.match_id, clock)));
         let message = DiscordMessage::silent(
             InteractionResponse::message("")
                 .embed(embed)
-                .attachment(InteractionAttachment::bytes(filename, bytes)),
+                .attachment(InteractionAttachment::bytes(filename, rendered)),
         );
         let message_id = if let Some(id) = existing {
             if let Err(error) = self.discord.edit_message(channel, id, message).await {
@@ -1160,6 +1384,7 @@ impl SpectatorWorker {
         );
         state.map_message_id = Some(message_id);
         state.last_delivered_map = Some((map.frame.match_id, map.frame.game_time));
+        state.map_status = Some(status);
         state.pending_map = None;
         self.save(record, state, now).await
     }
@@ -1285,6 +1510,100 @@ fn map_delivery_key(record: &DotaSpectatorRecord, state: &State, channel: u64) -
             .collect::<String>()
     )
 }
+
+fn map_image_filename(map: Option<(u64, i64)>) -> Option<String> {
+    map.map(|(match_id, game_time)| format!("map-{match_id}-{game_time}.png"))
+}
+
+fn map_status_changed(current: Option<&MapFreshness>, next: &MapFreshness) -> bool {
+    let Some(current) = current else {
+        return true;
+    };
+    // The relative Discord timestamp is tied to the last image that was
+    // actually published. Do not edit the message merely because an upstream
+    // poll refreshed a source timestamp while the displayed frame stayed the
+    // same.
+    current.phase != next.phase
+        || current.match_id != next.match_id
+        || current.game_time != next.game_time
+        || current.delay_seconds != next.delay_seconds
+}
+
+fn map_status_title(status: &MapFreshness) -> String {
+    let clock = status.game_time.map(map_clock);
+    match (status.phase, clock) {
+        (MapFreshnessPhase::Fresh, Some(clock)) => format!("Latest map · {clock}"),
+        (MapFreshnessPhase::Stale, Some(clock)) => format!("Latest map · {clock} · feed stale"),
+        (MapFreshnessPhase::Unavailable, Some(clock)) => {
+            format!("Latest map · {clock} · feed unavailable")
+        }
+        (MapFreshnessPhase::Unavailable, None) => "Live map · unavailable".into(),
+        (MapFreshnessPhase::Fresh, None) => "Live map · updating".into(),
+        (MapFreshnessPhase::Stale, None) => "Live map · feed stale".into(),
+        (MapFreshnessPhase::Waiting, _) => "Live map · waiting".into(),
+    }
+}
+
+fn map_clock(seconds: i64) -> String {
+    let value = seconds.unsigned_abs();
+    format!(
+        "{}{}:{:02}",
+        if seconds < 0 { "-" } else { "" },
+        value / 60,
+        value % 60
+    )
+}
+
+fn map_observation_label(source_fetched_at: Option<i64>) -> String {
+    source_fetched_at
+        .filter(|timestamp| *timestamp > 0)
+        .map(|timestamp| format!("<t:{timestamp}:R>"))
+        .unwrap_or_else(|| "an unknown time".into())
+}
+
+fn map_delay_label(delay_seconds: Option<i64>) -> String {
+    delay_seconds
+        .filter(|delay| *delay >= 0)
+        .map(|delay| format!("Delay {delay}s"))
+        .unwrap_or_else(|| "Delay unavailable".into())
+}
+
+fn map_status_description(status: &MapFreshness) -> String {
+    match status.phase {
+        MapFreshnessPhase::Waiting => "Waiting for the first live map observation.".into(),
+        MapFreshnessPhase::Fresh => format!(
+            "Updated {} · {}",
+            map_observation_label(status.source_fetched_at),
+            map_delay_label(status.delay_seconds),
+        ),
+        MapFreshnessPhase::Stale => format!(
+            "Feed paused · Last update {} · {}",
+            map_observation_label(status.source_fetched_at),
+            map_delay_label(status.delay_seconds),
+        ),
+        MapFreshnessPhase::Unavailable => {
+            if status.match_id.is_some() && status.game_time.is_some() {
+                format!(
+                    "Feed unavailable · Last update {} · {}",
+                    map_observation_label(status.source_fetched_at),
+                    map_delay_label(status.delay_seconds),
+                )
+            } else {
+                "Feed unavailable · Last update unavailable · Delay unavailable".into()
+            }
+        }
+    }
+}
+
+fn map_embed(status: &MapFreshness, image: Option<(u64, i64)>) -> InteractionEmbed {
+    let mut embed = InteractionEmbed::titled(map_status_title(status))
+        .description(map_status_description(status));
+    if let Some(filename) = map_image_filename(image) {
+        embed = embed.image(format!("attachment://{filename}"));
+    }
+    embed
+}
+
 fn lobby_message(pending: &PendingMatchRecord) -> Option<i64> {
     pending
         .state
@@ -1335,7 +1654,7 @@ impl BackgroundWorker for SpectatorWorker {
     async fn run(&self, mut context: WorkerContext) -> Result<(), String> {
         loop {
             tokio::select! {_=context.cancelled()=>return Ok(()),result=self.tick(chrono::Utc::now().timestamp())=>result?,}
-            if !context.sleep(Duration::from_secs(15)).await {
+            if !context.sleep(MAP_UPDATE_INTERVAL).await {
                 return Ok(());
             }
         }

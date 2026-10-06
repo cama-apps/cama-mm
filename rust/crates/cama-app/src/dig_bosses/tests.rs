@@ -151,6 +151,138 @@ fn test_crit_raises_win_chance() {
 }
 
 #[test]
+fn survival_halves_bold_win_rate_gain_at_every_point_and_caps_at_twenty() {
+    let input = DuelOddsInput {
+        player_hp: 3,
+        boss_hp: 5,
+        player_hit: 0.42006,
+        player_damage: 2,
+        boss_hit: 0.45,
+        boss_damage: 1,
+        critical_chance: 0.15,
+        critical_bonus: 1,
+    };
+    let baseline = approximate_duel_win_probability(input);
+    for points in 0..=25 {
+        let full_hit = input.player_hit + cama_domain::dig_stats::survival_roll_bonus(points);
+        let full = approximate_duel_win_probability(DuelOddsInput {
+            player_hit: full_hit,
+            ..input
+        });
+        let hit = calibrate_player_hit_for_survival(input, full_hit, 0);
+        let actual = approximate_duel_win_probability(DuelOddsInput {
+            player_hit: hit,
+            ..input
+        });
+        assert!((actual - baseline - (full - baseline) * 0.5).abs() < 1e-12);
+        if points >= 20 {
+            assert!((actual - 0.698503).abs() < 0.000001);
+        }
+    }
+}
+
+#[test]
+fn survival_calibration_hits_the_midpoint_of_the_raw_win_gain() {
+    let input = DuelOddsInput {
+        player_hp: 5,
+        boss_hp: 4,
+        player_hit: 0.60,
+        player_damage: 1,
+        boss_hit: 0.30,
+        boss_damage: 1,
+        critical_chance: 0.0,
+        critical_bonus: 0,
+    };
+    let full_hit = 0.80;
+    let baseline = duel_win_probability_unclamped(input, 0);
+    let full = duel_win_probability_unclamped(
+        DuelOddsInput {
+            player_hit: full_hit,
+            ..input
+        },
+        0,
+    );
+    let calibrated = calibrate_player_hit_for_survival(input, full_hit, 0);
+    let midpoint = duel_win_probability_unclamped(
+        DuelOddsInput {
+            player_hit: calibrated,
+            ..input
+        },
+        0,
+    );
+    assert!((midpoint - (baseline + full) * 0.5).abs() < 1.0e-9);
+    assert!(calibrated > input.player_hit);
+    assert!(calibrated < full_hit);
+}
+
+#[test]
+fn survival_calibration_uses_raw_probability_below_display_floor() {
+    let input = DuelOddsInput {
+        player_hp: 5,
+        boss_hp: 10,
+        player_hit: 0.05,
+        player_damage: 1,
+        boss_hit: 0.30,
+        boss_damage: 1,
+        critical_chance: 0.0,
+        critical_bonus: 0,
+    };
+    let full_hit = 0.60;
+    let baseline = duel_win_probability_unclamped(input, 0);
+    let full = duel_win_probability_unclamped(
+        DuelOddsInput {
+            player_hit: full_hit,
+            ..input
+        },
+        0,
+    );
+    let calibrated = calibrate_player_hit_for_survival(input, full_hit, 0);
+    let midpoint = duel_win_probability_unclamped(
+        DuelOddsInput {
+            player_hit: calibrated,
+            ..input
+        },
+        0,
+    );
+    assert!(approximate_duel_win_probability(input) <= WIN_CHANCE_FLOOR + 1.0e-9);
+    assert!((midpoint - (baseline + full) * 0.5).abs() < 1.0e-9);
+}
+
+#[test]
+fn survival_calibration_handles_free_fight_multiplier_and_pet_bonus() {
+    let input = DuelOddsInput {
+        player_hp: 5,
+        boss_hp: 4,
+        player_hit: 0.60 * 0.70,
+        player_damage: 1,
+        boss_hit: 0.30,
+        boss_damage: 1,
+        critical_chance: 0.0,
+        critical_bonus: 0,
+    };
+    let full_hit = (0.80_f64 * 0.70).min(0.90);
+    let baseline = duel_win_probability_unclamped(input, 12);
+    let full = duel_win_probability_unclamped(
+        DuelOddsInput {
+            player_hit: full_hit,
+            ..input
+        },
+        12,
+    );
+    let calibrated = calibrate_player_hit_for_survival(input, full_hit, 12);
+    let midpoint = duel_win_probability_unclamped(
+        DuelOddsInput {
+            player_hit: calibrated,
+            ..input
+        },
+        12,
+    );
+    assert!((midpoint - (baseline + full) * 0.5).abs() < 1.0e-9);
+    assert!(calibrated > input.player_hit);
+    assert!(calibrated < full_hit);
+}
+
+#[test]
 fn test_archetype_hp_multiplier_applied() {
     assert_eq!(
         scale_boss_stats(base_stats(), "pudge", 24, 0, false).boss_hp,

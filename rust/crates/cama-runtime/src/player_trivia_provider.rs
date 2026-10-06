@@ -1394,6 +1394,7 @@ fn convert_snapshot(value: db::PlayerTriviaSnapshot) -> app::PlayerTriviaSnapsho
                 stat_strength: row.stat_strength,
                 stat_smarts: row.stat_smarts,
                 stat_stamina: row.stat_stamina,
+                stat_survival: row.stat_survival,
             })
             .collect(),
         bankruptcies: value

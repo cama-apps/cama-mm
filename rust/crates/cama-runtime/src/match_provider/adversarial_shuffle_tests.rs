@@ -2,6 +2,71 @@
 use super::*;
 
 #[tokio::test]
+async fn completed_shuffle_displays_open_betting_in_every_published_copy() {
+    let discord = Arc::new(PublicationProbeDiscord::default());
+    let f = MatchRuntimeFixture::new_with_discord(discord.clone());
+    let ids = f.add_shuffle_pool(10, false);
+    let mut prepared = f.prepare_shuffle(ids, "glicko", Vec::new());
+    let repo = PendingMatchRepository::new(f.database.path());
+    let id = prepared.pending.pending_match_id;
+    prepared.pending = repo
+        .mutate_pending_match(GUILD, id, |state| {
+            state
+                .extra
+                .insert("shuffle_setup_complete".into(), json!(false));
+        })
+        .unwrap()
+        .unwrap()
+        .0;
+    assert!(!prepared.pending.state.betting_open(unix_seconds()));
+    f.provider
+        .handler
+        .finalize_shuffle(
+            shuffle_context(Some(200)),
+            Arc::new(RecordingMatchResponder::default()),
+            publication_snapshot(LobbyKind::Open, Some(300)),
+            prepared,
+        )
+        .await
+        .unwrap();
+    let saved = repo.pending_match(GUILD, id).unwrap().unwrap();
+    assert!(saved.state.betting_open(unix_seconds()));
+    let edits = discord.message_edits();
+    for (channel, message) in [
+        (
+            saved.state.shuffle_channel_id,
+            saved.state.shuffle_message_id,
+        ),
+        (
+            saved.state.cmd_shuffle_channel_id,
+            saved.state.cmd_shuffle_message_id,
+        ),
+        (
+            saved.state.thread_shuffle_thread_id,
+            saved.state.thread_shuffle_message_id,
+        ),
+    ] {
+        let (_, _, update) = edits
+            .iter()
+            .rev()
+            .find(|(c, m, _)| Some(*c as i64) == channel && Some(*m as i64) == message)
+            .expect("published copy must reflect the opened betting window");
+        let fields = &update.response.embeds[0].fields;
+        assert!(
+            fields
+                .iter()
+                .any(|field| field.value.contains("Closes <t:"))
+        );
+        assert!(
+            !fields
+                .iter()
+                .any(|field| field.value.contains("Betting closed"))
+        );
+    }
+    abort_betting_tasks(&f, id);
+}
+
+#[tokio::test]
 async fn seed_failure_compensates_pending_and_first_game_claim() {
     let mut config = production_test_config();
     config.values.first_game_pool_daily_amount = 100;

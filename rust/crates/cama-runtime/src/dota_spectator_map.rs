@@ -31,11 +31,16 @@ const WHITE: Rgba = Rgba(235, 241, 245, 255);
 const MUTED: Rgba = Rgba(158, 174, 187, 255);
 const RADIANT: Rgba = Rgba(92, 231, 165, 255);
 const DIRE: Rgba = Rgba(255, 111, 126, 255);
+const GOLD: Rgba = Rgba(255, 205, 112, 255);
+const MAP_EDGE: Rgba = Rgba(92, 115, 130, 255);
+const PANEL_EDGE: Rgba = Rgba(49, 66, 80, 255);
 const MAP_BYTES: &[u8] = include_bytes!("../../../../assets/dota_spectator/map-7.40.png");
 
 /// Render source-backed hero locations and objective status into one PNG.
 /// Missing fields stay unknown; wards, runes, and Roshan position are never
 /// inferred from game time. Dead heroes appear in the roster, not on the map.
+/// Structures with a source-backed destroyed bit are shown as a small cross so
+/// the map distinguishes a known loss from an unavailable building feed.
 pub fn render_map(frame: &LiveMapFrame) -> Result<Vec<u8>, String> {
     render_with_cache(frame, &production_steam_image_cache_root())
 }
@@ -51,9 +56,23 @@ fn render_with_cache(frame: &LiveMapFrame, cache: &Path) -> Result<Vec<u8>, Stri
     canvas.day_night(532, 23, is_day(frame.game_time));
     canvas.text(561, 6, &clock(frame.game_time), 28.0, WHITE);
     let (text, color) = gold_lead_label(frame.radiant_net_worth, frame.dire_net_worth);
-    canvas.text(686, 17, &text, 15.0, color);
+    let (score, score_color) = score_label(frame.radiant_score, frame.dire_score);
+    canvas.text(686, 17, &score, 14.0, score_color);
+    canvas.fitted_text(790, 17, &text, 240.0, 14.0, color);
+    let (roshan, roshan_color) = roshan_label(frame.roshan_respawn_seconds);
+    canvas.fitted_text(1042, 17, &roshan, 165.0, 11.0, roshan_color);
     canvas.blit(map, MAP_X, MAP_Y, MAP_SIZE, MAP_SIZE, false);
+    canvas.outline_rect(MAP_X - 1, MAP_Y - 1, MAP_SIZE + 2, MAP_SIZE + 2, MAP_EDGE);
+    canvas.outline_rect(MAP_X - 2, MAP_Y - 2, MAP_SIZE + 4, MAP_SIZE + 4, PANEL_EDGE);
     canvas.rect(672, MAP_Y, 552, MAP_SIZE, PANEL);
+    canvas.line(672, MAP_Y, 672, MAP_Y + MAP_SIZE, PANEL_EDGE);
+    canvas.line(
+        672,
+        MAP_Y + MAP_SIZE / 2,
+        1223,
+        MAP_Y + MAP_SIZE / 2,
+        PANEL_EDGE,
+    );
 
     // The league feed has no Ancient health/status bit. Keep each Ancient as
     // a static base landmark, but honor an explicit destruction record when
@@ -63,28 +82,33 @@ fn render_with_cache(frame: &LiveMapFrame, cache: &Path) -> Result<Vec<u8>, Stri
             .buildings
             .iter()
             .find(|building| building.radiant == radiant && building.name == "Ancient");
-        if ancient.is_some_and(|building| building.destroyed) {
-            continue;
-        }
         let position = ancient
             .and_then(|building| building.x.zip(building.y))
             .or_else(|| buildings::position("Ancient", radiant));
         if let Some((x, y)) = position.and_then(|(x, y)| project(x, y)) {
-            canvas.building_icon(x, y, "Ancient", team_color(radiant));
+            if ancient.is_some_and(|building| building.destroyed) {
+                canvas.destroyed_building_icon(x, y, team_color(radiant));
+            } else {
+                canvas.building_icon(x, y, "Ancient", team_color(radiant));
+            }
         }
     }
 
     for building in frame
         .buildings
         .iter()
-        .filter(|building| !building.destroyed && building.name != "Ancient")
+        .filter(|building| building.name != "Ancient")
     {
         let location = building
             .x
             .zip(building.y)
             .or_else(|| buildings::position(&building.name, building.radiant));
         if let Some((x, y)) = location.and_then(|(x, y)| project(x, y)) {
-            canvas.building_icon(x, y, &building.name, team_color(building.radiant));
+            if building.destroyed {
+                canvas.destroyed_building_icon(x, y, team_color(building.radiant));
+            } else {
+                canvas.building_icon(x, y, &building.name, team_color(building.radiant));
+            }
         }
     }
 
@@ -94,7 +118,16 @@ fn render_with_cache(frame: &LiveMapFrame, cache: &Path) -> Result<Vec<u8>, Stri
         .take(10)
         .map(|hero| (hero.hero_id, cached_portrait(cache, hero.hero_id)))
         .collect::<Vec<_>>();
-    for hero in frame.heroes.iter().take(10) {
+    let mut position_groups = BTreeMap::<(i32, i32), Vec<usize>>::new();
+    for (index, hero) in frame.heroes.iter().take(10).enumerate() {
+        if hero.respawn_seconds.is_some_and(|seconds| seconds > 0) {
+            continue;
+        }
+        if let Some(position) = hero.x.zip(hero.y).and_then(|(x, y)| project(x, y)) {
+            position_groups.entry(position).or_default().push(index);
+        }
+    }
+    for (index, hero) in frame.heroes.iter().take(10).enumerate() {
         if hero.respawn_seconds.is_some_and(|seconds| seconds > 0) {
             continue;
         }
@@ -105,7 +138,25 @@ fn render_with_cache(frame: &LiveMapFrame, cache: &Path) -> Result<Vec<u8>, Stri
             .iter()
             .find(|(id, _)| *id == hero.hero_id)
             .and_then(|(_, image)| image.as_ref());
-        canvas.hero_icon(hero, portrait, x, y, 17, false);
+        let (marker_x, marker_y) = position_groups
+            .get(&(x, y))
+            .filter(|group| group.len() > 1)
+            .and_then(|group| {
+                let slot = group.iter().position(|hero_index| *hero_index == index)?;
+                Some(callout_position(x, y, slot, group.len()))
+            })
+            .unwrap_or((x, y));
+        if (marker_x, marker_y) != (x, y) {
+            canvas.line(x, y, marker_x, marker_y, team_color(hero.radiant));
+        }
+        canvas.hero_icon(hero, portrait, marker_x, marker_y, 17, false);
+    }
+    for ((x, y), group) in position_groups {
+        if group.len() > 1 {
+            canvas.circle(x, y, 4, BG);
+            canvas.circle(x, y, 2, MUTED);
+            canvas.stack_badge(x, y, group.len());
+        }
     }
 
     let items = frame
@@ -124,6 +175,10 @@ fn render_with_cache(frame: &LiveMapFrame, cache: &Path) -> Result<Vec<u8>, Stri
             17.0,
             team_color(radiant),
         );
+        if let Some(summary) = building_summary(&frame.buildings, radiant) {
+            canvas.fitted_text(782, top + 3, &summary, 420.0, 10.0, MUTED);
+        }
+        canvas.line(686, top + 20, 1210, top + 20, team_color(radiant));
         for (index, hero) in frame
             .heroes
             .iter()
@@ -187,7 +242,7 @@ fn render_with_cache(frame: &LiveMapFrame, cache: &Path) -> Result<Vec<u8>, Stri
             canvas.text(935, y + 42, &net_worth_label(hero.net_worth), 10.0, MUTED);
         }
     }
-    Ok(canvas.0.encode_png())
+    crate::dota_spectator_png::compress(&canvas.0.encode_png())
 }
 
 /// OpenDota's matching map transform: world units become 128-unit cells,
@@ -207,6 +262,24 @@ fn project(x: f64, y: f64) -> Option<(i32, i32)> {
         MAP_X + (u * f64::from(MAP_SIZE - 1)).round() as i32,
         MAP_Y + (v * f64::from(MAP_SIZE - 1)).round() as i32,
     ))
+}
+
+fn callout_position(x: i32, y: i32, slot: usize, count: usize) -> (i32, i32) {
+    // Keep a fight's markers tied to the exact source point with short leader
+    // lines. The fixed-radius ring is deterministic, avoids temporal jitter,
+    // and is only used when multiple source entities occupy one rendered
+    // pixel. Ten markers have about 35px of perimeter spacing, so their
+    // 34px glyphs remain individually readable.
+    let angle =
+        -std::f64::consts::FRAC_PI_2 + (slot as f64 / count.max(1) as f64) * std::f64::consts::TAU;
+    let radius = 56.0;
+    let target_x = x + (angle.cos() * radius).round() as i32;
+    let target_y = y + (angle.sin() * radius).round() as i32;
+    let inset = 20;
+    (
+        target_x.clamp(MAP_X + inset, MAP_X + MAP_SIZE - 1 - inset),
+        target_y.clamp(MAP_Y + inset, MAP_Y + MAP_SIZE - 1 - inset),
+    )
 }
 
 fn player_label(name: &str) -> String {
@@ -267,6 +340,90 @@ fn gold_lead_label(radiant: Option<i64>, dire: Option<i64>) -> (String, Rgba) {
         format!("GOLD  {side} +{amount}"),
         team_color(radiant > dire),
     )
+}
+
+fn score_label(radiant: Option<i64>, dire: Option<i64>) -> (String, Rgba) {
+    let Some((radiant, dire)) = radiant.zip(dire).filter(|(r, d)| *r >= 0 && *d >= 0) else {
+        return ("SCORE  ?-?".into(), MUTED);
+    };
+    let color = if radiant == dire {
+        MUTED
+    } else {
+        team_color(radiant > dire)
+    };
+    (format!("SCORE  {radiant}-{dire}"), color)
+}
+
+fn roshan_label(respawn_seconds: Option<i64>) -> (String, Rgba) {
+    match respawn_seconds {
+        Some(seconds) if seconds > 0 => (format!("ROSHAN  {}", clock(seconds)), GOLD),
+        _ => ("ROSHAN  ?".into(), MUTED),
+    }
+}
+
+fn building_summary(
+    buildings: &[crate::dota_live::LiveMapBuilding],
+    radiant: bool,
+) -> Option<String> {
+    const TOWER_NAMES: [&str; 11] = [
+        "top tier 1 tower",
+        "top tier 2 tower",
+        "top tier 3 tower",
+        "mid tier 1 tower",
+        "mid tier 2 tower",
+        "mid tier 3 tower",
+        "bottom tier 1 tower",
+        "bottom tier 2 tower",
+        "bottom tier 3 tower",
+        "upper Ancient tier 4 tower",
+        "lower Ancient tier 4 tower",
+    ];
+    const BARRACKS_NAMES: [&str; 6] = [
+        "top melee barracks",
+        "top ranged barracks",
+        "mid melee barracks",
+        "mid ranged barracks",
+        "bottom melee barracks",
+        "bottom ranged barracks",
+    ];
+    let mut towers = Vec::new();
+    let mut barracks = Vec::new();
+    for building in buildings
+        .iter()
+        .filter(|building| building.radiant == radiant)
+    {
+        if TOWER_NAMES.contains(&building.name.as_str()) {
+            towers.push(building);
+        } else if BARRACKS_NAMES.contains(&building.name.as_str()) {
+            barracks.push(building);
+        }
+    }
+    if towers.is_empty() && barracks.is_empty() {
+        return None;
+    }
+    let count = |entries: &[&crate::dota_live::LiveMapBuilding], expected: usize| {
+        let unique = entries
+            .iter()
+            .map(|building| building.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        if entries.len() == expected && unique.len() == expected {
+            format!(
+                "{}/{}",
+                entries
+                    .iter()
+                    .filter(|building| !building.destroyed)
+                    .count(),
+                expected
+            )
+        } else {
+            format!("?/{expected}")
+        }
+    };
+    Some(format!(
+        "TOWERS {}   RAX {}",
+        count(&towers, TOWER_NAMES.len()),
+        count(&barracks, BARRACKS_NAMES.len())
+    ))
 }
 
 fn hero_stats(hero: &LiveMapHero) -> String {
@@ -344,6 +501,36 @@ fn cached_png(paths: Vec<PathBuf>) -> Option<RasterImage> {
     })
 }
 
+fn sample_bilinear(image: &RasterImage, x: f32, y: f32) -> Option<Rgba> {
+    if image.width == 0 || image.height == 0 {
+        return None;
+    }
+    let x = x.clamp(0.0, image.width.saturating_sub(1) as f32);
+    let y = y.clamp(0.0, image.height.saturating_sub(1) as f32);
+    let left = x.floor() as usize;
+    let top = y.floor() as usize;
+    let right = (left + 1).min(image.width - 1);
+    let bottom = (top + 1).min(image.height - 1);
+    let horizontal = x - left as f32;
+    let vertical = y - top as f32;
+    let top_left = image.pixel(left, top)?;
+    let top_right = image.pixel(right, top)?;
+    let bottom_left = image.pixel(left, bottom)?;
+    let bottom_right = image.pixel(right, bottom)?;
+    let channel = |top_left: u8, top_right: u8, bottom_left: u8, bottom_right: u8| {
+        let top = f32::from(top_left) * (1.0 - horizontal) + f32::from(top_right) * horizontal;
+        let bottom =
+            f32::from(bottom_left) * (1.0 - horizontal) + f32::from(bottom_right) * horizontal;
+        (top * (1.0 - vertical) + bottom * vertical).round() as u8
+    };
+    Some(Rgba(
+        channel(top_left.0, top_right.0, bottom_left.0, bottom_right.0),
+        channel(top_left.1, top_right.1, bottom_left.1, bottom_right.1),
+        channel(top_left.2, top_right.2, bottom_left.2, bottom_right.2),
+        channel(top_left.3, top_right.3, bottom_left.3, bottom_right.3),
+    ))
+}
+
 fn team_color(radiant: bool) -> Rgba {
     if radiant { RADIANT } else { DIRE }
 }
@@ -381,6 +568,15 @@ impl Canvas {
                 self.pixel(col, row, color);
             }
         }
+    }
+    fn outline_rect(&mut self, x: i32, y: i32, width: i32, height: i32, color: Rgba) {
+        if width <= 0 || height <= 0 {
+            return;
+        }
+        self.line(x, y, x + width - 1, y, color);
+        self.line(x, y, x, y + height - 1, color);
+        self.line(x + width - 1, y, x + width - 1, y + height - 1, color);
+        self.line(x, y + height - 1, x + width - 1, y + height - 1, color);
     }
     fn line(&mut self, x: i32, y: i32, end_x: i32, end_y: i32, color: Rgba) {
         let steps = (end_x - x).abs().max((end_y - y).abs()).max(1);
@@ -426,6 +622,27 @@ impl Canvas {
             }
         }
     }
+    fn blit_circle_smooth(&mut self, image: &RasterImage, x: i32, y: i32, size: i32) {
+        let crop = image.width.min(image.height) as f32;
+        let offset_x = (image.width as f32 - crop) / 2.0;
+        let offset_y = (image.height as f32 - crop) / 2.0;
+        for dy in 0..size {
+            for dx in 0..size {
+                let center_x = dx - size / 2;
+                let center_y = dy - size / 2;
+                if center_x * center_x + center_y * center_y > (size / 2) * (size / 2) {
+                    continue;
+                }
+                let source_x =
+                    offset_x + ((dx as f32 + 0.5) * crop / size as f32).clamp(0.0, crop - 1.0);
+                let source_y =
+                    offset_y + ((dy as f32 + 0.5) * crop / size as f32).clamp(0.0, crop - 1.0);
+                if let Some(pixel) = sample_bilinear(image, source_x, source_y) {
+                    self.pixel(x + dx, y + dy, pixel);
+                }
+            }
+        }
+    }
     fn hero_icon(
         &mut self,
         hero: &LiveMapHero,
@@ -448,14 +665,7 @@ impl Canvas {
         );
         self.circle(x, y, radius - 1, PANEL);
         if let Some(image) = portrait {
-            self.blit(
-                image,
-                x - radius + 1,
-                y - radius + 1,
-                (radius - 1) * 2,
-                (radius - 1) * 2,
-                true,
-            );
+            self.blit_circle_smooth(image, x - radius + 1, y - radius + 1, (radius - 1) * 2);
         } else {
             let short = hero_short_name(i64::from(hero.hero_id))
                 .chars()
@@ -472,6 +682,15 @@ impl Canvas {
         if dead {
             self.line(x - radius, y - radius, x + radius, y + radius, DIRE);
         }
+    }
+    fn stack_badge(&mut self, x: i32, y: i32, count: usize) {
+        let label = count.to_string();
+        let width = (label.chars().count() as i32 * 7 + 5).max(11);
+        let left = x + 10;
+        let top = y - 23;
+        self.rect(left, top, width, 14, BG);
+        self.outline_rect(left, top, width, 14, WHITE);
+        self.text(left + 3, top + 1, &label, 10.0, WHITE);
     }
     fn day_night(&mut self, x: i32, y: i32, day: bool) {
         if day {
@@ -587,6 +806,22 @@ impl Canvas {
                 self.pixel(left + dx as i32, top + dy as i32, fill);
             }
         }
+    }
+    fn destroyed_building_icon(&mut self, x: i32, y: i32, color: Rgba) {
+        // A destroyed marker is intentionally smaller and dimmer than a
+        // standing structure. It reports the source-backed state while
+        // leaving the terrain visible and avoiding a false live silhouette.
+        let muted = Rgba(
+            (u16::from(color.0) * 2 / 3) as u8,
+            (u16::from(color.1) * 2 / 3) as u8,
+            (u16::from(color.2) * 2 / 3) as u8,
+            255,
+        );
+        self.circle(x, y, 6, BG);
+        self.line(x - 4, y - 4, x + 4, y + 4, muted);
+        self.line(x - 4, y + 4, x + 4, y - 4, muted);
+        self.line(x - 6, y, x + 6, y, PANEL_EDGE);
+        self.line(x, y - 6, x, y + 6, PANEL_EDGE);
     }
     fn fitted_text(&mut self, x: i32, y: i32, text: &str, width: f32, size: f32, color: Rgba) {
         let mut used = 0.0;
@@ -710,6 +945,8 @@ mod tests {
         LiveMapFrame {
             match_id: 42,
             game_time: 91,
+            radiant_score: None,
+            dire_score: None,
             radiant_net_worth: None,
             dire_net_worth: None,
             heroes: vec![LiveMapHero {
@@ -751,8 +988,9 @@ mod tests {
         let bytes = render_with_cache(&frame(), cache.path()).unwrap();
         let image = decode_png_raster(&bytes).unwrap();
         assert_eq!((image.width, image.height), (WIDTH, HEIGHT));
-        // The expanded roster is 1240x704; the shared encoder uses stored RGBA.
-        assert!(bytes.len() < 4 * 1024 * 1024);
+        // Frequent Discord edits must use compressed uploads, not the 3.5 MB
+        // stored-RGBA encoding produced by the raster helper.
+        assert!(bytes.len() < 2 * 1024 * 1024);
     }
     #[test]
     fn dead_heroes_do_not_leave_false_map_positions() {
@@ -793,7 +1031,7 @@ mod tests {
     }
 
     #[test]
-    fn standing_buildings_use_fixed_positions_and_destroyed_buildings_disappear() {
+    fn standing_and_destroyed_buildings_use_distinct_fixed_markers() {
         let cache = tempfile::tempdir().unwrap();
         let base = frame();
         let blank = decode_png_raster(&render_with_cache(&base, cache.path()).unwrap()).unwrap();
@@ -814,10 +1052,10 @@ mod tests {
             blank.pixel(x as usize, y as usize)
         );
         state.buildings[0].destroyed = true;
-        assert_eq!(
-            decode_png_raster(&render_with_cache(&state, cache.path()).unwrap()).unwrap(),
-            blank
-        );
+        let destroyed =
+            decode_png_raster(&render_with_cache(&state, cache.path()).unwrap()).unwrap();
+        assert_ne!(destroyed, blank);
+        assert_ne!(destroyed, standing);
         state.buildings[0].destroyed = false;
         state.buildings[0].x = Some(-5000.0);
         state.buildings[0].y = Some(5000.0);
@@ -844,6 +1082,55 @@ mod tests {
         assert_eq!(gold_lead_label(Some(1000), Some(1000)).0, "GOLD  EVEN");
         assert_eq!(gold_lead_label(None, Some(2300)).0, "GOLD  ?");
         assert_eq!(gold_lead_label(Some(-1), Some(1)).0, "GOLD  ?");
+        assert_eq!(
+            score_label(Some(2), Some(1)),
+            ("SCORE  2-1".into(), RADIANT)
+        );
+        assert_eq!(score_label(Some(1), Some(2)), ("SCORE  1-2".into(), DIRE));
+        assert_eq!(score_label(None, Some(2)), ("SCORE  ?-?".into(), MUTED));
+        assert_eq!(roshan_label(Some(125)), ("ROSHAN  2:05".into(), GOLD));
+        assert_eq!(roshan_label(Some(0)), ("ROSHAN  ?".into(), MUTED));
+    }
+
+    #[test]
+    fn building_summary_requires_complete_unique_statuses() {
+        let mut buildings = Vec::new();
+        for name in [
+            "top tier 1 tower",
+            "top tier 2 tower",
+            "top tier 3 tower",
+            "mid tier 1 tower",
+            "mid tier 2 tower",
+            "mid tier 3 tower",
+            "bottom tier 1 tower",
+            "bottom tier 2 tower",
+            "bottom tier 3 tower",
+            "upper Ancient tier 4 tower",
+            "lower Ancient tier 4 tower",
+            "top melee barracks",
+            "top ranged barracks",
+            "mid melee barracks",
+            "mid ranged barracks",
+            "bottom melee barracks",
+            "bottom ranged barracks",
+        ] {
+            buildings.push(LiveMapBuilding {
+                radiant: true,
+                name: name.into(),
+                destroyed: name.contains("tier 2") || name.contains("ranged barracks"),
+                x: None,
+                y: None,
+            });
+        }
+        assert_eq!(
+            building_summary(&buildings, true).as_deref(),
+            Some("TOWERS 8/11   RAX 3/6")
+        );
+        buildings.push(buildings[0].clone());
+        assert_eq!(
+            building_summary(&buildings, true).as_deref(),
+            Some("TOWERS ?/11   RAX 3/6")
+        );
     }
 
     #[test]
@@ -907,7 +1194,7 @@ mod tests {
         state.buildings[0].x = Some(0.0);
         state.buildings[0].y = Some(0.0);
         let moved = decode_png_raster(&render_with_cache(&state, cache.path()).unwrap()).unwrap();
-        assert_eq!(
+        assert_ne!(
             moved.pixel(x as usize, y as usize),
             destroyed.pixel(x as usize, y as usize)
         );

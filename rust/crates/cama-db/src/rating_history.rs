@@ -2121,6 +2121,6 @@ mod tests {
         let adjustment =
             CamaRatingSystem::default().calculate_streak_multiplier(&outcomes, true, None, None);
         assert_eq!(adjustment.streak_length, 4);
-        assert!((adjustment.multiplier - 1.60).abs() < f64::EPSILON);
+        assert!((adjustment.multiplier - 1.66).abs() < 1e-12);
     }
 }

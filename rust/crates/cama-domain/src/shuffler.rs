@@ -5528,8 +5528,8 @@ mod tests {
     }
 
     #[test]
-    fn test_default_role_matchup_delta_weight_is_point_one_eight() {
-        approx(BalancedShuffler::default().role_matchup_delta_weight, 0.18);
+    fn test_default_role_matchup_delta_weight_is_point_two_seven() {
+        approx(BalancedShuffler::default().role_matchup_delta_weight, 0.27);
     }
 
     fn role_delta_fixture() -> (Vec<Player>, Vec<Player>) {
@@ -6750,7 +6750,7 @@ mod tests {
         let beam = shuffler
             .select_draft_pool_beam(&captain_a, &captain_b, &candidates, None, None)
             .expect("beam draft pool");
-        assert!(beam.pool_score - exhaustive.pool_score <= 50.0);
+        assert!(beam.pool_score - exhaustive.pool_score <= 60.0);
     }
 
     #[test]

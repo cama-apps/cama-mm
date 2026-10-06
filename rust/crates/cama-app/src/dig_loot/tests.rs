@@ -7,6 +7,65 @@ const RECEIVER: i64 = 10_002;
 const GUILD: i64 = 12_345;
 
 #[test]
+fn survival_improves_risky_and_desperate_rolls_and_stops_at_twenty_points() {
+    for (event_id, choice, base_chance) in [
+        ("underground_stream", "risky", 0.62),
+        ("creeper_ambush", "desperate", 0.40),
+    ] {
+        let resolve = |survival, roll| {
+            resolve_canonical_event_with_policy(
+                event_id,
+                choice,
+                CanonicalEventRolls {
+                    success_roll: roll,
+                    ..Default::default()
+                },
+                CanonicalEventPolicy {
+                    survival,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        for points in 1..=20 {
+            let roll = base_chance + points as f64 * 0.01 - 0.005;
+            assert!(!resolve(points - 1, roll).succeeded);
+            assert!(resolve(points, roll).succeeded);
+        }
+        assert!(!resolve(20, base_chance + 0.205).succeeded);
+        assert_eq!(resolve(20, 0.9), resolve(i64::MAX, 0.9));
+        assert_eq!(resolve(0, 0.5), resolve(-1, 0.5));
+        // Survival changes the selected branch, not the value of its reward.
+        assert_eq!(resolve(0, 0.0).jc, resolve(20, 0.0).jc);
+    }
+}
+
+#[test]
+fn survival_preserves_guaranteed_safe_choices_and_cruel_echoes() {
+    let safe = |survival, cruel_safe_failure| {
+        resolve_canonical_event_with_policy(
+            "underground_stream",
+            "safe",
+            CanonicalEventRolls {
+                success_roll: 0.99,
+                cruel_echo_roll: Some(0.01),
+                ..Default::default()
+            },
+            CanonicalEventPolicy {
+                survival,
+                cruel_safe_failure,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+    assert_eq!(safe(0, 0.0), safe(20, 0.0));
+    assert!(safe(20, 0.0).succeeded);
+    assert!(!safe(20, 0.1).succeeded);
+    assert_eq!(safe(0, 0.1), safe(20, 0.1));
+}
+
+#[test]
 fn authored_event_chains_are_finite_and_bounded() {
     for event in canonical_event_catalog() {
         let mut seen = BTreeSet::new();
