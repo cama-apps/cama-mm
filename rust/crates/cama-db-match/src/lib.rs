@@ -43,3 +43,9 @@ pub mod soft_avoid_repository;
 #[allow(dead_code)]
 #[path = "../../cama-db/src/test_support.rs"]
 mod test_support;
+
+#[path = "../../cama-db/src/deadlock.rs"]
+pub mod deadlock;
+
+#[path = "../../cama-db/src/deadlock_host.rs"]
+pub mod deadlock_host;

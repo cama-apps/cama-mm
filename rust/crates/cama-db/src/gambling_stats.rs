@@ -33,6 +33,8 @@ const SQLITE_ID_CHUNK: usize = 900;
 pub enum BetSide {
     Radiant,
     Dire,
+    TeamOne,
+    TeamTwo,
 }
 
 impl BetSide {
@@ -40,6 +42,8 @@ impl BetSide {
         match value {
             "radiant" => Ok(Self::Radiant),
             "dire" => Ok(Self::Dire),
+            "team_one" => Ok(Self::TeamOne),
+            "team_two" => Ok(Self::TeamTwo),
             _ => Err(GamblingStatsError::InvalidBetSide(value.to_owned())),
         }
     }
@@ -49,11 +53,16 @@ impl BetSide {
         match self {
             Self::Radiant => "radiant",
             Self::Dire => "dire",
+            Self::TeamOne => "team one",
+            Self::TeamTwo => "team two",
         }
     }
 
     const fn won(self, winning_team: i64) -> bool {
-        matches!((self, winning_team), (Self::Radiant, 1) | (Self::Dire, 2))
+        matches!(
+            (self, winning_team),
+            (Self::Radiant | Self::TeamOne, 1) | (Self::Dire | Self::TeamTwo, 2)
+        )
     }
 }
 
@@ -73,6 +82,7 @@ pub enum GamblingSource {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BetHistoryEntry {
+    pub game: &'static str,
     pub bet_id: i64,
     pub amount: i64,
     pub leverage: i64,
@@ -455,9 +465,17 @@ impl GamblingStatsRepository {
                 .collect::<Vec<_>>()
                 .join(",");
             let sql = format!(
-                "SELECT b.discord_id, b.team_bet_on, m.winning_team
-                 FROM bets b JOIN matches m ON m.match_id = b.match_id
-                 WHERE b.guild_id = ? AND b.match_id IS NOT NULL
+                "SELECT b.discord_id, b.team_bet_on, b.winning_team FROM (
+                 SELECT b.discord_id,b.guild_id,b.team_bet_on,m.winning_team,b.bet_time,b.bet_id
+                 FROM bets b JOIN matches m ON m.match_id=b.match_id
+                 WHERE b.match_id IS NOT NULL
+                 UNION ALL
+                 SELECT b.discord_id,b.guild_id,CASE WHEN b.side=1 THEN 'radiant' ELSE 'dire' END,
+                        m.winner,b.created_at,b.wager_id
+                 FROM deadlock_wagers b JOIN deadlock_matches m
+                   ON b.market_id='deadlock:' || m.match_id AND b.guild_id=m.guild_id
+                 WHERE m.status='settled') b
+                 WHERE b.guild_id = ?
                    AND b.discord_id IN ({placeholders})
                  ORDER BY b.discord_id, b.bet_time DESC, b.bet_id DESC"
             );
@@ -622,14 +640,24 @@ impl GamblingStatsPort for GamblingStatsRepository {
                     COALESCE(b.is_blind, 0), b.investment_target_id,
                     b.investment_direction, b.bet_time, b.match_id, b.payout,
                     COALESCE(bst.vanity_tax, 0),
-                    COALESCE(bst.low_priority_tax, 0), m.winning_team
+                    COALESCE(bst.low_priority_tax, 0), m.winning_team, 'dota' AS game
              FROM bets b
              JOIN matches m ON m.match_id = b.match_id
              LEFT JOIN bet_settlement_taxes bst
                ON bst.match_id = b.match_id AND bst.guild_id = b.guild_id
               AND bst.discord_id = b.discord_id
              WHERE b.discord_id = ?1 AND b.guild_id = ?2 AND b.match_id IS NOT NULL
-             ORDER BY b.bet_time, b.bet_id",
+             UNION ALL
+             SELECT b.wager_id,b.amount,b.leverage,b.effective_stake,
+                    CASE WHEN b.side=1 THEN 'team_one' ELSE 'team_two' END,
+                    b.kind<>'manual',NULL,NULL,b.created_at,m.match_id,b.payout,
+                    COALESCE((SELECT amount FROM deadlock_economic_receipts r WHERE r.market_id=b.market_id AND r.discord_id=b.discord_id AND r.kind='vanity_tax'),0),
+                    COALESCE((SELECT amount FROM deadlock_economic_receipts r WHERE r.market_id=b.market_id AND r.discord_id=b.discord_id AND r.kind='low_priority_tax'),0),
+                    m.winner,'deadlock'
+             FROM deadlock_wagers b JOIN deadlock_matches m
+               ON b.market_id='deadlock:' || m.match_id AND b.guild_id=m.guild_id
+             WHERE b.discord_id=?1 AND b.guild_id=?2 AND m.status='settled'
+             ORDER BY 9,15,1",
         )?;
         let rows = statement
             .query_map(
@@ -650,6 +678,7 @@ impl GamblingStatsPort for GamblingStatsRepository {
                         row.get::<_, i64>(11)?,
                         row.get::<_, i64>(12)?,
                         row.get::<_, i64>(13)?,
+                        row.get::<_, String>(14)?,
                     ))
                 },
             )?
@@ -672,12 +701,18 @@ impl GamblingStatsPort for GamblingStatsRepository {
                     stored_vanity_tax,
                     stored_low_priority_tax,
                     winning_team,
+                    game,
                 ) = row;
                 let team = BetSide::parse(&side)?;
                 let won = team.won(winning_team);
                 // One settlement withholds both profit taxes together, so they
                 // share the single first-sighting guard.
-                let settled = won && taxed_matches.insert(match_id);
+                let game = if game == "deadlock" {
+                    "deadlock"
+                } else {
+                    "dota"
+                };
+                let settled = won && taxed_matches.insert((game, match_id));
                 let vanity_tax = if settled { stored_vanity_tax } else { 0 };
                 let low_priority_tax = if settled { stored_low_priority_tax } else { 0 };
                 let profit = if won {
@@ -689,6 +724,7 @@ impl GamblingStatsPort for GamblingStatsRepository {
                     -effective_bet
                 };
                 Ok(BetHistoryEntry {
+                    game,
                     bet_id,
                     amount,
                     leverage,
@@ -818,7 +854,7 @@ impl GamblingStatsPort for GamblingStatsRepository {
         let connection = self.connection()?;
         connection
             .query_row(
-                "SELECT COUNT(*) FROM matches WHERE guild_id = ?1 AND winning_team IS NOT NULL",
+                "SELECT (SELECT COUNT(*) FROM matches WHERE guild_id = ?1 AND winning_team IS NOT NULL) + (SELECT COUNT(*) FROM deadlock_matches WHERE guild_id=?1 AND status='settled')",
                 [Self::normalize_guild_id(guild_id)],
                 |row| row.get(0),
             )
@@ -940,15 +976,24 @@ impl GamblingStatsPort for GamblingStatsRepository {
                 )
             };
             let sql = format!(
-                "WITH base AS (
-                     SELECT b.discord_id, b.guild_id, b.bet_id, b.match_id, b.bet_time,
+                "WITH all_bets AS (
+                     SELECT b.discord_id,b.guild_id,b.bet_id, 'dota:' || b.match_id AS match_id,b.bet_time,
                             b.amount * COALESCE(b.leverage, 1) AS effective_bet,
                             COALESCE(b.leverage, 1) AS leverage, b.payout,
                             CASE WHEN (m.winning_team = 1 AND b.team_bet_on = 'radiant')
                                       OR (m.winning_team = 2 AND b.team_bet_on = 'dire')
                                  THEN 1 ELSE 0 END AS won
                      FROM bets b JOIN matches m ON b.match_id = m.match_id
-                     WHERE b.guild_id = ? AND b.match_id IS NOT NULL {player_clause}
+                     WHERE b.match_id IS NOT NULL
+                     UNION ALL
+                     SELECT b.discord_id,b.guild_id,b.wager_id,b.market_id,b.created_at,
+                            b.effective_stake,b.leverage,b.payout,
+                            CASE WHEN b.side=m.winner THEN 1 ELSE 0 END
+                     FROM deadlock_wagers b JOIN deadlock_matches m
+                       ON b.market_id='deadlock:' || m.match_id AND b.guild_id=m.guild_id
+                     WHERE m.status='settled'
+                 ), base AS (
+                     SELECT * FROM all_bets b WHERE b.guild_id=? {player_clause}
                  ), ordered AS (
                      SELECT *,
                             LAG(won) OVER (PARTITION BY discord_id ORDER BY bet_time, bet_id)
@@ -967,7 +1012,10 @@ impl GamblingStatsPort for GamblingStatsRepository {
                                                  + bst.low_priority_tax)
                                       FROM bet_settlement_taxes bst
                                       WHERE bst.guild_id = ordered.guild_id
-                                        AND bst.discord_id = ordered.discord_id), 0),
+                                        AND bst.discord_id = ordered.discord_id), 0)
+                          - COALESCE((SELECT SUM(r.amount) FROM deadlock_economic_receipts r
+                                      WHERE r.guild_id=ordered.guild_id AND r.discord_id=ordered.discord_id
+                                        AND r.kind IN ('vanity_tax','low_priority_tax')),0),
                         COUNT(DISTINCT match_id),
                         SUM(CASE WHEN leverage = 5 THEN 1 ELSE 0 END),
                         SUM(CASE WHEN previous_won = 0 THEN 1 ELSE 0 END),
@@ -1211,7 +1259,7 @@ where
             total_matches: self.port.total_settled_matches(guild_id)?,
             matches_bet_on: history
                 .iter()
-                .map(|bet| bet.match_id)
+                .map(|bet| (bet.game, bet.match_id))
                 .collect::<BTreeSet<_>>()
                 .len() as i64,
             loss_chase_rate: if sequences == 0 {
@@ -1794,9 +1842,12 @@ fn calculate_auto_bet_performance(history: &[BetHistoryEntry]) -> AutoBetPerform
         .filter(|bet| bet.investment_target_id.is_none())
         .collect::<Vec<_>>();
     let auto_teams = automatic.iter().fold(
-        BTreeMap::<i64, BTreeSet<BetSide>>::new(),
+        BTreeMap::<(&str, i64), BTreeSet<BetSide>>::new(),
         |mut teams, bet| {
-            teams.entry(bet.match_id).or_default().insert(bet.team);
+            teams
+                .entry((bet.game, bet.match_id))
+                .or_default()
+                .insert(bet.team);
             teams
         },
     );
@@ -1804,12 +1855,16 @@ fn calculate_auto_bet_performance(history: &[BetHistoryEntry]) -> AutoBetPerform
         .iter()
         .filter(|bet| {
             !bet.is_blind
-                && auto_teams.get(&bet.match_id).is_some_and(|teams| {
-                    teams.contains(&match bet.team {
-                        BetSide::Radiant => BetSide::Dire,
-                        BetSide::Dire => BetSide::Radiant,
+                && auto_teams
+                    .get(&(bet.game, bet.match_id))
+                    .is_some_and(|teams| {
+                        teams.contains(&match bet.team {
+                            BetSide::Radiant => BetSide::Dire,
+                            BetSide::Dire => BetSide::Radiant,
+                            BetSide::TeamOne => BetSide::TeamTwo,
+                            BetSide::TeamTwo => BetSide::TeamOne,
+                        })
                     })
-                })
         })
         .collect::<Vec<_>>();
     AutoBetPerformance {

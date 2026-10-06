@@ -1028,6 +1028,14 @@ impl PlayerRepository {
         let guild_id = Self::normalize_guild_id(guild_id);
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let deadlock_enrolled: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM deadlock_players WHERE discord_id=?1 AND guild_id=?2)",
+            params![discord_id, guild_id],
+            |row| row.get(0),
+        )?;
+        if deadlock_enrolled {
+            return Err(CoreRepositoryError::InvalidInput("This shared account is enrolled in Deadlock. Ask an admin for an audited account migration before resetting it; its wallet and Deadlock history must be preserved.".to_owned()));
+        }
         let exists = transaction
             .query_row(
                 "SELECT 1 FROM players WHERE discord_id = ?1 AND guild_id = ?2",
@@ -5909,6 +5917,47 @@ mod tests {
     }
 
     #[test]
+    fn test_delete_player_preserves_deadlock_enrollment_wallet_and_other_guilds() {
+        let fixture = Fixture::new();
+        fixture.add_player(12345, TEST_GUILD_ID);
+        fixture.add_player(12345, TEST_GUILD_ID_SECONDARY);
+        fixture
+            .connection()
+            .execute(
+                "INSERT INTO deadlock_players(guild_id,discord_id,steam_id) VALUES(?1,12345,12345)",
+                [TEST_GUILD_ID],
+            )
+            .unwrap();
+        fixture
+            .connection()
+            .execute(
+                "UPDATE players SET jopacoin_balance=127 WHERE discord_id=12345 AND guild_id=?1",
+                [TEST_GUILD_ID],
+            )
+            .unwrap();
+        let error = fixture
+            .players
+            .delete(12345, Some(TEST_GUILD_ID))
+            .unwrap_err();
+        assert!(error.to_string().contains("audited account migration"));
+        assert_eq!(
+            fixture
+                .players
+                .get_by_id(12345, Some(TEST_GUILD_ID))
+                .unwrap()
+                .unwrap()
+                .jopacoin_balance,
+            127
+        );
+        assert!(
+            fixture
+                .players
+                .delete(12345, Some(TEST_GUILD_ID_SECONDARY))
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn test_delete_player() {
         let fixture = Fixture::new();
         fixture.add_player(12_345, TEST_GUILD_ID);
@@ -9955,6 +10004,7 @@ mod tests {
     const TEST_SCHEMA: &str = r#"
         PRAGMA journal_mode=WAL;
         PRAGMA busy_timeout=5000;
+        CREATE TABLE deadlock_players (guild_id INTEGER NOT NULL,discord_id INTEGER NOT NULL,steam_id INTEGER NOT NULL,PRIMARY KEY(guild_id,discord_id));
         CREATE TABLE players (
             discord_id INTEGER NOT NULL, guild_id INTEGER NOT NULL DEFAULT 0,
             discord_username TEXT NOT NULL, dotabuff_url TEXT, initial_mmr INTEGER,

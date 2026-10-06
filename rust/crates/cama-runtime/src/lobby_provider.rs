@@ -3639,7 +3639,10 @@ impl LobbyInteractionHandler {
         guild_id: AppGuildId,
         responder: &Arc<dyn InteractionResponder>,
     ) -> Result<Option<cama_domain::player::Player>, InteractionHandlerError> {
-        let player = self.load_player(player_id, guild_id).await?;
+        let player = self
+            .load_player(player_id, guild_id)
+            .await?
+            .filter(cama_domain::player::Player::has_dota_rating);
         if player.is_none() {
             followup_ephemeral(
                 responder,

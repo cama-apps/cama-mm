@@ -9,6 +9,8 @@
 #![forbid(unsafe_code)]
 
 mod auth;
+pub mod deadlock;
+pub mod deadlock_metadata;
 mod handshake;
 mod lobby;
 pub mod metadata;

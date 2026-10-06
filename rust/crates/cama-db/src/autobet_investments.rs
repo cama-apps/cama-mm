@@ -91,8 +91,10 @@ impl AutobetInvestmentRepository {
             .optional()?
             .unwrap_or(0);
         let current_total = transaction.query_row(
-            "SELECT COALESCE(SUM(percentage), 0) FROM autobet_investments
-             WHERE guild_id = ?1 AND investor_id = ?2",
+            "SELECT (SELECT COALESCE(SUM(percentage), 0) FROM autobet_investments
+             WHERE guild_id = ?1 AND investor_id = ?2) +
+             (SELECT COALESCE(SUM(percentage),0) FROM deadlock_betting_investments
+              WHERE guild_id=?1 AND investor_id=?2)",
             params![guild_id, investor_id],
             |row| row.get::<_, i64>(0),
         )?;

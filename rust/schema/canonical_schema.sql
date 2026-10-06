@@ -2505,3 +2505,38 @@ CREATE TRIGGER trg_package_deals_games_remaining_update_cap
             BEGIN
                 SELECT RAISE(ABORT, 'package deal games_remaining cannot exceed 10');
             END;
+
+-- Deadlock has independent rosters and per-format ratings, sharing only identity and JC.
+CREATE TABLE deadlock_players (guild_id INTEGER NOT NULL,discord_id INTEGER NOT NULL,steam_id INTEGER NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(guild_id,discord_id),UNIQUE(guild_id,steam_id));
+CREATE TABLE deadlock_ratings (guild_id INTEGER NOT NULL,discord_id INTEGER NOT NULL,format TEXT NOT NULL CHECK(format IN('street_brawl','standard')),mu REAL NOT NULL,sigma REAL NOT NULL CHECK(sigma>0),games INTEGER NOT NULL DEFAULT 0,revision INTEGER NOT NULL DEFAULT 0,seed_source TEXT NOT NULL,seed_value REAL,seeded_at INTEGER NOT NULL,seed_provenance TEXT,seed_source_at INTEGER,PRIMARY KEY(guild_id,discord_id,format));
+CREATE TABLE deadlock_queue (guild_id INTEGER NOT NULL,discord_id INTEGER NOT NULL,joined_at INTEGER NOT NULL,ready_format TEXT,ready_until INTEGER,PRIMARY KEY(guild_id,discord_id));
+CREATE TABLE deadlock_matches (match_id INTEGER PRIMARY KEY AUTOINCREMENT,guild_id INTEGER NOT NULL,format TEXT NOT NULL CHECK(format IN('street_brawl','standard')),status TEXT NOT NULL CHECK(status IN('economic_setup','gathering','running','recorded','settled','aborted')),roster_json TEXT NOT NULL,created_by INTEGER NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,winner INTEGER CHECK(winner IN(1,2)),external_match_id INTEGER UNIQUE,recorded_by INTEGER,abort_reason TEXT,request_key TEXT,economy_terms_json TEXT NOT NULL DEFAULT '{}',publication_channel_id INTEGER,publication_message_id INTEGER,publication_thread_id INTEGER,thread_message_id INTEGER,UNIQUE(guild_id,request_key));
+CREATE TABLE deadlock_participants (match_id INTEGER NOT NULL,guild_id INTEGER NOT NULL,discord_id INTEGER NOT NULL,side INTEGER NOT NULL CHECK(side IN(1,2)),rating_revision INTEGER NOT NULL,PRIMARY KEY(match_id,discord_id));
+CREATE TABLE deadlock_rating_events (match_id INTEGER NOT NULL,guild_id INTEGER NOT NULL,discord_id INTEGER NOT NULL,format TEXT NOT NULL,old_mu REAL NOT NULL,old_sigma REAL NOT NULL,new_mu REAL NOT NULL,new_sigma REAL NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(match_id,discord_id));
+CREATE TABLE deadlock_audit_events (event_id INTEGER PRIMARY KEY AUTOINCREMENT,guild_id INTEGER NOT NULL,match_id INTEGER,actor_id INTEGER NOT NULL,kind TEXT NOT NULL,detail TEXT NOT NULL,created_at INTEGER NOT NULL);
+CREATE INDEX idx_deadlock_matches_active ON deadlock_matches(guild_id,status);
+CREATE INDEX idx_deadlock_participants_player ON deadlock_participants(guild_id,discord_id);
+CREATE TABLE deadlock_betting_markets(market_id TEXT PRIMARY KEY, guild_id INTEGER NOT NULL, match_id INTEGER NOT NULL UNIQUE, format TEXT NOT NULL, roster_json TEXT NOT NULL, terms_json TEXT NOT NULL, deadline INTEGER NOT NULL, status TEXT NOT NULL CHECK(status IN ('open','closed','settled','refunded')), seed INTEGER NOT NULL DEFAULT 0 CHECK(seed>=0), created_at INTEGER NOT NULL, closed_at INTEGER, resolved_at INTEGER);
+CREATE TABLE deadlock_wagers(wager_id INTEGER PRIMARY KEY AUTOINCREMENT,market_id TEXT NOT NULL,guild_id INTEGER NOT NULL,discord_id INTEGER NOT NULL,side INTEGER NOT NULL CHECK(side IN (1,2)),amount INTEGER NOT NULL CHECK(amount>0),leverage INTEGER NOT NULL CHECK(leverage IN(1,2,3,5,10)),effective_stake INTEGER NOT NULL CHECK(effective_stake>0),request_key TEXT NOT NULL,kind TEXT NOT NULL,created_at INTEGER NOT NULL,payout INTEGER,UNIQUE(guild_id,request_key));
+CREATE TABLE deadlock_economic_receipts(receipt_id TEXT PRIMARY KEY,market_id TEXT NOT NULL,guild_id INTEGER NOT NULL,discord_id INTEGER,kind TEXT NOT NULL,amount INTEGER NOT NULL,detail_json TEXT NOT NULL DEFAULT '{}',created_at INTEGER NOT NULL);
+CREATE TABLE deadlock_betting_funds(guild_id INTEGER PRIMARY KEY,balance INTEGER NOT NULL DEFAULT 0 CHECK(balance>=0));
+CREATE TABLE deadlock_betting_investments(guild_id INTEGER NOT NULL,investor_id INTEGER NOT NULL,target_id INTEGER NOT NULL,direction TEXT NOT NULL CHECK(direction IN('long','short')),percentage INTEGER NOT NULL CHECK(percentage BETWEEN 1 AND 10),PRIMARY KEY(guild_id,investor_id,target_id));
+CREATE TABLE deadlock_betting_liquidity(guild_id INTEGER NOT NULL,discord_id INTEGER NOT NULL,percentage INTEGER NOT NULL CHECK(percentage BETWEEN 1 AND 50),PRIMARY KEY(guild_id,discord_id));
+CREATE INDEX idx_deadlock_wagers_market ON deadlock_wagers(guild_id,market_id);
+CREATE INDEX idx_deadlock_markets_recovery ON deadlock_betting_markets(status,guild_id);
+-- Both writers acquire SQLite's write lock; triggers enforce cross-game claims even for legacy Dota paths.
+CREATE TRIGGER deadlock_guard_dota_pending_insert BEFORE INSERT ON pending_matches
+WHEN EXISTS(SELECT 1 FROM deadlock_participants p JOIN deadlock_matches m USING(match_id) WHERE p.guild_id=NEW.guild_id AND m.status IN('economic_setup','gathering','running') AND (p.discord_id IN(SELECT value FROM json_each(NEW.payload,'$.radiant_team_ids')) OR p.discord_id IN(SELECT value FROM json_each(NEW.payload,'$.dire_team_ids'))))
+BEGIN SELECT RAISE(ABORT,'player is reserved by an active Deadlock match'); END;
+CREATE TRIGGER deadlock_guard_dota_pending_update BEFORE UPDATE OF payload,guild_id ON pending_matches
+WHEN EXISTS(SELECT 1 FROM deadlock_participants p JOIN deadlock_matches m USING(match_id) WHERE p.guild_id=NEW.guild_id AND m.status IN('economic_setup','gathering','running') AND (p.discord_id IN(SELECT value FROM json_each(NEW.payload,'$.radiant_team_ids')) OR p.discord_id IN(SELECT value FROM json_each(NEW.payload,'$.dire_team_ids'))))
+BEGIN SELECT RAISE(ABORT,'player is reserved by an active Deadlock match'); END;
+
+CREATE TABLE deadlock_host_jobs(match_id INTEGER PRIMARY KEY,guild_id INTEGER NOT NULL,account_key TEXT NOT NULL,phase TEXT NOT NULL CHECK(phase IN ('reserved','create_requested','gathering','launch_requested','running','manual_review','released')),party_id TEXT,join_code TEXT,external_match_id TEXT,error TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
+CREATE UNIQUE INDEX deadlock_one_active_host ON deadlock_host_jobs(account_key) WHERE phase!='released';
+CREATE TRIGGER deadlock_guard_dota_draft_insert BEFORE INSERT ON app_kv
+WHEN NEW.key='draft:state' AND (COALESCE(json_extract(NEW.value,'$.active'),1)=1 OR COALESCE(json_extract(NEW.value,'$.finalizing'),0)=1) AND EXISTS(SELECT 1 FROM deadlock_participants p JOIN deadlock_matches m USING(match_id) WHERE p.guild_id=NEW.guild_id AND m.status IN('economic_setup','gathering','running') AND p.discord_id IN(SELECT value FROM json_each(NEW.value,'$.state.player_pool_ids')))
+BEGIN SELECT RAISE(ABORT,'player is reserved by an active Deadlock match'); END;
+CREATE TRIGGER deadlock_guard_dota_draft_update BEFORE UPDATE OF value,guild_id,key ON app_kv
+WHEN NEW.key='draft:state' AND (COALESCE(json_extract(NEW.value,'$.active'),1)=1 OR COALESCE(json_extract(NEW.value,'$.finalizing'),0)=1) AND EXISTS(SELECT 1 FROM deadlock_participants p JOIN deadlock_matches m USING(match_id) WHERE p.guild_id=NEW.guild_id AND m.status IN('economic_setup','gathering','running') AND p.discord_id IN(SELECT value FROM json_each(NEW.value,'$.state.player_pool_ids')))
+BEGIN SELECT RAISE(ABORT,'player is reserved by an active Deadlock match'); END;

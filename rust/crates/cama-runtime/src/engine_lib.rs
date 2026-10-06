@@ -26,6 +26,11 @@ pub use cama_runtime_core::{
 pub mod betting_provider;
 pub mod command_tree_contract;
 pub mod curfew_sweep_worker;
+pub mod deadlock_config;
+pub mod deadlock_economy_hooks;
+pub mod deadlock_host;
+pub mod deadlock_provider;
+pub mod deadlock_ratings;
 pub mod dig_bonus_runtime;
 pub mod dig_provider;
 pub mod dig_weather_worker;

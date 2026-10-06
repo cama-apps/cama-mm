@@ -168,7 +168,7 @@ impl RegistrationRepository {
 
         if transaction
             .query_row(
-                "SELECT 1 FROM players WHERE discord_id = ?1 AND guild_id = ?2",
+                "SELECT 1 FROM players WHERE discord_id = ?1 AND guild_id = ?2 AND (initial_mmr IS NOT NULL OR current_mmr IS NOT NULL OR glicko_rating IS NOT NULL OR os_mu IS NOT NULL)",
                 params![request.discord_id, guild_id],
                 |_| Ok(()),
             )
@@ -199,7 +199,17 @@ impl RegistrationRepository {
              ) VALUES (
                  ?1, ?2, ?3, ?4, NULL, ?5, ?5, ?6, ?7, ?8, ?9, ?10,
                  ?11, ?12, ?13, 3, CURRENT_TIMESTAMP
-             )",
+             ) ON CONFLICT(discord_id,guild_id) DO UPDATE SET
+                 discord_username=excluded.discord_username,
+                 dotabuff_url=excluded.dotabuff_url,
+                 initial_mmr=excluded.initial_mmr,current_mmr=excluded.current_mmr,
+                 glicko_rating=excluded.glicko_rating,glicko_rd=excluded.glicko_rd,
+                 glicko_volatility=excluded.glicko_volatility,
+                 os_mu=excluded.os_mu,os_sigma=excluded.os_sigma,
+                 os_rating_version=excluded.os_rating_version,
+                 os_algorithm_fingerprint=excluded.os_algorithm_fingerprint,
+                 exclusion_count=excluded.exclusion_count,
+                 updated_at=CURRENT_TIMESTAMP",
             params![
                 request.discord_id,
                 guild_id,
@@ -278,6 +288,15 @@ impl RegistrationRepository {
             .optional()
             .map(|row| row.is_some())
             .map_err(Into::into)
+    }
+
+    /// A shared JC wallet is not a Dota registration.
+    pub fn dota_player_exists(
+        &self,
+        discord_id: i64,
+        guild_id: Option<i64>,
+    ) -> Result<bool, RegistrationRepositoryError> {
+        Ok(self.connection()?.query_row("SELECT EXISTS(SELECT 1 FROM players WHERE discord_id=?1 AND guild_id=?2 AND (initial_mmr IS NOT NULL OR current_mmr IS NOT NULL OR glicko_rating IS NOT NULL OR os_mu IS NOT NULL))",params![discord_id,Self::normalize_guild_id(guild_id)],|r|r.get(0))?)
     }
 
     pub fn player_preferences(
@@ -655,7 +674,7 @@ fn steam_owner(connection: &Connection, steam_id: i64) -> Result<Option<i64>, ru
     }
     connection
         .query_row(
-            "SELECT discord_id FROM players WHERE steam_id = ?1 ORDER BY guild_id LIMIT 1",
+            "SELECT discord_id FROM players WHERE steam_id = ?1 UNION SELECT discord_id FROM deadlock_players WHERE steam_id = ?1 LIMIT 1",
             [steam_id],
             |row| row.get(0),
         )

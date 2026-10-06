@@ -59,6 +59,15 @@ pub struct Player {
 }
 
 impl Player {
+    /// Shared economy identities have no Dota rating until Dota registration completes.
+    #[must_use]
+    pub fn has_dota_rating(&self) -> bool {
+        self.initial_mmr.is_some()
+            || self.mmr.is_some()
+            || self.glicko_rating.is_some()
+            || self.os_mu.is_some()
+    }
+
     /// Construct an unrated player with the same defaults as the Python model.
     pub fn new(name: impl Into<String>) -> Self {
         Self {

@@ -2212,7 +2212,10 @@ fn balance_snapshot(
 
 /// Python's integer `round(value * percentage / 100)` behavior, including
 /// ties-to-even rather than the more common half-away-from-zero rule.
-fn rounded_percentage(value: i64, percentage: i64) -> Result<i64, BettingServiceRepositoryError> {
+pub(crate) fn rounded_percentage(
+    value: i64,
+    percentage: i64,
+) -> Result<i64, BettingServiceRepositoryError> {
     let numerator = value
         .checked_mul(percentage)
         .ok_or(BettingServiceRepositoryError::WagerOverflow)?;
@@ -2832,6 +2835,30 @@ fn delete_pending_rows(
             params![guild_id, since_ts],
         ),
     }
+}
+
+/// Shared pool engine boundary. Callers retain their own match and wager
+/// namespaces; only effective stakes and payout arithmetic cross this boundary.
+pub(crate) fn pool_payouts(
+    bets: &[PendingBetRecord],
+    winner: BettingTeam,
+    seed: i64,
+    multiplier: f64,
+) -> BTreeMap<i64, i64> {
+    calculate_payouts(PayoutCalculation {
+        bets,
+        winning_team: winner,
+        mode: BettingMode::Pool,
+        total_pool: bets.iter().map(PendingBetRecord::effective_amount).sum(),
+        winning_pool: bets
+            .iter()
+            .filter(|bet| bet.team == winner)
+            .map(PendingBetRecord::effective_amount)
+            .sum(),
+        winner_seed: seed,
+        house_payout_multiplier: 1.0,
+        payout_multiplier: multiplier,
+    })
 }
 
 struct PayoutCalculation<'a> {

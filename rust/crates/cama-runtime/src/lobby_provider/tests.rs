@@ -4839,9 +4839,11 @@ async fn test_lobby_command_creates_publicly_then_reports_a_refused_join_private
     // A creator without roles still gets the lobby created (the public
     // message and thread) and hears about the join refusal privately.
     let database = database_with_players(&[]);
+    let mut creator = NewPlayer::new(99, "Creator", Some(42));
+    creator.glicko_rating = Some(1_000.0);
     PlayerRepository::new(database.path())
-        .add(&NewPlayer::new(99, "Creator", Some(42)))
-        .expect("register a player with no preferred roles");
+        .add(&creator)
+        .expect("register a Dota player with no preferred roles");
     let transport = Arc::new(RecordingTransport::default());
     let provider = provider_for(&database, transport.clone());
 
@@ -5464,4 +5466,32 @@ async fn live_lobby_name_is_kept_when_the_registered_player_row_is_missing() {
             .any(|field| field.value.contains("Unregistered Server Member"))
     );
     assert!(embed.fields.iter().all(|field| !field.value.contains("<@")));
+}
+
+#[tokio::test]
+async fn test_join_button_rejects_deadlock_wallet_without_dota_registration() {
+    let database = database_with_players(&[(99, "Creator")]);
+    cama_db::open_runtime_connection(database.path()).unwrap().execute("INSERT INTO players(discord_id,guild_id,discord_username,jopacoin_balance) VALUES(5,42,'Deadlock player',100)",[]).unwrap();
+    let provider = provider_for(&database, Arc::new(RecordingTransport::default()));
+    dispatch_command(
+        &provider,
+        "lobby",
+        99,
+        "Creator",
+        vec![lobby_option(LobbyKind::Open)],
+    )
+    .await;
+    let responder = dispatch_component(
+        &provider,
+        &join_button_id(LobbyKind::Open),
+        5,
+        "Deadlock player",
+    )
+    .await;
+    assert!(
+        !lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(5))
+    );
+    assert!(only_ephemeral_followup(&responder).contains("not registered"));
 }

@@ -249,7 +249,26 @@ pub fn validate_production_registry(
     }
 
     let ask_present = snapshot.top_level_commands.contains("ask");
-    let expected_top_level_count = 44 + usize::from(ask_present) + usize::from(pet_expected);
+    let deadlock_present = snapshot.top_level_commands.contains("deadlock");
+    if deadlock_present {
+        let missing = [
+            "/deadlock register",
+            "/deadlock join",
+            "/deadlock shuffle",
+            "/deadlock bet",
+            "/deadlock record",
+            "/deadlock abort",
+        ]
+        .into_iter()
+        .filter(|path| !snapshot.command_paths.contains(*path))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(CommandTreeContractError::MissingApprovedPaths(missing));
+        }
+    }
+    let expected_top_level_count =
+        44 + usize::from(ask_present) + usize::from(pet_expected) + usize::from(deadlock_present);
     if snapshot.top_level_commands.len() != expected_top_level_count {
         return Err(CommandTreeContractError::UnexpectedTopLevelCount {
             expected: expected_top_level_count,

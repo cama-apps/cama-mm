@@ -250,3 +250,5 @@ add_curfew_window_mode_column
 create_curfew_pending_changes_table
 add_dig_default_boss_risk
 create_player_display_names_table
+
+create_deadlock_lobbies_and_betting
