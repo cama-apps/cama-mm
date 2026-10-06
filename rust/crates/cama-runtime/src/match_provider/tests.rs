@@ -6587,7 +6587,23 @@ async fn test_execute_shuffle_refreshes_pool_exactly_once_after_finalize() {
     assert_eq!(refreshes.len(), 2, "one pool refresh on each lobby surface");
     assert_ne!(refreshes[0].0, refreshes[1].0, "parent and thread");
     assert_eq!(refreshes[0].2, refreshes[1].2);
-    assert_eq!(updates.len() - refreshes.len(), 2, "closed source controls");
+    let wager_updates = updates
+        .iter()
+        .filter(|(_, _, message)| {
+            message.response.embeds.iter().any(|embed| {
+                embed
+                    .fields
+                    .iter()
+                    .any(|field| field.value.contains("Closes <t:"))
+            })
+        })
+        .count();
+    assert_eq!(wager_updates, 2, "opened betting in both shuffle copies");
+    assert_eq!(
+        updates.len() - refreshes.len() - wager_updates,
+        2,
+        "closed source controls"
+    );
     assert!(
         fixture
             .provider
