@@ -1,4 +1,4 @@
-# Steam/Dota generated protocol provenance review
+# Steam/Dota/Deadlock generated protocol provenance review
 
 Reviewed 2026-09-11 by Codex (automated source review). Scope is the exact crates.io packages steam-vent-proto-steam 0.5.2 and steam-vent-proto-dota2 0.5.2. This is a reproducible generation and complete structural capability review, not a claim to have manually read approximately 1.2 million generated lines.
 
@@ -38,3 +38,32 @@ The evidence supports package-local safe-to-deploy entries for these two exact g
 4. Run it separately for Steam and Dota, then compare every generated file byte-for-byte with each package's `src/generated` directory. Require the same file set as well as identical contents.
 
 The observed result was 109 Steam and 77 Dota generated files, all identical. The generator is explicit review tooling; it is not part of the application's runtime or build dependency graph.
+
+## Deadlock 0.1.0 review — 2026-10-06
+
+Reviewed by Codex (automated source review) using the same provenance-and-generation approach. This is not a claim to have manually read the 320,321 generated lines.
+
+- Package: `steam-vent-proto-deadlock 0.1.0`.
+- Exact crates.io archive SHA-256: `6cb90b9f61017aa240eb125a5e89163e984f3990c5e64693ee3191c6d9b99b79`, matching the application lockfile.
+- All 109 regular archive files were compared byte-for-byte with the reviewed extracted package; no archive links or special files were accepted.
+- Shipped VCS metadata identifies commit `02dadfa0a111e0f42b56cf2b7e53f8117a67c82b` in `https://codeberg.org/newt/proto-deadlock`.
+- The shipped `flake.lock` pins the same generator commit `c03aa0f82cd4a4bccd55de13696f8fd9bffaf2bb` used above. The downloaded upstream tarball SHA-256 was `5d89eb8fdd0775898aee30c6a8d53698d8dca0645fa0d970b4e03a0608830a8b`.
+
+Read the complete custom generator (`main.rs` and `kinds.rs`) and rebuilt it with its shipped Cargo.lock, using protobuf/codegen/parser 3.5.1 and the pure parser with lite runtime. Ran it against the package's bundled `protos` directory into a fresh output directory. The generated file sets match exactly: 49 Rust files.
+
+The publication differs from regeneration only in CRLF line endings and this exact extra import in 45 files:
+
+```rust
+#[allow(unused_imports)]
+use ::steam_vent_proto_common::protobuf as protobuf;
+```
+
+Four files match after line-ending normalization alone. Removing this exact import from the other 45 published files, and normalizing line endings, makes every file equal to regenerated output. The alias names the already-declared dependency's protobuf reexport; it neither executes code nor changes the runtime selected by Cargo. No other source difference is present. Reproduction follows the four steps above with the Deadlock archive, followed by this explicitly limited normalization; do not accept arbitrary whitespace or source rewrites.
+
+Read the entire handwritten `src/lib.rs`, `src/handshake.rs`, and normalized/original manifests. The library only reexports generated types and a handshake returning fixed app ID 1422450 plus a clone of the caller-owned hello. Its sole dependency is `steam-vent-proto-common 0.5.1`. There is no build script, executable target, native dependency or additional feature-controlled code.
+
+A temporary Rust review helper parsed all 51 Rust files with syn 2.0.79 and traversed paths, imports, attributes, macros, unsafe expressions/signatures/impls/traits, foreign modules and mutable statics. No unsafe/foreign code or mutable statics were found. Standard-library paths are limited to owned containers, defaults, comparisons, hashing, and caller-supplied `std::io::Read`/`Write`. Imports name sibling modules and the common protobuf dependency. Attributes are ordinary lint allowances, built-in derives, docs, `non_exhaustive`, and a rustfmt-only attribute. The only expression macro is the generated `panic!` accessor pattern. There are no code-inclusion, link/export, constructor, ambient filesystem/network/process/environment, or native ABI capabilities. The scan helper is temporary review tooling, not a production dependency or CI test.
+
+Sampled generated message parsing, field accessors, size/write methods, and RPC delegates against the reviewed generator. They use safe containers and the independently reviewed protobuf runtime; caller-supplied streams do not create independent connections or open files. Allocation and recursion limits remain responsibilities of that runtime and the bounded Steam transport/metadata adapters.
+
+This evidence supports a package-local `safe-to-deploy` audit for this exact version. It adds no exemption, changes no dependency requirement, and does not certify current live Deadlock hosting, spectator permissions, or result availability. Those remain disabled-by-default operational qualification items.
