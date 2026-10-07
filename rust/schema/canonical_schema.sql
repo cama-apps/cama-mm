@@ -2510,6 +2510,15 @@ CREATE TRIGGER trg_package_deals_games_remaining_update_cap
 CREATE TABLE deadlock_players (guild_id INTEGER NOT NULL,discord_id INTEGER NOT NULL,steam_id INTEGER NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(guild_id,discord_id),UNIQUE(guild_id,steam_id));
 CREATE TABLE deadlock_ratings (guild_id INTEGER NOT NULL,discord_id INTEGER NOT NULL,format TEXT NOT NULL CHECK(format IN('street_brawl','standard')),mu REAL NOT NULL,sigma REAL NOT NULL CHECK(sigma>0),games INTEGER NOT NULL DEFAULT 0,revision INTEGER NOT NULL DEFAULT 0,seed_source TEXT NOT NULL,seed_value REAL,seeded_at INTEGER NOT NULL,seed_provenance TEXT,seed_source_at INTEGER,PRIMARY KEY(guild_id,discord_id,format));
 CREATE TABLE deadlock_queue (guild_id INTEGER NOT NULL,discord_id INTEGER NOT NULL,joined_at INTEGER NOT NULL,ready_format TEXT,ready_until INTEGER,PRIMARY KEY(guild_id,discord_id));
+CREATE TABLE deadlock_lobby_publications (
+    guild_id INTEGER PRIMARY KEY CHECK(guild_id > 0),
+    channel_id INTEGER NOT NULL CHECK(channel_id > 0),
+    message_id INTEGER CHECK(message_id > 0),
+    format TEXT NOT NULL DEFAULT 'street_brawl' CHECK(format IN('street_brawl','standard')),
+    generation INTEGER NOT NULL DEFAULT 0 CHECK(generation >= 0),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
 CREATE TABLE deadlock_matches (match_id INTEGER PRIMARY KEY AUTOINCREMENT,guild_id INTEGER NOT NULL,format TEXT NOT NULL CHECK(format IN('street_brawl','standard')),status TEXT NOT NULL CHECK(status IN('economic_setup','gathering','running','recorded','settled','aborted')),roster_json TEXT NOT NULL,created_by INTEGER NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,winner INTEGER CHECK(winner IN(1,2)),external_match_id INTEGER UNIQUE,recorded_by INTEGER,abort_reason TEXT,request_key TEXT,economy_terms_json TEXT NOT NULL DEFAULT '{}',publication_channel_id INTEGER,publication_message_id INTEGER,publication_thread_id INTEGER,thread_message_id INTEGER,UNIQUE(guild_id,request_key));
 CREATE TABLE deadlock_participants (match_id INTEGER NOT NULL,guild_id INTEGER NOT NULL,discord_id INTEGER NOT NULL,side INTEGER NOT NULL CHECK(side IN(1,2)),rating_revision INTEGER NOT NULL,PRIMARY KEY(match_id,discord_id));
 CREATE TABLE deadlock_rating_events (match_id INTEGER NOT NULL,guild_id INTEGER NOT NULL,discord_id INTEGER NOT NULL,format TEXT NOT NULL,old_mu REAL NOT NULL,old_sigma REAL NOT NULL,new_mu REAL NOT NULL,new_sigma REAL NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(match_id,discord_id));

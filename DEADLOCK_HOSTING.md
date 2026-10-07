@@ -6,19 +6,24 @@ Manual in-game hosting and manual result recording are the default for the initi
 
 ## Enable a guild
 
-Create a text channel named `deadlock-mm` in the target server. Give the bot View Channel, Send Messages, Read Message History, Create Public Threads, and Send Messages in Threads. Manage Threads is useful for recovering archived threads. Copy the guild and channel IDs and configure:
+Give the bot View Channel, Send Messages, Embed Links, Read Message History, Create Public Threads, and Send Messages in Threads. Manage Threads is useful for recovering archived threads. Enable the guild:
 
 ```dotenv
 DEADLOCK_ENABLED=true
 DEADLOCK_GUILD_IDS=YOUR_GUILD_ID
-DEADLOCK_CHANNEL_ID=YOUR_DEADLOCK_MM_CHANNEL_ID
+# Optional: direct the lobby to an existing text channel.
+# DEADLOCK_CHANNEL_ID=YOUR_CHANNEL_ID
 DEADLOCK_BET_WINDOW_SECONDS=180
 DEADLOCK_BET_SEED_AMOUNT=0
 DEADLOCK_STEAM_ENABLED=false
 DEADLOCK_STEAM_AUTO_RECORD=false
 ```
 
-For multiple guilds, use `DEADLOCK_CHANNELS=guild_id:channel_id,guild_id:channel_id` instead of the single-channel variable. Unconfigured guilds are rejected. Commands run in the configured channel or its threads. IDs, rather than channel names, are authoritative, so renaming a channel cannot redirect funds or matches.
+`DEADLOCK_CHANNEL_ID` selects an existing text channel for a single enabled guild. When unset or blank, the bot uses the existing text channel named `deadlock-mm`. If that channel is absent, it reports the missing destination; it never creates channels. A configured ID must refer to a text channel in that guild; an invalid override is reported and never silently redirected.
+
+For multiple guilds, use optional `DEADLOCK_CHANNELS=guild_id:channel_id,guild_id:channel_id` overrides; guilds listed in `DEADLOCK_GUILD_IDS` without an override use `deadlock-mm`. Unconfigured guilds are rejected. Queue, registration, and rating commands can run anywhere in the enabled guild and link back to the lobby. Matchmaking and betting actions run in the lobby channel or its threads; existing matches retain their original channels and threads after a destination change.
+
+Each guild has one queue embed whose message ID is persisted. Joins, departures, readiness, rating changes, and nickname changes edit that message, with private command confirmations. Startup and periodic recovery reuse it, including recovery from an interrupted send. A definitively deleted message is replaced; a Discord error waits for recovery. The first reconciliation adopts an existing bot-owned queue panel and removes duplicate queue panels found in the most recent 500 channel messages. Match starters, betting messages, and player posts are preserved.
 
 The feature is disabled unless explicitly enabled. Startup validates the configuration. Existing Dota commands and hosting continue independently. Rust schema initialization adds the Deadlock tables and migration ledger entries; do not manually create tables or apply DDL to a running production database.
 

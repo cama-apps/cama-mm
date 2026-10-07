@@ -69,6 +69,14 @@ pub struct DeadlockQueuePlayer {
     pub ready_until: Option<i64>,
     pub ready_format: Option<DeadlockFormat>,
 }
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeadlockLobbyPublication {
+    pub channel_id: i64,
+    pub message_id: Option<i64>,
+    pub format: DeadlockFormat,
+    pub generation: i64,
+    pub created_at: i64,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DeadlockMatch {
     pub match_id: i64,
@@ -95,6 +103,73 @@ impl DeadlockRepository {
         Self {
             path: path.as_ref().to_owned(),
         }
+    }
+    pub fn lobby_publication(
+        &self,
+        guild: i64,
+    ) -> Result<Option<DeadlockLobbyPublication>, DeadlockError> {
+        identity(guild, 1)?;
+        lobby_publication_on(&open_runtime_connection(&self.path)?, guild)
+    }
+
+    pub fn prepare_lobby_publication(
+        &self,
+        guild: i64,
+        channel: i64,
+        format: Option<DeadlockFormat>,
+        now: i64,
+    ) -> Result<DeadlockLobbyPublication, DeadlockError> {
+        identity(guild, channel)?;
+        let mut connection = open_runtime_connection(&self.path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
+            "INSERT INTO deadlock_lobby_publications(guild_id,channel_id,format,created_at,updated_at) VALUES(?1,?2,COALESCE(?3,'street_brawl'),?4,?4) ON CONFLICT(guild_id) DO UPDATE SET message_id=CASE WHEN channel_id=excluded.channel_id THEN message_id ELSE NULL END,generation=generation+CASE WHEN channel_id=excluded.channel_id THEN 0 ELSE 1 END,created_at=CASE WHEN channel_id=excluded.channel_id THEN created_at ELSE excluded.created_at END,channel_id=excluded.channel_id,format=COALESCE(?3,format),updated_at=excluded.updated_at",
+            params![guild,channel,format.map(DeadlockFormat::as_str),now],
+        )?;
+        let publication = lobby_publication_on(&transaction, guild)?
+            .ok_or_else(|| invalid("lobby publication was not saved"))?;
+        transaction.commit()?;
+        Ok(publication)
+    }
+
+    pub fn replace_missing_lobby_message(
+        &self,
+        guild: i64,
+        publication: &DeadlockLobbyPublication,
+        now: i64,
+    ) -> Result<(), DeadlockError> {
+        identity(guild, publication.channel_id)?;
+        let changed = open_runtime_connection(&self.path)?.execute(
+            "UPDATE deadlock_lobby_publications SET message_id=NULL,generation=generation+1,created_at=?5,updated_at=?5 WHERE guild_id=?1 AND channel_id=?2 AND generation=?3 AND message_id=?4",
+            params![guild,publication.channel_id,publication.generation,publication.message_id,now],
+        )?;
+        if changed != 1 {
+            return Err(invalid("lobby publication changed; retry reconciliation"));
+        }
+        Ok(())
+    }
+
+    pub fn save_lobby_message(
+        &self,
+        guild: i64,
+        publication: &DeadlockLobbyPublication,
+        message: i64,
+        now: i64,
+    ) -> Result<(), DeadlockError> {
+        identity(guild, message)?;
+        let changed = open_runtime_connection(&self.path)?.execute(
+            "UPDATE deadlock_lobby_publications SET message_id=?4,updated_at=?5 WHERE guild_id=?1 AND channel_id=?2 AND generation=?3 AND (message_id IS NULL OR message_id=?4)",
+            params![guild,publication.channel_id,publication.generation,message,now],
+        )?;
+        if changed != 1 {
+            return Err(invalid("lobby publication changed; retry reconciliation"));
+        }
+        Ok(())
+    }
+
+    pub fn is_match_channel(&self, guild: i64, channel: i64) -> Result<bool, DeadlockError> {
+        identity(guild, channel)?;
+        Ok(open_runtime_connection(&self.path)?.query_row("SELECT EXISTS(SELECT 1 FROM deadlock_matches WHERE guild_id=?1 AND (publication_channel_id=?2 OR publication_thread_id=?2))", params![guild,channel], |row| row.get(0))?)
     }
     pub fn enrolled(
         &self,
@@ -690,6 +765,23 @@ impl DeadlockRepository {
         Ok(())
     }
 }
+
+fn lobby_publication_on(
+    connection: &Connection,
+    guild: i64,
+) -> Result<Option<DeadlockLobbyPublication>, DeadlockError> {
+    let row = connection.query_row("SELECT channel_id,message_id,format,generation,created_at FROM deadlock_lobby_publications WHERE guild_id=?1", [guild], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,Option<i64>>(1)?,row.get::<_,String>(2)?,row.get::<_,i64>(3)?,row.get::<_,i64>(4)?))).optional()?;
+    row.map(|(channel_id, message_id, format, generation, created_at)| {
+        Ok(DeadlockLobbyPublication {
+            channel_id,
+            message_id,
+            format: parse_format(&format)?,
+            generation,
+            created_at,
+        })
+    })
+    .transpose()
+}
 fn audit(
     transaction: &Transaction<'_>,
     guild: i64,
@@ -801,6 +893,38 @@ mod tests {
         crate::schema_manager::initialize_or_migrate(file.path()).unwrap();
         let repo = DeadlockRepository::new(file.path());
         (file, repo)
+    }
+    #[test]
+    fn lobby_receipt_survives_format_changes_and_fences_deleted_or_moved_messages() {
+        let (_file, repo) = fixture();
+        let prepared = repo.prepare_lobby_publication(10, 100, None, 1000).unwrap();
+        assert_eq!(prepared.format, DeadlockFormat::StreetBrawl);
+        repo.save_lobby_message(10, &prepared, 101, 1001).unwrap();
+        let standard = repo
+            .prepare_lobby_publication(10, 100, Some(DeadlockFormat::Standard), 1002)
+            .unwrap();
+        assert_eq!(standard.message_id, Some(101));
+        assert_eq!(standard.created_at, 1000);
+        assert_eq!(standard.generation, prepared.generation);
+        assert!(repo.lobby_publication(20).unwrap().is_none());
+        assert!(repo.save_lobby_message(20, &standard, 101, 1002).is_err());
+        repo.replace_missing_lobby_message(10, &standard, 1003)
+            .unwrap();
+        assert!(repo.save_lobby_message(10, &standard, 101, 1004).is_err());
+        let replacement = repo.lobby_publication(10).unwrap().unwrap();
+        assert_eq!(replacement.generation, standard.generation + 1);
+        assert!(replacement.message_id.is_none());
+        repo.save_lobby_message(10, &replacement, 102, 1004)
+            .unwrap();
+        let moved = repo.prepare_lobby_publication(10, 200, None, 1005).unwrap();
+        assert_eq!(moved.format, DeadlockFormat::Standard);
+        assert_eq!(moved.generation, replacement.generation + 1);
+        assert!(moved.message_id.is_none());
+        assert!(
+            repo.save_lobby_message(10, &replacement, 102, 1006)
+                .is_err()
+        );
+        assert!(repo.prepare_lobby_publication(0, 100, None, 1006).is_err());
     }
     fn enroll(repo: &DeadlockRepository, user: i64) {
         let seeds =
