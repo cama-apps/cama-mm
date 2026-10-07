@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use cama_app::drawing::draw_prediction_market_chart;
-use cama_app::predictions::neutralize_discord_mentions;
+use cama_app::predictions::{neutralize_discord_mentions, resolve_and_neutralize_discord_mentions};
 use cama_db::prediction_worker_repository::{
     DuePredictionMarket, PredictionDigestMarket, PredictionDigestPayload,
     PredictionDigestPublication, PredictionRefreshPublication, PredictionRefreshPublicationKind,
@@ -22,7 +22,9 @@ use cama_db::predictions_repository::{Book, MarketSnapshot, Trade};
 use chrono::{DateTime, TimeZone, Utc};
 use tracing::{info, warn};
 
-use crate::discord_transport::{DiscordAllowedMentions, DiscordMessage, DiscordTransport};
+use crate::discord_transport::{
+    DiscordAllowedMentions, DiscordMessage, DiscordTransport, resolve_guild_player_names,
+};
 use crate::first_game_pool_worker::FirstGamePoolGuildSource;
 use crate::gamba_guild_source::{GambaDestination, GambaGuildSource};
 use crate::ids::blocking;
@@ -480,6 +482,25 @@ impl PredictionDigestWorker {
         now: i64,
     ) -> Result<(), String> {
         let mut payload = publication.payload.clone();
+        let player_ids = payload
+            .markets
+            .iter()
+            .flat_map(|market| summary_mention_users(&market.question))
+            .filter_map(|id| i64::try_from(id).ok())
+            .collect::<Vec<_>>();
+        let names = resolve_guild_player_names(
+            self.discord.as_ref(),
+            u64::try_from(publication.guild_id).ok(),
+            &player_ids,
+        )
+        .await;
+        for market in &mut payload.markets {
+            market.question = resolve_and_neutralize_discord_mentions(
+                &market.question,
+                |id| Some(names.resolve(id)),
+                |_| None,
+            );
+        }
         payload
             .markets
             .sort_by_key(|market| std::cmp::Reverse(market.volume_recent));

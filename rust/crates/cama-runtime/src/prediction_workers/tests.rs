@@ -273,10 +273,21 @@ impl DiscordTransport for MockDigestDiscord {
 
     async fn guild_member(
         &self,
-        _guild_id: u64,
-        _user_id: u64,
+        guild_id: u64,
+        user_id: u64,
     ) -> Result<Option<DiscordGuildMemberSnapshot>, String> {
-        Ok(None)
+        if guild_id == GUILD as u64 && user_id == 77 {
+            Ok(Some(DiscordGuildMemberSnapshot {
+                user_id,
+                display_name: "Server Nick".to_owned(),
+                presence: crate::discord_transport::DiscordPresence::Offline,
+                in_voice: false,
+                deafened: false,
+                activities: Vec::new(),
+            }))
+        } else {
+            Err("member lookup unavailable".to_owned())
+        }
     }
 }
 
@@ -710,6 +721,39 @@ async fn digest_catches_up_immediately_and_posts_live_guild_channel_with_png() {
             .bytes
             .starts_with(b"\x89PNG")
     );
+}
+
+#[tokio::test]
+async fn digest_resolves_question_players_without_exposing_unknown_ids() {
+    let fixture = Fixture::migrated();
+    let prediction_id = fixture.market(GUILD, NOW - 200);
+    fixture
+        .connection()
+        .execute(
+            "UPDATE predictions SET question=?1 WHERE prediction_id=?2",
+            params!["<@77> <@!88> team make playoffs", prediction_id],
+        )
+        .unwrap();
+    let discord = Arc::new(MockDigestDiscord::default());
+    let worker = digest_worker(
+        &fixture.path,
+        vec![GambaDestination {
+            guild_id: GUILD,
+            channel_id: GAMBA,
+        }],
+        discord.clone(),
+        NOW,
+        Duration::ZERO,
+    );
+    let (_shutdown, context) = worker_context();
+    worker.wake_once(&context).await.unwrap();
+    let sends = discord.sends();
+    let value = &sends[0].1.response.embeds[0].fields[0].value;
+    assert!(
+        value.contains("@Server Nick @Unknown player team make playoffs"),
+        "{value}"
+    );
+    assert_eq!(sends[0].1.allowed_mentions, DiscordAllowedMentions::None);
 }
 
 #[tokio::test]
