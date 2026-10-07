@@ -9,7 +9,7 @@ pub struct DeadlockConfig {
     pub enabled: bool,
     /// Guilds explicitly enabled for the dedicated matchmaking channel.
     pub guild_ids: BTreeSet<i64>,
-    /// Dedicated #deadlock-mm text channel per guild.
+    /// Optional channel overrides; otherwise find the existing #deadlock-mm.
     pub channels: BTreeMap<i64, u64>,
     pub betting_window_seconds: i64,
     pub seed_amount: i64,
@@ -76,9 +76,13 @@ impl DeadlockConfig {
         if guild_ids.is_empty() {
             guild_ids.extend(channels.keys().copied());
         }
-        if enabled && (channels.is_empty() || guild_ids.iter().any(|id| !channels.contains_key(id)))
-        {
-            return Err("Configure a dedicated #deadlock-mm channel with DEADLOCK_CHANNELS=guild_id:channel_id (or DEADLOCK_GUILD_IDS plus DEADLOCK_CHANNEL_ID)".into());
+        if enabled && guild_ids.is_empty() {
+            return Err(
+                "Configure DEADLOCK_GUILD_IDS or DEADLOCK_CHANNELS for the enabled servers".into(),
+            );
+        }
+        if channels.keys().any(|guild| !guild_ids.contains(guild)) {
+            return Err("DEADLOCK_CHANNELS must name enabled DEADLOCK_GUILD_IDS".into());
         }
         let betting_window_seconds = lookup("DEADLOCK_BET_WINDOW_SECONDS")
             .map(|s| {
@@ -115,10 +119,7 @@ impl DeadlockConfig {
     }
 
     pub fn allows(&self, guild_id: i64) -> bool {
-        self.enabled
-            && guild_id > 0
-            && self.guild_ids.contains(&guild_id)
-            && self.channels.contains_key(&guild_id)
+        self.enabled && guild_id > 0 && self.guild_ids.contains(&guild_id)
     }
 }
 
@@ -149,6 +150,36 @@ mod tests {
         assert!(enabled.allows(1));
         assert!(!enabled.allows(3));
         assert!(!enabled.allows(0));
+    }
+    #[test]
+    fn channel_is_optional_for_explicitly_enabled_guilds() {
+        let config = DeadlockConfig::from_lookup(|key| match key {
+            "DEADLOCK_ENABLED" => Some("true".into()),
+            "DEADLOCK_GUILD_IDS" => Some("42,43".into()),
+            "DEADLOCK_CHANNEL_ID" => Some("  ".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert!(config.allows(42));
+        assert!(config.allows(43));
+        assert!(!config.allows(44));
+        assert!(config.channels.is_empty());
+    }
+    #[test]
+    fn explicit_channel_mapping_cannot_enable_an_unlisted_guild() {
+        assert!(
+            DeadlockConfig::from_lookup(|key| match key {
+                "DEADLOCK_ENABLED" => Some("true".into()),
+                "DEADLOCK_GUILD_IDS" => Some("42".into()),
+                "DEADLOCK_CHANNELS" => Some("43:430".into()),
+                _ => None,
+            })
+            .is_err()
+        );
+        assert!(
+            DeadlockConfig::from_lookup(|key| (key == "DEADLOCK_ENABLED").then(|| "true".into()))
+                .is_err()
+        );
     }
     #[test]
     fn malformed_security_and_window_configuration_fails_closed() {

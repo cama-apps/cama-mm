@@ -22,6 +22,7 @@ use crate::application_config::ApplicationConfig;
 use crate::deadlock_config::DeadlockConfig;
 use crate::deadlock_ratings::{DeadlockRatingClient, ImportedRatings, steam_account_id};
 use crate::discord_transport::{DiscordMessage, DiscordTransport, resolve_guild_player_names};
+use crate::gateway_events::GatewayEventObserver;
 use crate::option_ext::{integer_option, string_option, user_option};
 use crate::registration::*;
 use crate::worker::{BackgroundWorker, BackgroundWorkerSpec, WorkerContext};
@@ -29,6 +30,9 @@ use crate::worker::{BackgroundWorker, BackgroundWorkerSpec, WorkerContext};
 #[cfg(test)]
 #[path = "deadlock_provider_tests.rs"]
 mod tests;
+
+#[path = "deadlock_lobby.rs"]
+mod lobby;
 
 pub struct DeadlockCommandRouter {
     dota: Arc<dyn InteractionHandler>,
@@ -303,6 +307,8 @@ impl DeadlockRegistrationProvider {
                 host_account,
                 rate_limiter: Mutex::new(RateLimiter::new()),
                 rate_clock: Instant::now(),
+                lobby_lock: tokio::sync::Mutex::new(()),
+                lobby_rendered: Mutex::new(BTreeMap::new()),
                 admin_ids: application.identities.admin_user_ids.clone(),
                 economy: Arc::new(SqliteEconomyEventService::new(
                     path.as_ref(),
@@ -313,6 +319,11 @@ impl DeadlockRegistrationProvider {
     }
     pub fn handler(&self) -> Arc<dyn InteractionHandler> {
         self.handler.clone()
+    }
+    pub fn gateway_observer(&self) -> Arc<dyn GatewayEventObserver> {
+        Arc::new(lobby::DeadlockLobbyObserver {
+            handler: self.handler.clone(),
+        })
     }
     pub fn recovery_worker(&self) -> BackgroundWorkerSpec {
         BackgroundWorkerSpec::new(
@@ -350,6 +361,8 @@ struct DeadlockHandler {
     host_account: Option<u32>,
     rate_limiter: Mutex<RateLimiter>,
     rate_clock: Instant,
+    lobby_lock: tokio::sync::Mutex<()>,
+    lobby_rendered: Mutex<BTreeMap<i64, (u64, InteractionResponse)>>,
 }
 struct Context {
     guild: i64,
@@ -495,7 +508,7 @@ impl InteractionHandler for DeadlockHandler {
                 .await
                 .map_err(|e| e.to_string().into());
         }
-        responder.defer(false).await.map_err(|e| e.to_string())?;
+        responder.defer(true).await.map_err(|e| e.to_string())?;
         let decision = self
             .rate_limiter
             .lock()
@@ -520,20 +533,33 @@ impl InteractionHandler for DeadlockHandler {
                 .await
                 .map_err(|e| e.to_string().into());
         }
-        let dedicated = self.config.channels[&context.guild];
-        let in_channel = match context.channel {
-            Some(channel) if channel == dedicated => true,
-            Some(channel) => {
-                self.discord
-                    .channel_parent_id(context.guild as u64, channel)
+        let queue_action = matches!(
+            context.action.as_str(),
+            "register" | "join" | "leave" | "ready" | "lobby" | "rating"
+        );
+        let in_channel = if queue_action {
+            Ok(true)
+        } else {
+            self.in_matchmaking_channel(&context).await
+        };
+        let in_channel = match in_channel {
+            Ok(in_channel) => in_channel,
+            Err(error) => {
+                return responder
+                    .followup(
+                        InteractionResponse::message(error)
+                            .ephemeral()
+                            .without_mentions(),
+                    )
                     .await
-                    .ok()
-                    .flatten()
-                    == Some(dedicated)
+                    .map_err(|e| e.to_string().into());
             }
-            None => false,
         };
         if !in_channel {
+            let dedicated = self
+                .lobby_channel(context.guild)
+                .await
+                .map_err(InteractionHandlerError::from)?;
             return responder
                 .followup(
                     InteractionResponse::message(format!(
@@ -547,6 +573,32 @@ impl InteractionHandler for DeadlockHandler {
         }
         match self.execute(&context).await {
             Ok((response, publication)) => {
+                let lobby = if matches!(
+                    context.action.as_str(),
+                    "register"
+                        | "join"
+                        | "leave"
+                        | "ready"
+                        | "lobby"
+                        | "shuffle"
+                        | "record"
+                        | "abort"
+                ) {
+                    let format = match context.action.as_str() {
+                        "ready" => Some(parse_format(&context.options)?),
+                        "lobby" if string_option(&context.options, "format").is_some() => {
+                            Some(parse_format(&context.options)?)
+                        }
+                        "shuffle" => Some(DeadlockFormat::StreetBrawl),
+                        _ => None,
+                    };
+                    Some(self.publish_lobby(context.guild, format).await)
+                } else {
+                    None
+                };
+                if let Some(Err(error)) = &lobby {
+                    tracing::warn!(guild=context.guild,%error,"Deadlock lobby update pending recovery");
+                }
                 if let Some(match_id) = publication {
                     match self.publish_match(context.guild, match_id).await {
                         Ok(thread) => responder
@@ -554,16 +606,27 @@ impl InteractionHandler for DeadlockHandler {
                                 InteractionResponse::message(format!(
                                     "Deadlock #{match_id}: <#{thread}>"
                                 ))
+                                .ephemeral()
                                 .without_mentions(),
                             )
                             .await
                             .map_err(|e| e.to_string())?,
                         Err(error) => {
                             tracing::warn!(%error,match_id,"Deadlock publication pending recovery");
-                            responder.followup(InteractionResponse::message(format!("Deadlock #{match_id} is saved. Posting its match thread needs recovery; use `/deadlock match match:{match_id}` to inspect it.")).without_mentions()).await.map_err(|e|e.to_string())?;
+                            responder.followup(InteractionResponse::message(format!("Deadlock #{match_id} is saved. Posting its match thread needs recovery; use `/deadlock match match:{match_id}` to inspect it.")).ephemeral().without_mentions()).await.map_err(|e|e.to_string())?;
                         }
                     }
                 } else {
+                    let mut response = response.ephemeral();
+                    if let Some(Ok(receipt)) = &lobby {
+                        response
+                            .content
+                            .push_str(&format!("\n[Lobby]({})", receipt.jump_url));
+                    } else if let Some(Err(_)) = &lobby {
+                        response.content.push_str(
+                            "\nYour change is saved. The lobby display will retry automatically.",
+                        );
+                    }
                     responder
                         .followup(response.without_mentions())
                         .await
@@ -807,11 +870,11 @@ impl DeadlockHandler {
             "join" => {
                 blocking(move || repo.queue_join(guild, user, at).map_err(|e| e.to_string()))
                     .await?;
-                return Ok((self.queue_response(guild, format).await?, None));
+                "Joined the Deadlock queue.".into()
             }
             "leave" => {
                 blocking(move || repo.queue_leave(guild, user).map_err(|e| e.to_string())).await?;
-                return Ok((self.queue_response(guild, format).await?, None));
+                "Left the Deadlock queue.".into()
             }
             "ready" => {
                 blocking(move || {
@@ -819,9 +882,9 @@ impl DeadlockHandler {
                         .map_err(|e| e.to_string())
                 })
                 .await?;
-                return Ok((self.queue_response(guild, format).await?, None));
+                format!("Ready for {} for ten minutes.", format.label())
             }
-            "lobby" => return Ok((self.queue_response(guild, format).await?, None)),
+            "lobby" => "Deadlock lobby updated.".into(),
             "shuffle" => {
                 if c.options.iter().any(|o| {
                     matches!(
@@ -1381,11 +1444,6 @@ impl DeadlockHandler {
     /// The channel starter and attached thread have stable identities. Sending
     /// with a delivery key and reconciling the thread parent handles lost replies.
     async fn publish_match(&self, guild: i64, id: i64) -> Result<u64, String> {
-        let channel = *self
-            .config
-            .channels
-            .get(&guild)
-            .ok_or("Missing #deadlock-mm channel")?;
         let repo = DeadlockRepository::new(&self.path);
         let game = blocking(move || {
             repo.match_by_id(guild, id)
@@ -1393,14 +1451,14 @@ impl DeadlockHandler {
                 .ok_or_else(|| "Deadlock match not found".into())
         })
         .await?;
+        let channel = match game.publication_channel_id {
+            Some(channel) => u64::try_from(channel).map_err(|_| "Invalid saved match channel")?,
+            None => self.lobby_channel(guild).await?,
+        };
         let response = self.match_response(guild, id).await?;
         let starter = if let Some(message) = game.publication_message_id {
-            let saved_channel = game
-                .publication_channel_id
+            game.publication_channel_id
                 .ok_or("Incomplete match publication receipt")?;
-            if saved_channel != channel as i64 {
-                return Err("The configured channel changed; preserve the original match channel until it finishes".into());
-            }
             self.discord
                 .edit_message(
                     channel,
@@ -1675,6 +1733,9 @@ impl BackgroundWorker for DeadlockRecovery {
                 }
             }
             for &guild in &self.handler.config.guild_ids {
+                if let Err(error) = self.handler.publish_lobby(guild, None).await {
+                    tracing::warn!(guild,%error,"Deadlock lobby publication will retry");
+                }
                 let repo = DeadlockRepository::new(&self.handler.path);
                 let games = blocking(move || {
                     repo.publication_candidates(guild)

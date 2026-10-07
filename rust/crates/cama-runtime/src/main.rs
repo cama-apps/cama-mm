@@ -16,6 +16,7 @@ use cama_db::{
 };
 use cama_runtime::discord_transport::DiscordGuildPlayerNameResolver;
 use cama_runtime::gateway::{GatewayError, GatewaySession};
+use cama_runtime::gateway_events::GatewayEventObserver;
 use cama_runtime::herogrid_provider::HeroGridRegistrationProvider;
 use cama_runtime::inventory;
 use cama_runtime::match_provider::production_betting_flavor;
@@ -999,7 +1000,7 @@ async fn run_serve() -> ExitCode {
         error!(%error, "registration lobby-notification composition refused startup");
         return ExitCode::from(1);
     }
-    let gateway_observers = GatewayEventObservers::new(vec![
+    let mut gateway_observers: Vec<Arc<dyn GatewayEventObserver>> = vec![
         Arc::new(VanityTaxGatewayObserver::new(Arc::clone(
             &vanity_tax_service,
         ))),
@@ -1016,7 +1017,11 @@ async fn run_serve() -> ExitCode {
         blame_luke_provider.gateway_observer(),
         survey_provider.gateway_observer(),
         draft_provider.gateway_observer(),
-    ]);
+    ];
+    if let Some(deadlock) = &deadlock_provider {
+        gateway_observers.push(deadlock.gateway_observer());
+    }
+    let gateway_observers = GatewayEventObservers::new(gateway_observers);
     let raw_reaction_observers =
         RawReactionObservers::new(vec![lobby_provider.raw_reaction_observer()]);
     let global_interaction_hooks = GlobalInteractionHooks::new(usage_monitor);

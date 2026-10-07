@@ -14,18 +14,19 @@ use cama_app::dig_bonus_events::GuildMember as DigBonusGuildMember;
 use cama_app::predictions::resolve_and_neutralize_discord_mentions;
 use serenity::Client;
 use serenity::all::{
-    ActionRowComponent, AutoArchiveDuration, ButtonStyle, Channel, ChannelId, ChannelType, Command,
-    CommandDataOption, CommandDataOptionValue, CommandInteraction, CommandOptionType,
-    ComponentInteraction, ComponentInteractionDataKind, Context, CreateActionRow,
-    CreateAllowedMentions, CreateAttachment, CreateAutocompleteResponse, CreateButton,
-    CreateCommand, CreateCommandOption, CreateEmbed, CreateEmbedAuthor, CreateEmbedFooter,
-    CreateInputText, CreateInteractionResponse, CreateInteractionResponseFollowup,
-    CreateInteractionResponseMessage, CreateMessage, CreateModal, CreateSelectMenu,
-    CreateSelectMenuKind, CreateSelectMenuOption, CreateThread, EditAttachments,
-    EditInteractionResponse, EditMessage, EditThread, EventHandler, GatewayIntents, GetMessages,
-    Guild, GuildChannel, GuildId, GuildMemberUpdateEvent, InputTextStyle, Interaction, Member,
-    MessageId, MessageInteractionMetadata, ModalInteraction, Nonce, OnlineStatus, Permissions,
-    Reaction, ReactionType, Ready, UnavailableGuild, User, UserId,
+    ActionRowComponent, AutoArchiveDuration, ButtonKind, ButtonStyle, Channel, ChannelId,
+    ChannelType, Command, CommandDataOption, CommandDataOptionValue, CommandInteraction,
+    CommandOptionType, ComponentInteraction, ComponentInteractionDataKind, Context,
+    CreateActionRow, CreateAllowedMentions, CreateAttachment, CreateAutocompleteResponse,
+    CreateButton, CreateCommand, CreateCommandOption, CreateEmbed, CreateEmbedAuthor,
+    CreateEmbedFooter, CreateInputText, CreateInteractionResponse,
+    CreateInteractionResponseFollowup, CreateInteractionResponseMessage, CreateMessage,
+    CreateModal, CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, CreateThread,
+    EditAttachments, EditInteractionResponse, EditMessage, EditThread, EventHandler,
+    GatewayIntents, GetMessages, Guild, GuildChannel, GuildId, GuildMemberUpdateEvent,
+    InputTextStyle, Interaction, Member, MessageId, MessageInteractionMetadata, ModalInteraction,
+    Nonce, OnlineStatus, Permissions, Reaction, ReactionType, Ready, UnavailableGuild, User,
+    UserId,
 };
 use serenity::all::{ChunkGuildFilter, GuildMembersChunkEvent, ShardStageUpdateEvent};
 use serenity::cache::Cache;
@@ -90,6 +91,66 @@ const WRAPPED_AVATAR_MAX_BYTES: usize = 2 * 1024 * 1024;
 const WRAPPED_AVATAR_TIMEOUT: Duration = Duration::from_secs(10);
 const COMPONENT_ACKNOWLEDGEMENT_DEADLINE: Duration = Duration::from_millis(1_500);
 static WRAPPED_AVATAR_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+fn named_text_channel(
+    guild: GuildId,
+    configured: Option<u64>,
+    known: Option<u64>,
+    name: &str,
+    channels: &HashMap<ChannelId, GuildChannel>,
+) -> Result<u64, String> {
+    let belongs =
+        |channel: &&GuildChannel| channel.guild_id == guild && channel.kind == ChannelType::Text;
+    if let Some(id) = configured {
+        return channels
+            .get(&ChannelId::new(id))
+            .filter(belongs)
+            .map(|channel| channel.id.get())
+            .ok_or_else(|| {
+                "DEADLOCK_CHANNEL_ID must identify a text channel in this server.".into()
+            });
+    }
+    let suitable = |channel: &&GuildChannel| belongs(channel) && channel.name == name;
+    known
+        .and_then(|id| channels.get(&ChannelId::new(id)))
+        .filter(suitable)
+        .or_else(|| {
+            channels
+                .values()
+                .filter(suitable)
+                .min_by_key(|channel| channel.id)
+        })
+        .map(|channel| channel.id.get())
+        .ok_or_else(|| format!("No existing #{name} text channel was found. Set DEADLOCK_CHANNEL_ID to an existing channel."))
+}
+
+fn is_deadlock_queue_panel(message: &serenity::all::Message, bot: UserId) -> bool {
+    let queue_title = message.content.starts_with("**Deadlock · ")
+        || message.embeds.iter().any(|embed| {
+            embed
+                .title
+                .as_deref()
+                .is_some_and(|title| title.starts_with("Deadlock · "))
+        });
+    if message.author.id != bot || !queue_title {
+        return false;
+    }
+    let ids: BTreeSet<&str> = message
+        .components
+        .iter()
+        .flat_map(|row| &row.components)
+        .filter_map(|component| {
+            if let ActionRowComponent::Button(button) = component
+                && let ButtonKind::NonLink { custom_id, .. } = &button.data
+            {
+                Some(custom_id.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    ids.contains("deadlock:join") && ids.contains("deadlock:leave")
+}
 
 #[derive(Clone, Default)]
 pub struct SerenityDiscordTransport {
@@ -4044,6 +4105,59 @@ impl DiscordTransport for SerenityDiscordTransport {
         marker: &str,
     ) -> Result<(), String> {
         spectator::delete(&self.context()?.http, guild_id, channel_id, marker).await
+    }
+
+    async fn resolve_named_text_channel(
+        &self,
+        guild_id: u64,
+        configured: Option<u64>,
+        known: Option<u64>,
+        name: &str,
+    ) -> Result<u64, String> {
+        let context = self.context()?;
+        let guild = GuildId::new(guild_id);
+        let channels = guild
+            .channels(&context.http)
+            .await
+            .map_err(|e| e.to_string())?;
+        named_text_channel(guild, configured, known, name, &channels)
+    }
+
+    async fn find_deadlock_lobby_messages(
+        &self,
+        channel_id: u64,
+    ) -> Result<Vec<DiscordMessageReceipt>, String> {
+        let context = self.context()?;
+        let bot = context.cache.current_user().id;
+        let channel = ChannelId::new(channel_id);
+        let mut before = None;
+        let mut found = Vec::new();
+        // Only our queue panels qualify; match starters, bets and user posts do not.
+        for _ in 0..5 {
+            let mut request = GetMessages::new().limit(100);
+            if let Some(id) = before {
+                request = request.before(id);
+            }
+            let page = channel
+                .messages(&context.http, request)
+                .await
+                .map_err(|e| e.to_string())?;
+            for message in &page {
+                if is_deadlock_queue_panel(message, bot) {
+                    found.push(DiscordMessageReceipt {
+                        channel_id,
+                        message_id: message.id.get(),
+                        jump_url: message.link(),
+                    });
+                }
+            }
+            if page.len() < 100 {
+                break;
+            }
+            before = page.last().map(|message| message.id);
+        }
+        found.sort_by_key(|receipt| receipt.message_id);
+        Ok(found)
     }
 
     async fn fetch_message(

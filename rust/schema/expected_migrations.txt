@@ -252,3 +252,4 @@ add_dig_default_boss_risk
 create_player_display_names_table
 add_survival_stat_to_tunnels
 create_deadlock_lobbies_and_betting
+create_deadlock_lobby_publications

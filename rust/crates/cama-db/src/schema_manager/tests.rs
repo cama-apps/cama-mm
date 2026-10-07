@@ -14,6 +14,43 @@ fn empty_database() -> NamedTempFile {
 }
 
 #[test]
+fn deadlock_lobby_publications_support_fresh_upgrade_and_idempotent_retry() {
+    for upgrade in [false, true] {
+        let database = empty_database();
+        if upgrade {
+            initialize_or_migrate(database.path()).unwrap();
+            open_runtime_connection(database.path())
+                .unwrap()
+                .execute_batch(
+                    "DROP TABLE deadlock_lobby_publications;
+                 DELETE FROM schema_migrations WHERE name='create_deadlock_lobby_publications';",
+                )
+                .unwrap();
+        }
+        let report = initialize_or_migrate(database.path()).unwrap();
+        assert!(
+            report
+                .newly_applied
+                .iter()
+                .any(|name| name == "create_deadlock_lobby_publications")
+        );
+        let repo = cama_db_match::deadlock::DeadlockRepository::new(database.path());
+        let prepared = repo.prepare_lobby_publication(42, 420, None, 1000).unwrap();
+        repo.save_lobby_message(42, &prepared, 421, 1001).unwrap();
+        assert!(
+            initialize_or_migrate(database.path())
+                .unwrap()
+                .was_current()
+        );
+        assert_eq!(
+            repo.lobby_publication(42).unwrap().unwrap().message_id,
+            Some(421)
+        );
+        assert!(audit_database(database.path()).unwrap().is_compatible());
+    }
+}
+
+#[test]
 fn player_display_names_support_fresh_upgrade_and_idempotent_retry() {
     for upgrade in [false, true] {
         let database = empty_database();

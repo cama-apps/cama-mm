@@ -11,11 +11,25 @@ use std::sync::{
 use tempfile::NamedTempFile;
 
 type Events = Arc<Mutex<Vec<String>>>;
+struct NoMemberPages;
+#[async_trait]
+impl crate::gateway_events::GuildMemberPageSource for NoMemberPages {
+    async fn fetch_page(
+        &self,
+        _: u64,
+        _: Option<u64>,
+        _: u64,
+    ) -> Result<Vec<crate::gateway_events::GatewayMember>, String> {
+        Err("Lobby recovery must not fetch the entire member list".into())
+    }
+}
 #[derive(Default)]
 struct Responder {
     events: Events,
     responses: Mutex<Vec<InteractionResponse>>,
     defer_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    panel_transport: Option<Arc<Transport>>,
+    private_defer: AtomicBool,
 }
 impl Responder {
     fn content(&self) -> String {
@@ -28,6 +42,17 @@ impl Responder {
             .join("\n")
     }
     fn embed(&self) -> InteractionEmbed {
+        if let Some(transport) = &self.panel_transport {
+            return transport
+                .messages
+                .lock()
+                .unwrap()
+                .values()
+                .flat_map(|message| &message.response.embeds)
+                .next()
+                .expect("expected a persistent lobby embed")
+                .clone();
+        }
         self.responses
             .lock()
             .unwrap()
@@ -45,7 +70,8 @@ impl InteractionResponder for Responder {
         self.responses.lock().unwrap().push(response);
         Ok(())
     }
-    async fn defer(&self, _: bool) -> Result<(), InteractionResponseError> {
+    async fn defer(&self, ephemeral: bool) -> Result<(), InteractionResponseError> {
+        self.private_defer.store(ephemeral, Ordering::SeqCst);
         self.events.lock().unwrap().push("defer".into());
         if let Some(hook) = self.defer_hook.lock().unwrap().take() {
             hook();
@@ -69,9 +95,57 @@ struct Transport {
     parents: Mutex<BTreeMap<u64, u64>>,
     fail_after_send: AtomicBool,
     names: Mutex<BTreeMap<u64, String>>,
+    messages: Mutex<BTreeMap<(u64, u64), DiscordMessage>>,
+    named_channels: Mutex<BTreeMap<u64, u64>>,
+    fail_fetch: AtomicBool,
+    fail_channel: AtomicBool,
 }
 #[async_trait]
 impl DiscordTransport for Transport {
+    async fn resolve_named_text_channel(
+        &self,
+        guild: u64,
+        configured: Option<u64>,
+        _: Option<u64>,
+        name: &str,
+    ) -> Result<u64, String> {
+        self.events.lock().unwrap().push("resolve channel".into());
+        if self.fail_channel.load(Ordering::SeqCst) {
+            return Err("wrong guild or missing channel permission".into());
+        }
+        assert_eq!(name, "deadlock-mm");
+        if let Some(channel) = configured {
+            return Ok(channel);
+        }
+        self
+            .named_channels
+            .lock()
+            .unwrap()
+            .get(&guild)
+            .copied()
+            .ok_or_else(|| "No existing #deadlock-mm text channel was found. Set DEADLOCK_CHANNEL_ID to an existing channel.".into())
+    }
+    async fn find_deadlock_lobby_messages(
+        &self,
+        channel: u64,
+    ) -> Result<Vec<DiscordMessageReceipt>, String> {
+        Ok(self
+            .messages
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|((id, _), message)| {
+                *id == channel
+                    && message
+                        .response
+                        .components
+                        .iter()
+                        .flat_map(|row| &row.buttons)
+                        .any(|button| button.custom_id == "deadlock:join")
+            })
+            .map(|((channel, message), _)| receipt(*channel, *message))
+            .collect())
+    }
     async fn pin_message(&self, _: u64, _: u64) -> Result<(), String> {
         Ok(())
     }
@@ -102,10 +176,21 @@ impl DiscordTransport for Transport {
 
     async fn fetch_message(
         &self,
-        _: u64,
-        _: u64,
+        channel: u64,
+        message: u64,
     ) -> Result<Option<DiscordMessageSnapshot>, String> {
-        Ok(None)
+        if self.fail_fetch.load(Ordering::SeqCst) {
+            return Err("simulated Discord outage".into());
+        }
+        Ok(self
+            .messages
+            .lock()
+            .unwrap()
+            .contains_key(&(channel, message))
+            .then(|| DiscordMessageSnapshot {
+                receipt: receipt(channel, message),
+                reactions: vec![],
+            }))
     }
     async fn send_message(
         &self,
@@ -114,12 +199,12 @@ impl DiscordTransport for Transport {
     ) -> Result<DiscordMessageReceipt, String> {
         let mut sent = self.sent.lock().unwrap();
         let id = 1000 + sent.len() as u64;
+        self.messages
+            .lock()
+            .unwrap()
+            .insert((channel, id), message.clone());
         sent.push((channel, message));
-        Ok(DiscordMessageReceipt {
-            channel_id: channel,
-            message_id: id,
-            jump_url: format!("https://discord.com/channels/42/{channel}/{id}"),
-        })
+        Ok(receipt(channel, id))
     }
     async fn send_message_with_delivery_key(
         &self,
@@ -160,11 +245,21 @@ impl DiscordTransport for Transport {
             .get(&(channel, key.into()))
             .cloned())
     }
-    async fn edit_message(&self, _: u64, _: u64, _: DiscordMessage) -> Result<(), String> {
+    async fn edit_message(
+        &self,
+        channel: u64,
+        id: u64,
+        message: DiscordMessage,
+    ) -> Result<(), String> {
         self.events.lock().unwrap().push("edit".into());
+        if !self.messages.lock().unwrap().contains_key(&(channel, id)) {
+            return Err("missing message".into());
+        }
+        self.messages.lock().unwrap().insert((channel, id), message);
         Ok(())
     }
-    async fn delete_message(&self, _: u64, _: u64) -> Result<(), String> {
+    async fn delete_message(&self, channel: u64, id: u64) -> Result<(), String> {
+        self.messages.lock().unwrap().remove(&(channel, id));
         Ok(())
     }
     async fn create_public_thread(
@@ -198,6 +293,13 @@ impl DiscordTransport for Transport {
     async fn channel_parent_id(&self, _: u64, channel: u64) -> Result<Option<u64>, String> {
         self.events.lock().unwrap().push("channel lookup".into());
         Ok(self.parents.lock().unwrap().get(&channel).copied())
+    }
+}
+fn receipt(channel: u64, id: u64) -> DiscordMessageReceipt {
+    DiscordMessageReceipt {
+        channel_id: channel,
+        message_id: id,
+        jump_url: format!("https://discord.com/channels/42/{channel}/{id}"),
     }
 }
 struct Fixture {
@@ -242,6 +344,23 @@ impl Fixture {
     fn repo(&self) -> DeadlockRepository {
         DeadlockRepository::new(self.file.path())
     }
+    fn fresh_provider(&self, config: DeadlockConfig) -> DeadlockRegistrationProvider {
+        let app = ApplicationConfig::from_lookup(|key| match key {
+            "DISCORD_BOT_TOKEN" => Some("test-token".into()),
+            "ADMIN_USER_IDS" => Some("99".into()),
+            _ => None,
+        })
+        .unwrap();
+        DeadlockRegistrationProvider::new(
+            self.file.path(),
+            config,
+            &app,
+            self.transport.clone(),
+            self.provider.handler.vanity.clone(),
+            None,
+        )
+        .unwrap()
+    }
     fn queue(&self, count: i64, format: DeadlockFormat) {
         for id in 1..=count {
             let seeds = [DeadlockFormat::StreetBrawl, DeadlockFormat::Standard].map(|format| {
@@ -265,6 +384,7 @@ impl Fixture {
     fn responder(&self) -> Arc<Responder> {
         Arc::new(Responder {
             events: self.transport.events.clone(),
+            panel_transport: Some(self.transport.clone()),
             ..Responder::default()
         })
     }
@@ -342,10 +462,335 @@ fn command_contract_has_two_formats_and_no_drafting() {
 }
 
 #[tokio::test]
-async fn dedicated_channel_is_enforced_after_acknowledgement_before_queue_mutation() {
+async fn queue_commands_and_concurrent_ready_checks_update_one_panel_with_private_receipts() {
+    let f = Fixture::new();
+    f.queue(2, DeadlockFormat::StreetBrawl);
+    let initial = f.command("lobby", 1, 999, 1, vec![]).await;
+    let id = f.repo().lobby_publication(42).unwrap().unwrap().message_id;
+    let (ready1, ready2) = tokio::join!(
+        f.command("ready", 1, 999, 2, vec![text_option("format", "standard")]),
+        f.command("ready", 2, 420, 3, vec![text_option("format", "standard")]),
+    );
+    assert!(ready2.embed().description.unwrap().contains("2/12 ready"));
+    let leave = f.command("leave", 1, 999, 4, vec![]).await;
+    let join = f.command("join", 1, 999, 5, vec![]).await;
+    let refresh = f.command("lobby", 1, 420, 6, vec![]).await;
+    assert!(refresh.embed().title.unwrap().contains("Standard 6v6"));
+    assert_eq!(
+        f.repo().lobby_publication(42).unwrap().unwrap().message_id,
+        id
+    );
+    assert_eq!(f.transport.sent.lock().unwrap().len(), 1);
+    assert_eq!(f.transport.messages.lock().unwrap().len(), 1);
+    for reply in [initial, ready1, ready2, leave, join, refresh] {
+        assert!(reply.private_defer.load(Ordering::SeqCst));
+        assert!(
+            reply
+                .responses
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|response| response.ephemeral && response.embeds.is_empty())
+        );
+        assert!(
+            reply
+                .content()
+                .contains("[Lobby](https://discord.com/channels/42/420/")
+        );
+    }
+    assert_eq!(f.transport.events.lock().unwrap()[0], "defer");
+}
+
+#[tokio::test]
+async fn restarted_provider_recovers_panel_and_refreshes_expired_readiness_and_nickname() {
     let f = Fixture::new();
     f.queue(1, DeadlockFormat::StreetBrawl);
-    let reply = f.command("leave", 1, 999, 1, vec![]).await;
+    let first = f.provider.handler.publish_lobby(42, None).await.unwrap();
+    cama_db::open_runtime_connection(f.file.path())
+        .unwrap()
+        .execute(
+            "UPDATE deadlock_queue SET ready_until=?1 WHERE guild_id=42",
+            [now() - 1],
+        )
+        .unwrap();
+    f.transport
+        .names
+        .lock()
+        .unwrap()
+        .insert(1, "Changed nickname".into());
+    let fresh = f.fresh_provider(f.provider.handler.config.clone());
+    fresh
+        .gateway_observer()
+        .member_update(crate::gateway_events::GatewayMember::new(
+            42,
+            1,
+            Some("Changed nickname".into()),
+        ))
+        .await
+        .unwrap();
+    let saved = f.repo().lobby_publication(42).unwrap().unwrap();
+    assert_eq!(saved.message_id, Some(first.message_id as i64));
+    let embed = f.responder().embed();
+    assert!(embed.description.unwrap().contains("0/8 ready"));
+    assert!(
+        embed
+            .fields
+            .iter()
+            .any(|field| field.value.contains("Changed nickname"))
+    );
+    let edits = f
+        .transport
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| *event == "edit")
+        .count();
+    fresh.handler.publish_lobby(42, None).await.unwrap();
+    assert_eq!(
+        f.transport
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| *event == "edit")
+            .count(),
+        edits
+    );
+    fresh.gateway_observer().member_remove(42, 1).await.unwrap();
+    assert!(
+        f.repo()
+            .queue(42, DeadlockFormat::StreetBrawl)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(f.transport.sent.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn ready_recovery_reconciles_only_enabled_guilds_and_reuses_the_panel_on_reconnect() {
+    use crate::gateway_events::ReadyRecoveryContext;
+    let f = Fixture::new();
+    let context =
+        ReadyRecoveryContext::new(Arc::<[u64]>::from(vec![42, 43]), Arc::new(NoMemberPages));
+    let observer = f.provider.gateway_observer();
+    let first = observer.ready_recovery(context.clone()).await;
+    assert_eq!(first.guilds_attempted, 1);
+    assert_eq!(first.guilds_refreshed, 1);
+    assert!(first.failures.is_empty());
+    assert!(f.repo().lobby_publication(43).unwrap().is_none());
+    let fresh = f.fresh_provider(f.provider.handler.config.clone());
+    let second = fresh.gateway_observer().ready_recovery(context).await;
+    assert_eq!(second.guilds_refreshed, 1);
+    assert_eq!(f.transport.sent.lock().unwrap().len(), 1);
+    f.transport.fail_channel.store(true, Ordering::SeqCst);
+    let report = observer
+        .ready_recovery(ReadyRecoveryContext::new(
+            Arc::<[u64]>::from(vec![42]),
+            Arc::new(NoMemberPages),
+        ))
+        .await;
+    assert_eq!(report.failures.len(), 1);
+    assert_eq!(report.failures[0].guild_id, 42);
+    assert_eq!(f.transport.sent.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn lost_lobby_send_recovers_existing_message_without_duplicate() {
+    let f = Fixture::new();
+    f.queue(1, DeadlockFormat::StreetBrawl);
+    f.transport.fail_after_send.store(true, Ordering::SeqCst);
+    assert!(f.provider.handler.publish_lobby(42, None).await.is_err());
+    assert!(
+        f.repo()
+            .lobby_publication(42)
+            .unwrap()
+            .unwrap()
+            .message_id
+            .is_none()
+    );
+    let fresh = f.fresh_provider(f.provider.handler.config.clone());
+    let receipt = fresh.handler.publish_lobby(42, None).await.unwrap();
+    assert_eq!(f.transport.sent.lock().unwrap().len(), 1);
+    assert_eq!(
+        f.repo().lobby_publication(42).unwrap().unwrap().message_id,
+        Some(receipt.message_id as i64)
+    );
+}
+
+#[tokio::test]
+async fn discord_failure_does_not_replace_panel_but_definite_deletion_does() {
+    let f = Fixture::new();
+    f.queue(1, DeadlockFormat::StreetBrawl);
+    let first = f.provider.handler.publish_lobby(42, None).await.unwrap();
+    f.transport.fail_fetch.store(true, Ordering::SeqCst);
+    let leave = f.command("leave", 1, 420, 1, vec![]).await;
+    assert!(leave.content().contains("change is saved"));
+    assert!(
+        f.repo()
+            .queue(42, DeadlockFormat::StreetBrawl)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(f.transport.sent.lock().unwrap().len(), 1);
+    assert_eq!(
+        f.repo().lobby_publication(42).unwrap().unwrap().message_id,
+        Some(first.message_id as i64)
+    );
+    f.transport.fail_fetch.store(false, Ordering::SeqCst);
+    f.transport
+        .delete_message(first.channel_id, first.message_id)
+        .await
+        .unwrap();
+    let second = f.provider.handler.publish_lobby(42, None).await.unwrap();
+    assert_ne!(first.message_id, second.message_id);
+    assert_eq!(f.transport.sent.lock().unwrap().len(), 2);
+    assert_eq!(f.transport.messages.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn existing_duplicate_queue_panels_are_adopted_and_match_messages_preserved() {
+    let f = Fixture::new();
+    f.queue(1, DeadlockFormat::StreetBrawl);
+    let body = f
+        .provider
+        .handler
+        .queue_response(42, DeadlockFormat::StreetBrawl)
+        .await
+        .unwrap();
+    let oldest = f
+        .transport
+        .send_message(420, DiscordMessage::silent(body.clone()))
+        .await
+        .unwrap();
+    f.transport
+        .send_message(420, DiscordMessage::silent(body))
+        .await
+        .unwrap();
+    let match_message = f
+        .transport
+        .send_message(
+            420,
+            DiscordMessage::silent(
+                InteractionResponse::message("Deadlock match with bets").action_row(
+                    InteractionActionRow::buttons(vec![InteractionButton::new(
+                        "deadlock:bet:1:1",
+                        "Bet",
+                    )]),
+                ),
+            ),
+        )
+        .await
+        .unwrap();
+    let canonical = f.provider.handler.publish_lobby(42, None).await.unwrap();
+    assert_eq!(canonical.message_id, oldest.message_id);
+    assert_eq!(f.transport.sent.lock().unwrap().len(), 3);
+    assert_eq!(f.transport.messages.lock().unwrap().len(), 2);
+    assert!(
+        f.transport
+            .messages
+            .lock()
+            .unwrap()
+            .contains_key(&(420, match_message.message_id))
+    );
+}
+
+#[tokio::test]
+async fn optional_channel_fallback_uses_existing_channel_and_explicit_override_moves_only_panel() {
+    let f = Fixture::new();
+    let mut config = f.provider.handler.config.clone();
+    config.channels.clear();
+    let fallback = f.fresh_provider(config.clone());
+    assert!(
+        fallback
+            .handler
+            .publish_lobby(42, None)
+            .await
+            .unwrap_err()
+            .contains("No existing #deadlock-mm")
+    );
+    assert!(f.transport.named_channels.lock().unwrap().is_empty());
+    assert!(f.transport.sent.lock().unwrap().is_empty());
+    assert!(f.repo().lobby_publication(42).unwrap().is_none());
+    f.transport.named_channels.lock().unwrap().insert(42, 421);
+    let first = fallback.handler.publish_lobby(42, None).await.unwrap();
+    assert_eq!(first.channel_id, 421);
+    fallback.handler.publish_lobby(42, None).await.unwrap();
+    assert_eq!(f.transport.named_channels.lock().unwrap().len(), 1);
+    assert_eq!(f.transport.sent.lock().unwrap().len(), 1);
+    config.channels.insert(42, 422);
+    let overridden = f.fresh_provider(config);
+    f.transport.fail_channel.store(true, Ordering::SeqCst);
+    assert!(overridden.handler.publish_lobby(42, None).await.is_err());
+    assert_eq!(
+        f.repo().lobby_publication(42).unwrap().unwrap().channel_id,
+        421
+    );
+    f.transport.fail_channel.store(false, Ordering::SeqCst);
+    let moved = overridden.handler.publish_lobby(42, None).await.unwrap();
+    assert_eq!(moved.channel_id, 422);
+    assert_eq!(f.transport.messages.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn changing_lobby_channel_preserves_existing_match_thread_and_betting_routes() {
+    let f = Fixture::new();
+    f.queue(8, DeadlockFormat::StreetBrawl);
+    f.command("shuffle", 99, 420, 1, vec![]).await;
+    let game = f.game();
+    let thread = game.publication_thread_id.unwrap() as u64;
+    let mut config = f.provider.handler.config.clone();
+    config.channels.insert(42, 422);
+    let moved = f.fresh_provider(config);
+    moved.handler.publish_lobby(42, None).await.unwrap();
+    assert_eq!(
+        moved
+            .handler
+            .publish_match(42, game.match_id)
+            .await
+            .unwrap(),
+        thread
+    );
+    // A broken destination override must not prevent closing an existing market.
+    f.transport.fail_channel.store(true, Ordering::SeqCst);
+    let reply = f.responder();
+    moved
+        .handler()
+        .handle(
+            request(
+                "close",
+                99,
+                thread,
+                2,
+                vec![int_option("match", game.match_id)],
+            ),
+            reply.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        DeadlockBettingRepository::new(f.file.path())
+            .market(42, game.match_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        "closed"
+    );
+    assert_eq!(
+        f.repo()
+            .match_by_id(42, game.match_id)
+            .unwrap()
+            .unwrap()
+            .publication_channel_id,
+        Some(420)
+    );
+}
+
+#[tokio::test]
+async fn match_actions_require_dedicated_channel_but_queue_actions_route_from_anywhere_after_ack() {
+    let f = Fixture::new();
+    f.queue(1, DeadlockFormat::StreetBrawl);
+    let reply = f.command("shuffle", 1, 999, 1, vec![]).await;
     assert!(reply.content().contains("#deadlock-mm"));
     assert_eq!(
         f.repo()
@@ -356,10 +801,10 @@ async fn dedicated_channel_is_enforced_after_acknowledgement_before_queue_mutati
     );
     assert_eq!(
         &f.transport.events.lock().unwrap()[..2],
-        &["defer", "channel lookup"]
+        &["defer", "resolve channel"]
     );
     f.transport.parents.lock().unwrap().insert(421, 420);
-    let reply = f.command("leave", 1, 421, 2, vec![]).await;
+    let reply = f.command("leave", 1, 999, 2, vec![]).await;
     assert!(!reply.content().contains("Use #deadlock-mm"));
     assert!(
         f.repo()
@@ -448,9 +893,10 @@ async fn lobby_embed_shows_readable_names_local_mode_ratings_and_ready_status() 
             .contains("Local ratings in brackets")
     );
     {
-        let responses = reply.responses.lock().unwrap();
-        assert!(responses[0].content.is_empty());
-        assert_eq!(responses[0].components[0].buttons.len(), 5);
+        let messages = f.transport.messages.lock().unwrap();
+        let response = &messages.values().next().unwrap().response;
+        assert!(response.content.is_empty());
+        assert_eq!(response.components[0].buttons.len(), 5);
     }
     let reply = f
         .command("lobby", 1, 420, 2, vec![text_option("format", "standard")])
@@ -738,6 +1184,7 @@ async fn standard_override_is_one_shuffle_and_uses_six_players_per_side() {
 async fn ambiguous_publication_recovers_without_duplicate_match_messages_or_wagers() {
     let f = Fixture::new();
     f.queue(8, DeadlockFormat::StreetBrawl);
+    f.provider.handler.publish_lobby(42, None).await.unwrap();
     f.transport.fail_after_send.store(true, Ordering::SeqCst);
     let reply = f.command("shuffle", 99, 420, 1, vec![]).await;
     assert!(reply.content().contains("saved"));
@@ -755,7 +1202,7 @@ async fn ambiguous_publication_recovers_without_duplicate_match_messages_or_wage
         .await
         .unwrap();
     assert_eq!(f.repo().recent_matches(42, 10).unwrap().len(), 1);
-    assert_eq!(f.transport.sent.lock().unwrap().len(), 3);
+    assert_eq!(f.transport.sent.lock().unwrap().len(), 4);
     assert_eq!(f.game().publication_thread_id, Some(thread as i64));
     assert!(
         f.transport
@@ -877,7 +1324,7 @@ async fn nonadmin_exact_shuffle_retry_reuses_match_after_leaving_queue() {
         retry.content()
     );
     assert_eq!(fixture.repo().recent_matches(42, 10).unwrap().len(), 1);
-    assert_eq!(fixture.transport.sent.lock().unwrap().len(), 3);
+    assert_eq!(fixture.transport.sent.lock().unwrap().len(), 4);
 }
 
 #[tokio::test]

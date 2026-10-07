@@ -443,6 +443,24 @@ pub enum DiscordDestinationStatus {
 
 #[async_trait]
 pub trait DiscordTransport: Send + Sync {
+    /// Resolve an existing guild text channel by configured ID or fallback name.
+    async fn resolve_named_text_channel(
+        &self,
+        _guild_id: u64,
+        _configured: Option<u64>,
+        _known: Option<u64>,
+        _name: &str,
+    ) -> Result<u64, String> {
+        Err("Text channel lookup is unavailable on this transport.".into())
+    }
+
+    /// Discover only this bot's queue panels with the exact join/leave controls.
+    async fn find_deadlock_lobby_messages(
+        &self,
+        _channel_id: u64,
+    ) -> Result<Vec<DiscordMessageReceipt>, String> {
+        Ok(Vec::new())
+    }
     /// Recover and delete owned channels after an unacknowledged create request.
     async fn delete_spectator_channels_by_marker(
         &self,

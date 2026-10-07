@@ -14,6 +14,87 @@ use std::thread::JoinHandle;
 
 struct WireTestHandler;
 
+#[test]
+fn deadlock_panel_cleanup_requires_our_author_embed_and_both_queue_controls() {
+    let bot = UserId::new(42);
+    let mut message = Message::default();
+    message.author.id = bot;
+    let mut embed = serenity::all::Embed::default();
+    embed.title = Some("Deadlock · Street Brawl 4v4".into());
+    message.embeds.push(embed);
+    message.components = vec![
+        serde_json::from_value(
+            serde_json::to_value(CreateActionRow::Buttons(vec![
+                CreateButton::new("deadlock:join").label("Join"),
+                CreateButton::new("deadlock:leave").label("Leave"),
+            ]))
+            .unwrap(),
+        )
+        .unwrap(),
+    ];
+    assert!(is_deadlock_queue_panel(&message, bot));
+    let controls = message.components.clone();
+    message.author.id = UserId::new(43);
+    assert!(!is_deadlock_queue_panel(&message, bot));
+    message.author.id = bot;
+    message.components[0].components.pop();
+    assert!(!is_deadlock_queue_panel(&message, bot));
+    message.components = vec![
+        serde_json::from_value(
+            serde_json::to_value(CreateActionRow::Buttons(vec![
+                CreateButton::new("deadlock:bet:1:1").label("Bet"),
+            ]))
+            .unwrap(),
+        )
+        .unwrap(),
+    ];
+    assert!(!is_deadlock_queue_panel(&message, bot));
+    message.components.clear();
+    assert!(!is_deadlock_queue_panel(&message, bot));
+    message.components = controls;
+    message.embeds.clear();
+    message.content = "**Deadlock · Street Brawl 4v4**\n0/8 ready · 1 queued".into();
+    assert!(is_deadlock_queue_panel(&message, bot));
+    message.content = "Other bot message".into();
+    assert!(!is_deadlock_queue_panel(&message, bot));
+}
+
+#[test]
+fn deadlock_channel_override_is_guild_text_only_and_fallback_is_named() {
+    let guild = GuildId::new(42);
+    let mut channels = HashMap::new();
+    for (id, guild_id, kind, name) in [
+        (420, 42, ChannelType::Text, "general"),
+        (421, 42, ChannelType::Text, "deadlock-mm"),
+        (422, 43, ChannelType::Text, "deadlock-mm"),
+        (423, 42, ChannelType::Voice, "deadlock-mm"),
+    ] {
+        let mut channel = GuildChannel::default();
+        channel.id = ChannelId::new(id);
+        channel.guild_id = GuildId::new(guild_id);
+        channel.kind = kind;
+        channel.name = name.into();
+        channels.insert(channel.id, channel);
+    }
+    assert_eq!(
+        named_text_channel(guild, Some(420), None, "deadlock-mm", &channels).unwrap(),
+        420
+    );
+    assert_eq!(
+        named_text_channel(guild, None, Some(420), "deadlock-mm", &channels).unwrap(),
+        421
+    );
+    for invalid in [422, 423, 424] {
+        assert!(named_text_channel(guild, Some(invalid), None, "deadlock-mm", &channels).is_err());
+    }
+    channels.remove(&ChannelId::new(421));
+    assert!(
+        named_text_channel(guild, None, Some(421), "deadlock-mm", &channels)
+            .unwrap_err()
+            .contains("No existing #deadlock-mm")
+    );
+}
+
 #[derive(Default)]
 struct RecordingInteractionResponder {
     events: Mutex<Vec<&'static str>>,
