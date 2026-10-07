@@ -405,6 +405,9 @@ fn reconcile_schema(
     }
 
     reconcile_schema_objects(transaction, &canonical, "index")?;
+    // create_deadlock_lobbies_and_betting is additive: canonical tables and
+    // cross-game claim triggers are installed here. No Dota ratings, wallets,
+    // bets, or legacy draft envelopes are rewritten during this migration.
     reconcile_schema_objects(transaction, &canonical, "trigger")?;
     report.created_tables.sort();
     report.rebuilt_tables.sort();

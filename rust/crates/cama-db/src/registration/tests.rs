@@ -698,6 +698,7 @@ CREATE TABLE players (
     dota_play_hours TEXT,
     PRIMARY KEY (discord_id, guild_id)
 );
+CREATE TABLE deadlock_players (guild_id INTEGER NOT NULL,discord_id INTEGER NOT NULL,steam_id INTEGER NOT NULL,PRIMARY KEY(guild_id,discord_id));
 CREATE TABLE player_steam_ids (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     discord_id INTEGER NOT NULL,
@@ -708,3 +709,78 @@ CREATE TABLE player_steam_ids (
     UNIQUE (steam_id)
 );
 ";
+
+#[test]
+fn wallet_only_identity_can_register_for_dota_without_resetting_balance() {
+    let fixture = Fixture::new();
+    fixture.add_player(12_346, None);
+    fixture
+        .connection()
+        .execute(
+            "UPDATE players SET jopacoin_balance=127 WHERE discord_id=12346",
+            [],
+        )
+        .unwrap();
+    assert!(
+        fixture
+            .repository
+            .player_exists(12_346, Some(GUILD))
+            .unwrap()
+    );
+    assert!(
+        !fixture
+            .repository
+            .dota_player_exists(12_346, Some(GUILD))
+            .unwrap()
+    );
+    fixture
+        .repository
+        .register_player_atomic(&request(12_346, 12_346))
+        .unwrap();
+    assert!(
+        fixture
+            .repository
+            .dota_player_exists(12_346, Some(GUILD))
+            .unwrap()
+    );
+    assert_eq!(
+        fixture
+            .connection()
+            .query_row(
+                "SELECT jopacoin_balance FROM players WHERE discord_id=12346",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        127
+    );
+    assert!(matches!(
+        fixture
+            .repository
+            .register_player_atomic(&request(12_346, 12_346)),
+        Err(RegistrationRepositoryError::DuplicatePlayer { .. })
+    ));
+}
+
+#[test]
+fn dota_signup_respects_orphaned_deadlock_ownership_across_guilds() {
+    let fixture = Fixture::new();
+    fixture
+        .connection()
+        .execute(
+            "INSERT INTO deadlock_players(guild_id,discord_id,steam_id) VALUES(999,100,12345)",
+            [],
+        )
+        .unwrap();
+    assert!(matches!(
+        fixture
+            .repository
+            .register_player_atomic(&request(200, 12345)),
+        Err(RegistrationRepositoryError::SteamAlreadyOwned { owner_id: 100, .. })
+    ));
+    fixture
+        .repository
+        .register_player_atomic(&request(100, 12345))
+        .unwrap();
+    assert_eq!(fixture.repository.steam_owner(12345).unwrap(), Some(100));
+}

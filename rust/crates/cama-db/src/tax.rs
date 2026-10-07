@@ -160,6 +160,9 @@ pub struct TaxPlayerSnapshot {
     pub dark_bargain_due: i64,
     pub prediction_exposure: TaxPlayerPredictionExposure,
     pub prediction_cost_basis: i64,
+    pub pending_dota_stake: i64,
+    pub pending_deadlock_stake: i64,
+    pub pending_match_bet_count: i64,
     pub effective_obligations: i64,
     pub recent_ledger_total: i64,
     pub recent_ledger_limit: usize,
@@ -393,8 +396,10 @@ impl TaxRepository {
             |row| row.get(0),
         )?;
         let pending_bets = connection.query_row(
-            "SELECT COALESCE(SUM(amount*COALESCE(leverage,1)),0),COUNT(*)
-             FROM bets WHERE guild_id=?1 AND match_id IS NULL",
+            "SELECT COALESCE(SUM(stake),0),COUNT(*) FROM (
+             SELECT amount*COALESCE(leverage,1) AS stake FROM bets WHERE guild_id=?1 AND match_id IS NULL
+             UNION ALL
+             SELECT w.effective_stake FROM deadlock_wagers w JOIN deadlock_betting_markets m ON m.market_id=w.market_id AND m.guild_id=w.guild_id WHERE w.guild_id=?1 AND m.status IN('open','closed'))",
             [guild_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
@@ -466,6 +471,11 @@ impl TaxRepository {
         let prediction_exposure =
             self.player_prediction_exposure_with(&connection, discord_id, guild_id)?;
         let prediction_cost_basis = prediction_exposure.summary.cost_basis;
+        let (pending_dota_stake,pending_deadlock_stake,pending_match_bet_count)=connection.query_row(
+            "SELECT COALESCE(SUM(CASE WHEN game='dota' THEN stake ELSE 0 END),0),COALESCE(SUM(CASE WHEN game='deadlock' THEN stake ELSE 0 END),0),COUNT(*) FROM (
+             SELECT 'dota' AS game,amount*COALESCE(leverage,1) AS stake FROM bets WHERE guild_id=?1 AND discord_id=?2 AND match_id IS NULL
+             UNION ALL
+             SELECT 'deadlock',w.effective_stake FROM deadlock_wagers w JOIN deadlock_betting_markets m ON m.market_id=w.market_id AND m.guild_id=w.guild_id WHERE w.guild_id=?1 AND w.discord_id=?2 AND m.status IN('open','closed'))",params![guild_id,discord_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
         let visible_debt = balance.saturating_neg().max(0);
         let loan_total = loan.0.saturating_add(loan.1);
         let effective_obligations = visible_debt
@@ -492,6 +502,9 @@ impl TaxRepository {
             dark_bargain_due,
             prediction_exposure,
             prediction_cost_basis,
+            pending_dota_stake,
+            pending_deadlock_stake,
+            pending_match_bet_count,
             effective_obligations,
             recent_ledger_total: i64::try_from(recent_ledger_total).unwrap_or(i64::MAX),
             recent_ledger_limit: ledger_limit,

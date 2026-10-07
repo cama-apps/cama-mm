@@ -437,3 +437,5 @@ disposable copy; never delete or run reset experiments against deployed data.
 This project is for the Camaraderous Dota 2 league.
 
 Automated league lobby hosting, result recording, and replay archival are documented in [DOTA_HOSTING.md](DOTA_HOSTING.md). Hosting is opt-in and uses one dedicated Steam account; bot spectating and live-stat publishing are deferred.
+
+Deadlock matchmaking uses a separate `#deadlock-mm` channel, Street Brawl 4v4 by default, an explicit Standard 6v6 shuffle option, and shared-wallet betting. Players manually create lobbies and organizers/admins record results; automatic Steam hosting and result recording are disabled by default. See [DEADLOCK_HOSTING.md](DEADLOCK_HOSTING.md) for configuration, commands, recovery, and the optional future Steam host integration.

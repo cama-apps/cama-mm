@@ -343,6 +343,26 @@ network, process, or secret access. Casts and bit masks implement wire encoding.
 This audit covers this package only; protobuf 3.5.1 requires independent coverage.
 """
 
+[[audits.steam-vent-proto-deadlock]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+version = "0.1.0"
+notes = """
+Verified crates.io archive SHA-256 6cb90b9f61017aa240eb125a5e89163e984f3990c5e64693ee3191c6d9b99b79
+and all 109 extracted files. Rebuilt the generator pinned by the package flake.lock
+(steam-vent c03aa0f82cd4a4bccd55de13696f8fd9bffaf2bb, locked rust-protobuf 3.5.1).
+All 49 generated files reproduce from the bundled schemas after normalizing CRLF
+and removing exactly 45 reviewed protobuf reexport import aliases; no other
+differences remain. Read both handwritten entrypoints, both manifests and the
+complete custom generator. Parsed all 51 Rust files with syn: no unsafe/foreign
+code, mutable statics, or ambient filesystem/network/process/environment access.
+Only caller-owned Read/Write streams delegate to the protobuf runtime. This
+package has no build script, executable target or dependency beyond already
+reviewed steam-vent-proto-common 0.5.1. Protobuf runtime/transport limits retain
+independent coverage; this audit does not establish live coordinator behavior.
+Evidence and reproduction details: supply-chain/reviews/generated-protocols.md.
+"""
+
 [[audits.steam-vent-proto-dota2]]
 who = "Codex (automated source review)"
 criteria = "safe-to-deploy"

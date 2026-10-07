@@ -924,7 +924,7 @@ impl ManashopRepository {
             .query_row(
                 "SELECT id, discord_id, data FROM manashop_buffs
                  WHERE target_id = ?1 AND guild_id = ?2 AND buff_type = 'blood_pact'
-                   AND triggered = 0 AND expires_at > ?3
+                   AND triggered = 0 AND granted_at <= ?3 AND expires_at > ?3
                  ORDER BY granted_at DESC, id DESC LIMIT 1",
                 params![target_id, guild_id, now],
                 |row| {

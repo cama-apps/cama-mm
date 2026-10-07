@@ -71,6 +71,47 @@ async fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         },
+        Ok(command @ (Command::DeadlockSteamLogin | Command::DeadlockSteamProbe)) => {
+            let result = async {
+                let config =
+                    cama_runtime::deadlock_host::DeadlockHostConfig::bootstrap_from_lookup(
+                        |key| env::var(key).ok(),
+                    )?;
+                let dota_account = env::var("DOTA_BOT_ACCOUNT_ID")
+                    .ok()
+                    .and_then(|s| s.parse().ok());
+                let dota_path = env::var_os("DOTA_STEAM_SESSION_PATH")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("data/steam/session.json"));
+                let dota_machine = dota_path.with_file_name("machine_tokens.json");
+                config.validate_separate_account(
+                    dota_account,
+                    Some(&dota_path),
+                    Some(&dota_machine),
+                )?;
+                if matches!(command, Command::DeadlockSteamProbe) {
+                    for summary in cama_runtime::deadlock_host::probe_steam_cache(&config).await? {
+                        println!("{summary:?}");
+                    }
+                } else {
+                    cama_runtime::deadlock_host::bootstrap_steam_login(&config).await?;
+                }
+                Ok::<_, String>(())
+            }
+            .await;
+            match result {
+                Ok(()) => {
+                    println!(
+                        "Deadlock Steam operation completed for the configured dedicated account."
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(message) => {
+                    eprintln!("{message}");
+                    ExitCode::from(1)
+                }
+            }
+        }
         Ok(Command::DotaHost {
             action,
             guild_id,
@@ -435,6 +476,40 @@ async fn run_serve() -> ExitCode {
             return ExitCode::from(64);
         }
     };
+    let deadlock_config = match cama_runtime::deadlock_config::DeadlockConfig::from_lookup(|key| {
+        env::var(key).ok()
+    }) {
+        Ok(config) => config,
+        Err(reason) => {
+            error!(%reason,"invalid Deadlock configuration");
+            return ExitCode::from(64);
+        }
+    };
+    let deadlock_host_config = match cama_runtime::deadlock_host::DeadlockHostConfig::from_lookup(
+        |key| env::var(key).ok(),
+    ) {
+        Ok(config) => config,
+        Err(reason) => {
+            error!(%reason,"invalid Deadlock Steam configuration");
+            return ExitCode::from(64);
+        }
+    };
+    if let Some(host) = &deadlock_host_config {
+        if !deadlock_config.enabled {
+            error!("DEADLOCK_STEAM_ENABLED requires DEADLOCK_ENABLED");
+            return ExitCode::from(64);
+        }
+        let dota = application_config.dota_host.as_ref();
+        let dota_machine = dota.map(|dota| dota.session_path.with_file_name("machine_tokens.json"));
+        if let Err(reason) = host.validate_separate_account(
+            dota.map(|d| d.account_id),
+            dota.map(|d| d.session_path.as_path()),
+            dota_machine.as_deref(),
+        ) {
+            error!(%reason,"Deadlock account isolation refused startup");
+            return ExitCode::from(64);
+        }
+    }
     let config = application_config.runtime.clone();
     let _process_lock = match acquire_runtime_lock(&config.db_path) {
         Ok(process_lock) => process_lock,
@@ -632,6 +707,24 @@ async fn run_serve() -> ExitCode {
             error!(%error, "match runtime construction refused startup");
             return ExitCode::from(1);
         }
+    };
+    let deadlock_provider = if deadlock_config.enabled {
+        match cama_runtime::deadlock_provider::DeadlockRegistrationProvider::new(
+            &config.db_path,
+            deadlock_config,
+            &application_config,
+            discord_transport.clone(),
+            vanity_tax_service.clone(),
+            deadlock_host_config.as_ref().map(|host| host.account_id),
+        ) {
+            Ok(provider) => Some(provider),
+            Err(reason) => {
+                error!(%reason,"Deadlock construction refused startup");
+                return ExitCode::from(64);
+            }
+        }
+    } else {
+        None
     };
     let betting_provider = BettingRegistrationProvider::with_runtime_config_and_vanity_tax(
         config.db_path.clone(),
@@ -1047,12 +1140,28 @@ async fn run_serve() -> ExitCode {
         error!(%error, "could not register lobby command provider");
         return ExitCode::from(1);
     }
-    if let Err(error) = registry.add_provider(&match_provider) {
+    let match_registration = match &deadlock_provider {
+        Some(deadlock) => match_provider.register_with_deadlock(&mut registry, deadlock.handler()),
+        None => registry.add_provider(&match_provider),
+    };
+    if let Err(error) = match_registration {
         error!(%error, "could not register match command provider");
         return ExitCode::from(1);
     }
-    if let Err(error) = registry.add_provider(&betting_provider) {
+    let betting_registration = match &deadlock_provider {
+        Some(deadlock) => {
+            betting_provider.register_with_deadlock(&mut registry, deadlock.handler())
+        }
+        None => registry.add_provider(&betting_provider),
+    };
+    if let Err(error) = betting_registration {
         error!(%error, "could not register betting command provider");
+        return ExitCode::from(1);
+    }
+    if let Some(deadlock) = &deadlock_provider
+        && let Err(error) = registry.add_provider(deadlock)
+    {
+        error!(%error,"could not register Deadlock commands");
         return ExitCode::from(1);
     }
     if let Err(error) = registry.add_provider(&draft_provider) {
@@ -1219,6 +1328,18 @@ async fn run_serve() -> ExitCode {
     }
     for worker in dota_workers {
         runtime = runtime.with_worker(worker);
+    }
+    if let Some(deadlock) = deadlock_provider {
+        runtime = runtime.with_worker(deadlock.recovery_worker());
+    }
+    if let Some(host) = deadlock_host_config {
+        runtime = runtime.with_worker(
+            cama_runtime::deadlock_host::DeadlockHostWorker::new(
+                &application_config.runtime.db_path,
+                host,
+            )
+            .spec(),
+        );
     }
     dig_provider.set_lifecycle_events(runtime.events().clone());
     let health_events = runtime.events().subscribe();

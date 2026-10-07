@@ -3,6 +3,17 @@ use tempfile::tempdir;
 use super::*;
 
 #[test]
+fn deadlock_operator_commands_are_explicit_and_reject_extra_arguments() {
+    for (name, expected) in [
+        ("deadlock-steam-login", Command::DeadlockSteamLogin),
+        ("deadlock-steam-probe", Command::DeadlockSteamProbe),
+    ] {
+        assert_eq!(parse_command([name.to_owned()].into_iter()), Ok(expected));
+        assert!(parse_command([name, "unexpected"].map(str::to_owned).into_iter()).is_err());
+    }
+}
+
+#[test]
 fn default_and_explicit_serve_select_the_gateway_runtime() {
     assert_eq!(parse_command(std::iter::empty()), Ok(Command::Serve));
     assert_eq!(

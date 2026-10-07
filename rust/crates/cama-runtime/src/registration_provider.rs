@@ -1832,8 +1832,14 @@ impl PlayerRegistrationHandler {
         let steam = self.steam.clone();
         let removed = tokio::task::spawn_blocking(move || steam.remove_steam_id(user_id, steam_id))
             .await
-            .map_err(|error| format!("Steam unlink task failed: {error}"))?
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("Steam unlink task failed: {error}"))?;
+        let removed = match removed {
+            Ok(removed) => removed,
+            Err(error @ cama_db::opendota_player::OpenDotaPlayerRepositoryError::SteamIdUsedByDeadlock { .. }) => {
+                return followup_ephemeral(&responder, error.to_string()).await;
+            }
+            Err(error) => return Err(error.to_string()),
+        };
         if !removed {
             return followup_ephemeral(
                 &responder,

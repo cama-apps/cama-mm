@@ -35,6 +35,13 @@ const REQUIRED_TABLES: &[&str] = &[
     "bankruptcy_state",
     "bet_settlement_taxes",
     "bets",
+    "deadlock_players",
+    "deadlock_ratings",
+    "deadlock_queue",
+    "deadlock_matches",
+    "deadlock_betting_markets",
+    "deadlock_wagers",
+    "deadlock_host_jobs",
     "dig_active_duels",
     "dig_artifacts",
     "dig_actions",
@@ -339,6 +346,13 @@ mod tests {
                 CREATE TABLE bankruptcy_state (id INTEGER PRIMARY KEY);
                 CREATE TABLE bet_settlement_taxes (id INTEGER PRIMARY KEY);
                 CREATE TABLE bets (bet_id INTEGER PRIMARY KEY);
+                CREATE TABLE deadlock_players (id INTEGER PRIMARY KEY);
+                CREATE TABLE deadlock_ratings (id INTEGER PRIMARY KEY);
+                CREATE TABLE deadlock_queue (id INTEGER PRIMARY KEY);
+                CREATE TABLE deadlock_matches (id INTEGER PRIMARY KEY);
+                CREATE TABLE deadlock_betting_markets (id INTEGER PRIMARY KEY);
+                CREATE TABLE deadlock_wagers (id INTEGER PRIMARY KEY);
+                CREATE TABLE deadlock_host_jobs (id INTEGER PRIMARY KEY);
                 CREATE TABLE dig_active_duels (id INTEGER PRIMARY KEY);
                 CREATE TABLE dig_artifacts (id INTEGER PRIMARY KEY);
                 CREATE TABLE schema_migrations (

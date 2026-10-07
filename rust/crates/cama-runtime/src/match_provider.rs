@@ -616,11 +616,47 @@ pub fn production_betting_flavor(
 
 impl RegistrationProvider for MatchRegistrationProvider {
     fn register(&self, registry: &mut RegistryBuilder) -> Result<(), RegistrationError> {
+        self.register_commands(registry, None)
+    }
+}
+
+impl MatchRegistrationProvider {
+    /// Add opt-in Deadlock routing without changing the Dota handler or its options.
+    pub fn register_with_deadlock(
+        &self,
+        registry: &mut RegistryBuilder,
+        deadlock: Arc<dyn InteractionHandler>,
+    ) -> Result<(), RegistrationError> {
+        self.register_commands(registry, Some(deadlock))
+    }
+
+    fn register_commands(
+        &self,
+        registry: &mut RegistryBuilder,
+        deadlock: Option<Arc<dyn InteractionHandler>>,
+    ) -> Result<(), RegistrationError> {
+        let mut options = shuffle_options();
+        let handler: Arc<dyn InteractionHandler> = if let Some(deadlock) = deadlock {
+            if let Some(lobby) = options.iter_mut().find(|option| option.name == "lobby") {
+                lobby.choices.push(CommandOptionChoice::String {
+                    name: "Deadlock (Street Brawl default)".to_owned(),
+                    value: "deadlock".to_owned(),
+                });
+            }
+            options.push(crate::deadlock_provider::format_option());
+            Arc::new(crate::deadlock_provider::DeadlockCommandRouter::new(
+                self.handler.clone(),
+                deadlock,
+                "lobby",
+            ))
+        } else {
+            self.handler.clone()
+        };
         registry.command(CommandSpec {
             name: "shuffle".to_owned(),
             description: "Create balanced teams from lobby".to_owned(),
-            options: shuffle_options(),
-            handler: self.handler.clone(),
+            options,
+            handler,
         })?;
         registry.command(CommandSpec {
             name: "record".to_owned(),
@@ -1418,7 +1454,7 @@ impl ProtectionGateway for MatchProtectionGateway {
     }
 }
 
-fn match_economy_config(config: &ApplicationConfig) -> EconomyEventConfig {
+pub(crate) fn match_economy_config(config: &ApplicationConfig) -> EconomyEventConfig {
     let values = &config.values;
     EconomyEventConfig {
         enabled: values.economy_events_enabled,
@@ -1433,7 +1469,7 @@ fn match_economy_config(config: &ApplicationConfig) -> EconomyEventConfig {
     .normalized()
 }
 
-fn pacific_mana_day(timestamp: i64) -> Result<String, String> {
+pub(crate) fn pacific_mana_day(timestamp: i64) -> Result<String, String> {
     let utc = DateTime::<Utc>::from_timestamp(timestamp, 0)
         .ok_or_else(|| format!("invalid Unix timestamp {timestamp}"))?;
     let year = utc.year();

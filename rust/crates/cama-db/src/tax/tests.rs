@@ -513,3 +513,58 @@ fn test_tax_man_bankruptcy_modifier_rejects_invalid_or_unknown_target() {
         TaxBankruptcyOutcome::TargetNotRegistered
     );
 }
+
+#[test]
+fn pending_match_exposure_includes_deadlock_until_settlement_or_refund() {
+    let fixture = Fixture::migrated();
+    fixture.player(1, 100);
+    let c = fixture.connection();
+    c.execute("INSERT INTO bets(guild_id,discord_id,team_bet_on,amount,bet_time,leverage) VALUES(?1,1,'radiant',10,?2,2)",params![GUILD,NOW]).unwrap();
+    c.execute("INSERT INTO deadlock_betting_markets(market_id,guild_id,match_id,format,roster_json,terms_json,deadline,status,created_at) VALUES('deadlock:1',?1,1,'street_brawl','{}','{}',?2,'closed',?2)",params![GUILD,NOW]).unwrap();
+    c.execute("INSERT INTO deadlock_wagers(market_id,guild_id,discord_id,side,amount,leverage,effective_stake,request_key,kind,created_at) VALUES('deadlock:1',?1,1,1,10,5,50,'bet','manual',?2)",params![GUILD,NOW]).unwrap();
+    let snapshot = fixture
+        .repository
+        .player_snapshot(1, GUILD, 8, 0, NOW)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            snapshot.pending_dota_stake,
+            snapshot.pending_deadlock_stake,
+            snapshot.pending_match_bet_count
+        ),
+        (20, 50, 2)
+    );
+    assert_eq!(snapshot.balance, 100);
+    let guild = fixture.repository.guild_snapshot(GUILD, NOW).unwrap();
+    assert_eq!(
+        (guild.pending_bet_effective_stake, guild.pending_bet_count),
+        (70, 2)
+    );
+    c.execute(
+        "UPDATE deadlock_betting_markets SET status='refunded' WHERE market_id='deadlock:1'",
+        [],
+    )
+    .unwrap();
+    let snapshot = fixture
+        .repository
+        .player_snapshot(1, GUILD, 8, 0, NOW)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            snapshot.pending_dota_stake,
+            snapshot.pending_deadlock_stake,
+            snapshot.pending_match_bet_count
+        ),
+        (20, 0, 1)
+    );
+    assert_eq!(
+        fixture
+            .repository
+            .guild_snapshot(GUILD + 1, NOW)
+            .unwrap()
+            .pending_bet_count,
+        0
+    );
+}

@@ -10,6 +10,8 @@ pub(crate) use cama_db_match::core_repositories;
 pub mod autobet_investments;
 #[path = "../../cama-db/src/betting_service.rs"]
 pub mod betting_service_repository;
+#[path = "../../cama-db/src/deadlock_betting.rs"]
+pub mod deadlock_betting;
 #[path = "../../cama-db/src/disbursement.rs"]
 pub mod disbursement;
 #[path = "../../cama-db/src/dota_bet_seed.rs"]

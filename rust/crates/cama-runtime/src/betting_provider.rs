@@ -1018,11 +1018,56 @@ impl GatewayEventObserver for BettingGatewayObserver {
 
 impl RegistrationProvider for BettingRegistrationProvider {
     fn register(&self, registry: &mut RegistryBuilder) -> Result<(), RegistrationError> {
+        self.register_commands(registry, None)
+    }
+}
+
+impl BettingRegistrationProvider {
+    pub fn register_with_deadlock(
+        &self,
+        registry: &mut RegistryBuilder,
+        deadlock: Arc<dyn InteractionHandler>,
+    ) -> Result<(), RegistrationError> {
+        self.register_commands(registry, Some(deadlock))
+    }
+
+    fn register_commands(
+        &self,
+        registry: &mut RegistryBuilder,
+        deadlock: Option<Arc<dyn InteractionHandler>>,
+    ) -> Result<(), RegistrationError> {
+        let mut options = bet_options(self.handler.config.min_bet);
+        let handler: Arc<dyn InteractionHandler> = if let Some(deadlock) = deadlock {
+            options.push(choices_string(
+                CommandOptionSpec::new(
+                    "game",
+                    "Game to bet on (default Dota)",
+                    CommandOptionKind::String,
+                ),
+                &[("Dota", "dota"), ("Deadlock", "deadlock")],
+            ));
+            if let Some(team) = options.iter_mut().find(|option| option.name == "team") {
+                team.description = "Team shown on the selected match".to_owned();
+                for (name, value) in [("Deadlock Team 1", "team1"), ("Deadlock Team 2", "team2")] {
+                    team.choices.push(CommandOptionChoice::String {
+                        name: name.to_owned(),
+                        value: value.to_owned(),
+                    });
+                }
+            }
+            Arc::new(crate::deadlock_provider::DeadlockCommandRouter::new(
+                self.handler.clone(),
+                deadlock,
+                "game",
+            ))
+        } else {
+            self.handler.clone()
+        };
         registry.command(CommandSpec {
             name: "bet".to_owned(),
             description: "Place a jopacoin bet on a match (check balance with /balance)".to_owned(),
-            options: bet_options(self.handler.config.min_bet),
-            handler: self.handler.clone(),
+            options,
+            handler,
         })?;
         registry.command(CommandSpec {
             name: "mybets".to_owned(),
@@ -7109,6 +7154,16 @@ fn balance_overview_embed(
             false,
         )
         .field(
+            "Match Bets at Risk",
+            format!(
+                "Dota: {} · Deadlock: {}\n{} unsettled wagers. Payouts depend on the final pools and results; stakes are not included as portfolio assets.",
+                portfolio_jc(snapshot.pending_dota_stake),
+                portfolio_jc(snapshot.pending_deadlock_stake),
+                grouped_jc(snapshot.pending_match_bet_count),
+            ),
+            false,
+        )
+        .field(
             "Liabilities & Capital at Risk",
             format!(
                 "Wallet debt: {} • Loans: {}\nDark Bargains: {} across {} active\nMarket basis at risk: {}\n**Total tax-ledger exposure:** {}",
@@ -7556,7 +7611,7 @@ fn record_betting_pet_activity(
     );
 }
 
-fn active_mana_effects(
+pub(crate) fn active_mana_effects(
     path: &Path,
     user_id: i64,
     guild_id: Option<i64>,

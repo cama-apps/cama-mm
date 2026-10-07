@@ -15,6 +15,8 @@ use crate::process_lock::ProcessLock;
 pub enum Command {
     Serve,
     SteamLogin,
+    DeadlockSteamLogin,
+    DeadlockSteamProbe,
     DotaHost {
         action: String,
         guild_id: Option<i64>,
@@ -54,6 +56,14 @@ pub fn parse_command(mut args: impl Iterator<Item = String>) -> Result<Command, 
             reject_remaining(args, "steam-login")?;
             Ok(Command::SteamLogin)
         }
+        Some("deadlock-steam-login") => {
+            reject_remaining(args, "deadlock-steam-login")?;
+            Ok(Command::DeadlockSteamLogin)
+        }
+        Some("deadlock-steam-probe") => {
+            reject_remaining(args, "deadlock-steam-probe")?;
+            Ok(Command::DeadlockSteamProbe)
+        }
         Some("dota-host") => {
             let action = args.next().unwrap_or_else(|| "status".to_owned());
             if action == "status" {
@@ -90,7 +100,7 @@ pub fn parse_command(mut args: impl Iterator<Item = String>) -> Result<Command, 
         Some("health-check") => parse_health_check(args),
         Some("health-smoke") => parse_health_smoke(args),
         Some(command) => Err(format!(
-            "unknown command {command:?}; expected `serve`, `steam-login`, `dota-host`, `db-admit`, `db-check`, `health-check`, `health-smoke`, `catalog-check`, or `inventory`"
+            "unknown command {command:?}; expected `serve`, `steam-login`, `deadlock-steam-login`, `deadlock-steam-probe`, `dota-host`, `db-admit`, `db-check`, `health-check`, `health-smoke`, `catalog-check`, or `inventory`"
         )),
     }
 }

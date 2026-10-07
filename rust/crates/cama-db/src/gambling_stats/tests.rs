@@ -27,6 +27,7 @@ fn auto_history_bet(
     direction: Option<&str>,
 ) -> BetHistoryEntry {
     BetHistoryEntry {
+        game: "dota",
         bet_id: match_id,
         amount: wagered,
         leverage: 1,
@@ -64,7 +65,10 @@ impl Fixture {
             let connection = Connection::open(file.path()).expect("open fixture template");
             connection
                 .execute_batch(
-                    "CREATE TABLE players (
+                    "CREATE TABLE deadlock_matches(match_id INTEGER PRIMARY KEY,guild_id INTEGER,status TEXT,winner INTEGER);
+                 CREATE TABLE deadlock_wagers(wager_id INTEGER PRIMARY KEY,market_id TEXT,guild_id INTEGER,discord_id INTEGER,side INTEGER,amount INTEGER,leverage INTEGER,effective_stake INTEGER,created_at INTEGER,payout INTEGER,kind TEXT);
+                 CREATE TABLE deadlock_economic_receipts(receipt_id TEXT PRIMARY KEY,market_id TEXT,guild_id INTEGER,discord_id INTEGER,kind TEXT,amount INTEGER);
+                 CREATE TABLE players (
                      discord_id INTEGER NOT NULL,
                      guild_id INTEGER NOT NULL DEFAULT 0,
                      discord_username TEXT NOT NULL,
@@ -1688,4 +1692,39 @@ fn test_same_side_manual_bet_and_unpaired_opposite_bet_are_not_arbitrage() {
     let arbitrage = calculate_auto_bet_performance(&history).arbitrage;
 
     assert_eq!(arbitrage, AutoBetGroupStats::default());
+}
+
+#[test]
+fn deadlock_and_dota_histories_keep_colliding_match_ids_distinct() {
+    let mut fixture = Fixture::new();
+    fixture.add_player(1001, 200, DEFAULT_GUILD);
+    let match_id = fixture.settle_bet(1001, 10, 1, BettingTeam::Radiant, DEFAULT_GUILD);
+    let c = Connection::open(fixture.path()).unwrap();
+    c.execute(
+        "INSERT INTO deadlock_matches(match_id,guild_id,status,winner) VALUES(?1,0,'settled',2)",
+        [match_id],
+    )
+    .unwrap();
+    c.execute("INSERT INTO deadlock_wagers(wager_id,market_id,guild_id,discord_id,side,amount,leverage,effective_stake,created_at,payout,kind) VALUES(1,?1,0,1001,2,20,1,20,90000,40,'manual')",[format!("deadlock:{match_id}")]).unwrap();
+    c.execute("INSERT INTO deadlock_economic_receipts(receipt_id,market_id,guild_id,discord_id,kind,amount) VALUES('tax',?1,0,1001,'vanity_tax',3)",[format!("deadlock:{match_id}")]).unwrap();
+    let repo = fixture.stats_repository();
+    let history = repo.player_bet_history(1001, None).unwrap();
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].game, "dota");
+    assert_eq!(history[1].game, "deadlock");
+    assert_eq!(history[1].team, BetSide::TeamTwo);
+    assert_eq!(history[1].profit, 17);
+    let metrics = repo.bulk_gambling_metrics(None, Some(&[1001])).unwrap();
+    assert_eq!(metrics[&1001].total_bets, 2);
+    assert_eq!(metrics[&1001].total_wagered, 30);
+    assert_eq!(
+        metrics[&1001].net_pnl,
+        history.iter().map(|bet| bet.profit).sum::<i64>()
+    );
+    assert_eq!(repo.total_settled_matches(None).unwrap(), 2);
+    assert_eq!(
+        repo.current_bet_streaks_bulk(&[1001], None).unwrap()[&1001],
+        2
+    );
+    assert!(repo.player_bet_history(1001, Some(2)).unwrap().is_empty());
 }

@@ -1104,7 +1104,8 @@ const FIXTURE_SCHEMA: &str = r#"
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY(discord_id,guild_id)
     );
-    CREATE TABLE player_steam_ids (
+    CREATE TABLE deadlock_players (guild_id INTEGER NOT NULL,discord_id INTEGER NOT NULL,steam_id INTEGER NOT NULL,PRIMARY KEY(guild_id,discord_id));
+CREATE TABLE player_steam_ids (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         discord_id INTEGER NOT NULL,
         steam_id INTEGER NOT NULL,
@@ -1138,3 +1139,69 @@ const FIXTURE_SCHEMA: &str = r#"
         PRIMARY KEY(guild_id,match_id,discord_id)
     );
 "#;
+
+#[test]
+fn deadlock_enrollment_in_any_guild_blocks_unlink_but_not_unrelated_accounts() {
+    let fixture = Fixture::new();
+    fixture.player(100, GUILD, "Player", None);
+    fixture
+        .repository
+        .add_steam_id(100, 12345, true, 100)
+        .unwrap();
+    fixture
+        .repository
+        .add_steam_id(100, 12346, false, 101)
+        .unwrap();
+    fixture
+        .connection()
+        .execute(
+            "INSERT INTO deadlock_players(guild_id,discord_id,steam_id) VALUES(?1,100,12345)",
+            [OTHER_GUILD],
+        )
+        .unwrap();
+    let error = fixture.repository.remove_steam_id(100, 12345).unwrap_err();
+    assert!(matches!(
+        error,
+        OpenDotaPlayerRepositoryError::SteamIdUsedByDeadlock { steam_id: 12345 }
+    ));
+    assert!(
+        error
+            .to_string()
+            .contains("audited Deadlock account migration")
+    );
+    assert_eq!(
+        fixture.repository.get_steam_id_owner(12345).unwrap(),
+        Some(100)
+    );
+    assert!(fixture.repository.remove_steam_id(100, 12346).unwrap());
+}
+
+#[test]
+fn orphaned_deadlock_link_remains_globally_owned_and_can_be_repaired_by_its_owner() {
+    let fixture = Fixture::new();
+    fixture.player(100, GUILD, "Owner", None);
+    fixture.player(200, OTHER_GUILD, "Other", None);
+    fixture
+        .connection()
+        .execute(
+            "INSERT INTO deadlock_players(guild_id,discord_id,steam_id) VALUES(?1,100,12345)",
+            [OTHER_GUILD],
+        )
+        .unwrap();
+    assert_eq!(
+        fixture.repository.get_steam_id_owner(12345).unwrap(),
+        Some(100)
+    );
+    assert!(matches!(
+        fixture.repository.add_steam_id(200, 12345, true, 100),
+        Err(OpenDotaPlayerRepositoryError::SteamIdAlreadyLinked { owner_id: 100, .. })
+    ));
+    fixture
+        .repository
+        .add_steam_id(100, 12345, true, 100)
+        .unwrap();
+    assert_eq!(
+        fixture.repository.get_steam_id_owner(12345).unwrap(),
+        Some(100)
+    );
+}

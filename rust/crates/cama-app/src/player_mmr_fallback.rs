@@ -157,7 +157,7 @@ impl MmrRegistrationRepository for RegistrationRepository {
     type Error = cama_db::registration_repository::RegistrationRepositoryError;
 
     fn player_exists(&mut self, discord_id: i64, guild_id: i64) -> Result<bool, Self::Error> {
-        RegistrationRepository::player_exists(self, discord_id, Some(guild_id))
+        RegistrationRepository::dota_player_exists(self, discord_id, Some(guild_id))
     }
 
     fn steam_owner(&mut self, steam_id: i64) -> Result<Option<i64>, Self::Error> {

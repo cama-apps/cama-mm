@@ -46,6 +46,10 @@ pub enum OpenDotaPlayerRepositoryError {
     MissingPlayer { discord_id: i64 },
     #[error("Steam ID {steam_id} is already linked to another player ({owner_id})")]
     SteamIdAlreadyLinked { steam_id: i64, owner_id: i64 },
+    #[error(
+        "Steam ID {steam_id} is used by a Deadlock enrollment. Ask an admin for an audited Deadlock account migration before unlinking it."
+    )]
+    SteamIdUsedByDeadlock { steam_id: i64 },
     #[error("OpenDota player SQLite operation failed: {0}")]
     Sqlite(#[from] rusqlite::Error),
 }
@@ -355,6 +359,14 @@ impl OpenDotaPlayerRepository {
     ) -> Result<bool, OpenDotaPlayerRepositoryError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let enrolled: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM deadlock_players WHERE discord_id=?1 AND steam_id=?2)",
+            params![discord_id, steam_id],
+            |row| row.get(0),
+        )?;
+        if enrolled {
+            return Err(OpenDotaPlayerRepositoryError::SteamIdUsedByDeadlock { steam_id });
+        }
         let was_primary = transaction
             .query_row(
                 "SELECT is_primary FROM player_steam_ids
@@ -743,7 +755,7 @@ fn steam_id_owner(connection: &Connection, steam_id: i64) -> Result<Option<i64>,
     connection
         .query_row(
             "SELECT discord_id FROM players WHERE steam_id=?1
-             ORDER BY guild_id,discord_id LIMIT 1",
+             UNION SELECT discord_id FROM deadlock_players WHERE steam_id=?1 LIMIT 1",
             [steam_id],
             |row| row.get(0),
         )
@@ -767,9 +779,8 @@ fn other_owner(
     }
     connection
         .query_row(
-            "SELECT discord_id FROM players
-             WHERE steam_id=?1 AND discord_id!=?2
-             ORDER BY guild_id,discord_id LIMIT 1",
+            "SELECT discord_id FROM players WHERE steam_id=?1 AND discord_id!=?2
+             UNION SELECT discord_id FROM deadlock_players WHERE steam_id=?1 AND discord_id!=?2 LIMIT 1",
             params![steam_id, discord_id],
             |row| row.get(0),
         )
