@@ -13,7 +13,7 @@ use crate::application_config::Secret;
 const STEAM_ID_BASE: u64 = 76_561_197_960_265_728;
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 
-/// Fixed, deliberately weak initial prior, not a calibrated PP-to-skill model.
+/// Fixed, deliberately weak initial prior, not a calibrated badge-to-skill model.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ImportedRating {
     pub mu: f64,
@@ -78,19 +78,12 @@ pub fn steam_account_id(input: &str) -> Result<u32, String> {
 #[derive(Clone)]
 pub struct DeadlockRatingClient {
     client: reqwest::Client,
-    statlocker_key: Option<Secret>,
     api_key: Option<Secret>,
-    // The public profile contract has no mode selector. Never assume its PP is Brawl.
-    statlocker_standard_confirmed: bool,
     cache: Arc<Mutex<BTreeMap<u32, (Instant, ImportedRatings)>>>,
 }
 
 impl DeadlockRatingClient {
-    pub fn new(
-        statlocker_key: Option<Secret>,
-        api_key: Option<Secret>,
-        statlocker_standard_confirmed: bool,
-    ) -> Result<Self, String> {
+    pub fn new(api_key: Option<Secret>) -> Result<Self, String> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(8))
             .connect_timeout(Duration::from_secs(3))
@@ -100,9 +93,7 @@ impl DeadlockRatingClient {
             .map_err(|_| "Could not initialize Deadlock rating HTTP client.".to_owned())?;
         Ok(Self {
             client,
-            statlocker_key,
             api_key,
-            statlocker_standard_confirmed,
             cache: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
@@ -126,56 +117,74 @@ impl DeadlockRatingClient {
         ratings
     }
 
+    #[cfg(test)]
+    pub(crate) fn seed_cache(&self, account: u32, ratings: ImportedRatings) {
+        self.cache
+            .lock()
+            .unwrap()
+            .insert(account, (Instant::now(), ratings));
+    }
+
     async fn fetch_uncached(&self, account: u32, now: i64) -> ImportedRatings {
-        if self.statlocker_standard_confirmed
-            && let Some(key) = &self.statlocker_key
-        {
-            let request = self
-                .client
-                .get(format!(
-                    "https://statlocker.gg/api/public/profile/{account}"
-                ))
-                .header("X-API-Key", key.expose());
-            if let Some(body) = response_json(request).await
-                && let Some(rating) = statlocker_rating(&body, account, now)
-            {
-                return ImportedRatings::from_standard(rating);
+        let reason = match response_json(self.rank_request(account)).await {
+            Ok(body) => {
+                if let Some(rating) = valve_rating(&body, account, now) {
+                    return ImportedRatings::from_standard(rating);
+                }
+                "No usable published ranked badge for this account".to_owned()
             }
-        }
-        let mut request = self.client.get(format!(
+            Err(reason) => format!("Rank lookup: {reason}"),
+        };
+        // These reasons contain only fixed messages and HTTP status codes,
+        // never request URLs, response bodies, or credentials.
+        tracing::warn!(%reason, "Deadlock initial rating import used a neutral prior");
+        ImportedRatings::provisional(&reason)
+    }
+
+    fn rank_request(&self, account: u32) -> reqwest::RequestBuilder {
+        let request = self.client.get(format!(
             "https://api.deadlock-api.com/v1/players/{account}/rank"
         ));
-        if let Some(key) = &self.api_key {
-            request = request.header("X-API-Key", key.expose());
+        match &self.api_key {
+            Some(key) => request.header("X-API-Key", key.expose()),
+            None => request,
         }
-        if let Some(body) = response_json(request).await
-            && let Some(rating) = valve_rating(&body, account, now)
-        {
-            return ImportedRatings::from_standard(rating);
-        }
-        ImportedRatings::provisional(
-            "No usable current external rank; missing, private, uncalibrated, or provider unavailable",
-        )
     }
 }
 
-async fn response_json(request: reqwest::RequestBuilder) -> Option<Value> {
-    let mut response = request.send().await.ok()?;
-    if !response.status().is_success()
-        || response
-            .content_length()
-            .is_some_and(|n| n > MAX_RESPONSE_BYTES as u64)
+async fn response_json(request: reqwest::RequestBuilder) -> Result<Value, String> {
+    let mut response = request.send().await.map_err(|error| {
+        if error.is_timeout() {
+            "request timed out"
+        } else {
+            "provider connection failed"
+        }
+        .to_owned()
+    })?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "provider returned HTTP {}",
+            response.status().as_u16()
+        ));
+    }
+    if response
+        .content_length()
+        .is_some_and(|n| n > MAX_RESPONSE_BYTES as u64)
     {
-        return None;
+        return Err("provider response exceeded the size limit".to_owned());
     }
     let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.ok()? {
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| "provider response could not be read".to_owned())?
+    {
         if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
-            return None;
+            return Err("provider response exceeded the size limit".to_owned());
         }
         bytes.extend_from_slice(&chunk);
     }
-    serde_json::from_slice(&bytes).ok()
+    serde_json::from_slice(&bytes).map_err(|_| "provider returned invalid JSON".to_owned())
 }
 
 fn badge_mu(badge: i64) -> Option<f64> {
@@ -208,41 +217,29 @@ fn valve_rating(body: &Value, account: u32, now: i64) -> Option<ImportedRating> 
     })
 }
 
-fn statlocker_rating(body: &Value, account: u32, now: i64) -> Option<ImportedRating> {
-    if body.get("accountId")?.as_u64()? != u64::from(account) {
-        return None;
-    }
-    let pp = body.get("ppScore")?.as_f64()?;
-    if !pp.is_finite() || !(1.0..=100_000.0).contains(&pp) {
-        return None;
-    }
-    let badge = body.get("estimatedRankNumber")?.as_i64()?;
-    // Use supplied badge; the documentation's PP conversion is inconsistent.
-    let mu = badge_mu(badge)?;
-    let source_time = body.get("lastUpdated")?.as_str()?;
-    let updated = chrono::DateTime::parse_from_rfc3339(source_time)
-        .ok()?
-        .timestamp();
-    if updated > now + 300 || now.saturating_sub(updated) > 90 * 86400 {
-        return None;
-    }
-    if body.get("isCalibrated").and_then(Value::as_bool) == Some(false) {
-        return None;
-    }
-    Some(ImportedRating {
-        mu,
-        sigma: 25.0 / 3.0,
-        source: "statlocker-standard-weak-prior-v1".to_owned(),
-        raw_value: Some(pp),
-        provenance: json!({"provider":"statlocker", "account_id":account,
-            "pp_score":pp, "badge":badge, "source_time":source_time, "fetched_at":now,
-            "source_mode":"standard-operator-confirmed", "transform":"badge-ordinal-v1", "provisional":true}),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rank_lookup_is_keyless_with_optional_authentication() {
+        let request = DeadlockRatingClient::new(None)
+            .unwrap()
+            .rank_request(7)
+            .build()
+            .unwrap();
+        assert_eq!(
+            request.url().as_str(),
+            "https://api.deadlock-api.com/v1/players/7/rank"
+        );
+        assert!(!request.headers().contains_key("X-API-Key"));
+        let request = DeadlockRatingClient::new(Some(Secret::new("fixture-key".to_owned())))
+            .unwrap()
+            .rank_request(7)
+            .build()
+            .unwrap();
+        assert_eq!(request.headers()["X-API-Key"], "fixture-key");
+    }
+
     #[test]
     fn steam_id_conversion_rejects_non_individual_ids() {
         assert_eq!(steam_account_id("123"), Ok(123));
@@ -285,15 +282,46 @@ mod tests {
         assert_eq!(imported.brawl.sigma, 25.0 / 3.0);
     }
     #[test]
-    fn statlocker_validates_identity_freshness_and_preserves_provenance() {
-        let now = chrono::DateTime::parse_from_rfc3339("2026-10-02T12:00:00Z")
-            .unwrap()
-            .timestamp();
-        let body = json!({"accountId":7,"ppScore":4250,"estimatedRankNumber":84,"lastUpdated":"2026-10-01T12:00:00Z"});
-        assert!(statlocker_rating(&body, 8, now).is_none());
-        let rating = statlocker_rating(&body, 7, now).unwrap();
-        assert_eq!(rating.raw_value, Some(4250.0));
+    fn ranked_badge_requires_consistent_fields_and_preserves_provider_provenance() {
+        let body = json!({"badge":84,"rank":8,"subrank":4,"last_match":{"match_id":2}});
+        let rating = valve_rating(&body, 7, 100).unwrap();
+        assert_eq!(rating.raw_value, Some(84.0));
         assert_eq!(rating.mu, badge_mu(84).unwrap());
-        assert!(statlocker_rating(&body, 7, now + 100 * 86400).is_none());
+        assert_eq!(rating.provenance["provider"], "deadlock-api");
+        assert_eq!(rating.provenance["account_id"], 7);
+        assert_eq!(rating.provenance["source_mode"], "ranked");
+        for invalid in [
+            json!({"badge":84,"rank":7,"subrank":4,"last_match":{"match_id":2}}),
+            json!({"badge":84,"rank":8,"subrank":3,"last_match":{"match_id":2}}),
+            json!({"badge":84,"rank":8,"subrank":4,"last_match":null}),
+        ] {
+            assert!(valve_rating(&invalid, 7, 100).is_none());
+        }
+    }
+    #[tokio::test]
+    async fn provider_failures_are_specific_and_do_not_leak_request_credentials() {
+        use std::io::{Read, Write};
+        for (status, body, expected) in [
+            (401, "secret response body", "provider returned HTTP 401"),
+            (429, "rate limited", "provider returned HTTP 429"),
+            (200, "not JSON", "provider returned invalid JSON"),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut request = [0; 4096];
+                let _received = socket.read(&mut request).unwrap();
+                write!(socket, "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            });
+            let request = reqwest::Client::new()
+                .get(format!("http://{addr}/?key=fixture-secret"))
+                .header("X-API-Key", "fixture-secret");
+            let reason = response_json(request).await.unwrap_err();
+            assert_eq!(reason, expected);
+            assert!(!reason.contains("fixture-secret"));
+            assert!(!reason.contains("secret response body"));
+            server.join().unwrap();
+        }
     }
 }

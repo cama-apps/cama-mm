@@ -27,6 +27,16 @@ impl Responder {
             .collect::<Vec<_>>()
             .join("\n")
     }
+    fn embed(&self) -> InteractionEmbed {
+        self.responses
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|response| &response.embeds)
+            .next()
+            .expect("expected a lobby embed")
+            .clone()
+    }
 }
 #[async_trait]
 impl InteractionResponder for Responder {
@@ -58,6 +68,7 @@ struct Transport {
     sent: Mutex<Vec<(u64, DiscordMessage)>>,
     parents: Mutex<BTreeMap<u64, u64>>,
     fail_after_send: AtomicBool,
+    names: Mutex<BTreeMap<u64, String>>,
 }
 #[async_trait]
 impl DiscordTransport for Transport {
@@ -176,6 +187,13 @@ impl DiscordTransport for Transport {
     ) -> Result<Option<DiscordGuildMemberSnapshot>, String> {
         self.events.lock().unwrap().push("member lookup".into());
         Ok(None)
+    }
+    fn cached_guild_member_render_names(
+        &self,
+        _: u64,
+        _: &[u64],
+    ) -> Result<Option<crate::discord_transport::DiscordGuildMemberRenderNames>, String> {
+        Ok(Some(self.names.lock().unwrap().clone()))
     }
     async fn channel_parent_id(&self, _: u64, channel: u64) -> Result<Option<u64>, String> {
         self.events.lock().unwrap().push("channel lookup".into());
@@ -376,11 +394,295 @@ async fn queue_database_read_occurs_after_defer_and_names_fail_closed() {
         .handle(request("lobby", 1, 420, 1, vec![]), responder.clone())
         .await
         .unwrap();
-    let text = responder.content();
+    let embed = responder.embed();
+    let text = format!(
+        "{} {}",
+        embed.description.as_deref().unwrap(),
+        embed
+            .fields
+            .iter()
+            .map(|field| field.value.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
     assert!(text.contains("1 queued"));
-    assert!(text.contains("Unknown player"));
-    assert!(!text.contains("123456789"));
+    assert!(text.contains("[Unknown player](https://statlocker.gg/profile/123456789) [25.0]"));
+    assert!(!text.contains("[123456789]"));
+    assert!(!text.contains("<@123456789>"));
     assert_eq!(f.transport.events.lock().unwrap()[0], "defer");
+}
+
+#[tokio::test]
+async fn lobby_embed_shows_readable_names_local_mode_ratings_and_ready_status() {
+    let f = Fixture::new();
+    f.queue(1, DeadlockFormat::StreetBrawl);
+    f.transport
+        .names
+        .lock()
+        .unwrap()
+        .insert(1, "Ash Chan".into());
+    let connection = cama_db::open_runtime_connection(f.file.path()).unwrap();
+    connection.execute("UPDATE deadlock_ratings SET mu=31.2 WHERE guild_id=42 AND discord_id=1 AND format='street_brawl'", []).unwrap();
+    connection.execute("UPDATE deadlock_ratings SET mu=27.1 WHERE guild_id=42 AND discord_id=1 AND format='standard'", []).unwrap();
+    let reply = f.command("lobby", 1, 420, 1, vec![]).await;
+    let embed = reply.embed();
+    assert_eq!(embed.title.as_deref(), Some("Deadlock · Street Brawl 4v4"));
+    assert_eq!(embed.color, Some(0xc69c6d));
+    assert!(embed.description.as_deref().unwrap().contains("1/8 ready"));
+    assert!(
+        embed
+            .description
+            .as_deref()
+            .unwrap()
+            .contains("7 more ready players")
+    );
+    assert_eq!(
+        embed.fields[0].value,
+        "✓ [Ash Chan](https://statlocker.gg/profile/1) [31.2] · Ready"
+    );
+    assert!(
+        embed
+            .footer
+            .as_deref()
+            .unwrap()
+            .contains("Local ratings in brackets")
+    );
+    {
+        let responses = reply.responses.lock().unwrap();
+        assert!(responses[0].content.is_empty());
+        assert_eq!(responses[0].components[0].buttons.len(), 5);
+    }
+    let reply = f
+        .command("lobby", 1, 420, 2, vec![text_option("format", "standard")])
+        .await;
+    let embed = reply.embed();
+    assert_eq!(embed.title.as_deref(), Some("Deadlock · Standard 6v6"));
+    assert!(embed.description.as_deref().unwrap().contains("0/12 ready"));
+    assert_eq!(
+        embed.fields[0].value,
+        "○ [Ash Chan](https://statlocker.gg/profile/1) [27.1] · Waiting"
+    );
+}
+
+#[tokio::test]
+async fn lobby_embed_explains_empty_and_full_ready_states() {
+    let f = Fixture::new();
+    let empty = f.command("lobby", 1, 420, 1, vec![]).await.embed();
+    assert!(empty.description.as_deref().unwrap().contains("0 queued"));
+    assert!(empty.fields[0].value.contains("No players yet"));
+    f.queue(8, DeadlockFormat::StreetBrawl);
+    let ready = f.command("lobby", 1, 420, 2, vec![]).await.embed();
+    assert!(ready.description.as_deref().unwrap().contains("8/8 ready"));
+    assert!(
+        ready
+            .description
+            .as_deref()
+            .unwrap()
+            .contains("Ready to shuffle")
+    );
+    assert!(
+        ready
+            .fields
+            .iter()
+            .any(|field| field.name == "Shuffle"
+                && field.value.contains("`/shuffle lobby:deadlock`"))
+    );
+}
+
+#[tokio::test]
+async fn lobby_embed_bounds_long_unicode_names_and_reports_queue_overflow() {
+    let f = Fixture::new();
+    f.queue(25, DeadlockFormat::StreetBrawl);
+    for id in 1..=25 {
+        f.transport
+            .names
+            .lock()
+            .unwrap()
+            .insert(id, format!("Player {}", "🦉".repeat(100)));
+    }
+    let embed = f.command("lobby", 1, 420, 1, vec![]).await.embed();
+    assert!(embed.content_len() <= 6000);
+    assert!(
+        embed
+            .fields
+            .iter()
+            .all(|field| field.value.encode_utf16().count() <= 1024)
+    );
+    let players: Vec<_> = embed
+        .fields
+        .iter()
+        .filter(|field| field.name.starts_with("Players"))
+        .collect();
+    assert!(players.len() > 1);
+    assert_eq!(
+        players
+            .iter()
+            .map(|field| field.value.matches("[25.0]").count())
+            .sum::<usize>(),
+        20
+    );
+    assert!(
+        embed.fields.iter().any(
+            |field| field.name == "Also queued" && field.value == "5 more players are waiting."
+        )
+    );
+}
+
+fn imported_rating_fixture() -> ImportedRatings {
+    let standard = crate::deadlock_ratings::ImportedRating {
+        mu: 36.0,
+        sigma: 8.333,
+        source: "valve-rank-weak-prior-v1".into(),
+        raw_value: Some(95.0),
+        provenance: serde_json::json!({"provider": "deadlock-api", "source_mode": "ranked"}),
+    };
+    let mut brawl = standard.clone();
+    brawl.mu = 27.75;
+    brawl.source = "standard-weak-brawl-prior-v1".into();
+    ImportedRatings { standard, brawl }
+}
+
+#[tokio::test]
+async fn registration_shows_ratings_and_fallback_reason_without_external_api_links() {
+    let f = Fixture::new();
+    f.provider.handler.ratings.seed_cache(
+        1,
+        ImportedRatings::provisional("No usable current ranked badge"),
+    );
+    let reply = f
+        .command("register", 1, 420, 1, vec![text_option("steam", "1")])
+        .await;
+    let text = reply.content();
+    assert!(text.contains("Standard **25.0** · Brawl **25.0**"));
+    assert!(text.contains("No external rating was available; starting with the default rating."));
+    assert!(!text.contains("API key"));
+    assert!(!text.contains("Import status:"));
+    assert!(!text.contains("deadlock-api"));
+    assert!(!text.contains("Deadlock API"));
+    assert!(text.contains("[Statlocker profile](https://statlocker.gg/profile/1)"));
+    assert_eq!(f.transport.events.lock().unwrap()[0], "defer");
+    let retry = f
+        .command("register", 1, 420, 2, vec![text_option("steam", "1")])
+        .await;
+    assert!(
+        retry
+            .content()
+            .contains("Your local ratings were preserved")
+    );
+    assert!(
+        retry
+            .content()
+            .contains("No external rating was available; starting with the default rating.")
+    );
+}
+
+#[tokio::test]
+async fn registration_retries_only_unplayed_neutral_priors_without_another_wallet_grant() {
+    let f = Fixture::new();
+    f.provider.handler.ratings.seed_cache(
+        1,
+        ImportedRatings::provisional("No usable current ranked badge"),
+    );
+    f.command("register", 1, 420, 1, vec![text_option("steam", "1")])
+        .await;
+    let balance = f.balance(1);
+    // Standard already has a local result; only the still-unplayed Brawl seed can change.
+    cama_db::open_runtime_connection(f.file.path()).unwrap().execute("UPDATE deadlock_ratings SET mu=29.3,games=1,revision=1 WHERE guild_id=42 AND discord_id=1 AND format='standard'", []).unwrap();
+    f.provider
+        .handler
+        .ratings
+        .seed_cache(1, imported_rating_fixture());
+    let reply = f
+        .command("register", 1, 420, 2, vec![text_option("steam", "1")])
+        .await;
+    let text = reply.content();
+    assert!(text.contains("Registration refreshed"));
+    assert!(text.contains("Standard **29.3** · Brawl **27.8**"));
+    assert!(text.contains("Initial rating: Valve ranked badge (provisional)."));
+    assert!(text.contains("[Statlocker profile](https://statlocker.gg/profile/1)"));
+    assert!(!text.contains("deadlock-api"));
+    assert_eq!(f.balance(1), balance);
+    let ratings = f.repo().ratings(42, 1).unwrap();
+    assert!(
+        ratings
+            .iter()
+            .any(|rating| rating.format == DeadlockFormat::Standard
+                && rating.mu == 29.3
+                && rating.games == 1)
+    );
+    assert!(
+        ratings
+            .iter()
+            .any(|rating| rating.format == DeadlockFormat::StreetBrawl
+                && rating.mu == 27.75
+                && rating.games == 0)
+    );
+    let reply = f
+        .command("register", 1, 420, 3, vec![text_option("steam", "1")])
+        .await;
+    assert!(
+        reply
+            .content()
+            .contains("Your local ratings were preserved")
+    );
+    assert_eq!(f.balance(1), balance);
+}
+
+#[tokio::test]
+async fn registration_converts_steam64_to_unsigned_account_id_for_profile_links() {
+    let f = Fixture::new();
+    let account = u32::MAX;
+    f.provider
+        .handler
+        .ratings
+        .seed_cache(account, imported_rating_fixture());
+    let steam64 = (76_561_197_960_265_728_u64 + u64::from(account)).to_string();
+    let reply = f
+        .command("register", 1, 420, 1, vec![text_option("steam", &steam64)])
+        .await;
+    let text = reply.content();
+    assert!(text.contains("[Statlocker profile](https://statlocker.gg/profile/4294967295)"));
+    assert!(!text.contains(&steam64));
+    assert!(!text.contains("deadlock-api"));
+    assert_eq!(
+        f.repo().enrolled(42, 1).unwrap().unwrap().steam_id,
+        i64::from(account)
+    );
+}
+
+#[tokio::test]
+async fn match_profile_links_escape_names_and_fit_discord_with_twelve_long_names() {
+    let f = Fixture::new();
+    f.queue(12, DeadlockFormat::Standard);
+    for id in 1..=12 {
+        f.transport
+            .names
+            .lock()
+            .unwrap()
+            .insert(id, "[🦉*_](example)".repeat(20));
+    }
+    f.command(
+        "shuffle",
+        99,
+        420,
+        1,
+        vec![text_option("format", "standard")],
+    )
+    .await;
+    let reply = f
+        .command(
+            "match",
+            99,
+            420,
+            2,
+            vec![int_option("match", f.game().match_id)],
+        )
+        .await;
+    let text = reply.content();
+    assert!(text.encode_utf16().count() <= 2000);
+    assert_eq!(text.matches("https://statlocker.gg/profile/").count(), 12);
+    assert!(text.contains("\\[🦉\\*\\_\\]"));
+    assert!(!text.contains("deadlock-api"));
 }
 
 #[tokio::test]

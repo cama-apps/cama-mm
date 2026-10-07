@@ -38,17 +38,19 @@ Readiness is specific to the requested format. Queue participation alone is not 
 
 ## Ratings
 
-Optional external configuration:
+Deadlock API supplies all external rating data. Basic lookups need no API key. An optional key can raise provider request limits:
 
 ```dotenv
-STATLOCKER_API_KEY=...
 DEADLOCK_API_KEY=...
-DEADLOCK_STATLOCKER_STANDARD_CONFIRMED=false
 ```
 
-Statlocker's documented profile API does not establish a mode selector. Set `DEADLOCK_STATLOCKER_STANDARD_CONFIRMED=true` only after confirming the account/profile endpoint's ladder semantics with the provider. The importer checks returned identity, positive PP, supplied badge, and timestamp, retaining raw provenance. It deliberately does not copy the inconsistent documented PP-to-badge conversion.
+Statlocker is used only for generated profile links: `https://statlocker.gg/profile/<Steam32 account ID>`. Registration includes the player's profile link; lobby and match rosters link readable names to their profiles. SteamID64 input is converted to an unsigned 32-bit account number. No Statlocker API request, API key, or confirmation flag is used.
 
-Without a usable confirmed Statlocker profile, the importer requests the current Valve ranked badge through Deadlock API. Missing/private/unranked/provider failures use an explicit neutral prior. Requests have bounded timeouts, bounded response bodies, no redirects, and a short bounded cache. Keys are redacted and requests do not hold SQLite write locks.
+The importer requests the current Valve ranked badge through Deadlock API and retains its provenance. Missing/private/unranked/provider failures use an explicit neutral prior. Registration shows a simple default-rating message, while logs retain diagnostic details such as HTTP errors and absent ranked badges, without exposing credentials. Requests have bounded timeouts, bounded response bodies, no redirects, and a short bounded cache. Keys are redacted and requests do not hold SQLite write locks.
+
+The importer maps the supplied ranked badge to the local OpenSkill scale. It does not divide Valve MMR by four. The Brawl prior shrinks the Standard estimate's deviation from the neutral rating by 75%. Lobby embeds show that format's local rating after each player's name. Existing saved rating sources remain readable and existing imported or played ratings are preserved.
+
+If an initial import failed, repeat `/deadlock register` with the same Steam account after correcting provider configuration or availability. Only an untouched neutral prior with zero games and zero rating revisions can be filled. A committed match blocks this update, and existing imported or played ratings are preserved. Retrying grants no new signup funds.
 
 Local ratings use the existing OpenSkill team update with independent Brawl and Standard pools. The initial badge ordinal maps to a **weak, provisional** prior on the OpenSkill scale; it is not claimed to be a statistically calibrated conversion. Brawl receives a strongly shrunk Standard prior until a supported Brawl import contract is available. High uncertainty lets local games move that initial estimate. Every enrollment stores the source, raw value, transformation label, and provenance. Established ratings are never overwritten by refresh or re-registration.
 
