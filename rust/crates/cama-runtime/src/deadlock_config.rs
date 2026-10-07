@@ -13,9 +13,7 @@ pub struct DeadlockConfig {
     pub channels: BTreeMap<i64, u64>,
     pub betting_window_seconds: i64,
     pub seed_amount: i64,
-    pub statlocker_key: Option<Secret>,
     pub api_key: Option<Secret>,
-    pub statlocker_standard_confirmed: bool,
 }
 
 impl DeadlockConfig {
@@ -103,25 +101,16 @@ impl DeadlockConfig {
         if seed_amount < 0 {
             return Err("DEADLOCK_BET_SEED_AMOUNT must be nonnegative".into());
         }
-        let statlocker_key = lookup("STATLOCKER_API_KEY")
-            .filter(|v| !v.trim().is_empty())
-            .map(Secret::new);
         let api_key = lookup("DEADLOCK_API_KEY")
             .filter(|v| !v.trim().is_empty())
             .map(Secret::new);
-        let statlocker_standard_confirmed = flag(
-            lookup("DEADLOCK_STATLOCKER_STANDARD_CONFIRMED"),
-            "DEADLOCK_STATLOCKER_STANDARD_CONFIRMED",
-        )?;
         Ok(Self {
             enabled,
             guild_ids,
             channels,
             betting_window_seconds,
             seed_amount,
-            statlocker_key,
             api_key,
-            statlocker_standard_confirmed,
         })
     }
 
@@ -136,6 +125,17 @@ impl DeadlockConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rating_import_does_not_require_or_read_statlocker_configuration() {
+        let config = DeadlockConfig::from_lookup(|key| {
+            assert_ne!(key, "STATLOCKER_API_KEY");
+            assert_ne!(key, "DEADLOCK_STATLOCKER_STANDARD_CONFIRMED");
+            None
+        })
+        .unwrap();
+        assert!(config.api_key.is_none());
+    }
+
     #[test]
     fn rollout_is_explicit_and_guild_scoped() {
         let disabled = DeadlockConfig::from_lookup(|_| None).unwrap();
@@ -160,7 +160,7 @@ mod tests {
             assert!(DeadlockConfig::from_lookup(|k| (k == key).then(|| value.to_owned())).is_err());
         }
         let config = DeadlockConfig::from_lookup(|k| {
-            (k == "STATLOCKER_API_KEY").then(|| "private-key".to_owned())
+            (k == "DEADLOCK_API_KEY").then(|| "private-key".to_owned())
         })
         .unwrap();
         assert!(!format!("{config:?}").contains("private-key"));

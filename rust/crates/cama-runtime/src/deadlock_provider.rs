@@ -274,11 +274,7 @@ impl DeadlockRegistrationProvider {
         vanity: Arc<PersistentVanityTaxService>,
         host_account: Option<u32>,
     ) -> Result<Self, String> {
-        let ratings = DeadlockRatingClient::new(
-            config.statlocker_key.clone(),
-            config.api_key.clone(),
-            config.statlocker_standard_confirmed,
-        )?;
+        let ratings = DeadlockRatingClient::new(config.api_key.clone())?;
         let terms = DeadlockMarketTerms {
             betting_window_seconds: config.betting_window_seconds,
             min_bet: application.values.jopacoin_min_bet,
@@ -738,17 +734,62 @@ impl DeadlockHandler {
                     string_option(&c.options, "steam").ok_or("Enter your Steam ID")?,
                 )?;
                 let lookup = repo.clone();
-                if let Some(existing) =
+                let reply = if let Some(existing) =
                     blocking(move || lookup.enrolled(guild, user).map_err(|e| e.to_string()))
                         .await?
                 {
                     if existing.steam_id != i64::from(account) {
                         return Err("Your Deadlock account is already linked; ask an admin to review an account change.".into());
                     }
-                    "You are already registered. Your local ratings were preserved.".to_owned()
+                    let lookup = repo.clone();
+                    let ratings =
+                        blocking(move || lookup.ratings(guild, user).map_err(|e| e.to_string()))
+                            .await?;
+                    if ratings.iter().any(|rating| {
+                        rating.games == 0
+                            && rating.revision == 0
+                            && rating.seed_source == "provisional-v1"
+                    }) {
+                        let imported = self.ratings.fetch(account, at).await;
+                        let source = rating_source_label(&imported.standard.source);
+                        let reason = registration_import_reason(&imported);
+                        let seeds = rating_seeds(imported, at);
+                        let updated = blocking(move || {
+                            repo.refresh_unplayed_provisional(
+                                guild,
+                                user,
+                                i64::from(account),
+                                &seeds,
+                                at,
+                            )
+                            .map_err(|e| e.to_string())
+                        })
+                        .await?;
+                        if updated > 0 {
+                            let refreshed = DeadlockRepository::new(&self.path);
+                            let ratings = blocking(move || {
+                                refreshed.ratings(guild, user).map_err(|e| e.to_string())
+                            })
+                            .await?;
+                            format!(
+                                "Registration refreshed. {}\nInitial rating: {source}.{reason}\nUnplayed provisional ratings were updated. Join with `/deadlock join`.",
+                                local_rating_summary(&ratings)
+                            )
+                        } else {
+                            format!(
+                                "You are already registered. {}\nYour local ratings were preserved.{reason}",
+                                local_rating_summary(&ratings)
+                            )
+                        }
+                    } else {
+                        format!(
+                            "You are already registered. {}\nYour local ratings were preserved.",
+                            local_rating_summary(&ratings)
+                        )
+                    }
                 } else {
                     let imported = self.ratings.fetch(account, at).await;
-                    let source = rating_source_label(&imported.standard.source);
+                    let summary = registration_import_summary(&imported);
                     let seeds = rating_seeds(imported, at);
                     let name = c.display_name.clone();
                     blocking(move || {
@@ -756,10 +797,12 @@ impl DeadlockHandler {
                             .map_err(|e| e.to_string())
                     })
                     .await?;
-                    format!(
-                        "Registered for Deadlock. Initial rating: {source}. Brawl starts provisionally and learns from your games. Join with `/deadlock join`. External data: [Statlocker](https://statlocker.gg) / [Deadlock API](https://deadlock-api.com)."
-                    )
-                }
+                    format!("Registered for Deadlock. {summary}\nJoin with `/deadlock join`.")
+                };
+                format!(
+                    "{reply}\n[Statlocker profile]({})",
+                    statlocker_profile_url(account)
+                )
             }
             "join" => {
                 blocking(move || repo.queue_join(guild, user, at).map_err(|e| e.to_string()))
@@ -1180,36 +1223,95 @@ impl DeadlockHandler {
             .iter()
             .filter(|p| p.ready_format == Some(format) && p.ready_until.is_some_and(|t| t > at))
             .count();
-        let mut rows = queue
-            .iter()
-            .take(20)
-            .map(|p| {
-                format!(
-                    "{} {}",
-                    if p.ready_format == Some(format) && p.ready_until.is_some_and(|t| t > at) {
-                        "✓"
-                    } else {
-                        "·"
-                    },
-                    names.resolve(p.player.discord_id)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        if queue.len() > 20 {
-            rows.push_str(&format!("\n…and {} more waiting.", queue.len() - 20));
-        }
-        let mut response = InteractionResponse::message(format!(
-            "**Deadlock · {}**\n{ready}/{} ready · {} queued\n{}\nReady expires after ten minutes. `/shuffle lobby:deadlock` defaults to Brawl; add `format:standard` for 6v6.",
-            format.label(),
-            format.player_count(),
-            queue.len(),
-            if rows.is_empty() {
-                "Queue is empty."
-            } else {
-                &rows
+        let needed = format.player_count().saturating_sub(ready);
+        let status = if queue.is_empty() {
+            "The lobby is open. Join below to start gathering players.".to_owned()
+        } else if needed == 0 {
+            "**Ready to shuffle.** Create balanced teams with the command below.".to_owned()
+        } else {
+            format!(
+                "Waiting for **{needed} more ready player{}**. Join and mark yourself ready below.",
+                if needed == 1 { "" } else { "s" }
+            )
+        };
+        let mut embed = InteractionEmbed::titled(format!("Deadlock · {}", format.label()))
+            .color(0xc69c6d)
+            .description(format!(
+                "**{ready}/{} ready** · **{} queued**\n\n{status}",
+                format.player_count(),
+                queue.len()
+            ))
+            .footer("Local ratings in brackets · Ready expires after ten minutes.");
+        if queue.is_empty() {
+            embed = embed.field("Players", "No players yet. Use **Join** below.", false);
+        } else {
+            let mut rows = String::new();
+            let mut continuation = false;
+            for p in queue.iter().take(20) {
+                let ready = p.ready_format == Some(format) && p.ready_until.is_some_and(|t| t > at);
+                let name = names.resolve(p.player.discord_id);
+                let name_label = statlocker_player_link(&name, p.player.steam_id);
+                let rating = format!("{:.1}", p.player.mu);
+                let rating = if rating.len() > 16 {
+                    format!("{:.2e}", p.player.mu)
+                } else {
+                    rating
+                };
+                let row = format!(
+                    "{} {} [{}] · {}",
+                    if ready { "✓" } else { "○" },
+                    name_label,
+                    rating,
+                    if ready { "Ready" } else { "Waiting" }
+                );
+                if !rows.is_empty()
+                    && rows.encode_utf16().count() + row.encode_utf16().count() + 2 > 1024
+                {
+                    embed = embed.field(
+                        if continuation {
+                            "Players (continued)"
+                        } else {
+                            "Players"
+                        },
+                        std::mem::take(&mut rows),
+                        false,
+                    );
+                    continuation = true;
+                }
+                if !rows.is_empty() {
+                    rows.push_str("\n\n");
+                }
+                rows.push_str(&row);
             }
-        ));
+            embed = embed.field(
+                if continuation {
+                    "Players (continued)"
+                } else {
+                    "Players"
+                },
+                rows,
+                false,
+            );
+            if queue.len() > 20 {
+                embed = embed.field(
+                    "Also queued",
+                    format!("{} more players are waiting.", queue.len() - 20),
+                    false,
+                );
+            }
+        }
+        let commands = match format {
+            DeadlockFormat::StreetBrawl => {
+                "**Street Brawl:** `/shuffle lobby:deadlock`\n\n**Standard 6v6:** ready with **Ready 6v6**, then `/shuffle lobby:deadlock format:standard`"
+            }
+            DeadlockFormat::Standard => {
+                "**Standard:** `/shuffle lobby:deadlock format:standard`\n\n**Street Brawl 4v4:** ready with **Ready 4v4**, then `/shuffle lobby:deadlock`"
+            }
+        };
+        embed = embed.field("Shuffle", commands, false);
+        let mut response = InteractionResponse::message("")
+            .embed(embed)
+            .without_mentions();
         response.components.push(InteractionActionRow::buttons(vec![
             InteractionButton::new("deadlock:join", "Join"),
             InteractionButton::new("deadlock:leave", "Leave")
@@ -1246,7 +1348,7 @@ impl DeadlockHandler {
                 .await;
         let render = |team: &[cama_domain::deadlock::DeadlockPlayer]| {
             team.iter()
-                .map(|p| names.resolve(p.discord_id))
+                .map(|p| statlocker_player_link(&names.resolve(p.discord_id), p.steam_id))
                 .collect::<Vec<_>>()
                 .join(", ")
         };
@@ -1472,6 +1574,80 @@ fn rating_source_label(source: &str) -> &'static str {
     } else {
         "Neutral provisional rating"
     }
+}
+
+fn registration_import_reason(imported: &ImportedRatings) -> String {
+    if imported.standard.source == "provisional-v1" {
+        "\nNo external rating was available; starting with the default rating.".to_owned()
+    } else {
+        String::new()
+    }
+}
+
+fn statlocker_profile_url(account: u32) -> String {
+    format!("https://statlocker.gg/profile/{account}")
+}
+
+fn statlocker_player_link(name: &str, account: i64) -> String {
+    // Bound and escape the display label, preserving readable names in Discord links.
+    let mut label: String = name.chars().take(32).collect();
+    if name.chars().count() > 32 {
+        label.push('…');
+    }
+    let mut escaped = String::new();
+    for ch in label.chars() {
+        if matches!(ch, '\\' | '[' | ']' | '*' | '_' | '`' | '~' | '|') {
+            escaped.push('\\');
+        }
+        if !ch.is_control() {
+            escaped.push(ch);
+        }
+    }
+    match u32::try_from(account).ok().filter(|id| *id > 0) {
+        Some(account) => format!("[{escaped}]({})", statlocker_profile_url(account)),
+        None => escaped,
+    }
+}
+
+fn registration_import_summary(imported: &ImportedRatings) -> String {
+    if imported.standard.source == "provisional-v1" {
+        return format!(
+            "Standard **{:.1}** · Brawl **{:.1}**.{}",
+            imported.standard.mu,
+            imported.brawl.mu,
+            registration_import_reason(imported)
+        );
+    }
+    let source = rating_source_label(&imported.standard.source);
+    format!(
+        "Standard **{:.1}** · Brawl **{:.1}**.\nInitial rating: {source}.{}",
+        imported.standard.mu,
+        imported.brawl.mu,
+        registration_import_reason(imported)
+    )
+}
+
+fn local_rating_summary(ratings: &[cama_db::deadlock::DeadlockRating]) -> String {
+    [DeadlockFormat::Standard, DeadlockFormat::StreetBrawl]
+        .into_iter()
+        .filter_map(|format| {
+            ratings
+                .iter()
+                .find(|rating| rating.format == format)
+                .map(|rating| {
+                    format!(
+                        "{} **{:.1}**",
+                        if format == DeadlockFormat::Standard {
+                            "Standard"
+                        } else {
+                            "Brawl"
+                        },
+                        rating.mu
+                    )
+                })
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 struct DeadlockRecovery {

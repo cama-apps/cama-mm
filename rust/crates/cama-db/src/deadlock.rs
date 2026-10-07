@@ -169,6 +169,60 @@ impl DeadlockRepository {
         transaction.commit()?;
         Ok(())
     }
+    /// Retry an unavailable signup prior without resetting played ratings,
+    /// changing an account link, or modifying a committed match's inputs.
+    pub fn refresh_unplayed_provisional(
+        &self,
+        guild: i64,
+        user: i64,
+        steam: i64,
+        seeds: &[DeadlockSeed],
+        now: i64,
+    ) -> Result<usize, DeadlockError> {
+        identity(guild, user)?;
+        for seed in seeds {
+            if !seed.mu.is_finite()
+                || !seed.sigma.is_finite()
+                || seed.sigma <= 0.0
+                || seed.source.trim().is_empty()
+                || seed.source_value.is_some_and(|value| !value.is_finite())
+            {
+                return Err(invalid("invalid rating seed"));
+            }
+        }
+        let mut connection = open_runtime_connection(&self.path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let linked: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM deadlock_players WHERE guild_id=?1 AND discord_id=?2 AND steam_id=?3)",
+            params![guild, user, steam], |row| row.get(0),
+        )?;
+        if !linked {
+            return Err(invalid("rating retry must use the linked Deadlock account"));
+        }
+        let committed: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM deadlock_participants p JOIN deadlock_matches m USING(match_id) WHERE p.guild_id=?1 AND p.discord_id=?2 AND m.status IN('economic_setup','gathering','running'))",
+            params![guild, user], |row| row.get(0),
+        )?;
+        if committed {
+            return Ok(0);
+        }
+        let mut updated = 0;
+        for seed in seeds {
+            if seed.source == "provisional-v1" || seed.source_value.is_none() {
+                continue;
+            }
+            updated += transaction.execute(
+                "UPDATE deadlock_ratings SET mu=?4,sigma=?5,seed_source=?6,seed_value=?7,seeded_at=?8,seed_provenance=?9,seed_source_at=?10 WHERE guild_id=?1 AND discord_id=?2 AND format=?3 AND games=0 AND revision=0 AND seed_source='provisional-v1'",
+                params![guild,user,seed.format.as_str(),seed.mu,seed.sigma,seed.source,seed.source_value,now,seed.provenance,seed.source_at],
+            )?;
+        }
+        if updated > 0 {
+            transaction.execute("INSERT INTO deadlock_audit_events(guild_id,actor_id,kind,detail,created_at) VALUES(?1,?2,'rating_seed_retry',?3,?4)",params![guild,user,format!("updated_formats={updated}"),now])?;
+        }
+        transaction.commit()?;
+        Ok(updated)
+    }
+
     pub fn queue_join(&self, guild: i64, user: i64, now: i64) -> Result<(), DeadlockError> {
         identity(guild, user)?;
         let mut conn = open_runtime_connection(&self.path)?;
@@ -764,6 +818,150 @@ mod tests {
         repo.ready(10, user, DeadlockFormat::StreetBrawl, 120)
             .unwrap();
     }
+    #[test]
+    fn neutral_import_retry_updates_once_without_granting_another_wallet_balance() {
+        let (file, repo) = fixture();
+        enroll(&repo, 1);
+        let seeds = imported_seeds();
+        assert_eq!(
+            repo.refresh_unplayed_provisional(10, 1, 1, &seeds, 130)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            repo.refresh_unplayed_provisional(10, 1, 1, &seeds, 131)
+                .unwrap(),
+            0
+        );
+        let ratings = repo.ratings(10, 1).unwrap();
+        assert!(ratings.iter().all(|rating| rating.seed_value == Some(84.0)
+            && rating.games == 0
+            && rating.revision == 0));
+        assert!(
+            repo.queue(10, DeadlockFormat::StreetBrawl).unwrap()[0]
+                .player
+                .mu
+                > 25.0
+        );
+        let connection = open_runtime_connection(file.path()).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT jopacoin_balance FROM players WHERE guild_id=10 AND discord_id=1",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM deadlock_audit_events WHERE kind='rating_seed_retry'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn import_retry_preserves_played_ratings_and_rejects_a_different_account() {
+        let (file, repo) = fixture();
+        enroll(&repo, 1);
+        let connection = open_runtime_connection(file.path()).unwrap();
+        connection.execute("UPDATE deadlock_ratings SET games=1,revision=1,mu=27 WHERE guild_id=10 AND discord_id=1 AND format='street_brawl'", []).unwrap();
+        assert!(
+            repo.refresh_unplayed_provisional(10, 1, 2, &imported_seeds(), 130)
+                .is_err()
+        );
+        assert_eq!(
+            repo.refresh_unplayed_provisional(10, 1, 1, &imported_seeds(), 130)
+                .unwrap(),
+            1
+        );
+        let brawl = repo
+            .ratings(10, 1)
+            .unwrap()
+            .into_iter()
+            .find(|rating| rating.format == DeadlockFormat::StreetBrawl)
+            .unwrap();
+        assert_eq!((brawl.mu, brawl.games, brawl.revision), (27.0, 1, 1));
+        assert!(
+            repo.refresh_unplayed_provisional(20, 1, 1, &imported_seeds(), 130)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn import_retry_cannot_change_a_committed_roster_or_accept_another_neutral_prior() {
+        let (_file, repo) = fixture();
+        for user in 1..=8 {
+            enroll(&repo, user);
+        }
+        let mut missing = imported_seeds();
+        for seed in &mut missing {
+            seed.source = "provisional-v1".into();
+            seed.source_value = None;
+        }
+        assert_eq!(
+            repo.refresh_unplayed_provisional(10, 1, 1, &missing, 130)
+                .unwrap(),
+            0
+        );
+        let game = repo
+            .shuffle(10, DeadlockFormat::StreetBrawl, 99, 130)
+            .unwrap();
+        assert_eq!(
+            repo.refresh_unplayed_provisional(10, 1, 1, &imported_seeds(), 131)
+                .unwrap(),
+            0
+        );
+        assert!(
+            repo.ratings(10, 1)
+                .unwrap()
+                .iter()
+                .all(|rating| rating.mu == 25.0)
+        );
+        assert!(
+            repo.match_by_id(10, game.match_id)
+                .unwrap()
+                .unwrap()
+                .team1
+                .iter()
+                .chain(game.team2.iter())
+                .all(|player| player.mu == 25.0)
+        );
+        repo.abort(10, game.match_id, 99, "cancelled", 132).unwrap();
+        assert_eq!(
+            repo.refresh_unplayed_provisional(10, 1, 1, &imported_seeds(), 133)
+                .unwrap(),
+            2
+        );
+    }
+
+    fn imported_seeds() -> [DeadlockSeed; 2] {
+        [DeadlockFormat::StreetBrawl, DeadlockFormat::Standard].map(|format| DeadlockSeed {
+            format,
+            mu: if format == DeadlockFormat::StreetBrawl {
+                26.75
+            } else {
+                32.0
+            },
+            sigma: 8.333,
+            source: if format == DeadlockFormat::StreetBrawl {
+                "standard-weak-brawl-prior-v1"
+            } else {
+                "valve-rank-weak-prior-v1"
+            }
+            .into(),
+            source_value: Some(84.0),
+            provenance: Some("{}".into()),
+            source_at: Some(125),
+        })
+    }
+
     #[test]
     fn enrollment_queue_and_frozen_fifo_roster() {
         let (file, repo) = fixture();

@@ -1,6 +1,8 @@
 # Deadlock lobby implementation research
 
-Research date: 2026-10-02. Repository originally inspected at `0fe792c8af9ebe2b0a100ef1222a3b6e899f6c07`. This records the research and implementation proposal. Subsequent implementation, including the dedicated `#deadlock-mm` channel, is described in [DEADLOCK_HOSTING.md](DEADLOCK_HOSTING.md); consult that document for the actual configuration and supported commands. Public documentation and source were inspected; no authenticated rating requests, real game lobbies, or live match completion were tested.
+**Current decision:** pull all external data from Deadlock API. Generate Statlocker profile links from Steam32 account IDs only. Statlocker API access is no longer an implementation dependency; its investigation below is retained as research evidence.
+
+Initial research date: 2026-10-02; provider audit updated 2026-10-07. Repository originally inspected at `0fe792c8af9ebe2b0a100ef1222a3b6e899f6c07`. This records the research and implementation proposal. Subsequent implementation, including the dedicated `#deadlock-mm` channel, is described in [DEADLOCK_HOSTING.md](DEADLOCK_HOSTING.md); consult that document for the actual configuration and supported commands. The October 7 audit includes live public rank/history lookups for the local test registration and an unauthenticated Statlocker request. No approved Statlocker key, real game lobby, or live match completion was tested.
 
 The first release should provide one persistent Deadlock queue per guild, **defaulting to Street Brawl 4v4**, with a **shuffle option for Standard 6v6**, external initial ratings, balanced teams, and **integrated Jopacoin betting**. Use a **separate Deadlock Steam account** and a dedicated Rust host adapter built on the existing Steam infrastructure. Keep the two modes' local ratings separate. Hero drafting, player drafting, and captain drafting are out of scope.
 
@@ -148,6 +150,48 @@ The rank implementation returns account IDs with badge/tier/subrank and match pr
 Use this as a coarse ranked-skill prior when Statlocker is unavailable, with explicit source labeling. It will not solve Brawl-only coverage. Do not retain an older integration's interpretation of `player_score` merely because a deprecated route still responds.
 
 Other tracker websites are not automatically independent providers. Statlocker itself directs raw-data consumers to Deadlock API. Prefer these documented interfaces over scraping UI pages or relying on undocumented endpoints.
+
+### Provider audit: October 7, 2026
+
+**Use Deadlock API directly as the sole data provider. Statlocker supplies generated website links only.** This is the closest audited equivalent to OpenDota: a documented REST API, a machine-readable schema, and an open source backend. No supported service examined provides a generally accessible personal Street Brawl MMR import. Absence of a documented API below means no integration contract was established in this audit, not proof that private partnerships are impossible.
+
+| Service | Supported access established | Rating and Brawl coverage | Decision |
+| --- | --- | --- | --- |
+| [Deadlock API](https://api.deadlock-api.com/docs) | Public REST/OpenAPI; no key required for the rank lookup. | Valve badge from observed ranked matches; missing/placement rank is zero with null match provenance. Brawl match stats are available, but no personal Brawl rating contract was found. | Use directly. An optional key increases quota. |
+| [Statlocker](https://statlocker.gg/api) | Approved `X-API-Key`; Steam sign-in and manual application review. | Own `ppScore` and estimated badge. Documented profile fields omit mode/season selection and a separate Brawl PP field. | Optional weak general prior; do not label PP as Valve MMR. |
+| [Tracklock / U.GG](https://tracklock.gg/deadlock-mmr-tracker) | Website and app; no public developer API contract found. | Historical NekoScore is a regional estimate from observed lobby scores, affected by parties and missing games. FAQ references November 2024; it is not evidence of a current import contract. | Do not depend on website scraping. |
+| [DeadlockTracker.gg](https://deadlocktracker.gg/mmr) | Website and Steam login; no documented API/rate contract found. | Website advertises DLT Rating and rank/weekly results. Current score derivation and mode semantics were not established. | No supported import path established. This is separate from Tracker Network. |
+| [Tracker Network](https://tracker.gg/developers/docs/getting-started) | Developer portal exists, but its game API docs list Apex Legends and The Division 2, not Deadlock. | [Deadlock desktop app](https://tracker.gg/articles/deadlock-tracker-is-live) imports match history and shows stats; no supported programmable Deadlock rating contract was found. | Additional client ingestion does not establish bot access. |
+| [LockBlaze](https://www.lockblaze.com/how-ratings-work) | Website; no documented public API found. | Custom 0–100 performance score based on combat/economy metrics and lobby difficulty. Its methodology is labeled a proof of concept; wins/losses do not directly determine match ratings. | Neither canonical MMR nor a supported seed service. |
+| [Deadlocker](https://www.deadlocker.gg/api) | Its API page directs developers to Deadlock API. | Same upstream hero/match/analytics data; no independent rating import documented. | Integrate the upstream directly. |
+| [Deadlock Labs](https://deadlocklabs.gg/about/) | Website/desktop tooling; no documented developer API found. | Advertises MMR history and its own match service; says it uses GC/community data and credits Deadlock API. | Independent ingestion is possible, but supported external rating access was not established. |
+| [Valve directly](https://partner.steamgames.com/doc/webapi) | No public Deadlock rank REST endpoint found in the official Steamworks Web API reference. Community services use authenticated Game Coordinator messages. | Observed ranked history can carry rank/progress. No public personal Brawl MMR access was established. | A new Steam integration would add operational work without proving the missing rating is available. |
+
+There is substantial shared upstream. Deadlock API's creator says Tracklock adopted their API, while Statlocker and LockBlaze originally built on its data. Statlocker now also describes replay/companion ingestion, so this is not a claim that every provider has identical present-day coverage. Merely changing tracker websites is unlikely to repair an absent upstream rank. [Upstream history](https://deadlock-api.com/blog/how-deadlock-api-started), [Statlocker ingestion](https://statlocker.gg/features).
+
+**The local test account explains the registration result.** A live keyless lookup returned:
+
+```json
+{"badge":0,"rank":0,"subrank":0,"last_match":null}
+```
+
+The account's public history returned 294 stored matches; none had a populated nonzero `ranked_display_badge`. That verifies the importer reached the service and lacked usable public ranked evidence. It does not establish that the player has never played ranked, that their Steam profile is private, or that Statlocker has no PP estimate. Those are separate questions. An unauthenticated request to Statlocker's documented profile endpoint returned HTTP 401. Account identity and history were not committed to the repository.
+
+**Coverage and operational limits:** `/rank` reads stored `player_match_stats`; it does not request a fresh Steam history. Ordinary match-history requests return stored ClickHouse data; a provider-bot friend can also fetch Steam data. Their [Steam-cache ingestion](https://deadlock-api.com/ingest-cache) can improve observed coverage, but requires the player's client cache and does not create a rank for unranked games. [Rank source](https://github.com/deadlock-api/deadlock-api/blob/master/api/src/routes/v1/players/rank.rs), [history source](https://github.com/deadlock-api/deadlock-api/blob/master/api/src/routes/v1/players/match_history.rs).
+
+Do not switch to `/mmr`, `/mmr-history`, or `/rank-predict` to recover a hidden estimate: current contracts deprecate those routes, and rank-predict is only an alias of rank. The batch rank quota is 20 requests/minute/IP, 100/minute plus 2,000/hour/key, and 200/minute globally; limits are endpoint-specific. Paid `/card` and `/account-stats` have separate Patreon/friend requirements. The card contract says cards stopped carrying their own rank in build 6711; its supplied rank is the same latest-ranked-match value. Paying for cards does not establish a Brawl MMR escape hatch. Current endpoint contracts take precedence over the provider's older blog describing every endpoint as free. [Current OpenAPI](https://api.deadlock-api.com/openapi.json).
+
+**Statlocker access remains external.** Its live public documentation module was inspected again, along with the application flow. Applications need an authenticated Steam web session; key generation also checks approval. No authenticated Statlocker session was available to submit this application's request, and no key/application was obtained. The Dota host's game session is not a Statlocker web login. The supported form is at [statlocker.gg/api](https://statlocker.gg/api); it explicitly asks applicants to use the form instead of staff DMs. Published quotas remain 10,000 account items and 1,000 match items per hour.
+
+Prepared application text for that form:
+
+> Cama-MM is a Rust Discord bot for community inhouse games. We are adding Deadlock matchmaking: Street Brawl 4v4 by default, with an optional Standard 6v6 shuffle. We want read-only profile access to initialize provisional player ratings from linked Steam account IDs. Later results update our own separate local rating pools. We cache lookups, retain source provenance, and credit Statlocker when its data is used. We do not need your draft or lobby creation endpoint. The bot also manages virtual Jopacoin wagers settled from organizer-entered match results. Could you confirm which mode/season the public profile PP and estimated badge represent, and whether a supported endpoint exposes separate Street Brawl PP and calibration metadata?
+
+Statlocker demonstrably maintains a [Brawl PP leaderboard](https://statlocker.gg/brawl-leaderboard), requiring twenty scored Brawl matches for leaderboard calibration. That is useful evidence that a mode-specific score exists, but its website fields cannot be assumed to be part of the approved profile API. Permissioned real responses are still required to qualify that import.
+
+**Implemented simplification:** all Statlocker API requests and configuration are removed. Deadlock API supplies ranked-badge data without a required key; an optional `DEADLOCK_API_KEY` raises quotas. Statlocker profile URLs use the unsigned Steam32 account ID in registration and roster links. Player messages show a simple provisional/default-rating explanation; provider diagnostics stay in logs. Untouched neutral seeds can be safely retried by re-registering the same account, while played/imported ratings and committed match rosters are preserved.
+
+The practical rollout remains a keyless ranked-badge prior where available, otherwise neutral local ratings that learn from recorded games. Statlocker estimates are not imported. Standard and Brawl use independent local pools. Current Brawl initialization shrinks the Standard deviation from neutral by 75%; it does not divide an external MMR by four. No new provider, credential, paid plan, or hidden-rating claim is needed to run the manual lobbies.
 
 ### Proposed rating policy
 
@@ -405,7 +449,7 @@ The implementation target is one queue, Street Brawl by default, an explicit Sta
 
 The remaining external questions are concrete:
 
-- Statlocker: approve access and confirm which mode/era `ppScore` represents; whether Brawl ratings are available through the supported API; null/calibration/freshness semantics; and the intended current scale. Obtain permissioned fixtures rather than scraping.
+- Statlocker requires no API qualification for the selected integration: generate profile links only. Historical API/PP questions above would matter only if a future integration is explicitly requested.
 - Dedicated Steam host: confirm Deadlock entitlement, crate/build compatibility, current coordinator version, spectator permissions, side/slot mapping, launch control, reconnect behavior, and private final-result access for both modes. These are live qualification tasks, not reasons to reuse the Dota account.
 - HTTP alternative, only if selected: verify real settings/callback auth, human/host controls, expiration, recovery retention, and private result coverage. This is a third-party host, not an API for logging in our dedicated account.
 - Rating policy: validate a fixed initial normalization using representative authorized player data; retain an explicit provisional fallback when evidence is inadequate.
