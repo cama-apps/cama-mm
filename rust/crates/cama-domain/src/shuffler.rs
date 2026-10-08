@@ -3430,7 +3430,7 @@ mod tests {
             .score_role_assignments_for_matchup(&team1, &team2, 1, ShuffleConstraints::default())
             .expect("fixed matchup scores");
 
-        approx(score, 170.0);
+        approx(score, 190.0);
     }
 
     #[test]
@@ -3507,7 +3507,7 @@ mod tests {
             &mut super::ScoringContext::default(),
         );
 
-        approx(selection.preselection_score, -2_254.0);
+        approx(selection.preselection_score, -2_234.0);
     }
 
     #[test]
@@ -3596,7 +3596,7 @@ mod tests {
                 ShuffleConstraints::default(),
             )
             .expect("fixed role matchup evaluates");
-        approx(matchup.total_score, -2_417.0);
+        approx(matchup.total_score, -2_357.0);
     }
 
     #[test]
@@ -5528,8 +5528,8 @@ mod tests {
     }
 
     #[test]
-    fn test_default_role_matchup_delta_weight_is_point_two_seven() {
-        approx(BalancedShuffler::default().role_matchup_delta_weight, 0.27);
+    fn test_default_role_matchup_delta_weight_is_point_three() {
+        approx(BalancedShuffler::default().role_matchup_delta_weight, 0.30);
     }
 
     fn role_delta_fixture() -> (Vec<Player>, Vec<Player>) {
@@ -5579,8 +5579,8 @@ mod tests {
             .expect("optimization succeeds")
             .2
         };
-        approx(score(1.0), 1_010.0);
-        approx(score(0.5), 760.0);
+        approx(score(1.0), 1_070.0);
+        approx(score(0.5), 820.0);
     }
 
     #[test]
@@ -5619,7 +5619,7 @@ mod tests {
         )
         .expect("matchup evaluates");
         approx(matchup.log_entry.parity_penalty, 350.0);
-        approx(matchup.total_score, 520.0);
+        approx(matchup.total_score, 540.0);
     }
 
     #[test]
@@ -5723,7 +5723,7 @@ mod tests {
                 },
             )
             .expect("fallback scoring succeeds");
-        approx(common.2, 930.0);
+        approx(common.2, 1_010.0);
         assert_eq!(common, fallback);
     }
 
@@ -6554,7 +6554,7 @@ mod tests {
             .score_draft_pool(&captain_a, &captain_b, &pool)
             .expect("draft pool score");
 
-        approx(score, 161.5);
+        approx(score, 180.5);
     }
 
     #[test]
