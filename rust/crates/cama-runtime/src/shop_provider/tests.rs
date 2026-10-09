@@ -146,6 +146,7 @@ struct Responder {
     followups: Mutex<Vec<InteractionResponse>>,
     autocomplete: Mutex<Vec<Vec<CommandOptionChoice>>>,
     fail_defer: bool,
+    fail_followup: bool,
 }
 
 impl Responder {
@@ -178,7 +179,11 @@ impl InteractionResponder for Responder {
         response: InteractionResponse,
     ) -> Result<(), InteractionResponseError> {
         self.followups.lock().expect("followups").push(response);
-        Ok(())
+        if self.fail_followup {
+            Err(InteractionResponseError::new("delivery failed"))
+        } else {
+            Ok(())
+        }
     }
 
     async fn autocomplete(
@@ -674,6 +679,129 @@ async fn failed_mana_effect_refunds_debit_releases_daily_slot_and_keeps_public_c
             )
             .unwrap(),
         0
+    );
+}
+
+#[tokio::test]
+async fn failed_ultimate_with_conduit_does_not_keep_a_rebate() {
+    let fixture = Fixture::migrated();
+    fixture.player(BUYER, 100);
+    let today = pacific_mana_day(unix_timestamp().unwrap()).unwrap();
+    let connection = fixture.connection();
+    connection
+        .execute(
+            "INSERT INTO player_mana(discord_id,guild_id,current_land,assigned_date,consumed_today)
+         VALUES(?1,?2,'Plains',?3,0)",
+            params![BUYER as i64, GUILD as i64, today],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO dig_artifacts(discord_id,guild_id,artifact_id,found_at,is_relic,equipped)
+         VALUES(?1,?2,'mana_conduit',10,1,1)",
+            params![BUYER as i64, GUILD as i64],
+        )
+        .unwrap();
+    fixture
+        .registry()
+        .command_handler("shop")
+        .unwrap()
+        .handle(
+            command(
+                "mana",
+                vec![string("item", "sanctuary"), user("target", 404)],
+                20_001,
+            ),
+            Arc::new(Responder::default()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture
+            .provider
+            .handler
+            .repository
+            .player(BUYER as i64, GUILD as i64)
+            .unwrap()
+            .unwrap()
+            .balance,
+        100
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT consumed_today FROM player_mana WHERE discord_id=?1 AND guild_id=?2",
+                params![BUYER as i64, GUILD as i64],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM manashop_daily_uses", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn successful_mana_effect_is_completed_before_delivery_failure() {
+    let fixture = Fixture::migrated();
+    fixture.player(BUYER, 100);
+    let today = pacific_mana_day(unix_timestamp().unwrap()).unwrap();
+    let connection = fixture.connection();
+    connection
+        .execute(
+            "INSERT INTO player_mana(discord_id,guild_id,current_land,assigned_date,consumed_today)
+         VALUES(?1,?2,'Plains',?3,0)",
+            params![BUYER as i64, GUILD as i64, today],
+        )
+        .unwrap();
+    let result = fixture
+        .registry()
+        .command_handler("shop")
+        .unwrap()
+        .handle(
+            command("mana", vec![string("item", "aegis")], 20_002),
+            Arc::new(Responder {
+                fail_followup: true,
+                ..Responder::default()
+            }),
+        )
+        .await;
+    assert!(result.is_err());
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT status FROM manashop_purchases WHERE purchase_id='shop-mana:9001:20002'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "completed"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM manashop_buffs WHERE buff_type='aegis'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        fixture
+            .provider
+            .handler
+            .repository
+            .player(BUYER as i64, GUILD as i64)
+            .unwrap()
+            .unwrap()
+            .balance,
+        65
     );
 }
 

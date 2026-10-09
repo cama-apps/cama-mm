@@ -393,6 +393,178 @@ fn test_manashop_purchase_shortfall_does_not_claim_or_tap() {
 }
 
 #[test]
+fn purchase_completion_failure_rolls_back_effect_and_rebate_then_recovers_pending_debit() {
+    let fixture = Fixture::new();
+    fixture.register(USER, GUILD, 200);
+    fixture
+        .repository
+        .claim_mana_atomic(USER, Some(GUILD), "Mountain", TODAY)
+        .unwrap();
+    fixture
+        .repository
+        .try_purchase_item_atomic(purchase("interrupted", "wildfire", 150, true))
+        .unwrap();
+    fixture.connection().execute_batch(
+        "CREATE TRIGGER reject_purchase_completion BEFORE UPDATE OF status ON manashop_purchases
+         WHEN NEW.status='completed' BEGIN SELECT RAISE(ABORT,'completion interrupted'); END;"
+    ).unwrap();
+    let error = fixture
+        .repository
+        .settle_item_purchase_atomic("interrupted", NOW, 37, |effects| {
+            effects.grant_buff(GrantBuffRequest {
+                discord_id: USER,
+                guild_id: Some(GUILD),
+                buff_type: "counterspell",
+                target_id: None,
+                granted_at: NOW,
+                expires_at: NOW + 86_400,
+                data: None,
+            })
+        })
+        .unwrap_err();
+    assert!(error.to_string().contains("completion interrupted"));
+    assert_eq!(
+        fixture.repository.balance(USER, Some(GUILD)).unwrap(),
+        Some(50)
+    );
+    assert_eq!(
+        fixture
+            .connection()
+            .query_row("SELECT COUNT(*) FROM manashop_buffs", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        fixture
+            .repository
+            .get_item_purchase("interrupted")
+            .unwrap()
+            .unwrap()
+            .status,
+        "pending"
+    );
+    let restarted = ManashopRepository::new(fixture.file.path());
+    let mut retry = purchase("retry", "wildfire", 150, true);
+    retry.now = NOW + PENDING_PURCHASE_STALE_SECONDS + 1;
+    assert!(restarted.try_purchase_item_atomic(retry).unwrap().success);
+    assert_eq!(restarted.balance(USER, Some(GUILD)).unwrap(), Some(50));
+    assert_eq!(
+        restarted
+            .get_item_purchase("interrupted")
+            .unwrap()
+            .unwrap()
+            .status,
+        "refunded"
+    );
+}
+
+#[test]
+fn completed_purchase_cannot_replay_or_refund_its_effect_and_rebate() {
+    let fixture = Fixture::new();
+    fixture.register(USER, GUILD, 200);
+    fixture
+        .repository
+        .claim_mana_atomic(USER, Some(GUILD), "Plains", TODAY)
+        .unwrap();
+    fixture
+        .repository
+        .try_purchase_item_atomic(purchase("settled", "sanctuary", 90, true))
+        .unwrap();
+    fixture
+        .repository
+        .settle_item_purchase_atomic("settled", NOW, 22, |effects| {
+            effects.grant_buff(GrantBuffRequest {
+                discord_id: USER,
+                guild_id: Some(GUILD),
+                buff_type: "sanctuary",
+                target_id: Some(ALLY),
+                granted_at: NOW,
+                expires_at: NOW + 86_400,
+                data: None,
+            })
+        })
+        .unwrap();
+    let restarted = ManashopRepository::new(fixture.file.path());
+    assert!(
+        !restarted
+            .refund_item_purchase_atomic("settled", NOW + 1)
+            .unwrap()
+    );
+    let replay: Result<(), _> =
+        restarted.settle_item_purchase_atomic("settled", NOW + 1, 22, |_| {
+            panic!("completed effects must not execute again")
+        });
+    assert!(replay.is_err());
+    assert_eq!(restarted.balance(USER, Some(GUILD)).unwrap(), Some(132));
+    assert!(restarted.is_mana_consumed(USER, Some(GUILD)).unwrap());
+    assert_eq!(
+        fixture
+            .connection()
+            .query_row("SELECT COUNT(*) FROM manashop_buffs", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn abandoned_previous_day_purchase_refunds_without_untapping_completed_current_mana() {
+    let fixture = Fixture::new();
+    fixture.register(USER, GUILD, 200);
+    fixture
+        .repository
+        .claim_mana_atomic(USER, Some(GUILD), "Mountain", TODAY)
+        .unwrap();
+    fixture
+        .repository
+        .try_purchase_item_atomic(purchase("old-day", "wildfire", 150, true))
+        .unwrap();
+    fixture
+        .repository
+        .claim_mana_atomic(USER, Some(GUILD), "Island", "2026-05-10")
+        .unwrap();
+    let mut current = purchase("current-day", "counterspell", 40, true);
+    current.used_date = "2026-05-10";
+    current.now = NOW + 61;
+    fixture
+        .repository
+        .try_purchase_item_atomic(current)
+        .unwrap();
+    fixture
+        .repository
+        .settle_item_purchase_atomic("current-day", NOW + 61, 0, |_| Ok(()))
+        .unwrap();
+    let restarted = ManashopRepository::new(fixture.file.path());
+    assert_eq!(
+        restarted.recover_stale_pending_purchases(NOW + 61).unwrap(),
+        1
+    );
+    assert_eq!(restarted.balance(USER, Some(GUILD)).unwrap(), Some(160));
+    assert!(restarted.is_mana_consumed(USER, Some(GUILD)).unwrap());
+    assert_eq!(
+        restarted
+            .get_item_purchase("old-day")
+            .unwrap()
+            .unwrap()
+            .status,
+        "refunded"
+    );
+    assert_eq!(
+        restarted
+            .get_item_purchase("current-day")
+            .unwrap()
+            .unwrap()
+            .status,
+        "completed"
+    );
+    assert_eq!(
+        restarted.recover_stale_pending_purchases(NOW + 62).unwrap(),
+        0
+    );
+}
+
+#[test]
 fn test_manashop_purchase_rolls_back_claim_and_tap_on_debit_error() {
     let fixture = Fixture::new();
     fixture.register(USER, GUILD, 200);

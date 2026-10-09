@@ -3456,6 +3456,13 @@ fn disbursement_petition_embed_explains_every_option_and_progress() {
     assert_eq!(response.components.len(), 2);
     assert!(response.components.iter().all(|row| row.buttons.len() == 5));
     assert!(
+        response
+            .components
+            .iter()
+            .flat_map(|row| &row.buttons)
+            .all(|button| button.custom_id.starts_with("disburse:900:"))
+    );
+    assert!(
         embed
             .footer
             .as_deref()
@@ -3474,6 +3481,62 @@ fn disbursement_petition_embed_explains_every_option_and_progress() {
         closed.embeds[0].footer.as_deref(),
         Some("Voting closed • Ties favor Even Split")
     );
+}
+
+#[tokio::test]
+async fn disbursement_old_buttons_cannot_vote_on_a_replacement() {
+    let database = NamedTempFile::new().expect("reserve button database");
+    initialize_or_migrate(database.path()).expect("schema");
+    PlayerRepository::new(database.path())
+        .add(&NewPlayer::new(1, "voter", Some(42)))
+        .unwrap();
+    let repository = DisbursementRepository::new(database.path());
+    repository
+        .create_proposal_atomic(Some(42), 900, 0, 1)
+        .unwrap();
+    repository
+        .reset_and_return_fund_atomic(Some(42), "reset")
+        .unwrap();
+    repository
+        .create_proposal_atomic(Some(42), 901, 0, 1)
+        .unwrap();
+    let config = ApplicationConfig::from_lookup(|name| {
+        (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
+    })
+    .unwrap();
+    let provider = BettingRegistrationProvider::new(
+        database.path(),
+        &config,
+        Arc::new(crate::serenity_transport::SerenityDiscordTransport::new()),
+    );
+    for custom_id in ["disburse:burn", "disburse:900:burn"] {
+        let recording = RecordingResponder::default();
+        provider
+            .handler
+            .component(
+                InteractionRequest::Component {
+                    interaction_id: 1,
+                    custom_id: custom_id.to_owned(),
+                    user_id: 1,
+                    user_display_name: "voter".to_owned(),
+                    guild_id: Some(42),
+                    channel_id: Some(7),
+                    member_permissions: None,
+                    values: Vec::new(),
+                },
+                Arc::new(recording.clone()),
+            )
+            .await
+            .unwrap();
+        assert!(
+            recording.responses.lock().unwrap()[0]
+                .content
+                .contains("no longer")
+        );
+        let proposal = repository.get_active_proposal(Some(42)).unwrap().unwrap();
+        assert_eq!(proposal.proposal_id, 901);
+        assert_eq!(proposal.total_votes(), 0);
+    }
 }
 
 #[tokio::test]

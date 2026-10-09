@@ -77,6 +77,12 @@ pub enum DisbursementRepositoryError {
     ActiveProposal,
     #[error("No active proposal")]
     NoActiveProposal,
+    #[error("This proposal is no longer active.")]
+    StaleProposal,
+    #[error("The allocation ballot changed; please try again.")]
+    BallotChanged,
+    #[error("Quorum has not been reached.")]
+    QuorumNotReached,
     #[error("Invalid vote method: {0}")]
     InvalidMethod(String),
     #[error("Insufficient funds. Available: {available}, minimum required: {minimum}")]
@@ -124,54 +130,7 @@ impl DisbursementRepository {
     ) -> Result<Option<DisbursementProposal>, DisbursementRepositoryError> {
         let connection = self.connection()?;
         let guild_id = Self::normalize_guild_id(guild_id);
-        let Some(row) = connection
-            .query_row(
-                "SELECT guild_id, proposal_id, message_id, channel_id, fund_amount,
-                        quorum_required, status, created_at
-                 FROM disburse_proposals WHERE guild_id = ?1 AND status = 'active'",
-                [guild_id],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, Option<i64>>(2)?,
-                        row.get::<_, Option<i64>>(3)?,
-                        row.get::<_, i64>(4)?,
-                        row.get::<_, i64>(5)?,
-                        row.get::<_, String>(6)?,
-                        row.get::<_, Option<String>>(7)?,
-                    ))
-                },
-            )
-            .optional()?
-        else {
-            return Ok(None);
-        };
-        let mut proposal = DisbursementProposal {
-            guild_id: row.0,
-            proposal_id: row.1,
-            message_id: row.2,
-            channel_id: row.3,
-            fund_amount: row.4,
-            quorum_required: row.5,
-            status: row.6,
-            created_at: row.7,
-            votes: zero_votes(),
-        };
-        let mut statement = connection.prepare(
-            "SELECT vote_method, COUNT(*) FROM disburse_votes
-             WHERE guild_id = ?1 AND proposal_id = ?2 GROUP BY vote_method",
-        )?;
-        let rows = statement.query_map(params![guild_id, proposal.proposal_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })?;
-        for row in rows {
-            let (method, count) = row?;
-            if let Some(slot) = proposal.votes.get_mut(&method) {
-                *slot = count;
-            }
-        }
-        Ok(Some(proposal))
+        read_active_proposal(&connection, guild_id)
     }
 
     /// Lock the current Reserve amount and create one active proposal in the
@@ -198,6 +157,21 @@ impl DisbursementRepository {
         {
             return Err(DisbursementRepositoryError::ActiveProposal);
         }
+        let previous_id = transaction
+            .query_row(
+                "SELECT proposal_id FROM disburse_proposals WHERE guild_id=?1",
+                [guild_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        let proposal_id = match previous_id {
+            Some(previous) => proposal_id.max(
+                previous
+                    .checked_add(1)
+                    .ok_or(DisbursementRepositoryError::AmountOverflow)?,
+            ),
+            None => proposal_id,
+        };
         let available = nonprofit_total(&transaction, guild_id)?;
         if available < minimum_fund {
             return Err(DisbursementRepositoryError::InsufficientFunds {
@@ -249,20 +223,27 @@ impl DisbursementRepository {
     pub fn set_proposal_message(
         &self,
         guild_id: Option<i64>,
+        proposal_id: i64,
         message_id: i64,
         channel_id: i64,
     ) -> Result<bool, DisbursementRepositoryError> {
         let connection = self.connection()?;
         Ok(connection.execute(
             "UPDATE disburse_proposals SET message_id = ?1, channel_id = ?2
-             WHERE guild_id = ?3 AND status = 'active'",
-            params![message_id, channel_id, Self::normalize_guild_id(guild_id)],
+             WHERE guild_id = ?3 AND proposal_id = ?4 AND status = 'active'",
+            params![
+                message_id,
+                channel_id,
+                Self::normalize_guild_id(guild_id),
+                proposal_id
+            ],
         )? == 1)
     }
 
     pub fn add_vote(
         &self,
         guild_id: Option<i64>,
+        proposal_id: i64,
         discord_id: i64,
         method: &str,
     ) -> Result<DisbursementProposal, DisbursementRepositoryError> {
@@ -270,15 +251,11 @@ impl DisbursementRepository {
         let guild_id = Self::normalize_guild_id(guild_id);
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let proposal_id = transaction
-            .query_row(
-                "SELECT proposal_id FROM disburse_proposals
-                 WHERE guild_id = ?1 AND status = 'active'",
-                [guild_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
+        let proposal = read_active_proposal(&transaction, guild_id)?
             .ok_or(DisbursementRepositoryError::NoActiveProposal)?;
+        if proposal.proposal_id != proposal_id {
+            return Err(DisbursementRepositoryError::StaleProposal);
+        }
         let now = unix_seconds();
         transaction.execute(
             "INSERT INTO disburse_votes(guild_id, proposal_id, discord_id, vote_method, voted_at)
@@ -287,9 +264,10 @@ impl DisbursementRepository {
                  vote_method = excluded.vote_method, voted_at = excluded.voted_at",
             params![guild_id, proposal_id, discord_id, method, now],
         )?;
+        let proposal = read_active_proposal(&transaction, guild_id)?
+            .ok_or(DisbursementRepositoryError::NoActiveProposal)?;
         transaction.commit()?;
-        self.get_active_proposal(Some(guild_id))?
-            .ok_or(DisbursementRepositoryError::NoActiveProposal)
+        Ok(proposal)
     }
 
     pub fn individual_votes(
@@ -328,6 +306,24 @@ impl DisbursementRepository {
         guild_id: Option<i64>,
         outcome: &str,
     ) -> Result<bool, DisbursementRepositoryError> {
+        self.reset_proposal_atomic(guild_id, outcome, None)
+    }
+
+    pub fn cancel_voted_proposal_atomic(
+        &self,
+        guild_id: Option<i64>,
+        proposal_id: i64,
+        require_quorum: bool,
+    ) -> Result<bool, DisbursementRepositoryError> {
+        self.reset_proposal_atomic(guild_id, "cancelled", Some((proposal_id, require_quorum)))
+    }
+
+    fn reset_proposal_atomic(
+        &self,
+        guild_id: Option<i64>,
+        outcome: &str,
+        expected: Option<(i64, bool)>,
+    ) -> Result<bool, DisbursementRepositoryError> {
         let guild_id = Self::normalize_guild_id(guild_id);
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -343,6 +339,15 @@ impl DisbursementRepository {
             transaction.commit()?;
             return Ok(false);
         };
+        if let Some((expected_id, require_quorum)) = expected {
+            validate_allocation(
+                &transaction,
+                guild_id,
+                expected_id,
+                "cancel",
+                require_quorum,
+            )?;
+        }
         archive_votes(&transaction, guild_id, proposal_id, outcome)?;
         transaction.execute(
             "UPDATE disburse_proposals SET status = 'reset'
@@ -376,7 +381,9 @@ impl DisbursementRepository {
     pub fn complete_reserve_allocation_atomic(
         &self,
         guild_id: Option<i64>,
+        proposal_id: i64,
         method: &str,
+        require_quorum: bool,
     ) -> Result<i64, DisbursementRepositoryError> {
         if !matches!(method, "burn" | "next_match_pot") {
             return Err(DisbursementRepositoryError::InvalidMethod(
@@ -386,6 +393,7 @@ impl DisbursementRepository {
         let guild_id = Self::normalize_guild_id(guild_id);
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let expected_proposal_id = proposal_id;
         let Some((proposal_id, amount)) = transaction
             .query_row(
                 "SELECT proposal_id, fund_amount FROM disburse_proposals
@@ -397,6 +405,13 @@ impl DisbursementRepository {
         else {
             return Err(DisbursementRepositoryError::NoActiveProposal);
         };
+        validate_allocation(
+            &transaction,
+            guild_id,
+            expected_proposal_id,
+            method,
+            require_quorum,
+        )?;
         archive_votes(&transaction, guild_id, proposal_id, method)?;
         transaction.execute(
             "UPDATE disburse_proposals SET status = 'completed'
@@ -428,7 +443,9 @@ impl DisbursementRepository {
     pub fn complete_and_disburse_atomic(
         &self,
         guild_id: Option<i64>,
+        proposal_id: i64,
         method: &str,
+        require_quorum: bool,
         distributions: &[(i64, i64)],
     ) -> Result<i64, DisbursementRepositoryError> {
         validate_method(method)?;
@@ -444,6 +461,7 @@ impl DisbursementRepository {
         let recipients_json = serde_json::to_string(&recipients)?;
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let expected_proposal_id = proposal_id;
         let Some((proposal_id, fund_amount)) = transaction
             .query_row(
                 "SELECT proposal_id, fund_amount FROM disburse_proposals
@@ -455,6 +473,13 @@ impl DisbursementRepository {
         else {
             return Err(DisbursementRepositoryError::NoActiveProposal);
         };
+        validate_allocation(
+            &transaction,
+            guild_id,
+            expected_proposal_id,
+            method,
+            require_quorum,
+        )?;
         archive_votes(&transaction, guild_id, proposal_id, method)?;
         transaction.execute(
             "UPDATE disburse_proposals SET status = 'completed'
@@ -574,6 +599,85 @@ impl DisbursementRepository {
     }
 }
 
+fn read_active_proposal(
+    connection: &Connection,
+    guild_id: i64,
+) -> Result<Option<DisbursementProposal>, DisbursementRepositoryError> {
+    let Some(row) = connection
+        .query_row(
+            "SELECT guild_id, proposal_id, message_id, channel_id, fund_amount,
+                        quorum_required, status, created_at
+                 FROM disburse_proposals WHERE guild_id = ?1 AND status = 'active'",
+            [guild_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                ))
+            },
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    let mut proposal = DisbursementProposal {
+        guild_id: row.0,
+        proposal_id: row.1,
+        message_id: row.2,
+        channel_id: row.3,
+        fund_amount: row.4,
+        quorum_required: row.5,
+        status: row.6,
+        created_at: row.7,
+        votes: zero_votes(),
+    };
+    let mut statement = connection.prepare(
+        "SELECT vote_method, COUNT(*) FROM disburse_votes
+             WHERE guild_id = ?1 AND proposal_id = ?2 GROUP BY vote_method",
+    )?;
+    let rows = statement.query_map(params![guild_id, proposal.proposal_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    for row in rows {
+        let (method, count) = row?;
+        if let Some(slot) = proposal.votes.get_mut(&method) {
+            *slot = count;
+        }
+    }
+    Ok(Some(proposal))
+}
+
+fn validate_allocation(
+    connection: &Connection,
+    guild_id: i64,
+    proposal_id: i64,
+    method: &str,
+    require_quorum: bool,
+) -> Result<(), DisbursementRepositoryError> {
+    let proposal = read_active_proposal(connection, guild_id)?
+        .ok_or(DisbursementRepositoryError::NoActiveProposal)?;
+    if proposal.proposal_id != proposal_id {
+        return Err(DisbursementRepositoryError::StaleProposal);
+    }
+    if require_quorum && !proposal.quorum_reached() {
+        return Err(DisbursementRepositoryError::QuorumNotReached);
+    }
+    let maximum = proposal.votes.values().copied().max().unwrap_or(0);
+    let winner = DISBURSE_METHODS.into_iter().find(|candidate| {
+        maximum > 0 && proposal.votes.get(*candidate).copied().unwrap_or(0) == maximum
+    });
+    if winner != Some(method) {
+        return Err(DisbursementRepositoryError::BallotChanged);
+    }
+    Ok(())
+}
+
 fn zero_votes() -> BTreeMap<String, i64> {
     DISBURSE_METHODS
         .into_iter()
@@ -673,6 +777,145 @@ mod tests {
     use tempfile::NamedTempFile;
 
     #[test]
+    fn allocation_rejects_a_method_superseded_by_the_current_ballot() {
+        let database = NamedTempFile::new().expect("temporary database");
+        copy_migrated_database(database.path()).expect("schema");
+        let repository = DisbursementRepository::new(database.path());
+        crate::loan_repository::LoanRepository::new(database.path())
+            .add_to_nonprofit_fund(Some(7), 50, None)
+            .expect("reserve");
+        repository
+            .create_proposal_atomic(Some(7), 100, 10, 1)
+            .unwrap();
+        repository.add_vote(Some(7), 100, 1, "burn").unwrap();
+        repository.add_vote(Some(7), 100, 1, "even").unwrap();
+
+        assert!(
+            repository
+                .complete_reserve_allocation_atomic(Some(7), 100, "burn", true)
+                .is_err()
+        );
+        assert_eq!(
+            repository
+                .get_active_proposal(Some(7))
+                .unwrap()
+                .unwrap()
+                .proposal_id,
+            100
+        );
+    }
+
+    #[test]
+    fn replacement_proposal_does_not_reuse_the_previous_identity() {
+        let database = NamedTempFile::new().expect("temporary database");
+        copy_migrated_database(database.path()).expect("schema");
+        let repository = DisbursementRepository::new(database.path());
+        repository
+            .create_proposal_atomic(Some(7), 100, 0, 1)
+            .unwrap();
+        repository
+            .reset_and_return_fund_atomic(Some(7), "reset")
+            .unwrap();
+        let replacement = repository
+            .create_proposal_atomic(Some(7), 100, 0, 1)
+            .unwrap();
+        assert_ne!(replacement.proposal_id, 100);
+    }
+
+    #[test]
+    fn stale_votes_and_allocations_cannot_mutate_a_replacement_proposal() {
+        let database = NamedTempFile::new().expect("temporary database");
+        copy_migrated_database(database.path()).expect("schema");
+        let repository = DisbursementRepository::new(database.path());
+        let loans = crate::loan_repository::LoanRepository::new(database.path());
+        loans.add_to_nonprofit_fund(Some(7), 50, None).unwrap();
+        repository
+            .create_proposal_atomic(Some(7), 100, 10, 1)
+            .unwrap();
+        repository
+            .reset_and_return_fund_atomic(Some(7), "reset")
+            .unwrap();
+        repository
+            .create_proposal_atomic(Some(7), 100, 10, 1)
+            .unwrap();
+        let replacement = repository.get_active_proposal(Some(7)).unwrap().unwrap();
+
+        assert!(matches!(
+            repository.add_vote(Some(7), 100, 1, "burn"),
+            Err(DisbursementRepositoryError::StaleProposal)
+        ));
+        for method in ["burn", "next_match_pot"] {
+            assert!(matches!(
+                repository.complete_reserve_allocation_atomic(Some(7), 100, method, false),
+                Err(DisbursementRepositoryError::StaleProposal)
+            ));
+        }
+        assert!(matches!(
+            repository.complete_and_disburse_atomic(Some(7), 100, "even", false, &[]),
+            Err(DisbursementRepositoryError::StaleProposal)
+        ));
+        assert!(matches!(
+            repository.cancel_voted_proposal_atomic(Some(7), 100, false),
+            Err(DisbursementRepositoryError::StaleProposal)
+        ));
+        assert_eq!(
+            repository.get_active_proposal(Some(7)).unwrap().unwrap(),
+            replacement
+        );
+        assert_eq!(loans.get_nonprofit_fund(Some(7)).unwrap(), 0);
+        assert!(repository.get_last_disbursement(Some(7)).unwrap().is_none());
+    }
+
+    #[test]
+    fn automatic_allocation_requires_quorum_but_admin_execution_can_override_it() {
+        let database = NamedTempFile::new().expect("temporary database");
+        copy_migrated_database(database.path()).expect("schema");
+        let repository = DisbursementRepository::new(database.path());
+        repository
+            .create_proposal_atomic(Some(7), 100, 0, 2)
+            .unwrap();
+        repository.add_vote(Some(7), 100, 1, "burn").unwrap();
+        assert!(matches!(
+            repository.complete_reserve_allocation_atomic(Some(7), 100, "burn", true),
+            Err(DisbursementRepositoryError::QuorumNotReached)
+        ));
+        repository
+            .complete_reserve_allocation_atomic(Some(7), 100, "burn", false)
+            .unwrap();
+        assert!(repository.get_active_proposal(Some(7)).unwrap().is_none());
+    }
+
+    #[test]
+    fn stale_message_publication_cannot_replace_the_new_proposals_message() {
+        let database = NamedTempFile::new().expect("temporary database");
+        copy_migrated_database(database.path()).expect("schema");
+        let repository = DisbursementRepository::new(database.path());
+        repository
+            .create_proposal_atomic(Some(7), 100, 0, 1)
+            .unwrap();
+        repository
+            .reset_and_return_fund_atomic(Some(7), "reset")
+            .unwrap();
+        repository
+            .create_proposal_atomic(Some(7), 200, 0, 1)
+            .unwrap();
+        assert!(
+            repository
+                .set_proposal_message(Some(7), 200, 22, 33)
+                .unwrap()
+        );
+        assert!(
+            !repository
+                .set_proposal_message(Some(7), 100, 44, 55)
+                .unwrap()
+        );
+        let proposal = repository.get_active_proposal(Some(7)).unwrap().unwrap();
+        assert_eq!(proposal.proposal_id, 200);
+        assert_eq!(proposal.message_id, Some(22));
+        assert_eq!(proposal.channel_id, Some(33));
+    }
+
+    #[test]
     fn proposal_vote_reset_and_completion_are_durable_and_idempotent() {
         let database = NamedTempFile::new().expect("temporary database");
         copy_migrated_database(database.path()).expect("schema");
@@ -692,11 +935,11 @@ mod tests {
             .create_proposal_atomic(Some(7), 100, 10, 1)
             .expect("proposal");
         assert_eq!(proposal.fund_amount, 50);
-        let proposal = repository.add_vote(Some(7), 1, "even").expect("vote");
+        let proposal = repository.add_vote(Some(7), 100, 1, "even").expect("vote");
         assert!(proposal.quorum_reached());
         assert_eq!(
             repository
-                .complete_and_disburse_atomic(Some(7), "even", &[(1, 20)])
+                .complete_and_disburse_atomic(Some(7), 100, "even", true, &[(1, 20)])
                 .expect("complete"),
             20
         );
@@ -716,7 +959,7 @@ mod tests {
             0
         );
         assert!(matches!(
-            repository.complete_and_disburse_atomic(Some(7), "even", &[(1, 1)]),
+            repository.complete_and_disburse_atomic(Some(7), 100, "even", true, &[(1, 1)]),
             Err(DisbursementRepositoryError::NoActiveProposal)
         ));
     }
@@ -740,8 +983,9 @@ mod tests {
         repository
             .create_proposal_atomic(Some(7), 100, 10, 1)
             .expect("proposal");
+        repository.add_vote(Some(7), 100, 1, "even").expect("vote");
         repository
-            .complete_and_disburse_atomic(Some(7), "even", &[(1, 20)])
+            .complete_and_disburse_atomic(Some(7), 100, "even", true, &[(1, 20)])
             .expect("complete");
         assert!(
             repository

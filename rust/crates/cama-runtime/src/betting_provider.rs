@@ -3081,7 +3081,14 @@ impl BettingInteractionHandler {
                 .disburse_votes_page(&page_key, page_action, guild_id, user_id, &responder)
                 .await;
         }
-        if let Some(method) = custom_id.strip_prefix(DISBURSE_COMPONENT_PREFIX) {
+        if let Some(ballot) = custom_id.strip_prefix(DISBURSE_COMPONENT_PREFIX) {
+            let Some((proposal_id, method)) = ballot
+                .split_once(':')
+                .and_then(|(id, method)| id.parse::<i64>().ok().map(|id| (id, method)))
+            else {
+                return respond_ephemeral(&responder, "This Reserve proposal is no longer valid.")
+                    .await;
+            };
             let guild_id = guild_id
                 .map(|value| signed_id(value, "guild"))
                 .transpose()?
@@ -3110,7 +3117,7 @@ impl BettingInteractionHandler {
                     );
                 }
                 let proposal = DisbursementRepository::new(&path)
-                    .add_vote(Some(guild_id), user_id, &method)
+                    .add_vote(Some(guild_id), proposal_id, user_id, &method)
                     .map_err(|error| error.to_string())?;
                 Ok((proposal, method.to_owned()))
             })
@@ -3120,7 +3127,10 @@ impl BettingInteractionHandler {
                 Err(error) => return respond_ephemeral(&responder, &error).await,
             };
             if proposal.quorum_reached() {
-                let result = self.execute_disbursement(guild_id, &proposal).await?;
+                let result = match self.execute_disbursement(guild_id, &proposal, true).await {
+                    Ok(result) => result,
+                    Err(error) => return respond_ephemeral(&responder, &error).await,
+                };
                 self.update_persistent_disbursement_message(
                     &proposal,
                     disbursement_proposal_response_with_disabled_buttons(&proposal),
@@ -5931,6 +5941,7 @@ impl BettingInteractionHandler {
                     Ok(proposal) => {
                         self.send_persistent_disbursement_message(
                             guild_id,
+                            proposal.proposal_id,
                             channel_id,
                             disbursement_proposal_response(&proposal),
                             responder,
@@ -5977,6 +5988,7 @@ impl BettingInteractionHandler {
                 }
                 self.send_persistent_disbursement_message(
                     guild_id,
+                    proposal.proposal_id,
                     channel_id,
                     disbursement_proposal_response(&proposal),
                     responder,
@@ -6075,7 +6087,7 @@ impl BettingInteractionHandler {
                     )
                     .await;
                 }
-                let result = self.execute_disbursement(guild_id, &proposal).await;
+                let result = self.execute_disbursement(guild_id, &proposal, false).await;
                 match result {
                     Ok(result) => {
                         self.update_persistent_disbursement_message(
@@ -6100,6 +6112,7 @@ impl BettingInteractionHandler {
     async fn send_persistent_disbursement_message(
         &self,
         guild_id: i64,
+        proposal_id: i64,
         _channel_id: Option<u64>,
         response: InteractionResponse,
         responder: &Arc<dyn InteractionResponder>,
@@ -6120,7 +6133,7 @@ impl BettingInteractionHandler {
         let path = self.database_path.clone();
         sqlite("disbursement message persistence", move || {
             DisbursementRepository::new(path)
-                .set_proposal_message(Some(guild_id), message_id, channel_id)
+                .set_proposal_message(Some(guild_id), proposal_id, message_id, channel_id)
                 .map(|_| ())
                 .map_err(|error| error.to_string())
         })
@@ -6155,19 +6168,21 @@ impl BettingInteractionHandler {
         &self,
         guild_id: i64,
         proposal: &DisbursementProposal,
+        require_quorum: bool,
     ) -> Result<DisbursementExecution, String> {
         let method = winning_disbursement_method(&proposal.votes)
             .ok_or_else(|| "No votes have been cast yet".to_owned())?
             .to_owned();
         let path = self.database_path.clone();
         let fund = proposal.fund_amount;
+        let proposal_id = proposal.proposal_id;
         let days = self.config.lottery_activity_days;
         sqlite("disbursement execution", move || {
             let repository = DisbursementRepository::new(&path);
             match method.as_str() {
                 "cancel" => {
                     if !repository
-                        .reset_and_return_fund_atomic(Some(guild_id), "cancelled")
+                        .cancel_voted_proposal_atomic(Some(guild_id), proposal_id, require_quorum)
                         .map_err(|error| error.to_string())?
                     {
                         return Err("No active proposal".to_owned());
@@ -6184,7 +6199,12 @@ impl BettingInteractionHandler {
                 }
                 "burn" | "next_match_pot" => {
                     let amount = repository
-                        .complete_reserve_allocation_atomic(Some(guild_id), &method)
+                        .complete_reserve_allocation_atomic(
+                            Some(guild_id),
+                            proposal_id,
+                            &method,
+                            require_quorum,
+                        )
                         .map_err(|error| error.to_string())?;
                     let message = if method == "burn" {
                         format!("{amount} Jopacoin removed from circulation.")
@@ -6217,7 +6237,13 @@ impl BettingInteractionHandler {
                     let distributions =
                         calculate_distributions(&method, fund, &players, lottery_winner);
                     let total = repository
-                        .complete_and_disburse_atomic(Some(guild_id), &method, &distributions)
+                        .complete_and_disburse_atomic(
+                            Some(guild_id),
+                            proposal_id,
+                            &method,
+                            require_quorum,
+                            &distributions,
+                        )
                         .map_err(|error| error.to_string())?;
                     let message = if distributions.is_empty() {
                         Some("No eligible players for this distribution method.".to_owned())
@@ -6665,7 +6691,7 @@ fn disbursement_proposal_response_with_disabled_buttons_impl(
                             InteractionButtonStyle::Primary
                         };
                         InteractionButton::new(
-                            format!("disburse:{method}"),
+                            format!("disburse:{}:{method}", proposal.proposal_id),
                             disburse_method_label(method),
                         )
                         .style(style)

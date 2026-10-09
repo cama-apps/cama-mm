@@ -32,7 +32,8 @@ use cama_db::guild_config_repository::GuildConfigRepository;
 use cama_db::loan_repository::LoanRepository;
 use cama_db::mana_service_repository::ManaRepository;
 use cama_db::manashop_rework_repository::{
-    ManashopRepository, PurchaseFailureReason as ManaPurchaseFailure, PurchaseRequest,
+    ManashopPurchaseEffects, ManashopRepository, ManashopRepositoryError,
+    PurchaseFailureReason as ManaPurchaseFailure, PurchaseRequest,
 };
 use cama_db::package_deal_repository::{
     PACKAGE_DEAL_CANCELLATION_INACTIVITY_DAYS, PackageDealCancellationFailureReason,
@@ -52,7 +53,7 @@ use cama_domain::economy_scaling::{scale_deflationary_minigame_jc_delta, scale_m
 use cama_domain::formatting::JOPACOIN_EMOTE;
 use cama_domain::guild_config::GuildConfigStore;
 use chrono::{DateTime, Utc};
-use serde_json::{Value as JsonValue, json};
+use serde_json::json;
 use thiserror::Error;
 use tracing::{debug, error, warn};
 
@@ -158,6 +159,10 @@ pub trait ShopDiscordPort: Send + Sync {
 pub enum ShopProviderBuildError {
     #[error("shop provider database is not migrated: {0}")]
     Database(#[from] cama_db::shop_runtime::ShopRuntimeRepositoryError),
+    #[error("shop purchase recovery failed: {0}")]
+    PurchaseRecovery(#[from] ManashopRepositoryError),
+    #[error("shop recovery clock failed: {0}")]
+    Clock(String),
 }
 
 #[derive(Clone)]
@@ -176,6 +181,10 @@ impl ShopRegistrationProvider {
         let path = database_path.as_ref().to_path_buf();
         let repository = ShopRuntimeRepository::new(&path);
         repository.verify_schema()?;
+        let manashop = ManashopRepository::new(&path);
+        manashop.recover_stale_pending_purchases(
+            unix_timestamp().map_err(ShopProviderBuildError::Clock)?,
+        )?;
         let economy_config = shop_economy_config(config);
         let runtime_config = ShopRuntimeConfig::from_application_config(config);
         let player_names = Arc::new(SharedGuildPlayerNameResolver::default());
@@ -218,7 +227,7 @@ impl ShopRegistrationProvider {
                 soft_avoids: SoftAvoidRepository::new(&path),
                 package_deals: PackageDealRepository::new(&path),
                 mana: ManaRepository::new(&path),
-                manashop: ManashopRepository::new(&path),
+                manashop,
                 recalibration,
                 gambling: GamblingStatsRepository::new(&path),
                 economy_events: Arc::new(SqliteEconomyEventService::new(&path, economy_config)),
@@ -1063,6 +1072,14 @@ impl ShopInteractionHandler {
             )
             .await;
         }
+        let now = self.clock.now()?;
+        let repository = self.manashop.clone();
+        let user_id = context.user_id;
+        let guild_id = context.guild_id;
+        run_blocking("manashop pending recovery", move || {
+            repository.recover_stale_pending_purchases_for_player(user_id, guild_id, now)
+        })
+        .await?;
         let Some(player) = self.load_player(context.user_id, context.guild_id).await? else {
             return respond_ephemeral(&responder, "You need to `/player register` first.").await;
         };
@@ -1072,11 +1089,8 @@ impl ShopInteractionHandler {
         };
         let context = self.with_rendered_player_names(context).await?;
         let target = user_option(&context, "target")?;
-        let now = self.clock.now()?;
         let today = pacific_mana_day(now)?;
         let mana = self.mana.clone();
-        let user_id = context.user_id;
-        let guild_id = context.guild_id;
         let current = run_blocking("manashop mana lookup", move || {
             mana.get_mana(user_id, Some(guild_id))
         })
@@ -1183,23 +1197,6 @@ impl ShopInteractionHandler {
             }
             return Ok(());
         }
-        let repository = self.manashop.clone();
-        let applying_id = purchase_id.clone();
-        let applying = run_blocking("manashop applying claim", move || {
-            repository.mark_item_purchase_applying_atomic(&applying_id, now)
-        })
-        .await?;
-        if !applying {
-            self.refund_mana_purchase(&purchase_id, now).await;
-            return respond_ephemeral(
-                &responder,
-                format!(
-                    "Could not start **{}** safely; purchase refunded.",
-                    spec.name
-                ),
-            )
-            .await;
-        }
         let _ = responder.defer(false).await;
 
         let ult_refund = if spec.tier == ManaTier::Ultimate {
@@ -1211,20 +1208,7 @@ impl ShopInteractionHandler {
             .unwrap_or(false);
             if has_conduit {
                 let refund = ((spec.cost as f64) * 0.25).floor() as i64;
-                let refund = refund.max(1);
-                let repository = self.repository.clone();
-                let credited = run_blocking("mana conduit refund", move || {
-                    repository.adjust_balance(
-                        user_id, guild_id, refund, None, None, None, None, None, None,
-                    )
-                })
-                .await;
-                // Only report a refund the player actually received: the
-                // reported balance is derived from this figure.
-                if let Err(error) = &credited {
-                    warn!(%error, user_id, guild_id, "mana conduit refund was not credited");
-                }
-                if credited.is_ok() { refund } else { 0 }
+                refund.max(1)
             } else {
                 0
             }
@@ -1267,15 +1251,6 @@ impl ShopInteractionHandler {
             .followup(InteractionResponse::message(content).with_user_mentions(allowed))
             .await
             .map_err(|error| error.to_string())?;
-        let repository = self.manashop.clone();
-        let completed_id = purchase_id.clone();
-        let completed = run_blocking("manashop purchase completion", move || {
-            repository.complete_item_purchase_atomic(&completed_id, now)
-        })
-        .await?;
-        if !completed {
-            return Err(format!("Manashop purchase {purchase_id} lost its applying state").into());
-        }
         Ok(())
     }
 
@@ -1361,7 +1336,18 @@ impl ShopInteractionHandler {
                     .iter()
                     .map(|request| request.victim_id)
                     .collect::<Vec<_>>();
-                let outcomes = self.apply_hostile_batch(requests).await?;
+                let reward_id = format!("pyroclasm:{purchase_id}");
+                let outcomes = self.settle_mana_effect(purchase_id, now, ult_refund, move |effects| {
+                    let outcomes = effects.apply_hostile_losses(&requests)?;
+                    let (total_destroyed, total_absorbed) = hostile_totals(&outcomes);
+                    let bounty = 35.min(total_destroyed / 2);
+                    if bounty > 0 {
+                        effects.adjust_balance(user_id, guild_id, bounty, Some("manashop"), Some(user_id),
+                            Some("hostile_loss_reward"), Some(&reward_id), Some("manashop pyroclasm bounty"),
+                            Some(&json!({"kind": "pyroclasm", "applied_loss": total_destroyed, "absorbed_amount": total_absorbed})))?;
+                    }
+                    Ok(outcomes)
+                }).await?;
                 let stored_names = selected
                     .iter()
                     .map(|player| (player.discord_id, player.name.clone()))
@@ -1391,23 +1377,6 @@ impl ShopInteractionHandler {
                     ));
                 }
                 let bounty = 35.min(total_destroyed / 2);
-                if bounty > 0 {
-                    self.credit_mana_reward(
-                        user_id,
-                        guild_id,
-                        bounty,
-                        "manashop",
-                        "hostile_loss_reward",
-                        format!("pyroclasm:{purchase_id}"),
-                        "manashop pyroclasm bounty",
-                        json!({
-                            "kind": "pyroclasm",
-                            "applied_loss": total_destroyed,
-                            "absorbed_amount": total_absorbed,
-                        }),
-                    )
-                    .await?;
-                }
                 let victims = if lines.is_empty() {
                     "  No eligible targets.".to_owned()
                 } else {
@@ -1442,6 +1411,8 @@ impl ShopInteractionHandler {
                 })
                 .await
                 .map_err(|error| error.to_string())?;
+                self.settle_mana_effect(purchase_id, now, ult_refund, |_| Ok(()))
+                    .await?;
                 let Some(info) = info else {
                     return Ok(format!(
                         "🏝️🔍 **INSIGHT** — <@{}> hasn't started digging.\n(cost: {} {JOPACOIN_EMOTE}, balance: {new_balance})",
@@ -1471,12 +1442,11 @@ impl ShopInteractionHandler {
                 ))
             }
             "sapling" => {
-                let repository = self.repository.clone();
-                let shaved = run_blocking("Sapling cooldown shave", move || {
-                    repository.shave_dig_cooldown(user_id, guild_id, 45 * 60)
-                })
-                .await
-                .unwrap_or(0);
+                let shaved = self
+                    .settle_mana_effect(purchase_id, now, ult_refund, move |effects| {
+                        effects.shave_dig_cooldown(user_id, guild_id, 45 * 60)
+                    })
+                    .await?;
                 Ok(format!(
                     "🌲🌱 **SAPLING** — <@{user_id}> accelerates growth.\n`/dig` cooldown reduced by {}m.\n(cost: {} {JOPACOIN_EMOTE}, balance: {new_balance})",
                     shaved / 60,
@@ -1484,24 +1454,19 @@ impl ShopInteractionHandler {
                 ))
             }
             "reprieve" => {
-                let repository = self.manashop.clone();
-                let buff_id = run_blocking("Reprieve grant", move || {
-                    BuffService::new(repository, now).grant_reprieve(user_id, guild_id)
-                })
-                .await
-                .map_err(|_| "Could not raise the reprieve; refunded.".to_owned())?;
-                let repository = self.repository.clone();
-                let recovered = run_blocking("Reprieve reconciliation", move || {
-                    repository.reconcile_purchased_pool(
-                        user_id,
-                        guild_id,
-                        buff_id,
-                        now.saturating_sub(24 * 3_600),
-                        now,
-                    )
-                })
-                .await
-                .unwrap_or(0);
+                let recovered = self
+                    .settle_mana_effect(purchase_id, now, ult_refund, move |effects| {
+                        let buff_id =
+                            BuffService::new(effects, now).grant_reprieve(user_id, guild_id)?;
+                        effects.reconcile_purchased_pool(
+                            user_id,
+                            guild_id,
+                            buff_id,
+                            now.saturating_sub(24 * 3_600),
+                            now,
+                        )
+                    })
+                    .await?;
                 Ok(format!(
                     "🌾🕊️ **REPRIEVE** — <@{user_id}> raises a rolling ward.\nRecovered **{recovered} {JOPACOIN_EMOTE}** from eligible losses in the past 24h. Remaining capacity protects 50% of hostile losses for 24h, up to **25 {JOPACOIN_EMOTE}** total.\n(cost: {} {JOPACOIN_EMOTE}, balance: {})",
                     spec.cost,
@@ -1526,7 +1491,7 @@ impl ShopInteractionHandler {
                         .map(|_| i64::from(entropy.chance(SOUL_HARVEST_BONUS_DRAIN_CHANCE)))
                         .collect::<Vec<_>>()
                 };
-                let requests = eligible
+                let requests: Vec<HostileLossRequest> = eligible
                     .iter()
                     .zip(bonuses)
                     .map(|(victim, bonus)| {
@@ -1545,7 +1510,11 @@ impl ShopInteractionHandler {
                         )
                     })
                     .collect();
-                let outcomes = self.apply_hostile_batch(requests).await?;
+                let outcomes = self
+                    .settle_mana_effect(purchase_id, now, ult_refund, move |effects| {
+                        effects.apply_hostile_losses(&requests)
+                    })
+                    .await?;
                 let (total, absorbed) = hostile_totals(&outcomes);
                 let shield = if absorbed > 0 {
                     format!(" Shields absorbed **{absorbed} {JOPACOIN_EMOTE}**.")
@@ -1560,9 +1529,8 @@ impl ShopInteractionHandler {
                 ))
             }
             "dynamite_cache" => {
-                let repository = self.repository.clone();
-                run_blocking("Dynamite Cache write", move || {
-                    repository.set_dig_temp_buff(
+                self.settle_mana_effect(purchase_id, now, ult_refund, move |effects| {
+                    effects.set_dig_temp_buff(
                         user_id,
                         guild_id,
                         &json!({
@@ -1611,19 +1579,24 @@ impl ShopInteractionHandler {
                     )
                 };
                 let reward = self.adjust_generated_mana_reward(guild_id, base, now).await;
-                if reward > 0 {
-                    self.credit_mana_reward(
-                        user_id,
-                        guild_id,
-                        reward,
-                        "mana_reward",
-                        relation,
-                        today.to_owned(),
-                        reason,
-                        json!({"base_reward": base, "adjusted_reward": reward}),
-                    )
-                    .await?;
-                }
+                let reward_day = today.to_owned();
+                self.settle_mana_effect(purchase_id, now, ult_refund, move |effects| {
+                    if reward > 0 {
+                        effects.adjust_balance(
+                            user_id,
+                            guild_id,
+                            reward,
+                            Some("mana_reward"),
+                            Some(user_id),
+                            Some(relation),
+                            Some(&reward_day),
+                            Some(reason),
+                            Some(&json!({"base_reward": base, "adjusted_reward": reward})),
+                        )?;
+                    }
+                    Ok(())
+                })
+                .await?;
                 Ok(format!(
                     "{emoji} **{title}** — <@{user_id}> reclaims {reward} {JOPACOIN_EMOTE}.\n({percent} in the past 24h, capped at 120. Cost: {} {JOPACOIN_EMOTE}, balance: {})",
                     spec.cost,
@@ -1631,9 +1604,8 @@ impl ShopInteractionHandler {
                 ))
             }
             "aegis" => {
-                let repository = self.manashop.clone();
-                run_blocking("Aegis grant", move || {
-                    BuffService::new(repository, now).grant_aegis(user_id, guild_id)
+                self.settle_mana_effect(purchase_id, now, ult_refund, move |effects| {
+                    BuffService::new(effects, now).grant_aegis(user_id, guild_id)
                 })
                 .await
                 .map_err(|_| "Could not raise the ward; refunded.".to_owned())?;
@@ -1645,10 +1617,9 @@ impl ShopInteractionHandler {
             "blood_pact" => {
                 let target =
                     target.ok_or_else(|| "Blood Pact requires a target; refunded.".to_owned())?;
-                let repository = self.manashop.clone();
                 let target_id = target.id;
-                run_blocking("Blood Pact grant", move || {
-                    BuffService::new(repository, now).grant_blood_pact(user_id, guild_id, target_id)
+                self.settle_mana_effect(purchase_id, now, ult_refund, move |effects| {
+                    BuffService::new(effects, now).grant_blood_pact(user_id, guild_id, target_id)
                 })
                 .await
                 .map_err(|_| "Could not seal the pact; refunded.".to_owned())?;
@@ -1668,7 +1639,7 @@ impl ShopInteractionHandler {
                         .map(|_| entropy.i64_inclusive(4, 14))
                         .collect::<Vec<_>>()
                 };
-                let requests = eligible
+                let requests: Vec<HostileLossRequest> = eligible
                     .iter()
                     .zip(rolls)
                     .filter_map(|(victim, roll)| {
@@ -1695,26 +1666,20 @@ impl ShopInteractionHandler {
                         })
                     })
                     .collect();
-                let outcomes = self.apply_hostile_batch(requests).await?;
+                let reward_id = format!("wildfire:{purchase_id}");
+                let outcomes = self.settle_mana_effect(purchase_id, now, ult_refund, move |effects| {
+                    let outcomes = effects.apply_hostile_losses(&requests)?;
+                    let (total, absorbed) = hostile_totals(&outcomes);
+                    let gain = (total as f64 * 0.45) as i64;
+                    if gain > 0 {
+                        effects.adjust_balance(user_id, guild_id, gain, Some("manashop"), Some(user_id),
+                            Some("hostile_loss_reward"), Some(&reward_id), Some("manashop wildfire harvest"),
+                            Some(&json!({"kind": "wildfire", "applied_loss": total, "absorbed_amount": absorbed})))?;
+                    }
+                    Ok(outcomes)
+                }).await?;
                 let (total, absorbed) = hostile_totals(&outcomes);
                 let gain = (total as f64 * 0.45) as i64;
-                if gain > 0 {
-                    self.credit_mana_reward(
-                        user_id,
-                        guild_id,
-                        gain,
-                        "manashop",
-                        "hostile_loss_reward",
-                        format!("wildfire:{purchase_id}"),
-                        "manashop wildfire harvest",
-                        json!({
-                            "kind": "wildfire",
-                            "applied_loss": total,
-                            "absorbed_amount": absorbed,
-                        }),
-                    )
-                    .await?;
-                }
                 let shield = if absorbed > 0 {
                     format!(" Shields absorbed **{absorbed} {JOPACOIN_EMOTE}**.")
                 } else {
@@ -1728,9 +1693,8 @@ impl ShopInteractionHandler {
                 ))
             }
             "counterspell" => {
-                let repository = self.manashop.clone();
-                run_blocking("Counterspell grant", move || {
-                    BuffService::new(repository, now).grant_counterspell(user_id, guild_id)
+                self.settle_mana_effect(purchase_id, now, ult_refund, move |effects| {
+                    BuffService::new(effects, now).grant_counterspell(user_id, guild_id)
                 })
                 .await
                 .map_err(|_| "Could not weave the ward; refunded.".to_owned())?;
@@ -1740,9 +1704,8 @@ impl ShopInteractionHandler {
                 ))
             }
             "overgrowth" => {
-                let repository = self.manashop.clone();
-                run_blocking("Overgrowth grant", move || {
-                    BuffService::new(repository, now).grant_overgrowth(user_id, guild_id)
+                self.settle_mana_effect(purchase_id, now, ult_refund, move |effects| {
+                    BuffService::new(effects, now).grant_overgrowth(user_id, guild_id)
                 })
                 .await
                 .map_err(|_| "Could not seed the overgrowth; refunded.".to_owned())?;
@@ -1762,10 +1725,9 @@ impl ShopInteractionHandler {
                 {
                     return Err(format!("<@{}> is not registered; refunded.", target.id));
                 }
-                let repository = self.manashop.clone();
                 let ally_id = target.id;
-                run_blocking("Sanctuary grant", move || {
-                    BuffService::new(repository, now).grant_sanctuary(user_id, guild_id, ally_id)
+                self.settle_mana_effect(purchase_id, now, ult_refund, move |effects| {
+                    BuffService::new(effects, now).grant_sanctuary(user_id, guild_id, ally_id)
                 })
                 .await
                 .map_err(|_| "Could not bind the sanctuary; refunded.".to_owned())?;
@@ -1777,10 +1739,8 @@ impl ShopInteractionHandler {
             "dark_bargain" => {
                 // The debt and its principal commit together: a player must
                 // never owe the bargain without having been paid it.
-                let repository = self.manashop.clone();
-                run_blocking("Dark Bargain", move || {
-                    BuffService::new(repository, now)
-                        .grant_dark_bargain(user_id, guild_id, 700, 800)
+                self.settle_mana_effect(purchase_id, now, ult_refund, move |effects| {
+                    BuffService::new(effects, now).grant_dark_bargain(user_id, guild_id, 700, 800)
                 })
                 .await
                 .map_err(|_| "Could not strike the bargain; refunded.".to_owned())?;
@@ -1811,43 +1771,19 @@ impl ShopInteractionHandler {
             .collect())
     }
 
-    async fn apply_hostile_batch(
+    async fn settle_mana_effect<T: Send + 'static>(
         &self,
-        requests: Vec<HostileLossRequest>,
-    ) -> Result<Vec<Result<cama_db::shop_runtime::HostileLossSettlement, String>>, String> {
-        let repository = self.repository.clone();
-        run_blocking("manashop hostile-loss batch", move || {
-            repository.apply_hostile_losses(&requests)
-        })
-        .await
-        .map_err(|error| error.to_string())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn credit_mana_reward(
-        &self,
-        user_id: i64,
-        guild_id: i64,
-        amount: i64,
-        source: &'static str,
-        related_type: &'static str,
-        related_id: String,
-        reason: &'static str,
-        metadata: JsonValue,
-    ) -> Result<i64, String> {
-        let repository = self.repository.clone();
-        run_blocking("manashop reward credit", move || {
-            repository.adjust_balance(
-                user_id,
-                guild_id,
-                amount,
-                Some(source),
-                Some(user_id),
-                Some(related_type),
-                Some(&related_id),
-                Some(reason),
-                Some(&metadata),
-            )
+        purchase_id: &str,
+        now: i64,
+        rebate: i64,
+        effect: impl FnOnce(ManashopPurchaseEffects<'_>) -> Result<T, ManashopRepositoryError>
+        + Send
+        + 'static,
+    ) -> Result<T, String> {
+        let repository = self.manashop.clone();
+        let purchase_id = purchase_id.to_owned();
+        run_blocking("manashop effect settlement", move || {
+            repository.settle_item_purchase_atomic(&purchase_id, now, rebate, effect)
         })
         .await
         .map_err(|error| error.to_string())
