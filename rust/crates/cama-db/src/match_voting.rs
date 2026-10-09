@@ -97,9 +97,7 @@ impl MatchVotingRepository {
         let connection = self.connection()?;
         let guild_id = Self::normalize_guild_id(key.guild_id);
         let pending_match_id = resolve_match_id(&connection, guild_id, key.pending_match_id)?;
-        pending_match_id
-            .map(|pending_match_id| query_snapshot(&connection, guild_id, pending_match_id))
-            .transpose()
+        resolved_snapshot(&connection, guild_id, pending_match_id)
     }
 
     /// Atomically write one shared-slot submission while preserving every
@@ -140,6 +138,17 @@ impl MatchVotingRepository {
             VoteSubmissionCasOutcome::MissingMatch,
             VoteSubmissionCasOutcome::Conflict,
         ))
+    }
+}
+
+fn resolved_snapshot(
+    connection: &Connection,
+    guild_id: i64,
+    pending_match_id: Option<i64>,
+) -> Result<Option<PendingVoteSnapshot>, MatchVotingRepositoryError> {
+    match pending_match_id {
+        Some(pending_match_id) => query_snapshot_optional(connection, guild_id, pending_match_id),
+        None => Ok(None),
     }
 }
 

@@ -26,6 +26,8 @@ pub enum ManashopRepositoryError {
     StateChanged(&'static str),
     #[error("manashop SQLite operation failed: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    #[error("manashop effect failed: {0}")]
+    Shop(#[from] crate::shop_runtime::ShopRuntimeRepositoryError),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -133,6 +135,143 @@ pub struct GrantBuffRequest<'a> {
     pub granted_at: i64,
     pub expires_at: i64,
     pub data: Option<&'a BuffData>,
+}
+
+/// Buff writes supported by either a repository or an active purchase transaction.
+pub trait ManashopBuffGrants {
+    fn grant_buff(&self, request: GrantBuffRequest<'_>) -> Result<i64, ManashopRepositoryError>;
+    fn refresh_buff_atomic(
+        &self,
+        request: GrantBuffRequest<'_>,
+    ) -> Result<i64, ManashopRepositoryError>;
+    fn grant_dark_bargain_atomic(
+        &self,
+        request: GrantBuffRequest<'_>,
+        principal: i64,
+    ) -> Result<i64, ManashopRepositoryError>;
+}
+
+/// Local effect operations sharing the purchase's SQLite transaction.
+#[derive(Clone, Copy)]
+pub struct ManashopPurchaseEffects<'a> {
+    connection: &'a Connection,
+}
+
+impl ManashopPurchaseEffects<'_> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn adjust_balance(
+        &self,
+        discord_id: i64,
+        guild_id: i64,
+        delta: i64,
+        source: Option<&str>,
+        actor_id: Option<i64>,
+        related_type: Option<&str>,
+        related_id: Option<&str>,
+        reason: Option<&str>,
+        metadata: Option<&serde_json::Value>,
+    ) -> Result<i64, ManashopRepositoryError> {
+        crate::shop_runtime::adjust_balance_in(
+            self.connection,
+            discord_id,
+            guild_id,
+            delta,
+            source,
+            actor_id,
+            related_type,
+            related_id,
+            reason,
+            metadata,
+        )
+        .map_err(Into::into)
+    }
+
+    pub fn shave_dig_cooldown(
+        &self,
+        discord_id: i64,
+        guild_id: i64,
+        seconds: i64,
+    ) -> Result<i64, ManashopRepositoryError> {
+        crate::shop_runtime::shave_dig_cooldown_in(self.connection, discord_id, guild_id, seconds)
+            .map_err(Into::into)
+    }
+
+    pub fn set_dig_temp_buff(
+        &self,
+        discord_id: i64,
+        guild_id: i64,
+        payload: &serde_json::Value,
+    ) -> Result<(), ManashopRepositoryError> {
+        crate::shop_runtime::set_dig_temp_buff_in(self.connection, discord_id, guild_id, payload)
+            .map_err(Into::into)
+    }
+
+    pub fn apply_hostile_losses(
+        &self,
+        requests: &[crate::shop_runtime::HostileLossRequest],
+    ) -> Result<
+        Vec<Result<crate::shop_runtime::HostileLossSettlement, String>>,
+        ManashopRepositoryError,
+    > {
+        crate::shop_runtime::apply_hostile_losses_in(self.connection, requests).map_err(Into::into)
+    }
+
+    pub fn reconcile_purchased_pool(
+        &self,
+        discord_id: i64,
+        guild_id: i64,
+        buff_id: i64,
+        since_ts: i64,
+        now: i64,
+    ) -> Result<i64, ManashopRepositoryError> {
+        crate::shop_runtime::reconcile_purchased_pool_in(
+            self.connection,
+            discord_id,
+            guild_id,
+            buff_id,
+            since_ts,
+            now,
+        )
+        .map_err(Into::into)
+    }
+}
+
+impl ManashopBuffGrants for ManashopPurchaseEffects<'_> {
+    fn grant_buff(&self, request: GrantBuffRequest<'_>) -> Result<i64, ManashopRepositoryError> {
+        grant_buff_in(self.connection, request)
+    }
+    fn refresh_buff_atomic(
+        &self,
+        request: GrantBuffRequest<'_>,
+    ) -> Result<i64, ManashopRepositoryError> {
+        refresh_buff_in(self.connection, request)
+    }
+    fn grant_dark_bargain_atomic(
+        &self,
+        request: GrantBuffRequest<'_>,
+        principal: i64,
+    ) -> Result<i64, ManashopRepositoryError> {
+        grant_dark_bargain_in(self.connection, request, principal)
+    }
+}
+
+impl ManashopBuffGrants for ManashopRepository {
+    fn grant_buff(&self, request: GrantBuffRequest<'_>) -> Result<i64, ManashopRepositoryError> {
+        Self::grant_buff(self, request)
+    }
+    fn refresh_buff_atomic(
+        &self,
+        request: GrantBuffRequest<'_>,
+    ) -> Result<i64, ManashopRepositoryError> {
+        Self::refresh_buff_atomic(self, request)
+    }
+    fn grant_dark_bargain_atomic(
+        &self,
+        request: GrantBuffRequest<'_>,
+        principal: i64,
+    ) -> Result<i64, ManashopRepositoryError> {
+        Self::grant_dark_bargain_atomic(self, request, principal)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -526,6 +665,103 @@ impl ManashopRepository {
             .map_err(Into::into)
     }
 
+    pub fn recover_stale_pending_purchases(
+        &self,
+        now: i64,
+    ) -> Result<usize, ManashopRepositoryError> {
+        self.recover_pending_purchases(now, None)
+    }
+
+    pub fn recover_stale_pending_purchases_for_player(
+        &self,
+        discord_id: i64,
+        guild_id: i64,
+        now: i64,
+    ) -> Result<usize, ManashopRepositoryError> {
+        self.recover_pending_purchases(now, Some((discord_id, guild_id)))
+    }
+
+    fn recover_pending_purchases(
+        &self,
+        now: i64,
+        player: Option<(i64, i64)>,
+    ) -> Result<usize, ManashopRepositoryError> {
+        let connection = self.connection()?;
+        let cutoff = now.saturating_sub(PENDING_PURCHASE_STALE_SECONDS);
+        let purchase_ids = if let Some((discord_id, guild_id)) = player {
+            connection
+                .prepare(
+                    "SELECT purchases.purchase_id FROM manashop_daily_uses AS uses
+                 JOIN manashop_purchases AS purchases ON purchases.purchase_id=uses.purchase_id
+                 WHERE uses.discord_id=?1 AND uses.guild_id=?2
+                   AND purchases.status='pending' AND purchases.updated_at<=?3",
+                )?
+                .query_map(params![discord_id, guild_id, cutoff], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            connection.prepare(
+                "SELECT purchase_id FROM manashop_purchases WHERE status='pending' AND updated_at<=?1",
+            )?.query_map([cutoff], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        drop(connection);
+        let mut recovered = 0;
+        for purchase_id in purchase_ids {
+            // Re-check pending state inside the refund transaction: settlement
+            // may have completed after the recovery query released its read.
+            recovered += usize::from(self.refund_purchase(&purchase_id, now, true)?);
+        }
+        Ok(recovered)
+    }
+
+    /// Effects, the successful rebate, and completion commit together. Until
+    /// then the debit remains pending and can use the existing stale refund.
+    pub fn settle_item_purchase_atomic<T>(
+        &self,
+        purchase_id: &str,
+        now: i64,
+        rebate: i64,
+        effect: impl FnOnce(ManashopPurchaseEffects<'_>) -> Result<T, ManashopRepositoryError>,
+    ) -> Result<T, ManashopRepositoryError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let purchase = transaction.query_row(
+            "SELECT purchase_id,discord_id,guild_id,item_id,used_date,cost,tap_mana,status,created_at,updated_at
+             FROM manashop_purchases WHERE purchase_id=?1 AND status='pending'",
+            [purchase_id], map_purchase,
+        ).optional()?.ok_or(ManashopRepositoryError::StateChanged("pending purchase"))?;
+        if rebate < 0 || rebate > purchase.cost || (rebate > 0 && !purchase.tap_mana) {
+            return Err(ManashopRepositoryError::StateChanged("purchase rebate"));
+        }
+        let result = effect(ManashopPurchaseEffects {
+            connection: &transaction,
+        })?;
+        if rebate > 0 {
+            crate::shop_runtime::adjust_balance_in(
+                &transaction,
+                purchase.discord_id,
+                purchase.guild_id,
+                rebate,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )?;
+        }
+        if transaction.execute(
+            "UPDATE manashop_purchases SET status='completed',updated_at=?1 WHERE purchase_id=?2 AND status='pending'",
+            params![now, purchase_id],
+        )? != 1 {
+            return Err(ManashopRepositoryError::StateChanged("purchase completion"));
+        }
+        transaction.commit()?;
+        Ok(result)
+    }
+
     pub fn mark_item_purchase_applying_atomic(
         &self,
         purchase_id: &str,
@@ -565,6 +801,15 @@ impl ManashopRepository {
         purchase_id: &str,
         now: i64,
     ) -> Result<bool, ManashopRepositoryError> {
+        self.refund_purchase(purchase_id, now, false)
+    }
+
+    fn refund_purchase(
+        &self,
+        purchase_id: &str,
+        now: i64,
+        pending_only: bool,
+    ) -> Result<bool, ManashopRepositoryError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let Some(purchase) = transaction
@@ -580,7 +825,7 @@ impl ManashopRepository {
             transaction.commit()?;
             return Ok(false);
         };
-        if purchase.status != "pending" && purchase.status != "applying" {
+        if purchase.status != "pending" && (pending_only || purchase.status != "applying") {
             transaction.commit()?;
             return Ok(false);
         }
@@ -612,6 +857,7 @@ impl ManashopRepository {
                 "UPDATE player_mana
                  SET consumed_today = 0, updated_at = CURRENT_TIMESTAMP
                  WHERE discord_id = ?1 AND guild_id = ?2
+                   AND assigned_date = ?3
                    AND NOT EXISTS (
                        SELECT 1 FROM manashop_purchases
                        WHERE discord_id = ?1 AND guild_id = ?2
@@ -646,59 +892,16 @@ impl ManashopRepository {
         &self,
         request: GrantBuffRequest<'_>,
     ) -> Result<i64, ManashopRepositoryError> {
-        let connection = self.connection()?;
-        connection.execute(
-            "INSERT INTO manashop_buffs (
-                 discord_id, guild_id, buff_type, target_id, granted_at,
-                 expires_at, triggered, data
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
-            params![
-                request.discord_id,
-                Self::normalize_guild_id(request.guild_id),
-                request.buff_type,
-                request.target_id,
-                request.granted_at,
-                request.expires_at,
-                request.data.map(buff_data_to_json)
-            ],
-        )?;
-        Ok(connection.last_insert_rowid())
+        grant_buff_in(&self.connection()?, request)
     }
 
     pub fn refresh_buff_atomic(
         &self,
         request: GrantBuffRequest<'_>,
     ) -> Result<i64, ManashopRepositoryError> {
-        let guild_id = Self::normalize_guild_id(request.guild_id);
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute(
-            "UPDATE manashop_buffs SET triggered = 1
-             WHERE discord_id = ?1 AND guild_id = ?2 AND buff_type = ?3
-               AND triggered = 0 AND expires_at > ?4",
-            params![
-                request.discord_id,
-                guild_id,
-                request.buff_type,
-                request.granted_at
-            ],
-        )?;
-        transaction.execute(
-            "INSERT INTO manashop_buffs (
-                 discord_id, guild_id, buff_type, target_id, granted_at,
-                 expires_at, triggered, data
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
-            params![
-                request.discord_id,
-                guild_id,
-                request.buff_type,
-                request.target_id,
-                request.granted_at,
-                request.expires_at,
-                request.data.map(buff_data_to_json)
-            ],
-        )?;
-        let id = transaction.last_insert_rowid();
+        let id = refresh_buff_in(&transaction, request)?;
         transaction.commit()?;
         Ok(id)
     }
@@ -1476,36 +1679,102 @@ impl ManashopRepository {
         request: GrantBuffRequest<'_>,
         principal: i64,
     ) -> Result<i64, ManashopRepositoryError> {
-        let guild_id = Self::normalize_guild_id(request.guild_id);
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute(
-            "INSERT INTO manashop_buffs (
+        let id = grant_dark_bargain_in(&transaction, request, principal)?;
+        transaction.commit()?;
+        Ok(id)
+    }
+}
+
+fn grant_buff_in(
+    connection: &Connection,
+    request: GrantBuffRequest<'_>,
+) -> Result<i64, ManashopRepositoryError> {
+    connection.execute(
+        "INSERT INTO manashop_buffs (
                  discord_id, guild_id, buff_type, target_id, granted_at,
                  expires_at, triggered, data
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
-            params![
-                request.discord_id,
-                guild_id,
-                request.buff_type,
-                request.target_id,
-                request.granted_at,
-                request.expires_at,
-                request.data.map(buff_data_to_json)
-            ],
-        )?;
-        let buff_id = transaction.last_insert_rowid();
-        if transaction.execute(
-            "UPDATE players SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?1
+        params![
+            request.discord_id,
+            ManashopRepository::normalize_guild_id(request.guild_id),
+            request.buff_type,
+            request.target_id,
+            request.granted_at,
+            request.expires_at,
+            request.data.map(buff_data_to_json)
+        ],
+    )?;
+    Ok(connection.last_insert_rowid())
+}
+
+fn refresh_buff_in(
+    connection: &Connection,
+    request: GrantBuffRequest<'_>,
+) -> Result<i64, ManashopRepositoryError> {
+    let guild_id = ManashopRepository::normalize_guild_id(request.guild_id);
+    connection.execute(
+        "UPDATE manashop_buffs SET triggered = 1
+             WHERE discord_id = ?1 AND guild_id = ?2 AND buff_type = ?3
+               AND triggered = 0 AND expires_at > ?4",
+        params![
+            request.discord_id,
+            guild_id,
+            request.buff_type,
+            request.granted_at
+        ],
+    )?;
+    connection.execute(
+        "INSERT INTO manashop_buffs (
+                 discord_id, guild_id, buff_type, target_id, granted_at,
+                 expires_at, triggered, data
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
+        params![
+            request.discord_id,
+            guild_id,
+            request.buff_type,
+            request.target_id,
+            request.granted_at,
+            request.expires_at,
+            request.data.map(buff_data_to_json)
+        ],
+    )?;
+    let id = connection.last_insert_rowid();
+    Ok(id)
+}
+
+fn grant_dark_bargain_in(
+    connection: &Connection,
+    request: GrantBuffRequest<'_>,
+    principal: i64,
+) -> Result<i64, ManashopRepositoryError> {
+    let guild_id = ManashopRepository::normalize_guild_id(request.guild_id);
+    connection.execute(
+        "INSERT INTO manashop_buffs (
+                 discord_id, guild_id, buff_type, target_id, granted_at,
+                 expires_at, triggered, data
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
+        params![
+            request.discord_id,
+            guild_id,
+            request.buff_type,
+            request.target_id,
+            request.granted_at,
+            request.expires_at,
+            request.data.map(buff_data_to_json)
+        ],
+    )?;
+    let buff_id = connection.last_insert_rowid();
+    if connection.execute(
+        "UPDATE players SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?1
              WHERE discord_id = ?2 AND guild_id = ?3",
-            params![principal, request.discord_id, guild_id],
-        )? != 1
-        {
-            return Err(ManashopRepositoryError::StateChanged("dark bargain player"));
-        }
-        transaction.commit()?;
-        Ok(buff_id)
+        params![principal, request.discord_id, guild_id],
+    )? != 1
+    {
+        return Err(ManashopRepositoryError::StateChanged("dark bargain player"));
     }
+    Ok(buff_id)
 }
 
 fn map_purchase(row: &rusqlite::Row<'_>) -> Result<PurchaseRecord, rusqlite::Error> {

@@ -370,43 +370,18 @@ impl ShopRuntimeRepository {
     ) -> Result<i64, ShopRuntimeRepositoryError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let has_context = source.is_some()
-            || actor_id.is_some()
-            || related_type.is_some()
-            || related_id.is_some()
-            || reason.is_some()
-            || metadata.is_some();
-        if has_context {
-            set_ledger_context(
-                &transaction,
-                source,
-                actor_id,
-                related_type,
-                related_id,
-                reason,
-                metadata,
-            )?;
-        }
-        let changed = transaction.execute(
-            "UPDATE players
-             SET jopacoin_balance=COALESCE(jopacoin_balance,0)+?1,
-                 updated_at=CURRENT_TIMESTAMP
-             WHERE discord_id=?2 AND guild_id=?3",
-            params![delta, discord_id, guild_id],
-        );
-        if has_context {
-            clear_ledger_context(&transaction)?;
-        }
-        if changed? != 1 {
-            return Err(ShopRuntimeRepositoryError::MissingPlayer {
-                discord_id,
-                guild_id,
-            });
-        }
-        if delta < 0 {
-            update_lowest_balance(&transaction, discord_id, guild_id)?;
-        }
-        let balance = player_balance(&transaction, discord_id, guild_id)?;
+        let balance = adjust_balance_in(
+            &transaction,
+            discord_id,
+            guild_id,
+            delta,
+            source,
+            actor_id,
+            related_type,
+            related_id,
+            reason,
+            metadata,
+        )?;
         transaction.commit()?;
         Ok(balance)
     }
@@ -660,12 +635,7 @@ impl ShopRuntimeRepository {
         seconds: i64,
     ) -> Result<i64, ShopRuntimeRepositoryError> {
         let connection = self.connection()?;
-        let changed = connection.execute(
-            "UPDATE tunnels SET last_dig_at=MAX(0,last_dig_at-?1)
-             WHERE discord_id=?2 AND guild_id=?3 AND last_dig_at IS NOT NULL",
-            params![seconds.max(0), discord_id, guild_id],
-        )?;
-        Ok(if changed == 1 { seconds.max(0) } else { 0 })
+        shave_dig_cooldown_in(&connection, discord_id, guild_id, seconds)
     }
 
     pub fn set_dig_temp_buff(
@@ -674,11 +644,8 @@ impl ShopRuntimeRepository {
         guild_id: i64,
         payload: &Value,
     ) -> Result<(), ShopRuntimeRepositoryError> {
-        self.connection()?.execute(
-            "UPDATE tunnels SET temp_buffs=?1 WHERE discord_id=?2 AND guild_id=?3",
-            params![payload.to_string(), discord_id, guild_id],
-        )?;
-        Ok(())
+        let connection = self.connection()?;
+        set_dig_temp_buff_in(&connection, discord_id, guild_id, payload)
     }
 
     pub fn has_equipped_relic(
@@ -887,25 +854,7 @@ impl ShopRuntimeRepository {
         }
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut results = Vec::with_capacity(requests.len());
-        for (index, request) in requests.iter().enumerate() {
-            let savepoint = format!("shop_hostile_{index}");
-            transaction.execute_batch(&format!("SAVEPOINT {savepoint}"))?;
-            match validate_hostile_request(request)
-                .and_then(|()| apply_hostile_loss_in(&transaction, request))
-            {
-                Ok(settlement) => {
-                    transaction.execute_batch(&format!("RELEASE SAVEPOINT {savepoint}"))?;
-                    results.push(Ok(settlement));
-                }
-                Err(error) => {
-                    transaction.execute_batch(&format!(
-                        "ROLLBACK TO SAVEPOINT {savepoint}; RELEASE SAVEPOINT {savepoint}"
-                    ))?;
-                    results.push(Err(error.to_string()));
-                }
-            }
-        }
+        let results = apply_hostile_losses_in(&transaction, requests)?;
         transaction.commit()?;
         Ok(results)
     }
@@ -920,78 +869,197 @@ impl ShopRuntimeRepository {
     ) -> Result<i64, ShopRuntimeRepositoryError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let row = transaction
-            .query_row(
-                "SELECT id,buff_type,data FROM manashop_buffs
-                 WHERE id=?1 AND guild_id=?2 AND discord_id=?3
-                   AND triggered=0 AND expires_at>?4",
-                params![buff_id, guild_id, discord_id, now],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let Some((buff_id, buff_type, raw_data)) = row else {
-            transaction.commit()?;
-            return Ok(0);
-        };
-        let (mut data, mut capacity, rate) = decode_pool(&buff_type, raw_data.as_deref())?;
-        let retroactive = buff_type == "reprieve"
-            || data
-                .get("rolling_retroactive")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-        if !retroactive {
-            return Err(ShopRuntimeRepositoryError::InvalidProtectionPool);
-        }
-        let pool_key = format!("buff:{buff_id}");
-        let mut refunded = 0_i64;
-        for event in
-            eligible_retro_events(&transaction, discord_id, guild_id, since_ts, now, &pool_key)?
-        {
-            let uncovered = event.applied.saturating_sub(event.retro_covered);
-            let amount = capacity.min(rate_absorption(uncovered, rate));
-            if amount <= 0 {
-                continue;
-            }
-            let after = capacity - amount;
-            let detail = ProtectionDetail {
-                source: buff_type.clone(),
-                absorbed: amount,
-                rate_millionths: rate_to_millionths(rate),
-                capacity_before: Some(capacity),
-                capacity_after: Some(after),
-                buff_id: Some(buff_id),
-                retroactive: true,
-            };
-            credit_retro_event(
-                &transaction,
-                &event,
-                discord_id,
-                guild_id,
-                amount,
-                &detail,
-                &pool_key,
-                now,
-            )?;
-            capacity = after;
-            refunded = refunded.saturating_add(amount);
-            if capacity <= 0 {
-                break;
-            }
-        }
-        data["capacity_remaining"] = Value::from(capacity);
-        transaction.execute(
-            "UPDATE manashop_buffs SET data=?1,triggered=?2 WHERE id=?3",
-            params![data.to_string(), i64::from(capacity <= 0), buff_id],
+        let refunded = reconcile_purchased_pool_in(
+            &transaction,
+            discord_id,
+            guild_id,
+            buff_id,
+            since_ts,
+            now,
         )?;
         transaction.commit()?;
         Ok(refunded)
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn adjust_balance_in(
+    connection: &Connection,
+    discord_id: i64,
+    guild_id: i64,
+    delta: i64,
+    source: Option<&str>,
+    actor_id: Option<i64>,
+    related_type: Option<&str>,
+    related_id: Option<&str>,
+    reason: Option<&str>,
+    metadata: Option<&Value>,
+) -> Result<i64, ShopRuntimeRepositoryError> {
+    let has_context = source.is_some()
+        || actor_id.is_some()
+        || related_type.is_some()
+        || related_id.is_some()
+        || reason.is_some()
+        || metadata.is_some();
+    if has_context {
+        set_ledger_context(
+            connection,
+            source,
+            actor_id,
+            related_type,
+            related_id,
+            reason,
+            metadata,
+        )?;
+    }
+    let changed = connection.execute(
+        "UPDATE players
+         SET jopacoin_balance=COALESCE(jopacoin_balance,0)+?1,
+             updated_at=CURRENT_TIMESTAMP
+         WHERE discord_id=?2 AND guild_id=?3",
+        params![delta, discord_id, guild_id],
+    );
+    if has_context {
+        clear_ledger_context(connection)?;
+    }
+    if changed? != 1 {
+        return Err(ShopRuntimeRepositoryError::MissingPlayer {
+            discord_id,
+            guild_id,
+        });
+    }
+    if delta < 0 {
+        update_lowest_balance(connection, discord_id, guild_id)?;
+    }
+    let balance = player_balance(connection, discord_id, guild_id)?;
+    Ok(balance)
+}
+
+pub(crate) fn shave_dig_cooldown_in(
+    connection: &Connection,
+    discord_id: i64,
+    guild_id: i64,
+    seconds: i64,
+) -> Result<i64, ShopRuntimeRepositoryError> {
+    let changed = connection.execute(
+        "UPDATE tunnels SET last_dig_at=MAX(0,last_dig_at-?1)
+         WHERE discord_id=?2 AND guild_id=?3 AND last_dig_at IS NOT NULL",
+        params![seconds.max(0), discord_id, guild_id],
+    )?;
+    Ok(if changed == 1 { seconds.max(0) } else { 0 })
+}
+
+pub(crate) fn set_dig_temp_buff_in(
+    connection: &Connection,
+    discord_id: i64,
+    guild_id: i64,
+    payload: &Value,
+) -> Result<(), ShopRuntimeRepositoryError> {
+    connection.execute(
+        "UPDATE tunnels SET temp_buffs=?1 WHERE discord_id=?2 AND guild_id=?3",
+        params![payload.to_string(), discord_id, guild_id],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn apply_hostile_losses_in(
+    connection: &Connection,
+    requests: &[HostileLossRequest],
+) -> Result<Vec<Result<HostileLossSettlement, String>>, ShopRuntimeRepositoryError> {
+    if requests.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut results = Vec::with_capacity(requests.len());
+    for (index, request) in requests.iter().enumerate() {
+        let savepoint = format!("shop_hostile_{index}");
+        connection.execute_batch(&format!("SAVEPOINT {savepoint}"))?;
+        match validate_hostile_request(request)
+            .and_then(|()| apply_hostile_loss_in(connection, request))
+        {
+            Ok(settlement) => {
+                connection.execute_batch(&format!("RELEASE SAVEPOINT {savepoint}"))?;
+                results.push(Ok(settlement));
+            }
+            Err(error) => {
+                connection.execute_batch(&format!(
+                    "ROLLBACK TO SAVEPOINT {savepoint}; RELEASE SAVEPOINT {savepoint}"
+                ))?;
+                results.push(Err(error.to_string()));
+            }
+        }
+    }
+    Ok(results)
+}
+
+pub(crate) fn reconcile_purchased_pool_in(
+    connection: &Connection,
+    discord_id: i64,
+    guild_id: i64,
+    buff_id: i64,
+    since_ts: i64,
+    now: i64,
+) -> Result<i64, ShopRuntimeRepositoryError> {
+    let row = connection
+        .query_row(
+            "SELECT id,buff_type,data FROM manashop_buffs
+             WHERE id=?1 AND guild_id=?2 AND discord_id=?3
+               AND triggered=0 AND expires_at>?4",
+            params![buff_id, guild_id, discord_id, now],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((buff_id, buff_type, raw_data)) = row else {
+        return Ok(0);
+    };
+    let (mut data, mut capacity, rate) = decode_pool(&buff_type, raw_data.as_deref())?;
+    let retroactive = buff_type == "reprieve"
+        || data
+            .get("rolling_retroactive")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+    if !retroactive {
+        return Err(ShopRuntimeRepositoryError::InvalidProtectionPool);
+    }
+    let pool_key = format!("buff:{buff_id}");
+    let mut refunded = 0_i64;
+    for event in eligible_retro_events(connection, discord_id, guild_id, since_ts, now, &pool_key)?
+    {
+        let uncovered = event.applied.saturating_sub(event.retro_covered);
+        let amount = capacity.min(rate_absorption(uncovered, rate));
+        if amount <= 0 {
+            continue;
+        }
+        let after = capacity - amount;
+        let detail = ProtectionDetail {
+            source: buff_type.clone(),
+            absorbed: amount,
+            rate_millionths: rate_to_millionths(rate),
+            capacity_before: Some(capacity),
+            capacity_after: Some(after),
+            buff_id: Some(buff_id),
+            retroactive: true,
+        };
+        credit_retro_event(
+            connection, &event, discord_id, guild_id, amount, &detail, &pool_key, now,
+        )?;
+        capacity = after;
+        refunded = refunded.saturating_add(amount);
+        if capacity <= 0 {
+            break;
+        }
+    }
+    data["capacity_remaining"] = Value::from(capacity);
+    connection.execute(
+        "UPDATE manashop_buffs SET data=?1,triggered=?2 WHERE id=?3",
+        params![data.to_string(), i64::from(capacity <= 0), buff_id],
+    )?;
+    Ok(refunded)
 }
 
 fn map_player(row: &Row<'_>) -> Result<ShopPlayer, rusqlite::Error> {

@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 
 use cama_db::manashop_rework_repository::{
     BloodPactClaim, BuffData, BuffRecord, DarkBargainSettlement, GrantBuffRequest,
-    ManashopRepository, ManashopRepositoryError,
+    ManashopBuffGrants, ManashopRepository, ManashopRepositoryError,
 };
 use cama_domain::economy_scaling::{DEFAULT_MINIGAME_JC_DELTA_SCALE, scale_minigame_jc_delta};
 
@@ -118,15 +118,15 @@ pub fn execute_swamp_siphon<G: ProtectionGateway>(
 }
 
 #[derive(Clone, Debug)]
-pub struct BuffService {
-    repository: ManashopRepository,
+pub struct BuffService<R = ManashopRepository> {
+    repository: R,
     now: i64,
     minigame_scale: f64,
 }
 
-impl BuffService {
+impl<R: ManashopBuffGrants> BuffService<R> {
     #[must_use]
-    pub fn new(repository: ManashopRepository, now: i64) -> Self {
+    pub fn new(repository: R, now: i64) -> Self {
         Self {
             repository,
             now,
@@ -141,7 +141,7 @@ impl BuffService {
     }
 
     #[must_use]
-    pub const fn repository(&self) -> &ManashopRepository {
+    pub const fn repository(&self) -> &R {
         &self.repository
     }
 
@@ -297,7 +297,9 @@ impl BuffService {
             data,
         })
     }
+}
 
+impl BuffService<ManashopRepository> {
     pub fn active_for(
         &self,
         discord_id: i64,

@@ -134,6 +134,30 @@ fn implicit_lookup_requires_exactly_one_match_and_explicit_unknown_is_safe() {
 }
 
 #[test]
+fn snapshot_returns_none_when_cleanup_deletes_the_resolved_match() {
+    for explicit in [false, true] {
+        let fixture = Fixture::new();
+        let pending_match_id = fixture.seed(GUILD, BASE_PAYLOAD);
+        let reader = fixture.repository.connection().expect("reader connection");
+        let resolved = resolve_match_id(&reader, GUILD, explicit.then_some(pending_match_id))
+            .expect("resolve pending match");
+        assert_eq!(resolved, Some(pending_match_id));
+        fixture
+            .connection()
+            .execute(
+                "DELETE FROM pending_matches WHERE pending_match_id = ?1",
+                params![pending_match_id],
+            )
+            .expect("concurrent cleanup");
+
+        assert_eq!(
+            resolved_snapshot(&reader, GUILD, resolved).expect("snapshot after cleanup"),
+            None
+        );
+    }
+}
+
+#[test]
 fn snapshot_decodes_teams_exclusions_and_shared_submissions() {
     let fixture = Fixture::new();
     let payload = BASE_PAYLOAD.replace(

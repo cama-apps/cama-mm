@@ -169,6 +169,7 @@ async fn queue_requires_matching_capture_and_is_durable_and_idempotent() {
         .unwrap();
     let archive = load(&dir).unwrap().unwrap();
     assert_eq!(archive.job.as_ref().unwrap().summary_message_id, 456);
+    let now = archive.job.as_ref().unwrap().queued_at;
     capture_sync(&database, 42, 7, 999, 30, &picture(), now).unwrap();
     assert_eq!(load(&dir).unwrap().unwrap().frames.len(), 2);
     assert!(ready_jobs(&database, &[43], now + 1).unwrap().is_empty());
