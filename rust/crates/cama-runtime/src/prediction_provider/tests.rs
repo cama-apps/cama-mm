@@ -25,6 +25,21 @@ const CHANNEL_MESSAGE_ID: i64 = 900;
 const ADMIN: i64 = 99;
 const TRADER: i64 = 100;
 
+#[test]
+fn ladder_bars_scale_small_liquidity_across_both_sides() {
+    let body = ladder_body(&Book {
+        current_price: Some(50),
+        yes_asks: vec![(52, 10), (54, 8), (56, 2)],
+        yes_bids: vec![(48, 6), (46, 4), (44, 1), (42, 0)],
+    });
+    let widths: Vec<_> = body
+        .lines()
+        .filter(|line| line.contains("\u{1b}[0;") && !line.contains("Buy"))
+        .map(|line| line.chars().filter(|character| *character == '█').count())
+        .collect();
+    assert_eq!(widths, vec![2, 8, 10, 6, 4, 1, 0]);
+}
+
 #[derive(Default)]
 struct CapturedResponses {
     immediate: Vec<InteractionResponse>,

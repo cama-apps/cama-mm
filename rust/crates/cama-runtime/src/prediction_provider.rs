@@ -2708,11 +2708,22 @@ fn ladder_body(book: &Book) -> String {
     let hidden_bids = bids_all.len().saturating_sub(LADDER_MAX_ROWS_PER_SIDE);
     let asks = &asks_all[..asks_all.len().min(LADDER_MAX_ROWS_PER_SIDE)];
     let bids = &bids_all[..bids_all.len().min(LADDER_MAX_ROWS_PER_SIDE)];
+    let max_size = asks
+        .iter()
+        .chain(bids.iter())
+        .map(|(_, size)| *size)
+        .max()
+        .unwrap_or(1)
+        .max(1);
     let green = "\u{1b}[0;32m";
     let red = "\u{1b}[0;31m";
     let reset = "\u{1b}[0;0m";
     let row = |price: i64, size: i64| {
-        let cells = usize::try_from((size / 10).clamp(0, 10)).unwrap_or_default();
+        let cells = if size > 0 {
+            ((i128::from(size) * 10 / i128::from(max_size)).max(1)) as usize
+        } else {
+            0
+        };
         format!("  {price:>3}  {:<10}  {size:>3}", "█".repeat(cells))
     };
     let mut lines = vec![format!("{green}🟢 Buy YES{reset}")];
