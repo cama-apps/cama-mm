@@ -4650,7 +4650,8 @@ fn test_shuffle_display_uses_configured_flat_off_role_value_penalty() {
     // stacks on top of it. Radiant is fully on-role, so it is a flat 5% off
     // 13_000; Dire carries one off-role player who now takes both factors,
     // which is why it falls further than 5% from 11_300.
-    assert_eq!(configured, [12_350.0, 10_763.0]);
+    // Dire: 11_300 * 0.95 - 2_000 * 0.95 * 0.02 - 200 = 10_782.
+    assert_eq!(configured, [12_350.0, 10_782.0]);
 }
 
 #[test]
