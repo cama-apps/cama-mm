@@ -260,7 +260,7 @@ fn repair_all_insufficient_balance_changes_nothing() {
 
 #[test]
 fn void_repair_quote_matches_atomic_bill_and_retry_never_mints_coins() {
-    let database = fixture(100, 275, 5);
+    let database = fixture(140, 275, 5);
     let connection = Connection::open(database.path()).expect("fixture DB");
     connection
         .execute("UPDATE dig_gear SET tier=7, durability=0", [])
@@ -280,7 +280,7 @@ fn void_repair_quote_matches_atomic_bill_and_retry_never_mints_coins() {
             )
         })
         .sum();
-    assert_eq!(quote, 80);
+    assert_eq!(quote, 120);
     let outcome = service
         .execute(USER, GUILD, DigGearRuntimeAction::RepairAll, 206)
         .expect("repair");

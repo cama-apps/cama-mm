@@ -1452,7 +1452,7 @@ fn high_end_repair_caps_upkeep_without_removing_the_coin_sink() {
         let table = tier_table(slot).expect("regular gear");
         for definition in table {
             let old_full_cost = python_round(definition.shop_price as f64 * 0.05);
-            let full_cost = old_full_cost.min(20);
+            let full_cost = old_full_cost.min(30);
             for durability in 0..=GEAR_MAX_DURABILITY {
                 let cost = repair_cost(slot, definition.tier, None, durability, None);
                 let missing = i64::from(GEAR_MAX_DURABILITY - durability);
@@ -1462,9 +1462,9 @@ fn high_end_repair_caps_upkeep_without_removing_the_coin_sink() {
                 }
             }
         }
-        assert_eq!(repair_cost(slot, 7, None, 0, None), 20);
-        assert_eq!(repair_cost(slot, 7, None, 10, None), 10);
-        assert_eq!(repair_cost(slot, 7, None, 19, None), 1);
+        assert_eq!(repair_cost(slot, 7, None, 0, None), 30);
+        assert_eq!(repair_cost(slot, 7, None, 10, None), 15);
+        assert_eq!(repair_cost(slot, 7, None, 19, None), 2);
     }
 }
 

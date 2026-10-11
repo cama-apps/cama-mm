@@ -25,6 +25,7 @@ use cama_db::dig_tunnel_encounters_repository::{
 use cama_db::loan_repository::{LedgerContext, LoanRepository};
 use cama_db::mana_service_repository::ManaRepository;
 use cama_db::shop_runtime::{HostileDestination, HostileLossRequest, ShopRuntimeRepository};
+use cama_domain::dig_cave_in::{CAVE_IN_BLOCK_LOSS_RANGES, cave_in_band};
 use cama_domain::dig_economy::scale_positive_dig_jc;
 use cama_domain::dig_splash::{HOSTILE_LOSS_MIN_BALANCE, strengthen_dig_event_penalty};
 use cama_domain::economy_scaling::{scale_deflationary_minigame_jc_delta, scale_minigame_jc_delta};
@@ -1213,6 +1214,14 @@ impl DigEventRuntimeService {
             })
             .map_err(DigEventRuntimeError::Policy)?;
 
+        // Flag-only cave-ins need a real setback. Preserve authored depth
+        // penalties rather than stacking a second loss on top of them.
+        if resolution.cave_in && resolution.advance == 0 {
+            let (minimum, maximum) = CAVE_IN_BLOCK_LOSS_RANGES[cave_in_band(snapshot.depth)];
+            let loss = entropy.advance(i64::from(minimum), i64::from(maximum));
+            resolution.advance = -loss.min(snapshot.depth.max(0));
+        }
+
         // Python sets the guild-wide window before touching splash victims or
         // the actor transaction, and failure is intentionally fail-soft.
         let guild_modifier = resolution
@@ -1405,6 +1414,9 @@ impl DigEventRuntimeService {
             )?
         {
             return self.resume_event_delivery(delivery);
+        }
+        if !receipt.applied_now && resolution.cave_in {
+            resolution.advance = receipt.depth_after.saturating_sub(receipt.depth_before);
         }
         let mut quest_entropy = quest_followup_entropy(request, self.config.entropy_secret);
         let quest_followup = self.resolve_quest_followup(
