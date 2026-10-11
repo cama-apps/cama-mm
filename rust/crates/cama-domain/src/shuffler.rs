@@ -399,8 +399,8 @@ impl Default for BalancedShuffler {
             consider_roles: true,
             use_openskill: false,
             use_jopacoin: false,
-            off_role_multiplier: 0.97,
-            off_role_flat_value_penalty: 80.0,
+            off_role_multiplier: 0.98,
+            off_role_flat_value_penalty: 72.0,
             off_role_flat_penalty: 740.0,
             role_matchup_delta_weight: ROLE_MATCHUP_DELTA_WEIGHT,
             exclusion_penalty_weight: 72.0,
@@ -2712,8 +2712,8 @@ mod tests {
         let roles = ["2", "1", "3", "4", "5"].map(str::to_owned);
         let metrics = shuffler.role_assignment_metrics(&[&player], &roles, &[3_000.0]);
 
-        assert_eq!(metrics.team_value, 2_830.0);
-        assert_eq!(metrics.role_values, [0.0, 2_830.0, 0.0, 0.0, 0.0]);
+        assert_eq!(metrics.team_value, 2_868.0);
+        assert_eq!(metrics.role_values, [0.0, 2_868.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]
@@ -3430,7 +3430,7 @@ mod tests {
             .score_role_assignments_for_matchup(&team1, &team2, 1, ShuffleConstraints::default())
             .expect("fixed matchup scores");
 
-        approx(score, 170.0);
+        approx(score, 190.0);
     }
 
     #[test]
@@ -3507,7 +3507,7 @@ mod tests {
             &mut super::ScoringContext::default(),
         );
 
-        approx(selection.preselection_score, -2_254.0);
+        approx(selection.preselection_score, -2_234.0);
     }
 
     #[test]
@@ -3596,7 +3596,7 @@ mod tests {
                 ShuffleConstraints::default(),
             )
             .expect("fixed role matchup evaluates");
-        approx(matchup.total_score, -2_417.0);
+        approx(matchup.total_score, -2_357.0);
     }
 
     #[test]
@@ -5579,8 +5579,8 @@ mod tests {
             .expect("optimization succeeds")
             .2
         };
-        approx(score(1.0), 1_010.0);
-        approx(score(0.5), 760.0);
+        approx(score(1.0), 1_070.0);
+        approx(score(0.5), 820.0);
     }
 
     #[test]
@@ -5619,7 +5619,7 @@ mod tests {
         )
         .expect("matchup evaluates");
         approx(matchup.log_entry.parity_penalty, 350.0);
-        approx(matchup.total_score, 520.0);
+        approx(matchup.total_score, 540.0);
     }
 
     #[test]
@@ -5723,7 +5723,7 @@ mod tests {
                 },
             )
             .expect("fallback scoring succeeds");
-        approx(common.2, 930.0);
+        approx(common.2, 1_010.0);
         assert_eq!(common, fallback);
     }
 
@@ -6554,7 +6554,7 @@ mod tests {
             .score_draft_pool(&captain_a, &captain_b, &pool)
             .expect("draft pool score");
 
-        approx(score, 161.5);
+        approx(score, 180.5);
     }
 
     #[test]
