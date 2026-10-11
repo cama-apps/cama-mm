@@ -296,6 +296,88 @@ fn key_for_outcome(
 }
 
 #[test]
+fn event_cave_in_loses_depth_once_and_stops_at_zero() {
+    for (depth, minimum_loss, maximum_loss, with_delivery) in [
+        (30, 6, 14, true),
+        (100, 8, 18, true),
+        (200, 12, 25, true),
+        (500, 16, 32, true),
+        (2, 2, 2, true),
+        (0, 0, 0, true),
+        (2, 2, 2, false),
+    ] {
+        let fixture = Fixture::new();
+        fixture.seed_actor(ACTOR, 100, depth, 0);
+        let policy = event_policy(&fixture.snapshot(), false, 1.0);
+        let key = (0..10_000)
+            .map(|index| format!("event-cave:{depth}:{index}"))
+            .find(|key| {
+                let mut entropy =
+                    SeededLootEntropy::new(event_seed(request("gas_pocket", "risky", key), 0));
+                let rolls = CanonicalEventRolls {
+                    success_roll: entropy.unit(),
+                    ..CanonicalEventRolls::default()
+                };
+                resolve_canonical_event_with_policy("gas_pocket", "risky", rolls, policy)
+                    .expect("preview")
+                    .cave_in
+            })
+            .expect("cave-in seed");
+        let service = fixture.service();
+        let event_request = request("gas_pocket", "risky", &key);
+        let first = if with_delivery {
+            service.resolve_event_with_delivery(
+                event_request,
+                DigEventDeliveryContext::new(ACTOR, GUILD, 77_001, 77_002),
+            )
+        } else {
+            service.resolve_event(event_request)
+        }
+        .expect("event");
+        let resolution = first.resolution.as_ref().expect("resolution");
+        assert!(resolution.cave_in);
+        let loss = depth - first.depth_after;
+        assert!(
+            (minimum_loss..=maximum_loss).contains(&loss),
+            "loss: {loss}"
+        );
+        assert_eq!(resolution.advance, -loss);
+        assert_eq!(fixture.snapshot().depth, first.depth_after);
+
+        let retry = service.resolve_event(event_request).expect("retry");
+        assert!(!retry.applied_now);
+        assert_eq!(retry.depth_after, first.depth_after);
+        assert_eq!(retry.resolution, first.resolution);
+        assert_eq!(fixture.snapshot().depth, first.depth_after);
+        assert_eq!(fixture.count_actions(ACTOR, "event"), 1);
+    }
+}
+
+#[test]
+fn event_cave_in_preserves_an_authored_setback() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 100, 500, 0);
+    let key = (0..10_000)
+        .map(|index| format!("authored-cave:{index}"))
+        .find(|key| {
+            let mut entropy =
+                SeededLootEntropy::new(event_seed(request("creeper_ambush", "desperate", key), 0));
+            entropy.unit() >= 0.4
+        })
+        .expect("failure seed");
+    let first = fixture
+        .service()
+        .resolve_event(request("creeper_ambush", "desperate", &key))
+        .expect("event");
+    let resolution = first.resolution.expect("resolution");
+    assert!(resolution.cave_in);
+    // Authored -2, jittered by at most two blocks, then scaled by 1.25.
+    assert!((-5..=-2).contains(&resolution.advance));
+    assert_eq!(first.depth_after, 500 + resolution.advance);
+    assert_eq!(fixture.snapshot().depth, first.depth_after);
+}
+
+#[test]
 fn migrated_safe_event_commits_full_actor_result_once() {
     let fixture = Fixture::new();
     fixture.seed_actor(ACTOR, 100, 50, 0);
