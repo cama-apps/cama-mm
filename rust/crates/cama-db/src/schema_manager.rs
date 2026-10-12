@@ -1271,6 +1271,13 @@ fn run_consolidated_backfills(
                  stabled_at=NULL;",
         )?;
     }
+    if pending(pending_migrations, "create_pet_diary_hatches") {
+        transaction.execute_batch(
+            "INSERT OR IGNORE INTO pet_diary_hatches(pet_id,guild_id,discord_id,pet_name,hatched_at)
+             SELECT pet_id,guild_id,discord_id,name,hatched_at FROM pets
+             WHERE species!='unhatched';",
+        )?;
+    }
     if pending(
         pending_migrations,
         "clear_dig_active_duels_for_retired_timed_mechanics",

@@ -27,7 +27,7 @@ use thiserror::Error;
 
 use crate::open_runtime_connection;
 
-const PET_COLUMNS: &str = "pet_id, discord_id, guild_id, name, species, adopted_at, hatched_at, \
+pub(crate) const PET_COLUMNS: &str = "pet_id, discord_id, guild_id, name, species, adopted_at, hatched_at, \
      adopt_fee, last_fed_at, hunger_at_last_fed, times_fed, feeds_today, \
      feed_date, week_consumed_jc, week_key, prev_week_consumed_jc, \
      prev_week_key, pampered_until, accessory, dig_work_units, dig_work_at, \
@@ -1191,6 +1191,11 @@ impl PetRepository {
             &format!("SELECT {PET_COLUMNS} FROM pets WHERE pet_id = ?1 AND guild_id = ?2"),
             params![pet_id, guild_id],
         )?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO pet_diary_hatches(pet_id,guild_id,discord_id,pet_name,hatched_at)
+             VALUES (?1,?2,?3,?4,?5)",
+            params![resolved.pet_id, resolved.guild_id, resolved.discord_id, resolved.name, resolved.hatched_at],
+        )?;
         transaction.commit()?;
         Ok(resolved)
     }
@@ -2299,7 +2304,7 @@ fn clear_ledger_context(transaction: &Transaction<'_>) -> Result<(), rusqlite::E
     Ok(())
 }
 
-fn optional_pet<P>(
+pub(crate) fn optional_pet<P>(
     connection: &Connection,
     sql: &str,
     parameters: P,
@@ -2673,6 +2678,13 @@ mod tests {
                              (SELECT metadata FROM economy_ledger_context WHERE id = 1)
                          );
                      END;
+                     CREATE TABLE pet_diary_hatches (
+                         pet_id INTEGER PRIMARY KEY,
+                         guild_id INTEGER NOT NULL,
+                         discord_id INTEGER NOT NULL,
+                         pet_name TEXT NOT NULL,
+                         hatched_at INTEGER NOT NULL
+                     );
                      CREATE TABLE pets (
                          pet_id                 INTEGER PRIMARY KEY AUTOINCREMENT,
                          discord_id             INTEGER NOT NULL,

@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use cama_db::core_repositories::PlayerRepository;
 use cama_db::pet_eating_repository::PetEatingRepository;
 use cama_db::pet_evolution_repository::PetEvolutionRepository;
+use cama_db::pet_keepsake_repository::PetKeepsakeRepository;
 use cama_db::pet_repository::{
     ActivatePetOutcome, ActivatePetRequest, AdoptPetRequest, AegisReviveRequest,
     BuySuppliesRequest, DeathClaimOutcome, DeathClaimRequest, FeedPetRequest, HungerTopUpRequest,
@@ -17,6 +18,7 @@ use cama_db::pet_repository::{
     TrinketPurchaseOutcome, TrinketPurchaseRequest, UpgradeEggRequest,
 };
 use cama_domain::pet::{Pet, PetStatus, RENAME_COST, RefundNotice, adoption_fee};
+use cama_domain::pet_keepsakes::{AlbumEntry, DiaryEntry, GiftReceipt};
 use cama_domain::service_result::ServiceResult;
 
 use crate::pet::{
@@ -368,6 +370,47 @@ where
         &mut self,
     ) -> &mut PetService<PetRepository, SqlitePetPlayerPort, R, C, SqlitePetEvolution> {
         &mut self.service
+    }
+
+    /// Called after status has resolved hatching, evolution, and starvation.
+    /// The repository rechecks eligibility under the same lock as the gift claim.
+    pub fn keepsake_check_in(
+        &mut self,
+        owner: i64,
+        guild: i64,
+    ) -> Result<Option<GiftReceipt>, String> {
+        let now = self.service.now();
+        let roll = self.service.random_mut().integer(0, i64::from(u32::MAX)) as u64;
+        PetKeepsakeRepository::new(&self.database_path)
+            .check_in(owner, guild, now, self.service.decay_per_day(), roll)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn keepsake_album(&self, owner: i64, guild: i64) -> Result<Vec<AlbumEntry>, String> {
+        PetKeepsakeRepository::new(&self.database_path)
+            .album(owner, guild)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn keepsake_diary(
+        &self,
+        owner: i64,
+        guild: i64,
+        page: i64,
+    ) -> Result<Vec<DiaryEntry>, String> {
+        if !(1..=1_000_000).contains(&page) {
+            return Err("Choose a diary page between 1 and 1000000.".to_owned());
+        }
+        let size = crate::pet_keepsake_commands::DIARY_PAGE_SIZE;
+        PetKeepsakeRepository::new(&self.database_path)
+            .diary(
+                owner,
+                guild,
+                self.service.now(),
+                size + 1,
+                (page - 1) * size,
+            )
+            .map_err(|error| error.to_string())
     }
 }
 

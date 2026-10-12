@@ -1131,6 +1131,27 @@ CREATE TABLE pet_evolution_daily (
                 PRIMARY KEY (pet_id, upbringing_day, instinct)
             );
 
+-- table: pet_diary_hatches
+CREATE TABLE pet_diary_hatches (
+    pet_id INTEGER PRIMARY KEY,
+    guild_id INTEGER NOT NULL,
+    discord_id INTEGER NOT NULL,
+    pet_name TEXT NOT NULL,
+    hatched_at INTEGER NOT NULL
+);
+
+-- table: pet_keepsakes
+CREATE TABLE pet_keepsakes (
+    discord_id INTEGER NOT NULL,
+    guild_id INTEGER NOT NULL,
+    game_day INTEGER NOT NULL,
+    pet_id INTEGER NOT NULL,
+    pet_name TEXT NOT NULL,
+    keepsake_id TEXT NOT NULL,
+    received_at INTEGER NOT NULL,
+    PRIMARY KEY (discord_id, guild_id, game_day)
+);
+
 -- table: pet_refund_windows
 CREATE TABLE pet_refund_windows (
                 guild_id INTEGER NOT NULL,

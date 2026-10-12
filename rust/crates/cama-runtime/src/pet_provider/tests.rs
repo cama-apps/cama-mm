@@ -1044,6 +1044,187 @@ fn leaf_request(subcommand: &str, options: Vec<InteractionOption>) -> Interactio
     }
 }
 
+#[tokio::test]
+async fn keepsake_album_and_diary_are_available_without_a_living_pet() {
+    let (_database, provider) = empty_fixture();
+    for (command, title) in [("album", "Keepsake album"), ("diary", "Cama diary")] {
+        let responder = Arc::new(TestResponder::new(false));
+        provider
+            .handler
+            .handle(leaf_request(command, Vec::new()), responder.clone())
+            .await
+            .expect("collection command");
+        assert_eq!(*responder.defers.lock().expect("defers"), vec![true]);
+        let followups = responder.followups.lock().expect("followups");
+        assert_eq!(followups.len(), 1);
+        assert!(
+            followups[0].embeds[0]
+                .title
+                .as_deref()
+                .unwrap_or_default()
+                .contains(title)
+        );
+    }
+}
+
+#[tokio::test]
+async fn keepsake_status_displays_the_same_daily_gift_after_delivery_failure() {
+    let (database, provider, _) = fixture(false);
+    let failed = Arc::new(TestResponder::new(false));
+    failed.fail_receipt();
+    assert!(
+        provider
+            .handler
+            .handle(status_command(), failed.clone())
+            .await
+            .is_err()
+    );
+    let retry = Arc::new(TestResponder::new(false));
+    provider
+        .handler
+        .handle(status_command(), retry.clone())
+        .await
+        .expect("retry status");
+    let repeated = Arc::new(TestResponder::new(false));
+    provider
+        .handler
+        .handle(status_command(), repeated.clone())
+        .await
+        .expect("repeat status");
+    let first = repeated.followups.lock().expect("repeat followups");
+    let second = retry.followups.lock().expect("retry followups");
+    let gift = |response: &InteractionResponse| {
+        response.embeds[0]
+            .fields
+            .iter()
+            .find(|field| field.name.contains("Today's gift"))
+            .map(|field| field.value.clone())
+    };
+    assert!(
+        gift(&second[0]).is_some(),
+        "owner status should display a keepsake"
+    );
+    assert_eq!(gift(&first[0]), gift(&second[0]));
+    assert_eq!(
+        cama_db::pet_keepsake_repository::PetKeepsakeRepository::new(database.path())
+            .album(OWNER as i64, GUILD as i64)
+            .unwrap()[0]
+            .count,
+        1
+    );
+}
+
+#[tokio::test]
+async fn keepsake_guest_status_cannot_collect_and_album_is_read_only() {
+    let (database, provider, _) = fixture(false);
+    let mut request = leaf_request(
+        "status",
+        vec![InteractionOption {
+            name: "user".to_owned(),
+            value: InteractionValue::User {
+                id: OWNER,
+                display_name: Some("Owner".to_owned()),
+                is_bot: Some(false),
+            },
+        }],
+    );
+    if let InteractionRequest::Command { user_id, .. } = &mut request {
+        *user_id = RECIPIENT;
+    }
+    let responder = Arc::new(TestResponder::new(false));
+    provider
+        .handler
+        .handle(request, responder.clone())
+        .await
+        .unwrap();
+    assert!(
+        responder.followups.lock().unwrap()[0].embeds[0]
+            .fields
+            .iter()
+            .all(|field| !field.name.contains("Today's gift"))
+    );
+    provider
+        .handler
+        .handle(
+            leaf_request("album", Vec::new()),
+            Arc::new(TestResponder::new(false)),
+        )
+        .await
+        .unwrap();
+    let repo = cama_db::pet_keepsake_repository::PetKeepsakeRepository::new(database.path());
+    assert!(repo.album(OWNER as i64, GUILD as i64).unwrap().is_empty());
+    assert!(
+        repo.album(RECIPIENT as i64, GUILD as i64)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn keepsake_commands_acknowledge_before_a_database_failure() {
+    let (database, mut provider) = empty_fixture();
+    let handler = Arc::get_mut(&mut provider.handler).unwrap();
+    Arc::get_mut(&mut handler.state).unwrap().database_path =
+        database.path().with_extension("missing");
+    for command in ["album", "diary"] {
+        let responder = Arc::new(TestResponder::new(false));
+        assert!(
+            provider
+                .handler
+                .handle(leaf_request(command, Vec::new()), responder.clone())
+                .await
+                .is_err()
+        );
+        assert_eq!(*responder.defers.lock().unwrap(), vec![true]);
+        assert_eq!(responder.calls.lock().unwrap().first(), Some(&"defer"));
+    }
+}
+
+#[tokio::test]
+async fn keepsake_diary_pages_do_not_lose_older_memories() {
+    let (database, provider, pet_id) = fixture(false);
+    let now = SystemPetClock.now();
+    let conn = rusqlite::Connection::open(database.path()).unwrap();
+    for day in 0..20 {
+        conn.execute("INSERT INTO pet_keepsakes(discord_id,guild_id,game_day,pet_id,pet_name,keepsake_id,received_at) VALUES (?1,?2,?3,?4,'Mochi','moon_button',?5)",
+            rusqlite::params![OWNER as i64, GUILD as i64, day, pet_id, now - day * 86400]).unwrap();
+    }
+    let first = Arc::new(TestResponder::new(false));
+    provider
+        .handler
+        .handle(leaf_request("diary", Vec::new()), first.clone())
+        .await
+        .unwrap();
+    let second = Arc::new(TestResponder::new(false));
+    provider
+        .handler
+        .handle(
+            leaf_request(
+                "diary",
+                vec![InteractionOption {
+                    name: "page".to_owned(),
+                    value: InteractionValue::Integer(2),
+                }],
+            ),
+            second.clone(),
+        )
+        .await
+        .unwrap();
+    let first_responses = first.followups.lock().unwrap();
+    let second_responses = second.followups.lock().unwrap();
+    let first_embed = &first_responses[0].embeds[0];
+    let second_embed = &second_responses[0].embeds[0];
+    assert!(first_embed.footer.as_deref().unwrap().contains("page:2"));
+    assert!(!second_embed.footer.as_deref().unwrap().contains("page:3"));
+    let first_text = first_embed.description.as_deref().unwrap();
+    let second_text = second_embed.description.as_deref().unwrap();
+    assert_eq!(
+        first_text.matches("brought you").count() + second_text.matches("brought you").count(),
+        20
+    );
+    assert!(second_text.contains(&format!("<t:{}:d>", now - 19 * 86400)));
+}
+
 fn component(custom_id: String) -> InteractionRequest {
     component_as(custom_id, OWNER)
 }
@@ -1113,6 +1294,8 @@ fn command_schema_matches_python_pet_group() {
             "graveyard",
             "leaderboard",
             "aspca",
+            "album",
+            "diary",
         ]
     );
     let descriptions = options
@@ -1180,6 +1363,14 @@ fn command_schema_matches_python_pet_group() {
             (
                 "aspca".to_owned(),
                 "Open the server's Camagotchi cruelty case files".to_owned()
+            ),
+            (
+                "album".to_owned(),
+                "Browse the keepsakes your camas have brought you".to_owned()
+            ),
+            (
+                "diary".to_owned(),
+                "Read your camas' milestones and little gifts".to_owned()
             ),
         ])
     );

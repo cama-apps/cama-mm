@@ -98,7 +98,9 @@ const REQUIRED_TABLES: &[&str] = &[
     "players",
     "pet_accessories",
     "pet_brawls",
+    "pet_diary_hatches",
     "pet_evolution_daily",
+    "pet_keepsakes",
     "pet_refund_windows",
     "pet_supplies",
     "pets",
@@ -410,6 +412,11 @@ mod tests {
                 CREATE TABLE player_steam_ids (id INTEGER PRIMARY KEY);
                 CREATE TABLE pet_accessories (id INTEGER PRIMARY KEY);
                 CREATE TABLE pet_brawls (brawl_id INTEGER PRIMARY KEY);
+                CREATE TABLE pet_diary_hatches (pet_id INTEGER PRIMARY KEY);
+                CREATE TABLE pet_keepsakes (
+                    discord_id INTEGER, guild_id INTEGER, game_day INTEGER,
+                    PRIMARY KEY (discord_id, guild_id, game_day)
+                );
                 CREATE TABLE pet_evolution_daily (id INTEGER PRIMARY KEY);
                 CREATE TABLE pet_refund_windows (id INTEGER PRIMARY KEY);
                 CREATE TABLE pet_supplies (id INTEGER PRIMARY KEY);

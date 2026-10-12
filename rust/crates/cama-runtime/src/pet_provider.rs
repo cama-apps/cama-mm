@@ -40,6 +40,9 @@ use cama_app::pet_eating::{
 };
 use cama_app::pet_evolution_app::{PetEvolutionService, SystemEvolutionClock};
 use cama_app::pet_flavor::{PetFlavorEvent as FlavorEvent, PetFlavorService};
+use cama_app::pet_keepsake_commands::{
+    DIARY_PAGE_SIZE, build_album_embed, build_diary_embed, gift_text,
+};
 use cama_app::pet_sqlite::SqlitePetCommandService;
 use cama_app::service_container::PersistentVanityTaxService;
 use cama_db::pet_brawl_repository::{
@@ -507,6 +510,23 @@ fn pet_options() -> Vec<CommandOptionSpec> {
             "Open the server's Camagotchi cruelty case files",
             Vec::new(),
         ),
+        subcommand(
+            "album",
+            "Browse the keepsakes your camas have brought you",
+            Vec::new(),
+        ),
+        subcommand(
+            "diary",
+            "Read your camas' milestones and little gifts",
+            vec![
+                CommandOptionSpec::new(
+                    "page",
+                    "Page of memories (newest first)",
+                    CommandOptionKind::Integer,
+                )
+                .with_integer_range(1, 1_000_000),
+            ],
+        ),
     ]
 }
 
@@ -685,6 +705,11 @@ impl PetInteractionHandler {
             }
             "leaderboard" => self.command_leaderboard(guild_id, responder).await,
             "aspca" => self.command_aspca(guild_id, responder).await,
+            "album" => self.command_album(user_id, guild_id, responder).await,
+            "diary" => {
+                self.command_diary(user_id, guild_id, sub_options, responder)
+                    .await
+            }
             other => Err(format!("unknown /pet subcommand {other:?}")),
         }
     }
@@ -1023,6 +1048,58 @@ impl PetInteractionHandler {
             self.spawn_status_timeout(token, 0);
         }
         Ok(())
+    }
+
+    async fn command_album(
+        &self,
+        user_id: i64,
+        guild_id: i64,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        responder
+            .defer(true)
+            .await
+            .map_err(|error| error.to_string())?;
+        let entries = self
+            .run_service(move |service| service.keepsake_album(user_id, guild_id))
+            .await?;
+        responder
+            .followup(response_embed(
+                build_album_embed(&entries),
+                None,
+                Vec::new(),
+                true,
+            ))
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn command_diary(
+        &self,
+        user_id: i64,
+        guild_id: i64,
+        options: &[InteractionOption],
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        responder
+            .defer(true)
+            .await
+            .map_err(|error| error.to_string())?;
+        let page = optional_integer(options, "page").unwrap_or(1);
+        let mut entries = self
+            .run_service(move |service| service.keepsake_diary(user_id, guild_id, page))
+            .await?;
+        let has_more = entries.len() > DIARY_PAGE_SIZE as usize;
+        entries.truncate(DIARY_PAGE_SIZE as usize);
+        responder
+            .followup(response_embed(
+                build_diary_embed(&entries, page, has_more),
+                None,
+                Vec::new(),
+                true,
+            ))
+            .await
+            .map_err(|error| error.to_string())
     }
 
     async fn command_stable(
@@ -1829,6 +1906,9 @@ impl PetInteractionHandler {
                     career: career.as_ref(),
                     solo_training_sessions,
                 });
+                if with_view && let Some(gift) = service.keepsake_check_in(user_id, guild_id)? {
+                    embed.field("🎁 Today's gift", gift_text(&gift), false);
+                }
                 if let Some(pet) = status.pet.as_ref().or(status.last_dead.as_ref()) {
                     let event = if status.pet.is_some() {
                         PetFlavorEvent::Status
