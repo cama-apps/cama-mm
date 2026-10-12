@@ -25,6 +25,7 @@ pub mod permissions;
 pub mod pet;
 pub mod pet_brawl;
 pub mod pet_evolution;
+pub mod pet_keepsakes;
 pub mod player;
 pub mod playtime;
 pub mod prediction_ladder;

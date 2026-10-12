@@ -14,6 +14,84 @@ fn empty_database() -> NamedTempFile {
 }
 
 #[test]
+fn pet_keepsakes_support_fresh_upgrade_and_retry() {
+    for upgrade in [false, true] {
+        let database = empty_database();
+        if upgrade {
+            initialize_or_migrate(database.path()).unwrap();
+            open_runtime_connection(database.path()).unwrap().execute_batch(
+                "DROP TABLE pet_keepsakes; DELETE FROM schema_migrations WHERE name='create_pet_keepsakes';"
+            ).unwrap();
+        }
+        let report = initialize_or_migrate(database.path()).unwrap();
+        assert!(
+            report
+                .newly_applied
+                .iter()
+                .any(|name| name == "create_pet_keepsakes")
+        );
+        let conn = open_runtime_connection(database.path()).unwrap();
+        conn.execute(
+            "INSERT INTO pet_keepsakes VALUES(1,2,3,4,'Pip','smooth_pebble',5)",
+            [],
+        )
+        .unwrap();
+        assert!(
+            initialize_or_migrate(database.path())
+                .unwrap()
+                .newly_applied
+                .is_empty()
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM pet_keepsakes", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert!(
+            conn.execute(
+                "INSERT INTO pet_keepsakes VALUES(1,2,3,9,'Pop','smooth_pebble',6)",
+                []
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn pet_diary_hatches_backfill_once_without_recording_eggs() {
+    let database = empty_database();
+    initialize_or_migrate(database.path()).unwrap();
+    let conn = open_runtime_connection(database.path()).unwrap();
+    conn.execute_batch("DROP TABLE pet_diary_hatches;
+        DELETE FROM schema_migrations WHERE name='create_pet_diary_hatches';
+        INSERT INTO pets(discord_id,guild_id,name,species,adopted_at,hatched_at,adopt_fee,last_fed_at,hunger_at_last_fed)
+        VALUES(1,2,'Pip','common_cama',100,200,0,200,100), (3,2,'Egg','unhatched',100,9999999999,0,100,100);").unwrap();
+    initialize_or_migrate(database.path()).unwrap();
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM pet_diary_hatches", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    conn.execute(
+        "UPDATE pets SET hatched_at=300,name='Renamed' WHERE discord_id=1",
+        [],
+    )
+    .unwrap();
+    initialize_or_migrate(database.path()).unwrap();
+    assert_eq!(
+        conn.query_row(
+            "SELECT pet_name,hatched_at FROM pet_diary_hatches",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        )
+        .unwrap(),
+        ("Pip".to_owned(), 200)
+    );
+}
+
+#[test]
 fn deadlock_lobby_publications_support_fresh_upgrade_and_idempotent_retry() {
     for upgrade in [false, true] {
         let database = empty_database();

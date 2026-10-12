@@ -32,6 +32,8 @@ pub mod pet_brawl_repository;
 pub mod pet_eating_repository;
 #[path = "../../cama-db/src/pet_evolution.rs"]
 pub mod pet_evolution_repository;
+#[path = "../../cama-db/src/pet_keepsakes.rs"]
+pub mod pet_keepsake_repository;
 #[path = "../../cama-db/src/pet_migration_contracts.rs"]
 pub mod pet_migration_contracts;
 #[path = "../../cama-db/src/pet.rs"]

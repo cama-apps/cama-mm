@@ -24,6 +24,8 @@ pub mod pet_eating;
 pub mod pet_evolution_app;
 #[path = "../../cama-app/src/pet_flavor.rs"]
 pub mod pet_flavor;
+#[path = "../../cama-app/src/pet_keepsake_commands.rs"]
+pub mod pet_keepsake_commands;
 #[path = "../../cama-app/src/pet_sqlite.rs"]
 pub mod pet_sqlite;
 #[path = "../../cama-app/src/shop_commands.rs"]
