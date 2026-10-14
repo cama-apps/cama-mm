@@ -29,6 +29,15 @@ pub const GLICKO2_SCALE: f64 = 173.7178;
 pub const GLICKO2_TAU: f64 = 0.5;
 const VOLATILITY_EPSILON: f64 = 0.000_001;
 
+/// Win-only gain bonus based on pre-match MMR, with exclusive upper bounds.
+pub(crate) fn low_mmr_win_multiplier(rating: f64) -> f64 {
+    if (0.0..1000.0).contains(&rating) {
+        2.0 - (rating / 100.0).floor() / 10.0
+    } else {
+        1.0
+    }
+}
+
 #[must_use]
 pub const fn cap_glicko_rd(rd: f64) -> f64 {
     if rd > MAX_GLICKO_RD {
@@ -481,6 +490,9 @@ impl CamaRatingSystem {
             (synthetic.rating - team_rating) * base_multiplier * modifiers.streak_multiplier;
         if delta > 0.0 {
             delta *= modifiers.gain_multiplier;
+            if result == 1.0 {
+                delta *= low_mmr_win_multiplier(player.rating);
+            }
         }
         delta = delta.clamp(
             -self.config.max_rating_swing_per_game,
@@ -709,6 +721,59 @@ impl std::error::Error for RatingError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn low_mmr_win_bonus_uses_pre_match_brackets_and_preserves_losses() {
+        let system = CamaRatingSystem::default();
+        let modifiers = PlayerUpdateModifiers {
+            streak_multiplier: 1.25,
+            gain_multiplier: 1.10,
+            ..PlayerUpdateModifiers::default()
+        };
+        for (start, multiplier) in [
+            (0.0, 2.0),
+            (100.0, 1.9),
+            (200.0, 1.8),
+            (300.0, 1.7),
+            (400.0, 1.6),
+            (500.0, 1.5),
+            (600.0, 1.4),
+            (700.0, 1.3),
+            (800.0, 1.2),
+            (900.0, 1.1),
+            (1000.0, 1.0),
+        ] {
+            for rating in [start, start + 99.999] {
+                for result in [0.0, 0.5, 1.0] {
+                    // Identical team strength and uncertainty isolate the player's bracket.
+                    let baseline = system.update_player_rating_with_modifiers(
+                        Player::new_fixed(1500.0, 50.0, 0.06),
+                        1500.0,
+                        1500.0,
+                        50.0,
+                        result,
+                        modifiers,
+                    );
+                    let actual = system.update_player_rating_with_modifiers(
+                        Player::new_fixed(rating, 50.0, 0.06),
+                        1500.0,
+                        1500.0,
+                        50.0,
+                        result,
+                        modifiers,
+                    );
+                    let factor = if result == 1.0 { multiplier } else { 1.0 };
+                    assert_close(
+                        actual.rating,
+                        (rating + (baseline.rating - 1500.0) * factor).max(0.0),
+                        1e-10,
+                    );
+                    assert_eq!(actual.rd, baseline.rd);
+                    assert_eq!(actual.volatility, baseline.volatility);
+                }
+            }
+        }
+    }
 
     fn assert_close(actual: f64, expected: f64, tolerance: f64) {
         assert!(
@@ -1467,7 +1532,7 @@ mod tests {
     }
 
     #[test]
-    fn test_same_rd_players_get_same_delta_regardless_of_personal_rating() {
+    fn test_same_rd_players_share_base_delta_before_low_mmr_win_bonus() {
         let system = CamaRatingSystem::default();
         let team1 = vec![
             member(500.0, 150.0, "low"),
@@ -1482,7 +1547,7 @@ mod tests {
             .unwrap();
         let low_delta = updates.team1[0].rating - 500.0;
         let high_delta = updates.team1[1].rating - 1500.0;
-        assert!((low_delta - high_delta).abs() < 1.0);
+        assert_close(low_delta, high_delta * 1.5, 1e-10);
     }
 
     #[test]
