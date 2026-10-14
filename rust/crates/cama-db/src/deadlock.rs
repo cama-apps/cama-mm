@@ -1,7 +1,7 @@
 //! Durable Deadlock queue, immutable match rosters and independent OpenSkill pools.
 use crate::open_runtime_connection;
 use cama_domain::deadlock::{DeadlockFormat, DeadlockPlayer, DeadlockTeams, balance_with_seed};
-use cama_domain::openskill::{CamaOpenSkillSystem, Player, WinningTeam};
+use cama_domain::openskill::{CamaOpenSkillSystem, OpenSkillConfig, Player, WinningTeam};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -673,7 +673,11 @@ impl DeadlockRepository {
             |p: &DeadlockPlayer| Player::new(p.discord_id as u64, Some(p.mu), Some(p.sigma));
         let team1: Vec<_> = current.team1.iter().map(to_player).collect();
         let team2: Vec<_> = current.team2.iter().map(to_player).collect();
-        let system = CamaOpenSkillSystem::new();
+        let system = CamaOpenSkillSystem::with_config(OpenSkillConfig {
+            low_mmr_win_bonus: false,
+            ..OpenSkillConfig::default()
+        })
+        .map_err(|e| invalid(e.to_string()))?;
         let updates = system
             .update_ratings_equal_weight(
                 &team1,
@@ -1152,6 +1156,19 @@ mod tests {
         conn.execute("INSERT INTO deadlock_betting_markets(market_id,guild_id,match_id,format,roster_json,terms_json,deadline,status,created_at) VALUES('test',10,?1,'street_brawl','{}','{}',140,'closed',130)",[m.match_id]).unwrap();
         repo.record_result(10, m.match_id, 1, 99, Some(123), 160)
             .unwrap();
+        // Equal teams retain symmetric gains/losses: Dota's low-MMR bonus
+        // must not leak into the independent Deadlock rating pools.
+        let total_delta: f64 = conn
+            .query_row(
+                "SELECT SUM(new_mu-old_mu) FROM deadlock_rating_events WHERE match_id=?1",
+                [m.match_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            total_delta.abs() < 1e-10,
+            "unexpected rating inflation: {total_delta}"
+        );
         repo.record_result(10, m.match_id, 1, 99, Some(123), 160)
             .unwrap();
         assert!(

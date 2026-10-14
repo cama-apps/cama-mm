@@ -10,6 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fmt::Write as _;
 
+use crate::rating::low_mmr_win_multiplier;
+
 /// A player's Gaussian OpenSkill belief.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rating {
@@ -104,6 +106,8 @@ pub struct OpenSkillConfig {
     pub streak_threshold: i64,
     pub streak_multiplier_per_game: f64,
     pub low_priority_gain_multiplier: f64,
+    /// Dota win bonus; disabled for other games sharing the rating model.
+    pub low_mmr_win_bonus: bool,
     pub sigma_decay_grace_period_days: i64,
     pub sigma_decay_per_week: f64,
     pub win_probability_temperature: f64,
@@ -119,6 +123,7 @@ impl Default for OpenSkillConfig {
             streak_threshold: 3,
             streak_multiplier_per_game: 0.33,
             low_priority_gain_multiplier: 1.10,
+            low_mmr_win_bonus: true,
             sigma_decay_grace_period_days: 7,
             sigma_decay_per_week: 2.0,
             win_probability_temperature: 6.5,
@@ -363,11 +368,16 @@ impl CamaOpenSkillSystem {
         let mut results = BTreeMap::new();
         for (index, (player, native)) in team1.iter().zip(updated1).enumerate() {
             let old_mu = team1_ratings[index].mu;
+            let win_bonus = if self.config.low_mmr_win_bonus && winning_team == WinningTeam::Team1 {
+                low_mmr_win_multiplier(f64::from(self.mu_to_display(old_mu)))
+            } else {
+                1.0
+            };
             let mu = apply_overlays(
                 old_mu,
                 native.mu,
                 streak_multipliers.get(&player.id).copied().unwrap_or(1.0),
-                gain_multipliers.get(&player.id).copied().unwrap_or(1.0),
+                gain_multipliers.get(&player.id).copied().unwrap_or(1.0) * win_bonus,
             );
             results.insert(
                 player.id,
@@ -379,11 +389,16 @@ impl CamaOpenSkillSystem {
         }
         for (index, (player, native)) in team2.iter().zip(updated2).enumerate() {
             let old_mu = team2_ratings[index].mu;
+            let win_bonus = if self.config.low_mmr_win_bonus && winning_team == WinningTeam::Team2 {
+                low_mmr_win_multiplier(f64::from(self.mu_to_display(old_mu)))
+            } else {
+                1.0
+            };
             let mu = apply_overlays(
                 old_mu,
                 native.mu,
                 streak_multipliers.get(&player.id).copied().unwrap_or(1.0),
-                gain_multipliers.get(&player.id).copied().unwrap_or(1.0),
+                gain_multipliers.get(&player.id).copied().unwrap_or(1.0) * win_bonus,
             );
             results.insert(
                 player.id,
@@ -580,6 +595,7 @@ impl CamaOpenSkillSystem {
                 "\"fantasy_min\":{},",
                 "\"kappa\":{},",
                 "\"limit_sigma\":false,",
+                "\"low_mmr_win_policy\":\"{}\",",
                 "\"low_priority_gain_multiplier\":{},",
                 "\"mu\":{},",
                 "\"openskill_package\":\"{}\",",
@@ -601,6 +617,11 @@ impl CamaOpenSkillSystem {
             python_json_number(Self::FANTASY_MAX),
             python_json_number(Self::FANTASY_MIN),
             python_json_number(Self::KAPPA),
+            if self.config.low_mmr_win_bonus {
+                "pre_match_display_0_1000_step100_2_to_1.1_v1"
+            } else {
+                "disabled"
+            },
             python_json_number(self.config.low_priority_gain_multiplier),
             python_json_number(Self::DEFAULT_MU),
             Self::OPENSKILL_PACKAGE_VERSION,
@@ -865,6 +886,59 @@ fn sha256_hex(input: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn low_mmr_win_bonus_uses_display_brackets_for_either_winning_team() {
+        let system = CamaOpenSkillSystem::new();
+        for (start, multiplier) in [
+            (0, 2.0),
+            (100, 1.9),
+            (200, 1.8),
+            (300, 1.7),
+            (400, 1.6),
+            (500, 1.5),
+            (600, 1.4),
+            (700, 1.3),
+            (800, 1.2),
+            (900, 1.1),
+            (1000, 1.0),
+        ] {
+            for display in [start, start + 99] {
+                let mu = 25.0 + f64::from(display) / 50.0;
+                for winner in [WinningTeam::Team1, WinningTeam::Team2] {
+                    let native = system
+                        .rate_native(
+                            &[Rating::new(mu, 4.0)],
+                            &[Rating::new(mu, 4.0)],
+                            winner,
+                            None,
+                        )
+                        .unwrap();
+                    let actual = system
+                        .update_ratings_equal_weight(
+                            &[equal(1, mu, 4.0)],
+                            &[equal(2, mu, 4.0)],
+                            winner,
+                            &BTreeMap::from([(1, 1.25), (2, 1.25)]),
+                            &BTreeMap::from([(1, 1.10), (2, 1.10)]),
+                        )
+                        .unwrap();
+                    for (id, posterior, won) in [
+                        (1, native.0[0], winner == WinningTeam::Team1),
+                        (2, native.1[0], winner == WinningTeam::Team2),
+                    ] {
+                        let factor = if won { 1.10 * multiplier } else { 1.0 };
+                        close(
+                            actual[&id].mu,
+                            mu + (posterior.mu - mu) * 1.25 * factor,
+                            1e-12,
+                        );
+                        assert_eq!(actual[&id].sigma, posterior.sigma);
+                    }
+                }
+            }
+        }
+    }
+
     const NO_MULTIPLIERS: &BTreeMap<u64, f64> = &BTreeMap::new();
 
     fn weighted(id: u64, mu: f64, sigma: f64, fantasy: f64) -> WeightedPlayer {
@@ -1042,7 +1116,7 @@ mod tests {
     }
 
     #[test]
-    fn test_weighted_update_matches_installed_plackett_luce_exactly() {
+    fn test_weighted_update_applies_win_bonus_to_native_posterior() {
         let system = CamaOpenSkillSystem::new();
         let team1 = [weighted(1, 42.0, 5.0, 30.0), weighted(2, 38.0, 7.0, 5.0)];
         let team2 = [weighted(3, 45.0, 4.0, 20.0), weighted(4, 35.0, 6.0, 10.0)];
@@ -1065,13 +1139,17 @@ mod tests {
                 NO_MULTIPLIERS,
             )
             .unwrap();
-        for (id, expected) in [
-            (1, native.0[0]),
-            (2, native.0[1]),
-            (3, native.1[0]),
-            (4, native.1[1]),
+        for (id, old_mu, multiplier, expected) in [
+            (1, 42.0, 1.2, native.0[0]), // 850 displayed MMR
+            (2, 38.0, 1.4, native.0[1]), // 650 displayed MMR
+            (3, 45.0, 1.0, native.1[0]),
+            (4, 35.0, 1.0, native.1[1]),
         ] {
-            close(actual[&id].rating.mu, expected.mu, 1e-12);
+            close(
+                actual[&id].rating.mu,
+                old_mu + (expected.mu - old_mu) * multiplier,
+                1e-12,
+            );
             close(actual[&id].rating.sigma, expected.sigma, 1e-12);
         }
     }
@@ -1401,27 +1479,26 @@ mod tests {
     #[test]
     fn native_posterior_matches_python_oracle() {
         let system = CamaOpenSkillSystem::new();
-        let team1 = [weighted(1, 42.0, 5.0, 30.0), weighted(2, 38.0, 7.0, 5.0)];
-        let team2 = [weighted(3, 45.0, 4.0, 20.0), weighted(4, 35.0, 6.0, 10.0)];
+        let factors1 = system.performance_factors(&[30.0, 5.0]);
+        let factors2 = system.performance_factors(&[20.0, 10.0]);
         let actual = system
-            .update_ratings_after_match(
-                &team1,
-                &team2,
+            .rate_native(
+                &[Rating::new(42.0, 5.0), Rating::new(38.0, 7.0)],
+                &[Rating::new(45.0, 4.0), Rating::new(35.0, 6.0)],
                 WinningTeam::Team1,
-                NO_MULTIPLIERS,
-                NO_MULTIPLIERS,
+                Some((&factors1, &factors2)),
             )
             .unwrap();
-        close(actual[&1].rating.mu, 43.035_486_501_589_56, 2e-13);
-        close(actual[&1].rating.sigma, 4.930_925_700_022_797, 2e-13);
-        close(actual[&4].rating.mu, 33.551_045_638_509_905, 2e-13);
-        close(actual[&4].rating.sigma, 5.902_252_445_582_854, 2e-13);
+        close(actual.0[0].mu, 43.035_486_501_589_56, 2e-13);
+        close(actual.0[0].sigma, 4.930_925_700_022_797, 2e-13);
+        close(actual.1[1].mu, 33.551_045_638_509_905, 2e-13);
+        close(actual.1[1].sigma, 5.902_252_445_582_854, 2e-13);
     }
 
     #[test]
-    fn default_algorithm_fingerprint_matches_python() {
+    fn default_algorithm_fingerprint_includes_low_mmr_win_policy() {
         let system = CamaOpenSkillSystem::new();
-        assert_eq!(system.algorithm_fingerprint(), "1d0f22e19add165d");
+        assert_eq!(system.algorithm_fingerprint(), "5ac5e6c1f8dc2501");
     }
 
     #[test]
