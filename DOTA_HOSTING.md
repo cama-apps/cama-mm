@@ -205,6 +205,13 @@ Use `/admin dota status` to see pending/Cama/Dota identities, progress, betting 
 
 Use `/admin dota resolve pending_match:ID outcome:recorded dota_match:VALVE_ID reason:...` to finish a session whose Cama result has been recorded and finalized, or `outcome:void` to refund and close an abandoned result. Supply the exact Dota ID displayed by status (`0` only when unassigned). The command records an audited intent; the worker verifies account/lobby ownership and terminal evidence before releasing the account reservation. A foreign lobby or a still-active game prevents destructive cleanup. An independently verified completed GC result can resolve a stale running phase. A conflicting recorded result must be corrected through the supported recording tools first. Resume is still appropriate for a transient fault; resolve is the explicit terminal recovery route.
 
+A committed Cama result rejects new `void` requests. If recording completes
+after a void request was queued, the worker validates the settled result and
+teams, archives the obsolete request, and proceeds with normal recorded-lobby
+cleanup. Status reads the canonical result even before the worker adopts it.
+Both Discord and local `resume` withdraw a queued resolution into its audit
+history so reconciliation can proceed.
+
 For a recorded manual replacement, `outcome:recorded` validates the committed
 Cama result against the same pending match and teams. Its replacement Dota ID
 may differ from the old host's ID: that difference alone is not a conflict.

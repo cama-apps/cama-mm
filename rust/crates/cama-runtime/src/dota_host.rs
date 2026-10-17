@@ -281,6 +281,12 @@ struct SessionState {
 }
 
 impl SessionState {
+    fn withdraw_resolution(&mut self) {
+        if let Some(resolution) = self.resolution.take() {
+            self.resolution_history.push(resolution);
+        }
+    }
+
     fn expected(&self) -> Vec<ExpectedPlayer> {
         self.roster
             .iter()
@@ -953,7 +959,8 @@ impl DotaHostWorker {
         let pending = self.pending(record).await?;
         // Validate settlement before GC freshness so transport retries
         // cannot hide a missing/incomplete or conflicting Cama result.
-        if resolution.outcome == "recorded" {
+        let stale_void = resolution.outcome == "void" && recorded.is_some();
+        if resolution.outcome == "recorded" || stale_void {
             let Some(id) = recorded else {
                 return self
                     .review(
@@ -1005,6 +1012,24 @@ impl DotaHostWorker {
             // Dota ID is not the identity of the old lobby being released.
             // Retain both identities; never re-record or rewrite the result.
             state.recorded_match_id = Some(id);
+            if stale_void {
+                // Recording can win the race with a queued void. The settled
+                // canonical result is authoritative; archive the obsolete
+                // request and let normal recorded-lobby cleanup verify GC
+                // ownership and disappearance on the next tick.
+                state.withdraw_resolution();
+                state.cancel_requested = false;
+                state.resume_requested = false;
+                record.last_error = None;
+                self.save(record, state, now).await?;
+                tracing::info!(
+                    guild_id = record.guild_id,
+                    pending_match_id = record.pending_match_id,
+                    recorded_match_id = id,
+                    "retired stale Dota void request after completed Cama recording"
+                );
+                return Ok(());
+            }
         }
         let lobby = port.snapshot().await?;
         if lobby.is_some()
@@ -1830,11 +1855,21 @@ pub async fn operator_command(
         let mut session=repo.session(guild,pending).map_err(|e|e.to_string())?.ok_or("Dota session not found")?;
         if !session.phase.is_active() { return Err("session is already terminal".to_owned()); }
         if action=="resume" && session.phase!=Phase::NeedsReview { return Err("only a session requiring review can be resumed".to_owned()); }
-        let key=match action.as_str() {"resume"=>"resume_requested","cancel"=>"cancel_requested",_=>return Err("invalid host operation".to_owned())};
-        let payload = session.payload.as_object_mut().ok_or("invalid session payload")?;
-        payload.insert(key.into(),true.into());
-        payload.insert(if action == "cancel" {"resume_requested"} else {"cancel_requested"}.into(), false.into());
-        if action == "cancel" { payload.insert("manual_start_requested".into(), false.into()); }
+        let mut state: SessionState = serde_json::from_value(session.payload.clone()).map_err(|_| "invalid session payload")?;
+        match action.as_str() {
+            "resume" => {
+                state.resume_requested = true;
+                state.cancel_requested = false;
+                state.withdraw_resolution();
+            }
+            "cancel" => {
+                state.cancel_requested = true;
+                state.resume_requested = false;
+                state.manual_start_requested = false;
+            }
+            _ => return Err("invalid host operation".to_owned()),
+        }
+        session.payload = serde_json::to_value(state).map_err(|e| e.to_string())?;
         repo.update(&session,session.revision,chrono::Utc::now().timestamp()).map_err(|e|e.to_string())?;
         Ok(format!("{action} requested for {guild}/{pending}; the host will reconcile Dota before acting"))
     }).await
@@ -1862,9 +1897,10 @@ pub async fn guild_operator_command(
                 .take(3)
                 .map(|s| {
                     let state: SessionState = serde_json::from_value(s.payload).map_err(|_| "Invalid saved hosting state.")?;
-                    let recorded_id = if state.manual_record_override.is_some() {
-                        MatchRepository::new(&path).match_id_for_pending_match(guild, s.pending_match_id).map_err(|error| error.to_string())?
-                    } else { state.recorded_match_id };
+                    let recorded_id = MatchRepository::new(&path)
+                        .match_id_for_pending_match(guild, s.pending_match_id).map_err(|error| error.to_string())?;
+                    let recorded_id = if state.manual_record_override.is_some() { recorded_id }
+                        else { recorded_id.or(state.recorded_match_id) };
                     let pending = PendingMatchRepository::new(&path).pending_match(guild, s.pending_match_id).map_err(|e|e.to_string())?;
                     let betting = if pending.as_ref().is_some_and(|p| p.state.extra.get("dota_betting_suspended") == Some(&serde_json::Value::Bool(true))) { "suspended by operator" }
                         else if pending.as_ref().is_some_and(|p| p.state.betting_open(chrono::Utc::now().timestamp())) { "open" }
@@ -1926,9 +1962,7 @@ pub async fn guild_operator_command(
                 if session.phase != Phase::NeedsReview { return Err("Only a session needing review can be resumed.".into()); }
                 state.resume_requested = true;
                 state.cancel_requested = false;
-                if let Some(withdrawn) = state.resolution.take() {
-                    state.resolution_history.push(withdrawn);
-                }
+                state.withdraw_resolution();
             }
             _ => return Err("Unknown Dota hosting action.".into()),
         }
@@ -1961,7 +1995,7 @@ pub async fn guild_resolution_command(
         return Err("Give an audit reason between 1 and 300 characters.".into());
     }
     blocking(move || {
-        let repo = DotaSessionRepository::new(path);
+        let repo = DotaSessionRepository::new(&path);
         let mut session = repo.session(guild, pending).map_err(|e| e.to_string())?
             .ok_or("No hosting session for that pending match in this server.")?;
         if !session.phase.is_active() { return Err("That session is already resolved.".into()); }
@@ -1970,6 +2004,9 @@ pub async fn guild_resolution_command(
         let mut state: SessionState = serde_json::from_value(session.payload.clone()).map_err(|e| e.to_string())?;
         if state.manual_record_override.is_some() {
             return Err("This hosted game was replaced through /record. Do not resolve or void the replacement using the old Dota match ID.".into());
+        }
+        if outcome == "void" && MatchRepository::new(&path).match_id_for_pending_match(guild, pending).map_err(|e| e.to_string())?.is_some() {
+            return Err("A committed result cannot be voided by hosting recovery. Use outcome:recorded to release its old lobby after settlement, or the match correction workflow to change the result.".into());
         }
         if let Some(existing) = &state.resolution {
             if existing.outcome == outcome && existing.expected_valve_match_id == expected {
