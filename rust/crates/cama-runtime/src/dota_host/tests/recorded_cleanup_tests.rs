@@ -562,3 +562,167 @@ async fn recording_conflicts_are_reported_before_stale_gc_without_consuming_refr
         assert!(f.port.calls.lock().unwrap().is_empty());
     }
 }
+
+async fn queue_void_resolution(f: &Fixture) {
+    guild_resolution_command(
+        f.worker.path.clone(),
+        1,
+        f.pending,
+        42,
+        "void".into(),
+        0,
+        "Old lobby was abandoned".into(),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn stale_void_yields_to_settled_result_and_releases_host_after_restart() {
+    for owned_lobby in [false, true] {
+        let f = reviewed_fixture();
+        f.update_state(|record, _| record.lobby_id = Some("777".into()));
+        queue_void_resolution(&f).await;
+        commit_manual_result(&f, true);
+        record_replacement_identity(&f);
+        if owned_lobby {
+            *f.port.lobby.lock().unwrap() = Some(lobby(&f.state().settings));
+        }
+        let status = guild_operator_command(f.worker.path.clone(), "status", 1, Some(f.pending))
+            .await
+            .unwrap();
+        assert!(status.contains("Cama 321"), "{status}");
+        for now in [200, 205, 210] {
+            tick_after_restart(&f, now).await.unwrap();
+        }
+        assert_eq!(f.session().phase, Phase::Recorded);
+        assert!(f.state().resolution.is_none());
+        let history = f.state().resolution_history;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].outcome, "void");
+        assert_eq!(history[0].actor_id, 42);
+        assert_eq!(history[0].reason, "Old lobby was abandoned");
+        assert_eq!(f.state().recorded_match_id, Some(321));
+        assert!(f.session().valve_match_id.is_none());
+        assert!(
+            DotaSessionRepository::new(&f.worker.path)
+                .active_sessions()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(f.recorder.count.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            *f.port.calls.lock().unwrap(),
+            vec!["destroy"; usize::from(owned_lobby)]
+        );
+        let committed = MatchRepository::new(&f.worker.path)
+            .get_match(321, Some(1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(committed.winning_team, rusqlite::types::Value::Integer(2));
+        assert_eq!(committed.valve_match_id, Some(9002542581));
+    }
+}
+
+#[tokio::test]
+async fn stale_void_waits_for_settlement_and_rejects_a_different_recorded_roster() {
+    for conflict in ["settlement", "roster"] {
+        let f = reviewed_fixture();
+        queue_void_resolution(&f).await;
+        commit_manual_result(&f, conflict != "settlement");
+        if conflict == "roster" {
+            cama_db::open_runtime_connection(&f.worker.path)
+                .unwrap()
+                .execute(
+                    "UPDATE matches SET team1_players='[11,2,3,4,5]' WHERE match_id=321",
+                    [],
+                )
+                .unwrap();
+        }
+        f.port.observation_stale.store(true, Ordering::SeqCst);
+        for now in [200, 205] {
+            tick_after_restart(&f, now).await.unwrap();
+        }
+        assert_eq!(f.session().phase, Phase::NeedsReview);
+        assert!(
+            f.session()
+                .last_error
+                .unwrap()
+                .contains(if conflict == "settlement" {
+                    "settlement is incomplete"
+                } else {
+                    "different roster"
+                })
+        );
+        assert!(f.state().resolution.is_some());
+        assert!(f.port.calls.lock().unwrap().is_empty());
+        assert_eq!(f.session().payload["lobby_cleanup"]["refresh_attempts"], 0);
+    }
+}
+
+#[tokio::test]
+async fn stale_void_keeps_active_or_foreign_lobby_reserved_after_recording() {
+    for foreign in [false, true] {
+        let f = reviewed_fixture();
+        queue_void_resolution(&f).await;
+        commit_manual_result(&f, true);
+        let mut current = lobby(&f.state().settings);
+        if foreign {
+            current.owner_account_id = 42;
+        } else {
+            current.stage = LobbyStage::Running;
+            current.game_state = Some(5);
+        }
+        *f.port.lobby.lock().unwrap() = Some(current);
+        for now in [200, 205, 210] {
+            tick_after_restart(&f, now).await.unwrap();
+        }
+        assert_eq!(f.session().phase, Phase::NeedsReview);
+        assert!(f.port.calls.lock().unwrap().is_empty());
+        assert_eq!(f.recorder.count.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            DotaSessionRepository::new(&f.worker.path)
+                .active_sessions()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn void_command_rejects_committed_result_without_queuing_a_blocking_intent() {
+    for settled in [false, true] {
+        let f = reviewed_fixture();
+        commit_manual_result(&f, settled);
+        let error = guild_resolution_command(
+            f.worker.path.clone(),
+            1,
+            f.pending,
+            42,
+            "void".into(),
+            0,
+            "Old lobby was abandoned".into(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("committed result"), "{error}");
+        assert!(error.contains("outcome:recorded"), "{error}");
+        assert!(f.state().resolution.is_none());
+    }
+}
+
+#[tokio::test]
+async fn local_resume_withdraws_stale_void_and_allows_recorded_cleanup() {
+    let f = reviewed_fixture();
+    queue_void_resolution(&f).await;
+    commit_manual_result(&f, true);
+    operator_command(f.worker.path.clone(), "resume", Some(1), Some(f.pending))
+        .await
+        .unwrap();
+    tick_after_restart(&f, 200).await.unwrap();
+    assert_eq!(f.session().phase, Phase::Recorded);
+    assert!(f.state().resolution.is_none());
+    assert_eq!(f.state().resolution_history.len(), 1);
+    assert_eq!(f.recorder.count.load(Ordering::SeqCst), 0);
+}
