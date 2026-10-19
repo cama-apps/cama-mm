@@ -235,8 +235,10 @@ pub struct ShuffleConstraints<'a> {
 /// Pool-wide inputs whose values do not belong in the shuffler configuration.
 #[derive(Clone, Copy, Debug)]
 pub struct PoolOptions<'a> {
-    pub exclusion_counts: Option<&'a HashMap<String, usize>>,
-    pub recent_match_names: Option<&'a HashSet<String>>,
+    /// Keyed by Discord ID; players without an ID have no exclusion history.
+    pub exclusion_counts: Option<&'a HashMap<i64, usize>>,
+    /// Discord IDs of the previous match's participants.
+    pub recent_match_ids: Option<&'a HashSet<i64>>,
     pub constraints: ShuffleConstraints<'a>,
     pub lobby_wait_minutes: Option<&'a HashMap<i64, i64>>,
     /// Deterministic seed used only when a pool is too large to enumerate.
@@ -247,7 +249,7 @@ impl Default for PoolOptions<'_> {
     fn default() -> Self {
         Self {
             exclusion_counts: None,
-            recent_match_names: None,
+            recent_match_ids: None,
             constraints: ShuffleConstraints::default(),
             lobby_wait_minutes: None,
             sampling_seed: 0xCA4A_5A11,
@@ -1218,8 +1220,8 @@ impl BalancedShuffler {
         captain_a: &Player,
         captain_b: &Player,
         candidates: &[Player],
-        exclusion_counts: Option<&HashMap<String, usize>>,
-        recent_match_names: Option<&HashSet<String>>,
+        exclusion_counts: Option<&HashMap<i64, usize>>,
+        recent_match_ids: Option<&HashSet<i64>>,
     ) -> Result<DraftPoolResult, ShufflerError> {
         if candidates.len() < 8 {
             return Err(ShufflerError::TooFewPoolPlayers {
@@ -1233,7 +1235,7 @@ impl BalancedShuffler {
                 self.score_draft_pool_refs(captain_a, captain_b, candidates, &mut context)?;
             let recent_penalty = draft_recent_penalty(
                 candidates,
-                recent_match_names,
+                recent_match_ids,
                 self.recent_match_penalty_weight,
             );
             return Ok(DraftPoolResult {
@@ -1248,7 +1250,7 @@ impl BalancedShuffler {
                 captain_b,
                 candidates,
                 exclusion_counts,
-                recent_match_names,
+                recent_match_ids,
             );
         }
 
@@ -1276,7 +1278,7 @@ impl BalancedShuffler {
             );
             let recent_penalty = draft_recent_penalty(
                 selected.iter().copied(),
-                recent_match_names,
+                recent_match_ids,
                 self.recent_match_penalty_weight,
             );
             let score = best_split_score + exclusion_penalty + recent_penalty;
@@ -1304,8 +1306,8 @@ impl BalancedShuffler {
         captain_a: &Player,
         captain_b: &Player,
         candidates: &[Player],
-        exclusion_counts: Option<&HashMap<String, usize>>,
-        recent_match_names: Option<&HashSet<String>>,
+        exclusion_counts: Option<&HashMap<i64, usize>>,
+        recent_match_ids: Option<&HashSet<i64>>,
     ) -> Result<DraftPoolResult, ShufflerError> {
         if candidates.len() < 8 {
             return Err(ShufflerError::TooFewPoolPlayers {
@@ -1328,7 +1330,7 @@ impl BalancedShuffler {
             &initial_pool,
             &initial_excluded,
             exclusion_counts,
-            recent_match_names,
+            recent_match_ids,
             &mut context,
         )?;
         const EARLY_EXIT_THRESHOLD: f64 = 150.0;
@@ -1383,7 +1385,7 @@ impl BalancedShuffler {
                                 &new_pool,
                                 &new_excluded,
                                 exclusion_counts,
-                                recent_match_names,
+                                recent_match_ids,
                                 &mut context,
                             )?;
                             score_cache.insert(key, score);
@@ -1492,8 +1494,8 @@ impl BalancedShuffler {
         candidates: &[Player],
         selected_indices: &[usize],
         excluded_indices: &[usize],
-        exclusion_counts: Option<&HashMap<String, usize>>,
-        recent_match_names: Option<&HashSet<String>>,
+        exclusion_counts: Option<&HashMap<i64, usize>>,
+        recent_match_ids: Option<&HashSet<i64>>,
         context: &mut ScoringContext,
     ) -> Result<f64, ShufflerError> {
         self.diagnostics
@@ -1517,7 +1519,7 @@ impl BalancedShuffler {
             )
             + draft_recent_penalty(
                 selected.iter().copied(),
-                recent_match_names,
+                recent_match_ids,
                 self.recent_match_penalty_weight,
             ))
     }
@@ -1545,7 +1547,7 @@ impl BalancedShuffler {
         context: &mut ScoringContext,
     ) -> Result<GreedyResult, ShufflerError> {
         let exclusion_counts = options.exclusion_counts;
-        let recent_names = options.recent_match_names;
+        let recent_ids = options.recent_match_ids;
         let mut sorted = players.to_vec();
         sorted.sort_by(|left, right| {
             self.player_value(right, context)
@@ -1557,13 +1559,8 @@ impl BalancedShuffler {
             let mut order = sorted.clone();
             order.sort_by(|left, right| {
                 let effective = |player: &&Player| {
-                    let base = exclusion_counts
-                        .and_then(|counts| counts.get(&player.name))
-                        .copied()
-                        .unwrap_or_default() as f64;
-                    if recent_names.is_some_and(|names| names.contains(&player.name))
-                        && self.exclusion_penalty_weight != 0.0
-                    {
+                    let base = exclusion_count(exclusion_counts, player) as f64;
+                    if is_recent(recent_ids, player) && self.exclusion_penalty_weight != 0.0 {
                         base - self.recent_match_penalty_weight / self.exclusion_penalty_weight
                     } else {
                         base
@@ -1613,20 +1610,13 @@ impl BalancedShuffler {
 
         let exclusion_penalty = excluded
             .iter()
-            .map(|player| {
-                exclusion_counts
-                    .and_then(|counts| counts.get(&player.name))
-                    .copied()
-                    .unwrap_or_default() as f64
-            })
+            .map(|player| exclusion_count(exclusion_counts, player) as f64)
             .sum::<f64>()
             * self.exclusion_penalty_weight;
-        let selected_names: HashSet<&str> =
-            selected.iter().map(|player| player.name.as_str()).collect();
-        let recent_penalty = recent_names.map_or(0.0, |names| {
-            selected_names
+        let recent_penalty = recent_ids.map_or(0.0, |_| {
+            selected
                 .iter()
-                .filter(|name| names.contains(**name))
+                .filter(|player| is_recent(recent_ids, player))
                 .count() as f64
                 * self.recent_match_penalty_weight
         });
@@ -1852,26 +1842,16 @@ impl BalancedShuffler {
             .iter()
             .map(|player| player.name.clone())
             .collect();
-        let selected_names: HashSet<&str> = selected_players
-            .iter()
-            .map(|player| player.name.as_str())
-            .collect();
-        let recent_penalty = options.recent_match_names.map_or(0.0, |recent| {
-            selected_names
+        let recent_penalty = options.recent_match_ids.map_or(0.0, |_| {
+            selected_players
                 .iter()
-                .filter(|name| recent.contains(**name))
+                .filter(|player| is_recent(options.recent_match_ids, player))
                 .count() as f64
                 * self.recent_match_penalty_weight
         });
-        let exclusion_penalty = excluded_names
+        let exclusion_penalty = excluded_players
             .iter()
-            .map(|name| {
-                options
-                    .exclusion_counts
-                    .and_then(|counts| counts.get(name))
-                    .copied()
-                    .unwrap_or_default() as f64
-            })
+            .map(|player| exclusion_count(options.exclusion_counts, player) as f64)
             .sum::<f64>()
             * self.exclusion_penalty_weight;
         let selected_ids = discord_ids(&selected_players);
@@ -2091,17 +2071,9 @@ impl BalancedShuffler {
                 .filter(|(index, _)| !selected_set.contains(index))
                 .map(|(_, player)| *player)
                 .collect();
-            let excluded_names: Vec<String> =
-                excluded.iter().map(|player| player.name.clone()).collect();
-            let exclusion_penalty = excluded_names
+            let exclusion_penalty = excluded
                 .iter()
-                .map(|name| {
-                    options
-                        .exclusion_counts
-                        .and_then(|counts| counts.get(name))
-                        .copied()
-                        .unwrap_or_default() as f64
-                })
+                .map(|player| exclusion_count(options.exclusion_counts, player) as f64)
                 .sum::<f64>()
                 * self.exclusion_penalty_weight;
             let selected_ids = discord_ids(&selected);
@@ -2138,12 +2110,10 @@ impl BalancedShuffler {
                     .fetch_add(1, AtomicOrdering::Relaxed);
                 continue;
             }
-            let selected_names: HashSet<&str> =
-                selected.iter().map(|player| player.name.as_str()).collect();
-            let recent_penalty = options.recent_match_names.map_or(0.0, |recent| {
-                selected_names
+            let recent_penalty = options.recent_match_ids.map_or(0.0, |_| {
+                selected
                     .iter()
-                    .filter(|name| recent.contains(**name))
+                    .filter(|player| is_recent(options.recent_match_ids, player))
                     .count() as f64
                     * self.recent_match_penalty_weight
             });
@@ -2274,6 +2244,19 @@ fn discord_ids(players: &[&Player]) -> HashSet<i64> {
         .collect()
 }
 
+fn exclusion_count(exclusion_counts: Option<&HashMap<i64, usize>>, player: &Player) -> usize {
+    player
+        .discord_id
+        .and_then(|discord_id| exclusion_counts?.get(&discord_id).copied())
+        .unwrap_or_default()
+}
+
+fn is_recent(recent_match_ids: Option<&HashSet<i64>>, player: &Player) -> bool {
+    player
+        .discord_id
+        .is_some_and(|discord_id| recent_match_ids.is_some_and(|ids| ids.contains(&discord_id)))
+}
+
 fn role_strings(roles: &RoleAssignment) -> Vec<String> {
     roles.to_vec()
 }
@@ -2359,7 +2342,7 @@ fn draft_pool_result_from_indices(
 
 fn draft_exclusion_penalty<'a, I>(
     players: I,
-    exclusion_counts: Option<&HashMap<String, usize>>,
+    exclusion_counts: Option<&HashMap<i64, usize>>,
     weight: f64,
 ) -> f64
 where
@@ -2367,30 +2350,25 @@ where
 {
     players
         .into_iter()
-        .map(|player| {
-            exclusion_counts
-                .and_then(|counts| counts.get(&player.name))
-                .copied()
-                .unwrap_or_default() as f64
-        })
+        .map(|player| exclusion_count(exclusion_counts, player) as f64)
         .sum::<f64>()
         * weight
 }
 
 fn draft_recent_penalty<'a, I>(
     players: I,
-    recent_match_names: Option<&HashSet<String>>,
+    recent_match_ids: Option<&HashSet<i64>>,
     weight: f64,
 ) -> f64
 where
     I: IntoIterator<Item = &'a Player>,
 {
-    let Some(recent_match_names) = recent_match_names else {
+    if recent_match_ids.is_none() {
         return 0.0;
-    };
+    }
     players
         .into_iter()
-        .filter(|player| recent_match_names.contains(&player.name))
+        .filter(|player| is_recent(recent_match_ids, player))
         .count() as f64
         * weight
 }
@@ -2642,6 +2620,26 @@ mod tests {
             discord_id: Some(discord_id),
             ..player(name, value, &["1", "2", "3", "4", "5"])
         }
+    }
+
+    fn id(player: &Player) -> i64 {
+        player.discord_id.expect("fixture has a Discord ID")
+    }
+
+    /// Give fixtures distinct Discord IDs so ID-keyed pool inputs apply.
+    fn with_discord_ids(players: Vec<Player>) -> Vec<Player> {
+        players
+            .into_iter()
+            .zip(1..)
+            .map(|(player, discord_id)| Player {
+                discord_id: Some(discord_id),
+                ..player
+            })
+            .collect()
+    }
+
+    fn excluded_ids(players: &[Player]) -> HashSet<i64> {
+        players.iter().map(id).collect()
     }
 
     fn no_rating_constraints() -> ShuffleConstraints<'static> {
@@ -2947,7 +2945,7 @@ mod tests {
             .iter()
             .map(|player| {
                 (
-                    player.name.clone(),
+                    id(player),
                     if low_priority.contains(&player.discord_id.unwrap()) {
                         100
                     } else {
@@ -3009,7 +3007,7 @@ mod tests {
             .iter()
             .map(|player| {
                 (
-                    player.name.clone(),
+                    id(player),
                     if low_priority.contains(&player.discord_id.unwrap()) {
                         20
                     } else {
@@ -3018,11 +3016,7 @@ mod tests {
                 )
             })
             .collect::<HashMap<_, _>>();
-        let recent_names = players
-            .iter()
-            .skip(10)
-            .map(|player| player.name.clone())
-            .collect::<HashSet<_>>();
+        let recent_ids = players.iter().skip(10).map(id).collect::<HashSet<_>>();
         let shuffler = BalancedShuffler {
             off_role_multiplier: 0.8,
             off_role_flat_penalty: 60.0,
@@ -3035,7 +3029,7 @@ mod tests {
         };
         let options = PoolOptions {
             exclusion_counts: Some(&exclusion_counts),
-            recent_match_names: Some(&recent_names),
+            recent_match_ids: Some(&recent_ids),
             constraints: ShuffleConstraints {
                 low_priority_ids: Some(&low_priority),
                 ..ShuffleConstraints::default()
@@ -3079,7 +3073,7 @@ mod tests {
             .iter()
             .map(|player| {
                 (
-                    player.name.clone(),
+                    id(player),
                     if low_priority.contains(&player.discord_id.unwrap()) {
                         20
                     } else {
@@ -3088,11 +3082,7 @@ mod tests {
                 )
             })
             .collect::<HashMap<_, _>>();
-        let recent_names = players
-            .iter()
-            .skip(10)
-            .map(|player| player.name.clone())
-            .collect::<HashSet<_>>();
+        let recent_ids = players.iter().skip(10).map(id).collect::<HashSet<_>>();
         let shuffler = BalancedShuffler {
             off_role_multiplier: 0.8,
             off_role_flat_penalty: 60.0,
@@ -3105,7 +3095,7 @@ mod tests {
         };
         let options = PoolOptions {
             exclusion_counts: Some(&exclusion_counts),
-            recent_match_names: Some(&recent_names),
+            recent_match_ids: Some(&recent_ids),
             constraints: ShuffleConstraints {
                 low_priority_ids: Some(&low_priority),
                 ..ShuffleConstraints::default()
@@ -3379,7 +3369,8 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let recent = HashSet::from([players[0].name.clone()]);
+        let players = with_discord_ids(players);
+        let recent = HashSet::from([id(&players[0])]);
         let shuffler = BalancedShuffler {
             use_glicko: false,
             rd_priority_weight: 0.0,
@@ -3392,7 +3383,7 @@ mod tests {
             .greedy_shuffle(
                 &players,
                 PoolOptions {
-                    recent_match_names: Some(&recent),
+                    recent_match_ids: Some(&recent),
                     ..PoolOptions::default()
                 },
             )
@@ -3453,7 +3444,7 @@ mod tests {
         let exclusion_counts = players
             .iter()
             .zip(exclusion_factors)
-            .map(|(player, factor)| (player.name.clone(), factor))
+            .map(|(player, factor)| (id(player), factor))
             .collect::<HashMap<_, _>>();
         let shuffler = BalancedShuffler {
             use_glicko: false,
@@ -5201,11 +5192,9 @@ mod tests {
         let players: Vec<Player> = (0..11)
             .map(|index| full_flex_player(format!("Player{index}"), 1_500, index + 1))
             .collect();
-        let mut counts: HashMap<String, usize> = players
-            .iter()
-            .map(|player| (player.name.clone(), 5))
-            .collect();
-        counts.insert("Player0".to_owned(), 0);
+        let mut counts: HashMap<i64, usize> =
+            players.iter().map(|player| (id(player), 5)).collect();
+        counts.insert(id(&players[0]), 0);
         let shuffler = BalancedShuffler {
             use_glicko: false,
             exclusion_penalty_weight: 500.0,
@@ -5231,6 +5220,62 @@ mod tests {
     }
 
     #[test]
+    fn test_pool_penalties_distinguish_players_sharing_a_name() {
+        // Stored names are not unique, so two pool players named "Twin" must
+        // keep their own exclusion count and recent-match status.
+        let mut players: Vec<Player> = (0..11)
+            .map(|index| full_flex_player(format!("Player{index}"), 1_500, index + 1))
+            .collect();
+        players[0].name = "Twin".to_owned();
+        players[1].name = "Twin".to_owned();
+
+        let mut counts: HashMap<i64, usize> =
+            players.iter().map(|player| (id(player), 5)).collect();
+        counts.insert(2, 0);
+        let exclusion_shuffler = BalancedShuffler {
+            use_glicko: false,
+            exclusion_penalty_weight: 500.0,
+            ..BalancedShuffler::default()
+        };
+        let exclusion_options = PoolOptions {
+            exclusion_counts: Some(&counts),
+            ..PoolOptions::default()
+        };
+        let pool = exclusion_shuffler
+            .shuffle_from_pool(&players, exclusion_options)
+            .expect("pool shuffle succeeds");
+        assert_eq!(excluded_ids(&pool.excluded), HashSet::from([2]));
+        let greedy = exclusion_shuffler
+            .greedy_shuffle(&players, exclusion_options)
+            .expect("greedy shuffle succeeds");
+        assert_eq!(excluded_ids(&greedy.excluded), HashSet::from([2]));
+
+        let zero_counts: HashMap<i64, usize> =
+            players.iter().map(|player| (id(player), 0)).collect();
+        let recent = HashSet::from([2_i64]);
+        let recent_shuffler = BalancedShuffler {
+            use_glicko: false,
+            recent_match_penalty_weight: 500.0,
+            exclusion_penalty_weight: 50.0,
+            rd_priority_weight: 0.0,
+            ..BalancedShuffler::default()
+        };
+        let recent_options = PoolOptions {
+            exclusion_counts: Some(&zero_counts),
+            recent_match_ids: Some(&recent),
+            ..PoolOptions::default()
+        };
+        let pool = recent_shuffler
+            .shuffle_from_pool(&players, recent_options)
+            .expect("pool shuffle succeeds");
+        assert_eq!(excluded_ids(&pool.excluded), HashSet::from([2]));
+        let greedy = recent_shuffler
+            .greedy_shuffle(&players, recent_options)
+            .expect("greedy shuffle succeeds");
+        assert_eq!(excluded_ids(&greedy.excluded), HashSet::from([2]));
+    }
+
+    #[test]
     fn test_greedy_shuffle_excludes_lowest_effective_exclusion_count() {
         let players: Vec<Player> = (0..12)
             .map(|index| {
@@ -5241,12 +5286,11 @@ mod tests {
                 )
             })
             .collect();
-        let mut counts: HashMap<String, usize> = players
-            .iter()
-            .map(|player| (player.name.clone(), 5))
-            .collect();
-        counts.insert("Player8".to_owned(), 0);
-        counts.insert("Player9".to_owned(), 0);
+        let players = with_discord_ids(players);
+        let mut counts: HashMap<i64, usize> =
+            players.iter().map(|player| (id(player), 5)).collect();
+        counts.insert(id(&players[8]), 0);
+        counts.insert(id(&players[9]), 0);
         let shuffler = BalancedShuffler {
             use_glicko: false,
             off_role_flat_penalty: 50.0,
@@ -5281,16 +5325,13 @@ mod tests {
                 )
             })
             .collect();
-        let counts: HashMap<String, usize> = players
+        let players = with_discord_ids(players);
+        let counts: HashMap<i64, usize> = players
             .iter()
             .enumerate()
-            .map(|(index, player)| (player.name.clone(), index))
+            .map(|(index, player)| (id(player), index))
             .collect();
-        let recent = HashSet::from([
-            "Player0".to_owned(),
-            "Player3".to_owned(),
-            "Player7".to_owned(),
-        ]);
+        let recent = HashSet::from([id(&players[0]), id(&players[3]), id(&players[7])]);
         let result = BalancedShuffler {
             use_glicko: false,
             off_role_flat_penalty: 50.0,
@@ -5301,7 +5342,7 @@ mod tests {
             &players,
             PoolOptions {
                 exclusion_counts: Some(&counts),
-                recent_match_names: Some(&recent),
+                recent_match_ids: Some(&recent),
                 ..PoolOptions::default()
             },
         )
@@ -5362,10 +5403,10 @@ mod tests {
     #[test]
     fn test_greedy_shuffle_prefers_excluding_recent_players() {
         let players = recent_penalty_players();
-        let recent = HashSet::from([players[12].name.clone(), players[13].name.clone()]);
+        let recent = HashSet::from([id(&players[12]), id(&players[13])]);
         let counts = players
             .iter()
-            .map(|player| (player.name.clone(), 5))
+            .map(|player| (id(player), 5))
             .collect::<HashMap<_, _>>();
         let result = BalancedShuffler {
             use_glicko: false,
@@ -5377,21 +5418,21 @@ mod tests {
             &players,
             PoolOptions {
                 exclusion_counts: Some(&counts),
-                recent_match_names: Some(&recent),
+                recent_match_ids: Some(&recent),
                 ..PoolOptions::default()
             },
         )
         .expect("greedy shuffle");
-        assert!(recent.is_subset(&names(&result.excluded)));
+        assert!(recent.is_subset(&excluded_ids(&result.excluded)));
     }
 
     #[test]
     fn test_penalty_disabled_when_zero() {
         let players = recent_penalty_players();
-        let recent = HashSet::from([players[0].name.clone(), players[1].name.clone()]);
+        let recent = HashSet::from([id(&players[0]), id(&players[1])]);
         let counts = players
             .iter()
-            .map(|player| (player.name.clone(), 0))
+            .map(|player| (id(player), 0))
             .collect::<HashMap<_, _>>();
         let shuffler = BalancedShuffler {
             use_glicko: false,
@@ -5404,7 +5445,7 @@ mod tests {
                 &players,
                 PoolOptions {
                     exclusion_counts: Some(&counts),
-                    recent_match_names: Some(&recent),
+                    recent_match_ids: Some(&recent),
                     ..PoolOptions::default()
                 },
             )
@@ -5428,13 +5469,10 @@ mod tests {
     #[test]
     fn test_greedy_shuffle_includes_recent_penalty() {
         let players = recent_penalty_players();
-        let recent = players
-            .iter()
-            .map(|player| player.name.clone())
-            .collect::<HashSet<_>>();
+        let recent = players.iter().map(id).collect::<HashSet<_>>();
         let counts = players
             .iter()
-            .map(|player| (player.name.clone(), 0))
+            .map(|player| (id(player), 0))
             .collect::<HashMap<_, _>>();
         let shuffler = BalancedShuffler {
             use_glicko: false,
@@ -5446,7 +5484,7 @@ mod tests {
                 &players,
                 PoolOptions {
                     exclusion_counts: Some(&counts),
-                    recent_match_names: Some(&recent),
+                    recent_match_ids: Some(&recent),
                     ..PoolOptions::default()
                 },
             )
@@ -5468,13 +5506,10 @@ mod tests {
         let players: Vec<Player> = (0..14)
             .map(|index| full_flex_player(format!("Player{index}"), 1_500, 1_000 + index))
             .collect();
-        let recent = players[..4]
-            .iter()
-            .map(|player| player.name.clone())
-            .collect::<HashSet<_>>();
+        let recent = players[..4].iter().map(id).collect::<HashSet<_>>();
         let counts = players
             .iter()
-            .map(|player| (player.name.clone(), 0))
+            .map(|player| (id(player), 0))
             .collect::<HashMap<_, _>>();
         let result = BalancedShuffler {
             use_glicko: false,
@@ -5487,23 +5522,23 @@ mod tests {
             &players,
             PoolOptions {
                 exclusion_counts: Some(&counts),
-                recent_match_names: Some(&recent),
+                recent_match_ids: Some(&recent),
                 ..PoolOptions::default()
             },
         )
         .expect("branch-bound shuffle");
-        assert_eq!(names(&result.excluded), recent);
+        assert_eq!(excluded_ids(&result.excluded), recent);
     }
 
     #[test]
     fn test_high_exclusion_count_overrides_recent_penalty() {
         let players = recent_penalty_players();
-        let recent = HashSet::from([players[0].name.clone()]);
+        let recent = HashSet::from([id(&players[0])]);
         let mut counts = players
             .iter()
-            .map(|player| (player.name.clone(), 0))
+            .map(|player| (id(player), 0))
             .collect::<HashMap<_, _>>();
-        counts.insert(players[0].name.clone(), 100);
+        counts.insert(id(&players[0]), 100);
         let result = BalancedShuffler {
             use_glicko: false,
             recent_match_penalty_weight: 25.0,
@@ -5514,7 +5549,7 @@ mod tests {
             &players,
             PoolOptions {
                 exclusion_counts: Some(&counts),
-                recent_match_names: Some(&recent),
+                recent_match_ids: Some(&recent),
                 ..PoolOptions::default()
             },
         )
@@ -5988,15 +6023,11 @@ mod tests {
     fn assert_split_bound_matches(seed: u64, recent_count: usize, max_roles: usize) {
         let players = seeded_pool(seed, "Seeded", max_roles);
         let mut random = SplitMix64(seed ^ 0xB0A0D);
-        let counts: HashMap<String, usize> = players
+        let counts: HashMap<i64, usize> = players
             .iter()
-            .map(|player| (player.name.clone(), random.index(6)))
+            .map(|player| (id(player), random.index(6)))
             .collect();
-        let recent: HashSet<String> = players
-            .iter()
-            .take(recent_count)
-            .map(|player| player.name.clone())
-            .collect();
+        let recent: HashSet<i64> = players.iter().take(recent_count).map(id).collect();
         let shuffler = BalancedShuffler {
             off_role_multiplier: uniform(&mut random, 0.55, 1.0),
             off_role_flat_penalty: uniform(&mut random, 0.0, 220.0),
@@ -6009,7 +6040,7 @@ mod tests {
         };
         let options = PoolOptions {
             exclusion_counts: Some(&counts),
-            recent_match_names: Some(&recent),
+            recent_match_ids: Some(&recent),
             ..PoolOptions::default()
         };
         let (reference, optimized) = branch_pair(&players, &shuffler, options);
@@ -6118,11 +6149,8 @@ mod tests {
             rating_spread_multiplier: 0.05,
             ..BalancedShuffler::default()
         };
-        let recent: HashSet<String> = if kind == "recent" {
-            players[..8]
-                .iter()
-                .map(|player| player.name.clone())
-                .collect()
+        let recent: HashSet<i64> = if kind == "recent" {
+            players[..8].iter().map(id).collect()
         } else {
             HashSet::new()
         };
@@ -6135,7 +6163,7 @@ mod tests {
             partner_discord_id: players[11].discord_id.unwrap(),
         }];
         let options = PoolOptions {
-            recent_match_names: Some(&recent),
+            recent_match_ids: Some(&recent),
             constraints: ShuffleConstraints {
                 avoids: (kind == "avoid").then_some(&avoids[..]),
                 deals: (kind == "deal").then_some(&deals[..]),
@@ -6391,10 +6419,8 @@ mod tests {
                 ..Player::new(format!("Player{index}"))
             })
             .collect();
-        let counts: HashMap<String, usize> = players
-            .iter()
-            .map(|player| (player.name.clone(), 0))
-            .collect();
+        let players = with_discord_ids(players);
+        let counts: HashMap<i64, usize> = players.iter().map(|player| (id(player), 0)).collect();
         let result = BalancedShuffler {
             off_role_flat_penalty: 100.0,
             exclusion_penalty_weight: 75.0,
@@ -6440,11 +6466,11 @@ mod tests {
 
     #[test]
     fn test_higher_weight_prevents_repeat_exclusions() {
-        let players = create_players_with_roles(14, 1_500, 0);
-        let counts: HashMap<String, usize> = players
+        let players = with_discord_ids(create_players_with_roles(14, 1_500, 0));
+        let counts: HashMap<i64, usize> = players
             .iter()
             .enumerate()
-            .map(|(index, player)| (player.name.clone(), usize::from(index < 4) * 2))
+            .map(|(index, player)| (id(player), usize::from(index < 4) * 2))
             .collect();
         let result = BalancedShuffler {
             off_role_flat_penalty: 100.0,
@@ -6682,10 +6708,10 @@ mod tests {
     #[test]
     fn test_draft_select_exclusion_penalty_keeps_frequently_excluded() {
         let (captain_a, captain_b) = draft_captains(1_600.0, 1_600.0);
-        let candidates = draft_candidates(10, 1_500.0, 10.0);
+        let candidates = with_discord_ids(draft_candidates(10, 1_500.0, 10.0));
         let counts = HashMap::from([
-            (candidates[8].name.clone(), 100_usize),
-            (candidates[9].name.clone(), 100_usize),
+            (id(&candidates[8]), 100_usize),
+            (id(&candidates[9]), 100_usize),
         ]);
         let result = BalancedShuffler::default()
             .select_draft_pool(&captain_a, &captain_b, &candidates, Some(&counts), None)
@@ -6698,11 +6724,8 @@ mod tests {
     #[test]
     fn test_draft_select_recent_match_penalty_affects_selection() {
         let (captain_a, captain_b) = draft_captains(1_600.0, 1_600.0);
-        let candidates = draft_candidates(10, 1_500.0, 0.0);
-        let recent = candidates
-            .iter()
-            .map(|player| player.name.clone())
-            .collect();
+        let candidates = with_discord_ids(draft_candidates(10, 1_500.0, 0.0));
+        let recent = candidates.iter().map(id).collect();
         let shuffler = BalancedShuffler::default();
         let with_recent = shuffler
             .select_draft_pool(&captain_a, &captain_b, &candidates, None, Some(&recent))
@@ -6716,8 +6739,8 @@ mod tests {
     #[test]
     fn test_draft_select_uses_shared_280_recent_match_penalty() {
         let (captain_a, captain_b) = draft_captains(1_600.0, 1_600.0);
-        let candidates = draft_candidates(8, 1_500.0, 0.0);
-        let recent = HashSet::from([candidates[0].name.clone()]);
+        let candidates = with_discord_ids(draft_candidates(8, 1_500.0, 0.0));
+        let recent = HashSet::from([id(&candidates[0])]);
         let shuffler = BalancedShuffler::default();
         let baseline = shuffler
             .select_draft_pool(&captain_a, &captain_b, &candidates, None, None)
@@ -6768,11 +6791,11 @@ mod tests {
     #[test]
     fn test_draft_beam_search_respects_exclusion_counts() {
         let (captain_a, captain_b) = draft_captains(1_600.0, 1_600.0);
-        let candidates = draft_candidates(15, 1_500.0, 10.0);
+        let candidates = with_discord_ids(draft_candidates(15, 1_500.0, 10.0));
         let counts = HashMap::from([
-            (candidates[12].name.clone(), 100_usize),
-            (candidates[13].name.clone(), 100_usize),
-            (candidates[14].name.clone(), 100_usize),
+            (id(&candidates[12]), 100_usize),
+            (id(&candidates[13]), 100_usize),
+            (id(&candidates[14]), 100_usize),
         ]);
         let result = BalancedShuffler::default()
             .select_draft_pool_beam(&captain_a, &captain_b, &candidates, Some(&counts), None)

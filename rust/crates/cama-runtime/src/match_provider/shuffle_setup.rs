@@ -155,21 +155,12 @@ impl MatchHandler {
         shuffler.region_split_penalty = self.config.region_split_penalty;
 
         let recent_match_ids = last_match_participant_ids(&self.database_path, request.guild_id)?;
-        let recent_match_names = players
-            .iter()
-            .filter(|player| {
-                player
-                    .discord_id
-                    .is_some_and(|id| recent_match_ids.contains(&id))
-            })
-            .map(|player| player.name.clone())
-            .collect::<HashSet<_>>();
         let exclusion_counts = players
             .iter()
             .filter_map(|player| {
                 player.discord_id.map(|player_id| {
                     (
-                        player.name.clone(),
+                        player_id,
                         usize::try_from(
                             exclusion_counts
                                 .get(&player_id)
@@ -187,7 +178,7 @@ impl MatchHandler {
                 &players,
                 PoolOptions {
                     exclusion_counts: Some(&exclusion_counts),
-                    recent_match_names: Some(&recent_match_names),
+                    recent_match_ids: Some(&recent_match_ids),
                     constraints,
                     lobby_wait_minutes: Some(&request.lobby_wait_minutes),
                     sampling_seed: fastrand::u64(..),
@@ -258,9 +249,10 @@ impl MatchHandler {
         let excluded_set = excluded_ids.iter().copied().collect::<HashSet<_>>();
         let excluded_penalty = excluded_players
             .iter()
-            .map(|player| {
+            .filter_map(|player| player.discord_id)
+            .map(|player_id| {
                 exclusion_counts
-                    .get(&player.name)
+                    .get(&player_id)
                     .copied()
                     .unwrap_or_default()
             })
@@ -270,7 +262,11 @@ impl MatchHandler {
             .players
             .iter()
             .chain(&dire_team.players)
-            .filter(|player| recent_match_names.contains(&player.name))
+            .filter(|player| {
+                player
+                    .discord_id
+                    .is_some_and(|id| recent_match_ids.contains(&id))
+            })
             .count() as f64
             * shuffler.recent_match_penalty_weight;
         let soft_avoid_penalty = shuffler.calculate_soft_avoid_penalty(
