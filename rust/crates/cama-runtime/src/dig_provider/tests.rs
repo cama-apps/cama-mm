@@ -656,6 +656,28 @@ async fn durable_dig_delivery_keeps_stored_username_while_rendering_server_nickn
 }
 
 #[tokio::test]
+async fn dig_player_name_never_falls_back_to_registration_name_or_id() {
+    let (_database, provider, _discord) = fixture();
+    let unnamed = provider
+        .handler
+        .render_player_name(USER as i64, GUILD as i64)
+        .await;
+    assert_eq!(unnamed, "Unknown player");
+    assert!(!unnamed.contains(&USER.to_string()));
+
+    let provider = provider.with_player_names(Arc::new(FixedPlayerNames(
+        GuildPlayerNameDirectory::new(Some(BTreeMap::from([(USER, "Server Miner".to_owned())]))),
+    )));
+    assert_eq!(
+        provider
+            .handler
+            .render_player_name(USER as i64, GUILD as i64)
+            .await,
+        "Server Miner"
+    );
+}
+
+#[tokio::test]
 async fn production_runtime_injects_shared_vanity_tax_into_live_dig() {
     let (database, base, discord) = fixture();
     let now = 1_900_210_029;
@@ -5695,7 +5717,7 @@ async fn prestige_preview_selection_restart_and_forgery_use_atomic_app_service()
     {
         let public = discord.public.lock().expect("public ascension responses");
         assert_eq!(public.len(), 1);
-        assert_eq!(public[0].content, "*dig-test-miner has ascended.*");
+        assert_eq!(public[0].content, "*Unknown player has ascended.*");
         assert!(
             public[0].attachments.is_empty(),
             "test config disables Neon"
@@ -7255,7 +7277,7 @@ async fn provider_help_and_gift_use_typed_social_service_and_python_delivery_con
             .description
             .as_deref()
             .expect("help description");
-        assert!(help_description.contains("You helped **dig-social-target**'s tunnel!"));
+        assert!(help_description.contains("You helped **Unknown player**'s tunnel!"));
         assert!(help_description.contains("Blocks added: **"));
     }
     assert_eq!(
@@ -7306,7 +7328,7 @@ async fn provider_help_and_gift_use_typed_social_service_and_python_delivery_con
         assert!(!gift_followups[0].ephemeral);
         assert_eq!(
             gift_followups[0].content,
-            "You gifted **Mole Claws** to **dig-social-target**!"
+            "You gifted **Mole Claws** to **Unknown player**!"
         );
     }
     assert_eq!(
@@ -7409,7 +7431,7 @@ async fn provider_sabotage_view_is_owner_bound_restart_expiring_and_exactly_once
             .as_deref()
             .expect("sabotage preview description"),
         format!(
-            "**Target:** dig-sabotage-target\n**Cost:** 20 {JOPACOIN_EMOTE}\n**Potential damage:** 3-8 blocks\n\nAre you sure? If they have a trap set, you could take damage instead."
+            "**Target:** Unknown player\n**Cost:** 20 {JOPACOIN_EMOTE}\n**Potential damage:** 3-8 blocks\n\nAre you sure? If they have a trap set, you could take damage instead."
         )
     );
     assert_eq!(preview.components[0].buttons.len(), 2);
@@ -7619,7 +7641,7 @@ async fn provider_miner_group_uses_typed_profile_allocation_respec_and_autobuy_s
     assert_eq!(profile_responder.defers.lock().unwrap().as_slice(), &[true]);
     let profile = profile_responder.followups.lock().unwrap()[0].clone();
     assert!(profile.ephemeral);
-    let expected_title = "dig-test-miner - Miner Profile".to_owned();
+    let expected_title = "Unknown player - Miner Profile".to_owned();
     assert_eq!(
         profile.embeds[0].title.as_deref(),
         Some(expected_title.as_str())

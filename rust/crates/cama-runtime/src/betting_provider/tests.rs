@@ -212,11 +212,12 @@ async fn economy_invest_command_sets_lists_and_removes_positions() {
         )
         .await
         .expect("list investment");
-    assert!(
-        recording.responses.lock().unwrap()[0]
-            .content
-            .contains("1. LONG <@2> — 7%")
-    );
+    // No live or last-seen name exists, so the list shows the readable
+    // placeholder rather than a mention or the registration name.
+    let listed = recording.responses.lock().unwrap()[0].content.clone();
+    assert!(listed.contains("1. LONG Unknown player — 7%"), "{listed}");
+    assert!(!listed.contains("<@"));
+    assert!(!listed.contains("target"));
     recording.responses.lock().unwrap().clear();
 
     provider
@@ -1979,6 +1980,93 @@ async fn bets_command_returns_more_than_fifteen_bets_without_omission() {
     assert!(responses.iter().all(|response| response.ephemeral));
 }
 
+#[tokio::test]
+async fn admin_bets_list_names_bettors_without_mentions_or_registration_names() {
+    let database = NamedTempFile::new().expect("temporary database");
+    initialize_or_migrate(database.path()).expect("schema");
+    let now = unix_seconds().expect("timestamp");
+    let pending = PendingMatchRepository::new(database.path())
+        .create_pending_match(
+            42,
+            &PendingMatchState {
+                shuffle_timestamp: Some(now.saturating_sub(10)),
+                bet_lock_until: Some(now.saturating_add(600)),
+                betting_mode: "pool".to_owned(),
+                ..PendingMatchState::default()
+            },
+        )
+        .expect("pending match");
+    let players = PlayerRepository::new(database.path());
+    let betting = BettingServiceRepository::new(database.path());
+    for discord_id in [1_001, 1_002] {
+        players
+            .add(&NewPlayer::new(
+                discord_id,
+                format!("registered-{discord_id}"),
+                Some(42),
+            ))
+            .expect("player");
+        players
+            .update_balance(discord_id, Some(42), 100)
+            .expect("balance");
+        betting
+            .place_bet_atomic(PlaceBetRequest {
+                guild_id: Some(42),
+                pending_match_id: pending.pending_match_id,
+                discord_id,
+                team: BettingTeam::Dire,
+                amount: 5,
+                bet_time: now,
+                leverage: 1,
+                max_debt: 500,
+                is_blind: false,
+                odds_at_placement: None,
+            })
+            .expect("place bet");
+    }
+    let discord = Arc::new(PartialMemberCacheDiscord {
+        cached: BTreeMap::from([(1_001, "Cached Bettor".to_owned())]),
+        ..PartialMemberCacheDiscord::default()
+    });
+    let provider = partial_member_cache_provider(&database, discord);
+    let responder = RecordingResponder::default();
+
+    provider
+        .handler
+        .handle(
+            InteractionRequest::Command {
+                interaction_id: 3,
+                name: "bets".to_owned(),
+                user_id: 999,
+                user_display_name: "viewer".to_owned(),
+                guild_id: Some(42),
+                channel_id: Some(99),
+                member_permissions: Some(ADMINISTRATOR_PERMISSION),
+                options: vec![InteractionOption {
+                    name: "match".to_owned(),
+                    value: InteractionValue::Integer(pending.pending_match_id),
+                }],
+            },
+            Arc::new(responder.clone()),
+        )
+        .await
+        .expect("dispatch bets command");
+
+    let responses = responder.responses.lock().unwrap();
+    let dire = responses
+        .iter()
+        .flat_map(|response| &response.embeds)
+        .flat_map(|embed| &embed.fields)
+        .filter(|field| field.name.starts_with("🔴 Dire Bets"))
+        .map(|field| field.value.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(dire.contains("Cached Bettor • 5"), "{dire}");
+    assert!(dire.contains("Unknown player • 5"), "{dire}");
+    assert!(!dire.contains("<@"));
+    assert!(!dire.contains("registered-"));
+}
+
 #[test]
 fn command_tree_contains_betting_and_economy_surface() {
     assert_eq!(bet_options(1).len(), 4);
@@ -1995,7 +2083,8 @@ fn golden_wheel_announcement_matches_public_python_copy_and_mentions_top_players
     let mut second = Player::new("second");
     second.discord_id = Some(8);
     second.jopacoin_balance = 700;
-    let announcement = golden_wheel_announcement(7, &[first, second]);
+    let names = BTreeMap::from([(7, "First Player".to_owned())]);
+    let announcement = golden_wheel_announcement(7, &[first, second], &names);
     assert!(!announcement.ephemeral);
     assert_eq!(
         announcement.allowed_mentions,
@@ -2009,9 +2098,10 @@ fn golden_wheel_announcement_matches_public_python_copy_and_mentions_top_players
         .description
         .as_deref()
         .unwrap_or_default();
-    assert!(description.contains("<@7> is spinning the GOLDEN WHEEL!"));
-    assert!(description.contains("**#1** <@7> — 900"));
-    assert!(description.contains("**#2** <@8> — 700"));
+    assert!(description.contains("First Player is spinning the GOLDEN WHEEL!"));
+    assert!(description.contains("**#1** First Player — 900"));
+    assert!(description.contains("**#2** Unknown player — 700"));
+    assert!(!description.contains("<@"));
 }
 
 #[test]

@@ -4023,6 +4023,15 @@ impl BettingInteractionHandler {
                 format!("{lobby_bonus} {JOPACOIN_EMOTE} shared equally among match participants."),
             ));
         }
+        let bettor_names = if is_admin || !betting_open {
+            self.render_player_names(
+                &bets.iter().map(|bet| bet.discord_id).collect::<Vec<_>>(),
+                Some(guild_id),
+            )
+            .await
+        } else {
+            BTreeMap::new()
+        };
         for (team, label) in [
             (BettingTeam::Radiant, "🟢 Radiant"),
             (BettingTeam::Dire, "🔴 Dire"),
@@ -4039,7 +4048,10 @@ impl BettingInteractionHandler {
                 .enumerate()
                 .map(|(index, bet)| {
                     let bettor = if is_admin || !betting_open {
-                        format!("<@{}>", bet.discord_id)
+                        bettor_names
+                            .get(&bet.discord_id)
+                            .cloned()
+                            .unwrap_or_else(|| "Unknown player".to_owned())
                     } else {
                         format!("Bettor #{}", index + 1)
                     };
@@ -5729,13 +5741,28 @@ impl BettingInteractionHandler {
                     .iter()
                     .map(|position| position.percentage)
                     .sum::<i64>();
+                // This reply is not deferred, so names come from the cache and
+                // last-seen archive rather than a member fetch.
+                let names = u64::try_from(guild_id).map_or_else(
+                    |_| GuildPlayerNameDirectory::default(),
+                    |guild_id| {
+                        cached_guild_player_names(
+                            self.discord.as_ref(),
+                            guild_id,
+                            &positions
+                                .iter()
+                                .filter_map(|position| u64::try_from(position.target_id).ok())
+                                .collect::<Vec<_>>(),
+                        )
+                    },
+                );
                 let mut content = String::from("**Configured investments**\n");
                 for (index, position) in positions.iter().enumerate() {
                     content.push_str(&format!(
-                        "{}. {} <@{}> — {}%\n",
+                        "{}. {} {} — {}%\n",
                         index + 1,
                         position.direction.to_ascii_uppercase(),
-                        position.target_id,
+                        names.resolve(position.target_id),
                         position.percentage
                     ));
                 }
@@ -9585,7 +9612,7 @@ fn spin_once(
         .collect::<Vec<_>>();
     let kind = select_wheel_kind(user_id, player.jopacoin_balance, bonus_spin, &top_ids);
     let golden_announcement = (kind == WheelKind::Golden && !bonus_spin)
-        .then(|| golden_wheel_announcement(user_id, &leaderboard));
+        .then(|| golden_wheel_announcement(user_id, &leaderboard, player_names));
     let policy = WheelEconomyPolicy {
         minigame_scale: config.minigame_jc_delta_scale,
         regular_target_ev: config.wheel_target_ev,
@@ -10009,7 +10036,24 @@ fn visible_wheel_positive_balance(
     })
 }
 
-fn golden_wheel_announcement(user_id: i64, leaderboard: &[Player]) -> InteractionResponse {
+fn golden_wheel_announcement(
+    user_id: i64,
+    leaderboard: &[Player],
+    player_names: &dyn WheelPlayerNameSource,
+) -> InteractionResponse {
+    let named_ids = leaderboard
+        .iter()
+        .take(cama_app::wheel::WHEEL_GOLDEN_TOP_N)
+        .filter_map(|row| row.discord_id)
+        .chain([user_id])
+        .collect::<Vec<_>>();
+    let names = player_names.names_for(&named_ids);
+    let name = |discord_id: i64| {
+        names
+            .get(&discord_id)
+            .map_or("Unknown player", String::as_str)
+            .to_owned()
+    };
     let top_lines = leaderboard
         .iter()
         .take(cama_app::wheel::WHEEL_GOLDEN_TOP_N)
@@ -10017,8 +10061,9 @@ fn golden_wheel_announcement(user_id: i64, leaderboard: &[Player]) -> Interactio
         .filter_map(|(index, row)| {
             row.discord_id.map(|discord_id| {
                 format!(
-                    "**#{}** <@{discord_id}> — {} {JOPACOIN_EMOTE}",
+                    "**#{}** {} — {} {JOPACOIN_EMOTE}",
                     index + 1,
+                    name(discord_id),
                     row.jopacoin_balance
                 )
             })
@@ -10037,7 +10082,8 @@ fn golden_wheel_announcement(user_id: i64, leaderboard: &[Player]) -> Interactio
         .embed(
             InteractionEmbed::titled("👑 GOLDEN WHEEL INCOMING 👑")
                 .description(format!(
-                    "👑 <@{user_id}> is spinning the GOLDEN WHEEL!\nThey are among the top {} wealthiest players in the server...\n\n**Current top-{}:**\n{}",
+                    "👑 {} is spinning the GOLDEN WHEEL!\nThey are among the top {} wealthiest players in the server...\n\n**Current top-{}:**\n{}",
+                    name(user_id),
                     cama_app::wheel::WHEEL_GOLDEN_TOP_N,
                     cama_app::wheel::WHEEL_GOLDEN_TOP_N,
                     top_lines.join("\n")

@@ -1231,9 +1231,10 @@ pub struct RecoveryReport {
 }
 
 /// The `/duel resolve` announcement: the net pot for a winner, with every
-/// non-zero withholding named, or the refund notice for a void.
+/// non-zero withholding named, or the refund notice for a void. `winner_name`
+/// is readable display text, never a mention.
 #[must_use]
-pub fn resolution_detail(resolution: &DuelResolution) -> String {
+pub fn resolution_detail(resolution: &DuelResolution, winner_name: &str) -> String {
     let challenge = &resolution.challenge;
     if challenge.status == DuelStatus::Voided {
         return format!(
@@ -1244,9 +1245,8 @@ pub fn resolution_detail(resolution: &DuelResolution) -> String {
     }
     let deductions = resolution.deductions;
     format!(
-        "Challenge #{} is resolved: <@{}> wins {} JC{}.",
+        "Challenge #{} is resolved: {winner_name} wins {} JC{}.",
         challenge.challenge_id,
-        challenge.winner_id.unwrap_or_default(),
         challenge.wager * 2 - deductions.total(),
         withholding_note(deductions)
     )
@@ -1804,7 +1804,12 @@ where
             .flavor
             .generate(event, guild_id, &Self::flavor_details(challenge));
         self.edit_original(challenge, &flavor);
-        let detail = resolution_detail(&resolution);
+        // This command-port model renders every player as a mention (with
+        // mentions suppressed); production rendering lives in the runtime.
+        let detail = resolution_detail(
+            &resolution,
+            &format!("<@{}>", challenge.winner_id.unwrap_or_default()),
+        );
         let _ = io.send_followup(ResponsePayload {
             content: Some(format!("{flavor}\n{detail}")),
             allowed_mentions: AllowedMentions::none(),

@@ -158,15 +158,17 @@ impl MafiaFlavorService {
         }
     }
 
+    /// `name` is the victim's readable display text, never a mention.
     #[must_use]
-    pub fn death_narration(&self, victim: &Player, by_plague: bool) -> String {
+    pub fn death_narration(&self, victim: &Player, name: &str, by_plague: bool) -> String {
         let pool = if by_plague { PLAGUE_DEATH } else { DEATH };
-        render_player(self.choose(pool), victim)
+        render_player(self.choose(pool), victim, name)
     }
 
+    /// `name` is the victim's readable display text, never a mention.
     #[must_use]
-    pub fn lynch_narration(&self, victim: &Player) -> String {
-        render_player(self.choose(LYNCH), victim)
+    pub fn lynch_narration(&self, victim: &Player, name: &str) -> String {
+        render_player(self.choose(LYNCH), victim, name)
     }
 
     #[must_use]
@@ -186,10 +188,10 @@ impl MafiaFlavorService {
     }
 }
 
-fn render_player(template: &str, victim: &Player) -> String {
+fn render_player(template: &str, victim: &Player, name: &str) -> String {
     template
         .replace("{hero}", &victim.hero_name)
-        .replace("{name}", &format!("<@{}>", victim.discord_id))
+        .replace("{name}", name)
         .replace("{role}", role_label(victim.role))
 }
 

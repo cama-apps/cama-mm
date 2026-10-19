@@ -605,9 +605,18 @@ struct RecordingDiscordState {
     edited: Vec<(u64, u64, DiscordMessage)>,
     pinned: Vec<(u64, u64)>,
     unpinned: Vec<(u64, u64)>,
+    members: BTreeMap<u64, String>,
 }
 
 impl RecordingDiscord {
+    fn set_member(&self, user_id: u64, display_name: &str) {
+        self.state
+            .lock()
+            .expect("Discord state")
+            .members
+            .insert(user_id, display_name.to_owned());
+    }
+
     fn set_fail_send(&self, fail: bool) {
         self.state.lock().expect("Discord state").fail_send = fail;
     }
@@ -778,9 +787,22 @@ impl DiscordTransport for RecordingDiscord {
     async fn guild_member(
         &self,
         _guild_id: u64,
-        _user_id: u64,
+        user_id: u64,
     ) -> Result<Option<DiscordGuildMemberSnapshot>, String> {
-        Ok(None)
+        Ok(self
+            .state
+            .lock()
+            .expect("Discord state")
+            .members
+            .get(&user_id)
+            .map(|display_name| DiscordGuildMemberSnapshot {
+                user_id,
+                display_name: display_name.clone(),
+                presence: crate::discord_transport::DiscordPresence::Unknown,
+                in_voice: false,
+                deafened: false,
+                activities: Vec::new(),
+            }))
     }
 }
 
@@ -1868,9 +1890,20 @@ async fn ready_retries_private_intro_after_thread_id_receipt_crash() {
     assert_eq!(fixture.mafia_port.thread_message_count(), 1);
 }
 
+#[test]
+fn readable_names_replace_mentions_and_ping_line_keeps_only_allowed_pings() {
+    let names = GuildPlayerNameDirectory::new(Some(BTreeMap::from([(1_u64, "Alpha".to_owned())])));
+    assert_eq!(mafia_name(&names, 1), "Alpha");
+    assert_eq!(mafia_name(&names, 2), "Unknown player");
+    let allowed = BTreeSet::from([1_u64, 3]);
+    assert_eq!(with_ping_line("text", &allowed, [1, 2, 1]), "text\n<@1>");
+    assert_eq!(with_ping_line("text", &allowed, [2]), "text");
+}
+
 #[tokio::test]
 async fn automatic_reminder_uses_python_copy_and_releases_failed_claim() {
     let fixture = media_fixture();
+    fixture.discord.set_member(1, "Alpha");
     fixture
         .provider
         .handler
@@ -1881,7 +1914,7 @@ async fn automatic_reminder_uses_python_copy_and_releases_failed_claim() {
     assert_eq!(messages.len(), 1);
     assert_eq!(
         messages[0].1.response.content,
-        "⚠️ <@1> <@2> <@3> <@4>\n4 players haven't acted yet — Night 1 ends <t:87400:R>."
+        "⚠️ <@1> <@2> <@3> <@4>\nAlpha, Unknown player, Unknown player, Unknown player\n4 players haven't acted yet — Night 1 ends <t:87400:R>."
     );
 
     // A failed delivery must release its durable claim so a later five-minute

@@ -818,7 +818,7 @@ where
         self.members
             .as_ref()
             .and_then(|members| members.display_name(discord_id))
-            .map_or_else(|| format!("User {discord_id}"), str::to_owned)
+            .map_or_else(|| "Unknown player".to_owned(), str::to_owned)
     }
 
     #[must_use]

@@ -14,6 +14,7 @@ use std::io::Cursor;
 use cama_db::herogrid_repository::{
     EnrichedPlayer, HeroGridDataPort, HeroGridPlayer, HeroGridStat,
 };
+use cama_domain::discord_content::readable_player_name;
 
 use crate::embeds::LobbyKind;
 use crate::hero_lookup::hero_short_name;
@@ -992,14 +993,18 @@ impl<P: HeroGridDataPort> HeroGridCommandService<P> {
             ));
         }
 
-        let stored_names = self
-            .port
-            .player_names(&player_ids, request.guild_id)
-            .map_err(HeroGridCommandError::Data)?;
-        let stored_names = stored_names
-            .into_iter()
-            .map(|player| (player.discord_id, player.name))
-            .collect::<BTreeMap<_, _>>();
+        // Supplied Discord names are authoritative. Stored names are only a
+        // fallback for callers without a Discord directory.
+        let stored_names = if request.player_name_overrides.is_some() {
+            BTreeMap::new()
+        } else {
+            self.port
+                .player_names(&player_ids, request.guild_id)
+                .map_err(HeroGridCommandError::Data)?
+                .into_iter()
+                .map(|player| (player.discord_id, player.name))
+                .collect::<BTreeMap<_, _>>()
+        };
         let mut seen = BTreeSet::new();
         let player_names = player_ids
             .iter()
@@ -1009,10 +1014,11 @@ impl<P: HeroGridDataPort> HeroGridCommandService<P> {
                 discord_id: player_id,
                 name: request
                     .player_name_overrides
-                    .and_then(|names| names.get(&player_id))
-                    .or_else(|| stored_names.get(&player_id))
-                    .cloned()
-                    .unwrap_or_else(|| format!("User {player_id}")),
+                    .unwrap_or(&stored_names)
+                    .get(&player_id)
+                    .and_then(|name| readable_player_name(name))
+                    .unwrap_or("Unknown player")
+                    .to_owned(),
             })
             .collect::<Vec<_>>();
 
@@ -1468,8 +1474,9 @@ mod tests {
         assert_eq!((decoded.raster.width, decoded.raster.height), (238, 318));
         let expected = draw_hero_grid(
             &[stat(100, 1, 1, 1), stat(200, 2, 1, 0)],
-            // Cached override wins; a cache miss keeps the stored player name.
-            &[player(100, "Server Alice"), player(200, "Bob")],
+            // Supplied Discord names are authoritative; a miss is never the
+            // stored registration name.
+            &[player(100, "Server Alice"), player(200, "Unknown player")],
             1,
             &format!("Hero Grid: {}", LobbyKind::Open.label()),
         )

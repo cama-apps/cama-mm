@@ -115,7 +115,8 @@ use tracing::{debug, warn};
 
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{
-    DiscordMessage, DiscordTransport, GuildPlayerNameResolver, resolve_guild_player_names,
+    DiscordMessage, DiscordTransport, GuildPlayerNameDirectory, GuildPlayerNameResolver,
+    resolve_guild_player_names,
 };
 use crate::embed_colors::{DISCORD_BLUE, DISCORD_ORANGE};
 use crate::gateway_events::{
@@ -1650,10 +1651,33 @@ struct PreparedShuffle {
 #[derive(Clone, Debug, PartialEq)]
 struct RecordedMatch {
     match_id: i64,
-    jc_lines: Vec<String>,
+    jc_lines: Vec<JcLine>,
     bet_settlement: Option<MatchBetSettlementRequest>,
     easter_eggs: MatchEasterEggRequest,
     debrief: Option<MatchPostMatchDebriefRequest>,
+}
+
+/// One JC summary line. Player lines receive their display name when the
+/// summary is delivered, so blocking settlement never bakes in an ID/mention.
+#[derive(Clone, Debug, PartialEq)]
+struct JcLine {
+    player_id: Option<i64>,
+    text: String,
+}
+
+fn render_jc_summary(lines: &[JcLine], names: &GuildPlayerNameDirectory) -> String {
+    lines
+        .iter()
+        .map(|line| match line.player_id {
+            Some(player_id) => format!(
+                "{}: {}",
+                escape_discord_text(&names.resolve(player_id)),
+                line.text
+            ),
+            None => line.text.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 impl PreparedShuffle {
@@ -3186,24 +3210,40 @@ impl MatchHandler {
         } else {
             format!(" (🟢 {radiant_votes} vs 🔴 {dire_votes})")
         };
+        let streaming_ids = streaming
+            .iter()
+            .filter_map(|discord_id| i64::try_from(*discord_id).ok())
+            .collect::<Vec<_>>();
+        let name_ids = recorded
+            .jc_lines
+            .iter()
+            .filter_map(|line| line.player_id)
+            .chain(streaming_ids.iter().copied())
+            .collect::<Vec<_>>();
+        let names = resolve_guild_player_names(
+            self.discord.as_ref(),
+            u64::try_from(pending.guild_id).ok(),
+            &name_ids,
+        )
+        .await;
         let mut message = format!(
             "✅ Match recorded — {winner}{confirmations}.\n\n🪙 **JC Changes:**\n{}",
-            recorded.jc_lines.join("\n")
+            render_jc_summary(&recorded.jc_lines, &names)
         );
-        if !streaming.is_empty() {
-            let mentions = streaming
+        if !streaming_ids.is_empty() {
+            let streamers = streaming_ids
                 .iter()
-                .map(|discord_id| format!("<@{discord_id}>"))
+                .map(|discord_id| escape_discord_text(&names.resolve(*discord_id)))
                 .collect::<Vec<_>>()
                 .join(", ");
             message.push_str(&format!(
-                "\n📺 Streaming bonus (+{} {JOPACOIN_EMOTE}): {mentions}",
+                "\n📺 Streaming bonus (+{} {JOPACOIN_EMOTE}): {streamers}",
                 self.config.streaming_bonus
             ));
         }
         for chunk in chunk_default_discord_content(&message) {
             responder
-                .followup(InteractionResponse::message(chunk))
+                .followup(InteractionResponse::message(chunk).without_mentions())
                 .await
                 .map_err(|error| error.to_string())?;
         }
@@ -3819,11 +3859,21 @@ impl MatchHandler {
         } else {
             "Dire"
         };
+        let names = resolve_guild_player_names(
+            self.discord.as_ref(),
+            u64::try_from(pending.guild_id).ok(),
+            &recorded
+                .jc_lines
+                .iter()
+                .filter_map(|line| line.player_id)
+                .collect::<Vec<_>>(),
+        )
+        .await;
         let body = format!(
             "🏆 **{} Match Complete - {winner} Victory!**\nMatch #{}\n\n🪙 **JC Changes:**\n{}",
             lobby.label(),
             recorded.match_id,
-            recorded.jc_lines.join("\n")
+            render_jc_summary(&recorded.jc_lines, &names)
         );
         if let Some(channel) = destination {
             self.deliver_record_result(
@@ -4772,7 +4822,7 @@ impl MatchHandler {
         losers: &[i64],
         settlement: &SettlementResult,
         deductions: &ProfitDeductionPolicy<'_>,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Vec<JcLine>, String> {
         let low_priority_taxable_ids = deductions.low_priority_taxable_ids;
         let matches = MatchRepository::new(&self.database_path);
         let bet_skims =
@@ -6680,7 +6730,7 @@ fn render_jc_lines(
     excluded: &[i64],
     changes: &BTreeMap<i64, BTreeMap<String, i64>>,
     settlement: &SettlementResult,
-) -> Vec<String> {
+) -> Vec<JcLine> {
     let winning_ids = winners.iter().copied().collect::<BTreeSet<_>>();
     let losing_ids = losers.iter().copied().collect::<BTreeSet<_>>();
     let excluded_ids = excluded.iter().copied().collect::<BTreeSet<_>>();
@@ -6758,10 +6808,10 @@ fn render_jc_lines(
             Some((
                 discord_id,
                 total,
-                format!(
-                    "<@{discord_id}>: **{}** {JOPACOIN_EMOTE}{detail}",
-                    signed(total)
-                ),
+                JcLine {
+                    player_id: Some(discord_id),
+                    text: format!("**{}** {JOPACOIN_EMOTE}{detail}", signed(total)),
+                },
             ))
         })
         .collect::<Vec<_>>();
@@ -6784,10 +6834,13 @@ fn render_jc_lines(
                 BettingTeam::Radiant => "🟢 Radiant",
                 BettingTeam::Dire => "🔴 Dire",
             };
-            lines.push(format!(
-                "**Final odds:** {team} {:.2}x",
-                winner_payout as f64 / winner_stake as f64
-            ));
+            lines.push(JcLine {
+                player_id: None,
+                text: format!(
+                    "**Final odds:** {team} {:.2}x",
+                    winner_payout as f64 / winner_stake as f64
+                ),
+            });
         }
     }
     for (heading, predicate) in [
@@ -6810,7 +6863,10 @@ fn render_jc_lines(
             .map(|(_, _, line)| line.clone())
             .collect::<Vec<_>>();
         if !group.is_empty() {
-            lines.push(heading.to_owned());
+            lines.push(JcLine {
+                player_id: None,
+                text: heading.to_owned(),
+            });
             lines.extend(group);
         }
     }

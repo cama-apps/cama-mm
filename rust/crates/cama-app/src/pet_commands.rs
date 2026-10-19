@@ -1180,7 +1180,7 @@ where
     ) -> Result<(), DeliveryError> {
         if let Some(channel_id) = self.channel_for(discord, pet.guild_id) {
             let flavor = self.flavor.generate(PetFlavorEvent::Hatched, pet, None);
-            let mut embed = build_hatch_embed(pet);
+            let mut embed = build_hatch_embed(pet, &format!("<@{}>", pet.discord_id));
             if let Some(flavor) = flavor {
                 embed.field("💬 Cama chatter", flavor, false);
             }
@@ -1206,7 +1206,7 @@ where
     ) -> Result<(), DeliveryError> {
         if let Some(channel_id) = self.channel_for(discord, pet.guild_id) {
             let flavor = self.flavor.generate(PetFlavorEvent::Evolved, pet, None);
-            let mut embed = build_evolution_embed(pet);
+            let mut embed = build_evolution_embed(pet, &format!("<@{}>", pet.discord_id));
             if let Some(flavor) = flavor {
                 embed.field("💬 Cama chatter", flavor, false);
             }
@@ -1241,7 +1241,7 @@ where
             .then(|| self.flavor.generate(PetFlavorEvent::Died, pet, None))
             .flatten();
         let mut embed = eating_outcome.map_or_else(
-            || build_death_embed(pet),
+            || build_death_embed(pet, &format!("<@{}>", pet.discord_id)),
             |outcome| build_eating_outcome_embed(pet, outcome),
         );
         if eating_outcome.is_none()
@@ -1814,8 +1814,9 @@ pub fn build_shop_embed(
     embed
 }
 
+/// `owner_name` is the owner's readable display text, never a mention.
 #[must_use]
-pub fn build_hatch_embed(pet: &Pet) -> Embed {
+pub fn build_hatch_embed(pet: &Pet, owner_name: &str) -> Embed {
     let species = get_species(&pet.species);
     let reveal = match species.tier {
         SpeciesTier::Common => "It's a",
@@ -1826,8 +1827,8 @@ pub fn build_hatch_embed(pet: &Pet) -> Embed {
     let mut embed = Embed::new(
         format!("🐣 {} hatched!", pet.name),
         format!(
-            "<@{}>'s egg cracked open... **{reveal} {}!**\n\n_{}_",
-            pet.discord_id, species.display_name, species.blurb
+            "{owner_name}'s egg cracked open... **{reveal} {}!**\n\n_{}_",
+            species.display_name, species.blurb
         ),
         if species.tier == SpeciesTier::Legendary {
             EmbedColor::Custom(0xE9_1E_63)
@@ -1839,8 +1840,9 @@ pub fn build_hatch_embed(pet: &Pet) -> Embed {
     embed
 }
 
+/// `owner_name` is the owner's readable display text, never a mention.
 #[must_use]
-pub fn build_evolution_embed(pet: &Pet) -> Embed {
+pub fn build_evolution_embed(pet: &Pet, owner_name: &str) -> Embed {
     let calling = pet
         .evolution_calling
         .as_deref()
@@ -1854,8 +1856,7 @@ pub fn build_evolution_embed(pet: &Pet) -> Embed {
             profile.emoji, pet.name, profile.label
         ),
         format!(
-            "<@{}>'s {} found a calling.\n\n**{paths}**\n_{}_",
-            pet.discord_id,
+            "{owner_name}'s {} found a calling.\n\n**{paths}**\n_{}_",
             pet_species_label(pet),
             profile.blurb
         ),
@@ -1865,8 +1866,9 @@ pub fn build_evolution_embed(pet: &Pet) -> Embed {
     embed
 }
 
+/// `owner_name` is the owner's readable display text, never a mention.
 #[must_use]
-pub fn build_death_embed(pet: &Pet) -> Embed {
+pub fn build_death_embed(pet: &Pet, owner_name: &str) -> Embed {
     let cause = match pet.death_cause.as_deref() {
         Some("sacrifice") => "was given to the altar",
         Some("eaten") => "was eaten",
@@ -1878,8 +1880,7 @@ pub fn build_death_embed(pet: &Pet) -> Embed {
     let mut embed = Embed::new(
         format!("🪦 {} has died", pet.name),
         format!(
-            "<@{}>'s {}{calling} {cause}, {}.\nTime of death: <t:{died_at}:f>. F.",
-            pet.discord_id,
+            "{owner_name}'s {}{calling} {cause}, {}.\nTime of death: <t:{died_at}:f>. F.",
             pet_species_label(pet),
             format_age(pet.age_seconds(died_at)),
         ),
@@ -3489,7 +3490,13 @@ mod tests {
     fn production_hatch_evolution_and_death_embeds_match_the_python_presentation() {
         let mut legendary = make_pet();
         legendary.species = "sunspun_cama".to_owned();
-        let hatch = build_hatch_embed(&legendary);
+        let hatch = build_hatch_embed(&legendary, "Owner Name");
+        assert!(
+            hatch
+                .description
+                .starts_with("Owner Name's egg cracked open")
+        );
+        assert!(!hatch.description.contains("<@"));
         assert_eq!(hatch.color, EmbedColor::Custom(0xE9_1E_63));
         assert!(hatch.description.contains("🎆 UNBELIEVABLE — it's the"));
         assert!(hatch.description.contains("Sunspun Cama"));
@@ -3499,7 +3506,8 @@ mod tests {
         legendary.evolution_calling = Some("oracle".to_owned());
         legendary.evolution_primary = Some("fortune".to_owned());
         legendary.evolution_secondary = Some("wisdom".to_owned());
-        let evolution = build_evolution_embed(&legendary);
+        let evolution = build_evolution_embed(&legendary, "Owner Name");
+        assert!(evolution.description.starts_with("Owner Name's "));
         assert_eq!(evolution.title, "🔮 Blep evolved — Oracle!");
         assert_eq!(
             evolution.color,
@@ -3512,7 +3520,8 @@ mod tests {
 
         legendary.died_at = Some(legendary.hatched_at + 9 * DAY);
         legendary.death_cause = Some("starvation".to_owned());
-        let death = build_death_embed(&legendary);
+        let death = build_death_embed(&legendary, "Owner Name");
+        assert!(death.description.starts_with("Owner Name's "));
         assert!(death.description.contains("👑 Sunspun Cama · 🔮 Oracle"));
         assert!(death.description.contains("starved, 9 days old"));
         assert!(

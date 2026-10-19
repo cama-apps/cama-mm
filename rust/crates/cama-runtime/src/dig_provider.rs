@@ -1553,30 +1553,24 @@ impl InteractionHandler for DigInteractionHandler {
 }
 
 impl DigInteractionHandler {
-    async fn stored_player_name(&self, user_id: i64, guild_id: i64) -> String {
-        let path = self.state.database_path.clone();
-        blocking(move || {
-            PlayerRepository::new(path)
-                .get_by_id(user_id, Some(guild_id))
-                .map_err(|error| error.to_string())
-        })
-        .await
-        .ok()
-        .flatten()
-        .map_or_else(|| format!("User {user_id}"), |player| player.name)
+    /// Live server name, then last-seen name, else `Unknown player`. The
+    /// registration name and the Discord ID are never display text.
+    async fn render_player_name(&self, user_id: i64, guild_id: i64) -> String {
+        self.state
+            .player_names
+            .resolve_names(guild_id, &[user_id])
+            .await
+            .resolve(user_id)
     }
 
-    fn project_player_name(&self, user_id: i64, guild_id: i64, stored_name: &str) -> String {
+    /// [`Self::render_player_name`] without a member fetch, for replies sent
+    /// before the interaction is acknowledged.
+    fn cached_player_name(&self, user_id: i64, guild_id: i64) -> String {
         self.state
             .player_names
             .names_for_guild(guild_id, &[user_id])
             .unwrap_or_default()
-            .resolve_or(user_id, stored_name)
-    }
-
-    async fn render_player_name(&self, user_id: i64, guild_id: i64) -> String {
-        let stored_name = self.stored_player_name(user_id, guild_id).await;
-        self.project_player_name(user_id, guild_id, &stored_name)
+            .resolve(user_id)
     }
 
     async fn render_delivery_responses(
@@ -1584,11 +1578,9 @@ impl DigInteractionHandler {
         delivery: &DigRuntimeDeliverySnapshot,
     ) -> Result<(InteractionResponse, Option<InteractionResponse>), String> {
         let mut projected = delivery.clone();
-        projected.context.display_name = self.project_player_name(
-            delivery.discord_id,
-            delivery.guild_id,
-            &delivery.context.display_name,
-        );
+        projected.context.display_name = self
+            .render_player_name(delivery.discord_id, delivery.guild_id)
+            .await;
         let (mut main, event) =
             dig_delivery_responses(&projected, &self.state.media, &self.state.view_nonce);
         if projected.render.kind == DigRuntimeRenderKind::Boss {
@@ -2885,8 +2877,7 @@ impl DigInteractionHandler {
                 )
                 .await
                 .map_err(|error| error.to_string())?;
-            let stored_name = self.stored_player_name(user_id, guild_id).await;
-            let user_display_name = self.project_player_name(user_id, guild_id, &stored_name);
+            let user_display_name = self.render_player_name(user_id, guild_id).await;
             // The same backlog replay `/dig go` runs, so a stale row is
             // retired here too instead of being reposted from this path.
             let blocked = match self
@@ -2932,7 +2923,7 @@ impl DigInteractionHandler {
                     DigRuntimeDeliveryContext::new(
                         interaction_id,
                         delivery_channel,
-                        stored_name,
+                        user_display_name.clone(),
                         avatar.clone(),
                     ),
                 )
@@ -4088,8 +4079,7 @@ impl DigInteractionHandler {
             .defer(false)
             .await
             .map_err(|error| error.to_string())?;
-        let stored_name = self.stored_player_name(user_id, guild_id).await;
-        let display_name = self.project_player_name(user_id, guild_id, &stored_name);
+        let display_name = self.render_player_name(user_id, guild_id).await;
         let now = unix_now();
         let avatar = self
             .state
@@ -4119,7 +4109,7 @@ impl DigInteractionHandler {
                 DigRuntimeDeliveryContext::new(
                     interaction_id,
                     delivery_channel,
-                    stored_name,
+                    display_name.clone(),
                     avatar.clone(),
                 ),
             )
@@ -6215,7 +6205,7 @@ impl DigInteractionHandler {
             }
         };
         let _ = target_name;
-        let target_name = self.render_player_name(target_id, guild_id).await;
+        let target_name = self.cached_player_name(target_id, guild_id);
         let token = self.create_sabotage_view(
             user_id,
             guild_id,
@@ -6254,7 +6244,7 @@ impl DigInteractionHandler {
     ) -> Result<(), String> {
         let target = user_option(options, "user")?;
         let target_id = target.map_or(user_id, |(id, _)| id);
-        let target_name = self.render_player_name(target_id, guild_id).await;
+        let target_name = self.cached_player_name(target_id, guild_id);
         let path = self.state.database_path.clone();
         let info = blocking(move || {
             cama_app::dig_runtime::DigRuntimeService::sqlite(&path)
@@ -6478,7 +6468,7 @@ impl DigInteractionHandler {
             return Err("/dig gift requires user".to_owned());
         };
         let _ = target_name;
-        let target_name = self.render_player_name(target_id, guild_id).await;
+        let target_name = self.cached_player_name(target_id, guild_id);
         let artifact = string_option(options, "artifact")?.unwrap_or_default();
         responder
             .defer(false)

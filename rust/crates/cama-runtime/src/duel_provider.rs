@@ -19,10 +19,13 @@ use cama_app::duel::{
 use cama_app::service_container::PersistentVanityTaxService;
 use cama_db::duel_repository::{DuelChallenge, DuelChallengeRepository, DuelStatus, DuelTrial};
 use cama_db::pet_evolution_repository::PetEvolutionRepository;
+use cama_domain::formatting::escape_discord_text;
 use cama_domain::pet_evolution::PetActivity;
 
 use crate::application_config::ApplicationConfig;
-use crate::discord_transport::{DiscordMessage, DiscordTransport};
+use crate::discord_transport::{
+    DiscordMessage, DiscordTransport, GuildPlayerNameDirectory, resolve_guild_player_names,
+};
 use crate::duel_challenges_worker::{DuelFlavorRuntimePort, ProductionDuelFlavorRuntime};
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
@@ -220,6 +223,15 @@ impl InteractionHandler for DuelInteractionHandler {
 }
 
 impl DuelInteractionHandler {
+    async fn challenge_names(&self, challenge: &DuelChallenge) -> GuildPlayerNameDirectory {
+        resolve_guild_player_names(
+            self.discord.as_ref(),
+            u64::try_from(challenge.guild_id).ok(),
+            &[challenge.challenger_id, challenge.recipient_id],
+        )
+        .await
+    }
+
     async fn recover_pending(&self, live_guild_ids: &[u64]) -> ReadyRecoveryReport {
         let live_guild_ids = live_guild_ids
             .iter()
@@ -318,6 +330,7 @@ impl DuelInteractionHandler {
 
     async fn restore_unbound_challenge(&self, challenge: &DuelChallenge) -> Result<(), String> {
         let flavor = self.flavor.generate(FlavorEvent::Issued, challenge).await;
+        let names = self.challenge_names(challenge).await;
         let channel_id = unsigned_id(challenge.channel_id, "channel")?;
         let recipient_id = unsigned_id(challenge.recipient_id, "recipient")?;
         let sent = self
@@ -326,7 +339,7 @@ impl DuelInteractionHandler {
                 channel_id,
                 DiscordMessage::mentioning(
                     InteractionResponse::message(format!("<@{}>", challenge.recipient_id))
-                        .embed(challenge_embed(challenge, &flavor)),
+                        .embed(challenge_embed(challenge, &flavor, &names)),
                     BTreeSet::from([recipient_id]),
                 ),
             )
@@ -511,10 +524,18 @@ impl DuelInteractionHandler {
         let challenge = match challenge {
             Ok(challenge) => challenge,
             Err(CommandError::RecipientFunding { wager, .. }) => {
+                let names = resolve_guild_player_names(
+                    self.discord.as_ref(),
+                    u64::try_from(guild_id).ok(),
+                    &[actor_id, recipient_id],
+                )
+                .await;
                 return followup_silent(
                     &responder,
                     format!(
-                        "The duel from <@{actor_id}> to <@{recipient_id}> failed because the challenged player cannot cover the {wager} JC wager."
+                        "The duel from {} to {} failed because the challenged player cannot cover the {wager} JC wager.",
+                        duel_name(&names, actor_id),
+                        duel_name(&names, recipient_id)
                     ),
                     false,
                 )
@@ -524,9 +545,10 @@ impl DuelInteractionHandler {
         };
 
         let flavor = self.flavor.generate(FlavorEvent::Issued, &challenge).await;
+        let names = self.challenge_names(&challenge).await;
         let response = InteractionResponse::message(format!("<@{recipient_id}>"))
             .with_user_mentions(vec![unsigned_id(recipient_id, "recipient")?])
-            .embed(challenge_embed(&challenge, &flavor));
+            .embed(challenge_embed(&challenge, &flavor, &names));
         let receipt = match responder.followup_with_receipt(response).await {
             Ok(Some(receipt)) => receipt,
             Ok(None) | Err(_) => {
@@ -552,7 +574,7 @@ impl DuelInteractionHandler {
         }
 
         let controls = InteractionResponse::message("")
-            .embed(challenge_embed(&challenge, &flavor))
+            .embed(challenge_embed(&challenge, &flavor, &names))
             .action_row(challenge_buttons(challenge.challenge_id));
         let _ = self
             .discord
@@ -704,11 +726,12 @@ impl DuelInteractionHandler {
                     }
                     DuelTrial::TrialOfFive => "Trial of Five: a lobby using Immortal Draft.",
                 });
+            let names = self.challenge_names(&challenge).await;
             let mut detail = format!(
-                "Challenge #{}: <@{}> vs <@{}>. Both {} JC stakes are locked. {trial}",
+                "Challenge #{}: {} vs {}. Both {} JC stakes are locked. {trial}",
                 challenge.challenge_id,
-                challenge.challenger_id,
-                challenge.recipient_id,
+                duel_name(&names, challenge.challenger_id),
+                duel_name(&names, challenge.recipient_id),
                 challenge.wager
             );
             if challenge.trial_type == Some(DuelTrial::TrialByCombat) {
@@ -748,6 +771,15 @@ impl DuelInteractionHandler {
             )
             .await;
         }
+        let names = resolve_guild_player_names(
+            self.discord.as_ref(),
+            u64::try_from(guild_id).ok(),
+            &challenges
+                .iter()
+                .flat_map(|challenge| [challenge.challenger_id, challenge.recipient_id])
+                .collect::<Vec<_>>(),
+        )
+        .await;
         let pages = challenges.len().div_ceil(25);
         for (index, page) in challenges.chunks(25).enumerate() {
             let mut embed = InteractionEmbed::titled("Outstanding Duel Challenges").color(0xF1C40F);
@@ -766,8 +798,10 @@ impl DuelInteractionHandler {
                         status_label(challenge.status)
                     ),
                     format!(
-                        "<@{}> vs <@{}> • {} JC{trial}",
-                        challenge.challenger_id, challenge.recipient_id, challenge.wager
+                        "{} vs {} • {} JC{trial}",
+                        duel_name(&names, challenge.challenger_id),
+                        duel_name(&names, challenge.recipient_id),
+                        challenge.wager
                     ),
                     false,
                 );
@@ -849,7 +883,11 @@ impl DuelInteractionHandler {
         };
         let flavor = self.flavor.generate(event, challenge).await;
         self.edit_challenge(challenge, &flavor).await;
-        let detail = resolution_detail(&resolution);
+        let names = self.challenge_names(challenge).await;
+        let detail = resolution_detail(
+            &resolution,
+            &duel_name(&names, challenge.winner_id.unwrap_or_default()),
+        );
         followup_silent(&responder, format!("{flavor}\n{detail}"), false).await
     }
 
@@ -863,9 +901,10 @@ impl DuelInteractionHandler {
         let Ok(message_id) = unsigned_id(message_id, "message") else {
             return;
         };
+        let names = self.challenge_names(challenge).await;
         let response = InteractionResponse::message("")
             .without_mentions()
-            .embed(challenge_embed(challenge, flavor));
+            .embed(challenge_embed(challenge, flavor, &names));
         let _ = self
             .discord
             .edit_message(
@@ -973,7 +1012,16 @@ fn challenge_buttons(challenge_id: i64) -> InteractionActionRow {
     ])
 }
 
-fn challenge_embed(challenge: &DuelChallenge, flavor: &str) -> InteractionEmbed {
+/// Readable display text for a duelist; never an ID or mention.
+fn duel_name(names: &GuildPlayerNameDirectory, discord_id: i64) -> String {
+    escape_discord_text(&names.resolve(discord_id))
+}
+
+fn challenge_embed(
+    challenge: &DuelChallenge,
+    flavor: &str,
+    names: &GuildPlayerNameDirectory,
+) -> InteractionEmbed {
     let color = match challenge.status {
         DuelStatus::Pending => 0xF1C40F,
         DuelStatus::Accepted => 0x3498DB,
@@ -997,7 +1045,7 @@ fn challenge_embed(challenge: &DuelChallenge, flavor: &str) -> InteractionEmbed 
         )
         .field(
             "Challenger",
-            format!("<@{}>", challenge.challenger_id),
+            duel_name(names, challenge.challenger_id),
             true,
         )
         .field(
@@ -1008,7 +1056,7 @@ fn challenge_embed(challenge: &DuelChallenge, flavor: &str) -> InteractionEmbed 
             ),
             true,
         )
-        .field("Recipient", format!("<@{}>", challenge.recipient_id), true)
+        .field("Recipient", duel_name(names, challenge.recipient_id), true)
         .field(
             "Recipient Rating",
             format!(
@@ -1044,7 +1092,7 @@ fn challenge_embed(challenge: &DuelChallenge, flavor: &str) -> InteractionEmbed 
     if challenge.status == DuelStatus::Resolved {
         embed = embed.field(
             "Winner",
-            format!("<@{}>", challenge.winner_id.unwrap_or_default()),
+            duel_name(names, challenge.winner_id.unwrap_or_default()),
             true,
         );
     }
