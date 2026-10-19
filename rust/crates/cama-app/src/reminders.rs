@@ -1665,41 +1665,7 @@ where
     }
 }
 
-#[must_use]
-pub fn escape_discord_text(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for character in value.chars() {
-        if character == '@' {
-            escaped.push('@');
-            escaped.push('\u{200b}');
-        } else if matches!(
-            character,
-            '\\' | '`'
-                | '*'
-                | '_'
-                | '{'
-                | '}'
-                | '['
-                | ']'
-                | '('
-                | ')'
-                | '#'
-                | '+'
-                | '-'
-                | '.'
-                | '!'
-                | '|'
-                | '>'
-                | '~'
-        ) {
-            escaped.push('\\');
-            escaped.push(character);
-        } else {
-            escaped.push(character);
-        }
-    }
-    escaped
-}
+pub use cama_domain::formatting::escape_discord_text;
 
 #[cfg(test)]
 #[path = "reminders/tests.rs"]
