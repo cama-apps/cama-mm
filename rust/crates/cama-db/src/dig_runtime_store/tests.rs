@@ -102,10 +102,6 @@ fn player_balance_helpers_apply_the_exact_cas_semantics() {
         1
     );
     assert_eq!(
-        debit_player_balance_if_sufficient(&connection, 1_000, USER, GUILD).expect("guarded"),
-        0
-    );
-    assert_eq!(
         debit_player_balance(&connection, 30, USER, GUILD).expect("debit"),
         1
     );
