@@ -1509,6 +1509,7 @@ impl SerenityHandler {
             interaction: command,
             http: context.http,
             acknowledged: AtomicBool::new(false),
+            deferral: PublicDeferral::default(),
         }));
         run_command_handler(
             handler,
@@ -1548,6 +1549,7 @@ impl SerenityHandler {
             interaction: command,
             http: context.http,
             acknowledged: AtomicBool::new(false),
+            deferral: PublicDeferral::default(),
         }));
         if let Err(error) = handler.handle(request, Arc::clone(&responder)).await {
             warn!(%error, "autocomplete handler failed");
@@ -1577,6 +1579,7 @@ impl SerenityHandler {
             interaction: component,
             http: context.http,
             acknowledged: AtomicBool::new(false),
+            deferral: PublicDeferral::default(),
         }));
         let Some(handler) = self.registry.component_handler(&custom_id) else {
             warn!(%custom_id, "unregistered component received");
@@ -1965,6 +1968,47 @@ struct CommandResponder {
     interaction: CommandInteraction,
     http: Arc<Http>,
     acknowledged: AtomicBool,
+    deferral: PublicDeferral,
+}
+
+/// Tracks a public "thinking" deferral whose original response has not been
+/// replaced yet.
+///
+/// Discord locks visibility at the deferral: the first follow-up after it
+/// edits the deferred original and ignores its own ephemeral flag. A private
+/// follow-up therefore deletes the public original first, after which a
+/// follow-up is a new message that honors the flag.
+#[derive(Default)]
+struct PublicDeferral(AtomicBool);
+
+impl PublicDeferral {
+    fn deferred(&self, ephemeral: bool) {
+        self.0.store(!ephemeral, Ordering::Release);
+    }
+
+    fn resolve(&self) {
+        self.0.store(false, Ordering::Release);
+    }
+
+    /// Whether this follow-up must delete the public original first. The
+    /// first follow-up resolves the original either way.
+    fn claim_for_followup(&self, ephemeral: bool) -> bool {
+        self.0.swap(false, Ordering::AcqRel) && ephemeral
+    }
+}
+
+async fn create_interaction_followup(
+    http: &Http,
+    token: &str,
+    deferral: &PublicDeferral,
+    response: InteractionResponse,
+) -> serenity::Result<serenity::all::Message> {
+    if deferral.claim_for_followup(response.ephemeral)
+        && let Err(error) = http.delete_original_interaction_response(token).await
+    {
+        warn!(%error, "could not delete the public deferral before a private follow-up");
+    }
+    serenity::builder::Builder::execute(followup_response(response), http, (None, token)).await
 }
 
 impl CommandResponder {
@@ -1973,10 +2017,13 @@ impl CommandResponder {
         response: InteractionResponse,
     ) -> Result<InteractionMessageReceipt, InteractionResponseError> {
         let fallback = response.clone();
-        match self
-            .interaction
-            .create_followup(&self.http, followup_response(response))
-            .await
+        match create_interaction_followup(
+            &self.http,
+            &self.interaction.token,
+            &self.deferral,
+            response,
+        )
+        .await
         {
             Ok(message) => Ok(InteractionMessageReceipt {
                 message_id: message.id.get(),
@@ -2028,6 +2075,7 @@ impl InteractionResponder for CommandResponder {
             .map_err(response_error);
         if result.is_ok() {
             self.acknowledged.store(true, Ordering::Release);
+            self.deferral.deferred(ephemeral);
         }
         result
     }
@@ -2093,6 +2141,9 @@ impl InteractionResponder for CommandResponder {
                 .edit_response(&self.http, edit_response(response))
                 .await
         };
+        if result.is_ok() {
+            self.deferral.resolve();
+        }
         result.map(drop).map_err(response_error)
     }
 
@@ -2373,6 +2424,7 @@ struct ComponentResponder {
     interaction: ComponentInteraction,
     http: Arc<Http>,
     acknowledged: AtomicBool,
+    deferral: PublicDeferral,
 }
 
 impl ComponentResponder {
@@ -2381,10 +2433,13 @@ impl ComponentResponder {
         response: InteractionResponse,
     ) -> Result<InteractionMessageReceipt, InteractionResponseError> {
         let fallback = response.clone();
-        match self
-            .interaction
-            .create_followup(&self.http, followup_response(response))
-            .await
+        match create_interaction_followup(
+            &self.http,
+            &self.interaction.token,
+            &self.deferral,
+            response,
+        )
+        .await
         {
             Ok(message) => Ok(InteractionMessageReceipt {
                 message_id: message.id.get(),
@@ -2443,6 +2498,7 @@ impl InteractionResponder for ComponentResponder {
             .map_err(response_error);
         if result.is_ok() {
             self.acknowledged.store(true, Ordering::Release);
+            self.deferral.deferred(ephemeral);
         }
         result
     }
@@ -2515,6 +2571,9 @@ impl InteractionResponder for ComponentResponder {
                 .edit_response(&self.http, edit_response(response))
                 .await
         };
+        if result.is_ok() {
+            self.deferral.resolve();
+        }
         result.map(drop).map_err(response_error)
     }
 
