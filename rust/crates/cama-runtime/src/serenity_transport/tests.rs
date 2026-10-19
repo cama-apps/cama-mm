@@ -1704,3 +1704,141 @@ async fn draft_delivery_nonce_passes_discord_http_length_validation() {
     assert!(message_nonce_matches(message.nonce.as_ref().unwrap(), key));
     server.join().unwrap();
 }
+
+type CapturedInteractionRequests = Vec<(String, Option<serde_json::Value>)>;
+
+/// Record each request line and JSON body until a `SENTINEL` connection
+/// arrives, so a missing request fails the assertion instead of hanging. A
+/// DELETE gets 204; anything else gets a message object.
+fn capture_interaction_requests() -> (String, JoinHandle<CapturedInteractionRequests>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind interaction capture server");
+    let proxy = format!("http://{}", listener.local_addr().expect("capture address"));
+    let server = std::thread::spawn(move || {
+        let mut captured = Vec::new();
+        'accept: loop {
+            let (mut stream, _) = listener.accept().expect("accept interaction request");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            let header_end = loop {
+                let read = stream.read(&mut chunk).expect("read interaction request");
+                if read == 0 {
+                    // An idle client connection closed without a request.
+                    continue 'accept;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break end + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]).into_owned();
+            let length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            while request.len() < header_end + length {
+                let read = stream.read(&mut chunk).expect("read interaction body");
+                assert!(read > 0, "capture server received a truncated body");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let line = headers.lines().next().unwrap_or_default().to_owned();
+            if line.starts_with("SENTINEL") {
+                break 'accept;
+            }
+            let body = (length > 0).then(|| {
+                serde_json::from_slice(&request[header_end..header_end + length])
+                    .expect("JSON interaction body")
+            });
+            if line.starts_with("DELETE") {
+                write!(
+                    stream,
+                    "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .expect("write delete reply");
+            } else {
+                let reply = serde_json::to_vec(&Message::default()).expect("message reply");
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    reply.len()
+                )
+                .expect("write followup reply headers");
+                stream.write_all(&reply).expect("write followup reply");
+            }
+            captured.push((line, body));
+        }
+        captured
+    });
+    (proxy, server)
+}
+
+#[tokio::test]
+async fn private_followup_after_public_deferral_deletes_the_original_first() {
+    const ORIGINAL: &str = "/webhooks/42/interaction-token/messages/@original";
+    const FOLLOWUP: &str = "/webhooks/42/interaction-token";
+    let is_ephemeral = |body: &Option<serde_json::Value>| {
+        body.as_ref()
+            .and_then(|body| body["flags"].as_u64())
+            .is_some_and(|flags| flags & 64 != 0)
+    };
+    // (deferred ephemerally?, follow-up ephemeral flags, expected requests)
+    for (deferred_ephemeral, followups, expected) in [
+        // Public deferral, private rejection: delete, then a new private message.
+        (
+            false,
+            vec![true],
+            vec![("DELETE", ORIGINAL), ("POST", FOLLOWUP)],
+        ),
+        // Public deferral, public reply: the follow-up resolves the original.
+        (false, vec![false], vec![("POST", FOLLOWUP)]),
+        // Private deferral, private reply: nothing to delete.
+        (true, vec![true], vec![("POST", FOLLOWUP)]),
+        // A private follow-up after a public first follow-up is a new message.
+        (
+            false,
+            vec![false, true],
+            vec![("POST", FOLLOWUP), ("POST", FOLLOWUP)],
+        ),
+    ] {
+        let (proxy, server) = capture_interaction_requests();
+        let http = HttpBuilder::new("test-token")
+            .application_id(ApplicationId::new(42))
+            .proxy(proxy.clone())
+            .ratelimiter_disabled(true)
+            .build();
+        let deferral = PublicDeferral::default();
+        deferral.deferred(deferred_ephemeral);
+        for &ephemeral in &followups {
+            let mut response = InteractionResponse::message("reply");
+            if ephemeral {
+                response = response.ephemeral();
+            }
+            create_interaction_followup(&http, "interaction-token", &deferral, response)
+                .await
+                .expect("follow-up delivered");
+        }
+        let address = proxy.trim_start_matches("http://").to_owned();
+        std::net::TcpStream::connect(address)
+            .expect("connect sentinel")
+            .write_all(b"SENTINEL\r\n\r\n")
+            .expect("send sentinel");
+        let captured = server.join().expect("capture server completes");
+        assert_eq!(captured.len(), expected.len());
+        let posts = captured
+            .iter()
+            .filter(|(line, _)| line.starts_with("POST"))
+            .collect::<Vec<_>>();
+        for ((line, _), (method, path)) in captured.iter().zip(&expected) {
+            assert!(
+                line.starts_with(method) && line.contains(&format!("{path} ")),
+                "expected {method} {path}, got {line}"
+            );
+        }
+        for ((_, body), ephemeral) in posts.iter().zip(&followups) {
+            assert_eq!(is_ephemeral(body), *ephemeral);
+        }
+    }
+}
