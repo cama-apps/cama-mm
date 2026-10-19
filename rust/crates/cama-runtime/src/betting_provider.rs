@@ -24,10 +24,6 @@ use cama_app::font_assets::{DejaVuFace, load_dejavu_font};
 use cama_app::golden_wheel::{LiveGoldenEconomy, compute_live_golden_wedges};
 use cama_app::jopat_post_match::{JopatPostMatchContext, NumericFact};
 use cama_app::mana_service::mana_day_label;
-use cama_app::manashop_rework::{
-    BuffService, HostileLossRequest as AppHostileLossRequest,
-    HostileLossSettlement as AppHostileLossSettlement, ProtectionGateway,
-};
 use cama_app::neon_degen::{EventKey, NeonDegenService, NeonEventPort, NeonResult, StoreError};
 use cama_app::wheel::{
     CooldownOutcome, LossRoll, WHEEL_BANANA_PEEL_LOSS_MAX, WHEEL_BANANA_PEEL_LOSS_MIN,
@@ -45,6 +41,7 @@ use cama_db::betting_service_repository::{
     BetCounterReceipt, BettingServiceRepository, PendingBetRecord, PlaceBetRequest,
 };
 use cama_db::core_repositories::{MatchRepository, PlayerRepository, WheelSpinClaim};
+use cama_db::dig_blood_pact::{DigBloodPactRepository, DigBloodPactSettlementRequest};
 use cama_db::disbursement::{
     DISBURSE_METHODS, DisbursementProposal, DisbursementRepository, DisbursementVote,
 };
@@ -55,7 +52,6 @@ use cama_db::loan_repository::{DebtPayment, LedgerContext, LoanRepository};
 use cama_db::low_priority_repository::LowPriorityRepository;
 use cama_db::mana_service_repository::BankruptBuff;
 use cama_db::mana_service_repository::ManaRepository;
-use cama_db::manashop_rework_repository::ManashopRepository;
 use cama_db::match_recording_repository::{
     IncomeAwardReceipt, IncomeAwardRequest, MatchRecordingRepository,
 };
@@ -7933,58 +7929,6 @@ fn credit_wheel_income(
         .ok_or_else(|| "wheel income credit returned no receipt".to_owned())
 }
 
-/// Route wheel Blood Pact payouts through the shared protection policy.  The
-/// hostile-loss repository owns the durable event key, protection pool, and
-/// recipient transfer; this adapter only translates the app-level port into
-/// the existing-schema request used by the rest of the economy.
-struct BettingProtectionGateway {
-    repository: ShopRuntimeRepository,
-    now: i64,
-    mana_date: String,
-}
-
-impl ProtectionGateway for BettingProtectionGateway {
-    type Error = cama_db::shop_runtime::ShopRuntimeRepositoryError;
-
-    fn apply_hostile_loss(
-        &mut self,
-        request: AppHostileLossRequest,
-    ) -> Result<AppHostileLossSettlement, Self::Error> {
-        let destination = match request.destination {
-            "burn" => DbHostileDestination::Burn,
-            "reserve" => DbHostileDestination::Reserve,
-            _ => DbHostileDestination::Player,
-        };
-        let settlement = self.repository.apply_hostile_loss(&DbHostileLossRequest {
-            victim_id: request.target_id,
-            guild_id: request.guild_id,
-            requested: request.attempted_loss,
-            kind: request.kind.to_owned(),
-            actor_id: Some(request.actor_id),
-            event_key: request.event_key,
-            destination,
-            recipient_id: (destination == DbHostileDestination::Player)
-                .then_some(request.recipient_id),
-            clamp_to_balance: request.clamp_to_balance,
-            min_balance: None,
-            protect_self: false,
-            metadata: json!({
-                "kind": request.kind,
-                "attempted_loss": request.attempted_loss,
-                "destination": request.destination,
-                "recipient_id": request.recipient_id,
-            }),
-            occurred_at: self.now,
-            mana_date: self.mana_date.clone(),
-        })?;
-        Ok(AppHostileLossSettlement {
-            attempted_loss: settlement.attempted,
-            absorbed_amount: settlement.absorbed,
-            applied_loss: settlement.applied,
-        })
-    }
-}
-
 /// Apply the post-outcome Blood Pact step from Python's wheel processor.
 ///
 /// The wheel can settle several independent transfers before it reaches this
@@ -8019,31 +7963,29 @@ fn apply_wheel_blood_pact_skim(
     {
         return Ok((existing.applied, current));
     }
-    let service =
-        BuffService::new(ManashopRepository::new(path), now).with_minigame_scale(minigame_scale);
-    let mut gateway = BettingProtectionGateway {
-        repository: shop,
-        now,
-        mana_date: {
-            let offset = pacific_offset_seconds(now)?;
-            let local = DateTime::<Utc>::from_timestamp(now, 0)
-                .ok_or_else(|| "system timestamp is outside chrono's range".to_owned())?
-                .with_timezone(
-                    &FixedOffset::east_opt(offset)
-                        .ok_or_else(|| "invalid Pacific time-zone offset".to_owned())?,
-                );
-            mana_day_label(local)
-        },
+    let mana_date = {
+        let offset = pacific_offset_seconds(now)?;
+        let local = DateTime::<Utc>::from_timestamp(now, 0)
+            .ok_or_else(|| "system timestamp is outside chrono's range".to_owned())?
+            .with_timezone(
+                &FixedOffset::east_opt(offset)
+                    .ok_or_else(|| "invalid Pacific time-zone offset".to_owned())?,
+            );
+        mana_day_label(local)
     };
-    let skimmed = service
-        .apply_blood_pact_with_protection_event_key(
-            user_id,
+    // Reserve, protect, transfer, and account the skim in one transaction.
+    let skimmed = DigBloodPactRepository::new(path)
+        .settle(&DigBloodPactSettlementRequest {
+            target_id: user_id,
             guild_id,
             earning,
             event_key,
-            &mut gateway,
-        )
-        .map_err(|error| error.to_string())?;
+            minigame_jc_delta_scale: minigame_scale,
+            occurred_at: now,
+            mana_date,
+        })
+        .map_err(|error| error.to_string())?
+        .applied_amount;
     let balance_after = players
         .get_by_id(user_id, Some(guild_id))
         .map_err(|error| error.to_string())?

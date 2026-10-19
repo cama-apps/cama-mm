@@ -28,10 +28,7 @@ use cama_app::economy_event_sqlite::SqliteEconomyEventService;
 use cama_app::embeds::LobbyKind;
 use cama_app::loan::{LoanPolicy, LoanService};
 use cama_app::lobby_runtime::AMBIGUOUS_LOBBY_MESSAGE;
-use cama_app::manashop_rework::{
-    BuffService, HostileLossRequest as AppHostileLossRequest,
-    HostileLossSettlement as AppHostileLossSettlement, ProtectionGateway,
-};
+use cama_app::manashop_rework::BuffService;
 use cama_app::match_recording::{GamesMilestone, RivalryRecord, WinStreakRecord};
 use cama_app::match_voting_service::{MatchVotingService, MatchVotingServiceError};
 use cama_app::neon_degen::{RatingHistorySnapshot, choose_notable_winner};
@@ -48,6 +45,7 @@ use cama_db::core_repositories::{
     MatchRepository, NewCoreRatingHistory, NewPlayer, OrderedMap, ParticipantStatsUpdate,
     PlayerRepository, ShuffleInputs, StreakInsertDefaults,
 };
+use cama_db::dig_blood_pact::{DigBloodPactRepository, DigBloodPactSettlementRequest};
 use cama_db::dota_bet_seed_repository::{
     BettingMode as SeedBettingMode, BettingTeam, DotaBetSeedRepository, FirstGameLobby,
 };
@@ -74,10 +72,7 @@ use cama_db::pet_evolution_repository::PetEvolutionRepository;
 use cama_db::profit_deductions::OwnedProfitDeductionPolicy;
 use cama_db::profit_deductions::ProfitDeductionPolicy;
 use cama_db::rating_history_repository::RatingHistoryRepository;
-use cama_db::shop_runtime::{
-    HostileDestination, HostileLossRequest as DbHostileLossRequest, ShopRuntimeRepository,
-    ShopRuntimeRepositoryError,
-};
+use cama_db::shop_runtime::ShopRuntimeRepository;
 use cama_db::soft_avoid_repository::SoftAvoidRepository;
 use cama_domain::bankruptcy::BankruptcyPenaltyPolicy;
 use cama_domain::discord_content::chunk_default_discord_content;
@@ -1200,52 +1195,21 @@ impl ProductionMatchRewardControl {
         {
             return Ok(existing.applied);
         }
-        let service = BuffService::new(ManashopRepository::new(&self.database_path), now)
-            .with_minigame_scale(self.minigame_scale);
-        let Some(claim) = service
-            .claim_blood_pact_skim(discord_id, guild_id, earning)
-            .map_err(|error| error.to_string())?
-        else {
-            return Ok(0);
-        };
-        let mut amount = scale_minigame_jc_delta(claim.amount as f64, self.minigame_scale);
-        if amount > claim.amount {
-            let extra = service
-                .repository()
-                .claim_blood_pact_extra_atomic(claim.buff_id, amount - claim.amount)
-                .map_err(|error| error.to_string())?;
-            amount = claim.amount.saturating_add(extra);
-        }
-        let mut gateway = MatchProtectionGateway {
-            repository: ShopRuntimeRepository::new(&self.database_path),
-            now,
-            mana_date: pacific_mana_day(now)?,
-        };
-        let settlement = gateway.apply_hostile_loss(AppHostileLossRequest {
-            target_id: discord_id,
-            guild_id,
-            attempted_loss: amount,
-            kind: "blood_pact",
-            actor_id: claim.skimmer_id,
-            event_key,
-            destination: "player",
-            recipient_id: claim.skimmer_id,
-            clamp_to_balance: false,
-        });
-        let Ok(settlement) = settlement else {
-            service
-                .repository()
-                .revert_blood_pact_skim(claim.buff_id, amount)
-                .map_err(|error| error.to_string())?;
-            return Ok(0);
-        };
-        if settlement.applied_loss < amount {
-            service
-                .repository()
-                .revert_blood_pact_skim(claim.buff_id, amount - settlement.applied_loss)
-                .map_err(|error| error.to_string())?;
-        }
-        Ok(settlement.applied_loss)
+        // Reserve, protect, transfer, and account the skim in one
+        // transaction so a crash or a concurrent duplicate cannot consume the
+        // pact cap without exactly one recorded transfer.
+        let settlement = DigBloodPactRepository::new(&self.database_path)
+            .settle(&DigBloodPactSettlementRequest {
+                target_id: discord_id,
+                guild_id,
+                earning,
+                event_key,
+                minigame_jc_delta_scale: self.minigame_scale,
+                occurred_at: now,
+                mana_date: pacific_mana_day(now)?,
+            })
+            .map_err(|error| error.to_string())?;
+        Ok(settlement.applied_amount)
     }
 
     fn apply_bet_blood_pact(
@@ -1402,54 +1366,6 @@ impl CorrectionWinRewardControl for ProductionMatchRewardControl {
         let outcome = self.award_match_win(request, None)?;
         Ok(CorrectionWinRewardResult {
             snapshot_balance_delta: outcome.snapshot_balance_delta(),
-        })
-    }
-}
-
-struct MatchProtectionGateway {
-    repository: ShopRuntimeRepository,
-    now: i64,
-    mana_date: String,
-}
-
-impl ProtectionGateway for MatchProtectionGateway {
-    type Error = ShopRuntimeRepositoryError;
-
-    fn apply_hostile_loss(
-        &mut self,
-        request: AppHostileLossRequest,
-    ) -> Result<AppHostileLossSettlement, Self::Error> {
-        let destination = match request.destination {
-            "burn" => HostileDestination::Burn,
-            "reserve" => HostileDestination::Reserve,
-            _ => HostileDestination::Player,
-        };
-        let settlement = self.repository.apply_hostile_loss(&DbHostileLossRequest {
-            victim_id: request.target_id,
-            guild_id: request.guild_id,
-            requested: request.attempted_loss,
-            kind: request.kind.to_owned(),
-            actor_id: Some(request.actor_id),
-            event_key: request.event_key,
-            destination,
-            recipient_id: (destination == HostileDestination::Player)
-                .then_some(request.recipient_id),
-            clamp_to_balance: request.clamp_to_balance,
-            min_balance: None,
-            protect_self: false,
-            metadata: json!({
-                "kind": request.kind,
-                "attempted_loss": request.attempted_loss,
-                "destination": request.destination,
-                "recipient_id": request.recipient_id,
-            }),
-            occurred_at: self.now,
-            mana_date: self.mana_date.clone(),
-        })?;
-        Ok(AppHostileLossSettlement {
-            attempted_loss: settlement.attempted,
-            absorbed_amount: settlement.absorbed,
-            applied_loss: settlement.applied,
         })
     }
 }
