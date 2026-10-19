@@ -50,6 +50,7 @@ use crate::discord_transport::{
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
+use crate::ids::signed_id;
 use crate::lobby_provider::MatchLobbyPort;
 use crate::match_provider::MatchRegistrationProvider;
 use crate::registration::{
@@ -5966,10 +5967,6 @@ fn persisted_delivery(progress_json: &str, name: &str) -> Option<Option<DiscordM
         message_id,
         jump_url,
     }))
-}
-
-fn signed_id(id: u64, kind: &str) -> Result<i64, String> {
-    i64::try_from(id).map_err(|_| format!("Discord {kind} ID exceeds SQLite range"))
 }
 
 fn signed_destination_id(id: Option<u64>, kind: &str) -> Result<Option<i64>, String> {

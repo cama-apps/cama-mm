@@ -16,6 +16,7 @@ use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResol
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
+use crate::ids::signed_id;
 use crate::registration::{
     CommandSpec, ComponentRoute, InteractionActionRow, InteractionAttachment, InteractionButton,
     InteractionButtonStyle, InteractionEmbed, InteractionHandler, InteractionHandlerError,
@@ -621,11 +622,6 @@ async fn followup_ephemeral(
         .followup(InteractionResponse::message(content).ephemeral())
         .await
         .map_err(|error| error.to_string().into())
-}
-
-fn signed_id(value: u64, kind: &str) -> Result<i64, InteractionHandlerError> {
-    i64::try_from(value)
-        .map_err(|_| format!("Discord {kind} ID exceeds SQLite's signed integer range").into())
 }
 
 #[cfg(all(test, feature = "runtime-test-core"))]

@@ -25,6 +25,7 @@ use tracing::{error, warn};
 
 use crate::discord_transport::{GuildPlayerNameDirectory, GuildPlayerNameResolver};
 use crate::embed_colors::{DISCORD_BLUE, DISCORD_GOLD};
+use crate::ids::signed_id;
 use crate::option_ext::string_option;
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
@@ -902,10 +903,6 @@ fn parse_lobby(value: Option<&str>) -> Result<Option<LobbyKind>, String> {
         Some("lowskill") => Ok(Some(LobbyKind::LowSkill)),
         Some(value) => Err(format!("invalid Scout lobby {value:?}")),
     }
-}
-
-fn signed_id(value: u64, label: &str) -> Result<i64, String> {
-    i64::try_from(value).map_err(|_| format!("Discord {label} id exceeds SQLite's signed range"))
 }
 
 #[derive(Clone, Copy)]

@@ -44,6 +44,7 @@ use chrono::Utc;
 
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
+use crate::ids::signed_id;
 use crate::option_ext::{boolean_option, integer_option, string_option};
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
@@ -1856,12 +1857,6 @@ fn required_string_option(
     string_option(options, name)
         .map(str::to_owned)
         .ok_or_else(|| InteractionHandlerError::from(format!("/tax requires {name}")))
-}
-
-fn signed_id(value: u64, label: &str) -> Result<i64, InteractionHandlerError> {
-    i64::try_from(value).map_err(|_| {
-        InteractionHandlerError::from(format!("Discord {label} ID exceeds SQLite range"))
-    })
 }
 
 async fn defer(

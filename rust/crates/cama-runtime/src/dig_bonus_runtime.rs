@@ -31,6 +31,7 @@ use crate::application_config::ApplicationConfig;
 use crate::betting_provider::BettingRegistrationProvider;
 use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
 use crate::economy_events_worker::EconomyEventsWorkerConfig;
+use crate::ids::signed_id;
 use crate::registration::{
     ComponentRoute, InteractionActionRow, InteractionButton, InteractionButtonStyle,
     InteractionEmbed, InteractionEmbedField, InteractionHandler, InteractionHandlerError,
@@ -1021,10 +1022,6 @@ fn session_kind(session: &LiveBonusSession) -> &'static str {
         LiveBonusSession::Package { .. } => "package",
         LiveBonusSession::Trivia { .. } => "trivia",
     }
-}
-
-fn signed_id(value: u64, label: &str) -> Result<i64, String> {
-    i64::try_from(value).map_err(|_| format!("{label} ID is outside SQLite INTEGER range"))
 }
 
 async fn respond_ephemeral(

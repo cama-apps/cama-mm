@@ -38,6 +38,7 @@ use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 use tracing::warn;
 
 use crate::application_config::ApplicationConfig;
+use crate::ids::signed_id;
 use crate::option_ext::user_option;
 use crate::registration::{
     CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute, InteractionActionRow,
@@ -787,10 +788,6 @@ fn parse_component(custom_id: &str) -> Result<(u64, StoryDirection), Interaction
         return Err(format!("invalid wrapped component {custom_id:?}").into());
     }
     Ok((session_id, direction))
-}
-
-fn signed_id(id: u64, label: &str) -> Result<i64, InteractionHandlerError> {
-    i64::try_from(id).map_err(|_| format!("Discord {label} id exceeds SQLite INTEGER").into())
 }
 
 fn response_error(error: crate::registration::InteractionResponseError) -> InteractionHandlerError {

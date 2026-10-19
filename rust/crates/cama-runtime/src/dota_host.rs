@@ -1825,9 +1825,7 @@ fn pending_channel(pending: &PendingMatchRecord) -> Option<u64> {
 async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
-    tokio::task::spawn_blocking(f)
-        .await
-        .map_err(|_| "Dota persistence task failed".to_owned())?
+    crate::ids::blocking("Dota persistence", f).await
 }
 
 /// Local operator commands only enqueue intent. The supervised host verifies
