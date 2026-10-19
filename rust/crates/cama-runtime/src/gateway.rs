@@ -485,7 +485,7 @@ async fn supervise_worker(
             },
         );
         let started = tokio::time::Instant::now();
-        match spec.worker.run(WorkerContext::new(shutdown.clone())).await {
+        match run_worker_attempt(&spec, shutdown.clone()).await {
             Ok(()) => break,
             Err(error) if !*shutdown.borrow() => {
                 if started.elapsed() >= WORKER_BACKOFF_RESET_UPTIME {
@@ -525,6 +525,30 @@ async fn supervise_worker(
         &events,
         LifecycleEvent::BackgroundWorkerStopped { name: spec.name },
     );
+}
+
+/// Run one worker attempt in its own task so a panic surfaces as a failure
+/// the supervisor can report and back off from, instead of unwinding the
+/// supervisor and silently ending the worker for the rest of the process.
+async fn run_worker_attempt(
+    spec: &BackgroundWorkerSpec,
+    shutdown: watch::Receiver<bool>,
+) -> Result<(), String> {
+    struct AbortOnDrop(tokio::task::AbortHandle);
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+
+    let worker = Arc::clone(&spec.worker);
+    let mut task = tokio::spawn(async move { worker.run(WorkerContext::new(shutdown)).await });
+    let _guard = AbortOnDrop(task.abort_handle());
+    match (&mut task).await {
+        Ok(result) => result,
+        Err(error) if error.is_panic() => Err(format!("worker panicked: {error}")),
+        Err(error) => Err(format!("worker task ended unexpectedly: {error}")),
+    }
 }
 
 async fn wait_until_ready(
@@ -578,6 +602,58 @@ mod tests {
         assert_eq!(policy.delay(2), Duration::from_secs(10));
         assert_eq!(policy.delay(8), Duration::from_secs(300));
         assert_eq!(policy.delay(u32::MAX), Duration::from_secs(300));
+    }
+
+    #[tokio::test]
+    async fn supervisor_restarts_a_worker_that_panics() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        use crate::worker::BackgroundWorker;
+
+        struct PanicsOnce(AtomicU32);
+        #[async_trait]
+        impl BackgroundWorker for PanicsOnce {
+            async fn run(&self, _context: WorkerContext) -> Result<(), String> {
+                assert!(
+                    self.0.fetch_add(1, Ordering::SeqCst) > 0,
+                    "first attempt panics"
+                );
+                Ok(())
+            }
+        }
+
+        let worker = Arc::new(PanicsOnce(AtomicU32::new(0)));
+        let spec = BackgroundWorkerSpec::new("panicky", worker.clone()).restart_policy(
+            ReconnectPolicy::new(Duration::from_millis(1), Duration::from_millis(1)),
+        );
+        let (events, mut observed) = broadcast::channel(16);
+        let (_shutdown_sender, shutdown) = watch::channel(false);
+        let ready = events.subscribe();
+        let supervisor = tokio::spawn(supervise_worker(spec, ready, shutdown, events.clone()));
+        events
+            .send(LifecycleEvent::Ready {
+                bot_user_id: 1,
+                guild_count: 0,
+            })
+            .expect("ready event");
+        tokio::time::timeout(Duration::from_secs(5), supervisor)
+            .await
+            .expect("supervisor finishes")
+            .expect("supervisor does not panic");
+
+        assert_eq!(worker.0.load(Ordering::SeqCst), 2);
+        let mut failed = false;
+        let mut stopped = false;
+        while let Ok(event) = observed.try_recv() {
+            match event {
+                LifecycleEvent::BackgroundWorkerFailed { error, .. } => {
+                    failed = error.contains("panicked");
+                }
+                LifecycleEvent::BackgroundWorkerStopped { .. } => stopped = true,
+                _ => {}
+            }
+        }
+        assert!(failed && stopped);
     }
 
     #[test]
