@@ -2594,6 +2594,59 @@ fn migrated_settlement_taxes_low_priority_players_without_a_vanity_row() {
 }
 
 #[test]
+fn migrated_settlement_vanity_tax_never_takes_the_stake_of_a_fully_penalized_winner() {
+    let match_id = 9_113;
+    let pending_match_id = 9_013;
+    let file = migrated_seed_fixture(match_id, pending_match_id, BettingMode::Pool);
+    let repository = repo(file.path());
+    repository
+        .place_bet_atomic(request(pending_match_id, 91_001, BettingTeam::Radiant, 20))
+        .expect("place winning pool bet");
+    repository
+        .place_bet_atomic(request(pending_match_id, 91_002, BettingTeam::Dire, 30))
+        .expect("place losing pool bet");
+    Connection::open(file.path())
+        .expect("open bankruptcy state")
+        .execute(
+            "INSERT INTO bankruptcy_state(
+                 discord_id,guild_id,last_bankruptcy_at,
+                 penalty_games_remaining,bankruptcy_count
+             ) VALUES (91001,?1,0,20,1)",
+            [GUILD],
+        )
+        .expect("insert fully penalized bettor");
+    let staked = balance(file.path(), 91_001);
+    let settlement = repository
+        .settle_pending_bets_with_adjustments_atomic(
+            match_id,
+            Some(GUILD),
+            NOW,
+            Some(pending_match_id),
+            BettingTeam::Radiant,
+            BettingMode::Pool,
+            &BetSettlementAdjustments {
+                bankruptcy_penalty_rate_per_game: Some(0.05),
+                vanity_tax_rate: Some(0.10),
+                vanity_taxable_ids: BTreeSet::from([91_001]),
+                consume_seed: true,
+                ..BetSettlementAdjustments::default()
+            },
+        )
+        .expect("settle fully penalized vanity winner");
+    let winner = &settlement.winners[0];
+    let profit = winner.payout - winner.effective_amount;
+    assert!(profit > 0);
+    // Twenty games at 5% withhold the whole profit, so the vanity share is
+    // trimmed to nothing and the winner gets exactly the stake back.
+    assert_eq!(settlement.bankruptcy_penalties[&91_001], profit);
+    assert!(!settlement.vanity_taxes.contains_key(&91_001));
+    assert_eq!(
+        balance(file.path(), 91_001),
+        staked + winner.effective_amount
+    );
+}
+
+#[test]
 fn migrated_pool_seed_multiplier_penalty_and_tax_share_one_settlement() {
     let match_id = 9_101;
     let pending_match_id = 9_001;

@@ -18,7 +18,8 @@ use crate::dota_bet_seed_repository::{
     abort_seed_in_transaction, settle_seed_with_player_pool_in_transaction,
 };
 use crate::open_runtime_connection;
-use cama_db_core::profit_deductions::penalty_games_remaining;
+use cama_db_core::profit_deductions::{ProfitDeductionPolicy, compute_profit_deductions};
+use cama_domain::bankruptcy::BankruptcyPenaltyPolicy;
 
 #[derive(Debug, Error)]
 pub enum BettingServiceRepositoryError {
@@ -1567,67 +1568,44 @@ impl BettingServiceRepository {
             }
         }
 
+        // One shared policy decides every withheld share, so the bankruptcy
+        // share and both taxes together never exceed the profit and a
+        // winner always keeps the stake.
+        let deduction_policy = ProfitDeductionPolicy {
+            bankruptcy: adjustments.bankruptcy_penalty_rate_per_game.map(|rate| {
+                BankruptcyPenaltyPolicy {
+                    rate_per_game: normalized_rate(rate, 1.0),
+                }
+            }),
+            vanity_tax_rate: adjustments.vanity_tax_rate.unwrap_or_else(|| {
+                adjustments.vanity_tax_basis_points.clamp(0, 10_000) as f64 / 10_000.0
+            }),
+            vanity_taxable_ids: &adjustments.vanity_taxable_ids,
+            low_priority_tax_rate: adjustments.low_priority_tax_rate.unwrap_or(0.0),
+            low_priority_taxable_ids: &adjustments.low_priority_taxable_ids,
+        };
         let mut bankruptcy_penalties = BTreeMap::new();
         let mut vanity_taxes = BTreeMap::new();
         let mut low_priority_taxes = BTreeMap::new();
         for (discord_id, (payout, stake)) in profit_inputs {
-            let profit = payout.saturating_sub(stake);
-            if profit <= 0 {
-                continue;
+            let deductions = compute_profit_deductions(
+                &transaction,
+                guild_id,
+                discord_id,
+                payout.saturating_sub(stake),
+                &deduction_policy,
+            )?;
+            if deductions.bankruptcy_penalty > 0 {
+                if let Some(credit) = credits.get_mut(&discord_id) {
+                    *credit = credit.saturating_sub(deductions.bankruptcy_penalty);
+                }
+                bankruptcy_penalties.insert(discord_id, deductions.bankruptcy_penalty);
             }
-            if let Some(rate_per_game) = adjustments.bankruptcy_penalty_rate_per_game {
-                let penalty_games = penalty_games_remaining(&transaction, guild_id, discord_id)?;
-                if penalty_games > 0 {
-                    let withheld = cama_domain::bankruptcy::withheld_rate(
-                        normalized_rate(rate_per_game, 1.0),
-                        penalty_games,
-                    );
-                    let penalty = (profit as f64 * withheld) as i64;
-                    if penalty > 0 {
-                        if let Some(credit) = credits.get_mut(&discord_id) {
-                            *credit = credit.saturating_sub(penalty);
-                        }
-                        bankruptcy_penalties.insert(discord_id, penalty);
-                    }
-                }
+            if deductions.vanity_tax > 0 {
+                vanity_taxes.insert(discord_id, deductions.vanity_tax);
             }
-            let vanity_tax = if adjustments.vanity_taxable_ids.contains(&discord_id) {
-                let vanity_rate = adjustments.vanity_tax_rate.map_or_else(
-                    || adjustments.vanity_tax_basis_points.clamp(0, 10_000) as f64 / 10_000.0,
-                    |rate| normalized_rate(rate, 1.0),
-                );
-                let vanity_tax = (profit as f64 * vanity_rate) as i64;
-                if vanity_tax > 0 {
-                    vanity_taxes.insert(discord_id, vanity_tax);
-                }
-                vanity_tax
-            } else {
-                0
-            };
-            if adjustments.low_priority_taxable_ids.contains(&discord_id) {
-                // Low priority taxes the same aggregate profit as vanity, not
-                // the post-vanity remainder, so both rates stay additive.
-                let low_priority_rate = adjustments
-                    .low_priority_tax_rate
-                    .map_or(0.0, |rate| normalized_rate(rate, 1.0));
-                // The bankruptcy withholding and both taxes are independent
-                // fractions of one basis, so their sum can exceed the profit
-                // they are withheld from. Clamp the combined withholding to
-                // `profit` by trimming the low-priority share, which keeps
-                // already-reported bankruptcy and vanity totals exact.
-                let headroom = profit
-                    .saturating_sub(
-                        bankruptcy_penalties
-                            .get(&discord_id)
-                            .copied()
-                            .unwrap_or_default(),
-                    )
-                    .saturating_sub(vanity_tax)
-                    .max(0);
-                let low_priority_tax = ((profit as f64 * low_priority_rate) as i64).min(headroom);
-                if low_priority_tax > 0 {
-                    low_priority_taxes.insert(discord_id, low_priority_tax);
-                }
+            if deductions.low_priority_tax > 0 {
+                low_priority_taxes.insert(discord_id, deductions.low_priority_tax);
             }
         }
 

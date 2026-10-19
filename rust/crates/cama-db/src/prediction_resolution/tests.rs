@@ -643,6 +643,36 @@ fn test_low_priority_tax_is_capped_by_the_profit_earlier_withholdings_leave() {
 }
 
 #[test]
+fn test_vanity_tax_is_capped_by_the_profit_the_bankruptcy_share_leaves() {
+    let fixture = Fixture::new();
+    fixture.player(1, 1_000);
+    fixture.set_bankruptcy_penalty(1);
+    let prediction_id = fixture.market("fully withheld vanity profit?");
+    fixture.buy(prediction_id, 1, ContractSide::Yes, 5);
+    let cost = fixture.position(prediction_id, 1).yes_cost_basis_total;
+    let before = fixture.balance(1);
+    let result = fixture
+        .settle(
+            prediction_id,
+            ContractSide::Yes,
+            &SettlementAdjustments {
+                // 100% per game withholds the whole profit.
+                bankruptcy_penalty_bps_per_game: Some(10_000),
+                ..vanity_adjustments(1)
+            },
+        )
+        .expect("fully withheld vanity settlement");
+    let gross = 5 * CONTRACT_VALUE * 10;
+    // The winner keeps the whole stake: the vanity share is trimmed to the
+    // profit the bankruptcy share left, which is nothing.
+    assert_eq!(result.winners[0].bankruptcy_penalty, gross - cost);
+    assert_eq!(result.winners[0].vanity_tax, 0);
+    assert_eq!(result.winners[0].payout, cost);
+    assert_eq!(fixture.balance(1) - before, cost);
+    assert_eq!(fixture.ledger_count(prediction_id, "vanity_tax"), 0);
+}
+
+#[test]
 fn test_low_priority_tax_reaches_only_listed_players_with_positive_profit() {
     let fixture = Fixture::new();
     fixture.player(1, 1_000);

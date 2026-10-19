@@ -15,7 +15,8 @@ use thiserror::Error;
 
 use crate::open_runtime_connection;
 use crate::predictions_repository::{CONTRACT_VALUE, ContractSide, NewLevel};
-use cama_db_core::profit_deductions::penalty_games_remaining;
+use cama_db_core::profit_deductions::{ProfitDeductionPolicy, compute_profit_deductions};
+use cama_domain::bankruptcy::BankruptcyPenaltyPolicy;
 
 pub const BASIS_POINTS: i64 = 10_000;
 
@@ -243,6 +244,17 @@ impl PredictionResolutionRepository {
             [prediction_id],
         )?;
         let positions = load_positions(&transaction, prediction_id)?;
+        let deduction_policy = ProfitDeductionPolicy {
+            bankruptcy: adjustments.bankruptcy_penalty_bps_per_game.map(|bps| {
+                BankruptcyPenaltyPolicy {
+                    rate_per_game: bps as f64 / BASIS_POINTS as f64,
+                }
+            }),
+            vanity_tax_rate: adjustments.vanity_tax_bps as f64 / BASIS_POINTS as f64,
+            vanity_taxable_ids: &adjustments.vanity_taxable_ids,
+            low_priority_tax_rate: adjustments.low_priority_tax_bps as f64 / BASIS_POINTS as f64,
+            low_priority_taxable_ids: &adjustments.low_priority_taxable_ids,
+        };
         let mut winners = Vec::new();
         let mut losers = Vec::new();
         let mut participants = Vec::with_capacity(positions.len());
@@ -281,38 +293,18 @@ impl PredictionResolutionRepository {
             let mut low_priority_tax = 0_i64;
 
             if base_payout > 0 {
-                if gross_profit > 0
-                    && let Some(bps_per_game) = adjustments.bankruptcy_penalty_bps_per_game
-                {
-                    let remaining =
-                        penalty_games_remaining(&transaction, guild_id, position.discord_id)?;
-                    bankruptcy_penalty =
-                        bankruptcy_withholding(gross_profit, bps_per_game, remaining)?;
-                }
-                if gross_profit > 0
-                    && adjustments
-                        .vanity_taxable_ids
-                        .contains(&position.discord_id)
-                {
-                    vanity_tax = multiply_bps_floor(gross_profit, adjustments.vanity_tax_bps)?;
-                }
-                if gross_profit > 0
-                    && adjustments
-                        .low_priority_taxable_ids
-                        .contains(&position.discord_id)
-                {
-                    // Billed on the same gross profit the vanity tax uses, then
-                    // capped at the profit the earlier withholdings left so the
-                    // three deductions together can never exceed that profit.
-                    let remaining_profit = gross_profit
-                        .checked_sub(bankruptcy_penalty)
-                        .and_then(|remaining| remaining.checked_sub(vanity_tax))
-                        .ok_or(PredictionResolutionError::ArithmeticOverflow)?
-                        .max(0);
-                    low_priority_tax =
-                        multiply_bps_floor(gross_profit, adjustments.low_priority_tax_bps)?
-                            .min(remaining_profit);
-                }
+                // The shared policy trims each later share to the profit the
+                // earlier ones left, so the winner always keeps the stake.
+                let deductions = compute_profit_deductions(
+                    &transaction,
+                    guild_id,
+                    position.discord_id,
+                    gross_profit,
+                    &deduction_policy,
+                )?;
+                bankruptcy_penalty = deductions.bankruptcy_penalty;
+                vanity_tax = deductions.vanity_tax;
+                low_priority_tax = deductions.low_priority_tax;
 
                 let credited_before_tax = gross_payout
                     .checked_sub(bankruptcy_penalty)
@@ -1219,35 +1211,6 @@ fn validate_levels(levels: &[NewLevel]) -> Result<(), PredictionResolutionError>
         return Err(PredictionResolutionError::InvalidLevel);
     }
     Ok(())
-}
-
-fn multiply_bps_floor(value: i64, bps: i64) -> Result<i64, PredictionResolutionError> {
-    let scaled = i128::from(value)
-        .checked_mul(i128::from(bps))
-        .ok_or(PredictionResolutionError::ArithmeticOverflow)?
-        / i128::from(BASIS_POINTS);
-    i64::try_from(scaled).map_err(|_| PredictionResolutionError::ArithmeticOverflow)
-}
-
-/// Truncate `gross_profit * withheld_rate` in IEEE doubles so prediction
-/// settlement withholds the same coins as every other profit surface, which
-/// truncate the f64 product rather than flooring integer basis points.
-fn bankruptcy_withholding(
-    gross_profit: i64,
-    bps_per_game: i64,
-    penalty_games_remaining: i64,
-) -> Result<i64, PredictionResolutionError> {
-    let rate_per_game = bps_per_game as f64 / BASIS_POINTS as f64;
-    let product = gross_profit as f64
-        * cama_domain::bankruptcy::withheld_rate(rate_per_game, penalty_games_remaining);
-    if !product.is_finite() {
-        return Err(PredictionResolutionError::ArithmeticOverflow);
-    }
-    let truncated = product.trunc();
-    if truncated < i64::MIN as f64 || truncated >= 9_223_372_036_854_775_808.0 {
-        return Err(PredictionResolutionError::ArithmeticOverflow);
-    }
-    Ok(truncated as i64)
 }
 
 /// Python parity (`prediction_repository.py::resolve_market`):
