@@ -258,40 +258,7 @@ pub const fn error_response_outcome(_transport_succeeded: bool) -> ErrorResponse
     }
 }
 
-#[must_use]
-pub fn escape_discord_text(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for character in value.chars() {
-        if character == '@' {
-            escaped.push_str("@\u{200b}");
-        } else {
-            if matches!(
-                character,
-                '\\' | '`'
-                    | '*'
-                    | '_'
-                    | '{'
-                    | '}'
-                    | '['
-                    | ']'
-                    | '('
-                    | ')'
-                    | '#'
-                    | '+'
-                    | '-'
-                    | '.'
-                    | '!'
-                    | '|'
-                    | '>'
-                    | '~'
-            ) {
-                escaped.push('\\');
-            }
-            escaped.push(character);
-        }
-    }
-    escaped
-}
+pub use cama_domain::formatting::escape_discord_text;
 
 fn truncate(value: &str, limit: usize) -> String {
     if value.len() <= limit {
