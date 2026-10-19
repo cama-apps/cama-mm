@@ -5,6 +5,9 @@
 //! boundary: the Blood Pact cap reservation and the protection-aware hostile
 //! transfer are committed together so a process stop cannot consume cap
 //! without also recording and applying the transfer.
+//!
+//! Match rewards, Dota bet payouts, the wheel, and Deadlock settle their
+//! Blood Pact skims through the same boundary.
 
 use std::path::{Path, PathBuf};
 

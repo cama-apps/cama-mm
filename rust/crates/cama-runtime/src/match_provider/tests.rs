@@ -285,6 +285,98 @@ fn test_unscaled_skim_accounting_unchanged() {
 }
 
 #[test]
+fn test_concurrent_same_key_blood_pact_consumes_cap_once() {
+    let (database, control) = blood_pact_cap_fixture(1.0, 0);
+    let barrier = std::sync::Barrier::new(8);
+    let skims = std::thread::scope(|scope| {
+        let handles = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    control.apply_attributed_blood_pact(
+                        WINNER,
+                        GUILD,
+                        100,
+                        "pact-cap:concurrent".to_owned(),
+                        1_700_000_000,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("Blood Pact thread"))
+            .collect::<Vec<_>>()
+    });
+    // Every duplicate reports the one settled transfer; the cap and the
+    // balances move exactly once.
+    for skim in skims {
+        assert_eq!(skim.expect("apply concurrent Blood Pact"), 25);
+    }
+    assert_eq!(blood_pact_cap_state(&database), (475, 25, 25));
+}
+
+#[test]
+fn test_failed_blood_pact_transfer_reserves_no_cap_and_retries_once() {
+    let (database, control) = blood_pact_cap_fixture(1.0, 0);
+    let connection = Connection::open(database.path()).expect("open Blood Pact database");
+    connection
+        .execute_batch("PRAGMA foreign_keys=OFF")
+        .expect("use migrated legacy foreign-key policy");
+    connection
+        .execute(
+            "DELETE FROM players WHERE guild_id=?1 AND discord_id=?2",
+            params![GUILD, SKIMMER],
+        )
+        .expect("remove skimmer");
+    // The transfer cannot land without its recipient, so nothing about the
+    // pact may change either.
+    assert_eq!(
+        control
+            .apply_attributed_blood_pact(
+                WINNER,
+                GUILD,
+                100,
+                "pact-cap:recipient-missing".to_owned(),
+                1_700_000_000,
+            )
+            .unwrap_or_default(),
+        0
+    );
+    let skimmed: i64 = connection
+        .query_row(
+            "SELECT CAST(json_extract(data,'$.skimmed_total') AS INTEGER)
+             FROM manashop_buffs WHERE guild_id=?1 AND discord_id=?2",
+            params![GUILD, SKIMMER],
+            |row| row.get(0),
+        )
+        .expect("read skimmed total");
+    assert_eq!(skimmed, 0);
+    connection
+        .execute(
+            "INSERT INTO players(discord_id,guild_id,discord_username,jopacoin_balance)
+             VALUES(?1,?2,'pact-skimmer',0)",
+            params![SKIMMER, GUILD],
+        )
+        .expect("restore skimmer");
+    for _ in 0..2 {
+        assert_eq!(
+            control
+                .apply_attributed_blood_pact(
+                    WINNER,
+                    GUILD,
+                    100,
+                    "pact-cap:recipient-missing".to_owned(),
+                    1_700_000_001,
+                )
+                .expect("retry Blood Pact"),
+            25
+        );
+    }
+    assert_eq!(blood_pact_cap_state(&database), (475, 25, 25));
+}
+
+#[test]
 fn migrated_correction_retry_recovers_communion_and_protected_pact_snapshot_exactly() {
     let (database, control) = reward_fixture();
     let request = CorrectionWinRewardRequest {
