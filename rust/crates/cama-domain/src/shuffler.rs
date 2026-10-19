@@ -1356,13 +1356,13 @@ impl BalancedShuffler {
         let mut best_pool = initial_pool;
         let mut best_excluded = initial_excluded;
         let mut best_score = initial_score;
-        let mut score_cache: HashMap<Vec<String>, f64> = HashMap::new();
-        score_cache.insert(draft_pool_key(candidates, &best_pool), initial_score);
+        let mut score_cache: HashMap<Vec<usize>, f64> = HashMap::new();
+        score_cache.insert(draft_pool_key(&best_pool), initial_score);
         let mut stagnant_iterations = 0;
 
         for _iteration in 0..35 {
             let mut neighbors: Vec<BeamEntry> = Vec::new();
-            let mut seen_pools: HashSet<Vec<String>> = HashSet::new();
+            let mut seen_pools: HashSet<Vec<usize>> = HashSet::new();
             for (pool, _ignored_excluded, _score) in &current_beams {
                 let pool_set: HashSet<usize> = pool.iter().copied().collect();
                 let outside = (0..candidates.len())
@@ -1372,7 +1372,7 @@ impl BalancedShuffler {
                     for in_index in &outside {
                         let mut new_pool = pool.clone();
                         new_pool[remove_at] = *in_index;
-                        let key = draft_pool_key(candidates, &new_pool);
+                        let key = draft_pool_key(&new_pool);
                         if !seen_pools.insert(key.clone()) {
                             continue;
                         }
@@ -2319,13 +2319,12 @@ fn draft_pool_splits() -> &'static [(Vec<usize>, Vec<usize>)] {
     })
 }
 
-fn draft_pool_key(players: &[Player], selected_indices: &[usize]) -> Vec<String> {
-    let mut names = selected_indices
-        .iter()
-        .map(|index| players[*index].name.clone())
-        .collect::<Vec<_>>();
-    names.sort();
-    names
+/// Candidate indices identify a pool within one search, even when two
+/// candidates share a display name.
+fn draft_pool_key(selected_indices: &[usize]) -> Vec<usize> {
+    let mut key = selected_indices.to_vec();
+    key.sort_unstable();
+    key
 }
 
 fn draft_pool_result_from_indices(
