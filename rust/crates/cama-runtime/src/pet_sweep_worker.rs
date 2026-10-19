@@ -4,7 +4,7 @@
 //! keeps both on Tokio's blocking pool, returns fully owned notices/media, and
 //! never holds either service across a Discord await.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -543,12 +543,26 @@ impl PetSweepWorker {
         notice: RefundNotice,
     ) -> Result<(), NoticeFailure> {
         if let Some(channel_id) = self.cached_channel(notice.guild_id).await? {
-            self.deliver_channel(
-                context,
-                channel_id,
-                pet_message(build_refund_embed(&notice), None),
-            )
-            .await?;
+            let mut names = BTreeMap::new();
+            for payout in &notice.payouts {
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    names.entry(payout.discord_id)
+                {
+                    let name = self
+                        .discord
+                        .player_name(notice.guild_id, payout.discord_id)
+                        .await;
+                    entry.insert(escape_discord_text(&name));
+                }
+            }
+            let embed = build_refund_embed(&notice, &|id| {
+                names
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_else(|| "Unknown player".to_owned())
+            });
+            self.deliver_channel(context, channel_id, pet_message(embed, None))
+                .await?;
         }
         self.run_service(move |service| service.mark_refund_announced(&notice))
             .await?;

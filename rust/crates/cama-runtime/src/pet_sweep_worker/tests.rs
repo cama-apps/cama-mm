@@ -981,13 +981,13 @@ async fn transient_refund_stays_durable_then_restart_posts_and_marks() {
     assert!(announced().is_some());
     let messages = restarted_discord.messages();
     assert_eq!(messages.len(), 1);
-    assert!(
-        messages[0].1.response.embeds[0]
-            .description
-            .as_deref()
-            .expect("refund copy")
-            .contains("150%")
-    );
+    let copy = messages[0].1.response.embeds[0]
+        .description
+        .as_deref()
+        .expect("refund copy");
+    assert!(copy.contains("150%"));
+    assert!(copy.contains("Owner 501 spent"));
+    assert!(!copy.contains("<@"));
 }
 
 #[tokio::test]

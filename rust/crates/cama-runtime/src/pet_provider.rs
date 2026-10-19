@@ -6,7 +6,7 @@
 //! timeout rules, renders the existing pet media, and delegates every durable
 //! mutation to the existing SQLite/application services.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -53,7 +53,7 @@ use cama_db::pet_eating_repository::{
 };
 use cama_db::pet_evolution_repository::PetEvolutionRepository;
 use cama_db::pet_repository::{PetRepository, PetTrainingError};
-use cama_domain::formatting::JOPACOIN_EMOTE;
+use cama_domain::formatting::{JOPACOIN_EMOTE, escape_discord_text};
 use cama_domain::pet::{
     FOOD_ITEMS, GILDED_EGG_PREMIUM, MAX_BUY_QTY, MAX_LIVING_PETS, PET_SWITCH_COST, Pet, PetMood,
     PetStage, SALT_LICK, TRINKET_COST, UNHATCHED_SPECIES, get_species,
@@ -68,7 +68,8 @@ use tracing::warn;
 
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{
-    DiscordIdPlayerNameResolver, DiscordTransport, GuildPlayerNameResolver,
+    DiscordIdPlayerNameResolver, DiscordTransport, GuildPlayerNameDirectory,
+    GuildPlayerNameResolver,
 };
 use crate::option_ext::{
     boolean_option as optional_bool, integer_option as optional_integer,
@@ -573,6 +574,19 @@ impl IntegerRangeOption for CommandOptionSpec {
 }
 
 impl PetInteractionHandler {
+    async fn owner_names(&self, guild_id: i64, pets: &[Pet]) -> GuildPlayerNameDirectory {
+        let owners = pets
+            .iter()
+            .map(|pet| pet.discord_id)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        self.state
+            .player_names
+            .resolve_names(guild_id, &owners)
+            .await
+    }
+
     async fn render_player_name(&self, user_id: i64, guild_id: i64) -> String {
         self.state
             .player_names
@@ -1531,14 +1545,17 @@ impl PetInteractionHandler {
         let database_path = self.state.database_path.clone();
         let decay = self.state.decay_per_day;
         let now = Utc::now().timestamp();
-        let embed = self
+        let pets = self
             .run_service(move |_| {
-                let pets = PetRepository::new(database_path)
+                PetRepository::new(database_path)
                     .get_welfare_pets(Some(guild_id))
-                    .map_err(|error| error.to_string())?;
-                Ok(build_aspca_embed(&pets, decay, now))
+                    .map_err(|error| error.to_string())
             })
             .await?;
+        let names = self.owner_names(guild_id, &pets).await;
+        let embed = build_aspca_embed(&pets, decay, now, &|id| {
+            escape_discord_text(&names.resolve(id))
+        });
         responder
             .followup(response_embed(embed, None, Vec::new(), false).without_mentions())
             .await
@@ -1571,7 +1588,11 @@ impl PetInteractionHandler {
             })
             .await?
         };
-        let embed = build_leaderboard_embed_with_records(&pets, decay, now, Some(&records));
+        let names = self.owner_names(guild_id, &pets).await;
+        let embed =
+            build_leaderboard_embed_with_records(&pets, decay, now, Some(&records), &|id| {
+                escape_discord_text(&names.resolve(id))
+            });
         responder
             .followup(response_embed(embed, None, Vec::new(), false))
             .await
