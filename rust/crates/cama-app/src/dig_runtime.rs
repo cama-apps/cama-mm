@@ -44,7 +44,6 @@ use cama_domain::dig_cave_in::{
 use cama_domain::dig_economy::scale_positive_dig_jc;
 use cama_domain::dig_gear::{AMULET_TIERS, ARMOR_TIERS, BOOTS_TIERS, WEAPON_TIERS, unique_gear};
 use cama_domain::dig_stats::{MinerStats, miner_stat_effects};
-use cama_domain::formatting::JOPACOIN_EMOTE;
 use cama_domain::game_date::game_date_for_timestamp;
 use cama_domain::mana::{ManaEffects, weather_combo_modifiers};
 use cama_domain::pet::{PetDigWork, PetDigWorkClaim};
@@ -1400,77 +1399,6 @@ impl DigRuntimeService<SqliteDigRuntimeStore> {
             .collect())
     }
 
-    /// Help another tunnel and append the canonical audit row atomically.
-    pub fn help(
-        &self,
-        actor_id: i64,
-        target_id: i64,
-        guild_id: i64,
-        now: i64,
-    ) -> Result<String, DigRuntimeStoreError> {
-        let mut connection = self.store.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let target = dig_runtime_store::tunnel_depth_and_max(&transaction, target_id, guild_id)?;
-        let Some((depth, max_depth)) = target else {
-            transaction.commit()?;
-            return Ok("That miner has not started a tunnel yet.".to_owned());
-        };
-        let depth_after = depth.saturating_add(1);
-        dig_runtime_store::set_tunnel_depth_and_max(
-            &transaction,
-            depth_after,
-            max_depth.max(depth_after),
-            target_id,
-            guild_id,
-        )?;
-        dig_runtime_store::insert_dig_action(
-            &transaction,
-            guild_id,
-            actor_id,
-            Some(target_id),
-            "help",
-            depth,
-            depth_after,
-            0,
-            "{}",
-            now,
-        )?;
-        transaction.commit()?;
-        Ok(format!(
-            "You steadied <@{target_id}>'s tunnel and helped them reach depth **{depth_after}**."
-        ))
-    }
-
-    pub fn gift_relic(
-        &self,
-        owner_id: i64,
-        target_id: i64,
-        guild_id: i64,
-        artifact_id: &str,
-        now: i64,
-    ) -> Result<bool, DigRuntimeStoreError> {
-        if owner_id == target_id {
-            return Ok(false);
-        }
-        let mut connection = self.store.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let target_exists = dig_runtime_store::player_exists(&transaction, target_id, guild_id)?;
-        if !target_exists {
-            transaction.commit()?;
-            return Ok(false);
-        }
-        let changed = dig_runtime_store::transfer_relic(
-            &transaction,
-            target_id,
-            guild_id,
-            now,
-            owner_id,
-            artifact_id,
-        )?;
-        transaction.commit()?;
-        Ok(changed == 1)
-    }
-
     pub fn reset_cooldown(
         &self,
         discord_id: i64,
@@ -1503,96 +1431,6 @@ impl DigRuntimeService<SqliteDigRuntimeStore> {
         } else {
             DigAdminMutationOutcome::MissingTunnel
         })
-    }
-
-    pub fn respec(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-        now: i64,
-    ) -> Result<String, DigRuntimeStoreError> {
-        const COST: i64 = 50;
-        let mut connection = self.store.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let balance = dig_runtime_store::player_balance(&transaction, discord_id, guild_id)?;
-        let Some(balance) = balance else {
-            transaction.commit()?;
-            return Ok("You must be registered first.".to_owned());
-        };
-        let tunnel_stats =
-            dig_runtime_store::tunnel_stat_allocation(&transaction, discord_id, guild_id)?;
-        let Some((strength, smarts, stamina, survival, _stat_points)) = tunnel_stats else {
-            transaction.commit()?;
-            return Ok("You don't have any allocated S points to reset.".to_owned());
-        };
-        let returned_points = strength
-            .saturating_add(smarts)
-            .saturating_add(stamina)
-            .saturating_add(survival);
-        if returned_points <= 0 {
-            transaction.commit()?;
-            return Ok("You don't have any allocated S points to reset.".to_owned());
-        }
-        if balance < COST {
-            transaction.commit()?;
-            return Ok(format!(
-                "Respec costs {COST} {JOPACOIN_EMOTE}; your balance is {balance}."
-            ));
-        }
-
-        let detail = serde_json::json!({
-            "cost": COST,
-            "returned_points": returned_points,
-            "previous_stats": {
-                "strength": strength,
-                "smarts": smarts,
-                "stamina": stamina,
-                "survival": survival,
-            },
-        })
-        .to_string();
-        dig_runtime_store::set_ledger_context(
-            &transaction,
-            "dig",
-            discord_id,
-            "miner_respec",
-            "s_points",
-            "dig miner respec debit",
-            &detail,
-        )?;
-        let debited = dig_runtime_store::debit_player_balance_if_sufficient(
-            &transaction,
-            COST,
-            discord_id,
-            guild_id,
-        )?;
-        dig_runtime_store::clear_ledger_context(&transaction)?;
-        if debited != 1 {
-            transaction.rollback()?;
-            return Ok(format!(
-                "Respec costs {COST} {JOPACOIN_EMOTE}; your balance is {balance}."
-            ));
-        }
-        dig_runtime_store::refresh_player_lowest_balance(&transaction, discord_id, guild_id)?;
-        let changed = dig_runtime_store::respec_tunnel_stats(&transaction, discord_id, guild_id)?;
-        if changed == 0 {
-            transaction.rollback()?;
-            return Ok("You don't have a tunnel yet. Use /dig go to start.".to_owned());
-        }
-        dig_runtime_store::insert_dig_action(
-            &transaction,
-            guild_id,
-            discord_id,
-            None,
-            "miner_respec",
-            0,
-            0,
-            -COST,
-            &detail,
-            now,
-        )?;
-        transaction.commit()?;
-        Ok(format!("Respec complete. Spent {COST} {JOPACOIN_EMOTE}."))
     }
 
     pub fn autobuy(

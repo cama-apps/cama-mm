@@ -297,35 +297,6 @@ pub fn update_player_balance_coalesce_cas(
     )
 }
 
-/// Debit a wallet only when the stored balance covers the cost.
-pub fn debit_player_balance_if_sufficient(
-    connection: &Connection,
-    cost: i64,
-    discord_id: i64,
-    guild_id: i64,
-) -> Result<usize, rusqlite::Error> {
-    connection.execute(
-        "UPDATE players SET jopacoin_balance=jopacoin_balance-?1,
-                updated_at=CURRENT_TIMESTAMP
-         WHERE discord_id=?2 AND guild_id=?3 AND jopacoin_balance>=?1",
-        params![cost, discord_id, guild_id],
-    )
-}
-
-/// Track the historical low-water mark after a debit.
-pub fn refresh_player_lowest_balance(
-    connection: &Connection,
-    discord_id: i64,
-    guild_id: i64,
-) -> Result<usize, rusqlite::Error> {
-    connection.execute(
-        "UPDATE players SET lowest_balance_ever=jopacoin_balance
-         WHERE discord_id=?1 AND guild_id=?2
-           AND (lowest_balance_ever IS NULL OR jopacoin_balance<lowest_balance_ever)",
-        params![discord_id, guild_id],
-    )
-}
-
 // ---------------------------------------------------------------------------
 // economy_ledger_context
 // ---------------------------------------------------------------------------
@@ -680,22 +651,6 @@ pub fn tunnel_depth(
         .optional()
 }
 
-/// Read one tunnel's depth and max depth.
-pub fn tunnel_depth_and_max(
-    connection: &Connection,
-    discord_id: i64,
-    guild_id: i64,
-) -> Result<Option<(i64, i64)>, rusqlite::Error> {
-    connection
-        .query_row(
-            "SELECT depth, max_depth FROM tunnels
-             WHERE discord_id=?1 AND guild_id=?2",
-            params![discord_id, guild_id],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-        )
-        .optional()
-}
-
 /// Depth-only CAS used by the actor-scoped balance update.
 pub fn update_tunnel_depth_cas(
     connection: &Connection,
@@ -708,21 +663,6 @@ pub fn update_tunnel_depth_cas(
         "UPDATE tunnels SET depth=?1 WHERE discord_id=?2 AND guild_id=?3
           AND depth=?4",
         params![depth_after, discord_id, guild_id, expected_depth],
-    )
-}
-
-/// Set depth and max depth for the /dig help action.
-pub fn set_tunnel_depth_and_max(
-    connection: &Connection,
-    depth: i64,
-    max_depth: i64,
-    discord_id: i64,
-    guild_id: i64,
-) -> Result<usize, rusqlite::Error> {
-    connection.execute(
-        "UPDATE tunnels SET depth=?1, max_depth=?2
-         WHERE discord_id=?3 AND guild_id=?4",
-        params![depth, max_depth, discord_id, guild_id],
     )
 }
 
@@ -755,44 +695,6 @@ pub fn set_tunnel_depth_reset_cooldown(
 
 /// Strength, Smarts, Stamina, Survival, and the stat-point pool, in storage order.
 pub type TunnelStatAllocation = (i64, i64, i64, i64, i64);
-
-/// Read the allocated miner stats and the free stat pool.
-pub fn tunnel_stat_allocation(
-    connection: &Connection,
-    discord_id: i64,
-    guild_id: i64,
-) -> Result<Option<TunnelStatAllocation>, rusqlite::Error> {
-    connection
-        .query_row(
-            "SELECT stat_strength, stat_smarts, stat_stamina, stat_survival, stat_points
-               FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
-            params![discord_id, guild_id],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
-                ))
-            },
-        )
-        .optional()
-}
-
-/// Return allocated stats to the free pool.
-pub fn respec_tunnel_stats(
-    connection: &Connection,
-    discord_id: i64,
-    guild_id: i64,
-) -> Result<usize, rusqlite::Error> {
-    connection.execute(
-        "UPDATE tunnels SET stat_points=stat_points+stat_strength+stat_smarts+stat_stamina+stat_survival,
-                stat_strength=0, stat_smarts=0, stat_stamina=0, stat_survival=0
-         WHERE discord_id=?1 AND guild_id=?2",
-        params![discord_id, guild_id],
-    )
-}
 
 /// Toggle the torch auto-buy opt-in.
 pub fn set_auto_buy_torch(
@@ -1268,27 +1170,6 @@ pub fn sync_artifacts(
         }
     }
     Ok(())
-}
-
-/// Move one owned relic copy to another player, unequipped.
-pub fn transfer_relic(
-    connection: &Connection,
-    target_id: i64,
-    guild_id: i64,
-    now: i64,
-    owner_id: i64,
-    artifact_id: &str,
-) -> Result<usize, rusqlite::Error> {
-    connection.execute(
-        "UPDATE dig_artifacts SET discord_id=?1, guild_id=?2, equipped=0, found_at=?3
-         WHERE id = (
-             SELECT id FROM dig_artifacts
-             WHERE discord_id=?4 AND guild_id=?2 AND artifact_id=?5
-               AND is_relic=1
-             ORDER BY id LIMIT 1
-         )",
-        params![target_id, guild_id, now, owner_id, artifact_id],
-    )
 }
 
 /// Equipped relic ids and artifact identifiers for the info renderer.
