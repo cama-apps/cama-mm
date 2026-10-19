@@ -1173,47 +1173,6 @@ impl ManashopRepository {
         }))
     }
 
-    pub fn revert_blood_pact_skim(
-        &self,
-        buff_id: i64,
-        amount: i64,
-    ) -> Result<(), ManashopRepositoryError> {
-        if amount <= 0 {
-            return Ok(());
-        }
-        self.mutate_buff_data_atomic(buff_id, |data| {
-            data.skimmed_total = Some(
-                data.skimmed_total
-                    .unwrap_or(0)
-                    .saturating_sub(amount)
-                    .max(0),
-            );
-            0
-        })?;
-        Ok(())
-    }
-
-    pub fn claim_blood_pact_extra_atomic(
-        &self,
-        buff_id: i64,
-        amount: i64,
-    ) -> Result<i64, ManashopRepositoryError> {
-        if amount <= 0 {
-            return Ok(0);
-        }
-        self.mutate_buff_data_atomic(buff_id, |data| {
-            let current = data.skimmed_total.unwrap_or(0);
-            // A missing cap means an uncapped pact, matching
-            // `claim_blood_pact_skim_in`; it must never read as zero headroom.
-            let granted = match data.cap {
-                Some(cap) => amount.min(cap.saturating_sub(current)).max(0),
-                None => amount,
-            };
-            data.skimmed_total = Some(current.saturating_add(granted));
-            granted
-        })
-    }
-
     /// Reserve scaled Blood Pact capacity inside a caller-owned transaction.
     pub(crate) fn claim_blood_pact_extra_in(
         connection: &Connection,
@@ -1283,37 +1242,6 @@ impl ManashopRepository {
             params![buff_data_to_json(&data), buff_id],
         )?;
         Ok(())
-    }
-
-    fn mutate_buff_data_atomic<F>(
-        &self,
-        buff_id: i64,
-        mutation: F,
-    ) -> Result<i64, ManashopRepositoryError>
-    where
-        F: FnOnce(&mut BuffData) -> i64,
-    {
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let raw = transaction
-            .query_row(
-                "SELECT data FROM manashop_buffs WHERE id = ?1",
-                params![buff_id],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .optional()?;
-        let Some(raw) = raw else {
-            transaction.commit()?;
-            return Ok(0);
-        };
-        let mut data = buff_data_from_json(raw.as_deref().unwrap_or("{}"));
-        let result = mutation(&mut data);
-        transaction.execute(
-            "UPDATE manashop_buffs SET data = ?1 WHERE id = ?2",
-            params![buff_data_to_json(&data), buff_id],
-        )?;
-        transaction.commit()?;
-        Ok(result)
     }
 
     pub fn consume_data_charge_atomic(
