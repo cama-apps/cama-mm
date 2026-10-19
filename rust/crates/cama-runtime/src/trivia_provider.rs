@@ -403,8 +403,14 @@ impl TriviaRuntimeState {
             .map(|value| signed_id(value, "channel"))
             .transpose()?;
 
+        // Slash commands get no automatic acknowledgement: defer before the
+        // channel lookup, balance read, and cooldown claim below.
+        responder
+            .defer(false)
+            .await
+            .map_err(|error| error.to_string())?;
         if let Some(retry_after) = self.take_command_rate_limit(user_id)? {
-            return respond_ephemeral(
+            return followup_ephemeral(
                 &responder,
                 format!("Slow down! Try again in {retry_after:.0}s."),
             )
@@ -417,7 +423,7 @@ impl TriviaRuntimeState {
             return Ok(());
         }
         if self.session_is_active(user_id, guild_id)? {
-            return respond_ephemeral(
+            return followup_ephemeral(
                 &responder,
                 "You already have an active trivia session! Finish it first.",
             )
@@ -434,7 +440,7 @@ impl TriviaRuntimeState {
         .await
         .map_err(|error| format!("trivia registration lookup task failed: {error}"))??;
         if !registered {
-            return respond_ephemeral(
+            return followup_ephemeral(
                 &responder,
                 "You must be registered to play trivia. Use `/player register` first.",
             )
@@ -443,11 +449,10 @@ impl TriviaRuntimeState {
 
         let is_admin = self.is_admin(user_id, member_permissions);
         let now = unix_timestamp()?;
-        let mut claimed = false;
         if !is_admin {
             let trivia = self.trivia.clone();
             let cooldown = self.config.cooldown_seconds;
-            claimed = tokio::task::spawn_blocking(move || {
+            let claimed = tokio::task::spawn_blocking(move || {
                 trivia
                     .try_claim_trivia_session(user_id, Some(guild_id), now, cooldown)
                     .map_err(|error| error.to_string())
@@ -474,7 +479,7 @@ impl TriviaRuntimeState {
                         )
                     },
                 );
-                return respond_ephemeral(&responder, message).await;
+                return followup_ephemeral(&responder, message).await;
             }
         } else if let Some(reminders) = &self.reminder_hooks {
             reminders
@@ -482,16 +487,6 @@ impl TriviaRuntimeState {
                 .await?;
         }
 
-        if responder.defer(false).await.is_err() {
-            if claimed {
-                let trivia = self.trivia.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    trivia.reset_trivia_cooldown(user_id, Some(guild_id))
-                })
-                .await;
-            }
-            return Ok(());
-        }
         let user_display_name = self.render_player_name(user_id, guild_id).await;
 
         let placeholder = TriviaQuestion {
@@ -601,6 +596,10 @@ impl TriviaRuntimeState {
         }
         let (target_id, _target_name) = user_option(&options)?;
         let guild_id = guild_id.map_or(Ok(0), |value| signed_id(value, "guild"))?;
+        responder
+            .defer(true)
+            .await
+            .map_err(|error| error.to_string())?;
         let trivia = self.trivia.clone();
         let reset = tokio::task::spawn_blocking(move || {
             trivia
@@ -615,7 +614,7 @@ impl TriviaRuntimeState {
         } else {
             format!("No player found for **{target_name}** (not registered or no cooldown).")
         };
-        respond_ephemeral(&responder, message).await
+        followup_ephemeral(&responder, message).await
     }
 
     async fn answer_component(
@@ -1135,12 +1134,14 @@ impl TriviaRuntimeState {
         channel_id: Option<i64>,
         responder: &Arc<dyn InteractionResponder>,
     ) -> Result<bool, String> {
+        // Only a definitive "not gamba" answer earns the penalty; a failed
+        // lookup is reported as a failure instead of charging the player.
         let allowed = match channel_id {
             Some(channel_id) => self
                 .discord
                 .trivia_channel_is_gamba(guild_id, channel_id)
                 .await
-                .unwrap_or(false),
+                .map_err(|error| format!("trivia channel lookup failed: {error}"))?,
             None => false,
         };
         if allowed {
@@ -1150,7 +1151,7 @@ impl TriviaRuntimeState {
         let _ =
             tokio::task::spawn_blocking(move || trivia.adjust_balance(user_id, Some(guild_id), -1))
                 .await;
-        respond_ephemeral(responder, WRONG_CHANNEL_MESSAGE).await?;
+        followup_ephemeral(responder, WRONG_CHANNEL_MESSAGE).await?;
         Ok(false)
     }
 
@@ -1443,6 +1444,16 @@ async fn respond_ephemeral(
 ) -> Result<(), String> {
     responder
         .respond(InteractionResponse::message(content).ephemeral())
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn followup_ephemeral(
+    responder: &Arc<dyn InteractionResponder>,
+    content: impl Into<String>,
+) -> Result<(), String> {
+    responder
+        .followup(InteractionResponse::message(content).ephemeral())
         .await
         .map_err(|error| error.to_string())
 }

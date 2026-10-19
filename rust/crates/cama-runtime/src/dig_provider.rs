@@ -1563,16 +1563,6 @@ impl DigInteractionHandler {
             .resolve(user_id)
     }
 
-    /// [`Self::render_player_name`] without a member fetch, for replies sent
-    /// before the interaction is acknowledged.
-    fn cached_player_name(&self, user_id: i64, guild_id: i64) -> String {
-        self.state
-            .player_names
-            .names_for_guild(guild_id, &[user_id])
-            .unwrap_or_default()
-            .resolve(user_id)
-    }
-
     async fn render_delivery_responses(
         &self,
         delivery: &DigRuntimeDeliverySnapshot,
@@ -2225,30 +2215,39 @@ impl DigInteractionHandler {
             (usize::MAX, Duration::ZERO)
         };
         let admin_command = subcommand.first().is_some_and(|part| part == "admin");
-        if !admin_command
-            && !self
+        // Admin subcommands acknowledge themselves and skip the checks below.
+        // Every other subcommand is deferred here, before the channel lookup
+        // (which may fetch from Discord) and the SQLite checks: slash commands
+        // get no automatic acknowledgement. Later replies are follow-ups.
+        if !admin_command {
+            responder
+                .defer(dig_subcommand_defers_ephemeral(&subcommand))
+                .await
+                .map_err(|error| error.to_string())?;
+            if !self
                 .require_dig_channel(user_id, guild_id, channel_id, &responder)
                 .await?
-        {
-            return Ok(());
-        }
-        if limit.0 != usize::MAX
-            && let Some(retry_after) =
-                self.take_rate_limit(user_id, guild_id, rate_scope, limit.0, limit.1)?
-        {
-            return respond(
-                &responder,
-                InteractionResponse::message(format!("Slow down! Wait {retry_after}s."))
-                    .ephemeral(),
-            )
-            .await;
-        }
-        if !admin_command && !self.registered(user_id, guild_id).await? {
-            return respond(
-                &responder,
-                InteractionResponse::message(REGISTER_FIRST_MESSAGE).ephemeral(),
-            )
-            .await;
+            {
+                return Ok(());
+            }
+            if limit.0 != usize::MAX
+                && let Some(retry_after) =
+                    self.take_rate_limit(user_id, guild_id, rate_scope, limit.0, limit.1)?
+            {
+                return followup(
+                    &responder,
+                    InteractionResponse::message(format!("Slow down! Wait {retry_after}s."))
+                        .ephemeral(),
+                )
+                .await;
+            }
+            if !self.registered(user_id, guild_id).await? {
+                return followup(
+                    &responder,
+                    InteractionResponse::message(REGISTER_FIRST_MESSAGE).ephemeral(),
+                )
+                .await;
+            }
         }
 
         match subcommand.as_slice() {
@@ -3999,7 +3998,7 @@ impl DigInteractionHandler {
         responder: &Arc<dyn InteractionResponder>,
     ) -> Result<bool, String> {
         let Some(current_channel_id) = current_channel_id else {
-            return respond(
+            return followup(
                 responder,
                 InteractionResponse::message(GUILD_ONLY_MESSAGE).ephemeral(),
             )
@@ -4016,7 +4015,7 @@ impl DigInteractionHandler {
                     return Ok(true);
                 }
                 self.debit_channel_penalty(user_id, guild_id).await?;
-                return respond(
+                return followup(
                     responder,
                     InteractionResponse::message(format!(
                         "The earth here is silent. Your tools belong in <#{expected}> — a single jopacoin dissolves into the ether as penance."
@@ -4036,7 +4035,7 @@ impl DigInteractionHandler {
             return Ok(true);
         }
         self.debit_channel_penalty(user_id, guild_id).await?;
-        respond(
+        followup(
             responder,
             InteractionResponse::message(
                 "The ancient spirits reject your offering... this ground is not consecrated. A single jopacoin dissolves into the ether as penance.",
@@ -4075,10 +4074,6 @@ impl DigInteractionHandler {
         channel_id: Option<i64>,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
-        responder
-            .defer(false)
-            .await
-            .map_err(|error| error.to_string())?;
         let display_name = self.render_player_name(user_id, guild_id).await;
         let now = unix_now();
         let avatar = self
@@ -6117,10 +6112,6 @@ impl DigInteractionHandler {
         options: &[InteractionOption],
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
-        responder
-            .defer(false)
-            .await
-            .map_err(|error| error.to_string())?;
         let Some((target_id, target_name)) = user_option(options, "user")? else {
             return Err("/dig help requires user".to_owned());
         };
@@ -6182,7 +6173,7 @@ impl DigInteractionHandler {
             return Err("/dig sabotage requires user".to_owned());
         };
         if target_id == user_id {
-            return respond(
+            return followup(
                 &responder,
                 InteractionResponse::message("You can't sabotage yourself.").ephemeral(),
             )
@@ -6197,7 +6188,7 @@ impl DigInteractionHandler {
         let preview = match preview {
             Ok(preview) => preview,
             Err(error) => {
-                return respond(
+                return followup(
                     &responder,
                     InteractionResponse::message(error.to_string()).ephemeral(),
                 )
@@ -6205,7 +6196,7 @@ impl DigInteractionHandler {
             }
         };
         let _ = target_name;
-        let target_name = self.cached_player_name(target_id, guild_id);
+        let target_name = self.render_player_name(target_id, guild_id).await;
         let token = self.create_sabotage_view(
             user_id,
             guild_id,
@@ -6226,7 +6217,7 @@ impl DigInteractionHandler {
             InteractionButton::new(format!("dig:sabotage:cancel:{token}"), "Cancel")
                 .style(InteractionButtonStyle::Secondary),
         ]);
-        respond(
+        followup(
             &responder,
             InteractionResponse::message("")
                 .embed(embed)
@@ -6244,7 +6235,7 @@ impl DigInteractionHandler {
     ) -> Result<(), String> {
         let target = user_option(options, "user")?;
         let target_id = target.map_or(user_id, |(id, _)| id);
-        let target_name = self.cached_player_name(target_id, guild_id);
+        let target_name = self.render_player_name(target_id, guild_id).await;
         let path = self.state.database_path.clone();
         let info = blocking(move || {
             cama_app::dig_runtime::DigRuntimeService::sqlite(&path)
@@ -6253,7 +6244,7 @@ impl DigInteractionHandler {
         })
         .await?;
         let Some(info) = info else {
-            return respond(
+            return followup(
                 &responder,
                 InteractionResponse::message(format!("{target_name} hasn't started digging yet."))
                     .ephemeral(),
@@ -6306,7 +6297,7 @@ impl DigInteractionHandler {
         {
             embed = embed.thumbnail(avatar);
         }
-        respond(&responder, InteractionResponse::message("").embed(embed)).await
+        followup(&responder, InteractionResponse::message("").embed(embed)).await
     }
 
     async fn command_leaderboard(
@@ -6323,7 +6314,7 @@ impl DigInteractionHandler {
         })
         .await?;
         if rows.is_empty() {
-            return respond(
+            return followup(
                 &responder,
                 InteractionResponse::message("No tunnels yet! Use `/dig go` to start.").ephemeral(),
             )
@@ -6345,7 +6336,7 @@ impl DigInteractionHandler {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        respond(
+        followup(
             &responder,
             InteractionResponse::message("").embed(
                 InteractionEmbed::titled("Tunnel Leaderboard")
@@ -6370,7 +6361,7 @@ impl DigInteractionHandler {
         })
         .await?;
         if rows.is_empty() {
-            return respond(
+            return followup(
                 &responder,
                 InteractionResponse::message("The hall of fame is empty. Prestige to earn a spot!")
                     .ephemeral(),
@@ -6394,7 +6385,7 @@ impl DigInteractionHandler {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        respond(
+        followup(
             &responder,
             InteractionResponse::message("").embed(
                 InteractionEmbed::titled("🏆 Hall of Fame")
@@ -6414,10 +6405,6 @@ impl DigInteractionHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
         let item = string_option(options, "item")?.unwrap_or_default();
-        responder
-            .defer(true)
-            .await
-            .map_err(|error| error.to_string())?;
         let path = self.state.database_path.clone();
         let item_for_db = item.clone();
         let result = blocking(move || {
@@ -6468,12 +6455,8 @@ impl DigInteractionHandler {
             return Err("/dig gift requires user".to_owned());
         };
         let _ = target_name;
-        let target_name = self.cached_player_name(target_id, guild_id);
+        let target_name = self.render_player_name(target_id, guild_id).await;
         let artifact = string_option(options, "artifact")?.unwrap_or_default();
-        responder
-            .defer(false)
-            .await
-            .map_err(|error| error.to_string())?;
         let path = self.state.database_path.clone();
         let artifact_for_db = artifact.clone();
         let now = unix_now();
@@ -6506,10 +6489,6 @@ impl DigInteractionHandler {
         guild_id: i64,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
-        responder
-            .defer(false)
-            .await
-            .map_err(|error| error.to_string())?;
         let path = self.state.database_path.clone();
         let shop = blocking(move || {
             cama_app::dig_gear_runtime::DigGearRuntimeService::sqlite(path)
@@ -6549,10 +6528,6 @@ impl DigInteractionHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
         let item = string_option(options, "item")?.unwrap_or_default();
-        responder
-            .defer(true)
-            .await
-            .map_err(|error| error.to_string())?;
         if let Some((slot, tier)) = parse_gear_shop_choice(&item) {
             let action = if slot == "weapon" || slot == "pickaxe" {
                 cama_app::dig_gear_runtime::DigGearRuntimeAction::BuyPickaxe { tier }
@@ -6651,10 +6626,6 @@ impl DigInteractionHandler {
         guild_id: i64,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
-        responder
-            .defer(false)
-            .await
-            .map_err(|error| error.to_string())?;
         let display_name = self.render_player_name(user_id, guild_id).await;
         let path = self.state.database_path.clone();
         let info = blocking(move || {
@@ -6706,10 +6677,6 @@ impl DigInteractionHandler {
         guild_id: i64,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
-        responder
-            .defer(true)
-            .await
-            .map_err(|error| error.to_string())?;
         let path = self.state.database_path.clone();
         let preview = blocking(move || {
             DigPrestigeRuntimeService::sqlite(&path)
@@ -6747,7 +6714,7 @@ impl DigInteractionHandler {
         })
         .await?;
         if !preview.can_prestige {
-            return respond(
+            return followup(
                 &responder,
                 InteractionResponse::message(
                     preview
@@ -6765,7 +6732,7 @@ impl DigInteractionHandler {
         } else {
             prestige_perk_response(&preview, &view_token, None)
         };
-        respond(&responder, response).await
+        followup(&responder, response).await
     }
 
     async fn command_abandon(
@@ -6785,7 +6752,7 @@ impl DigInteractionHandler {
         let preview = match preview {
             Ok(preview) => preview,
             Err(error) => {
-                return respond(&responder, InteractionResponse::message(error).ephemeral()).await;
+                return followup(&responder, InteractionResponse::message(error).ephemeral()).await;
             }
         };
         let token = self.create_abandon_view(user_id, guild_id, now)?;
@@ -6801,7 +6768,7 @@ impl DigInteractionHandler {
             InteractionButton::new(format!("dig:abandon:cancel:{token}"), "Cancel")
                 .style(InteractionButtonStyle::Secondary),
         ]);
-        respond(
+        followup(
             &responder,
             InteractionResponse::message("")
                 .embed(embed)
@@ -6816,10 +6783,6 @@ impl DigInteractionHandler {
         guild_id: i64,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
-        responder
-            .defer(false)
-            .await
-            .map_err(|error| error.to_string())?;
         let game_date = cama_domain::game_date::get_game_date();
         let path = self.state.database_path.clone();
         let result = blocking(move || {
@@ -6854,10 +6817,6 @@ impl DigInteractionHandler {
         guild_id: i64,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
-        responder
-            .defer(false)
-            .await
-            .map_err(|error| error.to_string())?;
         let path = self.state.database_path.clone();
         let result = blocking(move || {
             DigInventoryService::new(DigInventoryRepository::new(path))
@@ -6890,10 +6849,6 @@ impl DigInteractionHandler {
         guild_id: i64,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
-        responder
-            .defer(false)
-            .await
-            .map_err(|error| error.to_string())?;
         let path = self.state.database_path.clone();
         let (items, shop) = blocking(move || {
             let items = DigInventoryService::new(DigInventoryRepository::new(&path))
@@ -6981,7 +6936,7 @@ impl DigInteractionHandler {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        respond(
+        followup(
             &responder,
             InteractionResponse::message("").embed(
                 InteractionEmbed::titled("Artifact Catalog")
@@ -7006,7 +6961,7 @@ impl DigInteractionHandler {
         })
         .await?;
         let Some(panel) = panel else {
-            return respond(
+            return followup(
                 &responder,
                 InteractionResponse::message(
                     "You don't have a tunnel yet. Use `/dig go` to start!",
@@ -7015,7 +6970,7 @@ impl DigInteractionHandler {
             )
             .await;
         };
-        respond(
+        followup(
             &responder,
             gear_panel_response(&panel, user_id, guild_id, &self.state.view_nonce),
         )
@@ -7036,7 +6991,7 @@ impl DigInteractionHandler {
         })
         .await?;
         if weather.is_empty() {
-            return respond(
+            return followup(
                 &responder,
                 InteractionResponse::message("No weather today — skies are clear.").ephemeral(),
             )
@@ -7056,7 +7011,7 @@ impl DigInteractionHandler {
                 false,
             );
         }
-        respond(
+        followup(
             &responder,
             InteractionResponse::message("")
                 .embed(embed.footer("Weather affects all diggers in that layer today.")),
@@ -7071,7 +7026,7 @@ impl DigInteractionHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
         let token = self.create_guide_view(user_id, guild_id, unix_now())?;
-        respond(&responder, guide_response(0, &token)).await
+        followup(&responder, guide_response(0, &token)).await
     }
 
     async fn command_admin(
@@ -7177,10 +7132,6 @@ impl DigInteractionHandler {
     ) -> Result<(), String> {
         match subcommand {
             "profile" => {
-                responder
-                    .defer(true)
-                    .await
-                    .map_err(|error| error.to_string())?;
                 let display_name = self.render_player_name(user_id, guild_id).await;
                 let path = self.state.database_path.clone();
                 let result =
@@ -7226,17 +7177,13 @@ impl DigInteractionHandler {
                         .ephemeral(),
                     Err(error) => InteractionResponse::message(error.to_string()).ephemeral(),
                 };
-                respond(&responder, response).await
+                followup(&responder, response).await
             }
             "build" => {
                 let strength = integer_option(options, "strength")?.unwrap_or_default();
                 let smarts = integer_option(options, "smarts")?.unwrap_or_default();
                 let stamina = integer_option(options, "stamina")?.unwrap_or_default();
                 let survival = integer_option(options, "survival")?.unwrap_or_default();
-                responder
-                    .defer(true)
-                    .await
-                    .map_err(|error| error.to_string())?;
                 let path = self.state.database_path.clone();
                 let result = blocking(move || {
                     Ok(DigMinerRuntimeService::sqlite(&path).allocate_stats(
@@ -7268,10 +7215,6 @@ impl DigInteractionHandler {
                     .map_err(|error| error.to_string())
             }
             "respec" => {
-                responder
-                    .defer(true)
-                    .await
-                    .map_err(|error| error.to_string())?;
                 let path = self.state.database_path.clone();
                 let result = blocking(move || {
                     Ok(DigMinerRuntimeService::sqlite(&path).respec(user_id, guild_id, unix_now()))
@@ -7306,10 +7249,6 @@ impl DigInteractionHandler {
             "autobuy" => {
                 let item = string_option(options, "item")?.unwrap_or_default();
                 let enabled = bool_option(options, "enabled")?.unwrap_or(false);
-                responder
-                    .defer(true)
-                    .await
-                    .map_err(|error| error.to_string())?;
                 let update = match item.as_str() {
                     "torch" => DigMinerAutoBuyUpdate {
                         torch: Some(enabled),
@@ -8034,6 +7973,27 @@ async fn respond(
         .respond(response)
         .await
         .map_err(|error| error.to_string())
+}
+
+async fn followup(
+    responder: &Arc<dyn InteractionResponder>,
+    response: InteractionResponse,
+) -> Result<(), String> {
+    responder
+        .followup(response)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Visibility of the up-front `/dig` defer: subcommands whose replies are all
+/// private defer ephemerally; the rest defer publicly and send rejections as
+/// ephemeral follow-ups.
+fn dig_subcommand_defers_ephemeral(subcommand: &[String]) -> bool {
+    match subcommand {
+        [sub] => matches!(sub.as_str(), "use" | "buy" | "perks" | "prestige"),
+        [group, _] => group == "miner",
+        _ => false,
+    }
 }
 
 // Boss and gear views are process-local in Python.

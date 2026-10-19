@@ -1544,6 +1544,7 @@ struct TestDiscord {
     direct: StdMutex<Vec<(i64, InteractionResponse)>>,
     reject_un_nonnced_public_send: StdMutex<bool>,
     gamba: bool,
+    gamba_checks: StdMutex<usize>,
     avatar_url: Option<String>,
     lifecycle: Option<Arc<StdMutex<Vec<&'static str>>>>,
 }
@@ -1565,6 +1566,7 @@ impl Default for TestDiscord {
             direct: StdMutex::new(Vec::new()),
             reject_un_nonnced_public_send: StdMutex::new(false),
             gamba: true,
+            gamba_checks: StdMutex::new(0),
             avatar_url: None,
             lifecycle: None,
         }
@@ -1655,6 +1657,7 @@ impl DigDiscordPort for TestDiscord {
     }
 
     async fn dig_channel_is_gamba(&self, _guild_id: i64, _channel_id: i64) -> Result<bool, String> {
+        *self.gamba_checks.lock().expect("gamba checks") += 1;
         Ok(self.gamba)
     }
 
@@ -2068,6 +2071,57 @@ impl InteractionResponder for RejectingPublicFollowupResponder {
         } else {
             Ok(())
         }
+    }
+}
+
+/// Records, at the moment of the defer, how many channel lookups and what
+/// balance the slash command had already touched.
+struct AckOrderResponder {
+    inner: TestResponder,
+    discord: Arc<TestDiscord>,
+    database: std::path::PathBuf,
+    observed_at_defer: StdMutex<Vec<(usize, i64)>>,
+}
+
+impl AckOrderResponder {
+    fn new(discord: Arc<TestDiscord>, database: &std::path::Path) -> Self {
+        Self {
+            inner: TestResponder::default(),
+            discord,
+            database: database.to_path_buf(),
+            observed_at_defer: StdMutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl InteractionResponder for AckOrderResponder {
+    async fn respond(&self, response: InteractionResponse) -> Result<(), InteractionResponseError> {
+        self.inner.respond(response).await
+    }
+
+    async fn defer(&self, ephemeral: bool) -> Result<(), InteractionResponseError> {
+        let checks = *self.discord.gamba_checks.lock().expect("gamba checks");
+        let balance = Connection::open(&self.database)
+            .expect("open ordering database")
+            .query_row(
+                "SELECT COALESCE(SUM(jopacoin_balance), 0) FROM players WHERE guild_id=?1",
+                params![GUILD as i64],
+                |row| row.get(0),
+            )
+            .expect("balance at defer");
+        self.observed_at_defer
+            .lock()
+            .expect("observed at defer")
+            .push((checks, balance));
+        self.inner.defer(ephemeral).await
+    }
+
+    async fn followup(
+        &self,
+        response: InteractionResponse,
+    ) -> Result<(), InteractionResponseError> {
+        self.inner.followup(response).await
     }
 }
 
@@ -4158,7 +4212,7 @@ async fn provider_go_route_event_and_info_use_typed_app_service() {
         .expect("weather should use typed app read model");
     assert!(
         weather_responder
-            .responses
+            .followups
             .lock()
             .expect("weather responses")
             .last()
@@ -4304,7 +4358,7 @@ async fn provider_go_route_event_and_info_use_typed_app_service() {
         .await
         .expect("info should read typed app projection");
     {
-        let info = info_responder.responses.lock().expect("info responses");
+        let info = info_responder.followups.lock().expect("info responses");
         assert_eq!(info.len(), 1);
         assert_eq!(info[0].embeds.len(), 1);
         assert!(
@@ -4801,7 +4855,7 @@ async fn abandon_preview_owner_restart_cancel_and_atomic_settlement_are_exact() 
         )
         .await
         .expect("abandon preview");
-    let preview = preview_responder.responses.lock().unwrap()[0].clone();
+    let preview = preview_responder.followups.lock().unwrap()[0].clone();
     assert!(!preview.ephemeral);
     assert_eq!(preview.embeds[0].title.as_deref(), Some("Abandon Tunnel?"));
     assert!(
@@ -4966,7 +5020,7 @@ async fn abandon_preview_owner_restart_cancel_and_atomic_settlement_are_exact() 
         )
         .await
         .unwrap();
-    let cancel_id = cancel_preview.responses.lock().unwrap()[0].components[0].buttons[1]
+    let cancel_id = cancel_preview.followups.lock().unwrap()[0].components[0].buttons[1]
         .custom_id
         .clone();
     let cancelled = Arc::new(TestResponder::default());
@@ -5619,7 +5673,7 @@ async fn prestige_preview_selection_restart_and_forgery_use_atomic_app_service()
         .await
         .expect("prestige preview");
     let preview = preview_responder
-        .responses
+        .followups
         .lock()
         .expect("preview responses")[0]
         .clone();
@@ -5844,7 +5898,7 @@ async fn live_prestige_provider_attaches_pinnacle_gif_through_temporary_send() {
         .await
         .expect("live Neon prestige preview");
     let chosen = preview_responder
-        .responses
+        .followups
         .lock()
         .expect("live Neon preview response")[0]
         .components[0]
@@ -7014,7 +7068,7 @@ async fn gear_panel_components_use_typed_atomic_service_and_restart_nonce() {
         .await
         .expect("gear panel");
     {
-        let responses = panel_responder.responses.lock().expect("panel responses");
+        let responses = panel_responder.followups.lock().expect("panel responses");
         assert_eq!(responses.len(), 1);
         assert_eq!(
             responses[0].embeds[0].title.as_deref(),
@@ -7422,7 +7476,7 @@ async fn provider_sabotage_view_is_owner_bound_restart_expiring_and_exactly_once
         )
         .await
         .expect("typed sabotage preview");
-    let preview = preview_responder.responses.lock().unwrap()[0].clone();
+    let preview = preview_responder.followups.lock().unwrap()[0].clone();
     assert!(!preview.ephemeral);
     assert_eq!(preview.embeds[0].title.as_deref(), Some("Confirm Sabotage"));
     assert_eq!(
@@ -7676,7 +7730,7 @@ async fn provider_miner_group_uses_typed_profile_allocation_respec_and_autobuy_s
         )
         .await
         .expect("typed miner backstory");
-    let about = about_responder.responses.lock().unwrap()[0].clone();
+    let about = about_responder.followups.lock().unwrap()[0].clone();
     assert!(about.ephemeral);
     assert_eq!(
         about.embeds[0].title.as_deref(),
@@ -7925,8 +7979,13 @@ async fn provider_registration_channel_gate_and_autocomplete_are_live() {
         )
         .await
         .expect("wrong-channel admission should be handled");
-    let gate_response = gate_responder.responses.lock().expect("gate response");
+    // The rejection follows the up-front defer instead of being the initial
+    // callback, because the channel lookup may need Discord HTTP.
+    assert_eq!(gate_responder.defers.lock().unwrap().as_slice(), &[false]);
+    assert!(gate_responder.responses.lock().unwrap().is_empty());
+    let gate_response = gate_responder.followups.lock().expect("gate response");
     assert_eq!(gate_response.len(), 1);
+    assert!(gate_response[0].ephemeral);
     assert!(gate_response[0].content.contains("not consecrated"));
     drop(gate_response);
     let balance_after: i64 = Connection::open(database.path())
@@ -7938,6 +7997,80 @@ async fn provider_registration_channel_gate_and_autocomplete_are_live() {
         )
         .expect("balance after gate");
     assert_eq!(balance_after, balance_before - 1);
+}
+
+#[tokio::test]
+async fn slash_subcommands_defer_before_channel_lookup_penalty_and_registration() {
+    // Wrong channel: the defer precedes the channel lookup (Discord HTTP in
+    // production) and the SQLite penalty debit, with the subcommand's own
+    // visibility.
+    let gated_discord = Arc::new(TestDiscord {
+        gamba: false,
+        ..TestDiscord::default()
+    });
+    let (database, provider, _discord) = fixture_with_discord(Arc::clone(&gated_discord));
+    let mut expected_balance = 500;
+    for (interaction_id, subcommand, ephemeral) in [
+        (71, "go", false),
+        (72, "guide", false),
+        (73, "use", true),
+        (74, "prestige", true),
+    ] {
+        let responder = Arc::new(AckOrderResponder::new(
+            Arc::clone(&gated_discord),
+            database.path(),
+        ));
+        provider
+            .handler
+            .handle(
+                command_request(interaction_id, subcommand, Vec::new()),
+                responder.clone(),
+            )
+            .await
+            .expect("wrong-channel rejection");
+        let checks_before = *gated_discord.gamba_checks.lock().unwrap() - 1;
+        assert_eq!(
+            responder.observed_at_defer.lock().unwrap().as_slice(),
+            &[(checks_before, expected_balance)],
+            "{subcommand} must defer before the channel lookup and penalty"
+        );
+        assert_eq!(
+            responder.inner.defers.lock().unwrap().as_slice(),
+            &[ephemeral]
+        );
+        assert!(responder.inner.responses.lock().unwrap().is_empty());
+        let followups = responder.inner.followups.lock().unwrap();
+        assert_eq!(followups.len(), 1);
+        assert!(followups[0].ephemeral);
+        assert!(followups[0].content.contains("not consecrated"));
+        expected_balance -= 1;
+    }
+
+    // Unregistered: the registration lookup happens after the defer too.
+    let (database, provider, discord) = fixture();
+    let connection = Connection::open(database.path()).expect("open registration fixture");
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .expect("match production SQLite foreign-key mode");
+    connection
+        .execute("DELETE FROM players", [])
+        .expect("unregister miner");
+    let responder = Arc::new(AckOrderResponder::new(discord, database.path()));
+    provider
+        .handler
+        .handle(command_request(75, "info", Vec::new()), responder.clone())
+        .await
+        .expect("unregistered rejection");
+    assert_eq!(
+        responder.observed_at_defer.lock().unwrap().as_slice(),
+        &[(0, 0)]
+    );
+    assert_eq!(responder.inner.defers.lock().unwrap().as_slice(), &[false]);
+    assert!(responder.inner.responses.lock().unwrap().is_empty());
+    let followups = responder.inner.followups.lock().unwrap();
+    assert_eq!(followups.len(), 1);
+    assert!(followups[0].ephemeral);
+    assert_eq!(followups[0].content, super::REGISTER_FIRST_MESSAGE);
 }
 
 fn find<'a>(options: &'a [CommandOptionSpec], name: &str) -> &'a CommandOptionSpec {

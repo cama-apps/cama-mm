@@ -1075,3 +1075,141 @@ fn combined_trivia_withholding_never_exceeds_the_gross_reward() {
     assert_eq!(award, 0);
     assert_eq!(fixture.balance(), 3);
 }
+
+/// A gamba lookup with a fixed answer that counts how often it was asked.
+struct GambaLookupDiscord {
+    answer: Result<bool, String>,
+    lookups: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl TriviaDiscordPort for GambaLookupDiscord {
+    async fn trivia_channel_is_gamba(
+        &self,
+        _guild_id: i64,
+        _channel_id: i64,
+    ) -> Result<bool, String> {
+        self.lookups
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.answer.clone()
+    }
+
+    async fn trivia_user_avatar_url(
+        &self,
+        _user_id: i64,
+        _guild_id: i64,
+    ) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+
+    async fn edit_trivia_message(
+        &self,
+        _channel_id: u64,
+        _message_id: u64,
+        _response: InteractionResponse,
+    ) -> Result<(), InteractionResponseError> {
+        Ok(())
+    }
+
+    async fn delete_trivia_message(
+        &self,
+        _channel_id: u64,
+        _message_id: u64,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// Records how many gamba lookups had run when the command was deferred.
+struct LookupOrderResponses {
+    inner: FlowResponses,
+    discord: Arc<GambaLookupDiscord>,
+    lookups_at_defer: Mutex<Vec<usize>>,
+}
+
+#[async_trait]
+impl InteractionResponder for LookupOrderResponses {
+    async fn respond(&self, response: InteractionResponse) -> Result<(), InteractionResponseError> {
+        self.inner.respond(response).await
+    }
+
+    async fn defer(&self, ephemeral: bool) -> Result<(), InteractionResponseError> {
+        self.lookups_at_defer
+            .lock()
+            .expect("lookups at defer")
+            .push(
+                self.discord
+                    .lookups
+                    .load(std::sync::atomic::Ordering::SeqCst),
+            );
+        self.inner.defer(ephemeral).await
+    }
+
+    async fn followup(
+        &self,
+        response: InteractionResponse,
+    ) -> Result<(), InteractionResponseError> {
+        self.inner.followup(response).await
+    }
+}
+
+async fn run_trivia_with_gamba_answer(
+    fixture: &MigratedFixture,
+    answer: Result<bool, String>,
+) -> (Arc<LookupOrderResponses>, Result<(), String>) {
+    let cache = tempfile::tempdir().expect("trivia cache directory");
+    let discord = Arc::new(GambaLookupDiscord {
+        answer,
+        lookups: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let provider = TriviaRegistrationProvider::from_catalog(
+        &fixture.path,
+        flow_catalog(cache.path()),
+        TriviaImageCache::new(cache.path()).expect("image cache"),
+        &flow_config(),
+        fixture.vanity_tax(),
+        Arc::clone(&discord) as Arc<dyn TriviaDiscordPort>,
+        None,
+    )
+    .expect("construct trivia provider");
+    let responses = Arc::new(LookupOrderResponses {
+        inner: FlowResponses::default(),
+        discord,
+        lookups_at_defer: Mutex::new(Vec::new()),
+    });
+    let result = flow_registry(&provider)
+        .command_handler("trivia")
+        .expect("trivia command handler")
+        .handle(trivia_command(), responses.clone())
+        .await
+        .map_err(|error| error.to_string());
+    (responses, result)
+}
+
+#[tokio::test]
+async fn trivia_defers_before_the_gamba_lookup_and_penalty() {
+    let fixture = MigratedFixture::new();
+    let (responses, result) = run_trivia_with_gamba_answer(&fixture, Ok(false)).await;
+    result.expect("wrong-channel rejection");
+    assert_eq!(*responses.lookups_at_defer.lock().unwrap(), [0]);
+    assert_eq!(*responses.inner.deferred.lock().unwrap(), [false]);
+    assert!(responses.inner.immediate.lock().unwrap().is_empty());
+    let followups = responses.inner.followups.lock().unwrap();
+    assert_eq!(followups.len(), 1);
+    assert!(followups[0].ephemeral);
+    assert_eq!(followups[0].content, WRONG_CHANNEL_MESSAGE);
+    assert_eq!(fixture.balance(), 2);
+}
+
+#[tokio::test]
+async fn trivia_gamba_lookup_error_is_a_failure_not_a_penalty() {
+    let fixture = MigratedFixture::new();
+    let (responses, result) =
+        run_trivia_with_gamba_answer(&fixture, Err("channel fetch failed".to_owned())).await;
+    assert!(result.is_err());
+    assert_eq!(*responses.lookups_at_defer.lock().unwrap(), [0]);
+    assert_eq!(*responses.inner.deferred.lock().unwrap(), [false]);
+    assert!(responses.inner.immediate.lock().unwrap().is_empty());
+    assert!(responses.inner.followups.lock().unwrap().is_empty());
+    assert_eq!(fixture.balance(), 3);
+}

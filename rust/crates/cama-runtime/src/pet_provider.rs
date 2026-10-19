@@ -1616,21 +1616,24 @@ impl PetInteractionHandler {
             )
             .await;
         }
-        if !self.brawl_channel_allowed(guild_id, channel_id).await {
-            return respond(
-                &responder,
-                InteractionResponse::message(format!(
-                    "🐫 Pet brawls happen in <#{}> — take it to the arena.",
-                    self.state.pet_channel_id.unwrap_or_default()
-                ))
-                .ephemeral(),
-            )
-            .await;
-        }
+        // Defer before the channel check: it may fetch the thread parent from
+        // Discord, and slash commands get no automatic acknowledgement.
         responder
             .defer(false)
             .await
             .map_err(|error| error.to_string())?;
+        if !self.brawl_channel_allowed(guild_id, channel_id).await {
+            return responder
+                .followup(
+                    InteractionResponse::message(format!(
+                        "🐫 Pet brawls happen in <#{}> — take it to the arena.",
+                        self.state.pet_channel_id.unwrap_or_default()
+                    ))
+                    .ephemeral(),
+                )
+                .await
+                .map_err(|error| error.to_string());
+        }
         let display_name = self.render_player_name(user_id, guild_id).await;
         let mut interaction = brawl_interaction(user_id, guild_id, channel_id, display_name, true);
         if channel_id != self.state.pet_channel_id.unwrap_or(channel_id) {

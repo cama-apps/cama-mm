@@ -781,7 +781,17 @@ impl PredictionInteractionHandler {
         {
             return respond_ephemeral(&responder, GUILD_ONLY_MESSAGE).await;
         }
-        if !self.require_gamba(&command, &responder).await? {
+        // Slash commands get no automatic acknowledgement: defer before the
+        // gamba-channel lookup and its penalty write. Subcommands whose
+        // replies are all private defer ephemerally.
+        responder
+            .defer(matches!(
+                subcommand.as_str(),
+                "create" | "mine" | "force_refresh" | "refresh_status"
+            ))
+            .await
+            .map_err(|error| error.to_string())?;
+        if !self.require_gamba_after_defer(&command, &responder).await? {
             return Ok(());
         }
         match subcommand.as_str() {
@@ -833,7 +843,11 @@ impl PredictionInteractionHandler {
                             .await
                     }
                     MY_POSITION_ID => {
-                        if !self.require_gamba(&context, &responder).await? {
+                        responder
+                            .defer(true)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        if !self.require_gamba_after_defer(&context, &responder).await? {
                             return Ok(());
                         }
                         self.position_card(context, responder).await
@@ -883,44 +897,19 @@ impl PredictionInteractionHandler {
             })
     }
 
-    async fn require_gamba(
-        &self,
-        command: &CommandContext,
-        responder: &Arc<dyn InteractionResponder>,
-    ) -> Result<bool, String> {
-        let valid = match (command.guild_id, command.channel_id) {
-            (Some(guild_id), Some(channel_id)) => self
-                .command_discord
-                .prediction_channel_is_gamba(guild_id, channel_id)
-                .await
-                .unwrap_or(false),
-            _ => false,
-        };
-        if valid {
-            return Ok(true);
-        }
-        let repository = self.predictions.clone();
-        let user_id = command.user_id;
-        let guild_id = command.guild_id;
-        spawn_sqlite("gamba channel penalty", move || {
-            repository.debit_gamba_channel_penalty(user_id, guild_id)
-        })
-        .await?;
-        respond_ephemeral(responder, WRONG_CHANNEL_MESSAGE).await?;
-        Ok(false)
-    }
-
     async fn require_gamba_after_defer(
         &self,
         command: &CommandContext,
         responder: &Arc<dyn InteractionResponder>,
     ) -> Result<bool, String> {
+        // Only a definitive "not gamba" answer earns the penalty; a failed
+        // lookup is reported as a failure instead of charging the player.
         let valid = match (command.guild_id, command.channel_id) {
             (Some(guild_id), Some(channel_id)) => self
                 .command_discord
                 .prediction_channel_is_gamba(guild_id, channel_id)
                 .await
-                .unwrap_or(false),
+                .map_err(|error| format!("prediction channel lookup failed: {error}"))?,
             _ => false,
         };
         if valid {
@@ -1003,7 +992,7 @@ impl PredictionInteractionHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
         if !self.is_admin(&command) {
-            return respond_ephemeral(&responder, "Only admins can create prediction markets.")
+            return followup_ephemeral(&responder, "Only admins can create prediction markets.")
                 .await;
         }
         let question = string_option(options, "question")
@@ -1013,7 +1002,7 @@ impl PredictionInteractionHandler {
         let initial_fair =
             integer_option(options, "initial_fair").unwrap_or(self.config.initial_fair_default);
         if !(self.config.price_low..=self.config.price_high).contains(&initial_fair) {
-            return respond_ephemeral(
+            return followup_ephemeral(
                 &responder,
                 format!(
                     "initial_fair must be in [{}, {}].",
@@ -1022,10 +1011,6 @@ impl PredictionInteractionHandler {
             )
             .await;
         }
-        responder
-            .defer(true)
-            .await
-            .map_err(|error| error.to_string())?;
         if question.chars().count() < 5 {
             return followup(
                 &responder,
@@ -1483,7 +1468,7 @@ impl PredictionInteractionHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
         let Some(market) = self.market_for_component(command.channel_id).await? else {
-            return respond_ephemeral(&responder, "Could not identify market.").await;
+            return followup_ephemeral(&responder, "Could not identify market.").await;
         };
         let prediction_id = market.prediction_id;
         let user_id = command.user_id;
@@ -1496,11 +1481,11 @@ impl PredictionInteractionHandler {
         })
         .await?;
         let Some(position) = position else {
-            return respond_ephemeral(&responder, "You don't hold any contracts in this market.")
+            return followup_ephemeral(&responder, "You don't hold any contracts in this market.")
                 .await;
         };
         responder
-            .respond(
+            .followup(
                 InteractionResponse::message("")
                     .ephemeral()
                     .embed(position_embed(
@@ -1537,10 +1522,6 @@ impl PredictionInteractionHandler {
         options: &[InteractionOption],
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
-        responder
-            .defer(false)
-            .await
-            .map_err(|error| error.to_string())?;
         let guild_id = command.guild_id.expect("explicit guild guard");
         let show_all = boolean_option(options, "show_all").unwrap_or(false);
         let repository = self.predictions.clone();
@@ -1668,10 +1649,6 @@ impl PredictionInteractionHandler {
     ) -> Result<(), String> {
         let prediction_id = integer_option(options, "prediction_id")
             .ok_or_else(|| "view requires prediction_id".to_owned())?;
-        responder
-            .defer(false)
-            .await
-            .map_err(|error| error.to_string())?;
         if self
             .owned_market(command.guild_id, prediction_id, &responder)
             .await?
@@ -1690,10 +1667,6 @@ impl PredictionInteractionHandler {
         command: CommandContext,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
-        responder
-            .defer(true)
-            .await
-            .map_err(|error| error.to_string())?;
         let repository = self.predictions.clone();
         let user_id = command.user_id;
         let guild_id = command.guild_id;
@@ -1744,12 +1717,8 @@ impl PredictionInteractionHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
         if !self.is_admin(&command) {
-            return respond_ephemeral(&responder, "Only admins can view refresh status.").await;
+            return followup_ephemeral(&responder, "Only admins can view refresh status.").await;
         }
-        responder
-            .defer(true)
-            .await
-            .map_err(|error| error.to_string())?;
         let guild_id = command.guild_id.expect("explicit guild guard");
         let repository = self.predictions.clone();
         let refresh_seconds = self.config.refresh_seconds;
@@ -1817,16 +1786,13 @@ impl PredictionInteractionHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
         if !self.is_admin(&command) {
-            return respond_ephemeral(&responder, "Only admins can override the fair price.").await;
+            return followup_ephemeral(&responder, "Only admins can override the fair price.")
+                .await;
         }
         let prediction_id = integer_option(options, "prediction_id")
             .ok_or_else(|| "set_fair requires prediction_id".to_owned())?;
         let new_price = integer_option(options, "new_price")
             .ok_or_else(|| "set_fair requires new_price".to_owned())?;
-        responder
-            .defer(false)
-            .await
-            .map_err(|error| error.to_string())?;
         let Some(market) = self
             .owned_market(command.guild_id, prediction_id, &responder)
             .await?
@@ -1922,14 +1888,10 @@ impl PredictionInteractionHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
         if !self.is_admin(&command) {
-            return respond_ephemeral(&responder, "Only admins can force a market refresh.").await;
+            return followup_ephemeral(&responder, "Only admins can force a market refresh.").await;
         }
         let prediction_id = integer_option(options, "prediction_id")
             .ok_or_else(|| "force_refresh requires prediction_id".to_owned())?;
-        responder
-            .defer(true)
-            .await
-            .map_err(|error| error.to_string())?;
         let Some(market) = self
             .owned_market(command.guild_id, prediction_id, &responder)
             .await?
@@ -1990,14 +1952,10 @@ impl PredictionInteractionHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
         if !self.is_admin(&command) {
-            return respond_ephemeral(&responder, "Only admins can cancel markets.").await;
+            return followup_ephemeral(&responder, "Only admins can cancel markets.").await;
         }
         let prediction_id = integer_option(options, "prediction_id")
             .ok_or_else(|| "cancel requires prediction_id".to_owned())?;
-        responder
-            .defer(false)
-            .await
-            .map_err(|error| error.to_string())?;
         let Some(market) = self
             .owned_market(command.guild_id, prediction_id, &responder)
             .await?
@@ -2079,14 +2037,10 @@ impl PredictionInteractionHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
         if !self.is_admin(&command) {
-            return respond_ephemeral(&responder, "Only admins can roll back markets.").await;
+            return followup_ephemeral(&responder, "Only admins can roll back markets.").await;
         }
         let prediction_id = integer_option(options, "prediction_id")
             .ok_or_else(|| "rollback requires prediction_id".to_owned())?;
-        responder
-            .defer(false)
-            .await
-            .map_err(|error| error.to_string())?;
         let repository = self.predictions.clone();
         let resolutions = self.resolutions.clone();
         let config = self.config.clone();
@@ -2205,7 +2159,7 @@ impl PredictionInteractionHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
         if !self.is_admin(&command) {
-            return respond_ephemeral(&responder, "Only admins can resolve markets.").await;
+            return followup_ephemeral(&responder, "Only admins can resolve markets.").await;
         }
         let prediction_id = integer_option(options, "prediction_id")
             .ok_or_else(|| "resolve requires prediction_id".to_owned())?;
@@ -2213,10 +2167,6 @@ impl PredictionInteractionHandler {
             string_option(options, "outcome")
                 .ok_or_else(|| "resolve requires outcome".to_owned())?,
         )?;
-        responder
-            .defer(false)
-            .await
-            .map_err(|error| error.to_string())?;
         let Some(market) = self
             .owned_market(command.guild_id, prediction_id, &responder)
             .await?
@@ -2612,6 +2562,19 @@ async fn respond_ephemeral(
         )
         .await
         .map_err(|error| error.to_string())
+}
+
+async fn followup_ephemeral(
+    responder: &Arc<dyn InteractionResponder>,
+    content: impl Into<String>,
+) -> Result<(), String> {
+    followup(
+        responder,
+        InteractionResponse::message(content)
+            .ephemeral()
+            .without_mentions(),
+    )
+    .await
 }
 
 async fn followup(

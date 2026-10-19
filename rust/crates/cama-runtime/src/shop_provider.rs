@@ -771,6 +771,17 @@ impl ShopInteractionHandler {
             .await;
         }
         let item = required_string(&context.options, "item")?;
+        // Slash commands get no automatic acknowledgement: defer before the
+        // player-name lookups and every purchase's SQLite work. Items whose
+        // replies are all private defer ephemerally; the rest send rejections
+        // as ephemeral follow-ups.
+        responder
+            .defer(matches!(
+                item.as_str(),
+                "soft_avoid" | "package_deal" | "recalibrate_cooldown"
+            ))
+            .await
+            .map_err(|error| error.to_string())?;
         let context = self.with_rendered_player_names(context).await?;
         let target = user_option(&context, "target")?;
         match item.as_str() {
@@ -780,7 +791,7 @@ impl ShopInteractionHandler {
             }
             "announce_target" => {
                 let Some(target) = target else {
-                    return respond_ephemeral(
+                    return followup_ephemeral(
                         &responder,
                         "You selected 'Announce + Tag User' but didn't specify a target. Please provide a user to tag!",
                     )
@@ -805,7 +816,7 @@ impl ShopInteractionHandler {
             "double_or_nothing" => self.double_or_nothing(context, responder).await,
             "soft_avoid" => {
                 let Some(target) = target else {
-                    return respond_ephemeral(
+                    return followup_ephemeral(
                         &responder,
                         "You selected 'Soft Avoid' but didn't specify a target. Please provide a user to avoid being teamed with!",
                     )
@@ -815,7 +826,7 @@ impl ShopInteractionHandler {
             }
             "package_deal" => {
                 let Some(target) = target else {
-                    return respond_ephemeral(
+                    return followup_ephemeral(
                         &responder,
                         "You selected 'Package Deal' but didn't specify a target. Please provide a user you want to be teamed with!",
                     )
@@ -825,7 +836,7 @@ impl ShopInteractionHandler {
             }
             "recalibrate" => self.recalibrate(context, responder).await,
             "recalibrate_cooldown" => self.recalibration_cooldown(context, responder).await,
-            _ => respond_ephemeral(&responder, "That shop item is no longer available.").await,
+            _ => followup_ephemeral(&responder, "That shop item is no longer available.").await,
         }
     }
 
@@ -858,6 +869,10 @@ impl ShopInteractionHandler {
             )
             .await;
         };
+        responder
+            .defer(false)
+            .await
+            .map_err(|error| error.to_string())?;
         let repository = self.repository.clone();
         let now = self.clock.now()?;
         let user_id = context.user_id;
@@ -882,12 +897,11 @@ impl ShopInteractionHandler {
                 ),
                 _ => format!("{display_name} is unavailable right now."),
             };
-            if let Err(error) = respond_ephemeral(&responder, message).await {
+            if let Err(error) = followup_ephemeral(&responder, message).await {
                 warn!(user_id, %display_name, %error, "paid ping failure notice could not be sent");
             }
             return Ok(());
         }
-        let _ = responder.defer(false).await;
         let unsigned_target =
             u64::try_from(target).map_err(|_| "configured target id is invalid")?;
         responder
@@ -904,6 +918,10 @@ impl ShopInteractionHandler {
         context: CommandContext,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
+        responder
+            .defer(true)
+            .await
+            .map_err(|error| error.to_string())?;
         let repository = self.soft_avoids.clone();
         let guild_id = context.guild_id;
         let user_id = context.user_id;
@@ -912,7 +930,7 @@ impl ShopInteractionHandler {
         })
         .await?;
         if avoids.is_empty() {
-            return respond_ephemeral(&responder, "You have no active soft avoids.").await;
+            return followup_ephemeral(&responder, "You have no active soft avoids.").await;
         }
         let description = avoids
             .iter()
@@ -925,7 +943,7 @@ impl ShopInteractionHandler {
             .collect::<Vec<_>>()
             .join("\n");
         responder
-            .respond(
+            .followup(
                 InteractionResponse::message("")
                     .ephemeral()
                     .without_mentions()
@@ -944,6 +962,10 @@ impl ShopInteractionHandler {
         context: CommandContext,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
+        responder
+            .defer(true)
+            .await
+            .map_err(|error| error.to_string())?;
         let repository = self.package_deals.clone();
         let guild_id = context.guild_id;
         let user_id = context.user_id;
@@ -952,7 +974,7 @@ impl ShopInteractionHandler {
         })
         .await?;
         if deals.is_empty() {
-            return respond_ephemeral(&responder, "You have no active package deals.").await;
+            return followup_ephemeral(&responder, "You have no active package deals.").await;
         }
         let description = deals
             .iter()
@@ -965,7 +987,7 @@ impl ShopInteractionHandler {
             .collect::<Vec<_>>()
             .join("\n");
         responder
-            .respond(
+            .followup(
                 InteractionResponse::message("")
                     .ephemeral()
                     .without_mentions()
@@ -1072,6 +1094,12 @@ impl ShopInteractionHandler {
             )
             .await;
         }
+        // Slash commands get no automatic acknowledgement: defer before the
+        // pending-purchase recovery, member lookups, and debit below.
+        responder
+            .defer(false)
+            .await
+            .map_err(|error| error.to_string())?;
         let now = self.clock.now()?;
         let repository = self.manashop.clone();
         let user_id = context.user_id;
@@ -1081,11 +1109,11 @@ impl ShopInteractionHandler {
         })
         .await?;
         let Some(player) = self.load_player(context.user_id, context.guild_id).await? else {
-            return respond_ephemeral(&responder, "You need to `/player register` first.").await;
+            return followup_ephemeral(&responder, "You need to `/player register` first.").await;
         };
         let item_key = required_string(&context.options, "item")?;
         let Some(spec) = mana_item(&item_key) else {
-            return respond_ephemeral(&responder, "Unknown item.").await;
+            return followup_ephemeral(&responder, "Unknown item.").await;
         };
         let context = self.with_rendered_player_names(context).await?;
         let target = user_option(&context, "target")?;
@@ -1096,7 +1124,7 @@ impl ShopInteractionHandler {
         })
         .await?;
         if current.as_ref().is_some_and(|mana| mana.consumed_today) {
-            return respond_ephemeral(
+            return followup_ephemeral(
                 &responder,
                 "Your mana is spent — today's ultimate consumed your color. Come back tomorrow.",
             )
@@ -1107,14 +1135,14 @@ impl ShopInteractionHandler {
             .filter(|mana| mana.assigned_date == today)
             .and_then(|mana| Land::from_name(&mana.current_land));
         let Some(land) = active_land else {
-            return respond_ephemeral(
+            return followup_ephemeral(
                 &responder,
                 "You have no active mana today. Use `/mana` first.",
             )
             .await;
         };
         if land.color() != spec.color {
-            return respond_ephemeral(
+            return followup_ephemeral(
                 &responder,
                 format!(
                     "**{}** requires **{}** mana ({}). Your current mana is **{}**.",
@@ -1127,7 +1155,7 @@ impl ShopInteractionHandler {
             .await;
         }
         if spec.target_required && target.is_none() {
-            return respond_ephemeral(
+            return followup_ephemeral(
                 &responder,
                 format!("**{}** requires a `target` player.", spec.name),
             )
@@ -1138,14 +1166,14 @@ impl ShopInteractionHandler {
                 .as_ref()
                 .is_some_and(|target| target.id == context.user_id)
         {
-            return respond_ephemeral(
+            return followup_ephemeral(
                 &responder,
                 format!("**{}** must target another player.", spec.name),
             )
             .await;
         }
         if player.balance < spec.cost {
-            return respond_ephemeral(
+            return followup_ephemeral(
                 &responder,
                 format!(
                     "You need {} {JOPACOIN_EMOTE} for {}. You have {}.",
@@ -1192,12 +1220,11 @@ impl ShopInteractionHandler {
                     spec.cost, spec.name, purchase.balance
                 ),
             };
-            if let Err(error) = respond_ephemeral(&responder, message).await {
+            if let Err(error) = followup_ephemeral(&responder, message).await {
                 warn!(user_id, %error, "manashop failure notice could not be sent");
             }
             return Ok(());
         }
-        let _ = responder.defer(false).await;
 
         let ult_refund = if spec.tier == ManaTier::Ultimate {
             let repository = self.repository.clone();
@@ -1972,7 +1999,7 @@ impl ShopInteractionHandler {
             } else {
                 "You need to `/player register` before you can shop."
             };
-            return respond_ephemeral(&responder, copy).await;
+            return followup_ephemeral(&responder, copy).await;
         };
         if player.balance < cost {
             let suffix = if matches!(
@@ -1983,7 +2010,7 @@ impl ShopInteractionHandler {
             } else {
                 ""
             };
-            return respond_ephemeral(
+            return followup_ephemeral(
                 &responder,
                 format!(
                     "You need {cost} {JOPACOIN_EMOTE} for this, but you only have {}.{suffix}",
@@ -2002,7 +2029,7 @@ impl ShopInteractionHandler {
         })
         .await?;
         if !spent {
-            if let Err(error) = respond_ephemeral(
+            if let Err(error) = followup_ephemeral(
                 &responder,
                 format!("You no longer have {cost} {JOPACOIN_EMOTE} for this."),
             )
@@ -2013,7 +2040,6 @@ impl ShopInteractionHandler {
             return Ok(());
         }
 
-        let _ = responder.defer(false).await;
         let (title, description, color, footer, thumbnail, field) = match product {
             SimpleProduct::JopaCoin => (
                 "🪙 Jopa Coin(TM) Minted!",
@@ -2203,13 +2229,12 @@ impl ShopInteractionHandler {
                     self.config.double_or_nothing_cost
                 ),
             };
-            respond_ephemeral(&responder, message).await?;
+            followup_ephemeral(&responder, message).await?;
             if settlement.reason == Some(PurchaseFailureReason::OnCooldown) {
                 self.emit_neon_cooldown(&context, now).await;
             }
             return Ok(());
         }
-        let _ = responder.defer(false).await;
         let flavor_event = if settlement.won {
             FlavorEvent::DoubleOrNothingWin
         } else {
@@ -2320,14 +2345,14 @@ impl ShopInteractionHandler {
         target: UserOption,
     ) -> Result<(), InteractionHandlerError> {
         if target.id == context.user_id {
-            return respond_ephemeral(&responder, "You can't soft avoid yourself.").await;
+            return followup_ephemeral(&responder, "You can't soft avoid yourself.").await;
         }
         if self
             .load_player(context.user_id, context.guild_id)
             .await?
             .is_none()
         {
-            return respond_ephemeral(
+            return followup_ephemeral(
                 &responder,
                 "You need to `/player register` before you can shop.",
             )
@@ -2338,7 +2363,7 @@ impl ShopInteractionHandler {
             .await?
             .is_none()
         {
-            return respond_ephemeral(&responder, "The target player is not registered.").await;
+            return followup_ephemeral(&responder, "The target player is not registered.").await;
         }
         let soft_avoids = self.soft_avoids.clone();
         let user_id = context.user_id;
@@ -2352,7 +2377,7 @@ impl ShopInteractionHandler {
             .iter()
             .find(|avoid| avoid.avoided_discord_id == target.id)
         {
-            return respond_ephemeral(
+            return followup_ephemeral(
                 &responder,
                 format!(
                     "Your soft avoid for **{}** is already active with {} games remaining.",
@@ -2374,9 +2399,6 @@ impl ShopInteractionHandler {
             }),
             self.config.soft_avoid_cost,
         );
-        if responder.defer(true).await.is_err() {
-            return Ok(());
-        }
         let repository = self.soft_avoids.clone();
         let result = run_blocking("soft avoid purchase", move || {
             repository.purchase_avoid(Some(guild_id), user_id, target_id, cost, SOFT_AVOID_GAMES)
@@ -2443,17 +2465,17 @@ impl ShopInteractionHandler {
         target: UserOption,
     ) -> Result<(), InteractionHandlerError> {
         if target.id == context.user_id {
-            return respond_ephemeral(&responder, "You can't package deal with yourself.").await;
+            return followup_ephemeral(&responder, "You can't package deal with yourself.").await;
         }
         let Some(player) = self.load_player(context.user_id, context.guild_id).await? else {
-            return respond_ephemeral(
+            return followup_ephemeral(
                 &responder,
                 "You need to `/player register` before you can shop.",
             )
             .await;
         };
         let Some(target_player) = self.load_player(target.id, context.guild_id).await? else {
-            return respond_ephemeral(&responder, "The target player is not registered.").await;
+            return followup_ephemeral(&responder, "The target player is not registered.").await;
         };
         let divisor = self.config.package_deal_rating_divisor;
         let rating =
@@ -2465,9 +2487,6 @@ impl ShopInteractionHandler {
             .config
             .package_deal_games
             .clamp(1, PACKAGE_DEAL_MAX_GAMES);
-        if responder.defer(true).await.is_err() {
-            return Ok(());
-        }
         let repository = self.package_deals.clone();
         let guild_id = context.guild_id;
         let user_id = context.user_id;
@@ -2564,7 +2583,7 @@ impl ShopInteractionHandler {
             || "Recalibration is on cooldown.".to_owned(),
             |ends| format!("Recalibration is on cooldown. You can recalibrate again <t:{ends}:R>."),
         );
-        respond_ephemeral(&responder, message).await
+        followup_ephemeral(&responder, message).await
     }
 
     async fn recalibrate(
@@ -2574,7 +2593,7 @@ impl ShopInteractionHandler {
     ) -> Result<(), InteractionHandlerError> {
         let now = self.clock.now()?;
         let Some(player) = self.load_player(context.user_id, context.guild_id).await? else {
-            return respond_ephemeral(
+            return followup_ephemeral(
                 &responder,
                 "You need to `/player register` before you can recalibrate.",
             )
@@ -2589,14 +2608,14 @@ impl ShopInteractionHandler {
         .await?;
         match eligibility {
             RecalibrationEligibility::NotRegistered => {
-                return respond_ephemeral(
+                return followup_ephemeral(
                     &responder,
                     "You need to `/player register` before you can recalibrate.",
                 )
                 .await;
             }
             RecalibrationEligibility::NoRating => {
-                return respond_ephemeral(
+                return followup_ephemeral(
                     &responder,
                     "You don't have a rating yet. Play some games first!",
                 )
@@ -2606,7 +2625,7 @@ impl ShopInteractionHandler {
                 games_played,
                 min_games,
             } => {
-                return respond_ephemeral(
+                return followup_ephemeral(
                     &responder,
                     format!(
                         "You need at least {min_games} games to recalibrate (you have {games_played})."
@@ -2615,7 +2634,7 @@ impl ShopInteractionHandler {
                 .await;
             }
             RecalibrationEligibility::OnCooldown { cooldown_ends_at } => {
-                return respond_ephemeral(
+                return followup_ephemeral(
                     &responder,
                     format!(
                         "Recalibration is on cooldown. You can recalibrate again <t:{cooldown_ends_at}:R>."
@@ -2642,7 +2661,7 @@ impl ShopInteractionHandler {
         let cost = ((self.config.recalibrate_cost as f64) * (1.0 - discount)).floor() as i64;
         let cost = cost.max(1);
         if player.balance < cost {
-            return respond_ephemeral(
+            return followup_ephemeral(
                 &responder,
                 format!(
                     "You need **{cost}** {JOPACOIN_EMOTE} to recalibrate but only have **{}** {JOPACOIN_EMOTE}.",
@@ -2663,13 +2682,12 @@ impl ShopInteractionHandler {
         })
         .await?;
         if !spent {
-            return respond_ephemeral(
+            return followup_ephemeral(
                 &responder,
                 format!("You no longer have {cost} {JOPACOIN_EMOTE} for this."),
             )
             .await;
         }
-        let _ = responder.defer(false).await;
         let recalibration = self.recalibration.clone();
         let result = run_blocking("rating recalibration", move || {
             recalibration.recalibrate_at(user_id, Some(guild_id), now)
@@ -3311,6 +3329,20 @@ async fn respond_ephemeral(
 ) -> Result<(), InteractionHandlerError> {
     responder
         .respond(
+            InteractionResponse::message(content.into())
+                .ephemeral()
+                .without_mentions(),
+        )
+        .await
+        .map_err(|error| error.to_string().into())
+}
+
+async fn followup_ephemeral(
+    responder: &Arc<dyn InteractionResponder>,
+    content: impl Into<String>,
+) -> Result<(), InteractionHandlerError> {
+    responder
+        .followup(
             InteractionResponse::message(content.into())
                 .ephemeral()
                 .without_mentions(),
