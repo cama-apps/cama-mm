@@ -67,7 +67,7 @@ use cama_db::shop_runtime::{
     ShopRuntimeRepository,
 };
 use cama_db::tax_repository::{TaxLedgerEntry, TaxPlayerSnapshot, TaxRepository};
-use cama_db::tip_repository::TipRepository;
+use cama_db::tip_repository::{TipRepository, TipRepositoryError};
 use cama_db::wheel_spin_repository::{NewWheelSpin, WheelSpinRepository};
 use cama_domain::embed_safety::{FIELD_VALUE_LIMIT, MAX_FIELDS, TOTAL_LIMIT, truncate_field};
 use cama_domain::formatting::JOPACOIN_EMOTE;
@@ -5062,19 +5062,14 @@ impl BettingInteractionHandler {
             {
                 return Err(format!("<@{target}> is not registered."));
             }
-            let loan = LoanRepository::new(&path)
-                .get_state(user_id, Some(guild_id))
-                .map_err(|error| error.to_string())?;
-            if let Some(state) = loan.filter(|state| state.outstanding_principal > 0) {
-                return Err(format!(
-                    "You cannot tip while you have an outstanding loan. Play a match to repay your loan ({} {}).",
-                    state.outstanding_total().unwrap_or_default(),
-                    JOPACOIN_EMOTE,
-                ));
-            }
             TipRepository::new(&path)
                 .tip_atomic(Some(guild_id), user_id, target, amount, fee, tithe)
-                .map_err(|error| error.to_string())
+                .map_err(|error| match error {
+                    TipRepositoryError::OutstandingLoan { outstanding_total } => format!(
+                        "You cannot tip while you have an outstanding loan. Play a match to repay your loan ({outstanding_total} {JOPACOIN_EMOTE})."
+                    ),
+                    error => error.to_string(),
+                })
         })
         .await;
         match result {

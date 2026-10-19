@@ -105,6 +105,8 @@ pub enum TipRepositoryError {
         fee: i64,
         tithe: i64,
     },
+    #[error("You cannot tip while you have an outstanding loan ({outstanding_total}).")]
+    OutstandingLoan { outstanding_total: i64 },
     #[error("tip amount arithmetic exceeded SQLite's signed 64-bit range")]
     AmountOverflow,
     #[error("Sender debit failed after balance validation.")]
@@ -486,6 +488,21 @@ impl TipRepository {
         }
         let to_balance = player_balance(&transaction, to_discord_id, guild_id)?
             .ok_or(TipRepositoryError::RecipientNotFound)?;
+        // Checked under the same write lock as the debit so a loan taken
+        // concurrently cannot slip past the check.
+        let outstanding_loan = transaction
+            .query_row(
+                "SELECT COALESCE(outstanding_principal, 0), COALESCE(outstanding_fee, 0)
+                 FROM loan_state WHERE discord_id = ?1 AND guild_id = ?2",
+                params![from_discord_id, guild_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+        if let Some((principal, fee)) = outstanding_loan.filter(|(principal, _)| *principal > 0) {
+            return Err(TipRepositoryError::OutstandingLoan {
+                outstanding_total: principal.saturating_add(fee),
+            });
+        }
 
         let sender_metadata = format!(
             r#"{{"amount": {amount}, "fee": {fee}, "tithe": {tithe}, "total_cost": {total_cost}}}"#
@@ -750,6 +767,13 @@ mod tests {
                          jopacoin_balance     INTEGER DEFAULT 3,
                          lowest_balance_ever INTEGER,
                          updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                         PRIMARY KEY (discord_id, guild_id)
+                     );
+                     CREATE TABLE loan_state (
+                         discord_id            INTEGER NOT NULL,
+                         guild_id              INTEGER NOT NULL DEFAULT 0,
+                         outstanding_principal INTEGER DEFAULT 0,
+                         outstanding_fee       INTEGER DEFAULT 0,
                          PRIMARY KEY (discord_id, guild_id)
                      );
                      CREATE TABLE nonprofit_fund (
@@ -1457,6 +1481,47 @@ mod tests {
             }
         ));
         assert!(error.to_string().contains("Insufficient"));
+    }
+
+    #[test]
+    fn test_tip_atomic_rejects_a_sender_with_an_outstanding_loan() {
+        let fixture = atomic_fixture(100, 50);
+        let connection = Connection::open(fixture.file.path()).expect("open loan state");
+        connection
+            .execute(
+                "INSERT INTO loan_state(discord_id,guild_id,outstanding_principal,outstanding_fee)
+                 VALUES (1,?1,40,8)",
+                [TEST_GUILD_ID],
+            )
+            .expect("seed outstanding loan");
+        let error = fixture
+            .repository
+            .tip_atomic(Some(TEST_GUILD_ID), 1, 2, 10, 1, 0)
+            .expect_err("an outstanding loan blocks tipping");
+        assert!(matches!(
+            error,
+            TipRepositoryError::OutstandingLoan {
+                outstanding_total: 48
+            }
+        ));
+        assert_eq!((fixture.balance(1), fixture.balance(2)), (100, 50));
+
+        // A loan in another guild, or a repaid loan, does not block the tip.
+        connection
+            .execute(
+                "UPDATE loan_state SET guild_id=?1 WHERE discord_id=1",
+                [TEST_GUILD_ID + 1],
+            )
+            .expect("move loan to another guild");
+        tip(&fixture, 10, 1);
+        connection
+            .execute(
+                "INSERT INTO loan_state(discord_id,guild_id,outstanding_principal,outstanding_fee)
+                 VALUES (1,?1,0,0)",
+                [TEST_GUILD_ID],
+            )
+            .expect("seed repaid loan");
+        tip(&fixture, 10, 1);
     }
 
     #[test]
