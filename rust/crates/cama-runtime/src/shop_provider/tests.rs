@@ -422,18 +422,44 @@ fn mana_schema_preserves_all_fifteen_fixed_choices() {
 }
 
 #[tokio::test]
-async fn paid_ping_delivers_after_lapsed_defer_and_mentions_only_configured_target() {
+async fn paid_ping_defers_before_debit_and_mentions_only_configured_target() {
     let fixture = Fixture::migrated();
     fixture.player(BUYER, 100);
-    let responder = Arc::new(Responder::with_failed_defer());
+    let balance = |fixture: &Fixture| {
+        fixture
+            .connection()
+            .query_row(
+                "SELECT jopacoin_balance FROM players WHERE discord_id=?1 AND guild_id=?2",
+                params![i64::try_from(BUYER).unwrap(), i64::try_from(GUILD).unwrap()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+    };
+    // The defer is the first callback, so a lapsed interaction fails before
+    // the purchase instead of charging for a ping it cannot acknowledge.
+    let lapsed = Arc::new(Responder::with_failed_defer());
+    let result = fixture
+        .registry()
+        .command_handler("shop")
+        .expect("Shop handler")
+        .handle(command("pingedash", Vec::new(), 1), lapsed.clone())
+        .await;
+    assert!(result.is_err());
+    assert_eq!(lapsed.defers.lock().expect("defers").as_slice(), [false]);
+    assert!(lapsed.followups.lock().expect("followups").is_empty());
+    assert!(lapsed.immediate.lock().expect("immediate").is_empty());
+    assert_eq!(balance(&fixture), 100);
+
+    let responder = Arc::new(Responder::default());
     fixture
         .registry()
         .command_handler("shop")
         .expect("Shop handler")
-        .handle(command("pingedash", Vec::new(), 1), responder.clone())
+        .handle(command("pingedash", Vec::new(), 2), responder.clone())
         .await
         .expect("paid ping delivery");
     assert_eq!(responder.defers.lock().expect("defers").as_slice(), [false]);
+    assert!(responder.immediate.lock().expect("immediate").is_empty());
     let followup = responder.followups.lock().expect("followups")[0].clone();
     assert_eq!(
         followup.content,
@@ -443,17 +469,7 @@ async fn paid_ping_delivers_after_lapsed_defer_and_mentions_only_configured_targ
         followup.allowed_mentions,
         InteractionAllowedMentions::Users(vec![555])
     );
-    assert_eq!(
-        fixture
-            .connection()
-            .query_row(
-                "SELECT jopacoin_balance FROM players WHERE discord_id=?1 AND guild_id=?2",
-                params![i64::try_from(BUYER).unwrap(), i64::try_from(GUILD).unwrap()],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap(),
-        90
-    );
+    assert_eq!(balance(&fixture), 90);
     assert!(
         fixture
             .discord
@@ -747,6 +763,97 @@ async fn failed_ultimate_with_conduit_does_not_keep_a_rebate() {
 }
 
 #[tokio::test]
+async fn purchases_defer_before_any_player_lookup_or_debit() {
+    let fixture = Fixture::migrated();
+    fixture.player(BUYER, 1_000);
+    let today = pacific_mana_day(unix_timestamp().unwrap()).unwrap();
+    fixture
+        .connection()
+        .execute(
+            "INSERT INTO player_mana(discord_id,guild_id,current_land,assigned_date,consumed_today)
+         VALUES(?1,?2,'Plains',?3,0)",
+            params![BUYER as i64, GUILD as i64, today],
+        )
+        .unwrap();
+    let balance = || -> i64 {
+        fixture
+            .connection()
+            .query_row(
+                "SELECT jopacoin_balance FROM players WHERE discord_id=?1 AND guild_id=?2",
+                params![BUYER as i64, GUILD as i64],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    // A fresh provider per purchase keeps the per-user shop rate limit out
+    // of the way.
+    let fresh_registry = || {
+        let port: Arc<dyn ShopDiscordPort> = fixture.discord.clone();
+        let provider = ShopRegistrationProvider::new(&fixture.path, &config(), port, None)
+            .expect("Shop provider");
+        let mut builder = RegistryBuilder::default();
+        builder
+            .add_provider(&provider)
+            .expect("register Shop provider");
+        builder.build()
+    };
+    // A lapsed acknowledgement must stop each purchase before it touches the
+    // wallet: the defer is the first callback, ahead of every SQLite read.
+    for (index, (subcommand, options, ephemeral)) in [
+        ("buy", vec![string("item", "jopa_coin")], false),
+        ("buy", vec![string("item", "double_or_nothing")], false),
+        ("buy", vec![string("item", "recalibrate")], false),
+        (
+            "buy",
+            vec![string("item", "soft_avoid"), user("target", TARGET)],
+            true,
+        ),
+        ("mana", vec![string("item", "aegis")], false),
+        ("avoids", Vec::new(), true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let responder = Arc::new(Responder::with_failed_defer());
+        let result = fresh_registry()
+            .command_handler("shop")
+            .unwrap()
+            .handle(
+                command(subcommand, options, 24_000 + u64::try_from(index).unwrap()),
+                responder.clone(),
+            )
+            .await;
+        assert!(result.is_err(), "{subcommand} #{index} must fail");
+        assert_eq!(
+            responder.defers.lock().expect("defers").as_slice(),
+            [ephemeral]
+        );
+        assert!(responder.immediate.lock().expect("immediate").is_empty());
+        assert!(responder.followups.lock().expect("followups").is_empty());
+        assert_eq!(balance(), 1_000, "{subcommand} #{index} charged");
+    }
+
+    // Unregistered buyers are rejected by follow-up after the defer.
+    let mut request = command("buy", vec![string("item", "jopa_coin")], 24_100);
+    if let InteractionRequest::Command { user_id, .. } = &mut request {
+        *user_id = TARGET;
+    }
+    let responder = Arc::new(Responder::default());
+    fresh_registry()
+        .command_handler("shop")
+        .unwrap()
+        .handle(request, responder.clone())
+        .await
+        .expect("unregistered rejection");
+    assert_eq!(responder.defers.lock().expect("defers").as_slice(), [false]);
+    assert!(responder.immediate.lock().expect("immediate").is_empty());
+    let followups = responder.followups.lock().expect("followups");
+    assert_eq!(followups.len(), 1);
+    assert!(followups[0].ephemeral);
+    assert!(followups[0].content.contains("/player register"));
+}
+
+#[tokio::test]
 async fn successful_mana_effect_is_completed_before_delivery_failure() {
     let fixture = Fixture::migrated();
     fixture.player(BUYER, 100);
@@ -975,7 +1082,9 @@ async fn all_fifteen_mana_items_complete_durably_and_reject_replay_after_restart
             )
             .await
             .unwrap_or_else(|error| panic!("{} restart retry failed: {error}", spec.key));
-        let immediate = retry.immediate.lock().expect("immediate");
+        assert_eq!(retry.defers.lock().expect("defers").as_slice(), [false]);
+        assert!(retry.immediate.lock().expect("immediate").is_empty());
+        let immediate = retry.followups.lock().expect("followups");
         assert_eq!(immediate.len(), 1, "{} restart retry response", spec.key);
         assert!(
             immediate[0].ephemeral,
@@ -1153,7 +1262,9 @@ async fn double_or_nothing_settles_once_and_restart_enforces_cooldown() {
         )
         .await
         .expect("cooldown retry");
-    let immediate = retry.immediate.lock().expect("immediate");
+    assert_eq!(retry.defers.lock().expect("defers").as_slice(), [false]);
+    assert!(retry.immediate.lock().expect("immediate").is_empty());
+    let immediate = retry.followups.lock().expect("followups");
     assert_eq!(immediate.len(), 1);
     assert!(immediate[0].ephemeral);
     assert!(immediate[0].content.contains("cooldown"));
@@ -1225,7 +1336,9 @@ async fn avoid_and_package_purchases_are_private_listable_and_restart_durable() 
             .handle(command(subcommand, Vec::new(), 22_100), responder.clone())
             .await
             .unwrap_or_else(|error| panic!("{subcommand} command failed: {error}"));
-        let immediate = responder.immediate.lock().expect("immediate");
+        assert_eq!(responder.defers.lock().expect("defers").as_slice(), [true]);
+        assert!(responder.immediate.lock().expect("immediate").is_empty());
+        let immediate = responder.followups.lock().expect("followups");
         assert_eq!(immediate.len(), 1);
         assert!(immediate[0].ephemeral);
         assert_eq!(immediate[0].embeds[0].title.as_deref(), Some(title));
@@ -1766,7 +1879,9 @@ async fn recalibration_debit_and_uncertainty_reset_are_atomic_and_restart_durabl
         )
         .await
         .expect("recalibration cooldown retry");
-    let immediate = retry.immediate.lock().expect("immediate");
+    assert_eq!(retry.defers.lock().expect("defers").as_slice(), [false]);
+    assert!(retry.immediate.lock().expect("immediate").is_empty());
+    let immediate = retry.followups.lock().expect("followups");
     assert_eq!(immediate.len(), 1);
     assert!(immediate[0].ephemeral);
     assert!(immediate[0].content.contains("cooldown"));

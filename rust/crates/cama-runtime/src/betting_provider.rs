@@ -5440,6 +5440,12 @@ impl BettingInteractionHandler {
     ) -> Result<(), String> {
         let amount = parse_nested_i64(options, "amount")
             .ok_or_else(|| "Amount must be positive.".to_owned())?;
+        // Defer before the registration lookup: slash commands get no
+        // automatic acknowledgement.
+        responder
+            .defer(false)
+            .await
+            .map_err(|error| error.to_string())?;
         let registration_path = self.database_path.clone();
         let registered = sqlite("loan registration", move || {
             PlayerRepository::new(registration_path)
@@ -5448,16 +5454,12 @@ impl BettingInteractionHandler {
         })
         .await?;
         if !registered {
-            return respond_ephemeral(
+            return followup_ephemeral(
                 responder,
                 "You need to /player register before taking loans.",
             )
             .await;
         }
-        responder
-            .defer(false)
-            .await
-            .map_err(|error| error.to_string())?;
         let effects = {
             let path = self.database_path.clone();
             sqlite("loan mana effects", move || {

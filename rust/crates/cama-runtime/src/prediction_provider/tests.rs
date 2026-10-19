@@ -149,6 +149,8 @@ impl GambaGuildSource for FakeGambaGuilds {
 #[derive(Default)]
 struct FakeCommandDiscord {
     is_gamba: AtomicBool,
+    fail_gamba_lookup: AtomicBool,
+    gamba_lookups: AtomicU64,
     created: Mutex<Vec<(i64, DiscordMessage, String, DiscordMessage)>>,
     edits: Mutex<Vec<(i64, i64, DiscordMessage)>>,
     reopened: Mutex<Vec<i64>>,
@@ -177,6 +179,10 @@ impl PredictionCommandDiscordPort for FakeCommandDiscord {
     ) -> Result<bool, String> {
         assert_eq!(guild_id, GUILD);
         assert!(channel_id == COMMAND_CHANNEL || channel_id == THREAD_ID);
+        self.gamba_lookups.fetch_add(1, Ordering::SeqCst);
+        if self.fail_gamba_lookup.load(Ordering::SeqCst) {
+            return Err("channel fetch failed".to_owned());
+        }
         Ok(self.is_gamba.load(Ordering::SeqCst))
     }
 
@@ -845,9 +851,11 @@ async fn wrong_channel_charges_one_coin_and_returns_python_denial_copy() {
         .expect("wrong-channel policy");
 
     let responses = responder.snapshot();
-    assert_eq!(responses.immediate.len(), 1);
-    assert!(responses.immediate[0].ephemeral);
-    assert_eq!(responses.immediate[0].content, WRONG_CHANNEL_MESSAGE);
+    assert_eq!(responses.deferred, [false]);
+    assert!(responses.immediate.is_empty());
+    assert_eq!(responses.followups.len(), 1);
+    assert!(responses.followups[0].ephemeral);
+    assert_eq!(responses.followups[0].content, WRONG_CHANNEL_MESSAGE);
     let (balance, lowest): (i64, i64) = fixture
         .connection()
         .query_row(
@@ -858,6 +866,148 @@ async fn wrong_channel_charges_one_coin_and_returns_python_denial_copy() {
         )
         .expect("read charged wallet");
     assert_eq!((balance, lowest), (9, 9));
+}
+
+/// Records how many gamba-channel lookups had run when the interaction was
+/// acknowledged.
+struct LookupOrderResponder {
+    inner: CapturingResponder,
+    discord: Arc<FakeCommandDiscord>,
+    lookups_at_defer: Mutex<Vec<u64>>,
+}
+
+impl LookupOrderResponder {
+    fn new(discord: Arc<FakeCommandDiscord>) -> Self {
+        Self {
+            inner: CapturingResponder::default(),
+            discord,
+            lookups_at_defer: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl InteractionResponder for LookupOrderResponder {
+    async fn respond(&self, response: InteractionResponse) -> Result<(), InteractionResponseError> {
+        self.inner.respond(response).await
+    }
+
+    async fn defer(&self, ephemeral: bool) -> Result<(), InteractionResponseError> {
+        self.lookups_at_defer
+            .lock()
+            .expect("lookups at defer")
+            .push(self.discord.gamba_lookups.load(Ordering::SeqCst));
+        self.inner.defer(ephemeral).await
+    }
+
+    async fn followup(
+        &self,
+        response: InteractionResponse,
+    ) -> Result<(), InteractionResponseError> {
+        self.inner.followup(response).await
+    }
+}
+
+#[tokio::test]
+async fn predict_defers_before_gamba_lookup_and_lookup_errors_charge_nothing() {
+    let fixture = Fixture::migrated();
+    fixture.player(TRADER, 10);
+    fixture.market("Will the gamba lookup run after the defer?");
+    let registry = fixture.registry();
+    let wallet = || -> i64 {
+        fixture
+            .connection()
+            .query_row(
+                "SELECT jopacoin_balance FROM players WHERE discord_id=?1 AND guild_id=?2",
+                params![TRADER, GUILD],
+                |row| row.get(0),
+            )
+            .expect("read wallet")
+    };
+
+    // Slash command: the defer precedes the channel lookup and the penalty.
+    fixture.command.set_gamba(false);
+    let wrong_channel = Arc::new(LookupOrderResponder::new(Arc::clone(&fixture.command)));
+    registry
+        .command_handler("predict")
+        .expect("predict command handler")
+        .handle(
+            command_request("mine", vec![], TRADER, None),
+            wrong_channel.clone(),
+        )
+        .await
+        .expect("wrong-channel policy");
+    let lookups = fixture.command.gamba_lookups.load(Ordering::SeqCst);
+    assert_eq!(
+        wrong_channel.lookups_at_defer.lock().unwrap().as_slice(),
+        &[lookups - 1]
+    );
+    let responses = wrong_channel.inner.snapshot();
+    assert_eq!(responses.deferred, [true]);
+    assert!(responses.immediate.is_empty());
+    assert_eq!(responses.followups[0].content, WRONG_CHANNEL_MESSAGE);
+    assert_eq!(wallet(), 9);
+
+    // A failed lookup is a failure, not a definitive wrong-channel answer:
+    // nothing is charged and no denial copy is sent.
+    fixture
+        .command
+        .fail_gamba_lookup
+        .store(true, Ordering::SeqCst);
+    let failed = Arc::new(LookupOrderResponder::new(Arc::clone(&fixture.command)));
+    let result = registry
+        .command_handler("predict")
+        .expect("predict command handler")
+        .handle(
+            command_request("list", vec![], TRADER, None),
+            failed.clone(),
+        )
+        .await;
+    assert!(result.is_err());
+    let responses = failed.inner.snapshot();
+    assert_eq!(responses.deferred, [false]);
+    assert!(responses.immediate.is_empty());
+    assert!(responses.followups.is_empty());
+    assert_eq!(wallet(), 9);
+
+    // MY POSITION component: acknowledged before the lookup as well.
+    fixture
+        .command
+        .fail_gamba_lookup
+        .store(false, Ordering::SeqCst);
+    fixture.command.set_gamba(true);
+    let position = Arc::new(LookupOrderResponder::new(Arc::clone(&fixture.command)));
+    registry
+        .component_handler(MY_POSITION_ID)
+        .expect("position component handler")
+        .handle(
+            InteractionRequest::Component {
+                interaction_id: 5,
+                custom_id: MY_POSITION_ID.to_owned(),
+                user_id: u64::try_from(TRADER).expect("positive trader ID"),
+                user_display_name: "Prediction Trader".to_owned(),
+                guild_id: Some(u64::try_from(GUILD).expect("positive guild ID")),
+                channel_id: Some(u64::try_from(THREAD_ID).expect("positive thread ID")),
+                member_permissions: None,
+                values: vec![],
+            },
+            position.clone(),
+        )
+        .await
+        .expect("position without contracts");
+    let lookups_after = fixture.command.gamba_lookups.load(Ordering::SeqCst);
+    assert_eq!(
+        position.lookups_at_defer.lock().unwrap().as_slice(),
+        &[lookups_after - 1]
+    );
+    let responses = position.inner.snapshot();
+    assert_eq!(responses.deferred, [true]);
+    assert!(responses.immediate.is_empty());
+    assert!(responses.followups[0].ephemeral);
+    assert_eq!(
+        responses.followups[0].content,
+        "You don't hold any contracts in this market."
+    );
 }
 
 #[tokio::test]
@@ -1674,11 +1824,13 @@ async fn remaining_live_subcommands_and_position_button_preserve_python_visibili
         .await
         .expect("prediction position card");
     let position = position.snapshot();
-    assert_eq!(position.immediate.len(), 1);
-    assert!(position.immediate[0].ephemeral);
-    assert!(position.immediate[0].components.is_empty());
+    assert_eq!(position.deferred, [true]);
+    assert!(position.immediate.is_empty());
+    assert_eq!(position.followups.len(), 1);
+    assert!(position.followups[0].ephemeral);
+    assert!(position.followups[0].components.is_empty());
     assert_eq!(
-        position.immediate[0].embeds[0].title.as_deref(),
+        position.followups[0].embeds[0].title.as_deref(),
         Some("Your position in market #1")
     );
 }

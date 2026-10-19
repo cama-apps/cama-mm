@@ -163,12 +163,14 @@ impl InteractionResponder for TestResponder {
 
 struct ParentTransport {
     parent: StdMutex<Option<u64>>,
+    parent_lookups: StdMutex<usize>,
 }
 
 impl ParentTransport {
     fn new(parent: Option<u64>) -> Self {
         Self {
             parent: StdMutex::new(parent),
+            parent_lookups: StdMutex::new(0),
         }
     }
 }
@@ -283,6 +285,7 @@ impl DiscordTransport for ParentTransport {
         _guild_id: u64,
         _channel_id: u64,
     ) -> Result<Option<u64>, String> {
+        *self.parent_lookups.lock().expect("parent lookups") += 1;
         Ok(*self.parent.lock().expect("parent"))
     }
 }
@@ -338,6 +341,72 @@ async fn brawl_channel_gate_accepts_channel_and_parent_thread_only() {
             .brawl_channel_allowed(GUILD as i64, 77_004)
             .await
     );
+}
+
+/// Records how many thread-parent lookups had run when the command deferred.
+struct ParentLookupOrderResponder {
+    inner: TestResponder,
+    discord: Arc<ParentTransport>,
+    lookups_at_defer: StdMutex<Vec<usize>>,
+}
+
+#[async_trait]
+impl InteractionResponder for ParentLookupOrderResponder {
+    async fn respond(&self, response: InteractionResponse) -> Result<(), InteractionResponseError> {
+        self.inner.respond(response).await
+    }
+
+    async fn defer(&self, ephemeral: bool) -> Result<(), InteractionResponseError> {
+        let lookups = *self.discord.parent_lookups.lock().expect("parent lookups");
+        self.lookups_at_defer
+            .lock()
+            .expect("lookups at defer")
+            .push(lookups);
+        self.inner.defer(ephemeral).await
+    }
+
+    async fn followup(
+        &self,
+        response: InteractionResponse,
+    ) -> Result<(), InteractionResponseError> {
+        self.inner.followup(response).await
+    }
+}
+
+#[tokio::test]
+async fn brawl_defers_before_the_thread_parent_lookup() {
+    let database = NamedTempFile::new().expect("temporary database");
+    initialize_or_migrate(database.path()).expect("canonical schema");
+    let discord = Arc::new(ParentTransport::new(Some(88_888)));
+    let reminders = ReminderRegistrationProvider::new(database.path(), &config(), discord.clone());
+    let provider = PetRegistrationProvider::new(
+        database.path(),
+        &config(),
+        discord.clone(),
+        reminders.hooks(),
+        None,
+        None,
+    );
+    let mut request = brawl_command(RECIPIENT, 0);
+    if let InteractionRequest::Command { channel_id, .. } = &mut request {
+        *channel_id = Some(77_005);
+    }
+    let responder = Arc::new(ParentLookupOrderResponder {
+        inner: TestResponder::new(false),
+        discord: Arc::clone(&discord),
+        lookups_at_defer: StdMutex::new(Vec::new()),
+    });
+    provider
+        .handler
+        .handle(request, responder.clone())
+        .await
+        .expect("wrong-channel brawl rejection");
+    assert_eq!(*responder.lookups_at_defer.lock().unwrap(), [0]);
+    assert_eq!(*discord.parent_lookups.lock().unwrap(), 1);
+    assert_eq!(responder.inner.call_log(), ["defer", "followup"]);
+    let followups = responder.inner.followups.lock().unwrap();
+    assert!(followups[0].ephemeral);
+    assert!(followups[0].content.contains("take it to the arena"));
 }
 
 #[tokio::test]

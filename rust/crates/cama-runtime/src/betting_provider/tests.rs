@@ -398,6 +398,59 @@ async fn economy_invest_rate_limit_returns_ephemeral_retry_copy() {
     );
 }
 
+#[tokio::test]
+async fn economy_loan_defers_before_the_registration_lookup() {
+    let config = ApplicationConfig::from_lookup(|name| {
+        (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
+    })
+    .expect("loan configuration");
+    let options = vec![InteractionOption {
+        name: "amount".to_owned(),
+        value: InteractionValue::Integer(50),
+    }];
+
+    // An unmigrated database makes the registration lookup fail, so only an
+    // acknowledgement sent before that SQLite work can appear here.
+    let unmigrated = NamedTempFile::new().expect("unmigrated loan database");
+    let provider = BettingRegistrationProvider::new(
+        unmigrated.path(),
+        &config,
+        Arc::new(crate::serenity_transport::SerenityDiscordTransport::new()),
+    );
+    let recording = RecordingResponder::default();
+    let responder: Arc<dyn InteractionResponder> = Arc::new(recording.clone());
+    let result = provider
+        .handler
+        .loan(1, Some(42), None, &options, &responder)
+        .await;
+    assert!(result.is_err());
+    assert_eq!(*recording.events.lock().unwrap(), ["defer"]);
+    assert_eq!(*recording.defers.lock().unwrap(), [false]);
+
+    // Unregistered players get the private rejection as a follow-up.
+    let database = NamedTempFile::new().expect("loan database");
+    initialize_or_migrate(database.path()).expect("loan schema");
+    let provider = BettingRegistrationProvider::new(
+        database.path(),
+        &config,
+        Arc::new(crate::serenity_transport::SerenityDiscordTransport::new()),
+    );
+    let recording = RecordingResponder::default();
+    let responder: Arc<dyn InteractionResponder> = Arc::new(recording.clone());
+    provider
+        .handler
+        .loan(1, Some(42), None, &options, &responder)
+        .await
+        .expect("unregistered loan rejection");
+    assert_eq!(*recording.events.lock().unwrap(), ["defer", "followup"]);
+    let responses = recording.responses.lock().unwrap();
+    assert!(responses[0].ephemeral);
+    assert_eq!(
+        responses[0].content,
+        "You need to /player register before taking loans."
+    );
+}
+
 #[test]
 fn economy_invest_retry_after_truncates_four_point_two_to_four_seconds() {
     assert_eq!(
