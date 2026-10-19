@@ -60,6 +60,52 @@ impl Fixture {
             )
             .expect("load rating")
     }
+
+    fn rating_revision(&self, guild_id: i64) -> i64 {
+        self.connection()
+            .query_row(
+                "SELECT COALESCE(MAX(revision),0) FROM openskill_rating_revisions
+                 WHERE guild_id=?1",
+                [guild_id],
+                |row| row.get(0),
+            )
+            .expect("load rating revision")
+    }
+}
+
+#[test]
+fn test_set_glicko_uncertainty_invalidates_in_flight_match_recordings() {
+    let fixture = Fixture::new();
+    fixture.player(1, GUILD, Some(1_500.0), 50.0, 0.06);
+    let before = fixture.rating_revision(GUILD);
+    fixture
+        .repository
+        .set_glicko_uncertainty(1, GUILD, 1_400.0, 200.0, 0.07)
+        .expect("set uncertainty");
+    assert_eq!(fixture.rating(1, GUILD), (Some(1_400.0), 200.0, 0.07));
+    // A match recorded from ratings read before the override must retry.
+    assert_eq!(fixture.rating_revision(GUILD), before + 1);
+    assert!(matches!(
+        fixture
+            .repository
+            .set_glicko_uncertainty(2, GUILD, 1_400.0, 200.0, 0.07),
+        Err(AdminRepositoryError::PlayerNotFound)
+    ));
+    assert_eq!(fixture.rating_revision(GUILD), before + 1);
+}
+
+#[test]
+fn test_glicko_only_bump_invalidates_in_flight_match_recordings() {
+    let fixture = Fixture::new();
+    fixture.player(1, GUILD, Some(1_500.0), 50.0, 0.06);
+    let before = fixture.rating_revision(GUILD);
+    let result = fixture
+        .repository
+        .bump_uncertainties(GUILD, 100.0, 9)
+        .expect("bump uncertainty")
+        .expect("summary");
+    assert_eq!(result.openskill_count, 0);
+    assert_eq!(fixture.rating_revision(GUILD), before + 1);
 }
 
 #[test]
