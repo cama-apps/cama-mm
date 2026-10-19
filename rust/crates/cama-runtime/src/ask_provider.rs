@@ -18,6 +18,7 @@ use cama_domain::guild_config::GuildConfigStore;
 use tracing::warn;
 
 use crate::embed_colors::{DISCORD_BLUE, DISCORD_RED};
+use crate::ids::signed_id;
 use crate::{
     CommandOptionKind, CommandOptionSpec, CommandSpec, InteractionEmbed, InteractionHandler,
     InteractionHandlerError, InteractionRequest, InteractionResponder, InteractionResponse,
@@ -329,11 +330,6 @@ impl AskRateLimiter for WindowRateLimiter {
             retry_after_seconds: 0.0,
         }
     }
-}
-
-fn signed_id(value: u64, label: &str) -> Result<i64, InteractionHandlerError> {
-    i64::try_from(value)
-        .map_err(|_| InteractionHandlerError::Handler(format!("{label} id exceeds SQLite range")))
 }
 
 async fn respond_fail_soft(responder: &dyn InteractionResponder, response: InteractionResponse) {

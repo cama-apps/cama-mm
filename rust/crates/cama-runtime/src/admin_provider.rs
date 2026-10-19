@@ -51,6 +51,7 @@ use crate::discord_transport::{
     DiscordGuildPlayerNameResolver, DiscordMessage, DiscordTransport, GuildPlayerNameResolver,
 };
 use crate::global_hooks::{UsageMonitor, UsageSnapshot};
+use crate::ids::signed_id;
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, InteractionHandler,
     InteractionHandlerError, InteractionOption, InteractionRequest, InteractionResponder,
@@ -2548,10 +2549,6 @@ async fn respond_ephemeral(
         InteractionResponse::message(content.into()).ephemeral(),
     )
     .await
-}
-
-fn signed_id(id: u64, kind: &str) -> Result<i64, InteractionHandlerError> {
-    i64::try_from(id).map_err(|_| format!("{kind} id exceeds SQLite INTEGER range").into())
 }
 
 fn required_user(

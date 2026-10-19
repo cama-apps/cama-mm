@@ -54,6 +54,7 @@ use tracing::{debug, error, info, warn};
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
 use crate::embed_colors::{DISCORD_BLUE, DISCORD_GREEN, DISCORD_GREYPLE, DISCORD_RED};
+use crate::ids::signed_id;
 use crate::option_ext::{boolean_option, integer_option, user_option};
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
@@ -2446,10 +2447,6 @@ fn selected_subcommand(
             _ => None,
         })
         .ok_or_else(|| "missing enrichment subcommand".into())
-}
-
-fn signed_id(id: u64, label: &str) -> Result<i64, InteractionHandlerError> {
-    i64::try_from(id).map_err(|_| format!("Discord {label} id exceeds SQLite range").into())
 }
 
 async fn defer(responder: &Arc<dyn InteractionResponder>, ephemeral: bool) -> bool {

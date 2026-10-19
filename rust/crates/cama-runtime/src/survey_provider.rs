@@ -24,6 +24,7 @@ use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
 use crate::ids::blocking as sqlite;
+use crate::ids::signed_id as signed;
 use crate::option_ext::{
     boolean_option as optional_boolean, option_value, string_option as optional_string, user_option,
 };
@@ -2522,10 +2523,6 @@ async fn followup(
         .followup(response)
         .await
         .map_err(|error| error.to_string())
-}
-
-fn signed(value: u64, label: &str) -> Result<i64, String> {
-    i64::try_from(value).map_err(|_| format!("Discord {label} exceeds SQLite INTEGER"))
 }
 
 #[cfg(all(test, feature = "runtime-test-core"))]

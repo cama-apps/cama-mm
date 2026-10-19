@@ -33,6 +33,7 @@ use chrono::{DateTime, FixedOffset, Utc};
 
 use crate::ApplicationConfig;
 use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
+use crate::ids::signed_id;
 use crate::option_ext::{boolean_option, user_option};
 use crate::registration::{
     CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute, InteractionActionRow,
@@ -965,10 +966,6 @@ fn parse_board_component(custom_id: &str) -> Result<(i64, usize), String> {
         return Err("invalid mana board component".to_owned());
     }
     Ok((owner, page))
-}
-
-fn signed_id(value: u64, label: &str) -> Result<i64, String> {
-    i64::try_from(value).map_err(|_| format!("{label} id exceeds SQLite range"))
 }
 
 fn data_error(error: impl std::fmt::Display) -> ManaServiceError {

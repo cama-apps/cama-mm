@@ -53,6 +53,7 @@ use crate::discord_transport::{
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
+use crate::ids::signed_id;
 use crate::option_ext::{boolean_option, integer_option, string_option, user_option};
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
@@ -2797,10 +2798,6 @@ fn is_user_registration_error(error: &RegisterPlayerError) -> bool {
 
 fn valid_steam_id(steam_id: i64) -> bool {
     steam_id > 0 && steam_id < STEAM_ACCOUNT_ID_UPPER_BOUND
-}
-
-fn signed_id(id: u64, kind: &str) -> Result<i64, String> {
-    i64::try_from(id).map_err(|_| format!("{kind} ID {id} exceeds SQLite's signed range"))
 }
 
 fn now_seconds() -> i64 {

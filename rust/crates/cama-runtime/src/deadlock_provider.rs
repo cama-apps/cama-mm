@@ -400,9 +400,7 @@ fn now() -> i64 {
 async fn blocking<T: Send + 'static>(
     action: impl FnOnce() -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
-    tokio::task::spawn_blocking(action)
-        .await
-        .map_err(|e| format!("Deadlock task failed: {e}"))?
+    crate::ids::blocking("Deadlock", action).await
 }
 fn text_option(name: &str, value: &str) -> InteractionOption {
     InteractionOption {

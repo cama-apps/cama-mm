@@ -27,6 +27,7 @@ use tracing::{error, warn};
 
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
+use crate::ids::signed_id;
 use crate::option_ext::{string_option, user_option};
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, InteractionAttachment,
@@ -621,11 +622,6 @@ async fn respond_initial(
         )
         .await
         .map_err(response_error)
-}
-
-fn signed_id(value: u64, kind: &str) -> Result<i64, InteractionHandlerError> {
-    i64::try_from(value)
-        .map_err(|_| format!("Discord {kind} ID exceeds SQLite's signed integer range").into())
 }
 
 fn response_error(error: crate::registration::InteractionResponseError) -> InteractionHandlerError {
