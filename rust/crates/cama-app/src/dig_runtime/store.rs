@@ -30,10 +30,7 @@ impl SqliteDigRuntimeStore {
     }
 
     pub(super) fn connection(&self) -> Result<Connection, rusqlite::Error> {
-        let connection = Connection::open(&self.path)?;
-        connection.busy_timeout(std::time::Duration::from_secs(5))?;
-        connection.pragma_update(None, "foreign_keys", false)?;
-        Ok(connection)
+        cama_db::open_runtime_connection(&self.path)
     }
 
     /// Apply one actor-scoped Dig balance/tunnel mutation through the

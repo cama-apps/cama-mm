@@ -560,6 +560,7 @@ dependencies = [
  "cama-app",
  "cama-db",
  "cama-domain",
+ "futures-util",
  "serde",
  "thiserror 2.0.20",
  "tokio",
