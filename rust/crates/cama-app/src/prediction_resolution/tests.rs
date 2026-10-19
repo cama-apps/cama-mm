@@ -19,6 +19,7 @@ impl PredictionResolutionPort for FakeRepository {
     fn settle_orderbook(
         &self,
         _prediction_id: i64,
+        _guild_id: i64,
         _outcome: ContractSide,
         _resolved_by: Option<i64>,
         _adjustments: &SettlementAdjustments,

@@ -133,8 +133,14 @@ impl Fixture {
         outcome: ContractSide,
         adjustments: &SettlementAdjustments,
     ) -> Result<Resolution, PredictionResolutionError> {
-        self.repository
-            .settle_orderbook_at(prediction_id, outcome, Some(ADMIN), adjustments, NOW)
+        self.repository.settle_orderbook_at(
+            prediction_id,
+            GUILD,
+            outcome,
+            Some(ADMIN),
+            adjustments,
+            NOW,
+        )
     }
 
     fn rollback(&self, prediction_id: i64) -> Result<RollbackResult, PredictionResolutionError> {
@@ -941,6 +947,32 @@ fn test_rollback_orderbook_uses_only_current_resolution_ledger_cycle() {
     assert_eq!(
         fixture.ledger_count(prediction_id, "prediction_resolution_rollback"),
         2
+    );
+}
+
+#[test]
+fn test_settle_orderbook_rejects_market_from_another_guild() {
+    let fixture = Fixture::new();
+    fixture.player(1, 1_000);
+    let prediction_id = fixture.market("guild isolated settlement?");
+    fixture.buy(prediction_id, 1, ContractSide::Yes, 2);
+    let balance = fixture.balance(1);
+    assert!(matches!(
+        fixture.repository.settle_orderbook_at(
+            prediction_id,
+            OTHER_GUILD,
+            ContractSide::Yes,
+            Some(ADMIN),
+            &SettlementAdjustments::default(),
+            NOW
+        ),
+        Err(PredictionResolutionError::PredictionNotFound)
+    ));
+    assert_eq!(fixture.balance(1), balance);
+    assert_eq!(fixture.status(prediction_id), "open");
+    assert_eq!(
+        fixture.ledger_count(prediction_id, "prediction_resolution"),
+        0
     );
 }
 
