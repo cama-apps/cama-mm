@@ -11,6 +11,8 @@ use crate::test_support::initialize_test_database as initialize_or_migrate;
 const GUILD: u64 = 9_001;
 const BUYER: u64 = 101;
 const TARGET: u64 = 202;
+const PAYLOAD_ONLY: u64 = 303;
+const UNNAMED: u64 = 404;
 
 struct Fixture {
     _directory: TempDir,
@@ -1492,24 +1494,34 @@ async fn unregistered_target_without_cached_member_uses_payload_display_name() {
     assert_eq!(target.display_name, "Target Account");
 }
 
-#[test]
-fn arbitrary_shop_player_names_prefer_server_nicknames() {
+#[tokio::test]
+async fn arbitrary_shop_player_names_never_fall_back_to_registration_names() {
     let fixture = Fixture::migrated();
+    fixture.player(UNNAMED, 1_000);
     let provider = fixture
         .provider
         .with_player_names(Arc::new(StaticPlayerNames));
+    let target = i64::try_from(TARGET).unwrap();
+    let paid = i64::try_from(PAYLOAD_ONLY).unwrap();
+    let unnamed = i64::try_from(UNNAMED).unwrap();
 
-    let names = provider.handler.project_stored_player_names(
-        i64::try_from(GUILD).unwrap(),
-        BTreeMap::from([(i64::try_from(TARGET).unwrap(), "Stored Target".to_owned())]),
-    );
+    let names = provider
+        .handler
+        .rendered_player_names(
+            i64::try_from(GUILD).unwrap(),
+            &[target, paid, unnamed],
+            &BTreeMap::from([
+                (target, "Payload Target".to_owned()),
+                (paid, "Payload Only".to_owned()),
+            ]),
+        )
+        .await;
 
-    assert_eq!(
-        names
-            .get(&i64::try_from(TARGET).unwrap())
-            .map(String::as_str),
-        Some("Server Target")
-    );
+    assert_eq!(names[&target], "Server Target");
+    assert_eq!(names[&paid], "Payload Only");
+    // A registered player with no live or last-seen name is never shown by
+    // registration name or ID.
+    assert_eq!(names[&unnamed], "Unknown player");
 }
 
 #[tokio::test]

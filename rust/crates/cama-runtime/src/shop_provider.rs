@@ -271,7 +271,21 @@ impl SharedGuildPlayerNameResolver {
     }
 }
 
+#[async_trait]
 impl GuildPlayerNameResolver for SharedGuildPlayerNameResolver {
+    async fn resolve_names(
+        &self,
+        guild_id: i64,
+        player_ids: &[i64],
+    ) -> crate::discord_transport::GuildPlayerNameDirectory {
+        let inner = self
+            .inner
+            .read()
+            .map(|inner| Arc::clone(&inner))
+            .unwrap_or_else(|_| Arc::new(DiscordIdPlayerNameResolver));
+        inner.resolve_names(guild_id, player_ids).await
+    }
+
     fn names_for_guild(
         &self,
         guild_id: i64,
@@ -616,55 +630,51 @@ impl ShopInteractionHandler {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let mut stored_names = BTreeMap::new();
-        // The invoking user's interaction payload name is the stored fallback
-        // when the member cache misses.
-        stored_names.insert(context.user_id, context.user_display_name.clone());
+        let mut payload_names = BTreeMap::new();
+        // Interaction payload names are live Discord display names, used when
+        // the guild lookup has no name.
+        payload_names.insert(context.user_id, context.user_display_name.clone());
+        let mut target_ids = Vec::with_capacity(targets.len());
         for (index, id) in &targets {
             let target_id = signed_id(*id, "target user")?;
-            let payload_name = match &context.options[*index].value {
-                InteractionValue::User { display_name, .. } => display_name.clone(),
-                _ => None,
-            };
-            let stored_name = self
-                .load_player(target_id, context.guild_id)
-                .await?
-                .map(|player| player.name)
-                .or(payload_name)
-                .unwrap_or_default();
-            stored_names.insert(target_id, stored_name);
+            if let InteractionValue::User {
+                display_name: Some(display_name),
+                ..
+            } = &context.options[*index].value
+            {
+                payload_names.insert(target_id, display_name.clone());
+            }
+            target_ids.push(target_id);
         }
-        let rendered_names = self.project_stored_player_names(context.guild_id, stored_names);
-        context.user_display_name = rendered_names
-            .get(&context.user_id)
-            .cloned()
-            .unwrap_or_else(|| context.user_id.to_string());
-        for (_index, id) in targets {
-            let target_id = signed_id(id, "target user")?;
-            context.rendered_user_names.insert(
-                target_id,
-                rendered_names
-                    .get(&target_id)
-                    .cloned()
-                    .unwrap_or_else(|| target_id.to_string()),
-            );
+        let mut player_ids = target_ids.clone();
+        player_ids.push(context.user_id);
+        let rendered_names = self
+            .rendered_player_names(context.guild_id, &player_ids, &payload_names)
+            .await;
+        context.user_display_name = rendered_names[&context.user_id].clone();
+        for target_id in target_ids {
+            context
+                .rendered_user_names
+                .insert(target_id, rendered_names[&target_id].clone());
         }
         Ok(context)
     }
 
-    fn project_stored_player_names(
+    /// Live guild name, then a live interaction payload name, then the
+    /// last-seen name, else `Unknown player`. Every requested ID is present.
+    async fn rendered_player_names(
         &self,
         guild_id: i64,
-        stored_names: BTreeMap<i64, String>,
+        player_ids: &[i64],
+        payload_names: &BTreeMap<i64, String>,
     ) -> BTreeMap<i64, String> {
-        let player_ids = stored_names.keys().copied().collect::<Vec<_>>();
-        let names = self
-            .player_names
-            .names_for_guild(guild_id, &player_ids)
-            .unwrap_or_default();
-        stored_names
-            .into_iter()
-            .map(|(player_id, stored_name)| (player_id, names.resolve_or(player_id, &stored_name)))
+        let names = self.player_names.resolve_names(guild_id, player_ids).await;
+        player_ids
+            .iter()
+            .map(|&player_id| {
+                let payload = payload_names.get(&player_id).map_or("", String::as_str);
+                (player_id, names.resolve_or(player_id, payload))
+            })
             .collect()
     }
 
@@ -1375,11 +1385,13 @@ impl ShopInteractionHandler {
                     }
                     Ok(outcomes)
                 }).await?;
-                let stored_names = selected
+                let selected_ids = selected
                     .iter()
-                    .map(|player| (player.discord_id, player.name.clone()))
-                    .collect::<BTreeMap<_, _>>();
-                let names = self.project_stored_player_names(guild_id, stored_names);
+                    .map(|player| player.discord_id)
+                    .collect::<Vec<_>>();
+                let names = self
+                    .rendered_player_names(guild_id, &selected_ids, &BTreeMap::new())
+                    .await;
                 let mut total_destroyed = 0;
                 let mut total_absorbed = 0;
                 let mut lines = Vec::new();
@@ -2965,7 +2977,7 @@ impl PlayerContextPort for ProductionShopPlayerContext {
             .player_names
             .names_for_guild(guild_id, &[discord_id])
             .unwrap_or_default()
-            .resolve_or(discord_id, &player.name);
+            .resolve(discord_id);
         Ok(Some(PlayerContext {
             username,
             balance: player.balance,
