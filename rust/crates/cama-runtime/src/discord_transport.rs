@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use cama_domain::discord_content::readable_player_name;
+use futures_util::StreamExt;
 
 use crate::registration::InteractionResponse;
 
@@ -146,48 +147,72 @@ pub async fn resolve_guild_player_names(
         readable_names(transport.last_seen_player_names(guild_id, &requested))
     });
     let mut names = GuildPlayerNameDirectory::new(cached);
-    for user_id in user_ids {
-        let discord_id = i64::try_from(user_id).expect("converted from i64 above");
-        if names.contains(discord_id) {
-            continue;
-        }
-        let member_name = if let Some(guild_id) = guild_id {
-            match transport.guild_member(guild_id, user_id).await {
-                Ok(member) => member.and_then(|member| {
-                    readable_player_name(&member.display_name).map(str::to_owned)
-                }),
-                Err(error) => {
-                    tracing::warn!(%error, guild_id, user_id, "player display name lookup failed");
-                    None
-                }
+    let missing = user_ids
+        .into_iter()
+        .filter_map(|user_id| {
+            let discord_id = i64::try_from(user_id).expect("converted from i64 above");
+            (!names.contains(discord_id)).then_some((discord_id, user_id))
+        })
+        .collect::<Vec<_>>();
+    // Cold caches can miss a whole roster; fetch a few members at a time
+    // instead of paying every REST round trip back to back.
+    let resolved = futures_util::stream::iter(missing)
+        .map(|(discord_id, user_id)| {
+            let last_seen = &last_seen;
+            async move {
+                fetch_player_name(transport, guild_id, user_id, last_seen.get(&discord_id))
+                    .await
+                    .map(|name| (discord_id, name))
             }
-        } else {
-            None
-        };
-        let name = if member_name.is_some() {
-            member_name
-        } else if let Some(name) = last_seen.get(&discord_id) {
-            Some(name.clone())
-        } else {
-            transport
-                .user(user_id)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|user| {
-                    readable_player_name(&user.display_name)
-                        .or_else(|| readable_player_name(&user.account_username))
-                        .map(str::to_owned)
-                })
-        };
-        if let Some(name) = name {
-            names
-                .members
-                .get_or_insert_with(BTreeMap::new)
-                .insert(discord_id, name);
-        }
+        })
+        .buffer_unordered(MISSING_NAME_FETCH_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+    for (discord_id, name) in resolved.into_iter().flatten() {
+        names
+            .members
+            .get_or_insert_with(BTreeMap::new)
+            .insert(discord_id, name);
     }
     names
+}
+
+const MISSING_NAME_FETCH_CONCURRENCY: usize = 4;
+
+async fn fetch_player_name(
+    transport: &dyn DiscordTransport,
+    guild_id: Option<u64>,
+    user_id: u64,
+    last_seen: Option<&String>,
+) -> Option<String> {
+    let member_name = if let Some(guild_id) = guild_id {
+        match transport.guild_member(guild_id, user_id).await {
+            Ok(member) => member
+                .and_then(|member| readable_player_name(&member.display_name).map(str::to_owned)),
+            Err(error) => {
+                tracing::warn!(%error, guild_id, user_id, "player display name lookup failed");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if member_name.is_some() {
+        return member_name;
+    }
+    if let Some(name) = last_seen {
+        return Some(name.clone());
+    }
+    transport
+        .user(user_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|user| {
+            readable_player_name(&user.display_name)
+                .or_else(|| readable_player_name(&user.account_username))
+                .map(str::to_owned)
+        })
 }
 
 pub trait GuildPlayerNameResolver: Send + Sync {
