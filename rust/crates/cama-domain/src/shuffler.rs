@@ -157,7 +157,9 @@ pub struct ShufflerDiagnostics {
     pub branch_matchups_evaluated: usize,
     pub branch_player_selections_pruned: usize,
     pub branch_team_splits_pruned: usize,
+    /// Recorded only in this crate's unit tests; empty in production.
     pub fixed_team1_keys: Vec<Vec<usize>>,
+    /// Recorded only in this crate's unit tests; empty in production.
     pub team_summary_keys: Vec<Vec<usize>>,
 }
 
@@ -853,6 +855,7 @@ impl BalancedShuffler {
         self.diagnostics
             .team_summaries_built
             .fetch_add(1, AtomicOrdering::Relaxed);
+        #[cfg(test)]
         self.diagnostics
             .team_summary_keys
             .lock()
@@ -1158,12 +1161,13 @@ impl BalancedShuffler {
         // first minimal split.
         let mut best_matchups: Vec<(Team, Team)> = Vec::new();
         let mut best_score = f64::INFINITY;
-        for (team1_indices, team2_indices) in splits {
+        for &(team1_indices, team2_indices) in splits {
             let team1_refs = pick_refs(&refs, &team1_indices);
             let team2_refs = pick_refs(&refs, &team2_indices);
             self.diagnostics
                 .fixed_splits_evaluated
                 .fetch_add(1, AtomicOrdering::Relaxed);
+            #[cfg(test)]
             self.diagnostics
                 .fixed_team1_keys
                 .lock()
@@ -1738,7 +1742,7 @@ impl BalancedShuffler {
         let mut best_signature: Option<PoolSignature> = None;
         let mut evaluation_index = 0;
         for selection in selections {
-            for (team1_indices, team2_indices) in unique_team_splits() {
+            for &(team1_indices, team2_indices) in unique_team_splits() {
                 let team1_refs = pick_refs(&selection.selected_players, &team1_indices);
                 let team2_refs = pick_refs(&selection.selected_players, &team2_indices);
                 self.diagnostics
@@ -1880,7 +1884,7 @@ impl BalancedShuffler {
         let total_value: f64 = values.iter().sum();
         let split_value_diff = if values.iter().all(|value| value.is_finite()) {
             unique_team_splits()
-                .into_iter()
+                .iter()
                 .map(|(team1, _)| {
                     let team1_value: f64 = team1.iter().map(|index| values[*index]).sum();
                     (total_value - 2.0 * team1_value).abs()
@@ -2125,7 +2129,7 @@ impl BalancedShuffler {
                 continue;
             }
 
-            for (team1_indices, team2_indices) in unique_team_splits() {
+            for &(team1_indices, team2_indices) in unique_team_splits() {
                 let team1_refs = pick_refs(&selected, &team1_indices);
                 let team2_refs = pick_refs(&selected, &team2_indices);
                 let team1_mask = team1_indices.iter().fold(0_usize, |mask, index| {
@@ -2280,20 +2284,23 @@ fn pick_refs_vec<'a>(players: &[&'a Player], indices: &[usize]) -> Vec<&'a Playe
     indices.iter().map(|index| players[*index]).collect()
 }
 
-fn unique_team_splits() -> Vec<([usize; 5], [usize; 5])> {
-    combinations_from(1, 10, 4)
-        .into_iter()
-        .map(|others| {
-            let team1 = [0, others[0], others[1], others[2], others[3]];
-            let team1_set: HashSet<usize> = team1.into_iter().collect();
-            let team2: [usize; 5] = (0..10)
-                .filter(|index| !team1_set.contains(index))
-                .collect::<Vec<_>>()
-                .try_into()
-                .expect("a five-player complement");
-            (team1, team2)
-        })
-        .collect()
+fn unique_team_splits() -> &'static [([usize; 5], [usize; 5])] {
+    static SPLITS: OnceLock<Vec<([usize; 5], [usize; 5])>> = OnceLock::new();
+    SPLITS.get_or_init(|| {
+        combinations_from(1, 10, 4)
+            .into_iter()
+            .map(|others| {
+                let team1 = [0, others[0], others[1], others[2], others[3]];
+                let team1_set: HashSet<usize> = team1.into_iter().collect();
+                let team2: [usize; 5] = (0..10)
+                    .filter(|index| !team1_set.contains(index))
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .expect("a five-player complement");
+                (team1, team2)
+            })
+            .collect()
+    })
 }
 
 fn draft_pool_splits() -> &'static [(Vec<usize>, Vec<usize>)] {
