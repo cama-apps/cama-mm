@@ -202,12 +202,14 @@ impl PredictionResolutionRepository {
     pub fn settle_orderbook(
         &self,
         prediction_id: i64,
+        guild_id: i64,
         outcome: ContractSide,
         resolved_by: Option<i64>,
         adjustments: &SettlementAdjustments,
     ) -> Result<Resolution, PredictionResolutionError> {
         self.settle_orderbook_at(
             prediction_id,
+            guild_id,
             outcome,
             resolved_by,
             adjustments,
@@ -218,6 +220,7 @@ impl PredictionResolutionRepository {
     pub fn settle_orderbook_at(
         &self,
         prediction_id: i64,
+        guild_id: i64,
         outcome: ContractSide,
         resolved_by: Option<i64>,
         adjustments: &SettlementAdjustments,
@@ -226,12 +229,12 @@ impl PredictionResolutionRepository {
         validate_adjustments(adjustments)?;
         let mut connection = open_runtime_connection(&self.path)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (status, guild_id, lp_pnl): (String, i64, i64) = transaction
+        let (status, lp_pnl): (String, i64) = transaction
             .query_row(
-                "SELECT status,guild_id,COALESCE(lp_pnl,0)
-                 FROM predictions WHERE prediction_id=?1",
-                [prediction_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                "SELECT status,COALESCE(lp_pnl,0)
+                 FROM predictions WHERE prediction_id=?1 AND guild_id=?2",
+                params![prediction_id, guild_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?
             .ok_or(PredictionResolutionError::PredictionNotFound)?;

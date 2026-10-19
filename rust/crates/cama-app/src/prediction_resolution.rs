@@ -21,6 +21,7 @@ pub trait PredictionResolutionPort {
     fn settle_orderbook(
         &self,
         prediction_id: i64,
+        guild_id: i64,
         outcome: ContractSide,
         resolved_by: Option<i64>,
         adjustments: &SettlementAdjustments,
@@ -45,6 +46,7 @@ impl PredictionResolutionPort for PredictionResolutionRepository {
     fn settle_orderbook(
         &self,
         prediction_id: i64,
+        guild_id: i64,
         outcome: ContractSide,
         resolved_by: Option<i64>,
         adjustments: &SettlementAdjustments,
@@ -52,6 +54,7 @@ impl PredictionResolutionPort for PredictionResolutionRepository {
         PredictionResolutionRepository::settle_orderbook(
             self,
             prediction_id,
+            guild_id,
             outcome,
             resolved_by,
             adjustments,
@@ -117,12 +120,13 @@ where
     pub fn resolve_orderbook(
         &self,
         prediction_id: i64,
+        guild_id: i64,
         outcome: ContractSide,
         resolved_by: Option<i64>,
         adjustments: &SettlementAdjustments,
     ) -> Result<Resolution, R::Error> {
         self.repository
-            .settle_orderbook(prediction_id, outcome, resolved_by, adjustments)
+            .settle_orderbook(prediction_id, guild_id, outcome, resolved_by, adjustments)
     }
 
     pub fn rollback_orderbook(

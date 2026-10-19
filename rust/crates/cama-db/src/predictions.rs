@@ -1437,22 +1437,27 @@ impl PredictionRepository {
         })
     }
 
-    pub fn cancel_orderbook(&self, prediction_id: i64) -> Result<i64, PredictionRepositoryError> {
-        self.cancel_orderbook_detailed(prediction_id)
+    pub fn cancel_orderbook(
+        &self,
+        prediction_id: i64,
+        guild_id: i64,
+    ) -> Result<i64, PredictionRepositoryError> {
+        self.cancel_orderbook_detailed(prediction_id, guild_id)
             .map(|result| result.total_refunded)
     }
 
     pub fn cancel_orderbook_detailed(
         &self,
         prediction_id: i64,
+        guild_id: i64,
     ) -> Result<Cancellation, PredictionRepositoryError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (status, guild_id): (String, i64) = transaction
+        let status: String = transaction
             .query_row(
-                "SELECT status,guild_id FROM predictions WHERE prediction_id=?1",
-                [prediction_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                "SELECT status FROM predictions WHERE prediction_id=?1 AND guild_id=?2",
+                params![prediction_id, guild_id],
+                |row| row.get(0),
             )
             .optional()?
             .ok_or(PredictionRepositoryError::PredictionNotFound)?;
@@ -2949,7 +2954,10 @@ mod tests {
             .buy_contracts_atomic(market, 2, ContractSide::No, 2)
             .expect("buy no");
         let before = fixture.balance(1, GUILD) + fixture.balance(2, GUILD);
-        let refunded = fixture.repository.cancel_orderbook(market).expect("cancel");
+        let refunded = fixture
+            .repository
+            .cancel_orderbook(market, GUILD)
+            .expect("cancel");
         assert_eq!(
             fixture.balance(1, GUILD) + fixture.balance(2, GUILD),
             before + refunded
@@ -2958,6 +2966,29 @@ mod tests {
             refunded,
             quote_total(3 * 52, true) + quote_total(2 * 52, true)
         );
+    }
+
+    #[test]
+    fn test_cancel_rejects_market_from_another_guild() {
+        let fixture = Fixture::new();
+        fixture.player(1, GUILD, 1_000);
+        let market = fixture.market();
+        fixture
+            .repository
+            .buy_contracts_atomic(market, 1, ContractSide::Yes, 3)
+            .expect("buy yes");
+        let balance = fixture.balance(1, GUILD);
+        assert!(matches!(
+            fixture
+                .repository
+                .cancel_orderbook_detailed(market, OTHER_GUILD),
+            Err(PredictionRepositoryError::PredictionNotFound)
+        ));
+        assert_eq!(fixture.balance(1, GUILD), balance);
+        fixture
+            .repository
+            .cancel_orderbook_detailed(market, GUILD)
+            .expect("owning guild cancels");
     }
 
     #[test]
@@ -2974,7 +3005,10 @@ mod tests {
             .sell_contracts_atomic(market, 1, ContractSide::Yes, 2)
             .expect("sell");
         let before_cancel = fixture.balance(1, GUILD);
-        let refund = fixture.repository.cancel_orderbook(market).expect("cancel");
+        let refund = fixture
+            .repository
+            .cancel_orderbook(market, GUILD)
+            .expect("cancel");
         assert_eq!(fixture.balance(1, GUILD), before_cancel + refund);
         assert_eq!(
             refund,
@@ -3456,7 +3490,7 @@ mod tests {
             .expect("second buy");
         let result = fixture
             .repository
-            .cancel_orderbook_detailed(market)
+            .cancel_orderbook_detailed(market, GUILD)
             .expect("cancel");
         assert_eq!(result.refunded.len(), 2);
         assert_eq!(

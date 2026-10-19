@@ -2005,8 +2005,9 @@ impl PredictionInteractionHandler {
             return Ok(());
         };
         let repository = self.predictions.clone();
+        let market_guild_id = market.guild_id;
         let cancellation = spawn_sqlite("cancel prediction market", move || {
-            repository.cancel_orderbook_detailed(prediction_id)
+            repository.cancel_orderbook_detailed(prediction_id, market_guild_id)
         })
         .await;
         let cancellation = match cancellation {
@@ -2250,6 +2251,7 @@ impl PredictionInteractionHandler {
             resolutions
                 .settle_orderbook(
                     prediction_id,
+                    market_guild_id,
                     outcome,
                     Some(resolved_by),
                     &SettlementAdjustments {
