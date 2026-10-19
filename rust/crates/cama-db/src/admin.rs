@@ -197,8 +197,9 @@ impl AdminRepository {
         rd: f64,
         volatility: f64,
     ) -> Result<(), AdminRepositoryError> {
-        let connection = open_runtime_connection(&self.path)?;
-        let changed = connection.execute(
+        let mut connection = open_runtime_connection(&self.path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = transaction.execute(
             "UPDATE players
                 SET glicko_rating=?1,glicko_rd=?2,glicko_volatility=?3,
                     updated_at=CURRENT_TIMESTAMP
@@ -208,6 +209,11 @@ impl AdminRepository {
         if changed != 1 {
             return Err(AdminRepositoryError::PlayerNotFound);
         }
+        // Match recording writes absolute ratings computed from an earlier
+        // read; bumping the revision makes an in-flight recording retry
+        // instead of overwriting this override.
+        increment_openskill_revision(&transaction, guild_id)?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -296,9 +302,9 @@ impl AdminRepository {
                 ],
             )?;
         }
-        if openskill_count > 0 {
-            increment_openskill_revision(&transaction, guild_id)?;
-        }
+        // Every rated player's Glicko RD changed, so in-flight recordings must
+        // retry even when no player had an OpenSkill rating.
+        increment_openskill_revision(&transaction, guild_id)?;
         transaction.commit()?;
         let count = rows.len();
         Ok(Some(UncertaintyBumpSummary {
