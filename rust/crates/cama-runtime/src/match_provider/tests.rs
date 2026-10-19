@@ -5754,10 +5754,16 @@ fn lobby_bonus_is_included_in_player_summary_totals() {
         ),
         (3, BTreeMap::from([("bet".to_owned(), 10)])),
     ]);
-    let lines = render_jc_lines(&[1], &[2], &[], &changes, &SettlementResult::default()).join("\n");
-    assert!(lines.contains("<@1>: **+25**"));
-    assert!(lines.contains("<@2>: **+7**"));
-    assert!(lines.contains("<@3>: **+10**"));
+    let lines = jc_text(&render_jc_lines(
+        &[1],
+        &[2],
+        &[],
+        &changes,
+        &SettlementResult::default(),
+    ));
+    assert!(lines.contains("P1: **+25**"));
+    assert!(lines.contains("P2: **+7**"));
+    assert!(lines.contains("P3: **+10**"));
     assert_eq!(lines.matches("lobby bonus +5").count(), 2);
 }
 
@@ -5803,17 +5809,17 @@ fn test_jc_changes_format_groups_players_and_bettors_sorted_by_net_change() {
         ),
     ]);
     assert_eq!(
-        render_jc_lines(&[1, 2], &[3], &[4], &changes, &settlement).join("\n"),
+        jc_text(&render_jc_lines(&[1, 2], &[3], &[4], &changes, &settlement)),
         format!(
             "**Final odds:** 🟢 Radiant 2.50x\n\
              **Match Players:**\n\
-             <@1>: **+15** {JOPACOIN_EMOTE} (win +10, bet +5 · stake 5)\n\
-             <@4>: **+5** {JOPACOIN_EMOTE} (excluded +5)\n\
-             <@3>: **+2** {JOPACOIN_EMOTE} (play +5, bet −3 · stake 3)\n\
-             <@2>: **+1** {JOPACOIN_EMOTE} (win +10, bet −10 · stake 10, streak +1)\n\
+             P1: **+15** {JOPACOIN_EMOTE} (win +10, bet +5 · stake 5)\n\
+             P4: **+5** {JOPACOIN_EMOTE} (excluded +5)\n\
+             P3: **+2** {JOPACOIN_EMOTE} (play +5, bet −3 · stake 3)\n\
+             P2: **+1** {JOPACOIN_EMOTE} (win +10, bet −10 · stake 10, streak +1)\n\
              **Bettors:**\n\
-             <@6>: **+9** {JOPACOIN_EMOTE} (bet +9 · stake 6)\n\
-             <@5>: **−7** {JOPACOIN_EMOTE} (bet −7 · stake 7)"
+             P6: **+9** {JOPACOIN_EMOTE} (bet +9 · stake 6)\n\
+             Unknown player: **−7** {JOPACOIN_EMOTE} (bet −7 · stake 7)"
         )
     );
 }
@@ -5829,12 +5835,70 @@ fn test_jc_changes_aggregates_multiple_effective_stakes_per_bettor() {
     };
     let changes = BTreeMap::from([(7, BTreeMap::from([("bet".to_owned(), 30)]))]);
     assert_eq!(
-        render_jc_lines(&[], &[], &[], &changes, &settlement).join("\n"),
+        jc_text(&render_jc_lines(&[], &[], &[], &changes, &settlement)),
         format!(
             "**Final odds:** 🔴 Dire 1.75x\n\
              **Bettors:**\n\
-             <@7>: **+30** {JOPACOIN_EMOTE} (bet +30 · stake 40)"
+             P7: **+30** {JOPACOIN_EMOTE} (bet +30 · stake 40)"
         )
+    );
+}
+
+/// Names players 1-7 except 5, which exercises the missing-name fallback.
+fn jc_text(lines: &[JcLine]) -> String {
+    let names = (1..=7_u64)
+        .filter(|id| *id != 5)
+        .map(|id| (id, format!("P{id}")))
+        .collect();
+    render_jc_summary(lines, &GuildPlayerNameDirectory::new(Some(names)))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_record_summary_names_players_without_pinging() {
+    let discord = Arc::new(PublicationProbeDiscord::default());
+    let fixture = MatchRuntimeFixture::new_with_discord(discord.clone());
+    let pending = fixture.pending(unix_seconds() + 120);
+    for player_id in &pending.state.radiant_team_ids {
+        discord.set_member(
+            GUILD as u64,
+            *player_id as u64,
+            &format!("Radiant {player_id}"),
+        );
+    }
+    let responder = Arc::new(RecordingMatchResponder::default());
+
+    fixture
+        .provider
+        .handler
+        .finalize_record(
+            pending.clone(),
+            record_context(pending.state.radiant_team_ids[0], GUILD, "radiant", true),
+            responder.clone(),
+            "radiant",
+            3,
+            3,
+            0,
+            None,
+        )
+        .await
+        .expect("record match");
+
+    let responses = responder.responses.lock().expect("match responder lock");
+    let announcement = responses
+        .iter()
+        .map(|response| response.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(announcement.contains("🪙 **JC Changes:**"));
+    for player_id in &pending.state.radiant_team_ids {
+        assert!(announcement.contains(&format!("Radiant {player_id}: **")));
+    }
+    assert!(announcement.contains("Unknown player: **"));
+    assert!(!announcement.contains("<@"));
+    assert!(
+        responses
+            .iter()
+            .all(|response| response.allowed_mentions == InteractionAllowedMentions::None)
     );
 }
 

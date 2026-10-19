@@ -61,17 +61,6 @@ impl GuildPlayerNameDirectory {
         })
     }
 
-    /// Render names for the requested players that are actually present in the
-    /// member cache. Misses are omitted so callers can layer stored player
-    /// names underneath instead of receiving a baked-in numeric fallback.
-    #[must_use]
-    pub fn known_names(&self, player_ids: &[i64]) -> BTreeMap<i64, String> {
-        player_ids
-            .iter()
-            .filter_map(|player_id| self.cached_name(*player_id).map(|name| (*player_id, name)))
-            .collect()
-    }
-
     fn cached_name(&self, discord_id: i64) -> Option<String> {
         self.members
             .as_ref()
@@ -215,12 +204,21 @@ async fn fetch_player_name(
         })
 }
 
+#[async_trait]
 pub trait GuildPlayerNameResolver: Send + Sync {
     fn names_for_guild(
         &self,
         guild_id: i64,
         player_ids: &[i64],
     ) -> Result<GuildPlayerNameDirectory, String>;
+
+    /// Names for async rendering paths. Resolvers backed by a live transport
+    /// also fetch members missing from the cache; the default is the cached
+    /// directory, and a failed lookup yields no names rather than an ID.
+    async fn resolve_names(&self, guild_id: i64, player_ids: &[i64]) -> GuildPlayerNameDirectory {
+        self.names_for_guild(guild_id, player_ids)
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Default)]
@@ -248,7 +246,17 @@ impl DiscordGuildPlayerNameResolver {
     }
 }
 
+#[async_trait]
 impl GuildPlayerNameResolver for DiscordGuildPlayerNameResolver {
+    async fn resolve_names(&self, guild_id: i64, player_ids: &[i64]) -> GuildPlayerNameDirectory {
+        resolve_guild_player_names(
+            self.discord.as_ref(),
+            u64::try_from(guild_id).ok(),
+            player_ids,
+        )
+        .await
+    }
+
     fn names_for_guild(
         &self,
         guild_id: i64,
@@ -987,23 +995,5 @@ mod player_render_name_tests {
                 "Readable fallback"
             );
         }
-    }
-
-    #[test]
-    fn known_names_omits_cache_misses_instead_of_baking_in_ids() {
-        let names = GuildPlayerNameDirectory::new(Some(BTreeMap::from([(
-            7,
-            "Server Nickname".to_owned(),
-        )])));
-
-        assert_eq!(
-            names.known_names(&[7, 8]),
-            BTreeMap::from([(7, "Server Nickname".to_owned())])
-        );
-        assert!(
-            GuildPlayerNameDirectory::new(None)
-                .known_names(&[7, 8])
-                .is_empty()
-        );
     }
 }

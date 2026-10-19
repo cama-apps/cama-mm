@@ -8,7 +8,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::application_config::ApplicationConfig;
-use crate::discord_transport::{DiscordMessage, DiscordTransport};
+use crate::discord_transport::{
+    DiscordMessage, DiscordTransport, GuildPlayerNameDirectory, cached_guild_player_names,
+    resolve_guild_player_names,
+};
 use crate::first_game_pool_worker::FirstGamePoolGuildSource;
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
@@ -33,7 +36,7 @@ use cama_db::mafia_repository::{
     MafiaWinner, ThreadIds,
 };
 use cama_domain::bankruptcy::BankruptcyPenaltyPolicy;
-use cama_domain::formatting::JOPACOIN_EMOTE;
+use cama_domain::formatting::{JOPACOIN_EMOTE, escape_discord_text};
 use cama_domain::game_date::{game_date_for_timestamp, get_game_date, weekday_of_game_date};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -538,6 +541,35 @@ impl InteractionHandler for MafiaInteractionHandler {
 }
 
 impl MafiaInteractionHandler {
+    /// Names for background announcements; fetches members missing from the
+    /// cache.
+    async fn player_names(&self, guild_id: i64, player_ids: &[i64]) -> GuildPlayerNameDirectory {
+        resolve_guild_player_names(
+            self.discord.as_ref(),
+            u64::try_from(guild_id).ok(),
+            player_ids,
+        )
+        .await
+    }
+
+    /// Names for undeferred command replies: cache and last-seen only, so no
+    /// network request precedes the interaction acknowledgement.
+    fn cached_player_names(&self, guild_id: i64, player_ids: &[i64]) -> GuildPlayerNameDirectory {
+        u64::try_from(guild_id).map_or_else(
+            |_| GuildPlayerNameDirectory::default(),
+            |guild_id| {
+                cached_guild_player_names(
+                    self.discord.as_ref(),
+                    guild_id,
+                    &player_ids
+                        .iter()
+                        .filter_map(|id| u64::try_from(*id).ok())
+                        .collect::<Vec<_>>(),
+                )
+            },
+        )
+    }
+
     async fn handle_command(
         &self,
         context: CommandContext,
@@ -728,6 +760,13 @@ impl MafiaInteractionHandler {
             .map_err(|error| error.to_string().into());
         };
         let titles = self.titles(guild_id, actor).await?;
+        let names = self.cached_player_names(
+            guild_id,
+            &players
+                .iter()
+                .map(|player| player.discord_id)
+                .collect::<Vec<_>>(),
+        );
         responder
             .respond(
                 InteractionResponse::message("")
@@ -738,6 +777,7 @@ impl MafiaInteractionHandler {
                         &players,
                         &investigations,
                         &titles,
+                        &names,
                     )),
             )
             .await
@@ -923,9 +963,15 @@ impl MafiaInteractionHandler {
             .await
             .map_err(|error| error.to_string().into());
         }
-        let mentions = missing
+        let waiting_ids = missing.iter().take(25).copied().collect::<Vec<_>>();
+        let names = self.cached_player_names(guild_id, &waiting_ids);
+        let waiting = waiting_ids
             .iter()
-            .take(25)
+            .map(|id| mafia_name(&names, *id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mentions = waiting_ids
+            .iter()
             .map(|id| format!("<@{}>", id))
             .collect::<Vec<_>>()
             .join(" ");
@@ -937,8 +983,8 @@ impl MafiaInteractionHandler {
         responder
             .respond(
                 InteractionResponse::message(format!(
-                    "⏰ {} — the game is waiting on you. Please {}.",
-                    mentions, verb
+                    "⏰ {} — the game is waiting on you. Please {}.\n{}",
+                    waiting, verb, mentions
                 ))
                 .with_user_mentions(
                     missing
@@ -980,12 +1026,21 @@ impl MafiaInteractionHandler {
         }
         embed = embed.field("Phase ends", format!("<t:{}:R>", phase_end(&game)), false);
         if !deaths.is_empty() {
+            let names = self.cached_player_names(
+                guild_id,
+                &deaths.iter().map(|(id, _, _)| *id).collect::<Vec<_>>(),
+            );
             embed = embed.field(
                 "Deaths so far",
                 deaths
                     .iter()
                     .map(|(id, role, phase)| {
-                        format!("<@{}> — {} ({})", id, role_display(*role), phase.as_str())
+                        format!(
+                            "{} — {} ({})",
+                            mafia_name(&names, *id),
+                            role_display(*role),
+                            phase.as_str()
+                        )
                     })
                     .collect::<Vec<_>>()
                     .join("\n"),
@@ -1049,6 +1104,10 @@ impl MafiaInteractionHandler {
                 .await
                 .map_err(|error| error.to_string().into());
         }
+        let names = self.cached_player_names(
+            guild_id,
+            &rows.iter().map(|row| row.discord_id).collect::<Vec<_>>(),
+        );
         let text = rows
             .iter()
             .enumerate()
@@ -1058,7 +1117,12 @@ impl MafiaInteractionHandler {
                 } else {
                     0.0
                 };
-                leaderboard_line(index + 1, row, win_rate)
+                leaderboard_line(
+                    index + 1,
+                    row,
+                    win_rate,
+                    &mafia_name(&names, row.discord_id),
+                )
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -1604,11 +1668,20 @@ impl MafiaInteractionHandler {
             if !setup_missing {
                 return Ok(());
             }
+            let names = self
+                .player_names(
+                    game.guild_id,
+                    &players
+                        .iter()
+                        .map(|player| player.discord_id)
+                        .collect::<Vec<_>>(),
+                )
+                .await;
             let roster = players
                 .iter()
-                .map(|player| format!("<@{}>", player.discord_id))
+                .map(|player| mafia_name(&names, player.discord_id))
                 .collect::<Vec<_>>()
-                .join(" ");
+                .join(", ");
             let twist_line = game
                 .twist_event
                 .map(|twist| format!("\n**Twist:** {}", twist_label(twist)))
@@ -1701,19 +1774,33 @@ impl MafiaInteractionHandler {
             if !mafia_intro_missing {
                 return Ok(());
             }
+            let names = self
+                .player_names(
+                    game.guild_id,
+                    &mafia_players
+                        .iter()
+                        .map(|player| player.discord_id)
+                        .collect::<Vec<_>>(),
+                )
+                .await;
             let godfather = mafia_players
                 .iter()
                 .find(|player| player.is_godfather)
-                .map(|player| format!("\nGodfather: <@{}> 👑", player.discord_id))
+                .map(|player| format!("\nGodfather: {} 👑", mafia_name(&names, player.discord_id)))
                 .unwrap_or_default();
-            let allies = mafia_ids
+            let allies = mafia_players
+                .iter()
+                .map(|player| mafia_name(&names, player.discord_id))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mentions = mafia_ids
                 .iter()
                 .map(|id| format!("<@{}>", id))
                 .collect::<Vec<_>>()
-                .join(", ");
+                .join(" ");
             let thread_response = InteractionResponse::message(format!(
-                "🔪 The mafia: {}.{}\nCoordinate kills here. Submit your final pick via `/mafia act`.",
-                allies, godfather
+                "🔪 The mafia: {}.{}\nCoordinate kills here. Submit your final pick via `/mafia act`.\n{}",
+                allies, godfather, mentions
             ))
             .with_user_mentions(mafia_ids.clone());
             let receipt = self
@@ -1777,14 +1864,23 @@ impl MafiaInteractionHandler {
         } else {
             "☀️ Day"
         };
+        let names = self
+            .player_names(
+                game.guild_id,
+                &players
+                    .iter()
+                    .map(|player| player.discord_id)
+                    .collect::<Vec<_>>(),
+            )
+            .await;
         let alive_text = if alive.is_empty() {
             "—".to_owned()
         } else {
             alive
                 .iter()
-                .map(|player| format!("<@{}>", player.discord_id))
+                .map(|player| mafia_name(&names, player.discord_id))
                 .collect::<Vec<_>>()
-                .join(" ")
+                .join(", ")
         };
         let mut embed =
             InteractionEmbed::titled(format!("📊 Cama Mafia #{} — Standings", game.game_id))
@@ -1800,7 +1896,11 @@ impl MafiaInteractionHandler {
                 format!("💀 Fallen ({})", dead.len()),
                 dead.iter()
                     .map(|player| {
-                        format!("<@{}> — {}", player.discord_id, role_display(player.role))
+                        format!(
+                            "{} — {}",
+                            mafia_name(&names, player.discord_id),
+                            role_display(player.role)
+                        )
                     })
                     .collect::<Vec<_>>()
                     .join("\n"),
@@ -1874,13 +1974,20 @@ impl MafiaInteractionHandler {
             .iter()
             .map(|p| (p.discord_id, p))
             .collect::<BTreeMap<_, _>>();
+        let names = self
+            .player_names(
+                current_game.guild_id,
+                &players.iter().map(|p| p.discord_id).collect::<Vec<_>>(),
+            )
+            .await;
         let mut lines = Vec::new();
         for (id, source) in &summary.killed {
             if let Some(player) = by_id.get(id) {
-                lines.push(
-                    self.flavor
-                        .death_narration(&app_player(player), *source == "plague"),
-                );
+                lines.push(self.flavor.death_narration(
+                    &app_player(player),
+                    &mafia_name(&names, *id),
+                    *source == "plague",
+                ));
             }
         }
         if lines.is_empty() {
@@ -1888,8 +1995,8 @@ impl MafiaInteractionHandler {
         }
         if let Some(revived_id) = summary.revived_id {
             lines.push(format!(
-                "✨ The earth stirs — <@{}> claws back from the grave!",
-                revived_id
+                "✨ The earth stirs — {} claws back from the grave!",
+                mafia_name(&names, revived_id)
             ));
         }
         let living_mentions = players
@@ -1898,8 +2005,9 @@ impl MafiaInteractionHandler {
             .filter_map(|player| u64::try_from(player.discord_id).ok())
             .collect::<BTreeSet<_>>();
         let description = lines.join("\n");
+        let content = with_ping_line(&description, &living_mentions, summary.revived_id);
         let public_channel = self.public_channel_id(current_game.guild_id).await?;
-        let response = InteractionResponse::message(description.clone())
+        let response = InteractionResponse::message(content)
             .with_user_mentions(living_mentions.iter().copied().collect());
         let response = response.embed(
             InteractionEmbed::titled(format!(
@@ -2055,25 +2163,38 @@ impl MafiaInteractionHandler {
         .await?;
         let repository = self.repository.clone();
         let players = blocking(move || repository.get_players(game_id).map_err(to_string)).await?;
+        let names = self
+            .player_names(
+                current_game.guild_id,
+                &players
+                    .iter()
+                    .map(|player| player.discord_id)
+                    .collect::<Vec<_>>(),
+            )
+            .await;
         let mut lines = Vec::new();
         if let Some(lynched_id) = summary.lynched_id {
             if let Some(victim) = players
                 .iter()
                 .find(|player| player.discord_id == lynched_id)
             {
-                lines.push(self.flavor.lynch_narration(&app_player(victim)));
+                lines.push(
+                    self.flavor
+                        .lynch_narration(&app_player(victim), &mafia_name(&names, lynched_id)),
+                );
             }
         } else {
             lines.push(self.flavor.no_lynch_narration());
         }
         if !summary.vote_detail.is_empty() {
             lines.push("**🗳️ The votes are revealed:**".to_owned());
-            lines.extend(
-                summary
-                    .vote_detail
-                    .iter()
-                    .map(|(actor, target)| format!("• <@{}> → <@{}>", actor, target)),
-            );
+            lines.extend(summary.vote_detail.iter().map(|(actor, target)| {
+                format!(
+                    "• {} → {}",
+                    mafia_name(&names, *actor),
+                    mafia_name(&names, *target)
+                )
+            }));
         } else {
             lines.push("_No votes were cast._".to_owned());
         }
@@ -2106,7 +2227,15 @@ impl MafiaInteractionHandler {
             .filter(|player| player.is_alive)
             .filter_map(|player| u64::try_from(player.discord_id).ok())
             .collect::<BTreeSet<_>>();
-        let response = InteractionResponse::message(lines.join("\n"))
+        let content = with_ping_line(
+            &lines.join("\n"),
+            &living_mentions,
+            summary
+                .vote_detail
+                .iter()
+                .flat_map(|(actor, target)| [*actor, *target]),
+        );
+        let response = InteractionResponse::message(content)
             .with_user_mentions(living_mentions.iter().copied().collect())
             .embed(
                 InteractionEmbed::titled(format!(
@@ -2193,12 +2322,24 @@ impl MafiaInteractionHandler {
             .iter()
             .map(|player| (player.discord_id, player))
             .collect::<BTreeMap<_, _>>();
+        let names = self
+            .player_names(
+                current_game.guild_id,
+                &players
+                    .iter()
+                    .map(|player| player.discord_id)
+                    .collect::<Vec<_>>(),
+            )
+            .await;
         let mut lines = vec![self.flavor.resolution_narration(app_winner(winner))];
         if summary.twist == Some(MafiaTwist::TownHall) {
             lines.push("Town Hall was in session — no lynch today.".to_owned());
         } else if let Some(lynched_id) = summary.lynched_id {
             if let Some(victim) = by_id.get(&lynched_id) {
-                lines.push(self.flavor.lynch_narration(&app_player(victim)));
+                lines.push(
+                    self.flavor
+                        .lynch_narration(&app_player(victim), &mafia_name(&names, lynched_id)),
+                );
             }
         } else {
             lines.push(self.flavor.no_lynch_narration());
@@ -2208,7 +2349,7 @@ impl MafiaInteractionHandler {
                 .winning_ids
                 .iter()
                 .take(15)
-                .map(|id| format!("<@{}>", id))
+                .map(|id| mafia_name(&names, *id))
                 .collect::<Vec<_>>()
                 .join(", ");
             let extra = summary.winning_ids.len().saturating_sub(15);
@@ -2227,17 +2368,19 @@ impl MafiaInteractionHandler {
         if let Some(mvp_id) = summary.mvp_id {
             lines.push(if summary.mvp_bonus > 0 {
                 format!(
-                    "**MVP:** <@{}> (+{} {JOPACOIN_EMOTE})",
-                    mvp_id, summary.mvp_bonus
+                    "**MVP:** {} (+{} {JOPACOIN_EMOTE})",
+                    mafia_name(&names, mvp_id),
+                    summary.mvp_bonus
                 )
             } else {
-                format!("**MVP:** <@{}>", mvp_id)
+                format!("**MVP:** {}", mafia_name(&names, mvp_id))
             });
         }
         if let Some(bookie_id) = summary.bookie_id {
             lines.push(format!(
-                "🎰 **The Bookie** <@{}> called the lynch and cashed out (+{} {JOPACOIN_EMOTE}). The house wins.",
-                bookie_id, summary.bookie_payout
+                "🎰 **The Bookie** {} called the lynch and cashed out (+{} {JOPACOIN_EMOTE}). The house wins.",
+                mafia_name(&names, bookie_id),
+                summary.bookie_payout
             ));
         }
         if summary.nonprofit_overflow > 0 {
@@ -2258,7 +2401,7 @@ impl MafiaInteractionHandler {
                 summary
                     .vote_breakdown
                     .iter()
-                    .map(|(target, count)| format!("• <@{}>: {}", target, count)),
+                    .map(|(target, count)| format!("• {}: {}", mafia_name(&names, *target), count)),
             );
         }
         let description = lines.join("\n\n");
@@ -2267,7 +2410,19 @@ impl MafiaInteractionHandler {
             .iter()
             .filter_map(|id| u64::try_from(*id).ok())
             .collect::<BTreeSet<_>>();
-        let response = InteractionResponse::message(description.clone())
+        let content = with_ping_line(
+            &description,
+            &winning_mentions,
+            summary
+                .winning_ids
+                .iter()
+                .take(15)
+                .copied()
+                .chain(summary.mvp_id)
+                .chain(summary.bookie_id)
+                .chain(summary.vote_breakdown.keys().copied()),
+        );
+        let response = InteractionResponse::message(content)
             .with_user_mentions(winning_mentions.iter().copied().collect())
             .embed(
                 InteractionEmbed::titled(format!(
@@ -2428,9 +2583,15 @@ impl MafiaInteractionHandler {
                 return Err(error);
             }
         };
-        let mentions = missing
+        let waiting_ids = missing.iter().take(25).copied().collect::<Vec<_>>();
+        let names = self.player_names(guild_id, &waiting_ids).await;
+        let waiting = waiting_ids
             .iter()
-            .take(25)
+            .map(|id| mafia_name(&names, *id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mentions = waiting_ids
+            .iter()
             .map(|id| format!("<@{}>", id))
             .collect::<Vec<_>>()
             .join(" ");
@@ -2440,8 +2601,9 @@ impl MafiaInteractionHandler {
             "Day"
         };
         let response = InteractionResponse::message(format!(
-            "⚠️ {}\n{} {} haven't acted yet — {} {} ends <t:{}:R>.",
+            "⚠️ {}\n{}\n{} {} haven't acted yet — {} {} ends <t:{}:R>.",
             mentions,
+            waiting,
             missing.len(),
             if missing.len() == 1 {
                 "player"
@@ -2685,15 +2847,42 @@ fn is_winning_role(winner: Option<MafiaWinner>, role: MafiaRole) -> bool {
         Some(MafiaWinner::None) | None => false,
     }
 }
+/// Readable display text for a Mafia player; never an ID or mention.
+fn mafia_name(names: &GuildPlayerNameDirectory, discord_id: i64) -> String {
+    escape_discord_text(&names.resolve(discord_id))
+}
+
+/// Append mentions for the referenced players this message may ping. Names
+/// carry the readable text; the mention line only preserves intended pings.
+fn with_ping_line(
+    text: &str,
+    allowed: &BTreeSet<u64>,
+    referenced: impl IntoIterator<Item = i64>,
+) -> String {
+    let mut seen = BTreeSet::new();
+    let mentions = referenced
+        .into_iter()
+        .filter_map(|id| u64::try_from(id).ok())
+        .filter(|id| allowed.contains(id) && seen.insert(*id))
+        .map(|id| format!("<@{id}>"))
+        .collect::<Vec<_>>();
+    if mentions.is_empty() {
+        text.to_owned()
+    } else {
+        format!("{text}\n{}", mentions.join(" "))
+    }
+}
+
 fn leaderboard_line(
     rank: usize,
     row: &cama_db::mafia_repository::MafiaLeaderboardRow,
     win_rate: f64,
+    name: &str,
 ) -> String {
     format!(
-        "`{:>2}.` <@{}> — {}W / {}G ({:.0}%) • 🔪{} 👥{} 🃏{} ⭐{}",
+        "`{:>2}.` {} — {}W / {}G ({:.0}%) • 🔪{} 👥{} 🃏{} ⭐{}",
         rank,
-        row.discord_id,
+        name,
         row.wins,
         row.games_played,
         win_rate,
@@ -2733,6 +2922,7 @@ fn role_embed(
     players: &[MafiaPlayer],
     investigations: &[MafiaAction],
     titles: &[String],
+    names: &GuildPlayerNameDirectory,
 ) -> InteractionEmbed {
     let title = format!(
         "{} You are a {}{}",
@@ -2764,8 +2954,8 @@ fn role_embed(
             .filter(|ally| ally.role == MafiaRole::Mafia && ally.discord_id != player.discord_id)
             .map(|ally| {
                 format!(
-                    "<@{}> ({}){}",
-                    ally.discord_id,
+                    "{} ({}){}",
+                    mafia_name(names, ally.discord_id),
                     ally.hero_name.as_deref().unwrap_or("Unknown"),
                     if ally.is_godfather { " 👑" } else { "" },
                 )
@@ -2783,8 +2973,8 @@ fn role_embed(
                 .iter()
                 .filter_map(|action| {
                     Some(format!(
-                        "<@{}>: **{}**",
-                        action.target_id?,
+                        "{}: **{}**",
+                        mafia_name(names, action.target_id?),
                         action.result.as_deref().unwrap_or("?")
                     ))
                 })

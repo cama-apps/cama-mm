@@ -45,15 +45,17 @@ fn test_setup_includes_twist_line() {
 
 #[test]
 fn test_death_narration_includes_role_and_hero() {
-    let text = MafiaFlavorService::new(0).death_narration(&victim(Role::Townie), false);
+    let text =
+        MafiaFlavorService::new(0).death_narration(&victim(Role::Townie), "Server Victim", false);
     assert!(text.contains("Pudge"));
     assert!(text.contains("Townie"));
-    assert!(text.contains("<@999>"));
+    assert!(text.contains("Server Victim"));
+    assert!(!text.contains("<@"));
 }
 
 #[test]
 fn test_plague_death_uses_plague_template() {
-    let text = MafiaFlavorService::new(0).death_narration(&victim(Role::Townie), true);
+    let text = MafiaFlavorService::new(0).death_narration(&victim(Role::Townie), "Victim", true);
     assert!(text.to_lowercase().contains("plague") || text.to_lowercase().contains("fever"));
 }
 
@@ -61,7 +63,7 @@ fn test_plague_death_uses_plague_template() {
 fn test_lynch_narration_includes_role() {
     assert!(
         MafiaFlavorService::new(0)
-            .lynch_narration(&victim(Role::Mafia))
+            .lynch_narration(&victim(Role::Mafia), "Victim")
             .contains("Mafia")
     );
 }
@@ -84,7 +86,7 @@ fn all_templates_render_without_unexpanded_player_tokens() {
     let service = MafiaFlavorService::new(0);
     let victim = victim(Role::Bookie);
     for _ in 0..DEATH.len() * 2 {
-        let rendered = service.death_narration(&victim, false);
+        let rendered = service.death_narration(&victim, "Victim", false);
         assert!(!rendered.contains("{hero}"));
         assert!(!rendered.contains("{name}"));
         assert!(!rendered.contains("{role}"));

@@ -23,6 +23,7 @@ use cama_app::pet_flavor::{PetFlavorEvent, PetFlavorService, fallbacks};
 use cama_app::pet_sqlite::SqlitePetCommandService;
 use cama_db::pet_brawl_repository::PetBrawlRepository;
 use cama_db::pet_repository::PetRepository;
+use cama_domain::formatting::escape_discord_text;
 use cama_domain::pet::{
     DeathNotice, EvolutionNotice, HatchNotice, PET_BRAWL_ACTIVE_TTL_SECONDS, Pet, PetMood,
     PetStage, RefundNotice,
@@ -106,6 +107,12 @@ pub trait PetSweepDiscordPort: FirstGamePoolGuildSource + Send + Sync {
     ) -> Result<(), PetSweepDeliveryError>;
 
     async fn send_dm(&self, user_id: i64, message: DiscordMessage) -> Result<(), String>;
+
+    /// Readable owner display text for announcements, or `Unknown player`;
+    /// never an ID or mention.
+    async fn player_name(&self, _guild_id: i64, _user_id: i64) -> String {
+        "Unknown player".to_owned()
+    }
 }
 
 #[async_trait]
@@ -392,6 +399,10 @@ impl PetSweepWorker {
         }
     }
 
+    async fn owner_name(&self, pet: &Pet) -> String {
+        escape_discord_text(&self.discord.player_name(pet.guild_id, pet.discord_id).await)
+    }
+
     async fn deliver_hatch(
         &self,
         context: &WorkerContext,
@@ -403,7 +414,8 @@ impl PetSweepWorker {
             let flavor = self
                 .generate_flavor(context, PetFlavorEvent::Hatched, pet.clone())
                 .await?;
-            let embed = with_flavor(build_hatch_embed(&pet), Some(flavor));
+            let owner = self.owner_name(&pet).await;
+            let embed = with_flavor(build_hatch_embed(&pet, &owner), Some(flavor));
             self.deliver_channel(context, channel_id, pet_message(embed, Some(media)))
                 .await?;
         }
@@ -434,7 +446,8 @@ impl PetSweepWorker {
             let flavor = self
                 .generate_flavor(context, PetFlavorEvent::Evolved, pet.clone())
                 .await?;
-            let embed = with_flavor(build_evolution_embed(&pet), Some(flavor));
+            let owner = self.owner_name(&pet).await;
+            let embed = with_flavor(build_evolution_embed(&pet, &owner), Some(flavor));
             self.deliver_channel(context, channel_id, pet_message(embed, Some(media)))
                 .await?;
         }
@@ -470,7 +483,8 @@ impl PetSweepWorker {
             } else {
                 None
             };
-            let embed = with_flavor(build_death_embed(&pet), flavor);
+            let owner = self.owner_name(&pet).await;
+            let embed = with_flavor(build_death_embed(&pet, &owner), flavor);
             let media = if needs_payload {
                 Some(self.render_media(&pet, PetMediaKind::Death).await?)
             } else {

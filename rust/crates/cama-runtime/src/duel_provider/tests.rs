@@ -93,9 +93,17 @@ struct MockDiscord {
     deletes: Mutex<Vec<(u64, u64)>>,
     fail_sends: Mutex<bool>,
     next_message_id: Mutex<u64>,
+    members: Mutex<std::collections::BTreeMap<u64, String>>,
 }
 
 impl MockDiscord {
+    fn set_member(&self, user_id: i64, display_name: &str) {
+        self.members
+            .lock()
+            .expect("members")
+            .insert(user_id as u64, display_name.to_owned());
+    }
+
     fn edits(&self) -> Vec<(u64, u64, DiscordMessage)> {
         self.edits.lock().expect("edits").clone()
     }
@@ -226,9 +234,21 @@ impl DiscordTransport for MockDiscord {
     async fn guild_member(
         &self,
         _guild_id: u64,
-        _user_id: u64,
+        user_id: u64,
     ) -> Result<Option<DiscordGuildMemberSnapshot>, String> {
-        Ok(None)
+        Ok(self
+            .members
+            .lock()
+            .expect("members")
+            .get(&user_id)
+            .map(|display_name| DiscordGuildMemberSnapshot {
+                user_id,
+                display_name: display_name.clone(),
+                presence: crate::discord_transport::DiscordPresence::Unknown,
+                in_voice: false,
+                deafened: false,
+                activities: Vec::new(),
+            }))
     }
 }
 
@@ -516,17 +536,33 @@ async fn resolve_withholds_bankruptcy_penalty_and_vanity_tax_from_the_wager() {
             params![RECIPIENT, GUILD],
         )
         .expect("seed recipient penalty");
+    discord.set_member(RECIPIENT, "Recipient Name");
     let provider = provider_with_vanity_tax(&fixture.path, Arc::clone(&discord), vanity_tax);
     let registry = registry(&provider);
+    let issue_responder = Arc::new(CapturingResponder::with_receipt(300));
     registry
         .command_handler("duel")
         .expect("duel handler")
-        .handle(
-            issue_request(),
-            Arc::new(CapturingResponder::with_receipt(300)),
-        )
+        .handle(issue_request(), issue_responder.clone())
         .await
         .expect("issue duel");
+    {
+        let issued = issue_responder.followups.lock().expect("issue followups");
+        let embed = issued
+            .iter()
+            .find_map(|response| response.embeds.first())
+            .expect("issued challenge embed");
+        let field = |name: &str| {
+            embed
+                .fields
+                .iter()
+                .find(|field| field.name == name)
+                .map(|field| field.value.clone())
+        };
+        assert_eq!(field("Challenger").as_deref(), Some("Unknown player"));
+        assert_eq!(field("Recipient").as_deref(), Some("Recipient Name"));
+        assert!(embed.fields.iter().all(|field| !field.value.contains("<@")));
+    }
     let challenge = fixture.challenge();
     registry
         .component_handler(&format!("duel:{}:trial_by_combat", challenge.challenge_id))
@@ -561,7 +597,7 @@ async fn resolve_withholds_bankruptcy_penalty_and_vanity_tax_from_the_wager() {
     let announcement = &followups.last().expect("resolution announcement").content;
     assert!(
         announcement.ends_with(&format!(
-            "Challenge #{} is resolved: <@{RECIPIENT}> wins 925 JC (\u{2212}25 JC bankruptcy penalty, \u{2212}50 JC vanity tax).",
+            "Challenge #{} is resolved: Recipient Name wins 925 JC (\u{2212}25 JC bankruptcy penalty, \u{2212}50 JC vanity tax).",
             challenge.challenge_id
         )),
         "{announcement}"

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -181,6 +181,8 @@ impl InteractionHandler for HeroGridHandler {
         })
         .await
         .map_err(|error| format!("Hero Grid source task failed: {error}"))??;
+        // The candidate set can span every enriched player, so names come from
+        // the member cache and last-seen archive rather than per-member fetches.
         let player_names = self
             .player_names
             .names_for_guild(guild_id, &player_ids)
@@ -188,9 +190,12 @@ impl InteractionHandler for HeroGridHandler {
                 warn!(%error, guild_id, "Hero Grid player-name snapshot failed");
                 Default::default()
             });
-        // Only cache hits override; the grid service falls back to stored
-        // player names for misses instead of numeric Discord IDs.
-        let player_name_overrides = player_names.known_names(&player_ids);
+        // Every player gets a readable Discord name or `Unknown player`; the
+        // grid never falls back to registration names or numeric IDs.
+        let player_name_overrides = player_ids
+            .iter()
+            .map(|player_id| (*player_id, player_names.resolve(*player_id)))
+            .collect::<BTreeMap<_, _>>();
         let service = self.service.clone();
         let outcome = tokio::task::spawn_blocking(move || {
             service

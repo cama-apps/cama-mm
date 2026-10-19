@@ -245,6 +245,12 @@ fn paged_gambling_entries(count: usize) -> Vec<GamblingEntry> {
         .collect()
 }
 
+fn named_members(ids: std::ops::Range<i64>) -> Option<GuildMemberDirectory> {
+    Some(GuildMemberDirectory::new(
+        ids.map(|id| (id, format!("Player {id}"))),
+    ))
+}
+
 fn gambling_view(
     entries: Vec<GamblingEntry>,
     members: Option<GuildMemberDirectory>,
@@ -1046,16 +1052,20 @@ fn test_single_page_both_buttons_disabled() {
 
 #[test]
 fn test_page_slicing_shows_correct_entries() {
-    let mut view = gambling_view(paged_gambling_entries(20), None, None);
+    let mut view = gambling_view(
+        paged_gambling_entries(20),
+        named_members(1_000..1_020),
+        None,
+    );
     let first = view.build_embed();
     let first_earners = first
         .fields
         .iter()
         .find(|field| field.name == "Top Earners")
         .expect("first-page earners");
-    assert!(first_earners.value.contains("User 1000"));
-    assert!(first_earners.value.contains("User 1007"));
-    assert!(!first_earners.value.contains("User 1008"));
+    assert!(first_earners.value.contains("Player 1000"));
+    assert!(first_earners.value.contains("Player 1007"));
+    assert!(!first_earners.value.contains("Player 1008"));
 
     assert!(view.next_page());
     let second = view.build_embed();
@@ -1064,9 +1074,9 @@ fn test_page_slicing_shows_correct_entries() {
         .iter()
         .find(|field| field.name == "Top Earners")
         .expect("second-page earners");
-    assert!(!second_earners.value.contains("User 1000"));
-    assert!(second_earners.value.contains("User 1008"));
-    assert!(second_earners.value.contains("User 1015"));
+    assert!(!second_earners.value.contains("Player 1000"));
+    assert!(second_earners.value.contains("Player 1008"));
+    assert!(second_earners.value.contains("Player 1015"));
 }
 
 #[test]
@@ -1076,17 +1086,17 @@ fn test_down_bad_filters_negative_only() {
         .enumerate()
         .map(|(index, pnl)| gambling_entry(2_001 + index as i64, GUILD, pnl))
         .collect();
-    let view = gambling_view(entries, None, None);
+    let view = gambling_view(entries, named_members(2_001..2_005), None);
     let embed = view.build_embed();
     let down_bad = embed
         .fields
         .iter()
         .find(|field| field.name == "Down Bad")
         .expect("down-bad field");
-    assert!(down_bad.value.contains("User 2002"));
-    assert!(down_bad.value.contains("User 2004"));
-    assert!(!down_bad.value.contains("User 2001"));
-    assert!(!down_bad.value.contains("User 2003"));
+    assert!(down_bad.value.contains("Player 2002"));
+    assert!(down_bad.value.contains("Player 2004"));
+    assert!(!down_bad.value.contains("Player 2001"));
+    assert!(!down_bad.value.contains("Player 2003"));
 }
 
 #[test]
@@ -1108,14 +1118,18 @@ fn test_footer_includes_page_info() {
 
 #[test]
 fn test_index_numbering_continues_across_pages() {
-    let mut view = gambling_view(paged_gambling_entries(20), None, None);
+    let mut view = gambling_view(
+        paged_gambling_entries(20),
+        named_members(1_000..1_020),
+        None,
+    );
     let first = view.build_embed();
     let first_earners = first
         .fields
         .iter()
         .find(|field| field.name == "Top Earners")
         .expect("first page");
-    assert!(first_earners.value.starts_with("1. **User 1000**"));
+    assert!(first_earners.value.starts_with("1. **Player 1000**"));
 
     assert!(view.next_page());
     let second = view.build_embed();
@@ -1124,5 +1138,19 @@ fn test_index_numbering_continues_across_pages() {
         .iter()
         .find(|field| field.name == "Top Earners")
         .expect("second page");
-    assert!(second_earners.value.starts_with("9. **User 1008**"));
+    assert!(second_earners.value.starts_with("9. **Player 1008**"));
+}
+
+#[test]
+fn test_unnamed_players_render_unknown_player_not_ids() {
+    let view = gambling_view(paged_gambling_entries(2), None, None);
+    let earners = view
+        .build_embed()
+        .fields
+        .into_iter()
+        .find(|field| field.name == "Top Earners")
+        .expect("earners");
+    assert!(earners.value.starts_with("1. **Unknown player**"));
+    assert!(!earners.value.contains("User "));
+    assert!(!earners.value.contains("<@"));
 }

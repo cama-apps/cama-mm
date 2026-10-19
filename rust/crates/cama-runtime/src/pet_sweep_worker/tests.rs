@@ -258,6 +258,10 @@ impl FirstGamePoolGuildSource for FakeDiscord {
 
 #[async_trait]
 impl PetSweepDiscordPort for FakeDiscord {
+    async fn player_name(&self, _guild_id: i64, user_id: i64) -> String {
+        format!("Owner {user_id}")
+    }
+
     async fn cached_text_channel(
         &self,
         guild_id: i64,
@@ -461,6 +465,21 @@ async fn stale_brawls_precede_hatch_delivery_and_authored_bytes_are_sent() {
     );
     let messages = discord.messages();
     assert_eq!(messages.len(), 2);
+    let descriptions = messages
+        .iter()
+        .map(|(_, message)| {
+            message.response.embeds[0]
+                .description
+                .clone()
+                .expect("hatch description")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        descriptions
+            .iter()
+            .any(|text| text.starts_with("Owner 101's egg cracked open"))
+    );
+    assert!(descriptions.iter().all(|text| !text.contains("<@")));
     assert!(messages.iter().all(|(_, message)| {
         message.allowed_mentions == DiscordAllowedMentions::Default
             && message.response.attachments.len() == 1

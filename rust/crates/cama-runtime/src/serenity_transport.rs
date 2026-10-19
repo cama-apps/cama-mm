@@ -3359,6 +3359,16 @@ impl PetSweepDiscordPort for SerenityDiscordTransport {
             .map_err(|_| "Discord pet owner ID is outside the supported range".to_owned())?;
         DiscordTransport::send_direct_message(self, user_id, message).await
     }
+
+    async fn player_name(&self, guild_id: i64, user_id: i64) -> String {
+        crate::discord_transport::resolve_guild_player_names(
+            self,
+            u64::try_from(guild_id).ok(),
+            &[user_id],
+        )
+        .await
+        .resolve(user_id)
+    }
 }
 
 #[async_trait]

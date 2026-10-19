@@ -7,11 +7,12 @@ pub const DISCORD_MESSAGE_MAX_CHARS: usize = 2_000;
 
 /// Names are text, never Discord mention markup or a serialized identifier.
 /// Apply this at rendering boundaries too: historical stored names may contain
-/// the ID/mention fallbacks used by older versions of the bot.
+/// the ID/mention/`User <id>` fallbacks used by older versions of the bot.
 #[must_use]
 pub fn readable_player_name(name: &str) -> Option<&str> {
     let name = name.trim();
     let identifier = name.trim_start_matches('@').trim_start_matches('!');
+    let identifier = identifier.strip_prefix("User ").unwrap_or(identifier);
     (!name.is_empty()
         && !name.contains("<@")
         && !identifier.chars().all(|character| character.is_numeric()))
@@ -140,6 +141,7 @@ mod tests {
             "<@123456789>",
             "<@!123456789>",
             "name <@123>",
+            "User 123456789012345678",
         ] {
             assert_eq!(super::readable_player_name(invalid), None, "{invalid:?}");
         }
