@@ -2031,7 +2031,8 @@ async fn aspca_publicly_reports_hungry_pets_without_mutating_them() {
         crate::registration::InteractionAllowedMentions::None
     );
     let text = format!("{embed:?}");
-    assert!(text.contains(&format!("<@{OWNER}>")));
+    assert!(!text.contains("<@"));
+    assert!(text.contains("Unknown player"));
     assert_eq!(
         repository.get_welfare_pets(Some(GUILD as i64)).unwrap(),
         before

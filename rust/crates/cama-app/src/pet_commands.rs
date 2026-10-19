@@ -956,7 +956,10 @@ where
             return;
         }
         let pets = self.service.leaderboard(context.guild_id);
-        let embed = build_leaderboard_embed(&pets, self.service.decay_per_day(), context.now);
+        let embed =
+            build_leaderboard_embed(&pets, self.service.decay_per_day(), context.now, &|id| {
+                format!("<@{id}>")
+            });
         let _ = interaction.send_followup(ResponsePayload::embed(embed, Visibility::Public));
     }
 
@@ -1285,7 +1288,10 @@ where
         notice: &RefundNotice,
     ) -> Result<(), DeliveryError> {
         if let Some(channel_id) = self.channel_for(discord, notice.guild_id) {
-            let payload = ResponsePayload::embed(build_refund_embed(notice), Visibility::Public);
+            let payload = ResponsePayload::embed(
+                build_refund_embed(notice, &|id| format!("<@{id}>")),
+                Visibility::Public,
+            );
             match discord.send_channel(channel_id, payload) {
                 Ok(()) | Err(DeliveryError::Forbidden) => {}
                 Err(error) => return Err(error),
@@ -1992,7 +1998,7 @@ fn pet_calling_paths(pet: &Pet) -> String {
 }
 
 #[must_use]
-pub fn build_refund_embed(notice: &RefundNotice) -> Embed {
+pub fn build_refund_embed(notice: &RefundNotice, owner_name: &dyn Fn(i64) -> String) -> Embed {
     let mut payouts = notice.payouts.clone();
     payouts.sort_by_key(|payout| std::cmp::Reverse(payout.amount));
     let lines = payouts
@@ -2000,8 +2006,11 @@ pub fn build_refund_embed(notice: &RefundNotice) -> Embed {
         .take(15)
         .map(|payout| {
             format!(
-                "<@{}> spent {} on care → rolled **{}%** → +{} {JOPACOIN_EMOTE}",
-                payout.discord_id, payout.consumed_jc, payout.multiplier_pct, payout.amount
+                "{} spent {} on care → rolled **{}%** → +{} {JOPACOIN_EMOTE}",
+                owner_name(payout.discord_id),
+                payout.consumed_jc,
+                payout.multiplier_pct,
+                payout.amount
             )
         })
         .collect::<Vec<_>>()
@@ -2021,7 +2030,12 @@ pub fn build_refund_embed(notice: &RefundNotice) -> Embed {
 /// A read-only welfare audit. Dormant stable pets have frozen care clocks;
 /// pending starvation is reported as critical hunger until death is recorded.
 #[must_use]
-pub fn build_aspca_embed(pets: &[Pet], decay_per_day: i64, now: i64) -> Embed {
+pub fn build_aspca_embed(
+    pets: &[Pet],
+    decay_per_day: i64,
+    now: i64,
+    owner_name: &dyn Fn(i64) -> String,
+) -> Embed {
     #[derive(Default)]
     struct Charges {
         hungry: usize,
@@ -2133,7 +2147,8 @@ pub fn build_aspca_embed(pets: &[Pet], decay_per_day: i64, now: i64) -> Embed {
         embed.field(
             format!("#{} · {} shame points", index + 1, c.score()),
             format!(
-                "<@{owner}>\n{}\n*{verdict}*{}",
+                "{}\n{}\n*{verdict}*{}",
+                owner_name(*owner),
                 evidence.join("\n"),
                 cama_domain::pet::adoption_suspended_until(
                     incidents.get(owner).into_iter().flatten().copied(),
@@ -2240,8 +2255,13 @@ pub fn build_graveyard_embed_with_dex(
 }
 
 #[must_use]
-pub fn build_leaderboard_embed(pets: &[Pet], decay_per_day: i64, now: i64) -> Embed {
-    build_leaderboard_embed_with_records(pets, decay_per_day, now, None)
+pub fn build_leaderboard_embed(
+    pets: &[Pet],
+    decay_per_day: i64,
+    now: i64,
+    owner_name: &dyn Fn(i64) -> String,
+) -> Embed {
+    build_leaderboard_embed_with_records(pets, decay_per_day, now, None, owner_name)
 }
 
 #[must_use]
@@ -2250,6 +2270,7 @@ pub fn build_leaderboard_embed_with_records(
     decay_per_day: i64,
     now: i64,
     records: Option<&BTreeMap<i64, (i64, i64)>>,
+    owner_name: &dyn Fn(i64) -> String,
 ) -> Embed {
     if pets.is_empty() {
         return Embed::new(
@@ -2279,10 +2300,10 @@ pub fn build_leaderboard_embed_with_records(
                 String::new()
             };
             format!(
-                "{rank} **{}** ({}) — <@{}> · {} {}{record_text}",
+                "{rank} **{}** ({}) — {} · {} {}{record_text}",
                 pet.name,
                 pet_species_label(pet),
-                pet.discord_id,
+                owner_name(pet.discord_id),
                 format_age(pet.age_seconds(now)),
                 mood_emoji(mood),
             )
@@ -2476,7 +2497,7 @@ mod tests {
         hungry.hunger_at_last_fed = WARNING_HUNGER;
         pets.push(hungry);
         pets.push(owner_pet()); // Zero hunger, but no persisted death yet.
-        let embed = build_aspca_embed(&pets, 20, now);
+        let embed = build_aspca_embed(&pets, 20, now, &|id| format!("Owner {id}"));
         let charges = &embed.fields[1];
         assert_eq!(charges.name, "#1 · 32 shame points");
         for text in [
@@ -2485,7 +2506,7 @@ mod tests {
             "2 deaths on record",
             "1 eaten",
             "1 sacrificed",
-            "<@100>",
+            "Owner 100",
         ] {
             assert!(charges.value.contains(text), "missing {text}");
         }
@@ -2503,7 +2524,9 @@ mod tests {
         future_hatch.hatched_at = now + DAY;
         let mut healthy = owner_pet();
         healthy.last_fed_at = now;
-        let embed = build_aspca_embed(&[stabled, egg, future_hatch, healthy], 20, now);
+        let embed = build_aspca_embed(&[stabled, egg, future_hatch, healthy], 20, now, &|id| {
+            format!("Owner {id}")
+        });
         assert!(embed.description.contains("No charges today"));
         assert!(embed.fields.is_empty());
     }
@@ -2527,9 +2550,9 @@ mod tests {
             pet.hunger_at_last_fed = WARNING_HUNGER;
             pets.push(pet);
         }
-        let embed = build_aspca_embed(&pets, 20, now);
+        let embed = build_aspca_embed(&pets, 20, now, &|id| format!("Owner {id}"));
         assert_eq!(embed.fields.len(), 11);
-        assert!(embed.fields[1].value.starts_with("<@1>\n"));
+        assert!(embed.fields[1].value.starts_with("Owner 1\n"));
         assert!(embed.footer.as_ref().unwrap().contains("10 of 20"));
         let mut length = embed.title.chars().count()
             + embed.description.chars().count()
