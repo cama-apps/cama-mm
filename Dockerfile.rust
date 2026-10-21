@@ -3,6 +3,7 @@ FROM debian:bookworm-slim AS runtime-base
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         libsqlite3-0 \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge '20250419~deb12u2' \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 1001 appuser \
     && useradd --create-home --uid 1001 --gid 1001 --shell /usr/sbin/nologin appuser \
