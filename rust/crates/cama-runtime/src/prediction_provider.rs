@@ -2666,7 +2666,7 @@ fn cancelled_embed(market: &Market) -> InteractionEmbed {
         .field("Status", "**CANCELLED** — cost basis refunded.", false)
 }
 
-fn ladder_body(book: &Book) -> String {
+pub(super) fn ladder_body(book: &Book) -> String {
     let asks_all = &book.yes_asks;
     let bids_all = &book.yes_bids;
     let hidden_asks = asks_all.len().saturating_sub(LADDER_MAX_ROWS_PER_SIDE);
