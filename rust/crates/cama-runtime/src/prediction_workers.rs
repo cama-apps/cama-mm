@@ -751,33 +751,7 @@ fn market_embed(
 }
 
 fn format_ladder(book: &Book) -> String {
-    const MAX_ROWS: usize = 8;
-    let asks = book.yes_asks.iter().take(MAX_ROWS).collect::<Vec<_>>();
-    let bids = book.yes_bids.iter().take(MAX_ROWS).collect::<Vec<_>>();
-    let mut lines = vec!["🟢 Buy YES".to_owned()];
-    if asks.is_empty() {
-        lines.push("  (none — refreshes daily)".to_owned());
-    } else {
-        for (price, size) in asks.iter().rev() {
-            lines.push(format!("  {price:>3}  {size:>3}"));
-        }
-    }
-    let yes = asks
-        .first()
-        .map_or_else(|| "—".to_owned(), |(price, _)| format!("{price}%"));
-    let no = bids
-        .first()
-        .map_or_else(|| "—".to_owned(), |(price, _)| format!("{}%", 100 - price));
-    lines.push(format!("\n  ── YES {yes} · NO {no} ──\n"));
-    lines.push("🔴 Buy NO".to_owned());
-    if bids.is_empty() {
-        lines.push("  (none — refreshes daily)".to_owned());
-    } else {
-        for (price, size) in bids {
-            lines.push(format!("  {:>3}  {size:>3}", 100 - price));
-        }
-    }
-    format!("```\n{}\n```", lines.join("\n"))
+    crate::prediction_provider::ladder_body(book)
 }
 
 fn format_recent_trades(trades: &[Trade]) -> String {

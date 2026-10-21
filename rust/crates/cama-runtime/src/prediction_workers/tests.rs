@@ -23,6 +23,44 @@ const GAMBA: i64 = 420;
 const OTHER_GAMBA: i64 = 430;
 const NOW: i64 = 1_783_944_000; // 2026-07-13 12:00:00 UTC.
 
+#[test]
+fn daily_refresh_ladder_renders_proportional_bars() {
+    let body = format_ladder(&Book {
+        current_price: Some(77),
+        yes_asks: vec![
+            (81, 10),
+            (82, 10),
+            (83, 79),
+            (84, 90),
+            (85, 84),
+            (86, 66),
+            (87, 48),
+            (88, 30),
+        ],
+        yes_bids: vec![
+            (77, 10),
+            (75, 30),
+            (74, 48),
+            (73, 84),
+            (72, 88),
+            (71, 98),
+            (70, 70),
+            (69, 52),
+        ],
+    });
+    let widths: Vec<_> = body
+        .lines()
+        .filter(|line| line.contains('█'))
+        .map(|line| line.chars().filter(|character| *character == '█').count())
+        .collect();
+    assert_eq!(
+        widths,
+        vec![3, 4, 6, 8, 9, 8, 1, 1, 1, 3, 4, 8, 8, 10, 7, 5]
+    );
+    assert!(body.starts_with("```ansi\n"));
+    assert!(body.contains("YES 81%  ·  NO 23%"));
+}
+
 struct FixedClock(AtomicI64);
 
 impl FixedClock {
