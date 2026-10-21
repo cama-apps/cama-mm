@@ -295,6 +295,12 @@ criteria = ["safe-to-run", "rsa-public-key-encryption"]
 version = "0.9.10"
 notes = "Archive SHA-256 b8573f03f5883dcaebdfcf4725caa1ecb9c15b2ef50c43a07b816e06799bb12d. Manifest build=false; source has no unsafe code or ambient filesystem/network/process operations. Read RsaPublicKey construction/checking and PKCS#1 v1.5/OAEP encryption paths, padding/MGF, and rsa_encrypt public modular exponentiation. Default public-key constructor limits modulus to 4096 bits and exponent to 2..2^33-1, rejecting even modulus/exponent and exponent >= modulus. Encryption validates message size before padding allocation; its padding RNG requires CryptoRngCore and Steam's wrapper supplies rand thread_rng. No private RSA key is held or used by this application: Steam integrations only decode/build RsaPublicKey, read public n/e, encrypt password/session-key bytes, and expose unused public signature verification. The known RUSTSEC-2023-0071/Marvin private-key timing vulnerability is acknowledged, NOT audited away. Do not import this as safe-to-deploy for private-key use. Enforce scoped inverse dependency and callsite constraints in CI; independently audit every primitive dependency."
 
+[[audits.rustls-webpki]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+delta = "0.103.14 -> 0.103.16"
+notes = "Reviewed all changed runtime sources and manifests for the 2026-10-21 CA remediation. The verifier rejects exact SPKI matches against eight static distrusted intermediate public keys at every path head and trust anchor, before signature/path acceptance. This covers cross-signed certificates without relaxing existing checks; comparisons are on public inputs and introduce no unsafe code or ambient I/O. Reviewed regression tests cover leaf/intermediate/root distrust, unrelated certificates, cross-sign fallback and shared-key rejection. Other changes remove per-algorithm FIPS submission flags in favor of the existing try_fips_mode result, and adjust docs metadata; this deployment does not enable FIPS. No new build script or runtime dependency. RUSTSEC-2026-0382 identifies 0.103.16 as fixed."
+
 [[audits.serde_path_to_error]]
 who = "Codex (automated source review)"
 criteria = "safe-to-deploy"
@@ -439,6 +445,12 @@ notes = """
 SCOPED TO CAMA WITH THE unsafe FEATURE DISABLED, enforced by the repository dependency feature guard. Read manifests, unsafe operation sites, source/span APIs, lexer/parser boundaries, decoder validation and recursion-guard integration. The normal compiled configuration forbids unsafe code and uses checked string/slice indexing. No build script or ambient network/filesystem/process capability; optional debug writes diagnostics. With the explicitly opt-in unsafe feature, public safe ValidateWhitespace receiver methods can pass caller-invalid spans to Source::get_unchecked; this configuration is NOT certified. Span::new_unchecked is itself safe and does not validate bounds. Cama must continue consuming this package through toml_edit normal parser flow with unsafe disabled. Tests of that flow cover invalid Unicode, malformed syntax, depth limits and 10,000 generated inputs. No UB was executed when investigating the excluded configuration.
 Archive SHA256: 1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56.
 """
+
+[[audits.webpki-roots]]
+who = "Codex (automated source review)"
+criteria = "safe-to-deploy"
+delta = "1.0.9 -> 1.0.10"
+notes = "Reviewed the published crate delta for the 2026-10-21 CA remediation. Runtime data changes only remove the emSign ECC Root CA - G3 trust anchor (SHA-256 86a1ecba089c4a8d3bbe2734c612ba341d813e043cf9e8a862cd5c57a36bbe6b); no new trust anchors or runtime code are introduced. Manifest changes are version/MSRV metadata; the crate has no build script. Crate-local development lockfile updates do not alter Cama's locked dependency graph. RUSTSEC-2026-0381 identifies 1.0.10 as fixed. The 0.26.11 compatibility crate re-exports this updated bundle."
 
 [[audits.winnow]]
 who = "Codex (automated source review)"
