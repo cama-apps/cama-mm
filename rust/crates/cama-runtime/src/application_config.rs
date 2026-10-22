@@ -464,7 +464,7 @@ impl ApplicationConfig {
                 enrichment_retry_delays: p
                     .i64_list("ENRICHMENT_RETRY_DELAYS", &[1, 5, 20, 60, 180]),
                 exclusion_penalty_weight: p.f64("EXCLUSION_PENALTY_WEIGHT", 72.0),
-                first_game_pool_daily_amount: p.i64("FIRST_GAME_POOL_DAILY_AMOUNT", 100),
+                first_game_pool_daily_amount: p.i64("FIRST_GAME_POOL_DAILY_AMOUNT", 200),
                 gamba_synthetic_members_enabled: p.bool("GAMBA_SYNTHETIC_MEMBERS_ENABLED", false),
                 garnishment_percentage: p.f64("GARNISHMENT_PERCENTAGE", 1.0),
                 hostile_loss_min_balance: p.i64("HOSTILE_LOSS_MIN_BALANCE", 50),
@@ -871,6 +871,7 @@ mod tests {
         assert_eq!(config.values.initial_glicko_rd, 250.0);
         assert_eq!(config.values.recalibration_initial_rd, 250.0);
         assert_eq!(config.values.bet_lock_seconds, 1_200);
+        assert_eq!(config.values.first_game_pool_daily_amount, 200);
         assert_eq!(config.values.openskill_shuffle_chance, 0.05);
         assert_eq!(config.values.auto_spectator_bet_count, 10);
         assert_eq!(config.values.auto_spectator_bet_top_count, 5);

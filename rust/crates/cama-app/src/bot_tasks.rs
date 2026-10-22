@@ -15,7 +15,7 @@ use crate::economy_event_service::EconomyEventEffects;
 
 pub const DUEL_WORKER_WAKE_SECONDS: u64 = 60;
 pub const FIRST_GAME_POOL_WAKE_SECONDS: u64 = 900;
-pub const FIRST_GAME_POOL_DAILY_AMOUNT: i64 = 100;
+pub const FIRST_GAME_POOL_DAILY_AMOUNT: i64 = 200;
 pub const LOBBY_RECONCILE_MAX_ATTEMPTS: usize = 2;
 pub const LOBBY_RECONCILE_RETRY_SECONDS: u64 = 1;
 pub const THREAD_AUTO_ARCHIVE_MINUTES: u64 = 10_080;
