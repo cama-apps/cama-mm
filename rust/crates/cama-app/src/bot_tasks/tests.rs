@@ -60,8 +60,8 @@ fn test_first_game_pool_loop_funds_every_guild_for_current_game_date() {
     assert_eq!(
         port.funding_calls,
         [
-            (41, "2026-08-05".to_owned(), 100),
-            (42, "2026-08-05".to_owned(), 100),
+            (41, "2026-08-05".to_owned(), 200),
+            (42, "2026-08-05".to_owned(), 200),
         ]
     );
     assert_eq!(report.sleep_seconds, 900);
@@ -89,8 +89,8 @@ fn test_first_game_pool_loop_funds_again_when_game_date_advances() {
     assert_eq!(
         port.funding_calls,
         [
-            (41, "2026-08-05".to_owned(), 100),
-            (41, "2026-08-06".to_owned(), 100),
+            (41, "2026-08-05".to_owned(), 200),
+            (41, "2026-08-06".to_owned(), 200),
         ]
     );
 }
