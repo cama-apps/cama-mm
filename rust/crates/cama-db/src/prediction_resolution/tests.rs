@@ -1586,3 +1586,64 @@ fn test_bankruptcy_withholding_truncates_the_f64_product_like_other_surfaces() {
     assert_eq!(result.winners[0].bankruptcy_penalty, expected);
     assert_eq!(fixture.deductions(prediction_id, 6_003).0, expected);
 }
+
+#[test]
+fn expired_market_can_be_cancelled_and_refunded_once() {
+    let fixture = Fixture::new();
+    fixture.player(1, 1_000);
+    fixture.player(2, 1_000);
+    let market = fixture.market("expired market cancellation?");
+    fixture.buy(market, 1, ContractSide::Yes, 3);
+    fixture.buy(market, 2, ContractSide::No, 2);
+    fixture
+        .connection()
+        .execute(
+            "UPDATE predictions SET closes_at=?1 WHERE prediction_id=?2",
+            params![NOW - 1, market],
+        )
+        .expect("expire market");
+    assert_eq!(
+        fixture
+            .repository
+            .lock_expired_predictions(GUILD, NOW)
+            .expect("lock expired market"),
+        vec![market]
+    );
+    assert!(matches!(
+        fixture
+            .orderbook
+            .cancel_orderbook_detailed(market, OTHER_GUILD),
+        Err(crate::predictions_repository::PredictionRepositoryError::PredictionNotFound)
+    ));
+    let cancellation = fixture
+        .orderbook
+        .cancel_orderbook_detailed(market, GUILD)
+        .expect("cancel locked market");
+    assert_eq!(cancellation.refunded.len(), 2);
+    assert!(cancellation.total_refunded > 0);
+    assert_eq!(fixture.balance(1), 1_000);
+    assert_eq!(fixture.balance(2), 1_000);
+    assert_eq!(
+        fixture
+            .orderbook
+            .get_prediction(market)
+            .expect("read market")
+            .expect("market")
+            .status,
+        "cancelled"
+    );
+    assert!(
+        fixture
+            .orderbook
+            .get_book(market)
+            .expect("read book")
+            .yes_asks
+            .is_empty()
+    );
+    assert!(matches!(
+        fixture.orderbook.cancel_orderbook_detailed(market, GUILD),
+        Err(crate::predictions_repository::PredictionRepositoryError::CannotCancel(_))
+    ));
+    assert_eq!(fixture.balance(1), 1_000);
+    assert_eq!(fixture.balance(2), 1_000);
+}

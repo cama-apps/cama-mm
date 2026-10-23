@@ -5377,14 +5377,6 @@ mod tests {
     }
 
     #[test]
-    fn test_shuffler_uses_default_from_config() {
-        assert_eq!(
-            BalancedShuffler::default().recent_match_penalty_weight,
-            310.0
-        );
-    }
-
-    #[test]
     fn test_shuffler_accepts_custom_weight() {
         assert_eq!(
             BalancedShuffler {

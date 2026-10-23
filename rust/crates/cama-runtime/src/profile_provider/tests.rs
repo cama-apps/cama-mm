@@ -6,6 +6,7 @@ use std::thread;
 
 use cama_app::opendota_http::OpenDotaHttpConfig;
 use cama_db::gambling_stats_repository::{AutoBetGroupStats, AutoBetPerformance};
+use cama_db::prediction_resolution_repository::PredictionResolutionRepository;
 use cama_db::predictions_repository::{ContractSide, NewLevel, PredictionRepository};
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
@@ -1666,8 +1667,14 @@ fn test_predictions_tab_resolved_win() {
     let receipt = repository
         .buy_contracts_atomic(prediction_id, 100, ContractSide::Yes, 3)
         .expect("buy winning prediction contracts");
-    repository
-        .settle_orderbook(prediction_id, ContractSide::Yes, Some(100))
+    PredictionResolutionRepository::new(database.path())
+        .settle_orderbook(
+            prediction_id,
+            42,
+            ContractSide::Yes,
+            Some(100),
+            &Default::default(),
+        )
         .expect("settle winning prediction");
     let page = prediction_page(&database);
 
@@ -1688,8 +1695,14 @@ fn test_predictions_tab_resolved_loss() {
     let receipt = repository
         .buy_contracts_atomic(prediction_id, 100, ContractSide::Yes, 3)
         .expect("buy losing prediction contracts");
-    repository
-        .settle_orderbook(prediction_id, ContractSide::No, Some(100))
+    PredictionResolutionRepository::new(database.path())
+        .settle_orderbook(
+            prediction_id,
+            42,
+            ContractSide::No,
+            Some(100),
+            &Default::default(),
+        )
         .expect("settle losing prediction");
     let page = prediction_page(&database);
 
