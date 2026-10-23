@@ -740,14 +740,16 @@ pub fn set_auto_buy_torch_and_hard_hat(
 pub fn top_tunnel_depth_rows(
     connection: &Connection,
     guild_id: i64,
-) -> Result<Vec<(String, i64)>, rusqlite::Error> {
+) -> Result<Vec<(String, i64, i64, i64)>, rusqlite::Error> {
     let mut statement = connection.prepare(
-        "SELECT COALESCE(tunnel_name,'Unnamed Tunnel'), depth
+        "SELECT COALESCE(tunnel_name,'Unnamed Tunnel'), depth, discord_id, prestige_level
          FROM tunnels WHERE guild_id=?1
          ORDER BY depth DESC, total_jc_earned DESC, discord_id ASC LIMIT 10",
     )?;
     statement
-        .query_map([guild_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .query_map([guild_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
         .collect()
 }
 

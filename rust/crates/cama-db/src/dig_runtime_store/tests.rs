@@ -373,6 +373,13 @@ fn leaderboard_projections_keep_their_ordering() {
 
     let by_depth = top_tunnel_depth_rows(&connection, GUILD).expect("depth rows");
     assert_eq!(
+        by_depth
+            .iter()
+            .map(|row| (row.2, row.3))
+            .collect::<Vec<_>>(),
+        vec![(USER + 1, 0), (USER + 2, 1), (USER, 0)]
+    );
+    assert_eq!(
         by_depth.iter().map(|row| row.1).collect::<Vec<_>>(),
         vec![30, 20, 10]
     );

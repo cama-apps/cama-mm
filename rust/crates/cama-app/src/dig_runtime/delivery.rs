@@ -381,6 +381,8 @@ pub struct DigRuntimeWeatherPresentation {
 pub struct DigRuntimeLeaderboardRow {
     pub name: String,
     pub depth: i64,
+    pub user_id: i64,
+    pub prestige: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
