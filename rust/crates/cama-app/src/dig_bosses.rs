@@ -423,7 +423,7 @@ macro_rules! boss {
     };
 }
 
-pub const BOSSES: [BossDefinition; 33] = [
+pub const BOSSES: [BossDefinition; 36] = [
     boss!(
         25,
         "grothak",
@@ -812,6 +812,37 @@ pub const BOSSES: [BossDefinition; 33] = [
             "spineback_quill_barrage"
         ],
         "spineback_rend"
+    ),
+    boss!(
+        150,
+        "last_conductor",
+        "The Last Conductor",
+        5,
+        "tank",
+        [
+            "conductor_procession",
+            "conductor_carriage",
+            "conductor_departure"
+        ],
+        "conductor_derailment"
+    ),
+    boss!(
+        200,
+        "neon_bailiff",
+        "The Neon Bailiff",
+        5,
+        "bruiser",
+        ["bailiff_overcharge", "bailiff_piledriver", "bailiff_core"],
+        "bailiff_eviction"
+    ),
+    boss!(
+        275,
+        "hollow_cantor",
+        "The Hollow Cantor",
+        5,
+        "slippery",
+        ["cantor_resonance", "cantor_doubles", "cantor_refrain"],
+        "cantor_reverberation"
     ),
 ];
 
@@ -1282,7 +1313,7 @@ macro_rules! regular_phase {
     };
 }
 
-pub const PHASE_TWO: [RegularPhaseDefinition; 33] = [
+pub const PHASE_TWO: [RegularPhaseDefinition; 36] = [
     regular_phase!(
         "grothak",
         2,
@@ -1547,9 +1578,48 @@ pub const PHASE_TWO: [RegularPhaseDefinition; 33] = [
         "Hatred Wears No Mask Here",
         -0.13
     ),
+    RegularPhaseDefinition {
+        boss_id: "last_conductor",
+        phase: 2,
+        depth: 150,
+        name: "The Last Conductor, Off the Rails",
+        title: "The Timetable Tears",
+        dialogue: [
+            "The baton snaps. The train keeps coming.",
+            "Tracks unfold up the chamber walls.",
+            "'An unscheduled stop. How unfortunate.'",
+        ],
+        win_odds_penalty: -0.12,
+    },
+    RegularPhaseDefinition {
+        boss_id: "neon_bailiff",
+        phase: 2,
+        depth: 200,
+        name: "The Neon Bailiff, Redlined",
+        title: "Safety Interlocks Disengaged",
+        dialogue: [
+            "Its safety cage drops away. The motor does not slow.",
+            "'COLLATERAL DAMAGE AUTHORIZED.'",
+            "The stripes on its chassis burn white.",
+        ],
+        win_odds_penalty: -0.13,
+    },
+    RegularPhaseDefinition {
+        boss_id: "hollow_cantor",
+        phase: 2,
+        depth: 275,
+        name: "The Hollow Cantor, Unvoiced",
+        title: "The Bell Rings Inward",
+        dialogue: [
+            "The keeper's throat closes. Every stone begins to sing.",
+            "Your shadow mouths a warning you cannot hear.",
+            "The cracked bell folds around the cantor like a second ribcage.",
+        ],
+        win_odds_penalty: -0.13,
+    },
 ];
 
-pub const PHASE_THREE: [RegularPhaseDefinition; 24] = [
+pub const PHASE_THREE: [RegularPhaseDefinition; 27] = [
     regular_phase!(
         "void_warden",
         3,
@@ -1742,6 +1812,45 @@ pub const PHASE_THREE: [RegularPhaseDefinition; 24] = [
         "She Was Here Before the Dark",
         -0.20
     ),
+    RegularPhaseDefinition {
+        boss_id: "last_conductor",
+        phase: 3,
+        depth: 150,
+        name: "The Unarriving Express",
+        title: "Every Seat Is Yours",
+        dialogue: [
+            "The conductor opens its coat. A platform stretches away inside.",
+            "Every empty carriage bears your name.",
+            "'Final boarding. There will be no further announcements.'",
+        ],
+        win_odds_penalty: -0.18,
+    },
+    RegularPhaseDefinition {
+        boss_id: "neon_bailiff",
+        phase: 3,
+        depth: 200,
+        name: "The Walking Exclusion Zone",
+        title: "Nothing Here Meets Code",
+        dialogue: [
+            "The bailiff tears up its own notice. The entire shaft is condemned.",
+            "Its warning siren becomes a steady note.",
+            "'EVACUATION COMPLETE. ONE OBSTRUCTION REMAINS.'",
+        ],
+        win_odds_penalty: -0.20,
+    },
+    RegularPhaseDefinition {
+        boss_id: "hollow_cantor",
+        phase: 3,
+        depth: 275,
+        name: "The Choir Beneath Silence",
+        title: "The Last Echo Answers",
+        dialogue: [
+            "The keeper falls apart. The voices remain standing.",
+            "Every stolen echo takes the same breath.",
+            "Your lantern glass trembles in time with your heartbeat.",
+        ],
+        win_odds_penalty: -0.20,
+    },
 ];
 
 #[must_use]
@@ -1797,6 +1906,63 @@ const DIALOGUE_SLOTS: DialogueSlots = DialogueSlots {
 
 #[must_use]
 pub fn dialogue_slots(boss_id: &str) -> Option<DialogueSlots> {
+    match boss_id {
+        "last_conductor" => {
+            return Some(DialogueSlots {
+                first_meet: &[
+                    "A brass conductor punches a hole in your lantern light. Behind it, empty carriages fill with stars. 'One passenger outstanding.'",
+                    "Rails of pale light cross the shaft. At their junction, a conductor checks a timetable written for the dead.",
+                ],
+                after_defeat: &[
+                    "'Your seat was kept.' The conductor brushes your blood from a ticket.",
+                ],
+                after_retreat: &["'You may change platforms. You may not change the destination.'"],
+                after_close_win: &[
+                    "The conductor checks a watch with no hands. 'A connection missed by a heartbeat.'",
+                ],
+                after_scout: &["'Reading the timetable does not stop the train.' Its baton lifts."],
+            });
+        }
+        "neon_bailiff" => {
+            return Some(DialogueSlots {
+                first_meet: &[
+                    "Hazard stripes crawl across the stone. A demolition unit unfolds beneath a flickering sign: OCCUPANCY VIOLATION.",
+                    "A construction siren coughs awake. The machine beneath it drags one concrete fist through a drift of black crystal.",
+                ],
+                after_defeat: &[
+                    "The machine prints another eviction notice. This one has your outline on it.",
+                ],
+                after_retreat: &[
+                    "'PERIMETER BREACH REPEATED.' Its concrete knuckles scrape fresh arrows toward you.",
+                ],
+                after_close_win: &["The warning light flickers. 'STRUCTURAL FAILURE: ALMOST.'"],
+                after_scout: &[
+                    "Your lantern finds the cooling vents. The bailiff swivels them out of reach.",
+                ],
+            });
+        }
+        "hollow_cantor" => {
+            return Some(DialogueSlots {
+                first_meet: &[
+                    "A bell without a clapper rings beneath the shaft. Its keeper turns, wearing a choir of borrowed shadows.",
+                    "Your footsteps return as a chord. A veiled bellkeeper waits beneath the arch, holding a bell that rings without moving.",
+                ],
+                after_defeat: &[
+                    "The cantor hums with your voice. It learned the note you made when you fell.",
+                ],
+                after_retreat: &[
+                    "You stopped climbing. Your footsteps kept echoing. Now they are coming back down.",
+                ],
+                after_close_win: &[
+                    "One trembling overtone hangs between you. Neither of you breathes.",
+                ],
+                after_scout: &[
+                    "The cantor repeats your cautious footsteps, one beat ahead of you.",
+                ],
+            });
+        }
+        _ => {}
+    }
     let is_prestige_four = matches!(boss_id, "blightcoil" | "rimebound_king" | "spineback");
     ((boss_by_id(boss_id).is_some() && !is_prestige_four) || pinnacle_by_id(boss_id).is_some())
         .then_some(DIALOGUE_SLOTS)

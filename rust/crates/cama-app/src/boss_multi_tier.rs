@@ -134,7 +134,28 @@ macro_rules! stinger {
     };
 }
 
-pub const STINGERS: [StingerDefinition; 33] = [
+pub const STINGERS: [StingerDefinition; 36] = [
+    stinger!(
+        "conductor_derailment",
+        10,
+        0,
+        None,
+        "The conductor clips your ticket. A carriage of cold starlight deposits you ten blocks back."
+    ),
+    stinger!(
+        "bailiff_eviction",
+        0,
+        1_800,
+        None,
+        "The bailiff welds a quarantine gate across the shaft. You wait for its hazard lights to cool."
+    ),
+    stinger!(
+        "cantor_reverberation",
+        12,
+        0,
+        None,
+        "The final note catches your lantern. You wake twelve blocks above it, still hearing your own footsteps below."
+    ),
     stinger!(
         "grothak_crumble",
         4,

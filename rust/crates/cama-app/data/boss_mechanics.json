@@ -10298,5 +10298,689 @@
       }
     ],
     "safe_option_idx": 0
+  },
+  "conductor_procession": {
+    "id": "conductor_procession",
+    "archetype": "formation",
+    "trigger_round": 3,
+    "prompt_title": "The empty seats begin to march",
+    "prompt_description": "Ticket-shaped shields orbit the conductor. Its baton counts them into a single shining wall.",
+    "options": [
+      {
+        "label": "Shelter beneath the platform",
+        "flavor": "You let the procession pass overhead.",
+        "outcome_rolls": [
+          {
+            "probability": 0.8,
+            "player_hp_delta": 0,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": null,
+            "status_effect": null,
+            "narrative": "The shields scrape the platform overhead. You wait beneath it, untouched."
+          },
+          {
+            "probability": 0.2,
+            "player_hp_delta": -2,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": null,
+            "status_effect": null,
+            "narrative": "The platform splinters beneath the marching seats."
+          }
+        ]
+      },
+      {
+        "label": "Break the shield formation",
+        "flavor": "You strike between two beats of the baton.",
+        "outcome_rolls": [
+          {
+            "probability": 0.6,
+            "player_hp_delta": 0,
+            "boss_hp_delta": -3,
+            "skip_next_round_for": "boss",
+            "status_effect": null,
+            "narrative": "One shield shatters. The conductor misses a beat."
+          },
+          {
+            "probability": 0.4,
+            "player_hp_delta": -2,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": null,
+            "status_effect": null,
+            "narrative": "The seats close ranks around your pick."
+          }
+        ]
+      },
+      {
+        "label": "Charge straight for the baton",
+        "flavor": "You trust the gap will still be there when you arrive.",
+        "outcome_rolls": [
+          {
+            "probability": 0.3,
+            "player_hp_delta": 0,
+            "boss_hp_delta": -5,
+            "skip_next_round_for": null,
+            "status_effect": null,
+            "narrative": "Your pick tears through the baton arm. Starlight spills from the joint."
+          },
+          {
+            "probability": 0.7,
+            "player_hp_delta": -4,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": "player",
+            "status_effect": null,
+            "narrative": "The procession folds around you like a closing fist."
+          }
+        ]
+      }
+    ],
+    "safe_option_idx": 0
+  },
+  "conductor_carriage": {
+    "id": "conductor_carriage",
+    "archetype": "moving_hazard",
+    "trigger_round": 3,
+    "prompt_title": "A carriage leaves the rails",
+    "prompt_description": "A compartment full of sleeping constellations swings across the shaft. The switch lever glows beside you.",
+    "options": [
+      {
+        "label": "Flatten against the signal post",
+        "flavor": "You make yourself smaller than the passing carriage.",
+        "outcome_rolls": [
+          {
+            "probability": 0.8,
+            "player_hp_delta": 0,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": null,
+            "status_effect": null,
+            "narrative": "The brass steps miss your nose by a breath."
+          },
+          {
+            "probability": 0.2,
+            "player_hp_delta": -2,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": null,
+            "status_effect": null,
+            "narrative": "A trailing handrail rakes your ribs."
+          }
+        ]
+      },
+      {
+        "label": "Throw the points beneath it",
+        "flavor": "You wrench the switch toward the conductor.",
+        "outcome_rolls": [
+          {
+            "probability": 0.55,
+            "player_hp_delta": 0,
+            "boss_hp_delta": -4,
+            "skip_next_round_for": "boss",
+            "status_effect": null,
+            "narrative": "The carriage takes the wrong track and strikes its own conductor."
+          },
+          {
+            "probability": 0.45,
+            "player_hp_delta": -2,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": "player",
+            "status_effect": null,
+            "narrative": "The lever snaps back and throws you beneath the signal."
+          }
+        ]
+      },
+      {
+        "label": "Leap aboard and split the coupling",
+        "flavor": "You ride the moving carriage toward its master.",
+        "outcome_rolls": [
+          {
+            "probability": 0.35,
+            "player_hp_delta": 0,
+            "boss_hp_delta": -5,
+            "skip_next_round_for": null,
+            "status_effect": null,
+            "narrative": "The coupling bursts. The runaway carriage drags the conductor across the stone."
+          },
+          {
+            "probability": 0.65,
+            "player_hp_delta": -4,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": null,
+            "status_effect": null,
+            "narrative": "The door shuts on your arm before you can jump clear."
+          }
+        ]
+      }
+    ],
+    "safe_option_idx": 0
+  },
+  "conductor_departure": {
+    "id": "conductor_departure",
+    "archetype": "channel_aoe",
+    "trigger_round": 3,
+    "prompt_title": "The final departure is announced",
+    "prompt_description": "Every signal turns white. The conductor raises its baton for a departure from a station that no longer exists.",
+    "options": [
+      {
+        "label": "Take cover behind the buffers",
+        "flavor": "You brace for the pressure wave.",
+        "outcome_rolls": [
+          {
+            "probability": 0.75,
+            "player_hp_delta": -1,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": null,
+            "status_effect": null,
+            "narrative": "The buffers hold. A hail of ticket punches does not."
+          },
+          {
+            "probability": 0.25,
+            "player_hp_delta": -2,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": null,
+            "status_effect": null,
+            "narrative": "The blast rolls you over the end of the track."
+          }
+        ]
+      },
+      {
+        "label": "Strike the raised baton",
+        "flavor": "You try to cancel the departure on its final beat.",
+        "outcome_rolls": [
+          {
+            "probability": 0.5,
+            "player_hp_delta": 0,
+            "boss_hp_delta": -4,
+            "skip_next_round_for": "boss",
+            "status_effect": null,
+            "narrative": "The baton falls. Every signal goes dark."
+          },
+          {
+            "probability": 0.5,
+            "player_hp_delta": -3,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": null,
+            "status_effect": null,
+            "narrative": "The downbeat catches you with both feet off the platform."
+          }
+        ]
+      },
+      {
+        "label": "Drive your pick into the star engine",
+        "flavor": "You reach past the baton for the light in its chest.",
+        "outcome_rolls": [
+          {
+            "probability": 0.35,
+            "player_hp_delta": 0,
+            "boss_hp_delta": -6,
+            "skip_next_round_for": null,
+            "status_effect": null,
+            "narrative": "The engine coughs up a dying constellation. The departure is cancelled."
+          },
+          {
+            "probability": 0.65,
+            "player_hp_delta": -4,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": "player",
+            "status_effect": null,
+            "narrative": "You arrive exactly where the departing train needs you to be."
+          }
+        ]
+      }
+    ],
+    "safe_option_idx": 0
+  },
+  "bailiff_overcharge": {
+    "id": "bailiff_overcharge",
+    "archetype": "overload",
+    "trigger_round": 3,
+    "prompt_title": "The quarantine lights turn amber",
+    "prompt_description": "Black crystal climbs the bailiff's power cables. Its motor pitch rises past the point where a safety cutoff should fire.",
+    "options": [
+      {
+        "label": "Duck behind a concrete barrier",
+        "flavor": "You put approved construction material between you and the problem.",
+        "outcome_rolls": [
+          {
+            "probability": 0.8,
+            "player_hp_delta": 0,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": null,
+            "status_effect": null,
+            "narrative": "Hot grit peppers the far side of the barrier. You stay behind it."
+          },
+          {
+            "probability": 0.2,
+            "player_hp_delta": -2,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": null,
+            "status_effect": null,
+            "narrative": "The barrier has apparently failed inspection."
+          }
+        ]
+      },
+      {
+        "label": "Crack the cooling vent",
+        "flavor": "You follow the amber glow to the hottest cable.",
+        "outcome_rolls": [
+          {
+            "probability": 0.65,
+            "player_hp_delta": 0,
+            "boss_hp_delta": -3,
+            "skip_next_round_for": null,
+            "status_effect": "reveal",
+            "narrative": "Coolant erupts through the broken vent, exposing the motor."
+          },
+          {
+            "probability": 0.35,
+            "player_hp_delta": -2,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": null,
+            "status_effect": "burn",
+            "narrative": "A burst of scorched coolant catches your hands."
+          }
+        ]
+      },
+      {
+        "label": "Dodge through the discharge",
+        "flavor": "You wait for the flash, then step inside its reach.",
+        "outcome_rolls": [
+          {
+            "probability": 0.4,
+            "player_hp_delta": 0,
+            "boss_hp_delta": -5,
+            "skip_next_round_for": "boss",
+            "status_effect": null,
+            "narrative": "The discharge grounds behind you. Your pick stops the motor mid-revolution."
+          },
+          {
+            "probability": 0.6,
+            "player_hp_delta": -4,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": null,
+            "status_effect": "burn",
+            "narrative": "You move on amber. The white flash follows you."
+          }
+        ]
+      }
+    ],
+    "safe_option_idx": 0
+  },
+  "bailiff_piledriver": {
+    "id": "bailiff_piledriver",
+    "archetype": "timed_slam",
+    "trigger_round": 3,
+    "prompt_title": "The piledriver locks onto your shadow",
+    "prompt_description": "A warning stencil sweeps across the ground. The demolition arm winds back with three sharp clicks.",
+    "options": [
+      {
+        "label": "Clear the marked floor",
+        "flavor": "You leave the warning stencil well alone.",
+        "outcome_rolls": [
+          {
+            "probability": 0.8,
+            "player_hp_delta": 0,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": null,
+            "status_effect": null,
+            "narrative": "The piledriver buries itself where you were standing."
+          },
+          {
+            "probability": 0.2,
+            "player_hp_delta": -2,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": null,
+            "status_effect": null,
+            "narrative": "A split in the floor follows you beyond the painted line."
+          }
+        ]
+      },
+      {
+        "label": "Deflect it on the third click",
+        "flavor": "You wedge your pick under the descending hammer.",
+        "outcome_rolls": [
+          {
+            "probability": 0.55,
+            "player_hp_delta": 0,
+            "boss_hp_delta": -4,
+            "skip_next_round_for": "boss",
+            "status_effect": null,
+            "narrative": "The arm jams across its own chassis. The bailiff struggles to retract it."
+          },
+          {
+            "probability": 0.45,
+            "player_hp_delta": -3,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": null,
+            "status_effect": null,
+            "narrative": "You catch the second click. The third drives the handle into your chest."
+          }
+        ]
+      },
+      {
+        "label": "Slide under and sever the piston",
+        "flavor": "You aim for the narrow space behind the impact.",
+        "outcome_rolls": [
+          {
+            "probability": 0.35,
+            "player_hp_delta": 0,
+            "boss_hp_delta": -6,
+            "skip_next_round_for": null,
+            "status_effect": null,
+            "narrative": "The piston tears loose. The arm craters its own power housing."
+          },
+          {
+            "probability": 0.65,
+            "player_hp_delta": -4,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": "player",
+            "status_effect": null,
+            "narrative": "The hammer lands before your boots clear the stencil."
+          }
+        ]
+      }
+    ],
+    "safe_option_idx": 0
+  },
+  "bailiff_core": {
+    "id": "bailiff_core",
+    "archetype": "exposed_core",
+    "trigger_round": 3,
+    "prompt_title": "The chassis vents its stolen light",
+    "prompt_description": "Armor shutters peel away from a pulsing crystal core. A maintenance timer counts down in broken digits.",
+    "options": [
+      {
+        "label": "Kick rubble into the shutters",
+        "flavor": "You keep your hands outside the machinery.",
+        "outcome_rolls": [
+          {
+            "probability": 0.75,
+            "player_hp_delta": 0,
+            "boss_hp_delta": -1,
+            "skip_next_round_for": null,
+            "status_effect": null,
+            "narrative": "The shutters grind on the stone, scoring a power cable."
+          },
+          {
+            "probability": 0.25,
+            "player_hp_delta": -1,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": null,
+            "status_effect": null,
+            "narrative": "A fragment ricochets back off the closing armor."
+          }
+        ]
+      },
+      {
+        "label": "Pry the core housing open",
+        "flavor": "You take the maintenance window at its word.",
+        "outcome_rolls": [
+          {
+            "probability": 0.6,
+            "player_hp_delta": 0,
+            "boss_hp_delta": -3,
+            "skip_next_round_for": null,
+            "status_effect": "reveal",
+            "narrative": "The housing stays open. Its next movement shows every weak joint."
+          },
+          {
+            "probability": 0.4,
+            "player_hp_delta": -2,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": null,
+            "status_effect": null,
+            "narrative": "The timer skips to zero with your sleeve still inside."
+          }
+        ]
+      },
+      {
+        "label": "Rip out the live regulator",
+        "flavor": "You grab the part with the most warning labels.",
+        "outcome_rolls": [
+          {
+            "probability": 0.4,
+            "player_hp_delta": 0,
+            "boss_hp_delta": -5,
+            "skip_next_round_for": "boss",
+            "status_effect": null,
+            "narrative": "The regulator comes free. Every warning light blinks out."
+          },
+          {
+            "probability": 0.6,
+            "player_hp_delta": -4,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": null,
+            "status_effect": "burn",
+            "narrative": "The core discharges through your pick before you can let go."
+          }
+        ]
+      }
+    ],
+    "safe_option_idx": 0
+  },
+  "cantor_resonance": {
+    "id": "cantor_resonance",
+    "archetype": "resonance_counter",
+    "trigger_round": 3,
+    "prompt_title": "The bellkeeper steals your heartbeat",
+    "prompt_description": "A low pulse travels through the stone. Each new beat arrives closer to the rhythm in your chest.",
+    "options": [
+      {
+        "label": "Muffle the lantern glass",
+        "flavor": "You wrap your sleeve around the nearest ringing surface.",
+        "outcome_rolls": [
+          {
+            "probability": 0.8,
+            "player_hp_delta": 0,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": null,
+            "status_effect": null,
+            "narrative": "The cloth deadens the note. Your heartbeat remains your own."
+          },
+          {
+            "probability": 0.2,
+            "player_hp_delta": -2,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": null,
+            "status_effect": null,
+            "narrative": "The note reaches you through your teeth instead."
+          }
+        ]
+      },
+      {
+        "label": "Strike a counter-rhythm",
+        "flavor": "You tap your pick against the floor between the pulses.",
+        "outcome_rolls": [
+          {
+            "probability": 0.6,
+            "player_hp_delta": 0,
+            "boss_hp_delta": -3,
+            "skip_next_round_for": "boss",
+            "status_effect": null,
+            "narrative": "The returning wave meets its own echo. The cantor loses the beat."
+          },
+          {
+            "probability": 0.4,
+            "player_hp_delta": -2,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": null,
+            "status_effect": "silence",
+            "narrative": "Your counter-note joins the choir. Your next breath will not come."
+          }
+        ]
+      },
+      {
+        "label": "Ring the cracked bell back at it",
+        "flavor": "You commit both hands to the source of the sound.",
+        "outcome_rolls": [
+          {
+            "probability": 0.35,
+            "player_hp_delta": 0,
+            "boss_hp_delta": -5,
+            "skip_next_round_for": null,
+            "status_effect": null,
+            "narrative": "The bell answers in a broken harmony, splitting the keeper's shell."
+          },
+          {
+            "probability": 0.65,
+            "player_hp_delta": -4,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": "player",
+            "status_effect": null,
+            "narrative": "The clapperless bell rings through your wrists."
+          }
+        ]
+      }
+    ],
+    "safe_option_idx": 0
+  },
+  "cantor_doubles": {
+    "id": "cantor_doubles",
+    "archetype": "echo_decoys",
+    "trigger_round": 3,
+    "prompt_title": "Borrowed shadows step out of the walls",
+    "prompt_description": "Three keepers raise identical bells. Only one casts a ripple through the dust beneath your boots.",
+    "options": [
+      {
+        "label": "Watch the dust and keep moving",
+        "flavor": "You give the false keepers no opening.",
+        "outcome_rolls": [
+          {
+            "probability": 0.8,
+            "player_hp_delta": 0,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": null,
+            "status_effect": null,
+            "narrative": "Two shadows strike the space you just left."
+          },
+          {
+            "probability": 0.2,
+            "player_hp_delta": -2,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": null,
+            "status_effect": null,
+            "narrative": "The real keeper hides its blow inside the others."
+          }
+        ]
+      },
+      {
+        "label": "Strike the shadow that moves the dust",
+        "flavor": "You follow the weight of the sound.",
+        "outcome_rolls": [
+          {
+            "probability": 0.6,
+            "player_hp_delta": 0,
+            "boss_hp_delta": -3,
+            "skip_next_round_for": null,
+            "status_effect": "reveal",
+            "narrative": "Your pick finds the keeper. The doubles flicker, outlining its body."
+          },
+          {
+            "probability": 0.4,
+            "player_hp_delta": -2,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": null,
+            "status_effect": "silence",
+            "narrative": "The dust was moving toward it. A false bell closes on your ears."
+          }
+        ]
+      },
+      {
+        "label": "Shatter all three bells in one sweep",
+        "flavor": "You wager your footing on a single wide arc.",
+        "outcome_rolls": [
+          {
+            "probability": 0.35,
+            "player_hp_delta": 0,
+            "boss_hp_delta": -5,
+            "skip_next_round_for": "boss",
+            "status_effect": null,
+            "narrative": "The shadows collapse into one wounded keeper."
+          },
+          {
+            "probability": 0.65,
+            "player_hp_delta": -4,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": null,
+            "status_effect": null,
+            "narrative": "Your pick meets two empty echoes. The third bell meets your back."
+          }
+        ]
+      }
+    ],
+    "safe_option_idx": 0
+  },
+  "cantor_refrain": {
+    "id": "cantor_refrain",
+    "archetype": "channel_aoe",
+    "trigger_round": 3,
+    "prompt_title": "The stolen choir draws one breath",
+    "prompt_description": "A thousand remembered voices gather inside the cracked bell. The next note will have nowhere to go but through you.",
+    "options": [
+      {
+        "label": "Shelter in the bell's dead angle",
+        "flavor": "You press close to the stone beneath its rim.",
+        "outcome_rolls": [
+          {
+            "probability": 0.75,
+            "player_hp_delta": -1,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": null,
+            "status_effect": null,
+            "narrative": "The refrain passes overhead. Its lowest note still bruises your ribs."
+          },
+          {
+            "probability": 0.25,
+            "player_hp_delta": -2,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": null,
+            "status_effect": null,
+            "narrative": "The bell turns. The dead angle turns with it."
+          }
+        ]
+      },
+      {
+        "label": "Cut the refrain before the downbeat",
+        "flavor": "You strike the keeper just as the choir inhales.",
+        "outcome_rolls": [
+          {
+            "probability": 0.55,
+            "player_hp_delta": 0,
+            "boss_hp_delta": -4,
+            "skip_next_round_for": "boss",
+            "status_effect": null,
+            "narrative": "The borrowed voices scatter. The keeper searches for the missing note."
+          },
+          {
+            "probability": 0.45,
+            "player_hp_delta": -3,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": null,
+            "status_effect": "silence",
+            "narrative": "The choir swallows your interruption and takes your voice with it."
+          }
+        ]
+      },
+      {
+        "label": "Return the whole refrain",
+        "flavor": "You strike the bell hard enough to answer every voice at once.",
+        "outcome_rolls": [
+          {
+            "probability": 0.3,
+            "player_hp_delta": 0,
+            "boss_hp_delta": -6,
+            "skip_next_round_for": null,
+            "status_effect": null,
+            "narrative": "The returning resonance cracks the bell from crown to rim."
+          },
+          {
+            "probability": 0.7,
+            "player_hp_delta": -4,
+            "boss_hp_delta": 0,
+            "skip_next_round_for": "player",
+            "status_effect": null,
+            "narrative": "The note lifts you clear of the floor. There is no breath left to cry out."
+          }
+        ]
+      }
+    ],
+    "safe_option_idx": 0
   }
 }

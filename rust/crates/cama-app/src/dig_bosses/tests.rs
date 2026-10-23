@@ -1108,6 +1108,57 @@ fn test_pinnacle_info_returns_phase_title() {
 
 const AFFECTED_TIERS: [i32; 3] = [150, 200, 275];
 
+#[test]
+fn prestige_five_bosses_unlock_and_keep_their_identity() {
+    for (depth, id) in [
+        (150, "last_conductor"),
+        (200, "neon_bailiff"),
+        (275, "hollow_cantor"),
+    ] {
+        for prestige in 0..=4 {
+            let mut state = BossRunState {
+                prestige_level: prestige,
+                ..BossRunState::default()
+            };
+            assert!(lock_regular_boss(&mut state, depth, Some(id)).is_err());
+        }
+        for prestige in [5, 6, 8] {
+            let mut state = BossRunState {
+                prestige_level: prestige,
+                ..BossRunState::default()
+            };
+            assert_eq!(
+                lock_regular_boss(&mut state, depth, Some(id))
+                    .unwrap()
+                    .boss_id,
+                id
+            );
+            assert_eq!(
+                lock_regular_boss(&mut state, depth, None).unwrap().boss_id,
+                id
+            );
+        }
+        let boss = boss_by_id(id).expect("prestige five boss");
+        assert_eq!(boss.prestige_required, 5);
+        for phase in [2, 3] {
+            let definition = regular_phase(id, phase).expect("boss-specific phase");
+            assert_eq!(definition.depth, depth);
+            assert_ne!(definition.dialogue, PHASE_DIALOGUE);
+        }
+        let dialogue = dialogue_slots(id).expect("authored dialogue");
+        assert_ne!(dialogue.first_meet, FIRST_MEET);
+        for lines in [
+            dialogue.first_meet,
+            dialogue.after_defeat,
+            dialogue.after_retreat,
+            dialogue.after_close_win,
+            dialogue.after_scout,
+        ] {
+            assert!(!lines.is_empty());
+        }
+    }
+}
+
 fn expected_prestige_two(tier: i32) -> BTreeSet<&'static str> {
     match tier {
         150 => ["aegis_warden", "cairn_general"].into_iter().collect(),
@@ -1185,7 +1236,7 @@ fn test_deep_tier_prestige_composition() {
 
 #[test]
 fn test_prestige_pool_sizes_at_each_unlock_level() {
-    let expected = [(0, 3), (1, 3), (2, 5), (3, 6), (4, 7), (8, 7)];
+    let expected = [(0, 3), (1, 3), (2, 5), (3, 6), (4, 7), (5, 8), (8, 8)];
     for tier in AFFECTED_TIERS {
         for (prestige, size) in expected {
             assert_eq!(boss_pool_for_tier(tier, prestige).len(), size);
@@ -1222,7 +1273,7 @@ fn test_every_gated_boss_remains_available_after_unlock() {
 #[test]
 fn test_pool_default_returns_full_pool() {
     for tier in AFFECTED_TIERS {
-        assert_eq!(full_boss_pool_for_tier(tier).len(), 7);
+        assert_eq!(full_boss_pool_for_tier(tier).len(), 8);
     }
 }
 

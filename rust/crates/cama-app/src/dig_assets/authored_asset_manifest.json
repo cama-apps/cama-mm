@@ -242,6 +242,21 @@
       "sha256": "211bf9b91bf30b532865e6e84d6a523cb8c3d5b8ba29c078faf91ba96b08128e"
     },
     {
+      "path": "dig/bosses/hollow_cantor_defeat.png",
+      "bytes": 380439,
+      "sha256": "5d3d4daf218f9513f249057920048eb4b71b0f989537c90ac36fba7aa0b86cf7"
+    },
+    {
+      "path": "dig/bosses/hollow_cantor_encounter.png",
+      "bytes": 367410,
+      "sha256": "a6949a0edefe399e3f15fd568dbee1950c7254965c714374445e9f5fe61c0788"
+    },
+    {
+      "path": "dig/bosses/hollow_cantor_victory.png",
+      "bytes": 357994,
+      "sha256": "22cfc798ea50e50f4b67e61c1f9892d1895bc2dff00ff01e492cfbb88af9cdfc"
+    },
+    {
       "path": "dig/bosses/hollowforged_defeat.png",
       "bytes": 344735,
       "sha256": "632dc0aaea37474841fac58b317fe7028be954ed0009e4ce651910336a0ca957"
@@ -270,6 +285,21 @@
       "path": "dig/bosses/lantern_engine_victory.png",
       "bytes": 325041,
       "sha256": "185b13ff777810ed9347e665843c628dbbb16419d9ddf7fab9240802a0a005ea"
+    },
+    {
+      "path": "dig/bosses/last_conductor_defeat.png",
+      "bytes": 378417,
+      "sha256": "48a62fe93c4cc7ddc9adf1fa9b518db52cba1a3592147b68b3461cf7d121aeb3"
+    },
+    {
+      "path": "dig/bosses/last_conductor_encounter.png",
+      "bytes": 367436,
+      "sha256": "db4684d0c7d992b65f36aed90c56eb8d937a879c9dd0d741b6702e518b1b3915"
+    },
+    {
+      "path": "dig/bosses/last_conductor_victory.png",
+      "bytes": 357799,
+      "sha256": "8cbad58387bd64aa374e55179cb4ebd54cf0b2b81f78941fac3241fbe386f05f"
     },
     {
       "path": "dig/bosses/lilith_defeat.png",
@@ -330,6 +360,21 @@
       "path": "dig/bosses/nameless_victory.png",
       "bytes": 201084,
       "sha256": "0c094f16b4cdafd6eccd6deb9593e85cdf37fe52102dd9e6993a15bb73d4f5aa"
+    },
+    {
+      "path": "dig/bosses/neon_bailiff_defeat.png",
+      "bytes": 388594,
+      "sha256": "68708dc44a4f3eddbb920960cc05ef569140b24b37470d738c5e4e55d0d95db0"
+    },
+    {
+      "path": "dig/bosses/neon_bailiff_encounter.png",
+      "bytes": 371929,
+      "sha256": "f82819d669dfd262d4397656fd9b028f08b7142be05b82b32f930be1034c9736"
+    },
+    {
+      "path": "dig/bosses/neon_bailiff_victory.png",
+      "bytes": 371635,
+      "sha256": "dab7bd9d265d5bb4b378bbd809e00aaf1615f853d6e74249013b1e86ea79bd5d"
     },
     {
       "path": "dig/bosses/ogre_magi_defeat.png",
