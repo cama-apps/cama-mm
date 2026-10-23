@@ -45,6 +45,98 @@ async fn steam_lobby_slots_allow_any_order_on_the_correct_team_without_kicks() {
     );
 }
 
+fn link_alternate(f: &Fixture) {
+    let links = OpenDotaPlayerRepository::new(&f.worker.path);
+    links.add_steam_id(1, 1, true, 100).unwrap();
+    links.add_steam_id(1, 101, false, 100).unwrap();
+}
+
+#[tokio::test]
+async fn linked_alternate_is_seated_and_persisted_for_result_recording() {
+    let f = Fixture::new(false);
+    link_alternate(&f);
+    f.worker.tick(&f.port, 100).await.unwrap();
+    f.port.lobby.lock().unwrap().as_mut().unwrap().members[0].account_id = 101;
+    f.worker.tick(&f.port, 101).await.unwrap();
+    assert_eq!(f.state().roster[0].steam_account_id, 101);
+    assert!(!f.port.calls.lock().unwrap().iter().any(|c| c == "kick:101"));
+    f.worker.tick(&f.port, 111).await.unwrap();
+    assert_eq!(f.session().phase, Phase::Launching);
+    f.complete(Some("radiant"));
+    f.port.details.lock().unwrap().as_mut().unwrap().players[0].account32 = 101;
+    f.worker.tick(&f.port, 200).await.unwrap();
+    assert_eq!(f.recorder.count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn linked_alternate_on_wrong_side_returns_to_pool_without_lobby_kick() {
+    let f = Fixture::new(false);
+    link_alternate(&f);
+    f.worker.tick(&f.port, 100).await.unwrap();
+    {
+        let mut lobby = f.port.lobby.lock().unwrap();
+        let member = &mut lobby.as_mut().unwrap().members[0];
+        member.account_id = 101;
+        member.side = Some(Side::Dire);
+    }
+    f.worker.tick(&f.port, 101).await.unwrap();
+    let calls = f.port.calls.lock().unwrap();
+    assert!(calls.iter().any(|c| c == "pool:101"));
+    assert!(!calls.iter().any(|c| c == "kick:101" || c == "launch"));
+}
+
+#[tokio::test]
+async fn two_linked_accounts_cannot_replace_a_missing_teammate() {
+    let f = Fixture::new(false);
+    link_alternate(&f);
+    f.worker.tick(&f.port, 100).await.unwrap();
+    f.port.lobby.lock().unwrap().as_mut().unwrap().members[1].account_id = 101;
+    f.worker.tick(&f.port, 101).await.unwrap();
+    assert_eq!(f.state().roster[0].steam_account_id, 1);
+    assert!(f.port.calls.lock().unwrap().iter().any(|c| c == "kick:101"));
+    assert!(!f.port.calls.lock().unwrap().iter().any(|c| c == "launch"));
+}
+
+#[tokio::test]
+async fn steam64_linked_alternate_can_replace_a_primary_waiting_in_the_pool() {
+    let f = Fixture::new(false);
+    OpenDotaPlayerRepository::new(&f.worker.path)
+        .add_steam_id(
+            1,
+            (dota_lobby::STEAM_INDIVIDUAL_BASE + 101) as i64,
+            false,
+            100,
+        )
+        .unwrap();
+    f.worker.tick(&f.port, 100).await.unwrap();
+    {
+        let mut lobby = f.port.lobby.lock().unwrap();
+        let lobby = lobby.as_mut().unwrap();
+        let mut primary = lobby.members[0];
+        primary.side = None;
+        lobby.members[0].account_id = 101;
+        lobby.members.push(primary);
+    }
+    f.worker.tick(&f.port, 101).await.unwrap();
+    assert_eq!(f.state().roster[0].steam_account_id, 101);
+    assert_eq!(f.session().phase, Phase::Launching);
+    assert!(!f.port.calls.lock().unwrap().iter().any(|c| c == "kick:101"));
+}
+
+#[tokio::test]
+async fn account_selection_stays_frozen_after_launch() {
+    let f = Fixture::new(false);
+    link_alternate(&f);
+    f.launch().await;
+    f.port.lobby.lock().unwrap().as_mut().unwrap().members[0].account_id = 101;
+    f.complete(Some("radiant"));
+    f.port.details.lock().unwrap().as_mut().unwrap().players[0].account32 = 101;
+    f.worker.tick(&f.port, 200).await.unwrap();
+    assert_eq!(f.state().roster[0].steam_account_id, 1);
+    assert_eq!(f.session().phase, Phase::NeedsReview);
+    assert_eq!(f.recorder.count.load(Ordering::SeqCst), 0);
+}
+
 struct FakePort {
     prepare_create_error: Mutex<Option<String>>,
     manual_during_prepare: AtomicBool,

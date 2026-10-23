@@ -791,6 +791,76 @@ impl DotaHostWorker {
                 )
                 .await;
         }
+        // Resolve linked alternates only while gathering, before launch intent.
+        // Keep one account per Discord player and persist the observed choice so
+        // recovery, live tracking, and result verification share that identity.
+        let path = self.path.clone();
+        let roster = state.roster.clone();
+        let members = lobby.members.clone();
+        let bot = self.config.account_id;
+        let guild = record.guild_id;
+        let selected = blocking(move || {
+            let links = OpenDotaPlayerRepository::new(&path);
+            let ids = roster.iter().map(|p| p.discord_id).collect::<Vec<_>>();
+            let linked = links
+                .get_steam_ids_bulk(&ids, Some(guild))
+                .map_err(|e| e.to_string())?;
+            let mut selected = roster.clone();
+            for player in &mut selected {
+                if members
+                    .iter()
+                    .any(|m| m.account_id == player.steam_account_id && m.side.is_some())
+                {
+                    continue;
+                }
+                let accounts = linked
+                    .get(&player.discord_id)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|id| dota_lobby::account_id(*id))
+                    .collect::<Vec<_>>();
+                // Prefer a playing alternate over an account waiting in the pool.
+                for member in members
+                    .iter()
+                    .filter(|m| m.side.is_some())
+                    .chain(members.iter().filter(|m| m.side.is_none()))
+                {
+                    let account = member.account_id;
+                    if account == bot
+                        || !accounts.contains(&account)
+                        || roster.iter().any(|p| {
+                            p.discord_id != player.discord_id && p.steam_account_id == account
+                        })
+                    {
+                        continue;
+                    }
+                    // Account32 and Steam64 must resolve to the same owner.
+                    let mut conflicting = false;
+                    for raw in [
+                        i64::from(account),
+                        (dota_lobby::STEAM_INDIVIDUAL_BASE + u64::from(account)) as i64,
+                    ] {
+                        if links
+                            .get_steam_id_owner(raw)
+                            .map_err(|e| e.to_string())?
+                            .is_some_and(|owner| owner != player.discord_id)
+                        {
+                            conflicting = true;
+                        }
+                    }
+                    if !conflicting {
+                        player.steam_account_id = account;
+                        break;
+                    }
+                }
+            }
+            Ok(selected)
+        })
+        .await?;
+        if selected != state.roster {
+            state.roster = selected;
+            self.save(&mut record, &state, now).await?;
+        }
         let admission =
             dota_lobby::assess_admission(&state.expected(), &lobby.members, self.config.account_id);
         if lobby
