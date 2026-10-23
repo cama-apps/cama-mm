@@ -233,27 +233,6 @@ impl Default for ActivePredictionEffects {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SettlementParticipant {
-    pub discord_id: i64,
-    pub yes_contracts: i64,
-    pub no_contracts: i64,
-    pub winning_contracts: i64,
-    pub cost_basis: i64,
-    pub payout: i64,
-    pub profit: i64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Settlement {
-    pub prediction_id: i64,
-    pub guild_id: i64,
-    pub outcome: ContractSide,
-    pub participants: Vec<SettlementParticipant>,
-    pub total_payout: i64,
-    pub lp_pnl: i64,
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct UserOrderbookStats {
     pub realized_pnl: i64,
@@ -307,8 +286,6 @@ pub enum PredictionRepositoryError {
     InsufficientBalance { needed: i64, available: i64 },
     #[error("You only hold {held} contracts (requested to sell {requested}).")]
     InsufficientHoldings { held: i64, requested: i64 },
-    #[error("Cannot settle market in status '{0}'.")]
-    CannotSettle(String),
     #[error("Cannot cancel market in status '{0}'.")]
     CannotCancel(String),
     #[error("Invalid outcome")]
@@ -1332,111 +1309,6 @@ impl PredictionRepository {
         Ok(true)
     }
 
-    /// WARNING — no production caller. This settlement applies no payout
-    /// multiplier, bankruptcy penalty, or vanity tax; the live settlement is
-    /// `prediction_resolution_repository::settle_orderbook_at`. Do not wire
-    /// this variant to the runtime.
-    pub fn settle_orderbook(
-        &self,
-        prediction_id: i64,
-        outcome: ContractSide,
-        resolved_by: Option<i64>,
-    ) -> Result<Settlement, PredictionRepositoryError> {
-        let now = unix_timestamp()?;
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (status, guild_id, lp_pnl): (String, i64, i64) = transaction
-            .query_row(
-                "SELECT status,guild_id,COALESCE(lp_pnl,0) FROM predictions
-                 WHERE prediction_id=?1",
-                [prediction_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()?
-            .ok_or(PredictionRepositoryError::PredictionNotFound)?;
-        if status != "open" && status != "locked" {
-            return Err(PredictionRepositoryError::CannotSettle(status));
-        }
-        let mut statement = transaction.prepare(
-            "SELECT prediction_id,discord_id,yes_contracts,yes_cost_basis_total,
-                    no_contracts,no_cost_basis_total
-             FROM prediction_positions WHERE prediction_id=?1 ORDER BY discord_id",
-        )?;
-        let positions = statement
-            .query_map([prediction_id], position_from_row)?
-            .collect::<Result<Vec<_>, _>>()?;
-        drop(statement);
-        let mut participants = Vec::with_capacity(positions.len());
-        let mut total_payout = 0_i64;
-        for position in positions {
-            let winning_contracts = match outcome {
-                ContractSide::Yes => position.yes_contracts,
-                ContractSide::No => position.no_contracts,
-            };
-            let payout = winning_contracts
-                .checked_mul(CONTRACT_VALUE)
-                .ok_or(PredictionRepositoryError::ArithmeticOverflow)?;
-            if payout > 0 {
-                set_ledger_context(
-                    &transaction,
-                    "prediction_resolution",
-                    prediction_id,
-                    "prediction resolution payout",
-                )?;
-                let result = transaction.execute(
-                    "UPDATE players SET jopacoin_balance=COALESCE(jopacoin_balance,0)+?1,
-                         updated_at=CURRENT_TIMESTAMP
-                     WHERE discord_id=?2 AND guild_id=?3",
-                    params![payout, position.discord_id, guild_id],
-                );
-                clear_ledger_context(&transaction)?;
-                if result? != 1 {
-                    return Err(PredictionRepositoryError::PlayerNotFound);
-                }
-            }
-            total_payout = total_payout
-                .checked_add(payout)
-                .ok_or(PredictionRepositoryError::ArithmeticOverflow)?;
-            let cost_basis = position.yes_cost_basis_total + position.no_cost_basis_total;
-            participants.push(SettlementParticipant {
-                discord_id: position.discord_id,
-                yes_contracts: position.yes_contracts,
-                no_contracts: position.no_contracts,
-                winning_contracts,
-                cost_basis,
-                payout,
-                profit: payout - cost_basis,
-            });
-        }
-        transaction.execute(
-            "DELETE FROM prediction_levels WHERE prediction_id=?1",
-            [prediction_id],
-        )?;
-        transaction.execute(
-            "UPDATE predictions SET status='resolved',outcome=?1,resolved_at=?2,
-                 resolved_by=?3,lp_pnl=COALESCE(lp_pnl,0)-?4 WHERE prediction_id=?5",
-            params![
-                match outcome {
-                    ContractSide::Yes => "yes",
-                    ContractSide::No => "no",
-                },
-                now,
-                resolved_by,
-                total_payout,
-                prediction_id
-            ],
-        )?;
-        transaction.commit()?;
-        Ok(Settlement {
-            prediction_id,
-            guild_id,
-            outcome,
-            participants,
-            total_payout,
-            lp_pnl: lp_pnl - total_payout,
-        })
-    }
-
     pub fn cancel_orderbook(
         &self,
         prediction_id: i64,
@@ -1461,7 +1333,7 @@ impl PredictionRepository {
             )
             .optional()?
             .ok_or(PredictionRepositoryError::PredictionNotFound)?;
-        if status != "open" {
+        if status != "open" && status != "locked" {
             return Err(PredictionRepositoryError::CannotCancel(status));
         }
         let mut statement = transaction.prepare(
@@ -2161,6 +2033,7 @@ mod tests {
                          no_cost_basis_total INTEGER NOT NULL DEFAULT 0,
                          bankruptcy_penalty INTEGER NOT NULL DEFAULT 0,
                          vanity_tax INTEGER NOT NULL DEFAULT 0,
+                         low_priority_tax INTEGER NOT NULL DEFAULT 0,
                          PRIMARY KEY(prediction_id,discord_id)
                      );
                      CREATE INDEX idx_prediction_positions_user
@@ -2267,6 +2140,27 @@ mod tests {
                     &initial_levels(),
                 )
                 .expect("create market")
+        }
+
+        fn settle(
+            &self,
+            prediction_id: i64,
+            outcome: ContractSide,
+            resolved_by: Option<i64>,
+        ) -> Result<
+            crate::prediction_resolution_repository::Resolution,
+            crate::prediction_resolution_repository::PredictionResolutionError,
+        > {
+            crate::prediction_resolution_repository::PredictionResolutionRepository::new(
+                self.file.path(),
+            )
+            .settle_orderbook(
+                prediction_id,
+                GUILD,
+                outcome,
+                resolved_by,
+                &Default::default(),
+            )
         }
 
         fn position(&self, prediction_id: i64, position: Position) {
@@ -2897,8 +2791,7 @@ mod tests {
         let before_yes = fixture.balance(1, GUILD);
         let before_no = fixture.balance(2, GUILD);
         let settlement = fixture
-            .repository
-            .settle_orderbook(market, ContractSide::Yes, Some(12_345))
+            .settle(market, ContractSide::Yes, Some(12_345))
             .expect("settle");
         assert_eq!(settlement.total_payout, 5 * CONTRACT_VALUE);
         assert_eq!(fixture.balance(1, GUILD) - before_yes, 5 * CONTRACT_VALUE);
@@ -2919,8 +2812,7 @@ mod tests {
         let fixture = Fixture::new();
         let market = fixture.market();
         fixture
-            .repository
-            .settle_orderbook(market, ContractSide::Yes, None)
+            .settle(market, ContractSide::Yes, None)
             .expect("settle empty market");
         assert!(
             !fixture
@@ -3024,8 +2916,7 @@ mod tests {
         fixture.position(open, position(open, 1, 2, 10));
         fixture.position(resolved, position(resolved, 1, 1, 5));
         fixture
-            .repository
-            .settle_orderbook(resolved, ContractSide::No, None)
+            .settle(resolved, ContractSide::No, None)
             .expect("settle");
         let positions = fixture
             .repository
@@ -3272,12 +3163,10 @@ mod tests {
             .buy_contracts_atomic(loss, 1, ContractSide::Yes, 3)
             .expect("loss position");
         fixture
-            .repository
-            .settle_orderbook(win, ContractSide::Yes, None)
+            .settle(win, ContractSide::Yes, None)
             .expect("win settle");
         fixture
-            .repository
-            .settle_orderbook(loss, ContractSide::No, None)
+            .settle(loss, ContractSide::No, None)
             .expect("loss settle");
         let stats = fixture
             .repository
@@ -3304,8 +3193,7 @@ mod tests {
             .buy_contracts_atomic(open, 1, ContractSide::Yes, 3)
             .expect("open position");
         fixture
-            .repository
-            .settle_orderbook(resolved, ContractSide::Yes, None)
+            .settle(resolved, ContractSide::Yes, None)
             .expect("settle");
         let history = fixture
             .repository

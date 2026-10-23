@@ -8,7 +8,6 @@
 
 use cama_db::predictions_repository::{
     Book, ContractSide, Market, NewLevel, PredictionRepository, PredictionRepositoryError,
-    Settlement,
 };
 use thiserror::Error;
 
@@ -520,25 +519,6 @@ where
 }
 
 #[must_use]
-pub fn settlement_lines(settlement: &Settlement) -> Vec<String> {
-    settlement
-        .participants
-        .iter()
-        .map(|participant| {
-            format!(
-                "<@{}> spent {} ({} yes / {} no) → won {} JC (net {:+})",
-                participant.discord_id,
-                participant.cost_basis,
-                participant.yes_contracts,
-                participant.no_contracts,
-                participant.payout,
-                participant.profit
-            )
-        })
-        .collect()
-}
-
-#[must_use]
 pub fn resolution_announcement_chunks(
     prediction_id: i64,
     question: &str,
@@ -812,8 +792,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use cama_db::predictions_repository::{
-        Book, ContractSide, Market, PredictionRepository, Settlement, SettlementParticipant,
-        quote_total,
+        Book, ContractSide, Market, PredictionRepository, quote_total,
     };
 
     use super::{
@@ -826,7 +805,7 @@ mod tests {
         position_mark, refresh_embed_plan, refresh_status_markets, refresh_target,
         resolution_announcement_chunks, resolution_publish_plan,
         resolve_and_neutralize_discord_mentions, resolved_thread_plan, retry_without_attachment,
-        rollback_reply, settlement_lines, validate_set_fair,
+        rollback_reply, validate_set_fair,
     };
 
     const GUILD: i64 = 101;
@@ -852,32 +831,6 @@ mod tests {
             thread_id: Some(555),
             embed_message_id: Some(777),
             channel_message_id: Some(333),
-        }
-    }
-
-    fn settlement(participants: Vec<SettlementParticipant>) -> Settlement {
-        Settlement {
-            prediction_id: 42,
-            guild_id: GUILD,
-            outcome: ContractSide::Yes,
-            total_payout: participants
-                .iter()
-                .map(|participant| participant.payout)
-                .sum(),
-            lp_pnl: 0,
-            participants,
-        }
-    }
-
-    fn participant(id: i64, yes: i64, no: i64, cost: i64, payout: i64) -> SettlementParticipant {
-        SettlementParticipant {
-            discord_id: id,
-            yes_contracts: yes,
-            no_contracts: no,
-            winning_contracts: yes,
-            cost_basis: cost,
-            payout,
-            profit: payout - cost,
         }
     }
 
@@ -1165,27 +1118,6 @@ mod tests {
         test_admin_market_commands_reject_cross_guild_market_view,
         AdminMarketCommand::View
     );
-
-    #[test]
-    fn test_resolve_announces_all_winners_and_losers() {
-        let settlement = settlement(vec![
-            participant(101, 2, 0, 11, 20),
-            participant(102, 1, 0, 6, 10),
-            participant(201, 0, 3, 16, 0),
-            participant(202, 0, 1, 6, 0),
-        ]);
-        let lines = settlement_lines(&settlement);
-        assert_eq!(lines.len(), 4);
-        for id in [101, 102, 201, 202] {
-            assert_eq!(
-                lines
-                    .iter()
-                    .filter(|line| line.contains(&format!("<@{id}>")))
-                    .count(),
-                1
-            );
-        }
-    }
 
     #[test]
     fn test_resolve_names_market_in_announcement() {
