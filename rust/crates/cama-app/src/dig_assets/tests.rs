@@ -290,7 +290,7 @@ fn assert_repository_png(relative: &Path, size: (u32, u32), mode: PixelMode) -> 
 #[test]
 fn authored_asset_manifest_covers_every_repository_file() {
     let entries = authored_asset_manifest::entries().expect("manifest parses");
-    assert_eq!(entries.len(), 347);
+    assert_eq!(entries.len(), 356);
     authored_asset_manifest::verify_root(repository_asset_tree_root())
         .expect("every checked-in Dig and Pet asset matches its manifest hash");
 }
@@ -744,6 +744,26 @@ fn get_boss_art_returns_none_for_unknown_boss() {
 #[test]
 fn every_registered_boss_id_has_an_asset_slug() {
     assert!(boss_ids_missing_asset_slugs().is_empty());
+}
+
+#[test]
+fn prestige_five_boss_art_loads_authored_scenes_at_the_existing_size() {
+    let service = repository_service();
+    for id in ["last_conductor", "neon_bailiff", "hollow_cantor"] {
+        assert_eq!(boss_slug(id), Some(id));
+        for scene in [BossScene::Encounter, BossScene::Victory, BossScene::Defeat] {
+            let path = PathBuf::from(format!("bosses/{id}_{}.png", scene.as_str()));
+            assert_repository_png(&path, (512, 288), PixelMode::Rgba);
+            let expected = std::fs::read(repository_asset_root().join(path)).unwrap();
+            let attachment = service
+                .get_boss_art(BossIdentity::Id(id), scene, "Abyss")
+                .unwrap();
+            assert_eq!(
+                attachment.bytes, expected,
+                "{id}: must use authored art, not fallback"
+            );
+        }
+    }
 }
 
 #[test]

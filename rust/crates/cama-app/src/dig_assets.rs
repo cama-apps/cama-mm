@@ -496,6 +496,9 @@ pub fn boss_slug(boss_id: &str) -> Option<&'static str> {
         "sporeling_sovereign" => Some("sporeling"),
         "chronofrost" => Some("chronofrost"),
         "nameless_depth" => Some("nameless"),
+        "last_conductor" => Some("last_conductor"),
+        "neon_bailiff" => Some("neon_bailiff"),
+        "hollow_cantor" => Some("hollow_cantor"),
         "pudge" | "ogre_magi" | "crystal_maiden" | "tusk" | "lina" | "doom" | "spectre"
         | "void_spirit" | "treant_protector" | "broodmother" | "faceless_void" | "weaver"
         | "oracle" | "terrorblade" | "aegis_warden" | "cairn_general" | "heartspire"

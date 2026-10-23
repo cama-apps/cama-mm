@@ -15,8 +15,155 @@ const GUILD_ID: i64 = 777;
 const NOW: i64 = 1_000_000;
 
 #[test]
+fn prestige_five_mechanics_have_live_prompts_and_resolve_all_outcomes() {
+    for id in ["last_conductor", "neon_bailiff", "hollow_cantor"] {
+        let boss = boss_by_id(id).expect("new boss");
+        assert!(
+            !stinger_by_id(boss.stinger_id)
+                .unwrap()
+                .flavor_on_loss
+                .is_empty()
+        );
+        for mechanic_id in boss.mechanic_pool {
+            let mechanic = mechanic_by_id(mechanic_id).expect("live mechanic");
+            assert!(!mechanic.prompt_title.is_empty());
+            assert!(!mechanic.prompt_description.is_empty());
+            assert_eq!(mechanic.options.len(), 3);
+            let expected_hp_change = |option: &MechanicOption| {
+                option
+                    .outcome_rolls
+                    .iter()
+                    .map(|roll| roll.probability * f64::from(roll.player_hp_delta))
+                    .sum::<f64>()
+            };
+            let safe = expected_hp_change(&mechanic.options[mechanic.safe_option_index]);
+            assert!(
+                mechanic
+                    .options
+                    .iter()
+                    .all(|option| expected_hp_change(option) <= safe),
+                "{mechanic_id}: safe option must minimize expected HP loss"
+            );
+            for (index, option) in mechanic.options.iter().enumerate() {
+                assert!(!mechanic_option_odds(mechanic_id, index).unwrap().is_empty());
+                let mut cumulative = 0.0;
+                for roll in &option.outcome_rolls {
+                    assert!(!roll.narrative.is_empty());
+                    let mut entropy =
+                        SequenceEntropy::constant(cumulative + roll.probability / 2.0);
+                    let outcome = apply_option_outcome(
+                        option,
+                        20,
+                        30,
+                        &CombatEffects::default(),
+                        &mut entropy,
+                    );
+                    assert_eq!(outcome.player_hp, 20 + roll.player_hp_delta);
+                    assert_eq!(outcome.boss_hp, 30 + roll.boss_hp_delta);
+                    assert_eq!(outcome.narrative, roll.narrative);
+                    cumulative += roll.probability;
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn prestige_five_bosses_pause_resume_and_advance_through_their_phases() {
+    for (depth, id) in [
+        (150, "last_conductor"),
+        (200, "neon_bailiff"),
+        (275, "hollow_cantor"),
+    ] {
+        let mut service = test_service(0.99);
+        for prestige in [4, 5] {
+            service.entropy = SequenceEntropy::new(Vec::new(), vec![7], Vec::new());
+            service
+                .repository
+                .insert_tunnel(key(), tunnel(depth - 1, prestige, 500));
+            let selected = service.ensure_boss_locked(key(), depth).unwrap();
+            assert_eq!(selected.boss_id == id, prestige == 5);
+        }
+        let mut current = tunnel(depth - 1, 5, 500);
+        for earlier in BOSS_BOUNDARIES
+            .into_iter()
+            .filter(|earlier| *earlier < depth)
+        {
+            current.boss_progress.insert(
+                earlier.to_string(),
+                BossProgressValue::Legacy(BossStatus::Defeated),
+            );
+        }
+        current
+            .boss_progress
+            .insert(depth.to_string(), entry(BossStatus::Active, id));
+        service.repository.insert_tunnel(key(), current);
+        let StartBossDuelOutcome::Paused(paused) = service
+            .start_boss_duel(key(), RiskTier::Cautious, 0)
+            .unwrap()
+        else {
+            panic!("new boss should pause for its authored mechanic");
+        };
+        assert_eq!(paused.boss_id, id);
+        assert!(
+            boss_by_id(id)
+                .unwrap()
+                .mechanic_pool
+                .contains(&paused.mechanic_id.as_str())
+        );
+        let resolved = service
+            .resume_boss_duel(key(), paused.pending_prompt.safe_option_index)
+            .unwrap();
+        assert!(resolved.round_log.iter().any(|round| {
+            round
+                .mechanic
+                .as_ref()
+                .is_some_and(|mechanic| mechanic.mechanic_id == paused.mechanic_id)
+        }));
+        assert!(service.repository.active_duel(key()).is_none());
+
+        for (before, after) in [
+            (BossStatus::Active, BossStatus::PhaseOneDefeated),
+            (BossStatus::PhaseOneDefeated, BossStatus::PhaseTwoDefeated),
+            (BossStatus::PhaseTwoDefeated, BossStatus::Defeated),
+        ] {
+            let mut current = tunnel(depth - 1, 5, 500);
+            for earlier in BOSS_BOUNDARIES
+                .into_iter()
+                .filter(|earlier| *earlier < depth)
+            {
+                current.boss_progress.insert(
+                    earlier.to_string(),
+                    BossProgressValue::Legacy(BossStatus::Defeated),
+                );
+            }
+            current
+                .boss_progress
+                .insert(depth.to_string(), entry(before, id));
+            service.repository.insert_tunnel(key(), current);
+            let result = service
+                .fight_boss_with_override(
+                    key(),
+                    RiskTier::Cautious,
+                    0,
+                    Some(combat(20, 1, 1.0, 0.0)),
+                )
+                .unwrap();
+            assert!(result.won);
+            let current = service.repository.load_tunnel(key()).unwrap();
+            let BossProgressValue::Entry(progress) = &current.boss_progress[&depth.to_string()]
+            else {
+                panic!("typed progress");
+            };
+            assert_eq!(progress.status, after);
+            assert_eq!(progress.boss_id.as_deref(), Some(id));
+        }
+    }
+}
+
+#[test]
 fn bundled_mechanic_catalog_preserves_authored_ogre_fireblast() {
-    assert_eq!(MECHANIC_CATALOG.len(), 135);
+    assert_eq!(MECHANIC_CATALOG.len(), 144);
     let mechanic = mechanic_by_id("ogre_fireblast").expect("Ogre mechanic is bundled");
     assert_eq!(mechanic.trigger_round, 3);
     assert_eq!(
@@ -237,9 +384,9 @@ fn test_pool_size_per_tier() {
         (50, 3),
         (75, 3),
         (100, 3),
-        (150, 7),
-        (200, 7),
-        (275, 7),
+        (150, 8),
+        (200, 8),
+        (275, 8),
     ];
     for (tier, size) in expected {
         assert_eq!(boss_pool_for_tier(tier, 99).len(), size);
@@ -280,7 +427,7 @@ fn test_every_boss_has_mechanic_and_stinger() {
 fn test_boss_ids_unique() {
     let ids: BTreeSet<&str> = BOSSES.iter().map(|boss| boss.boss_id).collect();
     assert_eq!(ids.len(), BOSSES.len());
-    assert_eq!(ids.len(), 33);
+    assert_eq!(ids.len(), 36);
 }
 
 #[test]
