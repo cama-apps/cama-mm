@@ -4483,8 +4483,9 @@ fn production_goodness_weights_team_value_and_role_deltas() {
     let goodness =
         extra_f64(&prepared.pending.state, "goodness_score").expect("stored goodness score");
 
-    // 95 value difference at 1.9 plus a 95 lane-matchup delta at 0.27.
-    assert!((goodness - (-3_417.85)).abs() < 1e-9, "{goodness}");
+    // 95 value difference at 2.1 plus a 95 lane-matchup delta at 0.30;
+    // subtract 26% of the 15,100 total active rating.
+    assert!((goodness - (-3_698.0)).abs() < 1e-9, "{goodness}");
 }
 
 #[test]
