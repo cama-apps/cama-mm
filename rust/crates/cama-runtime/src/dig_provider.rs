@@ -6320,6 +6320,12 @@ impl DigInteractionHandler {
             )
             .await;
         }
+        let player_ids = rows.iter().map(|row| row.user_id).collect::<Vec<_>>();
+        let names = self
+            .state
+            .player_names
+            .resolve_names(guild_id, &player_ids)
+            .await;
         let max_depth = rows.iter().map(|row| row.depth).max().unwrap_or(1).max(1);
         let description = rows
             .iter()
@@ -6328,9 +6334,10 @@ impl DigInteractionHandler {
                 let bar =
                     "█".repeat((20_i64.saturating_mul(row.depth) / max_depth).max(1) as usize);
                 format!(
-                    "`{:>2}.` **{}** — Depth {}\n`{bar}`",
+                    "`{:>2}.` **{}** — Prestige {} · Depth {}\n`{bar}`",
                     index + 1,
-                    row.name,
+                    names.resolve(row.user_id),
+                    row.prestige,
                     row.depth
                 )
             })

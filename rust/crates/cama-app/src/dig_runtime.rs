@@ -1298,7 +1298,14 @@ impl DigRuntimeService<SqliteDigRuntimeStore> {
         Ok(
             dig_runtime_store::top_tunnel_depth_rows(&connection, guild_id)?
                 .into_iter()
-                .map(|(name, depth)| DigRuntimeLeaderboardRow { name, depth })
+                .map(
+                    |(name, depth, user_id, prestige)| DigRuntimeLeaderboardRow {
+                        name,
+                        depth,
+                        user_id,
+                        prestige,
+                    },
+                )
                 .collect(),
         )
     }

@@ -63,6 +63,58 @@ impl GuildPlayerNameResolver for FixedPlayerNames {
     }
 }
 
+#[tokio::test]
+async fn leaderboard_shows_player_names_prestige_and_depth() {
+    let (database, provider, _) = fixture();
+    let provider = provider.with_player_names(Arc::new(FixedPlayerNames(
+        GuildPlayerNameDirectory::new(Some(BTreeMap::from([(USER, "Server Miner".to_owned())])))
+            .with_last_seen(BTreeMap::from([(USER + 1, "Archived Miner".to_owned())])),
+    )));
+    Connection::open(database.path())
+        .unwrap()
+        .execute(
+            "INSERT INTO tunnels (discord_id,guild_id,tunnel_name,depth,prestige_level)
+             VALUES (?1,?4,'Hidden tunnel',300,2),
+                    (?2,?4,'Other tunnel',200,7),
+                    (?3,?4,'Unresolved tunnel',100,0),
+                    (?1,?5,'Other guild',999,99)",
+            params![
+                USER as i64,
+                USER as i64 + 1,
+                USER as i64 + 2,
+                GUILD as i64,
+                GUILD as i64 + 1
+            ],
+        )
+        .unwrap();
+    let responder = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(
+            command_request(901, "leaderboard", Vec::new()),
+            responder.clone(),
+        )
+        .await
+        .unwrap();
+    let replies = responder.followups.lock().unwrap();
+    let description = replies[0].embeds[0].description.as_deref().unwrap();
+    assert!(
+        description.contains("` 1.` **Server Miner** — Prestige 2 · Depth 300"),
+        "{description}"
+    );
+    assert!(
+        description.contains("` 2.` **Archived Miner** — Prestige 7 · Depth 200"),
+        "{description}"
+    );
+    assert!(
+        description.contains("` 3.` **Unknown player** — Prestige 0 · Depth 100"),
+        "{description}"
+    );
+    assert!(!description.contains("tunnel"));
+    assert!(!description.contains("<@"));
+    assert!(!description.contains("999"));
+}
+
 #[test]
 fn prestige_picker_explains_effects_stack_limits_and_owned_counts() {
     use cama_app::dig_prestige_runtime::{
