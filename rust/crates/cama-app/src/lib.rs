@@ -22,10 +22,9 @@ pub use cama_app_match::{
     rating_comparison_service, tax_commands, vanity_tax_service,
 };
 pub use cama_app_platform::{
-    admin_low_priority, blame_luke_media, bugfix_regressions, channel_checks, embeds, font_assets,
-    moderation, player_mmr_fallback, player_trivia_service, playtime_service, python_random,
-    referrals, registration, reminders, survey_commands, timezone_service, trivia_questions,
-    unified_leaderboard, wrapped_story,
+    admin_low_priority, blame_luke_media, embeds, font_assets, moderation, player_mmr_fallback,
+    player_trivia_service, playtime_service, python_random, referrals, registration, reminders,
+    survey_commands, timezone_service, trivia_questions, unified_leaderboard, wrapped_story,
 };
 
 pub mod admin_moderation_commands;

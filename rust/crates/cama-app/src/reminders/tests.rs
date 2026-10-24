@@ -1461,6 +1461,54 @@ fn test_reschedule_recovers_pending_pet_warning() {
 }
 
 #[test]
+fn test_arming_cooldown_respects_disabled_preference() {
+    let mut service = fixture();
+    set_store_preference(service.store(), 8, TEST_GUILD_ID, ReminderKind::Pet, false);
+    service
+        .store()
+        .seed_pet_warning(
+            user(8),
+            guild(TEST_GUILD_ID),
+            PetWarning {
+                warning_at: NOW + 600,
+                pet_name: "Alpaca".to_owned(),
+            },
+        )
+        .unwrap();
+    service
+        .store()
+        .seed_reminder_timestamps(
+            user(8),
+            guild(TEST_GUILD_ID),
+            ReminderTimestamps {
+                last_wheel_spin: Some(NOW),
+                last_trivia_session: Some(NOW),
+            },
+        )
+        .unwrap();
+    service
+        .store()
+        .seed_dig_ready_at(user(8), guild(TEST_GUILD_ID), Some(NOW + 600))
+        .unwrap();
+    for kind in [
+        ReminderKind::Wheel,
+        ReminderKind::Trivia,
+        ReminderKind::Dig,
+        ReminderKind::Pet,
+    ] {
+        set_store_preference(service.store(), 8, TEST_GUILD_ID, kind, false);
+        assert_eq!(
+            service
+                .arm_preference(user(8), Some(guild(TEST_GUILD_ID)), kind)
+                .unwrap(),
+            None,
+            "{kind}"
+        );
+        assert!(service.tasks().is_empty(), "{kind}");
+    }
+}
+
+#[test]
 fn test_recovering_elapsed_pet_warning_cancels_stale_generation() {
     let mut service = fixture();
     set_store_preference(service.store(), 8, TEST_GUILD_ID, ReminderKind::Pet, true);

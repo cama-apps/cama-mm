@@ -1342,7 +1342,7 @@ where
                 Some(guild_id),
                 warning.warning_at,
                 &warning.pet_name,
-                Some(true),
+                None,
             );
         }
         if kind == ReminderKind::Dig {
@@ -1355,12 +1355,12 @@ where
             let Some(ticket) = self.begin_dig_reconcile(user_id, Some(guild_id), now) else {
                 return Ok(None);
             };
-            return self
-                .finish_dig_reconcile(ticket, ready_at, Some(true))
-                .map(|outcome| match outcome {
+            return self.finish_dig_reconcile(ticket, ready_at, None).map(
+                |outcome| match outcome {
                     DigReconcileOutcome::Scheduled(task_id) => Some(task_id),
                     _ => None,
-                });
+                },
+            );
         }
 
         let timestamps = self
@@ -1378,10 +1378,10 @@ where
         }
         match kind {
             ReminderKind::Wheel => {
-                self.schedule_wheel_reminder(user_id, Some(guild_id), ready_at, Some(true))
+                self.schedule_wheel_reminder(user_id, Some(guild_id), ready_at, None)
             }
             ReminderKind::Trivia => {
-                self.schedule_trivia_reminder(user_id, Some(guild_id), ready_at, Some(true))
+                self.schedule_trivia_reminder(user_id, Some(guild_id), ready_at, None)
             }
             _ => Ok(None),
         }
