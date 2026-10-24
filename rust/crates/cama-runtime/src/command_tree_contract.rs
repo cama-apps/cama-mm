@@ -110,6 +110,7 @@ const APPROVED_PATHS: &[&str] = &[
 ];
 
 const RETIRED_PATHS: &[&str] = &[
+    "/player region",
     "/dig resetcooldown",
     "/dig forceevent",
     "/dig setdepth",
@@ -299,7 +300,7 @@ pub fn validate_production_registry(
 
     for (path, expected) in [
         ("/dig", 23),
-        ("/player", 11),
+        ("/player", 10),
         ("/player lobby", 2),
         ("/survey", 9),
         ("/survey question", 4),
@@ -633,7 +634,7 @@ mod tests {
                 .all(|count| *count <= DISCORD_COMMAND_OPTION_LIMIT)
         );
         assert_eq!(snapshot.direct_option_counts["/dig"], 23);
-        assert_eq!(snapshot.direct_option_counts["/player"], 11);
+        assert_eq!(snapshot.direct_option_counts["/player"], 10);
         assert_eq!(snapshot.direct_option_counts["/player lobby"], 2);
         assert_eq!(snapshot.direct_option_counts["/survey"], 9);
         assert_eq!(snapshot.direct_option_counts["/survey question"], 4);

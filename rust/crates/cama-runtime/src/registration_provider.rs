@@ -40,18 +40,11 @@ use cama_domain::curfew::CurfewMode;
 use cama_domain::formatting::{escape_discord_text, format_role_display};
 use cama_domain::openskill::CamaOpenSkillSystem;
 use cama_domain::rating::CamaRatingSystem;
-use cama_domain::region::{
-    CountsPayload, GameCountValue, RegionCountEntry, infer_region_from_counts,
-};
-use serde_json::Value as JsonValue;
 use tracing::{debug, error, warn};
 
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{
     DiscordDirectMessageErrorKind, DiscordMessage, DiscordTransport, cached_guild_player_names,
-};
-use crate::gateway_events::{
-    GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
 use crate::ids::signed_id;
 use crate::option_ext::{boolean_option, integer_option, string_option, user_option};
@@ -182,15 +175,6 @@ impl PlayerRegistrationProvider {
         self.handler.clone()
     }
 
-    /// Re-run the idempotent inferred-region backfill on READY/resume.
-    #[must_use]
-    pub fn region_backfill_observer(&self) -> Arc<dyn GatewayEventObserver> {
-        Arc::new(RegionBackfillObserver {
-            registration: self.handler.registration.clone(),
-            opendota: Arc::clone(&self.handler.opendota),
-        })
-    }
-
     /// Reuse this provider's SQLite-backed Neon service for Draft's typed
     /// event hooks. Keeping the adapter here preserves the existing Neon
     /// event store and enablement policy instead of constructing a second
@@ -200,124 +184,6 @@ impl PlayerRegistrationProvider {
         Arc::new(RegistrationDraftNeonObserver {
             handler: Arc::clone(&self.handler),
         })
-    }
-}
-
-struct RegionBackfillObserver {
-    registration: RegistrationRepository,
-    opendota: Arc<OpenDotaRuntimeServices>,
-}
-
-#[async_trait]
-impl GatewayEventObserver for RegionBackfillObserver {
-    fn name(&self) -> &'static str {
-        "player-region-backfill"
-    }
-
-    async fn ready_recovery(&self, context: ReadyRecoveryContext) -> ReadyRecoveryReport {
-        let ready_guild_ids = context
-            .guild_ids()
-            .iter()
-            .filter_map(|guild_id| i64::try_from(*guild_id).ok())
-            .collect::<BTreeSet<_>>();
-        let repository = self.registration.clone();
-        let candidates = match tokio::task::spawn_blocking(move || {
-            repository
-                .region_backfill_candidates_for_guilds(&ready_guild_ids)
-                .map_err(|error| error.to_string())
-        })
-        .await
-        {
-            Ok(Ok(candidates)) => candidates,
-            Ok(Err(message)) => {
-                return region_backfill_failure(context.guild_ids().len(), message);
-            }
-            Err(error) => {
-                return region_backfill_failure(
-                    context.guild_ids().len(),
-                    format!("region candidate task failed: {error}"),
-                );
-            }
-        };
-        let attempted_guilds = candidates
-            .iter()
-            .filter_map(|candidate| u64::try_from(candidate.guild_id).ok())
-            .collect::<BTreeSet<_>>();
-        let mut by_steam = BTreeMap::<i64, Vec<_>>::new();
-        let mut steam_order = Vec::new();
-        for candidate in candidates {
-            if !by_steam.contains_key(&candidate.steam_id) {
-                steam_order.push(candidate.steam_id);
-            }
-            by_steam
-                .entry(candidate.steam_id)
-                .or_default()
-                .push(candidate);
-        }
-        let mut updates = Vec::new();
-        for steam_id in steam_order {
-            let candidates = by_steam
-                .remove(&steam_id)
-                .expect("first-seen Steam ID was inserted");
-            let Some(raw_counts) = self
-                .opendota
-                .shared_client()
-                .get_player_counts(steam_id)
-                .await
-            else {
-                continue;
-            };
-            let counts = project_counts_payload(&raw_counts);
-            let Some(region) = infer_region_from_counts(Some(&counts)) else {
-                continue;
-            };
-            updates.extend(
-                candidates
-                    .into_iter()
-                    .map(|candidate| (candidate.discord_id, candidate.guild_id, region.to_owned())),
-            );
-        }
-        let repository = self.registration.clone();
-        let updated = match tokio::task::spawn_blocking(move || {
-            repository
-                .set_inferred_regions_bulk(&updates)
-                .map_err(|error| error.to_string())
-        })
-        .await
-        {
-            Ok(Ok(updated)) => updated,
-            Ok(Err(message)) => {
-                return region_backfill_failure(attempted_guilds.len(), message);
-            }
-            Err(error) => {
-                return region_backfill_failure(
-                    attempted_guilds.len(),
-                    format!("region bulk-write task failed: {error}"),
-                );
-            }
-        };
-        ReadyRecoveryReport {
-            observer: self.name(),
-            guilds_attempted: attempted_guilds.len(),
-            guilds_refreshed: attempted_guilds.len(),
-            guilds_superseded: 0,
-            members_refreshed: updated,
-            failures: Vec::new(),
-        }
-    }
-}
-
-fn region_backfill_failure(guilds_attempted: usize, message: String) -> ReadyRecoveryReport {
-    ReadyRecoveryReport {
-        observer: "player-region-backfill",
-        guilds_attempted,
-        guilds_refreshed: 0,
-        guilds_superseded: 0,
-        members_refreshed: 0,
-        failures: vec![ReadyRecoveryFailure {
-            guild_id: 0,
-            message,
-        }],
     }
 }
 
@@ -387,27 +253,6 @@ pub(crate) fn player_command_options() -> Vec<CommandOptionSpec> {
                 "Roles (1-5, e.g., '123' or '1,2,3' for carry, mid, offlane)",
                 CommandOptionKind::String,
             )],
-        ),
-        subcommand(
-            "region",
-            "Set your preferred Dota server (US East / US West)",
-            vec![CommandOptionSpec {
-                choices: vec![
-                    CommandOptionChoice::String {
-                        name: "US East".to_owned(),
-                        value: "USE".to_owned(),
-                    },
-                    CommandOptionChoice::String {
-                        name: "US West".to_owned(),
-                        value: "USW".to_owned(),
-                    },
-                ],
-                ..CommandOptionSpec::new(
-                    "region",
-                    "Your preferred server — leave blank to see your current setting",
-                    CommandOptionKind::String,
-                )
-            }],
         ),
         subcommand("exclusion", "Check your exclusion factor", Vec::new()),
         CommandOptionSpec::new(
@@ -1208,7 +1053,6 @@ impl PlayerRegistrationHandler {
                     "unlink" => self.unlink(context, guild_id, options, responder).await,
                     "steamids" => self.steamids(context, guild_id, responder).await,
                     "roles" => self.roles(context, guild_id, options, responder).await,
-                    "region" => self.region(context, guild_id, options, responder).await,
                     "exclusion" => self.exclusion(context, guild_id, responder).await,
                     "lobby autonotify" => {
                         self.autonotify(context, guild_id, options, responder).await
@@ -1353,8 +1197,6 @@ impl PlayerRegistrationHandler {
             .await
         {
             Ok(result) => {
-                self.best_effort_infer_region(&context, guild_id, steam_id)
-                    .await;
                 self.registration_success(&context, guild_id, result, responder)
                     .await
             }
@@ -1435,43 +1277,6 @@ impl PlayerRegistrationHandler {
         })?
     }
 
-    async fn best_effort_infer_region(
-        &self,
-        context: &CommandContext,
-        guild_id: u64,
-        steam_id: i64,
-    ) {
-        let Some(raw_counts) = self
-            .opendota
-            .shared_client()
-            .get_player_counts(steam_id)
-            .await
-        else {
-            return;
-        };
-        let counts = project_counts_payload(&raw_counts);
-        let Some(region) = infer_region_from_counts(Some(&counts)) else {
-            return;
-        };
-        let (Ok(discord_id), Ok(guild_id)) = (
-            signed_id(context.user_id, "user"),
-            signed_id(guild_id, "guild"),
-        ) else {
-            return;
-        };
-        let repository = self.registration.clone();
-        let region = region.to_owned();
-        match tokio::task::spawn_blocking(move || {
-            repository.set_inferred_region(discord_id, Some(guild_id), &region)
-        })
-        .await
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => warn!(%error, "registration region inference write failed"),
-            Err(error) => warn!(%error, "registration region inference task failed"),
-        }
-    }
-
     async fn registration_success(
         &self,
         context: &CommandContext,
@@ -1484,8 +1289,7 @@ impl PlayerRegistrationHandler {
                 InteractionResponse::message(format!(
                     "✅ Registered <@{}>!\n\
                      Cama Rating: {} ({:.0}% uncertainty)\n\
-                     Use `/player roles` to set your preferred roles.\n\
-                     Use `/player region` to set your server (US East / US West).",
+                     Use `/player roles` to set your preferred roles.",
                     context.user_id, result.cama_rating, result.uncertainty
                 ))
                 .with_user_mentions(vec![context.user_id]),
@@ -1968,68 +1772,6 @@ impl PlayerRegistrationHandler {
                 .await
                 .map_err(|error| error.to_string()),
         }
-    }
-
-    async fn region(
-        &self,
-        context: CommandContext,
-        guild_id: u64,
-        options: &[InteractionOption],
-        responder: Arc<dyn InteractionResponder>,
-    ) -> Result<(), String> {
-        let user_id = signed_id(context.user_id, "user")?;
-        let guild = signed_id(guild_id, "guild")?;
-        if let Some(region) = string_option(options, "region") {
-            let name = match region {
-                "USE" => "US East",
-                "USW" => "US West",
-                _ => return followup_ephemeral(&responder, "❌ Invalid region").await,
-            };
-            let repository = self.registration.clone();
-            let region = region.to_owned();
-            let updated = tokio::task::spawn_blocking(move || {
-                repository.set_preferred_region(user_id, Some(guild), &region)
-            })
-            .await
-            .map_err(|error| format!("region update task failed: {error}"))?
-            .map_err(|error| error.to_string())?;
-            if !updated {
-                return followup_ephemeral(&responder, "❌ Player not registered.").await;
-            }
-            return followup_ephemeral(&responder, format!("✅ Set your server to **{name}**."))
-                .await;
-        }
-        let repository = self.registration.clone();
-        let preferences = tokio::task::spawn_blocking(move || {
-            repository.player_preferences(user_id, Some(guild))
-        })
-        .await
-        .map_err(|error| format!("region lookup task failed: {error}"))?
-        .map_err(|error| error.to_string())?;
-        let Some(preferences) = preferences else {
-            return followup_ephemeral(&responder, "❌ Player not registered.").await;
-        };
-        let preferred = preferences
-            .preferred_region
-            .filter(|region| matches!(region.as_str(), "USE" | "USW"));
-        let inferred = preferences
-            .inferred_region
-            .filter(|region| matches!(region.as_str(), "USE" | "USW"));
-        let message = if let Some(region) = preferred {
-            format!(
-                "Your server is set to **{}**. Pick again to change it.",
-                region_name(&region)
-            )
-        } else if let Some(region) = inferred {
-            format!(
-                "Your server is **{}** (inferred from your Dota history). Use `/player region` and pick one to lock it in.",
-                region_name(&region)
-            )
-        } else {
-            "You haven't set a server yet. Use `/player region` and pick US East or US West."
-                .to_owned()
-        };
-        followup_ephemeral(&responder, message).await
     }
 
     async fn curfew_add(
@@ -2818,60 +2560,6 @@ fn now_nanos() -> u64 {
 
 fn now_nanos_i64() -> i64 {
     i64::try_from(now_nanos()).unwrap_or(i64::MAX)
-}
-
-fn region_name(region: &str) -> &str {
-    match region {
-        "USE" => "US East",
-        "USW" => "US West",
-        other => other,
-    }
-}
-
-fn project_counts_payload(value: &JsonValue) -> CountsPayload {
-    let region = value
-        .get("region")
-        .and_then(JsonValue::as_object)
-        .map(|regions| {
-            regions
-                .iter()
-                .map(|(key, entry)| {
-                    let projected = if let Some(object) = entry.as_object() {
-                        object
-                            .get("games")
-                            .map_or(RegionCountEntry::GamesMissing, |games| {
-                                RegionCountEntry::Games(project_game_count(games))
-                            })
-                    } else {
-                        RegionCountEntry::Bare(project_game_count(entry))
-                    };
-                    (key.clone(), projected)
-                })
-                .collect()
-        });
-    CountsPayload { region }
-}
-
-fn project_game_count(value: &JsonValue) -> GameCountValue {
-    match value {
-        JsonValue::Null => GameCountValue::Null,
-        JsonValue::Bool(value) => GameCountValue::Boolean(*value),
-        JsonValue::Number(value) => value.as_i64().map_or_else(
-            || {
-                value.as_u64().map_or_else(
-                    || {
-                        value
-                            .as_f64()
-                            .map_or(GameCountValue::Malformed, GameCountValue::Float)
-                    },
-                    GameCountValue::UnsignedInteger,
-                )
-            },
-            GameCountValue::Integer,
-        ),
-        JsonValue::String(value) => GameCountValue::String(value.clone()),
-        JsonValue::Array(_) | JsonValue::Object(_) => GameCountValue::Malformed,
-    }
 }
 
 fn format_suspension(state: &LobbySuspension) -> String {

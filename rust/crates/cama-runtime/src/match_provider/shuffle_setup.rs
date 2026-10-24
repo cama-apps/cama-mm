@@ -18,9 +18,6 @@ impl MatchHandler {
         ) {
             return Err("rating_system must be 'glicko', 'openskill', or 'jopacoin'".to_owned());
         }
-        if !matches!(request.shuffle_mode.as_str(), "balanced" | "region") {
-            return Err("shuffle_mode must be 'balanced' or 'region'".to_owned());
-        }
         let ShuffleInputs {
             mut players,
             last_match_dates,
@@ -151,8 +148,6 @@ impl MatchHandler {
         shuffler.package_deal_penalty = self.config.package_deal_penalty;
         shuffler.package_deal_split_penalty = self.config.package_deal_split_penalty;
         shuffler.rating_spread_multiplier = self.config.rating_spread_multiplier;
-        shuffler.region_split = request.shuffle_mode == "region";
-        shuffler.region_split_penalty = self.config.region_split_penalty;
 
         let recent_match_ids = last_match_participant_ids(&self.database_path, request.guild_id)?;
         let exclusion_counts = players
@@ -296,15 +291,6 @@ impl MatchHandler {
             &dire_set,
             Some(&low_priority_ids),
         );
-        let region_split_penalty = if request.shuffle_mode == "region" {
-            region_split_mismatches(
-                &region_inputs(&radiant_team.players),
-                &region_inputs(&dire_team.players),
-            ) as f64
-                * shuffler.region_split_penalty
-        } else {
-            0.0
-        };
         let selected_players = radiant_team
             .players
             .iter()
@@ -324,7 +310,6 @@ impl MatchHandler {
             + deal_split_penalty
             + low_priority_penalty
             + low_priority_team_adjustment
-            + region_split_penalty
             + shuffler.calculate_rating_spread_penalty(&selected_values)
             - BalancedShuffler::calculate_lobby_rating_bonus(&selected_values)
             - BalancedShuffler::calculate_lobby_wait_bonus(
@@ -403,9 +388,6 @@ impl MatchHandler {
                 .extra
                 .insert("spectator_lobby_message_id".into(), json!(message_id));
         }
-        state
-            .extra
-            .insert("shuffle_mode".to_owned(), json!(request.shuffle_mode));
         state
             .extra
             .insert("dota_hosting".to_owned(), json!(dota_hosting));

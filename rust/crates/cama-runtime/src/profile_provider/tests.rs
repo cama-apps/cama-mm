@@ -1545,6 +1545,19 @@ fn test_heroes_tab_runs_independent_reads_and_drawing_concurrently() {
 }
 
 #[test]
+fn overview_omits_retired_server_preference() {
+    let database = migrated_player_fixture();
+    let page = profile_page(&database, ProfileTab::Overview);
+
+    assert!(page.fields.iter().all(|field| field.name != "Server"));
+    assert!(
+        page.fields
+            .iter()
+            .all(|field| !field.value.contains("US West"))
+    );
+}
+
+#[test]
 fn test_overview_loads_badge_bankruptcy_and_hero_stats_concurrently() {
     let database = migrated_player_fixture();
     Connection::open(database.path())

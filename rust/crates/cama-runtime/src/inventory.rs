@@ -186,10 +186,6 @@ pub const PYTHON_READY_RECOVERY_ACTIONS: &[CutoverItem] = &[
         "TriviaImageCacheWarmObserver on Serenity ready/resume",
     ),
     wired(
-        "backfill inferred player regions",
-        "PlayerRegistrationProvider READY observer + deduplicated OpenDota counts/bulk SQLite update",
-    ),
-    wired(
         "reschedule stored reminders",
         "ReminderRecoveryObserver + authoritative wheel/trivia/dig/pet anchors",
     ),
@@ -778,9 +774,9 @@ mod tests {
 
     #[test]
     fn production_runtime_inventory_is_fully_wired() {
-        assert_eq!(required_count() + wired_count(), 67);
+        assert_eq!(required_count() + wired_count(), 66);
         assert_eq!(required_count(), 0);
-        assert_eq!(wired_count(), 67);
+        assert_eq!(wired_count(), 66);
         assert!(all_items().all(|item| !item.rust_boundary.is_empty()));
     }
 

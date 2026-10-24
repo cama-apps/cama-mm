@@ -211,7 +211,6 @@ pub struct Values {
     pub recalibration_cooldown_seconds: i64,
     pub recalibration_initial_rd: f64,
     pub recalibration_initial_volatility: f64,
-    pub region_split_penalty: f64,
     pub shop_announce_cost: i64,
     pub shop_announce_target_cost: i64,
     pub shop_double_or_nothing_cost: i64,
@@ -570,7 +569,6 @@ impl ApplicationConfig {
                     .f64("RECALIBRATION_INITIAL_RD", MAX_GLICKO_RD)
                     .min(MAX_GLICKO_RD),
                 recalibration_initial_volatility: p.f64("RECALIBRATION_INITIAL_VOLATILITY", 0.06),
-                region_split_penalty: p.f64("REGION_SPLIT_PENALTY", 500.0),
                 shop_announce_cost: p.i64("SHOP_ANNOUNCE_COST", 10),
                 shop_announce_target_cost: p.i64("SHOP_ANNOUNCE_TARGET_COST", 100),
                 shop_double_or_nothing_cost: p.i64("SHOP_DOUBLE_OR_NOTHING_COST", 50),
@@ -1150,6 +1148,6 @@ mod tests {
     #[test]
     fn configuration_catalog_entries_are_unique() {
         let catalog = config_py_env_keys().collect::<BTreeSet<_>>();
-        assert_eq!(catalog.len(), 215, "catalog entries must remain unique");
+        assert_eq!(catalog.len(), 214, "catalog entries must remain unique");
     }
 }

@@ -272,8 +272,6 @@ impl LobbyPlayerPort for SqliteLobbyPlayers {
                         .filter_map(|role| role.parse::<u8>().ok())
                         .collect(),
                     guild_id: player.guild_id,
-                    preferred_region: player.preferred_region,
-                    inferred_region: player.inferred_region,
                 })
             })
             .collect()

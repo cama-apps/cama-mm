@@ -93,9 +93,6 @@ use cama_domain::rating::{
     CamaRatingSystem, MatchUpdateOptions, RatingConfig, StreakAdjustment,
     TeamPlayer as GlickoTeamPlayer,
 };
-use cama_domain::region::{
-    PlayerRegionInput, region_split_mismatches, resolve_region, summarize_region,
-};
 use cama_domain::role_performance::RoleRecord;
 use cama_domain::shuffler::{
     BalancedShuffler, PackageDeal, PoolOptions, ShuffleConstraints, SoftAvoid,
@@ -665,13 +662,6 @@ impl MatchRegistrationProvider {
 
 fn shuffle_options() -> Vec<CommandOptionSpec> {
     let mut options = vec![
-        choices(
-            CommandOptionSpec::new("mode", "Team-shuffle mode", CommandOptionKind::String),
-            &[
-                ("Balanced (default)", "balanced"),
-                ("Region Split (US West vs US East)", "region"),
-            ],
-        ),
         choices(
             CommandOptionSpec::new(
                 "rating_system",
@@ -1466,7 +1456,6 @@ struct MatchConfig {
     package_deal_penalty: f64,
     package_deal_split_penalty: f64,
     rating_spread_multiplier: f64,
-    region_split_penalty: f64,
     bet_reminder_offsets: Vec<i64>,
     bet_last_call_offset: i64,
 }
@@ -1519,7 +1508,6 @@ impl MatchConfig {
             package_deal_penalty: config.values.package_deal_penalty,
             package_deal_split_penalty: config.values.package_deal_split_penalty,
             rating_spread_multiplier: config.values.rating_spread_multiplier,
-            region_split_penalty: config.values.region_split_penalty,
             bet_reminder_offsets: config.values.bet_reminder_offsets.clone(),
             bet_last_call_offset: config.values.bet_last_call_offset,
         }
@@ -1637,7 +1625,6 @@ struct PrepareShuffleRequest {
     excluded_conditional_ids: Vec<i64>,
     lobby_wait_minutes: HashMap<i64, i64>,
     rating_system: String,
-    shuffle_mode: String,
     shuffle_timestamp: i64,
     is_bomb_pot: bool,
     dota_hosting: DotaHostingOptions,
@@ -2580,9 +2567,6 @@ impl MatchHandler {
             excluded_conditional_ids,
             lobby_wait_minutes,
             rating_system: requested_rating_system,
-            shuffle_mode: string_option(&context.options, "mode")
-                .map(str::to_owned)
-                .unwrap_or_else(|| "balanced".to_owned()),
             shuffle_timestamp,
             is_bomb_pot: fastrand::f64() < self.config.bomb_pot_chance,
             dota_hosting,
@@ -5328,12 +5312,7 @@ impl MatchHandler {
             "🔴"
         };
         let lobby_kind = parse_persisted_lobby_kind(pending.state.lobby_kind.as_deref());
-        let shuffle_mode = extra_str(&pending.state, "shuffle_mode").unwrap_or("balanced");
-        let title_mode = if shuffle_mode == "region" {
-            "Region Team Shuffle"
-        } else {
-            "Balanced Team Shuffle"
-        };
+        let title_mode = "Balanced Team Shuffle";
         let title = if pending.state.is_bomb_pot {
             format!(
                 "💣 BOMB POT 💣 {} — Match #{} — {title_mode}",
@@ -5347,14 +5326,6 @@ impl MatchHandler {
                 pending.pending_match_id
             )
         };
-        let regions = participant_ids
-            .iter()
-            .filter_map(|player_id| players_by_id.get(player_id).copied())
-            .map(|player| PlayerRegionInput {
-                preferred_region: player.preferred_region.as_deref(),
-                inferred_region: player.inferred_region.as_deref(),
-            })
-            .collect::<Vec<_>>();
         let mut embed = InteractionEmbed::titled(title)
             .color(if pending.state.is_bomb_pot {
                 DISCORD_ORANGE
@@ -5365,8 +5336,7 @@ impl MatchHandler {
                 format!("🟢 Radiant ({radiant_sum:.0})  |  🔴 Dire ({dire_sum:.0})"),
                 format!("{first_pick_emoji} **First Pick: {first_pick}**\n\n{head_to_head}"),
                 false,
-            )
-            .field("🌎 Recommended Server", summarize_region(&regions), false);
+            );
         if let Some(options) = pending
             .state
             .extra
@@ -5382,29 +5352,6 @@ impl MatchHandler {
             if let Some(instructions) = options.lobby_instructions(bot_busy) {
                 embed = embed.field("🎮 Dota Lobby", instructions, false);
             }
-        }
-        if shuffle_mode == "region" {
-            let radiant_regions = pending
-                .state
-                .radiant_team_ids
-                .iter()
-                .filter_map(|id| players_by_id.get(id).copied())
-                .collect::<Vec<_>>();
-            let dire_regions = pending
-                .state
-                .dire_team_ids
-                .iter()
-                .filter_map(|id| players_by_id.get(id).copied())
-                .collect::<Vec<_>>();
-            embed = embed.field(
-                "🌎 Region Split",
-                format!(
-                    "{}\n{}",
-                    format_region_mix("Radiant", &radiant_regions),
-                    format_region_mix("Dire", &dire_regions)
-                ),
-                false,
-            );
         }
         let rating_display = match pending.state.balancing_rating_system.as_str() {
             "jopacoin" => "💰 Jopacoin Balance",
@@ -5423,11 +5370,7 @@ impl MatchHandler {
         );
         let mut balance_info = format!(
             "**Shuffle mode:** {}\n**Balanced with:** {rating_display}\n**Goodness score:** {:.1} (lower = better)\n**Adjusted value diff:** {:.0}\n**Off-role players:** Radiant: {radiant_off}, Dire: {dire_off} (Total: {})",
-            if shuffle_mode == "region" {
-                "Region Split"
-            } else {
-                "Balanced"
-            },
+            "Balanced",
             extra_f64(&pending.state, "goodness_score").unwrap_or_default(),
             pending.state.value_diff,
             radiant_off + dire_off,
@@ -6330,46 +6273,8 @@ fn role_value(configuration: &[(&'static str, &'static str)], role: &str) -> &'s
         .unwrap_or("")
 }
 
-fn extra_str<'a>(state: &'a PendingMatchState, key: &str) -> Option<&'a str> {
-    state.extra.get(key).and_then(serde_json::Value::as_str)
-}
-
 fn extra_f64(state: &PendingMatchState, key: &str) -> Option<f64> {
     state.extra.get(key).and_then(serde_json::Value::as_f64)
-}
-
-fn format_region_mix(label: &str, players: &[&Player]) -> String {
-    let mut west = 0;
-    let mut east = 0;
-    let mut unset = 0;
-    for player in players {
-        match resolve_region(&PlayerRegionInput {
-            preferred_region: player.preferred_region.as_deref(),
-            inferred_region: player.inferred_region.as_deref(),
-        }) {
-            Some("USW") => west += 1,
-            Some("USE") => east += 1,
-            _ => unset += 1,
-        }
-    }
-    let mut parts = Vec::new();
-    if west > 0 {
-        parts.push(format!("US West: {west}"));
-    }
-    if east > 0 {
-        parts.push(format!("US East: {east}"));
-    }
-    if unset > 0 {
-        parts.push(format!("Unset: {unset}"));
-    }
-    format!(
-        "**{label}:** {}",
-        if parts.is_empty() {
-            "US West".to_owned()
-        } else {
-            parts.join(", ")
-        }
-    )
 }
 
 fn off_role_count(player_ids: &[i64], roles: &[String], players: &BTreeMap<i64, &Player>) -> usize {
@@ -6532,16 +6437,6 @@ fn player_ids(players: &[Player]) -> Vec<i64> {
     players
         .iter()
         .filter_map(|player| player.discord_id)
-        .collect()
-}
-
-fn region_inputs(players: &[Player]) -> Vec<PlayerRegionInput<'_>> {
-    players
-        .iter()
-        .map(|player| PlayerRegionInput {
-            preferred_region: player.preferred_region.as_deref(),
-            inferred_region: player.inferred_region.as_deref(),
-        })
         .collect()
 }
 

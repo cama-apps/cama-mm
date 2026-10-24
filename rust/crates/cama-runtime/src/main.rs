@@ -1011,7 +1011,6 @@ async fn run_serve() -> ExitCode {
         duel_provider.gateway_observer(),
         betting_provider.gateway_observer(),
         mafia_provider.gateway_observer(),
-        registration_provider.region_backfill_observer(),
         trivia_provider.gateway_observer(),
         dig_provider.gateway_observer(),
         blame_luke_provider.gateway_observer(),

@@ -6,7 +6,6 @@
 //! primary Steam link share one `BEGIN IMMEDIATE` transaction, so any junction
 //! failure rolls the player row back as well.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use cama_domain::rating::cap_glicko_rd;
@@ -48,16 +47,7 @@ pub struct RegisteredPlayer {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegistrationPlayerPreferences {
-    pub preferred_region: Option<String>,
-    pub inferred_region: Option<String>,
     pub exclusion_count: i64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RegionBackfillCandidate {
-    pub discord_id: i64,
-    pub guild_id: i64,
-    pub steam_id: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -306,119 +296,17 @@ impl RegistrationRepository {
     ) -> Result<Option<RegistrationPlayerPreferences>, RegistrationRepositoryError> {
         self.connection()?
             .query_row(
-                "SELECT preferred_region,inferred_region,COALESCE(exclusion_count,0)
+                "SELECT COALESCE(exclusion_count,0)
                  FROM players WHERE discord_id=?1 AND guild_id=?2",
                 params![discord_id, Self::normalize_guild_id(guild_id)],
                 |row| {
                     Ok(RegistrationPlayerPreferences {
-                        preferred_region: row.get(0)?,
-                        inferred_region: row.get(1)?,
-                        exclusion_count: row.get(2)?,
+                        exclusion_count: row.get(0)?,
                     })
                 },
             )
             .optional()
             .map_err(Into::into)
-    }
-
-    pub fn set_preferred_region(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-        region: &str,
-    ) -> Result<bool, RegistrationRepositoryError> {
-        let updated = self.connection()?.execute(
-            "UPDATE players SET preferred_region=?1,updated_at=CURRENT_TIMESTAMP
-             WHERE discord_id=?2 AND guild_id=?3",
-            params![region, discord_id, Self::normalize_guild_id(guild_id),],
-        )?;
-        Ok(updated == 1)
-    }
-
-    pub fn set_inferred_region(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-        region: &str,
-    ) -> Result<bool, RegistrationRepositoryError> {
-        let updated = self.connection()?.execute(
-            "UPDATE players SET inferred_region=?1,updated_at=CURRENT_TIMESTAMP
-             WHERE discord_id=?2 AND guild_id=?3",
-            params![region, discord_id, Self::normalize_guild_id(guild_id),],
-        )?;
-        Ok(updated == 1)
-    }
-
-    /// Return every positive-ID player whose inferred region has not yet been
-    /// attempted, resolving the primary junction Steam ID before the legacy
-    /// column. READY recovery deduplicates the resulting Steam IDs before
-    /// calling OpenDota.
-    pub fn region_backfill_candidates(
-        &self,
-    ) -> Result<Vec<RegionBackfillCandidate>, RegistrationRepositoryError> {
-        self.region_backfill_candidates_scoped(None)
-    }
-
-    pub fn region_backfill_candidates_for_guilds(
-        &self,
-        guild_ids: &BTreeSet<i64>,
-    ) -> Result<Vec<RegionBackfillCandidate>, RegistrationRepositoryError> {
-        self.region_backfill_candidates_scoped(Some(guild_ids))
-    }
-
-    fn region_backfill_candidates_scoped(
-        &self,
-        guild_ids: Option<&BTreeSet<i64>>,
-    ) -> Result<Vec<RegionBackfillCandidate>, RegistrationRepositoryError> {
-        let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT p.discord_id, p.guild_id,
-                    COALESCE(psi.steam_id, p.steam_id) AS steam_id
-             FROM players p
-             LEFT JOIN player_steam_ids psi
-                    ON psi.discord_id = p.discord_id AND psi.is_primary = 1
-             WHERE p.inferred_region IS NULL
-               AND p.discord_id > 0
-               AND COALESCE(psi.steam_id, p.steam_id) IS NOT NULL
-             ORDER BY p.discord_id, p.guild_id",
-        )?;
-        let candidates = statement
-            .query_map([], |row| {
-                Ok(RegionBackfillCandidate {
-                    discord_id: row.get(0)?,
-                    guild_id: row.get(1)?,
-                    steam_id: row.get(2)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(RegistrationRepositoryError::from)?;
-        Ok(candidates
-            .into_iter()
-            .filter(|candidate| {
-                guild_ids.is_none_or(|guild_ids| guild_ids.contains(&candidate.guild_id))
-            })
-            .collect())
-    }
-
-    /// Persist a completed startup inference in one existing-schema
-    /// transaction. Rows that no longer need backfill are left unchanged.
-    pub fn set_inferred_regions_bulk(
-        &self,
-        updates: &[(i64, i64, String)],
-    ) -> Result<usize, RegistrationRepositoryError> {
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut changed = 0;
-        for (discord_id, guild_id, region) in updates {
-            changed += transaction.execute(
-                "UPDATE players
-                 SET inferred_region=?1,updated_at=CURRENT_TIMESTAMP
-                 WHERE discord_id=?2 AND guild_id=?3 AND inferred_region IS NULL",
-                params![region, discord_id, guild_id],
-            )?;
-        }
-        transaction.commit()?;
-        Ok(changed)
     }
 
     /// Save a restart-safe callback state in the existing generic key/value table.

@@ -12,7 +12,6 @@ use crate::discord_transport::{
     DiscordEmoji, DiscordGuildMemberSnapshot, DiscordMessageReceipt, DiscordMessageSnapshot,
     DiscordPresence, DiscordUserSnapshot,
 };
-use crate::gateway_events::{GatewayMember, GuildMemberPageSource, ReadyRecoveryContext};
 use crate::registration::{InteractionAllowedMentions, InteractionResponseError, Registry};
 use crate::test_support::initialize_test_database as initialize_or_migrate;
 
@@ -508,332 +507,6 @@ fn option(name: &str, value: InteractionValue) -> InteractionOption {
     }
 }
 
-async fn region_response(
-    preferred_region: Option<&str>,
-    inferred_region: Option<&str>,
-    selected_region: Option<&str>,
-    registered: bool,
-) -> InteractionResponse {
-    let database = database();
-    if registered {
-        let connection = Connection::open(database.path()).expect("open registration database");
-        connection
-            .pragma_update(None, "foreign_keys", false)
-            .expect("match production foreign-key mode");
-        connection
-            .execute(
-                "INSERT INTO players(
-                     discord_id,guild_id,discord_username,preferred_region,inferred_region
-                 ) VALUES(100,42,'Region Player',?1,?2)",
-                params![preferred_region, inferred_region],
-            )
-            .expect("seed region player");
-    }
-    let server = RouteServer::start(Vec::new());
-    let provider = PlayerRegistrationProvider::with_config(
-        database.path(),
-        services(&server),
-        Arc::new(MockDiscord::default()),
-        config(),
-    );
-    let registry = registry(&provider);
-    let responder = Arc::new(CapturingResponder::default());
-    let options = selected_region.map_or_else(Vec::new, |region| {
-        vec![option(
-            "region",
-            InteractionValue::String(region.to_owned()),
-        )]
-    });
-    registry
-        .command_handler("player")
-        .expect("player handler")
-        .handle(
-            player_command(500, 100, "region", options),
-            responder.clone(),
-        )
-        .await
-        .expect("region response");
-    responder
-        .captured
-        .lock()
-        .expect("response capture")
-        .followups
-        .pop()
-        .expect("region followup")
-}
-
-struct UnusedMembers;
-
-#[async_trait]
-impl GuildMemberPageSource for UnusedMembers {
-    async fn fetch_page(
-        &self,
-        _guild_id: u64,
-        _after: Option<u64>,
-        _limit: u64,
-    ) -> Result<Vec<GatewayMember>, String> {
-        panic!("region backfill must not fetch Discord members")
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn ready_region_backfill_dedupes_steam_ids_and_ignores_foreign_guilds() {
-    let database = database();
-    let connection = Connection::open(database.path()).expect("open registration database");
-    connection
-        .pragma_update(None, "foreign_keys", false)
-        .expect("production foreign-key mode");
-    for (discord_id, guild_id, steam_id) in
-        [(101, 42, 99), (101, 43, 99), (102, 42, 77), (103, 43, 88)]
-    {
-        connection
-            .execute(
-                "INSERT INTO players (
-                     discord_id,guild_id,discord_username,steam_id,inferred_region
-                 ) VALUES (?1,?2,'region-backfill',?3,NULL)",
-                params![discord_id, guild_id, steam_id],
-            )
-            .expect("insert backfill player");
-    }
-    let server = RouteServer::start(vec![
-        r#"{"region":{"1":{"games":7}}}"#,
-        r#"{"region":{"2":{"games":4}}}"#,
-    ]);
-    let provider = PlayerRegistrationProvider::with_config(
-        database.path(),
-        services(&server),
-        Arc::new(MockDiscord::default()),
-        config(),
-    );
-    let report = provider
-        .region_backfill_observer()
-        .ready_recovery(ReadyRecoveryContext::new(vec![42], Arc::new(UnusedMembers)))
-        .await;
-    assert!(report.failures.is_empty());
-    assert_eq!(report.guilds_attempted, 1);
-    assert_eq!(report.members_refreshed, 2);
-    let requests = server.requests(2);
-    assert_eq!(requests.len(), 2);
-    assert_eq!(
-        requests
-            .iter()
-            .filter(|request| request.starts_with("GET /players/99/counts "))
-            .count(),
-        1
-    );
-    assert!(
-        requests
-            .iter()
-            .all(|request| !request.starts_with("GET /players/88/counts ")),
-        "foreign-guild Steam IDs must not trigger OpenDota HTTP"
-    );
-    let regions = connection
-        .prepare(
-            "SELECT discord_id,guild_id,inferred_region FROM players
-             WHERE discord_id IN (101,102,103) ORDER BY discord_id,guild_id",
-        )
-        .expect("prepare region read")
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, Option<String>>(2)?,
-            ))
-        })
-        .expect("read regions")
-        .collect::<Result<Vec<_>, _>>()
-        .expect("collect regions");
-    assert_eq!(
-        regions,
-        [
-            (101, 42, Some("USW".to_owned())),
-            (101, 43, None),
-            (102, 42, Some("USE".to_owned())),
-            (103, 43, None),
-        ]
-    );
-}
-
-#[tokio::test]
-async fn test_writes_sentinel_when_no_us_games() {
-    let database = database();
-    let connection = Connection::open(database.path()).expect("open registration database");
-    connection
-        .pragma_update(None, "foreign_keys", false)
-        .expect("match production foreign-key mode");
-    connection
-        .execute(
-            "INSERT INTO players(discord_id,guild_id,discord_username,inferred_region)
-             VALUES(100,42,'No US Games',NULL)",
-            [],
-        )
-        .expect("seed player");
-    let server = RouteServer::start(vec![r#"{"region":{"3":{"games":200}}}"#]);
-    let provider = PlayerRegistrationProvider::with_config(
-        database.path(),
-        services(&server),
-        Arc::new(MockDiscord::default()),
-        config(),
-    );
-    provider
-        .handler
-        .best_effort_infer_region(
-            &CommandContext {
-                interaction_id: 1,
-                name: "player".to_owned(),
-                user_id: 100,
-                user_display_name: "No US Games".to_owned(),
-                guild_id: Some(42),
-                channel_id: Some(9),
-                options: Vec::new(),
-            },
-            42,
-            99,
-        )
-        .await;
-    assert_eq!(
-        connection
-            .query_row(
-                "SELECT inferred_region FROM players WHERE discord_id=100 AND guild_id=42",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .expect("read inferred region"),
-        "NONE"
-    );
-}
-
-#[tokio::test]
-async fn test_registration_no_write_when_counts_unavailable() {
-    let database = database();
-    let connection = Connection::open(database.path()).expect("open registration database");
-    connection
-        .pragma_update(None, "foreign_keys", false)
-        .expect("match production foreign-key mode");
-    connection
-        .execute(
-            "INSERT INTO players(discord_id,guild_id,discord_username,inferred_region)
-             VALUES(100,42,'Unavailable Counts',NULL)",
-            [],
-        )
-        .expect("seed player");
-    let server = RouteServer::start(Vec::new());
-    let provider = PlayerRegistrationProvider::with_config(
-        database.path(),
-        services(&server),
-        Arc::new(MockDiscord::default()),
-        config(),
-    );
-    provider
-        .handler
-        .best_effort_infer_region(
-            &CommandContext {
-                interaction_id: 1,
-                name: "player".to_owned(),
-                user_id: 100,
-                user_display_name: "Unavailable Counts".to_owned(),
-                guild_id: Some(42),
-                channel_id: Some(9),
-                options: Vec::new(),
-            },
-            42,
-            99,
-        )
-        .await;
-    assert!(
-        connection
-            .query_row(
-                "SELECT inferred_region FROM players WHERE discord_id=100 AND guild_id=42",
-                [],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .expect("read inferred region")
-            .is_none()
-    );
-}
-
-#[tokio::test]
-async fn test_backfill_skips_rows_when_counts_unavailable() {
-    let database = database();
-    let connection = Connection::open(database.path()).expect("open registration database");
-    connection
-        .pragma_update(None, "foreign_keys", false)
-        .expect("match production foreign-key mode");
-    connection
-        .execute(
-            "INSERT INTO players(
-                 discord_id,guild_id,discord_username,steam_id,inferred_region
-             ) VALUES(100,42,'Unavailable Backfill',99,NULL)",
-            [],
-        )
-        .expect("seed player");
-    let server = RouteServer::start(Vec::new());
-    let provider = PlayerRegistrationProvider::with_config(
-        database.path(),
-        services(&server),
-        Arc::new(MockDiscord::default()),
-        config(),
-    );
-    let report = provider
-        .region_backfill_observer()
-        .ready_recovery(ReadyRecoveryContext::new(vec![42], Arc::new(UnusedMembers)))
-        .await;
-    assert!(report.failures.is_empty());
-    assert_eq!(report.members_refreshed, 0);
-    assert!(
-        connection
-            .query_row(
-                "SELECT inferred_region FROM players WHERE discord_id=100 AND guild_id=42",
-                [],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .expect("read inferred region")
-            .is_none()
-    );
-}
-
-#[tokio::test]
-async fn test_valid_pick_persists() {
-    let response = region_response(None, None, Some("USW"), true).await;
-    assert_eq!(response.content, "✅ Set your server to **US West**.");
-    assert!(response.ephemeral);
-}
-
-#[tokio::test]
-async fn test_invalid_code_rejected_before_write() {
-    let response = region_response(None, None, Some("EU"), true).await;
-    assert_eq!(response.content, "❌ Invalid region");
-    assert!(response.ephemeral);
-}
-
-#[tokio::test]
-async fn test_unregistered_player_rejected() {
-    let response = region_response(None, None, Some("USE"), false).await;
-    assert_eq!(response.content, "❌ Player not registered.");
-    assert!(response.ephemeral);
-}
-
-#[tokio::test]
-async fn test_explicit_pick_reports_set() {
-    let response = region_response(Some("USE"), Some("USW"), None, true).await;
-    assert!(response.content.contains("server is set to **US East**"));
-    assert!(!response.content.contains("inferred"));
-}
-
-#[tokio::test]
-async fn test_inferred_only_reports_inferred() {
-    let response = region_response(None, Some("USW"), None, true).await;
-    assert!(response.content.contains("server is **US West**"));
-    assert!(response.content.contains("inferred from your Dota history"));
-}
-
-#[tokio::test]
-async fn test_sentinel_reports_none() {
-    let response = region_response(None, Some("NONE"), None, true).await;
-    assert!(response.content.contains("haven't set a server yet"));
-    assert!(!response.content.contains("inferred from your Dota history"));
-}
-
 #[test]
 fn command_schema_matches_python_extension() {
     let database = database();
@@ -864,7 +537,7 @@ fn command_schema_matches_python_extension() {
         .commands()
         .find(|command| command.name == "player")
         .expect("player schema");
-    assert_eq!(player.options.len(), 11);
+    assert_eq!(player.options.len(), 10);
     assert_eq!(
         player
             .options
@@ -881,7 +554,6 @@ fn command_schema_matches_python_extension() {
             "unlink",
             "steamids",
             "roles",
-            "region",
             "exclusion"
         ]
     );
@@ -899,20 +571,6 @@ fn command_schema_matches_python_extension() {
         [
             ("steam_id", CommandOptionKind::Integer, true),
             ("set_primary", CommandOptionKind::Boolean, false)
-        ]
-    );
-    let region = &player.options[9].options[0];
-    assert_eq!(
-        region.choices,
-        [
-            CommandOptionChoice::String {
-                name: "US East".to_owned(),
-                value: "USE".to_owned()
-            },
-            CommandOptionChoice::String {
-                name: "US West".to_owned(),
-                value: "USW".to_owned()
-            }
         ]
     );
     let lobby = &player.options[0];
@@ -1351,7 +1009,6 @@ async fn production_registration_uses_one_loopback_fetch_and_atomic_migrated_sql
     let database = database();
     let server = RouteServer::start(vec![
         r#"{"profile":{"personaname":"Dota Name"},"mmr_estimate":{"estimate":5000}}"#,
-        r#"{"region":{"2":{"games":50},"1":{"games":10}}}"#,
     ]);
     let discord = Arc::new(MockDiscord::default());
     let provider = PlayerRegistrationProvider::with_config(
@@ -1386,8 +1043,8 @@ async fn production_registration_uses_one_loopback_fetch_and_atomic_migrated_sql
         InteractionAllowedMentions::Users(vec![100])
     );
     drop(captured);
-    let requests = server.requests(2);
-    assert_eq!(requests.len(), 2);
+    let requests = server.requests(1);
+    assert_eq!(requests.len(), 1);
     assert_eq!(
         requests
             .iter()
@@ -1396,16 +1053,15 @@ async fn production_registration_uses_one_loopback_fetch_and_atomic_migrated_sql
         1,
         "MMR fallback must reuse its single player payload"
     );
-    assert!(requests[1].starts_with("GET /players/12345/counts "));
     let connection = Connection::open(database.path()).expect("open registration database");
-    let player: (i64, i64, String) = connection
+    let player: (i64, i64) = connection
         .query_row(
-            "SELECT initial_mmr,exclusion_count,inferred_region FROM players WHERE discord_id=100 AND guild_id=42",
+            "SELECT initial_mmr,exclusion_count FROM players WHERE discord_id=100 AND guild_id=42",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .expect("registered player");
-    assert_eq!(player, (5_000, 4, "USE".to_owned()));
+    assert_eq!(player, (5_000, 4));
     let primary: (i64, bool) = connection
         .query_row(
             "SELECT steam_id,is_primary FROM player_steam_ids WHERE discord_id=100",
@@ -1520,7 +1176,6 @@ async fn test_register_with_valid_opendota_response() {
     let database = database();
     let server = RouteServer::start(vec![
         r#"{"profile":{"personaname":"Dota Name"},"rank_tier":50,"mmr_estimate":{"estimate":2000}}"#,
-        "{}",
     ]);
     let provider = PlayerRegistrationProvider::with_config(
         database.path(),
@@ -1549,7 +1204,7 @@ async fn test_register_with_valid_opendota_response() {
     assert!(!success.ephemeral);
     assert!(success.content.starts_with("✅ Registered <@100001>!"));
     drop(captured);
-    assert_eq!(server.requests(2).len(), 2);
+    assert_eq!(server.requests(1).len(), 1);
     let connection = Connection::open(database.path()).expect("inspect valid registration");
     let player: (i64, f64) = connection
         .query_row(
@@ -1729,20 +1384,13 @@ async fn mmr_button_and_modal_survive_provider_restart_without_refetch() {
     assert_eq!(
         connection
             .query_row(
-                "SELECT initial_mmr,inferred_region,discord_username
+                "SELECT initial_mmr,discord_username
                  FROM players WHERE discord_id=101 AND guild_id=42",
                 [],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
             )
             .expect("modal-registered player"),
-        (4_200, None, "stable-account-name".to_owned()),
-        "the manual-MMR path must skip region inference"
+        (4_200, "stable-account-name".to_owned())
     );
 }
 

@@ -39,11 +39,7 @@ use cama_db::registration_repository::RegistrationRepository;
 use cama_domain::openskill::CamaOpenSkillSystem;
 use cama_domain::permissions::{DiscordPermissions, PermissionContext, has_admin_permission};
 use cama_domain::rating::{CamaRatingSystem, MAX_GLICKO_RD, cap_glicko_rd};
-use cama_domain::region::{
-    CountsPayload, GameCountValue, RegionCountEntry, infer_region_from_counts,
-};
 use chrono::{DateTime, SecondsFormat, Utc};
-use serde_json::Value as JsonValue;
 use tracing::{debug, error, warn};
 
 use crate::application_config::ApplicationConfig;
@@ -1007,10 +1003,6 @@ impl AdminHandler {
         .map_err(|task_error| format!("registration task failed: {task_error}"))?;
         match result {
             Ok(result) => {
-                if mmr.is_none() {
-                    self.best_effort_registration_region(target_id, guild_id, steam_id)
-                        .await;
-                }
                 respond_ephemeral(
                     &responder,
                     format!(
@@ -1029,32 +1021,6 @@ impl AdminHandler {
                 .await
             }
             Err(error) => respond_ephemeral(&responder, format!("❌ {error}")).await,
-        }
-    }
-
-    async fn best_effort_registration_region(&self, discord_id: i64, guild_id: i64, steam_id: i64) {
-        let Some(raw_counts) = self
-            .opendota
-            .shared_client()
-            .get_player_counts(steam_id)
-            .await
-        else {
-            return;
-        };
-        let counts = project_counts_payload(&raw_counts);
-        let Some(region) = infer_region_from_counts(Some(&counts)) else {
-            return;
-        };
-        let repository = self.registration.clone();
-        let region = region.to_owned();
-        match tokio::task::spawn_blocking(move || {
-            repository.set_inferred_region(discord_id, Some(guild_id), &region)
-        })
-        .await
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => warn!(%error, "admin registration region inference write failed"),
-            Err(error) => warn!(%error, "admin registration region inference task failed"),
         }
     }
 
@@ -2740,52 +2706,6 @@ fn format_lobby_labels(labels: &[String]) -> String {
             labels[..labels.len() - 1].join(", "),
             labels.last().expect("nonempty labels")
         ),
-    }
-}
-
-fn project_counts_payload(value: &JsonValue) -> CountsPayload {
-    let region = value
-        .get("region")
-        .and_then(JsonValue::as_object)
-        .map(|regions| {
-            regions
-                .iter()
-                .map(|(key, entry)| {
-                    let projected = if let Some(object) = entry.as_object() {
-                        object
-                            .get("games")
-                            .map_or(RegionCountEntry::GamesMissing, |games| {
-                                RegionCountEntry::Games(project_game_count(games))
-                            })
-                    } else {
-                        RegionCountEntry::Bare(project_game_count(entry))
-                    };
-                    (key.clone(), projected)
-                })
-                .collect()
-        });
-    CountsPayload { region }
-}
-
-fn project_game_count(value: &JsonValue) -> GameCountValue {
-    match value {
-        JsonValue::Null => GameCountValue::Null,
-        JsonValue::Bool(value) => GameCountValue::Boolean(*value),
-        JsonValue::Number(value) => value.as_i64().map_or_else(
-            || {
-                value.as_u64().map_or_else(
-                    || {
-                        value
-                            .as_f64()
-                            .map_or(GameCountValue::Malformed, GameCountValue::Float)
-                    },
-                    GameCountValue::UnsignedInteger,
-                )
-            },
-            GameCountValue::Integer,
-        ),
-        JsonValue::String(value) => GameCountValue::String(value.clone()),
-        JsonValue::Array(_) | JsonValue::Object(_) => GameCountValue::Malformed,
     }
 }
 

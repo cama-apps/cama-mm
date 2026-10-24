@@ -7,7 +7,6 @@ use cama_domain::draft_analysis::draft_winner;
 use cama_domain::embed_safety::{EmbedModel, FIELD_VALUE_LIMIT, truncate_field};
 use cama_domain::formatting::{JOPACOIN_EMOTE, ROLE_EMOJIS, TOMBSTONE_EMOJI, escape_discord_text};
 use cama_domain::rating::CamaRatingSystem;
-use cama_domain::region::{PlayerRegionInput, summarize_region};
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum LobbyKind {
@@ -46,8 +45,6 @@ pub struct LobbyPlayer {
     pub mmr: Option<i32>,
     pub preferred_roles: Vec<u8>,
     pub guild_id: Option<i64>,
-    pub preferred_region: Option<String>,
-    pub inferred_region: Option<String>,
 }
 
 impl LobbyPlayer {
@@ -60,8 +57,6 @@ impl LobbyPlayer {
             mmr: None,
             preferred_roles: Vec::new(),
             guild_id: None,
-            preferred_region: None,
-            inferred_region: None,
         }
     }
 }
@@ -270,14 +265,6 @@ pub fn create_lobby_embed(
         },
         false,
     );
-    let region_players = players
-        .iter()
-        .map(|player| PlayerRegionInput {
-            preferred_region: player.preferred_region.as_deref(),
-            inferred_region: player.inferred_region.as_deref(),
-        })
-        .collect::<Vec<_>>();
-    embed.add_field("🌎 Lobby Region", summarize_region(&region_players), false);
     if let Some(bonus_pool) = request.bonus_pool_preview {
         embed.add_field(
             "🎲 Bonus Pool",
@@ -914,7 +901,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lobby_embed_defaults_region_to_us_west() {
+    fn test_lobby_embed_omits_server_recommendation() {
         let mut player = LobbyPlayer::new(1, "Player");
         player.mmr = Some(3_000);
         let embed = create_lobby_embed(
@@ -927,7 +914,13 @@ mod tests {
             &[1],
             None,
         );
-        assert_eq!(field(&embed, "🌎 Lobby Region").value, "US West");
+        assert!(
+            embed
+                .fields
+                .iter()
+                .all(|field| !field.name.contains("Region")
+                    && !field.name.contains("Recommended Server"))
+        );
     }
 
     #[test]

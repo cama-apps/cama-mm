@@ -359,8 +359,6 @@ pub struct BalancedShuffler {
     pub package_deal_penalty: f64,
     pub package_deal_split_penalty: f64,
     pub rating_spread_multiplier: f64,
-    pub region_split: bool,
-    pub region_split_penalty: f64,
     role_assignment_provider: Arc<dyn RoleAssignmentProvider>,
     diagnostics: Arc<DiagnosticCounters>,
     /// Uniformly selects among equally-scored ten-player matchups, mirroring
@@ -387,8 +385,6 @@ impl Clone for BalancedShuffler {
             package_deal_penalty: self.package_deal_penalty,
             package_deal_split_penalty: self.package_deal_split_penalty,
             rating_spread_multiplier: self.rating_spread_multiplier,
-            region_split: self.region_split,
-            region_split_penalty: self.region_split_penalty,
             role_assignment_provider: Arc::clone(&self.role_assignment_provider),
             diagnostics: Arc::new(DiagnosticCounters::default()),
             tie_breaker: Arc::clone(&self.tie_breaker),
@@ -414,8 +410,6 @@ impl Default for BalancedShuffler {
             package_deal_penalty: 90.0,
             package_deal_split_penalty: 90.0,
             rating_spread_multiplier: 0.18,
-            region_split: false,
-            region_split_penalty: 500.0,
             role_assignment_provider: Arc::new(GlobalRoleAssignmentProvider),
             diagnostics: Arc::new(DiagnosticCounters::default()),
             tie_breaker: Arc::new(|count| {
@@ -967,8 +961,7 @@ impl BalancedShuffler {
         let team1_metrics = self.team_role_metrics(team1_players, max_assignments, context);
         let team2_metrics = self.team_role_metrics(team2_players, max_assignments, context);
         let constrained = constraints.avoids.is_some_and(|items| !items.is_empty())
-            || constraints.deals.is_some_and(|items| !items.is_empty())
-            || (self.region_split && self.region_split_penalty > 0.0);
+            || constraints.deals.is_some_and(|items| !items.is_empty());
         let team1_ids = discord_ids(team1_players);
         let team2_ids = discord_ids(team2_players);
         let low_priority_team_adjustment = Self::calculate_low_priority_team_adjustment(
@@ -1004,7 +997,6 @@ impl BalancedShuffler {
         self.diagnostics
             .constraint_penalty_calls
             .fetch_add(1, AtomicOrdering::Relaxed);
-        let region_penalty = self.calculate_region_split_penalty(team1_players, team2_players);
 
         let mut best_roles1 = None;
         let mut best_roles2 = None;
@@ -1022,8 +1014,7 @@ impl BalancedShuffler {
                     - rd_priority
                     + avoid_penalty
                     + deal_penalty
-                    + low_priority_team_adjustment
-                    + region_penalty;
+                    + low_priority_team_adjustment;
                 if score < best_score {
                     best_score = score;
                     best_roles1 = Some(metric1.role_assignments.clone());
@@ -2050,8 +2041,7 @@ impl BalancedShuffler {
         let use_split_bound = search.use_split_role_bound
             && base_terms_nonnegative
             && !avoids_nonempty
-            && !deals_nonempty
-            && (!self.region_split || self.region_split_penalty <= 0.0);
+            && !deals_nonempty;
 
         let low_priority_player_mask = refs
             .iter()
@@ -2209,17 +2199,6 @@ impl BalancedShuffler {
             }
         }
         Ok(best_result)
-    }
-
-    fn calculate_region_split_penalty(
-        &self,
-        team1_players: &[&Player],
-        team2_players: &[&Player],
-    ) -> f64 {
-        if !self.region_split || self.region_split_penalty <= 0.0 {
-            return 0.0;
-        }
-        region_split_mismatches(team1_players, team2_players) as f64 * self.region_split_penalty
     }
 }
 
@@ -2543,34 +2522,6 @@ fn materialize_override_matchup(
     })
 }
 
-fn resolved_region(player: &Player) -> Option<&'static str> {
-    for value in [
-        player.preferred_region.as_deref(),
-        player.inferred_region.as_deref(),
-    ] {
-        match value {
-            Some("USE") => return Some("USE"),
-            Some("USW") => return Some("USW"),
-            _ => {}
-        }
-    }
-    None
-}
-
-fn region_split_mismatches(team1: &[&Player], team2: &[&Player]) -> usize {
-    let count = |players: &[&Player], region: &str| {
-        players
-            .iter()
-            .filter(|player| resolved_region(player) == Some(region))
-            .count()
-    };
-    let team1_use = count(team1, "USE");
-    let team1_usw = count(team1, "USW");
-    let team2_use = count(team2, "USE");
-    let team2_usw = count(team2, "USW");
-    (team1_use + team2_usw).min(team1_usw + team2_use)
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
@@ -2580,7 +2531,6 @@ mod tests {
         BalancedShuffler, BranchSearchOptions, LOW_PRIORITY_GOODNESS_PENALTY, PackageDeal,
         PoolOptions, PoolResult, PoolScoreOverride, PoolSignature, RoleAssignment,
         RoleAssignmentProvider, ShuffleConstraints, SoftAvoid, SplitMix64, default_role_assignment,
-        region_split_mismatches,
     };
     use crate::player::Player;
     use crate::team::Team;
@@ -3598,35 +3548,30 @@ mod tests {
     }
 
     #[test]
-    fn test_region_shuffle_mode_splits_usw_and_use() {
-        let players = (0..10)
-            .map(|index| Player {
-                preferred_region: Some(if index < 5 { "USW" } else { "USE" }.to_owned()),
-                ..full_flex_player(format!("Player{index}"), 1_500, 1_000 + index)
-            })
-            .collect::<Vec<_>>();
-        let (team1, team2) = BalancedShuffler {
-            use_glicko: false,
-            off_role_flat_penalty: 0.0,
-            role_matchup_delta_weight: 0.0,
-            rd_priority_weight: 0.0,
-            region_split: true,
-            region_split_penalty: 1_000.0,
-            ..BalancedShuffler::default()
+    fn test_historical_region_preferences_do_not_affect_matchup_score() {
+        let mut players = create_players_with_roles(10, 1_500, 50);
+        let shuffler = BalancedShuffler::default();
+        let baseline = shuffler
+            .score_role_assignments_for_matchup(
+                &players[..5],
+                &players[5..],
+                3,
+                ShuffleConstraints::default(),
+            )
+            .expect("scoring succeeds");
+        for (index, player) in players.iter_mut().enumerate() {
+            player.preferred_region = Some(if index % 2 == 0 { "USE" } else { "USW" }.into());
+            player.inferred_region = Some(if index % 2 == 0 { "USW" } else { "USE" }.into());
         }
-        .shuffle(&players)
-        .expect("region shuffle succeeds");
-        let team_regions = [&team1, &team2]
-            .into_iter()
-            .map(|team| {
-                team.players
-                    .iter()
-                    .filter_map(|player| player.preferred_region.as_deref())
-                    .collect::<HashSet<_>>()
-            })
-            .collect::<Vec<_>>();
-        assert!(team_regions.contains(&HashSet::from(["USW"])));
-        assert!(team_regions.contains(&HashSet::from(["USE"])));
+        let with_historical_preferences = shuffler
+            .score_role_assignments_for_matchup(
+                &players[..5],
+                &players[5..],
+                3,
+                ShuffleConstraints::default(),
+            )
+            .expect("scoring succeeds");
+        approx(baseline.2, with_historical_preferences.2);
     }
 
     #[test]
@@ -4867,49 +4812,6 @@ mod tests {
         assert_eq!(team2.role_assignments.as_ref().map(Vec::len), Some(5));
     }
 
-    #[test]
-    fn test_region_split_mode_separates_usw_and_use() {
-        let mut players = Vec::new();
-        for index in 0..5 {
-            players.push(Player {
-                preferred_region: Some("USW".to_owned()),
-                ..full_flex_player(format!("USW{index}"), 1_500, index + 1)
-            });
-            players.push(Player {
-                preferred_region: Some("USE".to_owned()),
-                ..full_flex_player(format!("USE{index}"), 1_500, index + 6)
-            });
-        }
-        let shuffler = BalancedShuffler {
-            use_glicko: false,
-            off_role_flat_penalty: 0.0,
-            role_matchup_delta_weight: 0.0,
-            rd_priority_weight: 0.0,
-            region_split: true,
-            region_split_penalty: 1_000.0,
-            ..BalancedShuffler::default()
-        };
-        let (team1, team2) = shuffler.shuffle(&players).expect("shuffle succeeds");
-        let refs1: Vec<&Player> = team1.players.iter().collect();
-        let refs2: Vec<&Player> = team2.players.iter().collect();
-        assert_eq!(region_split_mismatches(&refs1, &refs2), 0);
-        let mut regions = [&team1, &team2]
-            .into_iter()
-            .map(|team| {
-                let mut values = team
-                    .players
-                    .iter()
-                    .filter_map(super::resolved_region)
-                    .collect::<Vec<_>>();
-                values.sort();
-                values.dedup();
-                values
-            })
-            .collect::<Vec<_>>();
-        regions.sort();
-        assert_eq!(regions, vec![vec!["USE"], vec!["USW"]]);
-    }
-
     fn assert_pool_size(pool_size: usize) {
         let players: Vec<Player> = (0..pool_size)
             .map(|index| player(format!("Player{index}"), 1_500 + index as i64 * 10, &[]))
@@ -5814,10 +5716,7 @@ mod tests {
             buyer_discord_id: 1,
             partner_discord_id: 2,
         }];
-        let shuffler = BalancedShuffler {
-            region_split: kind == "region",
-            ..BalancedShuffler::default()
-        };
+        let shuffler = BalancedShuffler::default();
         let constraints = ShuffleConstraints {
             avoids: (kind == "avoid").then_some(&avoids[..]),
             deals: (kind == "deal").then_some(&deals[..]),
@@ -5839,11 +5738,6 @@ mod tests {
     #[test]
     fn test_configured_constraints_retain_general_fallback_deal() {
         assert_constraint_uses_fallback("deal");
-    }
-
-    #[test]
-    fn test_configured_constraints_retain_general_fallback_region() {
-        assert_constraint_uses_fallback("region");
     }
 
     fn unit_f64(random: &mut SplitMix64) -> f64 {
