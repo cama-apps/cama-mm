@@ -1558,6 +1558,77 @@ mod tests {
         assert!(repo.pending_blood_pacts().unwrap().is_empty());
     }
     #[test]
+    fn spectator_reset_clears_preferences_without_poisoning_setup() {
+        let (db, repo) = fixture();
+        let players = crate::core_repositories::PlayerRepository::new(db.path());
+        repo.set_investment(1, 9, 1, "long", 10).unwrap();
+        repo.set_investment(1, 10, 9, "long", 10).unwrap();
+        repo.set_liquidity(1, 9, 10).unwrap();
+        repo.set_investment(2, 9, 1, "long", 10).unwrap();
+        repo.set_liquidity(2, 9, 10).unwrap();
+        assert!(players.delete(9, Some(1)).unwrap());
+        let c = repo.connection().unwrap();
+        assert!(read_investments(&c, 1).unwrap().is_empty());
+        assert!(read_liquidity(&c, 1).unwrap().is_empty());
+        assert_eq!(read_investments(&c, 2).unwrap().len(), 1);
+        assert_eq!(read_liquidity(&c, 2).unwrap().len(), 1);
+        assert_eq!(balance(&c, 2, 9).unwrap(), 100);
+        repo.open_market(1, 1, &terms(), 0).unwrap();
+    }
+
+    #[test]
+    fn spectator_reset_preserves_pending_wagers_until_settlement_or_refund() {
+        for refund in [false, true] {
+            let (db, repo) = fixture();
+            let players = crate::core_repositories::PlayerRepository::new(db.path());
+            repo.set_liquidity(1, 9, 10).unwrap();
+            repo.open_market(1, 1, &terms(), 0).unwrap();
+            repo.place_bet(&bet(9, 1, 25, "spectator")).unwrap();
+            repo.place_bet(&bet(10, 2, 25, "opponent")).unwrap();
+            for closed in [false, true] {
+                if closed {
+                    repo.close_market(1, 1, 15).unwrap();
+                }
+                let before = balance(&repo.connection().unwrap(), 1, 9).unwrap();
+                assert!(players.delete(9, Some(1)).is_err());
+                assert_eq!(balance(&repo.connection().unwrap(), 1, 9).unwrap(), before);
+                assert_eq!(
+                    read_liquidity(&repo.connection().unwrap(), 1)
+                        .unwrap()
+                        .len(),
+                    1
+                );
+            }
+            if refund {
+                repo.connection()
+                    .unwrap()
+                    .execute(
+                        "UPDATE deadlock_matches SET status='aborted' WHERE match_id=1",
+                        [],
+                    )
+                    .unwrap();
+                repo.refund_aborted(1, 1, 30).unwrap();
+                assert_eq!(balance(&repo.connection().unwrap(), 1, 9).unwrap(), 100);
+            } else {
+                record(&repo, 1);
+                repo.settle_recorded(1, 1, 30).unwrap();
+                assert!(balance(&repo.connection().unwrap(), 1, 9).unwrap() > 100);
+                assert!(players.delete(9, Some(1)).is_err());
+                let jobs = repo.pending_blood_pacts().unwrap();
+                assert!(!jobs.is_empty());
+                for job in jobs {
+                    repo.complete_blood_pact(&job, 0).unwrap();
+                }
+            }
+            assert!(players.delete(9, Some(1)).unwrap());
+            assert!(
+                read_liquidity(&repo.connection().unwrap(), 1)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+    #[test]
     fn failed_late_setup_rolls_back_seed_blinds_and_investments() {
         let (_db, repo) = fixture();
         repo.set_investment(1, 9, 1, "long", 10).unwrap();

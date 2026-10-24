@@ -4,10 +4,6 @@
 pub mod admin_low_priority;
 #[path = "../../cama-app/src/blame_luke_media.rs"]
 pub mod blame_luke_media;
-#[path = "../../cama-app/src/bugfix_regressions.rs"]
-pub mod bugfix_regressions;
-#[path = "../../cama-app/src/channel_checks.rs"]
-pub mod channel_checks;
 #[path = "../../cama-app/src/embeds.rs"]
 pub mod embeds;
 #[path = "../../cama-app/src/font_assets.rs"]

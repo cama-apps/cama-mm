@@ -16,11 +16,13 @@ use async_trait::async_trait;
 use cama_app::reminder_sqlite::SqliteReminderStore;
 use cama_app::reminders::{
     GuildId, LobbyKind, ReminderCooldowns, ReminderDelivery, ReminderKind, ReminderPreferences,
-    ReminderService, ReminderTaskKey, RuntimeDiscordPort, ScheduledReminder, SystemReminderClock,
-    TaskId, UserId,
+    ReminderService, ReminderTaskKey, RuntimeDiscordPort, SystemReminderClock, TaskId, UserId,
 };
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
+
+#[cfg(all(test, feature = "runtime-test-dig"))]
+use cama_app::reminders::ScheduledReminder;
 
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{DiscordMessage, DiscordTransport};
@@ -109,6 +111,10 @@ impl ReminderRegistrationProvider {
             timers: Mutex::new(BTreeMap::new()),
             discord,
             recovery_guard: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            sync_snapshot_barrier: Mutex::new(None),
+            #[cfg(test)]
+            fire_claim_barrier: Mutex::new(None),
         });
         Self {
             handler: Arc::new(ReminderHandler {
@@ -158,6 +164,10 @@ struct ReminderRuntimeState {
     timers: Mutex<BTreeMap<ReminderTaskKey, TimerGeneration>>,
     discord: Arc<dyn DiscordTransport>,
     recovery_guard: tokio::sync::Mutex<()>,
+    #[cfg(test)]
+    sync_snapshot_barrier: Mutex<Option<Arc<std::sync::Barrier>>>,
+    #[cfg(test)]
+    fire_claim_barrier: Mutex<Option<Arc<std::sync::Barrier>>>,
 }
 
 impl ReminderRuntimeState {
@@ -175,6 +185,7 @@ impl ReminderRuntimeState {
             .map_err(|_| "reminder timer lock was poisoned".to_owned())
     }
 
+    #[cfg(all(test, feature = "runtime-test-dig"))]
     fn task_snapshot(&self, key: ReminderTaskKey) -> Result<Option<ScheduledReminder>, String> {
         Ok(self.lock_service()?.task(key).cloned())
     }
@@ -186,7 +197,19 @@ impl ReminderRuntimeState {
     /// startup recovery pass holds the same service lock across a bulk
     /// per-guild rescan.
     fn sync_task_blocking(self: &Arc<Self>, key: ReminderTaskKey) -> Result<(), String> {
-        let task = self.task_snapshot(key)?;
+        // Hold the authoritative generation until its timer is installed.
+        // Always acquire service before timers; replacement and firing cannot
+        // overtake this snapshot, including for a zero-delay timer.
+        let service = self.lock_service()?;
+        let task = service.task(key).cloned();
+        #[cfg(test)]
+        {
+            let barrier = self.sync_snapshot_barrier.lock().unwrap().take();
+            if let Some(barrier) = barrier {
+                barrier.wait();
+                barrier.wait();
+            }
+        }
         let mut timers = self.lock_timers()?;
         if let (Some(existing), Some(task)) = (timers.get(&key), task.as_ref())
             && existing.task_id == task.id
@@ -208,15 +231,6 @@ impl ReminderRuntimeState {
             state.fire_task(key, task_id).await;
         });
         timers.insert(key, TimerGeneration { task_id, handle });
-        drop(timers);
-
-        // A zero-delay task can complete before insertion. Reconcile once so a
-        // completed generation never leaves a stale timer registry entry.
-        if self.task_snapshot(key)?.is_none()
-            && let Some(completed) = self.lock_timers()?.remove(&key)
-        {
-            completed.handle.abort();
-        }
         Ok(())
     }
 
@@ -236,13 +250,24 @@ impl ReminderRuntimeState {
         // The claim takes the service lock, which a startup recovery pass can
         // hold across a bulk rescan, so it never runs on this async worker.
         let claimed = tokio::task::spawn_blocking(move || {
-            let claimed = match state.lock_service() {
-                Ok(mut service) => service.claim_task(key, task_id),
+            let mut service = match state.lock_service() {
+                Ok(service) => service,
                 Err(error) => {
                     warn!(%error, ?key, "reminder timer could not claim service state");
-                    None
+                    return None;
                 }
             };
+            let claimed = service.claim_task(key, task_id);
+            #[cfg(test)]
+            {
+                let barrier = state.fire_claim_barrier.lock().unwrap().take();
+                if let Some(barrier) = barrier {
+                    barrier.wait();
+                    barrier.wait();
+                }
+            }
+            // Retire the timer under the same service lock as the claim, so
+            // reconciliation cannot abort this task before delivery resumes.
             if let Ok(mut timers) = state.lock_timers()
                 && timers.get(&key).map(|timer| timer.task_id) == Some(task_id)
             {

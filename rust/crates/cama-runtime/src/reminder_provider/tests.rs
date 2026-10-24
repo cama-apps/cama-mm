@@ -16,10 +16,181 @@ use super::*;
 const GUILD: i64 = 707;
 const USER: i64 = 808;
 
+#[tokio::test]
+async fn pet_rearm_respects_disabled_preference() {
+    let file = migrated_database();
+    let now = SystemReminderClock.now_seconds();
+    let connection = Connection::open(file.path()).unwrap();
+    connection
+        .execute(
+            "INSERT INTO pets
+         (discord_id,guild_id,name,species,adopted_at,hatched_at,adopt_fee,
+          last_fed_at,hunger_at_last_fed,dig_work_at)
+         VALUES (?1,?2,'Alpaca','common_cama',?3,?3,0,?3,100,?3)",
+            (USER, GUILD, now),
+        )
+        .unwrap();
+    let discord = Arc::new(MockDiscord::default());
+    let provider = test_provider(file.path(), discord.clone(), ReminderCooldowns::default());
+    let key = ReminderTaskKey::new(UserId::new(USER), GuildId::new(GUILD), ReminderKind::Pet);
+    provider
+        .hooks
+        .state
+        .lock_service()
+        .unwrap()
+        .set_preference(key.user_id, Some(key.guild_id), key.kind, false)
+        .unwrap();
+
+    provider.hooks.rearm_pet(USER, GUILD).await.unwrap();
+
+    assert!(provider.hooks.state.task_snapshot(key).unwrap().is_none());
+    assert!(
+        !provider
+            .hooks
+            .state
+            .lock_timers()
+            .unwrap()
+            .contains_key(&key)
+    );
+    assert!(discord.dms().is_empty());
+}
+
+#[tokio::test]
+async fn concurrent_timer_reconciliation_preserves_latest_delivery() {
+    let file = migrated_database();
+    let discord = Arc::new(MockDiscord::default());
+    let provider = test_provider(file.path(), discord.clone(), ReminderCooldowns::default());
+    let state = Arc::clone(&provider.hooks.state);
+    let key = ReminderTaskKey::new(UserId::new(USER), GuildId::new(GUILD), ReminderKind::Wheel);
+    let ready_at = SystemReminderClock.now_seconds() + 10_000;
+    state
+        .lock_service()
+        .unwrap()
+        .schedule_wheel_reminder(key.user_id, Some(key.guild_id), ready_at, Some(true))
+        .unwrap();
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    *state.sync_snapshot_barrier.lock().unwrap() = Some(Arc::clone(&barrier));
+    let syncing = Arc::clone(&state);
+    let first = tokio::task::spawn_blocking(move || syncing.sync_task_blocking(key));
+    barrier.wait();
+
+    // If reconciliation releases its service snapshot, install a replacement
+    // before allowing that stale snapshot to touch the timer registry.
+    let replacement = match state.service.try_lock() {
+        Ok(mut service) => service
+            .schedule_wheel_reminder(key.user_id, Some(key.guild_id), ready_at + 100, Some(true))
+            .unwrap(),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+        Err(error) => panic!("service mutex failed: {error}"),
+    };
+    if replacement.is_some() {
+        let replacing = Arc::clone(&state);
+        tokio::task::spawn_blocking(move || replacing.sync_task_blocking(key))
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    barrier.wait();
+    first.await.unwrap().unwrap();
+    let latest = if let Some(replacement) = replacement {
+        replacement
+    } else {
+        let latest = state
+            .lock_service()
+            .unwrap()
+            .schedule_wheel_reminder(key.user_id, Some(key.guild_id), ready_at + 100, Some(true))
+            .unwrap()
+            .unwrap();
+        let replacing = Arc::clone(&state);
+        tokio::task::spawn_blocking(move || replacing.sync_task_blocking(key))
+            .await
+            .unwrap()
+            .unwrap();
+        latest
+    };
+
+    let installed = state.lock_timers().unwrap().get(&key).unwrap().task_id;
+    assert_eq!(
+        installed, latest,
+        "a stale snapshot must not replace the current timer"
+    );
+    Arc::clone(&state).fire_task(key, installed).await;
+    Arc::clone(&state).fire_task(key, installed).await;
+    assert_eq!(
+        discord.dms().len(),
+        1,
+        "the latest reminder delivers exactly once"
+    );
+    assert!(state.task_snapshot(key).unwrap().is_none());
+    assert!(!state.lock_timers().unwrap().contains_key(&key));
+}
+
 fn migrated_database() -> NamedTempFile {
     let file = NamedTempFile::new().expect("temporary database");
     initialize_or_migrate(file.path()).expect("migrate database");
     file
+}
+
+#[tokio::test]
+async fn reconciliation_does_not_abort_a_claimed_delivery() {
+    let file = migrated_database();
+    let discord = Arc::new(MockDiscord::default());
+    let provider = test_provider(file.path(), discord.clone(), ReminderCooldowns::default());
+    let state = Arc::clone(&provider.hooks.state);
+    let key = ReminderTaskKey::new(UserId::new(USER), GuildId::new(GUILD), ReminderKind::Wheel);
+    let task_id = state
+        .lock_service()
+        .unwrap()
+        .schedule_wheel_reminder(
+            key.user_id,
+            Some(key.guild_id),
+            SystemReminderClock.now_seconds(),
+            Some(true),
+        )
+        .unwrap()
+        .unwrap();
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    *state.fire_claim_barrier.lock().unwrap() = Some(Arc::clone(&barrier));
+    let (finished, completion) = tokio::sync::oneshot::channel();
+    let firing = Arc::clone(&state);
+    let handle = tokio::spawn(async move {
+        firing.fire_task(key, task_id).await;
+        let _ = finished.send(());
+    });
+    state
+        .lock_timers()
+        .unwrap()
+        .insert(key, TimerGeneration { task_id, handle });
+    let reached = Arc::clone(&barrier);
+    tokio::task::spawn_blocking(move || reached.wait())
+        .await
+        .unwrap();
+
+    let claim_released_service = match state.service.try_lock() {
+        Ok(_) => true,
+        Err(std::sync::TryLockError::WouldBlock) => false,
+        Err(error) => panic!("service mutex failed: {error}"),
+    };
+    if claim_released_service {
+        let syncing = Arc::clone(&state);
+        tokio::task::spawn_blocking(move || syncing.sync_task_blocking(key))
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    barrier.wait();
+    assert!(
+        completion.await.is_ok(),
+        "reconciliation must not abort a claimed delivery"
+    );
+    let syncing = Arc::clone(&state);
+    tokio::task::spawn_blocking(move || syncing.sync_task_blocking(key))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(discord.dms().len(), 1);
+    assert!(state.task_snapshot(key).unwrap().is_none());
+    assert!(!state.lock_timers().unwrap().contains_key(&key));
 }
 
 pub(crate) fn test_provider(

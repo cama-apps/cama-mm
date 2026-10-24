@@ -1048,6 +1048,39 @@ impl PlayerRepository {
             transaction.commit()?;
             return Ok(false);
         }
+        let unsettled_deadlock: bool = transaction.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM deadlock_wagers w
+                 JOIN deadlock_betting_markets m
+                   ON m.market_id=w.market_id AND m.guild_id=w.guild_id
+                 WHERE w.discord_id=?1 AND w.guild_id=?2
+                   AND m.status IN ('open','closed')
+             ) OR EXISTS(
+                 SELECT 1 FROM deadlock_economic_receipts r
+                 WHERE r.discord_id=?1 AND r.guild_id=?2 AND r.kind='blood_pact_pending'
+                   AND NOT EXISTS(
+                       SELECT 1 FROM deadlock_economic_receipts done
+                       WHERE done.market_id=r.market_id AND done.guild_id=r.guild_id
+                         AND done.discord_id=r.discord_id AND done.kind='blood_pact_complete'
+                   )
+             )",
+            params![discord_id, guild_id],
+            |row| row.get(0),
+        )?;
+        if unsettled_deadlock {
+            return Err(CoreRepositoryError::InvalidInput(
+                "This account has pending Deadlock economic activity. Wait for settlement or refunds to finish before resetting it.".to_owned(),
+            ));
+        }
+        transaction.execute(
+            "DELETE FROM deadlock_betting_investments
+             WHERE guild_id=?2 AND (investor_id=?1 OR target_id=?1)",
+            params![discord_id, guild_id],
+        )?;
+        transaction.execute(
+            "DELETE FROM deadlock_betting_liquidity WHERE discord_id=?1 AND guild_id=?2",
+            params![discord_id, guild_id],
+        )?;
         for table in [
             "openskill_rating_events",
             "match_participants",
@@ -10004,6 +10037,11 @@ mod tests {
     const TEST_SCHEMA: &str = r#"
         PRAGMA journal_mode=WAL;
         PRAGMA busy_timeout=5000;
+        CREATE TABLE deadlock_betting_markets(market_id TEXT PRIMARY KEY,guild_id INTEGER NOT NULL,status TEXT NOT NULL);
+        CREATE TABLE deadlock_wagers(market_id TEXT NOT NULL,guild_id INTEGER NOT NULL,discord_id INTEGER NOT NULL);
+        CREATE TABLE deadlock_economic_receipts(market_id TEXT NOT NULL,guild_id INTEGER NOT NULL,discord_id INTEGER,kind TEXT NOT NULL);
+        CREATE TABLE deadlock_betting_investments(guild_id INTEGER NOT NULL,investor_id INTEGER NOT NULL,target_id INTEGER NOT NULL);
+        CREATE TABLE deadlock_betting_liquidity(guild_id INTEGER NOT NULL,discord_id INTEGER NOT NULL);
         CREATE TABLE deadlock_players (guild_id INTEGER NOT NULL,discord_id INTEGER NOT NULL,steam_id INTEGER NOT NULL,PRIMARY KEY(guild_id,discord_id));
         CREATE TABLE players (
             discord_id INTEGER NOT NULL, guild_id INTEGER NOT NULL DEFAULT 0,
