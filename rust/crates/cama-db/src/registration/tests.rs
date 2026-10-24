@@ -317,68 +317,7 @@ fn test_high_uint32_account_id_accepted() {
 }
 
 #[test]
-fn test_update_and_read_preferred_region() {
-    let fixture = Fixture::new();
-    fixture.add_player(1, None);
-
-    assert!(
-        fixture
-            .repository
-            .set_preferred_region(1, Some(GUILD), "USW")
-            .expect("update preferred region")
-    );
-
-    let preferences = fixture
-        .repository
-        .player_preferences(1, Some(GUILD))
-        .expect("read preferences")
-        .expect("registered player");
-    assert_eq!(preferences.preferred_region.as_deref(), Some("USW"));
-    assert_eq!(preferences.inferred_region, None);
-}
-
-#[test]
-fn test_inferred_region_and_sentinel_round_trip() {
-    let fixture = Fixture::new();
-    fixture.add_player(2, None);
-
-    assert!(
-        fixture
-            .repository
-            .set_inferred_region(2, Some(GUILD), "USE")
-            .expect("set inferred region")
-    );
-    assert_eq!(
-        fixture
-            .repository
-            .player_preferences(2, Some(GUILD))
-            .expect("read preferences")
-            .expect("registered player")
-            .inferred_region
-            .as_deref(),
-        Some("USE")
-    );
-
-    assert!(
-        fixture
-            .repository
-            .set_inferred_region(2, Some(GUILD), "NONE")
-            .expect("set sentinel")
-    );
-    assert_eq!(
-        fixture
-            .repository
-            .player_preferences(2, Some(GUILD))
-            .expect("read sentinel")
-            .expect("registered player")
-            .inferred_region
-            .as_deref(),
-        Some("NONE")
-    );
-}
-
-#[test]
-fn test_region_is_guild_scoped() {
+fn test_exclusion_preferences_are_guild_scoped() {
     const SECONDARY_GUILD: i64 = 43;
 
     let fixture = Fixture::new();
@@ -386,18 +325,18 @@ fn test_region_is_guild_scoped() {
     fixture
         .connection()
         .execute(
-            "INSERT INTO players (discord_id,guild_id,discord_username)
-             VALUES (?1,?2,?3)",
-            params![3, SECONDARY_GUILD, "P3"],
+            "UPDATE players SET exclusion_count=4 WHERE discord_id=3 AND guild_id=?1",
+            params![GUILD],
+        )
+        .expect("set primary guild exclusion count");
+    fixture
+        .connection()
+        .execute(
+            "INSERT INTO players (discord_id,guild_id,discord_username,exclusion_count)
+             VALUES (?1,?2,?3,?4)",
+            params![3, SECONDARY_GUILD, "P3", 1],
         )
         .expect("insert second guild player");
-
-    assert!(
-        fixture
-            .repository
-            .set_preferred_region(3, Some(GUILD), "USE")
-            .expect("set primary guild region")
-    );
 
     assert_eq!(
         fixture
@@ -405,9 +344,8 @@ fn test_region_is_guild_scoped() {
             .player_preferences(3, Some(GUILD))
             .expect("read primary guild")
             .expect("primary guild row")
-            .preferred_region
-            .as_deref(),
-        Some("USE")
+            .exclusion_count,
+        4
     );
     assert_eq!(
         fixture
@@ -415,98 +353,9 @@ fn test_region_is_guild_scoped() {
             .player_preferences(3, Some(SECONDARY_GUILD))
             .expect("read secondary guild")
             .expect("secondary guild row")
-            .preferred_region,
-        None
+            .exclusion_count,
+        1
     );
-}
-
-#[test]
-fn test_returns_only_unchecked_players_with_steam_id() {
-    let fixture = Fixture::new();
-    for (discord_id, steam_id, inferred_region) in [
-        (10, Some(111), None),
-        (11, Some(222), Some("USE")),
-        (12, None, None),
-        (-5, Some(333), None),
-    ] {
-        fixture
-            .connection()
-            .execute(
-                "INSERT INTO players(
-                     discord_id,guild_id,discord_username,steam_id,inferred_region
-                 ) VALUES(?1,?2,?3,?4,?5)",
-                params![
-                    discord_id,
-                    GUILD,
-                    format!("P{discord_id}"),
-                    steam_id,
-                    inferred_region
-                ],
-            )
-            .expect("seed backfill candidate");
-    }
-
-    let candidates = fixture
-        .repository
-        .region_backfill_candidates()
-        .expect("read backfill candidates");
-    assert_eq!(candidates.len(), 1);
-    assert_eq!(candidates[0].discord_id, 10);
-    assert_eq!(candidates[0].guild_id, GUILD);
-    assert_eq!(candidates[0].steam_id, 111);
-}
-
-#[test]
-fn test_real_repository_backfill_uses_candidate_read_and_one_bulk_write() {
-    let fixture = Fixture::new();
-    for (discord_id, guild_id, steam_id) in
-        [(9_101, GUILD, 99), (9_101, 43, 99), (9_102, GUILD, 77)]
-    {
-        fixture
-            .connection()
-            .execute(
-                "INSERT INTO players(
-                     discord_id,guild_id,discord_username,steam_id,inferred_region
-                 ) VALUES(?1,?2,?3,?4,NULL)",
-                params![discord_id, guild_id, format!("P{discord_id}"), steam_id],
-            )
-            .expect("seed backfill player");
-    }
-    let candidates = fixture
-        .repository
-        .region_backfill_candidates()
-        .expect("read candidates");
-    assert_eq!(candidates.len(), 3);
-    assert_eq!(
-        candidates
-            .iter()
-            .map(|candidate| candidate.steam_id)
-            .collect::<Vec<_>>(),
-        [99, 99, 77]
-    );
-    let updates = candidates
-        .into_iter()
-        .map(|candidate| (candidate.discord_id, candidate.guild_id, "USE".to_owned()))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        fixture
-            .repository
-            .set_inferred_regions_bulk(&updates)
-            .expect("bulk write"),
-        3
-    );
-    let regions = fixture
-        .connection()
-        .prepare(
-            "SELECT inferred_region FROM players
-             WHERE discord_id IN (9101,9102) ORDER BY discord_id,guild_id",
-        )
-        .expect("prepare region read")
-        .query_map([], |row| row.get::<_, String>(0))
-        .expect("read regions")
-        .collect::<Result<Vec<_>, _>>()
-        .expect("collect regions");
-    assert_eq!(regions, ["USE", "USE", "USE"]);
 }
 
 #[test]

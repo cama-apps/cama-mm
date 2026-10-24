@@ -102,7 +102,6 @@ async fn seed_failure_compensates_pending_and_first_game_claim() {
             excluded_conditional_ids: Vec::new(),
             lobby_wait_minutes: HashMap::new(),
             rating_system: "glicko".into(),
-            shuffle_mode: "balanced".into(),
             shuffle_timestamp: unix_seconds(),
             is_bomb_pot: false,
             dota_hosting: DotaHostingOptions::default(),

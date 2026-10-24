@@ -171,7 +171,6 @@ Reset a lobby (clears all players).
 Create balanced teams from the lobby (requires at least 10 players). Uses pool betting mode with auto-blind liquidity.
 
 **Options:**
-- `mode` (optional): "Balanced" (default) or "Region Split" (US West vs US East)
 - `rating_system` (optional): "Glicko-2" (default), "OpenSkill" (experimental), or "Jopacoin Balance"
 - `lobby` (optional): Which lobby to shuffle (defaults to the lobby you're in)
 
@@ -256,7 +255,6 @@ at 4:00 AM in fixed UTC-8 (12:00 UTC), without daylight-saving shifts.
 - `/refer` — Refer a player before their first game
 - `/player link` / `/player unlink` / `/player steamids` — Link, unlink, and list your Steam accounts
 - `/player roles` — Set preferred roles (1-5) for matchmaking
-- `/player region` — Set your preferred Dota server (US East / US West)
 - `/player exclusion` — Check your exclusion factor
 - `/player lobby autonotify enabled:<true|false>` — Enable or disable persistent public alerts when lobbies reach 8 and 9 players
 - `/player lobby autonotify playername:<player>` — Get one DM the next time that player joins a lobby in this server

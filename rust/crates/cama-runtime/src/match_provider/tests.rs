@@ -813,7 +813,6 @@ impl MatchRuntimeFixture {
                 excluded_conditional_ids,
                 lobby_wait_minutes: HashMap::new(),
                 rating_system: rating_system.to_owned(),
-                shuffle_mode: "balanced".to_owned(),
                 shuffle_timestamp: unix_seconds(),
                 is_bomb_pot: false,
                 dota_hosting: DotaHostingOptions::default(),
@@ -5979,15 +5978,16 @@ fn inferred_shuffle_command_context(user_id: i64) -> MatchCommandContext {
 }
 
 #[test]
-fn dota_shuffle_schema_preserves_existing_options_and_bounds_host_settings() {
+fn dota_shuffle_schema_omits_retired_mode_and_bounds_host_settings() {
     let options = shuffle_options();
-    assert_eq!(options.len(), 11);
+    assert_eq!(options.len(), 10);
+    assert!(options.iter().all(|option| option.name != "mode"));
     assert_eq!(
-        &options[..3]
+        &options[..2]
             .iter()
             .map(|option| option.name.as_str())
             .collect::<Vec<_>>(),
-        &["mode", "rating_system", "lobby"]
+        &["rating_system", "lobby"]
     );
     assert!(options.iter().all(|option| !option.required));
     let region = options
@@ -6022,10 +6022,6 @@ fn dota_shuffle_schema_preserves_existing_options_and_bounds_host_settings() {
 #[test]
 fn dota_shuffle_parses_all_admin_options_without_conflating_balance_mode() {
     let options = vec![
-        InteractionOption {
-            name: "mode".into(),
-            value: InteractionValue::String("region".into()),
-        },
         InteractionOption {
             name: "hosting".into(),
             value: InteractionValue::String("bot".into()),
@@ -6997,6 +6993,32 @@ fn test_clean_shuffle_excluded_set_disjoint_from_teams() {
             .copied()
             .collect::<BTreeSet<_>>(),
         player_ids.into_iter().collect()
+    );
+}
+
+#[tokio::test]
+async fn shuffle_embed_omits_server_recommendation() {
+    let fixture = MatchRuntimeFixture::new();
+    let player_ids = fixture.add_shuffle_pool(10, false);
+    let mut prepared = fixture.prepare_shuffle(player_ids, "glicko", Vec::new());
+    prepared
+        .pending
+        .state
+        .extra
+        .insert("shuffle_mode".into(), json!("region"));
+    let embed = fixture
+        .provider
+        .handler
+        .render_shuffle_embed(&prepared.pending)
+        .await
+        .expect("render shuffle embed");
+
+    assert!(
+        embed
+            .fields
+            .iter()
+            .all(|field| !field.name.contains("Recommended Server")
+                && !field.name.contains("Region Split"))
     );
 }
 

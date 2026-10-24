@@ -32,7 +32,6 @@ pub mod prediction_ladder;
 pub mod rate_limiter;
 pub mod rating;
 pub mod rating_insights;
-pub mod region;
 pub mod role_derivation;
 pub mod role_performance;
 pub mod service_result;

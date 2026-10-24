@@ -821,11 +821,6 @@ impl ProfileDataSources {
                     .join(", ")
             },
         );
-        let region = player
-            .preferred_region
-            .as_deref()
-            .or(player.inferred_region.as_deref())
-            .map_or_else(|| "Not set".to_owned(), region_name);
         let mut page = ProfilePage::new(format!("Profile: {target_name}"), DISCORD_BLUE)
             .field("Rating", format!("{glicko}\n{openskill}"), true)
             .field("Record", record, true)
@@ -834,8 +829,7 @@ impl ProfileDataSources {
                 format!("{} Jopacoin", player.jopacoin_balance),
                 true,
             )
-            .field("Roles", roles, true)
-            .field("Server", region, true);
+            .field("Roles", roles, true);
         if let Some(guild_id) = guild_id {
             let drafts = self
                 .drafts
@@ -2008,17 +2002,6 @@ fn role_name(role: &str) -> String {
         "3" => "Offlane".to_owned(),
         "4" => "Soft Support".to_owned(),
         "5" => "Hard Support".to_owned(),
-        value => value.to_owned(),
-    }
-}
-
-fn region_name(region: &str) -> String {
-    match region {
-        "USW" => "US West".to_owned(),
-        "USE" => "US East".to_owned(),
-        "EUW" => "Europe West".to_owned(),
-        "EUE" => "Europe East".to_owned(),
-        "SEA" => "Southeast Asia".to_owned(),
         value => value.to_owned(),
     }
 }

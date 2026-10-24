@@ -1010,12 +1010,6 @@ impl OpenDotaHttpClient {
             })
     }
 
-    /// Fetch aggregate player counts (including the region breakdown).
-    pub async fn get_player_counts(&self, steam_id: i64) -> Option<Value> {
-        self.get_json(&format!("/players/{steam_id}/counts"), &[])
-            .await
-    }
-
     /// Fetch raw match details. Empty/error objects are treated as missing,
     /// just as the Python integration does after JSON decoding.
     pub async fn get_match_details(&self, match_id: i64) -> Option<Value> {
