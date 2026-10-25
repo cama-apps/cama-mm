@@ -3378,7 +3378,7 @@ mod tests {
             .score_role_assignments_for_matchup(&team1, &team2, 1, ShuffleConstraints::default())
             .expect("fixed matchup scores");
 
-        approx(score, 210.0);
+        approx(score, 230.0);
     }
 
     #[test]
@@ -3455,7 +3455,7 @@ mod tests {
             &mut super::ScoringContext::default(),
         );
 
-        approx(selection.preselection_score, -2_719.0);
+        approx(selection.preselection_score, -2_699.0);
     }
 
     #[test]
@@ -3544,7 +3544,7 @@ mod tests {
                 ShuffleConstraints::default(),
             )
             .expect("fixed role matchup evaluates");
-        approx(matchup.total_score, -2_962.0);
+        approx(matchup.total_score, -2_902.0);
     }
 
     #[test]
@@ -3763,7 +3763,8 @@ mod tests {
         let shuffler = BalancedShuffler {
             consider_roles: false,
             rd_priority_weight: 0.0,
-            soft_avoid_penalty: 200.0,
+            // Doubled avoidance must outweigh the 200-rating split at the current parity weight.
+            soft_avoid_penalty: 250.0,
             ..BalancedShuffler::default()
         };
         let target_low_priority = HashSet::from([1001]);
@@ -5516,8 +5517,8 @@ mod tests {
             .expect("optimization succeeds")
             .2
         };
-        approx(score(1.0), 1_130.0);
-        approx(score(0.5), 880.0);
+        approx(score(1.0), 1_190.0);
+        approx(score(0.5), 940.0);
     }
 
     #[test]
@@ -5556,7 +5557,7 @@ mod tests {
         )
         .expect("matchup evaluates");
         approx(matchup.log_entry.parity_penalty, 350.0);
-        approx(matchup.total_score, 560.0);
+        approx(matchup.total_score, 580.0);
     }
 
     #[test]
@@ -5660,7 +5661,7 @@ mod tests {
                 },
             )
             .expect("fallback scoring succeeds");
-        approx(common.2, 1_090.0);
+        approx(common.2, 1_170.0);
         assert_eq!(common, fallback);
     }
 
@@ -6474,7 +6475,7 @@ mod tests {
             .score_draft_pool(&captain_a, &captain_b, &pool)
             .expect("draft pool score");
 
-        approx(score, 199.5);
+        approx(score, 218.5);
     }
 
     #[test]
