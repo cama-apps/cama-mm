@@ -121,7 +121,7 @@ impl Default for OpenSkillConfig {
             calibration_threshold: 4.0,
             performance_strength: 0.10,
             streak_threshold: 3,
-            streak_multiplier_per_game: 0.33,
+            streak_multiplier_per_game: 0.36,
             low_priority_gain_multiplier: 1.10,
             low_mmr_win_bonus: true,
             sigma_decay_grace_period_days: 7,
@@ -1498,7 +1498,7 @@ mod tests {
     #[test]
     fn default_algorithm_fingerprint_includes_low_mmr_win_policy() {
         let system = CamaOpenSkillSystem::new();
-        assert_eq!(system.algorithm_fingerprint(), "5ac5e6c1f8dc2501");
+        assert_eq!(system.algorithm_fingerprint(), "2cbce22ae3a3ded5");
     }
 
     #[test]

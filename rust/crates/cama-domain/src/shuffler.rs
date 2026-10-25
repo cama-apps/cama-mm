@@ -539,13 +539,13 @@ impl BalancedShuffler {
         (maximum - minimum) * self.rating_spread_multiplier
     }
 
-    /// Twenty-six percent of the selected players' total active rating.
+    /// Twenty-nine percent of the selected players' total active rating.
     #[must_use]
     pub fn calculate_lobby_rating_bonus(player_values: &[f64]) -> f64 {
-        player_values.iter().sum::<f64>() * 0.26
+        player_values.iter().sum::<f64>() * 0.29
     }
 
-    /// Bonus of 1.10 points per whole minute waited by selected players with Discord IDs.
+    /// Bonus of 1.20 points per whole minute waited by selected players with Discord IDs.
     #[must_use]
     pub fn calculate_lobby_wait_bonus(
         players: &[&Player],
@@ -559,7 +559,7 @@ impl BalancedShuffler {
             .filter_map(|player| player.discord_id)
             .map(|discord_id| wait_minutes.get(&discord_id).copied().unwrap_or_default())
             .sum::<i64>() as f64
-            * 1.10
+            * 1.20
     }
 
     /// Active rating system uncertainty bonus.
@@ -3284,7 +3284,7 @@ mod tests {
             .collect::<HashMap<_, _>>();
         let baseline = BalancedShuffler::calculate_lobby_wait_bonus(&refs, None);
         let waited = BalancedShuffler::calculate_lobby_wait_bonus(&refs, Some(&waits));
-        approx(baseline - waited, -60.5);
+        approx(baseline - waited, -66.0);
     }
 
     #[test]
@@ -3455,7 +3455,7 @@ mod tests {
             &mut super::ScoringContext::default(),
         );
 
-        approx(selection.preselection_score, -2_416.0);
+        approx(selection.preselection_score, -2_719.0);
     }
 
     #[test]
@@ -3544,7 +3544,7 @@ mod tests {
                 ShuffleConstraints::default(),
             )
             .expect("fixed role matchup evaluates");
-        approx(matchup.total_score, -2_563.0);
+        approx(matchup.total_score, -2_962.0);
     }
 
     #[test]

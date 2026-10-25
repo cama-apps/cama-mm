@@ -3740,15 +3740,15 @@ fn wheel_income_applies_vanity_tax_snapshot_and_stable_exact_once_key() {
     )
     .expect("credit taxable wheel reward");
     assert_eq!(first.gross, 100);
-    assert_eq!(first.vanity_tax, 10);
-    assert_eq!(first.net, 90);
+    assert_eq!(first.vanity_tax, 20);
+    assert_eq!(first.net, 80);
     assert_eq!(
         players
             .get_by_id(7, Some(42))
             .expect("player lookup")
             .expect("player")
             .jopacoin_balance,
-        93
+        83
     );
     assert_eq!(event_related_id("123:7:abc"), event_related_id("123:7:abc"));
     assert_ne!(event_related_id("123:7:abc"), event_related_id("124:7:abc"));
@@ -3782,16 +3782,16 @@ fn wheel_income_stacks_low_priority_tax_beside_the_vanity_tax() {
     )
     .expect("credit doubly taxed wheel reward");
     // Both rates read the 100 JC gross, never the post-vanity remainder.
-    assert_eq!(receipt.vanity_tax, 10);
+    assert_eq!(receipt.vanity_tax, 20);
     assert_eq!(receipt.low_priority_tax, 10);
-    assert_eq!(receipt.net, 80);
+    assert_eq!(receipt.net, 70);
     assert_eq!(
         players
             .get_by_id(7, Some(42))
             .expect("player lookup")
             .expect("player")
             .jopacoin_balance,
-        83
+        73
     );
     let (rows, delta, reason): (i64, i64, String) = Connection::open(database.path())
         .expect("open wheel ledger")

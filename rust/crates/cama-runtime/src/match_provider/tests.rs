@@ -2570,7 +2570,7 @@ async fn ready_recovery_reenters_committed_match_money_exactly_once_then_clears_
             },
         )
         .expect("read committed policy effects");
-    assert_eq!(policy_before, (2, 1, 10, 6, 10, 10));
+    assert_eq!(policy_before, (2, 1, 9, 5, 10, 10));
     drop(connection);
 
     let context = ReadyRecoveryContext::new(
@@ -4483,8 +4483,8 @@ fn production_goodness_weights_team_value_and_role_deltas() {
         extra_f64(&prepared.pending.state, "goodness_score").expect("stored goodness score");
 
     // 95 value difference at 2.1 plus a 95 lane-matchup delta at 0.30;
-    // subtract 26% of the 15,100 total active rating.
-    assert!((goodness - (-3_698.0)).abs() < 1e-9, "{goodness}");
+    // subtract 29% of the 15,100 total active rating.
+    assert!((goodness - (-4_151.0)).abs() < 1e-9, "{goodness}");
 }
 
 #[test]

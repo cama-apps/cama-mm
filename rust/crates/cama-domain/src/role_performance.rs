@@ -18,10 +18,10 @@ pub const MIN_GAMES_FOR_WINRATE: u32 = 3;
 pub const UNPROVEN_ROLE_FACTOR: f64 = 0.95;
 
 /// Multiplier applied at a 0% win rate with a sufficient sample.
-pub const MIN_ROLE_FACTOR: f64 = 0.9;
+pub const MIN_ROLE_FACTOR: f64 = 0.85;
 
 /// Multiplier applied at a 100% win rate with a sufficient sample.
-pub const MAX_ROLE_FACTOR: f64 = 1.1;
+pub const MAX_ROLE_FACTOR: f64 = 1.15;
 
 /// A player's win/loss record in one specific role.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

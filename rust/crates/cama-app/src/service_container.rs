@@ -134,7 +134,7 @@ impl Default for ServiceContainerOptions {
             production_ai_service: None,
             dig_llm_enabled: true,
             pet_enabled: false,
-            vanity_tax_rate: 0.10,
+            vanity_tax_rate: 0.20,
             opendota: None,
         }
     }

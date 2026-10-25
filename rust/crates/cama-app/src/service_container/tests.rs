@@ -165,7 +165,7 @@ fn test_vanity_tax_enforcement_survives_container_restart() {
     second_service
         .refresh_guild(123, &[member])
         .expect("refresh restarted container");
-    assert_eq!(second_service.calculate_tax(7, 123, 100), 10);
+    assert_eq!(second_service.calculate_tax(7, 123, 100), 20);
 }
 
 #[test]
