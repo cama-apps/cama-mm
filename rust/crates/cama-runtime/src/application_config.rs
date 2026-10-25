@@ -507,7 +507,7 @@ impl ApplicationConfig {
                 neon_layer1_chance: p.f64("NEON_LAYER1_CHANCE", 0.35),
                 neon_llm_chance: p.f64("NEON_LLM_CHANCE", 0.6),
                 neon_mvp_chance: p.f64("NEON_MVP_CHANCE", 0.35),
-                new_player_exclusion_boost: p.i64("NEW_PLAYER_EXCLUSION_BOOST", 5),
+                new_player_exclusion_boost: p.i64("NEW_PLAYER_EXCLUSION_BOOST", 4),
                 new_player_mmr_discount: i64::from(migration.new_player_mmr_discount),
                 off_role_flat_value_penalty: p.f64("OFF_ROLE_FLAT_VALUE_PENALTY", 72.0),
                 off_role_flat_penalty: p.f64("OFF_ROLE_FLAT_PENALTY", 740.0),
@@ -589,7 +589,7 @@ impl ApplicationConfig {
                 trivia_cooldown_seconds: p.i64("TRIVIA_COOLDOWN_SECONDS", 21600),
                 trivia_reward_per_question: p.i64("TRIVIA_REWARD_PER_QUESTION", 1),
                 use_glicko: p.bool("USE_GLICKO", true),
-                vanity_tax_rate: p.clamped_rate("VANITY_TAX_RATE", 0.1),
+                vanity_tax_rate: p.clamped_rate("VANITY_TAX_RATE", 0.2),
                 wheel_banana_peel_est_ev: p.f64("WHEEL_BANANA_PEEL_EST_EV", -23.5),
                 wheel_banana_peel_loss_max: p.i64("WHEEL_BANANA_PEEL_LOSS_MAX", 32),
                 wheel_banana_peel_loss_min: p.i64("WHEEL_BANANA_PEEL_LOSS_MIN", 15),
@@ -934,9 +934,9 @@ mod tests {
     }
 
     #[test]
-    fn test_new_player_exclusion_boost_defaults_to_five() {
+    fn test_new_player_exclusion_boost_defaults_to_four() {
         let config = parse(&[("DISCORD_BOT_TOKEN", "token")]);
-        assert_eq!(config.values.new_player_exclusion_boost, 5);
+        assert_eq!(config.values.new_player_exclusion_boost, 4);
         assert_eq!(config.values.off_role_flat_value_penalty, 72.0);
         assert_eq!(config.values.off_role_flat_penalty, 740.0);
         assert_eq!(config.values.soft_avoid_penalty, 180.0);

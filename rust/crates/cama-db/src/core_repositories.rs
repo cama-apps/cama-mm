@@ -29,10 +29,10 @@ use crate::referrals::{
 };
 
 const BULK_CHUNK_SIZE: usize = 900;
-const NEW_PLAYER_EXCLUSION_BOOST: i64 = 5;
+const NEW_PLAYER_EXCLUSION_BOOST: i64 = 4;
 const OPENSKILL_ALGORITHM_VERSION: i64 = 5;
-const OPENSKILL_ALGORITHM_FINGERPRINT: &str = "5ac5e6c1f8dc2501";
-const DEFAULT_STREAK_MULTIPLIER_PER_GAME: f64 = 0.33;
+const OPENSKILL_ALGORITHM_FINGERPRINT: &str = "2cbce22ae3a3ded5";
+const DEFAULT_STREAK_MULTIPLIER_PER_GAME: f64 = 0.36;
 const DEFAULT_STREAK_THRESHOLD: i64 = 3;
 
 #[derive(Debug, Error)]
@@ -5915,7 +5915,7 @@ mod tests {
                 .get_exclusion_counts(&[12_345], Some(TEST_GUILD_ID))
                 .unwrap()
                 .get(&12_345),
-            Some(&NEW_PLAYER_EXCLUSION_BOOST)
+            Some(&4)
         );
         fixture
             .players
