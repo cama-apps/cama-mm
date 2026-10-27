@@ -1,6 +1,6 @@
 //! Existing-schema persistence for pending-match votes.
 //!
-//! Python remains the production runtime and sole schema/migration authority.
+//! Schema creation and migration belong to the startup schema manager.
 //! This adapter opens only an already-migrated database through
 //! [`crate::open_runtime_connection`] and preserves the full pending payload
 //! while atomically replacing one user's submission with an exact-payload CAS.

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Barrier};
@@ -51,39 +51,10 @@ impl ReminderClock for FixedClock {
     }
 }
 
-#[derive(Default)]
-struct RecordingDiscord {
-    attempts: Vec<(UserId, String)>,
-    failures: BTreeSet<UserId>,
-    completed_attempts: usize,
-}
-
-impl RecordingDiscord {
-    fn fail_for(&mut self, user_id: UserId) {
-        self.failures.insert(user_id);
-    }
-}
-
-impl DiscordPort for RecordingDiscord {
-    fn send_dm(&mut self, user_id: UserId, message: &str) -> Result<(), PortError> {
-        self.attempts.push((user_id, message.to_owned()));
-        self.completed_attempts += 1;
-        if self.failures.contains(&user_id) {
-            Err(PortError::new("send_dm", "Forbidden"))
-        } else {
-            Ok(())
-        }
-    }
-}
-
-type TestService = ReminderService<InMemoryReminderStore, FixedClock, RecordingDiscord>;
+type TestService = ReminderService<InMemoryReminderStore, FixedClock>;
 
 fn fixture() -> TestService {
-    ReminderService::new(
-        InMemoryReminderStore::default(),
-        FixedClock::new(NOW),
-        RecordingDiscord::default(),
-    )
+    ReminderService::new(InMemoryReminderStore::default(), FixedClock::new(NOW))
 }
 
 fn set_store_preference(
@@ -191,30 +162,6 @@ fn test_get_enabled_users_empty() {
             .get_enabled_users_for_type(guild(TEST_GUILD_ID), ReminderKind::Betting)
             .unwrap()
             .is_empty()
-    );
-}
-
-#[test]
-fn test_get_enabled_users_by_type_bulk() {
-    let store = InMemoryReminderStore::default();
-    set_store_preference(&store, 1, TEST_GUILD_ID, ReminderKind::Wheel, true);
-    set_store_preference(&store, 1, TEST_GUILD_ID, ReminderKind::Dig, true);
-    set_store_preference(&store, 2, TEST_GUILD_ID, ReminderKind::Trivia, true);
-    set_store_preference(&store, 3, TEST_GUILD_ID + 1, ReminderKind::Wheel, true);
-    let kinds = valid_reminder_kinds(["wheel", "trivia", "dig", "invalid", "wheel"]);
-    assert_eq!(
-        kinds,
-        [ReminderKind::Wheel, ReminderKind::Trivia, ReminderKind::Dig]
-    );
-    assert_eq!(
-        store
-            .get_enabled_users_by_type_bulk(guild(TEST_GUILD_ID), &kinds)
-            .unwrap(),
-        BTreeMap::from([
-            (ReminderKind::Wheel, vec![user(1)]),
-            (ReminderKind::Trivia, vec![user(2)]),
-            (ReminderKind::Dig, vec![user(1)]),
-        ])
     );
 }
 
@@ -491,165 +438,6 @@ fn test_get_preferences_proxy() {
 }
 
 #[test]
-fn test_set_and_load_lobby_preference() {
-    let mut service = fixture();
-    assert!(
-        service
-            .set_preference(
-                user(1),
-                Some(guild(TEST_GUILD_ID)),
-                ReminderKind::Lobby,
-                true,
-            )
-            .unwrap()
-    );
-    assert_eq!(
-        service
-            .get_lobby_subscriber_ids(Some(guild(TEST_GUILD_ID)), None)
-            .unwrap(),
-        [user(1)]
-    );
-    assert!(
-        !service
-            .set_preference(
-                user(1),
-                Some(guild(TEST_GUILD_ID)),
-                ReminderKind::Lobby,
-                false,
-            )
-            .unwrap()
-    );
-    assert!(
-        service
-            .get_lobby_subscriber_ids(Some(guild(TEST_GUILD_ID)), None)
-            .unwrap()
-            .is_empty()
-    );
-}
-
-#[test]
-fn test_lowskill_lobby_subscribers_require_rating_below_1400() {
-    let mut service = fixture();
-    for user_id in 1..=4 {
-        service
-            .set_preference(
-                user(user_id),
-                Some(guild(TEST_GUILD_ID)),
-                ReminderKind::Lobby,
-                true,
-            )
-            .unwrap();
-    }
-    for (user_id, rating) in [(1, 1_399.0), (2, 1_400.0), (3, 1_401.0)] {
-        service
-            .store()
-            .seed_player_rating(user(user_id), guild(TEST_GUILD_ID), Some(rating))
-            .unwrap();
-    }
-    assert_eq!(
-        service
-            .get_lobby_subscriber_ids(Some(guild(TEST_GUILD_ID)), Some(LobbyKind::LowSkill))
-            .unwrap(),
-        [user(1)]
-    );
-}
-
-#[test]
-fn test_successful_delivery_consumes_subscription_once() {
-    let mut service = fixture();
-    service.clock().set_nanoseconds(100);
-    service
-        .add_lobby_player_subscription(user(1), user(10), Some(guild(TEST_GUILD_ID)))
-        .unwrap();
-    let attempted = service
-        .notify_lobby_player_subscribers(
-            user(10),
-            "Target Player",
-            Some(guild(TEST_GUILD_ID)),
-            Some(LobbyKind::LowSkill),
-            None,
-        )
-        .unwrap();
-    let repeated = service
-        .notify_lobby_player_subscribers(
-            user(10),
-            "Target Player",
-            Some(guild(TEST_GUILD_ID)),
-            Some(LobbyKind::LowSkill),
-            None,
-        )
-        .unwrap();
-    assert_eq!(attempted.attempted_count(), 1);
-    assert_eq!(repeated.attempted_count(), 0);
-    assert_eq!(service.discord().attempts.len(), 1);
-    let message = &service.discord().attempts[0].1;
-    assert!(message.contains("Target Player"));
-    assert!(message.contains(LobbyKind::LowSkill.label()));
-    assert!(message.contains("one-time"));
-}
-
-#[test]
-fn test_target_display_name_is_escaped_in_runtime_dm() {
-    let mut service = fixture();
-    service.clock().set_nanoseconds(100);
-    service
-        .add_lobby_player_subscription(user(1), user(10), Some(guild(TEST_GUILD_ID)))
-        .unwrap();
-    let crafted_name = "**<@123> @everyone [click](https://example.invalid)**";
-    service
-        .notify_lobby_player_subscribers(
-            user(10),
-            crafted_name,
-            Some(guild(TEST_GUILD_ID)),
-            None,
-            None,
-        )
-        .unwrap();
-    let message = &service.discord().attempts[0].1;
-    assert!(!message.contains(crafted_name));
-    assert!(!message.contains("<@123>"));
-    assert!(!message.contains("@everyone"));
-    assert!(message.contains("<@\u{200b}123\\>"));
-    assert!(message.contains("@\u{200b}everyone"));
-    assert!(message.contains("\\*\\*"));
-    assert!(message.contains("\\[click\\]\\("));
-}
-
-#[test]
-fn test_failed_delivery_still_consumes_subscription() {
-    let mut discord = RecordingDiscord::default();
-    discord.fail_for(user(1));
-    let clock = FixedClock::new(NOW);
-    clock.set_nanoseconds(100);
-    let mut service = ReminderService::new(InMemoryReminderStore::default(), clock, discord);
-    service
-        .add_lobby_player_subscription(user(1), user(10), Some(guild(TEST_GUILD_ID)))
-        .unwrap();
-    let attempted = service
-        .notify_lobby_player_subscribers(
-            user(10),
-            "Target Player",
-            Some(guild(TEST_GUILD_ID)),
-            None,
-            None,
-        )
-        .unwrap();
-    let repeated = service
-        .notify_lobby_player_subscribers(
-            user(10),
-            "Target Player",
-            Some(guild(TEST_GUILD_ID)),
-            None,
-            None,
-        )
-        .unwrap();
-    assert_eq!(attempted.attempted_count(), 1);
-    assert_eq!(attempted.failed.len(), 1);
-    assert_eq!(repeated.attempted_count(), 0);
-    assert_eq!(service.discord().attempts.len(), 1);
-}
-
-#[test]
 fn test_no_task_when_pref_disabled() {
     let mut service = fixture();
     let scheduled = service
@@ -704,26 +492,6 @@ fn test_rescheduling_cancels_old_task() {
             .unwrap()
             .id,
         second
-    );
-}
-
-#[test]
-fn test_finished_task_removed_from_tasks() {
-    let mut service = fixture();
-    service
-        .toggle_preference(user(1), Some(guild(TEST_GUILD_ID)), ReminderKind::Wheel)
-        .unwrap();
-    let task_id = service
-        .schedule_wheel_reminder(user(1), Some(guild(TEST_GUILD_ID)), NOW - 10, None)
-        .unwrap()
-        .unwrap();
-    let dispatched = service.dispatch_due();
-    assert_eq!(dispatched[0].0, task_id);
-    assert_eq!(dispatched[0].1.delivered, [user(1)]);
-    assert!(
-        service
-            .task(task_key(1, TEST_GUILD_ID, ReminderKind::Wheel))
-            .is_none()
     );
 }
 
@@ -812,82 +580,6 @@ fn test_reschedule_skips_none_last_spin() {
             .task(task_key(1, TEST_GUILD_ID, ReminderKind::Wheel))
             .is_none()
     );
-}
-
-#[test]
-fn test_notify_betting_no_subscribers() {
-    let mut service = fixture();
-    let report = service
-        .notify_betting_subscribers(Some(guild(TEST_GUILD_ID)), NOW + 900, None, None)
-        .unwrap();
-    assert_eq!(report, DeliveryReport::default());
-    assert!(service.discord().attempts.is_empty());
-}
-
-#[test]
-fn test_notify_betting_dms_subscribers() {
-    let mut service = fixture();
-    for user_id in [1, 2] {
-        service
-            .toggle_preference(
-                user(user_id),
-                Some(guild(TEST_GUILD_ID)),
-                ReminderKind::Betting,
-            )
-            .unwrap();
-    }
-    let report = service
-        .notify_betting_subscribers(Some(guild(TEST_GUILD_ID)), NOW + 900, None, None)
-        .unwrap();
-    assert_eq!(report.delivered, [user(1), user(2)]);
-    assert_eq!(
-        service
-            .discord()
-            .attempts
-            .iter()
-            .map(|(user_id, _)| *user_id)
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([user(1), user(2)])
-    );
-}
-
-#[test]
-fn test_notify_betting_identifies_lobby_and_pending_match() {
-    let mut service = fixture();
-    service
-        .toggle_preference(user(1), Some(guild(TEST_GUILD_ID)), ReminderKind::Betting)
-        .unwrap();
-    service
-        .notify_betting_subscribers(
-            Some(guild(TEST_GUILD_ID)),
-            NOW + 900,
-            Some(42),
-            Some(LobbyKind::LowSkill),
-        )
-        .unwrap();
-    assert_eq!(
-        service.discord().attempts[0].1,
-        "A new 🧀 Whine & Cheese match (Match #42) has been shuffled! Betting is open for ~15 more minutes. Use `/bet` now!"
-    );
-}
-
-#[test]
-fn test_notify_betting_awaits_dms_before_returning() {
-    let mut service = fixture();
-    for user_id in [1, 2] {
-        service
-            .toggle_preference(
-                user(user_id),
-                Some(guild(TEST_GUILD_ID)),
-                ReminderKind::Betting,
-            )
-            .unwrap();
-    }
-    let report = service
-        .notify_betting_subscribers(Some(guild(TEST_GUILD_ID)), NOW + 900, None, None)
-        .unwrap();
-    assert_eq!(report.attempted_count(), 2);
-    assert_eq!(service.discord().completed_attempts, 2);
 }
 
 #[test]

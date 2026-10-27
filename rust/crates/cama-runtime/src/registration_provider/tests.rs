@@ -1366,6 +1366,7 @@ async fn mmr_button_and_modal_survive_provider_restart_without_refetch() {
                 interaction_id: 90,
                 custom_id: modal_id,
                 user_id: 101,
+                user_display_name: "Modal Nickname".to_owned(),
                 guild_id: Some(42),
                 channel_id: Some(9),
                 member_permissions: None,
@@ -1390,6 +1391,8 @@ async fn mmr_button_and_modal_survive_provider_restart_without_refetch() {
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
             )
             .expect("modal-registered player"),
+        // Registration stores the stable account name, never the modal's
+        // display name or a numeric ID.
         (4_200, "stable-account-name".to_owned())
     );
 }
@@ -1962,6 +1965,7 @@ async fn invalid_mmr_attempts_and_timeout_are_restart_safe() {
                     interaction_id: 501,
                     custom_id: modal_id.clone(),
                     user_id: 400,
+                    user_display_name: "Registration Player".to_owned(),
                     guild_id: Some(42),
                     channel_id: Some(9),
                     member_permissions: None,
@@ -2013,6 +2017,7 @@ async fn invalid_mmr_attempts_and_timeout_are_restart_safe() {
                 interaction_id: 503,
                 custom_id: blocked_modal_id,
                 user_id: 400,
+                user_display_name: "Registration Player".to_owned(),
                 guild_id: Some(42),
                 channel_id: Some(9),
                 member_permissions: None,
@@ -2083,6 +2088,7 @@ async fn invalid_mmr_attempts_and_timeout_are_restart_safe() {
                 interaction_id: 602,
                 custom_id: expired_modal_id,
                 user_id: 401,
+                user_display_name: "Registration Player".to_owned(),
                 guild_id: Some(42),
                 channel_id: Some(9),
                 member_permissions: None,

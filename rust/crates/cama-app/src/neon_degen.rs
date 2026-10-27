@@ -1,9 +1,8 @@
-//! Typed Neon Degen/JOPA-T policies for the side-by-side Rust application.
+//! Typed Neon Degen/JOPA-T policies.
 //!
 //! The module deliberately keeps Discord, SQLite, image encoding, and model
-//! providers behind data contracts.  That lets the Rust service reproduce the
-//! Python trigger, privacy, persistence, and upload policies without starting a
-//! second bot process or becoming a second schema owner.
+//! providers behind data contracts, so the trigger, privacy, persistence, and
+//! upload policies stay testable without a live bot process.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -1864,29 +1863,6 @@ impl NeonDegenService {
         Some(NeonResult::text(1, render_cooldown_hit(cooldown_type)))
     }
 
-    /// Python-compatible `/gamba` result hook.  The betting runtime owns the
-    /// settled amount and attachment delivery; this service only decides if a
-    /// short terminal receipt should fire and applies the shared Neon
-    /// cooldown.  Positive wins use the same chance gate as the wheel's
-    /// ordinary Layer 1 easter egg, while bankrupt losses use the dedicated
-    /// Layer 2 copy.
-    #[must_use]
-    pub fn on_wheel_result(
-        &mut self,
-        discord_id: u64,
-        guild_id: Option<u64>,
-        result_value: i64,
-        new_balance: i64,
-    ) -> Option<NeonResult> {
-        self.on_wheel_result_with_prior_balance(
-            discord_id,
-            guild_id,
-            result_value,
-            None,
-            new_balance,
-        )
-    }
-
     /// Variant used by durable wheel settlement paths that know the balance
     /// immediately before the result.  Python's Freefall branch requires the
     /// player to have started with at least 100 JC; keeping that input at the
@@ -2291,14 +2267,6 @@ impl NeonDegenService {
         Some(text)
     }
 
-    #[must_use]
-    pub fn on_match_recorded(&mut self) -> Option<NeonResult> {
-        if !self.enabled || !self.rolls.roll(0.35) {
-            return None;
-        }
-        Some(NeonResult::text(2, render_match_recorded()))
-    }
-
     /// Python-compatible post-match debrief route. Match supplies only
     /// committed, typed facts; this method performs the same base/notable/
     /// extreme chance gate and renders the bounded JOPA-T fallback without
@@ -2650,135 +2618,10 @@ impl NeonDegenService {
         self.set_cooldown(discord_id, guild_id);
         Some(NeonResult::text(1, render_gamba_spectator(display_name)))
     }
-
-    #[must_use]
-    pub fn on_prediction_resolved(
-        &mut self,
-        question: &str,
-        outcome: &str,
-        total_pool: i64,
-        winner_count: u32,
-        loser_count: u32,
-    ) -> Option<NeonResult> {
-        if !self.enabled {
-            return None;
-        }
-        if total_pool >= 500 && self.rolls.roll(0.30) {
-            return Some(
-                NeonResult::text(
-                    3,
-                    render_prediction_market_crash(
-                        question,
-                        total_pool,
-                        outcome,
-                        winner_count,
-                        loser_count,
-                    ),
-                )
-                .with_gif(create_market_crash_gif(
-                    total_pool,
-                    outcome,
-                    winner_count,
-                    loser_count,
-                )),
-            );
-        }
-        if total_pool >= 200 && self.rolls.roll(0.70) {
-            return Some(NeonResult::text(
-                2,
-                render_prediction_market_crash(
-                    question,
-                    total_pool,
-                    outcome,
-                    winner_count,
-                    loser_count,
-                ),
-            ));
-        }
-        self.rolls
-            .roll(0.30)
-            .then(|| NeonResult::text(1, render_prediction_resolved(question, outcome, total_pool)))
-    }
-
-    #[must_use]
-    pub fn on_soft_avoid(
-        &mut self,
-        discord_id: u64,
-        guild_id: Option<u64>,
-        cost: i64,
-        games: u32,
-    ) -> Option<NeonResult> {
-        if !self.enabled || !self.check_cooldown(discord_id, guild_id) {
-            return None;
-        }
-        let result = if self.rolls.roll(0.10) {
-            NeonResult::text(2, render_soft_avoid_surveillance(cost, games))
-        } else if self.rolls.roll(0.25) {
-            NeonResult::text(1, render_soft_avoid(cost, games))
-        } else {
-            return None;
-        };
-        self.set_cooldown(discord_id, guild_id);
-        Some(result)
-    }
-
-    #[must_use]
-    pub fn on_match_enriched(
-        &mut self,
-        winners: &[MatchTelemetry],
-        mvp_chance: f64,
-    ) -> Vec<NeonResult> {
-        if !self.enabled {
-            return Vec::new();
-        }
-        let enriched = winners
-            .iter()
-            .filter(|winner| winner.has_enriched_telemetry())
-            .collect::<Vec<_>>();
-        if enriched.is_empty() || !self.rolls.roll(mvp_chance) {
-            return Vec::new();
-        }
-        let Some(target) = enriched.into_iter().max_by(|left, right| {
-            left.selection_key()
-                .partial_cmp(&right.selection_key())
-                .unwrap_or(std::cmp::Ordering::Equal)
-        }) else {
-            return Vec::new();
-        };
-        let mention = target
-            .discord_id
-            .map_or_else(String::new, |discord_id| format!("<@{discord_id}>\n"));
-        vec![NeonResult::text(
-            2,
-            format!(
-                "{mention}{}",
-                terminal_lines(&[
-                    "JOPA-T MVP TELEMETRY".into(),
-                    format!(
-                        "K/D/A: {}/{}/{}",
-                        target.kills, target.deaths, target.assists
-                    ),
-                    format!("GPM: {}", target.gpm),
-                ])
-            ),
-        )]
-    }
 }
 
 fn client_name(discord_id: u64) -> String {
     format!("Client-{}", discord_id % 10_000)
-}
-
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct MatchTelemetry {
-    pub discord_id: Option<u64>,
-    pub hero_id: Option<u16>,
-    pub kills: i32,
-    pub deaths: i32,
-    pub assists: i32,
-    pub gpm: i32,
-    pub xpm: Option<i32>,
-    pub fantasy_points: Option<f64>,
 }
 
 /// Durable rating facts supplied by Match after settlement.  The Neon layer
@@ -2906,43 +2749,6 @@ pub fn choose_notable_winner(
             notable_details(winner, openskill, false, true),
         )
     })
-}
-
-impl MatchTelemetry {
-    fn has_enriched_telemetry(&self) -> bool {
-        self.hero_id.is_some()
-            || self.kills != 0
-            || self.deaths != 0
-            || self.assists != 0
-            || self.gpm != 0
-            || self.xpm.is_some()
-            || self.fantasy_points.is_some()
-    }
-
-    fn selection_key(&self) -> (OrderedFloat, i32, i32) {
-        (
-            OrderedFloat(self.fantasy_points.unwrap_or(0.0)),
-            self.kills + self.assists,
-            self.gpm,
-        )
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct OrderedFloat(f64);
-
-impl Eq for OrderedFloat {}
-
-impl PartialOrd for OrderedFloat {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for OrderedFloat {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.total_cmp(&other.0)
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

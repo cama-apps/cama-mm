@@ -1123,7 +1123,7 @@ async fn test_firstpick_persists_through_record_workflow() {
     pending.state.first_pick_team = Some(first_pick_team(fastrand::bool()).to_owned());
     assert!(
         PendingMatchRepository::new(fixture.database.path())
-            .update_pending_match(GUILD, pending.pending_match_id, &pending.state)
+            .replace_pending_match_for_tests(GUILD, pending.pending_match_id, &pending.state)
             .expect("persist workflow first pick")
     );
     let first_pick = pending
@@ -2214,7 +2214,7 @@ async fn final_warning_uses_scoped_underdog_mentions_and_thread_reply_parent() {
     state.thread_shuffle_message_id = Some(77_004);
     assert!(
         PendingMatchRepository::new(fixture.database.path())
-            .update_pending_match(GUILD, pending.pending_match_id, &state)
+            .replace_pending_match_for_tests(GUILD, pending.pending_match_id, &state)
             .expect("persist reminder message targets")
     );
     let connection = Connection::open(fixture.database.path()).expect("open reminder database");
@@ -2499,7 +2499,7 @@ async fn ready_recovery_reenters_committed_match_money_exactly_once_then_clears_
     pending.state.effective_avoid_ids = vec![avoid.id];
     assert!(
         PendingMatchRepository::new(fixture.database.path())
-            .update_pending_match(GUILD, pending.pending_match_id, &pending.state)
+            .replace_pending_match_for_tests(GUILD, pending.pending_match_id, &pending.state)
             .expect("persist match recovery policy state")
     );
     assert_eq!(
@@ -3043,7 +3043,7 @@ fn production_reward_saga_recovers_partial_payout_without_compensation_or_double
     pending.state.excluded_player_ids = vec![excluded_id];
     assert!(
         PendingMatchRepository::new(fixture.database.path())
-            .update_pending_match(GUILD, pending.pending_match_id, &pending.state)
+            .replace_pending_match_for_tests(GUILD, pending.pending_match_id, &pending.state)
             .expect("persist excluded-player reward dependency")
     );
     let initial_balance = Connection::open(fixture.database.path())
@@ -3138,7 +3138,7 @@ fn bonus_failure_recovers_claim_and_pays_every_player_exactly_once() {
     let missing_recipient = 81_121_i64;
     pending.state.excluded_player_ids = vec![missing_recipient];
     PendingMatchRepository::new(fixture.database.path())
-        .update_pending_match(GUILD, pending.pending_match_id, &pending.state)
+        .replace_pending_match_for_tests(GUILD, pending.pending_match_id, &pending.state)
         .expect("persist missing reward dependency");
     let participants_before = Connection::open(fixture.database.path())
         .expect("read participant baseline")
@@ -4227,7 +4227,7 @@ async fn test_draft_abort_does_not_grant_shuffle_exclusion_credit() {
     pending.state.is_draft = true;
     assert!(
         PendingMatchRepository::new(fixture.database.path())
-            .update_pending_match(GUILD, pending.pending_match_id, &pending.state)
+            .replace_pending_match_for_tests(GUILD, pending.pending_match_id, &pending.state)
             .expect("mark pending match as a draft")
     );
     let player_ids = pending
@@ -4403,7 +4403,7 @@ fn soft_avoid_is_not_decremented_by_persisting_a_shuffle_alone() {
     pending.state.effective_avoid_ids = vec![avoid.id];
     assert!(
         PendingMatchRepository::new(fixture.database.path())
-            .update_pending_match(GUILD, pending.pending_match_id, &pending.state)
+            .replace_pending_match_for_tests(GUILD, pending.pending_match_id, &pending.state)
             .expect("persist effective shuffle avoid")
     );
     assert_eq!(
@@ -4437,7 +4437,7 @@ fn soft_avoid_decrements_once_only_after_recording_opposite_teams() {
     pending.state.effective_avoid_ids = vec![avoid.id];
     assert!(
         PendingMatchRepository::new(fixture.database.path())
-            .update_pending_match(GUILD, pending.pending_match_id, &pending.state)
+            .replace_pending_match_for_tests(GUILD, pending.pending_match_id, &pending.state)
             .expect("persist record avoid")
     );
     fixture
@@ -4761,7 +4761,7 @@ fn record_match_applies_one_exclusion_decay_per_inclusion_exactly_once() {
     pending.state.exclusion_updates_deferred = true;
     assert!(
         PendingMatchRepository::new(fixture.database.path())
-            .update_pending_match(GUILD, pending.pending_match_id, &pending.state)
+            .replace_pending_match_for_tests(GUILD, pending.pending_match_id, &pending.state)
             .expect("persist deferred exclusion decay")
     );
     let record = || {

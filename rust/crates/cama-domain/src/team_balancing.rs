@@ -45,23 +45,6 @@ impl Default for TeamBalancingService {
 }
 
 impl TeamBalancingService {
-    /// Construct a service with explicit scoring policy.
-    #[must_use]
-    pub const fn new(
-        use_glicko: bool,
-        off_role_multiplier: f64,
-        off_role_flat_penalty: f64,
-        role_matchup_delta_weight: f64,
-    ) -> Self {
-        Self::new_with_off_role_value_penalty(
-            use_glicko,
-            off_role_multiplier,
-            100.0,
-            off_role_flat_penalty,
-            role_matchup_delta_weight,
-        )
-    }
-
     /// Construct a service with both off-role reductions explicit.
     #[must_use]
     pub const fn new_with_off_role_value_penalty(
@@ -359,7 +342,8 @@ mod tests {
             Team::new(team1_players, Some(role_strings())).expect("five players form a team");
         let team2 =
             Team::new(team2_players, Some(role_strings())).expect("five players form a team");
-        let service = TeamBalancingService::new(false, 1.0, 0.0, 0.5);
+        let service =
+            TeamBalancingService::new_with_off_role_value_penalty(false, 1.0, 100.0, 0.0, 0.5);
 
         assert_eq!(
             service

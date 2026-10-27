@@ -1,6 +1,6 @@
 //! Existing-schema SQLite persistence for the Daily Mafia subgame.
 //!
-//! Python remains the sole schema-migration and live-runtime authority. Every
+//! Schema creation and migration belong to the startup schema manager. Every
 //! entry point opens an already-existing database through
 //! [`crate::open_runtime_connection`]; production code contains no DDL. Game
 //! startup, opt-out cancellation, bounty stakes, and bounty resolution use
@@ -617,10 +617,13 @@ impl MafiaRepository {
 
     /// Claim an active game for an administrator-forced terminal resolution.
     ///
-    /// The claim is deliberately conditional so two concurrent `/mafia admin
-    /// stop` requests cannot both settle the same game. The force-finalize
-    /// resolver preserves the current cycle number because Python's admin
-    /// standing tally is not a normal day-14 transition.
+    /// The claim only refuses games that are already RESOLVED; two concurrent
+    /// `/mafia admin stop` requests can both reopen an unresolved game. Double
+    /// settlement is prevented later by `finalize_day_resolution_inner`, whose
+    /// `phase='DAY'` claim inside the settlement transaction lets only one
+    /// caller pay out. The force-finalize resolver preserves the current cycle
+    /// number because the admin standing tally is not a normal day-14
+    /// transition.
     pub fn try_reopen_for_finalize(&self, game_id: i64) -> Result<bool, MafiaRepositoryError> {
         let connection = self.connection()?;
         Ok(connection.execute(
@@ -629,18 +632,6 @@ impl MafiaRepository {
              WHERE game_id=?2 AND phase!='RESOLVED'",
             params![now_seconds(), game_id],
         )? == 1)
-    }
-
-    pub fn set_twist_event(
-        &self,
-        game_id: i64,
-        twist: Option<MafiaTwist>,
-    ) -> Result<(), MafiaRepositoryError> {
-        self.connection()?.execute(
-            "UPDATE mafia_games SET twist_event=?1 WHERE game_id=?2",
-            params![twist.map(MafiaTwist::as_str), game_id],
-        )?;
-        Ok(())
     }
 
     /// Atomically apply the NIGHT deaths and claim NIGHT -> DAY. A losing
@@ -730,16 +721,6 @@ impl MafiaRepository {
             reason: None,
             bounty,
         })
-    }
-
-    pub fn revive_player(&self, game_id: i64, discord_id: i64) -> Result<(), MafiaRepositoryError> {
-        self.connection()?.execute(
-            "UPDATE mafia_players
-             SET is_alive=1, eliminated_phase=NULL, eliminated_at=NULL
-             WHERE game_id=?1 AND discord_id=?2",
-            params![game_id, discord_id],
-        )?;
-        Ok(())
     }
 
     /// Revive one player and clear the twist that resurrected them together.
@@ -1191,7 +1172,9 @@ impl MafiaRepository {
         Ok(())
     }
 
-    pub fn finalize_game(
+    /// Test fixture: mark a game resolved without settlement.
+    #[cfg(test)]
+    pub(crate) fn finalize_game(
         &self,
         game_id: i64,
         winner: MafiaWinner,
@@ -1283,52 +1266,6 @@ impl MafiaRepository {
         })
     }
 
-    /// Atomically settle a terminal DAY. The caller computes winner/payout
-    /// policy; this method owns the phase claim, deaths, Bookie/bounty effects,
-    /// wallet writes, overflow, and optional economy penalties.
-    #[allow(clippy::too_many_arguments)]
-    pub fn finalize_day_resolution(
-        &self,
-        game_id: i64,
-        winner: MafiaWinner,
-        payout_per_winner: i64,
-        mvp_id: Option<i64>,
-        lynched_id: Option<i64>,
-        payout_deltas: &BTreeMap<i64, i64>,
-        entry_fee: i64,
-        nonprofit_overflow: i64,
-        ended_at: i64,
-        day_number: Option<i64>,
-        lynched_was_mafia: bool,
-        alive_count: i64,
-        bankruptcy_penalty: Option<BankruptcyPenaltyPolicy>,
-        vanity_tax_rate: f64,
-        vanity_taxable_ids: &BTreeSet<i64>,
-        low_priority_tax_rate: f64,
-        low_priority_taxable_ids: &BTreeSet<i64>,
-    ) -> Result<MafiaFinalizeResult, MafiaRepositoryError> {
-        self.finalize_day_resolution_inner(
-            game_id,
-            winner,
-            payout_per_winner,
-            mvp_id,
-            lynched_id,
-            payout_deltas,
-            entry_fee,
-            nonprofit_overflow,
-            ended_at,
-            day_number,
-            lynched_was_mafia,
-            alive_count,
-            bankruptcy_penalty,
-            vanity_tax_rate,
-            vanity_taxable_ids,
-            low_priority_tax_rate,
-            low_priority_taxable_ids,
-            None::<fn(&MafiaFinalizeResult) -> Result<String, MafiaRepositoryError>>,
-        )
-    }
-
     /// Atomically settle a terminal DAY and write its exact resolution receipt
     /// before committing the same SQLite transaction. The factory runs after
     /// all payout, bounty, bankruptcy, and tax amounts are known, but
@@ -1377,7 +1314,7 @@ impl MafiaRepository {
             vanity_taxable_ids,
             low_priority_tax_rate,
             low_priority_taxable_ids,
-            Some(receipt_factory),
+            receipt_factory,
         )
     }
 
@@ -1401,7 +1338,7 @@ impl MafiaRepository {
         vanity_taxable_ids: &BTreeSet<i64>,
         low_priority_tax_rate: f64,
         low_priority_taxable_ids: &BTreeSet<i64>,
-        receipt_factory: Option<F>,
+        receipt_factory: F,
     ) -> Result<MafiaFinalizeResult, MafiaRepositoryError>
     where
         F: FnOnce(&MafiaFinalizeResult) -> Result<String, MafiaRepositoryError>,
@@ -1550,14 +1487,12 @@ impl MafiaRepository {
             vanity_taxes: taxes,
             low_priority_taxes,
         };
-        if let Some(receipt_factory) = receipt_factory {
-            let payload = receipt_factory(&result)?;
-            transaction.execute(
-                "UPDATE mafia_games SET resolution_summary=?1
-                 WHERE game_id=?2 AND resolution_summary IS NULL",
-                params![payload, game_id],
-            )?;
-        }
+        let payload = receipt_factory(&result)?;
+        transaction.execute(
+            "UPDATE mafia_games SET resolution_summary=?1
+             WHERE game_id=?2 AND resolution_summary IS NULL",
+            params![payload, game_id],
+        )?;
         transaction.commit()?;
         Ok(result)
     }
@@ -1723,7 +1658,8 @@ impl MafiaRepository {
 
     /// Resolve a correct-read bounty without allowing its parked stake to
     /// consume unrelated nonprofit revenue.
-    pub fn resolve_day_bounties(
+    #[cfg(test)]
+    pub(crate) fn resolve_day_bounties(
         &self,
         game_id: i64,
         guild_id: Option<i64>,

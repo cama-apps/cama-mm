@@ -2177,7 +2177,7 @@ fn app_results(results: &db::SurveyResults) -> policy::SurveyResults {
 
 fn survey_subcommands() -> Vec<CommandOptionSpec> {
     vec![
-        subcommand(
+        CommandOptionSpec::subcommand(
             "create",
             "Create a one-off survey draft",
             vec![string(
@@ -2188,7 +2188,7 @@ fn survey_subcommands() -> Vec<CommandOptionSpec> {
                 100,
             )],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "list",
             "List this server's surveys",
             vec![choices(
@@ -2198,12 +2198,12 @@ fn survey_subcommands() -> Vec<CommandOptionSpec> {
                 &[("Draft", "draft"), ("Open", "open"), ("Closed", "closed")],
             )],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "preview",
             "Preview a survey and its questions",
             vec![integer("survey_id", "Survey number", true, None, None)],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "delete",
             "Delete a survey draft",
             vec![integer("survey_id", "Survey number", true, None, None)],
@@ -2214,7 +2214,7 @@ fn survey_subcommands() -> Vec<CommandOptionSpec> {
             CommandOptionKind::SubcommandGroup,
         )
         .options(vec![
-            subcommand(
+            CommandOptionSpec::subcommand(
                 "add",
                 "Add a question to a survey draft",
                 vec![
@@ -2237,7 +2237,7 @@ fn survey_subcommands() -> Vec<CommandOptionSpec> {
                     ),
                 ],
             ),
-            subcommand(
+            CommandOptionSpec::subcommand(
                 "edit",
                 "Edit a draft survey question",
                 vec![
@@ -2263,7 +2263,7 @@ fn survey_subcommands() -> Vec<CommandOptionSpec> {
                     boolean("required", "Replacement required/optional setting", false),
                 ],
             ),
-            subcommand(
+            CommandOptionSpec::subcommand(
                 "remove",
                 "Remove a draft survey question",
                 vec![
@@ -2277,7 +2277,7 @@ fn survey_subcommands() -> Vec<CommandOptionSpec> {
                     ),
                 ],
             ),
-            subcommand(
+            CommandOptionSpec::subcommand(
                 "move",
                 "Move a draft question to a new position",
                 vec![
@@ -2299,7 +2299,7 @@ fn survey_subcommands() -> Vec<CommandOptionSpec> {
                 ],
             ),
         ]),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "send",
             "Send a survey immediately by DM",
             vec![
@@ -2333,26 +2333,22 @@ fn survey_subcommands() -> Vec<CommandOptionSpec> {
                 ),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "retry",
             "Retry failed DMs for an open survey",
             vec![integer("survey_id", "Survey number", true, None, None)],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "results",
             "View anonymous survey results",
             vec![integer("survey_id", "Survey number", true, None, None)],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "close",
             "Close an open survey",
             vec![integer("survey_id", "Survey number", true, None, None)],
         ),
     ]
-}
-
-fn subcommand(name: &str, description: &str, options: Vec<CommandOptionSpec>) -> CommandOptionSpec {
-    CommandOptionSpec::new(name, description, CommandOptionKind::Subcommand).options(options)
 }
 
 fn scalar(

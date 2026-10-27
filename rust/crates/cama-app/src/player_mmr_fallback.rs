@@ -3,8 +3,7 @@
 //! The payload model and fallback curve are transport-independent. Registration
 //! consumes a typed OpenDota port so an already-fetched `/players/{id}` payload
 //! is reused instead of issuing a second request. Persistence is wired to the
-//! existing atomic registration repository; Python remains the live OpenDota
-//! HTTP adapter during the additive migration.
+//! existing atomic registration repository.
 
 use std::fmt::Display;
 

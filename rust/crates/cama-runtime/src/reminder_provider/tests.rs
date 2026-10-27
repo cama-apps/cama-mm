@@ -198,12 +198,8 @@ pub(crate) fn test_provider(
     discord: Arc<dyn DiscordTransport>,
     cooldowns: ReminderCooldowns,
 ) -> ReminderRegistrationProvider {
-    let service = ReminderService::new(
-        SqliteReminderStore::new(path, 20),
-        SystemReminderClock,
-        RuntimeDiscordPort,
-    )
-    .with_cooldowns(cooldowns);
+    let service = ReminderService::new(SqliteReminderStore::new(path, 20), SystemReminderClock)
+        .with_cooldowns(cooldowns);
     ReminderRegistrationProvider::from_service(service, discord)
 }
 

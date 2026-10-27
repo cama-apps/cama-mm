@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::sync::OnceLock;
 
+use cama_domain::formatting::format_grouped_unsigned;
 use chrono::{TimeZone, Utc};
 use fontdue::{Font, FontSettings};
 
@@ -406,39 +407,6 @@ impl Raster {
                     self.line(previous, point, outline, 1);
                     previous = point;
                 }
-            }
-        }
-    }
-
-    fn pie(&mut self, center: (i32, i32), radius: i32, slices: &[(f64, Rgba)]) {
-        let total = slices.iter().map(|(value, _)| value.max(0.0)).sum::<f64>();
-        if total <= 0.0 {
-            return;
-        }
-        let squared = radius * radius;
-        for y in -radius..=radius {
-            for x in -radius..=radius {
-                if x * x + y * y > squared {
-                    continue;
-                }
-                let angle = (f64::from(y).atan2(f64::from(x)).to_degrees() + 450.0) % 360.0;
-                let mut threshold = 0.0;
-                let mut color = slices
-                    .iter()
-                    .rev()
-                    .find(|slice| slice.0 > 0.0)
-                    .map_or(DISCORD_GREY, |slice| slice.1);
-                for (value, candidate) in slices {
-                    if *value <= 0.0 {
-                        continue;
-                    }
-                    threshold += value.max(0.0) / total * 360.0;
-                    if angle <= threshold {
-                        color = *candidate;
-                        break;
-                    }
-                }
-                self.set_pixel(center.0 + x, center.1 + y, color);
             }
         }
     }
@@ -1128,26 +1096,6 @@ pub struct AttributeValues {
     pub agility: f64,
     pub intelligence: f64,
     pub universal: f64,
-}
-
-/// Render the four-way hero attribute pie and legend swatches.
-#[must_use]
-pub fn draw_attribute_distribution(values: AttributeValues) -> Cursor<Vec<u8>> {
-    let mut raster = Raster::new(300, 300, DISCORD_BG);
-    raster.text(65, 10, "Hero Attributes", DISCORD_WHITE, 2);
-    let slices = [
-        (values.strength, Rgba::rgb(0xe5, 0x39, 0x35)),
-        (values.agility, Rgba::rgb(0x43, 0xa0, 0x47)),
-        (values.intelligence, Rgba::rgb(0x1e, 0x88, 0xe5)),
-        (values.universal, Rgba::rgb(0x8e, 0x24, 0xaa)),
-    ];
-    raster.pie((150, 170), 80, &slices);
-    for (index, (value, color)) in slices.iter().filter(|slice| slice.0 > 0.0).enumerate() {
-        let x = 20 + i32::try_from(index).unwrap_or(0) * 70;
-        raster.fill_rect(x, 250, x + 14, 264, *color);
-        raster.text(x + 18, 254, &format!("{value:.0}%"), DISCORD_WHITE, 1);
-    }
-    render(raster)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -1925,28 +1873,13 @@ fn draw_gamba_callout(
     occupied.push(selected);
 }
 
-fn group_decimal_digits(digits: &str) -> String {
-    let mut grouped = String::with_capacity(digits.len() + digits.len().saturating_sub(1) / 3);
-    let leading = digits.len() % 3;
-    for (index, character) in digits.chars().enumerate() {
-        if index != 0 && index % 3 == leading {
-            grouped.push(',');
-        }
-        grouped.push(character);
-    }
-    grouped
-}
-
 fn format_gamba_count(value: usize) -> String {
-    group_decimal_digits(&value.to_string())
+    format_grouped_unsigned(value as u64)
 }
 
 fn format_gamba_signed(value: i64) -> String {
     let sign = if value >= 0 { '+' } else { '-' };
-    format!(
-        "{sign}{}",
-        group_decimal_digits(&value.unsigned_abs().to_string())
-    )
+    format!("{sign}{}", format_grouped_unsigned(value.unsigned_abs()))
 }
 
 fn draw_gamba_stat_strip(raster: &mut Raster, event_count: usize, stats: GambaStats) {
@@ -2923,33 +2856,11 @@ fn format_compact_axis_value(value: f64) -> String {
     }
 }
 
-/// Render the rating-distribution diagnostic used by `/calibration`.
-///
-/// The chart retains the Python surface: 100-point density bins, normal and
-/// KDE overlays when the sample has spread, mean/median markers, axes, legend,
-/// and descriptive statistics. Rendering is native and deterministic, so the
-/// production Rust process does not require matplotlib/scipy.
-#[must_use]
-pub fn draw_rating_distribution(ratings: &[f64]) -> Cursor<Vec<u8>> {
-    let median_rating = if ratings.is_empty() {
-        None
-    } else {
-        let mut sorted = ratings.to_vec();
-        sorted.sort_by(f64::total_cmp);
-        Some(if sorted.len().is_multiple_of(2) {
-            (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2.0
-        } else {
-            sorted[sorted.len() / 2]
-        })
-    };
-    draw_rating_distribution_with_median(ratings, median_rating)
-}
-
 /// Render the rating-distribution diagnostic with the service's explicit
 /// median value.
 ///
-/// The live Python `/calibration` boundary passes its already-computed median
-/// into the drawing helper. `None` intentionally suppresses the median marker
+/// The `/calibration` boundary passes its already-computed median into the
+/// drawing helper. `None` intentionally suppresses the median marker
 /// and legend entry instead of silently recomputing it.
 #[must_use]
 pub fn draw_rating_distribution_with_median(

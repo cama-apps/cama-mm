@@ -115,6 +115,109 @@ async fn leaderboard_shows_player_names_prestige_and_depth() {
     assert!(!description.contains("999"));
 }
 
+#[tokio::test]
+async fn hall_of_fame_names_players_without_mentions_on_a_cold_cache() {
+    let (database, provider, _) = fixture();
+    let provider = provider.with_player_names(Arc::new(FixedPlayerNames(
+        GuildPlayerNameDirectory::new(None)
+            .with_last_seen(BTreeMap::from([(USER, "Archived Miner".to_owned())])),
+    )));
+    Connection::open(database.path())
+        .unwrap()
+        .execute(
+            "INSERT INTO tunnels (discord_id,guild_id,tunnel_name,best_run_score,prestige_level)
+             VALUES (?1,?3,'First tunnel',500,2),
+                    (?2,?3,'Second tunnel',400,1)",
+            params![USER as i64, USER as i64 + 1, GUILD as i64],
+        )
+        .unwrap();
+    let responder = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(
+            command_request(902, "halloffame", Vec::new()),
+            responder.clone(),
+        )
+        .await
+        .unwrap();
+    let replies = responder.followups.lock().unwrap();
+    let description = replies[0].embeds[0].description.as_deref().unwrap();
+    assert!(
+        description.contains("**First tunnel** (Archived Miner) — Score: 500 (P2)"),
+        "{description}"
+    );
+    assert!(
+        description.contains("**Second tunnel** (Unknown player) — Score: 400 (P1)"),
+        "{description}"
+    );
+    assert!(!description.contains("<@"), "{description}");
+    assert!(
+        !description.contains(&(USER + 1).to_string()),
+        "{description}"
+    );
+}
+
+#[test]
+fn boss_scout_echo_killer_is_a_readable_name_on_a_cold_cache() {
+    use cama_app::boss_multi_tier::{ScoutOdds, ScoutResult, ScoutRiskDetails};
+    let details = ScoutRiskDetails {
+        win_chance: 0.5,
+        free_fight_chance: 0.1,
+        multiplier: 2.0,
+        player_hp: 3,
+        boss_hp: 3,
+        player_hit: 0.5,
+        boss_hit: 0.5,
+        player_damage: 1,
+        boss_damage: 1,
+    };
+    let killer = USER as i64 + 7;
+    let result = super::DigBossCallResult {
+        outcome: cama_app::dig_boss_runtime::DigBossScoutOutcome::Regular(Box::new(ScoutResult {
+            boss_id: "grothak".to_owned(),
+            boundary: 25,
+            odds: ScoutOdds {
+                cautious: details.clone(),
+                bold: details.clone(),
+                reckless: details,
+            },
+            pet_assist: None,
+            echo_applied: true,
+            echo_killer_id: Some(killer),
+            enhanced: false,
+            mechanic_pool: Vec::new(),
+            stinger: None,
+        })),
+        action_id: None,
+        abandoned_action_id: None,
+        abandoned_wager_forfeit: 0,
+        abandoned_gear_wear: Default::default(),
+        gear_drop: None,
+        prestige_relic_drop: None,
+        broken_gear: Vec::new(),
+        warnings: Vec::new(),
+        notices: Vec::new(),
+    };
+    assert_eq!(super::boss_scout_player_ids(&result), vec![killer]);
+    let cold = super::boss_scout_response(&result, &GuildPlayerNameDirectory::default());
+    let cold = cold.embeds[0].description.as_deref().unwrap();
+    assert!(
+        cold.contains("Weakened — Unknown player killed this boss"),
+        "{cold}"
+    );
+    assert!(!cold.contains("<@"), "{cold}");
+    let archived = GuildPlayerNameDirectory::new(None).with_last_seen(BTreeMap::from([(
+        killer as u64,
+        "Archived Slayer".to_owned(),
+    )]));
+    let named = super::boss_scout_response(&result, &archived);
+    let named = named.embeds[0].description.as_deref().unwrap();
+    assert!(
+        named.contains("Weakened — Archived Slayer killed this boss"),
+        "{named}"
+    );
+}
+
 #[test]
 fn prestige_picker_explains_effects_stack_limits_and_owned_counts() {
     use cama_app::dig_prestige_runtime::{
@@ -260,7 +363,11 @@ fn chained_result_contains_playable_followup_buttons() {
             chained: false,
         })
         .unwrap();
-    let response = super::event_resolution_response(&outcome, &provider.handler.state.view_nonce);
+    let response = super::event_resolution_response(
+        &outcome,
+        &provider.handler.state.view_nonce,
+        &GuildPlayerNameDirectory::default(),
+    );
     let buttons = response
         .components
         .iter()
@@ -1477,7 +1584,11 @@ fn failed_event_uses_python_error_embed() {
         retryable: false,
     };
 
-    let response = super::event_resolution_response(&outcome, "test-nonce");
+    let response = super::event_resolution_response(
+        &outcome,
+        "test-nonce",
+        &GuildPlayerNameDirectory::default(),
+    );
     assert!(response.ephemeral);
     assert!(response.content.is_empty());
     let embed = &response.embeds[0];
@@ -1487,6 +1598,94 @@ fn failed_event_uses_python_error_embed() {
         Some("The tunnel rejects that choice.")
     );
     assert_eq!(embed.color, Some(0xFF_44_44));
+}
+
+// Splash victims are other players; render them by display name, never as
+// mention markup that a cold client cache shows unresolved.
+#[test]
+fn event_splash_victims_render_readable_names_on_a_cold_cache() {
+    let outcome = cama_app::dig_event_runtime::DigEventRuntimeOutcome {
+        success: true,
+        error: None,
+        resolution: Some(cama_app::dig_loot::CanonicalEventResolution {
+            event_id: "collapsed_armory".to_owned(),
+            event_name: "Collapsed Armory".to_owned(),
+            choice: "risky".to_owned(),
+            complexity: cama_app::dig_loot::EventComplexity::Choice,
+            descriptions: Vec::new(),
+            steps: Vec::new(),
+            boon_options: Vec::new(),
+            ascii_art: None,
+            social: false,
+            succeeded: true,
+            message: "The armory coughs up one last bad idea.".to_owned(),
+            advance: 0,
+            jc: 4,
+            cave_in: false,
+            streak_loss: 0,
+            streak_days_after: None,
+            curse: None,
+            persisted_curse: None,
+            buff: None,
+            black_wax_seal_spent: false,
+            active_curse_remaining_after: None,
+            curse_cleared: false,
+            gear_reward_pool: vec!["glassbreaker_pick".to_owned()],
+            consumable_reward_pool: Vec::new(),
+            artifact_reward_pool: Vec::new(),
+            splash: None,
+            guild_modifier_on_success: None,
+            quest_id: None,
+            quest_step: None,
+            next_event_id: None,
+            chained_event_id: None,
+            reward: Some(cama_app::dig_loot::CanonicalReward::Gear(
+                "glassbreaker_pick".to_owned(),
+            )),
+            duplicate_gear_reward: false,
+            splash_payout_ratio: None,
+            economy_gross_jc: 4,
+            cruel_echoes: false,
+            boss_encounter: false,
+            random_plan: cama_app::dig_loot::CanonicalEventRandomPlan::default(),
+        }),
+        depth_before: 175,
+        depth_after: 175,
+        balance_after: 504,
+        action_id: Some(17),
+        reward_row_id: Some(23),
+        applied_now: true,
+        splash: Some(cama_app::dig_event_runtime::DigEventSplashOutcome {
+            strategy: "random_active".to_owned(),
+            event_name: "Collapsed Armory".to_owned(),
+            victims: vec![(USER as i64 + 3, 5), (USER as i64 + 4, 6)],
+            total_moved: 11,
+            mode: "steal".to_owned(),
+            absorbed_total: 0,
+            shielded_count: 0,
+        }),
+        guild_modifier: None,
+        chain_event: None,
+        chain_prompt: None,
+        quest_finale: None,
+        retryable: false,
+    };
+
+    let names = GuildPlayerNameDirectory::new(None)
+        .with_last_seen(BTreeMap::from([(USER + 3, "Archived Victim".to_owned())]));
+    let response = super::event_resolution_response(&outcome, "test-nonce", &names);
+    let field = response.embeds[0]
+        .fields
+        .iter()
+        .find(|field| field.name == "Aftermath")
+        .expect("splash aftermath field");
+    assert!(
+        field.value.contains("Archived Victim: 5"),
+        "{}",
+        field.value
+    );
+    assert!(field.value.contains("Unknown player: 6"), "{}", field.value);
+    assert!(!field.value.contains("<@"), "{}", field.value);
 }
 
 // tests/test_dig_event_messaging.py::test_event_result_embed_surfaces_gear_drop_details
@@ -1551,7 +1750,11 @@ fn event_result_embed_surfaces_exact_unique_gear_drop_details() {
         retryable: false,
     };
 
-    let response = super::event_resolution_response(&outcome, "test-nonce");
+    let response = super::event_resolution_response(
+        &outcome,
+        "test-nonce",
+        &GuildPlayerNameDirectory::default(),
+    );
     let field = response.embeds[0]
         .fields
         .iter()
@@ -2562,6 +2765,7 @@ fn modal_request(
         interaction_id: 3,
         custom_id: custom_id.into(),
         user_id: USER,
+        user_display_name: "Dig Player".to_owned(),
         guild_id: Some(GUILD),
         channel_id: Some(CHANNEL),
         member_permissions: None,
@@ -2789,8 +2993,11 @@ async fn accepted_event_delivery_is_reconciled_after_restart_without_duplicate_s
         .expect("query event Ready projection")
         .expect("event Ready projection");
     assert_eq!(delivery.context.channel_id, CHANNEL as i64);
-    let response =
-        super::event_resolution_response(&delivery.outcome, &provider.handler.state.view_nonce);
+    let response = super::event_resolution_response(
+        &delivery.outcome,
+        &provider.handler.state.view_nonce,
+        &GuildPlayerNameDirectory::default(),
+    );
     discord
         .dig_send_public_once(CHANNEL as i64, response, &delivery.nonce())
         .await
@@ -5640,7 +5847,7 @@ async fn admin_depth_and_cooldown_commands_preserve_max_and_report_missing_tunne
     assert_eq!(set_depth.defers.lock().unwrap().as_slice(), &[true]);
     assert_eq!(
         set_depth.followups.lock().unwrap()[0].content,
-        format!("Set <@{USER}> to depth **12** and reset cooldown.")
+        "Set **Dig Test Miner** to depth **12** and reset cooldown."
     );
     let stored = Connection::open(database.path())
         .expect("reopen migrated database")

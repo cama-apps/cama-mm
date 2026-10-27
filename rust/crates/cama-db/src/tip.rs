@@ -1,12 +1,11 @@
 //! Python-compatible tip history and atomic-transfer persistence.
 //!
-//! Python remains the schema-migration authority during the side-by-side
-//! rewrite. This module only opens an existing SQLite database and uses the
-//! already-migrated `tip_transactions`, `players`, `nonprofit_fund`, and
-//! economy-ledger tables. Atomic transfers acquire the same `BEGIN IMMEDIATE`
-//! lock as Python so balance validation, both wallet changes, the nonprofit
-//! credit, lowest-balance tracking, and trigger-generated ledger rows commit
-//! or roll back together.
+//! Schema creation and migration belong to the startup schema manager. This
+//! module only opens an existing SQLite database and uses the already-migrated
+//! `tip_transactions`, `players`, `nonprofit_fund`, and economy-ledger tables.
+//! Atomic transfers acquire a `BEGIN IMMEDIATE` lock so balance validation,
+//! both wallet changes, the nonprofit credit, lowest-balance tracking, and
+//! trigger-generated ledger rows commit or roll back together.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

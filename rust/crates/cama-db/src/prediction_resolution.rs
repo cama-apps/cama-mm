@@ -1,7 +1,7 @@
 //! Existing-schema prediction expiry, settlement, and rollback persistence.
 //!
-//! Python remains the migration and live runtime authority. This adapter opens
-//! only an already-migrated database and places every multi-row mutation behind
+//! Schema creation and migration belong to the startup schema manager. This
+//! adapter opens only an already-migrated database and places every multi-row mutation behind
 //! `BEGIN IMMEDIATE`. Settlement credits, audit context, position deductions,
 //! market state, and rollback ladder restoration therefore succeed or fail as
 //! one SQLite unit.

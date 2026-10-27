@@ -8,7 +8,7 @@ use tempfile::NamedTempFile;
 
 use super::*;
 use crate::betting_service_repository::{
-    BetSettlementAdjustments, BettingServiceRepository, PlaceBetRequest,
+    BetAttribution, BetSettlementAdjustments, BettingServiceRepository, PlaceBetRequest,
 };
 use crate::dota_bet_seed_repository::{BettingMode, BettingTeam};
 use crate::test_support::FastTestDatabase;
@@ -41,6 +41,7 @@ fn auto_history_bet(
         payout: Some(wagered.saturating_add(profit).max(0)),
         vanity_tax: 0,
         low_priority_tax: 0,
+        bankruptcy_penalty: 0,
         outcome: if profit >= 0 {
             GamblingOutcome::Won
         } else {
@@ -337,14 +338,6 @@ impl CountingPort {
 }
 
 impl GamblingStatsPort for CountingPort {
-    fn betting_impact_bets(
-        &self,
-        target_discord_id: i64,
-        guild_id: Option<i64>,
-    ) -> Result<Vec<BettingImpactBet>, GamblingStatsError> {
-        self.inner.betting_impact_bets(target_discord_id, guild_id)
-    }
-
     fn player_bet_history(
         &self,
         discord_id: i64,
@@ -503,7 +496,7 @@ fn test_real_investment_bet_persists_attribution_and_uses_settled_pnl() {
         .expect("insert investment pending match");
     let betting = BettingServiceRepository::new(fixture.path());
     betting
-        .place_investment_bet_atomic(
+        .place_bet_atomic_with_attribution(
             PlaceBetRequest {
                 guild_id: Some(DEFAULT_GUILD),
                 pending_match_id: pending_id,
@@ -516,8 +509,10 @@ fn test_real_investment_bet_persists_attribution_and_uses_settled_pnl() {
                 is_blind: true,
                 odds_at_placement: None,
             },
-            target_id,
-            "long",
+            Some(BetAttribution {
+                investment_target_id: Some(target_id),
+                investment_direction: Some("long".to_owned()),
+            }),
         )
         .expect("place attributed investment");
     Connection::open(fixture.path())
@@ -564,295 +559,6 @@ fn test_real_investment_bet_persists_attribution_and_uses_settled_pnl() {
     assert_eq!(stats.auto_bet_performance.total.bet_count, 1);
     assert_eq!(stats.auto_bet_performance.total.net_pnl, 10);
     assert_eq!(stats.auto_bet_performance.generic.bet_count, 0);
-}
-
-#[test]
-fn test_betting_impact_aggregates_external_settled_bets_and_profiles() {
-    let fixture = Fixture::new();
-    let target_id = 2_001;
-    let supporters = [2_101, 2_102];
-    let haters = [2_103, 2_104];
-    for discord_id in [target_id, 999] {
-        fixture.add_player(discord_id, 100, DEFAULT_GUILD);
-    }
-    for discord_id in supporters.into_iter().chain(haters) {
-        fixture.add_player(discord_id, 100, DEFAULT_GUILD);
-    }
-    let pending_id = 801;
-    let match_id = 901;
-    let bet_time = 1_800_000_000;
-    Connection::open(fixture.path())
-        .expect("open impact fixture")
-        .execute(
-            "INSERT INTO pending_matches (pending_match_id, guild_id, payload)
-             VALUES (?1, ?2, ?3)",
-            params![
-                pending_id,
-                DEFAULT_GUILD,
-                format!(
-                    "{{\"radiant_team_ids\":[{target_id}],\"dire_team_ids\":[999],\"bet_lock_until\":{},\"is_draft\":false}}",
-                    bet_time + 1_000
-                )
-            ],
-        )
-        .expect("insert impact pending match");
-    let betting = BettingServiceRepository::new(fixture.path());
-    for (discord_id, team, amount) in [
-        (supporters[0], BettingTeam::Radiant, 45),
-        (supporters[1], BettingTeam::Radiant, 30),
-        (haters[0], BettingTeam::Dire, 15),
-        (haters[1], BettingTeam::Dire, 10),
-    ] {
-        betting
-            .place_bet_atomic(PlaceBetRequest {
-                guild_id: Some(DEFAULT_GUILD),
-                pending_match_id: pending_id,
-                discord_id,
-                team,
-                amount,
-                bet_time,
-                leverage: 1,
-                max_debt: 500,
-                is_blind: false,
-                odds_at_placement: None,
-            })
-            .expect("place impact wager");
-    }
-    let connection = Connection::open(fixture.path()).expect("open impact settled fixture");
-    connection
-        .execute(
-            "INSERT INTO matches (
-                 match_id, guild_id, team1_players, team2_players, winning_team
-             ) VALUES (?1, ?2, ?3, '[999]', 1)",
-            params![match_id, DEFAULT_GUILD, format!("[{target_id}]")],
-        )
-        .expect("record impact match");
-    connection
-        .execute(
-            "INSERT INTO match_participants (
-                 match_id, discord_id, guild_id, team_number, won, side
-             ) VALUES (?1, ?2, ?3, 1, 1, 'radiant')",
-            params![match_id, target_id, DEFAULT_GUILD],
-        )
-        .expect("record impact participant");
-    betting
-        .settle_pending_bets_atomic(
-            match_id,
-            Some(DEFAULT_GUILD),
-            bet_time,
-            Some(pending_id),
-            BettingTeam::Radiant,
-            BettingMode::House,
-        )
-        .expect("settle impact wagers");
-
-    let impact = fixture
-        .service()
-        .get_betting_impact_stats(target_id, Some(DEFAULT_GUILD))
-        .expect("impact stats")
-        .expect("external bets");
-    assert_eq!(impact.matches_with_bets, 1);
-    assert_eq!(impact.total_bets, 4);
-    assert_eq!(impact.total_wagered_for, 75);
-    assert_eq!(impact.total_wagered_against, 25);
-    assert_eq!(impact.supporters_net_pnl, 75);
-    assert_eq!(impact.haters_net_pnl, -25);
-    assert_eq!(impact.market_favorability, 0.75);
-    assert_eq!(impact.supporter_win_rate, 1.0);
-    assert_eq!(impact.hater_win_rate, 0.0);
-    assert_eq!(
-        impact
-            .biggest_fan
-            .as_ref()
-            .map(|profile| profile.discord_id),
-        Some(supporters[0])
-    );
-    assert_eq!(
-        impact
-            .biggest_hater
-            .as_ref()
-            .map(|profile| profile.discord_id),
-        Some(haters[0])
-    );
-    assert_eq!(impact.biggest_single_win, 45);
-    assert_eq!(impact.biggest_single_loss, -15);
-}
-
-#[test]
-fn test_betting_impact_excludes_self_unsettled_and_other_guild_bets() {
-    let fixture = Fixture::new();
-    fixture.add_player(3_001, 100, DEFAULT_GUILD);
-    fixture.add_player(3_002, 100, DEFAULT_GUILD);
-    fixture.add_player(3_001, 100, 42);
-    fixture.add_player(3_002, 100, 42);
-    let connection = Connection::open(fixture.path()).expect("open impact isolation fixture");
-    connection
-        .execute_batch(
-            "INSERT INTO matches (
-                 match_id, guild_id, team1_players, team2_players, winning_team
-             ) VALUES (1, 0, '[3001]', '[3002]', 1),
-                      (2, 0, '[3001]', '[3002]', NULL),
-                      (3, 42, '[3001]', '[3002]', 1);",
-        )
-        .expect("insert impact matches");
-    connection
-        .execute_batch(
-            "INSERT INTO match_participants
-                 (match_id, discord_id, guild_id, team_number, won, side)
-             VALUES (1, 3001, 0, 1, 1, 'radiant'),
-                    (2, 3001, 0, 1, NULL, 'radiant'),
-                    (3, 3001, 42, 1, 1, 'radiant');
-             INSERT INTO bets
-                 (guild_id, match_id, discord_id, team_bet_on, amount, bet_time, leverage, payout)
-             VALUES (0, 1, 3001, 'radiant', 5, 1, 1, 10),
-                    (0, 1, 3002, 'radiant', 7, 1, 1, 14),
-                    (0, 2, 3002, 'radiant', 9, 1, 1, NULL),
-                    (42, 3, 3002, 'radiant', 11, 1, 1, 22);",
-        )
-        .expect("insert impact isolation bets");
-    let rows = fixture
-        .stats_repository()
-        .betting_impact_bets(3_001, Some(DEFAULT_GUILD))
-        .expect("impact isolation rows");
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].bettor_id, 3_002);
-    assert_eq!(rows[0].match_id, 1);
-}
-
-fn impact_bet(
-    bettor_id: i64,
-    match_id: i64,
-    effective_bet: i64,
-    bet_for_target: bool,
-    won: bool,
-    profit: i64,
-) -> BettingImpactBet {
-    BettingImpactBet {
-        bettor_id,
-        match_id,
-        effective_bet,
-        payout: Some(effective_bet.saturating_add(profit)),
-        vanity_tax: 0,
-        low_priority_tax: 0,
-        bet_for_target,
-        won,
-        profit,
-    }
-}
-
-#[test]
-fn test_betting_impact_query_returns_empty_for_player_without_matches() {
-    let fixture = Fixture::new();
-    fixture.add_player(4_001, 100, DEFAULT_GUILD);
-    assert!(
-        fixture
-            .stats_repository()
-            .betting_impact_bets(4_001, Some(DEFAULT_GUILD))
-            .expect("empty impact query")
-            .is_empty()
-    );
-}
-
-#[test]
-fn test_betting_impact_query_excludes_self_bets() {
-    let fixture = Fixture::new();
-    fixture.add_player(4_101, 100, DEFAULT_GUILD);
-    fixture.add_player(4_102, 100, DEFAULT_GUILD);
-    let connection = Connection::open(fixture.path()).expect("open self-bet fixture");
-    connection
-        .execute_batch(
-            "INSERT INTO matches(match_id,guild_id,team1_players,team2_players,winning_team)
-             VALUES (1,0,'[4101]','[4102]',1);
-             INSERT INTO match_participants
-                 (match_id,discord_id,guild_id,team_number,won,side)
-             VALUES (1,4101,0,1,1,'radiant');
-             INSERT INTO bets
-                 (guild_id,match_id,discord_id,team_bet_on,amount,bet_time,leverage,payout)
-             VALUES (0,1,4101,'radiant',5,1,1,10),
-                    (0,1,4102,'radiant',7,1,1,14);",
-        )
-        .expect("seed self-bet fixture");
-    let rows = fixture
-        .stats_repository()
-        .betting_impact_bets(4_101, Some(DEFAULT_GUILD))
-        .expect("external impact query");
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].bettor_id, 4_102);
-}
-
-#[test]
-fn test_betting_impact_query_ignores_unsettled_matches() {
-    let fixture = Fixture::new();
-    fixture.add_player(4_201, 100, DEFAULT_GUILD);
-    fixture.add_player(4_202, 100, DEFAULT_GUILD);
-    let connection = Connection::open(fixture.path()).expect("open unsettled fixture");
-    connection
-        .execute_batch(
-            "INSERT INTO matches(match_id,guild_id,team1_players,team2_players,winning_team)
-             VALUES (1,0,'[4201]','[4202]',NULL);
-             INSERT INTO match_participants
-                 (match_id,discord_id,guild_id,team_number,won,side)
-             VALUES (1,4201,0,1,NULL,'radiant');
-             INSERT INTO bets
-                 (guild_id,match_id,discord_id,team_bet_on,amount,bet_time,leverage,payout)
-             VALUES (0,1,4202,'radiant',7,1,1,NULL);",
-        )
-        .expect("seed unsettled fixture");
-    assert!(
-        fixture
-            .stats_repository()
-            .betting_impact_bets(4_201, Some(DEFAULT_GUILD))
-            .expect("settled-only impact query")
-            .is_empty()
-    );
-}
-
-#[test]
-fn test_betting_impact_returns_none_without_external_bets() {
-    assert!(compute_betting_impact_stats(4_301, &[]).is_none());
-}
-
-#[test]
-fn test_betting_impact_blessing_requires_positive_pnl() {
-    let bets = [impact_bet(4_401, 1, 10, true, false, -10)];
-    let impact = compute_betting_impact_stats(4_499, &bets).expect("impact");
-    assert!(impact.blessing.is_none());
-    assert!(impact.jinx.is_some());
-}
-
-#[test]
-fn test_betting_impact_consistent_fan_uses_for_count() {
-    let bets = [
-        impact_bet(4_501, 1, 5, true, true, 5),
-        impact_bet(4_502, 1, 5, true, true, 5),
-        impact_bet(4_502, 2, 5, true, true, 5),
-    ];
-    let impact = compute_betting_impact_stats(4_599, &bets).expect("impact");
-    assert_eq!(impact.most_consistent_fan.unwrap().discord_id, 4_502);
-}
-
-#[test]
-fn test_betting_impact_blessing_and_jinx_track_for_pnl() {
-    let bets = [
-        impact_bet(4_601, 1, 50, true, true, 50),
-        impact_bet(4_601, 2, 10, true, false, -10),
-        impact_bet(4_602, 1, 10, true, true, 10),
-        impact_bet(4_602, 2, 50, true, false, -50),
-    ];
-    let impact = compute_betting_impact_stats(4_699, &bets).expect("impact");
-    assert_eq!(impact.blessing.unwrap().discord_id, 4_601);
-    assert_eq!(impact.jinx.unwrap().discord_id, 4_602);
-}
-
-#[test]
-fn test_betting_impact_tracks_single_bet_extremes() {
-    let bets = [
-        impact_bet(4_701, 1, 50, true, true, 50),
-        impact_bet(4_702, 1, 30, false, false, -30),
-    ];
-    let impact = compute_betting_impact_stats(4_799, &bets).expect("impact");
-    assert_eq!(impact.biggest_single_win, 50);
-    assert_eq!(impact.biggest_single_loss, -30);
 }
 
 #[test]
@@ -1081,6 +787,85 @@ fn test_bankruptcy_debuff_vanity_tax_flows_into_history_and_aggregate_pnl() {
         )
         .expect("vanity ledger row");
     assert_eq!(vanity_ledger_delta, -10);
+}
+
+#[test]
+fn test_bankruptcy_penalty_flows_into_history_and_aggregate_pnl() {
+    let fixture = Fixture::new();
+    let guild_id = 4_243;
+    let discord_id = 1_004;
+    fixture.add_player(discord_id, 503, guild_id);
+    let connection = Connection::open(fixture.path()).expect("open fixture");
+    connection
+        .execute_batch(
+            "INSERT INTO bankruptcy_state (discord_id, guild_id, penalty_games_remaining)
+             VALUES (1004, 4243, 2);
+             INSERT INTO pending_matches (pending_match_id, guild_id, payload)
+             VALUES (710, 4243,
+                     '{\"radiant_team_ids\":[999],\"dire_team_ids\":[998],\"bet_lock_until\":20000,\"is_draft\":false}');
+             INSERT INTO matches (
+                 match_id, guild_id, team1_players, team2_players, winning_team
+             ) VALUES (711, 4243, '[999]', '[998]', 1);
+             INSERT INTO match_participants (match_id, discord_id, guild_id, team_number)
+             VALUES (711, 999, 4243, 1);",
+        )
+        .expect("bankrupt bettor fixture");
+    drop(connection);
+
+    let betting = BettingServiceRepository::new(fixture.path());
+    betting
+        .place_bet_atomic(PlaceBetRequest {
+            guild_id: Some(guild_id),
+            pending_match_id: 710,
+            discord_id,
+            team: BettingTeam::Radiant,
+            amount: 100,
+            bet_time: 10_000,
+            leverage: 1,
+            max_debt: 500,
+            is_blind: false,
+            odds_at_placement: None,
+        })
+        .expect("place bet");
+    let settlement = betting
+        .settle_pending_bets_with_adjustments_atomic(
+            711,
+            Some(guild_id),
+            9_000,
+            Some(710),
+            BettingTeam::Radiant,
+            BettingMode::House,
+            &BetSettlementAdjustments {
+                bankruptcy_penalty_rate_per_game: Some(0.05),
+                vanity_tax_basis_points: 1_000,
+                vanity_taxable_ids: BTreeSet::from([discord_id]),
+                ..BetSettlementAdjustments::default()
+            },
+        )
+        .expect("settle bet");
+    // Two outstanding penalty games withhold 10% of the 100 profit, and the
+    // vanity tax takes another 10; the stored payout stays gross.
+    assert_eq!(settlement.bankruptcy_penalties[&discord_id], 10);
+    assert_eq!(settlement.vanity_taxes[&discord_id], 10);
+    assert_eq!(settlement.winners[0].payout, 200);
+    assert_eq!(settlement.winners[0].balance_after, 583);
+
+    let repository = fixture.stats_repository();
+    let history = repository
+        .player_bet_history(discord_id, Some(guild_id))
+        .expect("history");
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].bankruptcy_penalty, 10);
+    assert_eq!(history[0].profit, 80);
+    let metrics = repository
+        .bulk_gambling_metrics(Some(guild_id), Some(&[discord_id]))
+        .expect("metrics");
+    assert_eq!(metrics[&discord_id].net_pnl, 80);
+    let leaderboard = fixture
+        .service()
+        .get_leaderboard(Some(guild_id), 10, 1)
+        .expect("guild summary");
+    assert_eq!(leaderboard.top_earners[0].net_pnl, 80);
 }
 
 #[test]
@@ -1727,4 +1512,26 @@ fn deadlock_and_dota_histories_keep_colliding_match_ids_distinct() {
         2
     );
     assert!(repo.player_bet_history(1001, Some(2)).unwrap().is_empty());
+}
+
+#[test]
+fn deadlock_bankruptcy_receipt_reduces_history_and_aggregate_pnl() {
+    let fixture = Fixture::new();
+    fixture.add_player(1001, 200, DEFAULT_GUILD);
+    let c = Connection::open(fixture.path()).unwrap();
+    c.execute(
+        "INSERT INTO deadlock_matches(match_id,guild_id,status,winner) VALUES(5,0,'settled',2)",
+        [],
+    )
+    .unwrap();
+    c.execute("INSERT INTO deadlock_wagers(wager_id,market_id,guild_id,discord_id,side,amount,leverage,effective_stake,created_at,payout,kind) VALUES(1,'deadlock:5',0,1001,2,20,1,20,90000,40,'manual')",[]).unwrap();
+    c.execute("INSERT INTO deadlock_economic_receipts(receipt_id,market_id,guild_id,discord_id,kind,amount) VALUES('deadlock:5:bankruptcy:1001','deadlock:5',0,1001,'bankruptcy',4)",[]).unwrap();
+    c.execute("INSERT INTO deadlock_economic_receipts(receipt_id,market_id,guild_id,discord_id,kind,amount) VALUES('deadlock:5:vanity_tax:1001','deadlock:5',0,1001,'vanity_tax',2)",[]).unwrap();
+    let repo = fixture.stats_repository();
+    let history = repo.player_bet_history(1001, None).unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].bankruptcy_penalty, 4);
+    assert_eq!(history[0].profit, 14);
+    let metrics = repo.bulk_gambling_metrics(None, Some(&[1001])).unwrap();
+    assert_eq!(metrics[&1001].net_pnl, 14);
 }

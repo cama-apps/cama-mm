@@ -163,6 +163,7 @@ pub struct SettledBetRow {
     pub payout: i64,
     pub settlement_vanity_tax: i64,
     pub settlement_low_priority_tax: i64,
+    pub settlement_bankruptcy_penalty: i64,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -2176,8 +2177,8 @@ fn build_betting_questions(
         let won = (row.team_bet_on.eq_ignore_ascii_case("radiant") && row.winning_team == 1)
             || (row.team_bet_on.eq_ignore_ascii_case("dire") && row.winning_team == 2);
         let tax_key = (row.discord_id, row.match_id);
-        // One settlement withholds both profit taxes together, so they share
-        // the single first-sighting guard.
+        // One settlement withholds the penalty and both profit taxes together,
+        // so they share the single first-sighting guard.
         let settled = won && taxed_settlements.insert(tax_key);
         let vanity_tax = if settled {
             row.settlement_vanity_tax
@@ -2189,11 +2190,16 @@ fn build_betting_questions(
         } else {
             0
         };
+        let bankruptcy_penalty = if settled {
+            row.settlement_bankruptcy_penalty
+        } else {
+            0
+        };
         let player = stats.entry(row.discord_id).or_default();
         player.bets += 1;
         player.wins += i64::from(won);
         player.wagered = player.wagered.saturating_add(effective);
-        player.pnl += row.payout - effective - vanity_tax - low_priority_tax;
+        player.pnl += row.payout - effective - vanity_tax - low_priority_tax - bankruptcy_penalty;
     }
     add_player_leader(
         candidates,

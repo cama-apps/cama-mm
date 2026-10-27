@@ -11,7 +11,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use cama_app::bankruptcy::{BankruptcyPolicy, BankruptcyService};
 use cama_app::dotabase_sqlite::{DotabaseSqliteSource, PRODUCTION_DOTABASE_PATH};
 use cama_app::economy_event_sqlite::SqliteEconomyEventService;
 use cama_app::mana_effects_service::{ManaRecord, effects_from_record};
@@ -21,9 +20,6 @@ use cama_app::trivia_image_cache::{
     CachedTriviaImage, TriviaImageCache, production_trivia_cache_path,
 };
 use cama_app::trivia_questions::{TriviaCatalog, TriviaQuestion, TriviaRandom, generate_question};
-use cama_db::bankruptcy_repository::BankruptcyRepository;
-use cama_db::loan_repository::{LedgerContext, LoanRepository};
-use cama_db::low_priority_repository::LowPriorityRepository;
 use cama_db::mana_service_repository::ManaRepository;
 use cama_db::pet_evolution_repository::PetEvolutionRepository;
 use cama_db::trivia_commands_repository::TriviaCommandsRepository;
@@ -38,6 +34,7 @@ use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResol
 use crate::economy_events_worker::EconomyEventsWorkerConfig;
 use crate::gateway_events::{GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryReport};
 use crate::ids::signed_id;
+use crate::profit_deductions::ProfitDeductionSource;
 use crate::registration::{
     CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute, InteractionActionRow,
     InteractionAttachment, InteractionButton, InteractionEmbed, InteractionHandler,
@@ -139,27 +136,19 @@ impl TriviaRegistrationProvider {
         let database_path = database_path.as_ref().to_path_buf();
         let catalog = Arc::new(catalog);
         let image_cache = Arc::new(image_cache);
-        let bankruptcy = BankruptcyService::new(
-            BankruptcyRepository::new(&database_path),
-            BankruptcyPolicy {
-                fresh_start_balance: config.values.bankruptcy_fresh_start_balance,
-                cooldown_seconds: config.values.bankruptcy_cooldown_seconds,
-                penalty_games: config.values.bankruptcy_penalty_games,
-                penalty_rate_per_game: config.values.bankruptcy_penalty_rate_per_game,
-            },
-        )
-        .map_err(|error| error.to_string())?;
+        let profit_deductions = ProfitDeductionSource::from_config(
+            config,
+            database_path.clone(),
+            Some(Arc::clone(&vanity_tax)),
+        );
         let economy_config = EconomyEventsWorkerConfig::from_application_config(config).event;
         let state = Arc::new(TriviaRuntimeState {
             player_names: Arc::new(DiscordIdPlayerNameResolver),
             trivia: TriviaCommandsRepository::new(&database_path),
             mana: ManaRepository::new(&database_path),
-            bankruptcy,
-            loans: LoanRepository::new(&database_path),
             pets: PetEvolutionRepository::new(&database_path),
             economy_events: SqliteEconomyEventService::new(&database_path, economy_config),
-            vanity_tax,
-            low_priority: LowPriorityRepository::new(&database_path),
+            profit_deductions,
             discord,
             reminder_hooks,
             catalog: Arc::clone(&catalog),
@@ -239,7 +228,6 @@ struct TriviaRuntimeConfig {
     answer_timeout: Duration,
     bankrupt_multiplier: f64,
     cooldown_seconds: i64,
-    low_priority_tax_rate: f64,
     minigame_scale: f64,
     reward_per_question: i64,
 }
@@ -254,7 +242,6 @@ impl TriviaRuntimeConfig {
             ),
             bankrupt_multiplier: config.values.trivia_bankrupt_multiplier,
             cooldown_seconds: config.values.trivia_cooldown_seconds,
-            low_priority_tax_rate: config.values.low_priority_profit_tax_rate,
             minigame_scale: config.values.minigame_jc_delta_scale,
             reward_per_question: config.values.trivia_reward_per_question,
         }
@@ -265,12 +252,9 @@ struct TriviaRuntimeState {
     player_names: Arc<dyn GuildPlayerNameResolver>,
     trivia: TriviaCommandsRepository,
     mana: ManaRepository,
-    bankruptcy: BankruptcyService<BankruptcyRepository>,
-    loans: LoanRepository,
     pets: PetEvolutionRepository,
     economy_events: SqliteEconomyEventService,
-    vanity_tax: Arc<PersistentVanityTaxService>,
-    low_priority: LowPriorityRepository,
+    profit_deductions: ProfitDeductionSource,
     discord: Arc<dyn TriviaDiscordPort>,
     reminder_hooks: Option<ReminderHooks>,
     catalog: Arc<TriviaCatalog>,
@@ -869,98 +853,43 @@ impl TriviaRuntimeState {
             }
         }
 
-        // The whole generated reward is profit, so the bankruptcy debuff and
-        // both taxes withhold from the per-question reward and the streak
-        // bonus together. Every share bills the same pre-deduction basis so
-        // none compounds on another, and the combined withholding is capped
-        // at that basis so a correct answer never becomes a charge.
+        // The whole generated reward is profit. Scaling and the daily reward
+        // event shape the gross first; one repository transaction then credits
+        // it, withholds the shared bankruptcy, vanity, and low-priority shares
+        // from that same basis (capped at it, so a correct answer never becomes
+        // a charge), and moves the Plains tithe to the reserve.
         let gross = self.config.reward_per_question + streak_bonus;
-        let mut raw = gross;
-        if gross > 0 {
-            let bankruptcy_penalty = match self.bankruptcy.apply_penalty_to_winnings(
-                user_id,
-                gross,
-                Some(guild_id),
-            ) {
-                Ok(penalty) => penalty.penalty_applied,
-                Err(error) => {
-                    warn!(user_id, guild_id, %error, "failed to apply trivia bankruptcy debuff");
-                    0
-                }
-            };
-            let vanity_tax = self.vanity_tax.calculate_tax(user_id, guild_id, gross);
-            let low_priority_tax = self.low_priority_tax(user_id, guild_id, gross);
-            let withheld = bankruptcy_penalty
-                .saturating_add(vanity_tax)
-                .saturating_add(low_priority_tax)
-                .min(gross);
-            raw = gross - withheld;
+        if gross <= 0 {
+            return 0;
         }
-        let scaled = scale_minigame_jc_delta(raw as f64, self.config.minigame_scale);
+        let scaled = scale_minigame_jc_delta(gross as f64, self.config.minigame_scale);
         let now = unix_timestamp().unwrap_or_default();
-        let mut reward = match self.economy_events.adjust_reward_at(guild_id, scaled, now) {
+        let gross = match self.economy_events.adjust_reward_at(guild_id, scaled, now) {
             Ok(adjusted) => adjusted,
             Err(error) => {
                 warn!(user_id, guild_id, %error, "failed to apply daily reward event; using scaled trivia reward");
                 scaled
             }
         };
-
-        if let Some(effects) = effects
-            && effects.plains_tithe_rate > 0.0
-            && reward > 1
-        {
-            let tithe = ((reward as f64 * effects.plains_tithe_rate) as i64).max(1);
-            if tithe < reward {
-                let context = LedgerContext {
-                    source: Some("trivia".to_owned()),
-                    related_type: Some("plains_tithe".to_owned()),
-                    reason: Some("trivia plains tithe reserve credit".to_owned()),
-                    metadata: Some(format!(
-                        r#"{{"tithe": {tithe}, "net_jc_before_tithe": {reward}}}"#
-                    )),
-                    ..LedgerContext::default()
-                };
-                match self
-                    .loans
-                    .add_to_nonprofit_fund(Some(guild_id), tithe, Some(&context))
-                {
-                    Ok(_) => reward -= tithe,
-                    Err(error) => {
-                        warn!(user_id, guild_id, %error, "trivia tithe transfer failed; tithe skipped")
-                    }
-                }
+        let policy = match self.profit_deductions.resolve(guild_id) {
+            Ok(policy) => policy,
+            Err(error) => {
+                warn!(user_id, guild_id, %error, "failed to resolve trivia profit deductions; reward withheld");
+                return 0;
             }
-        }
-        if reward <= 0 {
-            return reward;
-        }
-        match self
-            .trivia
-            .credit_trivia_reward(user_id, Some(guild_id), reward, question_number)
-        {
-            Ok(_) => reward,
+        };
+        let tithe_rate = effects.map_or(0.0, |effects| effects.plains_tithe_rate);
+        match self.trivia.settle_trivia_reward(
+            user_id,
+            Some(guild_id),
+            gross,
+            question_number,
+            &policy.as_policy(),
+            tithe_rate,
+        ) {
+            Ok(settlement) => settlement.reward,
             Err(error) => {
                 warn!(user_id, guild_id, %error, "failed to award trivia JC");
-                0
-            }
-        }
-    }
-
-    /// Sibling of the vanity tax for players serving active low priority.
-    /// Called from the blocking award path only, because the taxable set is a
-    /// SQLite read rather than the vanity service's in-memory cache.
-    fn low_priority_tax(&self, user_id: i64, guild_id: i64, profit: i64) -> i64 {
-        if profit <= 0 {
-            return 0;
-        }
-        match self.low_priority.active_taxable_ids(Some(guild_id)) {
-            Ok(taxable) if taxable.contains(&user_id) => {
-                (profit as f64 * self.config.low_priority_tax_rate) as i64
-            }
-            Ok(_) => 0,
-            Err(error) => {
-                warn!(user_id, guild_id, %error, "failed to read trivia low priority tax status");
                 0
             }
         }

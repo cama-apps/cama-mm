@@ -1,15 +1,16 @@
-//! Existing-schema SQLite persistence for Python's order-book predictions.
+//! Existing-schema SQLite persistence for order-book predictions.
 //!
-//! Python remains the only migration authority during the side-by-side
-//! rewrite. This repository never creates or alters production schema. Every
-//! multi-row mutation uses `BEGIN IMMEDIATE`, matching Python's single-writer
-//! boundary so wallet checks, book fills, positions, trades, and market state
-//! commit together on the shared SQLite database.
+//! Schema creation and migration belong to the startup schema manager. This
+//! repository never creates or alters production schema. Every multi-row
+//! mutation uses `BEGIN IMMEDIATE` as a single-writer boundary so wallet
+//! checks, book fills, positions, trades, and market state commit together on
+//! the shared SQLite database.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use cama_domain::prediction_ladder::{LadderLevel, LadderSide};
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params};
 use thiserror::Error;
 
@@ -35,6 +36,7 @@ impl ContractSide {
         }
     }
 
+    #[cfg(test)]
     const fn sell_book(self) -> (&'static str, &'static str) {
         match self {
             Self::Yes => ("yes_bid", "DESC"),
@@ -49,6 +51,7 @@ impl ContractSide {
         }
     }
 
+    #[cfg(test)]
     const fn sell_action(self) -> &'static str {
         match self {
             Self::Yes => "sell_yes",
@@ -95,6 +98,15 @@ impl NewLevel {
             side: BookSide::YesBid,
             price,
             size,
+        }
+    }
+}
+
+impl From<LadderLevel> for NewLevel {
+    fn from(level: LadderLevel) -> Self {
+        match level.side {
+            LadderSide::YesAsk => Self::ask(level.price, level.size),
+            LadderSide::YesBid => Self::bid(level.price, level.size),
         }
     }
 }
@@ -496,22 +508,6 @@ impl PredictionRepository {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    pub fn player_wallet(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-    ) -> Result<Option<i64>, PredictionRepositoryError> {
-        let connection = self.connection()?;
-        Ok(connection
-            .query_row(
-                "SELECT COALESCE(jopacoin_balance,0) FROM players
-                 WHERE discord_id=?1 AND guild_id=?2",
-                params![discord_id, Self::normalize_guild_id(guild_id)],
-                |row| row.get(0),
-            )
-            .optional()?)
-    }
-
     /// Match `require_gamba_channel`: missing players are a silent no-op, and
     /// a debit updates the historical low-water mark without overdraft checks.
     pub fn debit_gamba_channel_penalty(
@@ -541,20 +537,9 @@ impl PredictionRepository {
         Ok(changed == 1)
     }
 
-    pub fn set_status(
-        &self,
-        prediction_id: i64,
-        status: &str,
-    ) -> Result<(), PredictionRepositoryError> {
-        let connection = self.connection()?;
-        connection.execute(
-            "UPDATE predictions SET status=?1 WHERE prediction_id=?2",
-            params![status, prediction_id],
-        )?;
-        Ok(())
-    }
-
-    pub fn replace_levels(
+    /// Test fixture: replace a market's book with explicit levels.
+    #[cfg(test)]
+    pub(crate) fn replace_levels(
         &self,
         prediction_id: i64,
         levels: &[NewLevel],
@@ -586,36 +571,9 @@ impl PredictionRepository {
         read_position(&connection, prediction_id, discord_id).map_err(Into::into)
     }
 
-    pub fn quote_buy_contracts(
-        &self,
-        prediction_id: i64,
-        side: ContractSide,
-        contracts: i64,
-    ) -> Result<TradeQuote, PredictionRepositoryError> {
-        self.quote_buy_contracts_with_max(prediction_id, side, contracts, MAX_CONTRACTS_PER_TRADE)
-    }
-
-    pub fn quote_buy_contracts_with_max(
-        &self,
-        prediction_id: i64,
-        side: ContractSide,
-        contracts: i64,
-        maximum: i64,
-    ) -> Result<TradeQuote, PredictionRepositoryError> {
-        validate_contracts(contracts, maximum)?;
-        let connection = self.connection()?;
-        ensure_open(&connection, prediction_id)?;
-        let fills = plan_fills(
-            &connection,
-            prediction_id,
-            side.buy_book(),
-            contracts,
-            false,
-        )?;
-        Ok(quote_from_fills(side, contracts, &fills, true))
-    }
-
-    pub fn buy_contracts_atomic(
+    /// Test fixture: buy with the default trade-size cap.
+    #[cfg(test)]
+    pub(crate) fn buy_contracts_atomic(
         &self,
         prediction_id: i64,
         discord_id: i64,
@@ -736,7 +694,9 @@ impl PredictionRepository {
         })
     }
 
-    pub fn sell_contracts_atomic(
+    /// Test fixture: produce legacy sell trades; production has no early sell.
+    #[cfg(test)]
+    pub(crate) fn sell_contracts_atomic(
         &self,
         prediction_id: i64,
         discord_id: i64,
@@ -856,6 +816,11 @@ impl PredictionRepository {
         if requested <= 0 {
             return Err(PredictionRepositoryError::InvalidContracts);
         }
+        // Source and target would be the same row: the second write would
+        // overwrite the debit and mint the moved contracts.
+        if from_discord_id == to_discord_id {
+            return Ok(None);
+        }
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let Some((status, guild_id)) = transaction
@@ -952,14 +917,6 @@ impl PredictionRepository {
             viewer_position,
             volume_since_refresh,
         }))
-    }
-
-    pub fn list_open_markets(
-        &self,
-        guild_id: Option<i64>,
-        now: i64,
-    ) -> Result<Vec<OpenMarketSummary>, PredictionRepositoryError> {
-        self.list_open_markets_with_refresh(guild_id, now, REFRESH_SECONDS)
     }
 
     pub fn list_open_markets_with_refresh(
@@ -1196,24 +1153,6 @@ impl PredictionRepository {
         Ok(true)
     }
 
-    pub fn markets_due_for_refresh(
-        &self,
-        now: i64,
-    ) -> Result<Vec<Market>, PredictionRepositoryError> {
-        let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT prediction_id,guild_id,creator_id,question,status,outcome,
-                    current_price,initial_fair,prev_price,last_refresh_at,
-                    COALESCE(lp_pnl,0),created_at,resolved_at,resolved_by,
-                    channel_id,thread_id,embed_message_id,channel_message_id
-             FROM predictions WHERE status='open'
-               AND COALESCE(last_refresh_at,0)<=?1
-             ORDER BY COALESCE(last_refresh_at,0) ASC",
-        )?;
-        let rows = statement.query_map([now - REFRESH_SECONDS], market_from_row)?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
-    }
-
     pub fn recent_trades(
         &self,
         prediction_id: i64,
@@ -1281,41 +1220,6 @@ impl PredictionRepository {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
-    }
-
-    pub fn pop_one_shot_flag(
-        &self,
-        guild_id: Option<i64>,
-        key: &str,
-    ) -> Result<bool, PredictionRepositoryError> {
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let guild_id = Self::normalize_guild_id(guild_id);
-        let value: Option<String> = transaction
-            .query_row(
-                "SELECT value FROM app_kv WHERE guild_id=?1 AND key=?2",
-                params![guild_id, key],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if value.as_deref() != Some("0") {
-            return Ok(false);
-        }
-        transaction.execute(
-            "UPDATE app_kv SET value='1' WHERE guild_id=?1 AND key=?2",
-            params![guild_id, key],
-        )?;
-        transaction.commit()?;
-        Ok(true)
-    }
-
-    pub fn cancel_orderbook(
-        &self,
-        prediction_id: i64,
-        guild_id: i64,
-    ) -> Result<i64, PredictionRepositoryError> {
-        self.cancel_orderbook_detailed(prediction_id, guild_id)
-            .map(|result| result.total_refunded)
     }
 
     pub fn cancel_orderbook_detailed(
@@ -1458,41 +1362,6 @@ impl PredictionRepository {
         )?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
-
-    pub fn net_worth_leaderboard(
-        &self,
-        guild_id: Option<i64>,
-    ) -> Result<Vec<NetWorthEntry>, PredictionRepositoryError> {
-        let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "WITH position_values AS (
-                 SELECT pp.discord_id,SUM(
-                     CAST(pp.yes_contracts*?1*COALESCE(p.current_price,p.initial_fair,50)/100 AS INTEGER)
-                     +CAST(pp.no_contracts*?1*(100-COALESCE(p.current_price,p.initial_fair,50))/100 AS INTEGER)
-                 ) AS value
-                 FROM predictions p JOIN prediction_positions pp USING(prediction_id)
-                 WHERE p.guild_id=?2 AND p.status IN ('open','locked')
-                 GROUP BY pp.discord_id)
-             SELECT players.discord_id,players.discord_username,
-                    COALESCE(players.jopacoin_balance,0),
-                    COALESCE(players.jopacoin_balance,0)+COALESCE(position_values.value,0)
-             FROM players LEFT JOIN position_values USING(discord_id)
-             WHERE players.guild_id=?2
-             ORDER BY 4 DESC,3 DESC,players.discord_id ASC",
-        )?;
-        let rows = statement.query_map(
-            params![CONTRACT_VALUE, Self::normalize_guild_id(guild_id)],
-            |row| {
-                Ok(NetWorthEntry {
-                    discord_id: row.get(0)?,
-                    name: row.get(1)?,
-                    jopacoin_balance: row.get(2)?,
-                    net_worth: row.get(3)?,
-                })
-            },
-        )?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -1567,13 +1436,6 @@ fn insert_level(
         ],
     )?;
     Ok(())
-}
-
-fn ensure_open(
-    connection: &Connection,
-    prediction_id: i64,
-) -> Result<(), PredictionRepositoryError> {
-    open_market_guild(connection, prediction_id).map(|_| ())
 }
 
 fn open_market_guild(
@@ -1929,7 +1791,7 @@ mod tests {
 
     use super::{
         BookSide, CONTRACT_VALUE, ContractSide, NewLevel, Position, PredictionRepository,
-        PredictionRepositoryError, quote_total,
+        PredictionRepositoryError, REFRESH_SECONDS, quote_total,
     };
     use crate::test_support::FastTestDatabase;
 
@@ -2249,14 +2111,39 @@ mod tests {
         let market = fixture.market();
         fixture.position(market, position(market, 1, 8, 24));
         fixture
-            .repository
-            .set_status(market, "locked")
+            .connection()
+            .execute(
+                "UPDATE predictions SET status='locked' WHERE prediction_id=?1",
+                [market],
+            )
             .expect("lock market");
         assert_eq!(
             fixture
                 .repository
                 .transfer_position_contracts(market, 1, 2, ContractSide::Yes, 4)
                 .expect("attempt transfer"),
+            None
+        );
+        assert_eq!(
+            fixture
+                .repository
+                .get_position(market, 1)
+                .expect("position"),
+            Some(position(market, 1, 8, 24))
+        );
+    }
+
+    #[test]
+    fn test_position_transfer_to_self_moves_nothing() {
+        let fixture = Fixture::new();
+        fixture.player(1, GUILD, 1_000);
+        let market = fixture.market();
+        fixture.position(market, position(market, 1, 8, 24));
+        assert_eq!(
+            fixture
+                .repository
+                .transfer_position_contracts(market, 1, 1, ContractSide::Yes, 4)
+                .expect("self transfer"),
             None
         );
         assert_eq!(
@@ -2409,7 +2296,11 @@ mod tests {
             .expect("insert trade");
         let markets = fixture
             .repository
-            .list_open_markets(Some(GUILD), super::unix_timestamp().expect("clock"))
+            .list_open_markets_with_refresh(
+                Some(GUILD),
+                super::unix_timestamp().expect("clock"),
+                REFRESH_SECONDS,
+            )
             .expect("list markets");
         assert_eq!(markets[0].top_ask, Some(55));
         assert_eq!(markets[0].top_bid, Some(47));
@@ -2433,7 +2324,7 @@ mod tests {
         }
         let listed = fixture
             .repository
-            .list_open_markets(Some(GUILD), 1_000_000_000_000)
+            .list_open_markets_with_refresh(Some(GUILD), 1_000_000_000_000, REFRESH_SECONDS)
             .expect("single-query listing");
         assert_eq!(listed.len(), count);
     }
@@ -2470,30 +2361,6 @@ mod tests {
             .buy_contracts_atomic(market, 1, ContractSide::Yes, 53)
             .expect("sweep asks");
         assert_eq!(receipt.fills, vec![(52, 50), (53, 3)]);
-    }
-
-    #[test]
-    fn test_buy_preview_walks_live_levels_without_mutating_book() {
-        let fixture = Fixture::new();
-        let market = fixture.market();
-        fixture
-            .repository
-            .replace_levels(
-                market,
-                &[
-                    NewLevel::ask(40, 2),
-                    NewLevel::ask(70, 3),
-                    NewLevel::bid(35, 5),
-                ],
-            )
-            .expect("replace levels");
-        let before = fixture.repository.get_book(market).expect("book");
-        let quote = fixture
-            .repository
-            .quote_buy_contracts(market, ContractSide::Yes, 5)
-            .expect("quote");
-        assert_eq!(quote.fills, vec![(40, 2), (70, 3)]);
-        assert_eq!(fixture.repository.get_book(market).expect("book"), before);
     }
 
     #[test]
@@ -2540,88 +2407,6 @@ mod tests {
             .expect("buy no");
         assert_eq!(receipt.total, quote_total(3 * (100 - 48), true));
         assert_eq!(receipt.fills, vec![(48, 3)]);
-    }
-
-    #[test]
-    fn test_sell_yes_proceeds_at_top_bid() {
-        let fixture = Fixture::new();
-        fixture.player(1, GUILD, 1_000);
-        let market = fixture.market();
-        fixture
-            .repository
-            .buy_contracts_atomic(market, 1, ContractSide::Yes, 3)
-            .expect("buy");
-        let receipt = fixture
-            .repository
-            .sell_contracts_atomic(market, 1, ContractSide::Yes, 2)
-            .expect("sell");
-        assert_eq!(receipt.total, quote_total(2 * 48, false));
-        let remaining = fixture
-            .repository
-            .get_position(market, 1)
-            .expect("position")
-            .expect("remaining");
-        assert_eq!(remaining.yes_contracts, 1);
-        assert_eq!(remaining.yes_cost_basis_total, 6);
-    }
-
-    #[test]
-    fn test_sell_yes_rejected_without_holdings() {
-        let fixture = Fixture::new();
-        fixture.player(1, GUILD, 1_000);
-        let market = fixture.market();
-        assert!(matches!(
-            fixture
-                .repository
-                .sell_contracts_atomic(market, 1, ContractSide::Yes, 1),
-            Err(PredictionRepositoryError::InsufficientHoldings { held: 0, .. })
-        ));
-    }
-
-    #[test]
-    fn test_sell_full_position_deletes_row() {
-        let fixture = Fixture::new();
-        fixture.player(1, GUILD, 1_000);
-        let market = fixture.market();
-        fixture
-            .repository
-            .buy_contracts_atomic(market, 1, ContractSide::Yes, 3)
-            .expect("buy");
-        fixture
-            .repository
-            .sell_contracts_atomic(market, 1, ContractSide::Yes, 3)
-            .expect("sell all");
-        assert!(
-            fixture
-                .repository
-                .get_position(market, 1)
-                .expect("position")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn test_sell_missing_player_row_fails_cleanly() {
-        let fixture = Fixture::new();
-        let market = fixture.market();
-        fixture.position(market, position(market, 4_242, 5, 100));
-        let before = fixture.repository.get_book(market).expect("book");
-        assert!(matches!(
-            fixture
-                .repository
-                .sell_contracts_atomic(market, 4_242, ContractSide::Yes, 2),
-            Err(PredictionRepositoryError::PlayerNotFound)
-        ));
-        assert_eq!(fixture.repository.get_book(market).expect("book"), before);
-        assert_eq!(
-            fixture
-                .repository
-                .get_position(market, 4_242)
-                .expect("position")
-                .expect("row")
-                .yes_contracts,
-            5
-        );
     }
 
     #[test]
@@ -2754,27 +2539,6 @@ mod tests {
     }
 
     #[test]
-    fn test_get_markets_due_for_refresh() {
-        let fixture = Fixture::new();
-        let market = fixture.market();
-        fixture
-            .connection()
-            .execute(
-                "UPDATE predictions SET last_refresh_at=0 WHERE prediction_id=?1",
-                [market],
-            )
-            .expect("age market");
-        let due = fixture
-            .repository
-            .markets_due_for_refresh(1_000_000_000_000)
-            .expect("due markets");
-        assert!(
-            due.iter()
-                .any(|candidate| candidate.prediction_id == market)
-        );
-    }
-
-    #[test]
     fn test_resolve_yes_pays_yes_holders() {
         let fixture = Fixture::new();
         fixture.player(1, GUILD, 1_000);
@@ -2848,8 +2612,9 @@ mod tests {
         let before = fixture.balance(1, GUILD) + fixture.balance(2, GUILD);
         let refunded = fixture
             .repository
-            .cancel_orderbook(market, GUILD)
-            .expect("cancel");
+            .cancel_orderbook_detailed(market, GUILD)
+            .expect("cancel")
+            .total_refunded;
         assert_eq!(
             fixture.balance(1, GUILD) + fixture.balance(2, GUILD),
             before + refunded
@@ -2899,8 +2664,9 @@ mod tests {
         let before_cancel = fixture.balance(1, GUILD);
         let refund = fixture
             .repository
-            .cancel_orderbook(market, GUILD)
-            .expect("cancel");
+            .cancel_orderbook_detailed(market, GUILD)
+            .expect("cancel")
+            .total_refunded;
         assert_eq!(fixture.balance(1, GUILD), before_cancel + refund);
         assert_eq!(
             refund,
@@ -3007,54 +2773,6 @@ mod tests {
     }
 
     #[test]
-    fn test_guild_net_worth_leaderboard_uses_current_prices_for_active_positions() {
-        let fixture = Fixture::new();
-        fixture.player(1, GUILD, 100);
-        fixture.player(2, GUILD, 200);
-        fixture.player(3, GUILD, 500);
-        let market = fixture.market();
-        fixture
-            .connection()
-            .execute(
-                "UPDATE predictions SET current_price=70 WHERE prediction_id=?1",
-                [market],
-            )
-            .expect("move fair");
-        fixture.position(
-            market,
-            Position {
-                prediction_id: market,
-                discord_id: 1,
-                yes_contracts: 3,
-                no_contracts: 2,
-                ..Position::default()
-            },
-        );
-        fixture.position(
-            market,
-            Position {
-                prediction_id: market,
-                discord_id: 2,
-                no_contracts: 5,
-                ..Position::default()
-            },
-        );
-        let leaderboard = fixture
-            .repository
-            .net_worth_leaderboard(Some(GUILD))
-            .expect("leaderboard");
-        assert_eq!(
-            leaderboard
-                .iter()
-                .map(|row| row.discord_id)
-                .collect::<Vec<_>>(),
-            vec![3, 2, 1]
-        );
-        assert_eq!(leaderboard[1].net_worth, 215);
-        assert_eq!(leaderboard[2].net_worth, 127);
-    }
-
-    #[test]
     fn test_create_orderbook_writes_initial_fair_snapshot() {
         let fixture = Fixture::new();
         let market = fixture.market();
@@ -3064,36 +2782,6 @@ mod tests {
             .expect("history");
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].1, 50);
-    }
-
-    #[test]
-    fn test_pop_one_shot_flag_self_clears() {
-        let fixture = Fixture::new();
-        fixture
-            .connection()
-            .execute(
-                "INSERT INTO app_kv(guild_id,key,value) VALUES (?1,'banner','0')",
-                [GUILD],
-            )
-            .expect("seed flag");
-        assert!(
-            fixture
-                .repository
-                .pop_one_shot_flag(Some(GUILD), "banner")
-                .expect("first")
-        );
-        assert!(
-            !fixture
-                .repository
-                .pop_one_shot_flag(Some(GUILD), "banner")
-                .expect("second")
-        );
-        assert!(
-            !fixture
-                .repository
-                .pop_one_shot_flag(Some(GUILD), "missing")
-                .expect("missing")
-        );
     }
 
     #[test]
@@ -3303,7 +2991,7 @@ mod tests {
         assert!(matches!(
             fixture
                 .repository
-                .quote_buy_contracts_with_max(market, ContractSide::Yes, 3, 2),
+                .buy_contracts_atomic_with_max(market, 1, ContractSide::Yes, 3, 2),
             Err(PredictionRepositoryError::TradeTooLarge { maximum: 2 })
         ));
         fixture
@@ -3400,7 +3088,11 @@ mod tests {
         );
         for guild_id in [None, Some(0)] {
             let markets = repository
-                .list_open_markets(guild_id, super::unix_timestamp().expect("clock"))
+                .list_open_markets_with_refresh(
+                    guild_id,
+                    super::unix_timestamp().expect("clock"),
+                    REFRESH_SECONDS,
+                )
                 .expect("read open market summaries");
             if let Some(market) = markets.first() {
                 let snapshot = repository

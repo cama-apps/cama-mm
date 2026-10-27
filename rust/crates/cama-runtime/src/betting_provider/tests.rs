@@ -1326,6 +1326,68 @@ async fn provider_composes_live_surface_and_dispatches_a_command() {
     );
 }
 
+#[test]
+fn black_mana_caps_bankruptcy_penalty_games_before_declaration() {
+    let black = ManaEffects::for_color(Some("Black"), Some("Swamp"));
+    assert!(black.swamp_bankruptcy_games < 10);
+    assert_eq!(
+        bankruptcy_penalty_games(10, &black),
+        black.swamp_bankruptcy_games
+    );
+    assert_eq!(bankruptcy_penalty_games(1, &black), 1);
+    assert_eq!(bankruptcy_penalty_games(10, &ManaEffects::default()), 10);
+}
+
+#[tokio::test]
+async fn bankruptcy_announcement_reports_the_fresh_start_balance() {
+    let database = NamedTempFile::new().expect("bankruptcy database");
+    initialize_or_migrate(database.path()).expect("bankruptcy schema");
+    let players = PlayerRepository::new(database.path());
+    players
+        .add(&NewPlayer::new(7, "bankrupt-player", Some(42)))
+        .expect("bankrupt player");
+    players
+        .update_balance(7, Some(42), -100)
+        .expect("player in debt");
+    let config = ApplicationConfig::from_lookup(|name| match name {
+        "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
+        "BANKRUPTCY_FRESH_START_BALANCE" => Some("7".to_owned()),
+        "BANKRUPTCY_PENALTY_GAMES" => Some("4".to_owned()),
+        _ => None,
+    })
+    .expect("bankruptcy configuration");
+    let provider = BettingRegistrationProvider::new(
+        database.path(),
+        &config,
+        Arc::new(crate::serenity_transport::SerenityDiscordTransport::new()),
+    );
+    let recording = RecordingResponder::default();
+    let responder: Arc<dyn InteractionResponder> = Arc::new(recording.clone());
+    provider
+        .handler
+        .bankruptcy(7, Some(42), None, &responder)
+        .await
+        .expect("bankruptcy filing");
+
+    let responses = recording.responses.lock().unwrap();
+    let content = &responses[0].content;
+    assert!(content.contains("Debt cleared: 100"), "{content}");
+    assert!(content.contains("New balance: 7 "), "{content}");
+    assert!(content.contains("**WIN** 4 games"), "{content}");
+    let (balance, games): (i64, i64) = Connection::open(database.path())
+        .expect("bankruptcy readback")
+        .query_row(
+            "SELECT p.jopacoin_balance, b.penalty_games_remaining
+             FROM players p JOIN bankruptcy_state b
+               ON b.discord_id = p.discord_id AND b.guild_id = p.guild_id
+             WHERE p.discord_id = 7 AND p.guild_id = 42",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("bankruptcy state");
+    assert_eq!((balance, games), (7, 4));
+}
+
 #[tokio::test]
 async fn balance_is_a_private_paginated_portfolio_with_tax_ledger_exposure() {
     let database = NamedTempFile::new().expect("balance portfolio database");

@@ -1,11 +1,11 @@
 //! Existing-schema persistence for mana-shop purchases and timed buffs.
 //!
-//! Python remains the production runtime and the only schema-migration
-//! authority. This adapter only opens an already-migrated SQLite database via
+//! Schema creation and migration belong to the startup schema manager. This
+//! adapter only opens an already-migrated SQLite database via
 //! [`crate::open_runtime_connection`]. Multi-row state changes use
-//! `BEGIN IMMEDIATE`, matching Python's claim/debit/refund serialization.
+//! `BEGIN IMMEDIATE` to serialize claim, debit, and refund.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{
@@ -372,7 +372,9 @@ impl ManashopRepository {
         Ok(true)
     }
 
-    pub fn is_mana_consumed(
+    /// Test fixture: observe the daily mana tap.
+    #[cfg(test)]
+    pub(crate) fn is_mana_consumed(
         &self,
         discord_id: i64,
         guild_id: Option<i64>,
@@ -405,7 +407,9 @@ impl ManashopRepository {
         Ok(changed > 0)
     }
 
-    pub fn was_item_used_today(
+    /// Test fixture: observe the daily manashop claim.
+    #[cfg(test)]
+    pub(crate) fn was_item_used_today(
         &self,
         discord_id: i64,
         guild_id: Option<i64>,
@@ -428,30 +432,6 @@ impl ManashopRepository {
             )
             .optional()?
             .is_some())
-    }
-
-    pub fn mark_item_used_atomic(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-        item_id: &str,
-        used_date: &str,
-    ) -> Result<bool, ManashopRepositoryError> {
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let changed = transaction.execute(
-            "INSERT OR IGNORE INTO manashop_daily_uses
-                 (discord_id, guild_id, item_id, used_date)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                discord_id,
-                Self::normalize_guild_id(guild_id),
-                item_id,
-                used_date
-            ],
-        )?;
-        transaction.commit()?;
-        Ok(changed > 0)
     }
 
     pub fn try_purchase_item_atomic(
@@ -943,58 +923,6 @@ impl ManashopRepository {
             )
             .optional()
             .map_err(Into::into)
-    }
-
-    pub fn active_for_many(
-        &self,
-        discord_ids: &[i64],
-        guild_id: Option<i64>,
-        buff_type: &str,
-        now: i64,
-    ) -> Result<Vec<(i64, Vec<BuffRecord>)>, ManashopRepositoryError> {
-        let mut seen = BTreeSet::new();
-        let unique = discord_ids
-            .iter()
-            .copied()
-            .filter(|id| seen.insert(*id))
-            .collect::<Vec<_>>();
-        if unique.is_empty() {
-            return Ok(Vec::new());
-        }
-        let placeholders = std::iter::repeat_n("?", unique.len())
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!(
-            "SELECT id, discord_id, guild_id, buff_type, target_id,
-                    granted_at, expires_at, triggered, data
-             FROM manashop_buffs
-             WHERE discord_id IN ({placeholders})
-               AND guild_id = ? AND buff_type = ?
-               AND triggered = 0 AND expires_at > ?
-             ORDER BY discord_id, granted_at DESC, id DESC"
-        );
-        let mut bindings = unique
-            .iter()
-            .copied()
-            .map(Value::Integer)
-            .collect::<Vec<_>>();
-        bindings.extend([
-            Value::Integer(Self::normalize_guild_id(guild_id)),
-            Value::Text(buff_type.to_owned()),
-            Value::Integer(now),
-        ]);
-        let connection = self.connection()?;
-        let mut statement = connection.prepare(&sql)?;
-        let rows = statement.query_map(params_from_iter(bindings), map_buff)?;
-        let mut grouped: HashMap<i64, Vec<BuffRecord>> = HashMap::new();
-        for row in rows {
-            let record = row?;
-            grouped.entry(record.discord_id).or_default().push(record);
-        }
-        Ok(unique
-            .into_iter()
-            .map(|id| (id, grouped.remove(&id).unwrap_or_default()))
-            .collect())
     }
 
     pub fn active_targeted_at(
@@ -1535,7 +1463,9 @@ impl ManashopRepository {
             .unwrap_or_default())
     }
 
-    pub fn add_slow_drip_claim(
+    /// Test fixture: seed Slow Drip claims.
+    #[cfg(test)]
+    pub(crate) fn add_slow_drip_claim(
         &self,
         discord_id: i64,
         guild_id: Option<i64>,

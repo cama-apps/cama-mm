@@ -1,7 +1,7 @@
 //! Existing-schema persistence for wagers carried between Dig pinnacle phases.
 //!
-//! Python remains the production runtime and the sole schema/migration
-//! authority. This adapter only opens an already-migrated database through
+//! The Rust schema manager owns schema and migrations. This adapter only opens
+//! an already-migrated database through
 //! [`crate::open_runtime_connection`]. Carry-marker changes and balance
 //! settlement share one `BEGIN IMMEDIATE` transaction guarded by the exact
 //! tunnel snapshot, so retries cannot settle a stake twice.

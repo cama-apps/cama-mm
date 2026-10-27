@@ -10,7 +10,9 @@ use rusqlite::{Connection, params};
 use tempfile::TempDir;
 
 use super::*;
-use crate::registration::{InteractionMessageDelivery, InteractionResponseError, Registry};
+use crate::registration::{
+    InteractionMessageDelivery, InteractionResponseError, InteractionValue, Registry,
+};
 
 const GUILD: i64 = 42;
 const USER: i64 = 100;

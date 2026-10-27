@@ -428,7 +428,7 @@ async fn cleanup_rechecks_server_ownership_and_pending_match_before_destroying()
                     &mut pending.state.radiant_team_ids[0],
                     &mut pending.state.dire_team_ids[0],
                 );
-                repo.update_pending_match(1, f.pending, &pending.state)
+                repo.replace_pending_match_for_tests(1, f.pending, &pending.state)
                     .unwrap();
             }
             "stale" => f.port.observation_stale.store(true, Ordering::SeqCst),

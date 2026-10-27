@@ -2,14 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::test_support::copy_migrated_database as initialize_or_migrate;
-use cama_db::readycheck_repository::ReadycheckRepository;
-use tempfile::NamedTempFile;
 use tokio::sync::Notify;
 
 use super::*;
 use crate::embeds::LobbyPlayer;
-use crate::lobby_manager::PersistentLobbyManager;
 use crate::lobby_service::{JoinFailure, PendingMatchState};
 
 const GUILD: GuildId = GuildId(123);
@@ -1309,53 +1305,6 @@ async fn test_resetlobby_non_member_without_choice_gets_hint() {
             .get_lobby(scope(LobbyKind::Open))
             .is_some()
     );
-}
-
-// Stronger lift-and-shift bridge beyond the mocked canonical nodes.
-
-#[test]
-fn existing_schema_restart_preserves_dual_seats_and_kind_scoped_reset() {
-    let database = NamedTempFile::new().expect("temporary database");
-    initialize_or_migrate(database.path()).expect("initialize canonical schema");
-    let repository = ReadycheckRepository::new(database.path());
-    let mut first = PersistentLobbyManager::new(repository.clone()).expect("first startup");
-    let open = scope(LobbyKind::Open);
-    let low = scope(LobbyKind::LowSkill);
-    first
-        .get_or_create_lobby_at(open, Some(UserId(99)), "2026-08-12T00:00:00Z")
-        .expect("open lobby");
-    first
-        .get_or_create_lobby_at(low, Some(UserId(99)), "2026-08-12T00:00:00Z")
-        .expect("low lobby");
-    first
-        .join_lobby_at(UserId(1), open, 100.0)
-        .expect("join open");
-    first
-        .join_lobby_at(UserId(1), low, 101.0)
-        .expect("join low");
-    drop(first);
-
-    let mut restarted = PersistentLobbyManager::new(repository.clone()).expect("restart hydration");
-    assert!(
-        restarted
-            .get_lobby(open)
-            .expect("open after restart")
-            .players
-            .contains(&UserId(1))
-    );
-    assert!(
-        restarted
-            .get_lobby(low)
-            .expect("low after restart")
-            .players
-            .contains(&UserId(1))
-    );
-    restarted.reset_lobby(low).expect("reset only low");
-    drop(restarted);
-
-    let final_restart = PersistentLobbyManager::new(repository).expect("final restart");
-    assert!(final_restart.get_lobby(open).is_some());
-    assert!(final_restart.get_lobby(low).is_none());
 }
 
 #[tokio::test]

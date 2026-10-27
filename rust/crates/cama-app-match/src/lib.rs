@@ -1,9 +1,5 @@
 //! Independent match and economy application services compiled beside the other app slices.
 
-#[path = "../../cama-app/src/betting_validation.rs"]
-pub mod betting_validation;
-#[path = "../../cama-app/src/disburse_actions.rs"]
-pub mod disburse_actions;
 #[path = "../../cama-app/src/disburse_service.rs"]
 pub mod disburse_service;
 #[path = "../../cama-app/src/dota_info.rs"]

@@ -1,7 +1,6 @@
 //! Discord-independent bankruptcy policy and penalty orchestration.
 //!
-//! Python remains the live command and migration authority. This module keeps
-//! eligibility, cooldown derivation, and penalty math behind a typed
+//! This module keeps eligibility, cooldown derivation, and penalty math behind a typed
 //! persistence port. The existing-schema SQLite adapter implements that
 //! port without creating or migrating production tables.
 

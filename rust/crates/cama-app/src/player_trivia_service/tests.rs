@@ -1157,7 +1157,7 @@ fn test_prediction_questions_subtract_vanity_tax_from_total_pnl() {
 }
 
 #[test]
-fn test_betting_questions_subtract_vanity_tax_once_per_settlement() {
+fn test_betting_questions_subtract_withholding_once_per_settlement() {
     let mut rows = vec![
         SettledBetRow {
             bet_id: 1,
@@ -1171,6 +1171,7 @@ fn test_betting_questions_subtract_vanity_tax_once_per_settlement() {
             payout: 100,
             settlement_vanity_tax: 1,
             settlement_low_priority_tax: 0,
+            settlement_bankruptcy_penalty: 2,
         },
         SettledBetRow {
             bet_id: 2,
@@ -1184,6 +1185,7 @@ fn test_betting_questions_subtract_vanity_tax_once_per_settlement() {
             payout: 100,
             settlement_vanity_tax: 1,
             settlement_low_priority_tax: 0,
+            settlement_bankruptcy_penalty: 2,
         },
     ];
     for (index, amount) in [34, 33, 33].into_iter().enumerate() {
@@ -1199,6 +1201,7 @@ fn test_betting_questions_subtract_vanity_tax_once_per_settlement() {
             payout: 0,
             settlement_vanity_tax: 0,
             settlement_low_priority_tax: 0,
+            settlement_bankruptcy_penalty: 0,
         });
     }
     let mut next_bet_id = 10;
@@ -1216,6 +1219,7 @@ fn test_betting_questions_subtract_vanity_tax_once_per_settlement() {
                 payout: 1,
                 settlement_vanity_tax: 0,
                 settlement_low_priority_tax: 0,
+                settlement_bankruptcy_penalty: 0,
             });
             next_bet_id += 1;
         }
@@ -1233,7 +1237,9 @@ fn test_betting_questions_subtract_vanity_tax_once_per_settlement() {
     );
     let question = by_key(&questions)["betting:largest_loss"];
     assert_eq!(question.correct_answer(), "<@1>");
-    assert!(question.explanation.contains("down 1 JC"));
+    // +100 from the two bets on one settlement, minus its 1 JC vanity tax and
+    // 2 JC bankruptcy penalty counted once, minus the 100 JC lost elsewhere.
+    assert!(question.explanation.contains("down 3 JC"));
 }
 
 #[test]
@@ -1426,6 +1432,7 @@ fn every_live_python_candidate_family_is_representable_from_typed_snapshot() {
                 payout: if index < player_id { player_id * 25 } else { 0 },
                 settlement_vanity_tax: player_id,
                 settlement_low_priority_tax: 0,
+                settlement_bankruptcy_penalty: 0,
             });
             snapshot.wheel_spins.push(WheelSpinRow {
                 spin_id: player_id * 100 + index,

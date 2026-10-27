@@ -15,6 +15,10 @@ pub const WAGER_TAPER_KNEE: f64 = 0.65;
 pub const WIN_CHANCE_CAP: f64 = 0.95;
 /// Maximum wager profit as a ratio of the stake.
 pub const WAGER_PROFIT_CAP_RATIO: f64 = 4.0;
+/// Depths of the regular boss tiers, shallowest first.
+pub const BOSS_BOUNDARIES: [i32; 7] = [25, 50, 75, 100, 150, 200, 275];
+/// Depth of the pinnacle boss below the last regular tier.
+pub const PINNACLE_DEPTH: i32 = 350;
 
 /// Invalid numeric input rejected at the boundary of the pure economy model.
 #[derive(Clone, Copy, Debug, PartialEq)]

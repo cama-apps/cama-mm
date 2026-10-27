@@ -112,7 +112,7 @@ impl Theme {
     }
 
     fn value_line(self, value: i64) -> String {
-        let value = grouped_decimal(value);
+        let value = cama_domain::formatting::format_grouped(value);
         match self {
             Self::DivineRapierPosition => format!("+{value} RATING"),
             Self::BuybackDenied => format!("{value} JC LOST"),
@@ -329,23 +329,6 @@ fn apply_glitch(pixels: &mut [u8], entropy: u64) {
                     original[row * POST_MATCH_GIF_WIDTH as usize + source_x];
             }
         }
-    }
-}
-
-fn grouped_decimal(value: i64) -> String {
-    let negative = value.is_negative();
-    let digits = value.unsigned_abs().to_string();
-    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, character) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            grouped.push(',');
-        }
-        grouped.push(character);
-    }
-    if negative {
-        format!("-{grouped}")
-    } else {
-        grouped
     }
 }
 

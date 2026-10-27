@@ -8,7 +8,7 @@ use crate::test_support::copy_migrated_database;
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
 
-use super::build_levels;
+use super::refresh_levels;
 
 const GUILD: i64 = 42;
 
@@ -100,7 +100,7 @@ fn settings(refresh_seconds: i64) -> PredictionRefreshSettings {
 fn nonpositive_refresh_size_suppresses_outer_quotes_like_python() {
     let mut settings = settings(100);
     settings.size_per_level = 0;
-    assert!(build_levels(50, 4, &settings).is_empty());
+    assert!(refresh_levels(50, 4, &settings).is_empty());
 }
 
 #[test]

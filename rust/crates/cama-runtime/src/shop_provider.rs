@@ -59,6 +59,7 @@ use tracing::{debug, error, warn};
 
 use crate::ApplicationConfig;
 use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
+use crate::ids::signed_id;
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, InteractionAttachment,
     InteractionEmbed, InteractionHandler, InteractionHandlerError, InteractionOption,
@@ -3167,16 +3168,9 @@ fn subcommand_spec(
 fn subcommand(
     options: &[InteractionOption],
 ) -> Result<(String, Vec<InteractionOption>), InteractionHandlerError> {
-    let Some(option) = options
-        .iter()
-        .find(|option| matches!(option.value, InteractionValue::Subcommand(_)))
-    else {
-        return Err("missing /shop subcommand".into());
-    };
-    let InteractionValue::Subcommand(children) = &option.value else {
-        unreachable!();
-    };
-    Ok((option.name.clone(), children.clone()))
+    crate::option_ext::subcommand_option(options)
+        .map(|(name, children)| (name.to_owned(), children.to_vec()))
+        .ok_or_else(|| "missing /shop subcommand".into())
 }
 
 fn required_string(options: &[InteractionOption], name: &str) -> Result<String, String> {
@@ -3210,11 +3204,6 @@ fn is_admin(context: &CommandContext, config: &ShopRuntimeConfig) -> bool {
             permissions & (ADMINISTRATOR_PERMISSION | MANAGE_GUILD_PERMISSION) != 0
         })
 }
-
-fn signed_id(value: u64, label: &str) -> Result<i64, String> {
-    i64::try_from(value).map_err(|_| format!("{label} id exceeds SQLite range"))
-}
-
 fn unix_timestamp() -> Result<i64, String> {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)

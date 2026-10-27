@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use cama_domain::formatting::JOPACOIN_EMOTE;
+use cama_domain::formatting::{JOPACOIN_EMOTE, format_grouped};
 use cama_domain::pet::{
     ACCESSORIES, DIG_WORK_CAP_BLOCKS, DIG_WORK_UNITS_PER_BLOCK, FEED_CAP_PER_DAY, FOOD_ITEMS,
     FeedOutcome, GILDED_EGG_PREMIUM, Pet, PetMood, PetStage, PetStatus, RENAME_COST, RefundNotice,
@@ -1545,7 +1545,7 @@ pub struct StatusEmbedRequest<'a> {
 }
 
 /// Build the status panel with the optional brawl/career projections that the
-/// live Python cog loads alongside the pet status row.  The simple wrapper
+/// pet command loads alongside the pet status row.  The simple wrapper
 /// above remains for callers that do not compose the brawl service.
 #[must_use]
 pub fn build_status_embed_with_details(request: StatusEmbedRequest<'_>) -> Embed {
@@ -1940,8 +1940,8 @@ pub fn build_eating_outcome_embed(pet: &Pet, outcome: &BTreeMap<String, i64>) ->
         format!("🍖 {} was delicious", pet.name),
         format!(
             "You received **{}** {JOPACOIN_EMOTE}{note}.\n\nBad karma adds **{added}** game(s) to your sentence (**{remaining} remaining**). Your future earnings are taxed until you win your way free.\n\nBalance: **{}** {JOPACOIN_EMOTE}.",
-            format_integer(reward),
-            format_integer(balance)
+            format_grouped(reward),
+            format_grouped(balance)
         ),
         EmbedColor::Slate,
     )
@@ -2408,22 +2408,6 @@ fn format_work_blocks(units: i64) -> String {
     } else {
         format!("{}.{}", tenths / 10, tenths.abs() % 10)
     }
-}
-
-fn format_integer(value: i64) -> String {
-    let negative = value.is_negative();
-    let digits = value.unsigned_abs().to_string();
-    let mut result = String::with_capacity(digits.len() + digits.len() / 3 + usize::from(negative));
-    if negative {
-        result.push('-');
-    }
-    for (index, character) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            result.push(',');
-        }
-        result.push(character);
-    }
-    result
 }
 
 #[cfg(test)]

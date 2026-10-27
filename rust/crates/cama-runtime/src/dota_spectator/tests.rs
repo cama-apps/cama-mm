@@ -531,15 +531,7 @@ impl Fixture {
             None => DotaLiveFeed::new(&config),
         }
         .unwrap();
-        live.publish_match_with_expected_accounts(
-            1,
-            pending,
-            123,
-            None,
-            19144,
-            (1..=10).collect(),
-            true,
-        );
+        live.publish_match(1, pending, 123, None, 19144, 3, true, (1..=10).collect());
         let discord = Arc::new(FakeDiscord::default());
         let worker = SpectatorWorker::new(db.path(), vec![1], discord.clone(), live.clone());
         Self {
@@ -592,7 +584,7 @@ impl Fixture {
         let mut pending = repository.pending_match(1, self.pending).unwrap().unwrap();
         edit(&mut pending.state);
         repository
-            .update_pending_match(1, self.pending, &pending.state)
+            .replace_pending_match_for_tests(1, self.pending, &pending.state)
             .unwrap();
     }
     fn end_match(&self) {
@@ -853,7 +845,7 @@ async fn betting_reopened_during_permission_audit_blocks_queued_delivery() {
         let mut pending = repository.pending_match(1, pending_id).unwrap().unwrap();
         pending.state.bet_lock_until = Some(2000);
         repository
-            .update_pending_match(1, pending_id, &pending.state)
+            .replace_pending_match_for_tests(1, pending_id, &pending.state)
             .unwrap();
     }));
     f.worker.tick(1015).await.unwrap();
@@ -1167,7 +1159,7 @@ async fn same_tick_delivery_reaudits_after_persistence_and_blocks_reopened_betti
         let mut pending = repository.pending_match(1, pending_id).unwrap().unwrap();
         pending.state.bet_lock_until = Some(2000);
         repository
-            .update_pending_match(1, pending_id, &pending.state)
+            .replace_pending_match_for_tests(1, pending_id, &pending.state)
             .unwrap();
     }));
     f.worker.tick(1015).await.unwrap();
@@ -1281,15 +1273,8 @@ async fn stale_map_marks_last_image_once_and_resumes_without_replacing_attachmen
 
     // The feed can resume from its cached frame. The existing PNG remains in
     // Discord while only the status embed is changed back to fresh.
-    f.live.publish_match_with_expected_accounts(
-        1,
-        f.pending,
-        123,
-        None,
-        19144,
-        (1..=10).collect(),
-        true,
-    );
+    f.live
+        .publish_match(1, f.pending, 123, None, 19144, 3, true, (1..=10).collect());
     f.worker.tick(1035).await.unwrap();
     {
         let edits = f.discord.map_status_edits.lock().unwrap();
@@ -1316,15 +1301,8 @@ async fn different_live_match_marks_retained_map_unavailable_without_relabeling_
     poll_frame_with_map(&f, &listener, &frame(100, 0, 0), true).await;
     f.worker.tick(1000).await.unwrap();
     let original = f.state().map_status.unwrap();
-    f.live.publish_match_with_expected_accounts(
-        1,
-        f.pending,
-        999,
-        None,
-        19144,
-        (1..=10).collect(),
-        true,
-    );
+    f.live
+        .publish_match(1, f.pending, 999, None, 19144, 3, true, (1..=10).collect());
     f.worker.tick(1015).await.unwrap();
     let edits = f.discord.map_status_edits.lock().unwrap();
     assert_eq!(edits.len(), 1);
@@ -1431,7 +1409,7 @@ async fn spectator_map_reaudits_betting_after_render_and_withholds_private_image
         let mut pending = repository.pending_match(1, id).unwrap().unwrap();
         pending.state.extra.remove(DOTA_BETTING_CLOSED_MARKER);
         repository
-            .update_pending_match(1, id, &pending.state)
+            .replace_pending_match_for_tests(1, id, &pending.state)
             .unwrap();
     }));
     f.worker.tick(1000).await.unwrap();
@@ -1477,7 +1455,7 @@ async fn latest_map_rechecks_betting_before_publishing() {
             let mut pending = repository.pending_match(1, id).unwrap().unwrap();
             pending.state.extra.remove(DOTA_BETTING_CLOSED_MARKER);
             repository
-                .update_pending_match(1, id, &pending.state)
+                .replace_pending_match_for_tests(1, id, &pending.state)
                 .unwrap();
         }));
         f.worker.tick(1000 + elapsed).await.unwrap();

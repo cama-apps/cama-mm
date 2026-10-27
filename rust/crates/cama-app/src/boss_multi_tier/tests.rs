@@ -761,6 +761,30 @@ fn test_resume_claims_duel_atomically() {
 }
 
 #[test]
+fn test_failed_resume_settlement_keeps_the_paused_duel_for_retry() {
+    let mut service = test_service(0.0);
+    seed_at_first_boss(&mut service);
+    seed_paused(
+        &mut service,
+        "grothak",
+        "grothak_earthquake",
+        combat(3, 3, 0.60, 0.30),
+        3,
+        GearSnapshot::default(),
+    );
+    service.repository.inject_commit_failure();
+    assert!(service.resume_boss_duel(key(), 0).is_err());
+    assert!(
+        service.repository.active_duel(key()).is_some(),
+        "a failed settlement must not drop the paused duel"
+    );
+    service
+        .resume_boss_duel(key(), 0)
+        .expect("retry resolves the restored duel");
+    assert_eq!(service.repository.active_duel(key()), None);
+}
+
+#[test]
 fn test_resume_without_state_errors() {
     let mut service = test_service(0.0);
     seed_at_first_boss(&mut service);

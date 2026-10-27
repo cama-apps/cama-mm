@@ -1,6 +1,6 @@
 //! Existing-schema reads and spin persistence used by Golden Wheel policy.
 //!
-//! Python remains the schema and migration authority. Production methods open
+//! Schema creation and migration belong to the startup schema manager. Production methods open
 //! only the configured existing database through [`crate::open_runtime_connection`].
 //! Test-only fixtures create their own disposable schema.
 

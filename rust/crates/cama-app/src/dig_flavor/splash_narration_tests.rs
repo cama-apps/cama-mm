@@ -274,52 +274,6 @@ fn test_clamps_oversize_narrative() {
 }
 
 #[test]
-fn test_renders_narrative_above_victim_lines() {
-    let lines = splash_aftermath_lines(&SplashAftermath {
-        mode: "steal".to_owned(),
-        victims: vec![SplashVictim {
-            discord_id: 99_001,
-            amount: 10,
-        }],
-        llm_narrative: Some("Bob feels something missing.".to_owned()),
-        ..SplashAftermath::default()
-    });
-    assert_eq!(lines[0], "*Bob feels something missing.*");
-    assert!(lines[1].contains("<@99001>"));
-    assert!(lines[1].contains("-10"));
-}
-
-#[test]
-fn test_renders_without_narrative_when_missing() {
-    let lines = splash_aftermath_lines(&SplashAftermath {
-        mode: "grant".to_owned(),
-        victims: vec![SplashVictim {
-            discord_id: 99_002,
-            amount: 4,
-        }],
-        ..SplashAftermath::default()
-    });
-    assert_eq!(lines.len(), 1);
-    assert!(lines[0].contains("<@99002>"));
-    assert!(lines[0].contains("+4"));
-}
-
-#[test]
-fn test_blank_narrative_treated_as_missing() {
-    let lines = splash_aftermath_lines(&SplashAftermath {
-        mode: "burn".to_owned(),
-        victims: vec![SplashVictim {
-            discord_id: 99_003,
-            amount: 5,
-        }],
-        llm_narrative: Some("   ".to_owned()),
-        ..SplashAftermath::default()
-    });
-    assert_eq!(lines.len(), 1);
-    assert!(!lines[0].contains('*'));
-}
-
-#[test]
 fn test_tool_has_required_shape() {
     assert_eq!(SPLASH_NARRATION_TOOL.kind, "function");
     assert_eq!(SPLASH_NARRATION_TOOL.name, "narrate_splash");

@@ -1,10 +1,9 @@
 //! Discord-neutral routing for JOPA-T match, pet, and enrichment callouts.
 //!
-//! Python remains the live Discord, configuration, AI-provider, GIF-renderer,
-//! player-name, hero-catalog, and random-number authority during migration.
 //! This module owns the tested ordering and selection policy. Every live edge
-//! is represented by a typed port so the Rust policy can run without a gateway
-//! or a second persistence authority.
+//! (Discord, configuration, AI provider, GIF renderer, player names, hero
+//! catalog, randomness) is represented by a typed port so the policy can run
+//! without a gateway.
 
 use std::collections::{BTreeMap, VecDeque};
 

@@ -30,35 +30,6 @@ fn outcome(advance: i64, gross_jc: i64) -> DigOutcomeInput {
 }
 
 #[test]
-fn test_sabotage_embed_mentions_prediction_contract_steal() {
-    let rendered = append_prediction_contract_steal(
-        "Damage dealt: **6** blocks",
-        true,
-        Some(&PredictionContractSteal {
-            prediction_id: 42,
-            side: "yes",
-            contracts: 4,
-        }),
-    );
-    assert!(rendered.contains("Stole **4 YES** prediction contracts from market **#42**."));
-}
-
-#[test]
-fn test_sabotage_embed_ignores_prediction_contract_steal_on_miss() {
-    let description = "The sabotage missed.";
-    let rendered = append_prediction_contract_steal(
-        description,
-        false,
-        Some(&PredictionContractSteal {
-            prediction_id: 42,
-            side: "yes",
-            contracts: 4,
-        }),
-    );
-    assert_eq!(rendered, description);
-}
-
-#[test]
 fn test_paid_dig_ramp_is_strictly_increasing() {
     assert!(
         PAID_DIG_COSTS_PER_DAY
@@ -76,25 +47,6 @@ fn test_paid_dig_cost_levels_off_after_seed_ladder() {
         vec![40, 60, 80, 100, 100]
     );
     assert_eq!(paid_dig_cost(5, 13, 0.0), 30);
-}
-
-#[test]
-fn test_boss_victory_base_jc_covers_every_boss_boundary() {
-    assert_eq!(
-        BOSS_BOUNDARIES
-            .into_iter()
-            .map(|boundary| (boundary, boss_base_reward(boundary, 0)))
-            .collect::<Vec<_>>(),
-        vec![
-            (25, 15),
-            (50, 20),
-            (75, 25),
-            (100, 30),
-            (150, 40),
-            (200, 50),
-            (275, 65)
-        ]
-    );
 }
 
 macro_rules! multiplier_anchor {
@@ -168,8 +120,9 @@ fn test_dig_reuses_one_request_local_mana_effects_snapshot() {
 #[test]
 fn test_mana_snapshot_preserves_standalone_modifier_outcomes() {
     let effects = cama_domain::mana::ManaEffects::for_color(Some("Green"), Some("Forest"));
-    let supplied = cooldown_duration(0, false, false, effects.dig_cooldown_reduction_seconds);
-    let standalone = cooldown_duration(0, false, false, 30);
+    let supplied =
+        effective_dig_cooldown(0, None, None, None, effects.dig_cooldown_reduction_seconds);
+    let standalone = effective_dig_cooldown(0, None, None, None, 30);
     assert_eq!(supplied, standalone);
 }
 
@@ -454,53 +407,86 @@ fn dig_bankruptcy_cooldown_base_is_exactly_one_hour() {
 fn dig_bankruptcy_cooldown_bankrupt_player_uses_flat_cooldown() {
     // Bankruptcy is intentionally absent from the cooldown policy surface.
     let _bankruptcy_penalty_games_remaining = 5;
-    assert_eq!(cooldown_duration(0, false, false, 0), 3_600);
+    assert_eq!(effective_dig_cooldown(0, None, None, None, 0), 3_600);
 }
 
 #[test]
 fn dig_bankruptcy_cooldown_non_bankrupt_player_uses_flat_cooldown() {
     let _bankruptcy_penalty_games_remaining = 0;
-    assert_eq!(cooldown_duration(0, false, false, 0), 3_600);
+    assert_eq!(effective_dig_cooldown(0, None, None, None, 0), 3_600);
 }
 
 #[test]
 fn dig_bankruptcy_cooldown_injury_override_is_not_halved() {
     let injury = r#"{"type":"slower_cooldown"}"#;
-    assert!(has_slower_cooldown_injury(Some(injury)));
-    assert_eq!(cooldown_duration(0, false, true, 0), 6 * 3_600);
+    assert_eq!(
+        effective_dig_cooldown(0, Some(RESTLESS), Some(injury), None, 0),
+        6 * 3_600
+    );
 }
 
 #[test]
 fn dig_bankruptcy_cooldown_malformed_injury_state_does_not_crash() {
-    assert!(!has_slower_cooldown_injury(Some("{not valid json")));
-    assert_eq!(cooldown_duration(0, false, false, 0), 3_600);
+    assert_eq!(
+        effective_dig_cooldown(0, None, Some("{not valid json"), None, 0),
+        3_600
+    );
 }
 
 #[test]
 fn test_stamina_13_caps_cooldown_after_mutations_plain() {
-    assert_eq!(cooldown_duration(13, false, false, 0), 1_800);
+    assert_eq!(effective_dig_cooldown(13, None, None, None, 0), 1_800);
 }
 
 #[test]
 fn test_stamina_13_caps_cooldown_after_mutations_restless() {
-    assert_eq!(cooldown_duration(13, true, false, 0), 3_600);
+    assert_eq!(
+        effective_dig_cooldown(13, Some(RESTLESS), None, None, 0),
+        3_600
+    );
+}
+
+const RESTLESS: &str = r#"[{"id":"restless"}]"#;
+
+#[test]
+fn test_cooldown_curse_applies_after_stamina_and_caps_at_twenty_five_percent() {
+    let over_cap = r#"{"digs_remaining":2,"effect":{"cooldown_penalty":0.30}}"#;
+    assert_eq!(
+        effective_dig_cooldown(0, None, None, Some(over_cap), 0),
+        4_500
+    );
+}
+
+#[test]
+fn test_cooldown_curse_reads_legacy_effects_key_and_ignores_expired_curses() {
+    let legacy = r#"{"digs_remaining":2,"effects":{"cooldown_penalty":0.20}}"#;
+    let expired = r#"{"digs_remaining":0,"effect":{"cooldown_penalty":0.20}}"#;
+    assert_eq!(
+        effective_dig_cooldown(0, None, None, Some(legacy), 0),
+        4_320
+    );
+    assert_eq!(
+        effective_dig_cooldown(0, None, None, Some(expired), 0),
+        3_600
+    );
+}
+
+#[test]
+fn test_mana_reduction_runs_after_the_curse_and_floors_at_zero() {
+    let curse = r#"{"digs_remaining":1,"effect":{"cooldown_penalty":0.25}}"#;
+    assert_eq!(
+        effective_dig_cooldown(0, None, None, Some(curse), 30),
+        4_470
+    );
+    assert_eq!(effective_dig_cooldown(0, None, None, None, i64::MAX), 0);
 }
 
 #[test]
 fn test_forest_cooldown_is_ready_at_3570_seconds() {
-    let duration = cooldown_duration(0, false, false, 30);
+    let duration = effective_dig_cooldown(0, None, None, None, 30);
     assert_eq!(duration, 3_570);
     assert_eq!(cooldown_remaining(Some(1_000_000), 1_003_569, duration), 1);
     assert_eq!(cooldown_remaining(Some(1_000_000), 1_003_570, duration), 0);
-}
-
-#[test]
-fn test_bulk_ready_times_use_one_tunnel_snapshot() {
-    let snapshot = BTreeMap::from([(10_001, Some(1_000_000)), (10_002, Some(996_000))]);
-    assert_eq!(
-        bulk_ready_times(&[10_001, 10_002, 10_003, 10_001], &snapshot, 1_000_000),
-        BTreeMap::from([(10_001, Some(1_003_600)), (10_002, None), (10_003, None)])
-    );
 }
 
 #[test]
@@ -545,10 +531,7 @@ fn test_paid_dig_insufficient_funds() {
 #[test]
 fn test_set_profile_and_stats() {
     let story = sanitize_backstory("Former cartographer @everyone who fears ceilings.", 200);
-    let mut stats = MinerAllocation::default();
-    stats.allocate(2, 2, 1, 0).expect("allocation should fit");
     assert!(story.contains("(at)everyone"));
-    assert_eq!(stats.unspent_points(), 0);
 }
 
 #[test]
@@ -560,41 +543,6 @@ fn test_set_miner_auto_buy_settings() {
     assert_eq!(
         settings,
         BTreeMap::from([("torch", false), ("hard_hat", true)])
-    );
-}
-
-#[test]
-fn test_auto_buy_purchases_and_applies_selected_items() {
-    let mut balance = 100;
-    let mut torch_inventory = 0;
-    let mut hat_inventory = 0;
-    let torch = auto_buy_item(&mut torch_inventory, &mut balance, "Torch", 6);
-    let hat = auto_buy_item(&mut hat_inventory, &mut balance, "Hard Hat", 8);
-    assert_eq!(torch.status, AutoBuyStatus::Purchased);
-    assert_eq!(hat.status, AutoBuyStatus::Purchased);
-    assert_eq!(balance, 86);
-}
-
-#[test]
-fn test_auto_buy_uses_reserve_inventory_before_purchase() {
-    let mut balance = 100;
-    let mut inventory = 1;
-    let result = auto_buy_item(&mut inventory, &mut balance, "Torch", 6);
-    assert_eq!(result.status, AutoBuyStatus::QueuedFromInventory);
-    assert_eq!(result.cost, 0);
-    assert_eq!(balance, 100);
-}
-
-#[test]
-fn test_auto_buy_insufficient_balance_does_not_block_dig() {
-    let mut balance = 7;
-    let mut inventory = 0;
-    let result = auto_buy_item(&mut inventory, &mut balance, "Hard Hat", 8);
-    assert_eq!(result.status, AutoBuyStatus::SkippedInsufficientBalance);
-    let mut tunnel = started_tunnel(10);
-    assert_eq!(
-        apply_dig_outcome(&mut tunnel, outcome(1, 0), 2_000_000).advance,
-        1
     );
 }
 
@@ -619,79 +567,6 @@ fn test_profile_created_tunnel_still_gets_first_dig() {
 }
 
 #[test]
-fn test_stat_build_cannot_overspend() {
-    let mut stats = MinerAllocation::default();
-    let error = stats
-        .allocate(5, 1, 0, 0)
-        .expect_err("six points must fail");
-    assert!(error.contains("only have 5"));
-}
-
-#[test]
-fn test_stat_build_cannot_reduce_existing_allocations() {
-    let mut stats = MinerAllocation::default();
-    stats.allocate(3, 2, 0, 0).expect("first allocation fits");
-    let error = stats
-        .allocate(0, 1, 0, 0)
-        .expect_err("no unspent points remain");
-    assert!(error.contains("only have 0 unspent"));
-}
-
-#[test]
-fn test_respec_returns_all_points_and_charges_fifty_jc() {
-    let mut stats = MinerAllocation::default();
-    stats.allocate(2, 2, 1, 0).expect("allocation fits");
-    let mut balance = 100;
-    assert_eq!(stats.respec(&mut balance), Ok(5));
-    assert_eq!(balance, 50);
-    assert_eq!(stats.unspent_points(), 5);
-}
-
-#[test]
-fn test_respec_reports_returned_points_separately_from_total_unspent() {
-    let mut stats = MinerAllocation {
-        strength: 2,
-        smarts: 1,
-        stamina: 2,
-        survival: 0,
-        stat_points: 12,
-    };
-    let mut balance = 100;
-    assert_eq!(stats.respec(&mut balance), Ok(5));
-    assert_eq!(stats.unspent_points(), 12);
-}
-
-#[test]
-fn test_respec_rejects_insufficient_balance_without_resetting_stats() {
-    let mut stats = MinerAllocation::default();
-    stats.allocate(3, 2, 0, 0).expect("allocation fits");
-    let original = stats;
-    let mut balance = 49;
-    assert!(stats.respec(&mut balance).is_err());
-    assert_eq!(stats, original);
-    assert_eq!(balance, 49);
-}
-
-#[test]
-fn test_respec_rejects_empty_build_without_charging() {
-    let mut stats = MinerAllocation::default();
-    let mut balance = 100;
-    assert!(stats.respec(&mut balance).is_err());
-    assert_eq!(balance, 100);
-}
-
-#[test]
-fn test_respec_can_repeat_after_reallocating() {
-    let mut stats = MinerAllocation::default();
-    let mut balance = 100;
-    stats.allocate(5, 0, 0, 0).expect("allocation fits");
-    stats.respec(&mut balance).expect("first respec succeeds");
-    stats.allocate(0, 0, 5, 0).expect("allocation fits");
-    stats.respec(&mut balance).expect("second respec succeeds");
-    assert_eq!(balance, 0);
-}
-
-#[test]
 fn test_strength_and_smarts_affect_preconditions() {
     let strength = miner_stat_effects(MinerStats::new(5, 0, 0, 0).expect("valid stats"));
     let smarts = miner_stat_effects(MinerStats::new(0, 5, 0, 0).expect("valid stats"));
@@ -702,7 +577,7 @@ fn test_strength_and_smarts_affect_preconditions() {
 
 #[test]
 fn test_stamina_reduces_cooldown_and_paid_cost() {
-    assert!(cooldown_duration(5, false, false, 0) < FREE_DIG_COOLDOWN_SECONDS);
+    assert!(effective_dig_cooldown(5, None, None, None, 0) < FREE_DIG_COOLDOWN_SECONDS);
     assert_eq!(paid_dig_cost(0, 5, 0.0), 2);
 }
 
@@ -748,90 +623,6 @@ fn test_legacy_global_boss_awards_do_not_block_prestiged_run() {
 }
 
 #[test]
-fn test_cave_in_reduces_depth() {
-    let loss = cave_in_loss(20, 10, false);
-    let mut tunnel = started_tunnel(20);
-    let mut input = outcome(0, 0);
-    input.cave_in_loss = loss;
-    let result = apply_dig_outcome(&mut tunnel, input, 2_000_000);
-    assert!(result.cave_in);
-    assert_eq!(result.depth_after, 10);
-}
-
-#[test]
-fn test_cave_in_depth_min_zero() {
-    let mut tunnel = started_tunnel(1);
-    let mut input = outcome(0, 0);
-    input.cave_in_loss = cave_in_loss(1, 14, false);
-    assert_eq!(
-        apply_dig_outcome(&mut tunnel, input, 2_000_000).depth_after,
-        0
-    );
-}
-
-#[test]
-fn test_reinforcement_caps_cave_in_block_loss_at_eight() {
-    assert_eq!(cave_in_loss(40, 14, true), 8);
-    assert_eq!(cave_in_loss(40, 14, false), 14);
-}
-
-#[test]
-fn test_cave_in_medical_bill() {
-    assert_eq!(cave_in_medical_bill(50), 5);
-}
-
-#[test]
-fn test_milestone_bonuses_at_25_50_100() {
-    assert_eq!(milestone_bonus(23, 26), 3);
-    assert_eq!(milestone_bonus(48, 51), 6);
-    assert_eq!(milestone_bonus(98, 101), 20);
-}
-
-#[test]
-fn test_layer_penalty_reduces_layer_payout_across_prestige_ladder() {
-    assert!(prestige_layer_multiplier(1) > prestige_layer_multiplier(2));
-    assert!(prestige_layer_multiplier(3) > prestige_layer_multiplier(4));
-    assert!(prestige_layer_multiplier(4) > prestige_layer_multiplier(5));
-    assert_eq!((17.0 * prestige_layer_multiplier(1)) as i64, 20);
-    assert_eq!((17.0 * prestige_layer_multiplier(2)) as i64, 19);
-}
-
-#[test]
-fn test_help_advances_target_tunnel() {
-    let result = help_advance(10, 3, &BTreeSet::new());
-    let helper_reward = scale_positive_dig_jc(1);
-    assert_eq!(result.depth_after, 13);
-    assert_eq!(helper_reward, 1);
-    assert!(cooldown_remaining(Some(1_003_601), 1_003_661, 3_600) > 0);
-    assert_ne!(
-        10_001, 10_002,
-        "self-help is rejected at the service boundary"
-    );
-}
-
-fn sabotage_input() -> SabotageInput {
-    SabotageInput {
-        actor_id: 10_002,
-        target_id: 10_001,
-        target_depth: 50,
-        actor_balance: 200,
-        rolled_damage: 6,
-        hit: true,
-        trapped: false,
-        insured: false,
-    }
-}
-
-#[test]
-fn test_sabotage_reduces_target_depth_and_costs_jc() {
-    let result = resolve_sabotage(sabotage_input()).expect("valid sabotage");
-    assert!((3..=8).contains(&result.damage));
-    assert_eq!(result.target_depth_after, 44);
-    assert_eq!(result.cost, 10);
-    assert_eq!(result.actor_balance_after, 190);
-}
-
-#[test]
 fn test_sabotage_cooldown_per_target() {
     let first_at = 1_000_000;
     assert!(1_000_060 - first_at < SABOTAGE_COOLDOWN_SECONDS);
@@ -839,139 +630,10 @@ fn test_sabotage_cooldown_per_target() {
 }
 
 #[test]
-fn test_sabotage_miss_costs_jc_without_damage_or_reward() {
-    let result = resolve_sabotage(SabotageInput {
-        hit: false,
-        ..sabotage_input()
-    })
-    .expect("a miss is a resolved paid attempt");
-    assert_eq!(result.damage, 0);
-    assert_eq!(result.attacker_block_reward, 0);
-    assert_eq!(result.target_depth_after, 50);
-    assert_eq!(result.actor_balance_after, 190);
-}
-
-#[test]
-fn test_sabotage_insufficient_funds() {
-    assert!(
-        resolve_sabotage(SabotageInput {
-            actor_balance: 0,
-            ..sabotage_input()
-        })
-        .is_err()
-    );
-}
-
-#[test]
-fn test_sabotage_self_fails() {
-    assert!(
-        resolve_sabotage(SabotageInput {
-            actor_id: 10_001,
-            ..sabotage_input()
-        })
-        .is_err()
-    );
-}
-
-#[test]
-fn test_sabotage_attacker_block_reward_by_depth_tier() {
-    let rewards = [50, 150, 300].map(|target_depth| {
-        resolve_sabotage(SabotageInput {
-            target_depth,
-            ..sabotage_input()
-        })
-        .expect("valid sabotage")
-        .attacker_block_reward
-    });
-    assert_eq!(rewards, [3, 5, 7]);
-}
-
-#[test]
-fn test_successful_sabotage_can_steal_prediction_contracts() {
-    let mut victim = PredictionPosition {
-        contracts: 8,
-        cost_basis: 24,
-    };
-    let mut attacker = PredictionPosition {
-        contracts: 0,
-        cost_basis: 0,
-    };
-    assert_eq!(steal_prediction_contracts(&mut victim, &mut attacker, 4), 4);
-    assert_eq!(
-        victim,
-        PredictionPosition {
-            contracts: 4,
-            cost_basis: 12
-        }
-    );
-    assert_eq!(
-        attacker,
-        PredictionPosition {
-            contracts: 4,
-            cost_basis: 12
-        }
-    );
-}
-
-#[test]
-fn test_blocked_sabotage_credits_victim_jc_tip() {
-    let result = resolve_sabotage(SabotageInput {
-        target_depth: 200,
-        trapped: true,
-        ..sabotage_input()
-    })
-    .expect("trap resolves sabotage");
-    assert!(result.trapped);
-    let generated_tip_after_event = 50;
-    assert_eq!(
-        blocked_sabotage_victim_credit(result.cost, generated_tip_after_event),
-        result.cost + scale_positive_dig_jc(generated_tip_after_event)
-    );
-    assert!(result.actor_balance_after < 200 - result.cost);
-}
-
-#[test]
 fn test_set_trap_free_daily() {
     let traps_set_today = 0;
     let cost = if traps_set_today == 0 { 0 } else { 5 };
     assert_eq!(cost, 0);
-}
-
-#[test]
-fn test_trap_catches_saboteur_and_steals_jc() {
-    let result = resolve_sabotage(SabotageInput {
-        target_depth: 30,
-        trapped: true,
-        ..sabotage_input()
-    })
-    .expect("trap resolves sabotage");
-    assert!(result.trapped);
-    assert!(result.actor_balance_after < sabotage_input().actor_balance);
-}
-
-#[test]
-fn test_insurance_reduces_sabotage_damage() {
-    let plain = resolve_sabotage(sabotage_input()).expect("plain sabotage");
-    let insured = resolve_sabotage(SabotageInput {
-        insured: true,
-        ..sabotage_input()
-    })
-    .expect("insured sabotage");
-    assert!(insured.insurance_applied);
-    assert_eq!(insured.damage, plain.damage / 2);
-}
-
-#[test]
-fn test_insurance_cost_scales_with_depth() {
-    assert_eq!(insurance_cost(50), 7);
-}
-
-#[test]
-fn test_insurance_expires() {
-    let bought_at = 1_000_000;
-    let insured_until = bought_at + INSURANCE_DURATION_SECONDS;
-    assert!(insurance_active(insured_until, bought_at));
-    assert!(!insurance_active(insured_until, insured_until + 1));
 }
 
 fn parked_at(depth: i64, raw: &str) -> Option<i64> {
@@ -1077,64 +739,6 @@ fn test_event_does_not_skip_boss_boundary() {
 }
 
 #[test]
-fn test_boss_fight_win() {
-    let result = resolve_boss(24, 200, 10, true, 15, 5, 20);
-    assert!(result.won);
-    assert!(result.depth_after > 24);
-    assert!(result.payout > 0);
-}
-
-#[test]
-fn test_boss_fight_win_pays_base_reward_despite_taper() {
-    let result = resolve_boss(24, 200, 10, true, 15, 0, 20);
-    assert!(result.payout >= scale_positive_dig_jc(15));
-    assert_eq!(result.balance_after - 200, result.payout);
-}
-
-#[test]
-fn test_boss_base_reward_scales_with_ascension() {
-    assert_eq!(boss_base_reward(25, 0), 15);
-    assert_eq!(boss_base_reward(25, 4), 22);
-}
-
-#[test]
-fn test_boss_fight_rejects_wager_before_final_phase() {
-    assert_eq!(
-        validate_boss_wager(872, 1_000, false),
-        Err("Boss wagers are only accepted in the final phase.")
-    );
-}
-
-#[test]
-fn test_boss_fight_forced_no_wager_phase_avoids_free_fight_penalty() {
-    assert!(validate_boss_wager(0, 1_000, false).is_ok());
-    assert_eq!(boss_loss_debit(0, true), 0);
-}
-
-#[test]
-fn test_start_boss_duel_rejects_wager_before_final_phase() {
-    assert!(validate_boss_wager(872, 1_000, false).is_err());
-}
-
-#[test]
-fn test_boss_fight_ignores_stale_carried_wager() {
-    let stale_carried_wager = 872;
-    let requested_wager = 0;
-    assert_eq!(stale_carried_wager, 872);
-    assert_eq!(requested_wager, 0);
-    assert_eq!(1_000 - boss_loss_debit(requested_wager, false), 992);
-}
-
-#[test]
-fn test_boss_fight_lose() {
-    let result = resolve_boss(24, 200, 10, false, 15, 0, 20);
-    assert!(!result.won);
-    assert_eq!(result.balance_after, 190);
-    assert!((11..=20).contains(&result.knockback));
-    assert!(result.depth_after < 24);
-}
-
-#[test]
 fn test_boss_retreat() {
     let depth = 24;
     let retreat_loss = 2_i64.clamp(1, 3);
@@ -1146,59 +750,15 @@ fn test_boss_all_defeated_enables_prestige() {
     let partial = BOSS_BOUNDARIES[..3]
         .iter()
         .copied()
+        .map(i64::from)
         .collect::<BTreeSet<_>>();
     assert_ne!(next_undefeated_boss(&partial), None);
     let all = BOSS_BOUNDARIES
         .into_iter()
         .chain([PINNACLE_DEPTH])
+        .map(i64::from)
         .collect::<BTreeSet<_>>();
     assert_eq!(next_undefeated_boss(&all), None);
-}
-
-#[test]
-fn test_streak_increments_consecutive_days() {
-    assert_eq!(resolve_streak(1, Some(10), 11, false).days, 2);
-}
-
-#[test]
-fn test_streak_resets_on_gap() {
-    assert_eq!(resolve_streak(2, Some(10), 14, false).days, 1);
-}
-
-#[test]
-fn test_streak_resets_after_one_missed_day_without_charm() {
-    let result = resolve_streak(2, Some(10), 12, false);
-    assert_eq!(
-        result,
-        StreakOutcome {
-            days: 1,
-            charm_used: false
-        }
-    );
-}
-
-#[test]
-fn test_streak_charm_saves_exactly_one_missed_day() {
-    let result = resolve_streak(2, Some(10), 12, true);
-    assert_eq!(
-        result,
-        StreakOutcome {
-            days: 3,
-            charm_used: true
-        }
-    );
-}
-
-#[test]
-fn test_streak_charm_does_not_save_longer_gap() {
-    let result = resolve_streak(2, Some(10), 13, true);
-    assert_eq!(
-        result,
-        StreakOutcome {
-            days: 1,
-            charm_used: false
-        }
-    );
 }
 
 #[test]
@@ -1338,31 +898,6 @@ fn test_bankruptcy_debuff_normal_dig_routes_yield_but_first_dig_is_exempt() {
 }
 
 #[test]
-fn test_bankruptcy_debuff_boss_victory_routes_payout_through_policy() {
-    let ordinary = resolve_boss(24, 1_000, 10, true, 15, 5, 20);
-    let penalized = resolve_boss_with_policy(
-        24,
-        1_000,
-        10,
-        true,
-        15,
-        5,
-        20,
-        DigProfitPolicy {
-            bankruptcy_penalty_bps_per_game: 2_500,
-            bankruptcy_penalty_games_remaining: 1,
-            vanity_tax_basis_points: 0,
-            low_priority_tax_basis_points: 0,
-        },
-    );
-    let expected_penalty = ordinary.payout * 2_500 / 10_000;
-    assert!(expected_penalty > 0);
-    assert_eq!(penalized.bankruptcy_penalty, expected_penalty);
-    assert_eq!(penalized.payout + expected_penalty, ordinary.payout);
-    assert_eq!(penalized.balance_after, 1_000 + penalized.payout);
-}
-
-#[test]
 fn test_upgrade_pickaxe_requirements() {
     let stone = PICKAXE_TIERS[1];
     let cannot_upgrade = 10 < stone.depth_required;
@@ -1375,19 +910,6 @@ fn test_upgrade_pickaxe_requirements() {
 fn test_pickaxe_advance_bonus() {
     assert_eq!(PICKAXE_TIERS[1].advance_bonus, 1);
     assert!(layer_at(10).advance_range.0 + PICKAXE_TIERS[1].advance_bonus >= 2);
-}
-
-#[test]
-fn test_shallow_tips_excluded_at_deep_depth() {
-    let deep = eligible_tips(50);
-    assert!(deep.iter().all(|tip| !tip.contains("first paid dig")));
-}
-
-#[test]
-fn test_tips_match_at_correct_depth() {
-    let shallow = eligible_tips(5);
-    assert!(!shallow.is_empty());
-    assert!(shallow.contains(&DIG_TIPS[0].text));
 }
 
 #[test]
@@ -1490,47 +1012,6 @@ fn test_luminosity_level_thresholds() {
 }
 
 #[test]
-fn test_luminosity_cave_in_bonus() {
-    assert_close(luminosity_cave_in_bonus(100), 0.0);
-    assert_close(luminosity_cave_in_bonus(50), 0.08);
-    assert_close(luminosity_cave_in_bonus(10), 0.20);
-    assert_close(luminosity_cave_in_bonus(0), 0.35);
-}
-
-#[test]
-fn test_tiered_event_multiplier() {
-    let base = 0.22;
-    assert!(event_chance(base, 100) < 0.50);
-    assert!(event_chance(base, 50) < 0.50);
-    assert!(event_chance(base, 10) > 0.50);
-    assert!(event_chance(base, 0) > 0.50);
-}
-
-#[test]
-fn test_event_chance_cap() {
-    assert_close(event_chance(0.25, 0), 0.75);
-    assert_close(event_chance(0.35, 0), 0.75);
-    assert!(0.70 < event_chance(0.35, 0));
-    assert!(0.76 > event_chance(0.35, 0));
-}
-
-#[test]
-fn test_pitch_black_forces_risky() {
-    assert_eq!(resolved_event_choice("safe", 0), "risky");
-}
-
-#[test]
-fn test_dark_risky_penalty() {
-    assert!(0.58 >= risky_success_chance(0.62, 10));
-}
-
-#[test]
-fn test_dark_risky_penalty_floor() {
-    assert_close(risky_success_chance(0.10, 0), 0.05);
-    assert!(0.04 < risky_success_chance(0.10, 0));
-}
-
-#[test]
 fn test_set_and_get_buff() {
     let buff = TempBuff {
         id: "test_buff",
@@ -1568,79 +1049,6 @@ fn test_buff_decrements() {
 }
 
 #[test]
-fn test_cheer_saves_cheer_data() {
-    let mut cheers = CheerBook::default();
-    cheers
-        .cheer(10_002, 10_001, 1_000_000)
-        .expect("first cheer succeeds");
-    assert_eq!(cheers.active_count(1_000_000), 1);
-    assert_eq!(cheers.cheers[0].cheerer_id, 10_002);
-}
-
-#[test]
-fn test_cheer_increases_boss_win_chance() {
-    let mut cheers = CheerBook::default();
-    for cheerer in [10_002, 10_003, 10_004] {
-        cheers
-            .cheer(cheerer, 10_001, 1_000_000)
-            .expect("cheer slot available");
-    }
-    assert_close(cheers.hit_bonus(1_000_000), 0.15);
-    assert!(0.70 < 0.65 - 0.02 + cheers.hit_bonus(1_000_000));
-}
-
-#[test]
-fn test_cheer_max_three() {
-    let mut cheers = CheerBook::default();
-    for cheerer in [10_002, 10_003, 10_004] {
-        cheers
-            .cheer(cheerer, 10_001, 1_000_000)
-            .expect("cheer slot available");
-    }
-    assert!(cheers.cheer(10_005, 10_001, 1_000_000).is_err());
-}
-
-#[test]
-fn test_cheer_slots_free_after_expiry() {
-    let mut cheers = CheerBook::default();
-    for cheerer in [10_002, 10_003, 10_004] {
-        cheers
-            .cheer(cheerer, 10_001, 1_000_000)
-            .expect("cheer slot available");
-    }
-    assert!(cheers.cheer(10_005, 10_001, 1_003_601).is_ok());
-}
-
-#[test]
-fn test_cheer_self_rejected() {
-    assert!(
-        CheerBook::default()
-            .cheer(10_001, 10_001, 1_000_000)
-            .is_err()
-    );
-}
-
-#[test]
-fn test_cheer_does_not_trigger_dig_cooldown() {
-    let mut cheers = CheerBook::default();
-    cheers
-        .cheer(10_002, 10_001, 1_000_000)
-        .expect("cheer succeeds");
-    let cheerer_last_dig_at = None;
-    assert_eq!(cooldown_remaining(cheerer_last_dig_at, 1_000_000, 3_600), 0);
-}
-
-#[test]
-fn test_cheer_has_own_45s_cooldown() {
-    let mut cheers = CheerBook::default();
-    cheers
-        .cheer(10_002, 10_001, 1_000_000)
-        .expect("first cheer succeeds");
-    assert!(cheers.cheer(10_002, 10_003, 1_000_044).is_err());
-    assert!(cheers.cheer(10_002, 10_003, 1_000_045).is_ok());
-}
-
-#[test]
 fn test_fight_boss_error_has_no_won_key() {
     #[derive(Debug, Eq, PartialEq)]
     struct BossError {
@@ -1653,28 +1061,6 @@ fn test_fight_boss_error_has_no_won_key() {
     };
     assert!(!error.success);
     assert!(!format!("{error:?}").contains("won:"));
-}
-
-macro_rules! boss_wager_case {
-    ($name:ident, $wager:expr, $accepted:expr) => {
-        #[test]
-        fn $name() {
-            assert_eq!(validate_boss_wager($wager, 2_000, true).is_ok(), $accepted);
-        }
-    };
-}
-
-boss_wager_case!(test_boss_wager_cap_1000_true_fight_boss, 1_000, true);
-boss_wager_case!(test_boss_wager_cap_1000_true_start_boss_duel, 1_000, true);
-boss_wager_case!(test_boss_wager_cap_1001_false_fight_boss, 1_001, false);
-boss_wager_case!(test_boss_wager_cap_1001_false_start_boss_duel, 1_001, false);
-
-#[test]
-fn test_fight_boss_insufficient_balance_error() {
-    assert_eq!(
-        validate_boss_wager(999, 10, true),
-        Err("Insufficient balance for that boss wager.")
-    );
 }
 
 #[test]
@@ -1698,10 +1084,14 @@ fn test_newly_reached_boss_marks_dig_consumed() {
 
 #[test]
 fn test_reaching_pinnacle_surfaces_boss_on_arrival() {
-    let defeated = BOSS_BOUNDARIES.into_iter().collect::<BTreeSet<_>>();
-    let result = apply_boss_gate(PINNACLE_DEPTH - 2, 20, &defeated);
-    assert_eq!(result.boss_encounter, Some(PINNACLE_DEPTH));
-    assert_eq!(result.depth_after, PINNACLE_DEPTH - 1);
+    let defeated = BOSS_BOUNDARIES
+        .into_iter()
+        .map(i64::from)
+        .collect::<BTreeSet<_>>();
+    let pinnacle = i64::from(PINNACLE_DEPTH);
+    let result = apply_boss_gate(pinnacle - 2, 20, &defeated);
+    assert_eq!(result.boss_encounter, Some(pinnacle));
+    assert_eq!(result.depth_after, pinnacle - 1);
     assert!(result.advance > 0);
 }
 
@@ -1741,91 +1131,6 @@ fn test_parked_dig_ignores_cooldown_preconditions_path() {
     let terminal = apply_boss_gate(24, 0, &BTreeSet::new());
     assert_eq!(terminal.boss_encounter, Some(25));
     assert_eq!(terminal.advance, 0);
-}
-
-#[test]
-fn test_first_dig_rolls_back_balance_when_tunnel_write_fails() {
-    let mut tunnel = TunnelState::default();
-    let before = tunnel.clone();
-    let result: Result<(), &str> = atomic_state_update(&mut tunnel, |staged| {
-        apply_first_dig(staged, 5, 4, 4, 1_000_000);
-        Err("injected tunnel write failure")
-    });
-    assert!(result.is_err());
-    assert_eq!(tunnel, before);
-}
-
-#[test]
-fn test_normal_dig_rolls_back_balance_when_tunnel_write_fails() {
-    let mut tunnel = started_tunnel(10);
-    let before = tunnel.clone();
-    let result: Result<(), &str> = atomic_state_update(&mut tunnel, |staged| {
-        apply_dig_outcome(staged, outcome(3, 5), 2_000_000);
-        Err("injected tunnel write failure")
-    });
-    assert!(result.is_err());
-    assert_eq!(tunnel, before);
-}
-
-#[test]
-fn test_queued_consumables_survive_a_failed_dig_commit() {
-    let mut tunnel = started_tunnel(10);
-    tunnel.queued_consumables.push("dynamite");
-    let result: Result<(), &str> = atomic_state_update(&mut tunnel, |staged| {
-        staged.queued_consumables.clear();
-        Err("injected tunnel write failure")
-    });
-    assert!(result.is_err());
-    assert_eq!(tunnel.queued_consumables, vec!["dynamite"]);
-}
-
-#[test]
-fn test_queued_consumables_consumed_on_successful_dig() {
-    let mut tunnel = started_tunnel(10);
-    tunnel.queued_consumables.push("dynamite");
-    atomic_state_update(&mut tunnel, |staged| {
-        staged.queued_consumables.clear();
-        Ok::<_, &str>(())
-    })
-    .expect("commit succeeds");
-    assert!(tunnel.queued_consumables.is_empty());
-}
-
-#[test]
-fn test_queued_boss_preparation_survives_normal_dig() {
-    let mut tunnel = started_tunnel(10);
-    tunnel.boss_preparation.push("rescue_line");
-    atomic_state_update(&mut tunnel, |staged| {
-        apply_dig_outcome(staged, outcome(1, 0), 2_000_000);
-        Ok::<_, &str>(())
-    })
-    .expect("normal dig commits");
-    assert_eq!(tunnel.boss_preparation, vec!["rescue_line"]);
-}
-
-#[test]
-fn test_prestige_rolls_back_grant_when_tunnel_reset_fails() {
-    let mut tunnel = started_tunnel(PINNACLE_DEPTH);
-    tunnel.balance = 500;
-    let before = tunnel.clone();
-    let result: Result<(), &str> = atomic_state_update(&mut tunnel, |staged| {
-        staged.balance += 1_000;
-        staged.depth = 0;
-        Err("injected tunnel reset failure")
-    });
-    assert!(result.is_err());
-    assert_eq!(tunnel, before);
-}
-
-#[test]
-fn test_prestige_relic_not_minted_when_tunnel_reset_fails() {
-    let mut tunnel = started_tunnel(PINNACLE_DEPTH);
-    let result: Result<(), &str> = atomic_state_update(&mut tunnel, |staged| {
-        staged.artifacts.push("prestige_relic");
-        Err("injected tunnel reset failure")
-    });
-    assert!(result.is_err());
-    assert!(tunnel.artifacts.is_empty());
 }
 
 #[test]
@@ -1881,7 +1186,7 @@ fn test_direct_dig_with_queued_dynamite_caps_at_twenty_blocks() {
 #[test]
 fn test_direct_dig_with_strength_caps_at_twenty_blocks() {
     let mut tunnel = started_tunnel(1);
-    tunnel.stats.allocate(5, 0, 0, 0).expect("allocation fits");
+    tunnel.stats.strength = 5;
     let result = apply_dig_outcome(&mut tunnel, outcome(51, 0), 2_000_000);
     assert_eq!(result.advance, 20);
     assert_eq!(result.depth_after, 21);
@@ -1896,17 +1201,6 @@ fn test_authored_event_depth_is_not_capped() {
     let result = apply_dig_outcome(&mut tunnel, input, 2_000_000);
     assert_eq!(result.advance, 18);
     assert_eq!(result.depth_after, 119);
-}
-
-#[test]
-fn test_auto_buy_runs_before_dm_preconditions() {
-    let mut balance = 100;
-    let mut inventory = 0;
-    let purchase = auto_buy_item(&mut inventory, &mut balance, "Torch", 6);
-    let advertised_items = vec![purchase.item];
-    assert_eq!(purchase.status, AutoBuyStatus::Purchased);
-    assert_eq!(advertised_items, vec!["Torch"]);
-    assert_eq!(balance, 94);
 }
 
 #[test]
@@ -1927,7 +1221,7 @@ fn test_dm_dig_caps_main_advance_at_10() {
 #[test]
 fn test_dm_dig_with_strength_bonus_caps_advance_at_20() {
     let mut tunnel = started_tunnel(1);
-    tunnel.stats.allocate(2, 0, 0, 0).expect("allocation fits");
+    tunnel.stats.strength = 2;
     let result = apply_dig_outcome(&mut tunnel, outcome(50, 0), 2_000_000);
     assert_eq!(result.advance, 20);
     assert_eq!(result.depth_after, 21);
@@ -2028,7 +1322,7 @@ fn test_deterministic_dig_caps_advance_after_all_bonuses() {
 #[test]
 fn test_deterministic_dig_with_strength_bonus_caps_at_twenty_blocks() {
     let mut tunnel = started_tunnel(1);
-    tunnel.stats.allocate(2, 0, 0, 0).expect("allocation fits");
+    tunnel.stats.strength = 2;
     let result = apply_dig_outcome(&mut tunnel, outcome(51, 0), 2_000_000);
     assert_eq!(result.advance, 20);
     assert_eq!(result.depth_after, 21);
@@ -2090,25 +1384,6 @@ fn test_cave_in_scales_combined_positive_reward_once() {
     assert_eq!(result.gross_jc, 10);
     assert_eq!(result.jc_earned, scale_positive_dig_jc(10));
     assert_eq!(tunnel.balance, 100 + scale_positive_dig_jc(10));
-}
-
-#[test]
-fn test_pinnacle_reward_applies_edict_to_base_and_wager_profit() {
-    let ordinary = resolve_boss(350, 1_000, 250, true, 1_000, 500, 20);
-    let policy = DigProfitPolicy {
-        bankruptcy_penalty_bps_per_game: 2_500,
-        bankruptcy_penalty_games_remaining: 1,
-        vanity_tax_basis_points: 1_000,
-        low_priority_tax_basis_points: 0,
-    };
-    let settled = resolve_boss_with_policy(350, 1_000, 250, true, 1_000, 500, 20, policy);
-    let gross = scale_positive_dig_jc(1_000) + 500;
-    let expected = apply_jc_profit_policies(gross, policy);
-    assert_eq!(ordinary.payout, gross);
-    assert_eq!(settled.payout, expected.net);
-    assert_eq!(settled.bankruptcy_penalty, expected.bankruptcy_penalty);
-    assert_eq!(settled.vanity_tax, expected.vanity_tax);
-    assert_eq!(settled.balance_after, 1_000 + expected.net);
 }
 
 #[test]

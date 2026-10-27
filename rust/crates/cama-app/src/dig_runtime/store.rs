@@ -6,21 +6,6 @@ pub struct SqliteDigRuntimeStore {
     pub(super) path: PathBuf,
 }
 
-/// One actor-scoped tunnel/wallet mutation admitted by the runtime SQLite
-/// adapter. Keeping the audit identity beside the state deltas prevents
-/// positional call sites from swapping cost, reward, or timestamp fields.
-#[derive(Clone, Copy, Debug)]
-pub struct AtomicTunnelBalanceUpdate<'a> {
-    pub discord_id: i64,
-    pub guild_id: i64,
-    pub balance_delta: i64,
-    pub balance_cost: i64,
-    pub depth_after: Option<i64>,
-    pub detail: &'a str,
-    pub action_type: &'a str,
-    pub now: i64,
-}
-
 impl SqliteDigRuntimeStore {
     #[must_use]
     pub fn new(path: impl AsRef<Path>) -> Self {
@@ -31,130 +16,6 @@ impl SqliteDigRuntimeStore {
 
     pub(super) fn connection(&self) -> Result<Connection, rusqlite::Error> {
         cama_db::open_runtime_connection(&self.path)
-    }
-
-    /// Apply one actor-scoped Dig balance/tunnel mutation through the
-    /// existing SQLite adapter.  The ledger context is installed only around
-    /// the wallet writes, so a following ordinary balance update cannot
-    /// inherit an event's actor or relation.
-    pub fn atomic_tunnel_balance_update(
-        &self,
-        request: AtomicTunnelBalanceUpdate<'_>,
-    ) -> Result<i64, DigRuntimeStoreError> {
-        let AtomicTunnelBalanceUpdate {
-            discord_id,
-            guild_id,
-            balance_delta,
-            balance_cost,
-            depth_after,
-            detail,
-            action_type,
-            now,
-        } = request;
-        let detail_value = serde_json::from_str::<Value>(detail)
-            .map_err(|_| DigRuntimeStoreError::InvalidJson("balance update detail"))?;
-        if !detail_value.is_object() {
-            return Err(DigRuntimeStoreError::InvalidJson("balance update detail"));
-        }
-        let cost = balance_cost.max(0);
-        let event_id = detail_value
-            .get("event_id")
-            .or_else(|| detail_value.get("event"))
-            .and_then(Value::as_str);
-        let related_type = event_id.map_or("dig_action", |_| "event");
-        let related_id = event_id.unwrap_or(action_type);
-        let reason = if balance_delta - cost >= 0 {
-            "dig event credit"
-        } else {
-            "dig event debit"
-        };
-
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let balance = dig_runtime_store::player_balance(&transaction, discord_id, guild_id)?;
-        let Some(balance) = balance else {
-            return Err(DigRuntimeStoreError::MissingPlayer);
-        };
-        let depth_before = dig_runtime_store::tunnel_depth(&transaction, discord_id, guild_id)?;
-        let Some(depth_before) = depth_before else {
-            return Err(DigRuntimeStoreError::MissingTunnel);
-        };
-        if balance < cost {
-            return Err(DigRuntimeStoreError::InsufficientFunds);
-        }
-        let balance_after = balance
-            .checked_sub(cost)
-            .and_then(|value| value.checked_add(balance_delta))
-            .ok_or(DigRuntimeStoreError::Conflict)?;
-
-        if cost != 0 {
-            set_runtime_ledger_context(
-                &transaction,
-                discord_id,
-                "event",
-                related_id,
-                "dig paid cost",
-                detail,
-            )?;
-            let changed = dig_runtime_store::update_player_balance_cas(
-                &transaction,
-                balance - cost,
-                discord_id,
-                guild_id,
-                balance,
-            )?;
-            clear_runtime_ledger_context(&transaction)?;
-            if changed != 1 {
-                return Err(DigRuntimeStoreError::Conflict);
-            }
-        }
-        if balance_delta != 0 {
-            set_runtime_ledger_context(
-                &transaction,
-                discord_id,
-                related_type,
-                related_id,
-                reason,
-                detail,
-            )?;
-            let before = balance - cost;
-            let changed = dig_runtime_store::update_player_balance_cas(
-                &transaction,
-                balance_after,
-                discord_id,
-                guild_id,
-                before,
-            )?;
-            clear_runtime_ledger_context(&transaction)?;
-            if changed != 1 {
-                return Err(DigRuntimeStoreError::Conflict);
-            }
-        }
-        let depth_after = depth_after.unwrap_or(depth_before);
-        let changed = dig_runtime_store::update_tunnel_depth_cas(
-            &transaction,
-            depth_after,
-            discord_id,
-            guild_id,
-            depth_before,
-        )?;
-        if changed != 1 {
-            return Err(DigRuntimeStoreError::Conflict);
-        }
-        let action_id = dig_runtime_store::insert_dig_action(
-            &transaction,
-            guild_id,
-            discord_id,
-            None,
-            action_type,
-            depth_before,
-            depth_after,
-            balance_after - balance,
-            detail,
-            now,
-        )?;
-        transaction.commit()?;
-        Ok(action_id)
     }
 
     /// Load, mutate, and store one delivery projection in a single immediate
@@ -553,10 +414,10 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
             claimed_at: now,
         };
 
-        // Python's fail-soft boundary is intentional: consume the gross cap
-        // first, then perform the independent wallet credit.  Use the
-        // expected claim row as a CAS so two concurrent Digs cannot both
-        // consume the same idle interval or cross the daily cap.
+        // Consume the gross cap and credit the wallet in one immediate
+        // transaction. The expected claim row is a CAS so two concurrent Digs
+        // cannot both consume the same idle interval or cross the daily cap,
+        // and a failed credit rolls the cap consumption back with it.
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let updated = dig_runtime_store::update_slow_drip_claim_cas(
@@ -584,7 +445,6 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
                 return Ok(None);
             }
         }
-        transaction.commit()?;
         if claim.credit_jc > 0 {
             let metadata = serde_json::json!({
                 "claim_date": claim.claim_date,
@@ -596,51 +456,36 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
                 "claimed_at": claim.claimed_at,
             })
             .to_string();
-            let credit_result = (|| -> Result<(), DigRuntimeStoreError> {
-                let mut connection = self.connection()?;
-                let transaction =
-                    connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                let balance = dig_runtime_store::player_balance(
-                    &transaction,
-                    tunnel.discord_id,
-                    tunnel.guild_id,
-                )?;
-                let Some(balance) = balance else {
-                    return Err(DigRuntimeStoreError::MissingPlayer);
-                };
-                let balance_after = balance
-                    .checked_add(claim.credit_jc)
-                    .ok_or(DigRuntimeStoreError::Conflict)?;
-                set_runtime_ledger_context(
-                    &transaction,
-                    tunnel.discord_id,
-                    "slow_drip",
-                    &claim.claim_date,
-                    "slow drip credit",
-                    &metadata,
-                )?;
-                let changed = dig_runtime_store::update_player_balance_coalesce_cas(
-                    &transaction,
-                    balance_after,
-                    tunnel.discord_id,
-                    tunnel.guild_id,
-                    balance,
-                )?;
-                clear_runtime_ledger_context(&transaction)?;
-                if changed != 1 {
-                    return Err(DigRuntimeStoreError::Conflict);
-                }
-                transaction.commit()?;
-                Ok(())
-            })();
-            if let Err(error) = credit_result {
-                let _ = error;
-                return Ok(Some(DigSlowDripClaim {
-                    credit_jc: 0,
-                    ..claim
-                }));
+            let balance = dig_runtime_store::player_balance(
+                &transaction,
+                tunnel.discord_id,
+                tunnel.guild_id,
+            )?
+            .ok_or(DigRuntimeStoreError::MissingPlayer)?;
+            let balance_after = balance
+                .checked_add(claim.credit_jc)
+                .ok_or(DigRuntimeStoreError::Conflict)?;
+            set_runtime_ledger_context(
+                &transaction,
+                tunnel.discord_id,
+                "slow_drip",
+                &claim.claim_date,
+                "slow drip credit",
+                &metadata,
+            )?;
+            let changed = dig_runtime_store::update_player_balance_coalesce_cas(
+                &transaction,
+                balance_after,
+                tunnel.discord_id,
+                tunnel.guild_id,
+                balance,
+            )?;
+            clear_runtime_ledger_context(&transaction)?;
+            if changed != 1 {
+                return Err(DigRuntimeStoreError::Conflict);
             }
         }
+        transaction.commit()?;
         Ok(Some(claim))
     }
 

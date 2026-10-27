@@ -16,6 +16,7 @@ use cama_app::dig_neon::{BigWinFlavor, BigWinSource};
 use cama_app::drawing::draw_prediction_market_chart;
 use cama_app::neon_bigwin_media::render_big_win;
 use cama_app::neon_degen::{ansi_block, sanitize_llm_terminal_text};
+use cama_app::predictions::position_mark;
 use cama_app::service_container::PersistentVanityTaxService;
 use cama_db::bankruptcy_repository::BankruptcyRepository;
 use cama_db::core_repositories::PlayerRepository;
@@ -31,8 +32,11 @@ use cama_db::predictions_repository::{
     Book, Cancellation, ContractSide, Market, MarketSnapshot, NewLevel, OpenPositionSummary,
     Position, PredictionRepository, PredictionRepositoryError, Trade, TradeReceipt,
 };
+use cama_domain::embed_safety::truncate_field;
+use cama_domain::formatting::{format_duration_short, format_grouped};
 use cama_domain::guild_config::GuildConfigStore;
 use cama_domain::pet_evolution::PetActivity;
+use cama_domain::prediction_ladder::{adjusted_spread, build_levels};
 use serde_json::Value as JsonValue;
 use tracing::{debug, warn};
 
@@ -50,8 +54,8 @@ use crate::registration::{
     InteractionAcknowledgementPolicy, InteractionActionRow, InteractionAttachment,
     InteractionButton, InteractionButtonStyle, InteractionEmbed, InteractionHandler,
     InteractionHandlerError, InteractionModal, InteractionOption, InteractionRequest,
-    InteractionResponder, InteractionResponse, InteractionTextInput, InteractionValue,
-    RegistrationError, RegistrationProvider, RegistryBuilder,
+    InteractionResponder, InteractionResponse, InteractionTextInput, RegistrationError,
+    RegistrationProvider, RegistryBuilder,
 };
 
 trait PredictionVanityTaxPort: Send + Sync {
@@ -304,7 +308,7 @@ fn load_prediction_neon_context(
 fn prediction_neon_fallback(payout: i64) -> String {
     ansi_block(&format!(
         "[LEDGER] +{} JC settled. The house keeps receipts on winners too.",
-        grouped_integer(payout)
+        format_grouped(payout)
     ))
 }
 
@@ -408,23 +412,6 @@ fn strip_markdown_fence(value: &str) -> String {
         .unwrap_or(stripped)
         .trim()
         .to_owned()
-}
-
-fn grouped_integer(value: i64) -> String {
-    let negative = value.is_negative();
-    let digits = value.unsigned_abs().to_string();
-    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, character) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            grouped.push(',');
-        }
-        grouped.push(character);
-    }
-    if negative {
-        format!("-{grouped}")
-    } else {
-        grouped
-    }
 }
 
 #[async_trait]
@@ -1594,7 +1581,7 @@ impl PredictionInteractionHandler {
                 .to_ascii_uppercase();
             let (next, added) = embed.field_within_budget(
                 format!("📈 #{}  ·  RESOLVED {outcome}", market.prediction_id),
-                format!("\"{}\"", truncate_chars(&market.question, 200)),
+                format!("\"{}\"", truncate_field(&market.question, 200)),
                 false,
             );
             embed = next;
@@ -1606,7 +1593,7 @@ impl PredictionInteractionHandler {
         for market in cancelled.iter().take(cancelled_quota) {
             let (next, added) = embed.field_within_budget(
                 format!("📈 #{}  ·  CANCELLED", market.prediction_id),
-                format!("\"{}\"", truncate_chars(&market.question, 200)),
+                format!("\"{}\"", truncate_field(&market.question, 200)),
                 false,
             );
             embed = next;
@@ -1753,18 +1740,18 @@ impl PredictionInteractionHandler {
             } else {
                 let delta = last.saturating_add(refresh_seconds) - now;
                 (
-                    format!("{} ago", format_duration_short(now - last)),
+                    format!("{} ago", format_duration_short((now - last) as f64)),
                     if delta <= 0 {
-                        format!("overdue {}", format_duration_short(-delta))
+                        format!("overdue {}", format_duration_short(-delta as f64))
                     } else {
-                        format!("in {}", format_duration_short(delta))
+                        format!("in {}", format_duration_short(delta as f64))
                     },
                 )
             };
             rows.push(format!(
                 "{:>4}  {:<32}  {:>14}  {:>16}",
                 market.prediction_id,
-                truncate_chars(&market.question, 30),
+                truncate_field(&market.question, 30),
                 last_text,
                 next_text
             ));
@@ -1774,7 +1761,7 @@ impl PredictionInteractionHandler {
             .color(0x3498DB)
             .footer(format!(
                 "Refresh cadence: {}",
-                format_duration_short(refresh_seconds)
+                format_duration_short(refresh_seconds as f64)
             ));
         followup(&responder, InteractionResponse::message("").embed(embed)).await
     }
@@ -2432,7 +2419,7 @@ fn prediction_subcommands() -> Vec<CommandOptionSpec> {
         },
     ];
     vec![
-        subcommand(
+        CommandOptionSpec::subcommand(
             "create",
             "Create a new prediction market (admin)",
             vec![
@@ -2448,12 +2435,12 @@ fn prediction_subcommands() -> Vec<CommandOptionSpec> {
                 ),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "resolve",
             "Resolve a market YES or NO (admin)",
             vec![required_integer("prediction_id", "Market ID"), outcome],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "rollback",
             "Roll back a resolution and reopen the market (admin)",
             vec![required_integer(
@@ -2461,7 +2448,7 @@ fn prediction_subcommands() -> Vec<CommandOptionSpec> {
                 "Resolved market ID to reopen",
             )],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "set_fair",
             "Manually override a market's fair price (admin)",
             vec![
@@ -2469,12 +2456,12 @@ fn prediction_subcommands() -> Vec<CommandOptionSpec> {
                 required_integer("new_price", "New fair price"),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "cancel",
             "Cancel a market and refund cost basis (admin)",
             vec![required_integer("prediction_id", "Market ID to cancel")],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "list",
             "List open markets (or all with show_all)",
             vec![CommandOptionSpec::new(
@@ -2483,32 +2470,28 @@ fn prediction_subcommands() -> Vec<CommandOptionSpec> {
                 CommandOptionKind::Boolean,
             )],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "view",
             "Show a market's embed (price, ladder, recent trades)",
             vec![required_integer("prediction_id", "Market ID")],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "help",
             "Explainer: how prediction markets work in this bot",
             vec![],
         ),
-        subcommand("mine", "Your open positions across markets", vec![]),
-        subcommand(
+        CommandOptionSpec::subcommand("mine", "Your open positions across markets", vec![]),
+        CommandOptionSpec::subcommand(
             "force_refresh",
             "Manually trigger a market refresh (admin)",
             vec![required_integer("prediction_id", "Market ID to refresh")],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "refresh_status",
             "Show refresh state for all open markets in this guild (admin)",
             vec![],
         ),
     ]
-}
-
-fn subcommand(name: &str, description: &str, options: Vec<CommandOptionSpec>) -> CommandOptionSpec {
-    CommandOptionSpec::new(name, description, CommandOptionKind::Subcommand).options(options)
 }
 
 fn required_option(name: &str, description: &str, kind: CommandOptionKind) -> CommandOptionSpec {
@@ -2520,14 +2503,9 @@ fn required_integer(name: &str, description: &str) -> CommandOptionSpec {
 }
 
 fn leaf_command(options: &[InteractionOption]) -> Result<(String, &[InteractionOption]), String> {
-    let option = options
-        .iter()
-        .find(|option| matches!(option.value, InteractionValue::Subcommand(_)))
-        .ok_or_else(|| "predict command is missing a subcommand".to_owned())?;
-    let InteractionValue::Subcommand(children) = &option.value else {
-        unreachable!("filtered to subcommand")
-    };
-    Ok((option.name.clone(), children))
+    crate::option_ext::subcommand_option(options)
+        .map(|(name, children)| (name.to_owned(), children))
+        .ok_or_else(|| "predict command is missing a subcommand".to_owned())
 }
 
 fn rate_to_bps(rate: f64) -> i64 {
@@ -2767,13 +2745,6 @@ fn recent_trade_text(trades: &[Trade], display_names: &BTreeMap<i64, String>) ->
         .join("\n")
 }
 
-fn position_mark(book: &Book, side: ContractSide) -> Option<i64> {
-    match side {
-        ContractSide::Yes => book.yes_bids.first().map(|level| level.0),
-        ContractSide::No => book.yes_asks.first().map(|level| 100 - level.0),
-    }
-}
-
 fn average_price(cost_basis: i64, contracts: i64, contract_value: i64) -> f64 {
     if contracts <= 0 || contract_value == 0 {
         0.0
@@ -2891,7 +2862,7 @@ fn market_list_field(market: &Market, with_delta: bool) -> (String, String) {
         String::new()
     };
     let name = format!("📈 #{}  ·  YES {price}{delta}", market.prediction_id);
-    let question = truncate_chars(market.question.trim(), 200);
+    let question = truncate_field(market.question.trim(), 200);
     let mut value = if question.is_empty() {
         "—".to_owned()
     } else {
@@ -2917,16 +2888,6 @@ fn market_list_field(market: &Market, with_delta: bool) -> (String, String) {
     (name, value)
 }
 
-fn truncate_chars(value: &str, maximum: usize) -> String {
-    if value.chars().count() <= maximum {
-        value.to_owned()
-    } else if maximum >= 3 {
-        format!("{}...", value.chars().take(maximum - 3).collect::<String>())
-    } else {
-        value.chars().take(maximum).collect()
-    }
-}
-
 fn append_position_rows(
     rows: &mut Vec<String>,
     summary: &OpenPositionSummary,
@@ -2934,7 +2895,7 @@ fn append_position_rows(
     total_cost: &mut i64,
     total_mark: &mut i64,
 ) {
-    let question = truncate_chars(&summary.question, 26);
+    let question = truncate_field(&summary.question, 26);
     for (side, contracts, basis, mark) in [
         (
             "YES",
@@ -2968,25 +2929,6 @@ fn append_position_rows(
     }
 }
 
-fn format_duration_short(seconds: i64) -> String {
-    let seconds = seconds.max(0);
-    if seconds >= 86_400 {
-        format!("{}d", seconds / 86_400)
-    } else if seconds >= 3_600 {
-        format!("{}h", seconds / 3_600)
-    } else if seconds >= 60 {
-        format!("{}m", seconds / 60)
-    } else {
-        // Python's `format_duration_short` deliberately never renders `0s`.
-        format!("{}s", seconds.max(1))
-    }
-}
-
-fn adjusted_spread(base: i64, delta: i64, tick_size: i64) -> i64 {
-    let maximum = (98 / tick_size.max(1)).max(1);
-    base.saturating_add(delta).clamp(1, maximum)
-}
-
 fn configured_levels(
     fair: i64,
     normal_levels: usize,
@@ -2996,28 +2938,17 @@ fn configured_levels(
     tick_size: i64,
     spread_delta: i64,
 ) -> Vec<NewLevel> {
-    if size_per_level <= 0 {
-        return Vec::new();
-    }
-    let spread = adjusted_spread(spread_ticks, spread_delta, tick_size);
-    std::iter::repeat_n(size_per_level, normal_levels)
-        .chain(outer_level_sizes.iter().map(|size| (*size).max(0)))
-        .enumerate()
-        .flat_map(|(index, size)| {
-            if size == 0 {
-                return [None, None];
-            }
-            let index = i64::try_from(index).unwrap_or(i64::MAX);
-            let offset = spread.saturating_add(index).saturating_mul(tick_size);
-            let ask = fair.saturating_add(offset);
-            let bid = fair.saturating_sub(offset);
-            [
-                (1..=99).contains(&ask).then(|| NewLevel::ask(ask, size)),
-                (1..=99).contains(&bid).then(|| NewLevel::bid(bid, size)),
-            ]
-        })
-        .flatten()
-        .collect()
+    build_levels(
+        fair,
+        adjusted_spread(spread_ticks, spread_delta, tick_size),
+        tick_size,
+        normal_levels,
+        size_per_level,
+        outer_level_sizes,
+    )
+    .into_iter()
+    .map(NewLevel::from)
+    .collect()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

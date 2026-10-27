@@ -30,14 +30,15 @@ use crate::duel_challenges_worker::{DuelFlavorRuntimePort, ProductionDuelFlavorR
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
+use crate::ids::{signed_id, unsigned_id};
 use crate::option_ext::{integer_option, string_option, user_option};
 use crate::profit_deductions::ProfitDeductionSource;
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
     InteractionActionRow, InteractionButton, InteractionButtonStyle, InteractionEmbed,
     InteractionHandler, InteractionHandlerError, InteractionMessageReceipt, InteractionOption,
-    InteractionRequest, InteractionResponder, InteractionResponse, InteractionValue,
-    RegistrationError, RegistrationProvider, RegistryBuilder,
+    InteractionRequest, InteractionResponder, InteractionResponse, RegistrationError,
+    RegistrationProvider, RegistryBuilder,
 };
 
 const COMPONENT_PREFIX: &str = "duel:";
@@ -1141,14 +1142,8 @@ const fn trial_label(trial: DuelTrial) -> &'static str {
 }
 
 fn leaf_command(options: &[InteractionOption]) -> Result<(String, &[InteractionOption]), String> {
-    options
-        .iter()
-        .find_map(|option| match &option.value {
-            InteractionValue::Subcommand(children) => {
-                Some((option.name.clone(), children.as_slice()))
-            }
-            _ => None,
-        })
+    crate::option_ext::subcommand_option(options)
+        .map(|(name, children)| (name.to_owned(), children))
         .ok_or_else(|| "/duel requires a subcommand".to_owned())
 }
 
@@ -1188,15 +1183,6 @@ fn unix_now() -> i64 {
             i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
         })
 }
-
-fn signed_id(id: u64, kind: &str) -> Result<i64, String> {
-    i64::try_from(id).map_err(|_| format!("Discord {kind} ID exceeds SQLite range"))
-}
-
-fn unsigned_id(id: i64, kind: &str) -> Result<u64, String> {
-    u64::try_from(id).map_err(|_| format!("SQLite {kind} ID is negative"))
-}
-
 #[cfg(all(test, feature = "runtime-test-draft"))]
 #[path = "duel_provider/tests.rs"]
 mod tests;

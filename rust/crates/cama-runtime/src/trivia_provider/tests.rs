@@ -900,17 +900,25 @@ fn pinned_catalog_constructs_the_full_production_provider() {
 
 /// `flow_config` with the low priority profit tax and bankruptcy debuff raised
 /// high enough that a three-JC gross reward produces non-zero truncated shares.
-fn taxed_flow_config(bankruptcy_penalty_rate_per_game: &str) -> ApplicationConfig {
-    taxed_flow_config_with_reward(bankruptcy_penalty_rate_per_game, "1")
+/// The vanity rate must match the rate the test's vanity service was built
+/// with, as production derives both from `VANITY_TAX_RATE`.
+fn taxed_flow_config(
+    bankruptcy_penalty_rate_per_game: &str,
+    vanity_tax_rate: &str,
+) -> ApplicationConfig {
+    taxed_flow_config_with_reward(bankruptcy_penalty_rate_per_game, "1", vanity_tax_rate)
 }
 
 fn taxed_flow_config_with_reward(
     bankruptcy_penalty_rate_per_game: &str,
     reward_per_question: &str,
+    vanity_tax_rate: &str,
 ) -> ApplicationConfig {
     let bankruptcy_penalty_rate_per_game = bankruptcy_penalty_rate_per_game.to_owned();
     let reward_per_question = reward_per_question.to_owned();
+    let vanity_tax_rate = vanity_tax_rate.to_owned();
     ApplicationConfig::from_lookup(|key| match key {
+        "VANITY_TAX_RATE" => Some(vanity_tax_rate.clone()),
         "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
         "ECONOMY_EVENTS_ENABLED" => Some("false".to_owned()),
         "TRIVIA_ANSWER_TIMEOUT_SECONDS" => Some("300".to_owned()),
@@ -970,7 +978,7 @@ fn active_low_priority_taxes_the_whole_trivia_reward() {
     let provider = taxed_flow_provider(
         &fixture,
         cache.path(),
-        &taxed_flow_config("0.05"),
+        &taxed_flow_config("0.05", "0.1"),
         fixture.vanity_tax(),
     );
 
@@ -1006,7 +1014,7 @@ fn trivia_withholding_applies_to_the_per_question_reward_without_a_streak_bonus(
     let provider = taxed_flow_provider(
         &fixture,
         cache.path(),
-        &taxed_flow_config_with_reward("0.15", "10"),
+        &taxed_flow_config_with_reward("0.15", "10", "0.1"),
         vanity_tax,
     );
 
@@ -1033,7 +1041,7 @@ fn low_priority_and_vanity_trivia_taxes_bill_the_same_gross_reward() {
     let provider = taxed_flow_provider(
         &fixture,
         cache.path(),
-        &taxed_flow_config("0.05"),
+        &taxed_flow_config("0.05", "0.5"),
         vanity_tax,
     );
 
@@ -1061,7 +1069,7 @@ fn combined_trivia_withholding_never_exceeds_the_gross_reward() {
     let provider = taxed_flow_provider(
         &fixture,
         cache.path(),
-        &taxed_flow_config("0.5"),
+        &taxed_flow_config("0.5", "0.5"),
         vanity_tax,
     );
 

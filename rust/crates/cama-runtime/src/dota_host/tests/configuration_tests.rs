@@ -160,7 +160,7 @@ async fn configuration_rechecks_live_launch_ownership_and_freshness() {
                 let mut pending = repo.pending_match(1, f.pending).unwrap().unwrap();
                 pending.state.radiant_team_ids.swap(0, 1);
                 pending.state.radiant_team_ids[0] = 42;
-                repo.update_pending_match(1, f.pending, &pending.state)
+                repo.replace_pending_match_for_tests(1, f.pending, &pending.state)
                     .unwrap();
             }
             _ => unreachable!(),
@@ -202,7 +202,7 @@ async fn configuration_admission_rejects_launch_cancel_manual_and_other_guilds()
                     .state
                     .extra
                     .insert("draft_setup_complete".into(), false.into());
-                repo.update_pending_match(1, f.pending, &pending.state)
+                repo.replace_pending_match_for_tests(1, f.pending, &pending.state)
                     .unwrap();
             }
             "other_guild" => {}

@@ -1,8 +1,7 @@
 //! Adult-pet eating policy and Discord-neutral command orchestration.
 //!
-//! Python remains the live SQLite, Discord, reminder, and randomness authority
-//! during the side-by-side migration. This module keeps every one of those
-//! boundaries behind a typed port while preserving the service validation,
+//! This module keeps SQLite, Discord, reminder, and randomness boundaries
+//! behind typed ports while preserving the service validation,
 //! inclusive rolls, confirmation copy, delivery, and death-announcement rules.
 
 use std::collections::BTreeMap;
@@ -10,6 +9,7 @@ use std::fmt::Display;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cama_db::profit_deductions::ProfitDeductions;
+use cama_domain::formatting::format_grouped;
 use cama_domain::pet::{
     PET_EAT_PENALTY_GAMES_MAX, PET_EAT_PENALTY_GAMES_MIN, PET_EAT_REWARD_MAX, PET_EAT_REWARD_MIN,
     Pet, PetStage, PetStatus,
@@ -540,28 +540,12 @@ pub fn build_eating_outcome_embed(outcome: &PetEatingOutcome) -> EatingEmbed {
         title: format!("🍖 {} was delicious", outcome.pet.name),
         description: format!(
             "You received **{}** JC{note}.\n\nBad karma adds **{}** game(s) to your sentence (**{} remaining**). Your future earnings are taxed until you win your way free.\n\nBalance: **{}** JC.{activation}",
-            grouped(outcome.reward - outcome.deductions.total()),
+            format_grouped(outcome.reward - outcome.deductions.total()),
             outcome.penalty_games_added,
             outcome.penalty_games_remaining,
-            grouped(outcome.new_balance)
+            format_grouped(outcome.new_balance)
         ),
         color: EatingEmbedColor::Dead,
-    }
-}
-
-fn grouped(amount: i64) -> String {
-    let digits = amount.unsigned_abs().to_string();
-    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, digit) in digits.chars().enumerate() {
-        if index != 0 && (digits.len() - index).is_multiple_of(3) {
-            grouped.push(',');
-        }
-        grouped.push(digit);
-    }
-    if amount < 0 {
-        format!("-{grouped}")
-    } else {
-        grouped
     }
 }
 

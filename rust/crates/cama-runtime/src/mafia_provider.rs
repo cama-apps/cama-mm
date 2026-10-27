@@ -16,6 +16,7 @@ use crate::first_game_pool_worker::FirstGamePoolGuildSource;
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
+use crate::ids::{signed_id, unsigned_id};
 use crate::profit_deductions::bankruptcy_penalty_policy;
 use crate::registration::{
     CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute, InteractionEmbed,
@@ -2650,12 +2651,6 @@ where
 fn to_string(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
-fn signed_id(id: u64, label: &str) -> Result<i64, InteractionHandlerError> {
-    i64::try_from(id).map_err(|_| format!("{} ID exceeds SQLite INTEGER", label).into())
-}
-fn unsigned_id(id: i64, label: &str) -> Result<u64, String> {
-    u64::try_from(id).map_err(|_| format!("{} ID is negative", label))
-}
 fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2714,12 +2709,12 @@ fn user_option(
 }
 fn mafia_options() -> Vec<CommandOptionSpec> {
     vec![
-        subcommand(
+        CommandOptionSpec::subcommand(
             "role",
             "Privately reveal your role in today's mafia game",
             vec![],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "act",
             "Submit your nightly mafia action",
             vec![required(
@@ -2728,7 +2723,7 @@ fn mafia_options() -> Vec<CommandOptionSpec> {
                 CommandOptionKind::User,
             )],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "vote",
             "Vote to lynch a player during the day phase",
             vec![required(
@@ -2737,7 +2732,7 @@ fn mafia_options() -> Vec<CommandOptionSpec> {
                 CommandOptionKind::User,
             )],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "bounty",
             "Stake 1 jopacoin on a suspect — pays out if they're lynched and were mafia",
             vec![required(
@@ -2746,33 +2741,33 @@ fn mafia_options() -> Vec<CommandOptionSpec> {
                 CommandOptionKind::User,
             )],
         ),
-        subcommand("join", "Reserve a seat in the next mafia game", vec![]),
-        subcommand(
+        CommandOptionSpec::subcommand("join", "Reserve a seat in the next mafia game", vec![]),
+        CommandOptionSpec::subcommand(
             "remind",
             "Ping players who still need to act this phase",
             vec![],
         ),
-        subcommand("status", "Show today's mafia game status", vec![]),
-        subcommand("history", "Your mafia game history", vec![]),
-        subcommand("leaderboard", "Mafia leaderboard for this guild", vec![]),
-        subcommand("info", "How to play Daily Mafia", vec![]),
-        subcommand(
+        CommandOptionSpec::subcommand("status", "Show today's mafia game status", vec![]),
+        CommandOptionSpec::subcommand("history", "Your mafia game history", vec![]),
+        CommandOptionSpec::subcommand("leaderboard", "Mafia leaderboard for this guild", vec![]),
+        CommandOptionSpec::subcommand("info", "How to play Daily Mafia", vec![]),
+        CommandOptionSpec::subcommand(
             "optout",
             "Stop required actions and cancel your next-game signup",
             vec![],
         ),
-        subcommand("optin", "Resume required actions in Mafia", vec![]),
-        group(
+        CommandOptionSpec::subcommand("optin", "Resume required actions in Mafia", vec![]),
+        CommandOptionSpec::subcommand_group(
             "admin",
             "Mafia admin controls",
             vec![
-                subcommand("start", "Force-start a new mafia game", vec![]),
-                subcommand(
+                CommandOptionSpec::subcommand("start", "Force-start a new mafia game", vec![]),
+                CommandOptionSpec::subcommand(
                     "stop",
                     "End the running game now with a standing tally",
                     vec![],
                 ),
-                subcommand(
+                CommandOptionSpec::subcommand(
                     "abort",
                     "Cancel the running game and refund entry fees",
                     vec![],
@@ -2786,12 +2781,6 @@ fn option(name: &str, description: &str, kind: CommandOptionKind) -> CommandOpti
 }
 fn required(name: &str, description: &str, kind: CommandOptionKind) -> CommandOptionSpec {
     option(name, description, kind).required(true)
-}
-fn subcommand(name: &str, description: &str, options: Vec<CommandOptionSpec>) -> CommandOptionSpec {
-    option(name, description, CommandOptionKind::Subcommand).options(options)
-}
-fn group(name: &str, description: &str, options: Vec<CommandOptionSpec>) -> CommandOptionSpec {
-    option(name, description, CommandOptionKind::SubcommandGroup).options(options)
 }
 
 fn phase_end(game: &MafiaGame) -> i64 {
@@ -3646,22 +3635,8 @@ fn reconstruct_resolution_summary(
     let winner = game.winner.unwrap_or(MafiaWinner::None);
     let winning_ids = players
         .iter()
-        .filter_map(|player| match winner {
-            MafiaWinner::Town
-                if matches!(
-                    player.role,
-                    MafiaRole::Townie
-                        | MafiaRole::Doctor
-                        | MafiaRole::Detective
-                        | MafiaRole::Vigilante
-                ) =>
-            {
-                Some(player.discord_id)
-            }
-            MafiaWinner::Mafia if player.role == MafiaRole::Mafia => Some(player.discord_id),
-            MafiaWinner::Jester if player.role == MafiaRole::Jester => Some(player.discord_id),
-            _ => None,
-        })
+        .filter(|player| is_winning_role(Some(winner), player.role))
+        .map(|player| player.discord_id)
         .collect::<Vec<_>>();
     let lynched_id = players
         .iter()
@@ -4025,22 +4000,8 @@ fn resolve_day(
     if let Some(winner) = winner {
         let winning_ids = players
             .iter()
-            .filter_map(|player| match winner {
-                MafiaWinner::Town
-                    if matches!(
-                        player.role,
-                        MafiaRole::Townie
-                            | MafiaRole::Doctor
-                            | MafiaRole::Detective
-                            | MafiaRole::Vigilante
-                    ) =>
-                {
-                    Some(player.discord_id)
-                }
-                MafiaWinner::Mafia if player.role == MafiaRole::Mafia => Some(player.discord_id),
-                MafiaWinner::Jester if player.role == MafiaRole::Jester => Some(player.discord_id),
-                _ => None,
-            })
+            .filter(|player| is_winning_role(Some(winner), player.role))
+            .map(|player| player.discord_id)
             .collect::<Vec<_>>();
         let mut rng = fastrand::Rng::with_seed(seed_for(&game, 0x004d_5650));
         let mvp_id = compute_mvp(MvpContext {
@@ -4231,22 +4192,8 @@ fn force_finalize(
     let pot_total = game.roster_size * entry_fee;
     let winning_ids = players
         .iter()
-        .filter_map(|player| match winner {
-            MafiaWinner::Town
-                if matches!(
-                    player.role,
-                    MafiaRole::Townie
-                        | MafiaRole::Doctor
-                        | MafiaRole::Detective
-                        | MafiaRole::Vigilante
-                ) =>
-            {
-                Some(player.discord_id)
-            }
-            MafiaWinner::Mafia if player.role == MafiaRole::Mafia => Some(player.discord_id),
-            MafiaWinner::Jester if player.role == MafiaRole::Jester => Some(player.discord_id),
-            _ => None,
-        })
+        .filter(|player| is_winning_role(Some(winner), player.role))
+        .map(|player| player.discord_id)
         .collect::<Vec<_>>();
     let mut rng = fastrand::Rng::with_seed(seed_for(&game, 0x004d_5650));
     let mvp_id = compute_mvp(MvpContext {

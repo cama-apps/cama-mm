@@ -1,7 +1,7 @@
 //! Python-compatible persistence for Camagotchi upbringing and evolution.
 //!
-//! Python remains the schema-migration authority during the side-by-side
-//! rewrite. This repository therefore opens only an existing database, never
+//! Schema creation and migration belong to the startup schema manager. This
+//! repository therefore opens only an existing database, never
 //! creates or migrates caller data, and uses `BEGIN IMMEDIATE` for the bounded
 //! score write and evolution claim. Activity recording deliberately performs a
 //! read-only eligibility preflight before trying to acquire SQLite's single

@@ -1,10 +1,8 @@
 //! Typed policy for the cross-player Dig event expansion.
 //!
-//! Python remains the live Discord runtime and catalog authority during the
-//! migration. This module mirrors the authored events exercised by the
-//! expansion tests, injects every random choice, and routes wallet/audit
-//! mutations through an atomic economy port. The SQLite implementation opens
-//! Python's existing schema and is supplied by `cama-db`.
+//! This module owns the authored events exercised by the expansion tests,
+//! injects every random choice, and routes wallet/audit mutations through an
+//! atomic economy port. The SQLite implementation is supplied by `cama-db`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;

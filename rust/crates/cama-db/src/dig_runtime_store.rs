@@ -185,37 +185,6 @@ impl DigRuntimeTunnel {
     }
 }
 
-/// One tunnel row projected for the Dig leaderboard read model.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DigTunnelLeaderboardRow {
-    pub discord_id: i64,
-    pub guild_id: i64,
-    pub tunnel_name: Option<String>,
-    pub depth: i64,
-    pub total_digs: i64,
-    pub total_jc_earned: i64,
-    pub prestige_level: i64,
-    pub best_run_score: i64,
-}
-
-/// One hall-of-fame row: (discord_id, tunnel_name, prestige_level, best_run_score).
-pub type DigHallOfFameEntryRow = (i64, Option<String>, i64, i64);
-
-/// One guild stats row: (discord_id, tunnel_name, depth, total_digs, total_jc_earned).
-pub type DigGuildTunnelStatRow = (i64, Option<String>, i64, i64, i64);
-
-/// One persisted artifact row projected for the collection read model.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DigArtifactCollectionRow {
-    pub id: i64,
-    pub discord_id: i64,
-    pub guild_id: i64,
-    pub artifact_id: String,
-    pub found_at: i64,
-    pub is_relic: bool,
-    pub equipped: bool,
-}
-
 // ---------------------------------------------------------------------------
 // players
 // ---------------------------------------------------------------------------
@@ -264,21 +233,6 @@ pub fn debit_player_balance(
                 updated_at=CURRENT_TIMESTAMP
          WHERE discord_id=?2 AND guild_id=?3",
         params![amount, discord_id, guild_id],
-    )
-}
-
-/// Wallet CAS keyed on the exact stored balance.
-pub fn update_player_balance_cas(
-    connection: &Connection,
-    new_balance: i64,
-    discord_id: i64,
-    guild_id: i64,
-    expected_balance: i64,
-) -> Result<usize, rusqlite::Error> {
-    connection.execute(
-        "UPDATE players SET jopacoin_balance=?1,updated_at=CURRENT_TIMESTAMP
-          WHERE discord_id=?2 AND guild_id=?3 AND jopacoin_balance=?4",
-        params![new_balance, discord_id, guild_id, expected_balance],
     )
 }
 
@@ -696,46 +650,6 @@ pub fn set_tunnel_depth_reset_cooldown(
 /// Strength, Smarts, Stamina, Survival, and the stat-point pool, in storage order.
 pub type TunnelStatAllocation = (i64, i64, i64, i64, i64);
 
-/// Toggle the torch auto-buy opt-in.
-pub fn set_auto_buy_torch(
-    connection: &Connection,
-    enabled: i64,
-    discord_id: i64,
-    guild_id: i64,
-) -> Result<usize, rusqlite::Error> {
-    connection.execute(
-        "UPDATE tunnels SET auto_buy_torch=?1 WHERE discord_id=?2 AND guild_id=?3",
-        params![enabled, discord_id, guild_id],
-    )
-}
-
-/// Toggle the hard-hat auto-buy opt-in.
-pub fn set_auto_buy_hard_hat(
-    connection: &Connection,
-    enabled: i64,
-    discord_id: i64,
-    guild_id: i64,
-) -> Result<usize, rusqlite::Error> {
-    connection.execute(
-        "UPDATE tunnels SET auto_buy_hard_hat=?1 WHERE discord_id=?2 AND guild_id=?3",
-        params![enabled, discord_id, guild_id],
-    )
-}
-
-/// Toggle both torch and hard-hat auto-buy opt-ins together.
-pub fn set_auto_buy_torch_and_hard_hat(
-    connection: &Connection,
-    enabled: i64,
-    discord_id: i64,
-    guild_id: i64,
-) -> Result<usize, rusqlite::Error> {
-    connection.execute(
-        "UPDATE tunnels SET auto_buy_torch=?1, auto_buy_hard_hat=?1
-         WHERE discord_id=?2 AND guild_id=?3",
-        params![enabled, discord_id, guild_id],
-    )
-}
-
 /// Depth-ordered top-ten tunnels for the runtime leaderboard rendering.
 pub fn top_tunnel_depth_rows(
     connection: &Connection,
@@ -767,90 +681,6 @@ pub fn hall_of_fame_depth_rows(
     statement
         .query_map([guild_id], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-        })?
-        .collect()
-}
-
-/// Prestige-then-depth ordered top-ten tunnels for the leaderboard service.
-pub fn leaderboard_tunnel_rows(
-    connection: &Connection,
-    guild_id: i64,
-) -> Result<Vec<DigTunnelLeaderboardRow>, rusqlite::Error> {
-    let mut statement = connection.prepare(
-        "SELECT discord_id,guild_id,tunnel_name,depth,total_digs,total_jc_earned,
-                prestige_level,best_run_score
-         FROM tunnels
-         WHERE guild_id=?1
-         ORDER BY prestige_level DESC, depth DESC, discord_id ASC
-         LIMIT 10",
-    )?;
-    statement
-        .query_map(params![guild_id], |row| {
-            Ok(DigTunnelLeaderboardRow {
-                discord_id: row.get(0)?,
-                guild_id: row.get(1)?,
-                tunnel_name: row.get(2)?,
-                depth: row.get(3)?,
-                total_digs: row.get(4)?,
-                total_jc_earned: row.get(5)?,
-                prestige_level: row.get(6)?,
-                best_run_score: row.get(7)?,
-            })
-        })?
-        .collect()
-}
-
-/// Positive best-run scores in descending score order.
-pub fn hall_of_fame_entry_rows(
-    connection: &Connection,
-    guild_id: i64,
-) -> Result<Vec<DigHallOfFameEntryRow>, rusqlite::Error> {
-    let mut statement = connection.prepare(
-        "SELECT discord_id,tunnel_name,prestige_level,best_run_score
-         FROM tunnels
-         WHERE guild_id=?1 AND best_run_score > 0
-         ORDER BY best_run_score DESC
-         LIMIT 10",
-    )?;
-    statement
-        .query_map(params![guild_id], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-        })?
-        .collect()
-}
-
-/// All tunnel owners in the exact top-tunnel ordering, for rank lookup.
-pub fn tunnel_rank_ids(
-    connection: &Connection,
-    guild_id: i64,
-) -> Result<Vec<i64>, rusqlite::Error> {
-    let mut statement = connection.prepare(
-        "SELECT discord_id FROM tunnels WHERE guild_id=?1
-         ORDER BY prestige_level DESC, depth DESC, discord_id ASC",
-    )?;
-    statement
-        .query_map(params![guild_id], |row| row.get::<_, i64>(0))?
-        .collect()
-}
-
-/// Per-tunnel totals for the guild stats aggregation, in SQLite row order.
-pub fn guild_tunnel_stat_rows(
-    connection: &Connection,
-    guild_id: i64,
-) -> Result<Vec<DigGuildTunnelStatRow>, rusqlite::Error> {
-    let mut statement = connection.prepare(
-        "SELECT discord_id,tunnel_name,depth,total_digs,total_jc_earned
-         FROM tunnels WHERE guild_id=?1",
-    )?;
-    statement
-        .query_map(params![guild_id], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-            ))
         })?
         .collect()
 }
@@ -1172,51 +1002,6 @@ pub fn sync_artifacts(
         }
     }
     Ok(())
-}
-
-/// Equipped relic ids and artifact identifiers for the info renderer.
-pub fn equipped_relic_rows(
-    connection: &Connection,
-    discord_id: i64,
-    guild_id: i64,
-) -> Result<Vec<(i64, String)>, rusqlite::Error> {
-    let mut statement = connection.prepare(
-        "SELECT id,artifact_id FROM dig_artifacts
-         WHERE discord_id=?1 AND guild_id=?2 AND is_relic=1 AND equipped=1
-         ORDER BY id",
-    )?;
-    statement
-        .query_map(params![discord_id, guild_id], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })?
-        .collect()
-}
-
-/// One player's full persisted artifact rows for the collection read model.
-pub fn artifact_collection_rows(
-    connection: &Connection,
-    discord_id: i64,
-    guild_id: i64,
-) -> Result<Vec<DigArtifactCollectionRow>, rusqlite::Error> {
-    let mut statement = connection.prepare(
-        "SELECT id,discord_id,guild_id,artifact_id,found_at,is_relic,equipped
-         FROM dig_artifacts
-         WHERE discord_id=?1 AND guild_id=?2
-         ORDER BY id",
-    )?;
-    statement
-        .query_map(params![discord_id, guild_id], |row| {
-            Ok(DigArtifactCollectionRow {
-                id: row.get(0)?,
-                discord_id: row.get(1)?,
-                guild_id: row.get(2)?,
-                artifact_id: row.get(3)?,
-                found_at: row.get(4)?,
-                is_relic: row.get::<_, i64>(5)? != 0,
-                equipped: row.get::<_, i64>(6)? != 0,
-            })
-        })?
-        .collect()
 }
 
 // ---------------------------------------------------------------------------

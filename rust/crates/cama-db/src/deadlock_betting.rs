@@ -209,7 +209,9 @@ impl DeadlockBettingRepository {
             .query_map(params![guild_id, discord_id, active_only], wager_row)?
             .collect::<std::result::Result<_, _>>()?)
     }
-    pub fn seed_balance(&self, guild_id: i64) -> Result<i64> {
+    /// Test fixture: read the deadlock betting seed balance.
+    #[cfg(test)]
+    pub(crate) fn seed_balance(&self, guild_id: i64) -> Result<i64> {
         Ok(self
             .connection()?
             .query_row(
@@ -550,10 +552,17 @@ impl DeadlockBettingRepository {
                 |r| r.get(0),
             )?;
             let policy: UserPolicy = serde_json::from_str(&policy_json)?;
-            let bankruptcy = (profit as f64 * policy.bankruptcy_rate) as i64;
-            let vanity = ((profit as f64 * policy.vanity_rate) as i64).min(profit - bankruptcy);
-            let low_priority = ((profit as f64 * policy.low_priority_rate) as i64)
-                .min(profit - bankruptcy - vanity);
+            // Rates were frozen at placement; the shared split keeps the
+            // shares' order, caps, and truncation identical to Dota bets.
+            let deductions = cama_db_core::profit_deductions::split_profit_deductions(
+                profit,
+                policy.bankruptcy_rate,
+                policy.vanity_rate,
+                policy.low_priority_rate,
+            );
+            let bankruptcy = deductions.bankruptcy_penalty;
+            let vanity = deductions.vanity_tax;
+            let low_priority = deductions.low_priority_tax;
             if *gross > 0 {
                 wallet_delta(
                     &tx,
@@ -1427,6 +1436,24 @@ mod tests {
         assert_eq!(&repo.settle_recorded(1, 1, 40).unwrap(), result);
         assert!(repo.recover(50).unwrap().is_empty());
         assert!(repo.refund_aborted(1, 1, 50).is_err());
+    }
+    #[test]
+    fn frozen_tax_rate_obeys_the_shared_profit_tax_cap() {
+        let (_db, repo) = fixture();
+        let configured = DeadlockMarketTerms {
+            vanity_tax_rate: 0.8,
+            vanity_taxable_ids: BTreeSet::from([9]),
+            ..terms()
+        };
+        repo.open_market(1, 1, &configured, 0).unwrap();
+        repo.place_bet(&bet(9, 1, 20, "win")).unwrap();
+        repo.place_bet(&bet(10, 2, 80, "lose")).unwrap();
+        record(&repo, 1);
+        let result = repo.settle_recorded(1, 1, 20).unwrap();
+        // Profit 80; the shared helper caps the vanity share at half of it.
+        assert_eq!(result.gross_payouts.get(&9), Some(&100));
+        assert_eq!(result.deductions.get(&9), Some(&40));
+        assert_eq!(balance(&repo.connection().unwrap(), 1, 9).unwrap(), 140);
     }
     #[test]
     fn auto_preferences_are_opt_in_investments_follow_blinds_and_short_own_team_is_skipped() {

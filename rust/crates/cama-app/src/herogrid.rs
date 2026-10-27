@@ -2,10 +2,8 @@
 //!
 //! The renderer intentionally has no image dependency.  It rasterizes an RGBA
 //! image and emits a standards-compliant PNG with stored DEFLATE blocks, CRC-32
-//! chunk checksums, and an Adler-32 zlib checksum.  Python/Pillow and the Python
-//! hero catalog remain the pixel-reference authority during the parity phase;
-//! this implementation pins the tested layout and policy without starting a
-//! Discord client.
+//! chunk checksums, and an Adler-32 zlib checksum.  Tests pin the layout and
+//! policy without starting a Discord client.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -14,7 +12,7 @@ use std::io::Cursor;
 use cama_db::herogrid_repository::{
     EnrichedPlayer, HeroGridDataPort, HeroGridPlayer, HeroGridStat,
 };
-use cama_domain::discord_content::readable_player_name;
+use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
 
 use crate::embeds::LobbyKind;
 use crate::hero_lookup::hero_short_name;
@@ -886,7 +884,9 @@ pub struct HeroGridCommandRequest<'a> {
     pub min_games: i64,
     pub limit: Option<i64>,
     pub sources: &'a HeroGridSources,
-    pub player_name_overrides: Option<&'a BTreeMap<i64, String>>,
+    /// Readable Discord display names keyed by player id; misses render as
+    /// `Unknown player`, never a stored registration name.
+    pub player_name_overrides: &'a BTreeMap<i64, String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -993,18 +993,6 @@ impl<P: HeroGridDataPort> HeroGridCommandService<P> {
             ));
         }
 
-        // Supplied Discord names are authoritative. Stored names are only a
-        // fallback for callers without a Discord directory.
-        let stored_names = if request.player_name_overrides.is_some() {
-            BTreeMap::new()
-        } else {
-            self.port
-                .player_names(&player_ids, request.guild_id)
-                .map_err(HeroGridCommandError::Data)?
-                .into_iter()
-                .map(|player| (player.discord_id, player.name))
-                .collect::<BTreeMap<_, _>>()
-        };
         let mut seen = BTreeSet::new();
         let player_names = player_ids
             .iter()
@@ -1014,10 +1002,9 @@ impl<P: HeroGridDataPort> HeroGridCommandService<P> {
                 discord_id: player_id,
                 name: request
                     .player_name_overrides
-                    .unwrap_or(&stored_names)
                     .get(&player_id)
                     .and_then(|name| readable_player_name(name))
-                    .unwrap_or("Unknown player")
+                    .unwrap_or(UNKNOWN_PLAYER)
                     .to_owned(),
             })
             .collect::<Vec<_>>();
@@ -1057,7 +1044,6 @@ mod tests {
     struct MemoryPort {
         stats: Vec<HeroGridStat>,
         enriched: Vec<EnrichedPlayer>,
-        names: Vec<HeroGridPlayer>,
         stats_calls: Cell<usize>,
     }
 
@@ -1083,27 +1069,6 @@ mod tests {
             _guild_id: Option<i64>,
         ) -> Result<Vec<EnrichedPlayer>, Self::Error> {
             Ok(self.enriched.clone())
-        }
-
-        fn player_names(
-            &self,
-            discord_ids: &[i64],
-            _guild_id: Option<i64>,
-        ) -> Result<Vec<HeroGridPlayer>, Self::Error> {
-            let by_id = self
-                .names
-                .iter()
-                .map(|player| (player.discord_id, player.name.clone()))
-                .collect::<BTreeMap<_, _>>();
-            Ok(discord_ids
-                .iter()
-                .filter_map(|discord_id| {
-                    by_id.get(discord_id).map(|name| HeroGridPlayer {
-                        discord_id: *discord_id,
-                        name: name.clone(),
-                    })
-                })
-                .collect())
         }
     }
 
@@ -1446,7 +1411,6 @@ mod tests {
         };
         let service = HeroGridCommandService::new(MemoryPort {
             stats: vec![stat(100, 1, 1, 1), stat(200, 2, 1, 0)],
-            names: vec![player(100, "Alice"), player(200, "Bob")],
             ..MemoryPort::default()
         });
         let name_overrides = BTreeMap::from([(100, "Server Alice".to_owned())]);
@@ -1459,7 +1423,7 @@ mod tests {
                 min_games: 1,
                 limit: None,
                 sources: &sources,
-                player_name_overrides: Some(&name_overrides),
+                player_name_overrides: &name_overrides,
             })
             .expect("full command pipeline");
         let HeroGridCommandOutcome::Attachment(attachment) = outcome else {
@@ -1675,7 +1639,6 @@ mod tests {
         };
         let service = HeroGridCommandService::new(MemoryPort {
             stats: vec![stat(7, 1, 3, 2)],
-            names: vec![player(7, "P7"), player(8, "P8")],
             ..MemoryPort::default()
         });
         let outcome = service
@@ -1687,7 +1650,7 @@ mod tests {
                 min_games: 1,
                 limit: None,
                 sources: &sources,
-                player_name_overrides: None,
+                player_name_overrides: &BTreeMap::new(),
             })
             .expect("execute current-lobby command");
         let HeroGridCommandOutcome::Attachment(attachment) = outcome else {
@@ -1771,7 +1734,7 @@ mod tests {
                 min_games: 2,
                 limit: None,
                 sources: &sources,
-                player_name_overrides: None,
+                player_name_overrides: &BTreeMap::new(),
             })
             .expect("ambiguity is a command result");
         assert_eq!(
@@ -1880,7 +1843,7 @@ mod tests {
                 min_games: 1,
                 limit: None,
                 sources: &sources,
-                player_name_overrides: None,
+                player_name_overrides: &BTreeMap::new(),
             })
             .expect("signed-id pipeline");
         let HeroGridCommandOutcome::Attachment(attachment) = outcome else {

@@ -1,7 +1,7 @@
 //! SQLite adapter for the profile Economy balance-history chart.
 //!
 //! The reconstruction policy and renderer live in `cama-app`; this module only
-//! translates the existing Python-owned SQLite tables into that typed port.
+//! translates the existing SQLite tables into that typed port.
 //! Reads are deliberately defensive because a legacy database can predate one
 //! of the optional economy tables. A missing source is neutral, matching the
 //! Python chart builder's best-effort behavior.

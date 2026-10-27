@@ -26,9 +26,7 @@ use cama_db::dig_event_runtime::{
     DigEventActorKey, DigEventActorSnapshot, DigEventQuestSnapshot, DigEventRuntimeRepository,
 };
 use cama_db::dig_guild_modifiers::DigGuildModifierRepository;
-use cama_db::dig_inventory_repository::{
-    AutoBuyRequest, AutoBuySelection, BuyInsuranceOutcome, DigInventoryRepository, SetTrapOutcome,
-};
+use cama_db::dig_inventory_repository::{AutoBuyRequest, AutoBuySelection, DigInventoryRepository};
 use cama_db::dig_runtime_store;
 use cama_db::dig_weather::{DigWeatherEntry, DigWeatherRepository, weather_by_id};
 use cama_db::loan_repository::{LedgerContext, LoanRepository};
@@ -43,7 +41,6 @@ use cama_domain::dig_cave_in::{
 };
 use cama_domain::dig_economy::scale_positive_dig_jc;
 use cama_domain::dig_gear::{AMULET_TIERS, ARMOR_TIERS, BOOTS_TIERS, WEAPON_TIERS, unique_gear};
-use cama_domain::dig_stats::{MinerStats, miner_stat_effects};
 use cama_domain::game_date::game_date_for_timestamp;
 use cama_domain::mana::{ManaEffects, weather_combo_modifiers};
 use cama_domain::pet::{PetDigWork, PetDigWorkClaim};
@@ -55,8 +52,8 @@ use thiserror::Error;
 
 use crate::dig_loot::{
     CanonicalEventResolution, CaveInChanceRequest, DigLootModifiers, DigLootService, InventoryItem,
-    LootActionResult, LootEntropy, LootRepository, RepositoryError, SeededLootEntropy,
-    TunnelLootState, consumable, is_boss_prep_item, is_dig_consumable,
+    LootEntropy, LootRepository, RepositoryError, SeededLootEntropy, TunnelLootState, consumable,
+    is_boss_prep_item, is_dig_consumable,
 };
 use crate::dig_prestige4_content::{
     ArtifactRollPlan, Prestige4Entropy, artifact_rate_modifier, roll_artifact_stage,
@@ -74,8 +71,8 @@ use crate::dig_service::{
     DIG_REWARD_BASIS_POINTS, DIG_YIELD_MULTIPLIER_SCALE, DigOutcomeInput, DigProfitPolicy,
     MinerAllocation, TunnelState, apply_boss_gate, apply_dig_outcome, apply_first_dig,
     boss_rest_pending_from_json, clear_boss_rest_json, cooldown_remaining,
-    defeated_boundaries_from_json, layer_at, next_undefeated_boss, paid_dig_cost,
-    scale_dig_minigame_jc, scale_dig_yield_once,
+    defeated_boundaries_from_json, effective_dig_cooldown, layer_at, next_undefeated_boss,
+    paid_dig_cost, scale_dig_minigame_jc, scale_dig_yield_once,
 };
 use crate::dig_tunnels::{
     aggregate_prestige_perk_effects, ascension_effects, mutation_effects, mutations_from_json,
@@ -608,11 +605,11 @@ pub trait DigRuntimeStore: Send + Sync {
         Ok(Vec::new())
     }
 
-    /// Claim a relic-backed Slow Drip payout at the command boundary. Python
-    /// deliberately records the gross daily-cap claim before the separate
-    /// wallet credit, so a credit failure cannot restore idle time.  The
-    /// pending Dig itself may subsequently be rejected (cooldown, cap, or
-    /// boss), but the already-claimed payout remains durable.
+    /// Claim a relic-backed Slow Drip payout at the command boundary. The
+    /// gross daily-cap claim and the wallet credit commit together, so a
+    /// failed credit consumes no idle time.  The pending Dig itself may
+    /// subsequently be rejected (cooldown, cap, or boss), but the
+    /// already-claimed payout remains durable.
     fn claim_slow_drip(
         &self,
         _snapshot: &DigRuntimeSnapshot,
@@ -741,7 +738,7 @@ use effects::{
     multiplier_millionths, proportional_mana_yield_tax, weather_code, weather_effects,
 };
 pub use effects::{DigWeatherEffects, apply_cave_in_gear_ticks, catastrophic_cave_in_depth};
-pub use store::{AtomicTunnelBalanceUpdate, SqliteDigRuntimeStore};
+pub use store::SqliteDigRuntimeStore;
 
 /// A deterministic stage implementing the existing loot repository contract.
 /// It never writes SQLite; the outer application service owns the final CAS.
@@ -1249,7 +1246,7 @@ impl DigRuntimeService<SqliteDigRuntimeStore> {
     ) -> Result<Option<DigRuntimeFlexData>, DigRuntimeStoreError> {
         let snapshot = self.snapshot(discord_id, guild_id)?;
         Ok(snapshot.tunnel.map(|tunnel| {
-            let mut progress = crate::dig_service::BOSS_BOUNDARIES
+            let mut progress = crate::dig_bosses::BOSS_BOUNDARIES
                 .into_iter()
                 .map(|boundary| (boundary.to_string(), "active".to_owned()))
                 .collect::<BTreeMap<_, _>>();
@@ -1339,36 +1336,19 @@ impl DigRuntimeService<SqliteDigRuntimeStore> {
     ) -> Result<(), DigRuntimeStoreError> {
         let mut connection = self.store.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        dig_runtime_store::set_ledger_context(
+            &transaction,
+            "dig",
+            discord_id,
+            "dig_wrong_channel",
+            "dig_wrong_channel",
+            "wrong channel penalty",
+            "{}",
+        )?;
         dig_runtime_store::debit_player_balance(&transaction, amount, discord_id, guild_id)?;
+        dig_runtime_store::clear_ledger_context(&transaction)?;
         transaction.commit()?;
         Ok(())
-    }
-
-    /// Set the tunnel trap through the application boundary.  The migrated
-    /// repository owns the exact free-use/cost/CAS policy; Discord only
-    /// renders the typed result.
-    pub fn set_trap(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-        game_date: &str,
-    ) -> Result<SetTrapOutcome, DigRuntimeStoreError> {
-        DigInventoryRepository::new(&self.store.path)
-            .set_trap_atomic(discord_id, Some(guild_id), game_date)
-            .map_err(|error| DigRuntimeStoreError::Inventory(error.to_string()))
-    }
-
-    /// Purchase cave-in insurance through the same typed application seam as
-    /// every other Dig money mutation.
-    pub fn buy_insurance(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-        now: i64,
-    ) -> Result<BuyInsuranceOutcome, DigRuntimeStoreError> {
-        DigInventoryRepository::new(&self.store.path)
-            .buy_insurance_atomic(discord_id, Some(guild_id), now)
-            .map_err(|error| DigRuntimeStoreError::Inventory(error.to_string()))
     }
 
     /// Ensure and return today's authored weather rows for presentation.  A
@@ -1438,36 +1418,6 @@ impl DigRuntimeService<SqliteDigRuntimeStore> {
         } else {
             DigAdminMutationOutcome::MissingTunnel
         })
-    }
-
-    pub fn autobuy(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-        item: &str,
-        enabled: bool,
-    ) -> Result<(), DigRuntimeStoreError> {
-        let connection = self.store.connection()?;
-        let value = i64::from(enabled);
-        let changed = match item {
-            "torch" => {
-                dig_runtime_store::set_auto_buy_torch(&connection, value, discord_id, guild_id)?
-            }
-            "hard_hat" => {
-                dig_runtime_store::set_auto_buy_hard_hat(&connection, value, discord_id, guild_id)?
-            }
-            "both" => dig_runtime_store::set_auto_buy_torch_and_hard_hat(
-                &connection,
-                value,
-                discord_id,
-                guild_id,
-            )?,
-            _ => return Err(DigRuntimeStoreError::StateConflict),
-        };
-        if changed == 0 {
-            return Err(DigRuntimeStoreError::MissingTunnel);
-        }
-        Ok(())
     }
 }
 
@@ -1724,9 +1674,10 @@ where
             });
         }
 
-        // Python claims Slow Drip after the pending-route gate but before
+        // Slow Drip is claimed after the pending-route gate but before
         // prestige/boss/cooldown admission.  Its gross cap and wallet credit
-        // are already durable by the time any of those later gates return.
+        // are already durable by the time any of those later gates return;
+        // a failed claim commits neither and never blocks the Dig.
         let slow_drip_claim =
             match self
                 .store
@@ -1845,30 +1796,13 @@ where
             ((relic_paid_cost as f64 * mana_paid_multiplier.max(0.0)) as i64).max(1);
         let (curse_fx, _curse_remaining) =
             active_curse_effects(tunnel.temp_curses.as_deref()).unwrap_or_default();
-        let restless_bonus = mutation_fx
-            .get("cooldown_bonus_seconds")
-            .and_then(|effect| effect.number())
-            .unwrap_or(0.0)
-            .max(0.0) as i64;
-        let before_stamina = if injury_slows_cooldown(tunnel.injury_state.as_deref()) {
-            6 * 3_600
-        } else {
-            3_600_i64.saturating_add(restless_bonus)
-        };
-        let stat_fx = miner_stat_effects(
-            MinerStats::new(0, 0, tunnel.stat_stamina.max(0), 0)
-                .expect("normalized persisted stamina and survival are non-negative"),
+        let cooldown_seconds = effective_dig_cooldown(
+            tunnel.stat_stamina,
+            tunnel.mutations.as_deref(),
+            tunnel.injury_state.as_deref(),
+            tunnel.temp_curses.as_deref(),
+            mana_effects.dig_cooldown_reduction_seconds,
         );
-        let after_stamina = (before_stamina as f64 * stat_fx.cooldown_multiplier) as i64;
-        let cooldown_seconds = (after_stamina.max(1) as f64
-            * (1.0
-                + curse_fx
-                    .cooldown_penalty
-                    .clamp(0.0, crate::dig_event_threats::COOLDOWN_CURSE_CAP)))
-            as i64;
-        let cooldown_seconds = cooldown_seconds
-            .saturating_sub(mana_effects.dig_cooldown_reduction_seconds.max(0))
-            .max(0);
         let cooldown = cooldown_remaining(tunnel.last_dig_at, now, cooldown_seconds);
         // A paid flag only charges while it is actually bypassing an active
         // cooldown.  Python treats a paid click on an already-ready Dig as a
@@ -1910,7 +1844,9 @@ where
             if tunnel.auto_buy_hard_hat {
                 selections.push(AutoBuySelection {
                     item_type: "hard_hat",
-                    price: 8,
+                    price: consumable("hard_hat")
+                        .expect("hard_hat is a shop consumable")
+                        .cost,
                 });
             }
             let should_buy_torch = current
@@ -1920,7 +1856,9 @@ where
             if tunnel.auto_buy_torch && should_buy_torch {
                 selections.push(AutoBuySelection {
                     item_type: "torch",
-                    price: 6,
+                    price: consumable("torch")
+                        .expect("torch is a shop consumable")
+                        .cost,
                 });
             }
             // A queued hook is consumed the same dig for 5 charges that only
@@ -3532,47 +3470,6 @@ where
         })
     }
 
-    /// Buy a consumable and commit its balance/inventory mutation atomically.
-    pub fn buy_item(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-        item_type: &str,
-        now: i64,
-    ) -> Result<DigRuntimeActionResult, DigRuntimeStoreError> {
-        self.stage_loot_action(discord_id, guild_id, now, "dig_buy", |loot| {
-            loot.buy_item(discord_id, guild_id, item_type)
-        })
-    }
-
-    /// Queue an owned consumable for the next real Dig atomically.
-    pub fn queue_item(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-        item_id: i64,
-        now: i64,
-    ) -> Result<DigRuntimeActionResult, DigRuntimeStoreError> {
-        self.stage_loot_action(discord_id, guild_id, now, "dig_queue_item", |loot| {
-            loot.queue_item(discord_id, guild_id, item_id)
-        })
-    }
-
-    /// Use one unqueued consumable through the same transaction boundary as
-    /// `/dig use`; the action only reserves the item and the next real dig
-    /// burns it together with the tunnel outcome.
-    pub fn use_item(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-        item_type: &str,
-        now: i64,
-    ) -> Result<DigRuntimeActionResult, DigRuntimeStoreError> {
-        self.stage_loot_action(discord_id, guild_id, now, "dig_use_item", |loot| {
-            loot.use_item(discord_id, guild_id, item_type)
-        })
-    }
-
     pub fn relic_autocomplete(
         &self,
         discord_id: i64,
@@ -3591,88 +3488,6 @@ where
             .into_iter()
             .map(|choice| choice.value)
             .collect())
-    }
-
-    fn stage_loot_action(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-        now: i64,
-        action_type: &str,
-        action: impl FnOnce(
-            &mut DigLootService<DigRuntimeLootRepository, SeededLootEntropy>,
-        ) -> LootActionResult,
-    ) -> Result<DigRuntimeActionResult, DigRuntimeStoreError> {
-        let snapshot = self.store.snapshot(discord_id, guild_id)?;
-        if !snapshot.registered || snapshot.tunnel.is_none() {
-            return Ok(DigRuntimeActionResult::error(
-                &snapshot,
-                "You don't have a tunnel.",
-            ));
-        }
-        let mut loot = DigLootService::new(
-            DigRuntimeLootRepository::new(snapshot.clone()),
-            SeededLootEntropy::new(seed_for(
-                DigRuntimeRequest {
-                    discord_id,
-                    guild_id,
-                    now,
-                    paid: false,
-                    forced_event: false,
-                },
-                self.config.entropy_secret,
-            )),
-        );
-        let result = action(&mut loot);
-        if !result.success {
-            return Ok(DigRuntimeActionResult::from_loot(&snapshot, result));
-        }
-        let next = loot.repository().snapshot().clone();
-        let depth = snapshot.tunnel.as_ref().map_or(0, |tunnel| tunnel.depth);
-        let receipt = self.store.commit(DigRuntimeCommit {
-            expected: DigRuntimeVersion::from(&snapshot),
-            next,
-            delivery_draft: None,
-            consumed_item_ids: Vec::new(),
-            pet_work_claim: None,
-            consume_overgrowth: false,
-            depth_before: depth,
-            depth_after: depth,
-            jc_delta: -result.cost,
-            vanity_tax: 0,
-            low_priority_tax: 0,
-            balance_cost: 0,
-            action_type: action_type.to_owned(),
-            detail: serde_json::json!({"item": result.item, "item_id": result.item_id}).to_string(),
-            now,
-        })?;
-        Ok(DigRuntimeActionResult {
-            success: true,
-            error: None,
-            item: result.item.map(str::to_owned),
-            item_id: result.item_id,
-            route_id: None,
-            cost: result.cost,
-            queued: result.queued,
-            balance_after: receipt.balance_after,
-            action_id: Some(receipt.action_id),
-        })
-    }
-}
-
-impl DigRuntimeActionResult {
-    fn from_loot(snapshot: &DigRuntimeSnapshot, result: LootActionResult) -> Self {
-        Self {
-            success: result.success,
-            error: result.error,
-            item: result.item.map(str::to_owned),
-            item_id: result.item_id,
-            route_id: None,
-            cost: result.cost,
-            queued: result.queued,
-            balance_after: snapshot.balance,
-            action_id: None,
-        }
     }
 }
 
@@ -3755,16 +3570,6 @@ fn injury_reduces_advance(raw: Option<&str>) -> bool {
         .ok()
         .and_then(|value| value.get("type").and_then(Value::as_str).map(str::to_owned))
         .is_some_and(|kind| kind == "reduced_advance")
-}
-
-fn injury_slows_cooldown(raw: Option<&str>) -> bool {
-    let Some(raw) = raw else {
-        return false;
-    };
-    serde_json::from_str::<Value>(raw)
-        .ok()
-        .and_then(|value| value.get("type").and_then(Value::as_str).map(str::to_owned))
-        .is_some_and(|kind| kind == "slower_cooldown")
 }
 
 /// Consume one admitted Dig from the persisted injury state.  This is staged

@@ -565,36 +565,6 @@ impl ShopRuntimeRepository {
         })
     }
 
-    /// Preserve Python's legacy atomic cooldown-claim repository contract.
-    /// The live command uses [`Self::settle_double_or_nothing`], but callers
-    /// and cross-language parity tests still rely on this exact check-and-set
-    /// operation being available independently.
-    pub fn try_claim_double_or_nothing(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-        now: i64,
-        cooldown_seconds: i64,
-    ) -> Result<bool, ShopRuntimeRepositoryError> {
-        if cooldown_seconds < 0 {
-            return Err(ShopRuntimeRepositoryError::NegativeCooldown);
-        }
-        let connection = self.connection()?;
-        let changed = connection.execute(
-            "UPDATE players
-             SET last_double_or_nothing=?1,updated_at=CURRENT_TIMESTAMP
-             WHERE discord_id=?2 AND guild_id=?3
-               AND (last_double_or_nothing IS NULL OR last_double_or_nothing<?4)",
-            params![
-                now,
-                discord_id,
-                guild_id,
-                now.saturating_sub(cooldown_seconds)
-            ],
-        )?;
-        Ok(changed > 0)
-    }
-
     pub fn recent_loss_aggregates(
         &self,
         discord_id: i64,

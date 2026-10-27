@@ -328,7 +328,7 @@ async fn migrated_sqlite_resolution_wires_bookie_mvp_overflow_and_taxes() {
     );
     assert_eq!(
         bankruptcy_ledger.6.as_deref(),
-        Some("{\"winner\":\"TOWN\",\"entry_fee\":8}")
+        Some("{\"profit\":42,\"bankruptcy_penalty\":21,\"vanity_tax\":10,\"low_priority_tax\":0}")
     );
     let vanity_ledger = ledger
         .iter()
@@ -339,7 +339,7 @@ async fn migrated_sqlite_resolution_wires_bookie_mvp_overflow_and_taxes() {
     assert_eq!(vanity_ledger.5.as_deref(), Some("vanity tax on JC profit"));
     assert_eq!(
         vanity_ledger.6.as_deref(),
-        Some("{\"winner\":\"TOWN\",\"entry_fee\":8}")
+        Some("{\"profit\":42,\"bankruptcy_penalty\":21,\"vanity_tax\":10,\"low_priority_tax\":0}")
     );
     assert_eq!(
         fixture
@@ -479,7 +479,7 @@ async fn migrated_sqlite_resolution_taxes_active_low_priority_profit() {
     );
     assert_eq!(
         low_priority_ledger.6.as_deref(),
-        Some("{\"winner\":\"TOWN\",\"entry_fee\":8}")
+        Some("{\"profit\":42,\"bankruptcy_penalty\":0,\"vanity_tax\":0,\"low_priority_tax\":4}")
     );
 }
 

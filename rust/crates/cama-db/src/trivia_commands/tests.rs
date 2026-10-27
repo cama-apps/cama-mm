@@ -249,9 +249,17 @@ fn test_credit_trivia_reward_preserves_trigger_context_and_lowest_balance() {
     assert_eq!(
         fixture
             .repository
-            .credit_trivia_reward(PLAYER, Some(GUILD), 2, 4)
-            .expect("credit settled answer"),
-        5
+            .settle_trivia_reward(
+                PLAYER,
+                Some(GUILD),
+                2,
+                4,
+                &ProfitDeductionPolicy::none(),
+                0.0
+            )
+            .expect("credit settled answer")
+            .balance,
+        Some(5)
     );
     let connection = fixture.connection();
     let lowest: i64 = connection
@@ -299,6 +307,106 @@ fn test_credit_trivia_reward_preserves_trigger_context_and_lowest_balance() {
         })
         .expect("count cleared contexts");
     assert_eq!(contexts, 0);
+}
+
+#[test]
+fn test_settle_trivia_reward_withholds_and_tithes_in_one_transaction() {
+    let fixture = Fixture::new();
+    fixture.seed_default();
+    fixture
+        .connection()
+        .execute_batch(&format!(
+            "CREATE TABLE bankruptcy_state (
+                 discord_id INTEGER NOT NULL,
+                 guild_id INTEGER NOT NULL,
+                 penalty_games_remaining INTEGER,
+                 PRIMARY KEY (discord_id, guild_id)
+             );
+             INSERT INTO bankruptcy_state VALUES ({PLAYER}, {GUILD}, 2);
+             CREATE TABLE nonprofit_fund (
+                 guild_id INTEGER PRIMARY KEY,
+                 total_collected INTEGER,
+                 updated_at TIMESTAMP
+             );"
+        ))
+        .expect("deduction and reserve tables");
+    let vanity = std::collections::BTreeSet::from([PLAYER]);
+    let policy = ProfitDeductionPolicy {
+        bankruptcy: Some(cama_domain::bankruptcy::BankruptcyPenaltyPolicy { rate_per_game: 0.1 }),
+        vanity_tax_rate: 0.1,
+        vanity_taxable_ids: &vanity,
+        ..ProfitDeductionPolicy::none()
+    };
+    // Gross 20: bankruptcy withholds 20% (4) and vanity 10% (2), leaving 14;
+    // a 25% tithe of that is 3, so the player keeps 11.
+    let settlement = fixture
+        .repository
+        .settle_trivia_reward(PLAYER, Some(GUILD), 20, 7, &policy, 0.25)
+        .expect("settle reward");
+    assert_eq!(
+        settlement,
+        TriviaRewardSettlement {
+            withheld: 6,
+            tithe: 3,
+            reward: 11,
+            balance: Some(14),
+        }
+    );
+    assert_eq!(fixture.balance(PLAYER, GUILD), 14);
+    let reserve: i64 = fixture
+        .connection()
+        .query_row(
+            "SELECT total_collected FROM nonprofit_fund WHERE guild_id = ?1",
+            [GUILD],
+            |row| row.get(0),
+        )
+        .expect("reserve credited");
+    assert_eq!(reserve, 3);
+}
+
+#[test]
+fn test_settle_trivia_reward_rolls_back_when_the_tithe_cannot_be_booked() {
+    let fixture = Fixture::new();
+    fixture.seed_default();
+    // No nonprofit_fund table: the tithe write fails, so the reward credit
+    // in the same transaction must not survive either.
+    assert!(
+        fixture
+            .repository
+            .settle_trivia_reward(
+                PLAYER,
+                Some(GUILD),
+                20,
+                7,
+                &ProfitDeductionPolicy::none(),
+                0.25
+            )
+            .is_err()
+    );
+    assert_eq!(fixture.balance(PLAYER, GUILD), 3);
+    let audited: i64 = fixture
+        .connection()
+        .query_row("SELECT COUNT(*) FROM trivia_reward_audit", [], |row| {
+            row.get(0)
+        })
+        .expect("count audit rows");
+    assert_eq!(audited, 0);
+}
+
+#[test]
+fn test_settle_trivia_reward_for_missing_player_books_nothing() {
+    let fixture = Fixture::new();
+    assert!(matches!(
+        fixture.repository.settle_trivia_reward(
+            PLAYER,
+            Some(GUILD),
+            20,
+            7,
+            &ProfitDeductionPolicy::none(),
+            0.0
+        ),
+        Err(TriviaCommandsRepositoryError::MissingPlayer { .. })
+    ));
 }
 
 #[test]

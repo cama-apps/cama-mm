@@ -1,20 +1,18 @@
-//! Discord- and database-independent orchestration for the core `/dig` loop.
+//! Discord- and database-independent policy for the core `/dig` loop.
 //!
-//! The Python service is still the only live implementation.  This module
-//! mirrors its deterministic service policy behind typed inputs so the Rust
-//! migration can exercise payout ordering, cooldowns, progression gates,
-//! PvP, boss encounters, and atomic outcome application without starting a
-//! second Discord client or database writer.
+//! The live Dig runtime, reminders, and social actions share these typed
+//! helpers for payout ordering, cooldowns, layers, and boss progression gates.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
-use cama_domain::dig_cave_in::{CAVE_IN_BLOCK_LOSS_RANGES, cave_in_band};
 use cama_domain::dig_economy::scale_positive_dig_jc;
 use cama_domain::dig_stats::{MinerStats, miner_stat_effects};
 
+use crate::dig_bosses::{BOSS_BOUNDARIES, PINNACLE_DEPTH};
+use crate::dig_event_threats::COOLDOWN_CURSE_CAP;
+use crate::dig_tunnels::{mutation_effects, mutations_from_json};
+
 pub const FREE_DIG_COOLDOWN_SECONDS: i64 = 3_600;
-pub const CHEER_COOLDOWN_SECONDS: i64 = 45;
-pub const CHEER_DURATION_SECONDS: i64 = 3_600;
 pub const PAID_DIG_COSTS_PER_DAY: [i64; 8] = [3, 5, 10, 20, 40, 60, 80, 100];
 pub const FIRST_DIG_ADVANCE_RANGE: (i64, i64) = (3, 7);
 pub const FIRST_DIG_JC_RANGE: (i64, i64) = (1, 5);
@@ -24,17 +22,7 @@ pub const BASE_DIG_JC_PAYOUT_CAP: i64 = 20;
 pub const DIG_STREAK_JC_PAYOUT_CAP: i64 = 10;
 pub const DIG_STARTING_STAT_POINTS: i64 = 5;
 pub const MINER_RESPEC_COST: i64 = 50;
-pub const SABOTAGE_BASE_COST: i64 = 5;
-pub const SABOTAGE_COST_DIVISOR: i64 = 5;
-pub const SABOTAGE_DAMAGE_RANGE: (i64, i64) = (3, 8);
 pub const SABOTAGE_COOLDOWN_SECONDS: i64 = 43_200;
-pub const INSURANCE_BASE_COST: i64 = 5;
-pub const INSURANCE_COST_DEPTH_DIVISOR: i64 = 25;
-pub const INSURANCE_DURATION_SECONDS: i64 = 86_400;
-pub const BOSS_WAGER_CAP: i64 = 1_000;
-pub const BOSS_LOSS_REPAIR_BILL: i64 = 8;
-pub const PINNACLE_DEPTH: i64 = 350;
-pub const BOSS_BOUNDARIES: [i64; 7] = [25, 50, 75, 100, 150, 200, 275];
 
 /// Fixed-point denominator for composed Dig yield multipliers.
 ///
@@ -282,36 +270,6 @@ impl PickaxeTier {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Tip {
-    pub min_depth: i64,
-    pub max_depth: Option<i64>,
-    pub text: &'static str,
-}
-
-pub const DIG_TIPS: [Tip; 4] = [
-    Tip {
-        min_depth: 0,
-        max_depth: Some(10),
-        text: "Your first paid dig each day is the cheapest.",
-    },
-    Tip {
-        min_depth: 0,
-        max_depth: Some(25),
-        text: "Helping another miner consumes your free-dig cooldown.",
-    },
-    Tip {
-        min_depth: 25,
-        max_depth: Some(100),
-        text: "Scout bosses with a lantern before choosing a risk tier.",
-    },
-    Tip {
-        min_depth: 50,
-        max_depth: None,
-        text: "Low luminosity raises both danger and rewards.",
-    },
-];
-
 #[must_use]
 pub fn layer_at(depth: i64) -> Layer {
     LAYERS
@@ -320,41 +278,6 @@ pub fn layer_at(depth: i64) -> Layer {
         .find(|layer| depth >= layer.min_depth)
         .copied()
         .unwrap_or(LAYERS[0])
-}
-
-#[must_use]
-pub fn eligible_tips(depth: i64) -> Vec<&'static str> {
-    DIG_TIPS
-        .iter()
-        .filter(|tip| {
-            depth >= tip.min_depth && tip.max_depth.is_none_or(|maximum| depth <= maximum)
-        })
-        .map(|tip| tip.text)
-        .collect()
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PredictionContractSteal {
-    pub prediction_id: i64,
-    pub side: &'static str,
-    pub contracts: i64,
-}
-
-#[must_use]
-pub fn append_prediction_contract_steal(
-    description: &str,
-    sabotage_hit: bool,
-    steal: Option<&PredictionContractSteal>,
-) -> String {
-    let Some(steal) = steal.filter(|_| sabotage_hit) else {
-        return description.to_owned();
-    };
-    format!(
-        "{description}\nStole **{} {}** prediction contracts from market **#{}**.",
-        steal.contracts,
-        steal.side.to_ascii_uppercase(),
-        steal.prediction_id
-    )
 }
 
 #[must_use]
@@ -373,75 +296,76 @@ pub fn paid_dig_cost(paid_count: usize, stamina: i64, ascension_markup: f64) -> 
     ((marked_up as f64 * effects.paid_cost_multiplier) as i64).max(1)
 }
 
+/// The free-Dig cooldown in seconds.
+///
+/// This is the single definition shared by the live Dig gate, Dig reminders,
+/// and helper previews, so a reminder can never fire before the gate opens.
+/// A slower-cooldown injury replaces the base (and any Restless bonus),
+/// stamina scales the base, an active curse's capped cooldown penalty
+/// multiplies the result, and mana reduction subtracts last. Malformed legacy
+/// JSON is deliberately fail-soft because this runs on every Dig request.
 #[must_use]
-pub fn cooldown_duration(
-    stamina: i64,
-    restless: bool,
-    slower_cooldown_injury: bool,
+pub fn effective_dig_cooldown(
+    stat_stamina: i64,
+    mutations_json: Option<&str>,
+    injury_state_json: Option<&str>,
+    temp_curse_json: Option<&str>,
     mana_reduction_seconds: i64,
 ) -> i64 {
-    let before_stamina = if slower_cooldown_injury {
+    let restless_bonus = mutation_effects(&mutations_from_json(mutations_json))
+        .get("cooldown_bonus_seconds")
+        .and_then(|effect| effect.number())
+        .unwrap_or(0.0)
+        .max(0.0) as i64;
+    let before_stamina = if json_type_is(injury_state_json, "slower_cooldown") {
         6 * 3_600
     } else {
-        FREE_DIG_COOLDOWN_SECONDS
-            + if restless {
-                FREE_DIG_COOLDOWN_SECONDS
-            } else {
-                0
-            }
+        FREE_DIG_COOLDOWN_SECONDS.saturating_add(restless_bonus)
     };
     let effects = miner_stat_effects(
-        MinerStats::new(0, 0, stamina.max(0), 0)
+        MinerStats::new(0, 0, stat_stamina.max(0), 0)
             .expect("normalized stamina and survival are non-negative"),
     );
-    ((before_stamina as f64 * effects.cooldown_multiplier) as i64)
-        .max(1)
-        .saturating_sub(mana_reduction_seconds.max(0))
-        .max(1)
+    let after_stamina = (before_stamina as f64 * effects.cooldown_multiplier) as i64;
+    let cursed = (after_stamina.max(1) as f64
+        * (1.0 + active_curse_cooldown_penalty(temp_curse_json))) as i64;
+    cursed.saturating_sub(mana_reduction_seconds.max(0)).max(0)
 }
 
-/// Parse the one injury variant that overrides Dig's free cooldown.
-/// Malformed legacy JSON is deliberately fail-soft because this read runs on
-/// every Dig/status request.
-#[must_use]
-pub fn has_slower_cooldown_injury(injury_state_json: Option<&str>) -> bool {
-    injury_state_json
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-        .and_then(|value| {
-            value
-                .get("type")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
+/// The capped cooldown penalty of a still-active curse; `0.0` when absent,
+/// expired, or malformed. Reads the canonical `effect` key and the legacy
+/// `effects` spelling.
+fn active_curse_cooldown_penalty(raw: Option<&str>) -> f64 {
+    let Some(value) = raw.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+    else {
+        return 0.0;
+    };
+    if value
+        .get("digs_remaining")
+        .and_then(serde_json::Value::as_i64)
+        .is_none_or(|remaining| remaining <= 0)
+    {
+        return 0.0;
+    }
+    value
+        .get("effect")
+        .or_else(|| value.get("effects"))
+        .and_then(|effect| effect.get("cooldown_penalty"))
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(0.0)
+        .clamp(0.0, COOLDOWN_CURSE_CAP)
+}
+
+fn json_type_is(raw: Option<&str>, expected: &str) -> bool {
+    raw.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .is_some_and(|value| {
+            value.get("type").and_then(serde_json::Value::as_str) == Some(expected)
         })
-        .is_some_and(|kind| kind == "slower_cooldown")
 }
 
 #[must_use]
 pub fn cooldown_remaining(last_dig_at: Option<i64>, now: i64, duration: i64) -> i64 {
     last_dig_at.map_or(0, |last| (duration - (now - last)).max(0))
-}
-
-#[must_use]
-pub fn bulk_ready_times(
-    requested_ids: &[i64],
-    tunnel_last_digs: &BTreeMap<i64, Option<i64>>,
-    now: i64,
-) -> BTreeMap<i64, Option<i64>> {
-    requested_ids
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .map(|discord_id| {
-            let ready_at = tunnel_last_digs
-                .get(&discord_id)
-                .copied()
-                .flatten()
-                .map(|last| last + FREE_DIG_COOLDOWN_SECONDS)
-                .filter(|ready| *ready > now);
-            (discord_id, ready_at)
-        })
-        .collect()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -465,61 +389,6 @@ impl Default for MinerAllocation {
     }
 }
 
-impl MinerAllocation {
-    #[must_use]
-    pub const fn spent_points(self) -> i64 {
-        self.strength + self.smarts + self.stamina + self.survival
-    }
-
-    #[must_use]
-    pub const fn unspent_points(self) -> i64 {
-        self.stat_points - self.spent_points()
-    }
-
-    pub fn allocate(
-        &mut self,
-        strength: i64,
-        smarts: i64,
-        stamina: i64,
-        survival: i64,
-    ) -> Result<(), String> {
-        if strength < 0 || smarts < 0 || stamina < 0 || survival < 0 {
-            return Err("S stats cannot be negative.".to_owned());
-        }
-        let spend = strength + smarts + stamina + survival;
-        if spend == 0 {
-            return Err("Spend at least one point.".to_owned());
-        }
-        if spend > self.unspent_points() {
-            return Err(format!(
-                "That spends {spend} points, but you only have {} unspent.",
-                self.unspent_points()
-            ));
-        }
-        self.strength += strength;
-        self.smarts += smarts;
-        self.stamina += stamina;
-        self.survival += survival;
-        Ok(())
-    }
-
-    pub fn respec(&mut self, balance: &mut i64) -> Result<i64, String> {
-        let returned = self.spent_points();
-        if returned == 0 {
-            return Err("You don't have any allocated S points to reset.".to_owned());
-        }
-        if *balance < MINER_RESPEC_COST {
-            return Err("You need 50 JC to respec your S points.".to_owned());
-        }
-        *balance -= MINER_RESPEC_COST;
-        self.strength = 0;
-        self.smarts = 0;
-        self.stamina = 0;
-        self.survival = 0;
-        Ok(returned)
-    }
-}
-
 #[must_use]
 pub fn sanitize_backstory(value: &str, max_chars: usize) -> String {
     value
@@ -537,43 +406,6 @@ pub enum AutoBuyStatus {
     Purchased,
     QueuedFromInventory,
     SkippedInsufficientBalance,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AutoBuyResult {
-    pub item: &'static str,
-    pub cost: i64,
-    pub status: AutoBuyStatus,
-}
-
-pub fn auto_buy_item(
-    inventory_count: &mut i64,
-    balance: &mut i64,
-    item: &'static str,
-    cost: i64,
-) -> AutoBuyResult {
-    if *inventory_count > 0 {
-        *inventory_count -= 1;
-        return AutoBuyResult {
-            item,
-            cost: 0,
-            status: AutoBuyStatus::QueuedFromInventory,
-        };
-    }
-    if *balance >= cost {
-        *balance -= cost;
-        AutoBuyResult {
-            item,
-            cost,
-            status: AutoBuyStatus::Purchased,
-        }
-    } else {
-        AutoBuyResult {
-            item,
-            cost,
-            status: AutoBuyStatus::SkippedInsufficientBalance,
-        }
-    }
 }
 
 #[must_use]
@@ -604,6 +436,7 @@ pub fn next_undefeated_boss(defeated: &BTreeSet<i64>) -> Option<i64> {
     BOSS_BOUNDARIES
         .into_iter()
         .chain([PINNACLE_DEPTH])
+        .map(i64::from)
         .find(|boundary| !defeated.contains(boundary))
 }
 
@@ -1083,333 +916,6 @@ pub fn apply_first_dig(
     }
 }
 
-pub fn atomic_state_update<T, E>(
-    state: &mut TunnelState,
-    operation: impl FnOnce(&mut TunnelState) -> Result<T, E>,
-) -> Result<T, E> {
-    let mut staged = state.clone();
-    let result = operation(&mut staged)?;
-    *state = staged;
-    Ok(result)
-}
-
-#[must_use]
-pub fn cave_in_loss(depth: i64, rolled_loss: i64, reinforcement_active: bool) -> i64 {
-    let (minimum, maximum) = CAVE_IN_BLOCK_LOSS_RANGES[cave_in_band(depth)];
-    let loss = rolled_loss.clamp(i64::from(minimum), i64::from(maximum));
-    if reinforcement_active {
-        loss.min(8)
-    } else {
-        loss
-    }
-}
-
-#[must_use]
-pub fn cave_in_medical_bill(depth: i64) -> i64 {
-    (depth / 10).max(1)
-}
-
-#[must_use]
-pub fn milestone_bonus(old_max_depth: i64, new_depth: i64) -> i64 {
-    MILESTONES
-        .iter()
-        .filter(|(depth, _)| old_max_depth < *depth && new_depth >= *depth)
-        .map(|(_, bonus)| *bonus)
-        .sum()
-}
-
-#[must_use]
-pub fn prestige_layer_multiplier(prestige: i64) -> f64 {
-    match prestige {
-        i64::MIN..=0 => 1.0,
-        1 => 1.18,
-        2 => 1.15,
-        3 => 1.13,
-        4 => 1.08,
-        _ => 1.01,
-    }
-}
-
-#[must_use]
-pub fn help_advance(depth: i64, rolled_advance: i64, defeated: &BTreeSet<i64>) -> AdvanceResult {
-    apply_boss_gate(depth, rolled_advance, defeated)
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SabotageInput {
-    pub actor_id: i64,
-    pub target_id: i64,
-    pub target_depth: i64,
-    pub actor_balance: i64,
-    pub rolled_damage: i64,
-    pub hit: bool,
-    pub trapped: bool,
-    pub insured: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SabotageOutcome {
-    pub cost: i64,
-    pub damage: i64,
-    pub attacker_block_reward: i64,
-    pub actor_balance_after: i64,
-    pub target_depth_after: i64,
-    pub victim_credit: i64,
-    pub trapped: bool,
-    pub insurance_applied: bool,
-}
-
-pub fn resolve_sabotage(input: SabotageInput) -> Result<SabotageOutcome, &'static str> {
-    if input.actor_id == input.target_id {
-        return Err("You can't sabotage yourself.");
-    }
-    let cost = SABOTAGE_BASE_COST.max(input.target_depth / SABOTAGE_COST_DIVISOR);
-    if input.actor_balance < cost {
-        return Err("Insufficient balance for sabotage.");
-    }
-    if input.trapped {
-        return Ok(SabotageOutcome {
-            cost,
-            damage: 0,
-            attacker_block_reward: 0,
-            actor_balance_after: input.actor_balance - cost - cost.min(10),
-            target_depth_after: input.target_depth,
-            victim_credit: cost,
-            trapped: true,
-            insurance_applied: false,
-        });
-    }
-    if !input.hit {
-        return Ok(SabotageOutcome {
-            cost,
-            damage: 0,
-            attacker_block_reward: 0,
-            actor_balance_after: input.actor_balance - cost,
-            target_depth_after: input.target_depth,
-            victim_credit: 0,
-            trapped: false,
-            insurance_applied: false,
-        });
-    }
-    let rolled = input
-        .rolled_damage
-        .clamp(SABOTAGE_DAMAGE_RANGE.0, SABOTAGE_DAMAGE_RANGE.1);
-    let damage = if input.insured {
-        (rolled / 2).max(1)
-    } else {
-        rolled
-    };
-    let attacker_block_reward = match input.target_depth {
-        ..100 => 3,
-        100..250 => 5,
-        _ => 7,
-    };
-    Ok(SabotageOutcome {
-        cost,
-        damage,
-        attacker_block_reward,
-        actor_balance_after: input.actor_balance - cost,
-        target_depth_after: (input.target_depth - damage).max(0),
-        victim_credit: 0,
-        trapped: false,
-        insurance_applied: input.insured,
-    })
-}
-
-/// Total victim credit for a trap-blocked sabotage after the daily economy
-/// event has adjusted the authored tip. The sabotage cost is transferred
-/// separately from the newly generated, centrally scaled tip.
-#[must_use]
-pub fn blocked_sabotage_victim_credit(cost: i64, adjusted_tip_gross: i64) -> i64 {
-    cost.max(0) + scale_positive_dig_jc(adjusted_tip_gross.max(0))
-}
-
-#[must_use]
-pub fn insurance_cost(depth: i64) -> i64 {
-    INSURANCE_BASE_COST + depth.max(0) / INSURANCE_COST_DEPTH_DIVISOR
-}
-
-#[must_use]
-pub const fn insurance_active(insured_until: i64, now: i64) -> bool {
-    insured_until > now
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PredictionPosition {
-    pub contracts: i64,
-    pub cost_basis: i64,
-}
-
-pub fn steal_prediction_contracts(
-    victim: &mut PredictionPosition,
-    attacker: &mut PredictionPosition,
-    requested: i64,
-) -> i64 {
-    let stolen = requested.max(0).min(victim.contracts);
-    if stolen == 0 || victim.contracts == 0 {
-        return 0;
-    }
-    let basis = victim.cost_basis * stolen / victim.contracts;
-    victim.contracts -= stolen;
-    victim.cost_basis -= basis;
-    attacker.contracts += stolen;
-    attacker.cost_basis += basis;
-    stolen
-}
-
-#[must_use]
-pub fn boss_base_reward(boundary: i64, prestige_level: i64) -> i64 {
-    let base = match boundary {
-        25 => 15,
-        50 => 20,
-        75 => 25,
-        100 => 30,
-        150 => 40,
-        200 => 50,
-        275 => 65,
-        _ => 15,
-    };
-    let multiplier = 1.0 + prestige_level.max(0) as f64 * 0.125;
-    (base as f64 * multiplier) as i64
-}
-
-pub fn validate_boss_wager(
-    wager: i64,
-    balance: i64,
-    final_phase: bool,
-) -> Result<(), &'static str> {
-    if wager > BOSS_WAGER_CAP {
-        return Err("Boss wagers cannot exceed 1,000 JC.");
-    }
-    if wager > 0 && !final_phase {
-        return Err("Boss wagers are only accepted in the final phase.");
-    }
-    if wager > balance {
-        return Err("Insufficient balance for that boss wager.");
-    }
-    Ok(())
-}
-
-/// Debit for a lost regular boss phase. Mandatory no-wager phases are free;
-/// choosing a zero wager in a wager-eligible phase incurs the repair bill.
-#[must_use]
-pub const fn boss_loss_debit(wager: i64, forced_no_wager_phase: bool) -> i64 {
-    if wager > 0 {
-        wager
-    } else if forced_no_wager_phase {
-        0
-    } else {
-        BOSS_LOSS_REPAIR_BILL
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct BossResolution {
-    pub won: bool,
-    pub balance_after: i64,
-    pub depth_after: i64,
-    pub payout: i64,
-    pub bankruptcy_penalty: i64,
-    pub vanity_tax: i64,
-    pub low_priority_tax: i64,
-    pub knockback: i64,
-}
-
-#[must_use]
-pub fn resolve_boss(
-    depth: i64,
-    balance: i64,
-    wager: i64,
-    won: bool,
-    base_reward: i64,
-    wager_profit: i64,
-    knockback_roll: i64,
-) -> BossResolution {
-    resolve_boss_with_policy(
-        depth,
-        balance,
-        wager,
-        won,
-        base_reward,
-        wager_profit,
-        knockback_roll,
-        DigProfitPolicy::default(),
-    )
-}
-
-#[must_use]
-#[allow(clippy::too_many_arguments)]
-pub fn resolve_boss_with_policy(
-    depth: i64,
-    balance: i64,
-    wager: i64,
-    won: bool,
-    base_reward: i64,
-    wager_profit: i64,
-    knockback_roll: i64,
-    profit_policy: DigProfitPolicy,
-) -> BossResolution {
-    if won {
-        let gross_payout = scale_positive_dig_jc(base_reward) + wager_profit.max(0);
-        let profit = apply_jc_profit_policies(gross_payout, profit_policy);
-        BossResolution {
-            won: true,
-            balance_after: balance + profit.net,
-            depth_after: depth + 2,
-            payout: profit.net,
-            bankruptcy_penalty: profit.bankruptcy_penalty,
-            vanity_tax: profit.vanity_tax,
-            low_priority_tax: profit.low_priority_tax,
-            knockback: 0,
-        }
-    } else {
-        let knockback = knockback_roll.clamp(11, 20);
-        BossResolution {
-            won: false,
-            balance_after: balance - wager.max(0),
-            depth_after: (depth - knockback).max(0),
-            payout: 0,
-            bankruptcy_penalty: 0,
-            vanity_tax: 0,
-            low_priority_tax: 0,
-            knockback,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct StreakOutcome {
-    pub days: i64,
-    pub charm_used: bool,
-}
-
-#[must_use]
-pub fn resolve_streak(
-    existing_days: i64,
-    last_day: Option<i64>,
-    today: i64,
-    has_charm: bool,
-) -> StreakOutcome {
-    match last_day {
-        Some(last) if last == today => StreakOutcome {
-            days: existing_days,
-            charm_used: false,
-        },
-        Some(last) if last == today - 1 => StreakOutcome {
-            days: existing_days + 1,
-            charm_used: false,
-        },
-        Some(last) if last == today - 2 && existing_days > 0 && has_charm => StreakOutcome {
-            days: existing_days + 1,
-            charm_used: true,
-        },
-        _ => StreakOutcome {
-            days: 1,
-            charm_used: false,
-        },
-    }
-}
-
 #[must_use]
 pub fn streak_bonus(days: i64) -> i64 {
     STREAKS
@@ -1436,98 +942,6 @@ pub fn luminosity_level(luminosity: i64) -> LuminosityLevel {
         26..=75 => LuminosityLevel::Dim,
         1..=25 => LuminosityLevel::Dark,
         _ => LuminosityLevel::PitchBlack,
-    }
-}
-
-#[must_use]
-pub fn luminosity_cave_in_bonus(luminosity: i64) -> f64 {
-    match luminosity_level(luminosity) {
-        LuminosityLevel::Bright => 0.0,
-        LuminosityLevel::Dim => 0.08,
-        LuminosityLevel::Dark => 0.20,
-        LuminosityLevel::PitchBlack => 0.35,
-    }
-}
-
-#[must_use]
-pub fn event_chance(base: f64, luminosity: i64) -> f64 {
-    let multiplier = match luminosity_level(luminosity) {
-        LuminosityLevel::Bright => 1.0,
-        LuminosityLevel::Dim => 1.5,
-        LuminosityLevel::Dark => 2.5,
-        LuminosityLevel::PitchBlack => 3.0,
-    };
-    (base * multiplier).min(0.75)
-}
-
-#[must_use]
-pub fn risky_success_chance(authored: f64, luminosity: i64) -> f64 {
-    let penalty = match luminosity_level(luminosity) {
-        LuminosityLevel::Bright => 0.0,
-        LuminosityLevel::Dim => 0.05,
-        LuminosityLevel::Dark => 0.15,
-        LuminosityLevel::PitchBlack => 0.25,
-    };
-    (authored - penalty).max(0.05)
-}
-
-#[must_use]
-pub fn resolved_event_choice(requested: &'static str, luminosity: i64) -> &'static str {
-    if luminosity <= 0 && requested == "safe" {
-        "risky"
-    } else {
-        requested
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Cheer {
-    pub cheerer_id: i64,
-    pub created_at: i64,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct CheerBook {
-    cheers: Vec<Cheer>,
-    last_cheer_by_user: BTreeMap<i64, i64>,
-}
-
-impl CheerBook {
-    pub fn cheer(&mut self, cheerer_id: i64, target_id: i64, now: i64) -> Result<(), &'static str> {
-        if cheerer_id == target_id {
-            return Err("You cannot cheer for yourself.");
-        }
-        if self
-            .last_cheer_by_user
-            .get(&cheerer_id)
-            .is_some_and(|last| now - *last < CHEER_COOLDOWN_SECONDS)
-        {
-            return Err("Cheer is on cooldown.");
-        }
-        self.cheers
-            .retain(|cheer| now - cheer.created_at <= CHEER_DURATION_SECONDS);
-        if self.cheers.len() >= 3 {
-            return Err("The target already has the maximum cheer boost.");
-        }
-        self.cheers.push(Cheer {
-            cheerer_id,
-            created_at: now,
-        });
-        self.last_cheer_by_user.insert(cheerer_id, now);
-        Ok(())
-    }
-
-    #[must_use]
-    pub fn active_count(&self, now: i64) -> usize {
-        self.cheers
-            .iter()
-            .filter(|cheer| now - cheer.created_at <= CHEER_DURATION_SECONDS)
-            .count()
-    }
-
-    #[must_use]
-    pub fn hit_bonus(&self, now: i64) -> f64 {
-        self.active_count(now) as f64 * 0.05
     }
 }
 

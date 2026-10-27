@@ -35,6 +35,7 @@ use cama_db::dota_bet_seed_repository::{
     BettingMode as SeedBettingMode, BettingTeam, DotaBetSeedRepository, FirstGameLobby,
 };
 use cama_db::match_runtime::{PendingMatchRecord, PendingMatchRepository, PendingMatchState};
+use cama_domain::economy_scaling::{rate_basis_points, rate_percentage_points};
 use cama_domain::formatting::JOPACOIN_EMOTE;
 use cama_domain::player::Player;
 use serde_json::{Value, json};
@@ -50,7 +51,7 @@ use crate::discord_transport::{
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
-use crate::ids::signed_id;
+use crate::ids::{signed_id, unsigned_id};
 use crate::lobby_provider::MatchLobbyPort;
 use crate::match_provider::MatchRegistrationProvider;
 use crate::registration::{
@@ -4234,8 +4235,8 @@ impl DraftHandler {
                 BlindBetPolicy {
                     is_bomb_pot,
                     normal_threshold: self.config.auto_blind_threshold,
-                    normal_percentage: percentage_points(self.config.auto_blind_percentage),
-                    bomb_percentage: percentage_points(self.config.bomb_pot_blind_percentage),
+                    normal_percentage: rate_percentage_points(self.config.auto_blind_percentage),
+                    bomb_percentage: rate_percentage_points(self.config.bomb_pot_blind_percentage),
                     bomb_ante: self.config.bomb_pot_ante,
                     max_debt: self.config.max_debt,
                 },
@@ -4423,12 +4424,8 @@ impl DraftHandler {
                 enabled: self.config.auto_spectator_bet_enabled,
                 total_count: self.config.auto_spectator_bet_count,
                 top_count: self.config.auto_spectator_bet_top_count,
-                base_basis_points: percentage_basis_points(
-                    self.config.auto_spectator_bet_percentage,
-                ),
-                top_basis_points: percentage_basis_points(
-                    self.config.auto_spectator_bet_top_percentage,
-                ),
+                base_basis_points: rate_basis_points(self.config.auto_spectator_bet_percentage),
+                top_basis_points: rate_basis_points(self.config.auto_spectator_bet_top_percentage),
             },
         );
         let requests = plan
@@ -4962,7 +4959,7 @@ struct ParsedComponent {
 
 fn draft_options() -> Vec<CommandOptionSpec> {
     vec![
-        subcommand(
+        CommandOptionSpec::subcommand(
             "start",
             "Start an Immortal Draft with captain-based player selection",
             vec![
@@ -4989,31 +4986,27 @@ fn draft_options() -> Vec<CommandOptionSpec> {
                 ),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "resume",
             "[Admin] Retry saved Draft match finalization",
             Vec::new(),
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "restart",
             "Restart the current Immortal Draft (preserves lobby)",
             Vec::new(),
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "sampleinprogress",
             "[Admin] Show sample draft UI mid-draft for testing",
             Vec::new(),
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "samplecomplete",
             "[Admin] Show sample draft complete UI for testing",
             Vec::new(),
         ),
     ]
-}
-
-fn subcommand(name: &str, description: &str, options: Vec<CommandOptionSpec>) -> CommandOptionSpec {
-    CommandOptionSpec::new(name, description, CommandOptionKind::Subcommand).options(options)
 }
 
 fn choices(mut option: CommandOptionSpec, values: &[(&str, &str)]) -> CommandOptionSpec {
@@ -5028,14 +5021,8 @@ fn choices(mut option: CommandOptionSpec, values: &[(&str, &str)]) -> CommandOpt
 }
 
 fn leaf_command(options: &[InteractionOption]) -> Result<(&str, &[InteractionOption]), String> {
-    let option = options
-        .iter()
-        .find(|option| matches!(option.value, InteractionValue::Subcommand(_)))
-        .ok_or_else(|| "/draft requires a subcommand".to_owned())?;
-    let InteractionValue::Subcommand(children) = &option.value else {
-        unreachable!()
-    };
-    Ok((&option.name, children.as_slice()))
+    crate::option_ext::subcommand_option(options)
+        .ok_or_else(|| "/draft requires a subcommand".to_owned())
 }
 
 fn optional_lobby_kind(options: &[InteractionOption]) -> Result<Option<AppLobbyKind>, String> {
@@ -5865,26 +5852,8 @@ fn title_case(value: &str) -> String {
     })
 }
 
-fn percentage_points(value: f64) -> i64 {
-    if value <= 0.0 {
-        0
-    } else if value < 1.0 {
-        (value * 100.0).round() as i64
-    } else {
-        value.round() as i64
-    }
-}
-
 fn f64_bits(value: f64) -> String {
     format!("{:016x}", value.to_bits())
-}
-
-fn percentage_basis_points(value: f64) -> i64 {
-    if !value.is_finite() || value <= 0.0 {
-        0
-    } else {
-        (value * 10_000.0).round() as i64
-    }
 }
 
 fn betting_team_name(team: BettingTeam) -> &'static str {
@@ -5978,7 +5947,7 @@ fn to_i64(id: u64) -> Result<i64, String> {
 }
 
 fn to_u64(id: i64) -> Result<u64, String> {
-    u64::try_from(id).map_err(|_| format!("SQLite ID {id} is negative"))
+    unsigned_id(id, "Discord")
 }
 
 fn lock_state<'a>(state: &'a Arc<Mutex<DraftState>>) -> MutexGuard<'a, DraftState> {

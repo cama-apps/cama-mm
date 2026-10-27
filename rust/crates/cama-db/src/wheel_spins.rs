@@ -1,4 +1,4 @@
-//! Semantic Wheel outcome history over the existing Python-owned table.
+//! Semantic Wheel outcome history over the existing table.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;

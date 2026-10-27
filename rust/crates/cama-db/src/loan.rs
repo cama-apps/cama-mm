@@ -1,7 +1,7 @@
 //! Python-compatible loan and nonprofit-fund persistence.
 //!
-//! Python remains the production runtime and the only schema-migration
-//! authority during the side-by-side rewrite. This repository only opens an
+//! Schema creation and migration belong to the startup schema manager. This
+//! repository only opens an
 //! existing SQLite database through [`crate::open_runtime_connection`]; no
 //! production path creates, alters, or migrates schema. Mutating operations
 //! that span balances, loan state, the nonprofit reserve, or trigger-generated
@@ -10,7 +10,6 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{
     Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter,
@@ -61,7 +60,7 @@ pub struct LoanStatePatch {
     pub outstanding_fee: Option<i64>,
 }
 
-/// Context consumed by Python-owned economy-ledger triggers.
+/// Context consumed by the economy-ledger triggers.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LedgerContext {
     pub source: Option<String>,
@@ -168,8 +167,6 @@ pub enum LoanRepositoryError {
     AmountOverflow,
     #[error("idempotent nonprofit credits require source, related type, and related id")]
     MissingIdempotencyContext,
-    #[error("system clock is before the Unix epoch")]
-    ClockBeforeUnixEpoch,
     #[error("loan SQLite operation failed: {0}")]
     Sqlite(#[from] rusqlite::Error),
 }
@@ -587,63 +584,6 @@ impl LoanRepository {
         Ok(updated)
     }
 
-    /// Atomically reset the guild's active disbursement proposal and return
-    /// its reserved funds. A retry observes no active proposal and is a no-op,
-    /// so the reserve cannot be credited twice.
-    pub fn reset_and_return_fund_atomic(
-        &self,
-        guild_id: Option<i64>,
-        fund_amount_to_return: i64,
-    ) -> Result<bool, LoanRepositoryError> {
-        let guild_id = Self::normalize_guild_id(guild_id);
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let proposal_id = transaction
-            .query_row(
-                "SELECT proposal_id FROM disburse_proposals
-                 WHERE guild_id = ?1 AND status = 'active'",
-                [guild_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?;
-        let Some(proposal_id) = proposal_id else {
-            transaction.commit()?;
-            return Ok(false);
-        };
-
-        let changed = transaction.execute(
-            "UPDATE disburse_proposals SET status = 'reset'
-             WHERE guild_id = ?1 AND proposal_id = ?2 AND status = 'active'",
-            params![guild_id, proposal_id],
-        )?;
-        if changed != 1 {
-            transaction.commit()?;
-            return Ok(false);
-        }
-        transaction.execute(
-            "DELETE FROM disburse_votes WHERE guild_id = ?1 AND proposal_id = ?2",
-            params![guild_id, proposal_id],
-        )?;
-        if fund_amount_to_return != 0 {
-            let updated = nonprofit_total(&transaction, guild_id)?
-                .checked_add(fund_amount_to_return)
-                .ok_or(LoanRepositoryError::AmountOverflow)?;
-            let context = LedgerContext {
-                source: Some("disburse".to_owned()),
-                related_type: Some("disbursement".to_owned()),
-                related_id: Some(proposal_id.to_string()),
-                reason: Some("cancelled proposal funds returned to reserve".to_owned()),
-                metadata: Some(format!(r#"{{"fund_amount": {fund_amount_to_return}}}"#)),
-                actor_id: None,
-            };
-            with_ledger_context(&transaction, &context, || {
-                set_nonprofit_total(&transaction, guild_id, updated)
-            })?;
-        }
-        transaction.commit()?;
-        Ok(true)
-    }
-
     /// Pay unique, ordered bankrupt recipients until the reserve is empty.
     pub fn distribute_nonprofit_stipends_atomic(
         &self,
@@ -692,28 +632,6 @@ impl LoanRepository {
         }
         transaction.commit()?;
         Ok(paid)
-    }
-
-    /// Execute with the system clock, matching the public Python repository.
-    #[allow(clippy::too_many_arguments)]
-    pub fn execute_loan_atomic(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-        amount: i64,
-        fee: i64,
-        cooldown_seconds: i64,
-        max_amount: i64,
-    ) -> Result<LoanExecution, LoanRepositoryError> {
-        self.execute_loan_atomic_at(
-            discord_id,
-            guild_id,
-            amount,
-            fee,
-            cooldown_seconds,
-            max_amount,
-            unix_timestamp()?,
-        )
     }
 
     /// Deterministic-clock form used by typed application adapters and tests.
@@ -1079,14 +997,6 @@ fn with_optional_ledger_context<T>(
         Some(context) => with_ledger_context(transaction, context, operation),
         None => operation(),
     }
-}
-
-fn unix_timestamp() -> Result<i64, LoanRepositoryError> {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| LoanRepositoryError::ClockBeforeUnixEpoch)?
-        .as_secs();
-    i64::try_from(seconds).map_err(|_| LoanRepositoryError::AmountOverflow)
 }
 
 #[cfg(test)]

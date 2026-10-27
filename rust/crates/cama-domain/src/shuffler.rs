@@ -321,6 +321,12 @@ pub struct PoolResult {
     pub team1: Team,
     pub team2: Team,
     pub excluded: Vec<Player>,
+    /// The objective the optimizer minimized for this exact selection and
+    /// split (the goodness score; lower is better).
+    pub score: f64,
+    /// Each team's role-adjusted value as the optimizer compared it.
+    pub team1_value: f64,
+    pub team2_value: f64,
 }
 
 /// The Python Draft command's eight-player non-captain pool result.
@@ -890,6 +896,16 @@ impl BalancedShuffler {
         summary
     }
 
+    /// Both teams' role-adjusted values under their assigned roles.
+    fn team_values(&self, team1: &Team, team2: &Team, context: &mut ScoringContext) -> (f64, f64) {
+        let value = |team: &Team, context: &mut ScoringContext| {
+            let players = team.players.iter().collect::<Vec<_>>();
+            self.assigned_metrics(&players, &team_role_array(team), context)
+                .team_value
+        };
+        (value(team1, context), value(team2, context))
+    }
+
     fn assigned_metrics(
         &self,
         players: &[&Player],
@@ -1137,6 +1153,15 @@ impl BalancedShuffler {
         players: &[Player],
         constraints: ShuffleConstraints<'_>,
     ) -> Result<(Team, Team), ShufflerError> {
+        self.shuffle_with_constraints_scored(players, constraints)
+            .map(|scored| (scored.team1, scored.team2))
+    }
+
+    fn shuffle_with_constraints_scored(
+        &self,
+        players: &[Player],
+        constraints: ShuffleConstraints<'_>,
+    ) -> Result<ScoredTeams, ShufflerError> {
         if players.len() != 10 {
             return Err(ShufflerError::IncorrectPlayerCount {
                 expected: 10,
@@ -1151,7 +1176,7 @@ impl BalancedShuffler {
         // with `random.choice`, so equally-balanced pools do not produce the
         // same teams on every shuffle. Mirror that instead of keeping the
         // first minimal split.
-        let mut best_matchups: Vec<(Team, Team)> = Vec::new();
+        let mut best_matchups: Vec<ScoredTeams> = Vec::new();
         let mut best_score = f64::INFINITY;
         for &(team1_indices, team2_indices) in splits {
             let team1_refs = pick_refs(&refs, &team1_indices);
@@ -1176,9 +1201,9 @@ impl BalancedShuffler {
             if scored.score < best_score {
                 best_score = scored.score;
                 best_matchups.clear();
-                best_matchups.push((scored.team1, scored.team2));
+                best_matchups.push(scored);
             } else if scored.score == best_score {
-                best_matchups.push((scored.team1, scored.team2));
+                best_matchups.push(scored);
             }
         }
         if best_matchups.is_empty() {
@@ -1691,10 +1716,23 @@ impl BalancedShuffler {
             });
         }
         if players.len() == 10 {
-            let (team1, team2) = self.shuffle_with_constraints(players, options.constraints)?;
+            let scored = self.shuffle_with_constraints_scored(players, options.constraints)?;
+            // The split search leaves out the selection-level terms, which are
+            // constant for a fixed ten; add them so every pool size reports the
+            // same objective.
+            let refs: Vec<&Player> = players.iter().collect();
+            let selection = self.build_pool_selection(
+                &refs,
+                (0..10).collect(),
+                options,
+                &mut ScoringContext::default(),
+            );
             return Ok(PoolResult {
-                team1,
-                team2,
+                score: scored.score + selection.combo_penalty + selection.recent_penalty,
+                team1_value: scored.team1_metrics.team_value,
+                team2_value: scored.team2_metrics.team_value,
+                team1: scored.team1,
+                team2: scored.team2,
                 excluded: Vec::new(),
             });
         }
@@ -1813,6 +1851,9 @@ impl BalancedShuffler {
             team1: best.team1,
             team2: best.team2,
             excluded: best_excluded,
+            score: best.total_score,
+            team1_value: best.log_entry.team1_value,
+            team2_value: best.log_entry.team2_value,
         })
     }
 
@@ -2006,10 +2047,15 @@ impl BalancedShuffler {
         let mut context = ScoringContext::default();
         let greedy = self.greedy_refs(&refs, options, &mut context)?;
         let mut best_score = search.initial_upper_bound.unwrap_or(greedy.score);
+        let (team1_value, team2_value) =
+            self.team_values(&greedy.team1, &greedy.team2, &mut context);
         let mut best_result = PoolResult {
             team1: greedy.team1,
             team2: greedy.team2,
             excluded: greedy.excluded,
+            score: greedy.score,
+            team1_value,
+            team2_value,
         };
 
         let values: Vec<f64> = refs
@@ -2195,6 +2241,13 @@ impl BalancedShuffler {
                         Some(role_strings(&roles2)),
                     )?,
                     excluded: excluded.iter().map(|player| (*player).clone()).collect(),
+                    score: total_score,
+                    team1_value: self
+                        .assigned_metrics(&team1_refs, &roles1, &mut context)
+                        .team_value,
+                    team2_value: self
+                        .assigned_metrics(&team2_refs, &roles2, &mut context)
+                        .team_value,
                 };
             }
         }
@@ -3548,33 +3601,6 @@ mod tests {
     }
 
     #[test]
-    fn test_historical_region_preferences_do_not_affect_matchup_score() {
-        let mut players = create_players_with_roles(10, 1_500, 50);
-        let shuffler = BalancedShuffler::default();
-        let baseline = shuffler
-            .score_role_assignments_for_matchup(
-                &players[..5],
-                &players[5..],
-                3,
-                ShuffleConstraints::default(),
-            )
-            .expect("scoring succeeds");
-        for (index, player) in players.iter_mut().enumerate() {
-            player.preferred_region = Some(if index % 2 == 0 { "USE" } else { "USW" }.into());
-            player.inferred_region = Some(if index % 2 == 0 { "USW" } else { "USE" }.into());
-        }
-        let with_historical_preferences = shuffler
-            .score_role_assignments_for_matchup(
-                &players[..5],
-                &players[5..],
-                3,
-                ShuffleConstraints::default(),
-            )
-            .expect("scoring succeeds");
-        approx(baseline.2, with_historical_preferences.2);
-    }
-
-    #[test]
     fn test_avoid_opposite_teams_no_penalty() {
         let (team1, team2) = soft_avoid_teams();
         let avoids = [SoftAvoid {
@@ -4250,6 +4276,9 @@ mod tests {
             team1: with_deal.team1.clone(),
             team2: with_deal.team2.clone(),
             excluded: with_deal.excluded.clone(),
+            score: with_deal.score,
+            team1_value: 0.0,
+            team2_value: 0.0,
         });
         let excluded: HashSet<i64> = with_deal
             .excluded
@@ -4313,6 +4342,9 @@ mod tests {
             team1: with_deal.team1.clone(),
             team2: with_deal.team2.clone(),
             excluded: with_deal.excluded.clone(),
+            score: with_deal.score,
+            team1_value: 0.0,
+            team2_value: 0.0,
         });
         let excluded = with_deal
             .excluded
@@ -5601,7 +5633,8 @@ mod tests {
         let roles = Some(default_role_assignment().to_vec());
         let team1 = Team::new(players1.clone(), roles.clone()).expect("team");
         let team2 = Team::new(players2.clone(), roles).expect("team");
-        let service = TeamBalancingService::new(false, 1.0, 50.0, 1.0);
+        let service =
+            TeamBalancingService::new_with_off_role_value_penalty(false, 1.0, 100.0, 50.0, 1.0);
         assert_eq!(
             service
                 .calculate_role_matchup_delta(&team1, &team2, false, false)
@@ -5663,6 +5696,85 @@ mod tests {
             .expect("fallback scoring succeeds");
         approx(common.2, 1_170.0);
         assert_eq!(common, fallback);
+    }
+
+    #[test]
+    fn pool_result_score_is_the_objective_of_the_returned_split() {
+        // 10 players take the exhaustive fixed-pool split search, 12 the
+        // enumerated pool search, 14 branch-and-bound, 16 the sampled search.
+        for (count, max_assignments) in [(10, 20), (12, 3), (14, 3), (16, 3)] {
+            let players = with_discord_ids(create_players_with_roles(count, 1_400, 37));
+            let recent = HashSet::from([id(&players[1]), id(&players[count - 1])]);
+            let exclusions = players
+                .iter()
+                .enumerate()
+                .map(|(index, player)| (id(player), index % 3))
+                .collect::<HashMap<_, _>>();
+            let waits = HashMap::from([(id(&players[0]), 12), (id(&players[2]), 30)]);
+            let low_priority = HashSet::from([id(&players[3])]);
+            let options = PoolOptions {
+                exclusion_counts: Some(&exclusions),
+                recent_match_ids: Some(&recent),
+                constraints: ShuffleConstraints {
+                    low_priority_ids: Some(&low_priority),
+                    ..ShuffleConstraints::default()
+                },
+                lobby_wait_minutes: Some(&waits),
+                sampling_seed: 7,
+            };
+            let shuffler = BalancedShuffler::default();
+            let result = shuffler
+                .shuffle_from_pool(&players, options)
+                .expect("pool shuffle succeeds");
+
+            let (_, _, split_score) = shuffler
+                .score_role_assignments_for_matchup(
+                    &result.team1.players,
+                    &result.team2.players,
+                    max_assignments,
+                    options.constraints,
+                )
+                .expect("returned split scores");
+            let refs = players.iter().collect::<Vec<_>>();
+            let selected = players
+                .iter()
+                .enumerate()
+                .filter(|(_, player)| {
+                    !result
+                        .excluded
+                        .iter()
+                        .any(|excluded| excluded.discord_id == player.discord_id)
+                })
+                .map(|(index, _)| index)
+                .collect();
+            let selection = shuffler.build_pool_selection(
+                &refs,
+                selected,
+                options,
+                &mut super::ScoringContext::default(),
+            );
+            approx(
+                result.score,
+                split_score + selection.combo_penalty + selection.recent_penalty,
+            );
+
+            for (team, value) in [
+                (&result.team1, result.team1_value),
+                (&result.team2, result.team2_value),
+            ] {
+                approx(
+                    value,
+                    team.get_team_value_with_off_role_value_penalty(
+                        shuffler.use_glicko,
+                        shuffler.off_role_multiplier,
+                        shuffler.use_openskill,
+                        shuffler.use_jopacoin,
+                        shuffler.off_role_flat_value_penalty,
+                    )
+                    .expect("roles assigned"),
+                );
+            }
+        }
     }
 
     fn create_players_with_roles(count: usize, base: i64, spread: i64) -> Vec<Player> {

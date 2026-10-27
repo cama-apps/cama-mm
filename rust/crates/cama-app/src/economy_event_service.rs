@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use cama_domain::formatting::format_grouped;
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, Timelike, Utc, Weekday};
 use thiserror::Error;
 
@@ -1815,19 +1816,19 @@ where
         if event.effects.reserve_burn_jc != 0 {
             direct.push(format!(
                 "Reserve burned: **{} JC**",
-                format_integer(event.effects.reserve_burn_jc)
+                format_grouped(event.effects.reserve_burn_jc)
             ));
         }
         if event.effects.wallet_burn_jc != 0 {
             direct.push(format!(
                 "Wallet liquidity burned: **{} JC**",
-                format_integer(event.effects.wallet_burn_jc)
+                format_grouped(event.effects.wallet_burn_jc)
             ));
         }
         if event.effects.reserve_release_jc != 0 {
             direct.push(format!(
                 "Reserve released: **{} JC**",
-                format_integer(event.effects.reserve_release_jc)
+                format_grouped(event.effects.reserve_release_jc)
             ));
         }
         if !direct.is_empty() {
@@ -1905,13 +1906,13 @@ where
         if effects.reserve_burn_jc != 0 {
             lines.push(format!(
                 "The uncommitted Jopa Reserve loses **{} JC**.",
-                format_integer(effects.reserve_burn_jc)
+                format_grouped(effects.reserve_burn_jc)
             ));
         }
         if effects.reserve_release_jc != 0 {
             lines.push(format!(
                 "The Jopa Reserve releases **{} JC**.",
-                format_integer(effects.reserve_release_jc)
+                format_grouped(effects.reserve_release_jc)
             ));
         }
         if effects.wallet_burn_rate != 0.0 {
@@ -2040,28 +2041,11 @@ fn round_to(value: f64, decimals: usize) -> f64 {
     cama_domain::formatting::python_round_decimals(value, decimals)
 }
 
-fn format_integer(value: i64) -> String {
-    let negative = value < 0;
-    let digits = value.unsigned_abs().to_string();
-    let mut result = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, character) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            result.push(',');
-        }
-        result.push(character);
-    }
-    if negative {
-        format!("-{result}")
-    } else {
-        result
-    }
-}
-
 fn format_signed_integer(value: i64) -> String {
     if value >= 0 {
-        format!("+{}", format_integer(value))
+        format!("+{}", format_grouped(value))
     } else {
-        format_integer(value)
+        format_grouped(value)
     }
 }
 

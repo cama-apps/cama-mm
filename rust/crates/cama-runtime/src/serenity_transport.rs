@@ -72,10 +72,10 @@ use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec,
     InteractionAcknowledgementPolicy, InteractionActionRow, InteractionAllowedMentions,
     InteractionAttachment, InteractionAttachmentPolicy, InteractionButtonStyle, InteractionEmbed,
-    InteractionHandler, InteractionInitialResponseState, InteractionMessageDelivery,
-    InteractionMessageReceipt, InteractionModal, InteractionOption, InteractionRequest,
-    InteractionResponder, InteractionResponse, InteractionResponseError, InteractionTextInputStyle,
-    InteractionValue, Registry,
+    InteractionHandler, InteractionHandlerError, InteractionInitialResponseState,
+    InteractionMessageDelivery, InteractionMessageReceipt, InteractionModal, InteractionOption,
+    InteractionRequest, InteractionResponder, InteractionResponse, InteractionResponseError,
+    InteractionTextInputStyle, InteractionValue, Registry,
 };
 use crate::shop_provider::ShopDiscordPort;
 use crate::survey_provider::{
@@ -89,7 +89,7 @@ mod spectator;
 
 const WRAPPED_AVATAR_MAX_BYTES: usize = 2 * 1024 * 1024;
 const WRAPPED_AVATAR_TIMEOUT: Duration = Duration::from_secs(10);
-const COMPONENT_ACKNOWLEDGEMENT_DEADLINE: Duration = Duration::from_millis(1_500);
+const INTERACTION_ACKNOWLEDGEMENT_DEADLINE: Duration = Duration::from_millis(1_500);
 static WRAPPED_AVATAR_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 fn named_text_channel(
@@ -1115,8 +1115,8 @@ struct SerenityHandler {
     discord_transport: Option<Arc<SerenityDiscordTransport>>,
     bot_user_id: AtomicU64,
     guild_ids: Arc<RwLock<BTreeSet<u64>>>,
-    /// Request every member after GUILD_CREATE, matching discord.py's
-    /// `chunk_guilds_at_startup`. Requires the privileged members intent.
+    /// Request every member after GUILD_CREATE so the member cache is
+    /// complete at startup. Requires the privileged members intent.
     request_member_chunks: bool,
 }
 
@@ -1229,8 +1229,8 @@ impl EventHandler for SerenityHandler {
         self.run_ready_recovery(context.http.clone(), guild_ids.into_iter().collect())
             .await;
 
-        // Never erase the Python command tree if a development build connects
-        // before every Rust command provider has been wired.  The result is
+        // Never erase the deployed command tree if a development build connects
+        // before every command provider has been wired.  The result is
         // emitted only after the REST operation has completed, so a rejected
         // request cannot be reported as synchronized.
         let command_sync = self.synchronize_global_commands(&context.http).await;
@@ -1401,8 +1401,8 @@ impl SerenityHandler {
         let Some(user_id) = reaction.user_id.map(|id| id.get()) else {
             return;
         };
-        // Python ignores raw reactions until its own gateway user is ready and
-        // always ignores reactions created by that user.
+        // Ignore raw reactions until the bot's own gateway user is known, and
+        // always ignore reactions the bot itself created.
         if bot_user_id == 0 || user_id == bot_user_id {
             return;
         }
@@ -1481,7 +1481,10 @@ impl SerenityHandler {
             interaction_id: command.id.get(),
             name: command.data.name.clone(),
             user_id: command.user.id.get(),
-            user_display_name: command.user.name.clone(),
+            user_display_name: interaction_user_display_name(
+                command.member.as_deref(),
+                &command.user,
+            ),
             guild_id: command.guild_id.map(|id| id.get()),
             channel_id: Some(command.channel_id.get()),
             member_permissions: command
@@ -1565,7 +1568,10 @@ impl SerenityHandler {
             interaction_id: component.id.get(),
             custom_id: custom_id.clone(),
             user_id: component.user.id.get(),
-            user_display_name: component.user.name.clone(),
+            user_display_name: interaction_user_display_name(
+                component.member.as_ref(),
+                &component.user,
+            ),
             guild_id: component.guild_id.map(|id| id.get()),
             channel_id: Some(component.channel_id.get()),
             member_permissions: component
@@ -1612,6 +1618,7 @@ impl SerenityHandler {
             interaction_id: modal.id.get(),
             custom_id: custom_id.clone(),
             user_id: modal.user.id.get(),
+            user_display_name: interaction_user_display_name(modal.member.as_ref(), &modal.user),
             guild_id: modal.guild_id.map(|id| id.get()),
             channel_id: Some(modal.channel_id.get()),
             member_permissions: modal
@@ -1651,9 +1658,17 @@ fn member_server_nickname(member: &Member) -> Option<String> {
     member.nick.clone()
 }
 
+/// Readable name of the user who sent an interaction: server nickname (when
+/// the interaction came from a guild), then global display name, then
+/// account name.
+fn interaction_user_display_name(member: Option<&Member>, user: &User) -> String {
+    readable_member_name(member.and_then(|member| member.nick.as_deref()), user)
+        .unwrap_or_else(|| cama_domain::discord_content::UNKNOWN_PLAYER.to_owned())
+}
+
 fn member_render_name(member: &Member) -> String {
     readable_member_name(member.nick.as_deref(), &member.user)
-        .unwrap_or_else(|| "Unknown player".to_owned())
+        .unwrap_or_else(|| cama_domain::discord_content::UNKNOWN_PLAYER.to_owned())
 }
 
 /// Server nickname, then global display name, then account name; `None`
@@ -1725,10 +1740,34 @@ async fn run_command_handler(
     responder: Arc<dyn InteractionResponder>,
     hooks: Option<&GlobalInteractionHooks>,
 ) {
-    if let Err(handler_error) = handler
-        .handle(request.clone(), Arc::clone(&responder))
-        .await
-    {
+    run_command_handler_with_deadline(
+        handler,
+        request,
+        qualified_name,
+        responder,
+        hooks,
+        INTERACTION_ACKNOWLEDGEMENT_DEADLINE,
+    )
+    .await;
+}
+
+async fn run_command_handler_with_deadline(
+    handler: Arc<dyn InteractionHandler>,
+    request: InteractionRequest,
+    qualified_name: Option<&str>,
+    responder: Arc<dyn InteractionResponder>,
+    hooks: Option<&GlobalInteractionHooks>,
+    acknowledgement_deadline: Duration,
+) {
+    let acknowledgement_policy = handler.acknowledgement_policy(&request);
+    let result = handle_with_acknowledgement_watchdog(
+        handler.handle(request.clone(), Arc::clone(&responder)),
+        acknowledgement_policy,
+        &responder,
+        acknowledgement_deadline,
+    )
+    .await;
+    if let Err(handler_error) = result {
         if let Some(hooks) = hooks {
             hooks
                 .handle_error(
@@ -1747,6 +1786,39 @@ async fn run_command_handler(
     }
 }
 
+/// Run a handler, acknowledging the interaction itself if the handler has
+/// not sent an initial response before `acknowledgement_deadline`.
+///
+/// The automatic acknowledgement is a public deferral: for a slash command it
+/// shows "thinking" and a later private reply deletes it first (see
+/// [`PublicDeferral`]), so the handler's chosen visibility is kept either way.
+/// A private deferral would instead force every later reply private.
+/// Handlers whose initial response must be a modal opt out with
+/// [`InteractionAcknowledgementPolicy::Modal`].
+async fn handle_with_acknowledgement_watchdog(
+    handler_future: impl Future<Output = Result<(), InteractionHandlerError>>,
+    acknowledgement_policy: InteractionAcknowledgementPolicy,
+    responder: &Arc<dyn InteractionResponder>,
+    acknowledgement_deadline: Duration,
+) -> Result<(), InteractionHandlerError> {
+    tokio::pin!(handler_future);
+    if acknowledgement_policy != InteractionAcknowledgementPolicy::Automatic {
+        return handler_future.await;
+    }
+    tokio::select! {
+        result = &mut handler_future => result,
+        () = tokio::time::sleep(acknowledgement_deadline) => {
+            if responder.initial_response_state()
+                == InteractionInitialResponseState::NotStarted
+                && let Err(error) = responder.defer(false).await
+            {
+                warn!(%error, "automatic interaction acknowledgement failed");
+            }
+            handler_future.await
+        }
+    }
+}
+
 async fn run_component_handler(
     handler: Arc<dyn InteractionHandler>,
     request: InteractionRequest,
@@ -1756,7 +1828,7 @@ async fn run_component_handler(
         handler,
         request,
         responder,
-        COMPONENT_ACKNOWLEDGEMENT_DEADLINE,
+        INTERACTION_ACKNOWLEDGEMENT_DEADLINE,
     )
     .await;
 }
@@ -1768,25 +1840,13 @@ async fn run_component_handler_with_deadline(
     acknowledgement_deadline: Duration,
 ) {
     let acknowledgement_policy = handler.acknowledgement_policy(&request);
-    let handler_future = handler.handle(request, Arc::clone(&responder));
-    tokio::pin!(handler_future);
-
-    let result = if acknowledgement_policy == InteractionAcknowledgementPolicy::Automatic {
-        tokio::select! {
-            result = &mut handler_future => result,
-            () = tokio::time::sleep(acknowledgement_deadline) => {
-                if responder.initial_response_state()
-                    == InteractionInitialResponseState::NotStarted
-                    && let Err(error) = responder.defer(false).await
-                {
-                    warn!(%error, "automatic component acknowledgement failed");
-                }
-                handler_future.await
-            }
-        }
-    } else {
-        handler_future.await
-    };
+    let result = handle_with_acknowledgement_watchdog(
+        handler.handle(request, Arc::clone(&responder)),
+        acknowledgement_policy,
+        &responder,
+        acknowledgement_deadline,
+    )
+    .await;
 
     match result {
         Err(handler_error) => {
@@ -2228,9 +2288,9 @@ enum InitialResponseClaim {
 /// Coordinates the single initial callback shared by the handler and the
 /// acknowledgement watchdog.
 ///
-/// This is the Rust equivalent of checking `interaction.response.is_done()`
-/// around discord.py's safe defer/respond helpers, with an explicit in-flight
-/// state so two concurrent callbacks can never be sent.
+/// Every initial callback claims the single slot first, with an explicit
+/// in-flight state so two concurrent callbacks can never be sent; a response
+/// sent after the slot is taken becomes a follow-up or an original edit.
 struct CoordinatedResponder {
     inner: Arc<dyn InteractionResponder>,
     initial_state: AtomicU8,
@@ -2682,7 +2742,7 @@ impl InteractionResponder for ModalResponder {
             )
         } else {
             // A modal opened from a persistent message uses a deferred message
-            // update, matching discord.py's `defer(thinking=False)`.
+            // update without a "thinking" indicator.
             CreateInteractionResponse::Acknowledge
         };
         let result = self
@@ -2853,8 +2913,7 @@ fn edit_followup_message(response: InteractionResponse) -> CreateInteractionResp
 /// its `attachments` field, even when no files were supplied. Discord treats
 /// that empty list as an instruction to remove existing uploads on an edit.
 /// Component-only edits must therefore use the lower-level HTTP adapter with
-/// a payload that omits the field entirely, matching Discord.py's view-only
-/// edit behavior.
+/// a payload that omits the field entirely, so only the view changes.
 #[derive(serde::Serialize)]
 struct ComponentOnlyInteractionEdit {
     components: Vec<CreateActionRow>,
@@ -3447,8 +3506,8 @@ impl PredictionDiscordPort for SerenityDiscordTransport {
         })?;
         let channel_id = ChannelId::new(thread_id);
 
-        // Match Python's fetch-before-unarchive ordering: a vanished message
-        // must not revive an archived market thread for nothing.
+        // Fetch before unarchiving: a vanished message must not revive an
+        // archived market thread for nothing.
         let mut fetched = match channel_id
             .message(
                 (&context.cache, context.http.as_ref()),
@@ -4478,7 +4537,7 @@ impl DiscordTransport for SerenityDiscordTransport {
             .map_err(|error| error.to_string())?;
 
         // Discord's REST endpoint is per member.  Keep at most four requests
-        // in flight, matching the Python cog's THREAD_MEMBER_CONCURRENCY;
+        // in flight;
         // a single inaccessible member must not make the private thread
         // public or discard the other successful additions.
         let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(4));

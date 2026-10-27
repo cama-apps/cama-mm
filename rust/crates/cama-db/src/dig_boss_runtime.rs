@@ -582,23 +582,27 @@ impl DigBossRuntimeRepository {
         &self,
         duel: &DigBossPausedDuelRow,
     ) -> Result<(), DigBossRuntimeRepositoryError> {
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if !tunnel_exists(&transaction, duel.key)? {
-            transaction.rollback()?;
-            return Err(DigBossRuntimeRepositoryError::InvalidState(
-                "paused duel owner has no tunnel",
-            ));
-        }
-        transaction.execute(
-            "INSERT INTO dig_active_duels
-             (discord_id,guild_id,boss_id,tier,mechanic_id,risk_tier,wager,
-              player_hp,boss_hp,round_num,round_log,pending_prompt,rng_state,
-              status_effects,echo_applied,echo_killer_id,player_hit,player_dmg,
-              boss_hit,boss_dmg,crit_chance,crit_bonus,created_at,last_interaction_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,
-                     ?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)
-             ON CONFLICT(discord_id,guild_id) DO UPDATE SET
+        self.write_active_duel(duel, true).map(|_| ())
+    }
+
+    /// Put back a duel that [`Self::claim_active_duel`] removed when the
+    /// resolution failed before anything was settled. A pause saved since the
+    /// claim is newer and wins, so this never overwrites an existing row.
+    /// Returns whether the claimed row was restored.
+    pub fn restore_claimed_duel(
+        &self,
+        duel: &DigBossPausedDuelRow,
+    ) -> Result<bool, DigBossRuntimeRepositoryError> {
+        self.write_active_duel(duel, false)
+    }
+
+    fn write_active_duel(
+        &self,
+        duel: &DigBossPausedDuelRow,
+        overwrite: bool,
+    ) -> Result<bool, DigBossRuntimeRepositoryError> {
+        let conflict = if overwrite {
+            "DO UPDATE SET
               boss_id=excluded.boss_id,tier=excluded.tier,
               mechanic_id=excluded.mechanic_id,risk_tier=excluded.risk_tier,
               wager=excluded.wager,player_hp=excluded.player_hp,
@@ -609,7 +613,29 @@ impl DigBossRuntimeRepository {
               player_hit=excluded.player_hit,player_dmg=excluded.player_dmg,
               boss_hit=excluded.boss_hit,boss_dmg=excluded.boss_dmg,
               crit_chance=excluded.crit_chance,crit_bonus=excluded.crit_bonus,
-              last_interaction_at=excluded.last_interaction_at",
+              last_interaction_at=excluded.last_interaction_at"
+        } else {
+            "DO NOTHING"
+        };
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !tunnel_exists(&transaction, duel.key)? {
+            transaction.rollback()?;
+            return Err(DigBossRuntimeRepositoryError::InvalidState(
+                "paused duel owner has no tunnel",
+            ));
+        }
+        let written = transaction.execute(
+            &format!(
+                "INSERT INTO dig_active_duels
+                 (discord_id,guild_id,boss_id,tier,mechanic_id,risk_tier,wager,
+                  player_hp,boss_hp,round_num,round_log,pending_prompt,rng_state,
+                  status_effects,echo_applied,echo_killer_id,player_hit,player_dmg,
+                  boss_hit,boss_dmg,crit_chance,crit_bonus,created_at,last_interaction_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,
+                         ?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)
+                 ON CONFLICT(discord_id,guild_id) {conflict}"
+            ),
             params![
                 duel.key.discord_id,
                 duel.key.guild_id,
@@ -638,7 +664,7 @@ impl DigBossRuntimeRepository {
             ],
         )?;
         transaction.commit()?;
-        Ok(())
+        Ok(written == 1)
     }
 
     pub fn active_duel(

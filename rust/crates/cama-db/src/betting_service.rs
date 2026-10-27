@@ -1,6 +1,6 @@
 //! Existing-schema persistence for match betting.
 //!
-//! Python remains the schema, migration, and live runtime authority. This
+//! Schema creation and migration belong to the startup schema manager. This
 //! module opens only an already-migrated database through
 //! [`crate::open_runtime_connection`]. Bet placement, automatic batches,
 //! refunds, settlement, and one-shot buff credits use `BEGIN IMMEDIATE` so a
@@ -96,14 +96,6 @@ pub struct PlaceBetRequest {
 pub struct BetAttribution {
     pub investment_target_id: Option<i64>,
     pub investment_direction: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct AutomaticBetRequest {
-    pub discord_id: i64,
-    pub team: BettingTeam,
-    /// Integer percentage of the balance snapshot, e.g. `10` means 10%.
-    pub percentage: i64,
 }
 
 /// Exact spectator wager expressed in basis points of the locked balance
@@ -320,17 +312,6 @@ impl Default for BetSettlementAdjustments {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BetHistoryEntry {
-    pub bet_id: i64,
-    pub match_id: i64,
-    pub team: BettingTeam,
-    pub effective_amount: i64,
-    pub payout: Option<i64>,
-    pub won: bool,
-    pub profit: i64,
-}
-
 #[derive(Clone, Debug)]
 pub struct BettingServiceRepository {
     path: PathBuf,
@@ -497,116 +478,10 @@ impl BettingServiceRepository {
         Ok(changed > 0)
     }
 
-    /// Place one configured long/short investment and retain its attribution
-    /// on the existing `bets` row.  Match settlement and gambling statistics
-    /// already consume these nullable columns; keeping the write here avoids
-    /// a second provider-local bet model or a post-commit UPDATE race.
-    pub fn place_investment_bet_atomic(
-        &self,
-        request: PlaceBetRequest,
-        investment_target_id: i64,
-        investment_direction: &str,
-    ) -> Result<PendingBetRecord, BettingServiceRepositoryError> {
-        self.place_bet_atomic_with_attribution(
-            request,
-            Some(BetAttribution {
-                investment_target_id: Some(investment_target_id),
-                investment_direction: Some(investment_direction.to_owned()),
-            }),
-        )
-    }
-
-    /// Place a complete automatic-bet batch against one balance snapshot.
-    /// Domain-invalid candidates roll back to their own savepoint while the
-    /// rest of the batch remains atomic and preserves placement order.
-    pub fn place_automatic_bets_atomic(
-        &self,
-        guild_id: Option<i64>,
-        pending_match_id: Option<i64>,
-        bet_time: i64,
-        requests: &[AutomaticBetRequest],
-    ) -> Result<AutomaticBetOutcome, BettingServiceRepositoryError> {
-        let guild_id = Self::normalize_guild_id(guild_id);
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let payload = pending_match_id
-            .map(|id| {
-                transaction
-                    .query_row(
-                        "SELECT payload FROM pending_matches
-                         WHERE pending_match_id = ?1 AND guild_id = ?2",
-                        params![id, guild_id],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()?
-                    .ok_or(BettingServiceRepositoryError::MissingPendingMatch {
-                        guild_id,
-                        pending_match_id: id,
-                    })
-            })
-            .transpose()?;
-
-        let mut balance_snapshot = BTreeMap::new();
-        for request in requests {
-            if balance_snapshot.contains_key(&request.discord_id) {
-                continue;
-            }
-            let balance = transaction
-                .query_row(
-                    "SELECT COALESCE(jopacoin_balance, 0) FROM players
-                     WHERE discord_id = ?1 AND guild_id = ?2",
-                    params![request.discord_id, guild_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if let Some(balance) = balance {
-                balance_snapshot.insert(request.discord_id, balance);
-            }
-        }
-
-        let mut outcome = AutomaticBetOutcome {
-            created: Vec::new(),
-            skipped: Vec::new(),
-            balance_snapshot,
-        };
-        for request in requests {
-            transaction.execute_batch("SAVEPOINT automatic_bet_candidate")?;
-            let result = automatic_candidate(
-                &transaction,
-                guild_id,
-                pending_match_id,
-                payload.as_deref(),
-                bet_time,
-                *request,
-                &outcome.balance_snapshot,
-            );
-            match result {
-                Ok(record) => {
-                    transaction.execute_batch("RELEASE SAVEPOINT automatic_bet_candidate")?;
-                    outcome.created.push(record);
-                }
-                Err(error) if is_candidate_skip(&error) => {
-                    transaction.execute_batch(
-                        "ROLLBACK TO SAVEPOINT automatic_bet_candidate;
-                         RELEASE SAVEPOINT automatic_bet_candidate",
-                    )?;
-                    outcome.skipped.push(request.discord_id);
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        transaction.commit()?;
-        Ok(outcome)
-    }
-
-    /// Place exact automatic wagers from one locked balance snapshot.
-    ///
-    /// This is the production spectator-wager seam: unlike the historical
-    /// integer-percent API, the amount is not truncated to whole percentage
-    /// points.  Requests are idempotent for a pending match, and every
-    /// candidate is isolated by a savepoint so a stale balance or debt limit
-    /// rejection does not suppress the remaining tier.
-    pub fn place_automatic_amount_bets_atomic(
+    /// Test fixture: place exact automatic wagers through the same locked
+    /// snapshot path as the production basis-point seam.
+    #[cfg(test)]
+    pub(crate) fn place_automatic_amount_bets_atomic(
         &self,
         guild_id: Option<i64>,
         pending_match_id: Option<i64>,
@@ -755,7 +630,9 @@ impl BettingServiceRepository {
         )
     }
 
-    pub fn create_configured_investment_bets_atomic(
+    /// Test fixture: configured investments without shuffle-start balances.
+    #[cfg(test)]
+    pub(crate) fn create_configured_investment_bets_atomic(
         &self,
         guild_id: Option<i64>,
         pending_match_id: Option<i64>,
@@ -1400,37 +1277,6 @@ impl BettingServiceRepository {
         Ok(true)
     }
 
-    pub fn refund_pending_bets_atomic(
-        &self,
-        guild_id: Option<i64>,
-        since_ts: i64,
-        pending_match_id: Option<i64>,
-    ) -> Result<usize, BettingServiceRepositoryError> {
-        let guild_id = Self::normalize_guild_id(guild_id);
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let bets =
-            pending_bets_in_transaction(&transaction, guild_id, None, since_ts, pending_match_id)?;
-        set_ledger_context(
-            &transaction,
-            "bet_refund",
-            pending_match_id,
-            "pending bets refunded",
-        )?;
-        for bet in &bets {
-            transaction.execute(
-                "UPDATE players SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?1,
-                                    updated_at = CURRENT_TIMESTAMP
-                 WHERE discord_id = ?2 AND guild_id = ?3",
-                params![bet.effective_amount(), bet.discord_id, guild_id],
-            )?;
-        }
-        clear_ledger_context(&transaction)?;
-        delete_pending_rows(&transaction, guild_id, since_ts, pending_match_id)?;
-        transaction.commit()?;
-        Ok(bets.len())
-    }
-
     /// Settle untagged rows exactly once. Seed reservation/return is owned by
     /// `dota_bet_seed_repository`; the optional seed split is intentionally
     /// absent here so monetary stock cannot be consumed twice.
@@ -1760,47 +1606,6 @@ impl BettingServiceRepository {
         Ok(result)
     }
 
-    pub fn consume_and_credit_atomic(
-        &self,
-        buff_id: i64,
-        discord_id: i64,
-        guild_id: Option<i64>,
-        amount: i64,
-    ) -> Result<bool, BettingServiceRepositoryError> {
-        let guild_id = Self::normalize_guild_id(guild_id);
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let claimed = transaction.execute(
-            "UPDATE manashop_buffs SET triggered = 1 WHERE id = ?1 AND triggered = 0",
-            [buff_id],
-        )?;
-        if claimed == 0 {
-            transaction.commit()?;
-            return Ok(false);
-        }
-        set_ledger_context(
-            &transaction,
-            "manashop_buff",
-            Some(buff_id),
-            "one-shot blessing credit",
-        )?;
-        let changed = transaction.execute(
-            "UPDATE players SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?1,
-                                updated_at = CURRENT_TIMESTAMP
-             WHERE discord_id = ?2 AND guild_id = ?3",
-            params![amount, discord_id, guild_id],
-        )?;
-        if changed == 0 {
-            return Err(BettingServiceRepositoryError::MissingPlayer {
-                discord_id,
-                guild_id,
-            });
-        }
-        clear_ledger_context(&transaction)?;
-        transaction.commit()?;
-        Ok(true)
-    }
-
     /// Atomically consume Communion and attribute its credit to the same
     /// durable match-win tuple as the base reward. A correction retry can then
     /// reconstruct the exact pre-Blood-Pact balance delta by summing ledger
@@ -2084,51 +1889,6 @@ impl BettingServiceRepository {
         transaction.commit()?;
         Ok(())
     }
-
-    pub fn get_player_bet_history(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-    ) -> Result<Vec<BetHistoryEntry>, BettingServiceRepositoryError> {
-        let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT b.bet_id, b.match_id, b.team_bet_on,
-                    b.amount * COALESCE(b.leverage, 1), b.payout,
-                    m.winning_team
-             FROM bets b JOIN matches m ON m.match_id = b.match_id
-             WHERE b.discord_id = ?1 AND b.guild_id = ?2 AND b.match_id IS NOT NULL
-             ORDER BY b.bet_time, b.bet_id",
-        )?;
-        statement
-            .query_map(
-                params![discord_id, Self::normalize_guild_id(guild_id)],
-                |row| {
-                    let team_text: String = row.get(2)?;
-                    let team = parse_team(&team_text)?;
-                    let effective_amount: i64 = row.get(3)?;
-                    let payout: Option<i64> = row.get(4)?;
-                    let winning_team: i64 = row.get(5)?;
-                    let won = matches_winner(team, winning_team);
-                    let profit = if won {
-                        payout.unwrap_or_else(|| effective_amount.saturating_mul(2))
-                            - effective_amount
-                    } else {
-                        -effective_amount
-                    };
-                    Ok(BetHistoryEntry {
-                        bet_id: row.get(0)?,
-                        match_id: row.get(1)?,
-                        team,
-                        effective_amount,
-                        payout,
-                        won,
-                        profit,
-                    })
-                },
-            )?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(Into::into)
-    }
 }
 
 fn validate_wager(amount: i64, leverage: i64) -> Result<(), BettingServiceRepositoryError> {
@@ -2360,50 +2120,6 @@ fn automatic_bet_already_exists(
             .optional()
             .map(|row| row.is_some())
     }
-}
-
-fn automatic_candidate(
-    transaction: &Transaction<'_>,
-    guild_id: i64,
-    pending_match_id: Option<i64>,
-    payload: Option<&str>,
-    bet_time: i64,
-    request: AutomaticBetRequest,
-    balances: &BTreeMap<i64, i64>,
-) -> Result<PendingBetRecord, BettingServiceRepositoryError> {
-    let balance = balances.get(&request.discord_id).copied().ok_or(
-        BettingServiceRepositoryError::MissingPlayer {
-            discord_id: request.discord_id,
-            guild_id,
-        },
-    )?;
-    if request.percentage <= 0 || balance <= 0 {
-        return Err(BettingServiceRepositoryError::InvalidWager);
-    }
-    let amount = balance
-        .checked_mul(request.percentage)
-        .ok_or(BettingServiceRepositoryError::WagerOverflow)?
-        .saturating_add(50)
-        / 100;
-    if amount <= 0 {
-        return Err(BettingServiceRepositoryError::InvalidWager);
-    }
-    let request = PlaceBetRequest {
-        guild_id: Some(guild_id),
-        pending_match_id: pending_match_id.unwrap_or_default(),
-        discord_id: request.discord_id,
-        team: request.team,
-        amount,
-        bet_time,
-        leverage: 1,
-        max_debt: 500,
-        is_blind: true,
-        odds_at_placement: None,
-    };
-    if let Some(payload) = payload {
-        validate_setup_bet(transaction, payload, request)?;
-    }
-    insert_bet_in_transaction(transaction, guild_id, request, true, false)
 }
 
 fn configured_investments_in_transaction(
@@ -2795,26 +2511,6 @@ fn pending_bet_from_row(row: &rusqlite::Row<'_>) -> Result<PendingBetRecord, rus
     })
 }
 
-fn delete_pending_rows(
-    transaction: &Transaction<'_>,
-    guild_id: i64,
-    since_ts: i64,
-    pending_match_id: Option<i64>,
-) -> Result<usize, rusqlite::Error> {
-    match pending_match_id {
-        Some(pending_match_id) => transaction.execute(
-            "DELETE FROM bets WHERE guild_id = ?1 AND match_id IS NULL
-             AND (pending_match_id = ?2 OR
-                  (pending_match_id IS NULL AND bet_time >= ?3))",
-            params![guild_id, pending_match_id, since_ts],
-        ),
-        None => transaction.execute(
-            "DELETE FROM bets WHERE guild_id = ?1 AND match_id IS NULL AND bet_time >= ?2",
-            params![guild_id, since_ts],
-        ),
-    }
-}
-
 /// Shared pool engine boundary. Callers retain their own match and wager
 /// namespaces; only effective stakes and payout arithmetic cross this boundary.
 pub(crate) fn pool_payouts(
@@ -3138,13 +2834,6 @@ fn settlement_bet_jc_deltas(settlement: &SettlementResult) -> BTreeMap<i64, i64>
         }
     }
     deltas
-}
-
-const fn matches_winner(team: BettingTeam, winning_team: i64) -> bool {
-    matches!(
-        (team, winning_team),
-        (BettingTeam::Radiant, 1) | (BettingTeam::Dire, 2)
-    )
 }
 
 fn is_candidate_skip(error: &BettingServiceRepositoryError) -> bool {

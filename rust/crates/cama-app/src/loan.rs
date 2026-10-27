@@ -1,9 +1,8 @@
 //! Discord-independent loan orchestration and match-repayment hook.
 //!
-//! Python remains the production runtime. This module keeps policy, result
-//! mapping, and match-finalization ordering behind typed ports; the existing-
-//! schema [`cama_db::loan_repository::LoanRepository`] implements the port for
-//! side-by-side verification without claiming a runtime cutover.
+//! This module keeps policy, result mapping, and match-finalization ordering
+//! behind typed ports; [`cama_db::loan_repository::LoanRepository`] implements
+//! the persistence port.
 
 use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};

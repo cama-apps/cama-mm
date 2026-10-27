@@ -1,11 +1,11 @@
 //! Existing-schema persistence for dig consumables and tunnel defenses.
 //!
-//! Python remains the production runtime and the only schema-migration
-//! authority. This adapter opens an already-migrated database through
-//! [`crate::open_runtime_connection`]; it never creates, alters, or migrates
-//! production schema. Money-moving and queue-changing operations acquire a
-//! `BEGIN IMMEDIATE` transaction so balance, inventory, tunnel state, and the
-//! Python-owned economy-ledger triggers commit or roll back together.
+//! The Rust schema manager owns schema and migrations. This adapter opens an
+//! already-migrated database through [`crate::open_runtime_connection`]; it
+//! never creates, alters, or migrates production schema. Money-moving and
+//! queue-changing operations acquire a `BEGIN IMMEDIATE` transaction so
+//! balance, inventory, tunnel state, and the economy-ledger triggers commit or
+//! roll back together.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

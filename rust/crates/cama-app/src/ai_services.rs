@@ -1,7 +1,6 @@
-//! Typed, fail-soft AI orchestration for the side-by-side Rust migration.
+//! Typed, fail-soft AI orchestration.
 //!
-//! Python remains the live provider and SQLite authority.  This module ports
-//! the policy at its seams: credentials stay redacted, providers are loaded on
+//! This module owns the AI policy at its seams: credentials stay redacted, providers are loaded on
 //! first use off the caller thread, every attempt has an independent timeout,
 //! optional fallback providers are tried in order, telemetry never receives
 //! prompt bodies, generated SQL is structurally validated, and flavor output

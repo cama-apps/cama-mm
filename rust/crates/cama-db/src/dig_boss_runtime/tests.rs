@@ -655,6 +655,29 @@ fn paused_duel_survives_repository_recreation_and_is_claimed_once() {
     );
 }
 
+#[test]
+fn restoring_a_claimed_duel_never_overwrites_a_newer_pause() {
+    let database = fixture();
+    let repository = DigBossRuntimeRepository::new(database.path());
+    repository.save_active_duel(&paused_duel()).expect("save");
+    let claimed = repository
+        .claim_active_duel(KEY)
+        .expect("claim")
+        .expect("claimed duel");
+    assert!(repository.restore_claimed_duel(&claimed).expect("restore"));
+    assert_eq!(repository.active_duel(KEY).expect("read"), Some(claimed));
+
+    let mut newer = paused_duel();
+    newer.wager = 55;
+    repository.save_active_duel(&newer).expect("newer pause");
+    assert!(
+        !repository
+            .restore_claimed_duel(&paused_duel())
+            .expect("stale restore")
+    );
+    assert_eq!(repository.active_duel(KEY).expect("read"), Some(newer));
+}
+
 // tests/test_dig_pinnacle_combat.py::test_resumed_pinnacle_loss_ticks_snapshot_armor_after_swap
 #[test]
 fn resolution_wear_ticks_snapshot_loadout_and_loss_armor_after_swap() {

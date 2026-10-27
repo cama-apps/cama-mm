@@ -1,10 +1,10 @@
 //! Numeric coercion shared by legacy JSON projections.
 //!
-//! Python-owned payload readers commonly use `int(value)`: JSON integers,
-//! finite floats, booleans, and decimal strings are accepted, with floats
-//! truncated toward zero. Rust's `serde_json::Value::as_i64` accepts only an
-//! already-integral JSON number, so using it directly creates subtle cutover
-//! gaps for historical and external payloads.
+//! Legacy Python payload readers used `int(value)`: JSON integers, finite
+//! floats, booleans, and decimal strings are accepted, with floats truncated
+//! toward zero. Rust's `serde_json::Value::as_i64` accepts only an
+//! already-integral JSON number, so using it directly would reject historical
+//! and external payloads.
 
 use serde_json::Value;
 

@@ -1871,6 +1871,37 @@ async fn inferred_creator_reset_runs_cleanup_and_clears_the_existing_schema_row(
     }));
 }
 
+#[tokio::test]
+async fn kind_scoped_reset_survives_restart_and_keeps_the_sibling_lobby() {
+    let database = database_with_players(&[(10, "Creator")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    for kind in [LobbyKind::Open, LobbyKind::LowSkill] {
+        dispatch_command(&provider, "lobby", 10, "Creator", vec![lobby_option(kind)]).await;
+    }
+    dispatch_command(
+        &provider,
+        "resetlobby",
+        10,
+        "Creator",
+        vec![lobby_option(LobbyKind::LowSkill)],
+    )
+    .await;
+
+    let restarted = provider_for(&database, transport);
+    let service = &restarted.handler.state.service;
+    assert!(
+        service
+            .get_lobby(LobbyScope::new(AppGuildId(42), LobbyKind::Open))
+            .is_some_and(|lobby| lobby.players.contains(&AppUserId(10)))
+    );
+    assert!(
+        service
+            .get_lobby(LobbyScope::new(AppGuildId(42), LobbyKind::LowSkill))
+            .is_none()
+    );
+}
+
 #[test]
 fn test_kick_reason_is_optional_and_privately_bounded() {
     let database = database_with_players(&[]);
@@ -2711,8 +2742,7 @@ async fn fully_confirmed_readycheck_still_expires_at_the_deadline() {
         assert!(provider.handler.state.readychecks.add_readycheck_reaction(
             scope,
             AppUserId(player_id),
-            format!("<@{player_id}>"),
-            None,
+            None
         ));
     }
     let edits_before = transport.edit_count();
@@ -2799,7 +2829,7 @@ async fn unconfirmed_readycheck_fixture(
             lobby_ids: BTreeSet::from([AppUserId(10), AppUserId(20), AppUserId(30)]),
             player_data: BTreeMap::new(),
             created_at: Some(overdue_check_at),
-            initial_reacted: BTreeMap::from([(AppUserId(10), "<@10>".to_owned())]),
+            initial_reacted: BTreeSet::from([AppUserId(10)]),
         },
     );
     restarted
@@ -3696,7 +3726,7 @@ async fn live_readycheck_reconciles_button_join_and_leave_against_the_active_gen
         joined.lobby_ids,
         BTreeSet::from([AppUserId(10), AppUserId(20)])
     );
-    assert!(joined.reacted.contains_key(&AppUserId(20)));
+    assert!(joined.reacted.contains(&AppUserId(20)));
     assert!(
         transport
             .state
@@ -3728,7 +3758,7 @@ async fn live_readycheck_reconciles_button_join_and_leave_against_the_active_gen
         .readycheck_generation(scope)
         .expect("readycheck remains live");
     assert_eq!(left.lobby_ids, BTreeSet::from([AppUserId(10)]));
-    assert!(!left.reacted.contains_key(&AppUserId(20)));
+    assert!(!left.reacted.contains(&AppUserId(20)));
     assert!(
         transport
             .sent_messages()
@@ -4028,7 +4058,7 @@ async fn test_curfew_sweep_removes_the_kicked_player_from_the_active_readycheck(
         .expect("readycheck posted");
     assert!(before.lobby_ids.contains(&AppUserId(1)));
     assert!(
-        before.reacted.contains_key(&AppUserId(1)),
+        before.reacted.contains(&AppUserId(1)),
         "a just-joined player auto-confirms as a recent signup"
     );
     let readycheck_message_id = to_u64(before.message_id.0).expect("readycheck Discord message");
@@ -4074,7 +4104,7 @@ async fn test_curfew_sweep_removes_the_kicked_player_from_the_active_readycheck(
         "curfew kick must remove the player from the readycheck roster"
     );
     assert!(
-        !after.reacted.contains_key(&AppUserId(1)),
+        !after.reacted.contains(&AppUserId(1)),
         "curfew kick must drop the player's readycheck confirmation"
     );
     assert!(
@@ -4264,7 +4294,7 @@ async fn failed_readycheck_publication_releases_the_permit_for_the_next_attempt(
             lobby_ids: BTreeSet::from([AppUserId(10), AppUserId(20)]),
             player_data: BTreeMap::new(),
             created_at: Some(stale_check_at),
-            initial_reacted: BTreeMap::new(),
+            initial_reacted: BTreeSet::new(),
         },
     );
     transport.fail_edits();
@@ -5590,10 +5620,7 @@ fn readycheck_renders_text_names_for_every_group_and_legacy_confirmation() {
             },
         ),
     ]);
-    let reacted = BTreeMap::from([
-        (AppUserId(30), "<@30>".to_owned()),
-        (AppUserId(50), "50".to_owned()),
-    ]);
+    let reacted = BTreeSet::from([AppUserId(30), AppUserId(50)]);
     let embed = readycheck_embed(LobbyKind::Open, &players, &reacted, 10);
     let text = embed
         .fields

@@ -1,7 +1,7 @@
 //! Existing-schema bankruptcy persistence and atomic economy transitions.
 //!
-//! Python remains the migration and live runtime authority. This adapter only
-//! opens an already-migrated database through [`crate::open_runtime_connection`].
+//! Schema creation and migration belong to the startup schema manager. This
+//! adapter only opens an already-migrated database through [`crate::open_runtime_connection`].
 //! Bankruptcy declaration acquires `BEGIN IMMEDIATE` before validating or
 //! mutating state.
 

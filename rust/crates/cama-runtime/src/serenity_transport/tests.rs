@@ -106,7 +106,10 @@ impl RecordingInteractionResponder {
     fn record(&self, event: &'static str) -> Result<(), InteractionResponseError> {
         self.events.lock().expect("events lock").push(event);
         if self.reject_initial.load(Ordering::Acquire)
-            && matches!(event, "respond" | "defer" | "update" | "show_modal")
+            && matches!(
+                event,
+                "respond" | "defer" | "defer_private" | "update" | "show_modal"
+            )
         {
             Err(InteractionResponseError::new("Unknown interaction"))
         } else {
@@ -136,8 +139,9 @@ impl InteractionResponder for RecordingInteractionResponder {
         self.record_initial("respond").await
     }
 
-    async fn defer(&self, _ephemeral: bool) -> Result<(), InteractionResponseError> {
-        self.record_initial("defer").await
+    async fn defer(&self, ephemeral: bool) -> Result<(), InteractionResponseError> {
+        self.record_initial(if ephemeral { "defer_private" } else { "defer" })
+            .await
     }
 
     async fn followup(
@@ -315,6 +319,137 @@ async fn successful_silent_handler_receives_stale_control_response() {
     .await;
 
     assert_eq!(inner.events(), ["respond"]);
+}
+
+/// Simulates a slash command whose handler runs slow work (for example a
+/// SQLite write waiting on the busy timeout) before its private reply.
+struct SlowPrivateCommandHandler {
+    acknowledged_before_work_finished: AtomicBool,
+}
+
+#[async_trait]
+impl InteractionHandler for SlowPrivateCommandHandler {
+    async fn handle(
+        &self,
+        _request: InteractionRequest,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), InteractionHandlerError> {
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        self.acknowledged_before_work_finished.store(
+            responder.initial_response_state() == InteractionInitialResponseState::Accepted,
+            Ordering::Release,
+        );
+        responder
+            .respond(InteractionResponse::message("done").ephemeral())
+            .await
+            .map_err(|error| error.to_string().into())
+    }
+}
+
+struct ImmediateCommandHandler;
+
+#[async_trait]
+impl InteractionHandler for ImmediateCommandHandler {
+    async fn handle(
+        &self,
+        _request: InteractionRequest,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), InteractionHandlerError> {
+        responder
+            .respond(InteractionResponse::message("done"))
+            .await
+            .map_err(|error| error.to_string().into())
+    }
+}
+
+struct SlowFailingCommandHandler;
+
+#[async_trait]
+impl InteractionHandler for SlowFailingCommandHandler {
+    async fn handle(
+        &self,
+        _request: InteractionRequest,
+        _responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), InteractionHandlerError> {
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        Err("database is locked".into())
+    }
+}
+
+fn command_request() -> InteractionRequest {
+    InteractionRequest::Command {
+        interaction_id: 1,
+        name: "test".to_owned(),
+        user_id: 2,
+        user_display_name: "Tester".to_owned(),
+        guild_id: Some(3),
+        channel_id: Some(4),
+        member_permissions: None,
+        options: Vec::new(),
+    }
+}
+
+async fn run_test_command(handler: Arc<dyn InteractionHandler>) -> Vec<&'static str> {
+    let inner = Arc::new(RecordingInteractionResponder::default());
+    run_command_handler_with_deadline(
+        handler,
+        command_request(),
+        Some("test"),
+        coordinated_responder(inner.clone()),
+        None,
+        Duration::from_millis(1),
+    )
+    .await;
+    inner.events()
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_command_is_acknowledged_before_its_work_finishes() {
+    let handler = Arc::new(SlowPrivateCommandHandler {
+        acknowledged_before_work_finished: AtomicBool::new(false),
+    });
+    let events = run_test_command(handler.clone()).await;
+
+    assert!(
+        handler
+            .acknowledged_before_work_finished
+            .load(Ordering::Acquire)
+    );
+    // The watchdog defers publicly so a private reply can still replace it;
+    // a private deferral would force public replies private.
+    assert_eq!(events, ["defer", "followup"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn fast_command_response_is_not_preceded_by_an_automatic_defer() {
+    let inner = Arc::new(RecordingInteractionResponder::default());
+    run_command_handler_with_deadline(
+        Arc::new(ImmediateCommandHandler),
+        command_request(),
+        Some("test"),
+        coordinated_responder(inner.clone()),
+        None,
+        Duration::from_secs(1),
+    )
+    .await;
+
+    assert_eq!(inner.events(), ["respond"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn modal_policy_command_never_runs_the_automatic_defer_watchdog() {
+    assert_eq!(
+        run_test_command(Arc::new(DelayedModalHandler)).await,
+        ["show_modal"]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_failing_command_reports_failure_through_followup_after_defer() {
+    assert_eq!(
+        run_test_command(Arc::new(SlowFailingCommandHandler)).await,
+        ["defer", "followup"]
+    );
 }
 
 #[test]
@@ -698,6 +833,39 @@ fn serenity_render_name_uses_server_nickname_then_discord_display_then_username(
     assert_eq!(member_render_name(&member), "Account Username");
     member.user.name = "123456789012345678".to_owned();
     assert_eq!(member_render_name(&member), "Unknown player");
+}
+
+#[test]
+fn interaction_user_display_name_prefers_nickname_then_global_name_then_username() {
+    let mut member = Member::default();
+    member.user.name = "account_username".to_owned();
+    member.user.global_name = Some("Global Display Name".to_owned());
+    member.nick = Some("Server Nickname".to_owned());
+
+    assert_eq!(
+        interaction_user_display_name(Some(&member), &member.user),
+        "Server Nickname"
+    );
+    // Direct-message interactions carry no member.
+    assert_eq!(
+        interaction_user_display_name(None, &member.user),
+        "Global Display Name"
+    );
+    member.nick = None;
+    assert_eq!(
+        interaction_user_display_name(Some(&member), &member.user),
+        "Global Display Name"
+    );
+    member.user.global_name = None;
+    assert_eq!(
+        interaction_user_display_name(Some(&member), &member.user),
+        "account_username"
+    );
+    member.user.name = "123456789012345678".to_owned();
+    assert_eq!(
+        interaction_user_display_name(Some(&member), &member.user),
+        "Unknown player"
+    );
 }
 
 #[test]

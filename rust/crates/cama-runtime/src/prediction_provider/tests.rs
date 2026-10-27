@@ -14,7 +14,7 @@ use crate::discord_transport::{
     DiscordMessageSnapshot, GuildPlayerNameDirectory, GuildPlayerNameResolver,
 };
 use crate::gamba_guild_source::GambaDestination;
-use crate::registration::{InteractionResponseError, Registry};
+use crate::registration::{InteractionResponseError, InteractionValue, Registry};
 
 const GUILD: i64 = 42;
 const GAMBA_CHANNEL: i64 = 420;
@@ -1060,6 +1060,7 @@ async fn fixed_button_and_encoded_modal_survive_a_provider_restart() {
                 interaction_id: 3,
                 custom_id: modal.custom_id,
                 user_id: u64::try_from(TRADER).expect("positive trader ID"),
+                user_display_name: "Trader".to_owned(),
                 guild_id: Some(u64::try_from(GUILD).expect("positive guild ID")),
                 channel_id: Some(u64::try_from(THREAD_ID).expect("positive thread ID")),
                 member_permissions: None,
@@ -1210,6 +1211,7 @@ async fn recreated_provider_rejects_stale_prediction_callbacks_without_duplicate
                 interaction_id: 12,
                 custom_id: stale_modal.custom_id.clone(),
                 user_id: u64::try_from(TRADER).expect("positive trader ID"),
+                user_display_name: "Trader".to_owned(),
                 guild_id: Some(u64::try_from(GUILD).expect("positive guild ID")),
                 channel_id: Some(u64::try_from(THREAD_ID).expect("positive thread ID")),
                 member_permissions: None,
@@ -1837,10 +1839,12 @@ async fn remaining_live_subcommands_and_position_button_preserve_python_visibili
 
 #[test]
 fn duration_copy_matches_python_zero_floor() {
-    assert_eq!(format_duration_short(-5), "1s");
-    assert_eq!(format_duration_short(0), "1s");
-    assert_eq!(format_duration_short(59), "59s");
-    assert_eq!(format_duration_short(60), "1m");
+    assert_eq!(format_duration_short(-5.0), "1s");
+    assert_eq!(format_duration_short(0.0), "1s");
+    assert_eq!(format_duration_short(59.0), "59s");
+    assert_eq!(format_duration_short(60.0), "1m");
+    assert_eq!(format_duration_short(3_600.0), "1h");
+    assert_eq!(format_duration_short(86_400.0), "1d");
 }
 
 #[test]

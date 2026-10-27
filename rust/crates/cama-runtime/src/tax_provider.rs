@@ -36,7 +36,7 @@ use cama_db::tax_repository::{
     TaxBankruptcyAction, TaxBankruptcyOutcome, TaxBankruptcyRequest, TaxFineOutcome,
     TaxFineRequest, TaxGuildSnapshot, TaxLedgerEntry, TaxLedgerSourceTotal, TaxRepository,
 };
-use cama_domain::formatting::JOPACOIN_EMOTE;
+use cama_domain::formatting::{JOPACOIN_EMOTE, format_grouped, format_grouped_signed};
 use cama_domain::permissions::{
     DiscordPermissions, PermissionContext, has_admin_permission, has_tax_man_permission,
 };
@@ -1565,11 +1565,11 @@ fn build_audit_embed(
             "Balances",
             format!(
                 "Players: {}\nTotal balance: {}\nPositive balance: {}\nVisible debt: {}\nBroke players: {}",
-                grouped(snapshot.players),
+                format_grouped(snapshot.players),
                 format_jc(snapshot.total_balance),
                 format_jc(snapshot.positive_balance),
                 format_jc(snapshot.visible_debt),
-                grouped(snapshot.broke_players),
+                format_grouped(snapshot.broke_players),
             ),
             true,
         )
@@ -1587,12 +1587,12 @@ fn build_audit_embed(
             format!(
                 "Loans: {} ({} borrowers)\nDark Bargains: {} ({} active)\nPending bets: {} ({} bets)\nOpen markets: {}",
                 format_jc(snapshot.loan_principal.saturating_add(snapshot.loan_fee)),
-                grouped(snapshot.loan_borrowers),
+                format_grouped(snapshot.loan_borrowers),
                 format_jc(snapshot.dark_bargain_due),
-                grouped(snapshot.dark_bargain_count),
+                format_grouped(snapshot.dark_bargain_count),
                 format_jc(snapshot.pending_bet_effective_stake),
-                grouped(snapshot.pending_bet_count),
-                grouped(snapshot.open_prediction_markets),
+                format_grouped(snapshot.pending_bet_count),
+                format_grouped(snapshot.open_prediction_markets),
             ),
             false,
         )
@@ -1600,13 +1600,13 @@ fn build_audit_embed(
             "Prediction Markets",
             format!(
                 "Markets: {}\nHolders: {}\nCost basis: {}\nExpected payout: {}\nEV to holders: {}\nWorst-case payout: {}\nBook depth: {} contracts",
-                grouped(summary.open_markets),
-                grouped(summary.holder_count),
+                format_grouped(summary.open_markets),
+                format_grouped(summary.holder_count),
                 format_jc(summary.cost_basis),
                 format_jc(summary.expected_payout),
                 format_signed_jc(summary.ev_to_holders),
                 format_jc(summary.worst_case_payout),
-                grouped(summary.book_contracts),
+                format_grouped(summary.book_contracts),
             ),
             false,
         )
@@ -1636,8 +1636,8 @@ fn format_prediction_markets(markets: &[cama_db::tax_repository::TaxPredictionMa
                 market.prediction_id,
                 market.current_price,
                 short_text(&market.question, 48),
-                grouped(market.yes_contracts),
-                grouped(market.no_contracts),
+                format_grouped(market.yes_contracts),
+                format_grouped(market.no_contracts),
                 format_jc(market.cost_basis),
                 format_signed_jc(market.ev_to_holders),
                 format_jc(market.worst_case_payout),
@@ -1663,7 +1663,7 @@ fn format_source_totals(rows: &[TaxLedgerSourceTotal]) -> String {
             format!(
                 "`{}`: {} entries, net {}",
                 row.source,
-                grouped(row.entry_count),
+                format_grouped(row.entry_count),
                 format_signed_jc(row.net_delta),
             )
         })
@@ -1686,37 +1686,11 @@ fn short_text(value: &str, limit: usize) -> String {
 }
 
 fn format_jc(amount: i64) -> String {
-    format!("{} {JOPACOIN_EMOTE}", grouped(amount))
+    format!("{} {JOPACOIN_EMOTE}", format_grouped(amount))
 }
 
 fn format_signed_jc(amount: i64) -> String {
-    let value = if amount > 0 {
-        format!("+{}", grouped(amount))
-    } else {
-        grouped(amount)
-    };
-    format!("{value} {JOPACOIN_EMOTE}")
-}
-
-fn grouped(amount: i64) -> String {
-    let negative = amount < 0;
-    let digits = amount.unsigned_abs().to_string();
-    let first = digits.len() % 3;
-    let mut result = String::new();
-    if first != 0 {
-        result.push_str(&digits[..first]);
-    }
-    for chunk in digits.as_bytes()[first..].chunks(3) {
-        if !result.is_empty() {
-            result.push(',');
-        }
-        result.push_str(std::str::from_utf8(chunk).expect("decimal digits are UTF-8"));
-    }
-    if negative {
-        format!("-{result}")
-    } else {
-        result
-    }
+    format!("{} {JOPACOIN_EMOTE}", format_grouped_signed(amount))
 }
 
 fn tax_embed(embed: TaxEmbed) -> InteractionEmbed {

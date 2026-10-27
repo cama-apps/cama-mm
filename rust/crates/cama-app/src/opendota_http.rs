@@ -717,16 +717,8 @@ impl OpenDotaRuntimeServices {
     /// Construct from the runtime's single immutable configuration snapshot.
     /// Negative retry delays are rejected by the HTTP duration type and fall
     /// back to the canonical production sequence, matching `from_env`'s
-    /// fail-soft handling of malformed delay configuration.
-    pub fn from_production_settings(
-        api_key: Option<String>,
-        retry_delays_seconds: &[i64],
-    ) -> Result<Self, OpenDotaHttpBuildError> {
-        Self::from_production_settings_with_quota_path(api_key, retry_delays_seconds, None)
-    }
-
-    /// Construct production services while overriding the durable anonymous
-    /// quota ledger location. Runtime deployment points this beside the SQLite
+    /// fail-soft handling of malformed delay configuration. The durable
+    /// anonymous quota ledger location may be overridden. Runtime deployment points this beside the SQLite
     /// database on its existing persistent data mount.
     pub fn from_production_settings_with_quota_path(
         api_key: Option<String>,
@@ -1359,7 +1351,7 @@ fn parse_retry_delays(raw: &str) -> Option<Vec<Duration>> {
         .collect()
 }
 
-fn value_i64(value: &Value) -> Option<i64> {
+pub(crate) fn value_i64(value: &Value) -> Option<i64> {
     value
         .as_i64()
         .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
@@ -1367,21 +1359,21 @@ fn value_i64(value: &Value) -> Option<i64> {
         .or_else(|| value.as_str()?.trim().parse().ok())
 }
 
-fn field_i64(object: &Map<String, Value>, name: &str) -> Option<i64> {
+pub(crate) fn field_i64(object: &Map<String, Value>, name: &str) -> Option<i64> {
     object.get(name).and_then(value_i64)
 }
 
-fn value_f64(value: &Value) -> Option<f64> {
+pub(crate) fn value_f64(value: &Value) -> Option<f64> {
     value
         .as_f64()
         .or_else(|| value.as_str()?.trim().parse().ok())
 }
 
-fn field_f64(object: &Map<String, Value>, name: &str) -> Option<f64> {
+pub(crate) fn field_f64(object: &Map<String, Value>, name: &str) -> Option<f64> {
     object.get(name).and_then(value_f64)
 }
 
-fn field_bool(object: &Map<String, Value>, name: &str) -> Option<bool> {
+pub(crate) fn field_bool(object: &Map<String, Value>, name: &str) -> Option<bool> {
     object.get(name).and_then(|value| {
         value
             .as_bool()
@@ -1576,7 +1568,7 @@ fn project_mmr_value(value: &Value) -> Option<OpenDotaMmrValue> {
     }
 }
 
-fn truncate_finite_f64_to_i64(value: f64) -> Option<i64> {
+pub(crate) fn truncate_finite_f64_to_i64(value: f64) -> Option<i64> {
     // `i64::MAX as f64` rounds up to 2^63, so the upper bound must be
     // exclusive. i64::MIN is exactly representable as f64.
     const I64_EXCLUSIVE_UPPER_BOUND: f64 = 9_223_372_036_854_775_808.0;

@@ -1,8 +1,7 @@
 //! Persistent route catalog and application policy for Dig.
 //!
-//! Route state is transport-independent. Entropy is injected, SQLite writes
-//! delegate to the existing-schema repository, and Python remains the live
-//! Discord runtime and schema authority during parity work.
+//! Route state is transport-independent. Entropy is injected and SQLite writes
+//! delegate to the existing-schema repository.
 
 use std::fmt::{self, Display, Formatter};
 
@@ -11,7 +10,8 @@ use cama_db::dig_routes_repository::{
     RouteChoiceRequest, RouteTunnelRecord,
 };
 
-use crate::dig_service::{BOSS_BOUNDARIES, LAYERS, Layer, PINNACLE_DEPTH};
+use crate::dig_bosses::{BOSS_BOUNDARIES, PINNACLE_DEPTH};
+use crate::dig_service::{LAYERS, Layer};
 use crate::dig_tunnels::{EffectSpec, EffectValue, Tunnel};
 
 const fn effect(key: &'static str, value: f64) -> EffectSpec {
@@ -571,15 +571,17 @@ pub fn build_route_offer_state<R: RouteEntropy + ?Sized>(
 ) -> Result<Option<RouteState>, RouteOfferError> {
     let Some(boundary_index) = BOSS_BOUNDARIES
         .iter()
-        .position(|boundary| *boundary == defeated_boundary)
+        .position(|boundary| i64::from(*boundary) == defeated_boundary)
     else {
         return Ok(None);
     };
     let next_layer = LAYERS[boundary_index + 1].name;
-    let end_depth = BOSS_BOUNDARIES
-        .get(boundary_index + 1)
-        .copied()
-        .unwrap_or(PINNACLE_DEPTH);
+    let end_depth = i64::from(
+        BOSS_BOUNDARIES
+            .get(boundary_index + 1)
+            .copied()
+            .unwrap_or(PINNACLE_DEPTH),
+    );
     let previous_universal = parse_route_state(previous_raw_state).and_then(|state| {
         state
             .offered

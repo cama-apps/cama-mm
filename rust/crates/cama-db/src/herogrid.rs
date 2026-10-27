@@ -4,7 +4,7 @@
 //! an initialized database through [`crate::open_runtime_connection`]; production
 //! code in this module never creates a database, table, index, or migration.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use rusqlite::params_from_iter;
@@ -80,12 +80,6 @@ pub trait HeroGridDataPort {
         &self,
         guild_id: Option<i64>,
     ) -> Result<Vec<EnrichedPlayer>, Self::Error>;
-
-    fn player_names(
-        &self,
-        discord_ids: &[i64],
-        guild_id: Option<i64>,
-    ) -> Result<Vec<HeroGridPlayer>, Self::Error>;
 }
 
 #[derive(Clone, Debug)]
@@ -270,53 +264,6 @@ impl HeroGridRepository {
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
-
-    /// Resolve names in the caller's requested order.
-    ///
-    /// Missing ids are deliberately omitted so the application layer can use
-    /// Python's `User {id}` fallback without coupling the repository to copy.
-    pub fn get_player_names(
-        &self,
-        discord_ids: &[i64],
-        guild_id: Option<i64>,
-    ) -> Result<Vec<HeroGridPlayer>, HeroGridRepositoryError> {
-        if discord_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let unique_ids = stable_unique(discord_ids);
-        let guild_id = Self::normalize_guild_id(guild_id);
-        let connection = open_runtime_connection(&self.path)?;
-        let mut by_id = BTreeMap::new();
-        for chunk in unique_ids.chunks(ID_CHUNK_SIZE) {
-            let placeholders = repeat_placeholders(chunk.len());
-            let sql = format!(
-                "SELECT discord_id, discord_username
-                   FROM players
-                  WHERE guild_id = ?
-                    AND discord_id IN ({placeholders})"
-            );
-            let parameters = std::iter::once(guild_id).chain(chunk.iter().copied());
-            let mut statement = connection.prepare(&sql)?;
-            let rows = statement.query_map(params_from_iter(parameters), |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-            })?;
-            for row in rows {
-                let (discord_id, name) = row?;
-                by_id.entry(discord_id).or_insert(name);
-            }
-        }
-
-        Ok(discord_ids
-            .iter()
-            .filter_map(|discord_id| {
-                by_id.get(discord_id).map(|name| HeroGridPlayer {
-                    discord_id: *discord_id,
-                    name: name.clone(),
-                })
-            })
-            .collect())
-    }
 }
 
 impl HeroGridDataPort for HeroGridRepository {
@@ -335,14 +282,6 @@ impl HeroGridDataPort for HeroGridRepository {
         guild_id: Option<i64>,
     ) -> Result<Vec<EnrichedPlayer>, Self::Error> {
         self.get_players_with_enriched_data(guild_id)
-    }
-
-    fn player_names(
-        &self,
-        discord_ids: &[i64],
-        guild_id: Option<i64>,
-    ) -> Result<Vec<HeroGridPlayer>, Self::Error> {
-        self.get_player_names(discord_ids, guild_id)
     }
 }
 
@@ -648,45 +587,6 @@ mod tests {
                 games: 1,
                 wins: 1,
             }]
-        );
-        assert_eq!(
-            fixture
-                .repository()
-                .get_player_names(&[-9], Some(GUILD))
-                .expect("guild-scoped name"),
-            [HeroGridPlayer {
-                discord_id: -9,
-                name: "Primary".to_owned(),
-            }]
-        );
-    }
-
-    #[test]
-    fn signed_ids_and_requested_name_order_survive_bulk_reads() {
-        let fixture = Fixture::new();
-        let low = i64::MIN + 7;
-        let high = i64::MAX - 7;
-        fixture.player(low, "Low", GUILD);
-        fixture.player(high, "High", GUILD);
-        assert_eq!(
-            fixture
-                .repository()
-                .get_player_names(&[high, low, high], Some(GUILD))
-                .expect("ordered signed ids"),
-            [
-                HeroGridPlayer {
-                    discord_id: high,
-                    name: "High".to_owned(),
-                },
-                HeroGridPlayer {
-                    discord_id: low,
-                    name: "Low".to_owned(),
-                },
-                HeroGridPlayer {
-                    discord_id: high,
-                    name: "High".to_owned(),
-                },
-            ]
         );
     }
 

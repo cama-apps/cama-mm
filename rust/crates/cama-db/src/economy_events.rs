@@ -1,10 +1,10 @@
 //! Existing-schema SQLite persistence for daily economy events.
 //!
-//! Python remains the migration authority while the Rust implementation runs
-//! alongside it.  This repository therefore opens existing database files
-//! without SQLite's create flag and never creates or alters caller schema.
-//! Event insertion and every direct balance leg share one `BEGIN IMMEDIATE`
-//! transaction, preserving Python's one-card-per-guild/day idempotency and its
+//! Schema creation and migration belong to the startup schema manager.  This
+//! repository therefore opens existing database files without SQLite's create
+//! flag and never creates or alters caller schema. Event insertion and every
+//! direct balance leg share one `BEGIN IMMEDIATE` transaction, preserving the
+//! one-card-per-guild/day idempotency and its
 //! trigger-backed economy-ledger context.
 
 use std::collections::BTreeMap;
@@ -618,7 +618,7 @@ impl EconomyEventRepository {
         self.get_monetary_trends_for_windows(guild_id, current_stock, now, &DEFAULT_TREND_WINDOWS)
     }
 
-    pub fn get_monetary_trends_for_windows(
+    fn get_monetary_trends_for_windows(
         &self,
         guild_id: Option<i64>,
         current_stock: i64,
@@ -695,7 +695,7 @@ impl EconomyEventRepository {
         )
     }
 
-    pub fn get_flow_indicators_for_windows(
+    fn get_flow_indicators_for_windows(
         &self,
         guild_id: Option<i64>,
         current_stock: i64,

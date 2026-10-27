@@ -63,6 +63,40 @@ fn response_text(response: &InteractionResponse) -> String {
     parts.join("\n")
 }
 
+/// Drafter display names. `cached` controls whether the gateway cache already
+/// knows them; a live lookup always can, like a member fetch on a cold cache.
+struct DrafterNames {
+    cached: bool,
+}
+
+impl DrafterNames {
+    fn directory() -> GuildPlayerNameDirectory {
+        GuildPlayerNameDirectory::new(Some(BTreeMap::from([
+            (100, "Radiant Captain".to_owned()),
+            (105, "Dire Captain".to_owned()),
+        ])))
+    }
+}
+
+#[async_trait]
+impl GuildPlayerNameResolver for DrafterNames {
+    fn names_for_guild(
+        &self,
+        _guild_id: i64,
+        _player_ids: &[i64],
+    ) -> Result<GuildPlayerNameDirectory, String> {
+        Ok(if self.cached {
+            Self::directory()
+        } else {
+            GuildPlayerNameDirectory::default()
+        })
+    }
+
+    async fn resolve_names(&self, _guild_id: i64, _player_ids: &[i64]) -> GuildPlayerNameDirectory {
+        Self::directory()
+    }
+}
+
 fn selected_drafter() -> InteractionOption {
     option(
         "user",
@@ -118,7 +152,8 @@ async fn stored_draft_backfill_is_informational_cached_and_visible_everywhere() 
         MATCH_VIEW_TIMEOUT,
         prediction.clone(),
     )
-    .unwrap();
+    .unwrap()
+    .with_player_names(Arc::new(DrafterNames { cached: true }));
     let registry = registry(&provider);
     let before = competitive_state(&path);
     registry
@@ -191,19 +226,22 @@ async fn stored_draft_backfill_is_informational_cached_and_visible_everywhere() 
         let captured = responder.captured.lock().unwrap();
         assert_eq!(captured.deferred, [subcommand != "view"]);
         let text = response_text(captured.followups.last().unwrap());
+        let drafters = ["Radiant Captain", "Dire Captain"];
         for expected in [
             "61.66%",
             "38.34%",
             "Radiant favored",
             "[Batru](https://batru.gg)",
-            "<@100>",
-            "<@105>",
-        ] {
+        ]
+        .into_iter()
+        .chain(drafters)
+        {
             assert!(
                 text.contains(expected),
                 "{subcommand} missing {expected}: {text}"
             );
         }
+        assert!(!text.contains("<@"), "{subcommand}: {text}");
         if subcommand == "drafts" {
             assert!(text.contains("Win rate: **100.0%**"), "{text}");
             assert!(text.contains("Draft W/L/S: **1/0/0**"), "{text}");
@@ -297,9 +335,11 @@ async fn draft_history_pages_include_unknown_matches_and_rank_drafters_separatel
          VALUES (8,?1,'[]','[]',2,'2024-01-16'),(9,?1,'[]','[]',1,'2024-01-17')",
         [GUILD as i64],
     ).unwrap();
+    // A cold gateway cache: the drafter pages must fetch names live.
     let provider =
         EnrichmentRegistrationProvider::test_new(&path, &application_config(), offline_services())
-            .unwrap();
+            .unwrap()
+            .with_player_names(Arc::new(DrafterNames { cached: false }));
     let registry = registry(&provider);
     registry
         .command_handler("enrich")
@@ -376,8 +416,8 @@ async fn draft_history_pages_include_unknown_matches_and_rank_drafters_separatel
         }
     }
     for (view, drafter, rate) in [
-        ("best_drafters", "<@100>", "100.0%"),
-        ("worst_drafters", "<@105>", "0.0%"),
+        ("best_drafters", "Radiant Captain", "100.0%"),
+        ("worst_drafters", "Dire Captain", "0.0%"),
     ] {
         let responder = Arc::new(CapturingResponder::default());
         registry
@@ -403,6 +443,7 @@ async fn draft_history_pages_include_unknown_matches_and_rank_drafters_separatel
         let response = captured.followups.last().unwrap();
         let text = response_text(response);
         assert!(text.contains(drafter), "{text}");
+        assert!(!text.contains("<@"), "{text}");
         assert!(text.contains(rate), "{text}");
         assert!(text.contains("Decisive drafts: **1**"), "{text}");
         assert!(

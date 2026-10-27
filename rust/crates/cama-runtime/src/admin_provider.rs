@@ -44,7 +44,8 @@ use tracing::{debug, error, warn};
 
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{
-    DiscordGuildPlayerNameResolver, DiscordMessage, DiscordTransport, GuildPlayerNameResolver,
+    DiscordGuildPlayerNameResolver, DiscordMessage, DiscordTransport, GuildPlayerNameDirectory,
+    GuildPlayerNameResolver,
 };
 use crate::global_hooks::{UsageMonitor, UsageSnapshot};
 use crate::ids::signed_id;
@@ -449,10 +450,31 @@ impl InteractionHandler for AdminHandler {
 
 impl AdminHandler {
     async fn render_player_name(&self, user_id: i64, guild_id: i64) -> String {
-        self.player_names
-            .names_for_guild(guild_id, &[user_id])
-            .unwrap_or_default()
+        self.render_player_names(guild_id, &[user_id])
+            .await
             .resolve(user_id)
+    }
+
+    /// Live guild names for admin copy, fetching members the gateway cache
+    /// misses. Callers acknowledge first: the fetch is a Discord round trip.
+    async fn render_player_names(
+        &self,
+        guild_id: i64,
+        user_ids: &[i64],
+    ) -> GuildPlayerNameDirectory {
+        self.player_names.resolve_names(guild_id, user_ids).await
+    }
+
+    /// Readable name for a user option: the guild's live or last-seen name,
+    /// then the name Discord resolved with the interaction. Never an ID or
+    /// mention markup, which the client may leave unresolved.
+    async fn render_user_option(&self, user: &AdminUserOption, guild_id: i64) -> String {
+        let Ok(user_id) = i64::try_from(user.id) else {
+            return cama_domain::discord_content::UNKNOWN_PLAYER.to_owned();
+        };
+        self.render_player_names(guild_id, &[user_id])
+            .await
+            .resolve_or(user_id, user.display_name.as_deref().unwrap_or_default())
     }
 
     async fn lowprio_add(
@@ -460,10 +482,11 @@ impl AdminHandler {
         context: AdminCommandContext,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
-        if !self.require_admin(&context, &responder).await? {
+        if !self.require_admin_and_defer(&context, &responder).await? {
             return Ok(());
         }
         let user = required_user(&context.options, "user")?;
+        let name = self.render_user_option(&user, context.guild_id).await;
         let reason = string(&context.options, "reason");
         let wins = integer(&context.options, "wins").unwrap_or(LOW_PRIORITY_REQUIRED_WINS);
         // The audit row is written inside the assignment's own transaction now,
@@ -484,7 +507,7 @@ impl AdminHandler {
             .map_err(|error| format!("low-priority player task failed: {error}"))?
             .map_err(|error| error.to_string())?;
         if !exists {
-            return respond_ephemeral(&responder, format!("⚠️ <@{}> is not registered.", user.id))
+            return respond_ephemeral(&responder, format!("⚠️ **{}** is not registered.", name))
                 .await;
         }
         let low_priority = self.low_priority.clone();
@@ -516,8 +539,8 @@ impl AdminHandler {
         let acknowledged = respond_ephemeral(
             &responder,
             format!(
-                "✅ Updated matchmaking state for <@{}>. {} wins required.",
-                user.id, state.wins_remaining
+                "✅ Updated matchmaking state for **{}**. {} wins required.",
+                name, state.wins_remaining
             ),
         )
         .await;
@@ -550,10 +573,11 @@ impl AdminHandler {
         context: AdminCommandContext,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
-        if !self.require_admin(&context, &responder).await? {
+        if !self.require_admin_and_defer(&context, &responder).await? {
             return Ok(());
         }
         let user = required_user(&context.options, "user")?;
+        let name = self.render_user_option(&user, context.guild_id).await;
         let reason = string(&context.options, "reason");
         let target_id = signed_id(user.id, "user")?;
         let guild_id = context.guild_id;
@@ -590,11 +614,11 @@ impl AdminHandler {
         .await
         .map_err(|error| format!("low-priority clear task failed: {error}"))??;
         let content = if removed {
-            format!("✅ Cleared matchmaking state for <@{}>.", user.id)
+            format!("✅ Cleared matchmaking state for **{}**.", name)
         } else {
             format!(
-                "<@{}> does not have active restricted matchmaking state.",
-                user.id
+                "**{}** does not have active restricted matchmaking state.",
+                name
             )
         };
         respond_ephemeral(&responder, content).await?;
@@ -606,10 +630,11 @@ impl AdminHandler {
         context: AdminCommandContext,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
-        if !self.require_admin(&context, &responder).await? {
+        if !self.require_admin_and_defer(&context, &responder).await? {
             return Ok(());
         }
         let user = required_user(&context.options, "user")?;
+        let name = self.render_user_option(&user, context.guild_id).await;
         let target_id = signed_id(user.id, "user")?;
         let guild_id = context.guild_id;
         let repository = self.low_priority.clone();
@@ -618,20 +643,22 @@ impl AdminHandler {
                 .await
                 .map_err(|error| format!("low-priority status task failed: {error}"))?
                 .map_err(|error| error.to_string())?;
+        let issuer_ids = state.iter().map(|state| state.set_by).collect::<Vec<_>>();
+        let names = self.render_player_names(guild_id, &issuer_ids).await;
         let content = match state.filter(|state| state.active) {
             Some(state) => format!(
-                "<@{}>: {}/{} wins completed ({} remaining).\nReason: {}\nIssued by: <@{}>\nApplied: {}",
-                user.id,
+                "**{}**: {}/{} wins completed ({} remaining).\nReason: {}\nIssued by: **{}**\nApplied: {}",
+                name,
                 state.wins_required - state.wins_remaining,
                 state.wins_required,
                 state.wins_remaining,
                 state.reason.as_deref().unwrap_or("Not provided"),
-                state.set_by,
+                names.resolve(state.set_by),
                 state.created_at
             ),
             None => format!(
-                "<@{}> does not have active restricted matchmaking state.",
-                user.id
+                "**{}** does not have active restricted matchmaking state.",
+                name
             ),
         };
         respond_ephemeral(&responder, content).await
@@ -642,7 +669,7 @@ impl AdminHandler {
         context: AdminCommandContext,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
-        if !self.require_admin(&context, &responder).await? {
+        if !self.require_admin_and_defer(&context, &responder).await? {
             return Ok(());
         }
         let repository = self.low_priority.clone();
@@ -651,6 +678,11 @@ impl AdminHandler {
             .await
             .map_err(|error| format!("low-priority list task failed: {error}"))?
             .map_err(|error| error.to_string())?;
+        let player_ids = states
+            .iter()
+            .flat_map(|state| [state.discord_id, state.set_by])
+            .collect::<Vec<_>>();
+        let names = self.render_player_names(guild_id, &player_ids).await;
         let content = if states.is_empty() {
             "No active restricted matchmaking state.".to_owned()
         } else {
@@ -658,12 +690,12 @@ impl AdminHandler {
                 .iter()
                 .map(|state| {
                     format!(
-                        "<@{}> — {}/{} wins remaining; reason: {}; by <@{}>; assigned {}",
-                        state.discord_id,
+                        "**{}** — {}/{} wins remaining; reason: {}; by **{}**; assigned {}",
+                        names.resolve(state.discord_id),
                         state.wins_remaining,
                         state.wins_required,
                         state.reason.as_deref().unwrap_or("not provided"),
-                        state.set_by,
+                        names.resolve(state.set_by),
                         state.created_at
                     )
                 })
@@ -768,6 +800,23 @@ impl AdminHandler {
             .await?;
             Ok(false)
         }
+    }
+
+    /// Admin gate followed by the ephemeral acknowledgement that every
+    /// SQLite-backed route needs before its first blocking query: a busy
+    /// database can otherwise hold the reply past Discord's deadline. `false`
+    /// means the caller was already told they lack permission.
+    async fn require_admin_and_defer(
+        &self,
+        context: &AdminCommandContext,
+        responder: &Arc<dyn InteractionResponder>,
+    ) -> Result<bool, InteractionHandlerError> {
+        if !self.require_admin(context, responder).await? {
+            return Ok(false);
+        }
+        // Never touch the database for an interaction Discord no longer accepts.
+        defer(responder, true).await?;
+        Ok(true)
     }
 
     fn rate_limit(
@@ -972,6 +1021,7 @@ impl AdminHandler {
             return Ok(());
         }
         let user = required_user(&context.options, "user")?;
+        let name = self.render_user_option(&user, context.guild_id).await;
         let steam_id = required_integer(&context.options, "steam_id")?;
         let mmr = integer(&context.options, "mmr");
         if mmr.is_some_and(|mmr| !(0..=12_000).contains(&mmr)) {
@@ -979,10 +1029,9 @@ impl AdminHandler {
         }
         let target_id = signed_id(user.id, "user")?;
         let guild_id = context.guild_id;
-        let username = user
-            .display_name
-            .clone()
-            .unwrap_or_else(|| format!("User {}", user.id));
+        // Never store a numeric ID as the registration name; fall back to the
+        // readable rendered name ("Unknown player" when nothing is known).
+        let username = user.display_name.clone().unwrap_or_else(|| name.clone());
         let mut repository = self.registration.clone();
         let mut api = self.opendota.registration_api();
         let input = RegisterPlayerInput {
@@ -1006,8 +1055,8 @@ impl AdminHandler {
                 respond_ephemeral(
                     &responder,
                     format!(
-                        "✅ Registered <@{}>!\nCama Rating: {} ({:.0}% uncertainty)\nThey can use `/player roles` to set their preferred roles.",
-                        user.id, result.cama_rating, result.uncertainty
+                        "✅ Registered **{}**!\nCama Rating: {} ({:.0}% uncertainty)\nThey can use `/player roles` to set their preferred roles.",
+                        name, result.cama_rating, result.uncertainty
                     ),
                 )
                 .await
@@ -1141,6 +1190,7 @@ impl AdminHandler {
             return Ok(());
         }
         let user = required_user(&context.options, "user")?;
+        let name = self.render_user_option(&user, context.guild_id).await;
         let target_id = signed_id(user.id, "user")?;
         let guild_id = context.guild_id;
         let players = self.players.clone();
@@ -1149,7 +1199,7 @@ impl AdminHandler {
             .map_err(|error| format!("reset-user lookup task failed: {error}"))?
             .map_err(|error| error.to_string())?;
         if !exists {
-            return respond_ephemeral(&responder, format!("⚠️ <@{}> is not registered.", user.id))
+            return respond_ephemeral(&responder, format!("⚠️ **{}** is not registered.", name))
                 .await;
         }
         let players = self.players.clone();
@@ -1161,23 +1211,23 @@ impl AdminHandler {
         if !deleted {
             return respond_ephemeral(
                 &responder,
-                format!("❌ Failed to reset <@{}>'s account.", user.id),
+                format!("❌ Failed to reset **{}**'s account.", name),
             )
             .await;
         }
         respond_ephemeral(
             &responder,
-            format!(
-                "✅ Reset <@{}>'s account. They can register again.",
-                user.id
-            ),
+            format!("✅ Reset **{}**'s account. They can register again.", name),
         )
         .await?;
+        let actor_name = self
+            .render_player_name(signed_id(context.actor_id, "actor")?, guild_id)
+            .await;
         self.best_effort_dm(
             user.id,
             format!(
-                "Your account was reset by an administrator (<@{}>). You can register again with `/player register`.",
-                context.actor_id
+                "Your account was reset by an administrator (**{}**). You can register again with `/player register`.",
+                actor_name
             ),
         )
         .await;
@@ -1189,7 +1239,7 @@ impl AdminHandler {
         context: AdminCommandContext,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
-        if !self.require_admin(&context, &responder).await? {
+        if !self.require_admin_and_defer(&context, &responder).await? {
             return Ok(());
         }
         let amount = required_integer(&context.options, "amount")?;
@@ -1265,6 +1315,7 @@ impl AdminHandler {
             };
         }
         let user = user.expect("nonprofit false requires user");
+        let name = self.render_user_option(&user, guild_id).await;
         let target_id = signed_id(user.id, "user")?;
         let actor_id = signed_id(context.actor_id, "actor")?;
         let admin = self.admin.clone();
@@ -1278,7 +1329,7 @@ impl AdminHandler {
             Err(cama_db::admin::AdminRepositoryError::PlayerNotFound) => {
                 return respond_ephemeral(
                     &responder,
-                    format!("⚠️ <@{}> is not registered.", user.id),
+                    format!("⚠️ **{}** is not registered.", name),
                 )
                 .await;
             }
@@ -1292,9 +1343,9 @@ impl AdminHandler {
         respond_ephemeral(
             &responder,
             format!(
-                "✅ {verb} **{}** jopacoin {direction} <@{}>\nBalance: {old} → {new}",
+                "✅ {verb} **{}** jopacoin {direction} **{}**\nBalance: {old} → {new}",
                 amount.saturating_abs(),
-                user.id
+                name
             ),
         )
         .await
@@ -1305,10 +1356,11 @@ impl AdminHandler {
         context: AdminCommandContext,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
-        if !self.require_admin(&context, &responder).await? {
+        if !self.require_admin_and_defer(&context, &responder).await? {
             return Ok(());
         }
         let user = required_user(&context.options, "user")?;
+        let name = self.render_user_option(&user, context.guild_id).await;
         let target_id = signed_id(user.id, "user")?;
         let guild_id = context.guild_id;
         let loans = self.loans.clone();
@@ -1319,7 +1371,7 @@ impl AdminHandler {
         .map_err(|error| format!("loan player task failed: {error}"))?
         .map_err(|error| error.to_string())?;
         if registered.is_none() {
-            return respond_ephemeral(&responder, format!("⚠️ <@{}> is not registered.", user.id))
+            return respond_ephemeral(&responder, format!("⚠️ **{}** is not registered.", name))
                 .await;
         }
         let loans = self.loans.clone();
@@ -1330,8 +1382,8 @@ impl AdminHandler {
         respond_ephemeral(
             &responder,
             format!(
-                "✅ Reset loan cooldown for <@{}>. They can now take a new loan.",
-                user.id
+                "✅ Reset loan cooldown for **{}**. They can now take a new loan.",
+                name
             ),
         )
         .await
@@ -1342,10 +1394,11 @@ impl AdminHandler {
         context: AdminCommandContext,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
-        if !self.require_admin(&context, &responder).await? {
+        if !self.require_admin_and_defer(&context, &responder).await? {
             return Ok(());
         }
         let user = required_user(&context.options, "user")?;
+        let name = self.render_user_option(&user, context.guild_id).await;
         let target_id = signed_id(user.id, "user")?;
         let guild_id = context.guild_id;
         let players = self.players.clone();
@@ -1354,7 +1407,7 @@ impl AdminHandler {
             .map_err(|error| format!("bankruptcy player task failed: {error}"))?
             .map_err(|error| error.to_string())?;
         if !exists {
-            return respond_ephemeral(&responder, format!("⚠️ <@{}> is not registered.", user.id))
+            return respond_ephemeral(&responder, format!("⚠️ **{}** is not registered.", name))
                 .await;
         }
         let bankruptcy = self.bankruptcy.clone();
@@ -1367,15 +1420,15 @@ impl AdminHandler {
         if !reset {
             return respond_ephemeral(
                 &responder,
-                format!("ℹ️ <@{}> has no bankruptcy history to reset.", user.id),
+                format!("ℹ️ **{}** has no bankruptcy history to reset.", name),
             )
             .await;
         }
         respond_ephemeral(
             &responder,
             format!(
-                "✅ Reset bankruptcy for <@{}>. Cooldown and penalty games cleared.",
-                user.id
+                "✅ Reset bankruptcy for **{}**. Cooldown and penalty games cleared.",
+                name
             ),
         )
         .await
@@ -1386,10 +1439,11 @@ impl AdminHandler {
         context: AdminCommandContext,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
-        if !self.require_admin(&context, &responder).await? {
+        if !self.require_admin_and_defer(&context, &responder).await? {
             return Ok(());
         }
         let user = required_user(&context.options, "user")?;
+        let name = self.render_user_option(&user, context.guild_id).await;
         let steam_id = required_integer(&context.options, "steam_id")?;
         let set_primary = boolean(&context.options, "set_primary").unwrap_or(false);
         // The bound is exclusive everywhere else (validate_steam_id), so a
@@ -1398,7 +1452,7 @@ impl AdminHandler {
             return respond_ephemeral(&responder, "❌ Invalid Steam ID.").await;
         }
         if !self.registered(user.id, context.guild_id).await? {
-            return respond_ephemeral(&responder, format!("⚠️ <@{}> is not registered.", user.id))
+            return respond_ephemeral(&responder, format!("⚠️ **{}** is not registered.", name))
                 .await;
         }
         let target_id = signed_id(user.id, "user")?;
@@ -1417,8 +1471,8 @@ impl AdminHandler {
                 respond_ephemeral(
                     &responder,
                     format!(
-                        "✅ Added Steam ID `{steam_id}` to <@{}>'s account{note}.",
-                        user.id
+                        "✅ Added Steam ID `{steam_id}` to **{}**'s account{note}.",
+                        name
                     ),
                 )
                 .await
@@ -1432,13 +1486,14 @@ impl AdminHandler {
         context: AdminCommandContext,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
-        if !self.require_admin(&context, &responder).await? {
+        if !self.require_admin_and_defer(&context, &responder).await? {
             return Ok(());
         }
         let user = required_user(&context.options, "user")?;
+        let name = self.render_user_option(&user, context.guild_id).await;
         let steam_id = required_integer(&context.options, "steam_id")?;
         if !self.registered(user.id, context.guild_id).await? {
-            return respond_ephemeral(&responder, format!("⚠️ <@{}> is not registered.", user.id))
+            return respond_ephemeral(&responder, format!("⚠️ **{}** is not registered.", name))
                 .await;
         }
         let target_id = signed_id(user.id, "user")?;
@@ -1459,7 +1514,7 @@ impl AdminHandler {
         if !removed {
             return respond_ephemeral(
                 &responder,
-                format!("❌ Steam ID `{steam_id}` is not linked to <@{}>.", user.id),
+                format!("❌ Steam ID `{steam_id}` is not linked to **{}**.", name),
             )
             .await;
         }
@@ -1470,8 +1525,8 @@ impl AdminHandler {
         respond_ephemeral(
             &responder,
             format!(
-                "✅ Removed Steam ID `{steam_id}` from <@{}>'s account.\n{suffix}",
-                user.id
+                "✅ Removed Steam ID `{steam_id}` from **{}**'s account.\n{suffix}",
+                name
             ),
         )
         .await
@@ -1482,13 +1537,14 @@ impl AdminHandler {
         context: AdminCommandContext,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
-        if !self.require_admin(&context, &responder).await? {
+        if !self.require_admin_and_defer(&context, &responder).await? {
             return Ok(());
         }
         let user = required_user(&context.options, "user")?;
+        let name = self.render_user_option(&user, context.guild_id).await;
         let steam_id = required_integer(&context.options, "steam_id")?;
         if !self.registered(user.id, context.guild_id).await? {
-            return respond_ephemeral(&responder, format!("⚠️ <@{}> is not registered.", user.id))
+            return respond_ephemeral(&responder, format!("⚠️ **{}** is not registered.", name))
                 .await;
         }
         let target_id = signed_id(user.id, "user")?;
@@ -1510,8 +1566,8 @@ impl AdminHandler {
             return respond_ephemeral(
                 &responder,
                 format!(
-                    "❌ Steam ID `{steam_id}` is not linked to <@{}>.\nLinked accounts: {linked}",
-                    user.id
+                    "❌ Steam ID `{steam_id}` is not linked to **{}**.\nLinked accounts: {linked}",
+                    name
                 ),
             )
             .await;
@@ -1526,8 +1582,8 @@ impl AdminHandler {
             respond_ephemeral(
                 &responder,
                 format!(
-                    "✅ Set `{steam_id}` as <@{}>'s primary Steam account.",
-                    user.id
+                    "✅ Set `{steam_id}` as **{}**'s primary Steam account.",
+                    name
                 ),
             )
             .await
@@ -1556,10 +1612,11 @@ impl AdminHandler {
         context: AdminCommandContext,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
-        if !self.require_admin(&context, &responder).await? {
+        if !self.require_admin_and_defer(&context, &responder).await? {
             return Ok(());
         }
         let user = required_user(&context.options, "user")?;
+        let name = self.render_user_option(&user, context.guild_id).await;
         let rating = required_number(&context.options, "rating")?;
         if !(0.0..=self.config.admin_rating_max).contains(&rating) {
             return respond_ephemeral(
@@ -1579,15 +1636,12 @@ impl AdminHandler {
             .map_err(|error| format!("admin player task failed: {error}"))?
             .map_err(|error| error.to_string())?;
         let Some(snapshot) = snapshot else {
-            return respond_ephemeral(&responder, format!("⚠️ <@{}> is not registered.", user.id))
+            return respond_ephemeral(&responder, format!("⚠️ **{}** is not registered.", name))
                 .await;
         };
         let Some(old_rating) = snapshot.glicko_rating else {
-            return respond_ephemeral(
-                &responder,
-                format!("❌ <@{}> has no Glicko rating.", user.id),
-            )
-            .await;
+            return respond_ephemeral(&responder, format!("❌ **{}** has no Glicko rating.", name))
+                .await;
         };
         let Some(rd) = snapshot.glicko_rd else {
             return Err("rated player has no Glicko RD".into());
@@ -1615,8 +1669,8 @@ impl AdminHandler {
         respond_ephemeral(
             &responder,
             format!(
-                "✅ Set rating for <@{}>: {old_rating:.0} → **{rating:.0}** (RD kept at {rd:.1}; OpenSkill σ unchanged).",
-                user.id
+                "✅ Set rating for **{}**: {old_rating:.0} → **{rating:.0}** (RD kept at {rd:.1}; OpenSkill σ unchanged).",
+                name
             ),
         )
         .await
@@ -1627,10 +1681,11 @@ impl AdminHandler {
         context: AdminCommandContext,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
-        if !self.require_admin(&context, &responder).await? {
+        if !self.require_admin_and_defer(&context, &responder).await? {
             return Ok(());
         }
         let user = required_user(&context.options, "user")?;
+        let name = self.render_user_option(&user, context.guild_id).await;
         let rd = required_number(&context.options, "rd")?;
         if !(0.0..=MAX_GLICKO_RD).contains(&rd) {
             return respond_ephemeral(
@@ -1647,15 +1702,12 @@ impl AdminHandler {
             .map_err(|error| format!("admin player task failed: {error}"))?
             .map_err(|error| error.to_string())?;
         let Some(snapshot) = snapshot else {
-            return respond_ephemeral(&responder, format!("⚠️ <@{}> is not registered.", user.id))
+            return respond_ephemeral(&responder, format!("⚠️ **{}** is not registered.", name))
                 .await;
         };
         let Some(rating) = snapshot.glicko_rating else {
-            return respond_ephemeral(
-                &responder,
-                format!("❌ <@{}> has no Glicko rating.", user.id),
-            )
-            .await;
+            return respond_ephemeral(&responder, format!("❌ **{}** has no Glicko rating.", name))
+                .await;
         };
         let Some(old_rd) = snapshot.glicko_rd else {
             return Err("rated player has no Glicko RD".into());
@@ -1673,8 +1725,8 @@ impl AdminHandler {
         respond_ephemeral(
             &responder,
             format!(
-                "✅ Set RD for <@{}>: {old_rd:.1} → **{rd:.1}** (rating kept at {rating:.0}).",
-                user.id
+                "✅ Set RD for **{}**: {old_rd:.1} → **{rd:.1}** (rating kept at {rating:.0}).",
+                name
             ),
         )
         .await
@@ -1685,10 +1737,11 @@ impl AdminHandler {
         context: AdminCommandContext,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
-        if !self.require_admin(&context, &responder).await? {
+        if !self.require_admin_and_defer(&context, &responder).await? {
             return Ok(());
         }
         let user = required_user(&context.options, "user")?;
+        let name = self.render_user_option(&user, context.guild_id).await;
         let rating = required_number(&context.options, "rating")?;
         if !(0.0..=self.config.admin_rating_max).contains(&rating) {
             return respond_ephemeral(
@@ -1708,7 +1761,7 @@ impl AdminHandler {
             .map_err(|error| format!("admin player task failed: {error}"))?
             .map_err(|error| error.to_string())?;
         let Some(snapshot) = snapshot else {
-            return respond_ephemeral(&responder, format!("⚠️ <@{}> is not registered.", user.id))
+            return respond_ephemeral(&responder, format!("⚠️ **{}** is not registered.", name))
                 .await;
         };
         if snapshot.games_played() >= self.config.admin_rating_adjustment_max_games {
@@ -1739,8 +1792,8 @@ impl AdminHandler {
         respond_ephemeral(
             &responder,
             format!(
-                "✅ Set initial rating for <@{}> to {rating} (RD kept at {rd:.1}).",
-                user.id
+                "✅ Set initial rating for **{}** to {rating} (RD kept at {rd:.1}).",
+                name
             ),
         )
         .await
@@ -1790,10 +1843,11 @@ impl AdminHandler {
         context: AdminCommandContext,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
-        if !self.require_admin(&context, &responder).await? {
+        if !self.require_admin_and_defer(&context, &responder).await? {
             return Ok(());
         }
         let user = required_user(&context.options, "user")?;
+        let name = self.render_user_option(&user, context.guild_id).await;
         let target_id = signed_id(user.id, "user")?;
         let guild_id = context.guild_id;
         let admin = self.admin.clone();
@@ -1802,22 +1856,19 @@ impl AdminHandler {
             .map_err(|error| format!("recalibration player task failed: {error}"))?
             .map_err(|error| error.to_string())?;
         let Some(snapshot) = snapshot else {
-            return respond_ephemeral(&responder, format!("❌ <@{}> is not registered.", user.id))
+            return respond_ephemeral(&responder, format!("❌ **{}** is not registered.", name))
                 .await;
         };
         let Some(rating) = snapshot.glicko_rating else {
-            return respond_ephemeral(
-                &responder,
-                format!("❌ <@{}> has no Glicko rating.", user.id),
-            )
-            .await;
+            return respond_ephemeral(&responder, format!("❌ **{}** has no Glicko rating.", name))
+                .await;
         };
         if snapshot.games_played() < RECALIBRATION_MIN_GAMES {
             return respond_ephemeral(
                 &responder,
                 format!(
-                    "❌ <@{}> must play at least {RECALIBRATION_MIN_GAMES} games before recalibrating. Current: {} games.",
-                    user.id,
+                    "❌ **{}** must play at least {RECALIBRATION_MIN_GAMES} games before recalibrating. Current: {} games.",
+                    name,
                     snapshot.games_played()
                 ),
             )
@@ -1856,8 +1907,8 @@ impl AdminHandler {
                 return respond_ephemeral(
                     &responder,
                     format!(
-                        "❌ <@{}> is on recalibration cooldown. Can recalibrate again <t:{}:R>.",
-                        user.id,
+                        "❌ **{}** is on recalibration cooldown. Can recalibrate again <t:{}:R>.",
+                        name,
                         now.saturating_add(remaining_seconds)
                     ),
                 )
@@ -1875,8 +1926,8 @@ impl AdminHandler {
         respond_ephemeral(
             &responder,
             format!(
-                "✅ Recalibrated <@{}>!\n• Rating: **{rating:.0}** (unchanged)\n• RD: {old_rd:.1} → **{new_rd:.0}** (high uncertainty)\n{os_line}• Total recalibrations: {total}\n• Next recalibration available: <t:{}:R>",
-                user.id,
+                "✅ Recalibrated **{}**!\n• Rating: **{rating:.0}** (unchanged)\n• RD: {old_rd:.1} → **{new_rd:.0}** (high uncertainty)\n{os_line}• Total recalibrations: {total}\n• Next recalibration available: <t:{}:R>",
+                name,
                 now.saturating_add(cooldown)
             ),
         )
@@ -1888,10 +1939,11 @@ impl AdminHandler {
         context: AdminCommandContext,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
-        if !self.require_admin(&context, &responder).await? {
+        if !self.require_admin_and_defer(&context, &responder).await? {
             return Ok(());
         }
         let user = required_user(&context.options, "user")?;
+        let name = self.render_user_option(&user, context.guild_id).await;
         let target_id = signed_id(user.id, "user")?;
         let guild_id = context.guild_id;
         let repository = self.admin.clone();
@@ -1900,7 +1952,7 @@ impl AdminHandler {
             .map_err(|error| format!("admin player task failed: {error}"))?
             .map_err(|error| error.to_string())?;
         if snapshot.is_none() {
-            return respond_ephemeral(&responder, format!("⚠️ <@{}> is not registered.", user.id))
+            return respond_ephemeral(&responder, format!("⚠️ **{}** is not registered.", name))
                 .await;
         }
         let repository = self.admin.clone();
@@ -1913,15 +1965,15 @@ impl AdminHandler {
         if !reset {
             return respond_ephemeral(
                 &responder,
-                format!("ℹ️ <@{}> has no recalibration history to reset.", user.id),
+                format!("ℹ️ **{}** has no recalibration history to reset.", name),
             )
             .await;
         }
         respond_ephemeral(
             &responder,
             format!(
-                "✅ Reset recalibration cooldown for <@{}>. They can now recalibrate.",
-                user.id
+                "✅ Reset recalibration cooldown for **{}**. They can now recalibrate.",
+                name
             ),
         )
         .await
@@ -1983,6 +2035,7 @@ impl AdminHandler {
         if !try_defer(&responder, true).await {
             return Ok(());
         }
+        let name = self.render_user_option(&player, context.guild_id).await;
         let completion = match completion_raw.as_deref() {
             Some("either") => SuspensionCompletion::Either,
             Some("both") => SuspensionCompletion::Both,
@@ -2054,8 +2107,8 @@ impl AdminHandler {
                 return respond_ephemeral(
                     &responder,
                     format!(
-                        "❌ <@{}> already has an active suspension from **{}**: {} (reason: {}). Re-run with `replace: True` to overwrite it.",
-                        player.id,
+                        "❌ **{}** already has an active suspension from **{}**: {} (reason: {}). Re-run with `replace: True` to overwrite it.",
+                        name,
                         suspension_scope(&state),
                         suspension_terms(&state),
                         state.reason
@@ -2119,8 +2172,8 @@ impl AdminHandler {
         respond_ephemeral(
             &responder,
             format!(
-                "✅ {action} <@{}> from **{}**: {}.{outcome}\nReason: {reason}",
-                player.id,
+                "✅ {action} **{}** from **{}**: {}.{outcome}\nReason: {reason}",
+                name,
                 suspension_scope(&state),
                 suspension_terms(&state)
             ),
@@ -2133,10 +2186,11 @@ impl AdminHandler {
         context: AdminCommandContext,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
-        if !self.require_admin(&context, &responder).await? {
+        if !self.require_admin_and_defer(&context, &responder).await? {
             return Ok(());
         }
         let player = required_user(&context.options, "player")?;
+        let name = self.render_user_option(&player, context.guild_id).await;
         let reason = required_string(&context.options, "reason")?;
         let target_id = signed_id(player.id, "player")?;
         let actor_id = signed_id(context.actor_id, "actor")?;
@@ -2159,7 +2213,7 @@ impl AdminHandler {
         if lifted.is_none() {
             return respond_ephemeral(
                 &responder,
-                format!("<@{}> has no active lobby suspension.", player.id),
+                format!("**{}** has no active lobby suspension.", name),
             )
             .await;
         }
@@ -2171,8 +2225,8 @@ impl AdminHandler {
         respond_ephemeral(
             &responder,
             format!(
-                "✅ Lifted <@{}>'s lobby suspension.\nReason: {reason}",
-                player.id
+                "✅ Lifted **{}**'s lobby suspension.\nReason: {reason}",
+                name
             ),
         )
         .await
@@ -2183,10 +2237,11 @@ impl AdminHandler {
         context: AdminCommandContext,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
-        if !self.require_admin(&context, &responder).await? {
+        if !self.require_admin_and_defer(&context, &responder).await? {
             return Ok(());
         }
         let player = required_user(&context.options, "player")?;
+        let name = self.render_user_option(&player, context.guild_id).await;
         let target_id = signed_id(player.id, "player")?;
         let guild_id = context.guild_id;
         let moderation = self.moderation.clone();
@@ -2197,16 +2252,18 @@ impl AdminHandler {
         })
         .await
         .map_err(|error| format!("moderation status task failed: {error}"))??;
+        let issuer_ids = state.iter().map(|state| state.actor_id).collect::<Vec<_>>();
+        let names = self.render_player_names(guild_id, &issuer_ids).await;
         let content = state.map_or_else(
-            || format!("<@{}> has no active lobby suspension.", player.id),
+            || format!("**{}** has no active lobby suspension.", name),
             |state| {
                 format!(
-                    "**<@{}>** — {}\nTerm: {}\nReason: {}\nIssued by: <@{}>\nApplied: <t:{}:F>",
-                    player.id,
+                    "**{}** — {}\nTerm: {}\nReason: {}\nIssued by: **{}**\nApplied: <t:{}:F>",
+                    name,
                     suspension_scope(&state),
                     suspension_terms(&state),
                     state.reason,
-                    state.actor_id,
+                    names.resolve(state.actor_id),
                     state.created_at
                 )
             },
@@ -2219,7 +2276,7 @@ impl AdminHandler {
         context: AdminCommandContext,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
-        if !self.require_admin(&context, &responder).await? {
+        if !self.require_admin_and_defer(&context, &responder).await? {
             return Ok(());
         }
         let guild_id = context.guild_id;
@@ -2231,6 +2288,12 @@ impl AdminHandler {
         })
         .await
         .map_err(|error| format!("moderation list task failed: {error}"))??;
+        let player_ids = states
+            .iter()
+            .take(10)
+            .flat_map(|state| [state.discord_id, state.actor_id])
+            .collect::<Vec<_>>();
+        let names = self.render_player_names(guild_id, &player_ids).await;
         let content = if states.is_empty() {
             "No active lobby suspensions.".to_owned()
         } else {
@@ -2239,12 +2302,12 @@ impl AdminHandler {
                 .take(10)
                 .map(|state| {
                     format!(
-                        "<@{}> — {}; {}; reason: {}; by <@{}> at <t:{}:f>",
-                        state.discord_id,
+                        "**{}** — {}; {}; reason: {}; by **{}** at <t:{}:f>",
+                        names.resolve(state.discord_id),
                         suspension_scope(state),
                         suspension_terms(state),
                         state.reason,
-                        state.actor_id,
+                        names.resolve(state.actor_id),
                         state.created_at
                     )
                 })
@@ -2262,7 +2325,7 @@ impl AdminHandler {
         context: AdminCommandContext,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
-        if !self.require_admin(&context, &responder).await? {
+        if !self.require_admin_and_defer(&context, &responder).await? {
             return Ok(());
         }
         let player_id = user(&context.options, "player")?
@@ -2278,15 +2341,20 @@ impl AdminHandler {
         })
         .await
         .map_err(|error| format!("moderation history task failed: {error}"))??;
+        let player_ids = events
+            .iter()
+            .flat_map(|event| std::iter::once(event.discord_id).chain(event.actor_id))
+            .collect::<Vec<_>>();
+        let names = self.render_player_names(guild_id, &player_ids).await;
         let content = if events.is_empty() {
             "No moderation history found.".to_owned()
         } else {
             events
                 .iter()
                 .map(|event| {
-                    let actor = event
-                        .actor_id
-                        .map_or_else(String::new, |actor| format!(" by <@{actor}>"));
+                    let actor = event.actor_id.map_or_else(String::new, |actor| {
+                        format!(" by **{}**", names.resolve(actor))
+                    });
                     let reason = event
                         .reason
                         .as_deref()
@@ -2313,10 +2381,10 @@ impl AdminHandler {
                         details.push(format!("match=#{match_id}"));
                     }
                     format!(
-                        "<t:{}:f> **{}** <@{}>{actor} ({}){reason}",
+                        "<t:{}:f> **{}** **{}**{actor} ({}){reason}",
                         event.created_at,
                         event.event_type.name().replace('_', " "),
-                        event.discord_id,
+                        names.resolve(event.discord_id),
                         details.join(", ")
                     )
                 })
@@ -2985,16 +3053,16 @@ impl RegistrationProvider for AdminRegistrationProvider {
 
 fn admin_options(admin_rating_max: f64) -> Vec<CommandOptionSpec> {
     vec![
-        group(
+        CommandOptionSpec::subcommand_group(
             "dota",
             "Dota lobby settings and hosting controls",
             dota::options(),
         ),
-        group(
+        CommandOptionSpec::subcommand_group(
             "adjust",
             "Adjust player rating fields",
             vec![
-                subcommand(
+                CommandOptionSpec::subcommand(
                     "rating",
                     "Set a player's displayed rating in both systems (Admin only)",
                     vec![
@@ -3006,7 +3074,7 @@ fn admin_options(admin_rating_max: f64) -> Vec<CommandOptionSpec> {
                         ),
                     ],
                 ),
-                subcommand(
+                CommandOptionSpec::subcommand(
                     "rd",
                     "Set a player's Glicko RD/uncertainty (Admin only)",
                     vec![
@@ -3020,22 +3088,22 @@ fn admin_options(admin_rating_max: f64) -> Vec<CommandOptionSpec> {
                 ),
             ],
         ),
-        group(
+        CommandOptionSpec::subcommand_group(
             "lowprio",
             "Restricted matchmaking maintenance",
             low_priority_options(),
         ),
-        group(
+        CommandOptionSpec::subcommand_group(
             "moderation",
             "Temporary matchmaking suspensions and audit history",
             moderation_options(),
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "health",
             "Show bot health and since-startup usage (Admin only)",
             vec![],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "addfake",
             "Add fake users to lobby for testing (Admin only)",
             vec![option(
@@ -3044,12 +3112,12 @@ fn admin_options(admin_rating_max: f64) -> Vec<CommandOptionSpec> {
                 CommandOptionKind::Integer,
             )],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "filllobbytest",
             "Fill remaining lobby spots with fake users for testing (Admin only)",
             vec![],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "resetuser",
             "Reset a specific user's account (Admin only)",
             vec![required(
@@ -3058,7 +3126,7 @@ fn admin_options(admin_rating_max: f64) -> Vec<CommandOptionSpec> {
                 CommandOptionKind::User,
             )],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "registeruser",
             "Register another user as a player (Admin only)",
             vec![
@@ -3075,13 +3143,13 @@ fn admin_options(admin_rating_max: f64) -> Vec<CommandOptionSpec> {
                 ),
             ],
         ),
-        subcommand("sync", "Force sync commands (Admin only)", vec![]),
-        subcommand(
+        CommandOptionSpec::subcommand("sync", "Force sync commands (Admin only)", vec![]),
+        CommandOptionSpec::subcommand(
             "backfillroles",
             "Derive played roles from stored OpenDota data and report coverage (Admin only)",
             vec![],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "givecoin",
             "Give jopacoin to a user or reserve (Admin only)",
             vec![
@@ -3112,7 +3180,7 @@ fn admin_options(admin_rating_max: f64) -> Vec<CommandOptionSpec> {
             "Reset a user's bankruptcy cooldown (Admin only)",
             "The user whose bankruptcy cooldown to reset",
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "setrating",
             "Set initial rating for a player",
             vec![
@@ -3133,7 +3201,7 @@ fn admin_options(admin_rating_max: f64) -> Vec<CommandOptionSpec> {
             "Reset rating uncertainty for a player (Admin only)",
             "The player to recalibrate",
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "bumprd",
             "Increase rating uncertainty after a major patch (Admin only)",
             vec![option(
@@ -3147,7 +3215,7 @@ fn admin_options(admin_rating_max: f64) -> Vec<CommandOptionSpec> {
             "Reset a user's recalibration cooldown (Admin only)",
             "The user whose recalibration cooldown to reset",
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "extendbetting",
             "Extend the betting window for a pending match (Admin only)",
             vec![
@@ -3163,7 +3231,7 @@ fn admin_options(admin_rating_max: f64) -> Vec<CommandOptionSpec> {
                 ),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "correctmatch",
             "Correct an incorrectly recorded match result (Admin only)",
             vec![
@@ -3182,7 +3250,7 @@ fn admin_options(admin_rating_max: f64) -> Vec<CommandOptionSpec> {
                 ),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "addsteamid",
             "Add a Steam ID to a player's account (Admin only)",
             vec![
@@ -3199,7 +3267,7 @@ fn admin_options(admin_rating_max: f64) -> Vec<CommandOptionSpec> {
                 ),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "removesteamid",
             "Remove a Steam ID from a player's account (Admin only)",
             vec![
@@ -3215,7 +3283,7 @@ fn admin_options(admin_rating_max: f64) -> Vec<CommandOptionSpec> {
                 ),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "setprimarysteam",
             "Set a player's primary Steam ID (Admin only)",
             vec![
@@ -3231,7 +3299,7 @@ fn admin_options(admin_rating_max: f64) -> Vec<CommandOptionSpec> {
                 ),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "seedherogrid",
             "Seed fake players with enriched match data for /herogrid testing (Admin only)",
             vec![],
@@ -3258,7 +3326,7 @@ fn low_priority_options() -> Vec<CommandOptionSpec> {
     // shorthand reasons this command has always accepted.
     assignment_reason.max_length = Some(REASON_DISPLAY_LIMIT);
     vec![
-        subcommand(
+        CommandOptionSpec::subcommand(
             "add",
             "Set restricted matchmaking state",
             vec![
@@ -3267,7 +3335,7 @@ fn low_priority_options() -> Vec<CommandOptionSpec> {
                 wins,
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "remove",
             "Clear restricted matchmaking state",
             vec![
@@ -3279,7 +3347,7 @@ fn low_priority_options() -> Vec<CommandOptionSpec> {
                 ),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "status",
             "Show restricted matchmaking state",
             vec![required(
@@ -3288,7 +3356,7 @@ fn low_priority_options() -> Vec<CommandOptionSpec> {
                 CommandOptionKind::User,
             )],
         ),
-        subcommand("list", "List restricted matchmaking state", vec![]),
+        CommandOptionSpec::subcommand("list", "List restricted matchmaking state", vec![]),
     ]
 }
 
@@ -3308,7 +3376,7 @@ fn moderation_options() -> Vec<CommandOptionSpec> {
     matches.min_integer = Some(1);
     matches.max_integer = Some(20);
     vec![
-        subcommand(
+        CommandOptionSpec::subcommand(
             "suspend",
             "Temporarily block a player from matchmaking lobbies",
             vec![
@@ -3350,7 +3418,7 @@ fn moderation_options() -> Vec<CommandOptionSpec> {
                 ),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "lift",
             "Lift an active lobby suspension",
             vec![
@@ -3362,7 +3430,7 @@ fn moderation_options() -> Vec<CommandOptionSpec> {
                 reason,
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "status",
             "Show one player's lobby suspension",
             vec![required(
@@ -3371,8 +3439,8 @@ fn moderation_options() -> Vec<CommandOptionSpec> {
                 CommandOptionKind::User,
             )],
         ),
-        subcommand("list", "List active lobby suspensions", vec![]),
-        subcommand(
+        CommandOptionSpec::subcommand("list", "List active lobby suspensions", vec![]),
+        CommandOptionSpec::subcommand(
             "history",
             "Show durable matchmaking moderation history",
             vec![option(
@@ -3392,16 +3460,8 @@ fn required(name: &str, description: &str, kind: CommandOptionKind) -> CommandOp
     option(name, description, kind).required(true)
 }
 
-fn subcommand(name: &str, description: &str, options: Vec<CommandOptionSpec>) -> CommandOptionSpec {
-    option(name, description, CommandOptionKind::Subcommand).options(options)
-}
-
-fn group(name: &str, description: &str, options: Vec<CommandOptionSpec>) -> CommandOptionSpec {
-    option(name, description, CommandOptionKind::SubcommandGroup).options(options)
-}
-
 fn user_subcommand(name: &str, description: &str, user_description: &str) -> CommandOptionSpec {
-    subcommand(
+    CommandOptionSpec::subcommand(
         name,
         description,
         vec![required("user", user_description, CommandOptionKind::User)],

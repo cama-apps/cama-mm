@@ -1,11 +1,9 @@
-//! Additive, transport-neutral parity policy for multi-tier regular bosses.
+//! Transport-neutral policy for multi-tier regular bosses.
 //!
-//! Python remains the production, schema, and Discord runtime authority.  This
-//! module deliberately owns no SQLite connection and no gateway types.  It
-//! models the behavior asserted by `tests/test_boss_multi_tier.py` behind
-//! explicit repository, entropy, clock, economy-event, bankruptcy,
-//! gear/repair, and outcome-sink ports.  The in-memory adapters are test
-//! doubles, not claims of a production cutover.
+//! This module deliberately owns no SQLite connection and no gateway types. It
+//! models multi-tier boss behavior behind explicit repository, entropy, clock,
+//! economy-event, bankruptcy, gear/repair, and outcome-sink ports. The
+//! in-memory adapters are test doubles.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::LazyLock;
@@ -1322,6 +1320,14 @@ pub trait BossRepositoryPort {
         &mut self,
         key: PlayerKey,
     ) -> Result<Option<PausedBossDuel>, RepositoryError>;
+    /// Put back a duel claimed by [`Self::claim_active_duel`] whose resolution
+    /// failed before settlement. A pause saved since the claim is newer and
+    /// wins, so this never overwrites an existing duel.
+    fn restore_claimed_duel(
+        &mut self,
+        key: PlayerKey,
+        duel: PausedBossDuel,
+    ) -> Result<(), RepositoryError>;
     fn active_duel(&self, key: PlayerKey) -> Option<PausedBossDuel>;
     fn active_echo(&self, guild_id: GuildId, boss_id: &str, now: i64) -> Option<EchoRecord>;
     fn audits(&self) -> &[BossAuditRecord];
@@ -1397,6 +1403,15 @@ impl BossRepositoryPort for InMemoryBossRepository {
         key: PlayerKey,
     ) -> Result<Option<PausedBossDuel>, RepositoryError> {
         Ok(self.active_duels.remove(&key))
+    }
+
+    fn restore_claimed_duel(
+        &mut self,
+        key: PlayerKey,
+        duel: PausedBossDuel,
+    ) -> Result<(), RepositoryError> {
+        self.active_duels.entry(key).or_insert(duel);
+        Ok(())
     }
 
     fn active_duel(&self, key: PlayerKey) -> Option<PausedBossDuel> {
@@ -2980,7 +2995,7 @@ where
         key: PlayerKey,
         requested_option_index: usize,
     ) -> Result<ResolvedFight, BossServiceError> {
-        let mut paused = self
+        let paused = self
             .repository
             .claim_active_duel(key)?
             .ok_or(BossServiceError::NoActiveDuel)?;
@@ -2989,6 +3004,25 @@ where
         }
         let mechanic = mechanic_by_id(&paused.mechanic_id)
             .ok_or_else(|| BossServiceError::UnknownMechanic(paused.mechanic_id.clone()))?;
+        // The claim committed on its own so a repeated click cannot resolve
+        // the same pause twice. Every later step commits nothing durable
+        // until the settlement itself, so on failure the duel (and its
+        // staked wager) goes back for a retry instead of being dropped.
+        let claimed = paused.clone();
+        let resolved = self.resume_claimed_duel(key, paused, mechanic, requested_option_index);
+        if resolved.is_err() {
+            let _ = self.repository.restore_claimed_duel(key, claimed);
+        }
+        resolved
+    }
+
+    fn resume_claimed_duel(
+        &mut self,
+        key: PlayerKey,
+        mut paused: PausedBossDuel,
+        mechanic: MechanicDefinition,
+        requested_option_index: usize,
+    ) -> Result<ResolvedFight, BossServiceError> {
         let option_index = if requested_option_index < mechanic.options.len() {
             requested_option_index
         } else {

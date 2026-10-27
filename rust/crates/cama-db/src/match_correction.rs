@@ -1,14 +1,13 @@
 //! Existing-schema persistence for after-the-fact match-result corrections.
 //!
-//! Python remains the schema, migration, orchestration, and live-runtime
-//! authority during parity. This adapter opens only an existing database via
-//! [`crate::open_runtime_connection`]. It intentionally preserves Python's
+//! This adapter opens only an existing database via
+//! [`crate::open_runtime_connection`]. It intentionally preserves the legacy
 //! recovery seams: ownership, winner-bonus moves, the core result flip, bet
 //! settlement, and the OpenSkill replay worker are separate durable steps.
 //! There is no claim here that the complete correction pipeline is one SQLite
 //! transaction.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use rusqlite::types::Value;
@@ -21,9 +20,10 @@ use cama_domain::openskill::{
     CamaOpenSkillSystem, Rating as OpenSkillRating, WeightedPlayer, WinningTeam,
 };
 use cama_domain::rating::{
-    CamaRatingSystem, MatchUpdateOptions, NEW_PLAYER_MMR_DISCOUNT, RecordedValue, TeamPlayer,
-    cap_glicko_rd, recorded_streak_rate, recorded_streak_threshold,
+    CamaRatingSystem, NEW_PLAYER_MMR_DISCOUNT, RecordedValue, cap_glicko_rd, recorded_streak_rate,
+    recorded_streak_threshold,
 };
+use cama_domain::rating_match::{MatchRatingParticipant, MatchRatingRequest, rate_match};
 
 use crate::open_runtime_connection;
 use crate::rating_history_repository::RatingHistoryRepository;
@@ -510,8 +510,6 @@ impl MatchCorrectionRepository {
                 match_id,
                 20,
             )?;
-        let mut streaks = HashMap::new();
-        let mut gain_multipliers = HashMap::new();
         let mut streak_metadata = BTreeMap::new();
         for &discord_id in &participant_ids {
             let snapshot = snapshot_by_id.get(&discord_id).copied();
@@ -531,13 +529,6 @@ impl MatchCorrectionRepository {
                 Some(rate),
                 Some(threshold),
             );
-            streaks.insert(discord_id, adjustment.multiplier);
-            gain_multipliers.insert(
-                discord_id,
-                snapshot
-                    .and_then(|row| row.low_priority_gain_multiplier)
-                    .unwrap_or(1.0),
-            );
             streak_metadata.insert(
                 discord_id,
                 (adjustment.streak_length as i64, adjustment.multiplier),
@@ -547,8 +538,17 @@ impl MatchCorrectionRepository {
             .iter()
             .find_map(|snapshot| snapshot.base_rating_delta_multiplier)
             .unwrap_or(0.75);
-        let build_team = |ids: &[i64]| -> Result<Vec<TeamPlayer<i64>>, MatchCorrectionError> {
-            ids.iter()
+        let has_openskill = snapshots
+            .iter()
+            .any(|snapshot| snapshot.os_mu_before.is_some());
+        let fantasy_points = if has_openskill {
+            participant_fantasy_points(&connection, match_id, guild_id)?
+        } else {
+            BTreeMap::new()
+        };
+        let build_team =
+            |ids: &[i64]| -> Result<Vec<MatchRatingParticipant>, MatchCorrectionError> {
+                ids.iter()
                 .map(|&discord_id| {
                     let snapshot = snapshot_by_id.get(&discord_id).copied();
                     let stored = snapshot.and_then(|row| {
@@ -589,126 +589,47 @@ impl MatchCorrectionRepository {
                                 }
                             })?,
                     };
-                    Ok(TeamPlayer::new(
-                        rating_system.create_player_from_rating(rating, rd, volatility),
+                    Ok(MatchRatingParticipant {
                         discord_id,
-                    ))
-                })
-                .collect()
-        };
-        let radiant_glicko = build_team(&radiant_ids)?;
-        let dire_glicko = build_team(&dire_ids)?;
-        let glicko = rating_system
-            .update_ratings_after_match_with_options(
-                &radiant_glicko,
-                &dire_glicko,
-                new_winning_team.number() as i32,
-                &MatchUpdateOptions {
-                    streak_multipliers: streaks,
-                    base_rating_delta_multiplier: Some(base_rating_delta_multiplier),
-                    gain_multipliers,
-                },
-            )
-            .map_err(|error| MatchCorrectionError::Rating(error.to_string()))?;
-        let glicko_by_id = glicko
-            .team1
-            .into_iter()
-            .chain(glicko.team2)
-            .map(|update| (update.id, update))
-            .collect::<BTreeMap<_, _>>();
-
-        let has_openskill = snapshots
-            .iter()
-            .any(|snapshot| snapshot.os_mu_before.is_some());
-        let mut openskill_by_id = BTreeMap::new();
-        if has_openskill {
-            let fantasy_points = participant_fantasy_points(&connection, match_id, guild_id)?;
-            let to_weighted = |discord_id: i64| -> Result<WeightedPlayer, MatchCorrectionError> {
-                let id = u64::try_from(discord_id).map_err(|_| {
-                    MatchCorrectionError::Invariant(
-                        "Discord IDs must be non-negative for OpenSkill",
-                    )
-                })?;
-                let snapshot = snapshot_by_id.get(&discord_id).copied();
-                Ok(WeightedPlayer::new(
-                    id,
-                    snapshot.and_then(|row| row.os_mu_before),
-                    snapshot.and_then(|row| row.os_sigma_before),
-                    fantasy_points.get(&discord_id).copied().flatten(),
-                ))
-            };
-            let radiant = radiant_ids
-                .iter()
-                .copied()
-                .map(to_weighted)
-                .collect::<Result<Vec<_>, _>>()?;
-            let dire = dire_ids
-                .iter()
-                .copied()
-                .map(to_weighted)
-                .collect::<Result<Vec<_>, _>>()?;
-            let os_streaks = streak_metadata
-                .iter()
-                .map(|(&discord_id, &(_, multiplier))| {
-                    Ok((
-                        u64::try_from(discord_id).map_err(|_| {
-                            MatchCorrectionError::Invariant(
-                                "Discord IDs must be non-negative for OpenSkill",
-                            )
-                        })?,
-                        multiplier,
-                    ))
-                })
-                .collect::<Result<BTreeMap<_, _>, MatchCorrectionError>>()?;
-            let os_gains = participant_ids
-                .iter()
-                .map(|&discord_id| {
-                    Ok((
-                        u64::try_from(discord_id).map_err(|_| {
-                            MatchCorrectionError::Invariant(
-                                "Discord IDs must be non-negative for OpenSkill",
-                            )
-                        })?,
-                        snapshot_by_id
-                            .get(&discord_id)
+                        glicko: rating_system.create_player_from_rating(rating, rd, volatility),
+                        os_mu: snapshot.and_then(|row| row.os_mu_before),
+                        os_sigma: snapshot.and_then(|row| row.os_sigma_before),
+                        fantasy_points: fantasy_points.get(&discord_id).copied().flatten(),
+                        streak_multiplier: streak_metadata[&discord_id].1,
+                        gain_multiplier: snapshot
                             .and_then(|row| row.low_priority_gain_multiplier)
                             .unwrap_or(1.0),
-                    ))
+                    })
                 })
-                .collect::<Result<BTreeMap<_, _>, MatchCorrectionError>>()?;
-            openskill_by_id = openskill
-                .update_ratings_after_match(
-                    &radiant,
-                    &dire,
-                    if new_winning_team == MatchSide::Radiant {
-                        WinningTeam::Team1
-                    } else {
-                        WinningTeam::Team2
-                    },
-                    &os_streaks,
-                    &os_gains,
-                )
-                .map_err(|error| MatchCorrectionError::Rating(error.to_string()))?
-                .into_iter()
-                .map(|(id, update)| {
-                    (
-                        id as i64,
-                        (
-                            update.rating.mu,
-                            update.rating.sigma,
-                            update.contribution_weight,
-                        ),
-                    )
-                })
-                .collect();
-        }
+                .collect()
+            };
+        let radiant = build_team(&radiant_ids)?;
+        let dire = build_team(&dire_ids)?;
+        let rated = rate_match(
+            rating_system,
+            openskill,
+            &MatchRatingRequest {
+                radiant: &radiant,
+                dire: &dire,
+                winning_team: new_winning_team.number() as i32,
+                base_rating_delta_multiplier: Some(base_rating_delta_multiplier),
+                rate_openskill: has_openskill,
+            },
+        )
+        .map_err(|error| MatchCorrectionError::Rating(error.to_string()))?;
 
         participant_ids
             .into_iter()
             .map(|discord_id| {
-                let update = &glicko_by_id[&discord_id];
+                let update = &rated.glicko[&discord_id];
                 let won = side_for_player(discord_id, &radiant_ids) == new_winning_team;
-                let openskill = openskill_by_id.get(&discord_id).copied();
+                let openskill = rated.openskill.get(&discord_id).map(|update| {
+                    (
+                        update.rating.mu,
+                        update.rating.sigma,
+                        update.contribution_weight,
+                    )
+                });
                 let (streak_length, streak_multiplier) = streak_metadata[&discord_id];
                 Ok(RatingCorrection {
                     discord_id,

@@ -1,7 +1,7 @@
 //! Python-compatible duel challenge persistence.
 //!
-//! Python remains the only production schema-migration authority during the
-//! side-by-side rewrite. This module opens existing SQLite files without the
+//! Schema creation and migration belong to the startup schema manager. This
+//! module opens existing SQLite files without the
 //! create flag and never creates or migrates caller data. Every state-changing
 //! operation uses `BEGIN IMMEDIATE`, matching `BaseRepository.atomic_transaction`,
 //! so escrow, settlement, and reminder claims serialize across processes.

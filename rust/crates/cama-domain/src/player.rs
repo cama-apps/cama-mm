@@ -42,8 +42,6 @@ pub struct Player {
     pub first_leverage_used: bool,
     pub is_solo_grinder: bool,
     pub solo_grinder_checked_at: Option<String>,
-    pub preferred_region: Option<String>,
-    pub inferred_region: Option<String>,
     /// Win/loss record per role this player has been assigned, keyed by role
     /// ("1".."5"). Absent roles mean no recorded sample, which the role factor
     /// treats as unproven. Empty for players loaded outside team balancing.

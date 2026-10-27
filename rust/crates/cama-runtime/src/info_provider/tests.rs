@@ -948,6 +948,38 @@ async fn help_is_ephemeral_config_driven_and_permission_aware() {
     );
 }
 
+#[test]
+fn leaderboard_tab_load_never_waits_on_the_shared_view_lock() {
+    let (_directory, path) = migrated_database();
+    seed_leaderboard_data(&path);
+    let repository = InfoLeaderboardRepository::new(&path);
+    let guild = Some(i64::try_from(GUILD).expect("guild id"));
+    let session = LeaderboardSession {
+        view: Mutex::new(UnifiedLeaderboardView::with_options(
+            repository.clone(),
+            guild,
+            None,
+            LeaderboardTab::Balance,
+            10,
+        )),
+        repository,
+        guild_id: guild,
+        members: None,
+        limit: 10,
+        last_tab_click: Mutex::new(BTreeMap::new()),
+        expiry: Mutex::new(LeaderboardExpiry::default()),
+    };
+
+    // A concurrent click holding the view lock must not block the SQLite
+    // load, and the load must not hold the lock other clicks wait on.
+    let held = session.view.lock().expect("view lock");
+    let state = session
+        .load_tab_state(LeaderboardTab::Glicko)
+        .expect("load Glicko tab without the view lock");
+    assert!(state.loaded);
+    assert!(!held.tab_state(LeaderboardTab::Glicko).loaded);
+}
+
 #[tokio::test]
 async fn migrated_sqlite_and_live_members_drive_all_six_lazy_tabs() {
     let (_directory, path) = migrated_database();

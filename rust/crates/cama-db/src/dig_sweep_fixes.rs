@@ -1,7 +1,7 @@
 //! Existing-schema atomic persistence for Dig sweep regressions.
 //!
-//! Python remains the migration and live runtime authority. This adapter only
-//! opens a migrated database through [`crate::open_runtime_connection`]. Every
+//! Schema creation and migration belong to the startup schema manager. This
+//! adapter only opens a migrated database through [`crate::open_runtime_connection`]. Every
 //! operation that spans tunnel, inventory, balance, artifact, duel, or audit
 //! state uses `BEGIN IMMEDIATE`, making a failed compare-and-swap a complete
 //! no-op rather than a partially committed dig.

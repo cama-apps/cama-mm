@@ -253,7 +253,7 @@ fn test_service_does_not_build_routes_for_non_boss_or_pinnacle() {
         None
     );
     assert_eq!(
-        build_route_offer_state(None, PINNACLE_DEPTH, &mut entropy).unwrap(),
+        build_route_offer_state(None, i64::from(PINNACLE_DEPTH), &mut entropy).unwrap(),
         None
     );
 }

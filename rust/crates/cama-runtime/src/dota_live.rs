@@ -23,6 +23,7 @@ use cama_domain::dota_lobby::{account_id as dota_account_id, gameplay_has_starte
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::net::TcpListener;
 
@@ -257,7 +258,7 @@ pub struct DotaLiveFeed {
 }
 
 #[derive(Debug, Error, Eq, PartialEq)]
-enum LiveIngestError {
+pub(crate) enum LiveIngestError {
     #[error("GSI authentication failed")]
     Unauthorized,
     #[error("GSI payload is invalid")]
@@ -331,7 +332,7 @@ impl DotaLiveFeed {
     /// authenticated GSI ingestion can establish game-start evidence, while
     /// public snapshot, summary, and HTTP access remain unavailable.
     #[allow(clippy::too_many_arguments)]
-    pub async fn publish_match(
+    pub fn publish_match(
         &self,
         guild_id: i64,
         pending_match_id: i64,
@@ -349,32 +350,6 @@ impl DotaLiveFeed {
             server_id,
             league,
             tv_delay_seconds(tv_delay),
-            expected_account_ids,
-            betting_closed,
-        );
-    }
-
-    /// Synchronous registration helper for adapters that do not need the
-    /// async host-facing method. GSI samples are accepted only when every
-    /// expected account is present and no unexpected account is substituted.
-    #[allow(clippy::too_many_arguments)]
-    pub fn publish_match_with_expected_accounts(
-        &self,
-        guild_id: i64,
-        pending_match_id: i64,
-        match_id: u64,
-        server_id: Option<u64>,
-        league: u32,
-        expected_account_ids: Vec<u32>,
-        betting_closed: bool,
-    ) {
-        self.publish_match_inner(
-            guild_id,
-            pending_match_id,
-            match_id,
-            server_id,
-            league,
-            self.configured_delay_seconds,
             expected_account_ids,
             betting_closed,
         );
@@ -575,14 +550,16 @@ impl DotaLiveFeed {
         }
     }
 
-    /// Ingest a decoded GSI document.  The HTTP handler uses the byte-limited
-    /// JSON path below; this method is also useful to an embedded GSI adapter.
-    pub fn ingest_gsi(&self, payload: Value, observed_at: i64) -> Result<(), String> {
-        self.ingest_gsi_inner(payload, observed_at)
-            .map(|snapshot| {
-                self.store_snapshot((snapshot.guild_id, snapshot.pending_match_id), snapshot)
-            })
-            .map_err(|error| error.to_string())
+    /// Authenticate, validate, and store one decoded GSI document. The HTTP
+    /// handler decodes the body and maps the error to a status code.
+    pub(crate) fn ingest_gsi(
+        &self,
+        payload: Value,
+        observed_at: i64,
+    ) -> Result<(), LiveIngestError> {
+        let snapshot = self.ingest_gsi_inner(payload, observed_at)?;
+        self.store_snapshot((snapshot.guild_id, snapshot.pending_match_id), snapshot);
+        Ok(())
     }
 
     fn http_bind(&self) -> Option<SocketAddr> {
@@ -885,7 +862,7 @@ impl DotaLiveFeed {
             .and_then(|auth| auth.get("token"))
             .and_then(Value::as_str)
             .ok_or(LiveIngestError::Unauthorized)?;
-        if supplied_token != expected_token {
+        if !secret_tokens_match(supplied_token, expected_token) {
             return Err(LiveIngestError::Unauthorized);
         }
         let map = payload
@@ -1078,11 +1055,8 @@ async fn post_gsi(State(feed): State<Arc<DotaLiveFeed>>, body: Bytes) -> Respons
         Ok(payload) => payload,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
-    match feed.ingest_gsi_inner(payload, now_unix()) {
-        Ok(snapshot) => {
-            feed.store_snapshot((snapshot.guild_id, snapshot.pending_match_id), snapshot);
-            StatusCode::NO_CONTENT.into_response()
-        }
+    match feed.ingest_gsi(payload, now_unix()) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(LiveIngestError::Unauthorized) => StatusCode::UNAUTHORIZED.into_response(),
         Err(LiveIngestError::UnknownMatch) => StatusCode::NOT_FOUND.into_response(),
         Err(LiveIngestError::InvalidPayload | LiveIngestError::RosterMismatch) => {
@@ -1100,8 +1074,23 @@ impl DotaLiveFeed {
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "))
-            .is_some_and(|supplied| supplied == expected)
+            .is_some_and(|supplied| secret_tokens_match(supplied, expected))
     }
+}
+
+/// Compare a supplied secret with the configured one without leaking, through
+/// timing, how many leading bytes matched or how long the secret is: both
+/// sides are hashed to fixed-length digests and every byte is compared.
+fn secret_tokens_match(supplied: &str, expected: &str) -> bool {
+    let supplied = Sha256::digest(supplied.as_bytes());
+    let expected = Sha256::digest(expected.as_bytes());
+    supplied
+        .iter()
+        .zip(expected.iter())
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
 }
 
 async fn read_limited_json(mut response: reqwest::Response) -> Result<Value, UpstreamError> {

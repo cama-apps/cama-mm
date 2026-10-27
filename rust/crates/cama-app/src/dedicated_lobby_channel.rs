@@ -1,8 +1,6 @@
 //! Dedicated-lobby routing, persistence, and publication contracts.
 //!
-//! The Python application remains the only production Discord/SQLite owner
-//! during the side-by-side migration.  This module therefore keeps the
-//! orchestration executable behind narrow ports: a `LobbyStateStore` can be
+//! This module keeps the orchestration executable behind narrow ports: a `LobbyStateStore` can be
 //! backed by the existing `lobby_state` table, while channel/publication ports
 //! can be backed by the Discord runtime without coupling the policy to an SDK.
 

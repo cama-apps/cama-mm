@@ -1,4 +1,4 @@
-//! Typed, fail-soft Dig narration for the side-by-side Rust application.
+//! Typed, fail-soft Dig narration.
 //!
 //! The deterministic Dig resolver remains authoritative. This module accepts
 //! an already-resolved outcome, builds the same bounded prompt context as the
@@ -20,6 +20,7 @@ use crate::ai_services::{
     ToolPropertySchema as AiToolPropertySchema, ToolRequest, Value as AiValue,
 };
 use crate::dig_service::{BASE_DIG_JC_PAYOUT_CAP, DigOutcomeInput, TunnelState, apply_dig_outcome};
+use cama_domain::formatting::truncate_utf8_bytes;
 use cama_domain::guild_config::GuildConfigStore;
 
 pub const NARRATIVE_MAX_CHARS: usize = 300;
@@ -490,17 +491,6 @@ fn truncate_chars(value: &str, maximum: usize) -> String {
     format!("{}...", body.trim_end())
 }
 
-fn truncate_utf8_bytes(value: &str, maximum: usize) -> String {
-    if value.len() <= maximum {
-        return value.to_owned();
-    }
-    let mut end = maximum.min(value.len());
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value[..end].to_owned()
-}
-
 #[must_use]
 pub fn validate_flavor_args(
     args: &FlavorToolArgs,
@@ -633,42 +623,6 @@ pub fn build_splash_narration_messages(
             content: user,
         },
     ]
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct SplashAftermath {
-    pub mode: String,
-    pub victims: Vec<SplashVictim>,
-    pub llm_narrative: Option<String>,
-    pub absorbed_total: i64,
-    pub shielded_count: i64,
-}
-
-#[must_use]
-pub fn splash_aftermath_lines(splash: &SplashAftermath) -> Vec<String> {
-    let sign = if splash.mode == "grant" { "+" } else { "-" };
-    let mut lines = Vec::new();
-    let narrative = splash.llm_narrative.as_deref().unwrap_or_default().trim();
-    if !narrative.is_empty() {
-        lines.push(format!("*{narrative}*"));
-    }
-    lines.extend(splash.victims.iter().map(|victim| {
-        format!(
-            "<@{}>: {sign}{} {}",
-            victim.discord_id,
-            victim.amount,
-            cama_domain::formatting::JOPACOIN_EMOTE
-        )
-    }));
-    if splash.absorbed_total > 0 {
-        lines.push(format!(
-            "🌾 {} White shield activation(s) absorbed {} {}.",
-            splash.shielded_count,
-            splash.absorbed_total,
-            cama_domain::formatting::JOPACOIN_EMOTE
-        ));
-    }
-    lines
 }
 
 #[must_use]

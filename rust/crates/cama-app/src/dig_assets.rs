@@ -1,7 +1,6 @@
 //! Dig visual-asset selection and rendering contracts.
 //!
-//! Python remains the live Discord/Pillow implementation. This additive module
-//! owns the transport-independent part of the Rust cutover: catalog identity,
+//! This module owns the transport-independent part of Dig media: catalog identity,
 //! bounded file discovery, byte caching, media validation, deterministic render
 //! requests, fallback policy, and single-flight pinnacle rendering. A future
 //! runtime adapter can implement [`DigRenderPort`] with an image library without

@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use cama_domain::discord_content::readable_player_name;
+use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
 use cama_domain::draft_analysis::draft_winner;
 use cama_domain::embed_safety::{EmbedModel, FIELD_VALUE_LIMIT, truncate_field};
 use cama_domain::formatting::{JOPACOIN_EMOTE, ROLE_EMOJIS, TOMBSTONE_EMOJI, escape_discord_text};
@@ -177,12 +177,12 @@ pub fn format_player_list(
                 String::new()
             };
             let Some(player) = player else {
-                let display = format!("{tombstone}Unknown player");
+                let display = format!("{tombstone}{UNKNOWN_PLAYER}");
                 return format!("{}. {display} *(unregistered)*", index + 1);
             };
 
             let name =
-                escape_discord_text(readable_player_name(&player.name).unwrap_or("Unknown player"));
+                escape_discord_text(readable_player_name(&player.name).unwrap_or(UNKNOWN_PLAYER));
             let display = format!("{tombstone}{name}");
             let mut line = format!("{}. {display}", index + 1);
             if player.glicko_rating.is_some() {
@@ -312,6 +312,9 @@ pub fn format_duration(seconds: Option<i64>) -> String {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MatchParticipant {
     pub discord_id: Option<i64>,
+    /// Runtime-resolved readable name; anything unreadable renders as
+    /// `Unknown player`, never as mention markup.
+    pub display_name: Option<String>,
     pub guild_id: Option<i64>,
     pub hero_id: Option<i64>,
     /// Runtime-resolved bundled/Dotabase name. Older callers may omit this and
@@ -398,6 +401,14 @@ fn lane_name(lane_role: i64) -> &'static str {
     }
 }
 
+fn participant_name(participant: &MatchParticipant) -> String {
+    participant
+        .display_name
+        .as_deref()
+        .and_then(readable_player_name)
+        .map_or_else(|| UNKNOWN_PLAYER.to_owned(), escape_discord_text)
+}
+
 fn format_team_field(
     participants: &[MatchParticipant],
     radiant: bool,
@@ -443,7 +454,7 @@ fn format_team_field(
                 });
             let player = participant.discord_id.filter(|id| *id > 0).map_or_else(
                 || "?".to_owned(),
-                |discord_id| format!("{tombstone}<@{discord_id}>"),
+                |_| format!("{tombstone}{}", participant_name(participant)),
             );
             let mut stats = vec![format!("`{kills}/{deaths}/{assists}`")];
             if participant.gpm.is_some() || participant.xpm.is_some() {
@@ -471,8 +482,9 @@ fn format_team_field(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DraftAnalysisEmbed {
     pub radiant_win_probability_bps: Option<i64>,
-    pub radiant_drafter_discord_id: Option<i64>,
-    pub dire_drafter_discord_id: Option<i64>,
+    /// Runtime-resolved readable drafter names; `None` renders `Unknown`.
+    pub radiant_drafter_name: Option<String>,
+    pub dire_drafter_name: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -562,10 +574,10 @@ pub fn create_enriched_match_embed(
         false,
     );
     if let Some(analysis) = &request.draft_analysis {
-        let drafter = |discord_id: Option<i64>| {
-            discord_id
-                .filter(|id| *id > 0)
-                .map_or_else(|| "Unknown".to_owned(), |id| format!("<@{id}>"))
+        let drafter = |name: &Option<String>| {
+            name.as_deref()
+                .and_then(readable_player_name)
+                .map_or_else(|| "Unknown".to_owned(), escape_discord_text)
         };
         let estimate = analysis
             .radiant_win_probability_bps
@@ -592,8 +604,8 @@ pub fn create_enriched_match_embed(
             "Draft favorability",
             format!(
                 "{estimate}\nRadiant drafter: {}\nDire drafter: {}",
-                drafter(analysis.radiant_drafter_discord_id),
-                drafter(analysis.dire_drafter_discord_id),
+                drafter(&analysis.radiant_drafter_name),
+                drafter(&analysis.dire_drafter_name),
             ),
             false,
         );
@@ -684,7 +696,7 @@ pub fn create_match_summary_embed_with_context(
                         participant.deaths.unwrap_or(0),
                         participant.assists.unwrap_or(0)
                     ),
-                    None => format!("{tombstone}<@{}>", participant.discord_id.unwrap_or(0)),
+                    None => format!("{tombstone}{}", participant_name(participant)),
                 }
             })
             .collect::<Vec<_>>()
@@ -1022,8 +1034,8 @@ mod tests {
             let request = EnrichedMatchRequest {
                 draft_analysis: Some(DraftAnalysisEmbed {
                     radiant_win_probability_bps: Some(probability),
-                    radiant_drafter_discord_id: Some(123),
-                    dire_drafter_discord_id: Some(456),
+                    radiant_drafter_name: Some("Radiant Captain".to_owned()),
+                    dire_drafter_name: Some("<@456>".to_owned()),
                 }),
                 ..enriched_request(789, 2)
             };
@@ -1032,8 +1044,9 @@ mod tests {
             assert!(draft.contains(expected_percentages));
             assert!(draft.contains(expected_outcome));
             assert!(draft.contains("[Batru](https://batru.gg)"));
-            assert!(draft.contains("Radiant drafter: <@123>"));
-            assert!(draft.contains("Dire drafter: <@456>"));
+            assert!(draft.contains("Radiant drafter: Radiant Captain"));
+            // Mention markup is not a readable name.
+            assert!(draft.contains("Dire drafter: Unknown"));
             assert!(embed.title.as_deref().unwrap().contains("Dire Victory"));
             assert!(field(&embed, "DIRE").name.contains("Winner"));
             assert!(!field(&embed, "RADIANT").name.contains("Winner"));
@@ -1052,8 +1065,8 @@ mod tests {
             let request = EnrichedMatchRequest {
                 draft_analysis: Some(DraftAnalysisEmbed {
                     radiant_win_probability_bps: Some(probability),
-                    radiant_drafter_discord_id: None,
-                    dire_drafter_discord_id: None,
+                    radiant_drafter_name: None,
+                    dire_drafter_name: None,
                 }),
                 ..enriched_request(789, 1)
             };
@@ -1072,15 +1085,15 @@ mod tests {
             let request = EnrichedMatchRequest {
                 draft_analysis: Some(DraftAnalysisEmbed {
                     radiant_win_probability_bps: probability,
-                    radiant_drafter_discord_id: Some(123),
-                    dire_drafter_discord_id: Some(0),
+                    radiant_drafter_name: Some("Radiant Captain".to_owned()),
+                    dire_drafter_name: Some(String::new()),
                 }),
                 ..enriched_request(789, 1)
             };
             let embed = create_enriched_match_embed(&request, &[], &[], None);
             let draft = &field(&embed, "Draft favorability").value;
             assert!(draft.contains("Draft estimate unavailable"));
-            assert!(draft.contains("Radiant drafter: <@123>"));
+            assert!(draft.contains("Radiant drafter: Radiant Captain"));
             assert!(draft.contains("Dire drafter: Unknown"));
             assert!(!draft.contains("Split"));
             assert!(!draft.contains('%'));
@@ -1531,6 +1544,10 @@ mod tests {
         radiant.guild_id = Some(77);
         radiant.hero_id = None;
         radiant.hero_name = None;
+        let named = MatchParticipant {
+            display_name: Some("Tunnel *Rat*".to_owned()),
+            ..radiant.clone()
+        };
         let source = MutablePenaltySource::default();
         source.set(1_016, 5);
         let embed = create_match_summary_embed_with_context(
@@ -1546,7 +1563,22 @@ mod tests {
         assert!(
             field(&embed, "Radiant")
                 .value
-                .contains(&format!("{TOMBSTONE_EMOJI} <@1016>"))
+                .contains(&format!("{TOMBSTONE_EMOJI} Unknown player"))
+        );
+        let embed = create_match_summary_embed_with_context(
+            1,
+            1,
+            &[named],
+            &[],
+            None,
+            Some(&source),
+            "shuffle",
+            None,
+        );
+        assert!(
+            field(&embed, "Radiant")
+                .value
+                .contains(&format!("{TOMBSTONE_EMOJI} Tunnel \\*Rat\\*"))
         );
     }
 

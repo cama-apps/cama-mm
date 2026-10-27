@@ -223,7 +223,7 @@ impl EnrichmentHandler {
         mut route: DraftPageRoute,
     ) -> Result<InteractionResponse, InteractionHandlerError> {
         let drafts = self.drafts.clone();
-        run_blocking(move || {
+        let page = run_blocking(move || {
             if route.view != 0 {
                 let mut leaderboard = drafts
                     .drafter_leaderboard(
@@ -247,7 +247,7 @@ impl EnrichmentHandler {
                         )
                         .map_err(|error| error.to_string())?;
                 }
-                return Ok(drafter_leaderboard_response(&route, &leaderboard));
+                return Ok(DraftPageData::Leaderboard(route, leaderboard));
             }
             let mut history = drafts
                 .draft_history(
@@ -276,11 +276,72 @@ impl EnrichmentHandler {
                 .map(|id| drafts.drafter_stats(route.guild_id, id))
                 .transpose()
                 .map_err(|error| error.to_string())?;
-            Ok::<_, String>(draft_history_response(&route, &history, stats.as_ref()))
+            Ok::<_, String>(DraftPageData::History(route, history, stats))
         })
         .await
-        .map_err(InteractionHandlerError::from)
+        .map_err(InteractionHandlerError::from)?;
+        let (guild_id, player_ids) = page.player_ids();
+        let names = self.player_names.resolve_names(guild_id, &player_ids).await;
+        Ok(match page {
+            DraftPageData::Leaderboard(route, leaderboard) => {
+                drafter_leaderboard_response(&route, &leaderboard, &names)
+            }
+            DraftPageData::History(route, history, stats) => {
+                draft_history_response(&route, &history, stats.as_ref(), &names)
+            }
+        })
     }
+}
+
+/// Draft rows read off the Tokio workers, rendered once names are resolved.
+enum DraftPageData {
+    Leaderboard(DraftPageRoute, DrafterLeaderboardPage),
+    History(DraftPageRoute, DraftHistoryPage, Option<DrafterStats>),
+}
+
+impl DraftPageData {
+    /// The guild and every drafter the page names.
+    fn player_ids(&self) -> (i64, Vec<i64>) {
+        let (guild_id, ids) = match self {
+            Self::Leaderboard(route, leaderboard) => (
+                route.guild_id,
+                leaderboard
+                    .entries
+                    .iter()
+                    .map(|entry| entry.discord_id)
+                    .collect::<BTreeSet<_>>(),
+            ),
+            Self::History(route, history, _) => (
+                route.guild_id,
+                route
+                    .user_id
+                    .into_iter()
+                    .chain(
+                        history
+                            .entries
+                            .iter()
+                            .filter_map(|entry| entry.analysis.as_ref())
+                            .flat_map(|analysis| {
+                                [
+                                    analysis.radiant_drafter_discord_id,
+                                    analysis.dire_drafter_discord_id,
+                                ]
+                            })
+                            .flatten(),
+                    )
+                    .collect(),
+            ),
+        };
+        (guild_id, ids.into_iter().filter(|id| *id > 0).collect())
+    }
+}
+
+/// A drafter's readable display name; never an ID or mention markup.
+fn drafter_name(names: &GuildPlayerNameDirectory, discord_id: Option<i64>) -> String {
+    discord_id.filter(|id| *id > 0).map_or_else(
+        || "Unknown".to_owned(),
+        |id| escape_discord_text(&names.resolve(id)),
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -346,12 +407,19 @@ fn draft_history_response(
     route: &DraftPageRoute,
     history: &DraftHistoryPage,
     stats: Option<&DrafterStats>,
+    names: &GuildPlayerNameDirectory,
 ) -> InteractionResponse {
     let pages = history.total.div_ceil(route.limit).max(1);
     let summary = route
         .user_id
         .zip(stats)
-        .map(|(id, stats)| format!("<@{id}> — {}\n\n", drafter_summary(stats)))
+        .map(|(id, stats)| {
+            format!(
+                "{} — {}\n\n",
+                drafter_name(names, Some(id)),
+                drafter_summary(stats)
+            )
+        })
         .unwrap_or_default();
     let empty = if history.entries.is_empty() {
         "No recorded draft estimates found.\n\n"
@@ -376,7 +444,7 @@ fn draft_history_response(
     for entry in &history.entries {
         embed.add_field(
             format!("Match #{}", entry.match_id),
-            draft_line(entry),
+            draft_line(entry, names),
             false,
         );
     }
@@ -411,6 +479,7 @@ fn with_draft_page_buttons(
 fn drafter_leaderboard_response(
     route: &DraftPageRoute,
     leaderboard: &DrafterLeaderboardPage,
+    names: &GuildPlayerNameDirectory,
 ) -> InteractionResponse {
     let pages = leaderboard.total.div_ceil(route.limit).max(1);
     let mut embed = EmbedModel {
@@ -442,8 +511,8 @@ fn drafter_leaderboard_response(
         embed.add_field(
             format!("#{rank}"),
             format!(
-                "<@{}>\n{}\nDecisive drafts: **{}**",
-                entry.discord_id,
+                "{}\n{}\nDecisive drafts: **{}**",
+                drafter_name(names, Some(entry.discord_id)),
                 drafter_summary(&entry.stats),
                 entry.stats.drafts_won + entry.stats.drafts_lost
             ),
@@ -623,7 +692,7 @@ fn drafter_summary(stats: &DrafterStats) -> String {
     )
 }
 
-fn draft_line(entry: &DraftMatchEntry) -> String {
+fn draft_line(entry: &DraftMatchEntry, names: &GuildPlayerNameDirectory) -> String {
     let outcome = match entry.winning_team {
         Some(1) => "Radiant won",
         Some(2) => "Dire won",
@@ -649,23 +718,32 @@ fn draft_line(entry: &DraftMatchEntry) -> String {
             )
         })
         .unwrap_or_else(|| "Draft: **Unknown** · Draft estimate unavailable".to_owned());
-    let drafter = |id: Option<i64>| {
-        id.filter(|id| *id > 0)
-            .map_or_else(|| "Unknown".to_owned(), |id| format!("<@{id}>"))
-    };
     let links = entry.valve_match_id.filter(|id| *id > 0).map(|id| format!(
         "[OpenDota](https://www.opendota.com/matches/{id}) · [Dotabuff](https://www.dotabuff.com/matches/{id}) · [STRATZ](https://stratz.com/matches/{id})"
     )).unwrap_or_else(|| format!("`/matches view match_id:{}`", entry.match_id));
     format!(
         "Game result: **{outcome}**\n{estimate}\nDrafters: Radiant {} · Dire {}\n{links}",
-        drafter(analysis.and_then(|row| row.radiant_drafter_discord_id)),
-        drafter(analysis.and_then(|row| row.dire_drafter_discord_id))
+        drafter_name(
+            names,
+            analysis.and_then(|row| row.radiant_drafter_discord_id)
+        ),
+        drafter_name(names, analysis.and_then(|row| row.dire_drafter_discord_id))
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cama_db::match_draft::DrafterLeaderboardEntry;
+
+    fn names(entries: &[(u64, &str)]) -> GuildPlayerNameDirectory {
+        GuildPlayerNameDirectory::new(Some(
+            entries
+                .iter()
+                .map(|(id, name)| (*id, (*name).to_owned()))
+                .collect(),
+        ))
+    }
 
     #[test]
     fn draft_summary_excludes_splits_and_unknowns_from_win_rate() {
@@ -683,21 +761,25 @@ mod tests {
 
     #[test]
     fn draft_stats_lines_distinguish_draft_and_game_outcomes() {
-        let line = draft_line(&DraftMatchEntry {
-            match_id: 7,
-            valve_match_id: Some(100),
-            winning_team: Some(2),
-            analysis: Some(MatchDraftAnalysis {
-                radiant_win_probability_bps: Some(4896),
-                draft_winner: Some(0),
-                radiant_drafter_discord_id: Some(42),
-                ..Default::default()
-            }),
-        });
+        let line = draft_line(
+            &DraftMatchEntry {
+                match_id: 7,
+                valve_match_id: Some(100),
+                winning_team: Some(2),
+                analysis: Some(MatchDraftAnalysis {
+                    radiant_win_probability_bps: Some(4896),
+                    draft_winner: Some(0),
+                    radiant_drafter_discord_id: Some(42),
+                    ..Default::default()
+                }),
+            },
+            &names(&[(42, "Captain *Nick*")]),
+        );
         assert!(line.contains("48.96%"));
         assert!(line.contains("51.04%"));
         assert!(line.contains("Split"));
-        assert!(line.contains("<@42>"));
+        assert!(line.contains("Radiant Captain \\*Nick\\*"));
+        assert!(!line.contains("<@"));
         assert!(line.contains("Dire Unknown"));
         assert!(line.contains("Game result: **Dire won**"));
         for domain in [
@@ -716,18 +798,119 @@ mod tests {
 
     #[test]
     fn draft_history_unlinked_unknown_has_no_fabricated_probability() {
-        let line = draft_line(&DraftMatchEntry {
-            match_id: 7,
-            valve_match_id: None,
-            winning_team: Some(1),
-            analysis: None,
-        });
+        let line = draft_line(
+            &DraftMatchEntry {
+                match_id: 7,
+                valve_match_id: None,
+                winning_team: Some(1),
+                analysis: None,
+            },
+            &GuildPlayerNameDirectory::default(),
+        );
         assert!(line.contains("Game result: **Radiant won**"));
         assert!(line.contains("Draft estimate unavailable"));
         assert!(line.contains("Drafters: Radiant Unknown · Dire Unknown"));
         assert!(line.contains("`/matches view match_id:7`"));
         assert!(!line.contains('%'));
         assert!(!line.contains("Split"));
+    }
+
+    #[test]
+    fn drafters_missing_from_a_cold_name_cache_render_unknown_player_not_ids() {
+        let cold = GuildPlayerNameDirectory::default();
+        let line = draft_line(
+            &DraftMatchEntry {
+                match_id: 7,
+                valve_match_id: None,
+                winning_team: Some(1),
+                analysis: Some(MatchDraftAnalysis {
+                    radiant_drafter_discord_id: Some(42),
+                    dire_drafter_discord_id: Some(43),
+                    ..Default::default()
+                }),
+            },
+            &cold,
+        );
+        assert!(line.contains("Drafters: Radiant Unknown player \u{b7} Dire Unknown player"));
+        assert!(!line.contains("<@") && !line.contains("42") && !line.contains("43"));
+
+        let route = DraftPageRoute {
+            guild_id: 42,
+            user_id: Some(42),
+            by_imbalance: false,
+            view: 1,
+            page: 1,
+            limit: 5,
+        };
+        let leaderboard = DrafterLeaderboardPage {
+            entries: vec![DrafterLeaderboardEntry {
+                discord_id: 43,
+                stats: DrafterStats::default(),
+            }],
+            total: 1,
+        };
+        for directory in [cold.clone(), names(&[(43, "Dire Captain")])] {
+            let response = drafter_leaderboard_response(&route, &leaderboard, &directory);
+            let value = &response.embeds[0].fields[0].value;
+            assert!(!value.contains("<@"), "{value}");
+            let expected = if directory == cold {
+                "Unknown player"
+            } else {
+                "Dire Captain"
+            };
+            assert!(value.starts_with(expected), "{value}");
+        }
+        let history = DraftHistoryPage {
+            entries: Vec::new(),
+            total: 0,
+        };
+        let response = draft_history_response(
+            &route,
+            &history,
+            Some(&DrafterStats::default()),
+            &names(&[(42, "Summary Captain")]),
+        );
+        let description = response.embeds[0].description.as_deref().unwrap();
+        assert!(
+            description.starts_with("Summary Captain \u{2014} "),
+            "{description}"
+        );
+        assert!(!description.contains("<@"));
+    }
+
+    #[test]
+    fn draft_pages_collect_every_named_drafter_once() {
+        let route = DraftPageRoute {
+            guild_id: 9,
+            user_id: Some(5),
+            by_imbalance: false,
+            view: 0,
+            page: 1,
+            limit: 5,
+        };
+        let entry = |radiant, dire| DraftMatchEntry {
+            match_id: 1,
+            valve_match_id: None,
+            winning_team: Some(1),
+            analysis: Some(MatchDraftAnalysis {
+                radiant_drafter_discord_id: radiant,
+                dire_drafter_discord_id: dire,
+                ..Default::default()
+            }),
+        };
+        let page = DraftPageData::History(
+            route,
+            DraftHistoryPage {
+                entries: vec![
+                    entry(Some(5), Some(6)),
+                    entry(Some(6), None),
+                    entry(Some(0), Some(7)),
+                ],
+                total: 3,
+            },
+            None,
+        );
+        assert_eq!(page.player_ids(), (9, vec![5, 6, 7]));
     }
 
     #[test]
@@ -784,13 +967,15 @@ mod tests {
             entries: Vec::new(),
             total: 11,
         };
-        let response = draft_history_response(&route, &history, None);
+        let response =
+            draft_history_response(&route, &history, None, &GuildPlayerNameDirectory::default());
         let buttons = &response.components[0].buttons;
         assert!(buttons[0].disabled);
         assert!(!buttons[1].disabled);
         assert_eq!(buttons[1].custom_id, "enrichment:drafts:42:100:1:2:5:0");
         let route = DraftPageRoute { page: 3, ..route };
-        let response = draft_history_response(&route, &history, None);
+        let response =
+            draft_history_response(&route, &history, None, &GuildPlayerNameDirectory::default());
         assert_eq!(
             response.components[0].buttons[0].custom_id,
             "enrichment:drafts:42:100:1:2:5:0"
@@ -830,8 +1015,12 @@ mod tests {
             page: 1,
             limit: 10,
         };
-        let response =
-            draft_history_response(&route, &DraftHistoryPage { entries, total: 10 }, None);
+        let response = draft_history_response(
+            &route,
+            &DraftHistoryPage { entries, total: 10 },
+            None,
+            &GuildPlayerNameDirectory::default(),
+        );
         let embed = &response.embeds[0];
         let total = embed.title.as_ref().map_or(0, String::len)
             + embed.description.as_ref().map_or(0, String::len)

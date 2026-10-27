@@ -29,6 +29,18 @@ pub fn option_value<'a>(
         .map(|option| &option.value)
 }
 
+/// Find the first top-level subcommand and borrow its name and options.
+///
+/// Subcommand groups are not descended into; providers with groups keep
+/// their own lookup because they compose the group and leaf names
+/// differently.
+pub fn subcommand_option(options: &[InteractionOption]) -> Option<(&str, &[InteractionOption])> {
+    options.iter().find_map(|option| match &option.value {
+        InteractionValue::Subcommand(children) => Some((option.name.as_str(), children.as_slice())),
+        _ => None,
+    })
+}
+
 /// Borrow a string option; absent or wrong-typed values are `None`.
 pub fn string_option<'a>(options: &'a [InteractionOption], name: &str) -> Option<&'a str> {
     match option_value(options, name) {
@@ -179,6 +191,28 @@ mod tests {
         assert_eq!(string_option(&options, "note"), Some("hello"));
         assert_eq!(integer_option(&options, "amount"), Some(42));
         assert_eq!(boolean_option(&options, "enabled"), Some(true));
+    }
+
+    #[test]
+    fn subcommand_option_finds_first_top_level_subcommand_only() {
+        let leaf = vec![option("amount", InteractionValue::Integer(3))];
+        let options = vec![
+            option("note", InteractionValue::String("x".to_owned())),
+            option("group", InteractionValue::SubcommandGroup(Vec::new())),
+            option("place", InteractionValue::Subcommand(leaf.clone())),
+        ];
+        assert_eq!(
+            subcommand_option(&options),
+            Some(("place", leaf.as_slice()))
+        );
+        let grouped = vec![option(
+            "group",
+            InteractionValue::SubcommandGroup(vec![option(
+                "leaf",
+                InteractionValue::Subcommand(Vec::new()),
+            )]),
+        )];
+        assert_eq!(subcommand_option(&grouped), None);
     }
 
     #[test]

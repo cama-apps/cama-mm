@@ -6,10 +6,9 @@
 //! second migration authority.
 
 pub use cama_app_dig::{
-    dig_assets, dig_bosses, dig_command_views, dig_event_threats, dig_gear_runtime, dig_inventory,
-    dig_leaderboard_runtime, dig_loot, dig_new_events, dig_quest_policy, dig_relic_rework,
-    dig_routes, dig_service, dig_splash_runtime, dig_sweep_fixes, dig_tunnel_encounters,
-    dig_tunnel_naming, dig_tunnels, dig_view_supplements,
+    dig_assets, dig_bosses, dig_event_threats, dig_gear_runtime, dig_inventory, dig_loot,
+    dig_new_events, dig_quest_policy, dig_relic_rework, dig_routes, dig_service, dig_sweep_fixes,
+    dig_tunnel_encounters, dig_tunnel_naming, dig_tunnels, dig_view_supplements,
 };
 pub use cama_app_gameplay::{
     duel, mafia_service, mana_effects_service, mana_service, manashop_rework, pet, pet_assets,
@@ -17,9 +16,9 @@ pub use cama_app_gameplay::{
     pet_sqlite, shop_commands,
 };
 pub use cama_app_match::{
-    betting_validation, disburse_actions, disburse_service, dota_info, draft, economy_actions,
-    loan, match_recording, match_voting_service, prediction_resolution, predictions,
-    rating_comparison_service, tax_commands, vanity_tax_service,
+    disburse_service, dota_info, draft, economy_actions, loan, match_recording,
+    match_voting_service, prediction_resolution, predictions, rating_comparison_service,
+    tax_commands, vanity_tax_service,
 };
 pub use cama_app_platform::{
     admin_low_priority, blame_luke_media, embeds, font_assets, moderation, player_mmr_fallback,
@@ -27,24 +26,20 @@ pub use cama_app_platform::{
     survey_commands, timezone_service, trivia_questions, unified_leaderboard, wrapped_story,
 };
 
-pub mod admin_moderation_commands;
 pub mod ai_http;
 pub mod ai_query_sqlite;
 pub mod ai_services;
 pub mod ask;
 pub mod balance_history_service;
 pub mod bankruptcy;
-pub mod bankruptcy_buffs;
 pub mod betting_reminder_messaging;
 pub mod betting_service;
 pub mod boss_duel;
 pub mod boss_encounter_view_guard;
 pub mod boss_multi_tier;
-pub mod bot_tasks;
 pub mod curfew_service;
 pub mod dedicated_lobby_channel;
 pub mod dig_abandon_runtime;
-pub mod dig_artifact_catalog_runtime;
 pub mod dig_bonus_events;
 pub mod dig_boss_runtime;
 pub mod dig_carry_wager;
@@ -67,6 +62,7 @@ pub mod draft_analysis;
 pub mod draft_analysis_http;
 pub mod drawing;
 pub mod duel_flavor;
+pub mod economy_event_embed;
 pub mod economy_event_service;
 pub mod economy_event_sqlite;
 pub mod golden_wheel;
@@ -75,8 +71,6 @@ pub mod herogrid;
 pub mod interaction_safety;
 pub mod jopat_match_routing;
 pub mod jopat_post_match;
-pub mod lobby_commands_guild_id;
-pub mod lobby_manager;
 pub mod lobby_runtime;
 pub mod lobby_service;
 pub mod mafia_flavor;
@@ -96,7 +90,6 @@ pub mod scout;
 pub mod service_container;
 #[cfg(test)]
 mod test_support;
-pub mod trivia_commands;
 pub mod trivia_data;
 pub mod trivia_image_cache;
 pub mod wheel;

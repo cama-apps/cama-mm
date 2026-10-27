@@ -1,9 +1,8 @@
 //! Existing-schema persistence for `/dig` event threats.
 //!
-//! Python remains the sole schema, migration, catalog, and live-runtime
-//! authority. This adapter opens an already-migrated database through
-//! [`crate::open_runtime_connection`]. Direct curse replacement mirrors the
-//! Python helper boundary, while event and cursed-dig mutations use an exact
+//! This adapter opens an already-migrated database through
+//! [`crate::open_runtime_connection`]. Direct curse replacement keeps the
+//! legacy helper boundary, while event and cursed-dig mutations use an exact
 //! tunnel/wallet snapshot in one `BEGIN IMMEDIATE` transaction.
 
 use std::fmt::Write as _;

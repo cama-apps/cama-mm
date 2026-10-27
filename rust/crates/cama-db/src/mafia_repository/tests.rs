@@ -955,7 +955,7 @@ fn test_finalize_day_resolution_stacks_low_priority_tax_on_the_vanity_basis() {
     let game_id = fixture.game(MafiaPhase::Day);
     let result = fixture
         .repository
-        .finalize_day_resolution(
+        .finalize_day_resolution_with_receipt(
             game_id,
             MafiaWinner::Town,
             50,
@@ -973,6 +973,7 @@ fn test_finalize_day_resolution_stacks_low_priority_tax_on_the_vanity_basis() {
             &BTreeSet::from([1, 2]),
             0.10,
             &BTreeSet::from([1, 3]),
+            |_| Ok(String::new()),
         )
         .expect("finalize terminal day");
     assert!(result.applied);
@@ -1018,7 +1019,7 @@ fn test_finalize_day_resolution_caps_stacked_withholding_at_the_profit() {
     let game_id = fixture.game(MafiaPhase::Day);
     let result = fixture
         .repository
-        .finalize_day_resolution(
+        .finalize_day_resolution_with_receipt(
             game_id,
             MafiaWinner::Town,
             50,
@@ -1036,6 +1037,7 @@ fn test_finalize_day_resolution_caps_stacked_withholding_at_the_profit() {
             &BTreeSet::from([1]),
             0.9,
             &BTreeSet::from([1]),
+            |_| Ok(String::new()),
         )
         .expect("finalize terminal day");
     // Each tax share is clamped to the shared 50% ceiling.
@@ -1217,7 +1219,7 @@ fn test_finalize_day_resolution_scales_bankruptcy_penalty_with_games_remaining()
     let game_id = fixture.game(MafiaPhase::Day);
     let result = fixture
         .repository
-        .finalize_day_resolution(
+        .finalize_day_resolution_with_receipt(
             game_id,
             MafiaWinner::Town,
             50,
@@ -1237,6 +1239,7 @@ fn test_finalize_day_resolution_scales_bankruptcy_penalty_with_games_remaining()
             &BTreeSet::new(),
             0.0,
             &BTreeSet::new(),
+            |_| Ok(String::new()),
         )
         .expect("finalize scaled penalties");
     assert!(result.applied);
@@ -1293,7 +1296,7 @@ fn test_finalize_day_resolution_never_withholds_more_than_profit() {
     let taxable = BTreeSet::from([1]);
     let result = fixture
         .repository
-        .finalize_day_resolution(
+        .finalize_day_resolution_with_receipt(
             game_id,
             MafiaWinner::Town,
             50,
@@ -1313,6 +1316,7 @@ fn test_finalize_day_resolution_never_withholds_more_than_profit() {
             &taxable,
             0.25,
             &taxable,
+            |_| Ok(String::new()),
         )
         .expect("finalize capped deductions");
     assert!(result.applied);

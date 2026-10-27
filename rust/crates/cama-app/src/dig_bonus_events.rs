@@ -1,7 +1,6 @@
 //! Transport-independent orchestration for rare bonuses after completed digs.
 //!
-//! Python remains the live Discord and schema authority. Random selection is
-//! injected through the existing Dig loot entropy trait, trivia uses the
+//! Random selection is injected through the existing Dig loot entropy trait, trivia uses the
 //! existing question type and Dig reward scaler, package writes reuse the
 //! existing package-deal repository, and wallet settlement crosses one typed
 //! existing-schema transaction port.

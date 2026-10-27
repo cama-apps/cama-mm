@@ -1,11 +1,11 @@
 //! Python-compatible soft-avoid repository and service.
 //!
-//! Python remains the schema-migration authority during the side-by-side
-//! rewrite. This module therefore opens only an existing database, writes the
-//! existing `players`, `soft_avoids`, and economy-ledger tables, and never
-//! creates or migrates caller data. Purchases use the same `BEGIN IMMEDIATE`
-//! boundary as Python so two concurrent attempts for one pair can produce only
-//! one debit and one activation.
+//! Schema creation and migration belong to the startup schema manager. This
+//! module therefore opens only an existing database, writes the existing
+//! `players`, `soft_avoids`, and economy-ledger tables, and never creates or
+//! migrates caller data. Purchases use a `BEGIN IMMEDIATE` boundary so two
+//! concurrent attempts for one pair can produce only one debit and one
+//! activation.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};

@@ -751,11 +751,10 @@ impl InteractionHandler for PushNotificationHandler {
 }
 
 fn signed_ids(user_id: u64, guild_id: u64) -> Result<(i64, i64), String> {
-    let user_id = i64::try_from(user_id)
-        .map_err(|_| format!("Discord user snowflake {user_id} exceeds SQLite INTEGER range"))?;
-    let guild_id = i64::try_from(guild_id)
-        .map_err(|_| "Discord guild snowflake exceeds SQLite INTEGER range".to_owned())?;
-    Ok((user_id, guild_id))
+    Ok((
+        crate::ids::signed_id(user_id, "user")?,
+        crate::ids::signed_id(guild_id, "guild")?,
+    ))
 }
 
 const fn kind_str(kind: PushNotificationKind) -> &'static str {

@@ -4,8 +4,7 @@
 //! `cama_db::betting_service_repository`; nonprofit seed accounting remains in
 //! [`crate::dota_bet_seed`]. This module models shuffle/pending payloads,
 //! deterministic automatic spectator selection, and the ordering of economy,
-//! vanity-tax, Communion Blessing, and Blood Pact hooks. Python remains the
-//! live command and Discord authority during parity.
+//! vanity-tax, Communion Blessing, and Blood Pact hooks.
 
 use std::collections::{BTreeMap, BTreeSet};
 

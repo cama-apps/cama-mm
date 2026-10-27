@@ -1,6 +1,6 @@
 //! Existing-schema persistence for guild-scoped referral enrollment and first-match rewards.
 //!
-//! Python remains the schema, migration, and live-runtime authority. This adapter opens only
+//! Schema creation and migration belong to the startup schema manager. This adapter opens only
 //! an existing SQLite database through [`crate::open_runtime_connection`]. Enrollment and match
 //! settlement use `BEGIN IMMEDIATE`; all DDL in this tranche lives in disposable test fixtures.
 

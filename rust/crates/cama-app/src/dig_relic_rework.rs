@@ -1,9 +1,7 @@
 //! Discord-neutral policy for the Dig relic-cap and proc rework.
 //!
-//! Python remains the live runtime, catalog, and persistence authority during
-//! migration. This module reuses Rust's additive artifact catalog, injects all
-//! entropy, and isolates only the relic effects exercised by the canonical
-//! tranche. It does not open SQLite or compose Discord commands.
+//! This module reuses the Dig artifact catalog, injects all entropy, and
+//! isolates the relic effects of the rework. It does not open SQLite or compose Discord commands.
 
 use std::collections::{BTreeSet, VecDeque};
 
@@ -11,8 +9,9 @@ use cama_domain::dig_economy::scale_positive_dig_jc;
 use cama_domain::dig_stats::{MinerStats, miner_stat_effects};
 use cama_domain::game_date::game_date_for_timestamp;
 
+use crate::dig_bosses::PINNACLE_DEPTH;
 use crate::dig_loot::{ArtifactDef, artifact_catalog};
-use crate::dig_service::{LuminosityLevel, PINNACLE_DEPTH, luminosity_level};
+use crate::dig_service::{LuminosityLevel, luminosity_level};
 
 pub const RELIC_SLOTS_BASE: i64 = 1;
 pub const RELIC_SLOTS_MAX: i64 = 6;
@@ -262,10 +261,11 @@ impl RelicSet {
 
 #[must_use]
 pub fn post_pinnacle_decay_factor(depth: i64, relics: &RelicSet) -> f64 {
-    if depth <= PINNACLE_DEPTH {
+    let pinnacle = i64::from(PINNACLE_DEPTH);
+    if depth <= pinnacle {
         return 1.0;
     }
-    let steps_past = (depth - PINNACLE_DEPTH) / 25;
+    let steps_past = (depth - pinnacle) / 25;
     let rate = if relics.contains("frozen_clock") {
         0.025
     } else if relics.contains("root_network") {

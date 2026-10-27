@@ -1,7 +1,6 @@
 //! Typed manashop buff policy and hostile-loss orchestration.
 //!
-//! This module is transport-neutral: Python remains the live Discord command
-//! and migration authority. Durable state is delegated to the existing-schema
+//! This module is transport-neutral. Durable state is delegated to the existing-schema
 //! SQLite adapter, while protection and transfer effects are explicit ports so
 //! failed delivery can release reserved Blood Pact capacity.
 

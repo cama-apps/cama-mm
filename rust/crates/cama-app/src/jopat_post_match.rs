@@ -1,7 +1,6 @@
 //! Discord-neutral JOPA-T post-match prompt and fallback policy.
 //!
-//! Python remains the live Discord and model-provider authority during the
-//! side-by-side migration. This module owns only deterministic catalog,
+//! This module owns only deterministic catalog,
 //! selection, prompt, sanitization, and message-budget behavior. Runtime
 //! entropy is injected through [`JopatChoicePort`].
 

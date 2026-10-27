@@ -20,19 +20,6 @@ fn winner_context() -> PlayerContext {
     ])
 }
 
-fn winner() -> MatchTelemetry {
-    MatchTelemetry {
-        discord_id: Some(123),
-        hero_id: Some(1),
-        kills: 10,
-        deaths: 2,
-        assists: 15,
-        gpm: 600,
-        xpm: None,
-        fantasy_points: Some(25.5),
-    }
-}
-
 #[test]
 fn test_wheel_freefall_requires_high_prior_balance() {
     let mut low = service();
@@ -511,16 +498,6 @@ fn test_on_loan_layer_negative() {
 }
 
 #[test]
-fn test_on_match_recorded_uses_jopat_debrief() {
-    let mut service = service();
-    service.queue_rolls([0.0]);
-    let result = service.on_match_recorded().expect("forced debrief");
-    assert_eq!(result.layer, 2);
-    assert!(text(&result).contains("JOPA-T"));
-    assert_eq!(service.rolls.observed_chances(), &[0.35]);
-}
-
-#[test]
 fn test_post_match_debrief_uses_settlement_facts_and_notable_chance() {
     let mut service = service();
     let context = JopatPostMatchContext {
@@ -716,37 +693,6 @@ fn lobby_join_and_gamba_spectator_use_exact_trigger_chances_and_cooldown() {
     assert_eq!(watched.layer, 1);
     assert!(text(&watched).contains("Watcher"));
     assert_eq!(spectator.rolls.observed_chances(), &[0.05]);
-}
-
-#[test]
-fn test_on_prediction_resolved_fires_pool_50() {
-    let mut service = service();
-    service.queue_rolls([0.0]);
-    let result = service
-        .on_prediction_resolved("Q?", "yes", 50, 2, 3)
-        .expect("forced resolution");
-    assert!(result.layer >= 1);
-}
-
-#[test]
-fn test_on_prediction_resolved_fires_pool_300() {
-    let mut service = service();
-    service.queue_rolls([0.0]);
-    let result = service
-        .on_prediction_resolved("Q?", "yes", 300, 2, 3)
-        .expect("forced market crash");
-    assert!(result.layer >= 1);
-}
-
-#[test]
-fn test_on_soft_avoid_fires() {
-    let mut service = service();
-    service.queue_rolls([0.0]);
-    let result = service
-        .on_soft_avoid(888, Some(456), 50, 3)
-        .expect("forced anonymous event");
-    assert!((1..=2).contains(&result.layer));
-    assert!(text(&result).contains("```ansi"));
 }
 
 #[test]
@@ -1082,17 +1028,6 @@ fn test_guild_ai_disable_uses_static_fallback() {
     );
     assert_eq!(generated.text, "fallback");
     assert!(generated.request.is_none());
-}
-
-#[test]
-fn test_on_soft_avoid_neon_output_never_contains_buyer_name() {
-    let mut service = service();
-    service.queue_rolls([0.0]);
-    let result = service
-        .on_soft_avoid(888, Some(456), 50, 3)
-        .expect("forced soft avoid");
-    assert!(!text(&result).contains("SecretBuyer123"));
-    assert!(!text(&result).contains("99999"));
 }
 
 #[test]
@@ -1439,57 +1374,4 @@ fn test_strict_post_match_generation_rejects_wrong_outcome_polarity() {
         },
     );
     assert_eq!(result.text, "fallback");
-}
-
-#[test]
-fn test_returns_empty_when_disabled() {
-    let mut service = service();
-    service.set_enabled(false);
-    assert!(service.on_match_enriched(&[winner()], 1.0).is_empty());
-}
-
-#[test]
-fn test_returns_empty_when_no_winners() {
-    assert!(service().on_match_enriched(&[], 1.0).is_empty());
-}
-
-#[test]
-fn test_returns_empty_when_all_rolls_fail() {
-    let mut service = service();
-    service.queue_rolls([0.5]);
-    assert!(service.on_match_enriched(&[winner()], 0.0).is_empty());
-}
-
-#[test]
-fn test_returns_result_when_roll_succeeds() {
-    let mut service = service();
-    service.queue_rolls([0.0]);
-    let results = service.on_match_enriched(&[winner()], 1.0);
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].layer, 2);
-    assert!(text(&results[0]).contains("```ansi"));
-}
-
-#[test]
-fn test_skips_winner_without_enriched_telemetry() {
-    let player = MatchTelemetry {
-        discord_id: Some(999),
-        ..MatchTelemetry::default()
-    };
-    assert!(service().on_match_enriched(&[player], 1.0).is_empty());
-}
-
-#[test]
-fn test_multiple_winners_produce_at_most_one_callout() {
-    let mut service = service();
-    service.queue_rolls([0.0]);
-    let winners = (0..5)
-        .map(|discord_id| MatchTelemetry {
-            discord_id: Some(discord_id),
-            ..winner()
-        })
-        .collect::<Vec<_>>();
-    let results = service.on_match_enriched(&winners, 1.0);
-    assert_eq!(results.len(), 1);
-    assert_eq!(service.rolls.observed_chances(), &[1.0]);
 }

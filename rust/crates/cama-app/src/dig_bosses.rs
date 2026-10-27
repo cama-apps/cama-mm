@@ -1,14 +1,13 @@
 //! Typed, transport-independent policy for regular and pinnacle dig bosses.
 //!
-//! Python remains the live implementation. This additive module mirrors the
-//! boss catalog and state transitions behind explicit in-memory ports, allowing
-//! parity tests to exercise locking, HP carry-over, echoes, prestige gating,
-//! mechanics, and relic settlement without opening Discord or the shared DB.
+//! This module owns the boss catalog and state transitions behind explicit
+//! ports, so tests can exercise locking, HP carry-over, echoes, prestige
+//! gating, mechanics, and relic settlement without opening Discord or the
+//! shared DB.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const BOSS_BOUNDARIES: [i32; 7] = [25, 50, 75, 100, 150, 200, 275];
-pub const PINNACLE_DEPTH: i32 = 350;
+pub use cama_domain::dig_economy::{BOSS_BOUNDARIES, PINNACLE_DEPTH};
 pub const PRESTIGE_HARD_CAP: i32 = 500;
 pub const PINNACLE_SECRET_PHASE_CHANCE: f64 = 0.10;
 pub const BOSS_ROUND_CAP: u8 = 20;

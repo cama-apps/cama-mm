@@ -1,7 +1,7 @@
 //! Python-compatible access to guild-scoped low-priority matchmaking state.
 //!
-//! Python remains the only schema-migration authority during the side-by-side
-//! rewrite. This repository only opens an existing database and uses the
+//! Schema creation and migration belong to the startup schema manager. This
+//! repository only opens an existing database and uses the
 //! current `low_priority_state` table, plus the paired `moderation_events`
 //! audit row the `*_with_audit` operations append in the same transaction. Assignment inputs retain Python's
 //! dynamic integer distinction so boolean and floating-point values can be

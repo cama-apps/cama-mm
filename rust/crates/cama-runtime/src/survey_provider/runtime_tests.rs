@@ -983,6 +983,7 @@ async fn migrated_interaction_campaign_runs_create_dm_select_text_and_ready_fina
                 interaction_id: 4,
                 custom_id: modal.custom_id,
                 user_id: 44,
+                user_display_name: "Respondent".to_owned(),
                 guild_id: None,
                 channel_id: Some(6_044),
                 member_permissions: None,

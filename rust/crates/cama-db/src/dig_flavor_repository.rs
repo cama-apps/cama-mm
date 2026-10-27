@@ -13,6 +13,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use cama_domain::formatting::truncate_utf8_bytes;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -1249,17 +1250,6 @@ fn install_ledger_context(
 fn clear_ledger_context(transaction: &Transaction<'_>) -> Result<(), rusqlite::Error> {
     transaction.execute("DELETE FROM economy_ledger_context", [])?;
     Ok(())
-}
-
-fn truncate_utf8_bytes(value: &str, maximum: usize) -> String {
-    if value.len() <= maximum {
-        return value.to_owned();
-    }
-    let mut end = maximum.min(value.len());
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value[..end].to_owned()
 }
 
 #[cfg(test)]

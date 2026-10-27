@@ -1,10 +1,9 @@
 //! Discord-independent duel command orchestration.
 //!
-//! The Python command cog mixes application decisions with `discord.py`
-//! transport objects. This module preserves the decisions behind explicit
-//! interaction, message, member, and scheduler ports. A live Discord adapter
-//! is intentionally out of scope during side-by-side parity; tests use the
-//! same typed requests, responses, embeds, views, and channel rules.
+//! This module keeps duel decisions behind explicit interaction, message,
+//! member, and scheduler ports so they stay independent of the Discord
+//! transport; tests use the same typed requests, responses, embeds, views,
+//! and channel rules.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 

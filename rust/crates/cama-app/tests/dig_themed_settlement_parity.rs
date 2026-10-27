@@ -1,28 +1,23 @@
 //! Existing-schema end-to-end checks for themed social Dig events.
 //!
 //! The canonical event resolver owns the authored event values and policy
-//! scalars.  The existing-schema repositories then own the wallet movement:
-//! tunnel encounters settle burns in one transaction, while the dedicated
-//! cross-player repository settles each steal pair atomically.  Keeping the
-//! two paths explicit matters because a steal is zero-sum and a burn is not.
+//! scalars.  The existing-schema tunnel-encounter repository then settles
+//! burns in one transaction and selects the richest steal targets.
 
 use cama_app::dig_loot::{
     CanonicalEventPolicy, CanonicalEventResolution, CanonicalEventRolls,
     resolve_canonical_event_with_policy,
-};
-use cama_db::dig_new_events_repository::{
-    DigNewEventsRepository, StealSettlement, StealSettlementRequest,
 };
 use cama_db::dig_tunnel_encounters_repository::{
     DigTunnelEncounterRepository, EncounterCandidateQuery, EncounterOutcome, EncounterSettlement,
     EncounterSettlementRequest, EncounterVictimStrategy,
 };
 use cama_db::schema_manager;
-use cama_domain::dig_splash::{HOSTILE_LOSS_MIN_BALANCE, strengthen_dig_event_penalty};
+use cama_domain::dig_splash::strengthen_dig_event_penalty;
 use cama_domain::economy_scaling::{
-    DEFAULT_MINIGAME_JC_DELTA_SCALE, scale_deflationary_minigame_jc_delta, scale_minigame_jc_delta,
+    DEFAULT_MINIGAME_JC_DELTA_SCALE, scale_deflationary_minigame_jc_delta,
 };
-use rusqlite::{Connection, TransactionBehavior, params};
+use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
 const ACTOR: i64 = 10_001;
@@ -82,53 +77,8 @@ impl Fixture {
             .expect("balance")
     }
 
-    fn credit_actor_event(&self, resolution: &CanonicalEventResolution, event_key: &str) {
-        let detail = format!(
-            "dig-encounter:{}:{}:{}",
-            resolution.event_id, event_key, resolution.event_name
-        );
-        let mut connection = self.connection();
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .expect("actor event transaction");
-        transaction
-            .execute(
-                "INSERT OR REPLACE INTO economy_ledger_context (
-                     id, source, actor_id, related_type, related_id, reason, metadata
-                 ) VALUES (1, 'dig', ?1, 'event', ?2, 'dig event result', '{}')",
-                params![ACTOR, resolution.event_id],
-            )
-            .expect("event ledger context");
-        transaction
-            .execute(
-                "UPDATE players
-                    SET jopacoin_balance = jopacoin_balance + ?1,
-                        updated_at = CURRENT_TIMESTAMP
-                  WHERE discord_id = ?2 AND guild_id = ?3",
-                params![resolution.jc, ACTOR, GUILD],
-            )
-            .expect("credit actor event");
-        transaction
-            .execute(
-                "INSERT INTO dig_actions (
-                     guild_id, actor_id, target_id, action_type,
-                     depth_before, depth_after, jc_delta, detail, created_at
-                 ) VALUES (?1, ?2, NULL, 'event', 0, 0, ?3, ?4, ?5)",
-                params![GUILD, ACTOR, resolution.jc, detail, NOW],
-            )
-            .expect("event audit");
-        transaction
-            .execute("DELETE FROM economy_ledger_context WHERE id = 1", [])
-            .expect("clear event ledger context");
-        transaction.commit().expect("commit actor event");
-    }
-
     fn tunnel_repository(&self) -> DigTunnelEncounterRepository {
         DigTunnelEncounterRepository::new(self.database.path())
-    }
-
-    fn steal_repository(&self) -> DigNewEventsRepository {
-        DigNewEventsRepository::new(self.database.path())
     }
 }
 
@@ -217,7 +167,7 @@ fn richest_ids(fixture: &Fixture, limit: usize) -> Vec<i64> {
 
 // tests/test_dig_themed_ev_events.py::test_rhystic_tollgate_steals_from_the_richest
 #[test]
-fn dig_themed_rhystic_tollgate_transfers_scaled_pot_from_three_richest() {
+fn dig_themed_rhystic_tollgate_targets_the_three_richest() {
     let fixture = Fixture::new();
     fixture.seed_player(ACTOR, 500);
     fixture.seed_tunnel(ACTOR, 60);
@@ -234,90 +184,8 @@ fn dig_themed_rhystic_tollgate_transfers_scaled_pot_from_three_richest() {
     let splash = resolution.splash.as_ref().expect("steal splash");
     assert_eq!(splash.mode, "steal");
     assert_eq!(splash.penalty_jc, 12);
-    let actor_before = fixture.balance(ACTOR);
-    let victim_before =
-        [10_002, 10_003, 10_004, 10_005].map(|discord_id| fixture.balance(discord_id));
     let victims = richest_ids(&fixture, splash.victim_count);
     assert_eq!(victims, vec![10_002, 10_003, 10_004]);
-
-    // Event payout and each existing-schema transfer are deliberately
-    // separate commits, matching Python's event/splash failure boundary.
-    fixture.credit_actor_event(&resolution, "rhystic-themed");
-    let amount = scale_minigame_jc_delta(splash.penalty_jc as f64, 1.0);
-    let mut moved = 0;
-    for (index, victim_id) in victims.iter().copied().enumerate() {
-        let result = fixture
-            .steal_repository()
-            .settle_steal_atomic(StealSettlementRequest {
-                thief_discord_id: ACTOR,
-                victim_discord_id: victim_id,
-                guild_id: Some(GUILD),
-                amount,
-                minimum_victim_balance: HOSTILE_LOSS_MIN_BALANCE,
-                event_name: &resolution.event_name,
-                event_key: &format!("rhystic-themed-{index}"),
-                detail: "rhystic tollgate richest transfer",
-                now: NOW,
-            })
-            .expect("atomic steal settlement");
-        assert!(matches!(
-            result,
-            StealSettlement::Applied {
-                applied_now: true,
-                ..
-            }
-        ));
-        moved += amount;
-    }
-
-    assert_eq!(moved, splash.victim_count as i64 * amount);
-    for (index, victim_id) in victims.iter().copied().enumerate() {
-        assert_eq!(
-            fixture.balance(victim_id),
-            victim_before[index] - amount,
-            "victim {victim_id} loses the scaled toll"
-        );
-    }
-    assert_eq!(fixture.balance(10_005), victim_before[3]);
-    assert_eq!(
-        fixture.balance(ACTOR) - actor_before,
-        resolution.jc + moved,
-        "actor receives the finder's share plus the transferred pot"
-    );
-
-    let actions = fixture
-        .steal_repository()
-        .splash_actions(Some(GUILD))
-        .expect("steal audit actions");
-    let victim_actions = actions
-        .iter()
-        .filter(|action| action.action_type == "splash_victim")
-        .collect::<Vec<_>>();
-    let thief_actions = actions
-        .iter()
-        .filter(|action| action.action_type == "splash_thief")
-        .collect::<Vec<_>>();
-    assert_eq!(
-        victim_actions
-            .iter()
-            .map(|action| action.actor_id)
-            .collect::<Vec<_>>(),
-        victims
-    );
-    assert_eq!(
-        victim_actions
-            .iter()
-            .map(|action| -action.jc_delta)
-            .sum::<i64>(),
-        moved
-    );
-    assert_eq!(
-        thief_actions
-            .iter()
-            .map(|action| action.jc_delta)
-            .sum::<i64>(),
-        moved
-    );
 }
 
 // tests/test_dig_themed_ev_events.py::test_underworld_reclaims_burns_the_richest

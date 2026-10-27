@@ -1,9 +1,9 @@
 //! Existing-schema persistence for manual vanity-tax enforcement.
 //!
-//! Python remains the migration authority during the side-by-side rewrite.
+//! Schema creation and migration belong to the startup schema manager.
 //! This adapter therefore opens only an existing SQLite database, never
 //! creates schema, and serializes its read-modify-read write with
-//! `BEGIN IMMEDIATE` so the returned set is authoritative across runtimes.
+//! `BEGIN IMMEDIATE` so the returned set is authoritative across connections.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};

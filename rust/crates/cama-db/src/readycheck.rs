@@ -1,9 +1,10 @@
 //! Existing-schema persistence for ready-check lobby join timestamps.
 //!
-//! Python remains the schema and migration authority. This adapter opens an
-//! existing database exclusively through [`crate::open_runtime_connection`]
-//! and never creates or alters production schema. Test-only fixtures create a
-//! disposable `lobby_state` table with the Python-owned shape.
+//! Schema creation and migration belong to the startup schema manager. This
+//! adapter opens an existing database exclusively through
+//! [`crate::open_runtime_connection`] and never creates or alters production
+//! schema. Test-only fixtures create a disposable `lobby_state` table with the
+//! production shape.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};

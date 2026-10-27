@@ -12,6 +12,30 @@ pub trait DailyRewardPolicy {
     fn adjust_reward(&mut self, guild_id: Option<i64>, amount: i64) -> i64;
 }
 
+/// Convert a fractional rate such as `0.15` into whole percentage points.
+///
+/// Non-finite and negative rates count as zero.
+#[must_use]
+pub fn rate_percentage_points(rate: f64) -> i64 {
+    if !rate.is_finite() || rate <= 0.0 {
+        0
+    } else {
+        (rate * 100.0).round() as i64
+    }
+}
+
+/// Convert a fractional rate such as `0.015` into basis points.
+///
+/// Non-finite and negative rates count as zero.
+#[must_use]
+pub fn rate_basis_points(rate: f64) -> i64 {
+    if !rate.is_finite() || rate <= 0.0 {
+        0
+    } else {
+        (rate * 10_000.0).round() as i64
+    }
+}
+
 /// Scale a generated minigame delta with half-up rounding and preserved sign.
 ///
 /// Any non-zero input produces a magnitude of at least one, matching the
@@ -86,9 +110,20 @@ pub fn scale_deflationary_minigame_jc_delta(amount: f64, minigame_jc_delta_scale
 mod tests {
     use super::{
         DEFAULT_MINIGAME_JC_DELTA_SCALE, DEFLATIONARY_MINIGAME_JC_DELTA_MULTIPLIER,
-        DailyRewardPolicy, adjust_generated_jc_reward, scale_deflationary_minigame_jc_delta,
-        scale_minigame_jc_delta,
+        DailyRewardPolicy, adjust_generated_jc_reward, rate_basis_points, rate_percentage_points,
+        scale_deflationary_minigame_jc_delta, scale_minigame_jc_delta,
     };
+
+    #[test]
+    fn test_rates_convert_to_points_and_reject_invalid_values() {
+        assert_eq!(rate_percentage_points(0.1), 10);
+        assert_eq!(rate_percentage_points(0.15), 15);
+        assert_eq!(rate_percentage_points(1.0), 100);
+        assert_eq!(rate_percentage_points(-0.2), 0);
+        assert_eq!(rate_percentage_points(f64::NAN), 0);
+        assert_eq!(rate_basis_points(0.015), 150);
+        assert_eq!(rate_basis_points(f64::INFINITY), 0);
+    }
 
     #[test]
     fn test_scale_minigame_jc_delta_uses_half_up_rounding_and_preserves_sign() {

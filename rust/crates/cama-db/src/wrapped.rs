@@ -1,4 +1,4 @@
-//! Read-only Wrapped queries over the Python-owned match schema.
+//! Read-only Wrapped queries over the match schema.
 
 use std::path::{Path, PathBuf};
 

@@ -6,7 +6,6 @@ use cama_db::dig_event_runtime::{
     DigEventActorKey, DigEventQuestMutation, DigEventRuntimeRepository,
 };
 use cama_db::dig_guild_modifiers::DigGuildModifierRepository;
-use cama_db::dig_inventory_repository::{BuyInsuranceOutcome, SetTrapOutcome};
 use cama_db::economy_event_repository::{
     EconomyEventRepository, EventDirection, EventDraft, EventEffects,
 };
@@ -1443,189 +1442,7 @@ fn flex_projection_normalizes_boss_shapes_titles_and_prestige_badge() {
 }
 
 #[test]
-fn test_dig_atomic_balance_update_records_dig_context() {
-    let database = fast_migrated_database();
-    let connection = Connection::open(database.path()).expect("open migrated database");
-    connection
-        .pragma_update(None, "foreign_keys", false)
-        .expect("match Python foreign-key behavior");
-    connection
-        .execute(
-            "INSERT INTO players
-                 (discord_id,guild_id,discord_username,jopacoin_balance)
-                 VALUES (?1,?2,?3,?4)",
-            params![-301_i64, 42_i64, "event-test", 10_i64],
-        )
-        .expect("insert player");
-    connection
-        .execute(
-            "INSERT INTO tunnels (discord_id,guild_id,depth)
-                 VALUES (?1,?2,0)",
-            params![-301_i64, 42_i64],
-        )
-        .expect("insert tunnel");
-    connection
-        .execute("DELETE FROM economy_ledger_entries", [])
-        .expect("clear setup ledger");
-    drop(connection);
-
-    let detail = r#"{"event_id":"crystal_garden","choice":"safe"}"#;
-    let action_id = SqliteDigRuntimeStore::new(database.path())
-        .atomic_tunnel_balance_update(super::AtomicTunnelBalanceUpdate {
-            discord_id: -301,
-            guild_id: 42,
-            balance_delta: 5,
-            balance_cost: 0,
-            depth_after: Some(3),
-            detail,
-            action_type: "event",
-            now: 2_000_000_005,
-        })
-        .expect("dig balance update");
-    let connection = Connection::open(database.path()).expect("reopen database");
-    let ledger = connection
-        .query_row(
-            "SELECT delta,source,actor_id,related_type,related_id,reason,metadata
-                   FROM economy_ledger_entries",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<i64>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, String>(6)?,
-                ))
-            },
-        )
-        .expect("event ledger row");
-    assert_eq!(ledger.0, 5);
-    assert_eq!(ledger.1, "dig");
-    assert_eq!(ledger.2, Some(-301));
-    assert_eq!(ledger.3.as_deref(), Some("event"));
-    assert_eq!(ledger.4.as_deref(), Some("crystal_garden"));
-    assert_eq!(ledger.5.as_deref(), Some("dig event credit"));
-    assert_eq!(ledger.6, detail);
-    assert_eq!(
-        connection
-            .query_row(
-                "SELECT jopacoin_balance FROM players
-                      WHERE discord_id=?1 AND guild_id=?2",
-                params![-301_i64, 42_i64],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("balance"),
-        15
-    );
-    assert_eq!(
-        connection
-            .query_row(
-                "SELECT depth FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
-                params![-301_i64, 42_i64],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("depth"),
-        3
-    );
-    assert_eq!(
-        connection
-            .query_row(
-                "SELECT action_type,jc_delta FROM dig_actions WHERE id=?1",
-                [action_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
-            )
-            .expect("event action"),
-        ("event".to_owned(), 5)
-    );
-    assert_eq!(
-        connection
-            .query_row("SELECT COUNT(*) FROM economy_ledger_context", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .expect("context cleared"),
-        0
-    );
-}
-
-#[test]
-fn test_dig_atomic_paid_cost_rejects_insufficient_funds() {
-    let database = fast_migrated_database();
-    let connection = Connection::open(database.path()).expect("open migrated database");
-    connection
-        .pragma_update(None, "foreign_keys", false)
-        .expect("match Python foreign-key behavior");
-    connection
-        .execute(
-            "INSERT INTO players
-                 (discord_id,guild_id,discord_username,jopacoin_balance)
-                 VALUES (?1,?2,?3,?4)",
-            params![-302_i64, 42_i64, "paid-event-test", 2_i64],
-        )
-        .expect("insert player");
-    connection
-        .execute(
-            "INSERT INTO tunnels (discord_id,guild_id,depth)
-                 VALUES (?1,?2,0)",
-            params![-302_i64, 42_i64],
-        )
-        .expect("insert tunnel");
-    connection
-        .execute("DELETE FROM economy_ledger_entries", [])
-        .expect("clear setup ledger");
-    drop(connection);
-
-    let result = SqliteDigRuntimeStore::new(database.path()).atomic_tunnel_balance_update(
-        super::AtomicTunnelBalanceUpdate {
-            discord_id: -302,
-            guild_id: 42,
-            balance_delta: 0,
-            balance_cost: 3,
-            depth_after: Some(3),
-            detail: r#"{"event_id":"crystal_garden","choice":"safe"}"#,
-            action_type: "event",
-            now: 2_000_000_006,
-        },
-    );
-    assert!(matches!(
-        result,
-        Err(super::DigRuntimeStoreError::InsufficientFunds)
-    ));
-    let connection = Connection::open(database.path()).expect("reopen database");
-    assert_eq!(
-        connection
-            .query_row(
-                "SELECT jopacoin_balance FROM players
-                      WHERE discord_id=?1 AND guild_id=?2",
-                params![-302_i64, 42_i64],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("balance"),
-        2
-    );
-    assert_eq!(
-        connection
-            .query_row(
-                "SELECT depth FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
-                params![-302_i64, 42_i64],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("depth"),
-        0
-    );
-    assert_eq!(
-        connection
-            .query_row("SELECT COUNT(*) FROM economy_ledger_entries", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .expect("no failed settlement ledger row"),
-        0
-    );
-}
-
-#[test]
-fn migrated_sqlite_defense_and_weather_actions_use_app_boundary() {
+fn migrated_sqlite_weather_action_uses_app_boundary() {
     let database = fast_migrated_database();
     PlayerRepository::new(database.path())
         .add(&NewPlayer::new(9_001, "defense-test", Some(42)))
@@ -1641,21 +1458,6 @@ fn migrated_sqlite_defense_and_weather_actions_use_app_boundary() {
         })
         .expect("first dig");
 
-    assert!(matches!(
-        service.set_trap(9_001, 42, "2023-11-14"),
-        Ok(SetTrapOutcome::Set {
-            cost: 0,
-            balance_after: _
-        })
-    ));
-    assert!(matches!(
-        service.buy_insurance(9_001, 42, 1_700_000_000),
-        Ok(BuyInsuranceOutcome::Purchased {
-            cost: 5,
-            expires_at: 1_700_086_400,
-            balance_after: _
-        })
-    ));
     let weather = service
         .weather(42, "2023-11-14", 1_700_000_000)
         .expect("weather through app service");
@@ -2661,6 +2463,119 @@ fn test_slow_drip_tracks_gross_cap_but_credits_scaled_reward() {
             .expect("ledger count after retry"),
         before_retry
     );
+}
+
+#[test]
+fn test_wrong_channel_penalty_is_ledgered_as_a_dig_debit() {
+    const ACTOR: i64 = 52_021;
+    const GUILD: i64 = 52_022;
+    let database = fast_migrated_database();
+    PlayerRepository::new(database.path())
+        .add(&NewPlayer::new(ACTOR, "wrong-channel", Some(GUILD)))
+        .expect("seed player");
+    Connection::open(database.path())
+        .expect("penalty connection")
+        .execute(
+            "UPDATE players SET jopacoin_balance=100 WHERE discord_id=?1 AND guild_id=?2",
+            params![ACTOR, GUILD],
+        )
+        .expect("seed balance");
+    DigRuntimeService::sqlite(database.path())
+        .debit_channel_penalty(ACTOR, GUILD, 5)
+        .expect("wrong-channel penalty");
+    let connection = Connection::open(database.path()).expect("reload penalty");
+    let (source, related_type, delta): (String, String, i64) = connection
+        .query_row(
+            "SELECT COALESCE(source,''),COALESCE(related_type,''),delta
+                 FROM economy_ledger_entries
+                 WHERE guild_id=?1 AND account_id=?2
+                 ORDER BY ledger_id DESC LIMIT 1",
+            params![GUILD, ACTOR],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("penalty ledger row");
+    assert_eq!(
+        (source.as_str(), related_type.as_str(), delta),
+        ("dig", "dig_wrong_channel", -5)
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM economy_ledger_context", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("context count"),
+        0
+    );
+}
+
+/// A failed Slow Drip wallet credit must not consume the daily cap or the
+/// idle interval: the claim and the credit commit together or not at all.
+#[test]
+fn test_slow_drip_credit_failure_rolls_back_the_cap_claim() {
+    use super::DigRuntimeStore;
+
+    const ACTOR: i64 = 52_011;
+    const GUILD: i64 = 52_012;
+    const NOW: i64 = 1_700_000_000;
+    let database = fast_migrated_database();
+    PlayerRepository::new(database.path())
+        .add(&NewPlayer::new(ACTOR, "slow-drip-rollback", Some(GUILD)))
+        .expect("seed player");
+    let connection = Connection::open(database.path()).expect("slow drip connection");
+    // A wallet that cannot absorb the credit forces the credit step to fail.
+    connection
+        .execute(
+            "UPDATE players SET jopacoin_balance=?1 WHERE discord_id=?2 AND guild_id=?3",
+            params![i64::MAX, ACTOR, GUILD],
+        )
+        .expect("seed balance");
+    connection
+        .execute(
+            "INSERT INTO tunnels(
+                     discord_id,guild_id,tunnel_name,depth,max_depth,total_digs,
+                     total_jc_earned,last_dig_at,luminosity,prestige_level,
+                     prestige_perks,boss_progress,boss_attempts
+                 ) VALUES(?1,?2,'Slow Drip Tunnel',10,10,1,0,?3,100,0,'[]','{}','{}')",
+            params![ACTOR, GUILD, NOW - 4_000],
+        )
+        .expect("seed tunnel");
+    connection
+        .execute(
+            "INSERT INTO dig_artifacts(
+                     discord_id,guild_id,artifact_id,found_at,is_relic,equipped
+                 ) VALUES(?1,?2,'slow_drip',?3,1,1)",
+            params![ACTOR, GUILD, NOW - 5_000],
+        )
+        .expect("equip slow drip");
+    let claim_date =
+        cama_domain::game_date::game_date_for_timestamp(NOW as f64).expect("claim date");
+    connection
+        .execute(
+            "INSERT INTO slow_drip_claims(
+                     discord_id,guild_id,claim_date,claimed_today,last_claim_at
+                 ) VALUES(?1,?2,?3,0,?4)",
+            params![ACTOR, GUILD, claim_date, NOW - 1_200],
+        )
+        .expect("seed slow drip anchor");
+    drop(connection);
+
+    let store = SqliteDigRuntimeStore::new(database.path());
+    let snapshot = store.snapshot(ACTOR, GUILD).expect("snapshot");
+    assert!(
+        store
+            .claim_slow_drip(&snapshot, NOW, &EconomyEventConfig::default())
+            .is_err()
+    );
+    let (claimed_today, last_claim_at): (i64, i64) = Connection::open(database.path())
+        .expect("reload slow drip")
+        .query_row(
+            "SELECT claimed_today,last_claim_at FROM slow_drip_claims
+                 WHERE discord_id=?1 AND guild_id=?2 AND claim_date=?3",
+            params![ACTOR, GUILD, claim_date],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("claim row");
+    assert_eq!((claimed_today, last_claim_at), (0, NOW - 1_200));
 }
 
 #[test]
@@ -3797,6 +3712,61 @@ fn assert_stamina_cooldown_boundary(mutations: &str, expected_seconds: i64) {
         .expect("stamina cooldown boundary Dig");
     assert!(admitted.success);
     assert_eq!(admitted.cooldown_remaining, 0);
+}
+
+/// The Dig reminder must fire exactly when the live gate opens, including for
+/// a Restless miner carrying a curse persisted under the legacy `effects` key.
+#[test]
+fn dig_reminder_ready_time_matches_the_live_cooldown_gate() {
+    use crate::reminders::{GuildId, ReminderStore, UserId};
+
+    let database = fast_migrated_database();
+    let actor = 60_091;
+    let guild = 60_092;
+    let last_dig_at = 1_900_083_000;
+    seed_live_runtime_tunnel(
+        &database,
+        actor,
+        guild,
+        last_dig_at,
+        10,
+        1,
+        Some(last_dig_at),
+    );
+    Connection::open(database.path())
+        .expect("cooldown agreement connection")
+        .execute(
+            "UPDATE tunnels SET stat_stamina=4,mutations=?1,temp_curses=?2
+                 WHERE discord_id=?3 AND guild_id=?4",
+            params![
+                r#"[{"id":"restless"}]"#,
+                r#"{"id":"hex","name":"Hex","digs_remaining":3,"effects":{"cooldown_penalty":0.2}}"#,
+                actor,
+                guild
+            ],
+        )
+        .expect("seed cooldown inputs");
+    let ready_at = crate::reminder_sqlite::SqliteReminderStore::new(database.path(), 20)
+        .get_free_dig_ready_at(UserId::new(actor), GuildId::new(guild), last_dig_at)
+        .expect("reminder ready time")
+        .expect("dig is on cooldown");
+    let service = DigRuntimeService::sqlite(database.path());
+    let request_at = |now| DigRuntimeRequest {
+        discord_id: actor,
+        guild_id: guild,
+        now,
+        paid: false,
+        forced_event: false,
+    };
+    let blocked = service
+        .dig(request_at(ready_at - 1))
+        .expect("pre-reminder Dig");
+    assert!(!blocked.success);
+    assert_eq!(blocked.cooldown_remaining, 1);
+    let admitted = service
+        .dig(request_at(ready_at))
+        .expect("reminder-time Dig");
+    assert!(admitted.success);
 }
 
 #[test]
@@ -5876,6 +5846,60 @@ fn auto_buy_purchases(database: &FastTestDatabase, action_id: Option<i64>) -> Ve
         .as_array()
         .expect("auto purchases array")
         .clone()
+}
+
+#[test]
+fn sqlite_auto_buy_hard_hat_charges_the_shop_catalog_price() {
+    let database = fast_migrated_database();
+    let discord_id = 60_034;
+    let guild_id = 60_035;
+    let now = 1_900_016_000;
+    seed_live_runtime_tunnel(
+        &database,
+        discord_id,
+        guild_id,
+        now,
+        10,
+        1,
+        Some(now - 7_200),
+    );
+    let connection = Connection::open(database.path()).expect("open database");
+    connection
+        .execute(
+            "UPDATE tunnels SET auto_buy_hard_hat=1 WHERE discord_id=?1 AND guild_id=?2",
+            params![discord_id, guild_id],
+        )
+        .expect("enable hard hat auto-buy");
+    connection
+        .execute(
+            "UPDATE players SET jopacoin_balance=100 WHERE discord_id=?1 AND guild_id=?2",
+            params![discord_id, guild_id],
+        )
+        .expect("seed balance");
+    drop(connection);
+
+    let outcome = DigRuntimeService::sqlite(database.path())
+        .dig(DigRuntimeRequest {
+            discord_id,
+            guild_id,
+            now: find_non_cave_dig_time(discord_id, guild_id, now),
+            paid: false,
+            forced_event: false,
+        })
+        .expect("auto-buy dig");
+    assert!(outcome.success);
+    let purchases = auto_buy_purchases(&database, outcome.action_id);
+    let hard_hat = purchases
+        .iter()
+        .find(|purchase| purchase["item"] == "hard_hat")
+        .expect("hard hat auto purchase");
+    assert_eq!(hard_hat["status"], "purchased");
+    assert_eq!(
+        hard_hat["cost"],
+        crate::dig_loot::consumable("hard_hat")
+            .expect("hard hat catalog entry")
+            .cost
+    );
 }
 
 #[test]

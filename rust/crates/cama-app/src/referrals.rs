@@ -1,9 +1,8 @@
 //! Discord-neutral referral service, reward-summary formatting, and `/refer` transport policy.
 //!
-//! The live Python command and match service remain authoritative. This module makes the bounded
-//! application decisions explicit: repository error classification, referral component merging,
-//! deterministic JC summaries, private acknowledgement before public onboarding, and restrictive
-//! mention policy.
+//! This module makes the bounded application decisions explicit: repository error classification,
+//! referral component merging, deterministic JC summaries, private acknowledgement before public
+//! onboarding, and restrictive mention policy.
 
 use std::collections::{BTreeMap, BTreeSet};
 

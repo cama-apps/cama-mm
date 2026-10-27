@@ -1,7 +1,7 @@
 //! Python-compatible access to match outcome and rating-history windows.
 //!
-//! Python remains the schema-migration authority during the side-by-side
-//! rewrite. This repository therefore opens an existing database without the
+//! Schema creation and migration belong to the startup schema manager. This
+//! repository therefore opens an existing database without the
 //! `CREATE` flag, uses the same five-second busy timeout, and explicitly keeps
 //! SQLite foreign-key enforcement disabled. The outcome queries intentionally
 //! order by match chronology rather than `rating_history.id`: an OpenSkill
@@ -229,7 +229,7 @@ pub struct RecalibrationService {
     config: RecalibrationServiceConfig,
 }
 
-/// Repository for the existing Python-owned `rating_history` table.
+/// Repository for the existing `rating_history` table.
 #[derive(Clone, Debug)]
 pub struct RatingHistoryRepository {
     path: PathBuf,

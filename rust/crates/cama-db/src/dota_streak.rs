@@ -1,6 +1,6 @@
 //! Existing-schema persistence for Dota daily-play streaks.
 //!
-//! Python remains the schema, migration, and live runtime authority. This
+//! Schema creation and migration belong to the startup schema manager. This
 //! adapter opens only an already-migrated database through
 //! [`crate::open_runtime_connection`]. A bulk advance holds one
 //! `BEGIN IMMEDIATE` transaction so concurrent match finalizations can advance

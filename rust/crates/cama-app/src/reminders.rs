@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 use std::str::FromStr;
+#[cfg(test)]
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -175,17 +176,6 @@ impl FromStr for ReminderKind {
             invalid => Err(InvalidReminderKind(invalid.to_owned())),
         }
     }
-}
-
-/// Parse, validate, and de-duplicate reminder names while preserving input order.
-#[must_use]
-pub fn valid_reminder_kinds<'a>(values: impl IntoIterator<Item = &'a str>) -> Vec<ReminderKind> {
-    let mut seen = BTreeSet::new();
-    values
-        .into_iter()
-        .filter_map(|value| ReminderKind::from_str(value).ok())
-        .filter(|kind| seen.insert(*kind))
-        .collect()
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -371,12 +361,6 @@ pub trait ReminderStore {
     ) -> Result<Option<PetWarning>, PortError>;
 }
 
-/// Synchronous delivery boundary. Returning from `send_dm` means the attempt
-/// has finished; service methods never detach unowned delivery work.
-pub trait DiscordPort {
-    fn send_dm(&mut self, user_id: UserId, message: &str) -> Result<(), PortError>;
-}
-
 pub trait ReminderClock {
     fn now_seconds(&self) -> i64;
     fn now_nanoseconds(&self) -> i64;
@@ -403,24 +387,14 @@ impl ReminderClock for SystemReminderClock {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct RuntimeDiscordPort;
-
-impl DiscordPort for RuntimeDiscordPort {
-    fn send_dm(&mut self, _user_id: UserId, _message: &str) -> Result<(), PortError> {
-        Err(PortError::new(
-            "send_dm",
-            "runtime reminder delivery must use its asynchronous Discord transport",
-        ))
-    }
-}
-
+#[cfg(test)]
 #[derive(Clone, Default)]
 pub struct InMemoryReminderStore {
     state: Arc<Mutex<InMemoryReminderState>>,
 }
 
 #[derive(Default)]
+#[cfg(test)]
 struct InMemoryReminderState {
     preferences: BTreeMap<(UserId, GuildId), ReminderPreferences>,
     lobby_targets: BTreeMap<(GuildId, UserId, UserId), i64>,
@@ -431,6 +405,7 @@ struct InMemoryReminderState {
     failed_bulk_preference_guilds: BTreeSet<GuildId>,
 }
 
+#[cfg(test)]
 impl InMemoryReminderStore {
     fn lock_state(&self) -> Result<MutexGuard<'_, InMemoryReminderState>, PortError> {
         self.state
@@ -510,6 +485,7 @@ impl InMemoryReminderStore {
     }
 }
 
+#[cfg(test)]
 impl ReminderStore for InMemoryReminderStore {
     fn get_preferences(
         &self,
@@ -771,24 +747,10 @@ pub struct ScheduledReminder {
     pub message: String,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct DeliveryReport {
-    pub attempted: Vec<UserId>,
-    pub delivered: Vec<UserId>,
-    pub failed: Vec<(UserId, PortError)>,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReminderDelivery {
     pub recipients: Vec<UserId>,
     pub message: String,
-}
-
-impl DeliveryReport {
-    #[must_use]
-    pub fn attempted_count(&self) -> usize {
-        self.attempted.len()
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -847,10 +809,9 @@ pub struct RecoveryReport {
     pub failures: Vec<RecoveryFailure>,
 }
 
-pub struct ReminderService<S, C, D> {
+pub struct ReminderService<S, C> {
     store: S,
     clock: C,
-    discord: D,
     tasks: BTreeMap<ReminderTaskKey, ScheduledReminder>,
     cancelled_tasks: BTreeSet<TaskId>,
     next_task_id: u64,
@@ -860,18 +821,16 @@ pub struct ReminderService<S, C, D> {
     cooldowns: ReminderCooldowns,
 }
 
-impl<S, C, D> ReminderService<S, C, D>
+impl<S, C> ReminderService<S, C>
 where
     S: ReminderStore,
     C: ReminderClock,
-    D: DiscordPort,
 {
     #[must_use]
-    pub fn new(store: S, clock: C, discord: D) -> Self {
+    pub fn new(store: S, clock: C) -> Self {
         Self {
             store,
             clock,
-            discord,
             tasks: BTreeMap::new(),
             cancelled_tasks: BTreeSet::new(),
             next_task_id: 0,
@@ -896,11 +855,6 @@ where
     #[must_use]
     pub const fn clock(&self) -> &C {
         &self.clock
-    }
-
-    #[must_use]
-    pub const fn discord(&self) -> &D {
-        &self.discord
     }
 
     #[must_use]
@@ -959,33 +913,8 @@ where
         self.set_preference(user_id, Some(guild_id), kind, enabled)
     }
 
-    pub fn get_lobby_subscriber_ids(
-        &self,
-        guild_id: Option<GuildId>,
-        lobby_kind: Option<LobbyKind>,
-    ) -> Result<Vec<UserId>, PortError> {
-        let guild_id = GuildId::normalize(guild_id);
-        let subscriber_ids = self
-            .store
-            .get_enabled_users_for_type(guild_id, ReminderKind::Lobby)?;
-        if lobby_kind.unwrap_or_default() != LobbyKind::LowSkill {
-            return Ok(subscriber_ids);
-        }
-
-        Ok(self
-            .store
-            .get_player_ratings(&subscriber_ids, guild_id)?
-            .into_iter()
-            .filter_map(|player| {
-                player
-                    .glicko_rating
-                    .is_some_and(|rating| rating < LOWSKILL_RATING_CUTOFF)
-                    .then_some(player.user_id)
-            })
-            .collect())
-    }
-
-    pub fn add_lobby_player_subscription(
+    #[cfg(test)]
+    fn add_lobby_player_subscription(
         &self,
         subscriber_id: UserId,
         target_id: UserId,
@@ -996,6 +925,23 @@ where
             target_id,
             GuildId::normalize(guild_id),
             self.clock.now_nanoseconds(),
+        )
+    }
+
+    #[cfg(test)]
+    fn schedule_dig_reminder(
+        &mut self,
+        user_id: UserId,
+        guild_id: Option<GuildId>,
+        ready_at: i64,
+        preference_enabled: Option<bool>,
+    ) -> Result<Option<TaskId>, PortError> {
+        self.schedule_cooldown(
+            user_id,
+            guild_id,
+            ReminderKind::Dig,
+            ready_at,
+            preference_enabled,
         )
     }
 
@@ -1010,52 +956,6 @@ where
             target_id,
             GuildId::normalize(guild_id),
         )
-    }
-
-    pub fn notify_lobby_player_subscribers(
-        &mut self,
-        target_id: UserId,
-        target_display_name: &str,
-        guild_id: Option<GuildId>,
-        lobby_kind: Option<LobbyKind>,
-        join_cutoff_ns: Option<i64>,
-    ) -> Result<DeliveryReport, PortError> {
-        let guild_id = GuildId::normalize(guild_id);
-        let claimed = self.store.claim_lobby_target_subscribers(
-            target_id,
-            guild_id,
-            join_cutoff_ns.unwrap_or_else(|| self.clock.now_nanoseconds()),
-        )?;
-        let mut seen = BTreeSet::new();
-        let subscriber_ids: Vec<_> = claimed
-            .into_iter()
-            .filter(|subscriber_id| subscriber_id.is_deliverable() && seen.insert(*subscriber_id))
-            .collect();
-        if subscriber_ids.is_empty() {
-            return Ok(DeliveryReport::default());
-        }
-
-        let kind = lobby_kind.unwrap_or_default();
-        let safe_target_name = escape_discord_text(target_display_name);
-        let message = format!(
-            "🔔 **{safe_target_name}** just joined {}! This one-time lobby notification has now been used.",
-            kind.label()
-        );
-        Ok(self.send_many(&subscriber_ids, &message))
-    }
-
-    pub fn notify_betting_subscribers(
-        &mut self,
-        guild_id: Option<GuildId>,
-        bet_lock_until: i64,
-        pending_match_id: Option<i64>,
-        lobby_kind: Option<LobbyKind>,
-    ) -> Result<DeliveryReport, PortError> {
-        let delivery =
-            self.prepare_betting_delivery(guild_id, bet_lock_until, pending_match_id, lobby_kind)?;
-        Ok(delivery.map_or_else(DeliveryReport::default, |delivery| {
-            self.send_many(&delivery.recipients, &delivery.message)
-        }))
     }
 
     pub fn prepare_betting_delivery(
@@ -1124,22 +1024,6 @@ where
         )
     }
 
-    pub fn schedule_dig_reminder(
-        &mut self,
-        user_id: UserId,
-        guild_id: Option<GuildId>,
-        ready_at: i64,
-        preference_enabled: Option<bool>,
-    ) -> Result<Option<TaskId>, PortError> {
-        self.schedule_cooldown(
-            user_id,
-            guild_id,
-            ReminderKind::Dig,
-            ready_at,
-            preference_enabled,
-        )
-    }
-
     pub fn schedule_pet_reminder(
         &mut self,
         user_id: UserId,
@@ -1203,34 +1087,6 @@ where
             GuildId::normalize(guild_id),
             ReminderKind::Dig,
         ))
-    }
-
-    /// Deliver every due task in `(timestamp, task id)` order. Each send is
-    /// complete before this method returns, matching the retained Python task.
-    pub fn dispatch_due(&mut self) -> Vec<(TaskId, DeliveryReport)> {
-        let now = self.clock.now_seconds();
-        let mut due: Vec<_> = self
-            .tasks
-            .values()
-            .filter(|task| task.due_at <= now)
-            .cloned()
-            .collect();
-        due.sort_by_key(|task| (task.due_at, task.id));
-
-        due.into_iter()
-            .filter_map(|task| {
-                let is_current = self
-                    .tasks
-                    .get(&task.key)
-                    .is_some_and(|current| current.id == task.id);
-                if !is_current {
-                    return None;
-                }
-                self.tasks.remove(&task.key);
-                let report = self.send_many(&[task.key.user_id], &task.message);
-                Some((task.id, report))
-            })
-            .collect()
     }
 
     /// Reserve a generation for a dig read. An older recovery reference is
@@ -1631,18 +1487,6 @@ where
             .insert(key, self.next_dig_reconcile_version);
         self.dig_reference_times.insert(key, reference_now);
         self.cancel_task(key)
-    }
-
-    fn send_many(&mut self, subscribers: &[UserId], message: &str) -> DeliveryReport {
-        let mut report = DeliveryReport::default();
-        for &user_id in subscribers {
-            report.attempted.push(user_id);
-            match self.discord.send_dm(user_id, message) {
-                Ok(()) => report.delivered.push(user_id),
-                Err(error) => report.failed.push((user_id, error)),
-            }
-        }
-        report
     }
 
     const fn cooldown_for(&self, kind: ReminderKind) -> Option<i64> {
