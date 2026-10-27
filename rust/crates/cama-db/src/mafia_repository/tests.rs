@@ -1038,8 +1038,9 @@ fn test_finalize_day_resolution_caps_stacked_withholding_at_the_profit() {
             &BTreeSet::from([1]),
         )
         .expect("finalize terminal day");
-    assert_eq!(result.vanity_taxes, BTreeMap::from([(1, 36)]));
-    assert_eq!(result.low_priority_taxes, BTreeMap::from([(1, 4)]));
+    // Each tax share is clamped to the shared 50% ceiling.
+    assert_eq!(result.vanity_taxes, BTreeMap::from([(1, 20)]));
+    assert_eq!(result.low_priority_taxes, BTreeMap::from([(1, 20)]));
     // Withholding stops at the 40 JC profit, leaving the entry fee intact.
     assert_eq!(
         fixture
@@ -1258,5 +1259,73 @@ fn test_finalize_day_resolution_scales_bankruptcy_penalty_with_games_remaining()
             .player_balance(2, Some(GUILD))
             .expect("balance two"),
         100 + 50 - 12
+    );
+}
+
+#[test]
+fn test_finalize_day_resolution_never_withholds_more_than_profit() {
+    let fixture = Fixture::new();
+    fixture.seed_player(1, GUILD, 100);
+    let connection = fixture.connection();
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS bankruptcy_state (
+                 discord_id INTEGER NOT NULL,
+                 guild_id INTEGER NOT NULL,
+                 last_bankruptcy_at INTEGER,
+                 penalty_games_remaining INTEGER,
+                 bankruptcy_count INTEGER,
+                 updated_at TEXT,
+                 PRIMARY KEY (discord_id, guild_id)
+             )",
+        )
+        .expect("create bankruptcy_state");
+    connection
+        .execute(
+            "INSERT INTO bankruptcy_state(
+                 discord_id,guild_id,penalty_games_remaining,bankruptcy_count
+             ) VALUES (1,?1,20,1)",
+            [GUILD],
+        )
+        .expect("seed penalty");
+    drop(connection);
+    let game_id = fixture.game(MafiaPhase::Day);
+    let taxable = BTreeSet::from([1]);
+    let result = fixture
+        .repository
+        .finalize_day_resolution(
+            game_id,
+            MafiaWinner::Town,
+            50,
+            None,
+            None,
+            &BTreeMap::from([(1, 50)]),
+            10,
+            0,
+            2_000,
+            None,
+            false,
+            0,
+            Some(BankruptcyPenaltyPolicy {
+                rate_per_game: 0.05,
+            }),
+            0.25,
+            &taxable,
+            0.25,
+            &taxable,
+        )
+        .expect("finalize capped deductions");
+    assert!(result.applied);
+    // Twenty outstanding games withhold the full 40 JC profit, leaving nothing
+    // for the vanity or low-priority share; the entry fee is still returned.
+    assert_eq!(result.bankruptcy_penalties, BTreeMap::from([(1, 40)]));
+    assert!(result.vanity_taxes.is_empty());
+    assert!(result.low_priority_taxes.is_empty());
+    assert_eq!(
+        fixture
+            .repository
+            .player_balance(1, Some(GUILD))
+            .expect("balance"),
+        100 + 10
     );
 }
