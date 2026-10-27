@@ -76,6 +76,7 @@ fn victory_commit<'a>(
             weakened_until: 1_700_086_400,
         }),
         artifact: None,
+        bankruptcy_penalty: 0,
         vanity_tax: 0,
         low_priority_tax: 0,
         consume_lantern_id: None,

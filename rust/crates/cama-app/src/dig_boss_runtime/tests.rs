@@ -740,6 +740,7 @@ fn final_victory_atomically_awards_stat_point_and_keeps_run_scoped_ledger() {
                     killer_id: PLAYER,
                     weakened_until: 1_700_086_400,
                 }),
+                bankruptcy_penalty: 5,
                 vanity_tax: 10,
                 low_priority_tax: 10,
                 preparation_mutation: crate::boss_multi_tier::BossPreparationMutation::Clear {
@@ -782,6 +783,20 @@ fn final_victory_atomically_awards_stat_point_and_keeps_run_scoped_ledger() {
                 |row| row.get::<_, i64>(0),
             )
             .expect("tax ledger"),
+        1
+    );
+    // The bankruptcy share is withheld from the same gross credit as its own
+    // Dig ledger row, so the net balance is unchanged.
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM economy_ledger_entries
+                  WHERE account_id=?1 AND guild_id=?2 AND source='dig'
+                    AND reason='dig boss bankruptcy penalty' AND delta=-5",
+                params![PLAYER, GUILD],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("bankruptcy ledger"),
         1
     );
 }

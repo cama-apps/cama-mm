@@ -924,6 +924,27 @@ mod tests {
         .collect()
     }
     #[test]
+    fn deadlock_configs_read_only_snapshot_keys() {
+        let mut env = values();
+        env.insert("DEADLOCK_ENABLED".into(), "true".into());
+        let mut requested = Vec::new();
+        DeadlockHostConfig::from_lookup(|key| {
+            requested.push(key.to_owned());
+            env.get(key).cloned()
+        })
+        .expect("host config");
+        let _ = crate::deadlock_config::DeadlockConfig::from_lookup(|key| {
+            requested.push(key.to_owned());
+            env.get(key).cloned()
+        });
+        for key in requested {
+            assert!(
+                crate::application_config::DEADLOCK_ENV_KEYS.contains(&key.as_str()),
+                "{key} is read by a Deadlock config but missing from DEADLOCK_ENV_KEYS"
+            );
+        }
+    }
+    #[test]
     fn hosting_disabled_does_not_require_credentials() {
         assert!(DeadlockHostConfig::from_lookup(|_| None).unwrap().is_none());
     }

@@ -1274,6 +1274,9 @@ pub struct RepositoryCommit {
     pub next_tunnel: TunnelState,
     pub audit: Option<BossAuditRecord>,
     pub echo: Option<EchoRecord>,
+    /// Bankruptcy share withheld from the gross Dig payout, recorded as its
+    /// own ledger debit.
+    pub bankruptcy_penalty: i64,
     /// Separate ledger debit applied after crediting the gross Dig payout.
     pub vanity_tax: i64,
     /// Sibling debit for a player in low priority, recorded on its own row.
@@ -2624,6 +2627,7 @@ where
                             depth_after: tunnel.depth,
                         }),
                         echo: None,
+                        bankruptcy_penalty: 0,
                         vanity_tax: 0,
                         low_priority_tax: 0,
                         preparation_mutation: BossPreparationMutation::Preserve,
@@ -2714,6 +2718,7 @@ where
                         killer_id: input.key.player_id,
                         weakened_until: now.saturating_add(ECHO_WINDOW_SECONDS),
                     }),
+                    bankruptcy_penalty: economy.bankruptcy_penalty,
                     vanity_tax: economy.vanity_tax,
                     low_priority_tax: economy.low_priority_tax,
                     preparation_mutation: BossPreparationMutation::Clear {
@@ -2816,6 +2821,7 @@ where
                     depth_after,
                 }),
                 echo: None,
+                bankruptcy_penalty: 0,
                 vanity_tax: 0,
                 low_priority_tax: 0,
                 preparation_mutation: BossPreparationMutation::Clear {
@@ -3394,6 +3400,7 @@ where
                 next_tunnel: next,
                 audit: None,
                 echo: None,
+                bankruptcy_penalty: 0,
                 vanity_tax: 0,
                 low_priority_tax: 0,
                 preparation_mutation: BossPreparationMutation::Preserve,
