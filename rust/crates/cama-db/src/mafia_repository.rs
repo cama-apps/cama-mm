@@ -16,7 +16,9 @@ use rusqlite::{
 };
 use thiserror::Error;
 
-use cama_db_core::profit_deductions::penalty_games_remaining;
+use cama_db_core::profit_deductions::{
+    DeductionLedgerContext, ProfitDeductionPolicy, withhold_profit_deductions,
+};
 use cama_domain::bankruptcy::BankruptcyPenaltyPolicy;
 
 use crate::open_runtime_connection;
@@ -1504,135 +1506,41 @@ impl MafiaRepository {
                 params![guild_id, nonprofit_overflow],
             )?;
         }
-        // Python's penalty uses the configured kept-rate and durable
-        // bankruptcy_state. Keep the same fail-soft behavior when that table
-        // has no active penalty row.
-        if let Some(policy) = bankruptcy_penalty {
-            set_ledger_context_with_metadata(
+        let deduction_policy = ProfitDeductionPolicy {
+            bankruptcy: bankruptcy_penalty,
+            vanity_tax_rate,
+            vanity_taxable_ids,
+            low_priority_tax_rate,
+            low_priority_taxable_ids,
+        };
+        let ledger = DeductionLedgerContext {
+            source: "mafia_bankruptcy_penalty",
+            related_type: Some("mafia_game"),
+            related_id: Some(game_id),
+            reason: "mafia",
+        };
+        for (&discord_id, &amount) in payout_deltas {
+            let profit = (amount - entry_fee).max(0);
+            let Some(withheld) = withhold_profit_deductions(
                 &transaction,
-                "mafia_bankruptcy_penalty",
-                None,
-                game_id,
-                "mafia bankruptcy penalty",
-                &format!(
-                    "{{\"winner\":\"{}\",\"entry_fee\":{}}}",
-                    winner.as_str(),
-                    entry_fee
-                ),
-            )?;
-            let penalty_result: Result<(), MafiaRepositoryError> = (|| {
-                for (&discord_id, &amount) in payout_deltas {
-                    let profit = (amount - entry_fee).max(0);
-                    if profit == 0 {
-                        continue;
-                    }
-                    let remaining = penalty_games_remaining(&transaction, guild_id, discord_id)?;
-                    if remaining <= 0 {
-                        continue;
-                    }
-                    let penalty = ((profit as f64) * policy.withheld_rate(remaining)) as i64;
-                    if penalty <= 0 {
-                        continue;
-                    }
-                    let changed = transaction.execute(
-                        "UPDATE players SET jopacoin_balance=COALESCE(jopacoin_balance,0)-?1,
-                             updated_at=CURRENT_TIMESTAMP WHERE discord_id=?2 AND guild_id=?3",
-                        params![penalty, discord_id, guild_id],
-                    )?;
-                    if changed != 1 {
-                        return Err(MafiaRepositoryError::Invalid("penalty_player_missing"));
-                    }
-                    penalties.insert(discord_id, penalty);
+                guild_id,
+                discord_id,
+                profit,
+                &deduction_policy,
+                &ledger,
+            )?
+            else {
+                return Err(MafiaRepositoryError::Invalid("deduction_player_missing"));
+            };
+            for (shares, amount) in [
+                (&mut penalties, withheld.bankruptcy_penalty),
+                (&mut taxes, withheld.vanity_tax),
+                (&mut low_priority_taxes, withheld.low_priority_tax),
+            ] {
+                if amount > 0 {
+                    shares.insert(discord_id, amount);
                 }
-                Ok(())
-            })();
-            clear_ledger_context(&transaction)?;
-            penalty_result?;
-        }
-        if vanity_tax_rate > 0.0 {
-            let rate = vanity_tax_rate.clamp(0.0, 1.0);
-            set_ledger_context_with_metadata(
-                &transaction,
-                "vanity_tax",
-                None,
-                game_id,
-                "vanity tax on JC profit",
-                &format!(
-                    "{{\"winner\":\"{}\",\"entry_fee\":{}}}",
-                    winner.as_str(),
-                    entry_fee
-                ),
-            )?;
-            let tax_result: Result<(), MafiaRepositoryError> = (|| {
-                for (&discord_id, &amount) in payout_deltas {
-                    if !vanity_taxable_ids.contains(&discord_id) {
-                        continue;
-                    }
-                    let profit = (amount - entry_fee).max(0);
-                    let tax = ((profit as f64) * rate) as i64;
-                    if tax <= 0 {
-                        continue;
-                    }
-                    let changed = transaction.execute(
-                        "UPDATE players SET jopacoin_balance=COALESCE(jopacoin_balance,0)-?1,
-                             updated_at=CURRENT_TIMESTAMP WHERE discord_id=?2 AND guild_id=?3",
-                        params![tax, discord_id, guild_id],
-                    )?;
-                    if changed != 1 {
-                        return Err(MafiaRepositoryError::Invalid("vanity_tax_player_missing"));
-                    }
-                    taxes.insert(discord_id, tax);
-                }
-                Ok(())
-            })();
-            clear_ledger_context(&transaction)?;
-            tax_result?;
-        }
-        if low_priority_tax_rate > 0.0 {
-            let rate = low_priority_tax_rate.clamp(0.0, 1.0);
-            set_ledger_context_with_metadata(
-                &transaction,
-                "low_priority_tax",
-                None,
-                game_id,
-                "low priority tax on JC profit",
-                &format!(
-                    "{{\"winner\":\"{}\",\"entry_fee\":{}}}",
-                    winner.as_str(),
-                    entry_fee
-                ),
-            )?;
-            let tax_result: Result<(), MafiaRepositoryError> = (|| {
-                for (&discord_id, &amount) in payout_deltas {
-                    if !low_priority_taxable_ids.contains(&discord_id) {
-                        continue;
-                    }
-                    let profit = (amount - entry_fee).max(0);
-                    // The penalty and the vanity tax are independent rates on
-                    // this same profit, so cap the combined withholding at the
-                    // profit instead of letting the payout go net negative.
-                    let withheld = penalties.get(&discord_id).copied().unwrap_or(0)
-                        + taxes.get(&discord_id).copied().unwrap_or(0);
-                    let tax = (((profit as f64) * rate) as i64).min(profit - withheld);
-                    if tax <= 0 {
-                        continue;
-                    }
-                    let changed = transaction.execute(
-                        "UPDATE players SET jopacoin_balance=COALESCE(jopacoin_balance,0)-?1,
-                             updated_at=CURRENT_TIMESTAMP WHERE discord_id=?2 AND guild_id=?3",
-                        params![tax, discord_id, guild_id],
-                    )?;
-                    if changed != 1 {
-                        return Err(MafiaRepositoryError::Invalid(
-                            "low_priority_tax_player_missing",
-                        ));
-                    }
-                    low_priority_taxes.insert(discord_id, tax);
-                }
-                Ok(())
-            })();
-            clear_ledger_context(&transaction)?;
-            tax_result?;
+            }
         }
         let result = MafiaFinalizeResult {
             applied: true,
