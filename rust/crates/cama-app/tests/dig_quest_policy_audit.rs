@@ -1,10 +1,9 @@
 //! Unadmitted differential audit for the 31 Python quest service/integration cases.
 //!
 //! This harness is deliberately standalone.  It imports the generated quest
-//! policy, the in-progress SQLite event runtime, and the unadmitted quest
-//! repository by path so quest behavior can be checked without changing
-//! production module admission, schema ownership, command wiring, or parity
-//! manifests.
+//! policy and the SQLite event runtime by path so quest behavior can be
+//! checked without changing production module admission, schema ownership,
+//! command wiring, or parity manifests.
 
 #![allow(dead_code)]
 
@@ -47,8 +46,6 @@ pub mod dig_event_runtime {
 mod dig_event_runtime_quest_repository;
 #[path = "../src/dig_event_runtime.rs"]
 mod dig_event_runtime_quest_under_test;
-#[path = "../../cama-db/src/dig_quest_repository.rs"]
-mod dig_quest_repository_under_test;
 
 const ACTOR: i64 = 83_001;
 const GUILD: i64 = 83_002;
@@ -103,7 +100,7 @@ pub(crate) fn fast_migrated_database() -> FastTestDatabase {
 }
 
 pub mod test_support {
-    pub(crate) use super::{FastTestDatabase, copy_migrated_database, fast_migrated_database};
+    pub(crate) use super::{FastTestDatabase, fast_migrated_database};
 }
 
 fn migrated_database() -> NamedTempFile {
@@ -184,8 +181,14 @@ impl Fixture {
     }
 
     fn set_active(&self, quest_id: &str, step: i64) {
-        dig_quest_repository_under_test::DigQuestRepository::new(self.database.path())
-            .set_active(ACTOR, Some(GUILD), quest_id, step, NOW)
+        self.connection()
+            .execute(
+                "INSERT INTO dig_quests
+                    (discord_id, guild_id, active_quest_id,
+                     active_quest_step, completed_quests, last_updated_at)
+                 VALUES (?1, ?2, ?3, ?4, '[]', ?5)",
+                params![ACTOR, GUILD, quest_id, step, NOW],
+            )
             .expect("set active quest");
     }
 
@@ -513,70 +516,6 @@ fn audit_agh_finale_credits_jc_and_sets_guild_modifier() {
             )
             .expect("modifier row"),
         1
-    );
-}
-
-#[test]
-fn audit_completed_quest_is_not_reeligible_after_completion() {
-    let fixture = Fixture::new();
-    let repository =
-        dig_quest_repository_under_test::DigQuestRepository::new(fixture.database.path());
-    repository
-        .complete_quest(ACTOR, Some(GUILD), "agh_lost_trial", NOW)
-        .expect("complete quest");
-    let state = repository
-        .get_state(ACTOR, Some(GUILD))
-        .expect("quest state");
-    assert!(
-        !eligible(
-            25,
-            0,
-            state.active_quest_id.as_deref(),
-            state.active_quest_step,
-            &["agh_lost_trial"],
-            &[],
-        )
-        .contains("agh_s1")
-    );
-}
-
-#[test]
-fn audit_quest_state_survives_tunnel_prestige_reset_and_is_guild_isolated() {
-    let fixture = Fixture::new();
-    fixture.seed_actor(10, 1, 100);
-    fixture.seed_player(ACTOR, OTHER_GUILD, 100);
-    fixture.seed_tunnel(ACTOR, OTHER_GUILD, 10, 1);
-    let repository =
-        dig_quest_repository_under_test::DigQuestRepository::new(fixture.database.path());
-    repository
-        .set_active(ACTOR, Some(GUILD), "agh_lost_trial", 3, NOW)
-        .expect("set active");
-    fixture
-        .connection()
-        .execute(
-            "UPDATE tunnels SET depth=0, prestige_level=2
-              WHERE discord_id=?1 AND guild_id=?2",
-            params![ACTOR, GUILD],
-        )
-        .expect("prestige reset");
-    let state = repository
-        .get_state(ACTOR, Some(GUILD))
-        .expect("source state");
-    assert_eq!(state.active_quest_id.as_deref(), Some("agh_lost_trial"));
-    assert_eq!(state.active_quest_step, Some(3));
-    let other = repository
-        .get_state(ACTOR, Some(OTHER_GUILD))
-        .expect("other guild state");
-    assert!(other.active_quest_id.is_none());
-    repository
-        .set_active(ACTOR, Some(OTHER_GUILD), "agh_lost_trial", 1, NOW)
-        .expect("same quest in other guild");
-    assert_eq!(
-        repository
-            .get_state(ACTOR, Some(OTHER_GUILD))
-            .expect("other state")
-            .active_quest_step,
-        Some(1)
     );
 }
 

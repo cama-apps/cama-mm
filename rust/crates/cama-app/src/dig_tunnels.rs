@@ -1,7 +1,6 @@
-//! Prestige-run and tunnel-lifecycle policy for the side-by-side Rust port.
+//! Prestige-run and tunnel-lifecycle policy.
 //!
-//! Python remains the live Discord and SQLite implementation. This module keeps
-//! the transport-independent state machine behind explicit persistence and
+//! This module keeps the transport-independent state machine behind explicit persistence and
 //! entropy ports: guarded prestige/abandon transactions, display-name
 //! projections, integer normalization, ascension/corruption/mutation policy,
 //! scoring, and hall-of-fame ordering. The in-memory adapter is deliberately a

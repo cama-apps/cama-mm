@@ -7,7 +7,7 @@ use tempfile::NamedTempFile;
 
 use crate::discord_transport::{
     DiscordAllowedMentions, DiscordEmoji, DiscordGuildMemberSnapshot, DiscordMessageReceipt,
-    DiscordMessageSnapshot,
+    DiscordMessageSnapshot, DiscordPresence,
 };
 use crate::registration::{InteractionResponseError, Registry};
 
@@ -693,6 +693,8 @@ struct RecordingTransport {
     /// Name the gateway would resolve for [`GUILD`]; `None` models a transport
     /// that cannot resolve it, which the copy must survive.
     guild_name: Mutex<Option<String>>,
+    /// Server display names a member fetch returns for [`GUILD`].
+    member_names: Mutex<BTreeMap<u64, String>>,
     responder: Mutex<Option<Arc<RecordingResponder>>>,
 }
 
@@ -813,10 +815,23 @@ impl DiscordTransport for RecordingTransport {
 
     async fn guild_member(
         &self,
-        _guild_id: u64,
-        _user_id: u64,
+        guild_id: u64,
+        user_id: u64,
     ) -> Result<Option<DiscordGuildMemberSnapshot>, String> {
-        Ok(None)
+        Ok(self
+            .member_names
+            .lock()
+            .expect("member name lock")
+            .get(&user_id)
+            .filter(|_| guild_id == GUILD)
+            .map(|display_name| DiscordGuildMemberSnapshot {
+                user_id,
+                display_name: display_name.clone(),
+                presence: DiscordPresence::Unknown,
+                in_voice: false,
+                deafened: false,
+                activities: Vec::new(),
+            }))
     }
 
     async fn guild_name(&self, guild_id: u64) -> Result<Option<String>, String> {
@@ -1130,19 +1145,36 @@ impl ProviderFixture {
     }
 
     async fn dispatch_request(&self, request: InteractionRequest) -> Arc<RecordingResponder> {
+        let (responder, result) = self.try_dispatch_request(request).await;
+        result.expect("Admin command succeeds");
+        responder
+    }
+
+    async fn try_dispatch_request(
+        &self,
+        request: InteractionRequest,
+    ) -> (Arc<RecordingResponder>, Result<(), InteractionHandlerError>) {
         let responder = Arc::new(RecordingResponder::default());
         *self
             .transport
             .responder
             .lock()
             .expect("responder probe lock") = Some(responder.clone());
-        self.registry()
+        let result = self
+            .registry()
             .command_handler("admin")
             .expect("Admin handler")
             .handle(request, responder.clone())
-            .await
-            .expect("Admin command succeeds");
-        responder
+            .await;
+        (responder, result)
+    }
+
+    fn name_member(&self, user_id: u64, display_name: &str) {
+        self.transport
+            .member_names
+            .lock()
+            .expect("member name lock")
+            .insert(user_id, display_name.to_owned());
     }
 }
 
@@ -1618,7 +1650,11 @@ async fn production_registeruser_uses_shared_opendota_registration_and_migrated_
         .await
         .last();
     assert!(response.ephemeral);
-    assert!(response.content.contains("✅ Registered <@42003>!"));
+    assert!(
+        response
+            .content
+            .contains("✅ Registered **Target Player**!")
+    );
     let connection = Connection::open(fixture.database.path()).expect("inspect Admin database");
     let player: (String, i64, i64) = connection
         .query_row(
@@ -1642,6 +1678,42 @@ async fn production_registeruser_uses_shared_opendota_registration_and_migrated_
             .expect("primary Steam account"),
         12_345
     );
+}
+
+#[tokio::test]
+async fn registeruser_without_a_display_name_never_stores_a_numeric_id() {
+    let fixture = ProviderFixture::new();
+    fixture
+        .dispatch(
+            "registeruser",
+            vec![
+                InteractionOption {
+                    name: "user".to_owned(),
+                    value: InteractionValue::User {
+                        id: TARGET,
+                        display_name: None,
+                        is_bot: Some(false),
+                    },
+                },
+                integer_option("steam_id", 12_345),
+                integer_option("mmr", 2_500),
+            ],
+            21,
+        )
+        .await;
+    let connection = Connection::open(fixture.database.path()).expect("inspect Admin database");
+    let stored: String = connection
+        .query_row(
+            "SELECT discord_username FROM players WHERE discord_id=?1 AND guild_id=?2",
+            params![
+                i64::try_from(TARGET).unwrap(),
+                i64::try_from(GUILD).unwrap()
+            ],
+            |row| row.get(0),
+        )
+        .expect("registered player");
+    assert!(!stored.contains(&TARGET.to_string()), "{stored}");
+    assert_eq!(stored, "Unknown player");
 }
 
 #[tokio::test]
@@ -2351,4 +2423,207 @@ async fn dota_betting_control_is_acknowledged_audited_and_survives_explicit_exte
             .state
             .betting_open(chrono::Utc::now().timestamp())
     );
+}
+
+/// Every SQLite-backed `/admin` route must acknowledge before its first query:
+/// with a five-second busy timeout a locked database would otherwise outlast
+/// Discord's three-second callback window. An unreadable database file makes
+/// the first query fail, so a route that queried before deferring returns its
+/// error with no acknowledgement on record.
+#[tokio::test]
+async fn sqlite_backed_admin_routes_acknowledge_before_touching_the_database() {
+    let target = || user_option("user", TARGET, "Target");
+    let player = || user_option("player", TARGET, "Target");
+    let cases: Vec<(&str, InteractionRequest)> = vec![
+        (
+            "lowprio add",
+            admin_lowprio_command("add", vec![target()], 1, ADMIN, Some(MANAGE_GUILD)),
+        ),
+        (
+            "lowprio status",
+            admin_lowprio_command("status", vec![target()], 2, ADMIN, Some(MANAGE_GUILD)),
+        ),
+        (
+            "lowprio list",
+            admin_lowprio_command("list", Vec::new(), 3, ADMIN, Some(MANAGE_GUILD)),
+        ),
+        (
+            "givecoin",
+            admin_command(
+                "givecoin",
+                vec![target(), integer_option("amount", 5)],
+                4,
+                ADMIN,
+                Some(MANAGE_GUILD),
+            ),
+        ),
+        (
+            "resetloancooldown",
+            admin_command(
+                "resetloancooldown",
+                vec![target()],
+                5,
+                ADMIN,
+                Some(MANAGE_GUILD),
+            ),
+        ),
+        (
+            "adjust rating",
+            admin_adjust_command(
+                "rating",
+                vec![target(), number_option("rating", 1_500.0)],
+                6,
+                ADMIN,
+                Some(MANAGE_GUILD),
+            ),
+        ),
+        (
+            "recalibrate",
+            admin_command("recalibrate", vec![target()], 7, ADMIN, Some(MANAGE_GUILD)),
+        ),
+        (
+            "moderation status",
+            admin_group_command(
+                "moderation",
+                "status",
+                vec![player()],
+                8,
+                ADMIN,
+                Some(MANAGE_GUILD),
+            ),
+        ),
+        (
+            "moderation list",
+            admin_group_command(
+                "moderation",
+                "list",
+                Vec::new(),
+                9,
+                ADMIN,
+                Some(MANAGE_GUILD),
+            ),
+        ),
+    ];
+    for (route, request) in cases {
+        let fixture = ProviderFixture::new();
+        std::fs::write(fixture.database.path(), b"not a sqlite database")
+            .expect("corrupt admin database");
+        let (responder, result) = fixture.try_dispatch_request(request).await;
+        assert!(result.is_err(), "{route} must surface the database failure");
+        assert_eq!(
+            *responder.defers.lock().expect("defer lock"),
+            [true],
+            "{route} must defer ephemerally before its first query"
+        );
+    }
+}
+
+#[tokio::test]
+async fn admin_denial_is_answered_without_deferring() {
+    let fixture = ProviderFixture::new();
+    let responder = fixture
+        .dispatch_request(admin_lowprio_command(
+            "status",
+            vec![user_option("user", TARGET, "Target")],
+            1,
+            TARGET,
+            None,
+        ))
+        .await;
+    assert!(responder.defers.lock().expect("defer lock").is_empty());
+    assert_eq!(responder.last().content, ADMIN_DENIED);
+}
+
+#[tokio::test]
+async fn admin_replies_name_players_and_issuers_without_mention_markup() {
+    let fixture = ProviderFixture::new();
+    fixture.player(TARGET, 5, 5, Some(1_500.0), Some(120.0), Some(0.06));
+    fixture.name_member(TARGET, "Server Nick");
+    fixture.name_member(ADMIN, "Admin Nick");
+    fixture
+        .dispatch_request(admin_lowprio_command(
+            "add",
+            vec![
+                user_option("user", TARGET, "account_name"),
+                integer_option("wins", 3),
+            ],
+            1,
+            ADMIN,
+            Some(MANAGE_GUILD),
+        ))
+        .await;
+
+    let status = fixture
+        .dispatch_request(admin_lowprio_command(
+            "status",
+            vec![user_option("user", TARGET, "account_name")],
+            2,
+            ADMIN,
+            Some(MANAGE_GUILD),
+        ))
+        .await
+        .last()
+        .content;
+    assert!(
+        status.starts_with("**Server Nick**: 0/3 wins completed"),
+        "{status}"
+    );
+    assert!(status.contains("Issued by: **Admin Nick**"), "{status}");
+    assert!(!status.contains("<@"), "{status}");
+    assert!(!status.contains(&TARGET.to_string()), "{status}");
+
+    let list = fixture
+        .dispatch_request(admin_lowprio_command(
+            "list",
+            Vec::new(),
+            3,
+            ADMIN,
+            Some(MANAGE_GUILD),
+        ))
+        .await
+        .last()
+        .content;
+    assert!(
+        list.starts_with("**Server Nick** — 3/3 wins remaining"),
+        "{list}"
+    );
+    assert!(list.contains("by **Admin Nick**"), "{list}");
+    assert!(!list.contains("<@"), "{list}");
+}
+
+#[tokio::test]
+async fn admin_replies_fall_back_to_the_resolved_option_name_never_an_id() {
+    let fixture = ProviderFixture::new();
+    let named = fixture
+        .dispatch_request(admin_command(
+            "resetloancooldown",
+            vec![user_option("user", TARGET, "Target Player")],
+            1,
+            ADMIN,
+            Some(MANAGE_GUILD),
+        ))
+        .await
+        .last()
+        .content;
+    assert_eq!(named, "⚠️ **Target Player** is not registered.");
+
+    let unnamed = fixture
+        .dispatch_request(admin_command(
+            "resetloancooldown",
+            vec![InteractionOption {
+                name: "user".to_owned(),
+                value: InteractionValue::User {
+                    id: TARGET,
+                    display_name: None,
+                    is_bot: Some(false),
+                },
+            }],
+            2,
+            ADMIN,
+            Some(MANAGE_GUILD),
+        ))
+        .await
+        .last()
+        .content;
+    assert_eq!(unnamed, "⚠️ **Unknown player** is not registered.");
 }

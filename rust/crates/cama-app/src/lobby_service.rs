@@ -1,7 +1,6 @@
 //! Discord-independent lobby orchestration.
 //!
-//! The live Python application still owns persistence and Discord callbacks.
-//! This module ports the concurrency-sensitive lobby policy behind typed
+//! This module owns the concurrency-sensitive lobby policy behind typed
 //! player, pending-match, clock, and bonus-pool ports.
 //!
 //! Two locks, always taken in this order. `writes` serializes durable
@@ -31,7 +30,7 @@ pub const DOTA_BET_SEED_AMOUNT: i64 = 50;
 /// Existing-schema persistence boundary used by the production runtime.
 ///
 /// The trait deliberately carries complete `lobby_state` rows so every
-/// successful mutation preserves Python-owned routing metadata. Implementors
+/// successful mutation preserves stored routing metadata. Implementors
 /// must not create or migrate schema.
 pub trait LobbyPersistencePort: Send + Sync {
     fn load_all_lobbies(&self) -> Result<Vec<PersistedLobbyState>, String>;

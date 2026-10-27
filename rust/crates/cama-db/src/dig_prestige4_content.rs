@@ -1,10 +1,9 @@
 //! Existing-schema persistence for the prestige-four Dig content tranche.
 //!
-//! Python remains the sole migration and live-runtime authority. This adapter
-//! opens only an already-migrated database through
+//! This adapter opens only an already-migrated database through
 //! [`crate::open_runtime_connection`]. Paused duel claiming, guarded boss
 //! victory, and optional artifact drops deliberately remain separate
-//! transactions because that is the production Python seam.
+//! transactions, preserving the legacy recovery seam.
 
 use std::path::{Path, PathBuf};
 

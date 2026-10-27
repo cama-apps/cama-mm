@@ -16,6 +16,7 @@ use cama_db::deadlock_betting::{
 use cama_db::deadlock_host::DeadlockHostRepository;
 use cama_db::low_priority_repository::LowPriorityRepository;
 use cama_domain::deadlock::DeadlockFormat;
+use cama_domain::economy_scaling::rate_percentage_points;
 use cama_domain::rate_limiter::RateLimiter;
 
 use crate::application_config::ApplicationConfig;
@@ -286,7 +287,7 @@ impl DeadlockRegistrationProvider {
             seed: config.seed_amount,
             blind_threshold: application.values.auto_blind_threshold,
             blind_percentage: if application.values.auto_blind_enabled {
-                (application.values.auto_blind_percentage * 100.0).round() as i64
+                rate_percentage_points(application.values.auto_blind_percentage)
             } else {
                 0
             },
@@ -755,7 +756,7 @@ fn parse_context(request: InteractionRequest) -> Result<Context, String> {
                     guild_id,
                     user_id,
                     channel_id,
-                    "Unknown player".into(),
+                    cama_domain::discord_content::UNKNOWN_PLAYER.into(),
                     member_permissions,
                     interaction_id,
                     "bet".into(),

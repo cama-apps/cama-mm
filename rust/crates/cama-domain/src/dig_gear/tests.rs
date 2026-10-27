@@ -67,14 +67,6 @@ fn assert_close(left: f64, right: f64) {
     assert!((left - right).abs() < 1e-9, "{left} != {right}");
 }
 
-fn embed_field<'a>(embed: &'a GearEmbed, name: &str) -> &'a EmbedField {
-    embed
-        .fields
-        .iter()
-        .find(|field| field.name == name)
-        .expect("field exists")
-}
-
 #[test]
 fn test_drop_gate_returns_none_for_unmapped_boundary() {
     let mut service = GearService::fixture();
@@ -856,50 +848,6 @@ fn test_relic_cap_rollout_dig_core_apply_outcome_resets_streak_on_cave_in() {
 }
 
 #[test]
-fn test_relic_cap_embed_over_cap_warning_renders() {
-    let loadout = GearLoadout {
-        relics: vec!["mole_claws".to_owned(); 8],
-        ..GearLoadout::default()
-    };
-    let embed = build_gear_embed(&loadout, 6, 0, 0);
-    let field = embed
-        .fields
-        .iter()
-        .find(|field| field.name.starts_with("Relics"))
-        .expect("relic field");
-    assert!(field.name.contains("8/6"));
-    assert!(field.value.contains("Over cap"));
-    assert!(field.value.contains("unequip 2"));
-}
-
-#[test]
-fn test_relic_cap_embed_unique_gear_effect_renders() {
-    let loadout = GearLoadout {
-        weapon: Some(unique_piece(&GLASSBREAKER_PICK, 8)),
-        ..GearLoadout::default()
-    };
-    let embed = build_gear_embed(&loadout, 3, 0, 0);
-    let weapon = embed_field(&embed, "Weapon");
-    assert!(weapon.value.contains("+2 boss damage"));
-    assert!(weapon.value.contains("-8% hit chance"));
-}
-
-#[test]
-fn test_relic_cap_embed_ring_slot_renders_with_effect_and_durability() {
-    let loadout = GearLoadout {
-        ring: Some(unique_piece(&SURVEYORS_LOOP, 9)),
-        ..GearLoadout::default()
-    };
-    let embed = build_gear_embed(&loadout, 3, 0, 0);
-    let ring = embed_field(&embed, "Ring");
-    assert!(ring.value.contains("Surveyor's Loop"));
-    assert!(ring.value.contains("9/14"));
-    assert!(ring.value.contains(
-        "Safe event successes gain +1 block; risky and desperate choices lose 5% success chance."
-    ));
-}
-
-#[test]
 fn test_apply_gear_to_combat_empty_loadout_returns_unchanged_stats() {
     let base = CombatStats::bold();
     let result = apply_gear_to_combat(base, &GearLoadout::default());
@@ -1263,102 +1211,6 @@ fn test_try_debit_zero_amount_is_a_noop_success() {
 }
 
 #[test]
-fn test_relic_label_plain_known_relic() {
-    assert_eq!(format_relic_label("frozen_clock", false), "Frozen Clock");
-}
-
-#[test]
-fn test_relic_label_plain_known_relic_with_stats_flag_unchanged() {
-    assert_eq!(format_relic_label("frozen_clock", true), "Frozen Clock");
-}
-
-#[test]
-fn test_relic_label_pinnacle_without_stats() {
-    let id = "pinnacle:Pickaxe:Patience:boss_hit_minus:hp_plus_1";
-    assert_eq!(
-        format_relic_label(id, false),
-        "Pickaxe of Feints and Scales"
-    );
-}
-
-#[test]
-fn test_relic_label_pinnacle_with_stats() {
-    let id = "pinnacle:Pickaxe:Patience:boss_hit_minus:hp_plus_1";
-    assert_eq!(
-        format_relic_label(id, true),
-        "Pickaxe of Feints and Scales (Bosses miss more often, Tougher skin)"
-    );
-}
-
-#[test]
-fn test_relic_label_unknown_plain_id_returns_raw() {
-    assert_eq!(
-        format_relic_label("not_a_real_relic", false),
-        "not_a_real_relic"
-    );
-}
-
-#[test]
-fn test_relic_label_pinnacle_skips_unknown_stat_id() {
-    let id = "pinnacle:Pickaxe:Patience:bogus_stat:hp_plus_1";
-    assert_eq!(
-        format_relic_label(id, true),
-        "Pickaxe of Scales (Tougher skin)"
-    );
-}
-
-#[test]
-fn test_relic_label_pinnacle_legacy_suffix_rederived_from_stats() {
-    let first = "pinnacle:Pickaxe:Patience:scout_free:durability_minus";
-    let second = "pinnacle:Pickaxe:Patience:boss_hit_minus:hp_plus_1";
-    assert_eq!(
-        format_relic_label(first, false),
-        "Pickaxe of Patience and Scouting"
-    );
-    assert_eq!(
-        format_relic_label(second, false),
-        "Pickaxe of Feints and Scales"
-    );
-    assert_ne!(
-        format_relic_label(first, false),
-        format_relic_label(second, false)
-    );
-}
-
-#[test]
-fn test_relic_label_pinnacle_name_is_order_independent() {
-    let first = "pinnacle:Heart:Echoes:boss_payout_5:boss_hp_minus_10";
-    let second = "pinnacle:Heart:Ruin:boss_hp_minus_10:boss_payout_5";
-    assert_eq!(
-        format_relic_label(first, false),
-        "Heart of Tribute and Withering"
-    );
-    assert_eq!(
-        format_relic_label(first, false),
-        format_relic_label(second, false)
-    );
-}
-
-#[test]
-fn test_relic_label_pinnacle_quest_suffix_preserved() {
-    let id = "pinnacle:Cloak of the Necropolis:Long Silence:boss_payout_5:jc_plus_5";
-    assert_eq!(
-        format_relic_label(id, false),
-        "Cloak of the Necropolis of Long Silence"
-    );
-}
-
-#[test]
-fn test_relic_label_pinnacle_stat_titles_cover_pool() {
-    let titles = PINNACLE_STATS.map(|(_, _, title)| title);
-    assert!(titles.iter().all(|title| !title.is_empty()));
-    assert_eq!(
-        titles.into_iter().collect::<BTreeSet<_>>().len(),
-        PINNACLE_STATS.len()
-    );
-}
-
-#[test]
 fn test_relic_label_quest_relic_suffixes_avoid_legacy_pool() {
     let pool = PINNACLE_RELIC_SUFFIX_POOL
         .into_iter()
@@ -1538,21 +1390,4 @@ fn test_prorated_repair_all_preview_matches_prorated_debit() {
     assert_eq!(preview, 8);
     assert_eq!(result.cost, preview);
     assert_eq!(service.store.balance(PLAYER, GUILD), before - preview);
-}
-
-#[test]
-fn test_prorated_repair_broken_loadout_marks_effects_disabled() {
-    let mut service = GearService::fixture();
-    let id = service
-        .buy_gear(PLAYER, GUILD, "armor", 3)
-        .expect("buy")
-        .gear_id
-        .expect("id");
-    service.equip_gear(PLAYER, GUILD, id);
-    service.store.repair_gear(id, 0);
-    let loadout = service.loadout(PLAYER, GUILD);
-    let embed = build_gear_embed(&loadout, 2, service.store.gear(PLAYER, GUILD).len(), 1);
-    let armor = embed_field(&embed, "Armor");
-    assert!(armor.value.contains("BROKEN"));
-    assert!(armor.value.contains("effects disabled"));
 }

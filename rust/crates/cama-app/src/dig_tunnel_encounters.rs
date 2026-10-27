@@ -1,9 +1,8 @@
 //! Typed policy and orchestration for six deflationary Dig encounters.
 //!
-//! Python remains the live event catalog, Discord renderer, and runtime
-//! authority during migration. This module mirrors the authored fields pinned
-//! by parity tests, injects success/jitter/selection entropy, and delegates the
-//! existing-schema state transition to a typed atomic persistence port.
+//! This module owns the authored fields pinned by the encounter tests, injects
+//! success/jitter/selection entropy, and delegates the existing-schema state
+//! transition to a typed atomic persistence port.
 
 use std::collections::BTreeSet;
 

@@ -409,9 +409,10 @@ fn test_slow_work_uses_dedicated_executor() {
     assert!(first_token);
     assert!(!second_token);
 
-    let configured = OpenDotaRuntimeServices::from_production_settings(
+    let configured = OpenDotaRuntimeServices::from_production_settings_with_quota_path(
         Some("typed-snapshot-secret".to_owned()),
         &[0, 2, 4],
+        None,
     )
     .expect("typed production settings");
     assert_eq!(

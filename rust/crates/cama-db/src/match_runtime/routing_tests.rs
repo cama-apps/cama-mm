@@ -177,7 +177,7 @@ fn old_unmarked_pending_and_cancelled_reservations_cannot_be_adopted() {
     let fresh = repo.create_pending_match(1, &state(10)).unwrap();
     let mut manual = fresh.state;
     manual.extra.get_mut("dota_hosting").unwrap()["hosting"] = json!("manual");
-    repo.update_pending_match(1, fresh.pending_match_id, &manual)
+    repo.replace_pending_match_for_tests(1, fresh.pending_match_id, &manual)
         .unwrap();
     assert!(matches!(
         sessions.claim_reserved_session(1, fresh.pending_match_id, "99", json!({}), 115),

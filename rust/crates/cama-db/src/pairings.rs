@@ -1,7 +1,7 @@
 //! Python-compatible pairings repository and command service.
 //!
-//! Python remains the schema-migration authority during the side-by-side
-//! rewrite. This module opens only an existing SQLite database, never creates
+//! Schema creation and migration belong to the startup schema manager. This
+//! module opens only an existing SQLite database, never creates
 //! or migrates caller data, and stores every pair in signed-64-bit canonical
 //! order (`player1_id < player2_id`). Match updates and rebuilds use one
 //! deferred transaction, matching Python's connection context manager.
@@ -555,7 +555,10 @@ fn row_to_pairing(row: &rusqlite::Row<'_>) -> Result<Pairing, rusqlite::Error> {
     })
 }
 
-fn update_match_pairings(
+/// Aggregate every teammate and opponent relationship from one match inside
+/// the caller's transaction. This is the single pairing-update path shared by
+/// match recording and the rebuild command.
+pub(crate) fn update_match_pairings(
     connection: &Connection,
     match_id: i64,
     guild_id: i64,

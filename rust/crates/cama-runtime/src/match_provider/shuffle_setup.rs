@@ -180,10 +180,23 @@ impl MatchHandler {
                 },
             )
             .map_err(|error| error.to_string())?;
-        let (radiant_team, dire_team) = if fastrand::bool() {
-            (result.team1, result.team2)
+        // The optimizer reports the objective it minimized; the side swap
+        // below changes neither it nor the value difference.
+        let goodness_score = result.score;
+        let (radiant_team, dire_team, radiant_value, dire_value) = if fastrand::bool() {
+            (
+                result.team1,
+                result.team2,
+                result.team1_value,
+                result.team2_value,
+            )
         } else {
-            (result.team2, result.team1)
+            (
+                result.team2,
+                result.team1,
+                result.team2_value,
+                result.team1_value,
+            )
         };
         let excluded_players = result.excluded;
         let radiant_ids = team_player_ids(&radiant_team)?;
@@ -197,44 +210,8 @@ impl MatchHandler {
             .role_assignments
             .clone()
             .ok_or_else(|| "Dire role assignments were not produced".to_owned())?;
-        let radiant_value = radiant_team
-            .get_team_value_with_off_role_value_penalty(
-                true,
-                shuffler.off_role_multiplier,
-                use_openskill,
-                use_jopacoin,
-                shuffler.off_role_flat_value_penalty,
-            )
-            .map_err(|error| error.to_string())?;
-        let dire_value = dire_team
-            .get_team_value_with_off_role_value_penalty(
-                true,
-                shuffler.off_role_multiplier,
-                use_openskill,
-                use_jopacoin,
-                shuffler.off_role_flat_value_penalty,
-            )
-            .map_err(|error| error.to_string())?;
         let value_diff = (radiant_value - dire_value).abs();
 
-        let balancing = TeamBalancingService::new_with_off_role_value_penalty(
-            true,
-            shuffler.off_role_multiplier,
-            shuffler.off_role_flat_value_penalty,
-            shuffler.off_role_flat_penalty,
-            shuffler.role_matchup_delta_weight,
-        );
-        let off_role_penalty = (radiant_team
-            .get_off_role_count()
-            .map_err(|error| error.to_string())?
-            + dire_team
-                .get_off_role_count()
-                .map_err(|error| error.to_string())?) as f64
-            * shuffler.off_role_flat_penalty;
-        let weighted_parity_delta = balancing
-            .calculate_role_matchup_delta(&radiant_team, &dire_team, use_openskill, use_jopacoin)
-            .map_err(|error| error.to_string())?
-            * shuffler.role_matchup_delta_weight;
         let radiant_set = radiant_ids.iter().copied().collect::<HashSet<_>>();
         let dire_set = dire_ids.iter().copied().collect::<HashSet<_>>();
         let selected_set = radiant_set
@@ -242,81 +219,6 @@ impl MatchHandler {
             .copied()
             .collect::<HashSet<_>>();
         let excluded_set = excluded_ids.iter().copied().collect::<HashSet<_>>();
-        let excluded_penalty = excluded_players
-            .iter()
-            .filter_map(|player| player.discord_id)
-            .map(|player_id| {
-                exclusion_counts
-                    .get(&player_id)
-                    .copied()
-                    .unwrap_or_default()
-            })
-            .sum::<usize>() as f64
-            * shuffler.exclusion_penalty_weight;
-        let recent_match_penalty = radiant_team
-            .players
-            .iter()
-            .chain(&dire_team.players)
-            .filter(|player| {
-                player
-                    .discord_id
-                    .is_some_and(|id| recent_match_ids.contains(&id))
-            })
-            .count() as f64
-            * shuffler.recent_match_penalty_weight;
-        let soft_avoid_penalty = shuffler.calculate_soft_avoid_penalty(
-            &radiant_set,
-            &dire_set,
-            Some(&domain_avoids),
-            Some(&low_priority_ids),
-        );
-        let package_deal_penalty = shuffler.calculate_package_deal_penalty(
-            &radiant_set,
-            &dire_set,
-            Some(&domain_deals),
-            Some(&low_priority_ids),
-        );
-        let deal_split_penalty = shuffler.calculate_package_deal_split_penalty(
-            &selected_set,
-            &excluded_set,
-            Some(&domain_deals),
-            Some(&low_priority_ids),
-        );
-        let low_priority_penalty = BalancedShuffler::calculate_low_priority_penalty(
-            &selected_set,
-            Some(&low_priority_ids),
-        );
-        let low_priority_team_adjustment = BalancedShuffler::calculate_low_priority_team_adjustment(
-            &radiant_set,
-            &dire_set,
-            Some(&low_priority_ids),
-        );
-        let selected_players = radiant_team
-            .players
-            .iter()
-            .chain(&dire_team.players)
-            .collect::<Vec<_>>();
-        let selected_values = selected_players
-            .iter()
-            .map(|player| player.get_value(true, use_openskill, use_jopacoin))
-            .collect::<Vec<_>>();
-        let goodness_score = value_diff * ADJUSTED_VALUE_DIFF_WEIGHT
-            + off_role_penalty
-            + weighted_parity_delta
-            + excluded_penalty
-            + recent_match_penalty
-            + soft_avoid_penalty
-            + package_deal_penalty
-            + deal_split_penalty
-            + low_priority_penalty
-            + low_priority_team_adjustment
-            + shuffler.calculate_rating_spread_penalty(&selected_values)
-            - BalancedShuffler::calculate_lobby_rating_bonus(&selected_values)
-            - BalancedShuffler::calculate_lobby_wait_bonus(
-                &selected_players,
-                Some(&request.lobby_wait_minutes),
-            )
-            - shuffler.calculate_rd_priority(&selected_players);
 
         let glicko_radiant_win_prob =
             glicko_probability(&self.rating, &radiant_team.players, &dire_team.players);
@@ -514,8 +416,12 @@ impl MatchHandler {
                     BlindBetPolicy {
                         is_bomb_pot: request.is_bomb_pot,
                         normal_threshold: self.config.auto_blind_threshold,
-                        normal_percentage: percentage_points(self.config.auto_blind_percentage),
-                        bomb_percentage: percentage_points(self.config.bomb_pot_blind_percentage),
+                        normal_percentage: rate_percentage_points(
+                            self.config.auto_blind_percentage,
+                        ),
+                        bomb_percentage: rate_percentage_points(
+                            self.config.bomb_pot_blind_percentage,
+                        ),
                         bomb_ante: self.config.bomb_pot_ante,
                         max_debt: self.config.max_debt,
                     },
@@ -629,10 +535,10 @@ impl MatchHandler {
                         enabled: true,
                         total_count: self.config.auto_spectator_bet_count,
                         top_count: self.config.auto_spectator_bet_top_count,
-                        base_basis_points: percentage_basis_points(
+                        base_basis_points: rate_basis_points(
                             self.config.auto_spectator_bet_percentage,
                         ),
-                        top_basis_points: percentage_basis_points(
+                        top_basis_points: rate_basis_points(
                             self.config.auto_spectator_bet_top_percentage,
                         ),
                     },

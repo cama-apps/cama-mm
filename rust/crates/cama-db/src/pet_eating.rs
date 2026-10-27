@@ -1,7 +1,7 @@
 //! Existing-schema persistence for consuming an adult Camagotchi.
 //!
-//! Python remains the schema, migration, and live runtime authority during the
-//! side-by-side migration. This adapter opens only an already-migrated SQLite
+//! Schema creation and migration belong to the startup schema manager. This
+//! adapter opens only an already-migrated SQLite
 //! database. The pet CAS, evolution suppression, player reward, bankruptcy
 //! penalty, brawl guard, and trigger-backed ledger context share one
 //! `BEGIN IMMEDIATE` transaction.

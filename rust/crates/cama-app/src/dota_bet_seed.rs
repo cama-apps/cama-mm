@@ -2,7 +2,7 @@
 //!
 //! The module keeps reserve/claim persistence behind a narrow port and models
 //! settlement, display, projections, and retired-command policy with typed
-//! values. Python remains the live command/runtime authority during parity.
+//! values.
 
 use std::collections::BTreeMap;
 

@@ -1,4 +1,4 @@
-//! Deterministic pet-card media policy for the side-by-side Rust migration.
+//! Deterministic pet-card media policy.
 //!
 //! This module is the live native renderer. It emits standards-valid RGBA PNG
 //! files, preserves full-card overrides, composes the shipped hybrid component

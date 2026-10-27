@@ -4,10 +4,11 @@
 //! makes those snapshots explicit while retaining the same filtering,
 //! threshold, ordering, and aggregation rules.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
+use crate::openskill::{CamaOpenSkillSystem, OpenSkillError, Rating as OpenSkillRating};
 use crate::player::{OPENSKILL_DISPLAY_SCALE, Player};
-use crate::rating::{MAX_GLICKO_RD, cap_glicko_rd};
+use crate::rating::{CamaRatingSystem, MAX_GLICKO_RD, cap_glicko_rd};
 
 /// Display-rank thresholds in descending order.
 pub const RATING_BUCKETS: [(&str, f64); 8] = [
@@ -23,12 +24,6 @@ pub const RATING_BUCKETS: [(&str, f64); 8] = [
 
 /// OpenSkill sigma at or below this value is considered calibrated.
 pub const OPENSKILL_CALIBRATION_THRESHOLD: f64 = 4.0;
-
-/// Temperature used by the deployed OpenSkill probability calibration.
-pub const OPENSKILL_WIN_PROBABILITY_TEMPERATURE: f64 = 6.5;
-
-const OPENSKILL_WIN_PROBABILITY_EPSILON: f64 = 1e-12;
-const OPENSKILL_BETA: f64 = 25.0 / 6.0;
 
 /// One persisted rating-history row.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -179,10 +174,13 @@ pub trait RatingSeedCalculator {
     fn seed_rating(&self, source_mmr: i64) -> f64;
 }
 
-/// Default deployed Glicko seed policy: clamp, subtract 500 MMR, then scale by 0.25.
+/// Fixed seed policy for calibration tests: clamp, subtract 500 MMR, then
+/// scale by 0.25. Production seeds through [`CamaRatingSystem`].
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DefaultRatingSeedCalculator;
 
+#[cfg(test)]
 impl RatingSeedCalculator for DefaultRatingSeedCalculator {
     fn seed_rating(&self, source_mmr: i64) -> f64 {
         let capped = source_mmr.clamp(0, 12_000);
@@ -198,72 +196,29 @@ pub struct OpenSkillMatchRatings {
     pub team2: Vec<(f64, f64)>,
 }
 
-/// Abstracts prediction so callers can use the production model or a deterministic test model.
-pub trait OpenSkillPredictor {
-    fn calibrated_win_probability(&self, team: &[(f64, f64)], opponent: &[(f64, f64)]) -> f64;
-}
-
-/// Pure implementation of the deployed two-team OpenSkill probability policy.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct CamaOpenSkillPredictor;
-
-impl CamaOpenSkillPredictor {
-    /// Raw Plackett-Luce two-team win probability.
-    #[must_use]
-    pub fn raw_win_probability(team: &[(f64, f64)], opponent: &[(f64, f64)]) -> f64 {
-        if team.is_empty() || opponent.is_empty() {
-            return 0.5;
-        }
-
-        let team_mu: f64 = team.iter().map(|(mu, _)| mu).sum();
-        let opponent_mu: f64 = opponent.iter().map(|(mu, _)| mu).sum();
-        let variance: f64 = team
-            .iter()
-            .chain(opponent)
-            .map(|(_, sigma)| sigma * sigma)
-            .sum();
-        let denominator = (2.0 * OPENSKILL_BETA.powi(2) + variance).sqrt();
-        normal_cdf((team_mu - opponent_mu) / denominator)
-    }
-
-    /// Apply the same log-odds temperature scaling as Python.
-    #[must_use]
-    pub fn calibrate_win_probability(probability: f64, temperature: f64) -> f64 {
-        assert!(
-            temperature > 0.0,
-            "OpenSkill probability temperature must be positive"
-        );
-        let probability = probability.clamp(
-            OPENSKILL_WIN_PROBABILITY_EPSILON,
-            1.0 - OPENSKILL_WIN_PROBABILITY_EPSILON,
-        );
-        let scaled_log_odds = (probability / (1.0 - probability)).ln() / temperature;
-        if scaled_log_odds >= 0.0 {
-            let exp_negative = (-scaled_log_odds).exp();
-            1.0 / (1.0 + exp_negative)
-        } else {
-            let exp_positive = scaled_log_odds.exp();
-            exp_positive / (1.0 + exp_positive)
-        }
+/// Seed policy of the configured Glicko system: discount, then map to rating.
+impl RatingSeedCalculator for CamaRatingSystem {
+    fn seed_rating(&self, source_mmr: i64) -> f64 {
+        let source_mmr =
+            i32::try_from(source_mmr.clamp(i64::from(Self::MMR_MIN), i64::from(Self::MMR_MAX)))
+                .expect("clamped to the i32 MMR range");
+        self.mmr_to_rating(self.new_player_seed_mmr(source_mmr))
     }
 }
 
-impl OpenSkillPredictor for CamaOpenSkillPredictor {
-    fn calibrated_win_probability(&self, team: &[(f64, f64)], opponent: &[(f64, f64)]) -> f64 {
-        Self::calibrate_win_probability(
-            Self::raw_win_probability(team, opponent),
-            OPENSKILL_WIN_PROBABILITY_TEMPERATURE,
-        )
-    }
-}
-
-/// Bulk source for pre-match OpenSkill snapshots.
-pub trait OpenSkillMatchSource {
-    fn get_os_ratings_for_matches(
-        &mut self,
-        match_ids: &[i64],
-        guild_id: Option<i64>,
-    ) -> HashMap<i64, OpenSkillMatchRatings>;
+/// Calibrated win probability of `team` over `opponent` under the configured
+/// OpenSkill system, from `(mu, sigma)` snapshots.
+pub fn openskill_win_probability(
+    system: &CamaOpenSkillSystem,
+    team: &[(f64, f64)],
+    opponent: &[(f64, f64)],
+) -> Result<f64, OpenSkillError> {
+    let ratings = |side: &[(f64, f64)]| {
+        side.iter()
+            .map(|(mu, sigma)| OpenSkillRating::new(*mu, *sigma))
+            .collect::<Vec<_>>()
+    };
+    system.os_predict_calibrated_win_probability(&ratings(team), &ratings(opponent))
 }
 
 /// Calibration values shared by individual rating views.
@@ -303,12 +258,6 @@ fn median(values: &[f64]) -> Option<f64> {
     } else {
         values[middle]
     })
-}
-
-// Python parity: shares the exact-erf normal CDF with the OpenSkill module
-// (`statistics.NormalDist().cdf` on the Python side).
-fn normal_cdf(value: f64) -> f64 {
-    crate::openskill::normal_cdf(value)
 }
 
 /// Convert RD to certainty percentage. Higher means more certain.
@@ -414,10 +363,12 @@ struct OpenSkillMatchGroup<'a> {
 }
 
 /// Reconstruct OpenSkill predictions from complete pre-match team snapshots.
-#[must_use]
-pub fn compute_openskill_prediction_quality(history: &[RatingHistoryEntry]) -> PredictionQuality {
+pub fn compute_openskill_prediction_quality(
+    history: &[RatingHistoryEntry],
+    system: &CamaOpenSkillSystem,
+) -> Result<PredictionQuality, OpenSkillError> {
     if history.is_empty() {
-        return PredictionQuality::default();
+        return Ok(PredictionQuality::default());
     }
 
     // Python dictionaries preserve the first-seen match order. Keep a vector
@@ -441,7 +392,6 @@ pub fn compute_openskill_prediction_quality(history: &[RatingHistoryEntry]) -> P
         }
     }
 
-    let predictor = CamaOpenSkillPredictor;
     let mut predictions = Vec::new();
     for (_, teams) in matches {
         if teams.team1.len() != 5 || teams.team2.len() != 5 {
@@ -466,11 +416,11 @@ pub fn compute_openskill_prediction_quality(history: &[RatingHistoryEntry]) -> P
             continue;
         }
         predictions.push(MatchPrediction {
-            expected_radiant_win_prob: Some(predictor.calibrated_win_probability(&team1, &team2)),
+            expected_radiant_win_prob: Some(openskill_win_probability(system, &team1, &team2)?),
             winning_team: Some(if team1_won { 1 } else { 2 }),
         });
     }
-    compute_prediction_quality(&predictions)
+    Ok(compute_prediction_quality(&predictions))
 }
 
 /// Summarize absolute Glicko movement.
@@ -487,14 +437,16 @@ pub fn compute_rating_movement(history: &[RatingHistoryEntry]) -> RatingMovement
     }
 }
 
-/// Summarize absolute OpenSkill movement on the shared display scale.
+/// Summarize absolute OpenSkill movement on the system's display scale.
 #[must_use]
-pub fn compute_openskill_rating_movement(history: &[RatingHistoryEntry]) -> RatingMovement {
+pub fn compute_openskill_rating_movement(
+    history: &[RatingHistoryEntry],
+    system: &CamaOpenSkillSystem,
+) -> RatingMovement {
+    let scale = system.config().display_scale;
     let deltas: Vec<_> = history
         .iter()
-        .filter_map(|entry| {
-            Some((entry.os_mu_after? - entry.os_mu_before?).abs() * OPENSKILL_DISPLAY_SCALE)
-        })
+        .filter_map(|entry| Some((entry.os_mu_after? - entry.os_mu_before?).abs() * scale))
         .collect();
     RatingMovement {
         count: deltas.len(),
@@ -565,7 +517,11 @@ pub fn compute_rating_stability(history: &[RatingHistoryEntry]) -> RatingStabili
 
 /// Compare OpenSkill movement above and below its sigma calibration threshold.
 #[must_use]
-pub fn compute_openskill_rating_stability(history: &[RatingHistoryEntry]) -> RatingStability {
+pub fn compute_openskill_rating_stability(
+    history: &[RatingHistoryEntry],
+    system: &CamaOpenSkillSystem,
+) -> RatingStability {
+    let config = system.config();
     let mut calibrated = Vec::new();
     let mut uncalibrated = Vec::new();
     for entry in history {
@@ -574,12 +530,12 @@ pub fn compute_openskill_rating_stability(history: &[RatingHistoryEntry]) -> Rat
         else {
             continue;
         };
-        let target = if sigma <= OPENSKILL_CALIBRATION_THRESHOLD {
+        let target = if sigma <= config.calibration_threshold {
             &mut calibrated
         } else {
             &mut uncalibrated
         };
-        target.push((after - before).abs() * OPENSKILL_DISPLAY_SCALE);
+        target.push((after - before).abs() * config.display_scale);
     }
     stability_from_deltas(&calibrated, &uncalibrated)
 }
@@ -721,14 +677,16 @@ pub fn compute_team_composition_stats(history: &[RatingHistoryEntry]) -> TeamCom
     }
 }
 
-/// Compute the global calibration report from typed snapshots.
-#[must_use]
+/// Compute the global calibration report from typed snapshots under the
+/// configured Glicko seed policy and OpenSkill system.
 pub fn compute_calibration_stats(
     players: &[Player],
     match_count: usize,
     match_predictions: &[MatchPrediction],
     history: &[RatingHistoryEntry],
-) -> CalibrationStats {
+    rating_system: &CamaRatingSystem,
+    openskill_system: &CamaOpenSkillSystem,
+) -> Result<CalibrationStats, OpenSkillError> {
     let normalized_players = players
         .iter()
         .cloned()
@@ -831,7 +789,7 @@ pub fn compute_calibration_stats(
     let mut most_experienced: Vec<_> = players.iter().collect();
     most_experienced.sort_by_key(|player| std::cmp::Reverse(player.wins + player.losses));
 
-    let seed_calculator = DefaultRatingSeedCalculator;
+    let seed_calculator = rating_system;
     let mut drifts: Vec<_> = rated_players
         .iter()
         .filter_map(|player| {
@@ -845,13 +803,16 @@ pub fn compute_calibration_stats(
         .collect();
     let drift_values: Vec<_> = drifts.iter().map(|(_, drift)| *drift).collect();
     drifts.sort_by(|left, right| right.1.total_cmp(&left.1));
+    let biggest_gainers = drifts.iter().take(3).cloned().collect();
+    drifts.sort_by(|left, right| left.1.total_cmp(&right.1));
+    let biggest_drops = drifts.into_iter().take(3).collect();
 
     let glicko_prediction_quality = compute_prediction_quality(match_predictions);
     let rating_movement = compute_rating_movement(history);
     let rating_stability = compute_rating_stability(history);
     let avg_rd = mean(&rd_values);
 
-    CalibrationStats {
+    Ok(CalibrationStats {
         total_players: players.len(),
         match_count,
         rated_players: rated_players.len(),
@@ -868,22 +829,25 @@ pub fn compute_calibration_stats(
         most_experienced: most_experienced.into_iter().take(3).cloned().collect(),
         avg_drift: mean(&drift_values),
         median_drift: median(&drift_values),
-        biggest_gainers: drifts.iter().take(3).cloned().collect(),
-        biggest_drops: drifts.iter().rev().take(3).cloned().collect(),
+        biggest_gainers,
+        biggest_drops,
         prediction_quality: glicko_prediction_quality,
         glicko_prediction_quality,
-        openskill_prediction_quality: compute_openskill_prediction_quality(history),
+        openskill_prediction_quality: compute_openskill_prediction_quality(
+            history,
+            openskill_system,
+        )?,
         rating_movement,
         glicko_rating_movement: rating_movement,
-        openskill_rating_movement: compute_openskill_rating_movement(history),
+        openskill_rating_movement: compute_openskill_rating_movement(history, openskill_system),
         side_balance: compute_side_balance(match_predictions),
         rating_stability,
         glicko_rating_stability: rating_stability,
-        openskill_rating_stability: compute_openskill_rating_stability(history),
+        openskill_rating_stability: compute_openskill_rating_stability(history, openskill_system),
         team_composition: compute_team_composition_stats(history),
         avg_certainty: avg_rd.map(rd_to_certainty),
         avg_rd,
-    }
+    })
 }
 
 /// Compute the per-player values shared by the calibration and profile views.
@@ -1025,119 +989,33 @@ pub fn compute_player_calibration(
     }
 }
 
-fn os_win_probability_from_ratings(
-    predictor: &impl OpenSkillPredictor,
-    ratings: &OpenSkillMatchRatings,
-    team_number: Option<i32>,
-) -> Option<f64> {
-    if ratings.team1.is_empty() || ratings.team2.is_empty() {
-        return None;
-    }
-    match team_number {
-        Some(1) => Some(predictor.calibrated_win_probability(&ratings.team1, &ratings.team2)),
-        Some(2) => Some(predictor.calibrated_win_probability(&ratings.team2, &ratings.team1)),
-        _ => None,
-    }
-}
-
-/// Bulk-load OpenSkill snapshots once and return aligned side probabilities.
-#[must_use]
-pub fn get_os_win_probabilities(
-    match_source: Option<&mut impl OpenSkillMatchSource>,
-    predictor: &impl OpenSkillPredictor,
-    match_sides: &[(Option<i64>, Option<i32>)],
-    guild_id: Option<i64>,
-) -> Vec<Option<f64>> {
-    let mut seen = HashSet::new();
-    let match_ids: Vec<_> = match_sides
-        .iter()
-        .filter_map(|(match_id, _)| match_id.filter(|id| *id != 0))
-        .filter(|match_id| seen.insert(*match_id))
-        .collect();
-    let Some(match_source) = match_source else {
-        return vec![None; match_sides.len()];
-    };
-    if match_ids.is_empty() {
-        return vec![None; match_sides.len()];
-    }
-    let ratings_by_match = match_source.get_os_ratings_for_matches(&match_ids, guild_id);
-    match_sides
-        .iter()
-        .map(|(match_id, team_number)| {
-            let match_id = match_id.filter(|id| *id != 0)?;
-            let ratings = ratings_by_match.get(&match_id)?;
-            os_win_probability_from_ratings(predictor, ratings, *team_number)
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The calibration report under the default deployed systems.
+    fn stats(
+        players: &[Player],
+        match_count: usize,
+        predictions: &[MatchPrediction],
+        history: &[RatingHistoryEntry],
+    ) -> CalibrationStats {
+        compute_calibration_stats(
+            players,
+            match_count,
+            predictions,
+            history,
+            &CamaRatingSystem::default(),
+            &CamaOpenSkillSystem::new(),
+        )
+        .expect("default OpenSkill system predicts")
+    }
 
     fn close(actual: f64, expected: f64, tolerance: f64) {
         assert!(
             (actual - expected).abs() <= tolerance,
             "expected {expected}, got {actual}"
         );
-    }
-
-    #[derive(Default)]
-    struct MatchSource {
-        calls: Vec<(Vec<i64>, Option<i64>)>,
-    }
-
-    impl OpenSkillMatchSource for MatchSource {
-        fn get_os_ratings_for_matches(
-            &mut self,
-            match_ids: &[i64],
-            guild_id: Option<i64>,
-        ) -> HashMap<i64, OpenSkillMatchRatings> {
-            self.calls.push((match_ids.to_vec(), guild_id));
-            HashMap::from([
-                (
-                    11,
-                    OpenSkillMatchRatings {
-                        team1: vec![(60.0, 5.0)],
-                        team2: vec![(40.0, 5.0)],
-                    },
-                ),
-                (
-                    12,
-                    OpenSkillMatchRatings {
-                        team1: vec![(55.0, 5.0)],
-                        team2: Vec::new(),
-                    },
-                ),
-            ])
-        }
-    }
-
-    struct FirstMuPredictor;
-
-    impl OpenSkillPredictor for FirstMuPredictor {
-        fn calibrated_win_probability(&self, team: &[(f64, f64)], _opponent: &[(f64, f64)]) -> f64 {
-            team[0].0 / 100.0
-        }
-    }
-
-    #[test]
-    fn test_get_os_win_probabilities_bulk_loads_once_and_preserves_alignment() {
-        let mut source = MatchSource::default();
-        let probabilities = get_os_win_probabilities(
-            Some(&mut source),
-            &FirstMuPredictor,
-            &[
-                (Some(11), Some(1)),
-                (Some(12), Some(1)),
-                (Some(11), Some(2)),
-                (None, Some(1)),
-            ],
-            Some(77),
-        );
-
-        assert_eq!(probabilities, vec![Some(0.6), None, Some(0.4), None]);
-        assert_eq!(source.calls, vec![(vec![11, 12], Some(77))]);
     }
 
     #[test]
@@ -1190,7 +1068,7 @@ mod tests {
             },
         ];
 
-        let stats = compute_calibration_stats(&players, 12, &predictions, &history);
+        let stats = stats(&players, 12, &predictions, &history);
 
         assert_eq!(stats.rating_bucket_count("Immortal"), Some(1));
         assert_eq!(stats.rating_bucket_count("Legend"), Some(1));
@@ -1233,7 +1111,7 @@ mod tests {
                 ..RatingHistoryEntry::default()
             },
         ];
-        let stats = compute_calibration_stats(&[], 0, &[], &history);
+        let stats = stats(&[], 0, &[], &history);
         let movement = stats.openskill_rating_movement;
         assert_eq!(movement.count, 2);
         close(movement.avg_delta.unwrap(), 25.0, 1e-10);
@@ -1273,15 +1151,18 @@ mod tests {
             }
         }
 
-        let stats = compute_calibration_stats(&[], 2, &[], &history);
+        let stats = stats(&[], 2, &[], &history);
         let quality = stats.openskill_prediction_quality;
         let team1 = vec![(60.0, 4.0); 5];
         let team2 = vec![(35.0, 4.0); 5];
-        let raw = CamaOpenSkillPredictor::raw_win_probability(&team1, &team2);
-        let calibrated = CamaOpenSkillPredictor::calibrate_win_probability(
-            raw,
-            OPENSKILL_WIN_PROBABILITY_TEMPERATURE,
-        );
+        let system = CamaOpenSkillSystem::new();
+        let ratings = |side: &[(f64, f64)]| {
+            side.iter()
+                .map(|(mu, sigma)| OpenSkillRating::new(*mu, *sigma))
+                .collect::<Vec<_>>()
+        };
+        let raw = system.os_predict_win_probability(&ratings(&team1), &ratings(&team2));
+        let calibrated = openskill_win_probability(&system, &team1, &team2).unwrap();
         let expected_brier = ((calibrated - 1.0).powi(2) + calibrated.powi(2)) / 2.0;
         assert_eq!(quality.count, 2);
         close(quality.brier.unwrap(), expected_brier, 1e-10);
@@ -1768,13 +1649,13 @@ mod tests {
 
     #[test]
     fn test_returns_team_composition_key() {
-        let result = compute_calibration_stats(&[integration_player("Player1")], 0, &[], &[]);
+        let result = stats(&[integration_player("Player1")], 0, &[], &[]);
         assert_eq!(result.team_composition, TeamCompositionStats::default());
     }
 
     #[test]
     fn test_team_composition_structure() {
-        let result = compute_calibration_stats(&[integration_player("Player1")], 0, &[], &[]);
+        let result = stats(&[integration_player("Player1")], 0, &[], &[]);
         assert!(result.team_composition.halves.is_empty());
         assert_eq!(result.team_composition.total_teams, 0);
         assert_eq!(result.team_composition.gini_correlation, None);
@@ -1792,7 +1673,7 @@ mod tests {
             Some(0.5),
             true,
         );
-        let result = compute_calibration_stats(&players, 1, &[], &entries);
+        let result = stats(&players, 1, &[], &entries);
         assert_eq!(result.team_composition.total_teams, 1);
     }
 }

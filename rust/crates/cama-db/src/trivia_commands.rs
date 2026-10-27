@@ -1,12 +1,15 @@
 //! Existing-schema persistence for the classic `/trivia` command.
 //!
-//! Python remains the schema and runtime authority. This repository opens
+//! Schema creation and migration belong to the startup schema manager. This repository opens
 //! only an existing database through [`crate::open_runtime_connection`].
 //! Cooldown claims and all writes use `BEGIN IMMEDIATE` so concurrent command
 //! invocations cannot both claim the same cooldown window.
 
 use std::path::{Path, PathBuf};
 
+use cama_db_core::profit_deductions::{
+    DeductionLedgerContext, ProfitDeductionPolicy, withhold_profit_deductions,
+};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use thiserror::Error;
 
@@ -26,6 +29,19 @@ pub enum TriviaCommandsRepositoryError {
 pub struct TriviaLeaderboardEntry {
     pub discord_id: i64,
     pub best_streak: i64,
+}
+
+/// What one settled trivia answer moved.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TriviaRewardSettlement {
+    /// Bankruptcy, vanity, and low-priority shares withheld from the gross.
+    pub withheld: i64,
+    /// Plains tithe moved to the nonprofit reserve.
+    pub tithe: i64,
+    /// Net JC the player kept.
+    pub reward: i64,
+    /// Player balance after settlement; `None` when nothing was credited.
+    pub balance: Option<i64>,
 }
 
 #[derive(Clone, Debug)]
@@ -170,54 +186,100 @@ impl TriviaCommandsRepository {
         Ok(balance)
     }
 
-    /// Credit one settled trivia answer with the same trigger context emitted
-    /// by Python's `PlayerService.adjust_balance` call. Positive trivia rewards
-    /// do not alter `lowest_balance_ever`.
-    pub fn credit_trivia_reward(
+    /// Settle one correct answer in a single `BEGIN IMMEDIATE` transaction:
+    /// credit the gross reward, withhold the shared profit deductions as their
+    /// own ledger rows, then move the Plains tithe (a share of what the player
+    /// keeps) from the player to the nonprofit reserve. Any failure rolls the
+    /// whole settlement back, so the tithe can never be booked without the
+    /// reward. Positive trivia rewards do not alter `lowest_balance_ever`.
+    pub fn settle_trivia_reward(
         &self,
         discord_id: i64,
         guild_id: Option<i64>,
-        amount: i64,
+        gross: i64,
         question_number: i64,
-    ) -> Result<i64, TriviaCommandsRepositoryError> {
+        deduction_policy: &ProfitDeductionPolicy<'_>,
+        tithe_rate: f64,
+    ) -> Result<TriviaRewardSettlement, TriviaCommandsRepositoryError> {
+        if gross <= 0 {
+            return Ok(TriviaRewardSettlement::default());
+        }
         let guild_id = Self::normalize_guild_id(guild_id);
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute("DELETE FROM economy_ledger_context", [])?;
-        transaction.execute(
-            "INSERT INTO economy_ledger_context (
-                 id,source,actor_id,related_type,related_id,reason,metadata
-             ) VALUES (1,'trivia',?1,'trivia_answer',?2,
-                       'scaled trivia reward',?3)",
-            params![
-                discord_id,
-                question_number.to_string(),
-                format!(r#"{{"adjusted_reward": {amount}}}"#),
-            ],
-        )?;
-        let changed = transaction.execute(
-            "UPDATE players
-             SET jopacoin_balance=COALESCE(jopacoin_balance,0)+?1,
-                 updated_at=CURRENT_TIMESTAMP
-             WHERE discord_id=?2 AND guild_id=?3",
-            params![amount, discord_id, guild_id],
-        );
-        let clear = transaction.execute("DELETE FROM economy_ledger_context", []);
-        let changed = match changed {
-            Ok(changed) => {
-                clear?;
-                changed
-            }
-            Err(error) => {
-                let _ = clear;
-                return Err(error.into());
-            }
+        let missing = || TriviaCommandsRepositoryError::MissingPlayer {
+            discord_id,
+            guild_id,
         };
+        let changed = with_trivia_context(
+            &transaction,
+            discord_id,
+            "trivia_answer",
+            &question_number.to_string(),
+            "scaled trivia reward",
+            &format!(r#"{{"adjusted_reward": {gross}}}"#),
+            || {
+                transaction.execute(
+                    "UPDATE players
+                     SET jopacoin_balance=COALESCE(jopacoin_balance,0)+?1,
+                         updated_at=CURRENT_TIMESTAMP
+                     WHERE discord_id=?2 AND guild_id=?3",
+                    params![gross, discord_id, guild_id],
+                )
+            },
+        )?;
         if changed == 0 {
-            return Err(TriviaCommandsRepositoryError::MissingPlayer {
+            return Err(missing());
+        }
+        let deductions = withhold_profit_deductions(
+            &transaction,
+            guild_id,
+            discord_id,
+            gross,
+            deduction_policy,
+            &DeductionLedgerContext {
+                source: "trivia",
+                related_type: Some("trivia_answer"),
+                related_id: Some(question_number),
+                reason: "trivia reward",
+            },
+        )?
+        .ok_or_else(missing)?;
+        let kept = deductions.net();
+        let tithe = if tithe_rate > 0.0 && kept > 1 {
+            let tithe = ((kept as f64 * tithe_rate) as i64).max(1);
+            if tithe < kept { tithe } else { 0 }
+        } else {
+            0
+        };
+        if tithe > 0 {
+            let metadata = format!(r#"{{"tithe": {tithe}, "net_jc_before_tithe": {kept}}}"#);
+            with_trivia_context(
+                &transaction,
                 discord_id,
-                guild_id,
-            });
+                "plains_tithe",
+                &question_number.to_string(),
+                "trivia plains tithe reserve credit",
+                &metadata,
+                || {
+                    transaction.execute(
+                        "UPDATE players
+                         SET jopacoin_balance=COALESCE(jopacoin_balance,0)-?1,
+                             updated_at=CURRENT_TIMESTAMP
+                         WHERE discord_id=?2 AND guild_id=?3",
+                        params![tithe, discord_id, guild_id],
+                    )?;
+                    transaction.execute(
+                        "INSERT INTO nonprofit_fund (guild_id, total_collected, updated_at)
+                         VALUES (?1, ?2, CURRENT_TIMESTAMP)
+                         ON CONFLICT(guild_id) DO UPDATE SET
+                             total_collected = COALESCE(nonprofit_fund.total_collected, 0)
+                                 + excluded.total_collected,
+                             updated_at = CURRENT_TIMESTAMP",
+                        params![guild_id, tithe],
+                    )
+                },
+            )?;
         }
         let balance = transaction.query_row(
             "SELECT COALESCE(jopacoin_balance,0)
@@ -226,7 +288,12 @@ impl TriviaCommandsRepository {
             |row| row.get(0),
         )?;
         transaction.commit()?;
-        Ok(balance)
+        Ok(TriviaRewardSettlement {
+            withheld: deductions.total(),
+            tithe,
+            reward: kept - tithe,
+            balance: Some(balance),
+        })
     }
 
     pub fn record_trivia_session(
@@ -291,6 +358,31 @@ impl TriviaCommandsRepository {
             .collect::<Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
+}
+
+/// Run `operation` under a `trivia` ledger context, clearing it afterwards
+/// even when the operation fails.
+fn with_trivia_context<T>(
+    connection: &Connection,
+    actor_id: i64,
+    related_type: &str,
+    related_id: &str,
+    reason: &str,
+    metadata: &str,
+    operation: impl FnOnce() -> rusqlite::Result<T>,
+) -> rusqlite::Result<T> {
+    connection.execute("DELETE FROM economy_ledger_context", [])?;
+    connection.execute(
+        "INSERT INTO economy_ledger_context (
+             id,source,actor_id,related_type,related_id,reason,metadata
+         ) VALUES (1,'trivia',?1,?2,?3,?4,?5)",
+        params![actor_id, related_type, related_id, reason, metadata],
+    )?;
+    let outcome = operation();
+    let cleared = connection.execute("DELETE FROM economy_ledger_context", []);
+    let value = outcome?;
+    cleared?;
+    Ok(value)
 }
 
 #[cfg(test)]

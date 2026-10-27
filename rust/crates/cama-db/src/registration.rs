@@ -1,6 +1,6 @@
 //! Existing-schema persistence for player registration and preferred roles.
 //!
-//! Python remains the schema, migration, and live runtime authority. This
+//! Schema creation and migration belong to the startup schema manager. This
 //! adapter opens only an already-migrated database through
 //! [`crate::open_runtime_connection`]. Player creation and its globally unique
 //! primary Steam link share one `BEGIN IMMEDIATE` transaction, so any junction

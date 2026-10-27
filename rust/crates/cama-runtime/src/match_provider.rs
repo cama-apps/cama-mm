@@ -78,27 +78,25 @@ use cama_domain::bankruptcy::BankruptcyPenaltyPolicy;
 use cama_domain::discord_content::chunk_default_discord_content;
 use cama_domain::dota_hosting::DotaHostingOptions;
 use cama_domain::dota_lobby::{STEAM_INDIVIDUAL_BASE, account_id as dota_account_id};
-use cama_domain::economy_scaling::scale_minigame_jc_delta;
+use cama_domain::economy_scaling::{
+    rate_basis_points, rate_percentage_points, scale_minigame_jc_delta,
+};
 use cama_domain::formatting::{
     BettingDisplayOptions, JOPACOIN_EMOTE, ROLE_EMOJIS, ROLE_NAMES, escape_discord_text,
     format_betting_display,
 };
 use cama_domain::guild_config::GuildConfigStore;
 use cama_domain::openskill::{CamaOpenSkillSystem, OpenSkillError, Rating as OpenSkillRating};
-use cama_domain::openskill::{Player as OpenSkillPlayer, WinningTeam as OpenSkillWinningTeam};
 use cama_domain::pet_evolution::PetActivity;
 use cama_domain::player::Player;
 use cama_domain::rate_limiter::RateLimiter;
-use cama_domain::rating::{
-    CamaRatingSystem, MatchUpdateOptions, RatingConfig, StreakAdjustment,
-    TeamPlayer as GlickoTeamPlayer,
-};
+use cama_domain::rating::{CamaRatingSystem, RatingConfig, StreakAdjustment};
+use cama_domain::rating_match::{MatchRatingParticipant, MatchRatingRequest, rate_match};
 use cama_domain::role_performance::RoleRecord;
 use cama_domain::shuffler::{
     BalancedShuffler, PackageDeal, PoolOptions, ShuffleConstraints, SoftAvoid,
 };
 use cama_domain::team::Team;
-use cama_domain::team_balancing::{ADJUSTED_VALUE_DIFF_WEIGHT, TeamBalancingService};
 use chrono::{
     DateTime, Datelike, Duration as ChronoDuration, NaiveDate, NaiveDateTime, Timelike, Utc,
     Weekday,
@@ -119,6 +117,7 @@ use crate::embed_colors::{DISCORD_BLUE, DISCORD_ORANGE};
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
+use crate::ids::signed_id;
 use crate::lobby_provider::MatchLobbyPort;
 use crate::option_ext::string_option;
 use crate::push_notification_provider::PushNotificationHooks;
@@ -1273,8 +1272,8 @@ impl ProductionMatchRewardControl {
             .next()
             .ok_or_else(|| "match win award returned no receipt".to_owned())?;
 
-        // Sanctuary's match-win income bonus is retired in the live Python
-        // service and therefore intentionally contributes zero here.
+        // Sanctuary's match-win income bonus is retired and therefore
+        // intentionally contributes zero here.
         let recovered_communion = if receipt.applied {
             0
         } else {
@@ -4306,118 +4305,50 @@ impl MatchHandler {
             }
         }
 
-        let radiant_glicko = pending
+        let rating_participant = |player_id: &i64| {
+            let os_before = openskill_before
+                .get(player_id)
+                .ok_or_else(|| format!("missing OpenSkill state for {player_id}"))?;
+            Ok(MatchRatingParticipant {
+                discord_id: *player_id,
+                glicko: *glicko_before
+                    .get(player_id)
+                    .ok_or_else(|| format!("missing Glicko state for {player_id}"))?,
+                os_mu: Some(os_before.mu),
+                os_sigma: Some(os_before.sigma),
+                fantasy_points: None,
+                streak_multiplier: streak_multipliers.get(player_id).copied().unwrap_or(1.0),
+                gain_multiplier: gain_multipliers.get(player_id).copied().unwrap_or(1.0),
+            })
+        };
+        let radiant_rating = pending
             .state
             .radiant_team_ids
             .iter()
-            .map(|player_id| {
-                Ok(GlickoTeamPlayer::new(
-                    *glicko_before
-                        .get(player_id)
-                        .ok_or_else(|| format!("missing Glicko state for {player_id}"))?,
-                    *player_id,
-                ))
-            })
+            .map(rating_participant)
             .collect::<Result<Vec<_>, String>>()?;
-        let dire_glicko = pending
+        let dire_rating = pending
             .state
             .dire_team_ids
             .iter()
-            .map(|player_id| {
-                Ok(GlickoTeamPlayer::new(
-                    *glicko_before
-                        .get(player_id)
-                        .ok_or_else(|| format!("missing Glicko state for {player_id}"))?,
-                    *player_id,
-                ))
-            })
+            .map(rating_participant)
             .collect::<Result<Vec<_>, String>>()?;
-        let radiant_stats = self.rating.aggregate_team_stats(
-            &radiant_glicko
-                .iter()
-                .map(|player| player.player)
-                .collect::<Vec<_>>(),
-        );
-        let dire_stats = self.rating.aggregate_team_stats(
-            &dire_glicko
-                .iter()
-                .map(|player| player.player)
-                .collect::<Vec<_>>(),
-        );
+        let team_glicko = |side: &[MatchRatingParticipant]| {
+            self.rating.aggregate_team_stats(
+                &side
+                    .iter()
+                    .map(|participant| participant.glicko)
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let radiant_stats = team_glicko(&radiant_rating);
+        let dire_stats = team_glicko(&dire_rating);
         let expected_radiant = CamaRatingSystem::predict_win_probability(
             radiant_stats.rating,
             radiant_stats.rd,
             dire_stats.rating,
             dire_stats.rd,
         );
-        let glicko_updates = self
-            .rating
-            .update_ratings_after_match_with_options(
-                &radiant_glicko,
-                &dire_glicko,
-                winning_team,
-                &MatchUpdateOptions {
-                    streak_multipliers: streak_multipliers.clone(),
-                    base_rating_delta_multiplier: None,
-                    gain_multipliers: gain_multipliers.clone(),
-                },
-            )
-            .map_err(|error| error.to_string())?;
-        let glicko_updates = glicko_updates
-            .team1
-            .into_iter()
-            .chain(glicko_updates.team2)
-            .map(|update| {
-                (
-                    update.id,
-                    CoreGlickoUpdate {
-                        discord_id: update.id,
-                        rating: update.rating,
-                        rd: update.rd,
-                        volatility: update.volatility,
-                    },
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-
-        let synthetic_ids = participant_ids
-            .iter()
-            .enumerate()
-            .map(|(index, player_id)| (*player_id, u64::try_from(index + 1).unwrap_or_default()))
-            .collect::<BTreeMap<_, _>>();
-        let os_team = |ids: &[i64]| {
-            ids.iter()
-                .map(|player_id| {
-                    let rating = openskill_before
-                        .get(player_id)
-                        .ok_or_else(|| format!("missing OpenSkill state for {player_id}"))?;
-                    Ok(OpenSkillPlayer::new(
-                        synthetic_ids[player_id],
-                        Some(rating.mu),
-                        Some(rating.sigma),
-                    ))
-                })
-                .collect::<Result<Vec<_>, String>>()
-        };
-        let radiant_os = os_team(&pending.state.radiant_team_ids)?;
-        let dire_os = os_team(&pending.state.dire_team_ids)?;
-        let os_streaks = participant_ids
-            .iter()
-            .map(|player_id| {
-                (
-                    synthetic_ids[player_id],
-                    streak_multipliers.get(player_id).copied().unwrap_or(1.0),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        let os_gains = participant_ids
-            .iter()
-            .filter_map(|player_id| {
-                gain_multipliers
-                    .get(player_id)
-                    .map(|gain| (synthetic_ids[player_id], *gain))
-            })
-            .collect::<BTreeMap<_, _>>();
         let raw_openskill = self.openskill.os_predict_win_probability(
             &pending
                 .state
@@ -4436,32 +4367,46 @@ impl MatchHandler {
             .openskill
             .calibrate_win_probability(raw_openskill, None)
             .map_err(|error| error.to_string())?;
-        let os_result = self
-            .openskill
-            .update_ratings_equal_weight(
-                &radiant_os,
-                &dire_os,
-                if winning_team == 1 {
-                    OpenSkillWinningTeam::Team1
-                } else {
-                    OpenSkillWinningTeam::Team2
-                },
-                &os_streaks,
-                &os_gains,
-            )
-            .map_err(|error| error.to_string())?;
+        let rated = rate_match(
+            &self.rating,
+            &self.openskill,
+            &MatchRatingRequest {
+                radiant: &radiant_rating,
+                dire: &dire_rating,
+                winning_team,
+                base_rating_delta_multiplier: None,
+                rate_openskill: true,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let glicko_updates = rated
+            .glicko
+            .iter()
+            .map(|(player_id, update)| {
+                (
+                    *player_id,
+                    CoreGlickoUpdate {
+                        discord_id: *player_id,
+                        rating: update.rating,
+                        rd: update.rd,
+                        volatility: update.volatility,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         let os_updates = participant_ids
             .iter()
             .map(|player_id| {
-                let updated = os_result
-                    .get(&synthetic_ids[player_id])
+                let updated = rated
+                    .openskill
+                    .get(player_id)
                     .ok_or_else(|| format!("missing OpenSkill update for {player_id}"))?;
                 Ok((
                     *player_id,
                     CoreOpenSkillUpdate {
                         discord_id: *player_id,
-                        mu: updated.mu,
-                        sigma: updated.sigma,
+                        mu: updated.rating.mu,
+                        sigma: updated.rating.sigma,
                     },
                 ))
             })
@@ -6011,10 +5956,6 @@ impl AdminMatchControl for MatchHandler {
     }
 }
 
-fn signed_id(id: u64, kind: &str) -> Result<i64, InteractionHandlerError> {
-    i64::try_from(id).map_err(|_| format!("{kind} id exceeds SQLite INTEGER range").into())
-}
-
 fn checked_i32(value: i64, name: &'static str) -> Result<i32, MatchProviderBuildError> {
     i32::try_from(value).map_err(|_| MatchProviderBuildError::InvalidConfig(name))
 }
@@ -6484,18 +6425,6 @@ fn openskill_probability(
     system
         .calibrate_win_probability(system.os_predict_win_probability(&radiant, &dire), None)
         .map_err(|error| error.to_string())
-}
-
-fn percentage_points(value: f64) -> i64 {
-    (value * 100.0).round_ties_even() as i64
-}
-
-fn percentage_basis_points(value: f64) -> i64 {
-    if !value.is_finite() || value <= 0.0 {
-        0
-    } else {
-        (value * 10_000.0).round() as i64
-    }
 }
 
 fn bet_jc_deltas(

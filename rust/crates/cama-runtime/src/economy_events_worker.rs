@@ -12,7 +12,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use cama_app::bot_tasks::{EconomyEvent as DisplayEconomyEvent, build_public_economy_event_embed};
+use cama_app::economy_event_embed::{
+    EconomyEvent as DisplayEconomyEvent, build_public_economy_event_embed,
+};
 use cama_app::economy_event_service::{EVENT_CATALOG, EconomyEventConfig};
 use cama_app::economy_event_sqlite::SqliteEconomyEventService;
 use cama_db::economy_event_repository::EconomyEvent;

@@ -18,8 +18,9 @@ use crate::raw_reactions::RawReactionObservers;
 use crate::registration::Registry;
 use crate::worker::{BackgroundWorkerSpec, WorkerContext};
 
-/// Python uses `discord.Intents.default()` plus all three privileged intents.
-/// The resulting profile is the complete Discord intent set.
+/// The production runtime requests Discord's default intents plus all three
+/// privileged intents (members, presences, message content); see
+/// [`GatewayIntentProfile::python_parity`], whose name is historical.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GatewayIntentProfile {
     pub guilds: bool,
@@ -283,8 +284,8 @@ where
         self
     }
 
-    /// Attach typed raw-reaction consumers. An empty fan-out does not claim
-    /// that any Python reaction behavior has been ported.
+    /// Attach typed raw-reaction consumers. With an empty fan-out, raw
+    /// reaction events are ignored.
     #[must_use]
     pub fn with_raw_reaction_observers(mut self, observers: RawReactionObservers) -> Self {
         self.raw_reaction_observers = observers;
@@ -371,8 +372,8 @@ where
                 shutdown: shutdown_receiver.clone(),
             };
 
-            // A session that reached Ready resets the exponential backoff,
-            // matching discord.py's reconnect behavior. The observer is
+            // A session that reached Ready resets the exponential backoff, so
+            // a later disconnect retries promptly. The observer is
             // polled concurrently with the running session so a long
             // session's lifecycle traffic can never evict the single Ready
             // event from the bounded broadcast channel before it is seen.

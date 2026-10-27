@@ -23,6 +23,7 @@ use cama_app::economy_event_sqlite::SqliteEconomyEventService;
 use cama_app::font_assets::{DejaVuFace, load_dejavu_font};
 use cama_app::golden_wheel::{LiveGoldenEconomy, compute_live_golden_wedges};
 use cama_app::jopat_post_match::{JopatPostMatchContext, NumericFact};
+use cama_app::loan::{LoanPolicy, LoanService};
 use cama_app::mana_service::mana_day_label;
 use cama_app::neon_degen::{EventKey, NeonDegenService, NeonEventPort, NeonResult, StoreError};
 use cama_app::wheel::{
@@ -65,11 +66,13 @@ use cama_db::shop_runtime::{
 use cama_db::tax_repository::{TaxLedgerEntry, TaxPlayerSnapshot, TaxRepository};
 use cama_db::tip_repository::{TipRepository, TipRepositoryError};
 use cama_db::wheel_spin_repository::{NewWheelSpin, WheelSpinRepository};
+use cama_domain::discord_content::UNKNOWN_PLAYER;
 use cama_domain::embed_safety::{FIELD_VALUE_LIMIT, MAX_FIELDS, TOTAL_LIMIT, truncate_field};
-use cama_domain::formatting::JOPACOIN_EMOTE;
+use cama_domain::formatting::{JOPACOIN_EMOTE, format_grouped};
 use cama_domain::mana::{ManaEffects, format_mana_badge};
 use cama_domain::pet_evolution::PetActivity;
 use cama_domain::player::Player;
+use cama_domain::tip_service::tip_fee_and_tithe;
 use chrono::{DateTime, FixedOffset, Utc};
 use fontdue::{Font, FontSettings};
 use gif::{Encoder, Frame, Repeat};
@@ -83,7 +86,7 @@ use crate::discord_transport::{
     resolve_guild_player_names,
 };
 use crate::gateway_events::{GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryReport};
-use crate::ids::blocking as sqlite;
+use crate::ids::{blocking as sqlite, signed_id};
 use crate::match_provider::MatchRegistrationProvider;
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
@@ -710,10 +713,8 @@ pub struct BettingRuntimeConfig {
     pub bankruptcy_penalty_games: i64,
     pub bankruptcy_penalty_rate_per_game: f64,
     pub garnishment_rate: f64,
-    /// Kept in the runtime snapshot for the coordinated VanityTaxPort hook.
-    /// The provider intentionally does not tax every spinner until that port
-    /// supplies the taxable-id set (see `credit_wheel_income`).
-    #[allow(dead_code)]
+    /// Profit tax withheld from wheel income for players in the vanity-tax
+    /// taxable-id set (see `credit_wheel_income`).
     pub vanity_tax_rate: f64,
     /// Profit tax withheld from wheel income while a player serves active low
     /// priority. The taxable set is read from SQLite inside the spin's
@@ -1181,10 +1182,6 @@ fn bet_options(min_bet: i64) -> Vec<CommandOptionSpec> {
     ]
 }
 
-fn subcommand(name: &str, description: &str, options: Vec<CommandOptionSpec>) -> CommandOptionSpec {
-    CommandOptionSpec::new(name, description, CommandOptionKind::Subcommand).options(options)
-}
-
 fn economy_options() -> Vec<CommandOptionSpec> {
     let mut percentage = CommandOptionSpec::new(
         "percentage",
@@ -1207,7 +1204,7 @@ fn economy_options() -> Vec<CommandOptionSpec> {
     );
     loan_amount.required = true;
     vec![
-        subcommand(
+        CommandOptionSpec::subcommand(
             "tip",
             "Give jopacoin to another player",
             vec![
@@ -1221,7 +1218,7 @@ fn economy_options() -> Vec<CommandOptionSpec> {
                 .required(true),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "invest",
             "Configure free automatic long or short match investments",
             vec![
@@ -1251,7 +1248,7 @@ fn economy_options() -> Vec<CommandOptionSpec> {
                 position,
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "paydebt",
             "Help another player pay off their debt",
             vec![
@@ -1269,14 +1266,14 @@ fn economy_options() -> Vec<CommandOptionSpec> {
                 .required(true),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "bankruptcy",
             "Declare bankruptcy to clear your debt (once per week, with penalties)",
             Vec::new(),
         ),
-        subcommand("loan", "Borrow jopacoin (with a fee)", vec![loan_amount]),
-        subcommand("reserve", "View the Jopacoin Reserve", Vec::new()),
-        subcommand(
+        CommandOptionSpec::subcommand("loan", "Borrow jopacoin (with a fee)", vec![loan_amount]),
+        CommandOptionSpec::subcommand("reserve", "View the Jopacoin Reserve", Vec::new()),
+        CommandOptionSpec::subcommand(
             "disburse",
             "Propose or manage Jopacoin Reserve allocation",
             vec![choices_string(
@@ -2773,7 +2770,7 @@ impl BettingInteractionHandler {
         self.render_player_names(&[user_id], guild_id)
             .await
             .remove(&user_id)
-            .unwrap_or_else(|| "Unknown player".to_owned())
+            .unwrap_or_else(|| UNKNOWN_PLAYER.to_owned())
     }
 
     async fn render_player_names(
@@ -4051,7 +4048,7 @@ impl BettingInteractionHandler {
                         bettor_names
                             .get(&bet.discord_id)
                             .cloned()
-                            .unwrap_or_else(|| "Unknown player".to_owned())
+                            .unwrap_or_else(|| UNKNOWN_PLAYER.to_owned())
                     } else {
                         format!("Bettor #{}", index + 1)
                     };
@@ -5024,17 +5021,7 @@ impl BettingInteractionHandler {
             .await
             .unwrap_or_default()
         };
-        let fee =
-            if effects.color.as_deref() == Some("White") && effects.plains_tip_fee_rate.is_some() {
-                0
-            } else {
-                ((amount as f64 * self.config.tip_fee_rate).ceil() as i64).max(1)
-            };
-        let tithe = if effects.plains_tithe_rate > 0.0 {
-            ((amount as f64 * effects.plains_tithe_rate) as i64).max(1)
-        } else {
-            0
-        };
+        let (fee, tithe) = tip_fee_and_tithe(amount, self.config.tip_fee_rate, &effects);
         let path = self.database_path.clone();
         let result = sqlite("economy tip", move || {
             let players = PlayerRepository::new(&path);
@@ -5226,11 +5213,11 @@ impl BettingInteractionHandler {
                     let user_display_name = rendered_names
                         .get(&user_id)
                         .cloned()
-                        .unwrap_or_else(|| "Unknown player".to_owned());
+                        .unwrap_or_else(|| UNKNOWN_PLAYER.to_owned());
                     let target_name = rendered_names
                         .get(&target)
                         .cloned()
-                        .unwrap_or_else(|| "Unknown player".to_owned());
+                        .unwrap_or_else(|| UNKNOWN_PLAYER.to_owned());
                     self.emit_tip_neon(
                         channel_id,
                         user_id,
@@ -5341,7 +5328,7 @@ impl BettingInteractionHandler {
             guild_id,
             fresh_start_balance: self.config.bankruptcy_fresh_start_balance,
             cooldown_seconds: self.config.bankruptcy_cooldown_seconds,
-            penalty_games: self.config.bankruptcy_penalty_games,
+            penalty_games: bankruptcy_penalty_games(self.config.bankruptcy_penalty_games, &effects),
             now: unix_seconds()?,
         };
         let result = sqlite("economy bankruptcy", move || {
@@ -5355,27 +5342,11 @@ impl BettingInteractionHandler {
         let content = match result {
             DeclarationOutcome::Applied {
                 debt_cleared,
-                mut penalty_games,
+                new_balance,
+                penalty_games,
                 bankruptcy_count,
-                ..
             } => {
                 neon_data = Some((debt_cleared, bankruptcy_count));
-                if effects.color.as_deref() == Some("Black")
-                    && effects.swamp_bankruptcy_games < penalty_games
-                {
-                    let reduction = penalty_games - effects.swamp_bankruptcy_games;
-                    let path = self.database_path.clone();
-                    if sqlite("bankruptcy Swamp penalty reduction", move || {
-                        BankruptcyRepository::new(path)
-                            .adjust_penalty_games_atomic(user_id, guild_id, -reduction)
-                            .map_err(|error| error.to_string())
-                    })
-                    .await
-                    .is_ok()
-                    {
-                        penalty_games = effects.swamp_bankruptcy_games;
-                    }
-                }
                 let per_game = self.config.bankruptcy_penalty_rate_per_game;
                 let withheld_now =
                     cama_domain::bankruptcy::withheld_rate(per_game, penalty_games) * 100.0;
@@ -5387,7 +5358,7 @@ impl BettingInteractionHandler {
                      Penalty: {withheld_now:.0}% of profit withheld \
                      ({per_game:.0}% per game left) \
                      until you **WIN** {penalty_games} games\n\
-                     New balance: 0 {JOPACOIN_EMOTE}"
+                     New balance: {new_balance} {JOPACOIN_EMOTE}"
                 )
             }
             DeclarationOutcome::PlayerNotFound => {
@@ -5473,13 +5444,22 @@ impl BettingInteractionHandler {
             self.config.loan_fee_rate,
             self.config.loan_max_amount,
         );
-        let fee = (amount as f64 * modifiers.fee_rate) as i64;
-        let cooldown = self.config.loan_cooldown_seconds;
-        let max_amount = modifiers.limit;
+        let policy = LoanPolicy {
+            cooldown_seconds: self.config.loan_cooldown_seconds,
+            max_amount: self.config.loan_max_amount,
+            fee_rate: self.config.loan_fee_rate,
+            max_debt: self.config.max_debt,
+        };
         let path = self.database_path.clone();
         let result = sqlite("economy loan", move || {
-            LoanRepository::new(path)
-                .execute_loan_atomic(user_id, guild_id, amount, fee, cooldown, max_amount)
+            LoanService::new(LoanRepository::new(path), policy)
+                .execute_loan(
+                    user_id,
+                    amount,
+                    guild_id,
+                    Some(modifiers.fee_rate),
+                    Some(modifiers.limit),
+                )
                 .map_err(|error| error.to_string())
         })
         .await;
@@ -7128,9 +7108,9 @@ fn balance_overview_embed(
     };
     let mut status = format!(
         "Bankruptcies: **{}** • Penalty games: **{}**\nLoans taken: **{}** • Fees paid: {}",
-        grouped_jc(snapshot.bankruptcy_count),
-        grouped_jc(snapshot.penalty_games_remaining),
-        grouped_jc(snapshot.total_loans_taken),
+        format_grouped(snapshot.bankruptcy_count),
+        format_grouped(snapshot.penalty_games_remaining),
+        format_grouped(snapshot.total_loans_taken),
         portfolio_jc(snapshot.total_fees_paid),
     );
     if snapshot.penalty_games_remaining > 0 {
@@ -7141,7 +7121,7 @@ fn balance_overview_embed(
         status.push_str(&format!(
             "\nBankruptcy modifier: **{:.0}% of profit withheld** for {} more win(s)",
             withheld * 100.0,
-            grouped_jc(snapshot.penalty_games_remaining),
+            format_grouped(snapshot.penalty_games_remaining),
         ));
     }
     if snapshot.balance < 0 {
@@ -7177,8 +7157,8 @@ fn balance_overview_embed(
             "Market Exposure",
             format!(
                 "{} market(s) • {} contracts\nBasis: {}\nValue: {} • P/L: {}",
-                grouped_jc(summary.markets),
-                grouped_jc(market_contracts),
+                format_grouped(summary.markets),
+                format_grouped(market_contracts),
                 portfolio_jc(summary.cost_basis),
                 portfolio_jc(summary.expected_payout),
                 signed_portfolio_jc(summary.ev),
@@ -7205,7 +7185,7 @@ fn balance_overview_embed(
                 "Dota: {} · Deadlock: {}\n{} unsettled wagers. Payouts depend on the final pools and results; stakes are not included as portfolio assets.",
                 portfolio_jc(snapshot.pending_dota_stake),
                 portfolio_jc(snapshot.pending_deadlock_stake),
-                grouped_jc(snapshot.pending_match_bet_count),
+                format_grouped(snapshot.pending_match_bet_count),
             ),
             false,
         )
@@ -7216,7 +7196,7 @@ fn balance_overview_embed(
                 portfolio_jc(snapshot.visible_debt),
                 portfolio_jc(snapshot.loan_total),
                 portfolio_jc(snapshot.dark_bargain_due),
-                grouped_jc(snapshot.dark_bargain_count),
+                format_grouped(snapshot.dark_bargain_count),
                 portfolio_jc(summary.cost_basis),
                 portfolio_jc(snapshot.effective_obligations),
             ),
@@ -7237,7 +7217,7 @@ fn balance_markets_embed(
     let mut embed = InteractionEmbed::titled(format!("{title} • Open Markets"))
         .description(format!(
             "**{} positions** • Basis {} • Current value {} • P/L {} • Max payout {}",
-            grouped_jc(summary.markets),
+            format_grouped(summary.markets),
             portfolio_jc(summary.cost_basis),
             portfolio_jc(summary.expected_payout),
             signed_portfolio_jc(summary.ev),
@@ -7264,11 +7244,11 @@ fn balance_markets_embed(
                 "`{position_status}` • YES **{}¢** / NO **{}¢**\nYES: **{}** contracts • basis {}\nNO: **{}** contracts • basis {}\n**{} contracts** • basis {} → value {} ({}) • max {}",
                 position.current_price,
                 100_i64.saturating_sub(position.current_price),
-                grouped_jc(position.yes_contracts),
+                format_grouped(position.yes_contracts),
                 portfolio_jc(position.yes_cost_basis),
-                grouped_jc(position.no_contracts),
+                format_grouped(position.no_contracts),
                 portfolio_jc(position.no_cost_basis),
-                grouped_jc(contracts),
+                format_grouped(contracts),
                 portfolio_jc(position.cost_basis),
                 portfolio_jc(position.expected_payout),
                 signed_portfolio_jc(position.ev),
@@ -7292,7 +7272,7 @@ fn balance_activity_embed(
     let mut embed = InteractionEmbed::titled(format!("{title} • Recent Activity"))
         .description(format!(
             "Every wallet movement in the central economy ledger • **{} entries**",
-            grouped_jc(total_entries),
+            format_grouped(total_entries),
         ))
         .color(0x5865F2)
         .footer(footer);
@@ -7402,35 +7382,14 @@ fn allocation_bar(percentage: i64) -> String {
 }
 
 fn portfolio_jc(amount: i64) -> String {
-    format!("{} {JOPACOIN_EMOTE}", grouped_jc(amount))
+    format!("{} {JOPACOIN_EMOTE}", format_grouped(amount))
 }
 
 fn signed_portfolio_jc(amount: i64) -> String {
     if amount > 0 {
-        format!("+{} {JOPACOIN_EMOTE}", grouped_jc(amount))
+        format!("+{} {JOPACOIN_EMOTE}", format_grouped(amount))
     } else {
         portfolio_jc(amount)
-    }
-}
-
-fn grouped_jc(amount: i64) -> String {
-    let negative = amount < 0;
-    let digits = amount.unsigned_abs().to_string();
-    let first = digits.len() % 3;
-    let mut result = String::new();
-    if first != 0 {
-        result.push_str(&digits[..first]);
-    }
-    for chunk in digits.as_bytes()[first..].chunks(3) {
-        if !result.is_empty() {
-            result.push(',');
-        }
-        result.push_str(std::str::from_utf8(chunk).expect("decimal digits are UTF-8"));
-    }
-    if negative {
-        format!("-{result}")
-    } else {
-        result
     }
 }
 
@@ -7609,10 +7568,6 @@ async fn charge_wrong_channel(path: &Path, user_id: i64, guild_id: i64) -> Resul
     .await
 }
 
-fn signed_id(value: u64, label: &str) -> Result<i64, String> {
-    i64::try_from(value).map_err(|_| format!("{label} id exceeds SQLite signed range"))
-}
-
 /// Stable positive relation key for the ledger's integer exact-once marker.
 /// Wheel event IDs intentionally retain human-readable components (`time`,
 /// actor, random nonce), while the existing schema stores only an integer
@@ -7655,6 +7610,16 @@ fn record_betting_pet_activity(
         source_key,
         occurred_at,
     );
+}
+
+/// Penalty games a new bankruptcy filing records: Black mana's Swamp effect
+/// caps the configured count, so the declaration writes it in one step.
+fn bankruptcy_penalty_games(configured: i64, effects: &ManaEffects) -> i64 {
+    if effects.color.as_deref() == Some("Black") {
+        configured.min(effects.swamp_bankruptcy_games.max(0))
+    } else {
+        configured
+    }
 }
 
 pub(crate) fn active_mana_effects(
@@ -9379,7 +9344,7 @@ fn hostile_result_note(
         player_names
             .get(&player_id)
             .cloned()
-            .unwrap_or_else(|| "Unknown player".to_owned())
+            .unwrap_or_else(|| UNKNOWN_PLAYER.to_owned())
     };
     let victim_name = outcome.victim_id.map(player_name);
     let note = match mechanic {
@@ -10053,7 +10018,7 @@ fn golden_wheel_announcement(
     let name = |discord_id: i64| {
         names
             .get(&discord_id)
-            .map_or("Unknown player", String::as_str)
+            .map_or(UNKNOWN_PLAYER, String::as_str)
             .to_owned()
     };
     let top_lines = leaderboard

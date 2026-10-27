@@ -1,6 +1,6 @@
-//! Existing-schema SQLite parity for Python's core player and match repositories.
+//! Existing-schema SQLite persistence for the core player and match repositories.
 //!
-//! Python remains the migration and schema authority.  Every entry point in
+//! Schema creation and migration belong to the startup schema manager.  Every entry point in
 //! this module opens an existing file through [`crate::open_runtime_connection`];
 //! production code never creates tables, alters schema, or creates a database.
 //! Multi-statement writes acquire a `BEGIN IMMEDIATE` transaction so readers
@@ -24,6 +24,7 @@ use rusqlite::{
 use thiserror::Error;
 
 use crate::open_runtime_connection;
+use crate::pairings_repository::update_match_pairings;
 use crate::referrals::{
     aggregate_referral_changes, encode_referral_jc_changes, settle_first_match_referrals,
 };
@@ -747,8 +748,8 @@ impl PlayerRepository {
                 Ok((
                     player.discord_id.unwrap_or_default(),
                     player,
-                    row.get::<_, Value>(25)?,
-                    row.get::<_, Option<i64>>(26)?.unwrap_or(0),
+                    row.get::<_, Value>(23)?,
+                    row.get::<_, Option<i64>>(24)?.unwrap_or(0),
                 ))
             })?;
             for row in rows {
@@ -1570,7 +1571,7 @@ const PLAYER_SELECT: &str = "SELECT discord_username, current_mmr, initial_mmr, 
             COALESCE(jopacoin_balance, 0), steam_id,
             COALESCE(personal_best_win_streak, 0), COALESCE(total_bets_placed, 0),
             COALESCE(first_leverage_used, 0), COALESCE(is_solo_grinder, 0),
-            solo_grinder_checked_at, preferred_region, inferred_region,
+            solo_grinder_checked_at,
             last_match_date, exclusion_count
      FROM players";
 
@@ -1621,8 +1622,6 @@ fn player_from_row(row: &rusqlite::Row<'_>) -> Result<Player, rusqlite::Error> {
         first_leverage_used: python_truthy(row.get_ref(18)?),
         is_solo_grinder: python_truthy(row.get_ref(19)?),
         solo_grinder_checked_at: row.get(20)?,
-        preferred_region: row.get(21)?,
-        inferred_region: row.get(22)?,
     })
 }
 
@@ -4273,8 +4272,8 @@ impl MatchRepository {
         insert_participants(&transaction, match_id, &core.match_record, guild_id)?;
         update_match_pairings(
             &transaction,
-            guild_id,
             match_id,
+            guild_id,
             &core.match_record.team1_ids,
             &core.match_record.team2_ids,
             core.match_record.winning_team,
@@ -4522,68 +4521,6 @@ fn insert_participants(
                 record.team2_roles.get(index)
             ],
         )?;
-    }
-    Ok(())
-}
-
-fn update_match_pairings(
-    transaction: &Transaction<'_>,
-    guild_id: i64,
-    match_id: i64,
-    radiant_ids: &[i64],
-    dire_ids: &[i64],
-    winning_team: i64,
-) -> Result<(), rusqlite::Error> {
-    for (team_number, ids) in [(1_i64, radiant_ids), (2_i64, dire_ids)] {
-        let won = i64::from(team_number == winning_team);
-        for (index, &first) in ids.iter().enumerate() {
-            for &second in &ids[index + 1..] {
-                let (player1, player2) = if first < second {
-                    (first, second)
-                } else {
-                    (second, first)
-                };
-                transaction.execute(
-                    "INSERT INTO player_pairings (
-                         guild_id,player1_id,player2_id,games_together,
-                         wins_together,last_match_id
-                     ) VALUES (?1,?2,?3,1,?4,?5)
-                     ON CONFLICT(guild_id,player1_id,player2_id) DO UPDATE SET
-                         games_together=games_together+1,
-                         wins_together=wins_together+excluded.wins_together,
-                         last_match_id=excluded.last_match_id,
-                         updated_at=CURRENT_TIMESTAMP",
-                    params![guild_id, player1, player2, won, match_id],
-                )?;
-            }
-        }
-    }
-    for &radiant in radiant_ids {
-        for &dire in dire_ids {
-            let (player1, player2) = if radiant < dire {
-                (radiant, dire)
-            } else {
-                (dire, radiant)
-            };
-            let player1_won = if player1 == radiant {
-                winning_team == 1
-            } else {
-                winning_team == 2
-            };
-            transaction.execute(
-                "INSERT INTO player_pairings (
-                     guild_id,player1_id,player2_id,games_against,
-                     player1_wins_against,last_match_id
-                 ) VALUES (?1,?2,?3,1,?4,?5)
-                 ON CONFLICT(guild_id,player1_id,player2_id) DO UPDATE SET
-                     games_against=games_against+1,
-                     player1_wins_against=player1_wins_against
-                         + excluded.player1_wins_against,
-                     last_match_id=excluded.last_match_id,
-                     updated_at=CURRENT_TIMESTAMP",
-                params![guild_id, player1, player2, i64::from(player1_won), match_id],
-            )?;
-        }
     }
     Ok(())
 }

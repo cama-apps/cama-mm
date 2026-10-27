@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 
-use crate::drawing::draw_rating_distribution;
 use crate::rating_analysis_command::{CalibrationCurveData, CalibrationPoint};
 use crate::rating_comparison_service::{
     CalibrationBucket, RatingComparisonMatchData, RatingComparisonResult, RatingSystemStats,
@@ -88,10 +87,7 @@ fn test_import_drawing_does_not_load_scientific_stack() {
 
 #[test]
 fn test_lazy_rating_plotters_render_pngs() {
-    let distribution =
-        draw_rating_distribution(&[1_200.0, 1_350.0, 1_475.0, 1_600.0, 1_725.0, 1_900.0]);
     let charts = [
-        distribution.into_inner(),
         draw_calibration_curve(&calibration_curves()),
         draw_rating_comparison_chart(&comparison()),
     ];

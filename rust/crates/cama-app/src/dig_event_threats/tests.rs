@@ -292,15 +292,6 @@ mod test_curse_threat {
     }
 
     #[test]
-    fn test_cooldown_curse_applies_after_stamina_and_caps_at_twenty_five_percent() {
-        let effects = ThreatCurseEffects {
-            cooldown_penalty: Some(0.30),
-            ..ThreatCurseEffects::default()
-        };
-        assert_eq!(cursed_cooldown(4_000, effects, 0), 5_000);
-    }
-
-    #[test]
     fn test_cave_in_curse_matches_live_and_precondition_paths() {
         let effects = ThreatCurseEffects {
             cave_in_bonus: Some(0.50),

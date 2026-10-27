@@ -159,44 +159,67 @@ pub fn compute_profit_deductions(
     policy: &ProfitDeductionPolicy<'_>,
 ) -> rusqlite::Result<ProfitDeductions> {
     if profit <= 0 {
-        return Ok(ProfitDeductions {
+        return Ok(split_profit_deductions(profit, 0.0, 0.0, 0.0));
+    }
+    let bankruptcy_rate = match policy.bankruptcy {
+        Some(bankruptcy) => {
+            bankruptcy.withheld_rate(penalty_games_remaining(connection, guild_id, discord_id)?)
+        }
+        None => 0.0,
+    };
+    let rate_for = |roster: &BTreeSet<i64>, rate: f64| {
+        if roster.contains(&discord_id) {
+            rate
+        } else {
+            0.0
+        }
+    };
+    Ok(split_profit_deductions(
+        profit,
+        bankruptcy_rate,
+        rate_for(policy.vanity_taxable_ids, policy.vanity_tax_rate),
+        rate_for(
+            policy.low_priority_taxable_ids,
+            policy.low_priority_tax_rate,
+        ),
+    ))
+}
+
+/// Split `profit` by already-resolved rates: the bankruptcy share's withheld
+/// rate and the player's vanity and low-priority rates (zero when untaxed).
+///
+/// Callers that freeze a player's rates ahead of settlement use this directly;
+/// [`compute_profit_deductions`] resolves the rates from live state first.
+/// Each later share is trimmed to what the earlier ones left.
+#[must_use]
+pub fn split_profit_deductions(
+    profit: i64,
+    bankruptcy_rate: f64,
+    vanity_tax_rate: f64,
+    low_priority_tax_rate: f64,
+) -> ProfitDeductions {
+    if profit <= 0 {
+        return ProfitDeductions {
             profit: profit.max(0),
             ..ProfitDeductions::default()
-        });
+        };
     }
-    let bankruptcy_penalty = match policy.bankruptcy {
-        Some(bankruptcy) => {
-            let remaining = penalty_games_remaining(connection, guild_id, discord_id)?;
-            truncated(profit, bankruptcy.withheld_rate(remaining))
-        }
-        None => 0,
-    };
-    let vanity_tax = if policy.vanity_taxable_ids.contains(&discord_id) {
-        truncated(profit, clamped_rate(policy.vanity_tax_rate, MAX_TAX_RATE))
-            .min(profit.saturating_sub(bankruptcy_penalty).max(0))
-    } else {
-        0
-    };
-    let low_priority_tax = if policy.low_priority_taxable_ids.contains(&discord_id) {
-        truncated(
-            profit,
-            clamped_rate(policy.low_priority_tax_rate, MAX_TAX_RATE),
-        )
+    let bankruptcy_penalty = truncated(profit, clamped_rate(bankruptcy_rate, 1.0));
+    let vanity_tax = truncated(profit, clamped_rate(vanity_tax_rate, MAX_TAX_RATE))
+        .min(profit.saturating_sub(bankruptcy_penalty).max(0));
+    let low_priority_tax = truncated(profit, clamped_rate(low_priority_tax_rate, MAX_TAX_RATE))
         .min(
             profit
                 .saturating_sub(bankruptcy_penalty)
                 .saturating_sub(vanity_tax)
                 .max(0),
-        )
-    } else {
-        0
-    };
-    Ok(ProfitDeductions {
+        );
+    ProfitDeductions {
         profit,
         bankruptcy_penalty,
         vanity_tax,
         low_priority_tax,
-    })
+    }
 }
 
 /// Debit each non-zero share as its own attributed balance movement.

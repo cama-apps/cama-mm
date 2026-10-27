@@ -1,8 +1,8 @@
 //! Python-compatible persistence for Camagotchi pets.
 //!
-//! Python remains the schema and migration authority during the side-by-side
-//! rewrite. This module opens only an existing SQLite file, uses the existing
-//! Python tables and ledger triggers, and never creates or migrates production
+//! Schema creation and migration belong to the startup schema manager. This
+//! module opens only an existing SQLite file, uses the existing tables and
+//! ledger triggers, and never creates or migrates production
 //! data. Multi-row state changes use `BEGIN IMMEDIATE`, matching Python's
 //! single-writer transaction boundary.
 

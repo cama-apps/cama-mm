@@ -7,6 +7,7 @@
 
 use std::borrow::Cow;
 
+use cama_domain::formatting::format_grouped;
 use gif::{Encoder, Frame, Repeat};
 use thiserror::Error;
 
@@ -92,7 +93,7 @@ impl BigWinScene {
             banner,
             reconcile_client_line: format!("> client: {name}"),
             client_line: format!("client {name}"),
-            payout_line: format!("+{} jc", grouped_decimal(payout)),
+            payout_line: format!("+{} jc", format_grouped(payout)),
             kind,
             accent,
         }
@@ -184,7 +185,7 @@ fn render_count_up(canvas: &mut Canvas, scene: &BigWinScene, payout: i64, frame:
     canvas.text_centered(scene.source_line, 32, DIM_GREEN, 2, false);
     let shown = payout.saturating_mul(i64::try_from(frame + 1).unwrap_or(18)) / 18;
     canvas.text_centered(
-        &format!("+{}", grouped_decimal(shown)),
+        &format!("+{}", format_grouped(shown)),
         128,
         scene.accent,
         4,
@@ -211,7 +212,7 @@ fn render_banner(
     );
     canvas.text_centered("==============================", 104, DIM_GREEN, 1, false);
     canvas.text_centered(
-        &format!("+{} jc", grouped_decimal(payout)),
+        &format!("+{} jc", format_grouped(payout)),
         135,
         NEON_GREEN,
         2,
@@ -346,23 +347,6 @@ fn apply_glitch(pixels: &mut [u8], entropy: u64) {
                     original[row * BIG_WIN_WIDTH as usize + source_x];
             }
         }
-    }
-}
-
-fn grouped_decimal(value: i64) -> String {
-    let negative = value.is_negative();
-    let digits = value.unsigned_abs().to_string();
-    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, character) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            grouped.push(',');
-        }
-        grouped.push(character);
-    }
-    if negative {
-        format!("-{grouped}")
-    } else {
-        grouped
     }
 }
 

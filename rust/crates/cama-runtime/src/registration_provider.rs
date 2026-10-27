@@ -210,7 +210,7 @@ impl RegistrationProvider for PlayerRegistrationProvider {
 
 pub(crate) fn player_command_options() -> Vec<CommandOptionSpec> {
     let mut options = vec![
-        subcommand(
+        CommandOptionSpec::subcommand(
             "register",
             "Register yourself as a player",
             vec![required_option(
@@ -219,7 +219,7 @@ pub(crate) fn player_command_options() -> Vec<CommandOptionSpec> {
                 CommandOptionKind::Integer,
             )],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "link",
             "Link an additional Steam account",
             vec![
@@ -235,7 +235,7 @@ pub(crate) fn player_command_options() -> Vec<CommandOptionSpec> {
                 ),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "unlink",
             "Remove a linked Steam account",
             vec![required_option(
@@ -244,8 +244,8 @@ pub(crate) fn player_command_options() -> Vec<CommandOptionSpec> {
                 CommandOptionKind::Integer,
             )],
         ),
-        subcommand("steamids", "View your linked Steam accounts", Vec::new()),
-        subcommand(
+        CommandOptionSpec::subcommand("steamids", "View your linked Steam accounts", Vec::new()),
+        CommandOptionSpec::subcommand(
             "roles",
             "Set your preferred roles",
             vec![required_option(
@@ -254,14 +254,14 @@ pub(crate) fn player_command_options() -> Vec<CommandOptionSpec> {
                 CommandOptionKind::String,
             )],
         ),
-        subcommand("exclusion", "Check your exclusion factor", Vec::new()),
+        CommandOptionSpec::subcommand("exclusion", "Check your exclusion factor", Vec::new()),
         CommandOptionSpec::new(
             "lobby",
             "Lobby notification preferences",
             CommandOptionKind::SubcommandGroup,
         )
         .options(vec![
-            subcommand(
+            CommandOptionSpec::subcommand(
                 "autonotify",
                 "Manage public lobby alerts or watch a player's next signup",
                 vec![
@@ -277,7 +277,7 @@ pub(crate) fn player_command_options() -> Vec<CommandOptionSpec> {
                     ),
                 ],
             ),
-            subcommand(
+            CommandOptionSpec::subcommand(
                 "status",
                 "Privately view your active lobby suspension and low-priority progress",
                 Vec::new(),
@@ -289,7 +289,7 @@ pub(crate) fn player_command_options() -> Vec<CommandOptionSpec> {
             CommandOptionKind::SubcommandGroup,
         )
         .options(vec![
-            subcommand(
+            CommandOptionSpec::subcommand(
                 "add",
                 "Add (or update) a named curfew window",
                 vec![
@@ -325,7 +325,7 @@ pub(crate) fn player_command_options() -> Vec<CommandOptionSpec> {
                     )),
                 ],
             ),
-            subcommand(
+            CommandOptionSpec::subcommand(
                 "remove",
                 "Remove one of your named curfew windows",
                 vec![required_option(
@@ -334,7 +334,7 @@ pub(crate) fn player_command_options() -> Vec<CommandOptionSpec> {
                     CommandOptionKind::String,
                 )],
             ),
-            subcommand("list", "View your named curfew windows", Vec::new()),
+            CommandOptionSpec::subcommand("list", "View your named curfew windows", Vec::new()),
         ]),
         CommandOptionSpec::new(
             "timezone",
@@ -342,7 +342,7 @@ pub(crate) fn player_command_options() -> Vec<CommandOptionSpec> {
             CommandOptionKind::SubcommandGroup,
         )
         .options(vec![
-            subcommand(
+            CommandOptionSpec::subcommand(
                 "set",
                 "Set your timezone, used by curfew windows and other time-based features",
                 vec![required_option(
@@ -351,8 +351,8 @@ pub(crate) fn player_command_options() -> Vec<CommandOptionSpec> {
                     CommandOptionKind::String,
                 )],
             ),
-            subcommand("status", "View your timezone setting", Vec::new()),
-            subcommand(
+            CommandOptionSpec::subcommand("status", "View your timezone setting", Vec::new()),
+            CommandOptionSpec::subcommand(
                 "list",
                 "See common timezone names to use with /player timezone set",
                 Vec::new(),
@@ -364,7 +364,7 @@ pub(crate) fn player_command_options() -> Vec<CommandOptionSpec> {
             CommandOptionKind::SubcommandGroup,
         )
         .options(vec![
-            subcommand(
+            CommandOptionSpec::subcommand(
                 "set",
                 "Set the hours you like to play dota — informational only, doesn't restrict queueing",
                 vec![required_option(
@@ -373,9 +373,9 @@ pub(crate) fn player_command_options() -> Vec<CommandOptionSpec> {
                     CommandOptionKind::String,
                 )],
             ),
-            subcommand("clear", "Clear your dota play-time hours", Vec::new()),
-            subcommand("status", "View your dota play-time hours", Vec::new()),
-            subcommand(
+            CommandOptionSpec::subcommand("clear", "Clear your dota play-time hours", Vec::new()),
+            CommandOptionSpec::subcommand("status", "View your dota play-time hours", Vec::new()),
+            CommandOptionSpec::subcommand(
                 "popular",
                 "See the group's most popular hours to play dota",
                 Vec::new(),
@@ -395,14 +395,6 @@ pub(crate) fn player_command_options() -> Vec<CommandOptionSpec> {
     options.insert(2, timezone);
     options.insert(3, playtime);
     options
-}
-
-fn subcommand(
-    name: &'static str,
-    description: &'static str,
-    options: Vec<CommandOptionSpec>,
-) -> CommandOptionSpec {
-    CommandOptionSpec::new(name, description, CommandOptionKind::Subcommand).options(options)
 }
 
 /// Discord timestamp markup: the client renders the instant in each
@@ -676,7 +668,7 @@ impl PlayerRegistrationHandler {
     fn render_player_name(&self, guild_id: u64, user_id: u64) -> String {
         let names = cached_guild_player_names(self.discord.as_ref(), guild_id, &[user_id]);
         i64::try_from(user_id).map_or_else(
-            |_| "Unknown player".to_owned(),
+            |_| cama_domain::discord_content::UNKNOWN_PLAYER.to_owned(),
             |user_id| names.resolve(user_id),
         )
     }
@@ -1254,12 +1246,24 @@ impl PlayerRegistrationHandler {
         steam_id: i64,
         mmr_override: Option<i64>,
     ) -> Result<RegisterPlayerResult, RegisterPlayerError> {
+        // Registration records the stable account username; the interaction
+        // display name is only a fallback when the account lookup fails, and a
+        // numeric ID is never stored.
+        let discord_username = self
+            .discord
+            .user(context.user_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|user| user.account_username)
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| context.user_display_name.clone());
         let mut repository = self.registration.clone();
         let mut api = self.opendota.registration_api();
         let input = RegisterPlayerInput {
             discord_id: signed_id(context.user_id, "user")
                 .map_err(RegisterPlayerError::Repository)?,
-            discord_username: context.user_display_name.clone(),
+            discord_username,
             guild_id: signed_id(guild_id, "guild").map_err(RegisterPlayerError::Repository)?,
             steam_id,
             mmr_override,
@@ -1376,6 +1380,7 @@ impl PlayerRegistrationHandler {
         let InteractionRequest::Modal {
             custom_id,
             user_id,
+            user_display_name,
             guild_id,
             channel_id,
             fields,
@@ -1409,18 +1414,11 @@ impl PlayerRegistrationHandler {
             return Ok(());
         };
         respond_ephemeral(&responder, "✅ MMR received").await?;
-        let account_username = self
-            .discord
-            .user(user_id)
-            .await
-            .ok()
-            .flatten()
-            .map_or_else(|| user_id.to_string(), |user| user.account_username);
         let context = CommandContext {
             interaction_id: nonce,
             name: "player".to_owned(),
             user_id,
-            user_display_name: account_username,
+            user_display_name,
             guild_id: Some(encoded_guild),
             channel_id,
             options: Vec::new(),

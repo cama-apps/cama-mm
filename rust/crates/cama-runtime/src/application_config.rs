@@ -16,7 +16,7 @@ use cama_app::shop_commands::SHOP_SOFT_AVOID_COST;
 use cama_db::schema_manager::MigrationSettings;
 use cama_domain::rating::MAX_GLICKO_RD;
 
-use crate::{DiscordToken, RuntimeConfig};
+use crate::RuntimeConfig;
 
 pub const MAFIA_CHANNEL_ID: i64 = 1_514_997_325_385_306_132;
 const DEFAULT_GROQ_MODEL: &str = "groq/qwen/qwen3.6-27b";
@@ -93,7 +93,6 @@ pub struct Values {
     pub bet_last_call_offset: i64,
     pub bet_lock_seconds: i64,
     pub bet_reminder_offsets: Vec<i64>,
-    pub bet_underdog_ping_ratio: f64,
     pub bomb_pot_ante: i64,
     pub bomb_pot_blind_percentage: f64,
     pub bomb_pot_chance: f64,
@@ -114,7 +113,6 @@ pub struct Values {
     pub economy_normal_annual_rate: f64,
     pub enrichment_discovery_time_window: i64,
     pub enrichment_history_limit: i64,
-    pub enrichment_min_player_match: i64,
     pub enrichment_refresh_interval_ms: i64,
     pub enrichment_retry_delays: Vec<i64>,
     pub exclusion_penalty_weight: f64,
@@ -131,9 +129,6 @@ pub struct Values {
     pub jopacoin_per_game: i64,
     pub jopacoin_win_reward: i64,
     pub leverage_tiers: Vec<i64>,
-    pub lightning_bolt_min_tax: i64,
-    pub lightning_bolt_pct_max: f64,
-    pub lightning_bolt_pct_min: f64,
     pub loan_cooldown_seconds: i64,
     pub loan_fee_rate: f64,
     pub loan_max_amount: i64,
@@ -156,20 +151,12 @@ pub struct Values {
     pub neon_cooldown_seconds: i64,
     pub neon_degen_enabled: bool,
     pub neon_dig_chance: f64,
-    pub neon_layer1_chance: f64,
-    pub neon_llm_chance: f64,
-    pub neon_mvp_chance: f64,
     pub new_player_exclusion_boost: i64,
     pub new_player_mmr_discount: i64,
     pub off_role_flat_value_penalty: f64,
     pub off_role_flat_penalty: f64,
     pub off_role_multiplier: f64,
-    pub openskill_calibration_sigma_threshold: f64,
-    pub openskill_performance_strength: f64,
     pub openskill_shuffle_chance: f64,
-    pub openskill_sigma_decay_grace_period_days: i64,
-    pub openskill_sigma_decay_per_week: f64,
-    pub openskill_win_probability_temperature: f64,
     pub package_deal_games_duration: i64,
     pub package_deal_penalty: f64,
     pub package_deal_split_penalty: f64,
@@ -232,46 +219,9 @@ pub struct Values {
     pub trivia_reward_per_question: i64,
     pub use_glicko: bool,
     pub vanity_tax_rate: f64,
-    pub wheel_banana_peel_est_ev: f64,
-    pub wheel_banana_peel_loss_max: i64,
-    pub wheel_banana_peel_loss_min: i64,
     pub wheel_bankrupt_target_ev: f64,
-    pub wheel_blue_shell_est_ev: f64,
-    pub wheel_bomb_omb_est_ev: f64,
-    pub wheel_bomb_omb_victim_count: i64,
-    pub wheel_bomb_omb_victim_loss_max: i64,
-    pub wheel_bomb_omb_victim_loss_min: i64,
-    pub wheel_chain_reaction_est_ev: f64,
-    pub wheel_comeback_est_ev: f64,
-    pub wheel_commune_est_ev: f64,
-    pub wheel_discover_est_ev: f64,
-    pub wheel_emergency_est_ev: f64,
-    pub wheel_extend_1_est_ev: f64,
-    pub wheel_extend_2_est_ev: f64,
-    pub wheel_golden_compound_est_ev: f64,
-    pub wheel_golden_dividend_est_ev: f64,
-    pub wheel_golden_heist_est_ev: f64,
-    pub wheel_golden_hostile_takeover_est_ev: f64,
-    pub wheel_golden_market_crash_est_ev: f64,
-    pub wheel_golden_recession_est_ev: f64,
-    pub wheel_golden_recession_mid_pct: f64,
-    pub wheel_golden_recession_mid_rank_end: i64,
-    pub wheel_golden_recession_rest_pct: f64,
-    pub wheel_golden_recession_top_pct: f64,
     pub wheel_golden_target_ev: f64,
-    pub wheel_golden_top_n: i64,
-    pub wheel_golden_trickle_down_est_ev: f64,
-    pub wheel_golden_trickle_down_pct_max: f64,
-    pub wheel_golden_trickle_down_pct_min: f64,
-    pub wheel_green_shell_est_ev: f64,
-    pub wheel_green_shell_steal_max: i64,
-    pub wheel_green_shell_steal_min: i64,
-    pub wheel_jailbreak_est_ev: f64,
-    pub wheel_lightning_bolt_est_ev: f64,
-    pub wheel_lose_penalty_cooldown: i64,
-    pub wheel_red_shell_est_ev: f64,
     pub wheel_target_ev: f64,
-    pub wheel_town_trial_est_ev: f64,
     pub white_bankrupt_stipend: i64,
     pub wrapped_min_bets: i64,
     pub wrapped_min_games: i64,
@@ -416,7 +366,7 @@ impl ApplicationConfig {
                 ai_rate_limit_window: p.i64("AI_RATE_LIMIT_WINDOW", 60),
                 ai_timeout_seconds: p.f64("AI_TIMEOUT_SECONDS", 15.0),
                 auto_blind_enabled: p.bool("AUTO_BLIND_ENABLED", true),
-                auto_blind_percentage: p.f64("AUTO_BLIND_PERCENTAGE", 0.1),
+                auto_blind_percentage: p.fraction("AUTO_BLIND_PERCENTAGE", 0.1),
                 auto_blind_threshold: p.i64("AUTO_BLIND_THRESHOLD", 50),
                 auto_spectator_bet_count: p.i64("AUTO_SPECTATOR_BET_COUNT", 10),
                 auto_spectator_bet_enabled: p.bool("AUTO_SPECTATOR_BET_ENABLED", true),
@@ -431,9 +381,8 @@ impl ApplicationConfig {
                 bet_last_call_offset: p.i64("BET_LAST_CALL_OFFSET", 60),
                 bet_lock_seconds: p.i64("BET_LOCK_SECONDS", 1200),
                 bet_reminder_offsets: p.i64_list("BET_REMINDER_OFFSETS", &[600, 300]),
-                bet_underdog_ping_ratio: p.f64("BET_UNDERDOG_PING_RATIO", 4.0),
                 bomb_pot_ante: p.i64("BOMB_POT_ANTE", 10),
-                bomb_pot_blind_percentage: p.f64("BOMB_POT_BLIND_PERCENTAGE", 0.15),
+                bomb_pot_blind_percentage: p.fraction("BOMB_POT_BLIND_PERCENTAGE", 0.15),
                 bomb_pot_chance: p.f64("BOMB_POT_CHANCE", 0.2),
                 bomb_pot_participation_bonus: p.i64("BOMB_POT_PARTICIPATION_BONUS", 5),
                 calibration_rd_threshold: p.f64("CALIBRATION_RD_THRESHOLD", 100.0),
@@ -455,7 +404,6 @@ impl ApplicationConfig {
                 economy_normal_annual_rate: p.f64("ECONOMY_NORMAL_ANNUAL_RATE", 0.02),
                 enrichment_discovery_time_window: p.i64("ENRICHMENT_DISCOVERY_TIME_WINDOW", 7200),
                 enrichment_history_limit: p.i64("ENRICHMENT_HISTORY_LIMIT", 500),
-                enrichment_min_player_match: p.i64("ENRICHMENT_MIN_PLAYER_MATCH", 10),
                 // Parsed-stat repair is intentionally slower than the anonymous
                 // OpenDota ceiling. The shared transport limiter still meters
                 // every retry and all other consumers across the process.
@@ -476,9 +424,6 @@ impl ApplicationConfig {
                 jopacoin_per_game: 5,
                 jopacoin_win_reward: 10,
                 leverage_tiers: p.i64_list("LEVERAGE_TIERS", &[2, 3, 5]),
-                lightning_bolt_min_tax: p.i64("LIGHTNING_BOLT_MIN_TAX", 1),
-                lightning_bolt_pct_max: p.f64("LIGHTNING_BOLT_PCT_MAX", 0.0627),
-                lightning_bolt_pct_min: p.f64("LIGHTNING_BOLT_PCT_MIN", 0.02),
                 loan_cooldown_seconds: p.i64("LOAN_COOLDOWN_SECONDS", 259200),
                 loan_fee_rate: p.f64("LOAN_FEE_RATE", 0.2),
                 loan_max_amount: p.i64("LOAN_MAX_AMOUNT", 100),
@@ -504,24 +449,12 @@ impl ApplicationConfig {
                 neon_cooldown_seconds: p.i64("NEON_COOLDOWN_SECONDS", 60),
                 neon_degen_enabled: p.bool("NEON_DEGEN_ENABLED", true),
                 neon_dig_chance: p.f64("NEON_DIG_CHANCE", 0.12),
-                neon_layer1_chance: p.f64("NEON_LAYER1_CHANCE", 0.35),
-                neon_llm_chance: p.f64("NEON_LLM_CHANCE", 0.6),
-                neon_mvp_chance: p.f64("NEON_MVP_CHANCE", 0.35),
                 new_player_exclusion_boost: p.i64("NEW_PLAYER_EXCLUSION_BOOST", 4),
                 new_player_mmr_discount: i64::from(migration.new_player_mmr_discount),
                 off_role_flat_value_penalty: p.f64("OFF_ROLE_FLAT_VALUE_PENALTY", 72.0),
                 off_role_flat_penalty: p.f64("OFF_ROLE_FLAT_PENALTY", 740.0),
                 off_role_multiplier: p.f64("OFF_ROLE_MULTIPLIER", 0.98),
-                openskill_calibration_sigma_threshold: migration.openskill.calibration_threshold,
-                openskill_performance_strength: migration.openskill.performance_strength,
                 openskill_shuffle_chance: p.f64("OPENSKILL_SHUFFLE_CHANCE", 0.05),
-                openskill_sigma_decay_grace_period_days: migration
-                    .openskill
-                    .sigma_decay_grace_period_days,
-                openskill_sigma_decay_per_week: migration.openskill.sigma_decay_per_week,
-                openskill_win_probability_temperature: migration
-                    .openskill
-                    .win_probability_temperature,
                 package_deal_games_duration: p.i64("PACKAGE_DEAL_GAMES_DURATION", 10),
                 package_deal_penalty: p.f64("PACKAGE_DEAL_PENALTY", 90.0),
                 package_deal_split_penalty: p.f64("PACKAGE_DEAL_SPLIT_PENALTY", 90.0),
@@ -590,48 +523,9 @@ impl ApplicationConfig {
                 trivia_reward_per_question: p.i64("TRIVIA_REWARD_PER_QUESTION", 1),
                 use_glicko: p.bool("USE_GLICKO", true),
                 vanity_tax_rate: p.clamped_rate("VANITY_TAX_RATE", 0.2),
-                wheel_banana_peel_est_ev: p.f64("WHEEL_BANANA_PEEL_EST_EV", -23.5),
-                wheel_banana_peel_loss_max: p.i64("WHEEL_BANANA_PEEL_LOSS_MAX", 32),
-                wheel_banana_peel_loss_min: p.i64("WHEEL_BANANA_PEEL_LOSS_MIN", 15),
                 wheel_bankrupt_target_ev: p.f64("WHEEL_BANKRUPT_TARGET_EV", 12.0),
-                wheel_blue_shell_est_ev: p.f64("WHEEL_BLUE_SHELL_EST_EV", -4.0),
-                wheel_bomb_omb_est_ev: p.f64("WHEEL_BOMB_OMB_EST_EV", -52.5),
-                wheel_bomb_omb_victim_count: p.i64("WHEEL_BOMB_OMB_VICTIM_COUNT", 3),
-                wheel_bomb_omb_victim_loss_max: p.i64("WHEEL_BOMB_OMB_VICTIM_LOSS_MAX", 25),
-                wheel_bomb_omb_victim_loss_min: p.i64("WHEEL_BOMB_OMB_VICTIM_LOSS_MIN", 10),
-                wheel_chain_reaction_est_ev: p.f64("WHEEL_CHAIN_REACTION_EST_EV", -25.0),
-                wheel_comeback_est_ev: p.f64("WHEEL_COMEBACK_EST_EV", 15.0),
-                wheel_commune_est_ev: p.f64("WHEEL_COMMUNE_EST_EV", 8.0),
-                wheel_discover_est_ev: p.f64("WHEEL_DISCOVER_EST_EV", 5.0),
-                wheel_emergency_est_ev: p.f64("WHEEL_EMERGENCY_EST_EV", -25.0),
-                wheel_extend_1_est_ev: p.f64("WHEEL_EXTEND_1_EST_EV", -10.0),
-                wheel_extend_2_est_ev: p.f64("WHEEL_EXTEND_2_EST_EV", -20.0),
-                wheel_golden_compound_est_ev: p.f64("WHEEL_GOLDEN_COMPOUND_EST_EV", 100.0),
-                wheel_golden_dividend_est_ev: p.f64("WHEEL_GOLDEN_DIVIDEND_EST_EV", 10.0),
-                wheel_golden_heist_est_ev: p.f64("WHEEL_GOLDEN_HEIST_EST_EV", 33.0),
-                wheel_golden_hostile_takeover_est_ev: p
-                    .f64("WHEEL_GOLDEN_HOSTILE_TAKEOVER_EST_EV", 35.0),
-                wheel_golden_market_crash_est_ev: p.f64("WHEEL_GOLDEN_MARKET_CRASH_EST_EV", 35.0),
-                wheel_golden_recession_est_ev: p.f64("WHEEL_GOLDEN_RECESSION_EST_EV", -200.0),
-                wheel_golden_recession_mid_pct: p.f64("WHEEL_GOLDEN_RECESSION_MID_PCT", 0.035),
-                wheel_golden_recession_mid_rank_end: p
-                    .i64("WHEEL_GOLDEN_RECESSION_MID_RANK_END", 10),
-                wheel_golden_recession_rest_pct: p.f64("WHEEL_GOLDEN_RECESSION_REST_PCT", 0.02),
-                wheel_golden_recession_top_pct: p.f64("WHEEL_GOLDEN_RECESSION_TOP_PCT", 0.06),
                 wheel_golden_target_ev: p.f64("WHEEL_GOLDEN_TARGET_EV", -82.5),
-                wheel_golden_top_n: p.i64("WHEEL_GOLDEN_TOP_N", 3),
-                wheel_golden_trickle_down_est_ev: p.f64("WHEEL_GOLDEN_TRICKLE_DOWN_EST_EV", 65.0),
-                wheel_golden_trickle_down_pct_max: p.f64("WHEEL_GOLDEN_TRICKLE_DOWN_PCT_MAX", 0.05),
-                wheel_golden_trickle_down_pct_min: p.f64("WHEEL_GOLDEN_TRICKLE_DOWN_PCT_MIN", 0.02),
-                wheel_green_shell_est_ev: p.f64("WHEEL_GREEN_SHELL_EST_EV", 0.0),
-                wheel_green_shell_steal_max: p.i64("WHEEL_GREEN_SHELL_STEAL_MAX", 33),
-                wheel_green_shell_steal_min: p.i64("WHEEL_GREEN_SHELL_STEAL_MIN", 15),
-                wheel_jailbreak_est_ev: p.f64("WHEEL_JAILBREAK_EST_EV", 10.0),
-                wheel_lightning_bolt_est_ev: p.f64("WHEEL_LIGHTNING_BOLT_EST_EV", -65.0),
-                wheel_lose_penalty_cooldown: p.i64("WHEEL_LOSE_PENALTY_COOLDOWN", 432000),
-                wheel_red_shell_est_ev: p.f64("WHEEL_RED_SHELL_EST_EV", 0.0),
                 wheel_target_ev: p.f64("WHEEL_TARGET_EV", -27.5),
-                wheel_town_trial_est_ev: p.f64("WHEEL_TOWN_TRIAL_EST_EV", 0.0),
                 white_bankrupt_stipend: p.i64("WHITE_BANKRUPT_STIPEND", 5),
                 wrapped_min_bets: p.i64("WRAPPED_MIN_BETS", 3),
                 wrapped_min_games: p.i64("WRAPPED_MIN_GAMES", 3),
@@ -657,22 +551,6 @@ impl ApplicationConfig {
     #[must_use]
     pub fn migration_settings(&self) -> MigrationSettings {
         self.migration.clone()
-    }
-
-    #[must_use]
-    pub fn discord_token(&self) -> &DiscordToken {
-        &self.runtime.token
-    }
-
-    /// Construct the shared OpenDota client exclusively from this immutable
-    /// startup snapshot; the adapter never rereads process environment state.
-    pub fn opendota_services(&self) -> Result<OpenDotaRuntimeServices, OpenDotaHttpBuildError> {
-        OpenDotaRuntimeServices::from_production_settings(
-            self.opendota_api_key
-                .as_ref()
-                .map(|secret| secret.expose().to_owned()),
-            &self.values.enrichment_retry_delays,
-        )
     }
 
     /// Construct OpenDota services with a durable anonymous daily-quota
@@ -772,6 +650,18 @@ impl Parser<'_> {
     fn strength_multiplier(&self, name: &str, default: f64) -> f64 {
         let value = self.f64(name, default);
         if value.is_finite() && value >= 1.0 {
+            value
+        } else {
+            default
+        }
+    }
+
+    /// A share of a balance written as a fraction (`0.1` is 10%). A value
+    /// outside `0.0..=1.0` cannot be a fraction, so it falls back to the
+    /// default instead of being guessed at as a percentage.
+    fn fraction(&self, name: &str, default: f64) -> f64 {
+        let value = self.f64(name, default);
+        if value.is_finite() && (0.0..=1.0).contains(&value) {
             value
         } else {
             default
@@ -895,6 +785,23 @@ mod tests {
         ]);
         assert_eq!(config.values.initial_glicko_rd, 250.0);
         assert_eq!(config.values.recalibration_initial_rd, 250.0);
+    }
+
+    #[test]
+    fn blind_percentages_are_fractions_and_reject_out_of_range_values() {
+        let config = parse(&[
+            ("DISCORD_BOT_TOKEN", "token"),
+            ("AUTO_BLIND_PERCENTAGE", "0.2"),
+            ("BOMB_POT_BLIND_PERCENTAGE", "15"),
+        ]);
+        assert_eq!(config.values.auto_blind_percentage, 0.2);
+        // `15` is not a fraction; it falls back to the default 15% share.
+        assert_eq!(config.values.bomb_pot_blind_percentage, 0.15);
+        let config = parse(&[
+            ("DISCORD_BOT_TOKEN", "token"),
+            ("AUTO_BLIND_PERCENTAGE", "-0.1"),
+        ]);
+        assert_eq!(config.values.auto_blind_percentage, 0.1);
     }
 
     #[test]
@@ -1148,6 +1055,27 @@ mod tests {
     #[test]
     fn configuration_catalog_entries_are_unique() {
         let catalog = config_py_env_keys().collect::<BTreeSet<_>>();
-        assert_eq!(catalog.len(), 214, "catalog entries must remain unique");
+        assert_eq!(catalog.len(), 169, "catalog entries must remain unique");
+    }
+
+    #[test]
+    fn retired_unread_settings_are_not_captured_and_do_not_break_old_env_files() {
+        const RETIRED_ENV_KEYS: &[&str] = &[
+            "BET_UNDERDOG_PING_RATIO",
+            "ENRICHMENT_MIN_PLAYER_MATCH",
+            "LIGHTNING_BOLT_PCT_MAX",
+            "NEON_LLM_CHANCE",
+            "WHEEL_BANANA_PEEL_EST_EV",
+            "WHEEL_GOLDEN_RECESSION_TOP_PCT",
+            "WHEEL_LOSE_PENALTY_COOLDOWN",
+        ];
+        let runtime_keys = all_runtime_env_keys();
+        for key in RETIRED_ENV_KEYS {
+            assert!(!runtime_keys.contains(key), "{key} must stay retired");
+        }
+        let mut values = vec![("DISCORD_BOT_TOKEN", "token")];
+        values.extend(RETIRED_ENV_KEYS.iter().map(|key| (*key, "garbage")));
+        let config = parse(&values);
+        assert_eq!(config, parse(&[("DISCORD_BOT_TOKEN", "token")]));
     }
 }

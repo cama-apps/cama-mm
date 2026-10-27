@@ -1,9 +1,8 @@
 //! Discord-independent shop command policy and atomic settlement seams.
 //!
-//! Python remains the live Discord entry point during the side-by-side rewrite.
 //! This module keeps the command's validation order, visibility decisions,
-//! pricing, and transaction boundaries independent from `discord.py`.  A live
-//! adapter can implement the ports below without allowing Rust and Python to
+//! pricing, and transaction boundaries independent from the Discord
+//! transport.  Adapters implement the ports below without being able to
 //! write the same purchase twice.
 
 use std::collections::HashMap;

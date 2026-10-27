@@ -23,6 +23,7 @@ use cama_app::pet_flavor::{PetFlavorEvent, PetFlavorService, fallbacks};
 use cama_app::pet_sqlite::SqlitePetCommandService;
 use cama_db::pet_brawl_repository::PetBrawlRepository;
 use cama_db::pet_repository::PetRepository;
+use cama_domain::discord_content::UNKNOWN_PLAYER;
 use cama_domain::formatting::escape_discord_text;
 use cama_domain::pet::{
     DeathNotice, EvolutionNotice, HatchNotice, PET_BRAWL_ACTIVE_TTL_SECONDS, Pet, PetMood,
@@ -111,7 +112,7 @@ pub trait PetSweepDiscordPort: FirstGamePoolGuildSource + Send + Sync {
     /// Readable owner display text for announcements, or `Unknown player`;
     /// never an ID or mention.
     async fn player_name(&self, _guild_id: i64, _user_id: i64) -> String {
-        "Unknown player".to_owned()
+        UNKNOWN_PLAYER.to_owned()
     }
 }
 
@@ -559,7 +560,7 @@ impl PetSweepWorker {
                 names
                     .get(&id)
                     .cloned()
-                    .unwrap_or_else(|| "Unknown player".to_owned())
+                    .unwrap_or_else(|| UNKNOWN_PLAYER.to_owned())
             });
             self.deliver_channel(context, channel_id, pet_message(embed, None))
                 .await?;

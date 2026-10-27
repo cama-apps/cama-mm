@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use cama_app::reminder_sqlite::SqliteReminderStore;
 use cama_app::reminders::{
     GuildId, LobbyKind, ReminderCooldowns, ReminderDelivery, ReminderKind, ReminderPreferences,
-    ReminderService, ReminderTaskKey, RuntimeDiscordPort, SystemReminderClock, TaskId, UserId,
+    ReminderService, ReminderTaskKey, SystemReminderClock, TaskId, UserId,
 };
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
@@ -38,8 +38,7 @@ use crate::registration::{
 const OBSERVER_NAME: &str = "stored-reminders";
 const COMPONENT_PREFIX: &str = "reminder_";
 
-type LiveReminderService =
-    ReminderService<SqliteReminderStore, SystemReminderClock, RuntimeDiscordPort>;
+type LiveReminderService = ReminderService<SqliteReminderStore, SystemReminderClock>;
 
 #[derive(Clone, Copy)]
 struct ReminderLabel {
@@ -98,8 +97,8 @@ impl ReminderRegistrationProvider {
         discord: Arc<dyn DiscordTransport>,
     ) -> Self {
         let store = SqliteReminderStore::new(database_path, config.values.pet_hunger_decay_per_day);
-        let service = ReminderService::new(store, SystemReminderClock, RuntimeDiscordPort)
-            .with_cooldowns(ReminderCooldowns {
+        let service =
+            ReminderService::new(store, SystemReminderClock).with_cooldowns(ReminderCooldowns {
                 trivia_seconds: config.values.trivia_cooldown_seconds,
             });
         Self::from_service(service, discord)
@@ -740,12 +739,10 @@ impl ReminderHooks {
 }
 
 fn signed_ids(user_id: u64, guild_id: Option<u64>) -> Result<(UserId, GuildId), String> {
-    let user_id = i64::try_from(user_id)
-        .map_err(|_| format!("Discord user snowflake {user_id} exceeds SQLite INTEGER range"))?;
+    let user_id = crate::ids::signed_id(user_id, "user")?;
     let guild_id = guild_id
-        .map(i64::try_from)
-        .transpose()
-        .map_err(|_| "Discord guild snowflake exceeds SQLite INTEGER range".to_owned())?
+        .map(|guild_id| crate::ids::signed_id(guild_id, "guild"))
+        .transpose()?
         .unwrap_or_default();
     Ok((UserId::new(user_id), GuildId::new(guild_id)))
 }

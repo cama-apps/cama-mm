@@ -2,7 +2,6 @@
 
 pub mod bankruptcy;
 pub mod catalogs;
-pub mod config_contract;
 pub mod curfew;
 pub mod dig_cave_in;
 pub mod dig_economy;
@@ -32,6 +31,7 @@ pub mod prediction_ladder;
 pub mod rate_limiter;
 pub mod rating;
 pub mod rating_insights;
+pub mod rating_match;
 pub mod role_derivation;
 pub mod role_performance;
 pub mod service_result;

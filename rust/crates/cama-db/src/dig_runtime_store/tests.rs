@@ -90,15 +90,11 @@ fn player_balance_helpers_apply_the_exact_cas_semantics() {
     );
     assert!(player_exists(&connection, USER, GUILD).expect("exists"));
     assert_eq!(
-        update_player_balance_cas(&connection, 90, USER, GUILD, 99).expect("stale cas"),
+        update_player_balance_coalesce_cas(&connection, 90, USER, GUILD, 99).expect("stale cas"),
         0
     );
     assert_eq!(
-        update_player_balance_cas(&connection, 90, USER, GUILD, 100).expect("cas"),
-        1
-    );
-    assert_eq!(
-        update_player_balance_coalesce_cas(&connection, 80, USER, GUILD, 90).expect("cas"),
+        update_player_balance_coalesce_cas(&connection, 80, USER, GUILD, 100).expect("cas"),
         1
     );
     assert_eq!(
@@ -383,33 +379,10 @@ fn leaderboard_projections_keep_their_ordering() {
         by_depth.iter().map(|row| row.1).collect::<Vec<_>>(),
         vec![30, 20, 10]
     );
-    let leaderboard = leaderboard_tunnel_rows(&connection, GUILD).expect("leaderboard");
-    assert_eq!(
-        leaderboard
-            .iter()
-            .map(|row| row.discord_id)
-            .collect::<Vec<_>>(),
-        vec![USER + 2, USER + 1, USER]
-    );
-    assert_eq!(
-        tunnel_rank_ids(&connection, GUILD).expect("ranks"),
-        vec![USER + 2, USER + 1, USER]
-    );
-    let fame = hall_of_fame_entry_rows(&connection, GUILD).expect("fame");
-    assert_eq!(
-        fame.iter().map(|row| row.0).collect::<Vec<_>>(),
-        vec![USER + 2, USER]
-    );
     let fame_runtime = hall_of_fame_depth_rows(&connection, GUILD).expect("fame runtime");
     assert_eq!(
         fame_runtime.iter().map(|row| row.1).collect::<Vec<_>>(),
         vec![USER + 2, USER]
-    );
-    assert_eq!(
-        guild_tunnel_stat_rows(&connection, GUILD)
-            .expect("stat rows")
-            .len(),
-        3
     );
 }
 

@@ -255,7 +255,14 @@ impl WrappedSources {
             .map(|id| {
                 self.wrapped
                     .player_name(*id, guild_id)
-                    .map(|name| (*id, name.unwrap_or_else(|| "Unknown player".to_owned())))
+                    .map(|name| {
+                        (
+                            *id,
+                            name.unwrap_or_else(|| {
+                                cama_domain::discord_content::UNKNOWN_PLAYER.to_owned()
+                            }),
+                        )
+                    })
                     .map_err(|error| error.to_string())
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
@@ -869,7 +876,7 @@ fn build_slides(
             .map(|profile| profile.display_name.as_str())
             .filter(|name| !name.is_empty())
             .map(str::to_owned)
-            .unwrap_or_else(|| "Unknown player".to_owned())
+            .unwrap_or_else(|| cama_domain::discord_content::UNKNOWN_PLAYER.to_owned())
     };
 
     let mut server = base_slide(

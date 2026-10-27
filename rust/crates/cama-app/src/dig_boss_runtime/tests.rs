@@ -3598,3 +3598,192 @@ fn regular_boss_wager_is_capped_like_the_pinnacle() {
         })
     ));
 }
+
+fn paused_duel_rows(database: &FastTestDatabase) -> Vec<(String, i64)> {
+    let connection = Connection::open(database.path()).expect("paused duel DB");
+    let mut statement = connection
+        .prepare(
+            "SELECT boss_id,wager FROM dig_active_duels
+              WHERE discord_id=?1 AND guild_id=?2",
+        )
+        .expect("paused duel query");
+    statement
+        .query_map(params![PLAYER, GUILD], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("paused duel rows")
+        .collect::<Result<_, _>>()
+        .expect("paused duel decode")
+}
+
+#[test]
+fn failed_pinnacle_resume_settlement_keeps_the_paused_duel_and_its_wager() {
+    let database = fixture();
+    set_pinnacle(&database, 1, "active", None);
+    let started = pinnacle_runtime(&database)
+        .start_pinnacle(
+            pinnacle_request(1_700_000_000),
+            RiskTier::Reckless,
+            25,
+            SequenceEntropy::constant(0.99),
+        )
+        .expect("start pinnacle");
+    let DigPinnacleStartOutcome::Paused(paused) = started.outcome else {
+        panic!("expected durable pinnacle prompt")
+    };
+    let connection = Connection::open(database.path()).expect("failure DB");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_pinnacle_settlement BEFORE INSERT ON dig_actions
+             WHEN NEW.action_type='pinnacle_fight'
+             BEGIN SELECT RAISE(ABORT,'injected settlement failure'); END;",
+        )
+        .expect("failure trigger");
+    let error = pinnacle_runtime(&database)
+        .resume_pinnacle(
+            pinnacle_request(1_700_000_001),
+            paused.pending_prompt.safe_option_index,
+            SequenceEntropy::constant(1.0),
+        )
+        .expect_err("injected settlement failure");
+    assert!(matches!(error, DigBossRuntimeError::Infrastructure(_)));
+    // The claim must not outlive a settlement that never committed: the
+    // paused duel, and so its staked wager, is still there to resolve.
+    assert_eq!(
+        paused_duel_rows(&database),
+        vec![("forgotten_king".to_owned(), 25)]
+    );
+
+    connection
+        .execute_batch("DROP TRIGGER fail_pinnacle_settlement;")
+        .expect("drop trigger");
+    let resumed = pinnacle_runtime(&database)
+        .resume_pinnacle(
+            pinnacle_request(1_700_000_002),
+            paused.pending_prompt.safe_option_index,
+            SequenceEntropy::constant(1.0),
+        )
+        .expect("retried resume settles");
+    assert!(!resumed.outcome.won);
+    assert_eq!(resumed.outcome.jc_delta, -25);
+    assert!(paused_duel_rows(&database).is_empty());
+}
+
+#[test]
+fn failed_abandoned_wager_forfeit_keeps_the_paused_duel() {
+    let database = fixture();
+    let mut stale = paused_duel();
+    stale.wager = 80;
+    SqliteBossRepository::new(database.path(), 1_700_000_000)
+        .save_active_duel(key(), stale)
+        .expect("stale wager pause");
+    set_pinnacle(&database, 1, "active", None);
+    let connection = Connection::open(database.path()).expect("failure DB");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_abandoned_forfeit BEFORE INSERT ON dig_actions
+             WHEN NEW.action_type='boss_duel_abandoned'
+             BEGIN SELECT RAISE(ABORT,'injected forfeit failure'); END;",
+        )
+        .expect("failure trigger");
+    pinnacle_runtime(&database)
+        .start_pinnacle(
+            pinnacle_request(1_700_000_001),
+            RiskTier::Cautious,
+            0,
+            SequenceEntropy::constant(0.99),
+        )
+        .expect_err("injected forfeit failure");
+    assert_eq!(
+        paused_duel_rows(&database),
+        vec![("grothak".to_owned(), 80)]
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT jopacoin_balance FROM players WHERE discord_id=?1 AND guild_id=?2",
+                params![PLAYER, GUILD],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("balance"),
+        100
+    );
+}
+
+#[test]
+fn pinnacle_profit_withholding_matches_the_shared_profit_deductions() {
+    let database = fixture();
+    set_pinnacle(&database, 3, "phase2_defeated", None);
+    let connection = Connection::open(database.path()).expect("deduction DB");
+    connection
+        .execute(
+            "INSERT INTO bankruptcy_state
+             (discord_id,guild_id,last_bankruptcy_at,penalty_games_remaining,bankruptcy_count)
+             VALUES (?1,?2,1,3,1)",
+            params![PLAYER, GUILD],
+        )
+        .expect("bankruptcy state");
+    let vanity = Arc::new(VanityTaxService::with_rate_fraction(None, 0.10));
+    vanity
+        .refresh_guild(
+            GUILD,
+            &[VanityMember {
+                discord_id: PLAYER,
+                nickname: None,
+            }],
+            None,
+        )
+        .expect("vanity snapshot");
+    let mut config = DigBossRuntimeConfig::new(database.path(), 20);
+    config.economy_event.enabled = false;
+    let result = DigBossRuntimeService::sqlite(config)
+        .with_vanity_tax(vanity)
+        .with_low_priority_tax(Arc::new(FixedBossLowPriorityTax {
+            discord_id: PLAYER,
+            guild_id: GUILD,
+            percent: 10,
+        }))
+        .settle_pinnacle(
+            pinnacle_request(1_700_000_000),
+            PinnacleSettlementInput {
+                boss_id: "forgotten_king".to_owned(),
+                phase: 3,
+                risk_tier: RiskTier::Reckless,
+                wager: 50,
+                won: true,
+                ending_boss_hp: 0,
+                boss_hp_max: 8,
+                starting_boss_hp: 8,
+                win_chance: 0.5,
+                attempts: 1,
+                round_log: Vec::new(),
+                gear_wear: GearWearResult::default(),
+                boss_preparation: None,
+                warding_salts_blocked: false,
+            },
+            &mut SequenceEntropy::new(Vec::new(), vec![0, 0], Vec::new()),
+        )
+        .expect("taxed pinnacle victory");
+    let outcome = result.outcome;
+    let roster = std::collections::BTreeSet::from([PLAYER]);
+    let expected = cama_db::profit_deductions::compute_profit_deductions(
+        &connection,
+        GUILD,
+        PLAYER,
+        outcome.scaled_base_jc + outcome.wager_payout,
+        &cama_db::profit_deductions::ProfitDeductionPolicy {
+            bankruptcy: Some(cama_domain::bankruptcy::BankruptcyPenaltyPolicy {
+                rate_per_game: crate::bankruptcy::BankruptcyPolicy::default().penalty_rate_per_game,
+            }),
+            vanity_tax_rate: 0.10,
+            vanity_taxable_ids: &roster,
+            low_priority_tax_rate: 0.10,
+            low_priority_taxable_ids: &roster,
+        },
+    )
+    .expect("shared deductions");
+    assert!(expected.bankruptcy_penalty > 0 && expected.vanity_tax > 0);
+    assert!(expected.low_priority_tax > 0);
+    assert_eq!(outcome.bankruptcy_penalty, expected.bankruptcy_penalty);
+    assert_eq!(outcome.vanity_tax, expected.vanity_tax);
+    assert_eq!(outcome.low_priority_tax, expected.low_priority_tax);
+    assert_eq!(outcome.jc_delta, expected.net());
+}

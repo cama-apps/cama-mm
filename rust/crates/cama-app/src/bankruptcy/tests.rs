@@ -539,19 +539,6 @@ fn test_bankruptcy_debuff_default_rate_withholds_five_percent_per_game() {
 }
 
 #[test]
-fn test_bankruptcy_debuff_trivia_base_and_streak_schedule() {
-    use crate::trivia_commands::{jc_for_streak, streak_bonus_for_streak};
-
-    assert_eq!(streak_bonus_for_streak(3), 1);
-    assert_eq!(streak_bonus_for_streak(6), 1);
-    assert_eq!(streak_bonus_for_streak(10), 2);
-    assert_eq!(streak_bonus_for_streak(14), 1);
-    assert_eq!(streak_bonus_for_streak(7), 0);
-    assert_eq!(jc_for_streak(7), 1);
-    assert_eq!(jc_for_streak(10), 3);
-}
-
-#[test]
 fn test_bankruptcy_debuff_tiny_trivia_bonus_is_not_zeroed() {
     let harness = debuff_harness();
     harness.port.add_player(8_001, GUILD, -50);

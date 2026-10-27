@@ -52,7 +52,9 @@ use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
 use crate::application_config::ApplicationConfig;
-use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
+use crate::discord_transport::{
+    DiscordIdPlayerNameResolver, GuildPlayerNameDirectory, GuildPlayerNameResolver,
+};
 use crate::embed_colors::{DISCORD_BLUE, DISCORD_GREEN, DISCORD_GREYPLE, DISCORD_RED};
 use crate::ids::signed_id;
 use crate::option_ext::{boolean_option, integer_option, user_option};
@@ -63,6 +65,7 @@ use crate::registration::{
     InteractionRequest, InteractionResponder, InteractionResponse, InteractionValue,
     RegistrationError, RegistrationProvider, RegistryBuilder,
 };
+use cama_domain::formatting::escape_discord_text;
 
 const ADMINISTRATOR_PERMISSION: u64 = 1 << 3;
 const MANAGE_GUILD_PERMISSION: u64 = 1 << 5;
@@ -333,7 +336,7 @@ impl RegistrationProvider for EnrichmentRegistrationProvider {
 
 fn enrich_subcommands() -> Vec<CommandOptionSpec> {
     vec![
-        subcommand(
+        CommandOptionSpec::subcommand(
             "setleague",
             "Set the Dota 2 league ID used by OpenDota discovery (Admin)",
             vec![
@@ -345,7 +348,7 @@ fn enrich_subcommands() -> Vec<CommandOptionSpec> {
                 .required(true),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "match",
             "Enrich a match with OpenDota data (Admin)",
             vec![
@@ -366,12 +369,12 @@ fn enrich_subcommands() -> Vec<CommandOptionSpec> {
                 ),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "backfill",
             "Backfill steam_id from dotabuff URLs for all players (Admin)",
             vec![],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "drafts",
             "Backfill draft predictions and captains for recorded matches (Admin)",
             vec![CommandOptionSpec::new(
@@ -380,8 +383,8 @@ fn enrich_subcommands() -> Vec<CommandOptionSpec> {
                 CommandOptionKind::Boolean,
             )],
         ),
-        subcommand("config", "Show current server configuration", vec![]),
-        subcommand(
+        CommandOptionSpec::subcommand("config", "Show current server configuration", vec![]),
+        CommandOptionSpec::subcommand(
             "discover",
             "[Admin] Auto-discover Dota match IDs for unenriched matches",
             vec![
@@ -402,8 +405,8 @@ fn enrich_subcommands() -> Vec<CommandOptionSpec> {
                 ),
             ],
         ),
-        subcommand("wipeall", "[Admin] Wipe all match enrichments", vec![]),
-        subcommand(
+        CommandOptionSpec::subcommand("wipeall", "[Admin] Wipe all match enrichments", vec![]),
+        CommandOptionSpec::subcommand(
             "wipematch",
             "[Admin] Wipe enrichment data for a specific match",
             vec![
@@ -415,7 +418,7 @@ fn enrich_subcommands() -> Vec<CommandOptionSpec> {
                 .required(true),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "rebuildpairings",
             "Rebuild pairwise stats from match history (Admin only)",
             vec![],
@@ -459,7 +462,7 @@ fn matches_subcommands() -> Vec<CommandOptionSpec> {
     );
     draft_page.min_integer = Some(1);
     vec![
-        subcommand(
+        CommandOptionSpec::subcommand(
             "drafts",
             "Browse draft results or rank the most and least successful drafters",
             vec![
@@ -478,7 +481,7 @@ fn matches_subcommands() -> Vec<CommandOptionSpec> {
                 ),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "history",
             "View recent matches with detailed stats",
             vec![
@@ -494,7 +497,7 @@ fn matches_subcommands() -> Vec<CommandOptionSpec> {
                 ),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "view",
             "View detailed stats for a specific match",
             vec![
@@ -510,7 +513,7 @@ fn matches_subcommands() -> Vec<CommandOptionSpec> {
                 ),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "recent",
             "View your recent Dota 2 matches as an image",
             vec![
@@ -527,10 +530,6 @@ fn matches_subcommands() -> Vec<CommandOptionSpec> {
             ],
         ),
     ]
-}
-
-fn subcommand(name: &str, description: &str, options: Vec<CommandOptionSpec>) -> CommandOptionSpec {
-    CommandOptionSpec::new(name, description, CommandOptionKind::Subcommand).options(options)
 }
 
 fn nonnegative_usize(value: i64) -> usize {
@@ -906,6 +905,7 @@ impl EnrichmentHandler {
         let drafts = self.drafts.clone();
         let opendota = Arc::clone(&self.opendota);
         let hero_catalog = Arc::clone(&self.hero_catalog);
+        let player_names = Arc::clone(&self.player_names);
         let match_view_timeout = self.match_view_timeout;
         let match_id = result.match_id.0;
         let confidence_percent = result.confidence.unwrap_or_default() * 100.0;
@@ -939,6 +939,7 @@ impl EnrichmentHandler {
                 &drafts,
                 &opendota,
                 &hero_catalog,
+                player_names.as_ref(),
             ));
             let advantage = matches
                 .get_enrichment_data(match_id, Some(guild_id))
@@ -1280,6 +1281,7 @@ impl EnrichmentHandler {
         let drafts = self.drafts.clone();
         let opendota = Arc::clone(&self.opendota);
         let hero_catalog = Arc::clone(&self.hero_catalog);
+        let player_names = Arc::clone(&self.player_names);
         let response = run_blocking(move || -> Result<InteractionResponse, String> {
             let selected = if let Some(match_id) = requested_internal {
                 matches
@@ -1349,6 +1351,7 @@ impl EnrichmentHandler {
                     &drafts,
                     &opendota,
                     &hero_catalog,
+                    player_names.as_ref(),
                 );
                 let mut note = format!("Enriched {}/10 players", result.players_enriched);
                 if !result.players_not_found.is_empty() {
@@ -1893,6 +1896,7 @@ impl EnrichmentHandler {
         let drafts = self.drafts.clone();
         let opendota = Arc::clone(&self.opendota);
         let hero_catalog = Arc::clone(&self.hero_catalog);
+        let player_names = Arc::clone(&self.player_names);
         let response = run_blocking(move || {
             if !players
                 .exists(target_id, Some(guild_id))
@@ -1985,7 +1989,17 @@ impl EnrichmentHandler {
                     )
                 };
                 if let Some(analysis) = drafts.get(match_row.match_id, guild_id).ok().flatten() {
-                    field.push_str(&format!("\n{}", draft_history_text(&analysis)));
+                    let drafter_ids = [
+                        analysis.radiant_drafter_discord_id,
+                        analysis.dire_drafter_discord_id,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>();
+                    let names = player_names
+                        .names_for_guild(guild_id, &drafter_ids)
+                        .unwrap_or_default();
+                    field.push_str(&format!("\n{}", draft_history_text(&analysis, &names)));
                 }
                 embed = embed.field(
                     format!(
@@ -2121,6 +2135,7 @@ impl EnrichmentHandler {
         let drafts = self.drafts.clone();
         let opendota = Arc::clone(&self.opendota);
         let hero_catalog = Arc::clone(&self.hero_catalog);
+        let player_names = Arc::clone(&self.player_names);
         let timeout_seconds = i64::try_from(self.match_view_timeout.as_secs()).unwrap_or(i64::MAX);
         let response = run_blocking(move || {
             let match_data = if let Some(match_id) = explicit_match_id {
@@ -2174,8 +2189,14 @@ impl EnrichmentHandler {
                 .iter()
                 .any(|participant| value_i64(&participant.hero_id).is_some_and(|id| id != 0));
             if !is_enriched {
+                let names = match_player_names(
+                    &participants,
+                    None,
+                    Some(guild_id),
+                    player_names.as_ref(),
+                );
                 let (radiant, dire) =
-                    embed_participants(&participants, &opendota, Some(guild_id));
+                    embed_participants(&participants, &opendota, Some(guild_id), &names);
                 let summary = create_match_summary_embed_with_context(
                     match_data.match_id,
                     winning_team(&match_data.winning_team),
@@ -2203,6 +2224,7 @@ impl EnrichmentHandler {
                 &drafts,
                 &opendota,
                 &hero_catalog,
+                player_names.as_ref(),
             );
             if let Some(thumbnail) = participants
                 .iter()
@@ -2337,6 +2359,7 @@ impl EnrichmentHandler {
         let drafts = self.drafts.clone();
         let opendota = Arc::clone(&self.opendota);
         let hero_catalog = Arc::clone(&self.hero_catalog);
+        let player_names = Arc::clone(&self.player_names);
         let response = run_blocking(move || {
             let match_data = matches
                 .get_match(route.match_id, Some(route.guild_id))
@@ -2352,6 +2375,7 @@ impl EnrichmentHandler {
                 &drafts,
                 &opendota,
                 &hero_catalog,
+                player_names.as_ref(),
             );
             Ok::<_, String>(
                 InteractionResponse::message(String::new())
@@ -2438,14 +2462,7 @@ fn disabled_component_response(response: &InteractionResponse) -> Option<Interac
 fn selected_subcommand(
     options: &[InteractionOption],
 ) -> Result<(&str, &[InteractionOption]), InteractionHandlerError> {
-    options
-        .iter()
-        .find_map(|option| match &option.value {
-            InteractionValue::Subcommand(children) => {
-                Some((option.name.as_str(), children.as_slice()))
-            }
-            _ => None,
-        })
+    crate::option_ext::subcommand_option(options)
         .ok_or_else(|| "missing enrichment subcommand".into())
 }
 
@@ -2601,15 +2618,19 @@ fn format_discovery(result: &BatchDiscoveryResult, dry_run: bool) -> String {
     lines.join("\n")
 }
 
-fn draft_embed_data(analysis: &MatchDraftAnalysis) -> DraftAnalysisEmbed {
+fn draft_embed_data(
+    analysis: &MatchDraftAnalysis,
+    names: &GuildPlayerNameDirectory,
+) -> DraftAnalysisEmbed {
+    let drafter = |id: Option<i64>| id.filter(|id| *id > 0).map(|id| names.resolve(id));
     DraftAnalysisEmbed {
         radiant_win_probability_bps: analysis.radiant_win_probability_bps,
-        radiant_drafter_discord_id: analysis.radiant_drafter_discord_id,
-        dire_drafter_discord_id: analysis.dire_drafter_discord_id,
+        radiant_drafter_name: drafter(analysis.radiant_drafter_discord_id),
+        dire_drafter_name: drafter(analysis.dire_drafter_discord_id),
     }
 }
 
-fn draft_history_text(analysis: &MatchDraftAnalysis) -> String {
+fn draft_history_text(analysis: &MatchDraftAnalysis, names: &GuildPlayerNameDirectory) -> String {
     let estimate = analysis
         .radiant_win_probability_bps
         .filter(|probability| (0..=10_000).contains(probability))
@@ -2628,8 +2649,12 @@ fn draft_history_text(analysis: &MatchDraftAnalysis) -> String {
                 )
             },
         );
-    let captain =
-        |id: Option<i64>| id.map_or_else(|| "Unknown".to_owned(), |id| format!("<@{id}>"));
+    let captain = |id: Option<i64>| {
+        id.filter(|id| *id > 0).map_or_else(
+            || "Unknown".to_owned(),
+            |id| escape_discord_text(&names.resolve(id)),
+        )
+    };
     format!(
         "{estimate}\nDrafters: R {} · D {}",
         captain(analysis.radiant_drafter_discord_id),
@@ -2644,9 +2669,18 @@ fn build_match_embed(
     drafts: &MatchDraftRepository,
     opendota: &OpenDotaRuntimeServices,
     hero_catalog: &HeroCatalog,
+    player_names: &dyn GuildPlayerNameResolver,
 ) -> InteractionEmbed {
     let guild_id = participants.first().map(|participant| participant.guild_id);
-    let (radiant, dire) = embed_participants(participants, opendota, guild_id);
+    let draft_analysis =
+        guild_id.and_then(|guild_id| drafts.get(match_data.match_id, guild_id).ok().flatten());
+    let names = match_player_names(
+        participants,
+        draft_analysis.as_ref(),
+        guild_id,
+        player_names,
+    );
+    let (radiant, dire) = embed_participants(participants, opendota, guild_id, &names);
     let model = create_enriched_match_embed(
         &EnrichedMatchRequest {
             match_id: match_data.match_id,
@@ -2658,10 +2692,9 @@ fn build_match_embed(
             show_mvp: true,
             draft: match_data.lobby_type.as_deref() == Some("draft"),
             guild_id,
-            draft_analysis: guild_id
-                .and_then(|guild_id| drafts.get(match_data.match_id, guild_id).ok().flatten())
+            draft_analysis: draft_analysis
                 .as_ref()
-                .map(draft_embed_data),
+                .map(|analysis| draft_embed_data(analysis, &names)),
         },
         &radiant,
         &dire,
@@ -2710,10 +2743,41 @@ fn hero_thumbnail_url(catalog: &HeroCatalog, hero_id: i64) -> Option<String> {
         .and_then(|hero| hero.image_url.clone())
 }
 
+/// Readable names for every participant and drafter of one match.
+fn match_player_names(
+    participants: &[MatchParticipant],
+    draft_analysis: Option<&MatchDraftAnalysis>,
+    guild_id: Option<i64>,
+    player_names: &dyn GuildPlayerNameResolver,
+) -> GuildPlayerNameDirectory {
+    let Some(guild_id) = guild_id else {
+        return GuildPlayerNameDirectory::default();
+    };
+    let ids = participants
+        .iter()
+        .map(|participant| participant.discord_id)
+        .chain(draft_analysis.into_iter().flat_map(|analysis| {
+            [
+                analysis.radiant_drafter_discord_id,
+                analysis.dire_drafter_discord_id,
+            ]
+            .into_iter()
+            .flatten()
+        }))
+        .filter(|id| *id > 0)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    player_names
+        .names_for_guild(guild_id, &ids)
+        .unwrap_or_default()
+}
+
 fn embed_participants(
     participants: &[MatchParticipant],
     opendota: &OpenDotaRuntimeServices,
     guild_id: Option<i64>,
+    names: &GuildPlayerNameDirectory,
 ) -> (Vec<EmbedParticipant>, Vec<EmbedParticipant>) {
     let mut radiant = Vec::new();
     let mut dire = Vec::new();
@@ -2721,6 +2785,7 @@ fn embed_participants(
         let hero_id = value_i64(&participant.hero_id);
         let projected = EmbedParticipant {
             discord_id: Some(participant.discord_id),
+            display_name: Some(names.resolve(participant.discord_id)),
             guild_id: Some(participant.guild_id).or(guild_id),
             hero_id,
             hero_name: hero_id

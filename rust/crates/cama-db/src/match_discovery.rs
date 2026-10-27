@@ -1,6 +1,6 @@
 //! Existing-schema persistence used by match discovery administration.
 //!
-//! Python owns every schema migration. Production paths in this module only
+//! The startup schema manager owns every schema migration. Production paths in this module only
 //! open an already-existing database through [`crate::open_runtime_connection`].
 //! DDL appears solely in disposable test fixtures.
 

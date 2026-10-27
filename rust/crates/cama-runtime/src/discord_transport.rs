@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cama_domain::discord_content::readable_player_name;
+use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
 use futures_util::StreamExt;
 
 use crate::registration::InteractionResponse;
@@ -47,7 +47,7 @@ impl GuildPlayerNameDirectory {
     #[must_use]
     pub fn resolve(&self, discord_id: i64) -> String {
         self.cached_name(discord_id)
-            .unwrap_or_else(|| "Unknown player".to_owned())
+            .unwrap_or_else(|| UNKNOWN_PLAYER.to_owned())
     }
 
     /// Prefer a live name, then a readable supplied name. Never expose an ID
@@ -56,7 +56,7 @@ impl GuildPlayerNameDirectory {
     pub fn resolve_or(&self, discord_id: i64, stored_name: &str) -> String {
         self.cached_name(discord_id).unwrap_or_else(|| {
             readable_player_name(stored_name)
-                .unwrap_or("Unknown player")
+                .unwrap_or(UNKNOWN_PLAYER)
                 .to_owned()
         })
     }

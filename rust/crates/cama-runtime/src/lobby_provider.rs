@@ -45,7 +45,7 @@ use cama_db::pending_lobby::PendingLobbyRepository;
 use cama_db::readycheck_repository::{
     PersistedLobbyState, ReadycheckPrunedNotice, ReadycheckRepository,
 };
-use cama_domain::discord_content::readable_player_name;
+use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
 use cama_domain::embed_safety::EmbedModel;
 use cama_domain::formatting::{
     JOPACOIN_EMOJI_ID, JOPACOIN_EMOTE, escape_discord_text, format_duration_short,
@@ -967,13 +967,13 @@ impl LobbyRuntimeState {
             .collect::<BTreeSet<_>>();
         let departed_confirmations = previous
             .reacted
-            .keys()
+            .iter()
             .copied()
             .filter(|player_id| !lobby_ids.contains(player_id));
         let new_unconfirmed = lobby_ids
             .difference(&previous.lobby_ids)
             .copied()
-            .filter(|player_id| !previous.reacted.contains_key(player_id))
+            .filter(|player_id| !previous.reacted.contains(player_id))
             .filter(|player_id| !auto_confirm.contains(player_id));
         for player_id in departed_confirmations.chain(new_unconfirmed) {
             let (Ok(channel_id), Ok(message_id), Ok(user_id)) = (
@@ -1004,12 +1004,8 @@ impl LobbyRuntimeState {
             return;
         }
         for player_id in auto_confirm {
-            self.readychecks.add_readycheck_reaction(
-                scope,
-                player_id,
-                format!("<@{}>", player_id.0),
-                Some(previous.message_id),
-            );
+            self.readychecks
+                .add_readycheck_reaction(scope, player_id, Some(previous.message_id));
         }
         let Some(generation) = self.readychecks.readycheck_generation(scope) else {
             return;
@@ -1054,7 +1050,7 @@ impl LobbyRuntimeState {
         let confirmed = generation
             .player_data
             .iter()
-            .filter(|(player_id, _)| generation.reacted.contains_key(player_id))
+            .filter(|(player_id, _)| generation.reacted.contains(player_id))
             .map(|(player_id, data)| (*player_id, data.clone()))
             .collect();
         let embed = readycheck_embed(
@@ -1716,7 +1712,7 @@ impl MatchLobbyPort {
                 .map(|generation| {
                     generation
                         .reacted
-                        .into_keys()
+                        .into_iter()
                         .map(|player_id| player_id.0)
                         .collect()
                 });
@@ -2745,12 +2741,12 @@ impl LobbyInteractionHandler {
             .ok_or(ReadycheckRunError::Policy(
                 ReadycheckCommandFailure::NoThread,
             ))?;
-        let mut initial_reacted = BTreeMap::new();
+        let mut initial_reacted = BTreeSet::new();
         for (player_id, data) in &player_data {
             if data.group == ReadinessGroup::Recent
                 || (permit.invoker_id == *player_id && permit.confirm_invoker)
             {
-                initial_reacted.insert(*player_id, format!("<@{}>", player_id.0));
+                initial_reacted.insert(*player_id);
             }
         }
         let embed = readycheck_embed(
@@ -3906,7 +3902,7 @@ impl LobbyInteractionHandler {
         } else {
             discord_display_name
                 .and_then(readable_player_name)
-                .unwrap_or("Unknown player")
+                .unwrap_or(UNKNOWN_PLAYER)
                 .to_owned()
         };
         if let Some(thread_id) = lobby.message_ids.thread_id {
@@ -4173,14 +4169,14 @@ fn readycheck_pruned_players_message(
 fn readycheck_embed(
     kind: LobbyKind,
     player_data: &BTreeMap<AppUserId, ReadycheckPlayerData>,
-    reacted: &BTreeMap<AppUserId, String>,
+    reacted: &BTreeSet<AppUserId>,
     ready_threshold: usize,
 ) -> InteractionEmbed {
     let now = unix_time_now();
     let mut active = Vec::new();
     let mut afk = Vec::new();
     for (player_id, player) in player_data {
-        if reacted.contains_key(player_id) {
+        if reacted.contains(player_id) {
             continue;
         }
         match player.group {
@@ -4210,10 +4206,10 @@ fn readycheck_embed(
     }
     if !reacted.is_empty() {
         let confirmed = reacted
-            .keys()
+            .iter()
             .map(|player_id| {
                 player_data.get(player_id).map_or_else(
-                    || "Unknown player".to_owned(),
+                    || UNKNOWN_PLAYER.to_owned(),
                     |player| readycheck_player_line(&player.name, player, now),
                 )
             })
@@ -4228,7 +4224,7 @@ fn readycheck_embed(
 }
 
 fn readycheck_player_line(identity: &str, player: &ReadycheckPlayerData, now: f64) -> String {
-    let mut line = escape_discord_text(readable_player_name(identity).unwrap_or("Unknown player"));
+    let mut line = escape_discord_text(readable_player_name(identity).unwrap_or(UNKNOWN_PLAYER));
     if !player.signals.is_empty() {
         line.push(' ');
         line.push_str(&player.signals);
@@ -4309,7 +4305,7 @@ fn selected_user(
                 display_name
                     .as_deref()
                     .and_then(readable_player_name)
-                    .unwrap_or("Unknown player")
+                    .unwrap_or(UNKNOWN_PLAYER)
                     .to_owned(),
             )),
             _ => Err(InteractionHandlerError::Transformer {
@@ -4646,7 +4642,6 @@ impl RawReactionObserver for LobbyRawReactionObserver {
                 RawReactionKind::Add => self.state.readychecks.add_readycheck_reaction(
                     scope,
                     player_id,
-                    format!("<@{}>", player_id.0),
                     Some(message_id),
                 ),
                 RawReactionKind::Remove => self.state.readychecks.remove_readycheck_reaction(
@@ -4849,7 +4844,7 @@ impl RawReactionObserver for LobbyRawReactionObserver {
             let display_name = self
                 .resolve_actor_display_name(&event)
                 .await
-                .unwrap_or_else(|| "Unknown player".to_owned());
+                .unwrap_or_else(|| UNKNOWN_PLAYER.to_owned());
             if let Some(thread_id) = lobby.message_ids.thread_id
                 && let Err(error) = self
                     .state

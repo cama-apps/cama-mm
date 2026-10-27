@@ -1,7 +1,7 @@
 //! Existing-schema settlement for deflationary Dig tunnel encounters.
 //!
-//! Python remains the production runtime and migration authority. This
-//! adapter opens only an already-migrated database through
+//! The Rust schema manager owns schema and migrations. This adapter opens only
+//! an already-migrated database through
 //! [`crate::open_runtime_connection`]. Candidate selection, victim burns,
 //! proportional actor payout (or failure loss), ledger context, and Dig audit
 //! rows commit together under one `BEGIN IMMEDIATE` transaction.

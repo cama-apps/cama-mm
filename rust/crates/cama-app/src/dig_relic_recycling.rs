@@ -1,8 +1,8 @@
 //! Typed Dig relic rarity, raw-find, and recycling policy independent from Discord.
 //!
-//! Python remains the live service/catalog authority. This module reuses Rust's additive artifact
-//! catalog, injects entropy, and makes persistence a port. The SQLite recycling adapter revalidates
-//! inventory after application-level checks so stale selections cannot partially consume relics.
+//! This module reuses the Dig artifact catalog, injects entropy, and makes persistence a port. The
+//! SQLite recycling adapter revalidates inventory after application-level checks so stale
+//! selections cannot partially consume relics.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Display;

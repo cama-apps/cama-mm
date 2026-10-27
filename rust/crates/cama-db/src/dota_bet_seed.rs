@@ -1,6 +1,6 @@
 //! Existing-schema persistence for reserve-backed Dota betting seeds.
 //!
-//! Python remains the schema and migration authority. Production code in this
+//! Schema creation and migration belong to the startup schema manager. Production code in this
 //! module only opens an already-migrated database through
 //! [`crate::open_runtime_connection`]. DDL is confined to disposable tests.
 
@@ -489,7 +489,9 @@ impl DotaBetSeedRepository {
         Ok(reservation)
     }
 
-    pub fn seed_state(
+    /// Test fixture: read a pending match's persisted seed reservation.
+    #[cfg(test)]
+    pub(crate) fn seed_state(
         &self,
         guild_id: Option<i64>,
         pending_match_id: i64,
@@ -678,48 +680,10 @@ impl DotaBetSeedRepository {
         Ok(previews)
     }
 
-    pub fn first_game_claim(
-        &self,
-        guild_id: Option<i64>,
-        pending_match_id: i64,
-    ) -> Result<Option<FirstGameClaim>, DotaBetSeedRepositoryError> {
-        let guild_id = Self::normalize_guild_id(guild_id);
-        let connection = open_runtime_connection(&self.path)?;
-        connection
-            .query_row(
-                "SELECT lobby_kind, game_date, amount, settled
-                   FROM first_game_pool_claims
-                  WHERE guild_id = ?1 AND pending_match_id = ?2",
-                params![guild_id, pending_match_id],
-                |row| {
-                    let lobby = match row.get::<_, String>(0)?.as_str() {
-                        "open" => FirstGameLobby::Open,
-                        "lowskill" => FirstGameLobby::LowSkill,
-                        other => {
-                            return Err(rusqlite::Error::InvalidColumnType(
-                                0,
-                                other.to_owned(),
-                                rusqlite::types::Type::Text,
-                            ));
-                        }
-                    };
-                    Ok(FirstGameClaim {
-                        guild_id,
-                        lobby,
-                        game_date: row.get(1)?,
-                        pending_match_id,
-                        amount: row.get(2)?,
-                        settled: row.get::<_, i64>(3)? != 0,
-                    })
-                },
-            )
-            .optional()
-            .map_err(Into::into)
-    }
-
     /// Narrow monetary-stock view used to prove that a claimed first-game pool
     /// remains reserve stock while its pending match exists.
-    pub fn seed_stock(
+    #[cfg(test)]
+    pub(crate) fn seed_stock(
         &self,
         guild_id: Option<i64>,
     ) -> Result<SeedStock, DotaBetSeedRepositoryError> {
@@ -905,6 +869,7 @@ fn ensure_pending_match(
     }
 }
 
+#[cfg(test)]
 fn seed_state_on_connection(
     connection: &rusqlite::Connection,
     guild_id: i64,

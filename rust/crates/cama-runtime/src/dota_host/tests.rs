@@ -588,7 +588,7 @@ impl Fixture {
             .insert("dota_host_account_key".into(), "99".into());
         pending.state.radiant_team_ids = vec![1, -1, -2, -3, -4];
         pending.state.dire_team_ids = vec![-5, -6, -7, -8, -9];
-        repo.update_pending_match(1, f.pending, &pending.state)
+        repo.replace_pending_match_for_tests(1, f.pending, &pending.state)
             .unwrap();
         GuildConfigRepository::new(&f.worker.path, false)
             .set_league_id(1, 123)
@@ -658,7 +658,7 @@ async fn manual_hosting_snapshot_skips_discovery_and_steam_entirely() {
         "dota_hosting".into(),
         serde_json::json!({"hosting":"manual"}),
     );
-    repo.update_pending_match(1, f.pending, &pending.state)
+    repo.replace_pending_match_for_tests(1, f.pending, &pending.state)
         .unwrap();
     f.worker.tick(&f.port, 100).await.unwrap();
     assert!(f.port.calls.lock().unwrap().is_empty());
@@ -676,7 +676,7 @@ async fn hosting_options_are_frozen_and_override_environment_defaults() {
     let repo = PendingMatchRepository::new(&f.worker.path);
     let mut pending = repo.pending_match(1, f.pending).unwrap().unwrap();
     pending.state.extra.insert("dota_hosting".into(), serde_json::json!({"region":3,"game_mode":23,"tv_delay":0,"league_id":456,"first_pick":"dire","start":"manual"}));
-    repo.update_pending_match(1, f.pending, &pending.state)
+    repo.replace_pending_match_for_tests(1, f.pending, &pending.state)
         .unwrap();
     GuildConfigRepository::new(&f.worker.path, false)
         .update_dota_hosting_options(
@@ -805,7 +805,7 @@ async fn simulation_obeys_manual_start_before_running_stages() {
         .state
         .extra
         .insert("dota_hosting".into(), serde_json::json!({"start":"manual"}));
-    repo.update_pending_match(1, f.pending, &pending.state)
+    repo.replace_pending_match_for_tests(1, f.pending, &pending.state)
         .unwrap();
     let port = simulated::connect(&f.worker.config);
     f.worker.tick(port.as_ref(), 100).await.unwrap();
@@ -2687,7 +2687,7 @@ async fn incomplete_shuffle_setup_cannot_claim_or_create_a_dota_lobby() {
         .state
         .extra
         .insert("shuffle_setup_complete".into(), false.into());
-    repo.update_pending_match(1, f.pending, &pending.state)
+    repo.replace_pending_match_for_tests(1, f.pending, &pending.state)
         .unwrap();
     f.worker.tick(&f.port, 100).await.unwrap();
     assert!(
@@ -2701,7 +2701,7 @@ async fn incomplete_shuffle_setup_cannot_claim_or_create_a_dota_lobby() {
         .state
         .extra
         .insert("shuffle_setup_complete".into(), true.into());
-    repo.update_pending_match(1, f.pending, &pending.state)
+    repo.replace_pending_match_for_tests(1, f.pending, &pending.state)
         .unwrap();
     f.worker.tick(&f.port, 105).await.unwrap();
     assert_eq!(

@@ -1,11 +1,8 @@
 //! Transport-independent Dota trivia question generation.
 //!
-//! The live Python service currently loads these records from Dotabase and uses
-//! Python's `random` module.  This additive Rust slice intentionally keeps both
-//! concerns behind inputs: callers supply a [`TriviaCatalog`] and an injected
-//! [`TriviaRandom`] implementation.  That makes the selection, answer-redaction,
-//! image metadata, and difficulty contracts deterministic without creating a
-//! second Dotabase or Discord runtime during the side-by-side migration.
+//! The catalog and randomness are inputs: callers supply a [`TriviaCatalog`]
+//! and an injected [`TriviaRandom`] implementation.  That makes the selection,
+//! answer-redaction, image metadata, and difficulty contracts deterministic.
 
 use std::collections::HashSet;
 

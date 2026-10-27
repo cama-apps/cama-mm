@@ -9,6 +9,7 @@
 use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
 
+use cama_domain::prediction_ladder::{adjusted_spread, build_levels};
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -201,12 +202,17 @@ impl PredictionWorkerRepository {
         } else {
             0
         };
-        let maximum_spread = (98 / settings.tick_size.max(1)).max(1);
-        let adjusted_refresh_spread =
-            (settings.refresh_spread_ticks + spread_delta).clamp(1, maximum_spread);
-        let adjusted_initial_spread =
-            (settings.initial_spread_ticks + spread_delta).clamp(1, maximum_spread);
-        let levels = build_levels(new_price, adjusted_refresh_spread, settings);
+        let adjusted_refresh_spread = adjusted_spread(
+            settings.refresh_spread_ticks,
+            spread_delta,
+            settings.tick_size,
+        );
+        let adjusted_initial_spread = adjusted_spread(
+            settings.initial_spread_ticks,
+            spread_delta,
+            settings.tick_size,
+        );
+        let levels = refresh_levels(new_price, adjusted_refresh_spread, settings);
         let trades = trades_since(&transaction, prediction_id, previous_refresh)?;
 
         let minimum_quote_offset = adjusted_initial_spread
@@ -589,38 +595,22 @@ fn validate_refresh_settings(
     Ok(())
 }
 
-fn build_levels(
+fn refresh_levels(
     fair: i64,
     spread_ticks: i64,
     settings: &PredictionRefreshSettings,
 ) -> Vec<NewLevel> {
-    let size_per_level = settings.size_per_level.max(0);
-    if size_per_level == 0 {
-        return Vec::new();
-    }
-    let sizes = std::iter::repeat_n(size_per_level, settings.levels_per_side)
-        .chain(settings.outer_level_sizes.iter().map(|size| (*size).max(0)));
-    let mut levels = Vec::new();
-    for (index, size) in sizes.enumerate() {
-        if size == 0 {
-            continue;
-        }
-        let Ok(index) = i64::try_from(index) else {
-            break;
-        };
-        let offset = spread_ticks
-            .saturating_add(index)
-            .saturating_mul(settings.tick_size);
-        let ask = fair.saturating_add(offset);
-        let bid = fair.saturating_sub(offset);
-        if (1..=99).contains(&ask) {
-            levels.push(NewLevel::ask(ask, size));
-        }
-        if (1..=99).contains(&bid) {
-            levels.push(NewLevel::bid(bid, size));
-        }
-    }
-    levels
+    build_levels(
+        fair,
+        spread_ticks,
+        settings.tick_size,
+        settings.levels_per_side,
+        settings.size_per_level,
+        &settings.outer_level_sizes,
+    )
+    .into_iter()
+    .map(NewLevel::from)
+    .collect()
 }
 
 fn level_side(level: NewLevel) -> &'static str {

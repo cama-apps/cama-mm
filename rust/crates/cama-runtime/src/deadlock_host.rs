@@ -822,10 +822,7 @@ fn now() -> i64 {
 async fn blocking<T: Send + 'static, E: std::fmt::Display + Send + 'static>(
     call: impl FnOnce() -> Result<T, E> + Send + 'static,
 ) -> Result<T, String> {
-    tokio::task::spawn_blocking(call)
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())
+    crate::ids::blocking("Deadlock host", move || call().map_err(|e| e.to_string())).await
 }
 fn acquire_account_lock(config: &DeadlockHostConfig) -> Result<File, String> {
     let path = config.auth.session_path.with_extension("host.lock");

@@ -1,10 +1,9 @@
-//! Cross-runtime single-owner guard for the production Discord process.
+//! Single-owner guard for the production Discord process.
 //!
-//! Both deployment artifacts lock the same file before touching SQLite or the
-//! Discord gateway. The Python container uses `flock(1)` and Rust uses the
-//! matching advisory file-lock primitive through `fs2`, so an accidental
-//! overlapping deploy fails closed instead of creating two event consumers or
-//! writers.
+//! The runtime takes an advisory lock on a file beside the database (through
+//! `fs2`, the same primitive util-linux `flock(1)` uses) before touching
+//! SQLite or the Discord gateway, so an accidental overlapping deploy fails
+//! closed instead of creating two event consumers or writers.
 
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -123,18 +122,18 @@ mod tests {
     fn util_linux_flock_and_rust_share_the_same_guard() {
         let directory = tempdir().expect("temp directory");
         let path = directory.path().join(DEFAULT_LOCK_FILE_NAME);
-        let mut python_wrapper = Command::new("flock")
+        let mut flock_wrapper = Command::new("flock")
             .args(["--nonblock", "--no-fork"])
             .arg(&path)
             .args(["sh", "-c", "printf ready; read _ || true"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
-            .expect("spawn the same util-linux wrapper used by Dockerfile");
+            .expect("spawn a util-linux flock wrapper");
 
         let mut ready = [0_u8; 5];
         std::io::Read::read_exact(
-            python_wrapper.stdout.as_mut().expect("wrapper stdout"),
+            flock_wrapper.stdout.as_mut().expect("wrapper stdout"),
             &mut ready,
         )
         .expect("wrapper acquired the lock");
@@ -144,17 +143,17 @@ mod tests {
             Err(ProcessLockError::AlreadyRunning { .. })
         ));
 
-        drop(python_wrapper.stdin.take());
-        assert!(python_wrapper.wait().expect("wrapper exit").success());
+        drop(flock_wrapper.stdin.take());
+        assert!(flock_wrapper.wait().expect("wrapper exit").success());
         let rust_runtime =
-            ProcessLock::try_acquire(&path).expect("Rust owns the lock after Python exits");
+            ProcessLock::try_acquire(&path).expect("runtime owns the lock after flock exits");
         assert!(
             !Command::new("flock")
                 .args(["--nonblock"])
                 .arg(&path)
                 .arg("true")
                 .status()
-                .expect("run Python container's lock primitive")
+                .expect("run util-linux flock")
                 .success(),
             "util-linux flock must reject overlap while Rust owns the guard"
         );
@@ -167,7 +166,7 @@ mod tests {
                 .status()
                 .expect("run lock primitive after Rust shutdown")
                 .success(),
-            "Python restart must acquire the guard after Rust exits"
+            "flock must acquire the guard after the runtime exits"
         );
     }
 }

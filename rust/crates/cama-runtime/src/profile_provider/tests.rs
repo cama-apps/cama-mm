@@ -1652,7 +1652,13 @@ fn test_predictions_tab_open_position() {
     let database = migrated_player_fixture();
     let (repository, prediction_id) = insert_profile_prediction(&database, "Will it rain?");
     let receipt = repository
-        .buy_contracts_atomic(prediction_id, 100, ContractSide::Yes, 3)
+        .buy_contracts_atomic_with_max(
+            prediction_id,
+            100,
+            ContractSide::Yes,
+            3,
+            cama_db::predictions_repository::MAX_CONTRACTS_PER_TRADE,
+        )
         .expect("buy profile prediction contracts");
     let page = prediction_page(&database);
 
@@ -1678,7 +1684,13 @@ fn test_predictions_tab_resolved_win() {
     let database = migrated_player_fixture();
     let (repository, prediction_id) = insert_profile_prediction(&database, "Will it snow?");
     let receipt = repository
-        .buy_contracts_atomic(prediction_id, 100, ContractSide::Yes, 3)
+        .buy_contracts_atomic_with_max(
+            prediction_id,
+            100,
+            ContractSide::Yes,
+            3,
+            cama_db::predictions_repository::MAX_CONTRACTS_PER_TRADE,
+        )
         .expect("buy winning prediction contracts");
     PredictionResolutionRepository::new(database.path())
         .settle_orderbook(
@@ -1706,7 +1718,13 @@ fn test_predictions_tab_resolved_loss() {
     let database = migrated_player_fixture();
     let (repository, prediction_id) = insert_profile_prediction(&database, "Will it hail?");
     let receipt = repository
-        .buy_contracts_atomic(prediction_id, 100, ContractSide::Yes, 3)
+        .buy_contracts_atomic_with_max(
+            prediction_id,
+            100,
+            ContractSide::Yes,
+            3,
+            cama_db::predictions_repository::MAX_CONTRACTS_PER_TRADE,
+        )
         .expect("buy losing prediction contracts");
     PredictionResolutionRepository::new(database.path())
         .settle_orderbook(

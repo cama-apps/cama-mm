@@ -244,7 +244,7 @@ fn integer_choices(name: &str, description: &str, values: &[(&str, i64)]) -> Com
 
 pub(super) fn options() -> Vec<CommandOptionSpec> {
     let mut result = vec![
-        subcommand(
+        CommandOptionSpec::subcommand(
             "settings",
             "Show or update defaults for future shuffles in this server",
             vec![
@@ -311,7 +311,7 @@ pub(super) fn options() -> Vec<CommandOptionSpec> {
                 ),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "reset",
             "Reset future-shuffle Dota settings to deployment defaults",
             vec![],
@@ -329,12 +329,12 @@ pub(super) fn options() -> Vec<CommandOptionSpec> {
         1,
         9_007_199_254_740_991,
     ));
-    result.push(subcommand(
+    result.push(CommandOptionSpec::subcommand(
         "configure",
         "Queue settings for an existing prelaunch bot lobby; future defaults unchanged",
         active_settings,
     ));
-    result.push(subcommand(
+    result.push(CommandOptionSpec::subcommand(
         "betting",
         "Suspend or resume wager admission with an audit reason",
         vec![
@@ -359,7 +359,7 @@ pub(super) fn options() -> Vec<CommandOptionSpec> {
             ),
         ],
     ));
-    result.push(subcommand(
+    result.push(CommandOptionSpec::subcommand(
         "resolve",
         "Resolve a finished hosted match and safely release the bot account",
         vec![
@@ -401,7 +401,7 @@ pub(super) fn options() -> Vec<CommandOptionSpec> {
         ("resume", "Resume a safely recoverable held hosting session"),
         ("manual", "Hand this pending match to a human Dota host"),
     ] {
-        result.push(subcommand(
+        result.push(CommandOptionSpec::subcommand(
             name,
             description,
             vec![bounded_integer(

@@ -207,7 +207,7 @@ impl InteractionHandler for HeroGridHandler {
                     min_games,
                     limit,
                     sources: &sources,
-                    player_name_overrides: Some(&player_name_overrides),
+                    player_name_overrides: &player_name_overrides,
                 })
                 .map_err(|error| match error {
                     HeroGridCommandError::Data(error) => HeroGridFailure::Data(error.to_string()),

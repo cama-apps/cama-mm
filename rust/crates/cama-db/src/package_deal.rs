@@ -1,7 +1,7 @@
 //! Python-compatible package-deal persistence and scalar pricing.
 //!
-//! Python remains the sole schema-migration authority during the side-by-side
-//! rewrite. This module opens only an existing SQLite file and uses the
+//! Schema creation and migration belong to the startup schema manager. This
+//! module opens only an existing SQLite file and uses the
 //! already-migrated `players`, `package_deals`, `package_deal_purchases`, and
 //! economy-ledger tables. Paid purchases use `BEGIN IMMEDIATE`, matching the
 //! Python repository's serialization boundary for pricing, debit, and top-up.
@@ -354,29 +354,6 @@ impl PackageDealRepository {
         Ok(deals)
     }
 
-    /// Return active deals where a player is either endpoint.
-    pub fn get_deals_involving_player(
-        &self,
-        guild_id: Option<i64>,
-        discord_id: i64,
-    ) -> Result<Vec<PackageDeal>, PackageDealRepositoryError> {
-        let guild_id = Self::normalize_guild_id(guild_id);
-        let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT id, guild_id, buyer_discord_id, partner_discord_id,
-                    games_remaining, cost_paid, created_at, updated_at
-             FROM package_deals
-             WHERE guild_id = ?1
-               AND (buyer_discord_id = ?2 OR partner_discord_id = ?2)
-               AND games_remaining > 0
-             ORDER BY created_at DESC",
-        )?;
-        let deals = statement
-            .query_map(params![guild_id, discord_id], row_to_deal)?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(deals)
-    }
-
     /// Read immutable purchases in Python's inclusive-start/exclusive-end window.
     pub fn get_purchases_involving_player(
         &self,
@@ -427,8 +404,10 @@ impl PackageDealRepository {
         Ok(deals)
     }
 
-    /// Consume one game from each still-active deal ID in the given guild.
-    pub fn decrement_deals(
+    /// Test fixture: consume one game from each still-active deal ID. Match
+    /// recording consumes deals inside its own transaction in `core_repositories`.
+    #[cfg(test)]
+    pub(crate) fn decrement_deals(
         &self,
         guild_id: Option<i64>,
         deal_ids: &[i64],
@@ -521,19 +500,6 @@ impl PackageDealRepository {
             cancelled: true,
             reason: None,
         })
-    }
-
-    /// Delete consumed rows while leaving the immutable purchase log intact.
-    pub fn delete_expired_deals(
-        &self,
-        guild_id: Option<i64>,
-    ) -> Result<usize, PackageDealRepositoryError> {
-        let guild_id = Self::normalize_guild_id(guild_id);
-        let connection = self.connection()?;
-        Ok(connection.execute(
-            "DELETE FROM package_deals WHERE guild_id = ?1 AND games_remaining <= 0",
-            params![guild_id],
-        )?)
     }
 }
 
@@ -1232,36 +1198,6 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_expired_deals() {
-        let fixture = Fixture::new();
-        let first = fixture
-            .repository
-            .create_or_extend_deal(Some(GUILD_ID), BUYER_ID, 200, 1, 0)
-            .unwrap();
-        fixture
-            .repository
-            .create_or_extend_deal(Some(GUILD_ID), BUYER_ID, 300, 5, 0)
-            .unwrap();
-        fixture
-            .repository
-            .decrement_deals(Some(GUILD_ID), &[first.id])
-            .unwrap();
-        assert_eq!(
-            fixture
-                .repository
-                .delete_expired_deals(Some(GUILD_ID))
-                .unwrap(),
-            1
-        );
-        let deals = fixture
-            .repository
-            .get_user_deals(Some(GUILD_ID), BUYER_ID)
-            .unwrap();
-        assert_eq!(deals.len(), 1);
-        assert_eq!(deals[0].partner_discord_id, 300);
-    }
-
-    #[test]
     fn cancel_deal_at_thirty_day_inactivity_boundary_keeps_purchase_history() {
         const NOW: i64 = 2_000_000_000;
         const THIRTY_DAYS: i64 = 30 * 24 * 60 * 60;
@@ -1560,7 +1496,7 @@ mod tests {
     }
 
     #[test]
-    fn test_purchase_log_survives_consumption_and_deletion() {
+    fn test_purchase_log_survives_consumption() {
         let fixture = Fixture::new();
         let deal = fixture
             .repository
@@ -1572,14 +1508,10 @@ mod tests {
                 .decrement_deals(Some(GUILD_ID), &[deal.id])
                 .unwrap();
         }
-        fixture
-            .repository
-            .delete_expired_deals(Some(GUILD_ID))
-            .unwrap();
         assert!(
             fixture
                 .repository
-                .get_deals_involving_player(Some(GUILD_ID), BUYER_ID)
+                .get_active_deals_for_players(Some(GUILD_ID), &[BUYER_ID, PARTNER_ID])
                 .unwrap()
                 .is_empty()
         );

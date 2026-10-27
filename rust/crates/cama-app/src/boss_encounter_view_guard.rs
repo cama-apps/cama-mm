@@ -1,7 +1,6 @@
 //! Transport-independent policy for Discord boss encounter and duel views.
 //!
-//! Python remains the live Discord adapter during the side-by-side migration.
-//! This module owns the state machine behind its views: authorization, modal
+//! This module owns the state machine behind the runtime's views: authorization, modal
 //! ownership, one-shot fight and resume guards, typed component identifiers,
 //! callback ordering, presentation, and failure-tolerant delivery ports.
 
@@ -1061,7 +1060,7 @@ pub fn build_phase_transition(
             "Carried Wager",
             format!(
                 "**{}** JC is already riding on this phase.",
-                format_number(amount)
+                cama_domain::formatting::format_grouped(amount)
             ),
         );
     }
@@ -1081,22 +1080,6 @@ pub fn build_phase_transition(
         encounter_info: next_info,
         art,
         callback_attached,
-    }
-}
-
-fn format_number(value: i64) -> String {
-    let digits = value.unsigned_abs().to_string();
-    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, byte) in digits.bytes().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            grouped.push(',');
-        }
-        grouped.push(char::from(byte));
-    }
-    if value < 0 {
-        format!("-{grouped}")
-    } else {
-        grouped
     }
 }
 

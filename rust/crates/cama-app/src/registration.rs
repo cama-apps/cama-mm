@@ -1,9 +1,7 @@
 //! Discord-independent registration command policy.
 //!
-//! Typed ports model reminder persistence, DM preflight, and role storage. The
-//! production Discord callback and OpenDota transport remain Python-owned
-//! during additive parity, while ordering and user-visible outcomes are fully
-//! deterministic here.
+//! Typed ports model reminder persistence, DM preflight, and role storage, so
+//! ordering and user-visible outcomes are fully deterministic here.
 
 use std::fmt::Display;
 

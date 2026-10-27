@@ -6,7 +6,6 @@
 
 use std::path::{Path, PathBuf};
 
-use cama_db::dig_event_threats::ThreatCurseEffects;
 use cama_db::dig_social_runtime::{
     AtomicDigHelpSettlement, AtomicDigSabotageSettlement, DigGiftOutcome, DigHelpSettlementOutcome,
     DigHelpSnapshot, DigSabotageRevenge, DigSabotageSettlementOutcome, DigSabotageTunnelSnapshot,
@@ -21,19 +20,16 @@ use cama_db::shop_runtime::ShopRuntimeRepository;
 use cama_domain::dig_economy::{DIG_POSITIVE_JC_MULTIPLIER, scale_positive_dig_jc};
 use cama_domain::game_date::game_date_for_timestamp;
 use cama_domain::mana::{ManaEffects, apply_sabotage_modifiers};
-use serde_json::Value;
 use thiserror::Error;
 
-use crate::dig_event_threats::cursed_cooldown;
 use crate::dig_loot::artifact_catalog;
 use crate::dig_runtime::DigRuntimeConfig;
 use crate::dig_service::{
     PICKAXE_TIERS, SABOTAGE_COOLDOWN_SECONDS, defeated_boundaries_from_json, next_undefeated_boss,
 };
-use crate::dig_service::{cooldown_duration, cooldown_remaining, layer_at};
+use crate::dig_service::{cooldown_remaining, effective_dig_cooldown, layer_at};
 use crate::dig_sweep_fixes::{ProtectionSource, funded_protection};
 use crate::dig_tunnel_naming::{DigTunnelNamingService, TunnelNameEntropy};
-use crate::dig_tunnels::{mutation_effects, mutations_from_json};
 use crate::economy_event_sqlite::{SqliteEconomyEventError, SqliteEconomyEventService};
 
 pub trait DigSocialEntropy: TunnelNameEntropy {
@@ -1032,7 +1028,7 @@ fn effective_new_helper_cooldown(
     mana: &ManaEffects,
 ) -> i64 {
     helper.map_or_else(
-        || cooldown_duration(0, false, false, mana.dig_cooldown_reduction_seconds),
+        || effective_dig_cooldown(0, None, None, None, mana.dig_cooldown_reduction_seconds),
         |helper| effective_help_cooldown(helper, mana),
     )
 }
@@ -1041,50 +1037,13 @@ fn effective_help_cooldown(
     helper: &cama_db::dig_social_runtime::DigHelpTunnelSnapshot,
     mana: &ManaEffects,
 ) -> i64 {
-    let mutations = mutations_from_json(helper.mutations_json.as_deref());
-    let restless = mutation_effects(&mutations)
-        .get("cooldown_bonus_seconds")
-        .and_then(|effect| effect.number())
-        .is_some_and(|seconds| seconds > 0.0);
-    let slower_cooldown = json_string_eq(
+    effective_dig_cooldown(
+        helper.stat_stamina,
+        helper.mutations_json.as_deref(),
         helper.injury_state_json.as_deref(),
-        "type",
-        "slower_cooldown",
-    );
-    let after_stamina = cooldown_duration(helper.stat_stamina, restless, slower_cooldown, 0);
-    cursed_cooldown(
-        after_stamina,
-        active_cooldown_curse(helper.temp_curses_json.as_deref()),
+        helper.temp_curses_json.as_deref(),
         mana.dig_cooldown_reduction_seconds,
     )
-}
-
-fn active_cooldown_curse(raw: Option<&str>) -> ThreatCurseEffects {
-    let Some(value) = raw.and_then(|raw| serde_json::from_str::<Value>(raw).ok()) else {
-        return ThreatCurseEffects::default();
-    };
-    if value
-        .get("digs_remaining")
-        .and_then(Value::as_i64)
-        .unwrap_or_default()
-        <= 0
-    {
-        return ThreatCurseEffects::default();
-    }
-    ThreatCurseEffects {
-        cooldown_penalty: value
-            .get("effect")
-            .or_else(|| value.get("effects"))
-            .and_then(|effect| effect.get("cooldown_penalty"))
-            .and_then(Value::as_f64),
-        ..ThreatCurseEffects::default()
-    }
-}
-
-fn json_string_eq(raw: Option<&str>, key: &str, expected: &str) -> bool {
-    raw.and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-        .and_then(|value| value.get(key).and_then(Value::as_str).map(str::to_owned))
-        .is_some_and(|value| value == expected)
 }
 
 fn next_unfinished_boss_boundary(raw: Option<&str>) -> Option<i64> {

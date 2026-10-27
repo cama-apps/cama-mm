@@ -1,10 +1,9 @@
 //! Public, provider-free counterparts for `tests/test_dig_quest_service.py`.
 //!
-//! The Python service composes repository I/O, event resolution, and Discord
-//! delivery.  These tests pin the admitted policy/service boundary: injected
-//! quest catalogs, exact eligibility/progression semantics, typed finale
-//! payloads, and the already-migrated quest-state table.  Event-provider and
-//! Discord delivery cases remain in their dedicated runtime audit target.
+//! These tests pin the quest policy/service boundary: injected quest catalogs,
+//! exact eligibility/progression semantics, and typed finale payloads.
+//! Event-provider and Discord delivery cases remain in their dedicated runtime
+//! audit target.
 
 use std::collections::BTreeSet;
 
@@ -17,13 +16,7 @@ use cama_app::dig_quest_policy::{
     eligible_quest_event_ids, quest_for_event, quest_system_predicate_satisfied,
     resolve_quest_finale_for_service,
 };
-use cama_db::dig_quest_repository::DigQuestRepository;
-use cama_db::schema_manager;
-use rusqlite::{Connection, params};
-use tempfile::NamedTempFile;
 
-const ACTOR: i64 = 84_001;
-const GUILD: i64 = 84_002;
 const NOW: i64 = 2_000_000_000;
 
 fn quest(
@@ -78,12 +71,6 @@ fn jc_quest(quest_id: &str) -> CanonicalQuestDef {
             modifier_payload: serde_json::json!({"jc_event_bonus_pct": 25}),
         },
     )
-}
-
-fn migrated_database() -> NamedTempFile {
-    let file = NamedTempFile::new().expect("temporary quest database");
-    schema_manager::initialize_or_migrate(file.path()).expect("canonical migrated schema");
-    file
 }
 
 #[test]
@@ -317,26 +304,6 @@ fn test_advance_through_to_finale_dispatches_relic() {
     assert_ne!(relic_stat_ids[0], relic_stat_ids[1]);
     assert!(active_id.is_none());
     assert!(active_step.is_none());
-
-    // The repository boundary owns the actual artifact insert; this test
-    // pins the exact identifier consumed by that boundary.
-    let database = migrated_database();
-    let repository = DigQuestRepository::new(database.path());
-    repository
-        .add_relic_artifact(ACTOR, Some(GUILD), &artifact_id, NOW)
-        .expect("persist relic");
-    let connection = Connection::open(database.path()).expect("open database");
-    assert_eq!(
-        connection
-            .query_row(
-                "SELECT COUNT(*) FROM dig_artifacts
-                  WHERE discord_id=?1 AND guild_id=?2 AND artifact_id=?3 AND is_relic=1",
-                params![ACTOR, GUILD, artifact_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("count relic"),
-        1
-    );
 }
 
 #[test]
@@ -367,35 +334,6 @@ fn test_completed_quest_not_re_eligible_after_finale() {
     let completed = BTreeSet::from(["qtest".to_owned()]);
     let empty = BTreeSet::new();
     assert!(eligible_quest_event_ids(&quests, 0, 0, None, None, &completed, &empty).is_empty());
-}
-
-#[test]
-fn test_progression_persists_across_prestige_reset() {
-    let database = migrated_database();
-    let repository = DigQuestRepository::new(database.path());
-    repository
-        .set_active(ACTOR, Some(GUILD), "qtest", 3, NOW)
-        .expect("set active quest");
-    let connection = Connection::open(database.path()).expect("open database");
-    connection
-        .execute(
-            "INSERT INTO tunnels(discord_id,guild_id,depth,prestige_level,tunnel_name)
-             VALUES(?1,?2,10,1,'Test')",
-            params![ACTOR, GUILD],
-        )
-        .expect("seed tunnel");
-    connection
-        .execute(
-            "UPDATE tunnels SET depth=0, prestige_level=2
-              WHERE discord_id=?1 AND guild_id=?2",
-            params![ACTOR, GUILD],
-        )
-        .expect("reset tunnel");
-    let state = repository
-        .get_state(ACTOR, Some(GUILD))
-        .expect("read quest state");
-    assert_eq!(state.active_quest_id.as_deref(), Some("qtest"));
-    assert_eq!(state.active_quest_step, Some(3));
 }
 
 #[test]

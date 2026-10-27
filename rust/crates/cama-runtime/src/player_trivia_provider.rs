@@ -1459,6 +1459,7 @@ fn convert_snapshot(value: db::PlayerTriviaSnapshot) -> app::PlayerTriviaSnapsho
                 payout: row.payout,
                 settlement_vanity_tax: row.settlement_vanity_tax,
                 settlement_low_priority_tax: row.settlement_low_priority_tax,
+                settlement_bankruptcy_penalty: row.settlement_bankruptcy_penalty,
             })
             .collect(),
         dig_artifacts: value

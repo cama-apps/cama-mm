@@ -575,52 +575,6 @@ fn pay_debt_rejects_insufficient_sender_balance() {
 }
 
 #[test]
-fn test_reset_returns_reserve_and_no_ops_on_retry() {
-    let fixture = Fixture::new();
-    fixture
-        .repository
-        .add_to_nonprofit_fund(Some(TEST_GUILD_ID), 500, None)
-        .expect("seed reserve");
-    fixture
-        .repository
-        .deduct_from_nonprofit_fund(Some(TEST_GUILD_ID), 200, None)
-        .expect("reserve proposal funds");
-    fixture
-        .connection()
-        .execute(
-            "INSERT INTO disburse_proposals (
-                 guild_id, proposal_id, fund_amount, quorum_required, status
-             ) VALUES (?1, 1, 200, 3, 'active')",
-            [TEST_GUILD_ID],
-        )
-        .expect("seed active proposal");
-
-    assert!(
-        fixture
-            .repository
-            .reset_and_return_fund_atomic(Some(TEST_GUILD_ID), 200)
-            .expect("first reset")
-    );
-    assert_eq!(fixture.fund(), 500);
-    let status: String = fixture
-        .connection()
-        .query_row(
-            "SELECT status FROM disburse_proposals WHERE proposal_id = 1",
-            [],
-            |row| row.get(0),
-        )
-        .expect("proposal status");
-    assert_eq!(status, "reset");
-    assert!(
-        !fixture
-            .repository
-            .reset_and_return_fund_atomic(Some(TEST_GUILD_ID), 200)
-            .expect("idempotent retry")
-    );
-    assert_eq!(fixture.fund(), 500);
-}
-
-#[test]
 fn test_get_state_no_loans() {
     let fixture = Fixture::new();
     fixture.add_player(6_001, 3);

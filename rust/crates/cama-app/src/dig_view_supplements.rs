@@ -1,8 +1,8 @@
 //! Smaller Dig route, event-view, and phase-transition policies.
 //!
-//! The live Python commands remain authoritative. These typed state machines
-//! keep Discord acknowledgement/removal behavior and one-shot economic guards
-//! executable while the Rust transport and repository adapters are built.
+//! These typed state machines keep Discord acknowledgement/removal behavior
+//! and one-shot economic guards independent of the transport and repository
+//! adapters.
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RouteOffer {

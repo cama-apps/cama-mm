@@ -9,6 +9,7 @@ use crate::gateway_events::{
     GatewayEventObserver, GatewayMember, GuildMemberPageSource, ReadyRecoveryContext,
     ReadyRecoveryFailure, ReadyRecoveryReport,
 };
+use crate::ids::signed_id;
 
 pub const DISCORD_MEMBER_PAGE_LIMIT: u64 = 1_000;
 const OBSERVER_NAME: &str = "vanity-tax-membership";
@@ -34,11 +35,6 @@ impl VanityTaxGatewayObserver {
             service,
             page_limit,
         }
-    }
-
-    fn signed_id(kind: &'static str, value: u64) -> Result<i64, String> {
-        i64::try_from(value)
-            .map_err(|_| format!("Discord {kind} snowflake {value} exceeds SQLite INTEGER range"))
     }
 
     async fn fetch_guild_members(
@@ -75,7 +71,7 @@ impl VanityTaxGatewayObserver {
                 next_after =
                     Some(next_after.map_or(member.user_id, |current| current.max(member.user_id)));
                 members.push(VanityMember {
-                    discord_id: Self::signed_id("user", member.user_id)?,
+                    discord_id: signed_id(member.user_id, "user")?,
                     nickname: member.server_nickname,
                 });
             }
@@ -97,8 +93,8 @@ impl VanityTaxGatewayObserver {
     }
 
     fn update_member(&self, member: GatewayMember) -> Result<(), String> {
-        let guild_id = Self::signed_id("guild", member.guild_id)?;
-        let user_id = Self::signed_id("user", member.user_id)?;
+        let guild_id = signed_id(member.guild_id, "guild")?;
+        let user_id = signed_id(member.user_id, "user")?;
         self.service
             .update_member(guild_id, user_id, member.server_nickname.as_deref());
         Ok(())
@@ -121,7 +117,7 @@ impl GatewayEventObserver for VanityTaxGatewayObserver {
             .guild_ids()
             .iter()
             .map(|&guild_id| {
-                let refresh = Self::signed_id("guild", guild_id).map(|signed_guild_id| {
+                let refresh = signed_id(guild_id, "guild").map(|signed_guild_id| {
                     let generation = self.service.begin_refresh(signed_guild_id);
                     (guild_id, signed_guild_id, generation)
                 });
@@ -186,10 +182,8 @@ impl GatewayEventObserver for VanityTaxGatewayObserver {
     }
 
     async fn member_remove(&self, guild_id: u64, user_id: u64) -> Result<(), String> {
-        self.service.remove_member(
-            Self::signed_id("guild", guild_id)?,
-            Self::signed_id("user", user_id)?,
-        );
+        self.service
+            .remove_member(signed_id(guild_id, "guild")?, signed_id(user_id, "user")?);
         Ok(())
     }
 }

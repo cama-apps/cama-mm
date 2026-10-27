@@ -1,10 +1,9 @@
 //! Existing-schema persistence for rare Dig bonus events.
 //!
-//! Python remains the schema and live runtime authority. This repository only
-//! opens an already-migrated database through [`crate::open_runtime_connection`].
-//! Trivia settlement installs the audit context and changes the player balance
-//! inside one `BEGIN IMMEDIATE` transaction so the existing Python trigger
-//! emits a matching economy-ledger entry.
+//! This repository only opens an already-migrated database through
+//! [`crate::open_runtime_connection`]. Trivia settlement installs the audit
+//! context and changes the player balance inside one `BEGIN IMMEDIATE`
+//! transaction so the economy-ledger trigger emits a matching entry.
 
 use std::path::{Path, PathBuf};
 

@@ -9,7 +9,6 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cama_db::core_repositories::PlayerRepository;
-use cama_db::dig_event_threats::ThreatCurseEffects;
 use cama_db::mana_service_repository::ManaRepository;
 use cama_db::notifications::{NotificationKind, NotificationPreferences, NotificationRepository};
 use cama_db::pet_repository::PetRepository;
@@ -18,11 +17,8 @@ use cama_domain::game_date::get_game_date;
 use cama_domain::mana::ManaEffects;
 use cama_domain::pet::UNHATCHED_SPECIES;
 use rusqlite::types::Value;
-use serde_json::Value as JsonValue;
 
-use crate::dig_event_threats::cursed_cooldown;
-use crate::dig_service::cooldown_duration;
-use crate::dig_tunnels::{mutation_effects, mutations_from_json};
+use crate::dig_service;
 use crate::reminders::{
     GuildId, PetWarning, PlayerRating, PortError, ReminderKind, ReminderPreferences, ReminderStore,
     ReminderTimestamps, UserId,
@@ -320,51 +316,13 @@ impl ReminderStore for SqliteReminderStore {
 }
 
 fn effective_dig_cooldown(anchor: &DigReminderAnchor, mana_reduction_seconds: i64) -> i64 {
-    let mutations = mutations_from_json(anchor.mutations_json.as_deref());
-    let restless = mutation_effects(&mutations)
-        .get("cooldown_bonus_seconds")
-        .and_then(|effect| effect.number())
-        .is_some_and(|seconds| seconds > 0.0);
-    let slower_cooldown = json_string_eq(
+    dig_service::effective_dig_cooldown(
+        anchor.stat_stamina,
+        anchor.mutations_json.as_deref(),
         anchor.injury_state_json.as_deref(),
-        "type",
-        "slower_cooldown",
-    );
-    let after_stamina = cooldown_duration(anchor.stat_stamina, restless, slower_cooldown, 0);
-    let curse = active_cooldown_curse(anchor.temp_curse_json.as_deref());
-    cursed_cooldown(after_stamina, curse, mana_reduction_seconds)
-}
-
-fn active_cooldown_curse(raw: Option<&str>) -> ThreatCurseEffects {
-    let Some(value) = raw.and_then(|raw| serde_json::from_str::<JsonValue>(raw).ok()) else {
-        return ThreatCurseEffects::default();
-    };
-    if value
-        .get("digs_remaining")
-        .and_then(JsonValue::as_i64)
-        .unwrap_or_default()
-        <= 0
-    {
-        return ThreatCurseEffects::default();
-    }
-    ThreatCurseEffects {
-        cooldown_penalty: value
-            .get("effect")
-            .and_then(|effect| effect.get("cooldown_penalty"))
-            .and_then(JsonValue::as_f64),
-        ..ThreatCurseEffects::default()
-    }
-}
-
-fn json_string_eq(raw: Option<&str>, key: &str, expected: &str) -> bool {
-    raw.and_then(|raw| serde_json::from_str::<JsonValue>(raw).ok())
-        .and_then(|value| {
-            value
-                .get(key)
-                .and_then(JsonValue::as_str)
-                .map(str::to_owned)
-        })
-        .is_some_and(|value| value == expected)
+        anchor.temp_curse_json.as_deref(),
+        mana_reduction_seconds,
+    )
 }
 
 fn optional_timestamp(value: &Value) -> Option<i64> {

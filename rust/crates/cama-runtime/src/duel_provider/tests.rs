@@ -11,7 +11,7 @@ use crate::discord_transport::{
     DiscordEmoji, DiscordGuildMemberSnapshot, DiscordMessageReceipt, DiscordMessageSnapshot,
 };
 use crate::gateway_events::{GatewayMember, GuildMemberPageSource};
-use crate::registration::{InteractionResponseError, Registry};
+use crate::registration::{InteractionResponseError, InteractionValue, Registry};
 use crate::test_support::initialize_test_database as initialize_or_migrate;
 
 const GUILD: i64 = 9_001;

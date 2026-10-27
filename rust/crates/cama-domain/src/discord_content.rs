@@ -5,6 +5,9 @@ use std::fmt::{Display, Formatter};
 
 pub const DISCORD_MESSAGE_MAX_CHARS: usize = 2_000;
 
+/// Shown when no live or last-seen readable name exists for a player.
+pub const UNKNOWN_PLAYER: &str = "Unknown player";
+
 /// Names are text, never Discord mention markup or a serialized identifier.
 /// Apply this at rendering boundaries too: historical stored names may contain
 /// the ID/mention/`User <id>` fallbacks used by older versions of the bot.

@@ -949,45 +949,6 @@ fn successful_bet_counter_is_durable_and_guild_scoped() {
 }
 
 #[test]
-fn test_stale_pending_bets_do_not_show_or_block_new_match() {
-    let file = fixture();
-    add_pending(file.path(), 1, false);
-    add_pending(file.path(), 2, false);
-    add_player(file.path(), 110, 50);
-    let repository = repo(file.path());
-    repository
-        .place_bet_atomic(request(1, 110, BettingTeam::Radiant, 5))
-        .expect("old bet");
-    assert_eq!(
-        repository
-            .refund_pending_bets_atomic(Some(GUILD), NOW, Some(1))
-            .expect("refund old match"),
-        1
-    );
-    assert_eq!(balance(file.path(), 110), 50);
-    assert_eq!(
-        repository
-            .get_pending_totals(Some(GUILD), NOW + 1, Some(2))
-            .expect("new totals"),
-        PotTotals::default()
-    );
-    let mut new_request = request(2, 110, BettingTeam::Dire, 4);
-    new_request.bet_time = NOW + 1;
-    repository
-        .place_bet_atomic(new_request)
-        .expect("new match bet");
-    assert_eq!(
-        repository
-            .get_pending_totals(Some(GUILD), NOW + 1, Some(2))
-            .expect("new totals"),
-        PotTotals {
-            radiant: 0,
-            dire: 4
-        }
-    );
-}
-
-#[test]
 fn test_get_pot_odds_isolated_between_matches() {
     let file = fixture();
     add_pending(file.path(), 11, false);
@@ -1065,46 +1026,6 @@ fn test_spectator_can_bet_on_multiple_matches() {
     assert_eq!(second.len(), 1);
     assert_eq!(second[0].team, BettingTeam::Dire);
     assert_eq!(balance(file.path(), 3_101), 100);
-}
-
-#[test]
-fn test_refund_bets_only_affects_aborted_match() {
-    let file = fixture();
-    add_pending(file.path(), 31, false);
-    add_pending(file.path(), 32, false);
-    add_player(file.path(), 3_201, 100);
-    add_player(file.path(), 3_202, 100);
-    let repository = repo(file.path());
-    repository
-        .place_bet_atomic(request(31, 3_201, BettingTeam::Radiant, 50))
-        .expect("aborted match bet");
-    repository
-        .place_bet_atomic(request(32, 3_202, BettingTeam::Dire, 30))
-        .expect("surviving match bet");
-    assert_eq!(balance(file.path(), 3_201), 50);
-    assert_eq!(balance(file.path(), 3_202), 70);
-
-    assert_eq!(
-        repository
-            .refund_pending_bets_atomic(Some(GUILD), NOW, Some(31))
-            .expect("refund aborted match"),
-        1
-    );
-    assert_eq!(balance(file.path(), 3_201), 100);
-    assert_eq!(balance(file.path(), 3_202), 70);
-    assert!(
-        repository
-            .get_pending_bets(Some(GUILD), None, NOW, Some(31))
-            .expect("aborted bets")
-            .is_empty()
-    );
-    assert_eq!(
-        repository
-            .get_pending_bets(Some(GUILD), None, NOW, Some(32))
-            .expect("surviving bets")
-            .len(),
-        1
-    );
 }
 
 #[test]
@@ -1295,11 +1216,10 @@ fn test_concurrent_match_refund_only_aborted_match_on_migrated_sqlite() {
     assert_eq!(balance(file.path(), 3_201), 150);
     assert_eq!(balance(file.path(), 3_202), 170);
 
-    assert_eq!(
+    assert!(
         repository
-            .refund_pending_bets_atomic(Some(GUILD), NOW, Some(11))
-            .expect("refund migrated aborted match"),
-        1
+            .abort_pending_match_atomic(Some(GUILD), 11, &[])
+            .expect("refund migrated aborted match")
     );
     assert_eq!(balance(file.path(), 3_201), 200);
     assert_eq!(balance(file.path(), 3_202), 170);
@@ -1396,19 +1316,19 @@ fn test_create_auto_blind_bets_basic() {
         add_player(file.path(), discord_id, 100);
     }
     let requests = (1..=10)
-        .map(|discord_id| AutomaticBetRequest {
+        .map(|discord_id| AutomaticBasisPointBetRequest {
             discord_id,
             team: if discord_id <= 5 {
                 BettingTeam::Radiant
             } else {
                 BettingTeam::Dire
             },
-            percentage: 10,
+            basis_points: 1000,
         })
         .collect::<Vec<_>>();
     let repository = repo(file.path());
     let outcome = repository
-        .place_automatic_bets_atomic(Some(GUILD), Some(1), NOW, &requests)
+        .place_automatic_basis_point_bets_atomic(Some(GUILD), Some(1), NOW, &requests, 500)
         .expect("automatic bets");
     assert_eq!(outcome.created.len(), 10);
     assert!(outcome.skipped.is_empty());
@@ -1716,7 +1636,13 @@ fn inconsistent_investment_attribution_is_rejected_before_debit() {
         odds_at_placement: None,
     };
     assert!(matches!(
-        repo(file.path()).place_investment_bet_atomic(request, 12_502, "sideways"),
+        repo(file.path()).place_bet_atomic_with_attribution(
+            request,
+            Some(BetAttribution {
+                investment_target_id: Some(12_502),
+                investment_direction: Some("sideways".to_owned()),
+            }),
+        ),
         Err(BettingServiceRepositoryError::InvalidWager)
     ));
     assert_eq!(balance(file.path(), 12_501), 100);
@@ -1957,53 +1883,22 @@ fn configured_investments_require_shuffle_start_balance_and_floor_live_balance()
 }
 
 #[test]
-fn test_create_auto_blind_bets_batches_balance_snapshot() {
-    let file = fixture();
-    add_pending(file.path(), 1, false);
-    add_player(file.path(), 150, 100);
-    let requests = [
-        AutomaticBetRequest {
-            discord_id: 150,
-            team: BettingTeam::Radiant,
-            percentage: 10,
-        },
-        AutomaticBetRequest {
-            discord_id: 150,
-            team: BettingTeam::Radiant,
-            percentage: 10,
-        },
-    ];
-    let outcome = repo(file.path())
-        .place_automatic_bets_atomic(Some(GUILD), Some(1), NOW, &requests)
-        .expect("snapshot batch");
-    assert_eq!(outcome.balance_snapshot, BTreeMap::from([(150, 100)]));
-    assert_eq!(
-        outcome
-            .created
-            .iter()
-            .map(|bet| bet.amount)
-            .collect::<Vec<_>>(),
-        [10, 10]
-    );
-    assert_eq!(balance(file.path(), 150), 80);
-}
-
-#[test]
 fn test_blind_bet_is_blind_flag() {
     let file = fixture();
     add_pending(file.path(), 1, false);
     add_player(file.path(), 1, 100);
     let repository = repo(file.path());
     repository
-        .place_automatic_bets_atomic(
+        .place_automatic_basis_point_bets_atomic(
             Some(GUILD),
             Some(1),
             NOW,
-            &[AutomaticBetRequest {
+            &[AutomaticBasisPointBetRequest {
                 discord_id: 1,
                 team: BettingTeam::Radiant,
-                percentage: 10,
+                basis_points: 1000,
             }],
+            500,
         )
         .expect("blind bet");
     repository
@@ -2026,19 +1921,19 @@ fn test_get_all_pending_bets() {
     }
     add_player(file.path(), 160, 100);
     let requests = (1..=10)
-        .map(|discord_id| AutomaticBetRequest {
+        .map(|discord_id| AutomaticBasisPointBetRequest {
             discord_id,
             team: if discord_id <= 5 {
                 BettingTeam::Radiant
             } else {
                 BettingTeam::Dire
             },
-            percentage: 10,
+            basis_points: 1000,
         })
         .collect::<Vec<_>>();
     let repository = repo(file.path());
     repository
-        .place_automatic_bets_atomic(Some(GUILD), Some(1), NOW, &requests)
+        .place_automatic_basis_point_bets_atomic(Some(GUILD), Some(1), NOW, &requests, 500)
         .expect("blind bets");
     repository
         .place_bet_atomic(request(1, 160, BettingTeam::Radiant, 20))
@@ -2061,19 +1956,19 @@ fn test_blind_bets_integration_like_shuffle_command() {
     let pending_team_ids = (1..=10).collect::<Vec<_>>();
     let requests = pending_team_ids
         .iter()
-        .map(|discord_id| AutomaticBetRequest {
+        .map(|discord_id| AutomaticBasisPointBetRequest {
             discord_id: *discord_id,
             team: if *discord_id <= 5 {
                 BettingTeam::Radiant
             } else {
                 BettingTeam::Dire
             },
-            percentage: 10,
+            basis_points: 1000,
         })
         .collect::<Vec<_>>();
     let repository = repo(file.path());
     let created = repository
-        .place_automatic_bets_atomic(Some(GUILD), Some(7), NOW, &requests)
+        .place_automatic_basis_point_bets_atomic(Some(GUILD), Some(7), NOW, &requests, 500)
         .expect("shuffle command automatic bets");
     assert_eq!(created.created.len(), 10);
     assert_eq!(
@@ -2094,15 +1989,16 @@ fn test_auto_spectator_can_manual_bet_opposite_team_on_draft() {
     add_player(file.path(), 170, 5_000);
     let repository = repo(file.path());
     repository
-        .place_automatic_bets_atomic(
+        .place_automatic_basis_point_bets_atomic(
             Some(GUILD),
             Some(1),
             NOW,
-            &[AutomaticBetRequest {
+            &[AutomaticBasisPointBetRequest {
                 discord_id: 170,
                 team: BettingTeam::Radiant,
-                percentage: 2,
+                basis_points: 200,
             }],
+            500,
         )
         .expect("auto spectator bet");
     repository
@@ -2115,62 +2011,6 @@ fn test_auto_spectator_can_manual_bet_opposite_team_on_draft() {
         bets.iter().map(|bet| bet.team).collect::<Vec<_>>(),
         [BettingTeam::Radiant, BettingTeam::Dire]
     );
-}
-
-#[test]
-fn test_consume_and_credit_atomic_pays_once() {
-    let file = fixture();
-    add_player(file.path(), 180, 0);
-    let connection = Connection::open(file.path()).expect("open fixture");
-    connection
-        .execute(
-            "INSERT INTO manashop_buffs
-                 (discord_id, guild_id, buff_type, granted_at, expires_at)
-             VALUES (?1, ?2, 'communion_blessing', ?3, ?4)",
-            params![180, GUILD, NOW, NOW + 3_600],
-        )
-        .expect("grant blessing");
-    let buff_id = connection.last_insert_rowid();
-    drop(connection);
-    let repository = repo(file.path());
-    assert!(
-        repository
-            .consume_and_credit_atomic(buff_id, 180, Some(GUILD), 25)
-            .expect("first claim")
-    );
-    assert!(
-        !repository
-            .consume_and_credit_atomic(buff_id, 180, Some(GUILD), 25)
-            .expect("second claim")
-    );
-    assert_eq!(balance(file.path(), 180), 25);
-}
-
-#[test]
-fn test_bet_history_distinguishes_zero_payout_from_null() {
-    let file = fixture();
-    add_player(file.path(), 190, 0);
-    let connection = Connection::open(file.path()).expect("open fixture");
-    connection
-        .execute_batch("INSERT INTO matches (match_id, winning_team) VALUES (901, 1), (902, 1);")
-        .expect("insert matches");
-    connection
-        .execute(
-            "INSERT INTO bets
-                 (guild_id, match_id, discord_id, team_bet_on, amount, bet_time, leverage, payout)
-             VALUES (?1, 901, 190, 'radiant', 10, 1, 1, 0),
-                    (?1, 902, 190, 'radiant', 10, 2, 1, NULL)",
-            [GUILD],
-        )
-        .expect("insert settled bets");
-    let history = repo(file.path())
-        .get_player_bet_history(190, Some(GUILD))
-        .expect("bet history");
-    assert_eq!(history.len(), 2);
-    assert_eq!(history[0].payout, Some(0));
-    assert_eq!(history[0].profit, -10);
-    assert_eq!(history[1].payout, None);
-    assert_eq!(history[1].profit, 10);
 }
 
 fn migrated_seed_fixture(match_id: i64, pending_match_id: i64, mode: BettingMode) -> NamedTempFile {
@@ -3594,42 +3434,6 @@ fn integration_repo_participant_team_and_lock_rejections_are_atomic() {
 }
 
 #[test]
-fn batch_repo_uses_one_locked_snapshot_for_repeated_candidates() {
-    let file = fixture();
-    add_pending(file.path(), 50_006, false);
-    add_player(file.path(), 50_106, 100);
-    let outcome = repo(file.path())
-        .place_automatic_bets_atomic(
-            Some(GUILD),
-            Some(50_006),
-            NOW,
-            &[
-                AutomaticBetRequest {
-                    discord_id: 50_106,
-                    team: BettingTeam::Radiant,
-                    percentage: 10,
-                },
-                AutomaticBetRequest {
-                    discord_id: 50_106,
-                    team: BettingTeam::Radiant,
-                    percentage: 10,
-                },
-            ],
-        )
-        .expect("snapshot batch");
-    assert_eq!(outcome.balance_snapshot[&50_106], 100);
-    assert_eq!(
-        outcome
-            .created
-            .iter()
-            .map(|bet| bet.amount)
-            .collect::<Vec<_>>(),
-        vec![10, 10]
-    );
-    assert_eq!(balance(file.path(), 50_106), 80);
-}
-
-#[test]
 fn batch_repo_isolates_debt_candidate_and_keeps_odds_sequential() {
     let file = fixture();
     add_pending(file.path(), 50_007, false);
@@ -3775,15 +3579,16 @@ fn race_fix5_auto_blind_rejects_debt_candidate_after_balance_drain() {
     add_pending(file.path(), 50_009, false);
     add_player(file.path(), 50_117, -1);
     let outcome = repo(file.path())
-        .place_automatic_bets_atomic(
+        .place_automatic_basis_point_bets_atomic(
             Some(GUILD),
             Some(50_009),
             NOW,
-            &[AutomaticBetRequest {
+            &[AutomaticBasisPointBetRequest {
                 discord_id: 50_117,
                 team: BettingTeam::Radiant,
-                percentage: 10,
+                basis_points: 1000,
             }],
+            500,
         )
         .expect("debt candidate race policy");
     assert!(outcome.created.is_empty());
@@ -4110,31 +3915,6 @@ fn pool_settlement_handles_multiple_bets_for_one_bettor() {
 }
 
 #[test]
-fn multiple_pending_bets_refund_together_and_restore_wallets() {
-    let file = fixture();
-    add_pending(file.path(), 30_007, false);
-    add_player(file.path(), 30_261, 100);
-    add_player(file.path(), 30_262, 100);
-    let repository = repo(file.path());
-    repository
-        .place_bet_atomic(request(30_007, 30_261, BettingTeam::Radiant, 20))
-        .expect("place blind refund bet");
-    let mut manual = request(30_007, 30_262, BettingTeam::Dire, 15);
-    manual.is_blind = false;
-    repository
-        .place_bet_atomic(manual)
-        .expect("place manual refund bet");
-    assert_eq!(
-        repository
-            .refund_pending_bets_atomic(Some(GUILD), NOW, Some(30_007))
-            .unwrap(),
-        2
-    );
-    assert_eq!(balance(file.path(), 30_261), 100);
-    assert_eq!(balance(file.path(), 30_262), 100);
-}
-
-#[test]
 fn blind_bet_rounding_uses_python_ties_to_even_amounts() {
     let file = fixture();
     add_pending(file.path(), 30_008, false);
@@ -4188,39 +3968,6 @@ fn blind_bet_settlement_credits_the_stored_blind_row() {
         .unwrap();
     assert_eq!(settled.winners[0].payout, 20);
     assert_eq!(balance(file.path(), 30_281), 110);
-}
-
-#[test]
-fn mixed_blind_and_manual_bets_are_refunded_on_abort() {
-    let file = fixture();
-    add_pending(file.path(), 30_010, false);
-    add_player(file.path(), 30_291, 100);
-    add_player(file.path(), 30_292, 100);
-    let repository = repo(file.path());
-    repository
-        .create_auto_blind_bets_atomic(
-            Some(GUILD),
-            Some(30_010),
-            NOW,
-            &[BlindBetCandidate {
-                discord_id: 30_291,
-                team: BettingTeam::Radiant,
-                ante_override: None,
-            }],
-            BlindBetPolicy::default(),
-        )
-        .unwrap();
-    repository
-        .place_bet_atomic(request(30_010, 30_292, BettingTeam::Dire, 12))
-        .unwrap();
-    assert_eq!(
-        repository
-            .refund_pending_bets_atomic(Some(GUILD), NOW, Some(30_010))
-            .unwrap(),
-        2
-    );
-    assert_eq!(balance(file.path(), 30_291), 100);
-    assert_eq!(balance(file.path(), 30_292), 100);
 }
 
 #[test]
@@ -4349,32 +4096,6 @@ fn pool_settlement_double_retry_is_idempotent() {
     assert_eq!(first.winners[0].payout, 30);
     assert_eq!(retry, SettlementResult::default());
     assert_eq!(balance(file.path(), 30_331), 1_020);
-}
-
-#[test]
-fn settlement_after_refund_pays_nobody() {
-    let file = fixture();
-    add_pending(file.path(), 30_015, false);
-    add_player(file.path(), 30_341, 100);
-    let repository = repo(file.path());
-    repository
-        .place_bet_atomic(request(30_015, 30_341, BettingTeam::Radiant, 10))
-        .unwrap();
-    repository
-        .refund_pending_bets_atomic(Some(GUILD), NOW, Some(30_015))
-        .unwrap();
-    let result = repository
-        .settle_pending_bets_atomic(
-            30_115,
-            Some(GUILD),
-            NOW,
-            Some(30_015),
-            BettingTeam::Radiant,
-            BettingMode::House,
-        )
-        .unwrap();
-    assert_eq!(result, SettlementResult::default());
-    assert_eq!(balance(file.path(), 30_341), 100);
 }
 
 #[test]

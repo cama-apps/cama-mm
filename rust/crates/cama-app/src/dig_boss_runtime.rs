@@ -323,6 +323,19 @@ impl BossRepositoryPort for SqliteBossRepository {
             .map_err(|error| self.repository_error(error))
     }
 
+    fn restore_claimed_duel(
+        &mut self,
+        key: PlayerKey,
+        duel: PausedBossDuel,
+    ) -> Result<(), RepositoryError> {
+        let row =
+            paused_duel_row(key, &duel, self.now).map_err(|error| self.repository_error(error))?;
+        self.repository
+            .restore_claimed_duel(&row)
+            .map(|_| ())
+            .map_err(|error| self.repository_error(error))
+    }
+
     fn active_duel(&self, key: PlayerKey) -> Option<PausedBossDuel> {
         match self.repository.active_duel(database_key(key)) {
             Ok(Some(row)) => match paused_duel_from_row(&row) {
@@ -2963,21 +2976,43 @@ impl DigBossRuntimeService {
         &self,
         request: DigBossRuntimeRequest,
         requested_option_index: usize,
-        mut entropy: E,
+        entropy: E,
     ) -> Result<DigBossRuntimeResult<DigPinnacleResolved>, DigBossRuntimeError> {
         let repository = DigBossRuntimeRepository::new(&self.config.database_path);
+        // The claim commits on its own so a repeated click cannot resolve the
+        // same pause twice. Nothing is settled until `settle_pinnacle` commits
+        // (and nothing after that commit can fail), so any error puts the
+        // paused duel back instead of dropping its wager with the row.
         let row = repository
             .claim_active_duel(database_key(request.player_key()))
             .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
             .ok_or(BossServiceError::NoActiveDuel)?;
+        let resolved =
+            self.resolve_claimed_pinnacle(request, &row, requested_option_index, entropy);
+        if let Err(error) = &resolved
+            && let Err(restore_error) = repository.restore_claimed_duel(&row)
+        {
+            return Err(DigBossRuntimeError::Infrastructure(format!(
+                "{error}; restoring the paused pinnacle duel also failed: {restore_error}"
+            )));
+        }
+        resolved
+    }
+
+    fn resolve_claimed_pinnacle<E: EntropyPort>(
+        &self,
+        request: DigBossRuntimeRequest,
+        row: &DigBossPausedDuelRow,
+        requested_option_index: usize,
+        mut entropy: E,
+    ) -> Result<DigBossRuntimeResult<DigPinnacleResolved>, DigBossRuntimeError> {
         if row.boundary != i64::from(PINNACLE_DEPTH) || pinnacle_by_id(&row.boss_id).is_none() {
             return Err(DigBossRuntimeError::InvalidPinnacle(format!(
                 "paused duel {} is not a pinnacle encounter",
                 row.boss_id
             )));
         }
-        let mut paused =
-            paused_duel_from_row(&row).map_err(DigBossRuntimeError::InvalidPinnacle)?;
+        let mut paused = paused_duel_from_row(row).map_err(DigBossRuntimeError::InvalidPinnacle)?;
         let mechanic = runtime_mechanic_by_id(&paused.mechanic_id)
             .ok_or_else(|| BossServiceError::UnknownMechanic(paused.mechanic_id.clone()))?;
         let option_index = if requested_option_index < mechanic.options.len() {
@@ -3955,6 +3990,11 @@ impl DigBossRuntimeService {
                     found_at: request.now,
                     is_relic: true,
                 });
+            // Narrowed before the commit: once the settlement applies, nothing
+            // may fail, because `resume_pinnacle` restores the claimed duel on
+            // any error and a restored, already-settled duel would pay twice.
+            let new_depth =
+                narrow_i32(proposed.depth, "depth").map_err(DigBossRuntimeError::Infrastructure)?;
             let commit = repository
                 .commit(DigBossRuntimeCommit {
                     expected: &expected,
@@ -4002,8 +4042,7 @@ impl DigBossRuntimeService {
                         bankruptcy_penalty,
                         vanity_tax,
                         low_priority_tax,
-                        new_depth: narrow_i32(proposed.depth, "depth")
-                            .map_err(DigBossRuntimeError::Infrastructure)?,
+                        new_depth,
                         boss_hp_remaining: if input.won {
                             0
                         } else {
@@ -4336,14 +4375,38 @@ impl DigBossRuntimeService {
         else {
             return Ok(None);
         };
-        let requested_forfeit = row.wager.max(0);
-        if requested_forfeit == 0 {
+        if row.wager <= 0 {
             return Ok(Some(ClaimedAbandonedDuel {
                 row,
                 action_id: None,
                 wager_forfeit: 0,
             }));
         }
+        // The forfeit commits separately from the claim, so a failed forfeit
+        // puts the paused duel back rather than voiding its wager.
+        match self.forfeit_claimed_duel(&repository, request, boundary, &row) {
+            Ok((action_id, wager_forfeit)) => Ok(Some(ClaimedAbandonedDuel {
+                row,
+                action_id,
+                wager_forfeit,
+            })),
+            Err(error) => match repository.restore_claimed_duel(&row) {
+                Ok(_) => Err(error),
+                Err(restore_error) => Err(DigBossRuntimeError::Infrastructure(format!(
+                    "{error}; restoring the abandoned duel also failed: {restore_error}"
+                ))),
+            },
+        }
+    }
+
+    fn forfeit_claimed_duel(
+        &self,
+        repository: &DigBossRuntimeRepository,
+        request: DigBossRuntimeRequest,
+        boundary: i32,
+        row: &DigBossPausedDuelRow,
+    ) -> Result<(Option<i64>, i64), DigBossRuntimeError> {
+        let requested_forfeit = row.wager.max(0);
         loop {
             let expected = repository
                 .snapshot(database_key(request.player_key()))
@@ -4380,11 +4443,7 @@ impl DigBossRuntimeService {
                 .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
             {
                 DigBossRuntimeCommitOutcome::Applied(receipt) => {
-                    return Ok(Some(ClaimedAbandonedDuel {
-                        row,
-                        action_id: receipt.action_id,
-                        wager_forfeit,
-                    }));
+                    return Ok((receipt.action_id, wager_forfeit));
                 }
                 DigBossRuntimeCommitOutcome::Conflict => continue,
                 DigBossRuntimeCommitOutcome::MissingPlayer

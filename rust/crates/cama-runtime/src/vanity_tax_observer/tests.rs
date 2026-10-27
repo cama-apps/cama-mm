@@ -249,7 +249,7 @@ async fn unsigned_snowflakes_that_do_not_fit_sqlite_are_rejected() {
         .member_join(GatewayMember::new(42, invalid, None))
         .await;
     assert_eq!(failures.len(), 1);
-    assert!(failures[0].message.contains("exceeds SQLite INTEGER range"));
+    assert!(failures[0].message.contains("exceeds SQLite INTEGER"));
     assert!(service.taxable_ids(42).is_empty());
 
     let source: Arc<dyn GuildMemberPageSource> = Arc::new(MockMemberHttp::default());

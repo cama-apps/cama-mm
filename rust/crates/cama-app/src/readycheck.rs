@@ -342,7 +342,7 @@ pub struct ReadycheckGeneration {
     pub channel_id: ChannelId,
     pub lobby_ids: BTreeSet<UserId>,
     pub player_data: BTreeMap<UserId, ReadycheckPlayerData>,
-    pub reacted: BTreeMap<UserId, String>,
+    pub reacted: BTreeSet<UserId>,
     pub declined: BTreeSet<UserId>,
     pub created_at: f64,
     /// When the unconfirmed sweep falls due and retires this generation.
@@ -357,7 +357,7 @@ pub struct ReadycheckStateInput {
     pub lobby_ids: BTreeSet<UserId>,
     pub player_data: BTreeMap<UserId, ReadycheckPlayerData>,
     pub created_at: Option<f64>,
-    pub initial_reacted: BTreeMap<UserId, String>,
+    pub initial_reacted: BTreeSet<UserId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -588,7 +588,7 @@ impl ReadycheckService {
         let initial_reacted = input
             .initial_reacted
             .into_iter()
-            .filter(|(player_id, _)| input.lobby_ids.contains(player_id))
+            .filter(|player_id| input.lobby_ids.contains(player_id))
             .collect();
         let created_at = input.created_at.unwrap_or_else(unix_time_now);
         let generation = ReadycheckGeneration {
@@ -624,7 +624,7 @@ impl ReadycheckService {
         let generation = state.scopes.get(&scope)?.readycheck.as_ref()?;
         Some(ConfirmationSnapshot {
             message_id: generation.message_id,
-            confirmed_ids: generation.reacted.keys().copied().collect(),
+            confirmed_ids: generation.reacted.clone(),
         })
     }
 
@@ -638,12 +638,12 @@ impl ReadycheckService {
     }
 
     #[must_use]
-    pub fn readycheck_reacted(&self, scope: LobbyScope) -> BTreeMap<UserId, String> {
+    pub fn readycheck_reacted(&self, scope: LobbyScope) -> BTreeSet<UserId> {
         self.lock()
             .scopes
             .get(&scope)
             .and_then(|scoped| scoped.readycheck.as_ref())
-            .map_or_else(BTreeMap::new, |generation| generation.reacted.clone())
+            .map_or_else(BTreeSet::new, |generation| generation.reacted.clone())
     }
 
     #[must_use]
@@ -679,7 +679,6 @@ impl ReadycheckService {
         &self,
         scope: LobbyScope,
         player_id: UserId,
-        tag: impl Into<String>,
         expected_message_id: Option<MessageId>,
     ) -> bool {
         let mut state = self.lock();
@@ -701,10 +700,9 @@ impl ReadycheckService {
             .as_ref()
             .unwrap_or(&generation.lobby_ids)
             .contains(&player_id);
-        if !eligible || generation.reacted.contains_key(&player_id) {
+        if !eligible || !generation.reacted.insert(player_id) {
             return false;
         }
-        generation.reacted.insert(player_id, tag.into());
         generation.declined.remove(&player_id);
         true
     }
@@ -724,7 +722,7 @@ impl ReadycheckService {
             return false;
         };
         if expected_message_id.is_some_and(|expected| expected != generation.message_id)
-            || generation.reacted.remove(&player_id).is_none()
+            || !generation.reacted.remove(&player_id)
         {
             return false;
         }
@@ -746,13 +744,13 @@ impl ReadycheckService {
         }
         let removed_confirmations = generation
             .reacted
-            .keys()
+            .iter()
             .copied()
             .filter(|player_id| !lobby_ids.contains(player_id))
             .collect::<BTreeSet<_>>();
         generation
             .reacted
-            .retain(|player_id, _| lobby_ids.contains(player_id));
+            .retain(|player_id| lobby_ids.contains(player_id));
         generation
             .declined
             .retain(|player_id| lobby_ids.contains(player_id));
@@ -795,7 +793,7 @@ impl ReadycheckService {
             .as_ref()
             .map(|generation| ConfirmationSnapshot {
                 message_id: generation.message_id,
-                confirmed_ids: generation.reacted.keys().copied().collect(),
+                confirmed_ids: generation.reacted.clone(),
             });
         Some(LobbyReadycheckSnapshot {
             player_ids,
@@ -880,7 +878,7 @@ impl ReadycheckService {
             let live_ids = lobby.players.clone();
             let departed_confirmations = generation
                 .reacted
-                .keys()
+                .iter()
                 .filter(|player_id| !live_ids.contains(player_id))
                 .copied()
                 .collect::<BTreeSet<_>>();
@@ -889,19 +887,16 @@ impl ReadycheckService {
             generation.sweep_due_at = request.now + READYCHECK_SWEEP_SECONDS;
             generation
                 .reacted
-                .retain(|player_id, _| live_ids.contains(player_id));
+                .retain(|player_id| live_ids.contains(player_id));
             generation
                 .declined
                 .retain(|player_id| live_ids.contains(player_id));
             if request.confirm_invoker {
-                generation
-                    .reacted
-                    .entry(request.invoker_id)
-                    .or_insert_with(|| format!("<@{}>", request.invoker_id.0));
+                generation.reacted.insert(request.invoker_id);
                 generation.declined.remove(&request.invoker_id);
             }
             let mention_ids = live_ids
-                .difference(&generation.reacted.keys().copied().collect())
+                .difference(&generation.reacted)
                 .copied()
                 .collect::<BTreeSet<_>>();
             let mut operations = departed_confirmations
@@ -1024,14 +1019,14 @@ impl ReadycheckService {
             .as_ref()
             .filter(|lobby| lobby.status == LobbyStatus::Open)
             .map_or_else(BTreeSet::new, |lobby| lobby.players.clone());
-        let mut reacted = BTreeMap::new();
+        let mut reacted = BTreeSet::new();
         for (player_id, data) in &player_data {
             if data.group == ReadinessGroup::Recent && lobby_ids.contains(player_id) {
-                reacted.insert(*player_id, format!("<@{}>", player_id.0));
+                reacted.insert(*player_id);
             }
         }
         if permit.confirm_invoker && lobby_ids.contains(&permit.invoker_id) {
-            reacted.insert(permit.invoker_id, format!("<@{}>", permit.invoker_id.0));
+            reacted.insert(permit.invoker_id);
         }
         scoped.readycheck = Some(ReadycheckGeneration {
             message_id,
@@ -1070,7 +1065,7 @@ impl ReadycheckService {
                 .players
                 .iter()
                 .copied()
-                .filter(|player_id| !generation.reacted.contains_key(player_id))
+                .filter(|player_id| !generation.reacted.contains(player_id))
                 .collect(),
         })
     }
@@ -1147,7 +1142,7 @@ impl ReadycheckService {
         let required = live_members.as_ref().unwrap_or(&generation.lobby_ids);
         let confirmed = required
             .iter()
-            .filter(|player_id| generation.reacted.contains_key(player_id))
+            .filter(|player_id| generation.reacted.contains(player_id))
             .count();
         if generation.message_id != expected_message_id
             || generation.completion_notified

@@ -71,6 +71,7 @@ use crate::discord_transport::{
     DiscordIdPlayerNameResolver, DiscordTransport, GuildPlayerNameDirectory,
     GuildPlayerNameResolver,
 };
+use crate::ids::signed_id;
 use crate::option_ext::{
     boolean_option as optional_bool, integer_option as optional_integer,
     string_option as optional_string,
@@ -322,7 +323,7 @@ impl InteractionHandler for PetInteractionHandler {
 
 fn pet_options() -> Vec<CommandOptionSpec> {
     vec![
-        subcommand(
+        CommandOptionSpec::subcommand(
             "adopt",
             "Adopt a mysterious cama egg",
             vec![
@@ -345,7 +346,7 @@ fn pet_options() -> Vec<CommandOptionSpec> {
                 ),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "status",
             "Check on your cama (art, fullness, mood)",
             vec![
@@ -361,14 +362,14 @@ fn pet_options() -> Vec<CommandOptionSpec> {
                 ),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "stable",
             "View your living camas and their active or stabled state",
             Vec::new(),
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "activate",
-            &format!(
+            format!(
                 "Activate a stabled cama ({} JC, once every 24 hours)",
                 PET_SWITCH_COST
             ),
@@ -382,9 +383,9 @@ fn pet_options() -> Vec<CommandOptionSpec> {
                 .autocomplete(),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "upgrade",
-            &format!("Gild an unhatched standard egg (+{GILDED_EGG_PREMIUM} JC)"),
+            format!("Gild an unhatched standard egg (+{GILDED_EGG_PREMIUM} JC)"),
             vec![
                 CommandOptionSpec::new(
                     "pet",
@@ -395,12 +396,12 @@ fn pet_options() -> Vec<CommandOptionSpec> {
                 .autocomplete(),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "train",
             "Cash in up to three banked solo training sessions",
             Vec::new(),
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "feed",
             "Feed your cama from your supplies",
             vec![choices_string_option(
@@ -418,8 +419,8 @@ fn pet_options() -> Vec<CommandOptionSpec> {
                 }),
             )],
         ),
-        subcommand("shop", "Browse cama food and treats", Vec::new()),
-        subcommand(
+        CommandOptionSpec::subcommand("shop", "Browse cama food and treats", Vec::new()),
+        CommandOptionSpec::subcommand(
             "buy",
             "Buy cama supplies",
             vec![
@@ -455,14 +456,14 @@ fn pet_options() -> Vec<CommandOptionSpec> {
                 .with_integer_range(1, MAX_BUY_QTY),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "rename",
             "Rename your cama (10 JC)",
             vec![string_option("name", "The new name", true)],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "trinket",
-            &format!("Roll a Mystery Trinket ({TRINKET_COST} JC) or wear one you own"),
+            format!("Roll a Mystery Trinket ({TRINKET_COST} JC) or wear one you own"),
             vec![
                 CommandOptionSpec::new(
                     "wear",
@@ -472,7 +473,7 @@ fn pet_options() -> Vec<CommandOptionSpec> {
                 .autocomplete(),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "brawl",
             "Challenge someone to a pet brawl, optionally for up to 100 JC",
             vec![
@@ -486,17 +487,17 @@ fn pet_options() -> Vec<CommandOptionSpec> {
                 .with_integer_range(0, 100),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "altar",
             "Sacrifice your cama for a better egg (dark, effective)",
             vec![string_option("name", "The new egg's name", true)],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "eat",
             "Make an irreversible choice about your adult cama",
             Vec::new(),
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "graveyard",
             "Visit the cama memorial garden",
             vec![CommandOptionSpec::new(
@@ -505,18 +506,18 @@ fn pet_options() -> Vec<CommandOptionSpec> {
                 CommandOptionKind::User,
             )],
         ),
-        subcommand("leaderboard", "The oldest living camas", Vec::new()),
-        subcommand(
+        CommandOptionSpec::subcommand("leaderboard", "The oldest living camas", Vec::new()),
+        CommandOptionSpec::subcommand(
             "aspca",
             "Open the server's Camagotchi cruelty case files",
             Vec::new(),
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "album",
             "Browse the keepsakes your camas have brought you",
             Vec::new(),
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "diary",
             "Read your camas' milestones and little gifts",
             vec![
@@ -529,10 +530,6 @@ fn pet_options() -> Vec<CommandOptionSpec> {
             ],
         ),
     ]
-}
-
-fn subcommand(name: &str, description: &str, options: Vec<CommandOptionSpec>) -> CommandOptionSpec {
-    CommandOptionSpec::new(name, description, CommandOptionKind::Subcommand).options(options)
 }
 
 fn string_option(name: &str, description: &str, required: bool) -> CommandOptionSpec {
@@ -3295,11 +3292,6 @@ struct BuiltStatus {
     attachment: Option<InteractionAttachment>,
     view: Option<StatusView>,
 }
-
-fn signed_id(value: u64, label: &str) -> Result<i64, String> {
-    i64::try_from(value).map_err(|_| format!("{label} id is outside SQLite's supported range"))
-}
-
 fn command_path(options: &[InteractionOption]) -> Result<(&str, &[InteractionOption]), String> {
     let Some(option) = options.first() else {
         return Err("/pet requires a subcommand".to_owned());

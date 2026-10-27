@@ -1,6 +1,6 @@
 //! Existing-schema data repair for the bounded Dig relic-loadout rollout.
 //!
-//! Python remains the sole schema, migration, and live-runtime authority. This
+//! Schema creation and migration belong to the startup schema manager. This
 //! adapter does not add columns or register a migration: it only reapplies the
 //! post-migration data repair against an already-upgraded schema. Flagging
 //! affected tunnels and trimming old equipped relics commit together under
@@ -47,7 +47,7 @@ impl DigRelicReworkRepository {
     /// Reapply only the data portion of Python's relic-cap rollout.
     ///
     /// The schema must already expose `tunnels.relic_trim_notice` and the
-    /// Python-owned `dig_artifacts` columns. Affected miners are identified
+    /// existing `dig_artifacts` columns. Affected miners are identified
     /// before trimming, then only their newest six equipped relic rows (highest
     /// database ids) remain equipped. Owned inventory rows are never deleted.
     pub fn repair_relic_loadout_cap(

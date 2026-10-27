@@ -738,7 +738,7 @@ pub fn animate_pinnacle(prestige: bool) -> GifAsset {
     } else {
         "dig_pinnacle"
     };
-    // The final hold is intentionally part of the live Python attachment
+    // The final hold is intentionally part of the legacy attachment
     // contract. Pillow may coalesce the first duplicate logical frame when
     // decoding, but the authored timeline is 17x90ms + 12x130ms + 60s.
     let mut durations = vec![90; 17];

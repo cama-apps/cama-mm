@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use cama_app::unified_leaderboard::{
     BalanceLeaderboard, BankruptcyState, ButtonStyle, GamblingEntry, GamblingServerStats,
     GamblingSnapshot, GuildMemberDirectory, LeaderboardTab, NegativeBalanceEntry, RatingKind,
-    ScopedTipLeaderboardEntry, TRIVIA_WINDOW_DAYS, TabData, TipsSnapshot, TriviaEntry,
+    ScopedTipLeaderboardEntry, TRIVIA_WINDOW_DAYS, TabData, TabState, TipsSnapshot, TriviaEntry,
     UnifiedLeaderboardRepositoryPort, UnifiedLeaderboardView,
 };
 use cama_db::bankruptcy_repository::BankruptcyRepository;
@@ -227,12 +227,35 @@ struct InfoHandler {
 }
 
 struct LeaderboardSession {
-    view: Arc<Mutex<UnifiedLeaderboardView<InfoLeaderboardRepository>>>,
+    /// Only held for in-memory work. SQLite tab loads run on a fresh view
+    /// outside the lock (see [`LeaderboardSession::load_tab_state`]) so a
+    /// concurrent click never blocks a Tokio worker behind a busy database.
+    view: Mutex<UnifiedLeaderboardView<InfoLeaderboardRepository>>,
+    repository: InfoLeaderboardRepository,
+    guild_id: Option<i64>,
+    members: Option<GuildMemberDirectory>,
+    limit: usize,
     last_tab_click: Mutex<BTreeMap<u64, Instant>>,
     /// Bumped on every accepted interaction so the timer armed for an earlier
     /// one expires nothing. The legacy view measured its timeout from the last
     /// interaction, not from creation.
     expiry: Mutex<LeaderboardExpiry>,
+}
+
+impl LeaderboardSession {
+    /// Load one tab from SQLite into a fresh view, without touching the
+    /// session's shared view or its lock.
+    fn load_tab_state(&self, tab: LeaderboardTab) -> Result<TabState, String> {
+        let mut view = UnifiedLeaderboardView::with_options(
+            self.repository.clone(),
+            self.guild_id,
+            self.members.clone(),
+            tab,
+            self.limit,
+        );
+        view.load_tab(tab).map_err(|error| error.to_string())?;
+        Ok(view.tab_state(tab).clone())
+    }
 }
 
 #[derive(Default)]
@@ -434,7 +457,7 @@ impl InfoHandler {
         let mut view = UnifiedLeaderboardView::with_options(
             self.leaderboard.clone(),
             signed_guild,
-            members,
+            members.clone(),
             tab,
             limit,
         );
@@ -457,15 +480,13 @@ impl InfoHandler {
         };
 
         let view_id = self.next_view_id.fetch_add(1, Ordering::Relaxed);
-        let view = Arc::new(Mutex::new(view));
-        let response = {
-            let view = view
-                .lock()
-                .map_err(|_| InteractionHandlerError::from("leaderboard view lock poisoned"))?;
-            leaderboard_response(view_id, &view)
-        };
+        let response = leaderboard_response(view_id, &view);
         let session = Arc::new(LeaderboardSession {
-            view: Arc::clone(&view),
+            view: Mutex::new(view),
+            repository: self.leaderboard.clone(),
+            guild_id: signed_guild,
+            members,
+            limit,
             last_tab_click: Mutex::new(BTreeMap::new()),
             expiry: Mutex::new(LeaderboardExpiry::default()),
         });
@@ -632,20 +653,33 @@ impl InfoHandler {
                     warn!(%error, "unable to defer leaderboard tab interaction");
                     return Ok(());
                 }
-                let view = Arc::clone(&session.view);
-                let response = tokio::task::spawn_blocking(move || {
-                    let mut view = view
-                        .lock()
-                        .map_err(|_| "leaderboard view lock poisoned".to_owned())?;
+                let loaded = if needs_load {
+                    let loader = Arc::clone(&session);
+                    Some(
+                        tokio::task::spawn_blocking(move || loader.load_tab_state(tab))
+                            .await
+                            .map_err(|error| {
+                                InteractionHandlerError::from(format!(
+                                    "leaderboard tab task failed: {error}"
+                                ))
+                            })?
+                            .map_err(InteractionHandlerError::from)?,
+                    )
+                } else {
+                    None
+                };
+                let response = {
+                    let mut view = session.view.lock().map_err(|_| {
+                        InteractionHandlerError::from("leaderboard view lock poisoned")
+                    })?;
+                    if let Some(state) = loaded
+                        && !view.tab_state(tab).loaded
+                    {
+                        *view.tab_state_mut(tab) = state;
+                    }
                     view.switch_tab(tab);
-                    view.load_tab(tab).map_err(|error| error.to_string())?;
-                    Ok::<_, String>(leaderboard_response(view_id, &view))
-                })
-                .await
-                .map_err(|error| {
-                    InteractionHandlerError::from(format!("leaderboard tab task failed: {error}"))
-                })?
-                .map_err(InteractionHandlerError::from)?;
+                    leaderboard_response(view_id, &view)
+                };
                 if needs_load {
                     responder.edit_original(response).await
                 } else {

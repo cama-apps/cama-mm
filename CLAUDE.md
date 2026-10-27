@@ -27,6 +27,8 @@ The Rust workspace uses edition 2024 and Rust 1.94:
 - `rust/crates/cama-runtime-engine`: production Tokio/Serenity adapters, coupled providers and workers, gateway recovery, and health.
 - `rust/crates/cama-runtime`: compatibility facade and production composition root over the independently compiled runtime crates.
 
+Source files live physically in `cama-domain/src`, `cama-db/src`, `cama-app/src`, and `cama-runtime/src`; the slice crates compile them through `#[path = "../../cama-X/src/foo.rs"] pub mod foo;` mounts in their `lib.rs` (`cama-db-core` and `cama-runtime-engine` point their `[lib] path` at `cama-db/src/lib.rs` and `cama-runtime/src/engine_lib.rs`). A new file compiles only once a crate mounts it, so find a module's owning crate by grepping the `#[path]` mounts before testing, moving, or deleting it.
+
 Repository-wide architecture audits run in the `cama-runtime-engine` match
 test shard; there is no separate `xtask` crate or cross-language parity gate.
 

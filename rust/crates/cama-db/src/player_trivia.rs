@@ -179,6 +179,7 @@ pub struct SettledBetRow {
     pub payout: i64,
     pub settlement_vanity_tax: i64,
     pub settlement_low_priority_tax: i64,
+    pub settlement_bankruptcy_penalty: i64,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1235,7 +1236,7 @@ fn load_snapshot_from_connection(
         "SELECT b.bet_id, b.discord_id, b.match_id, b.team_bet_on, m.winning_team,
                 b.amount, COALESCE(b.leverage,1), b.amount*COALESCE(b.leverage,1),
                 COALESCE(b.payout,0), COALESCE(bst.vanity_tax,0),
-                COALESCE(bst.low_priority_tax,0)
+                COALESCE(bst.low_priority_tax,0), COALESCE(bst.bankruptcy_penalty,0)
          FROM bets b JOIN matches m ON m.guild_id=b.guild_id AND m.match_id=b.match_id
          LEFT JOIN bet_settlement_taxes bst ON bst.guild_id=b.guild_id
               AND bst.match_id=b.match_id AND bst.discord_id=b.discord_id
@@ -1254,6 +1255,7 @@ fn load_snapshot_from_connection(
                 payout: row.get(8)?,
                 settlement_vanity_tax: row.get(9)?,
                 settlement_low_priority_tax: row.get(10)?,
+                settlement_bankruptcy_penalty: row.get(11)?,
             })
         },
     )?;

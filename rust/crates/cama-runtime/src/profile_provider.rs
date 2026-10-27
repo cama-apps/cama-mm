@@ -31,7 +31,9 @@ use cama_db::pairings_repository::{PairingsRepository, PairingsService};
 use cama_db::predictions_repository::{CONTRACT_VALUE, PredictionRepository};
 use cama_db::rating_history_repository::RatingHistoryRepository;
 use cama_db::tip_repository::TipRepository;
-use cama_domain::formatting::{JOPACOIN_EMOTE, TOMBSTONE_EMOJI};
+use cama_domain::formatting::{
+    JOPACOIN_EMOTE, TOMBSTONE_EMOJI, format_grouped, format_grouped_signed,
+};
 use cama_domain::rating::cap_glicko_rd;
 use cama_domain::rating_insights::rd_to_certainty;
 use cama_domain::role_performance::MIN_GAMES_FOR_WINRATE;
@@ -45,6 +47,7 @@ use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResol
 use crate::embed_colors::{
     DISCORD_BLUE, DISCORD_GREEN, DISCORD_ORANGE, DISCORD_PURPLE, DISCORD_RED,
 };
+use crate::ids::signed_id;
 use crate::option_ext::user_option;
 use crate::registration::{
     CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute, InteractionActionRow,
@@ -303,7 +306,7 @@ impl ProfileHandler {
 
         let target_id = match user_option(&options, "user")? {
             Some(user) => user.id,
-            None => signed_discord_id(user_id, "target user")?,
+            None => signed_id(user_id, "target user")?,
         };
         let guild_id = signed_optional_discord_id(guild_id, "guild")?;
         let names = guild_id
@@ -464,14 +467,8 @@ impl ProfileHandler {
     }
 }
 
-fn signed_discord_id(value: u64, label: &str) -> Result<i64, String> {
-    i64::try_from(value).map_err(|_| format!("Discord {label} id exceeds SQLite's signed range"))
-}
-
 fn signed_optional_discord_id(value: Option<u64>, label: &str) -> Result<Option<i64>, String> {
-    value
-        .map(|value| signed_discord_id(value, label))
-        .transpose()
+    value.map(|value| signed_id(value, label)).transpose()
 }
 
 fn parse_component_id(custom_id: &str) -> Result<(u64, ProfileTab), String> {
@@ -1854,30 +1851,12 @@ fn format_balance_history_breakdown(totals: &BTreeMap<String, i64>) -> String {
 const PROFILE_EMBED_TOTAL_LIMIT: usize = 6_000;
 const PROFILE_FIELD_VALUE_LIMIT: usize = 1_024;
 
-fn grouped_number(value: i64) -> String {
-    let raw = value.to_string();
-    let (sign, digits) = raw
-        .strip_prefix('-')
-        .map_or(("", raw.as_str()), |digits| ("-", digits));
-    let first_len = digits.len() % 3;
-    let mut grouped = String::new();
-    if first_len > 0 {
-        grouped.push_str(&digits[..first_len]);
-    }
-    for chunk in digits.as_bytes()[first_len..].chunks(3) {
-        if !grouped.is_empty() {
-            grouped.push(',');
-        }
-        grouped.push_str(std::str::from_utf8(chunk).unwrap_or_default());
-    }
-    format!("{sign}{grouped}")
-}
-
+/// Auto-bet P&L shows `+0` for break-even, unlike [`format_grouped_signed`].
 fn grouped_signed(value: i64) -> String {
-    if value >= 0 {
-        format!("+{}", grouped_number(value))
+    if value == 0 {
+        "+0".to_owned()
     } else {
-        grouped_number(value)
+        format_grouped_signed(value)
     }
 }
 
@@ -1887,11 +1866,11 @@ fn auto_bet_group_line(label: &str, group: &AutoBetGroupStats) -> String {
     format!(
         "**{label}:** {} JC · {} {} · {}W–{}L · {} wagered",
         grouped_signed(group.net_pnl),
-        grouped_number(i64::try_from(group.bet_count).unwrap_or(i64::MAX)),
+        format_grouped(i64::try_from(group.bet_count).unwrap_or(i64::MAX)),
         bet_word,
-        grouped_number(i64::try_from(group.wins).unwrap_or(i64::MAX)),
-        grouped_number(i64::try_from(losses).unwrap_or(i64::MAX)),
-        grouped_number(group.total_wagered)
+        format_grouped(i64::try_from(group.wins).unwrap_or(i64::MAX)),
+        format_grouped(i64::try_from(losses).unwrap_or(i64::MAX)),
+        format_grouped(group.total_wagered)
     )
 }
 

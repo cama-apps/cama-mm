@@ -1,9 +1,8 @@
 //! Existing-schema persistence for daily mana assignment.
 //!
-//! Python remains the schema-migration and production runtime authority during
-//! the side-by-side migration. This adapter only opens an already-migrated
-//! database through [`crate::open_runtime_connection`] and mirrors Python's
-//! `BEGIN IMMEDIATE` claim semantics.
+//! Schema creation and migration belong to the startup schema manager. This
+//! adapter only opens an already-migrated database through
+//! [`crate::open_runtime_connection`] and claims under `BEGIN IMMEDIATE`.
 
 use std::collections::BTreeSet;
 use std::fmt;

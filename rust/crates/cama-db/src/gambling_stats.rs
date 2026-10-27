@@ -1,7 +1,7 @@
 //! Existing-schema gambling statistics and pure degen/leaderboard policy.
 //!
-//! Python remains the schema, migration, and live runtime authority during the
-//! side-by-side rewrite. Production paths in this module only open an already
+//! Schema creation and migration belong to the startup schema manager.
+//! Production paths in this module only open an already
 //! migrated database through [`crate::open_runtime_connection`]; they never
 //! create or alter schema. The only multi-row write here records a Double or
 //! Nothing spin and its player cooldown under `BEGIN IMMEDIATE`. Bet placement
@@ -11,9 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use rusqlite::{
-    Connection, OptionalExtension, TransactionBehavior, params, params_from_iter, types::Value,
-};
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value};
 use thiserror::Error;
 
 use crate::open_runtime_connection;
@@ -96,6 +94,7 @@ pub struct BetHistoryEntry {
     pub payout: Option<i64>,
     pub vanity_tax: i64,
     pub low_priority_tax: i64,
+    pub bankruptcy_penalty: i64,
     pub outcome: GamblingOutcome,
     pub profit: i64,
 }
@@ -282,65 +281,6 @@ pub struct Leaderboard {
     pub server_stats: ServerStats,
 }
 
-/// One settled external wager used by the player-facing betting-impact
-/// report.  This is deliberately a repository value object rather than a
-/// second bet model: the source of truth remains the existing `bets` and
-/// match-participant rows.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BettingImpactBet {
-    pub bettor_id: i64,
-    pub match_id: i64,
-    pub effective_bet: i64,
-    pub payout: Option<i64>,
-    pub vanity_tax: i64,
-    pub low_priority_tax: i64,
-    pub bet_for_target: bool,
-    pub won: bool,
-    pub profit: i64,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct BettorProfile {
-    pub discord_id: i64,
-    pub total_wagered_for: i64,
-    pub total_wagered_against: i64,
-    pub net_pnl_for: i64,
-    pub net_pnl_against: i64,
-    pub bets_for_count: i64,
-    pub bets_against_count: i64,
-    pub wins_for: i64,
-    pub wins_against: i64,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct BettingImpactStats {
-    pub discord_id: i64,
-    pub matches_with_bets: i64,
-    pub total_bets: i64,
-    pub total_wagered_for: i64,
-    pub total_wagered_against: i64,
-    pub supporters_net_pnl: i64,
-    pub haters_net_pnl: i64,
-    pub supporter_win_rate: f64,
-    pub hater_win_rate: f64,
-    pub supporter_bets_count: i64,
-    pub hater_bets_count: i64,
-    pub market_favorability: f64,
-    pub supporter_roi: f64,
-    pub hater_roi: f64,
-    pub biggest_fan: Option<BettorProfile>,
-    pub biggest_hater: Option<BettorProfile>,
-    pub most_consistent_fan: Option<BettorProfile>,
-    pub most_consistent_hater: Option<BettorProfile>,
-    pub blessing: Option<BettorProfile>,
-    pub jinx: Option<BettorProfile>,
-    pub luckiest_hater: Option<BettorProfile>,
-    pub biggest_single_win: i64,
-    pub biggest_single_loss: i64,
-    pub unique_supporters: i64,
-    pub unique_haters: i64,
-}
-
 #[derive(Debug, Error)]
 pub enum GamblingStatsError {
     #[error("gambling statistics SQLite operation failed: {0}")]
@@ -352,12 +292,6 @@ pub enum GamblingStatsError {
 }
 
 pub trait GamblingStatsPort {
-    fn betting_impact_bets(
-        &self,
-        target_discord_id: i64,
-        guild_id: Option<i64>,
-    ) -> Result<Vec<BettingImpactBet>, GamblingStatsError>;
-
     fn player_bet_history(
         &self,
         discord_id: i64,
@@ -506,13 +440,16 @@ impl GamblingStatsRepository {
             .collect())
     }
 
-    pub fn log_double_or_nothing_atomic(
+    /// Test fixture: record one Double or Nothing spin.
+    #[cfg(test)]
+    pub(crate) fn log_double_or_nothing_atomic(
         &self,
         write: DoubleOrNothingWrite,
     ) -> Result<i64, GamblingStatsError> {
         let guild_id = Self::normalize_guild_id(write.guild_id);
         let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         transaction.execute(
             "INSERT INTO double_or_nothing_spins
                  (guild_id, discord_id, cost, balance_before, balance_after, won, spin_time)
@@ -539,95 +476,6 @@ impl GamblingStatsRepository {
 }
 
 impl GamblingStatsPort for GamblingStatsRepository {
-    fn betting_impact_bets(
-        &self,
-        target_discord_id: i64,
-        guild_id: Option<i64>,
-    ) -> Result<Vec<BettingImpactBet>, GamblingStatsError> {
-        let connection = self.connection()?;
-        let guild_id = Self::normalize_guild_id(guild_id);
-        let mut statement = connection.prepare(
-            "SELECT b.discord_id, b.match_id,
-                    b.amount * COALESCE(b.leverage, 1), b.payout,
-                    COALESCE(bst.vanity_tax, 0),
-                    COALESCE(bst.low_priority_tax, 0),
-                    CASE WHEN mp.team_number = 1 THEN 'radiant' ELSE 'dire' END,
-                    b.team_bet_on,
-                    m.winning_team
-             FROM match_participants mp
-             JOIN matches m ON m.match_id = mp.match_id
-             JOIN bets b ON b.match_id = m.match_id
-                AND b.discord_id != ?1 AND b.guild_id = ?2
-             LEFT JOIN bet_settlement_taxes bst
-                ON bst.match_id = b.match_id
-               AND bst.guild_id = b.guild_id
-               AND bst.discord_id = b.discord_id
-             WHERE mp.discord_id = ?1 AND mp.guild_id = ?2
-               AND m.guild_id = ?2 AND m.winning_team IS NOT NULL
-             ORDER BY b.match_id, b.bet_time, b.bet_id",
-        )?;
-        let rows = statement
-            .query_map(params![target_discord_id, guild_id], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, Option<i64>>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, i64>(8)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut taxed_settlements = BTreeSet::new();
-        rows.into_iter()
-            .map(
-                |(
-                    bettor_id,
-                    match_id,
-                    effective_bet,
-                    payout,
-                    stored_vanity_tax,
-                    stored_low_priority_tax,
-                    target_team,
-                    bet_team,
-                    winning_team,
-                )| {
-                    let target_team = BetSide::parse(&target_team)?;
-                    let bet_team = BetSide::parse(&bet_team)?;
-                    let won = bet_team.won(winning_team);
-                    // One settlement withholds both profit taxes together, so
-                    // they share the single first-sighting guard.
-                    let settled = won && taxed_settlements.insert((bettor_id, match_id));
-                    let vanity_tax = if settled { stored_vanity_tax } else { 0 };
-                    let low_priority_tax = if settled { stored_low_priority_tax } else { 0 };
-                    let profit = if won {
-                        payout
-                            .unwrap_or_else(|| effective_bet.saturating_mul(2))
-                            .saturating_sub(effective_bet)
-                            .saturating_sub(vanity_tax)
-                            .saturating_sub(low_priority_tax)
-                    } else {
-                        -effective_bet
-                    };
-                    Ok(BettingImpactBet {
-                        bettor_id,
-                        match_id,
-                        effective_bet,
-                        payout,
-                        vanity_tax,
-                        low_priority_tax,
-                        bet_for_target: bet_team == target_team,
-                        won,
-                        profit,
-                    })
-                },
-            )
-            .collect()
-    }
-
     fn player_bet_history(
         &self,
         discord_id: i64,
@@ -640,7 +488,8 @@ impl GamblingStatsPort for GamblingStatsRepository {
                     COALESCE(b.is_blind, 0), b.investment_target_id,
                     b.investment_direction, b.bet_time, b.match_id, b.payout,
                     COALESCE(bst.vanity_tax, 0),
-                    COALESCE(bst.low_priority_tax, 0), m.winning_team, 'dota' AS game
+                    COALESCE(bst.low_priority_tax, 0),
+                    COALESCE(bst.bankruptcy_penalty, 0), m.winning_team, 'dota' AS game
              FROM bets b
              JOIN matches m ON m.match_id = b.match_id
              LEFT JOIN bet_settlement_taxes bst
@@ -653,11 +502,12 @@ impl GamblingStatsPort for GamblingStatsRepository {
                     b.kind<>'manual',NULL,NULL,b.created_at,m.match_id,b.payout,
                     COALESCE((SELECT amount FROM deadlock_economic_receipts r WHERE r.market_id=b.market_id AND r.discord_id=b.discord_id AND r.kind='vanity_tax'),0),
                     COALESCE((SELECT amount FROM deadlock_economic_receipts r WHERE r.market_id=b.market_id AND r.discord_id=b.discord_id AND r.kind='low_priority_tax'),0),
+                    COALESCE((SELECT amount FROM deadlock_economic_receipts r WHERE r.market_id=b.market_id AND r.discord_id=b.discord_id AND r.kind='bankruptcy'),0),
                     m.winner,'deadlock'
              FROM deadlock_wagers b JOIN deadlock_matches m
                ON b.market_id='deadlock:' || m.match_id AND b.guild_id=m.guild_id
              WHERE b.discord_id=?1 AND b.guild_id=?2 AND m.status='settled'
-             ORDER BY 9,15,1",
+             ORDER BY 9,16,1",
         )?;
         let rows = statement
             .query_map(
@@ -678,7 +528,8 @@ impl GamblingStatsPort for GamblingStatsRepository {
                         row.get::<_, i64>(11)?,
                         row.get::<_, i64>(12)?,
                         row.get::<_, i64>(13)?,
-                        row.get::<_, String>(14)?,
+                        row.get::<_, i64>(14)?,
+                        row.get::<_, String>(15)?,
                     ))
                 },
             )?
@@ -700,12 +551,13 @@ impl GamblingStatsPort for GamblingStatsRepository {
                     payout,
                     stored_vanity_tax,
                     stored_low_priority_tax,
+                    stored_bankruptcy_penalty,
                     winning_team,
                     game,
                 ) = row;
                 let team = BetSide::parse(&side)?;
                 let won = team.won(winning_team);
-                // One settlement withholds both profit taxes together, so they
+                // One settlement withholds every profit share together, so they
                 // share the single first-sighting guard.
                 let game = if game == "deadlock" {
                     "deadlock"
@@ -715,11 +567,17 @@ impl GamblingStatsPort for GamblingStatsRepository {
                 let settled = won && taxed_matches.insert((game, match_id));
                 let vanity_tax = if settled { stored_vanity_tax } else { 0 };
                 let low_priority_tax = if settled { stored_low_priority_tax } else { 0 };
+                let bankruptcy_penalty = if settled {
+                    stored_bankruptcy_penalty
+                } else {
+                    0
+                };
                 let profit = if won {
                     payout.unwrap_or(effective_bet.saturating_mul(2))
                         - effective_bet
                         - vanity_tax
                         - low_priority_tax
+                        - bankruptcy_penalty
                 } else {
                     -effective_bet
                 };
@@ -738,6 +596,7 @@ impl GamblingStatsPort for GamblingStatsRepository {
                     payout,
                     vanity_tax,
                     low_priority_tax,
+                    bankruptcy_penalty,
                     outcome: if won {
                         GamblingOutcome::Won
                     } else {
@@ -1009,13 +868,14 @@ impl GamblingStatsPort for GamblingStatsRepository {
                                  THEN COALESCE(payout, effective_bet * 2) - effective_bet
                                  ELSE -effective_bet END)
                           - COALESCE((SELECT SUM(bst.vanity_tax
-                                                 + bst.low_priority_tax)
+                                                 + bst.low_priority_tax
+                                                 + bst.bankruptcy_penalty)
                                       FROM bet_settlement_taxes bst
                                       WHERE bst.guild_id = ordered.guild_id
                                         AND bst.discord_id = ordered.discord_id), 0)
                           - COALESCE((SELECT SUM(r.amount) FROM deadlock_economic_receipts r
                                       WHERE r.guild_id=ordered.guild_id AND r.discord_id=ordered.discord_id
-                                        AND r.kind IN ('vanity_tax','low_priority_tax')),0),
+                                        AND r.kind IN ('vanity_tax','low_priority_tax','bankruptcy')),0),
                         COUNT(DISTINCT match_id),
                         SUM(CASE WHEN leverage = 5 THEN 1 ELSE 0 END),
                         SUM(CASE WHEN previous_won = 0 THEN 1 ELSE 0 END),
@@ -1197,19 +1057,6 @@ where
             matches_played: paper_hands.matches_played,
             auto_bet_performance: calculate_auto_bet_performance(&history),
         }))
-    }
-
-    /// Calculate the same external-bettor impact report used by the profile
-    /// view.  The repository query has already enforced settled-match,
-    /// guild, participant, and self-bet boundaries; this layer only folds the
-    /// rows into the public profile metrics.
-    pub fn get_betting_impact_stats(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-    ) -> Result<Option<BettingImpactStats>, GamblingStatsError> {
-        let bets = self.port.betting_impact_bets(discord_id, guild_id)?;
-        Ok(compute_betting_impact_stats(discord_id, &bets))
     }
 
     pub fn calculate_degen_score(
@@ -1481,162 +1328,6 @@ where
             })
             .collect()
     }
-}
-
-/// Pure aggregation counterpart to [`GamblingStatsService::get_betting_impact_stats`].
-/// Keeping this policy independent of SQLite makes the directional, rate, and
-/// notable-bettor rules directly executable in migrated parity tests.
-#[must_use]
-pub fn compute_betting_impact_stats(
-    discord_id: i64,
-    bets: &[BettingImpactBet],
-) -> Option<BettingImpactStats> {
-    if bets.is_empty() {
-        return None;
-    }
-    #[derive(Clone, Copy, Default)]
-    struct Aggregate {
-        wagered_for: i64,
-        wagered_against: i64,
-        pnl_for: i64,
-        pnl_against: i64,
-        bets_for: i64,
-        bets_against: i64,
-        wins_for: i64,
-        wins_against: i64,
-    }
-    let mut aggregates = BTreeMap::<i64, Aggregate>::new();
-    let mut matches = BTreeSet::new();
-    let mut biggest_single_win = 0_i64;
-    let mut biggest_single_loss = 0_i64;
-    for bet in bets {
-        matches.insert(bet.match_id);
-        biggest_single_win = biggest_single_win.max(if bet.profit > 0 { bet.profit } else { 0 });
-        biggest_single_loss = if bet.profit < 0 {
-            biggest_single_loss.min(bet.profit)
-        } else {
-            biggest_single_loss
-        };
-        let aggregate = aggregates.entry(bet.bettor_id).or_default();
-        if bet.bet_for_target {
-            aggregate.wagered_for = aggregate.wagered_for.saturating_add(bet.effective_bet);
-            aggregate.pnl_for = aggregate.pnl_for.saturating_add(bet.profit);
-            aggregate.bets_for = aggregate.bets_for.saturating_add(1);
-            if bet.won {
-                aggregate.wins_for = aggregate.wins_for.saturating_add(1);
-            }
-        } else {
-            aggregate.wagered_against = aggregate.wagered_against.saturating_add(bet.effective_bet);
-            aggregate.pnl_against = aggregate.pnl_against.saturating_add(bet.profit);
-            aggregate.bets_against = aggregate.bets_against.saturating_add(1);
-            if bet.won {
-                aggregate.wins_against = aggregate.wins_against.saturating_add(1);
-            }
-        }
-    }
-    let total_wagered_for: i64 = aggregates.values().map(|value| value.wagered_for).sum();
-    let total_wagered_against: i64 = aggregates.values().map(|value| value.wagered_against).sum();
-    let supporters_net_pnl: i64 = aggregates.values().map(|value| value.pnl_for).sum();
-    let haters_net_pnl: i64 = aggregates.values().map(|value| value.pnl_against).sum();
-    let supporter_bets_count: i64 = aggregates.values().map(|value| value.bets_for).sum();
-    let hater_bets_count: i64 = aggregates.values().map(|value| value.bets_against).sum();
-    let supporter_wins: i64 = aggregates.values().map(|value| value.wins_for).sum();
-    let hater_wins: i64 = aggregates.values().map(|value| value.wins_against).sum();
-    let supporters = aggregates
-        .iter()
-        .filter(|(_, value)| value.wagered_for > 0)
-        .map(|(id, value)| (*id, *value))
-        .collect::<BTreeMap<_, _>>();
-    let haters = aggregates
-        .iter()
-        .filter(|(_, value)| value.wagered_against > 0)
-        .map(|(id, value)| (*id, *value))
-        .collect::<BTreeMap<_, _>>();
-    let profile = |discord_id: i64, value: Aggregate| BettorProfile {
-        discord_id,
-        total_wagered_for: value.wagered_for,
-        total_wagered_against: value.wagered_against,
-        net_pnl_for: value.pnl_for,
-        net_pnl_against: value.pnl_against,
-        bets_for_count: value.bets_for,
-        bets_against_count: value.bets_against,
-        wins_for: value.wins_for,
-        wins_against: value.wins_against,
-    };
-    let select = |values: &BTreeMap<i64, Aggregate>, key: fn(Aggregate) -> i64| {
-        values
-            .iter()
-            .max_by(|(left_id, left), (right_id, right)| {
-                key(**left)
-                    .cmp(&key(**right))
-                    .then_with(|| right_id.cmp(left_id))
-            })
-            .map(|(id, value)| profile(*id, *value))
-    };
-    let biggest_fan = select(&supporters, |value| value.wagered_for);
-    let biggest_hater = select(&haters, |value| value.wagered_against);
-    let most_consistent_fan = select(&supporters, |value| value.bets_for);
-    let most_consistent_hater = select(&haters, |value| value.bets_against);
-    let blessing = select(&supporters, |value| value.pnl_for).filter(|value| value.net_pnl_for > 0);
-    let jinx = supporters
-        .iter()
-        .min_by(|(left_id, left), (right_id, right)| {
-            left.pnl_for
-                .cmp(&right.pnl_for)
-                .then_with(|| left_id.cmp(right_id))
-        })
-        .map(|(id, value)| profile(*id, *value))
-        .filter(|value| value.net_pnl_for < 0);
-    let luckiest_hater =
-        select(&haters, |value| value.pnl_against).filter(|value| value.net_pnl_against > 0);
-    let total_wagered = total_wagered_for.saturating_add(total_wagered_against);
-    Some(BettingImpactStats {
-        discord_id,
-        matches_with_bets: matches.len() as i64,
-        total_bets: bets.len() as i64,
-        total_wagered_for,
-        total_wagered_against,
-        supporters_net_pnl,
-        haters_net_pnl,
-        supporter_win_rate: if supporter_bets_count == 0 {
-            0.0
-        } else {
-            supporter_wins as f64 / supporter_bets_count as f64
-        },
-        hater_win_rate: if hater_bets_count == 0 {
-            0.0
-        } else {
-            hater_wins as f64 / hater_bets_count as f64
-        },
-        supporter_bets_count,
-        hater_bets_count,
-        market_favorability: if total_wagered == 0 {
-            0.5
-        } else {
-            total_wagered_for as f64 / total_wagered as f64
-        },
-        supporter_roi: if total_wagered_for == 0 {
-            0.0
-        } else {
-            supporters_net_pnl as f64 / total_wagered_for as f64
-        },
-        hater_roi: if total_wagered_against == 0 {
-            0.0
-        } else {
-            haters_net_pnl as f64 / total_wagered_against as f64
-        },
-        biggest_fan,
-        biggest_hater,
-        most_consistent_fan,
-        most_consistent_hater,
-        blessing,
-        jinx,
-        luckiest_hater,
-        biggest_single_win,
-        biggest_single_loss,
-        unique_supporters: supporters.len() as i64,
-        unique_haters: haters.len() as i64,
-    })
 }
 
 #[must_use]

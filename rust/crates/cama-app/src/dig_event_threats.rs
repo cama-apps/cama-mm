@@ -1,9 +1,8 @@
 //! Discord-neutral policy for `/dig` event threats.
 //!
 //! Synthetic event definitions and injected rolls keep this module independent
-//! of Python's live catalog and RNG. Python remains authoritative for command
-//! registration and the full dig pipeline; Rust mirrors the threat arithmetic,
-//! curse lifecycle, atomic persistence boundary, and result presentation.
+//! of the runtime catalog and RNG. It owns the threat arithmetic, curse
+//! lifecycle, atomic persistence boundary, and result presentation.
 
 use cama_db::dig_event_threats::{
     AtomicThreatSettlement, DigEventThreatRepository, DigEventThreatRepositoryError,
@@ -458,20 +457,6 @@ pub fn capped_curse_effect(effects: ThreatCurseEffects, effect: FractionalCurseE
 pub enum FractionalCurseEffect {
     CaveIn,
     Cooldown,
-}
-
-/// Stamina runs before the curse; mana reduction runs after it, matching the
-/// canonical Python ordering.
-#[must_use]
-pub fn cursed_cooldown(
-    after_stamina_seconds: i64,
-    effects: ThreatCurseEffects,
-    mana_reduction_seconds: i64,
-) -> i64 {
-    let penalty = capped_curse_effect(effects, FractionalCurseEffect::Cooldown);
-    ((after_stamina_seconds.max(1) as f64 * (1.0 + penalty)) as i64)
-        .saturating_sub(mana_reduction_seconds.max(0))
-        .max(1)
 }
 
 #[must_use]

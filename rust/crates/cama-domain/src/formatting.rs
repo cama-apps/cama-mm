@@ -262,6 +262,57 @@ pub fn format_duration_short(seconds: f64) -> String {
     }
 }
 
+/// Format a non-negative integer with comma thousands separators, such as
+/// `1,234,567`.
+#[must_use]
+pub fn format_grouped_unsigned(value: u64) -> String {
+    let digits = value.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped
+}
+
+/// Format an integer with comma thousands separators and a leading `-` for
+/// negative values, such as `-1,234`.
+#[must_use]
+pub fn format_grouped(value: i64) -> String {
+    let grouped = format_grouped_unsigned(value.unsigned_abs());
+    if value < 0 {
+        format!("-{grouped}")
+    } else {
+        grouped
+    }
+}
+
+/// [`format_grouped`] with an explicit `+` on positive values; zero and
+/// negative values are unchanged, such as `+1,234`, `0`, and `-1,234`.
+#[must_use]
+pub fn format_grouped_signed(value: i64) -> String {
+    if value > 0 {
+        format!("+{}", format_grouped(value))
+    } else {
+        format_grouped(value)
+    }
+}
+
+/// Truncate to at most `maximum` UTF-8 bytes without splitting a character.
+#[must_use]
+pub fn truncate_utf8_bytes(value: &str, maximum: usize) -> String {
+    if value.len() <= maximum {
+        return value.to_owned();
+    }
+    let mut end = maximum;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
+}
+
 fn role_value(configuration: &[(&'static str, &'static str)], role: &str) -> Option<&'static str> {
     configuration
         .iter()
@@ -343,9 +394,49 @@ mod tests {
     use super::{
         BettingDisplayOptions, JOPACOIN_EMOTE, PoolOddsSeeds, ROLE_EMOJIS, ROLE_NAMES,
         SpectatorAutobetSummaryInput, SpectatorAutobetTiers, calculate_pool_odds,
-        format_betting_display, format_role_display, format_spectator_autobet_summary,
-        python_round_decimals,
+        format_betting_display, format_grouped, format_grouped_signed, format_grouped_unsigned,
+        format_role_display, format_spectator_autobet_summary, python_round_decimals,
+        truncate_utf8_bytes,
     };
+
+    #[test]
+    fn test_truncate_utf8_bytes_keeps_character_boundaries() {
+        assert_eq!(truncate_utf8_bytes("abc", 3), "abc");
+        assert_eq!(truncate_utf8_bytes("abcdef", 4), "abcd");
+        // "é" is two bytes; cutting inside it backs off to the previous boundary.
+        assert_eq!(truncate_utf8_bytes("aé", 2), "a");
+        assert_eq!(truncate_utf8_bytes("🦀🦀", 7), "🦀");
+        assert_eq!(truncate_utf8_bytes("🦀", 0), "");
+    }
+
+    #[test]
+    fn test_format_grouped_inserts_thousands_separators() {
+        assert_eq!(format_grouped_unsigned(0), "0");
+        assert_eq!(format_grouped_unsigned(999), "999");
+        assert_eq!(format_grouped_unsigned(1_000), "1,000");
+        assert_eq!(
+            format_grouped_unsigned(u64::MAX),
+            "18,446,744,073,709,551,615"
+        );
+        assert_eq!(format_grouped(0), "0");
+        assert_eq!(format_grouped(12_345), "12,345");
+        assert_eq!(format_grouped(123_456), "123,456");
+        assert_eq!(format_grouped(-1_234_567), "-1,234,567");
+        assert_eq!(format_grouped(-999), "-999");
+        assert_eq!(format_grouped(i64::MIN), "-9,223,372,036,854,775,808");
+        assert_eq!(format_grouped(i64::MAX), "9,223,372,036,854,775,807");
+    }
+
+    #[test]
+    fn test_format_grouped_signed_marks_only_positive_values() {
+        assert_eq!(format_grouped_signed(1_234), "+1,234");
+        assert_eq!(format_grouped_signed(0), "0");
+        assert_eq!(format_grouped_signed(-1_234), "-1,234");
+        assert_eq!(
+            format_grouped_signed(i64::MIN),
+            "-9,223,372,036,854,775,808"
+        );
+    }
 
     #[test]
     fn test_format_role_display_uses_role_configuration() {

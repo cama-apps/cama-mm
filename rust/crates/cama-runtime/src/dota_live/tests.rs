@@ -47,8 +47,7 @@ fn dota_tv_delay_enum_uses_current_lobby_wire_values() {
 #[tokio::test]
 async fn faster_polling_preserves_the_forty_five_second_freshness_window() {
     let feed = DotaLiveFeed::new(&config(None)).unwrap();
-    feed.publish_match(7, 8, 123, None, 5, 3, true, vec![1])
-        .await;
+    feed.publish_match(7, 8, 123, None, 5, 3, true, vec![1]);
     let mut snapshot = normalize_realtime_stats(
         &json!({"match_id":123,"game_time":90,"players":[{"account_id":1}]}),
         7,
@@ -98,8 +97,7 @@ async fn upstream_cooldown_covers_fallbacks_and_feed_clones_then_resumes() {
         )
         .unwrap();
         for (pending, match_id) in [(8, 123), (9, 124)] {
-            feed.publish_match(7, pending, match_id, Some(99), 5, 3, true, vec![1])
-                .await;
+            feed.publish_match(7, pending, match_id, Some(99), 5, 3, true, vec![1]);
             let mut snapshot = normalize_realtime_stats(
                 &json!({"match_id":match_id,"game_time":90,"players":[{"account_id":1}]}),
                 7,
@@ -173,8 +171,7 @@ async fn network_failure_keeps_the_old_retry_spacing_instead_of_five_second_retr
         format!("http://{}", listener.local_addr().unwrap()),
     )
     .unwrap();
-    feed.publish_match(7, 8, 123, Some(99), 5, 3, true, vec![1])
-        .await;
+    feed.publish_match(7, 8, 123, Some(99), 5, 3, true, vec![1]);
     let server = tokio::spawn(async move {
         for _ in 0..2 {
             let (mut socket, _) = listener.accept().await.unwrap();
@@ -313,8 +310,7 @@ fn league_scoreboard_reads_nested_team_scores_and_players() {
 #[tokio::test]
 async fn private_publish_can_observe_start_before_close_and_repeated_publish_preserves_sample() {
     let feed = DotaLiveFeed::new(&config(None)).expect("feed");
-    feed.publish_match(7, 8, 123, None, 5, 2, false, vec![1])
-        .await;
+    feed.publish_match(7, 8, 123, None, 5, 2, false, vec![1]);
     assert!(
         feed.matches
             .read()
@@ -354,14 +350,12 @@ async fn private_publish_can_observe_start_before_close_and_repeated_publish_pre
     .expect("later non-playable GSI sample");
     assert!(feed.gameplay_started(7, 8, 123));
 
-    feed.publish_match(7, 8, 123, None, 5, 2, true, vec![1])
-        .await;
+    feed.publish_match(7, 8, 123, None, 5, 2, true, vec![1]);
     let first = feed.snapshot(7, 8).expect("cached sample");
     assert_eq!(first.delay_seconds, Some(120));
     assert_eq!(first.delay_source, Some(LiveDelaySource::Configured));
 
-    feed.publish_match(7, 8, 123, Some(99), 6, 2, true, vec![1])
-        .await;
+    feed.publish_match(7, 8, 123, Some(99), 6, 2, true, vec![1]);
     let repeated = feed.snapshot(7, 8).expect("sample survives republish");
     assert_eq!(repeated.observed_at, first.observed_at);
     assert_eq!(repeated.fetched_at, first.fetched_at);
@@ -369,8 +363,7 @@ async fn private_publish_can_observe_start_before_close_and_repeated_publish_pre
 
     // Closure is monotonic even if a recovery pass later arrives with the
     // old pre-close flag.
-    feed.publish_match(7, 8, 123, None, 5, 2, false, vec![1])
-        .await;
+    feed.publish_match(7, 8, 123, None, 5, 2, false, vec![1]);
     assert!(feed.snapshot(7, 8).is_some());
 
     feed.finish_match(7, 8).await;
@@ -381,8 +374,7 @@ async fn private_publish_can_observe_start_before_close_and_repeated_publish_pre
 #[tokio::test]
 async fn invalid_or_nonplayable_gsi_input_cannot_create_start_evidence() {
     let feed = DotaLiveFeed::new(&config(None)).expect("feed");
-    feed.publish_match(7, 8, 123, None, 5, 2, false, vec![1])
-        .await;
+    feed.publish_match(7, 8, 123, None, 5, 2, false, vec![1]);
 
     let payload = |token: &str, match_id: &str, game_state: Value, account: &str| {
         let mut players = Map::new();
@@ -404,7 +396,7 @@ async fn invalid_or_nonplayable_gsi_input_cannot_create_start_evidence() {
             ),
             700
         ),
-        Err("GSI authentication failed".to_owned())
+        Err(LiveIngestError::Unauthorized)
     );
     assert!(!feed.gameplay_started(7, 8, 123));
 
@@ -418,7 +410,7 @@ async fn invalid_or_nonplayable_gsi_input_cannot_create_start_evidence() {
             ),
             701
         ),
-        Err("GSI match is not an active registered match".to_owned())
+        Err(LiveIngestError::UnknownMatch)
     );
     assert!(!feed.gameplay_started(7, 8, 123));
 
@@ -432,7 +424,7 @@ async fn invalid_or_nonplayable_gsi_input_cannot_create_start_evidence() {
             ),
             702
         ),
-        Err("GSI roster does not match the registered roster".to_owned())
+        Err(LiveIngestError::RosterMismatch)
     );
     assert!(!feed.gameplay_started(7, 8, 123));
 
@@ -472,8 +464,7 @@ async fn invalid_or_nonplayable_gsi_input_cannot_create_start_evidence() {
 #[tokio::test]
 async fn gsi_requires_active_match_and_rejects_accounts_outside_frozen_roster() {
     let feed = DotaLiveFeed::new(&config(None)).expect("feed");
-    feed.publish_match(7, 8, 123, None, 5, 3, true, vec![1, 2])
-        .await;
+    feed.publish_match(7, 8, 123, None, 5, 3, true, vec![1, 2]);
     let base = json!({
         "auth": {"token": "gsi-token-with-at-least-32-bytes-long"},
         "map": {"matchid": "123", "delay": 17},
@@ -510,13 +501,13 @@ async fn gsi_requires_active_match_and_rejects_accounts_outside_frozen_roster() 
     });
     assert_eq!(
         feed.ingest_gsi(wrong_roster, 701),
-        Err("GSI roster does not match the registered roster".to_owned())
+        Err(LiveIngestError::RosterMismatch)
     );
 
     feed.finish_match(7, 8).await;
     assert_eq!(
         feed.ingest_gsi(base, 702),
-        Err("GSI match is not an active registered match".to_owned())
+        Err(LiveIngestError::UnknownMatch)
     );
 }
 
@@ -547,8 +538,7 @@ fn gsi_observer_team_slots_merge_player_hero_and_items_sections() {
 #[tokio::test]
 async fn cache_is_bounded_and_prefers_evicting_finished_matches() {
     let feed = DotaLiveFeed::new(&config(None)).expect("feed");
-    feed.publish_match(7, 1, 1, None, 5, 3, true, Vec::new())
-        .await;
+    feed.publish_match(7, 1, 1, None, 5, 3, true, Vec::new());
     feed.ingest_gsi(
         json!({
             "auth": {"token": "gsi-token-with-at-least-32-bytes-long"},
@@ -559,8 +549,7 @@ async fn cache_is_bounded_and_prefers_evicting_finished_matches() {
     .expect("sample");
     feed.finish_match(7, 1).await;
     for match_id in 2..=DOTA_LIVE_MAX_MATCHES as u64 {
-        feed.publish_match(7, match_id as i64, match_id, None, 5, 3, true, Vec::new())
-            .await;
+        feed.publish_match(7, match_id as i64, match_id, None, 5, 3, true, Vec::new());
     }
     {
         let matches = feed.matches.read().expect("cache lock");
@@ -576,8 +565,7 @@ async fn cache_is_bounded_and_prefers_evicting_finished_matches() {
         3,
         true,
         Vec::new(),
-    )
-    .await;
+    );
     {
         let matches = feed.matches.read().expect("cache lock");
         assert_eq!(matches.len(), DOTA_LIVE_MAX_MATCHES);
@@ -612,6 +600,21 @@ fn workers_are_opt_in_to_valve_polling_and_http() {
     let http_workers = http_only.workers();
     assert_eq!(http_workers.len(), 1);
     assert_eq!(http_workers[0].name, "dota-live-http");
+}
+
+#[test]
+fn secret_token_comparison_accepts_only_the_exact_secret() {
+    let secret = "viewer-token-with-at-least-32-bytes";
+    assert!(secret_tokens_match(secret, secret));
+    for wrong in [
+        "",
+        "viewer-token-with-at-least-32-byte",
+        "viewer-token-with-at-least-32-bytes-extra",
+        "viewer-token-with-at-least-32-bytez",
+        "Viewer-token-with-at-least-32-bytes",
+    ] {
+        assert!(!secret_tokens_match(wrong, secret), "{wrong}");
+    }
 }
 
 #[test]
@@ -683,8 +686,7 @@ async fn polling_uses_realtime_stats_then_normalizes_the_response_once() {
 
     let feed = DotaLiveFeed::new_with_upstream_base(&config(None), format!("http://{address}"))
         .expect("feed");
-    feed.publish_match(7, 8, 123, Some(99), 5, 3, true, vec![1, 2])
-        .await;
+    feed.publish_match(7, 8, 123, Some(99), 5, 3, true, vec![1, 2]);
     feed.poll_once().await;
     server.await.expect("server");
     let snapshot = feed.snapshot(7, 8).expect("polled snapshot");
@@ -804,15 +806,13 @@ async fn invalid_realtime_stats_falls_back_to_live_league_games() {
 
     let feed = DotaLiveFeed::new_with_upstream_base(&config(None), format!("http://{address}"))
         .expect("feed");
-    feed.publish_match(7, 8, 123, Some(99), 5, 3, false, vec![1])
-        .await;
+    feed.publish_match(7, 8, 123, Some(99), 5, 3, false, vec![1]);
     feed.poll_once().await;
     server.await.expect("server");
 
     assert!(feed.gameplay_started(7, 8, 123));
     assert!(feed.snapshot(7, 8).is_none());
-    feed.publish_match(7, 8, 123, Some(99), 5, 3, true, vec![1])
-        .await;
+    feed.publish_match(7, 8, 123, Some(99), 5, 3, true, vec![1]);
     let snapshot = feed.snapshot(7, 8).expect("fallback snapshot");
     assert_eq!(snapshot.source, LiveSnapshotSource::LiveLeagueGames);
     assert_eq!(snapshot.game_time_seconds, Some(91));
@@ -867,8 +867,7 @@ async fn disconnected_realtime_stats_falls_back_to_live_league_games() {
 
     let feed = DotaLiveFeed::new_with_upstream_base(&config(None), format!("http://{address}"))
         .expect("feed");
-    feed.publish_match(7, 8, 123, Some(99), 5, 3, true, vec![1])
-        .await;
+    feed.publish_match(7, 8, 123, Some(99), 5, 3, true, vec![1]);
     feed.poll_once().await;
     server.await.expect("server");
 
@@ -1109,8 +1108,7 @@ async fn partial_realtime_does_not_block_complete_league_announcements() {
     });
     let feed =
         DotaLiveFeed::new_with_upstream_base(&config(None), format!("http://{address}")).unwrap();
-    feed.publish_match(7, 8, 123, Some(99), 5, 3, true, vec![1])
-        .await;
+    feed.publish_match(7, 8, 123, Some(99), 5, 3, true, vec![1]);
     tokio::time::timeout(std::time::Duration::from_secs(5), feed.poll_once())
         .await
         .unwrap();
@@ -1242,8 +1240,7 @@ async fn realtime_scoreboard_checks_league_maps_without_losing_usable_fallback()
         });
         let feed = DotaLiveFeed::new_with_upstream_base(&config(None), format!("http://{address}"))
             .unwrap();
-        feed.publish_match(7, 8, 123, Some(99), 5, 3, true, (100..110).collect())
-            .await;
+        feed.publish_match(7, 8, 123, Some(99), 5, 3, true, (100..110).collect());
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             feed.poll_once().await;
             server.await.unwrap();
@@ -1286,8 +1283,7 @@ async fn realtime_map_does_not_request_the_league_fallback() {
     });
     let feed =
         DotaLiveFeed::new_with_upstream_base(&config(None), format!("http://{address}")).unwrap();
-    feed.publish_match(7, 8, 123, Some(99), 5, 3, true, (100..110).collect())
-        .await;
+    feed.publish_match(7, 8, 123, Some(99), 5, 3, true, (100..110).collect());
     // Keep the listener open: an unexpected second request cannot silently fail
     // and return the same realtime sample through the error fallback.
     tokio::time::timeout(std::time::Duration::from_secs(5), feed.poll_once())
@@ -1541,8 +1537,7 @@ fn valve_start_requires_unambiguous_phase_or_positive_clock() {
 #[tokio::test]
 async fn valve_start_validates_roster_and_stays_private_and_monotonic() {
     let feed = DotaLiveFeed::new(&config(None)).unwrap();
-    feed.publish_match(7, 8, 123, None, 5, 3, false, vec![1, 2])
-        .await;
+    feed.publish_match(7, 8, 123, None, 5, 3, false, vec![1, 2]);
     let target = feed.poll_targets().pop().unwrap();
     for players in [
         json!([]),
@@ -1563,12 +1558,10 @@ async fn valve_start_validates_roster_and_stays_private_and_monotonic() {
     assert!(feed.snapshot(7, 8).is_none());
     feed.observe_valve_start(&target, &json!({"match_id":123,"game_state":2}), &snapshot);
     feed.mark_stale(target.key());
-    feed.publish_match(7, 8, 123, None, 5, 3, true, vec![1, 2])
-        .await;
+    feed.publish_match(7, 8, 123, None, 5, 3, true, vec![1, 2]);
     assert!(feed.gameplay_started(7, 8, 123));
     assert!(feed.snapshot(7, 8).is_some());
-    feed.publish_match(7, 8, 124, None, 5, 3, false, vec![1, 2])
-        .await;
+    feed.publish_match(7, 8, 124, None, 5, 3, false, vec![1, 2]);
     feed.observe_valve_start(&target, &game, &snapshot);
     assert!(!feed.gameplay_started(7, 8, 124));
 }

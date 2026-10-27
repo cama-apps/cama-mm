@@ -1,7 +1,7 @@
 //! Existing-schema persistence for persistent Dig routes.
 //!
-//! Python remains the production runtime and the sole schema/migration
-//! authority. This repository only opens an already-migrated SQLite database
+//! The Rust schema manager owns schema and migrations. This repository only
+//! opens an already-migrated SQLite database
 //! through [`crate::open_runtime_connection`]. Route choices, boss outcomes,
 //! rewards, echoes, and audit rows use `BEGIN IMMEDIATE` so stale Discord
 //! views cannot overwrite the first committed result.

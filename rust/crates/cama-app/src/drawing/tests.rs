@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::io::{Cursor, Read};
 
 use super::*;
 
@@ -459,88 +459,6 @@ fn test_hero_performance_chart_matches_python_dimensions_and_thresholds() {
 fn test_hero_performance_chart_empty_history_matches_python_fallback() {
     let image = draw_hero_performance_chart(&[], "TestUser");
     assert_rgba_png(&image, Some((450, 100)));
-}
-
-#[test]
-fn test_basic_attribute_distribution() {
-    let image = draw_attribute_distribution(AttributeValues {
-        strength: 25.0,
-        agility: 35.0,
-        intelligence: 30.0,
-        universal: 10.0,
-    });
-    let decoded = assert_rgba_png(&image, Some((300, 300)));
-    assert!(decoded.contains(Rgba::rgb(0xe5, 0x39, 0x35)));
-    assert!(decoded.contains(Rgba::rgb(0x43, 0xa0, 0x47)));
-}
-
-#[test]
-fn test_attribute_distribution_missing_attrs() {
-    let image = draw_attribute_distribution(AttributeValues {
-        agility: 60.0,
-        intelligence: 40.0,
-        ..AttributeValues::default()
-    });
-    let decoded = assert_rgba_png(&image, Some((300, 300)));
-    assert!(!decoded.contains(Rgba::rgb(0xe5, 0x39, 0x35)));
-}
-
-#[test]
-fn test_attribute_distribution_single_attr() {
-    let image = draw_attribute_distribution(AttributeValues {
-        strength: 100.0,
-        ..AttributeValues::default()
-    });
-    let decoded = assert_rgba_png(&image, Some((300, 300)));
-    assert!(decoded.contains(Rgba::rgb(0xe5, 0x39, 0x35)));
-}
-
-#[test]
-fn test_all_functions_return_seekable_bytesio() {
-    let roles = BTreeMap::from([
-        ("Carry".to_owned(), 50.0),
-        ("Support".to_owned(), 30.0),
-        ("Nuker".to_owned(), 20.0),
-    ]);
-    let mut images = vec![
-        draw_matches_table(&[match_row("Pudge", true, Some(1_000))], &BTreeMap::new()),
-        draw_role_graph(&roles, "Role Distribution"),
-        draw_lane_distribution(&[("Safe Lane".to_owned(), 50.0), ("Mid".to_owned(), 50.0)]),
-        draw_attribute_distribution(AttributeValues {
-            strength: 50.0,
-            agility: 50.0,
-            ..AttributeValues::default()
-        }),
-    ];
-    for image in &mut images {
-        assert_eq!(image.position(), 0);
-        image.seek(SeekFrom::Start(10)).expect("seek into PNG");
-        image.seek(SeekFrom::Start(0)).expect("rewind PNG");
-        let mut signature = [0_u8; 8];
-        image.read_exact(&mut signature).expect("read signature");
-        assert_eq!(&signature, b"\x89PNG\r\n\x1a\n");
-    }
-}
-
-#[test]
-fn test_all_images_are_rgba() {
-    let roles = BTreeMap::from([
-        ("A".to_owned(), 33.0),
-        ("B".to_owned(), 33.0),
-        ("C".to_owned(), 34.0),
-    ]);
-    let images = [
-        draw_matches_table(&[match_row("Test", true, Some(100))], &BTreeMap::new()),
-        draw_role_graph(&roles, "Role Distribution"),
-        draw_lane_distribution(&[("Safe Lane".to_owned(), 100.0)]),
-        draw_attribute_distribution(AttributeValues {
-            strength: 100.0,
-            ..AttributeValues::default()
-        }),
-    ];
-    for image in images {
-        assert_eq!(decode_png(&image).color_type, 6);
-    }
 }
 
 #[test]
@@ -1222,67 +1140,6 @@ fn test_shared_axis_changes_keep_balance_chart_rendering() {
     assert!(decoded.contains(DISCORD_GREEN));
     assert!(decoded.contains(DISCORD_RED));
     assert!(decoded.contains(DISCORD_WHITE));
-}
-
-#[test]
-fn test_successful_and_failed_renders_register_no_figure() {
-    let ratings = [1_400.0, 1_500.0, 1_520.0, 1_600.0, 1_700.0, 1_450.0];
-    let varied = draw_rating_distribution(&ratings);
-    let decoded = assert_rgba_png(&varied, Some((640, 390)));
-    assert!(
-        decoded.contains(DISCORD_GREEN),
-        "spread distribution draws normal fit"
-    );
-    assert!(
-        decoded.contains(DISCORD_YELLOW),
-        "five-plus samples draw the KDE overlay"
-    );
-    assert!(decoded.contains(DISCORD_RED), "mean marker is visible");
-    assert!(
-        decoded.contains(Rgba::rgb(0xf4, 0x7b, 0x67)),
-        "median marker is visible"
-    );
-    let mut ordered_ratings = ratings;
-    ordered_ratings.sort_by(f64::total_cmp);
-    let normality =
-        distribution_normality_p_value(&ordered_ratings).expect("normality probability");
-    assert!(
-        (normality - 0.858_128_646_411_875_1).abs() < 1e-6,
-        "native Royston probability {normality} matches scipy.stats.shapiro"
-    );
-
-    let mut state = 1_u32;
-    let mut large_sample = Vec::with_capacity(5_001);
-    while large_sample.len() < 5_001 {
-        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        let first = (f64::from(state) + 1.0) / (f64::from(u32::MAX) + 2.0);
-        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        let second = (f64::from(state) + 1.0) / (f64::from(u32::MAX) + 2.0);
-        let radius = (-2.0 * first.ln()).sqrt();
-        let angle = 2.0 * std::f64::consts::PI * second;
-        large_sample.push(radius * angle.cos());
-        large_sample.push(radius * angle.sin());
-    }
-    large_sample.truncate(5_001);
-    large_sample.sort_by(f64::total_cmp);
-    let large_normality =
-        distribution_normality_p_value(&large_sample).expect("large-sample normality probability");
-    assert!(
-        (large_normality - 0.750_632_579_300_718_9).abs() < 1e-6,
-        "native D'Agostino-Pearson probability {large_normality} matches scipy.stats.normaltest"
-    );
-
-    let mut outputs = BTreeSet::new();
-    for _ in 0..3 {
-        let flat = draw_rating_distribution(&[1_500.0; 8]);
-        assert_rgba_png(&flat, Some((640, 390)));
-        outputs.insert(flat.into_inner());
-    }
-    assert_eq!(
-        outputs.len(),
-        1,
-        "degenerate rendering is deterministic and stateless"
-    );
 }
 
 #[test]

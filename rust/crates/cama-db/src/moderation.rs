@@ -1,6 +1,6 @@
 //! Existing-schema persistence for lobby moderation.
 //!
-//! Python remains the sole schema and migration authority. This module opens
+//! Schema creation and migration belong to the startup schema manager. This module opens
 //! only an already-migrated database through [`crate::open_runtime_connection`]
 //! and uses `BEGIN IMMEDIATE` for suspension/audit transitions. Schema helpers
 //! below are read-only contract checks; production Rust performs no DDL.

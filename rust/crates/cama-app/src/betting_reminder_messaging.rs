@@ -1,7 +1,6 @@
 //! Discord-neutral betting reminder and wager-copy policy.
 //!
-//! The live Python command remains the Discord/runtime authority. This module
-//! keeps the reminder strings, lopsided-pool threshold, tightly scoped mention
+//! This module keeps the reminder strings, lopsided-pool threshold, tightly scoped mention
 //! policy, partial-message thread routing, and concurrent copy refresh behavior
 //! executable without a gateway.
 

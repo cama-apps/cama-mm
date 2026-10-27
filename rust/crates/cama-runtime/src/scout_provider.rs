@@ -32,8 +32,7 @@ use crate::registration::{
     InteractionActionRow, InteractionAttachment, InteractionButton, InteractionButtonStyle,
     InteractionEmbed, InteractionHandler, InteractionHandlerError, InteractionMessageDelivery,
     InteractionMessageReceipt, InteractionOption, InteractionRequest, InteractionResponder,
-    InteractionResponse, InteractionValue, RegistrationError, RegistrationProvider,
-    RegistryBuilder,
+    InteractionResponse, RegistrationError, RegistrationProvider, RegistryBuilder,
 };
 
 const HEROES_PER_PAGE: usize = 10;
@@ -876,14 +875,7 @@ fn stable_unique(values: &[i64]) -> Vec<i64> {
 }
 
 fn subcommand(options: &[InteractionOption]) -> Result<(&str, &[InteractionOption]), String> {
-    options
-        .iter()
-        .find_map(|option| match &option.value {
-            InteractionValue::Subcommand(children) => {
-                Some((option.name.as_str(), children.as_slice()))
-            }
-            _ => None,
-        })
+    crate::option_ext::subcommand_option(options)
         .ok_or_else(|| "Scout command is missing a subcommand".to_owned())
 }
 

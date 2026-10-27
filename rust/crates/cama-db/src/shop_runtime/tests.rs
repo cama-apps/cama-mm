@@ -166,74 +166,6 @@ fn paid_ping_kind_preserves_python_sources() {
 }
 
 #[test]
-fn test_second_claim_within_cooldown_is_rejected() {
-    const COOLDOWN: i64 = 30 * 86_400;
-    let fixture = Fixture::new();
-    fixture.player(BUYER, 0);
-    assert!(
-        fixture
-            .repository
-            .try_claim_double_or_nothing(BUYER, GUILD, NOW, COOLDOWN)
-            .unwrap()
-    );
-    assert!(
-        !fixture
-            .repository
-            .try_claim_double_or_nothing(BUYER, GUILD, NOW + 5, COOLDOWN)
-            .unwrap()
-    );
-    assert_eq!(
-        fixture
-            .repository
-            .player(BUYER, GUILD)
-            .unwrap()
-            .expect("claimed player")
-            .last_double_or_nothing,
-        Some(NOW)
-    );
-}
-
-#[test]
-fn test_claim_succeeds_again_after_cooldown_elapses() {
-    const COOLDOWN: i64 = 30 * 86_400;
-    let fixture = Fixture::new();
-    fixture.player(BUYER, 0);
-    assert!(
-        fixture
-            .repository
-            .try_claim_double_or_nothing(BUYER, GUILD, NOW, COOLDOWN)
-            .unwrap()
-    );
-    let later = NOW + COOLDOWN + 1;
-    assert!(
-        fixture
-            .repository
-            .try_claim_double_or_nothing(BUYER, GUILD, later, COOLDOWN)
-            .unwrap()
-    );
-    assert_eq!(
-        fixture
-            .repository
-            .player(BUYER, GUILD)
-            .unwrap()
-            .expect("claimed player")
-            .last_double_or_nothing,
-        Some(later)
-    );
-}
-
-#[test]
-fn test_claim_requires_player_row() {
-    let fixture = Fixture::new();
-    assert!(
-        !fixture
-            .repository
-            .try_claim_double_or_nothing(999, GUILD, NOW, 30 * 86_400)
-            .unwrap()
-    );
-}
-
-#[test]
 fn get_last_double_or_nothing_returns_none_for_new_player() {
     let fixture = Fixture::new();
     fixture.player(BUYER, 100);
@@ -1996,8 +1928,8 @@ fn recent_losses_and_dig_effects_match_python_queries_and_survive_reopen() {
     );
 }
 
-/// Python owns the schema, Rust performs live Shop settlements, then Python
-/// verifies balances, cooldown, idempotency, and trigger-authored audit rows.
+/// Shop settlements run against a disposable fixture database, then the test verifies
+/// balances, cooldown, idempotency, and trigger-authored audit rows.
 #[test]
 fn double_or_nothing_new_player_has_no_previous_spin() {
     let fixture = Fixture::new();

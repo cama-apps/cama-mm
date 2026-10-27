@@ -1,6 +1,6 @@
 //! Durable pending-match persistence for the live match runtime.
 //!
-//! The Python-owned schema stores the complete pending match as JSON in
+//! The schema stores the complete pending match as JSON in
 //! `pending_matches.payload`.  This adapter opens only an already-migrated
 //! database through [`crate::open_runtime_connection`]; production code in
 //! this module never creates or alters schema.
@@ -474,11 +474,14 @@ impl PendingMatchRepository {
             .collect())
     }
 
-    /// Replace the complete JSON document under a strict guild guard.
+    /// Test support: replace the complete JSON document under a strict guild
+    /// guard, without the revision or lifecycle checks production mutations
+    /// apply. Production code must use the dedicated atomic operations.
     ///
     /// Unknown fields loaded into `state.extra` remain present in the encoded
     /// document. Returns `false` for a missing or cross-guild row.
-    pub fn update_pending_match(
+    #[doc(hidden)]
+    pub fn replace_pending_match_for_tests(
         &self,
         guild_id: i64,
         pending_match_id: i64,
@@ -1772,7 +1775,7 @@ mod tests {
 
         assert!(
             !repository
-                .update_pending_match(GUILD_B, created.pending_match_id, &changed_state)
+                .replace_pending_match_for_tests(GUILD_B, created.pending_match_id, &changed_state)
                 .expect("cross-guild update")
         );
         assert_eq!(
@@ -2032,7 +2035,7 @@ mod tests {
 
         assert!(
             !repository
-                .update_pending_match(GUILD_B, created.pending_match_id, &tampered)
+                .replace_pending_match_for_tests(GUILD_B, created.pending_match_id, &tampered)
                 .expect("reject cross-guild update")
         );
         let stored = repository
@@ -2053,7 +2056,7 @@ mod tests {
 
         assert!(
             repository
-                .update_pending_match(GUILD_A, created.pending_match_id, &updated)
+                .replace_pending_match_for_tests(GUILD_A, created.pending_match_id, &updated)
                 .expect("update matching guild")
         );
         let stored = repository

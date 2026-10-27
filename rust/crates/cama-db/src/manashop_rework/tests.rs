@@ -12,7 +12,6 @@ const USER: i64 = 111;
 const ALLY: i64 = 222;
 const TARGET: i64 = 333;
 const GUILD: i64 = 9_001;
-const OTHER_GUILD: i64 = 9_002;
 const NOW: i64 = 2_000_000_000;
 const TODAY: &str = "2026-05-09";
 
@@ -307,58 +306,6 @@ fn test_protection_plains_claim_resets_guardian_capacity_only_for_plains() {
             )
             .unwrap(),
         25
-    );
-}
-
-#[test]
-fn test_was_item_used_today_starts_false_then_true() {
-    let fixture = Fixture::new();
-    assert!(
-        !fixture
-            .repository
-            .was_item_used_today(USER, Some(GUILD), "aegis", TODAY)
-            .unwrap()
-    );
-    assert!(
-        fixture
-            .repository
-            .mark_item_used_atomic(USER, Some(GUILD), "aegis", TODAY)
-            .unwrap()
-    );
-    assert!(
-        fixture
-            .repository
-            .was_item_used_today(USER, Some(GUILD), "aegis", TODAY)
-            .unwrap()
-    );
-}
-
-#[test]
-fn test_mark_item_used_atomic_blocks_double_use_same_day() {
-    let fixture = Fixture::new();
-    assert!(
-        fixture
-            .repository
-            .mark_item_used_atomic(USER, Some(GUILD), "regrowth", TODAY)
-            .unwrap()
-    );
-    assert!(
-        !fixture
-            .repository
-            .mark_item_used_atomic(USER, Some(GUILD), "regrowth", TODAY)
-            .unwrap()
-    );
-    assert!(
-        fixture
-            .repository
-            .mark_item_used_atomic(USER, Some(GUILD), "blood_pact", TODAY)
-            .unwrap()
-    );
-    assert!(
-        fixture
-            .repository
-            .mark_item_used_atomic(USER, Some(GUILD), "regrowth", "2026-05-10")
-            .unwrap()
     );
 }
 
@@ -798,57 +745,6 @@ fn test_manashop_retry_recovers_purchase_abandoned_before_effects() {
             .is_mana_consumed(USER, Some(GUILD))
             .unwrap()
     );
-}
-
-#[test]
-fn test_active_for_many_batches_owners_and_preserves_missing() {
-    let fixture = Fixture::new();
-    let grant = |owner, guild, kind, expires| {
-        fixture
-            .repository
-            .grant_buff(GrantBuffRequest {
-                discord_id: owner,
-                guild_id: Some(guild),
-                buff_type: kind,
-                target_id: None,
-                granted_at: NOW,
-                expires_at: expires,
-                data: None,
-            })
-            .unwrap()
-    };
-    let first_user = grant(USER, GUILD, "counterspell", NOW + 3_600);
-    let second_user = grant(USER, GUILD, "counterspell", NOW + 3_600);
-    let ally = grant(ALLY, GUILD, "counterspell", NOW + 3_600);
-    grant(ALLY, OTHER_GUILD, "counterspell", NOW + 3_600);
-    grant(TARGET, GUILD, "overgrowth", NOW + 3_600);
-    grant(TARGET, GUILD, "counterspell", NOW - 1);
-    let active = fixture
-        .repository
-        .active_for_many(
-            &[ALLY, USER, ALLY, TARGET],
-            Some(GUILD),
-            "counterspell",
-            NOW,
-        )
-        .unwrap();
-    assert_eq!(
-        active.iter().map(|entry| entry.0).collect::<Vec<_>>(),
-        vec![ALLY, USER, TARGET]
-    );
-    assert_eq!(
-        active[0].1.iter().map(|row| row.id).collect::<Vec<_>>(),
-        vec![ally]
-    );
-    assert_eq!(
-        active[1]
-            .1
-            .iter()
-            .map(|row| row.id)
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([first_user, second_user])
-    );
-    assert!(active[2].1.is_empty());
 }
 
 #[test]

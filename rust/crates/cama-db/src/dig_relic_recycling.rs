@@ -1,6 +1,6 @@
 //! Existing-schema persistence for atomic Dig relic recycling.
 //!
-//! Python remains the schema, migration, and live-runtime authority. Production code here opens
+//! Schema creation and migration belong to the startup schema manager. Production code here opens
 //! only an existing database through [`crate::open_runtime_connection`]. The single mutation is a
 //! `BEGIN IMMEDIATE` transaction that revalidates three selected inventory rows, deletes exactly
 //! those rows, and inserts the output relic. All DDL is confined to disposable tests.

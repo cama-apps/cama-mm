@@ -1,8 +1,6 @@
 //! Adapter-neutral orchestration for active mana effects.
 //!
-//! The Python process remains the production Discord and SQLite authority
-//! during the side-by-side migration. This module ports the policy exercised
-//! by `tests/test_mana_effects_service.py` behind explicit persistence,
+//! This module keeps mana-effect policy behind explicit persistence,
 //! entropy, and daily-economy ports. The included in-memory repository applies
 //! siphons and tithes atomically, making the money transitions executable
 //! without opening the live database.

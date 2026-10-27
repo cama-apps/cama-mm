@@ -9,10 +9,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use cama_domain::dig_economy::BOSS_BOUNDARIES;
 use rusqlite::{Connection, OpenFlags, params};
 use thiserror::Error;
-
-pub const BOSS_BOUNDARIES: [i64; 7] = [25, 50, 75, 100, 150, 200, 275];
 
 const REQUIRED_DIG_MIGRATIONS: [&str; 10] = [
     "add_dig_action_history_indexes",

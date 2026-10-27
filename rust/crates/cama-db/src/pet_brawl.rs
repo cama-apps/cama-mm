@@ -1,7 +1,7 @@
 //! Python-compatible pet-brawl lifecycle, escrow, and settlement persistence.
 //!
-//! Python remains the schema-migration authority during the side-by-side
-//! rewrite. This module opens only an existing SQLite file. Every lifecycle
+//! Schema creation and migration belong to the startup schema manager. This
+//! module opens only an existing SQLite file. Every lifecycle
 //! mutation uses `BEGIN IMMEDIATE`, matching Python's serialization boundary
 //! for state guards, wallet escrow/refunds, hunger/training settlement, and
 //! the final brawl row.

@@ -76,7 +76,7 @@ fn test_total_artifact_count_matches_expected() {
 
 #[test]
 fn test_post_pinnacle_decay_factor_root_network_slows_decay() {
-    let depth = PINNACLE_DEPTH + 100;
+    let depth = i64::from(PINNACLE_DEPTH) + 100;
     let base = post_pinnacle_decay_factor(depth, &RelicSet::default());
     let root = post_pinnacle_decay_factor(depth, &RelicSet::new(["root_network"]));
     let frozen = post_pinnacle_decay_factor(depth, &RelicSet::new(["frozen_clock"]));

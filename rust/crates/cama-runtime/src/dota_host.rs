@@ -1333,18 +1333,16 @@ impl DotaHostWorker {
             .ok()
             .flatten()
             .is_some_and(|pending| pending.state.betting_open(now));
-        self.live
-            .publish_match(
-                record.guild_id,
-                record.pending_match_id,
-                match_id,
-                state.server_id,
-                state.settings.league_id,
-                state.settings.tv_delay,
-                state.betting_closed && !wagers_open,
-                state.roster.iter().map(|p| p.steam_account_id).collect(),
-            )
-            .await;
+        self.live.publish_match(
+            record.guild_id,
+            record.pending_match_id,
+            match_id,
+            state.server_id,
+            state.settings.league_id,
+            state.settings.tv_delay,
+            state.betting_closed && !wagers_open,
+            state.roster.iter().map(|p| p.steam_account_id).collect(),
+        );
     }
 
     async fn finish(

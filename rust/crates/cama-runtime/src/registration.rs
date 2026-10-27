@@ -71,6 +71,26 @@ impl CommandOptionSpec {
         }
     }
 
+    /// A subcommand option holding `options` as its parameters.
+    #[must_use]
+    pub fn subcommand(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        options: Vec<Self>,
+    ) -> Self {
+        Self::new(name, description, CommandOptionKind::Subcommand).options(options)
+    }
+
+    /// A subcommand group holding `options` as its subcommands.
+    #[must_use]
+    pub fn subcommand_group(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        options: Vec<Self>,
+    ) -> Self {
+        Self::new(name, description, CommandOptionKind::SubcommandGroup).options(options)
+    }
+
     #[must_use]
     pub const fn required(mut self, required: bool) -> Self {
         self.required = required;
@@ -157,6 +177,7 @@ pub enum InteractionRequest {
         interaction_id: u64,
         custom_id: String,
         user_id: u64,
+        user_display_name: String,
         guild_id: Option<u64>,
         channel_id: Option<u64>,
         member_permissions: Option<u64>,
@@ -167,10 +188,11 @@ pub enum InteractionRequest {
 /// Controls whether the Discord transport may acknowledge an interaction
 /// while its handler is still running.
 ///
-/// Most component and modal-submit handlers use an automatic deferred update,
-/// matching discord.py's `safe_defer(..., thinking=False)` pattern. Buttons
-/// whose initial response must be a modal opt out because Discord rejects a
-/// modal after any other acknowledgement.
+/// Slash commands, components, and modal submissions that have not responded
+/// shortly after dispatch are deferred automatically (a public "thinking"
+/// deferral for commands, a deferred update for components and modals).
+/// Handlers whose initial response must be a modal opt out because Discord
+/// rejects a modal after any other acknowledgement.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum InteractionAcknowledgementPolicy {
     #[default]
@@ -847,8 +869,9 @@ impl From<&str> for InteractionHandlerError {
 pub trait InteractionHandler: Send + Sync {
     /// Select the transport acknowledgement policy for this request.
     ///
-    /// Override this only for component buttons that call `show_modal`; modal
-    /// submissions themselves should retain automatic acknowledgement.
+    /// Override this only for interactions whose initial response is
+    /// `show_modal`; modal submissions themselves should retain automatic
+    /// acknowledgement.
     fn acknowledgement_policy(
         &self,
         _request: &InteractionRequest,
@@ -922,8 +945,8 @@ impl Registry {
     }
 
     /// Global command replacement is destructive: Discord removes commands
-    /// absent from the submitted tree. Incremental ports leave this off until
-    /// the complete Python tree has a Rust provider.
+    /// absent from the submitted tree. Partial builds leave this off so they
+    /// never erase commands they do not provide.
     #[must_use]
     pub const fn global_command_sync_enabled(&self) -> bool {
         self.global_command_sync_enabled

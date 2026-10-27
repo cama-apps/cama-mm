@@ -67,7 +67,7 @@ use cama_db::dig_miner_runtime::{DigMinerAllocation, DigMinerAutoBuyUpdate};
 use cama_db::low_priority_repository::LowPriorityRepository;
 use cama_db::neon_events::NeonEventRepository;
 use cama_db::pet_evolution_repository::PetEvolutionRepository;
-use cama_domain::formatting::JOPACOIN_EMOTE;
+use cama_domain::formatting::{JOPACOIN_EMOTE, format_grouped};
 use cama_domain::pet_evolution::PetActivity;
 use tokio::sync::Notify;
 use tokio::sync::broadcast;
@@ -76,12 +76,14 @@ use tracing::{error, info, warn};
 
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{
-    DiscordDestinationStatus, DiscordIdPlayerNameResolver, GuildPlayerNameResolver,
+    DiscordDestinationStatus, DiscordIdPlayerNameResolver, GuildPlayerNameDirectory,
+    GuildPlayerNameResolver,
 };
 use crate::gateway::LifecycleEvent;
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
+use crate::ids::signed_id;
 use crate::profit_deductions::ProfitDeductionSource;
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
@@ -1134,7 +1136,8 @@ impl DigInteractionHandler {
         match self
             .deliver_event_to_channel_with_failure(
                 delivery,
-                event_resolution_response(&delivery.outcome, &self.state.view_nonce),
+                self.event_response(delivery.guild_id, &delivery.outcome)
+                    .await,
             )
             .await
         {
@@ -3165,7 +3168,7 @@ impl DigInteractionHandler {
                         warn!(%error, "could not re-enable Dig event controls after a conflict");
                     }
                 }
-                let response = event_resolution_response(&result, &self.state.view_nonce);
+                let response = self.event_response(guild_id, &result).await;
                 return responder
                     .followup(response)
                     .await
@@ -3199,7 +3202,9 @@ impl DigInteractionHandler {
                     .await
                     .map_err(|error| error.to_string());
             };
-            let response = event_resolution_response(&delivery.outcome, &self.state.view_nonce);
+            let response = self
+                .event_response(delivery.guild_id, &delivery.outcome)
+                .await;
             if result.applied_now {
                 return self
                     .deliver_event_from_interaction(&delivery, response, responder)
@@ -3726,8 +3731,13 @@ impl DigInteractionHandler {
                 .await
                 .map_err(|error| error.to_string())?;
             let result = self.scout_boss(user_id, guild_id, unix_now()).await?;
+            let names = self
+                .state
+                .player_names
+                .resolve_names(guild_id, &boss_scout_player_ids(&result))
+                .await;
             return responder
-                .followup(boss_scout_response(&result).ephemeral())
+                .followup(boss_scout_response(&result, &names).ephemeral())
                 .await
                 .map_err(|error| error.to_string());
         }
@@ -4545,6 +4555,44 @@ impl DigInteractionHandler {
             .map_err(|error| error.to_string())
         })
         .await
+    }
+
+    /// Readable display text for one player, preferring a live name over the
+    /// name Discord resolved into the interaction option; never a mention or
+    /// raw ID.
+    async fn player_name(
+        &self,
+        guild_id: i64,
+        discord_id: i64,
+        option_name: Option<&str>,
+    ) -> String {
+        self.state
+            .player_names
+            .resolve_names(guild_id, &[discord_id])
+            .await
+            .resolve_or(discord_id, option_name.unwrap_or_default())
+    }
+
+    /// Render an event outcome with splash victims shown by display name.
+    async fn event_response(
+        &self,
+        guild_id: i64,
+        outcome: &cama_app::dig_event_runtime::DigEventRuntimeOutcome,
+    ) -> InteractionResponse {
+        let victim_ids = outcome
+            .splash
+            .as_ref()
+            .map(|splash| splash.victims.iter().map(|(id, _)| *id).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let names = if victim_ids.is_empty() {
+            GuildPlayerNameDirectory::default()
+        } else {
+            self.state
+                .player_names
+                .resolve_names(guild_id, &victim_ids)
+                .await
+        };
+        event_resolution_response(outcome, &self.state.view_nonce, &names)
     }
 
     async fn scout_boss(
@@ -5586,7 +5634,8 @@ impl DigInteractionHandler {
     ) -> Result<(), String> {
         self.deliver_event_to_channel_with_failure(
             delivery,
-            event_resolution_response(&delivery.outcome, &self.state.view_nonce),
+            self.event_response(delivery.guild_id, &delivery.outcome)
+                .await,
         )
         .await
         .map_err(|failure| match failure {
@@ -6375,6 +6424,12 @@ impl DigInteractionHandler {
             )
             .await;
         }
+        let player_ids = rows.iter().map(|row| row.user_id).collect::<Vec<_>>();
+        let names = self
+            .state
+            .player_names
+            .resolve_names(guild_id, &player_ids)
+            .await;
         let description = rows
             .iter()
             .enumerate()
@@ -6386,8 +6441,11 @@ impl DigInteractionHandler {
                     _ => format!("`#{}`", index + 1),
                 };
                 format!(
-                    "{medal} **{}** (<@{}>) — Score: {} (P{})",
-                    row.name, row.user_id, row.score, row.prestige
+                    "{medal} **{}** ({}) — Score: {} (P{})",
+                    row.name,
+                    names.resolve(row.user_id),
+                    row.score,
+                    row.prestige
                 )
             })
             .collect::<Vec<_>>()
@@ -7054,7 +7112,7 @@ impl DigInteractionHandler {
         }
         match subcommand {
             "resetcooldown" => {
-                let Some((target_id, _)) = user_option(options, "user")? else {
+                let Some((target_id, target_name)) = user_option(options, "user")? else {
                     return Err("/dig admin resetcooldown requires user".to_owned());
                 };
                 responder
@@ -7070,7 +7128,10 @@ impl DigInteractionHandler {
                 .await?;
                 let content = match outcome {
                     DigAdminMutationOutcome::Applied => {
-                        format!("Reset free dig cooldown for <@{target_id}>.")
+                        let name = self
+                            .player_name(guild_id, target_id, target_name.as_deref())
+                            .await;
+                        format!("Reset free dig cooldown for **{name}**.")
                     }
                     DigAdminMutationOutcome::MissingTunnel => {
                         "That player doesn't have a tunnel.".to_owned()
@@ -7097,7 +7158,7 @@ impl DigInteractionHandler {
                 .await
             }
             "setdepth" => {
-                let Some((target_id, _)) = user_option(options, "user")? else {
+                let Some((target_id, target_name)) = user_option(options, "user")? else {
                     return Err("/dig admin setdepth requires user".to_owned());
                 };
                 let depth = integer_option(options, "depth")?.unwrap_or_default().max(0);
@@ -7114,7 +7175,10 @@ impl DigInteractionHandler {
                 .await?;
                 let content = match outcome {
                     DigAdminMutationOutcome::Applied => {
-                        format!("Set <@{target_id}> to depth **{depth}** and reset cooldown.")
+                        let name = self
+                            .player_name(guild_id, target_id, target_name.as_deref())
+                            .await;
+                        format!("Set **{name}** to depth **{depth}** and reset cooldown.")
                     }
                     DigAdminMutationOutcome::MissingTunnel => {
                         "That player doesn't have a tunnel.".to_owned()
@@ -7468,8 +7532,8 @@ impl DigInteractionHandler {
 
 fn dig_options() -> Vec<CommandOptionSpec> {
     let mut options = vec![
-        subcommand("go", "Dig deeper into your tunnel", Vec::new()),
-        subcommand(
+        CommandOptionSpec::subcommand("go", "Dig deeper into your tunnel", Vec::new()),
+        CommandOptionSpec::subcommand(
             "help",
             "Help another player's tunnel",
             vec![
@@ -7477,7 +7541,7 @@ fn dig_options() -> Vec<CommandOptionSpec> {
                     .required(true),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "sabotage",
             "Sabotage another player's tunnel",
             vec![
@@ -7485,7 +7549,7 @@ fn dig_options() -> Vec<CommandOptionSpec> {
                     .required(true),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "info",
             "View tunnel information",
             vec![CommandOptionSpec::new(
@@ -7494,13 +7558,13 @@ fn dig_options() -> Vec<CommandOptionSpec> {
                 CommandOptionKind::User,
             )],
         ),
-        subcommand("leaderboard", "View top tunnels", Vec::new()),
-        subcommand(
+        CommandOptionSpec::subcommand("leaderboard", "View top tunnels", Vec::new()),
+        CommandOptionSpec::subcommand(
             "halloffame",
             "View the hall of fame (best prestige run scores)",
             Vec::new(),
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "use",
             "Queue a consumable for your next dig",
             vec![
@@ -7509,7 +7573,7 @@ fn dig_options() -> Vec<CommandOptionSpec> {
                     .autocomplete(),
             ],
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "gift",
             "Gift a relic to another player",
             vec![
@@ -7520,8 +7584,8 @@ fn dig_options() -> Vec<CommandOptionSpec> {
                     .autocomplete(),
             ],
         ),
-        subcommand("shop", "Browse the mining shop", Vec::new()),
-        subcommand(
+        CommandOptionSpec::subcommand("shop", "Browse the mining shop", Vec::new()),
+        CommandOptionSpec::subcommand(
             "buy",
             "Buy an item from the mining shop",
             vec![
@@ -7530,37 +7594,37 @@ fn dig_options() -> Vec<CommandOptionSpec> {
                     .autocomplete(),
             ],
         ),
-        subcommand("flex", "Show off your mining stats", Vec::new()),
-        subcommand(
+        CommandOptionSpec::subcommand("flex", "Show off your mining stats", Vec::new()),
+        CommandOptionSpec::subcommand(
             "prestige",
             "Prestige your tunnel (reset depth, gain a perk)",
             Vec::new(),
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "perks",
             "View prestige perk effects, owned stacks and limits",
             Vec::new(),
         ),
-        subcommand(
+        CommandOptionSpec::subcommand(
             "abandon",
             "Abandon your tunnel (partial refund)",
             Vec::new(),
         ),
-        subcommand("trap", "Set a trap in your tunnel", Vec::new()),
-        subcommand("insure", "Buy cave-in insurance", Vec::new()),
-        subcommand("inventory", "View your mining inventory", Vec::new()),
-        subcommand(
+        CommandOptionSpec::subcommand("trap", "Set a trap in your tunnel", Vec::new()),
+        CommandOptionSpec::subcommand("insure", "Buy cave-in insurance", Vec::new()),
+        CommandOptionSpec::subcommand("inventory", "View your mining inventory", Vec::new()),
+        CommandOptionSpec::subcommand(
             "artifacts",
             "View all artifacts and the ones you own",
             Vec::new(),
         ),
-        subcommand("gear", "Manage your boss-combat gear", Vec::new()),
-        subcommand(
+        CommandOptionSpec::subcommand("gear", "Manage your boss-combat gear", Vec::new()),
+        CommandOptionSpec::subcommand(
             "weather",
             "View today's layer weather conditions",
             Vec::new(),
         ),
-        subcommand("guide", "Learn how to dig", Vec::new()),
+        CommandOptionSpec::subcommand("guide", "Learn how to dig", Vec::new()),
     ];
     options.push(
         CommandOptionSpec::new(
@@ -7569,7 +7633,7 @@ fn dig_options() -> Vec<CommandOptionSpec> {
             CommandOptionKind::SubcommandGroup,
         )
         .options(vec![
-            subcommand(
+            CommandOptionSpec::subcommand(
                 "resetcooldown",
                 "Reset a player's free dig cooldown (Admin only)",
                 vec![
@@ -7581,7 +7645,7 @@ fn dig_options() -> Vec<CommandOptionSpec> {
                     .required(true),
                 ],
             ),
-            subcommand(
+            CommandOptionSpec::subcommand(
                 "forceevent",
                 "Force next dig to trigger an event (Admin only)",
                 vec![
@@ -7593,7 +7657,7 @@ fn dig_options() -> Vec<CommandOptionSpec> {
                     .required(true),
                 ],
             ),
-            subcommand(
+            CommandOptionSpec::subcommand(
                 "setdepth",
                 "Set a player's tunnel depth (Admin only)",
                 vec![
@@ -7612,8 +7676,12 @@ fn dig_options() -> Vec<CommandOptionSpec> {
             CommandOptionKind::SubcommandGroup,
         )
         .options(vec![
-            subcommand("profile", "View your miner profile and S stats", Vec::new()),
-            subcommand(
+            CommandOptionSpec::subcommand(
+                "profile",
+                "View your miner profile and S stats",
+                Vec::new(),
+            ),
+            CommandOptionSpec::subcommand(
                 "about",
                 "Set your miner backstory once",
                 vec![{
@@ -7627,7 +7695,7 @@ fn dig_options() -> Vec<CommandOptionSpec> {
                     backstory
                 }],
             ),
-            subcommand(
+            CommandOptionSpec::subcommand(
                 "build",
                 "Spend unallocated points on Strength, Smarts, Stamina, and Survival",
                 vec![
@@ -7653,12 +7721,12 @@ fn dig_options() -> Vec<CommandOptionSpec> {
                     ),
                 ],
             ),
-            subcommand(
+            CommandOptionSpec::subcommand(
                 "respec",
                 "Reset your allocated S points for 50 JC",
                 Vec::new(),
             ),
-            subcommand(
+            CommandOptionSpec::subcommand(
                 "autobuy",
                 "Auto-buy Torch, Hard Hat, and/or Grappling Hook for each dig",
                 vec![
@@ -7705,10 +7773,6 @@ fn dig_options() -> Vec<CommandOptionSpec> {
         ]),
     );
     options
-}
-
-fn subcommand(name: &str, description: &str, options: Vec<CommandOptionSpec>) -> CommandOptionSpec {
-    CommandOptionSpec::new(name, description, CommandOptionKind::Subcommand).options(options)
 }
 
 // -------------------------------------------------------------------------
@@ -7789,11 +7853,6 @@ impl EntropyPort for RuntimeBossEntropy {
         }
     }
 }
-
-fn signed_id(value: u64, label: &str) -> Result<i64, String> {
-    i64::try_from(value).map_err(|_| format!("{label} id is outside SQLite's signed range"))
-}
-
 fn parse_boss_owner(raw: &str) -> Result<(i64, i64), String> {
     let mut parts = raw.split(':');
     let owner_id = parts
@@ -10208,7 +10267,7 @@ fn boss_encounter_response_with_roll(
             "Carried Wager",
             format!(
                 "**{}** {JOPACOIN_EMOTE} is already riding on this phase.",
-                format_jc_amount(wager)
+                format_grouped(wager)
             ),
             false,
         );
@@ -10607,7 +10666,17 @@ fn boss_resume_response(
     }
 }
 
-fn boss_scout_response(result: &DigBossCallResult<DigBossScoutOutcome>) -> InteractionResponse {
+fn boss_scout_player_ids(result: &DigBossCallResult<DigBossScoutOutcome>) -> Vec<i64> {
+    match &result.outcome {
+        DigBossScoutOutcome::Regular(scout) => scout.echo_killer_id.into_iter().collect(),
+        DigBossScoutOutcome::Pinnacle(_) => Vec::new(),
+    }
+}
+
+fn boss_scout_response(
+    result: &DigBossCallResult<DigBossScoutOutcome>,
+    names: &GuildPlayerNameDirectory,
+) -> InteractionResponse {
     let mut lines = Vec::new();
     let (boss_name, enhanced) = match &result.outcome {
         DigBossScoutOutcome::Regular(scout) => {
@@ -10623,7 +10692,7 @@ fn boss_scout_response(result: &DigBossCallResult<DigBossScoutOutcome>) -> Inter
             if scout.echo_applied {
                 let killer = scout
                     .echo_killer_id
-                    .map_or_else(|| "a guildmate".to_owned(), |killer| format!("<@{killer}>"));
+                    .map_or_else(|| "a guildmate".to_owned(), |killer| names.resolve(killer));
                 lines.push(format!(
                     "*Weakened — {killer} killed this boss in the last 24h.*\n"
                 ));
@@ -10713,6 +10782,7 @@ fn boss_scout_response(result: &DigBossCallResult<DigBossScoutOutcome>) -> Inter
 fn event_resolution_response(
     outcome: &cama_app::dig_event_runtime::DigEventRuntimeOutcome,
     view_nonce: &str,
+    names: &GuildPlayerNameDirectory,
 ) -> InteractionResponse {
     if !outcome.success {
         return InteractionResponse::message("").ephemeral().embed(
@@ -10874,7 +10944,9 @@ fn event_resolution_response(
         let victims = splash
             .victims
             .iter()
-            .map(|(victim_id, amount)| format!("<@{victim_id}>: {amount} {JOPACOIN_EMOTE}"))
+            .map(|(victim_id, amount)| {
+                format!("{}: {amount} {JOPACOIN_EMOTE}", names.resolve(*victim_id))
+            })
             .collect::<Vec<_>>()
             .join("\n");
         let shields = (splash.shielded_count > 0).then(|| {
@@ -10984,23 +11056,6 @@ fn format_dig_duration(seconds: i64) -> String {
     } else {
         format!("{days}d {hours}h")
     }
-}
-
-fn format_jc_amount(amount: i64) -> String {
-    let sign = if amount < 0 { "-" } else { "" };
-    let digits = amount.unsigned_abs().to_string();
-    let first = digits.len() % 3;
-    let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
-    if first != 0 {
-        formatted.push_str(&digits[..first]);
-    }
-    for chunk in digits.as_bytes()[first..].chunks(3) {
-        if !formatted.is_empty() {
-            formatted.push(',');
-        }
-        formatted.push_str(std::str::from_utf8(chunk).expect("ASCII JC digits"));
-    }
-    format!("{sign}{formatted}")
 }
 
 // -------------------------------------------------------------------------

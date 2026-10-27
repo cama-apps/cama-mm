@@ -85,8 +85,8 @@ pub fn draw_rating_comparison_chart(comparison: &RatingComparisonResult) -> Vec<
         ),
     ];
     for (index, (label, glicko, openskill, lower_is_better)) in metrics.into_iter().enumerate() {
-        // These are the three axes produced by the live Python chart after
-        // its tight layout: 275x275 panels with 48px gaps.
+        // These match the three axes of the legacy Python chart after its
+        // tight layout: 275x275 panels with 48px gaps.
         let left = 58 + i32::try_from(index).unwrap_or_default() * 323;
         let right = left + 275;
         let top = 104;

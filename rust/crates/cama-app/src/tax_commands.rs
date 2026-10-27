@@ -1,7 +1,6 @@
 //! Discord-independent Tax Man command policy and adapter ports.
 //!
-//! Python remains the live Discord and SQLite authority while this module is
-//! exercised side by side.  Read models are typed, privileged commands gate
+//! Read models are typed, privileged commands gate
 //! before touching their ports, and every enforcement mutation is a single
 //! atomic port call so an eventual adapter cannot accidentally split a money
 //! movement from its ledger/audit record.
@@ -13,7 +12,9 @@ use cama_domain::economy_scaling::DEFAULT_MINIGAME_JC_DELTA_SCALE;
 use cama_domain::embed_safety::{
     DESCRIPTION_LIMIT, EmbedModel, FIELD_VALUE_LIMIT, add_lines_field, truncate_field,
 };
-use cama_domain::formatting::JOPACOIN_EMOTE;
+use cama_domain::formatting::{
+    JOPACOIN_EMOTE, format_grouped, format_grouped_signed, format_grouped_unsigned,
+};
 use cama_domain::permissions::{PermissionContext, has_admin_permission, has_tax_man_permission};
 
 pub const LEDGER_DEFAULT_LIMIT: usize = 10;
@@ -313,19 +314,19 @@ fn immediate_effect_text(effects: &EconomyEffects) -> String {
     if effects.reserve_burn_jc != 0 {
         actions.push(format!(
             "**{} JC** burned from the Jopa Reserve",
-            grouped(effects.reserve_burn_jc)
+            format_grouped(effects.reserve_burn_jc)
         ));
     }
     if effects.wallet_burn_jc != 0 {
         actions.push(format!(
             "**{} JC** burned from positive wallets",
-            grouped(effects.wallet_burn_jc)
+            format_grouped(effects.wallet_burn_jc)
         ));
     }
     if effects.reserve_release_jc != 0 {
         actions.push(format!(
             "**{} JC** redistributed from the Jopa Reserve",
-            grouped(effects.reserve_release_jc)
+            format_grouped(effects.reserve_release_jc)
         ));
     }
     if actions.is_empty() {
@@ -360,16 +361,16 @@ pub fn build_policy_embed(status: &PolicyStatus) -> TaxEmbed {
         "Reconciled stock",
         format!(
             "Total: **{} JC**\nWallets: **{} JC** (avg **{:.2}**)\nPositive wallets: **{} JC** · visible debt: **{} JC**\nReserve: **{} available** + **{} locked**\nNext-match pot: **{} JC**\nPrediction cash: **{} JC**\nWager escrow: **{} JC**",
-            grouped(sheet.monetary_stock),
-            grouped(sheet.player_wallets),
+            format_grouped(sheet.monetary_stock),
+            format_grouped(sheet.player_wallets),
             sheet.average_wallet,
-            grouped(sheet.positive_wallets),
-            grouped(sheet.visible_debt),
-            grouped(sheet.reserve_available),
-            grouped(sheet.reserve_locked),
-            grouped(sheet.reserve_next_match_pot),
-            grouped(sheet.prediction_open_cash),
-            grouped(sheet.wager_escrow),
+            format_grouped(sheet.positive_wallets),
+            format_grouped(sheet.visible_debt),
+            format_grouped(sheet.reserve_available),
+            format_grouped(sheet.reserve_locked),
+            format_grouped(sheet.reserve_next_match_pot),
+            format_grouped(sheet.prediction_open_cash),
+            format_grouped(sheet.wager_escrow),
         ),
         false,
     );
@@ -442,15 +443,15 @@ pub fn build_policy_embed(status: &PolicyStatus) -> TaxEmbed {
         let immediate = if event.direct_effect_jc == 0 {
             "**None** — this event works through adjusted outcomes".to_owned()
         } else {
-            format!("**{} JC**", grouped_signed(event.direct_effect_jc))
+            format!("**{} JC**", format_grouped_signed(event.direct_effect_jc))
         };
         model.add_field(
             format!("Active event: {} (Level {})", event.name, event.severity),
             format!(
                 "Observed 7-day stock movement: **{} JC/day**\nToday's target correction: **{} JC**\nProjected daily impact: **{} JC**\nImmediate supply change: {immediate}",
-                grouped_signed(event.forecast_flow_jc),
-                grouped_signed(event.target_effect_jc),
-                grouped_signed(event.expected_effect_jc),
+                format_grouped_signed(event.forecast_flow_jc),
+                format_grouped_signed(event.target_effect_jc),
+                format_grouped_signed(event.expected_effect_jc),
             ),
             false,
         );
@@ -483,9 +484,9 @@ fn format_supply_trend(label: &str, trend: Option<&MonetaryTrend>) -> String {
     format!(
         "{label}: **{:+.2}%** ({} JC) {arrow} **{:+.2}%/day**, **{} JC/day** over {:.1}d",
         trend.period_rate * 100.0,
-        grouped_signed(trend.change_jc),
+        format_grouped_signed(trend.change_jc),
         trend.daily_rate * 100.0,
-        grouped_signed(trend.average_daily_change_jc.round() as i64),
+        format_grouped_signed(trend.average_daily_change_jc.round() as i64),
         trend.elapsed_days,
     )
 }
@@ -513,8 +514,8 @@ fn format_flow_indicator(label: &str, flow: Option<&FlowIndicator>) -> String {
     };
     format!(
         "{label}: net **{} JC/day** · ledger movement **{} JC/day** · turnover **{:.2}%/day**",
-        grouped_signed(flow.average_daily_net_jc.round() as i64),
-        grouped(flow.average_daily_gross_jc.round() as i64),
+        format_grouped_signed(flow.average_daily_net_jc.round() as i64),
+        format_grouped(flow.average_daily_gross_jc.round() as i64),
         flow.daily_turnover_rate * 100.0,
     )
 }
@@ -793,7 +794,7 @@ pub fn build_player_embed(
             format_jc(snapshot.loan_principal),
             format_jc(snapshot.loan_fee),
             format_jc(snapshot.loan_total),
-            grouped(snapshot.total_loans_taken),
+            format_grouped(snapshot.total_loans_taken),
         ),
         true,
     );
@@ -801,9 +802,9 @@ pub fn build_player_embed(
         "Duration Effects",
         format!(
             "Bankruptcies: {}\nPenalty games: {}\nDark Bargains: {}\nDark Bargain due: {}",
-            grouped(snapshot.bankruptcy_count),
-            grouped(snapshot.penalty_games_remaining),
-            grouped(snapshot.dark_bargain_count),
+            format_grouped(snapshot.bankruptcy_count),
+            format_grouped(snapshot.penalty_games_remaining),
+            format_grouped(snapshot.dark_bargain_count),
             format_jc(snapshot.dark_bargain_due),
         ),
         true,
@@ -850,9 +851,9 @@ fn format_prediction_positions(exposure: &PredictionExposure) -> String {
             position.prediction_id,
             position.current_price,
             short_text(&position.question, 48),
-            grouped(position.yes_contracts),
+            format_grouped(position.yes_contracts),
             format_jc(position.yes_cost_basis),
-            grouped(position.no_contracts),
+            format_grouped(position.no_contracts),
             format_jc(position.no_cost_basis),
             format_signed_jc(position.ev),
         )
@@ -879,49 +880,15 @@ fn normalize_whitespace(value: &str) -> String {
 }
 
 fn format_jc(amount: i64) -> String {
-    format!("{} {JOPACOIN_EMOTE}", grouped(amount))
+    format!("{} {JOPACOIN_EMOTE}", format_grouped(amount))
 }
 
 fn format_signed_jc(amount: i64) -> String {
-    format!("{} {JOPACOIN_EMOTE}", grouped_signed(amount))
-}
-
-fn grouped_signed(amount: i64) -> String {
-    if amount > 0 {
-        format!("+{}", grouped(amount))
-    } else {
-        grouped(amount)
-    }
+    format!("{} {JOPACOIN_EMOTE}", format_grouped_signed(amount))
 }
 
 fn grouped_usize(amount: usize) -> String {
-    group_digits(&amount.to_string())
-}
-
-fn grouped(amount: i64) -> String {
-    let negative = amount < 0;
-    let digits = amount.unsigned_abs().to_string();
-    let result = group_digits(&digits);
-    if negative {
-        format!("-{result}")
-    } else {
-        result
-    }
-}
-
-fn group_digits(digits: &str) -> String {
-    let mut output = String::with_capacity(digits.len() + digits.len() / 3);
-    let first = digits.len() % 3;
-    if first != 0 {
-        output.push_str(&digits[..first]);
-    }
-    for chunk in digits.as_bytes()[first..].chunks(3) {
-        if !output.is_empty() {
-            output.push(',');
-        }
-        output.push_str(std::str::from_utf8(chunk).expect("decimal digits are UTF-8"));
-    }
-    output
+    format_grouped_unsigned(amount as u64)
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1660,10 +1627,10 @@ fn format_bankruptcy_result(user: &UserRef, result: BankruptcyResult) -> String 
             penalty_games_remaining,
         } => format!(
             "Added {} bankruptcy modifier game(s) to {}. Penalty games: {} -> {}.",
-            grouped(games),
+            format_grouped(games),
             user.display_name,
-            grouped(previous_games),
-            grouped(penalty_games_remaining),
+            format_grouped(previous_games),
+            format_grouped(penalty_games_remaining),
         ),
         BankruptcyResult::Removed {
             previous_games,
@@ -1671,8 +1638,8 @@ fn format_bankruptcy_result(user: &UserRef, result: BankruptcyResult) -> String 
         } => format!(
             "Removed bankruptcy modifier from {}. Penalty games: {} -> {}.",
             user.display_name,
-            grouped(previous_games),
-            grouped(penalty_games_remaining),
+            format_grouped(previous_games),
+            format_grouped(penalty_games_remaining),
         ),
         BankruptcyResult::TargetNotRegistered => {
             "That user is not registered in this guild.".to_owned()

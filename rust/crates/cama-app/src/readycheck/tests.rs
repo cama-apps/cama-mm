@@ -57,7 +57,7 @@ fn set_generation(
             lobby_ids: ids,
             player_data,
             created_at: Some(created_at),
-            initial_reacted: BTreeMap::new(),
+            initial_reacted: BTreeSet::new(),
         },
     );
 }
@@ -266,7 +266,7 @@ fn test_set_readycheck_state_defaults_created_at_to_now() {
             lobby_ids: BTreeSet::from([player(1)]),
             player_data: data([1]),
             created_at: None,
-            initial_reacted: BTreeMap::new(),
+            initial_reacted: BTreeSet::new(),
         },
     );
     let after = unix_time_now();
@@ -300,7 +300,7 @@ fn test_reset_lobby_clears_created_at() {
 fn test_snapshot_identifies_current_generation_and_copies_confirmations() {
     let service = ReadycheckService::new();
     set_generation(&service, [1, 2], 1_000.0);
-    assert!(service.add_readycheck_reaction(scope(), player(1), "<@1>", None));
+    assert!(service.add_readycheck_reaction(scope(), player(1), None));
 
     let snapshot = service
         .confirmation_snapshot(scope())
@@ -308,7 +308,7 @@ fn test_snapshot_identifies_current_generation_and_copies_confirmations() {
     assert_eq!(snapshot.message_id, MESSAGE);
     assert_eq!(snapshot.confirmed_ids, BTreeSet::from([player(1)]));
 
-    assert!(service.add_readycheck_reaction(scope(), player(2), "<@2>", None));
+    assert!(service.add_readycheck_reaction(scope(), player(2), None));
     service.set_readycheck_state(
         scope(),
         ReadycheckStateInput {
@@ -317,7 +317,7 @@ fn test_snapshot_identifies_current_generation_and_copies_confirmations() {
             lobby_ids: BTreeSet::from([player(1), player(2)]),
             player_data: data([1, 2]),
             created_at: Some(2_000.0),
-            initial_reacted: BTreeMap::new(),
+            initial_reacted: BTreeSet::new(),
         },
     );
 
@@ -347,10 +347,10 @@ fn test_player_who_joins_after_readycheck_can_confirm() {
 
     assert!(service.join_lobby_at(scope(), player(2), 200.0));
 
-    assert!(service.add_readycheck_reaction(scope(), player(2), "<@2>", Some(MESSAGE),));
+    assert!(service.add_readycheck_reaction(scope(), player(2), Some(MESSAGE),));
     assert_eq!(
         service.readycheck_reacted(scope()),
-        BTreeMap::from([(player(2), "<@2>".to_owned())])
+        BTreeSet::from([player(2)])
     );
 }
 
@@ -363,7 +363,7 @@ fn test_player_who_left_after_readycheck_cannot_confirm() {
 
     assert!(service.leave_lobby(scope(), player(2)));
 
-    assert!(!service.add_readycheck_reaction(scope(), player(2), "<@2>", Some(MESSAGE),));
+    assert!(!service.add_readycheck_reaction(scope(), player(2), Some(MESSAGE),));
     assert!(service.readycheck_reacted(scope()).is_empty());
 }
 
@@ -371,7 +371,7 @@ fn test_player_who_left_after_readycheck_cannot_confirm() {
 fn test_roster_update_returns_departed_confirmations() {
     let service = ReadycheckService::new();
     set_generation(&service, [1, 2], 1_000.0);
-    assert!(service.add_readycheck_reaction(scope(), player(2), "<@2>", None));
+    assert!(service.add_readycheck_reaction(scope(), player(2), None));
 
     let update = service
         .update_readycheck_data(scope(), BTreeSet::from([player(1)]), data([1]), MESSAGE)
@@ -396,7 +396,7 @@ fn test_replaced_readycheck_rejects_old_roster_update() {
             lobby_ids: BTreeSet::from([player(7)]),
             player_data: data([7]),
             created_at: Some(1_000.0),
-            initial_reacted: BTreeMap::new(),
+            initial_reacted: BTreeSet::new(),
         },
     );
 
@@ -418,7 +418,7 @@ fn test_snapshot_copies_current_lobby_and_confirmations_together() {
     lobby.player_join_times = BTreeMap::from([(player(1), 100.5), (player(2), 200.5)]);
     service.put_lobby(lobby);
     set_generation(&service, [1, 2], 1_000.0);
-    assert!(service.add_readycheck_reaction(scope(), player(1), "<@1>", None));
+    assert!(service.add_readycheck_reaction(scope(), player(1), None));
 
     let snapshot = service
         .lobby_readycheck_snapshot(scope())
@@ -444,7 +444,7 @@ fn test_snapshot_copies_current_lobby_and_confirmations_together() {
     let mut changed = service.lobby(scope()).expect("lobby");
     changed.player_join_times.insert(player(1), 999.5);
     service.put_lobby(changed);
-    assert!(service.add_readycheck_reaction(scope(), player(2), "<@2>", None));
+    assert!(service.add_readycheck_reaction(scope(), player(2), None));
 
     // All snapshot fields are owned copies, unaffected by later mutations.
     assert_eq!(
@@ -465,7 +465,7 @@ fn test_lobby_mutation_cannot_interleave_with_snapshot() {
     service.put_lobby(lobby);
     set_generation(&service, 1..=10, 1_000.0);
     for id in 1..=10 {
-        assert!(service.add_readycheck_reaction(scope(), player(id), format!("<@{id}>"), None,));
+        assert!(service.add_readycheck_reaction(scope(), player(id), None,));
     }
 
     let (iteration_started_tx, iteration_started_rx) = mpsc::channel();
@@ -528,7 +528,7 @@ fn test_remove_reaction_marks_player_declined() {
     let service = ReadycheckService::new();
     assert!(service.join_lobby_at(scope(), player(1), 100.0));
     set_generation(&service, [1], 1_000.0);
-    assert!(service.add_readycheck_reaction(scope(), player(1), "<@1>", None));
+    assert!(service.add_readycheck_reaction(scope(), player(1), None));
 
     assert!(service.remove_readycheck_reaction(scope(), player(1), None));
 
@@ -553,10 +553,10 @@ fn test_confirming_again_clears_declined_marker() {
     let service = ReadycheckService::new();
     assert!(service.join_lobby_at(scope(), player(1), 100.0));
     set_generation(&service, [1], 1_000.0);
-    assert!(service.add_readycheck_reaction(scope(), player(1), "<@1>", None));
+    assert!(service.add_readycheck_reaction(scope(), player(1), None));
     assert!(service.remove_readycheck_reaction(scope(), player(1), None));
 
-    assert!(service.add_readycheck_reaction(scope(), player(1), "<@1>", None));
+    assert!(service.add_readycheck_reaction(scope(), player(1), None));
 
     assert!(service.readycheck_declined(scope()).is_empty());
 }
@@ -566,7 +566,7 @@ fn test_new_readycheck_generation_resets_declined() {
     let service = ReadycheckService::new();
     assert!(service.join_lobby_at(scope(), player(1), 100.0));
     set_generation(&service, [1], 1_000.0);
-    assert!(service.add_readycheck_reaction(scope(), player(1), "<@1>", None));
+    assert!(service.add_readycheck_reaction(scope(), player(1), None));
     assert!(service.remove_readycheck_reaction(scope(), player(1), None));
 
     service.set_readycheck_state(
@@ -577,7 +577,7 @@ fn test_new_readycheck_generation_resets_declined() {
             lobby_ids: BTreeSet::from([player(1)]),
             player_data: data([1]),
             created_at: Some(2_000.0),
-            initial_reacted: BTreeMap::new(),
+            initial_reacted: BTreeSet::new(),
         },
     );
 
@@ -590,7 +590,7 @@ fn test_departed_player_declined_marker_is_pruned() {
     assert!(service.join_lobby_at(scope(), player(1), 100.0));
     assert!(service.join_lobby_at(scope(), player(2), 200.0));
     set_generation(&service, [1, 2], 1_000.0);
-    assert!(service.add_readycheck_reaction(scope(), player(2), "<@2>", None));
+    assert!(service.add_readycheck_reaction(scope(), player(2), None));
     assert!(service.remove_readycheck_reaction(scope(), player(2), None));
 
     service
@@ -605,7 +605,7 @@ fn test_reset_lobby_clears_declined() {
     let service = ReadycheckService::new();
     assert!(service.join_lobby_at(scope(), player(1), 100.0));
     set_generation(&service, [1], 1_000.0);
-    assert!(service.add_readycheck_reaction(scope(), player(1), "<@1>", None));
+    assert!(service.add_readycheck_reaction(scope(), player(1), None));
     assert!(service.remove_readycheck_reaction(scope(), player(1), None));
 
     service.reset_lobby(scope());
@@ -715,7 +715,7 @@ fn stronger_stale_recovery_orders_transport_without_pruning() {
     ]);
     service.put_lobby(lobby);
     set_generation(&service, 1..=6, 8_000.0);
-    assert!(service.add_readycheck_reaction(scope(), player(4), "<@4>", None));
+    assert!(service.add_readycheck_reaction(scope(), player(4), None));
     let mut classifications = data(1..=6);
     classifications.get_mut(&player(6)).expect("player 6").group = ReadinessGroup::PlayingDota;
     let mut stale_request = request(10_000.0);
@@ -794,8 +794,8 @@ fn stronger_completion_notification_is_exactly_once_per_generation() {
     let service = ReadycheckService::new();
     service.put_lobby(lobby_with([1, 2]));
     set_generation(&service, [1, 2], 1_000.0);
-    assert!(service.add_readycheck_reaction(scope(), player(1), "<@1>", None));
-    assert!(service.add_readycheck_reaction(scope(), player(2), "<@2>", None));
+    assert!(service.add_readycheck_reaction(scope(), player(1), None));
+    assert!(service.add_readycheck_reaction(scope(), player(2), None));
 
     assert!(service.take_completion_notification(scope(), MESSAGE));
     assert!(!service.take_completion_notification(scope(), MESSAGE));
@@ -807,8 +807,8 @@ fn failed_completion_delivery_can_retry_only_the_current_generation() {
     let service = ReadycheckService::new();
     service.put_lobby(lobby_with([1, 2]));
     set_generation(&service, [1, 2], 1_000.0);
-    assert!(service.add_readycheck_reaction(scope(), player(1), "<@1>", None));
-    assert!(service.add_readycheck_reaction(scope(), player(2), "<@2>", None));
+    assert!(service.add_readycheck_reaction(scope(), player(1), None));
+    assert!(service.add_readycheck_reaction(scope(), player(2), None));
 
     assert!(service.take_completion_notification(scope(), MESSAGE));
     assert!(!service.release_completion_notification(scope(), MessageId(999)));
@@ -829,25 +829,20 @@ fn stronger_readycheck_state_is_isolated_by_signed_guild() {
             lobby_ids: BTreeSet::from([player(-1)]),
             player_data: data([-1]),
             created_at: Some(2_000.0),
-            initial_reacted: BTreeMap::new(),
+            initial_reacted: BTreeSet::new(),
         },
     );
 
-    assert!(service.add_readycheck_reaction(scope(), player(-1), "default", None));
-    assert!(service.add_readycheck_reaction(
-        other_scope,
-        player(-1),
-        "other",
-        Some(MessageId(-111)),
-    ));
+    assert!(service.add_readycheck_reaction(scope(), player(-1), None));
+    assert!(service.add_readycheck_reaction(other_scope, player(-1), Some(MessageId(-111)),));
 
     assert_eq!(
         service.readycheck_reacted(scope()),
-        BTreeMap::from([(player(-1), "default".to_owned())])
+        BTreeSet::from([player(-1)])
     );
     assert_eq!(
         service.readycheck_reacted(other_scope),
-        BTreeMap::from([(player(-1), "other".to_owned())])
+        BTreeSet::from([player(-1)])
     );
 }
 
@@ -930,7 +925,7 @@ fn test_trigger_er_auto_counted_ready() {
     assert_eq!(plan.mention_ids, BTreeSet::from([player(2)]));
     assert_eq!(
         service.readycheck_reacted(scope()),
-        BTreeMap::from([(player(1), "<@1>".to_owned())])
+        BTreeSet::from([player(1)])
     );
 }
 
@@ -938,14 +933,10 @@ fn test_trigger_er_auto_counted_ready() {
 fn test_new_readycheck_accepts_reaction_before_checkmark_and_ping() {
     let service = staleness_service([1, 2]);
     let plan = publish_new(&service, 1_000.0, data([1, 2]));
-    assert!(service.add_readycheck_reaction(scope(), player(2), "<@2>", Some(MESSAGE)));
+    assert!(service.add_readycheck_reaction(scope(), player(2), Some(MESSAGE)));
 
     assert_eq!(
-        service
-            .readycheck_reacted(scope())
-            .keys()
-            .copied()
-            .collect::<BTreeSet<_>>(),
+        service.readycheck_reacted(scope()),
         BTreeSet::from([player(1), player(2)])
     );
     assert!(matches!(
@@ -967,7 +958,7 @@ fn test_new_readycheck_keeps_auto_confirms_when_ping_delivery_fails() {
     assert!(mirror_delivery_failed);
     assert_eq!(
         service.readycheck_reacted(scope()),
-        BTreeMap::from([(player(1), "<@1>".to_owned())])
+        BTreeSet::from([player(1)])
     );
 }
 
@@ -982,11 +973,7 @@ fn test_players_joined_under_ten_minutes_are_auto_counted_ready() {
     let plan = publish_new(&service, 2_000_000.0, player_data);
 
     assert_eq!(
-        service
-            .readycheck_reacted(scope())
-            .keys()
-            .copied()
-            .collect::<BTreeSet<_>>(),
+        service.readycheck_reacted(scope()),
         BTreeSet::from([player(1), player(2)])
     );
     assert_eq!(plan.mention_ids, BTreeSet::from([player(3)]));
@@ -996,7 +983,7 @@ fn test_players_joined_under_ten_minutes_are_auto_counted_ready() {
 fn test_fresh_refresh_edits_in_place_and_preserves_reacted() {
     let service = staleness_service(1..=10);
     publish_new(&service, 1_000.0, data(1..=10));
-    assert!(service.add_readycheck_reaction(scope(), player(2), "<@2>", None));
+    assert!(service.add_readycheck_reaction(scope(), player(2), None));
     let mut refresh = request(1_121.0);
     refresh.existing_message = ExistingMessageState::Available;
 
@@ -1005,7 +992,7 @@ fn test_fresh_refresh_edits_in_place_and_preserves_reacted() {
         .expect("fresh refresh");
 
     assert_eq!(plan.mode, PublicationMode::Refresh);
-    assert!(service.readycheck_reacted(scope()).contains_key(&player(2)));
+    assert!(service.readycheck_reacted(scope()).contains(&player(2)));
     assert_eq!(
         plan.transport.operations,
         [ReadycheckTransportOperation::EditReadycheck {
@@ -1020,7 +1007,7 @@ fn test_fresh_refresh_edits_in_place_and_preserves_reacted() {
 fn test_fresh_refresh_clears_departed_players_physical_reactions() {
     let service = staleness_service([1, 2, 3]);
     publish_new(&service, 1_000.0, data([1, 2, 3]));
-    assert!(service.add_readycheck_reaction(scope(), player(2), "<@2>", None));
+    assert!(service.add_readycheck_reaction(scope(), player(2), None));
     assert!(service.leave_lobby(scope(), player(2)));
     let mut refresh = request(1_121.0);
     refresh.existing_message = ExistingMessageState::Available;
@@ -1031,7 +1018,7 @@ fn test_fresh_refresh_clears_departed_players_physical_reactions() {
 
     assert_eq!(
         service.readycheck_reacted(scope()),
-        BTreeMap::from([(player(1), "<@1>".to_owned())])
+        BTreeSet::from([player(1)])
     );
     assert!(readycheck_description(2, 10).starts_with("**2** players"));
     assert!(matches!(
@@ -1049,7 +1036,7 @@ fn test_refresh_invoker_reaching_ten_announces_shuffle() {
     let service = staleness_service(1..=10);
     publish_new(&service, 1_000.0, data(1..=10));
     for id in 2..10 {
-        assert!(service.add_readycheck_reaction(scope(), player(id), format!("<@{id}>"), None));
+        assert!(service.add_readycheck_reaction(scope(), player(id), None));
     }
     let mut refresh = request(1_121.0);
     refresh.invoker_id = player(10);
@@ -1067,7 +1054,7 @@ fn test_refresh_invoker_reaching_ten_announces_shuffle() {
 fn test_stale_repost_deletes_old_and_resets_confirmations() {
     let service = staleness_service(1..=10);
     set_generation(&service, 1..=10, 0.0);
-    assert!(service.add_readycheck_reaction(scope(), player(2), "<@2>", None));
+    assert!(service.add_readycheck_reaction(scope(), player(2), None));
     let mut stale = request(2_000.0);
     stale.existing_message = ExistingMessageState::Available;
 
@@ -1091,7 +1078,7 @@ fn test_stale_repost_deletes_old_and_resets_confirmations() {
     );
     assert_eq!(
         service.readycheck_reacted(scope()),
-        BTreeMap::from([(player(1), "<@1>".to_owned())])
+        BTreeSet::from([player(1)])
     );
 }
 
@@ -1133,7 +1120,7 @@ fn test_due_sweep_names_unconfirmed_players_regardless_of_presence() {
             (5, ReadinessGroup::Afk),
         ]),
     );
-    assert!(service.add_readycheck_reaction(scope(), player(5), "<@5>", None));
+    assert!(service.add_readycheck_reaction(scope(), player(5), None));
 
     assert_eq!(
         service.due_sweep(scope(), 1_000.0 + READYCHECK_SWEEP_SECONDS),
@@ -1149,8 +1136,8 @@ fn test_due_sweep_names_unconfirmed_players_regardless_of_presence() {
 fn test_due_sweep_takes_a_player_who_explicitly_unreadied() {
     let service = staleness_service([1, 2, 3]);
     publish_new(&service, 1_000.0, data([1, 2, 3]));
-    assert!(service.add_readycheck_reaction(scope(), player(2), "<@2>", None));
-    assert!(service.add_readycheck_reaction(scope(), player(3), "<@3>", None));
+    assert!(service.add_readycheck_reaction(scope(), player(2), None));
+    assert!(service.add_readycheck_reaction(scope(), player(3), None));
     assert!(service.remove_readycheck_reaction(scope(), player(2), None));
 
     let sweep = service.due_sweep(scope(), 1_300.0).expect("due sweep");
@@ -1180,10 +1167,7 @@ fn test_completed_sweep_retires_the_ready_check() {
         .complete_sweep(scope(), MESSAGE)
         .expect("the swept generation is handed back for its final repaint");
     assert_eq!(retired.message_id, MESSAGE);
-    assert_eq!(
-        retired.reacted,
-        BTreeMap::from([(player(1), "<@1>".to_owned())])
-    );
+    assert_eq!(retired.reacted, BTreeSet::from([player(1)]));
 
     assert_eq!(service.readycheck_generation(scope()), None);
     assert_eq!(service.confirmation_snapshot(scope()), None);
@@ -1197,7 +1181,7 @@ fn test_retired_ready_check_ignores_reactions() {
     publish_new(&service, 1_000.0, data([1, 2]));
     assert!(service.complete_sweep(scope(), MESSAGE).is_some());
 
-    assert!(!service.add_readycheck_reaction(scope(), player(2), "<@2>", Some(MESSAGE)));
+    assert!(!service.add_readycheck_reaction(scope(), player(2), Some(MESSAGE)));
     assert!(!service.remove_readycheck_reaction(scope(), player(1), Some(MESSAGE)));
     assert_eq!(
         service
@@ -1275,15 +1259,15 @@ fn test_explicit_unready_is_not_reconfirmed_by_refresh() {
         .prepare_command(refresh, player_data)
         .expect("fresh refresh");
 
-    assert!(!service.readycheck_reacted(scope()).contains_key(&player(2)));
-    assert!(service.readycheck_reacted(scope()).contains_key(&player(1)));
+    assert!(!service.readycheck_reacted(scope()).contains(&player(2)));
+    assert!(service.readycheck_reacted(scope()).contains(&player(1)));
 }
 
 #[test]
 fn test_explicit_unready_survives_other_player_leaving() {
     let service = staleness_service([1, 2, 3]);
     set_generation(&service, [1, 2, 3], 1_000.0);
-    assert!(service.add_readycheck_reaction(scope(), player(2), "<@2>", None));
+    assert!(service.add_readycheck_reaction(scope(), player(2), None));
     assert!(service.remove_readycheck_reaction(scope(), player(2), None));
     assert!(service.leave_lobby(scope(), player(3)));
     let mut refresh = request(1_121.0);
@@ -1292,7 +1276,7 @@ fn test_explicit_unready_survives_other_player_leaving() {
         .prepare_command(refresh, data([1, 2]))
         .expect("sync after departure");
 
-    assert!(!service.readycheck_reacted(scope()).contains_key(&player(2)));
+    assert!(!service.readycheck_reacted(scope()).contains(&player(2)));
 }
 
 #[test]
@@ -1306,7 +1290,7 @@ fn test_refresh_reconfirms_invoker_who_previously_unreadied() {
         .prepare_command(refresh, data([1, 2]))
         .expect("invoker refresh");
 
-    assert!(service.readycheck_reacted(scope()).contains_key(&player(1)));
+    assert!(service.readycheck_reacted(scope()).contains(&player(1)));
     assert!(service.readycheck_declined(scope()).is_empty());
 }
 
@@ -1319,9 +1303,9 @@ fn test_reclicking_checkmark_after_unready_confirms_again() {
         grouped_data(&[(1, ReadinessGroup::Afk), (2, ReadinessGroup::Recent)]),
     );
     assert!(service.remove_readycheck_reaction(scope(), player(2), None));
-    assert!(service.add_readycheck_reaction(scope(), player(2), "<@2>", None));
+    assert!(service.add_readycheck_reaction(scope(), player(2), None));
 
-    assert!(service.readycheck_reacted(scope()).contains_key(&player(2)));
+    assert!(service.readycheck_reacted(scope()).contains(&player(2)));
     assert!(!service.readycheck_declined(scope()).contains(&player(2)));
 }
 
@@ -1329,7 +1313,7 @@ fn test_reclicking_checkmark_after_unready_confirms_again() {
 fn test_failed_reaction_removal_still_prunes_departed_confirmation() {
     let service = staleness_service([1, 2, 3]);
     publish_new(&service, 1_000.0, data([1, 2, 3]));
-    assert!(service.add_readycheck_reaction(scope(), player(2), "<@2>", None));
+    assert!(service.add_readycheck_reaction(scope(), player(2), None));
     assert!(service.leave_lobby(scope(), player(2)));
     let mut refresh = request(1_121.0);
     refresh.existing_message = ExistingMessageState::Available;
@@ -1340,7 +1324,7 @@ fn test_failed_reaction_removal_still_prunes_departed_confirmation() {
 
     assert_eq!(
         service.readycheck_reacted(scope()),
-        BTreeMap::from([(player(1), "<@1>".to_owned())])
+        BTreeSet::from([player(1)])
     );
 }
 
