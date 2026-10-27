@@ -204,16 +204,28 @@ pub fn split_profit_deductions(
             ..ProfitDeductions::default()
         };
     }
-    let bankruptcy_penalty = truncated(profit, clamped_rate(bankruptcy_rate, 1.0));
-    let vanity_tax = truncated(profit, clamped_rate(vanity_tax_rate, MAX_TAX_RATE))
-        .min(profit.saturating_sub(bankruptcy_penalty).max(0));
-    let low_priority_tax = truncated(profit, clamped_rate(low_priority_tax_rate, MAX_TAX_RATE))
-        .min(
-            profit
-                .saturating_sub(bankruptcy_penalty)
-                .saturating_sub(vanity_tax)
-                .max(0),
-        );
+    trim_profit_deductions(
+        profit,
+        truncated(profit, clamped_rate(bankruptcy_rate, 1.0)),
+        truncated(profit, clamped_rate(vanity_tax_rate, MAX_TAX_RATE)),
+        truncated(profit, clamped_rate(low_priority_tax_rate, MAX_TAX_RATE)),
+    )
+}
+
+/// Chain already-computed shares of `profit` in withholding order: each share
+/// is clamped to zero and trimmed to what the earlier ones left, so together
+/// they never exceed the profit.
+#[must_use]
+pub fn trim_profit_deductions(
+    profit: i64,
+    bankruptcy_penalty: i64,
+    vanity_tax: i64,
+    low_priority_tax: i64,
+) -> ProfitDeductions {
+    let profit = profit.max(0);
+    let bankruptcy_penalty = bankruptcy_penalty.clamp(0, profit);
+    let vanity_tax = vanity_tax.clamp(0, profit - bankruptcy_penalty);
+    let low_priority_tax = low_priority_tax.clamp(0, profit - bankruptcy_penalty - vanity_tax);
     ProfitDeductions {
         profit,
         bankruptcy_penalty,
@@ -312,6 +324,24 @@ pub fn withhold_profit_deductions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trim_chains_shares_and_never_exceeds_the_profit() {
+        assert_eq!(
+            trim_profit_deductions(100, 30, 50, 50),
+            ProfitDeductions {
+                profit: 100,
+                bankruptcy_penalty: 30,
+                vanity_tax: 50,
+                low_priority_tax: 20,
+            }
+        );
+        assert_eq!(trim_profit_deductions(40, 60, 10, -5).total(), 40);
+        assert_eq!(
+            trim_profit_deductions(-5, 1, 1, 1),
+            ProfitDeductions::default()
+        );
+    }
 
     const GUILD: i64 = 77;
     const PLAYER: i64 = 4_001;

@@ -246,7 +246,38 @@ pub struct ApplicationConfig {
     pub llm: LlmConfig,
     pub opendota_api_key: Option<Secret>,
     pub dota_host: Option<crate::dota_host_config::DotaHostConfig>,
+    /// Raw Deadlock settings from the same startup snapshot. The Deadlock
+    /// config types live beside the Steam client in the runtime engine, so
+    /// they parse from [`ApplicationConfig::deadlock_setting`] rather than
+    /// re-reading the process environment.
+    deadlock_settings: BTreeMap<&'static str, String>,
 }
+
+/// Every environment key the Deadlock bot and Steam host configs read.
+pub const DEADLOCK_ENV_KEYS: &[&str] = &[
+    "DEADLOCK_API_KEY",
+    "DEADLOCK_BET_SEED_AMOUNT",
+    "DEADLOCK_BET_WINDOW_SECONDS",
+    "DEADLOCK_CHANNELS",
+    "DEADLOCK_CHANNEL_ID",
+    "DEADLOCK_ENABLED",
+    "DEADLOCK_GUILD_IDS",
+    "DEADLOCK_STEAM_ACCOUNT_ID",
+    "DEADLOCK_STEAM_AUTO_RECORD",
+    "DEADLOCK_STEAM_DATACENTER_CODES",
+    "DEADLOCK_STEAM_ENABLED",
+    "DEADLOCK_STEAM_GUARD_CODE",
+    "DEADLOCK_STEAM_LOBBY_SO_TYPE",
+    "DEADLOCK_STEAM_MACHINE_TOKEN_PATH",
+    "DEADLOCK_STEAM_PARTY_SO_TYPE",
+    "DEADLOCK_STEAM_PASSWORD",
+    "DEADLOCK_STEAM_PING_TIMES",
+    "DEADLOCK_STEAM_RESULT_ACTOR_ID",
+    "DEADLOCK_STEAM_SERVER_REGION",
+    "DEADLOCK_STEAM_SESSION_PATH",
+    "DEADLOCK_STEAM_SHARED_SECRET",
+    "DEADLOCK_STEAM_USERNAME",
+];
 
 impl fmt::Debug for ApplicationConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -260,6 +291,11 @@ impl fmt::Debug for ApplicationConfig {
             .field("llm", &self.llm)
             .field("opendota_api_key", &self.opendota_api_key)
             .field("dota_host", &self.dota_host)
+            // Deadlock settings include Steam credentials; list names only.
+            .field(
+                "deadlock_settings",
+                &self.deadlock_settings.keys().collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -267,6 +303,12 @@ impl fmt::Debug for ApplicationConfig {
 impl ApplicationConfig {
     pub fn from_env() -> Result<Self, crate::ConfigError> {
         Self::from_lookup(|name| env::var(name).ok())
+    }
+
+    /// One raw Deadlock setting from the startup snapshot.
+    #[must_use]
+    pub fn deadlock_setting(&self, name: &str) -> Option<String> {
+        self.deadlock_settings.get(name).cloned()
     }
 
     /// The env-configured Glicko system shared by every rating-mutating path.
@@ -545,6 +587,10 @@ impl ApplicationConfig {
             dota_host: crate::dota_host_config::DotaHostConfig::from_lookup(|name| {
                 captured.get(name).cloned()
             })?,
+            deadlock_settings: DEADLOCK_ENV_KEYS
+                .iter()
+                .filter_map(|name| captured.get(name).map(|value| (*name, value.clone())))
+                .collect(),
         })
     }
 
@@ -736,6 +782,7 @@ fn all_runtime_env_keys() -> Vec<&'static str> {
         "OPENDOTA_API_KEY",
     ]);
     keys.extend(crate::dota_host_config::ENV_KEYS);
+    keys.extend(DEADLOCK_ENV_KEYS);
     keys
 }
 
@@ -802,6 +849,23 @@ mod tests {
             ("AUTO_BLIND_PERCENTAGE", "-0.1"),
         ]);
         assert_eq!(config.values.auto_blind_percentage, 0.1);
+    }
+
+    #[test]
+    fn deadlock_settings_come_from_the_snapshot_and_stay_redacted() {
+        let config = parse(&[
+            ("DISCORD_BOT_TOKEN", "token"),
+            ("DEADLOCK_ENABLED", "true"),
+            ("DEADLOCK_STEAM_PASSWORD", "deadlock-fixture-password"),
+        ]);
+        assert_eq!(
+            config.deadlock_setting("DEADLOCK_ENABLED").as_deref(),
+            Some("true")
+        );
+        assert_eq!(config.deadlock_setting("DEADLOCK_GUILD_IDS"), None);
+        let debug = format!("{config:?}");
+        assert!(debug.contains("DEADLOCK_STEAM_PASSWORD"));
+        assert!(!debug.contains("deadlock-fixture-password"));
     }
 
     #[test]

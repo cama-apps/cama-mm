@@ -279,6 +279,7 @@ impl BossRepositoryPort for SqliteBossRepository {
                 audit,
                 echo,
                 artifact: None,
+                bankruptcy_penalty: commit.bankruptcy_penalty,
                 vanity_tax: commit.vanity_tax,
                 low_priority_tax: commit.low_priority_tax,
                 consume_lantern_id,
@@ -1933,26 +1934,21 @@ impl BankruptcyPort for SqliteBossProfitPolicy {
                 }
             }
         };
-        let vanity_tax = self
-            .vanity_tax
-            .calculate_tax(key.player_id, key.guild_id.0, positive_winnings)
-            .clamp(0, penalty.penalized.max(0));
-        // The low-priority sink reads the same gross winnings, so the two
-        // taxes stack additively rather than compounding. Clamping to what the
-        // bankruptcy penalty and the vanity tax left keeps the combined
-        // withholding at or below the profit basis.
-        let low_priority_tax = self
-            .low_priority_tax
-            .calculate_tax(key.player_id, key.guild_id.0, positive_winnings)
-            .clamp(0, penalty.penalized.max(0).saturating_sub(vanity_tax));
+        // Both taxes read the same gross winnings and chain after the
+        // penalty under the shared profit-deduction rule.
+        let shares = cama_db::profit_deductions::trim_profit_deductions(
+            positive_winnings,
+            penalty.penalty_applied,
+            self.vanity_tax
+                .calculate_tax(key.player_id, key.guild_id.0, positive_winnings),
+            self.low_priority_tax
+                .calculate_tax(key.player_id, key.guild_id.0, positive_winnings),
+        );
         BankruptcyAdjustment {
-            penalized: penalty
-                .penalized
-                .saturating_sub(vanity_tax)
-                .saturating_sub(low_priority_tax),
-            penalty_applied: penalty.penalty_applied,
-            vanity_tax,
-            low_priority_tax,
+            penalized: positive_winnings.saturating_sub(shares.total()),
+            penalty_applied: shares.bankruptcy_penalty,
+            vanity_tax: shares.vanity_tax,
+            low_priority_tax: shares.low_priority_tax,
         }
     }
 }
@@ -2624,6 +2620,7 @@ impl DigBossRuntimeService {
                     }),
                     echo: None,
                     artifact: None,
+                    bankruptcy_penalty: 0,
                     vanity_tax: 0,
                     low_priority_tax: 0,
                     consume_lantern_id: None,
@@ -3291,6 +3288,7 @@ impl DigBossRuntimeService {
                     audit: None,
                     echo: None,
                     artifact: None,
+                    bankruptcy_penalty: 0,
                     vanity_tax: 0,
                     low_priority_tax: 0,
                     consume_lantern_id: None,
@@ -3535,6 +3533,7 @@ impl DigBossRuntimeService {
                     audit: None,
                     echo: None,
                     artifact: None,
+                    bankruptcy_penalty: 0,
                     vanity_tax: 0,
                     low_priority_tax: 0,
                     consume_lantern_id: None,
@@ -4002,6 +4001,7 @@ impl DigBossRuntimeService {
                     audit: Some(audit),
                     echo: None,
                     artifact,
+                    bankruptcy_penalty,
                     vanity_tax,
                     low_priority_tax,
                     consume_lantern_id: None,
@@ -4436,6 +4436,7 @@ impl DigBossRuntimeService {
                     }),
                     echo: None,
                     artifact: None,
+                    bankruptcy_penalty: 0,
                     vanity_tax: 0,
                     low_priority_tax: 0,
                     consume_lantern_id: None,
@@ -4607,6 +4608,7 @@ impl DigBossRuntimeService {
                     audit: None,
                     echo: None,
                     artifact: None,
+                    bankruptcy_penalty: 0,
                     vanity_tax: 0,
                     low_priority_tax: 0,
                     consume_lantern_id: None,

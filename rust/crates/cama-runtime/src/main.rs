@@ -478,7 +478,7 @@ async fn run_serve() -> ExitCode {
         }
     };
     let deadlock_config = match cama_runtime::deadlock_config::DeadlockConfig::from_lookup(|key| {
-        env::var(key).ok()
+        application_config.deadlock_setting(key)
     }) {
         Ok(config) => config,
         Err(reason) => {
@@ -486,15 +486,16 @@ async fn run_serve() -> ExitCode {
             return ExitCode::from(64);
         }
     };
-    let deadlock_host_config = match cama_runtime::deadlock_host::DeadlockHostConfig::from_lookup(
-        |key| env::var(key).ok(),
-    ) {
-        Ok(config) => config,
-        Err(reason) => {
-            error!(%reason,"invalid Deadlock Steam configuration");
-            return ExitCode::from(64);
-        }
-    };
+    let deadlock_host_config =
+        match cama_runtime::deadlock_host::DeadlockHostConfig::from_lookup(|key| {
+            application_config.deadlock_setting(key)
+        }) {
+            Ok(config) => config,
+            Err(reason) => {
+                error!(%reason,"invalid Deadlock Steam configuration");
+                return ExitCode::from(64);
+            }
+        };
     if let Some(host) = &deadlock_host_config {
         if !deadlock_config.enabled {
             error!("DEADLOCK_STEAM_ENABLED requires DEADLOCK_ENABLED");
