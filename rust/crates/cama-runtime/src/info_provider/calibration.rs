@@ -205,7 +205,6 @@ impl CalibrationDataSources {
             format_movement("Glicko", stats.glicko_rating_movement),
             format_movement("OpenSkill", stats.openskill_rating_movement),
         );
-        let drift_text = drift_text(&stats);
         let stability_text = format!(
             "{}\n{}\n*Ratio <1 means calibrated ratings move less*",
             format_stability("Glicko", stats.glicko_rating_stability),
@@ -240,7 +239,6 @@ impl CalibrationDataSources {
                 true,
             )
             .field("📊 Rating Movement", movement_text, false)
-            .field("🔄 Rating Drift (Seed vs Current)", drift_text, false)
             .field("⚖️ Rating Stability", stability_text, false);
 
         if !stats.team_composition.halves.is_empty() {
@@ -420,7 +418,7 @@ impl CalibrationDataSources {
             );
         }
         embed = embed.footer(
-            "RD = Rating Deviation | Drift = Current - Seed | Brier: 0=perfect, 0.25=coin flip | ECE: lower=better calibrated",
+            "RD = Rating Deviation | Brier: 0=perfect, 0.25=coin flip | ECE: lower=better calibrated",
         );
 
         let ratings = players
@@ -717,36 +715,6 @@ fn side_balance_text(balance: &cama_domain::rating_insights::SideBalance) -> Str
     }
 }
 
-fn drift_text(stats: &cama_domain::rating_insights::CalibrationStats) -> String {
-    let (Some(average), Some(median)) = (stats.avg_drift, stats.median_drift) else {
-        return "No seed MMR data yet.".to_owned();
-    };
-    let direction = if average > 0.0 {
-        "outperforming"
-    } else if average < 0.0 {
-        "underperforming"
-    } else {
-        "matching"
-    };
-    format!(
-        "*Current rating vs initial MMR seed*\nAvg: **{average:+.0}** | Median: **{median:+.0}**\nPlayers are {direction} their pub MMR\n📈 Gainers: {}\n📉 Drops: {}",
-        format_drift_players(&stats.biggest_gainers),
-        format_drift_players(&stats.biggest_drops),
-    )
-}
-
-fn format_drift_players(entries: &[(Player, f64)]) -> String {
-    if entries.is_empty() {
-        return "n/a".to_owned();
-    }
-    entries
-        .iter()
-        .take(3)
-        .map(|(player, drift)| format!("{} ({drift:+.0})", player_name(player)))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 fn format_ranked(players: &[Player], value: impl Fn(&Player) -> String) -> String {
     if players.is_empty() {
         return "n/a".to_owned();
@@ -1033,23 +1001,6 @@ impl CalibrationDataSources {
             .color(DISCORD_BLUE)
             .field("📊 Rating Profile", profile_lines.join("\n"), false);
 
-        if let Some(drift) = calibration.drift {
-            embed = embed.field(
-                "🎯 Rating Drift",
-                format!(
-                    "{} **{drift:+.0}** rating vs initial seed ({} MMR)",
-                    if drift > 0.0 {
-                        "📈"
-                    } else if drift < 0.0 {
-                        "📉"
-                    } else {
-                        "➡️"
-                    },
-                    player.initial_mmr.unwrap_or_default(),
-                ),
-                false,
-            );
-        }
         embed = add_performance_fields(embed, &calibration);
         if calibration.last_5_delta.is_some() || calibration.openskill_last_5_delta.is_some() {
             embed = embed.field("📉 Trend", trend_text(&calibration, history.len()), true);
