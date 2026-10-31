@@ -45,7 +45,7 @@ use crate::discord_transport::{
     DiscordDestinationStatus, DiscordDirectMessageError, DiscordDirectMessageErrorKind,
     DiscordEmoji, DiscordGuildMemberRenderNames, DiscordGuildMemberSnapshot, DiscordMessage,
     DiscordMessageReceipt, DiscordMessageSnapshot, DiscordPresence, DiscordTransport,
-    DiscordUserSnapshot,
+    DiscordUserSnapshot, ScoutChannelPort,
 };
 use crate::duel_challenges_worker::{
     DuelChannelKind, DuelChannelSnapshot, DuelDiscordPort, DuelGuildSnapshot,
@@ -3578,7 +3578,47 @@ fn configured_gamba_location_matches(
     channel_id: u64,
     parent_id: Option<u64>,
 ) -> bool {
-    configured_id == Some(channel_id) || configured_id == parent_id
+    configured_id.is_some_and(|id| id == channel_id || Some(id) == parent_id)
+}
+
+#[async_trait]
+impl ScoutChannelPort for SerenityDiscordTransport {
+    async fn scout_channel_is_dota_mm(
+        &self,
+        guild_id: i64,
+        channel_id: i64,
+    ) -> Result<bool, String> {
+        let context = self.context()?;
+        let guild_id = GuildId::new(
+            u64::try_from(guild_id)
+                .map_err(|_| "Discord scout guild ID is outside the supported range")?,
+        );
+        let channel_id = ChannelId::new(
+            u64::try_from(channel_id)
+                .map_err(|_| "Discord scout channel ID is outside the supported range")?,
+        );
+        let Some(mut channel) = prediction_channel(&context, guild_id, channel_id).await? else {
+            return Ok(false);
+        };
+        if channel.guild_id != guild_id {
+            return Ok(false);
+        }
+        if matches!(
+            channel.kind,
+            ChannelType::PublicThread | ChannelType::PrivateThread | ChannelType::NewsThread
+        ) {
+            let Some(parent_id) = channel.parent_id else {
+                return Ok(false);
+            };
+            let Some(parent) = prediction_channel(&context, guild_id, parent_id).await? else {
+                return Ok(false);
+            };
+            channel = parent;
+        }
+        Ok(channel.guild_id == guild_id
+            && channel.kind == ChannelType::Text
+            && channel.name.to_ascii_lowercase().contains("dota-mm"))
+    }
 }
 
 #[async_trait]

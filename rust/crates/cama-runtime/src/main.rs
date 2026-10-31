@@ -961,6 +961,7 @@ async fn run_serve() -> ExitCode {
         Arc::new(DiscordGuildPlayerNameResolver::new(
             discord_transport.clone(),
         )),
+        discord_transport.clone(),
     ) {
         Ok(provider) => provider,
         Err(error) => {

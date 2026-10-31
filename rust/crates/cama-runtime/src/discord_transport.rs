@@ -15,6 +15,16 @@ use crate::registration::InteractionResponse;
 
 pub type DiscordGuildMemberRenderNames = BTreeMap<u64, String>;
 
+#[async_trait]
+pub trait ScoutChannelPort: Send + Sync {
+    /// Whether this guild channel, or its thread parent, belongs to `dota-mm`.
+    async fn scout_channel_is_dota_mm(
+        &self,
+        guild_id: i64,
+        channel_id: i64,
+    ) -> Result<bool, String>;
+}
+
 /// A confirmed deleted attached thread requires a new map/thread pair, because
 /// attached thread IDs reuse their starter and old join receipts are invalid.
 pub const SPECTATOR_THREAD_DELETED: &str =

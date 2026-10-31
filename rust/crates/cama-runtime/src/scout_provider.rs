@@ -23,7 +23,9 @@ use cama_db::scout_repository::ScoutRepository;
 use thiserror::Error;
 use tracing::{error, warn};
 
-use crate::discord_transport::{GuildPlayerNameDirectory, GuildPlayerNameResolver};
+use crate::discord_transport::{
+    GuildPlayerNameDirectory, GuildPlayerNameResolver, ScoutChannelPort,
+};
 use crate::embed_colors::{DISCORD_BLUE, DISCORD_GOLD};
 use crate::ids::signed_id;
 use crate::option_ext::string_option;
@@ -40,6 +42,8 @@ const REPORT_LIMIT: usize = 100;
 const VIEW_TIMEOUT: Duration = Duration::from_secs(840);
 const COMPONENT_PREFIX: &str = "scout:";
 const GUILD_ONLY_MESSAGE: &str = "This command can only be used in a server.";
+const WRONG_CHANNEL_MESSAGE: &str =
+    "Use /scout in #dota-mm or one of its threads. A 1 JC wrong-channel penalty applies.";
 const RENDER_FAILURE: &str = "Failed to generate scout report. Please try again.";
 
 #[derive(Debug, Error)]
@@ -57,11 +61,13 @@ impl ScoutRegistrationProvider {
         database_path: impl AsRef<Path>,
         draft_states: Arc<DraftStateManager>,
         player_names: Arc<dyn GuildPlayerNameResolver>,
+        channels: Arc<dyn ScoutChannelPort>,
     ) -> Result<Self, ScoutProviderBuildError> {
         Self::with_assets(
             database_path,
             draft_states,
             player_names,
+            channels,
             PRODUCTION_DOTABASE_PATH,
             production_steam_image_cache_root().join("scout"),
             VIEW_TIMEOUT,
@@ -72,6 +78,7 @@ impl ScoutRegistrationProvider {
         database_path: impl AsRef<Path>,
         draft_states: Arc<DraftStateManager>,
         player_names: Arc<dyn GuildPlayerNameResolver>,
+        channels: Arc<dyn ScoutChannelPort>,
         dotabase_path: impl AsRef<Path>,
         cache_path: impl AsRef<Path>,
         view_timeout: Duration,
@@ -94,6 +101,7 @@ impl ScoutRegistrationProvider {
                 context_repository: HeroGridRepository::new(&database_path),
                 player_repository: PlayerRepository::new(&database_path),
                 player_names,
+                channels,
                 draft_states,
                 hero_urls: Arc::new(hero_urls),
                 portrait_cache_root: cache_path.as_ref().to_path_buf(),
@@ -175,6 +183,7 @@ struct ScoutHandler {
     context_repository: HeroGridRepository,
     player_repository: PlayerRepository,
     player_names: Arc<dyn GuildPlayerNameResolver>,
+    channels: Arc<dyn ScoutChannelPort>,
     draft_states: Arc<DraftStateManager>,
     hero_urls: Arc<BTreeMap<i64, String>>,
     portrait_cache_root: std::path::PathBuf,
@@ -229,6 +238,7 @@ impl ScoutHandler {
             name,
             user_id,
             guild_id,
+            channel_id,
             options,
             ..
         } = request
@@ -246,9 +256,31 @@ impl ScoutHandler {
         };
         let guild_id = signed_id(guild_id, "guild")?;
         let invoking_user_id = signed_id(user_id, "user")?;
+        let channel_id = channel_id.map(|id| signed_id(id, "channel")).transpose()?;
         if let Err(error) = responder.defer(false).await {
             warn!(%error, "unable to defer Scout interaction");
             return Ok(());
+        }
+        let allowed = match channel_id {
+            Some(channel_id) => self
+                .channels
+                .scout_channel_is_dota_mm(guild_id, channel_id)
+                .await
+                .map_err(|error| format!("Scout channel lookup failed: {error}"))?,
+            None => false,
+        };
+        if !allowed {
+            let players = self.player_repository.clone();
+            tokio::task::spawn_blocking(move || {
+                players.add_balance_with_context(invoking_user_id, Some(guild_id), -1, None)
+            })
+            .await
+            .map_err(|error| format!("Scout channel penalty task failed: {error}"))?
+            .map_err(|error| error.to_string())?;
+            return responder
+                .followup(InteractionResponse::message(WRONG_CHANNEL_MESSAGE).ephemeral())
+                .await
+                .map_err(|error| error.to_string().into());
         }
         let (subcommand, options) = subcommand(&options)?;
         let team_filter = parse_team(string_option(options, "team"))?;
