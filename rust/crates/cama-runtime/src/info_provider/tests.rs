@@ -1290,6 +1290,9 @@ async fn calibration_runs_live_sqlite_analytics_and_emits_real_png_bytes() {
         response.embeds[0].title.as_deref(),
         Some("Rating System Health")
     );
+    let rendered = format!("{:?}", response.embeds).to_lowercase();
+    assert!(!rendered.contains("seed"));
+    assert!(!rendered.contains("drift"));
     assert_eq!(
         response.embeds[0].image_url.as_deref(),
         Some("attachment://rating_distribution.png")
@@ -1414,12 +1417,9 @@ async fn individual_calibration_renders_non_default_deployment_rating_config() {
         .expect("configured individual calibration");
 
     let response = responder.followups.lock().expect("followups")[0].clone();
-    let drift = response.embeds[0]
-        .fields
-        .iter()
-        .find(|field| field.name == "🎯 Rating Drift")
-        .expect("configured rating drift field");
-    assert!(drift.value.contains("**+950** rating"));
+    let rendered = format!("{:?}", response.embeds).to_lowercase();
+    assert!(!rendered.contains("seed"));
+    assert!(!rendered.contains("drift"));
     let openskill = response.embeds[0]
         .fields
         .iter()
