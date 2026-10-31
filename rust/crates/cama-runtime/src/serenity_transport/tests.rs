@@ -459,9 +459,117 @@ fn configured_gamba_channel_id_is_accepted() {
 }
 
 #[test]
+fn missing_gamba_configuration_does_not_authorize_unrelated_channels() {
+    assert!(!configured_gamba_location_matches(None, 43, None));
+    assert!(!configured_gamba_location_matches(None, 43, Some(44)));
+}
+
+#[test]
 fn configured_gamba_thread_parent_is_accepted() {
     assert!(configured_gamba_location_matches(Some(42), 43, Some(42)));
     assert!(!configured_gamba_location_matches(Some(42), 43, Some(44)));
+}
+
+fn command_channel_transport(configured_gamba: Option<i64>) -> SerenityDiscordTransport {
+    let transport = SerenityDiscordTransport::with_gamba_channel_id(configured_gamba);
+    let cache = Arc::new(Cache::default());
+    let mut guild = Guild::default();
+    guild.id = GuildId::new(42);
+    for (id, name, kind, parent) in [
+        (10, "🎲GAMBA🎲", ChannelType::Text, None),
+        (11, "⚔️DOTA-MM⚔️", ChannelType::Text, None),
+        (12, "general", ChannelType::Text, None),
+        (20, "trivia", ChannelType::PublicThread, Some(10)),
+        (21, "match", ChannelType::PrivateThread, Some(11)),
+        (22, "other", ChannelType::PublicThread, Some(12)),
+        (23, "dota-mm", ChannelType::PublicThread, Some(12)),
+        (30, "dota-mm", ChannelType::Category, None),
+        (31, "general", ChannelType::Text, Some(30)),
+        (40, "dota-mm", ChannelType::Text, None),
+        (41, "foreign parent", ChannelType::PublicThread, Some(40)),
+    ] {
+        let mut channel = GuildChannel::default();
+        channel.id = ChannelId::new(id);
+        channel.guild_id = guild.id;
+        channel.name = name.to_owned();
+        channel.kind = kind;
+        channel.parent_id = parent.map(ChannelId::new);
+        if matches!(kind, ChannelType::PublicThread | ChannelType::PrivateThread) {
+            guild.threads.push(channel);
+        } else {
+            guild.channels.insert(channel.id, channel);
+        }
+    }
+    let mut event: serenity::all::GuildCreateEvent =
+        serde_json::from_value(serde_json::to_value(guild).unwrap()).unwrap();
+    // A fetched or stale channel snapshot from another guild must not authorize Scout.
+    event
+        .guild
+        .channels
+        .get_mut(&ChannelId::new(40))
+        .unwrap()
+        .guild_id = GuildId::new(99);
+    cache.update(&mut event);
+    *transport.context.write().unwrap() = Some(SerenityContext {
+        http: Arc::new(Http::new("test-token")),
+        cache,
+    });
+    transport
+}
+
+#[tokio::test]
+async fn trivia_without_configured_gamba_checks_the_channel_and_thread_parent() {
+    let transport = command_channel_transport(None);
+    for (channel_id, allowed) in [
+        (10, true),
+        (20, true),
+        (11, false),
+        (12, false),
+        (22, false),
+    ] {
+        assert_eq!(
+            transport
+                .trivia_channel_is_gamba(42, channel_id)
+                .await
+                .unwrap(),
+            allowed,
+            "channel {channel_id}",
+        );
+    }
+}
+
+#[tokio::test]
+async fn scout_accepts_dota_mm_and_its_threads_but_not_other_channels_or_categories() {
+    let transport = command_channel_transport(None);
+    for (channel_id, allowed) in [
+        (10, false),
+        (11, true),
+        (12, false),
+        (20, false),
+        (21, true),
+        (22, false),
+        (23, false),
+        (30, false),
+        (31, false),
+        (40, false),
+        (41, false),
+    ] {
+        assert_eq!(
+            transport
+                .scout_channel_is_dota_mm(42, channel_id)
+                .await
+                .unwrap(),
+            allowed,
+            "channel {channel_id}",
+        );
+    }
+}
+
+#[tokio::test]
+async fn command_channel_lookup_without_gateway_context_is_an_error() {
+    let transport = SerenityDiscordTransport::new();
+    assert!(transport.scout_channel_is_dota_mm(42, 11).await.is_err());
+    assert!(transport.trivia_channel_is_gamba(42, 10).await.is_err());
 }
 
 struct CapturedCommandRequest {

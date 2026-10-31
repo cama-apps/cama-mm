@@ -112,6 +112,31 @@ struct StaticPlayerNames {
     directory: GuildPlayerNameDirectory,
 }
 
+#[derive(Default)]
+struct ScoutChannels {
+    responder: Option<Arc<CapturingResponder>>,
+}
+
+#[async_trait]
+impl ScoutChannelPort for ScoutChannels {
+    async fn scout_channel_is_dota_mm(
+        &self,
+        guild_id: i64,
+        channel_id: i64,
+    ) -> Result<bool, String> {
+        assert_eq!(guild_id, GUILD);
+        if let Some(responder) = &self.responder {
+            assert_eq!(responder.captured.lock().unwrap().defers, [false]);
+        }
+        match channel_id {
+            9 => Ok(true),
+            98 => Err("channel lookup unavailable".to_owned()),
+            99 => Ok(false),
+            _ => panic!("unexpected Scout channel {channel_id}"),
+        }
+    }
+}
+
 impl GuildPlayerNameResolver for StaticPlayerNames {
     fn names_for_guild(
         &self,
@@ -175,6 +200,16 @@ impl Fixture {
         connection
     }
 
+    fn balance(&self, guild_id: i64) -> i64 {
+        self.connection()
+            .query_row(
+                "SELECT jopacoin_balance FROM players WHERE discord_id=?1 AND guild_id=?2",
+                params![USER, guild_id],
+                |row| row.get(0),
+            )
+            .expect("Scout player balance")
+    }
+
     fn register(&self, discord_id: i64, name: &str, steam_id: Option<i64>) {
         self.connection()
             .execute(
@@ -231,6 +266,7 @@ impl Fixture {
             Arc::new(StaticPlayerNames {
                 directory: GuildPlayerNameDirectory::new(nicknames),
             }),
+            Arc::new(ScoutChannels::default()),
             &self.dotabase,
             &self.cache,
             timeout,
@@ -348,6 +384,89 @@ fn players(value: &str) -> InteractionOption {
         name: "players".to_owned(),
         value: InteractionValue::String(value.to_owned()),
     }
+}
+
+#[tokio::test]
+async fn wrong_channel_blocks_both_scout_commands_and_charges_one_coin() {
+    for subcommand in ["report", "links"] {
+        let fixture = Fixture::new();
+        fixture.register(USER, "Alice", Some(1234));
+        fixture.connection().execute(
+            "UPDATE players SET jopacoin_balance=3, lowest_balance_ever=3 WHERE discord_id=?1 AND guild_id=?2",
+            params![USER, GUILD],
+        ).unwrap();
+        fixture
+            .connection()
+            .execute(
+                "INSERT INTO players (discord_id,guild_id,discord_username,jopacoin_balance)
+             VALUES (?1,?2,'Alice elsewhere',8)",
+                params![USER, GUILD + 1],
+            )
+            .unwrap();
+        let mut provider = fixture.provider(VIEW_TIMEOUT);
+        let responder = Arc::new(CapturingResponder::default());
+        Arc::get_mut(&mut provider.handler).unwrap().channels = Arc::new(ScoutChannels {
+            responder: Some(responder.clone()),
+        });
+        let mut request = command(subcommand, vec![players("<@100>")]);
+        if let InteractionRequest::Command { channel_id, .. } = &mut request {
+            *channel_id = Some(99);
+        }
+        registry(&provider)
+            .command_handler("scout")
+            .unwrap()
+            .handle(request, responder.clone())
+            .await
+            .unwrap();
+        assert_eq!(fixture.balance(GUILD), 2);
+        assert_eq!(fixture.balance(GUILD + 1), 8);
+        let lowest: i64 = fixture
+            .connection()
+            .query_row(
+                "SELECT lowest_balance_ever FROM players WHERE discord_id=?1 AND guild_id=?2",
+                params![USER, GUILD],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(lowest, 2);
+        let captured = responder.captured.lock().unwrap();
+        assert_eq!(captured.defers, [false]);
+        assert!(captured.immediate.is_empty());
+        assert_eq!(captured.followups.len(), 1);
+        assert!(captured.followups[0].ephemeral);
+        assert!(captured.followups[0].content.contains("dota-mm"));
+        assert!(captured.followups[0].attachments.is_empty());
+        assert!(captured.followups[0].embeds.is_empty());
+        assert!(provider.handler.views.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn scout_channel_lookup_failure_does_not_charge_or_publish() {
+    let fixture = Fixture::new();
+    fixture.register(USER, "Alice", Some(1234));
+    let balance = fixture.balance(GUILD);
+    let responder = Arc::new(CapturingResponder::default());
+    let mut provider = fixture.provider(VIEW_TIMEOUT);
+    Arc::get_mut(&mut provider.handler).unwrap().channels = Arc::new(ScoutChannels {
+        responder: Some(responder.clone()),
+    });
+    let mut request = command("links", vec![players("<@100>")]);
+    if let InteractionRequest::Command { channel_id, .. } = &mut request {
+        *channel_id = Some(98);
+    }
+    let error = registry(&provider)
+        .command_handler("scout")
+        .unwrap()
+        .handle(request, responder.clone())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("channel lookup unavailable"));
+    assert_eq!(fixture.balance(GUILD), balance);
+    let captured = responder.captured.lock().unwrap();
+    assert_eq!(captured.defers, [false]);
+    assert!(captured.immediate.is_empty());
+    assert!(captured.followups.is_empty());
 }
 
 #[test]
@@ -582,6 +701,7 @@ fn test_batch_deduplicates_and_bounds_parallel_missing_fetches() {
 async fn links_disclose_only_guild_registered_players_and_preserve_mentions() {
     let fixture = Fixture::new();
     fixture.register(USER, "Alice", Some(1234));
+    let balance = fixture.balance(GUILD);
     let registry = registry(&fixture.provider_with_nicknames(
         VIEW_TIMEOUT,
         Some(BTreeMap::from([(USER as u64, "Server Alice".to_owned())])),
@@ -596,6 +716,8 @@ async fn links_disclose_only_guild_registered_players_and_preserve_mentions() {
         )
         .await
         .expect("render Scout links");
+
+    assert_eq!(fixture.balance(GUILD), balance);
 
     let captured = responder.captured.lock().expect("captured Scout links");
     assert_eq!(captured.defers, [false]);
@@ -665,6 +787,8 @@ async fn view_timeout_deletes_the_followup_and_stale_components_fail_safely() {
 #[tokio::test]
 async fn guild_guard_is_ephemeral_and_precedes_defer() {
     let fixture = Fixture::new();
+    fixture.register(USER, "Alice", None);
+    let balance = fixture.balance(GUILD);
     let registry = registry(&fixture.provider(VIEW_TIMEOUT));
     let responder = Arc::new(CapturingResponder::default());
     let mut request = command("report", Vec::new());
@@ -677,6 +801,7 @@ async fn guild_guard_is_ephemeral_and_precedes_defer() {
         .handle(request, responder.clone())
         .await
         .expect("apply guild guard");
+    assert_eq!(fixture.balance(GUILD), balance);
     let captured = responder.captured.lock().expect("capture guild guard");
     assert!(captured.defers.is_empty());
     assert_eq!(captured.immediate[0].content, GUILD_ONLY_MESSAGE);
