@@ -1,10 +1,7 @@
 //! Native 800×600 PNG renderer for the live Cama Wrapped story.
 //!
-//! The production command supplies semantic slide data and this module draws
-//! the complete server, awards, personal, records, pairwise, package, lane,
-//! rating, and gambling pages without Python, Pillow, matplotlib, or temporary
-//! files. Fixed DejaVu assets preserve Python's authored Gamba typography;
-//! Discord avatar PNGs are decoded fail-soft and composited when available.
+//! Semantic story data becomes fitted TrueType artwork, bounded GIF reveals,
+//! and static charts. Discord avatar PNGs are decoded fail-soft.
 
 use std::io::{Read, Write};
 use std::sync::OnceLock;
@@ -16,23 +13,18 @@ use thiserror::Error;
 
 use crate::font_assets::{DejaVuFace, load_dejavu_font};
 
+mod artwork;
+mod poster;
+
 pub const WRAPPED_SLIDE_WIDTH: usize = 800;
 pub const WRAPPED_SLIDE_HEIGHT: usize = 600;
 
-const BACKGROUND: Rgba = Rgba::rgb(18, 18, 24);
 const PANEL: Rgba = Rgba::rgb(30, 31, 42);
 const WHITE: Rgba = Rgba::rgb(245, 245, 248);
-const GREY: Rgba = Rgba::rgb(170, 174, 190);
 const GRID: Rgba = Rgba::rgb(62, 64, 78);
 const GREEN: Rgba = Rgba::rgb(46, 204, 113);
 const RED: Rgba = Rgba::rgb(237, 66, 69);
 const YELLOW: Rgba = Rgba::rgb(241, 196, 15);
-const WRAPPED_BACKGROUND_START: Rgba = Rgba::rgb(30, 30, 35);
-const WRAPPED_BACKGROUND_END: Rgba = Rgba::rgb(45, 45, 55);
-// `wrap_chart_in_slide` keeps its default ACCENT_GOLD even for the Gamba
-// slide; the chart itself carries the Discord red/green event palette.
-const WRAPPED_GAMBA_ACCENT: Rgba = Rgba::rgb(241, 196, 15);
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WrappedAvatar {
     pub discord_id: i64,
@@ -42,9 +34,7 @@ pub struct WrappedAvatar {
 /// Exact typed payload for the all-time Gamba page in `/wrapped`.
 ///
 /// This is deliberately separate from the live `/profile` chart payload. The
-/// wrapped command first renders the 700×400 chart and then places that
-/// attachment on the 800×600 story canvas, matching Python's
-/// `wrap_chart_in_slide` lifecycle.
+/// wrapped command renders the 700×400 chart inside the 800×600 story canvas.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WrappedGambaData {
     pub degen_score: i32,
@@ -55,6 +45,9 @@ pub struct WrappedGambaData {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct WrappedSlideData {
+    pub artwork: WrappedArtwork,
+    pub chapter_index: usize,
+    pub chapter_count: usize,
     pub kind: String,
     pub title: String,
     pub username: String,
@@ -75,6 +68,9 @@ impl WrappedSlideData {
     #[must_use]
     pub fn new(kind: impl Into<String>, title: impl Into<String>) -> Self {
         Self {
+            artwork: WrappedArtwork::Rune,
+            chapter_index: 0,
+            chapter_count: 1,
             kind: kind.into(),
             title: title.into(),
             username: String::new(),
@@ -93,14 +89,67 @@ impl WrappedSlideData {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WrappedArtwork {
+    #[default]
+    Rune,
+    Ward,
+    Courier,
+}
+
 #[derive(Debug, Error)]
 pub enum WrappedMediaError {
     #[error("Wrapped slide text exceeds the supported image layout")]
     OversizedText,
+    #[error("Wrapped animation could not be encoded: {0}")]
+    Animation(#[from] gif::EncodingError),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WrappedRenderedMedia {
+    pub filename: &'static str,
+    pub bytes: Vec<u8>,
+}
+
+/// Animations reveal a single rendered image, with a complete final frame.
+/// Detailed chapters and still mode always use PNG.
+pub fn render_wrapped_media(
+    slide: &WrappedSlideData,
+    animated: bool,
+) -> Result<WrappedRenderedMedia, WrappedMediaError> {
+    validate_slide(slide)?;
+    let canvas = poster::render(slide);
+    if !animated
+        || !matches!(
+            slide.kind.as_str(),
+            "story_intro" | "story_games" | "story_identity" | "story_moment"
+        )
+    {
+        return Ok(WrappedRenderedMedia {
+            filename: "wrapped_slide.png",
+            bytes: encode_png(&canvas),
+        });
+    }
+    let bytes = poster::animate(&canvas, slide)?;
+    if bytes.len() > 4 * 1024 * 1024 {
+        return Ok(WrappedRenderedMedia {
+            filename: "wrapped_slide.png",
+            bytes: encode_png(&canvas),
+        });
+    }
+    Ok(WrappedRenderedMedia {
+        filename: "wrapped_slide.gif",
+        bytes,
+    })
 }
 
 /// Render one story page as a seekable, Discord-ready RGBA PNG.
 pub fn render_wrapped_slide(slide: &WrappedSlideData) -> Result<Vec<u8>, WrappedMediaError> {
+    validate_slide(slide)?;
+    Ok(encode_png(&poster::render(slide)))
+}
+
+fn validate_slide(slide: &WrappedSlideData) -> Result<(), WrappedMediaError> {
     if slide
         .lines
         .iter()
@@ -116,190 +165,18 @@ pub fn render_wrapped_slide(slide: &WrappedSlideData) -> Result<Vec<u8>, Wrapped
     {
         return Err(WrappedMediaError::OversizedText);
     }
-    if slide.kind == "chart_gamba" {
-        return render_wrapped_gamba(slide);
-    }
-    let accent = Rgba::rgb(slide.accent[0], slide.accent[1], slide.accent[2]);
-    let mut canvas = Canvas::new(WRAPPED_SLIDE_WIDTH, WRAPPED_SLIDE_HEIGHT, BACKGROUND);
-    canvas.fill_rect(0, 0, WRAPPED_SLIDE_WIDTH as i32, 10, accent);
-    canvas.text_centered(&slide.title, 35, WHITE, 4);
-    canvas.text_centered(&slide.year_label, 78, GREY, 2);
-    match slide.kind.as_str() {
-        "story_games" => draw_reveal(&mut canvas, slide, accent),
-        "server_summary" => draw_server_summary(&mut canvas, slide, accent),
-        "awards" => draw_cards(&mut canvas, slide, accent, true),
-        kind if kind.starts_with("records_") => draw_cards(&mut canvas, slide, accent, false),
-        "story_hero" => draw_hero(&mut canvas, slide, accent),
-        "story_lanes" => draw_lane_bars(&mut canvas, slide, accent),
-        "story_teammates" | "story_rivals" => draw_pairwise(&mut canvas, slide, accent),
-        "story_packages" => draw_package(&mut canvas, slide, accent),
-        "chart_rating" | "chart_gamba" => draw_chart(&mut canvas, slide, accent),
-        _ => draw_stats_grid(&mut canvas, slide, accent),
-    }
-    if !slide.username.is_empty() {
-        canvas.text(28, 568, &slide.username, GREY, 2);
-    }
-    canvas.text_right("CAMA WRAPPED", 772, 568, GREY, 2);
-    Ok(encode_png(&canvas))
-}
-
-fn render_wrapped_gamba(slide: &WrappedSlideData) -> Result<Vec<u8>, WrappedMediaError> {
-    // Python's wrap_chart_in_slide owns this canvas, not the generic Wrapped
-    // header/footer used by the other story pages. Preserve its gradient,
-    // title position, 700×400 chart boundary, and optional footer line.
-    let mut canvas = Canvas::new(
-        WRAPPED_SLIDE_WIDTH,
-        WRAPPED_SLIDE_HEIGHT,
-        WRAPPED_BACKGROUND_START,
-    );
-    canvas.vertical_gradient(WRAPPED_BACKGROUND_START, WRAPPED_BACKGROUND_END);
-    canvas.truetype_text_centered(
-        &slide.title.to_ascii_uppercase(),
-        15,
-        WRAPPED_GAMBA_ACCENT,
-        18.0,
-        true,
-    );
-
-    if let Some(gamba) = &slide.gamba {
-        let chart = draw_gamba_chart(
-            &slide.username,
-            gamba.degen_score,
-            &gamba.degen_title,
-            &gamba.points,
-            gamba.stats,
-        )
-        .into_inner();
-        if let Some(chart) = decode_png(&chart) {
-            canvas.blit_opaque(&chart, 50, 45);
-        } else {
-            canvas.text_centered("Chart unavailable", 250, GREY, 2);
-        }
-    } else {
-        canvas.text_centered("Chart unavailable", 250, GREY, 2);
-    }
-
-    if let Some(footer) = slide.lines.first().filter(|line| !line.is_empty()) {
-        canvas.truetype_text_centered(footer, 560, GREY, 16.0, false);
-    }
-    Ok(encode_png(&canvas))
-}
-
-fn draw_reveal(canvas: &mut Canvas, slide: &WrappedSlideData, accent: Rgba) {
-    canvas.text_centered(&slide.headline, 135, accent, 3);
-    canvas.text_centered(&slide.stat_value, 215, WHITE, 7);
-    canvas.text_centered(&slide.stat_label, 285, accent, 3);
-    draw_wrapped_lines(canvas, &slide.lines, 350, 4, 2, WHITE);
-}
-
-fn draw_server_summary(canvas: &mut Canvas, slide: &WrappedSlideData, accent: Rgba) {
-    canvas.fill_rect(45, 125, 755, 530, PANEL);
-    canvas.text_centered(&slide.headline, 150, accent, 3);
-    draw_metric_grid(canvas, &slide.lines, 205, accent);
-}
-
-fn draw_stats_grid(canvas: &mut Canvas, slide: &WrappedSlideData, accent: Rgba) {
-    canvas.text_centered(&slide.headline, 125, accent, 3);
-    draw_metric_grid(canvas, &slide.lines, 175, accent);
-}
-
-fn draw_metric_grid(canvas: &mut Canvas, lines: &[String], top: i32, accent: Rgba) {
-    for (index, line) in lines.iter().take(8).enumerate() {
-        let row = i32::try_from(index / 2).unwrap_or_default();
-        let column = i32::try_from(index % 2).unwrap_or_default();
-        let left = 60 + column * 350;
-        let y = top + row * 82;
-        canvas.fill_rect(left, y, left + 325, y + 65, PANEL);
-        canvas.fill_rect(left, y, left + 6, y + 65, accent);
-        canvas.text(left + 20, y + 22, &truncate(line, 43), WHITE, 2);
-    }
-}
-
-fn draw_cards(canvas: &mut Canvas, slide: &WrappedSlideData, accent: Rgba, awards: bool) {
-    canvas.text_centered(&slide.headline, 120, accent, 3);
-    for (index, line) in slide.lines.iter().take(6).enumerate() {
-        let row = i32::try_from(index / 2).unwrap_or_default();
-        let column = i32::try_from(index % 2).unwrap_or_default();
-        let left = 48 + column * 365;
-        let top = 165 + row * 120;
-        canvas.fill_rect(left, top, left + 340, top + 98, PANEL);
-        canvas.outline_rect(left, top, left + 340, top + 98, accent, 2);
-        let color = if awards && index % 2 == 1 {
-            WHITE
-        } else {
-            accent
-        };
-        for (line_index, wrapped) in wrap_text(line, 26, 3).iter().enumerate() {
-            canvas.text(
-                left + 16,
-                top + 16 + i32::try_from(line_index).unwrap_or_default() * 24,
-                wrapped,
-                color,
-                2,
-            );
-        }
-    }
-}
-
-fn draw_hero(canvas: &mut Canvas, slide: &WrappedSlideData, accent: Rgba) {
-    canvas.fill_rect(55, 125, 745, 300, PANEL);
-    canvas.text_centered(&slide.headline, 155, accent, 4);
-    canvas.text_centered(&slide.stat_value, 220, WHITE, 5);
-    draw_wrapped_lines(canvas, &slide.lines, 335, 7, 2, WHITE);
-}
-
-fn draw_lane_bars(canvas: &mut Canvas, slide: &WrappedSlideData, accent: Rgba) {
-    canvas.text_centered(&slide.headline, 120, accent, 3);
-    let values = if slide.series.is_empty() {
-        vec![0.0; slide.lines.len()]
-    } else {
-        slide.series.clone()
-    };
-    let max = values.iter().copied().fold(1.0_f64, f64::max);
-    for (index, (label, value)) in slide.lines.iter().zip(values).take(5).enumerate() {
-        let y = 180 + i32::try_from(index).unwrap_or_default() * 72;
-        canvas.text(75, y, &truncate(label, 24), WHITE, 2);
-        canvas.fill_rect(285, y - 4, 710, y + 25, PANEL);
-        let width = (420.0 * (value / max).clamp(0.0, 1.0)).round() as i32;
-        canvas.fill_rect(285, y - 4, 285 + width, y + 25, accent);
-    }
-}
-
-fn draw_pairwise(canvas: &mut Canvas, slide: &WrappedSlideData, accent: Rgba) {
-    canvas.text_centered(&slide.headline, 118, accent, 3);
-    for (index, line) in slide.lines.iter().take(6).enumerate() {
-        let top = 165 + i32::try_from(index).unwrap_or_default() * 61;
-        if let Some(avatar) = slide
-            .avatars
-            .get(index)
-            .and_then(|avatar| decode_png(&avatar.png))
-        {
-            canvas.blit_scaled(&avatar, 60, top - 8, 50, 50);
-        } else {
-            canvas.circle((85, top + 17), 24, accent);
-        }
-        canvas.fill_rect(125, top - 8, 735, top + 43, PANEL);
-        for (line_index, wrapped) in wrap_text(line, 72, 3).iter().enumerate() {
-            canvas.text(
-                145,
-                top + i32::try_from(line_index).unwrap_or_default() * 13,
-                wrapped,
-                WHITE,
-                1,
-            );
-        }
-    }
-}
-
-fn draw_package(canvas: &mut Canvas, slide: &WrappedSlideData, accent: Rgba) {
-    canvas.text_centered(&slide.headline, 130, accent, 4);
-    canvas.text_centered(&slide.stat_value, 215, WHITE, 6);
-    canvas.text_centered(&slide.stat_label, 275, accent, 2);
-    draw_wrapped_lines(canvas, &slide.lines, 340, 6, 2, WHITE);
+    Ok(())
 }
 
 fn draw_chart(canvas: &mut Canvas, slide: &WrappedSlideData, accent: Rgba) {
-    canvas.text_centered(&slide.headline, 115, accent, 3);
+    poster::text(
+        canvas,
+        &slide.headline,
+        (48, 100, 704, 64),
+        34.0,
+        accent,
+        true,
+    );
     let (left, top, right, bottom) = (70, 175, 745, 475);
     canvas.fill_rect(left, top, right, bottom, PANEL);
     for line in 0..=5 {
@@ -317,6 +194,22 @@ fn draw_chart(canvas: &mut Canvas, slide: &WrappedSlideData, accent: Rgba) {
         let minimum = combined.iter().copied().fold(f64::INFINITY, f64::min);
         let maximum = combined.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         let span = (maximum - minimum).max(1.0);
+        poster::text(
+            canvas,
+            &format!("{maximum:.0}"),
+            (14, top - 7, 50, 22),
+            12.0,
+            WHITE,
+            false,
+        );
+        poster::text(
+            canvas,
+            &format!("{minimum:.0}"),
+            (14, bottom - 12, 50, 22),
+            12.0,
+            WHITE,
+            false,
+        );
         let point = |index: usize, value: f64, count: usize| {
             let x = left
                 + (right - left) * i32::try_from(index).unwrap_or_default()
@@ -363,6 +256,14 @@ fn draw_chart(canvas: &mut Canvas, slide: &WrappedSlideData, accent: Rgba) {
             }
         }
     }
+    for (index, (label, color)) in [("Glicko", accent), ("OpenSkill", YELLOW)]
+        .into_iter()
+        .enumerate()
+    {
+        let left = 78 + index as i32 * 170;
+        canvas.line((left, 490), (left + 23, 490), color, 3);
+        poster::text(canvas, label, (left + 32, 479, 130, 22), 15.0, WHITE, false);
+    }
     draw_wrapped_lines(canvas, &slide.lines, 500, 2, 2, WHITE);
 }
 
@@ -375,45 +276,17 @@ fn draw_wrapped_lines(
     color: Rgba,
 ) {
     let mut y = top;
-    for line in lines
-        .iter()
-        .flat_map(|line| wrap_text(line, 75, 2))
-        .take(maximum_lines)
-    {
-        canvas.text_centered(&line, y, color, scale);
+    for line in lines.iter().take(maximum_lines) {
+        poster::text(
+            canvas,
+            line,
+            (48, y, 704, 26),
+            (scale * 10) as f32,
+            color,
+            false,
+        );
         y += 28;
     }
-}
-
-fn truncate(text: &str, maximum: usize) -> String {
-    if text.chars().count() <= maximum {
-        return text.to_owned();
-    }
-    text.chars()
-        .take(maximum.saturating_sub(2))
-        .collect::<String>()
-        + ".."
-}
-
-fn wrap_text(text: &str, maximum: usize, lines: usize) -> Vec<String> {
-    let mut output = Vec::new();
-    let mut current = String::new();
-    for word in text.split_whitespace() {
-        if !current.is_empty() && current.len() + 1 + word.len() > maximum {
-            output.push(std::mem::take(&mut current));
-            if output.len() == lines {
-                break;
-            }
-        }
-        if !current.is_empty() {
-            current.push(' ');
-        }
-        current.push_str(word);
-    }
-    if !current.is_empty() && output.len() < lines {
-        output.push(current);
-    }
-    output
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -479,29 +352,6 @@ impl Canvas {
         }
     }
 
-    fn vertical_gradient(&mut self, start: Rgba, end: Rgba) {
-        let height = self.height.max(1) as f64;
-        for y in 0..self.height {
-            let ratio = y as f64 / height;
-            let color = Rgba::rgb(
-                (f64::from(start.0[0]) + (f64::from(end.0[0]) - f64::from(start.0[0])) * ratio)
-                    as u8,
-                (f64::from(start.0[1]) + (f64::from(end.0[1]) - f64::from(start.0[1])) * ratio)
-                    as u8,
-                (f64::from(start.0[2]) + (f64::from(end.0[2]) - f64::from(start.0[2])) * ratio)
-                    as u8,
-            );
-            self.fill_rect(0, y as i32, self.width as i32, y as i32 + 1, color);
-        }
-    }
-
-    fn outline_rect(&mut self, l: i32, t: i32, r: i32, b: i32, color: Rgba, width: i32) {
-        self.fill_rect(l, t, r, t + width, color);
-        self.fill_rect(l, b - width, r, b, color);
-        self.fill_rect(l, t, l + width, b, color);
-        self.fill_rect(r - width, t, r, b, color);
-    }
-
     fn line(&mut self, start: (i32, i32), end: (i32, i32), color: Rgba, width: i32) {
         let (mut x0, mut y0) = start;
         let (x1, y1) = end;
@@ -542,26 +392,6 @@ impl Canvas {
         }
     }
 
-    fn text(&mut self, x: i32, y: i32, text: &str, color: Rgba, scale: i32) {
-        for (index, character) in text.chars().enumerate() {
-            let x = x + i32::try_from(index).unwrap_or_default() * 6 * scale;
-            for (row, bits) in glyph(character).into_iter().enumerate() {
-                for column in 0..5_u8 {
-                    if bits & (1 << (4 - column)) != 0 {
-                        let left = x + i32::from(column) * scale;
-                        let top = y + i32::try_from(row).unwrap_or_default() * scale;
-                        self.fill_rect(left, top, left + scale, top + scale, color);
-                    }
-                }
-            }
-        }
-    }
-
-    fn text_centered(&mut self, text: &str, y: i32, color: Rgba, scale: i32) {
-        let width = i32::try_from(text.chars().count()).unwrap_or_default() * 6 * scale;
-        self.text((self.width as i32 - width) / 2, y, text, color, scale);
-    }
-
     fn text_case_sensitive(&mut self, x: i32, y: i32, text: &str, color: Rgba, scale: i32) {
         for (index, character) in text.chars().enumerate() {
             let x = x + i32::try_from(index).unwrap_or_default() * 6 * scale;
@@ -575,65 +405,6 @@ impl Canvas {
                 }
             }
         }
-    }
-
-    fn text_centered_case_sensitive(&mut self, text: &str, y: i32, color: Rgba, scale: i32) {
-        let width = i32::try_from(text.chars().count()).unwrap_or_default() * 6 * scale;
-        self.text_case_sensitive((self.width as i32 - width) / 2, y, text, color, scale);
-    }
-
-    fn truetype_text_centered(
-        &mut self,
-        text: &str,
-        y: i32,
-        color: Rgba,
-        pixel_size: f32,
-        bold: bool,
-    ) {
-        let Some(font) = wrapped_font(bold) else {
-            self.text_centered_case_sensitive(text, y, color, 2);
-            return;
-        };
-        let width = truetype_text_width(text, pixel_size, font);
-        let x = (self.width as i32 - width) / 2;
-        let ascent = font
-            .horizontal_line_metrics(pixel_size)
-            .map_or(pixel_size, |metrics| metrics.ascent);
-        let baseline = y as f32 + ascent;
-        let mut pen_x = x as f32;
-        let mut previous = None;
-        for character in text.chars() {
-            if let Some(previous) = previous {
-                pen_x += font
-                    .horizontal_kern(previous, character, pixel_size)
-                    .unwrap_or_default();
-            }
-            let (metrics, bitmap) = font.rasterize(character, pixel_size);
-            let origin_x = pen_x.round() as i32 + metrics.xmin;
-            let origin_y = baseline.round() as i32
-                - metrics.ymin
-                - i32::try_from(metrics.height).unwrap_or_default();
-            for glyph_y in 0..metrics.height {
-                for glyph_x in 0..metrics.width {
-                    let alpha = bitmap[glyph_y * metrics.width + glyph_x];
-                    if alpha == 0 {
-                        continue;
-                    }
-                    self.set(
-                        origin_x + i32::try_from(glyph_x).unwrap_or_default(),
-                        origin_y + i32::try_from(glyph_y).unwrap_or_default(),
-                        Rgba([color.0[0], color.0[1], color.0[2], alpha]),
-                    );
-                }
-            }
-            pen_x += metrics.advance_width;
-            previous = Some(character);
-        }
-    }
-
-    fn text_right(&mut self, text: &str, right: i32, y: i32, color: Rgba, scale: i32) {
-        let width = i32::try_from(text.chars().count()).unwrap_or_default() * 6 * scale;
-        self.text(right - width, y, text, color, scale);
     }
 
     fn blit_scaled(
@@ -774,6 +545,9 @@ fn decode_png(bytes: &[u8]) -> Option<DecodedPng> {
         }
     }
     if width == 0 || height == 0 || width > 1024 || height > 1024 {
+        return None;
+    }
+    if width.checked_mul(height)?.checked_mul(4)? > 8 * 1024 * 1024 {
         return None;
     }
     let channels = match color_type {
@@ -1029,6 +803,10 @@ mod tests {
     #[test]
     fn all_production_slide_kinds_are_native_rgba_pngs() {
         for kind in [
+            "story_intro",
+            "story_identity",
+            "story_moment",
+            "story_finale",
             "server_summary",
             "awards",
             "story_games",
@@ -1066,25 +844,26 @@ mod tests {
         let decoded = decode_png(&png).expect("wrapped Gamba native PNG");
         assert_eq!((decoded.width, decoded.height), (800, 600));
         assert_eq!(
-            &decoded.pixels[(45 * decoded.width + 50) * 4..][..4],
+            &decoded.pixels[(123 * decoded.width + 50) * 4..][..4],
             crate::drawing::DISCORD_BG.0,
-            "the typed 700x400 chart begins at Python's wrapped offset"
+            "the typed 700x400 chart is preserved inside the new story frame"
         );
         let mut untitled = slide;
         untitled.title.clear();
         let untitled =
             decode_png(&render_wrapped_slide(&untitled).expect("untitled Wrapped Gamba PNG"))
                 .expect("untitled Wrapped Gamba native PNG");
-        let title_band = 4 * decoded.width * 36;
+        let title_start = 4 * decoded.width * 84;
+        let title_band = 4 * decoded.width * 122;
         assert_ne!(
-            &decoded.pixels[..title_band],
-            &untitled.pixels[..title_band],
-            "the story title is drawn on the wrapped gradient"
+            &decoded.pixels[title_start..title_band],
+            &untitled.pixels[title_start..title_band],
+            "the story title is drawn above the chart"
         );
     }
 
     #[test]
-    fn wrapped_gamba_footer_preserves_authored_case_dot_and_uppercase_title() {
+    fn wrapped_gamba_footer_preserves_authored_case_and_middle_dot() {
         const FOOTER: &str = "+60 JC · 6 bets · Degen Score: 73";
         assert_eq!(glyph('·'), [0, 0, 0, 4, 0, 0, 0]);
         assert_ne!(case_sensitive_glyph('e'), glyph('e'));
@@ -1095,7 +874,7 @@ mod tests {
         assert!(
             decoded.pixels[(550 * decoded.width * 4)..(585 * decoded.width * 4)]
                 .chunks_exact(4)
-                .any(|pixel| pixel[..3] == GREY.0[..3]),
+                .any(|pixel| pixel[..3] == [255, 249, 239]),
             "the authored footer renders on the story canvas"
         );
 
@@ -1113,10 +892,10 @@ mod tests {
         );
         let mut uppercase_title = slide;
         uppercase_title.title = uppercase_title.title.to_ascii_uppercase();
-        assert_eq!(
+        assert_ne!(
             rendered,
-            render_wrapped_slide(&uppercase_title).expect("uppercase title contract"),
-            "the story title remains intentionally uppercased"
+            render_wrapped_slide(&uppercase_title).expect("title case sensitivity"),
+            "poster typography preserves authored casing"
         );
     }
 
@@ -1150,11 +929,96 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(
-            pixel(60, 157),
-            BACKGROUND.0,
+            pixel(40, 201),
+            [255, 249, 239, 255],
             "corner remains circularly clipped"
         );
-        assert_ne!(pixel(85, 182), [255, 0, 0, 128]);
-        assert_eq!(pixel(85, 182)[3], 255, "final Discord PNG stays opaque");
+        assert_ne!(pixel(69, 230), [255, 0, 0, 128]);
+        assert_eq!(pixel(69, 230)[3], 255, "final Discord PNG stays opaque");
+    }
+}
+
+#[cfg(test)]
+mod remix_tests {
+    use super::*;
+
+    #[test]
+    fn authored_art_decodes_with_alpha_without_relaxing_avatar_limits() {
+        assert!(decode_png(&encode_png(&Canvas::new(1025, 1, WHITE))).is_none());
+        for bytes in [
+            include_bytes!("../../../../assets/wrapped/ward.png").as_slice(),
+            include_bytes!("../../../../assets/wrapped/courier.png").as_slice(),
+        ] {
+            assert!(bytes.len() <= 450 * 1024);
+            let art = decode_png(bytes).expect("bundled artwork");
+            assert_eq!((art.width, art.height), (512, 512));
+            assert!(art.pixels.chunks_exact(4).any(|pixel| pixel[3] == 0));
+            assert!(art.pixels.chunks_exact(4).any(|pixel| pixel[3] == 255));
+        }
+        let bytes = include_bytes!("../../../../assets/wrapped/battlefield.png");
+        assert!(bytes.len() <= 900 * 1024);
+        let scene = decode_png(bytes).expect("bundled battlefield");
+        assert_eq!((scene.width, scene.height), (800, 600));
+    }
+
+    #[test]
+    fn illustrated_cover_and_character_chapters_have_real_art_detail() {
+        let intro = decode_png(
+            &render_wrapped_slide(&WrappedSlideData::new("story_intro", "Your year")).unwrap(),
+        )
+        .unwrap();
+        let colors = intro
+            .pixels
+            .chunks_exact(4)
+            .map(|p| [p[0], p[1], p[2]])
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            colors.len() > 5_000,
+            "battlefield illustration is composited"
+        );
+        let mut moment = WrappedSlideData::new("story_moment", "Your vision budget");
+        moment.artwork = WrappedArtwork::Ward;
+        let ward = render_wrapped_slide(&moment).unwrap();
+        moment.artwork = WrappedArtwork::Courier;
+        assert_ne!(ward, render_wrapped_slide(&moment).unwrap());
+    }
+
+    #[test]
+    fn personal_chapters_use_distinct_poster_palettes() {
+        let intro =
+            render_wrapped_slide(&WrappedSlideData::new("story_intro", "Your year")).unwrap();
+        let moment =
+            render_wrapped_slide(&WrappedSlideData::new("story_moment", "Your habits")).unwrap();
+        let a = decode_png(&intro).unwrap();
+        let b = decode_png(&moment).unwrap();
+        assert_ne!(
+            &a.pixels[(80 * 800 + 20) * 4..][..3],
+            &b.pixels[(80 * 800 + 20) * 4..][..3]
+        );
+    }
+
+    #[test]
+    fn hero_and_lane_coverage_is_visible() {
+        for kind in ["story_hero", "story_lanes"] {
+            let mut slide = WrappedSlideData::new(kind, "Recorded picks");
+            slide.stat_label = "Recorded in 7 of 20 games".into();
+            let labeled = render_wrapped_slide(&slide).unwrap();
+            slide.stat_label.clear();
+            assert_ne!(labeled, render_wrapped_slide(&slide).unwrap());
+        }
+    }
+
+    #[test]
+    fn still_and_animation_reject_oversized_input_before_rendering() {
+        let mut slide = WrappedSlideData::new("story_intro", "Wrapped");
+        slide.username = "a".repeat(501);
+        assert!(matches!(
+            render_wrapped_slide(&slide),
+            Err(WrappedMediaError::OversizedText)
+        ));
+        assert!(matches!(
+            render_wrapped_media(&slide, true),
+            Err(WrappedMediaError::OversizedText)
+        ));
     }
 }

@@ -14,6 +14,67 @@ use std::thread::JoinHandle;
 
 struct WireTestHandler;
 
+#[tokio::test]
+async fn wrapped_profiles_keep_archived_names_without_gateway_or_avatar_access() {
+    let archive = Arc::new(PlayerNameArchive::default());
+    archive.record(42, [(7, "Last seen nickname".to_owned())]);
+    let transport = SerenityDiscordTransport::new().with_player_name_archive(archive);
+    for include_avatar in [false, true] {
+        let profile = transport
+            .wrapped_profile(42, 7, include_avatar)
+            .await
+            .expect("name remains available")
+            .expect("profile");
+        assert_eq!(profile.display_name, "Last seen nickname");
+        assert!(profile.avatar_png.is_none());
+
+        let other_guild = transport
+            .wrapped_profile(43, 7, include_avatar)
+            .await
+            .expect("missing profile is fail-soft")
+            .expect("safe profile");
+        assert_eq!(other_guild.display_name, "Unknown player");
+    }
+}
+
+#[tokio::test]
+async fn wrapped_profile_fetches_a_cold_cache_name_even_without_an_avatar_request() {
+    let mut member = Member::default();
+    member.user.id = UserId::new(7);
+    member.user.name = "Account name".to_owned();
+    member.nick = Some("Fresh server nickname".to_owned());
+    let (proxy, server) = canned_discord_reply_with_request(
+        "200 OK",
+        serde_json::to_string(&member).expect("member JSON"),
+        Some("/guilds/42/members/7"),
+    );
+    let archive = Arc::new(PlayerNameArchive::default());
+    archive.record(42, [(7, "Older nickname".to_owned())]);
+    let transport = SerenityDiscordTransport::new().with_player_name_archive(Arc::clone(&archive));
+    *transport.context.write().unwrap() = Some(SerenityContext {
+        http: Arc::new(
+            HttpBuilder::new("test-token")
+                .proxy(proxy)
+                .ratelimiter_disabled(true)
+                .build(),
+        ),
+        cache: Arc::new(Cache::default()),
+    });
+
+    let profile = transport
+        .wrapped_profile(42, 7, false)
+        .await
+        .unwrap()
+        .unwrap();
+    server.join().expect("member lookup completed");
+    assert_eq!(profile.display_name, "Fresh server nickname");
+    assert!(profile.avatar_png.is_none());
+    assert_eq!(
+        archive.names(42, &[7]).get(&7).map(String::as_str),
+        Some("Fresh server nickname")
+    );
+}
+
 #[test]
 fn deadlock_panel_cleanup_requires_our_author_embed_and_both_queue_controls() {
     let bot = UserId::new(42);
