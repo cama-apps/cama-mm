@@ -411,7 +411,7 @@ impl Default for BalancedShuffler {
             role_matchup_delta_weight: ROLE_MATCHUP_DELTA_WEIGHT,
             exclusion_penalty_weight: 72.0,
             rd_priority_weight: 0.2,
-            recent_match_penalty_weight: 310.0,
+            recent_match_penalty_weight: 340.0,
             soft_avoid_penalty: 180.0,
             package_deal_penalty: 90.0,
             package_deal_split_penalty: 90.0,
@@ -551,7 +551,7 @@ impl BalancedShuffler {
         player_values.iter().sum::<f64>() * 0.29
     }
 
-    /// Bonus of 1.20 points per whole minute waited by selected players with Discord IDs.
+    /// Bonus of 1.3 points per whole minute waited by selected players with Discord IDs.
     #[must_use]
     pub fn calculate_lobby_wait_bonus(
         players: &[&Player],
@@ -565,7 +565,7 @@ impl BalancedShuffler {
             .filter_map(|player| player.discord_id)
             .map(|discord_id| wait_minutes.get(&discord_id).copied().unwrap_or_default())
             .sum::<i64>() as f64
-            * 1.20
+            * 1.3
     }
 
     /// Active rating system uncertainty bonus.
@@ -3337,7 +3337,7 @@ mod tests {
             .collect::<HashMap<_, _>>();
         let baseline = BalancedShuffler::calculate_lobby_wait_bonus(&refs, None);
         let waited = BalancedShuffler::calculate_lobby_wait_bonus(&refs, Some(&waits));
-        approx(baseline - waited, -66.0);
+        approx(baseline - waited, -71.5);
     }
 
     #[test]
@@ -3363,7 +3363,7 @@ mod tests {
     }
 
     #[test]
-    fn test_goodness_adds_310_for_selected_last_match_player() {
+    fn test_goodness_adds_340_for_selected_last_match_player() {
         let players = (0..10)
             .map(|index| {
                 player(
@@ -3398,7 +3398,7 @@ mod tests {
                 },
             )
             .expect("recent-player shuffle");
-        assert_eq!(penalized.score - baseline.score, 310.0);
+        assert_eq!(penalized.score - baseline.score, 340.0);
     }
 
     #[test]
@@ -3431,7 +3431,7 @@ mod tests {
             .score_role_assignments_for_matchup(&team1, &team2, 1, ShuffleConstraints::default())
             .expect("fixed matchup scores");
 
-        approx(score, 250.0);
+        approx(score, 280.0);
     }
 
     #[test]
@@ -3508,7 +3508,7 @@ mod tests {
             &mut super::ScoringContext::default(),
         );
 
-        approx(selection.preselection_score, -2_679.0);
+        approx(selection.preselection_score, -2_649.0);
     }
 
     #[test]
@@ -3549,7 +3549,7 @@ mod tests {
                 .iter()
                 .map(|player| player.mmr.expect("fixture MMR"))
                 .collect::<HashSet<_>>(),
-            HashSet::from([650, 800, 950, 1_000, 1_300])
+            HashSet::from([650, 800, 950, 1_000, 1_525])
         );
     }
 
@@ -3597,7 +3597,7 @@ mod tests {
                 ShuffleConstraints::default(),
             )
             .expect("fixed role matchup evaluates");
-        approx(matchup.total_score, -2_842.0);
+        approx(matchup.total_score, -2_752.0);
     }
 
     #[test]
@@ -3790,7 +3790,7 @@ mod tests {
             consider_roles: false,
             rd_priority_weight: 0.0,
             // Doubled avoidance must outweigh the 200-rating split at the current parity weight.
-            soft_avoid_penalty: 250.0,
+            soft_avoid_penalty: 300.0,
             ..BalancedShuffler::default()
         };
         let target_low_priority = HashSet::from([1001]);
@@ -5075,10 +5075,10 @@ mod tests {
         let previous = configured_shuffler(Some(550.0))
             .shuffle_from_pool(&players, PoolOptions::default())
             .expect("550-point pool shuffle");
-        // The tuned team/rating weights require over 1,218.59 points to favor this roster.
-        let actual = configured_shuffler(Some(1_250.0))
+        // The stronger team-delta weight needs a larger off-role penalty to favor this roster.
+        let actual = configured_shuffler(Some(1_500.0))
             .shuffle_from_pool(&players, PoolOptions::default())
-            .expect("1250-point pool shuffle");
+            .expect("1500-point pool shuffle");
         let excluded_ids = |result: &PoolResult| {
             result
                 .excluded
@@ -5097,7 +5097,7 @@ mod tests {
         assert_eq!(
             off_roles(&actual),
             0,
-            "a 1250-point penalty should prefer the lower-off-role roster"
+            "a 1500-point penalty should prefer the lower-off-role roster"
         );
     }
 
@@ -5307,7 +5307,7 @@ mod tests {
     fn test_config_default_value() {
         assert_eq!(
             BalancedShuffler::default().recent_match_penalty_weight,
-            310.0
+            340.0
         );
     }
 
@@ -5549,8 +5549,8 @@ mod tests {
             .expect("optimization succeeds")
             .2
         };
-        approx(score(1.0), 1_250.0);
-        approx(score(0.5), 1_000.0);
+        approx(score(1.0), 1_340.0);
+        approx(score(0.5), 1_090.0);
     }
 
     #[test]
@@ -5589,7 +5589,7 @@ mod tests {
         )
         .expect("matchup evaluates");
         approx(matchup.log_entry.parity_penalty, 350.0);
-        approx(matchup.total_score, 600.0);
+        approx(matchup.total_score, 630.0);
     }
 
     #[test]
@@ -5694,7 +5694,7 @@ mod tests {
                 },
             )
             .expect("fallback scoring succeeds");
-        approx(common.2, 1_250.0);
+        approx(common.2, 1_370.0);
         assert_eq!(common, fallback);
     }
 
@@ -6587,7 +6587,7 @@ mod tests {
             .score_draft_pool(&captain_a, &captain_b, &pool)
             .expect("draft pool score");
 
-        approx(score, 237.5);
+        approx(score, 266.0);
     }
 
     #[test]
@@ -6744,7 +6744,7 @@ mod tests {
     }
 
     #[test]
-    fn test_draft_select_uses_shared_280_recent_match_penalty() {
+    fn test_draft_select_uses_shared_340_recent_match_penalty() {
         let (captain_a, captain_b) = draft_captains(1_600.0, 1_600.0);
         let candidates = with_discord_ids(draft_candidates(8, 1_500.0, 0.0));
         let recent = HashSet::from([id(&candidates[0])]);
@@ -6756,7 +6756,7 @@ mod tests {
             .select_draft_pool(&captain_a, &captain_b, &candidates, None, Some(&recent))
             .expect("recent-aware draft pool");
 
-        approx(with_recent.pool_score - baseline.pool_score, 310.0);
+        approx(with_recent.pool_score - baseline.pool_score, 340.0);
     }
 
     #[test]
