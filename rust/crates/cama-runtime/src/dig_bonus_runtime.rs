@@ -1193,7 +1193,6 @@ mod tests {
 
     use crate::test_support::initialize_test_database as initialize_or_migrate;
     use cama_app::trivia_questions::{AbilityData, Difficulty, HeroData, ItemData, TriviaQuestion};
-    use chrono::Timelike;
     use rusqlite::Connection;
     use tempfile::NamedTempFile;
 
@@ -1474,7 +1473,10 @@ mod tests {
     #[test]
     fn sqlite_reward_source_uses_fixed_trivia_gross_and_active_edict() {
         let database = fixture();
-        let now = Utc::now().timestamp();
+        // 09:00 Pacific after DST ends, before the 10:00 event rollover.
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-02T17:00:00Z")
+            .expect("fixed dispatch time")
+            .timestamp();
         let dig_created_at = now - 86_400;
         let connection = Connection::open(database.path()).expect("open fixture");
         connection
@@ -1486,16 +1488,7 @@ mod tests {
                 rusqlite::params![GUILD, USER, dig_created_at],
             )
             .expect("seed action");
-        let local = chrono::DateTime::from_timestamp(now - 7 * 3_600, 0)
-            .expect("current timestamp")
-            .naive_utc();
-        let event_date = (if local.hour() < 10 {
-            local.date() - chrono::Duration::days(1)
-        } else {
-            local.date()
-        })
-        .format("%Y-%m-%d")
-        .to_string();
+        let event_date = "2026-11-01";
         connection
             .execute(
                 "INSERT INTO economy_daily_events (
@@ -1514,7 +1507,7 @@ mod tests {
         // unrelated to this settlement.
         assert_eq!(
             source
-                .event_adjusted_gross_jc(1, USER, GUILD)
+                .event_adjusted_gross_jc_at(1, USER, GUILD, now)
                 .expect("adjust reward"),
             30
         );
