@@ -7,6 +7,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 include!("wrapped_story/flavor_catalog.rs");
 
+#[path = "wrapped_story/personal_moments.rs"]
+mod personal_moments;
+pub use personal_moments::{PersonalMoment, PersonalMomentMatch, PersonalStory, personal_moments};
+
 pub fn flavor_pool(key: &str) -> Option<&'static [&'static str]> {
     FLAVOR_POOLS
         .iter()

@@ -1,7 +1,7 @@
 //! Complete live `/wrapped` Discord command provider.
 //!
 //! The provider reads the Rust-migrated SQLite database, renders every story
-//! page as a native PNG, preserves the Python command's public defer/follow-up
+//! page as native PNG/GIF media, preserves the public defer/follow-up
 //! contract, and owns a ten-minute invoker-scoped component session. Sessions
 //! are intentionally process-local like discord.py's non-persistent `View`;
 //! after restart or expiry, stale buttons receive an explicit private error.
@@ -15,13 +15,15 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use cama_app::drawing::{GambaInfo, GambaPoint, GambaStats as NativeGambaStats};
 use cama_app::wrapped_media::{
-    WrappedAvatar, WrappedGambaData, WrappedSlideData, render_wrapped_slide,
+    WrappedArtwork, WrappedAvatar, WrappedGambaData, WrappedRenderedMedia, WrappedSlideData,
+    render_wrapped_media,
 };
 use cama_app::wrapped_story::{
     HeroRow, MatchDetails, MatchStatsRow, PairwiseEntry, PairwiseInput, PairwiseRaw,
-    PersonalSummaryInput, PersonalSummaryWrapped, YearMatchRow, flavor_pool, get_flavor,
-    hero_spotlight, package_deal_wrapped, pairwise_player_ids, pairwise_wrapped, personal_summary,
-    role_breakdown, year_timestamps,
+    PersonalMoment, PersonalMomentMatch, PersonalSummaryInput, PersonalSummaryWrapped,
+    YearMatchRow, flavor_pool, get_flavor, hero_spotlight, package_deal_wrapped,
+    pairwise_player_ids, pairwise_wrapped, personal_moments, personal_summary, role_breakdown,
+    year_timestamps,
 };
 use cama_db::gambling_stats_repository::{
     GamblingOutcome, GamblingSource, GamblingStatsRepository, GamblingStatsService,
@@ -33,6 +35,7 @@ use cama_db::wrapped_live::{
     WrappedLiveRepository, WrappedPlayerHeroStats, WrappedPlayerStats, WrappedRatingChange,
     WrappedRatingPoint, WrappedServerSummary, WrappedYearMatch,
 };
+use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
 use chrono::{Datelike, Utc};
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 use tracing::warn;
@@ -51,6 +54,7 @@ const COMPONENT_PREFIX: &str = "wrapped:";
 const STORY_TIMEOUT: Duration = Duration::from_secs(600);
 const COMMAND_COOLDOWN: Duration = Duration::from_secs(60);
 const PROFILE_CONCURRENCY: usize = 5;
+const MAX_CACHED_MEDIA_BYTES: usize = 12 * 1024 * 1024;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct WrappedDiscordProfile {
@@ -146,11 +150,25 @@ struct WrappedHandler {
 struct StorySession {
     owner_id: u64,
     slides: Vec<WrappedSlideData>,
-    rendered: BTreeMap<usize, Vec<u8>>,
+    details: Vec<WrappedSlideData>,
+    rendered: BTreeMap<(bool, usize, bool), WrappedRenderedMedia>,
     current: usize,
+    story_position: usize,
+    showing_details: bool,
+    animated: bool,
     expiry_generation: u64,
     receipt: Option<InteractionMessageReceipt>,
     active: bool,
+}
+
+impl StorySession {
+    fn pages(&self) -> &[WrappedSlideData] {
+        if self.showing_details {
+            &self.details
+        } else {
+            &self.slides
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -212,10 +230,6 @@ impl WrappedSources {
         let bankruptcies = self
             .wrapped
             .bankruptcies(guild_id, start_ts, end_ts)
-            .map_err(|error| error.to_string())?;
-        let player_name = self
-            .wrapped
-            .player_name(target_id, guild_id)
             .map_err(|error| error.to_string())?;
         let matches = self
             .wrapped
@@ -295,7 +309,6 @@ impl WrappedSources {
             betting,
             bets_against,
             bankruptcies,
-            player_name,
             matches,
             pairwise,
             pairwise_names,
@@ -370,7 +383,6 @@ struct WrappedRawData {
     betting: Vec<WrappedBettingStats>,
     bets_against: Vec<WrappedBetsAgainst>,
     bankruptcies: Vec<WrappedBankruptcy>,
-    player_name: Option<String>,
     matches: Vec<WrappedYearMatch>,
     pairwise: PairwiseInput,
     pairwise_names: BTreeMap<i64, String>,
@@ -487,9 +499,9 @@ impl WrappedHandler {
         let slide_target_name = profiles
             .get(&signed_target)
             .map(|profile| profile.display_name.as_str())
-            .filter(|name| !name.is_empty())
-            .map_or_else(|| signed_target.to_string(), str::to_owned);
-        let response_target_name = slide_target_name.clone();
+            .and_then(readable_player_name)
+            .unwrap_or(UNKNOWN_PLAYER)
+            .to_owned();
         let slides = match tokio::task::spawn_blocking(move || {
             build_slides(
                 raw,
@@ -518,9 +530,17 @@ impl WrappedHandler {
                 .await
                 .map_err(response_error);
         }
+        let (mut details, mut slides): (Vec<_>, Vec<_>) = slides.into_iter().partition(|slide| {
+            slide.kind.starts_with("records_")
+                || matches!(slide.kind.as_str(), "awards" | "story_summary")
+        });
+        number_chapters(&mut slides);
+        number_chapters(&mut details);
         let first_slide = slides[0].clone();
         let first =
-            match tokio::task::spawn_blocking(move || render_wrapped_slide(&first_slide)).await {
+            match tokio::task::spawn_blocking(move || render_wrapped_media(&first_slide, true))
+                .await
+            {
                 Ok(Ok(bytes)) => bytes,
                 Ok(Err(error)) => {
                     warn!(%error, "wrapped first slide render failed");
@@ -532,12 +552,15 @@ impl WrappedHandler {
                 }
             };
         let session_id = self.next_session.fetch_add(1, Ordering::Relaxed);
-        let slide_count = slides.len();
         let session = Arc::new(AsyncMutex::new(StorySession {
             owner_id: user_id,
             slides,
-            rendered: BTreeMap::from([(0, first.clone())]),
+            details,
+            rendered: BTreeMap::from([((false, 0, true), first.clone())]),
             current: 0,
+            story_position: 0,
+            showing_details: false,
+            animated: true,
             expiry_generation: 0,
             receipt: None,
             active: true,
@@ -546,13 +569,7 @@ impl WrappedHandler {
             .lock()
             .map_err(|_| InteractionHandlerError::from("wrapped session lock poisoned"))?
             .insert(session_id, Arc::clone(&session));
-        let response = story_response(
-            format!("**Cama Wrapped {year}** for {response_target_name}"),
-            first,
-            session_id,
-            0,
-            slide_count,
-        );
+        let response = story_response(first, session_id, &*session.lock().await, 0, false, true);
         let receipt = match responder.followup_with_receipt(response).await {
             Ok(receipt) => receipt,
             Err(error) => {
@@ -596,10 +613,12 @@ impl WrappedHandler {
                 .await
                 .map_err(response_error);
         };
+        // Acknowledge before waiting behind another click's render or delivery.
+        responder.defer(false).await.map_err(response_error)?;
         let mut session = session.lock().await;
         if !session.active {
             return responder
-                .respond(
+                .followup(
                     InteractionResponse::message("This wrapped has expired.")
                         .ephemeral()
                         .without_mentions(),
@@ -609,7 +628,7 @@ impl WrappedHandler {
         }
         if session.owner_id != user_id {
             return responder
-                .respond(
+                .followup(
                     InteractionResponse::message(
                         "Only the command invoker can navigate this wrapped.",
                     )
@@ -621,29 +640,62 @@ impl WrappedHandler {
         session.expiry_generation = session.expiry_generation.wrapping_add(1);
         let expiry_generation = session.expiry_generation;
         self.schedule_expiry(session_id, expiry_generation, Arc::clone(&responder));
+        let mut showing_details = session.showing_details;
+        let mut animated = session.animated;
+        let mut story_position = session.story_position;
         let target = match direction {
-            StoryDirection::Previous => session.current.checked_sub(1),
-            StoryDirection::Next => session
-                .current
-                .checked_add(1)
-                .filter(|index| *index < session.slides.len()),
+            StoryDirection::Previous => session.current.saturating_sub(1),
+            StoryDirection::Next => (session.current + 1).min(session.pages().len() - 1),
+            StoryDirection::Replay => {
+                showing_details = false;
+                0
+            }
+            StoryDirection::Motion => {
+                animated = !animated;
+                session.current
+            }
+            StoryDirection::Recap => {
+                showing_details = false;
+                session.slides.len() - 1
+            }
+            StoryDirection::Details if !session.details.is_empty() => {
+                if !showing_details {
+                    story_position = session.current;
+                }
+                showing_details = true;
+                0
+            }
+            StoryDirection::Back => {
+                showing_details = false;
+                story_position
+            }
+            StoryDirection::Details => session.current,
         };
-        let Some(target) = target else {
-            return responder.defer(false).await.map_err(response_error);
-        };
-        let bytes = if let Some(bytes) = session.rendered.get(&target) {
-            bytes.clone()
+        let cache_key = (showing_details, target, animated);
+        let media = if let Some(media) = session.rendered.get(&cache_key) {
+            media.clone()
         } else {
-            let slide = session.slides[target].clone();
-            match tokio::task::spawn_blocking(move || render_wrapped_slide(&slide)).await {
-                Ok(Ok(bytes)) => {
-                    session.rendered.insert(target, bytes.clone());
-                    bytes
+            let slide = if showing_details {
+                &session.details[target]
+            } else {
+                &session.slides[target]
+            }
+            .clone();
+            match tokio::task::spawn_blocking(move || render_wrapped_media(&slide, animated)).await
+            {
+                Ok(Ok(media)) => {
+                    let cached_bytes: usize =
+                        session.rendered.values().map(|item| item.bytes.len()).sum();
+                    if cached_bytes + media.bytes.len() > MAX_CACHED_MEDIA_BYTES {
+                        session.rendered.clear();
+                    }
+                    session.rendered.insert(cache_key, media.clone());
+                    media
                 }
                 Ok(Err(error)) => {
                     warn!(%error, session_id, target, "wrapped slide render failed");
                     return responder
-                        .respond(
+                        .followup(
                             InteractionResponse::message("Failed to render this slide.")
                                 .ephemeral(),
                         )
@@ -653,7 +705,7 @@ impl WrappedHandler {
                 Err(error) => {
                     warn!(%error, session_id, target, "wrapped slide task failed");
                     return responder
-                        .respond(
+                        .followup(
                             InteractionResponse::message("Failed to render this slide.")
                                 .ephemeral(),
                         )
@@ -662,19 +714,22 @@ impl WrappedHandler {
                 }
             }
         };
+        let response = story_response(
+            media,
+            session_id,
+            &session,
+            target,
+            showing_details,
+            animated,
+        );
+        // Keep delivery ordered with navigation and only advance after Discord
+        // accepts the page. A failed edit leaves the displayed state intact.
+        responder.update(response).await.map_err(response_error)?;
         session.current = target;
-        let count = session.slides.len();
-        drop(session);
-        responder
-            .update(story_response(
-                String::new(),
-                bytes,
-                session_id,
-                target,
-                count,
-            ))
-            .await
-            .map_err(response_error)
+        session.showing_details = showing_details;
+        session.animated = animated;
+        session.story_position = story_position;
+        Ok(())
     }
 
     fn on_cooldown(&self, user_id: u64) -> Result<bool, InteractionHandlerError> {
@@ -774,6 +829,11 @@ impl WrappedHandler {
 enum StoryDirection {
     Previous,
     Next,
+    Replay,
+    Motion,
+    Recap,
+    Details,
+    Back,
 }
 
 fn parse_component(custom_id: &str) -> Result<(u64, StoryDirection), InteractionHandlerError> {
@@ -789,6 +849,11 @@ fn parse_component(custom_id: &str) -> Result<(u64, StoryDirection), Interaction
     let direction = match parts.next() {
         Some("prev") => StoryDirection::Previous,
         Some("next") => StoryDirection::Next,
+        Some("replay") => StoryDirection::Replay,
+        Some("motion") => StoryDirection::Motion,
+        Some("recap") => StoryDirection::Recap,
+        Some("details") => StoryDirection::Details,
+        Some("back") => StoryDirection::Back,
         _ => return Err(format!("invalid wrapped component {custom_id:?}").into()),
     };
     if parts.next().is_some() {
@@ -817,22 +882,92 @@ async fn wrapped_failure(
 }
 
 fn story_response(
-    content: String,
-    bytes: Vec<u8>,
+    media: WrappedRenderedMedia,
     session_id: u64,
+    session: &StorySession,
     index: usize,
-    count: usize,
+    showing_details: bool,
+    animated: bool,
 ) -> InteractionResponse {
-    InteractionResponse::message(content)
-        .attachment(InteractionAttachment::bytes("wrapped_slide.png", bytes))
-        .action_row(InteractionActionRow::buttons(vec![
-            InteractionButton::new(format!("wrapped:{session_id}:prev"), "< Prev")
-                .style(InteractionButtonStyle::Secondary)
-                .disabled(index == 0),
-            InteractionButton::new(format!("wrapped:{session_id}:next"), "Next >")
-                .style(InteractionButtonStyle::Primary)
-                .disabled(index + 1 >= count),
-        ]))
+    let pages = if showing_details {
+        &session.details
+    } else {
+        &session.slides
+    };
+    let count = pages.len();
+    let slide = &pages[index];
+    let last = index + 1 == count;
+    let mut buttons = vec![
+        InteractionButton::new(format!("wrapped:{session_id}:prev"), "Previous")
+            .style(InteractionButtonStyle::Secondary)
+            .disabled(index == 0),
+        InteractionButton::new(
+            format!(
+                "wrapped:{session_id}:{}",
+                if last && !showing_details {
+                    "replay"
+                } else {
+                    "next"
+                }
+            ),
+            if last && !showing_details {
+                "Replay"
+            } else {
+                "Next"
+            },
+        )
+        .style(InteractionButtonStyle::Primary)
+        .disabled(last && showing_details),
+        InteractionButton::new(
+            format!("wrapped:{session_id}:motion"),
+            if animated {
+                "Still images"
+            } else {
+                "Animations"
+            },
+        ),
+        InteractionButton::new(
+            format!(
+                "wrapped:{session_id}:{}",
+                if showing_details { "back" } else { "recap" }
+            ),
+            if showing_details {
+                "Back to story"
+            } else {
+                "My recap"
+            },
+        ),
+    ];
+    if !showing_details && !session.details.is_empty() {
+        buttons.push(InteractionButton::new(
+            format!("wrapped:{session_id}:details"),
+            "More stats",
+        ));
+    }
+    InteractionResponse::message(format!(
+        "**{}** for {}\n{} {}/{} · {}",
+        slide.year_label,
+        slide.username,
+        if showing_details {
+            "More stats"
+        } else {
+            "Chapter"
+        },
+        index + 1,
+        count,
+        slide.title,
+    ))
+    .without_mentions()
+    .attachment(InteractionAttachment::bytes(media.filename, media.bytes))
+    .action_row(InteractionActionRow::buttons(buttons))
+}
+
+fn number_chapters(slides: &mut [WrappedSlideData]) {
+    let count = slides.len();
+    for (index, slide) in slides.iter_mut().enumerate() {
+        slide.chapter_index = index;
+        slide.chapter_count = count;
+    }
 }
 
 fn prefetch_ids(
@@ -868,24 +1003,40 @@ fn build_slides(
     minimum_games: usize,
     minimum_bets: i64,
 ) -> Vec<WrappedSlideData> {
+    let target_display_name = readable_player_name(target_display_name).unwrap_or(UNKNOWN_PLAYER);
     let year_label = format!("Cama Wrapped {year}");
     let mut slides = Vec::new();
     let display_name = |id: i64, _fallback: &str| {
         profiles
             .get(&id)
             .map(|profile| profile.display_name.as_str())
-            .filter(|name| !name.is_empty())
+            .and_then(readable_player_name)
             .map(str::to_owned)
             .unwrap_or_else(|| cama_domain::discord_content::UNKNOWN_PLAYER.to_owned())
     };
 
-    let mut server = base_slide(
-        "server_summary",
-        "Server Summary",
+    let mut intro = base_slide(
+        "story_intro",
+        "This one is yours",
         target_display_name,
         &year_label,
     );
-    server.headline = "THE SERVER YEAR IN REVIEW".to_owned();
+    intro.headline = format!("{year}. You had to be there.");
+    intro.stat_value = target_display_name.to_owned();
+    intro.stat_label = "Your Cama Wrapped".to_owned();
+    intro.lines = vec![if raw.matches.is_empty() {
+        "No recorded games for you this year. Here's the community you were part of.".to_owned()
+    } else {
+        "The wins. The questionable decisions. The people who queued anyway.".to_owned()
+    }];
+    slides.push(intro);
+    let mut server = base_slide(
+        "server_summary",
+        "You were part of this",
+        target_display_name,
+        &year_label,
+    );
+    server.headline = "Same server. So many stories.".to_owned();
     server.lines = vec![
         format!("{} MATCHES PLAYED", raw.summary.total_matches),
         format!("{} HEROES PICKED", raw.summary.unique_heroes),
@@ -898,7 +1049,7 @@ fn build_slides(
         .find(|player| player.games_played >= minimum_games as i64)
     {
         server.lines.push(format!(
-            "TOP PERFORMER - {} - {}W {}L ({:.0}% WR)",
+            "QUEUE REGULAR - {} - {}W {}L ({:.0}% WR)",
             display_name(player.discord_id, &player.discord_username),
             player.wins,
             player.games_played - player.wins,
@@ -957,9 +1108,7 @@ fn build_slides(
                 .take(6_usize.saturating_sub(selected.len())),
         );
         selected.truncate(6);
-        let mut awards = base_slide("awards", "Awards", target_display_name, &year_label);
-        awards.headline = "SERVER SUPERLATIVES".to_owned();
-        awards.lines = selected
+        let lines = selected
             .into_iter()
             .map(|award| {
                 format!(
@@ -970,8 +1119,18 @@ fn build_slides(
                     award.flavor,
                 )
             })
-            .collect();
-        slides.push(awards);
+            .collect::<Vec<_>>();
+        for chunk in lines.chunks(2) {
+            let mut awards = base_slide(
+                "awards",
+                "The unofficial awards",
+                target_display_name,
+                &year_label,
+            );
+            awards.headline = "Acceptance speeches optional.".to_owned();
+            awards.lines = chunk.to_vec();
+            slides.push(awards);
+        }
     }
 
     let app_stats = raw
@@ -1011,7 +1170,7 @@ fn build_slides(
         .collect::<Vec<_>>();
     let summary = PersonalSummaryInput {
         discord_id: target_id,
-        player_name: raw.player_name.clone(),
+        player_name: Some(target_display_name.to_owned()),
         match_details: (!raw.matches.is_empty()).then(|| MatchDetails {
             games_played: raw.matches.len() as i64,
             wins: raw
@@ -1043,42 +1202,120 @@ fn build_slides(
         } else {
             "games_played_low"
         });
-        push_personal_slides(&mut slides, personal, target_display_name, &year_label);
+        push_personal_slides(
+            &mut slides,
+            personal,
+            target_display_name,
+            &year_label,
+            &raw,
+        );
     }
 
-    if raw.player_name.is_some() && raw.matches.len() >= minimum_games {
+    let moment_rows = raw
+        .matches
+        .iter()
+        .map(|row| PersonalMomentMatch {
+            hero_id: row.hero_id,
+            won: row.won,
+            duration_seconds: row.duration_seconds,
+            kills: row.kills,
+            deaths: row.deaths,
+            assists: row.assists,
+            wards: row
+                .obs_placed
+                .zip(row.sen_placed)
+                .map(|(obs, sen)| obs.saturating_add(sen)),
+            pings: row.pings,
+            courier_kills: row.courier_kills,
+            hero_healing: row.hero_healing,
+            tower_damage: row.tower_damage,
+            comeback: row.comeback,
+        })
+        .collect::<Vec<_>>();
+    let stories = personal_moments(&moment_rows);
+    if let Some(time) = &stories.playtime {
+        slides.push(moment_slide(
+            time,
+            "story_moment",
+            target_display_name,
+            &year_label,
+        ));
+    }
+    if let Some(identity) = &stories.identity {
+        slides.push(moment_slide(
+            identity,
+            "story_identity",
+            target_display_name,
+            &year_label,
+        ));
+    }
+    for moment in &stories.moments {
+        slides.push(moment_slide(
+            moment,
+            "story_moment",
+            target_display_name,
+            &year_label,
+        ));
+    }
+
+    if raw.matches.len() >= minimum_games {
         for (kind, title, lines, accent) in record_slides(&raw.matches) {
             if lines.is_empty() {
                 continue;
             }
-            let mut slide = base_slide(kind, title, target_display_name, &year_label);
-            slide.headline = format!("{title} RECORDS").to_ascii_uppercase();
-            slide.lines = lines;
-            slide.accent = accent;
-            slides.push(slide);
+            for chunk in lines.chunks(2) {
+                let mut slide = base_slide(kind, title, target_display_name, &year_label);
+                slide.headline = format!("Your {title} highlights");
+                slide.lines = chunk.to_vec();
+                slide.accent = accent;
+                slides.push(slide);
+            }
         }
     }
 
     if let Some(hero) = hero_spotlight(target_id, &app_heroes, |id| Some(hero_name(id))) {
-        let mut slide = base_slide(
-            "story_hero",
-            "Hero Spotlight",
-            target_display_name,
-            &year_label,
-        );
+        let mut slide = base_slide("story_hero", "On repeat", target_display_name, &year_label);
         slide.headline = hero.top_hero_name.clone();
-        slide.stat_value = format!("{} PICKS", hero.top_hero_picks);
+        slide.stat_value = format!("{} picks", hero.top_hero_picks);
+        let recorded_picks: i64 = app_heroes
+            .iter()
+            .filter(|row| row.discord_id == target_id)
+            .map(|row| row.picks)
+            .sum();
+        slide.stat_label = format!(
+            "{:.0}% of your {recorded_picks} recorded hero picks",
+            hero.top_hero_picks as f64 / recorded_picks.max(1) as f64 * 100.0
+        );
         slide.lines = hero
             .top_3_heroes
             .iter()
             .map(|entry| {
-                format!(
-                    "{} - {} picks - {:.0}% win - {:.2} KDA",
+                let mut line = format!(
+                    "{} - {} picks - {:.0}% win",
                     entry.name,
                     entry.picks,
-                    entry.win_rate * 100.0,
-                    entry.kda
-                )
+                    entry.win_rate * 100.0
+                );
+                let samples = raw
+                    .matches
+                    .iter()
+                    .filter(|row| row.hero_id.is_some_and(|id| hero_name(id) == entry.name))
+                    .filter_map(|row| row.kills.zip(row.deaths).zip(row.assists))
+                    .collect::<Vec<_>>();
+                if !samples.is_empty() {
+                    let (kills, deaths, assists) =
+                        samples
+                            .iter()
+                            .fold((0, 0, 0), |(k, d, a), ((kills, deaths), assists)| {
+                                (k + kills, d + deaths, a + assists)
+                            });
+                    let kda = (kills + assists) as f64 / deaths.max(1) as f64;
+                    line.push_str(&format!(
+                        " - {kda:.2} KDA ({} recorded games)",
+                        samples.len()
+                    ));
+                }
+                line
             })
             .collect();
         slide.accent = [46, 204, 113];
@@ -1090,11 +1327,16 @@ fn build_slides(
     {
         let mut slide = base_slide(
             "story_lanes",
-            "Lane Breakdown",
+            "Your usual spot",
             target_display_name,
             &year_label,
         );
-        slide.headline = "WHERE YOU LIVED".to_owned();
+        slide.headline = "You knew your way around.".to_owned();
+        slide.stat_label = format!(
+            "Lane data recorded in {} of {} games",
+            roles.total_games,
+            raw.matches.len()
+        );
         for role in [1, 2, 3] {
             if let Some(count) = roles.lane_freq.get(&role) {
                 slide
@@ -1133,7 +1375,7 @@ fn build_slides(
             "story_packages",
             "Package Deals",
             target_display_name,
-            "All-Time",
+            &year_label,
         );
         slide.headline = "FRIENDSHIP HAS A PRICE".to_owned();
         slide.stat_value = format!(
@@ -1185,7 +1427,7 @@ fn build_slides(
             "chart_rating",
             "Rating Chart",
             target_display_name,
-            &year_label,
+            "All-Time",
         );
         slide.headline = "RATING HISTORY (ALL-TIME)".to_owned();
         let latest = rating_series
@@ -1210,6 +1452,49 @@ fn build_slides(
         slides.push(slide);
     }
 
+    let mut finale = base_slide(
+        "story_finale",
+        "That's your year",
+        target_display_name,
+        &year_label,
+    );
+    finale.headline = stories
+        .identity
+        .as_ref()
+        .map_or("One of a kind.", |identity| identity.value.as_str())
+        .to_owned();
+    finale.stat_value = target_display_name.to_owned();
+    finale.stat_label = "Save this card. See you next queue.".to_owned();
+    if let Some(personal) = &personal {
+        finale.lines.push(format!(
+            "{} games · {} wins",
+            personal.games_played, personal.wins
+        ));
+        if let Some(time) = &stories.playtime {
+            finale.lines.push(format!("{} {}", time.value, time.label));
+        }
+        if let Some(hero) = hero_spotlight(target_id, &app_heroes, |id| Some(hero_name(id))) {
+            finale.lines.push(format!(
+                "On repeat: {} · {} picks",
+                hero.top_hero_name, hero.top_hero_picks
+            ));
+            finale.lines.push(format!(
+                "{} heroes in your recorded rotation",
+                hero.unique_heroes
+            ));
+        }
+        if let Some(identity) = &stories.identity {
+            finale.lines.push(identity.detail.clone());
+        }
+    } else {
+        finale
+            .lines
+            .push("No recorded games for you this year.".to_owned());
+        finale
+            .lines
+            .push("Your next chapter starts with a game.".to_owned());
+    }
+
     if let Some(gamba) = raw.gamba_stats
         && !raw.gamba_points.is_empty()
     {
@@ -1217,7 +1502,7 @@ fn build_slides(
             "chart_gamba",
             "Gamba (All-Time)",
             target_display_name,
-            &year_label,
+            "All-Time",
         );
         slide.headline = "GAMBA (ALL-TIME)".to_owned();
         let pnl = raw.gamba_points.last().map_or(0, |point| point.cumulative);
@@ -1237,7 +1522,42 @@ fn build_slides(
         slide.accent = [237, 66, 69];
         slides.push(slide);
     }
+    slides.sort_by_key(|slide| match slide.kind.as_str() {
+        "story_intro" => 0,
+        "story_games" => 1,
+        "story_hero" => 2,
+        "story_identity" => 3,
+        "story_moment" => 4,
+        "story_lanes" => 5,
+        "story_teammates" => 6,
+        "story_rivals" => 7,
+        "story_packages" => 8,
+        "chart_rating" => 9,
+        "chart_gamba" => 10,
+        "server_summary" => 11,
+        _ => 12,
+    });
+    slides.push(finale);
     slides
+}
+
+fn moment_slide(
+    moment: &PersonalMoment,
+    kind: &str,
+    username: &str,
+    year: &str,
+) -> WrappedSlideData {
+    let mut slide = base_slide(kind, moment.title, username, year);
+    slide.headline = moment.headline.to_owned();
+    slide.stat_value = moment.value.clone();
+    slide.stat_label = moment.label.to_owned();
+    slide.lines = vec![moment.detail.clone(), moment.coverage.clone()];
+    slide.artwork = match moment.key {
+        "wards" | "pings" => WrappedArtwork::Ward,
+        "couriers" | "playtime" => WrappedArtwork::Courier,
+        _ => WrappedArtwork::Rune,
+    };
+    slide
 }
 
 fn base_slide(kind: &str, title: &str, username: &str, year_label: &str) -> WrappedSlideData {
@@ -1252,36 +1572,87 @@ fn push_personal_slides(
     personal: &PersonalSummaryWrapped,
     target_name: &str,
     year_label: &str,
+    raw: &WrappedRawData,
 ) {
     let mut reveal = base_slide("story_games", "Your Year", target_name, year_label);
-    reveal.headline = "YOUR YEAR IN REVIEW".to_owned();
+    reveal.headline = "You kept coming back.".to_owned();
     reveal.stat_value = personal.games_played.to_string();
-    reveal.stat_label = "GAMES PLAYED".to_owned();
-    reveal.lines = vec![
-        personal.flavor_text.clone(),
-        format!(
-            "More than {:.0}% of players",
+    reveal.stat_label = "games. Each one a story.".to_owned();
+    reveal.artwork = WrappedArtwork::Courier;
+    reveal.lines = vec![personal.flavor_text.clone()];
+    if raw.player_stats.len() > 1
+        && raw
+            .player_stats
+            .iter()
+            .any(|row| row.discord_id == personal.discord_id)
+    {
+        reveal.lines.push(format!(
+            "Activity percentile: {:.0} among this year's players",
             personal.games_played_percentile
-        ),
-    ];
+        ));
+    }
     reveal.accent = [241, 196, 15];
     slides.push(reveal);
 
-    let kda = (personal.total_kills + personal.total_assists) as f64
-        / personal.total_deaths.max(1) as f64;
-    let mut stats = base_slide("story_summary", "Stats Grid", target_name, year_label);
-    stats.headline = "THE NUMBERS".to_owned();
-    stats.lines = vec![
-        format!("{:.0}% WIN RATE", personal.win_rate * 100.0),
-        format!("{kda:.1} AVG KDA"),
-        format!("{}m AVG GAME", personal.avg_game_duration / 60),
-        format!(
-            "{}/{}/{} TOTAL K/D/A",
-            personal.total_kills, personal.total_deaths, personal.total_assists
-        ),
-        format!("{} UNIQUE HEROES", personal.unique_heroes),
-        format!("{:+} RATING", personal.rating_change),
-    ];
+    let mut stats = base_slide(
+        "story_summary",
+        "The supporting evidence",
+        target_name,
+        year_label,
+    );
+    stats.headline = "Your year, by the numbers.".to_owned();
+    stats.lines.push(format!(
+        "{} games · {} wins · {} losses",
+        personal.games_played, personal.wins, personal.losses
+    ));
+    let decided = personal.wins + personal.losses;
+    if decided > 0 {
+        stats.lines.push(format!(
+            "{:.0}% win rate in {decided} decided games",
+            personal.wins as f64 / decided as f64 * 100.0
+        ));
+    }
+    let combat = raw
+        .matches
+        .iter()
+        .filter_map(|row| row.kills.zip(row.deaths).zip(row.assists))
+        .collect::<Vec<_>>();
+    if combat.is_empty() {
+        stats.lines.push("No combat stats recorded.".to_owned());
+    } else {
+        let (kills, deaths, assists) = combat
+            .iter()
+            .fold((0, 0, 0), |(k, d, a), ((kills, deaths), assists)| {
+                (k + kills, d + deaths, a + assists)
+            });
+        let kda = (kills + assists) as f64 / deaths.max(1) as f64;
+        stats.lines.push(format!(
+            "{kills}/{deaths}/{assists} K/D/A · {kda:.1} aggregate KDA across {} recorded games",
+            combat.len()
+        ));
+    }
+    if personal.avg_game_duration > 0 {
+        stats.lines.push(format!(
+            "{}m average recorded game",
+            personal.avg_game_duration / 60
+        ));
+    }
+    if personal.unique_heroes > 0 {
+        stats.lines.push(format!(
+            "{} heroes in your recorded rotation",
+            personal.unique_heroes
+        ));
+    }
+    if raw
+        .rating_changes
+        .iter()
+        .any(|row| row.discord_id == personal.discord_id)
+    {
+        stats.lines.push(format!(
+            "{:+} rating change this year",
+            personal.rating_change
+        ));
+    }
     slides.push(stats);
 }
 
@@ -1391,8 +1762,8 @@ fn add_pairwise_entries(
             profiles
                 .get(&entry.discord_id)
                 .map(|profile| profile.display_name.as_str())
-                .filter(|name| !name.is_empty())
-                .map_or_else(|| entry.discord_id.to_string(), str::to_owned),
+                .and_then(readable_player_name)
+                .unwrap_or(UNKNOWN_PLAYER),
             entry.wins,
             losses,
             entry.win_rate * 100.0,
@@ -2058,7 +2429,10 @@ fn bankruptcy_award(row: &WrappedBankruptcy) -> StoryAward {
         discord_id: row.discord_id,
         username: row.discord_username.clone(),
         title: "Bankruptcy Speedrunner",
-        stat: format!("{}x", row.bankruptcy_count),
+        stat: format!(
+            "{} bankruptcies all-time; active this year",
+            row.bankruptcy_count
+        ),
         flavor: random_flavor("award_bankruptcy_speedrunner"),
     }
 }

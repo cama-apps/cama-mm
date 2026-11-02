@@ -5185,38 +5185,38 @@ impl WrappedDiscordPort for SerenityDiscordTransport {
         user_id: u64,
         include_avatar: bool,
     ) -> Result<Option<WrappedDiscordProfile>, String> {
-        let context = self.context()?;
+        let signed_user = crate::ids::signed_id(user_id, "user")?;
+        let display_name = crate::discord_transport::resolve_guild_player_names(
+            self,
+            Some(guild_id),
+            &[signed_user],
+        )
+        .await
+        .resolve(signed_user);
+        let mut profile = WrappedDiscordProfile {
+            display_name,
+            avatar_png: None,
+        };
+        if !include_avatar {
+            return Ok(Some(profile));
+        }
+        // Optional artwork must never discard a live or last-seen name.
+        let Ok(context) = self.context() else {
+            return Ok(Some(profile));
+        };
         let guild_id = GuildId::new(guild_id);
         let user_id = UserId::new(user_id);
-        let mut display_name = context
-            .cache
-            .guild(guild_id)
-            .and_then(|guild| guild.members.get(&user_id).map(member_render_name))
-            .unwrap_or_default();
-        if !include_avatar {
-            return Ok(Some(WrappedDiscordProfile {
-                display_name,
-                avatar_png: None,
-            }));
-        }
         let member = match guild_id
             .member((&context.cache, context.http.as_ref()), user_id)
             .await
         {
             Ok(member) => member,
-            Err(serenity::Error::Http(error))
-                if error
-                    .status_code()
-                    .is_some_and(|status| status.as_u16() == 404) =>
-            {
-                return Ok(None);
+            Err(error) => {
+                warn!(%error, user_id = user_id.get(), "wrapped avatar member lookup failed");
+                return Ok(Some(profile));
             }
-            Err(error) => return Err(error.to_string()),
         };
-        if display_name.is_empty() {
-            display_name = member_render_name(&member);
-        }
-        let avatar_png = if let Some(avatar) = member.avatar {
+        profile.avatar_png = if let Some(avatar) = member.avatar {
             let url = format!(
                 "https://cdn.discordapp.com/guilds/{}/users/{}/avatars/{avatar}.png?size=64",
                 guild_id.get(),
@@ -5232,10 +5232,7 @@ impl WrappedDiscordPort for SerenityDiscordTransport {
         } else {
             None
         };
-        Ok(Some(WrappedDiscordProfile {
-            display_name,
-            avatar_png,
-        }))
+        Ok(Some(profile))
     }
 }
 

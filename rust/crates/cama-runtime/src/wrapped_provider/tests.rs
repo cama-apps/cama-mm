@@ -455,6 +455,8 @@ struct Responder {
     followups: Mutex<Vec<InteractionResponse>>,
     updates: Mutex<Vec<InteractionResponse>>,
     deleted: Mutex<Vec<InteractionMessageReceipt>>,
+    update_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    fail_update: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait]
@@ -490,6 +492,13 @@ impl InteractionResponder for Responder {
     }
 
     async fn update(&self, response: InteractionResponse) -> Result<(), InteractionResponseError> {
+        let gate = self.update_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            gate.notified().await;
+        }
+        if self.fail_update.load(AtomicOrdering::SeqCst) {
+            return Err(InteractionResponseError::new("test delivery failure"));
+        }
         self.updates.lock().expect("updates").push(response);
         Ok(())
     }
@@ -566,6 +575,460 @@ fn assert_native_png(response: &InteractionResponse) {
     assert!(bytes.len() > 1_000);
 }
 
+fn assert_native_media(response: &InteractionResponse) {
+    if response.attachments[0].filename.ends_with(".gif") {
+        assert!(response.attachments[0].bytes.starts_with(b"GIF89a"));
+    } else {
+        assert_native_png(response);
+    }
+}
+
+#[tokio::test]
+async fn personal_story_offers_still_mode_recap_and_separate_details() {
+    let fixture = Fixture::migrated();
+    let provider = build_provider(&fixture, FakeDiscord::production(), STORY_TIMEOUT);
+    let registry = build_registry(&provider);
+    let handler = registry.command_handler("wrapped").unwrap();
+    let responder = Arc::new(Responder::default());
+    handler
+        .handle(command(OWNER, Some(GUILD)), responder.clone())
+        .await
+        .unwrap();
+    let (motion_id, recap_id, details_id) = {
+        let messages = responder.followups.lock().unwrap();
+        let message = &messages[0];
+        let buttons = &message.components[0].buttons;
+        let find = |label| {
+            buttons
+                .iter()
+                .find(|button| button.label == label)
+                .unwrap_or_else(|| panic!("missing {label} control"))
+                .custom_id
+                .clone()
+        };
+        assert!(message.attachments[0].bytes.starts_with(b"GIF89a"));
+        (find("Still images"), find("My recap"), find("More stats"))
+    };
+    handler
+        .handle(component(&motion_id, OWNER), responder.clone())
+        .await
+        .unwrap();
+    assert_native_png(responder.updates.lock().unwrap().last().unwrap());
+    handler
+        .handle(component(&recap_id, OWNER), responder.clone())
+        .await
+        .unwrap();
+    {
+        let updates = responder.updates.lock().unwrap();
+        let recap = updates.last().unwrap();
+        assert_native_png(recap);
+        assert!(
+            recap.components[0]
+                .buttons
+                .iter()
+                .any(|button| button.label == "Replay")
+        );
+    }
+    handler
+        .handle(component(&details_id, OWNER), responder.clone())
+        .await
+        .unwrap();
+    let back_id;
+    {
+        let updates = responder.updates.lock().unwrap();
+        let details = updates.last().unwrap();
+        assert!(details.content.contains("More stats"));
+        assert!(
+            details.components[0]
+                .buttons
+                .iter()
+                .any(|button| button.label == "Back to story")
+        );
+        back_id = details.components[0]
+            .buttons
+            .iter()
+            .find(|button| button.label == "Back to story")
+            .unwrap()
+            .custom_id
+            .clone();
+    }
+    handler
+        .handle(component(&back_id, OWNER), responder.clone())
+        .await
+        .unwrap();
+    let replay_id = responder.updates.lock().unwrap().last().unwrap().components[0].buttons[1]
+        .custom_id
+        .clone();
+    assert!(replay_id.ends_with(":replay"));
+    handler
+        .handle(component(&replay_id, OWNER), responder.clone())
+        .await
+        .unwrap();
+    assert!(
+        responder
+            .updates
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .content
+            .contains("Chapter 1/")
+    );
+    let before = responder.updates.lock().unwrap().len();
+    handler
+        .handle(component(&motion_id, 999), responder.clone())
+        .await
+        .unwrap();
+    assert_eq!(responder.updates.lock().unwrap().len(), before);
+    assert!(
+        responder
+            .followups
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .ephemeral
+    );
+    let session = provider
+        .handler
+        .sessions
+        .lock()
+        .unwrap()
+        .values()
+        .next()
+        .cloned()
+        .unwrap();
+    let session = session.lock().await;
+    assert_eq!(session.slides.first().unwrap().kind, "story_intro");
+    assert_eq!(session.slides.last().unwrap().kind, "story_finale");
+    assert!(
+        !session
+            .slides
+            .iter()
+            .any(|slide| slide.kind.starts_with("records_"))
+    );
+    assert!(
+        session
+            .slides
+            .iter()
+            .any(|slide| slide.kind == "story_moment")
+    );
+    assert!(
+        session
+            .slides
+            .last()
+            .unwrap()
+            .lines
+            .iter()
+            .any(|line| line.contains("3 games"))
+    );
+    assert!(
+        session
+            .details
+            .iter()
+            .filter(|slide| slide.kind.starts_with("records_") || slide.kind == "awards")
+            .all(|slide| slide.lines.len() <= 2)
+    );
+    for (index, slide) in session.slides.iter().enumerate() {
+        assert_eq!(slide.chapter_index, index);
+        assert_eq!(slide.chapter_count, session.slides.len());
+    }
+    assert!(
+        session
+            .slides
+            .iter()
+            .filter(|slide| matches!(
+                slide.kind.as_str(),
+                "story_teammates" | "story_rivals" | "chart_rating" | "chart_gamba"
+            ))
+            .all(|slide| slide.year_label == "All-Time")
+    );
+    assert!(!session.animated);
+    assert!(
+        session
+            .rendered
+            .values()
+            .map(|media| media.bytes.len())
+            .sum::<usize>()
+            <= MAX_CACHED_MEDIA_BYTES
+    );
+}
+
+#[test]
+fn missing_or_unreadable_profiles_never_show_discord_ids() {
+    let fixture = Fixture::migrated();
+    let raw = WrappedSources::new(&fixture.path)
+        .load(GUILD as i64, OWNER as i64, 2026)
+        .unwrap()
+        .unwrap();
+    let slides = build_slides(raw, &BTreeMap::new(), OWNER as i64, "<@100>", 2026, 3, 3);
+    assert!(
+        slides
+            .iter()
+            .all(|slide| slide.username == "Unknown player")
+    );
+    let peers = slides
+        .iter()
+        .filter(|slide| matches!(slide.kind.as_str(), "story_teammates" | "story_rivals"));
+    for slide in peers {
+        assert!(
+            slide
+                .lines
+                .iter()
+                .all(|line| !line.contains("200 -") && !line.contains("300 -"))
+        );
+    }
+}
+
+#[test]
+fn sparse_wrapped_does_not_invent_zero_combat_or_identity() {
+    let fixture = Fixture::migrated();
+    let mut raw = WrappedSources::new(&fixture.path)
+        .load(GUILD as i64, OWNER as i64, 2026)
+        .unwrap()
+        .unwrap();
+    raw.player_heroes.clear();
+    raw.rating_changes.clear();
+    for row in &mut raw.matches {
+        row.hero_id = None;
+        row.kills = None;
+        row.deaths = None;
+        row.assists = None;
+        row.duration_seconds = None;
+        row.obs_placed = None;
+        row.sen_placed = None;
+        row.pings = None;
+        row.courier_kills = None;
+        row.hero_healing = None;
+        row.tower_damage = None;
+        row.comeback = None;
+        row.enrichment_present = false;
+    }
+    let slides = build_slides(raw, &BTreeMap::new(), OWNER as i64, "Player", 2026, 3, 3);
+    assert!(!slides.iter().any(|slide| slide.kind == "story_identity"));
+    let summary = slides
+        .iter()
+        .find(|slide| slide.kind == "story_summary")
+        .unwrap();
+    assert!(
+        summary
+            .lines
+            .iter()
+            .any(|line| line == "No combat stats recorded.")
+    );
+    assert!(
+        !summary
+            .lines
+            .iter()
+            .any(|line| line.contains("0/0/0") || line.contains("0m") || line.contains("+0"))
+    );
+    assert_eq!(slides.last().unwrap().lines, ["3 games · 2 wins"]);
+}
+
+#[test]
+fn review_hero_without_combat_does_not_claim_zero_kda() {
+    let fixture = Fixture::migrated();
+    Connection::open(&fixture.path).unwrap().execute("UPDATE match_participants SET kills=NULL, deaths=NULL, assists=NULL WHERE discord_id=100", []).unwrap();
+    let raw = WrappedSources::new(&fixture.path)
+        .load(GUILD as i64, OWNER as i64, 2026)
+        .unwrap()
+        .unwrap();
+    let slides = build_slides(raw, &BTreeMap::new(), OWNER as i64, "Player", 2026, 3, 3);
+    let hero = slides
+        .iter()
+        .find(|slide| slide.kind == "story_hero")
+        .unwrap();
+    assert!(hero.lines.iter().all(|line| !line.contains("KDA")));
+}
+
+#[test]
+fn review_year_packages_and_original_summary_metrics_remain_accurate() {
+    let fixture = Fixture::migrated();
+    let raw = WrappedSources::new(&fixture.path)
+        .load(GUILD as i64, OWNER as i64, 2026)
+        .unwrap()
+        .unwrap();
+    let slides = build_slides(raw, &BTreeMap::new(), OWNER as i64, "Player", 2026, 3, 3);
+    let package = slides
+        .iter()
+        .find(|slide| slide.kind == "story_packages")
+        .unwrap();
+    assert_eq!(package.year_label, "Cama Wrapped 2026");
+    let summary = slides
+        .iter()
+        .find(|slide| slide.kind == "story_summary")
+        .unwrap();
+    assert!(summary.lines.iter().any(|line| line.contains("67%")));
+    assert!(
+        summary
+            .lines
+            .iter()
+            .any(|line| line.contains("5.5 aggregate KDA") && line.contains("3 recorded games"))
+    );
+}
+
+#[test]
+fn review_historical_matches_survive_a_missing_registration_row() {
+    let fixture = Fixture::migrated();
+    let connection = Connection::open(&fixture.path).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .unwrap();
+    connection
+        .execute(
+            "DELETE FROM players WHERE discord_id=100 AND guild_id=42",
+            [],
+        )
+        .unwrap();
+    let raw = WrappedSources::new(&fixture.path)
+        .load(GUILD as i64, OWNER as i64, 2026)
+        .unwrap()
+        .unwrap();
+    assert_eq!(raw.matches.len(), 3);
+    let slides = build_slides(
+        raw,
+        &BTreeMap::new(),
+        OWNER as i64,
+        "Known player",
+        2026,
+        3,
+        3,
+    );
+    assert!(
+        slides
+            .iter()
+            .any(|slide| slide.kind == "story_games" && slide.stat_value == "3")
+    );
+    assert!(
+        slides
+            .last()
+            .unwrap()
+            .lines
+            .iter()
+            .any(|line| line.contains("3 games"))
+    );
+}
+
+#[test]
+fn review_summary_keeps_win_rate_and_aggregate_kda() {
+    let fixture = Fixture::migrated();
+    let raw = WrappedSources::new(&fixture.path)
+        .load(GUILD as i64, OWNER as i64, 2026)
+        .unwrap()
+        .unwrap();
+    let slides = build_slides(raw, &BTreeMap::new(), OWNER as i64, "Player", 2026, 3, 3);
+    let summary = slides
+        .iter()
+        .find(|slide| slide.kind == "story_summary")
+        .unwrap();
+    assert!(summary.lines.iter().any(|line| line.contains("67%")));
+    assert!(
+        summary
+            .lines
+            .iter()
+            .any(|line| line.contains("5.5 aggregate KDA") && line.contains("3 recorded games"))
+    );
+}
+
+#[test]
+fn personal_story_does_not_invent_a_percentile_without_a_comparison_cohort() {
+    let fixture = Fixture::migrated();
+    let mut raw = WrappedSources::new(&fixture.path)
+        .load(GUILD as i64, OWNER as i64, 2026)
+        .unwrap()
+        .unwrap();
+    raw.player_stats.clear();
+    let slides = build_slides(raw, &BTreeMap::new(), OWNER as i64, "Player", 2026, 3, 3);
+    let games = slides
+        .iter()
+        .find(|slide| slide.kind == "story_games")
+        .unwrap();
+    assert_eq!(games.stat_value, "3");
+    assert!(!games.lines.iter().any(|line| line.contains("percentile")));
+}
+
+#[tokio::test]
+async fn review_navigation_serializes_delivery_and_rolls_back_failures() {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+    let fixture = Fixture::migrated();
+    let provider = build_provider(&fixture, FakeDiscord::production(), STORY_TIMEOUT);
+    let registry = build_registry(&provider);
+    let handler = registry.command_handler("wrapped").unwrap();
+    let responder = Arc::new(Responder::default());
+    handler
+        .handle(command(OWNER, Some(GUILD)), responder.clone())
+        .await
+        .unwrap();
+    let next_id = responder.followups.lock().unwrap()[0].components[0].buttons[1]
+        .custom_id
+        .clone();
+    let session = provider
+        .handler
+        .sessions
+        .lock()
+        .unwrap()
+        .values()
+        .next()
+        .cloned()
+        .unwrap();
+    // Cache the next two pages so polling tests delivery ordering, without CPU
+    // scheduling or render duration affecting this regression.
+    {
+        let mut session = session.lock().await;
+        for index in [1, 2] {
+            let media = render_wrapped_media(&session.slides[index], true).unwrap();
+            session.rendered.insert((false, index, true), media);
+        }
+    }
+    let gate = Arc::new(tokio::sync::Notify::new());
+    *responder.update_gate.lock().unwrap() = Some(gate.clone());
+    let mut first = Box::pin(handler.handle(component(&next_id, OWNER), responder.clone()));
+    let mut second = Box::pin(handler.handle(component(&next_id, OWNER), responder.clone()));
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(matches!(first.as_mut().poll(&mut context), Poll::Pending));
+    assert!(matches!(second.as_mut().poll(&mut context), Poll::Pending));
+    assert!(responder.updates.lock().unwrap().is_empty());
+    assert_eq!(
+        responder.defers.lock().unwrap().len(),
+        3,
+        "both clicks acknowledged before a delivery lock wait"
+    );
+    gate.notify_one();
+    assert!(matches!(
+        first.as_mut().poll(&mut context),
+        Poll::Ready(Ok(()))
+    ));
+    assert!(matches!(
+        second.as_mut().poll(&mut context),
+        Poll::Ready(Ok(()))
+    ));
+    assert_eq!(session.lock().await.current, 2);
+    assert!(
+        responder
+            .updates
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .content
+            .contains("Chapter 3/")
+    );
+    responder.fail_update.store(true, AtomicOrdering::SeqCst);
+    let motion_id = next_id.replace(":next", ":motion");
+    assert!(
+        handler
+            .handle(component(&motion_id, OWNER), responder.clone())
+            .await
+            .is_err()
+    );
+    assert!(
+        session.lock().await.animated,
+        "failed delivery must preserve displayed mode"
+    );
+    assert_eq!(session.lock().await.current, 2);
+}
+
 #[test]
 fn exact_python_slash_schema_and_component_route_are_registered() {
     let fixture = Fixture::migrated();
@@ -586,7 +1049,7 @@ fn exact_python_slash_schema_and_component_route_are_registered() {
 }
 
 #[tokio::test]
-async fn migrated_sqlite_builds_all_sixteen_native_pages_and_live_navigation() {
+async fn migrated_sqlite_builds_personal_story_and_preserves_detailed_stats() {
     let fixture = Fixture::migrated();
     let discord = FakeDiscord::production();
     let provider = build_provider(&fixture, discord.clone(), STORY_TIMEOUT);
@@ -605,12 +1068,13 @@ async fn migrated_sqlite_builds_all_sixteen_native_pages_and_live_navigation() {
         let followups = responder.followups.lock().unwrap();
         assert_eq!(followups.len(), 1);
         assert!(!followups[0].ephemeral);
-        assert_eq!(
-            followups[0].content,
-            "**Cama Wrapped 2026** for Guild Owner"
+        assert!(
+            followups[0]
+                .content
+                .starts_with("**Cama Wrapped 2026** for Guild Owner\nChapter 1/")
         );
-        assert_native_png(&followups[0]);
-        assert_eq!(followups[0].components[0].buttons.len(), 2);
+        assert_native_media(&followups[0]);
+        assert_eq!(followups[0].components[0].buttons.len(), 5);
         assert!(followups[0].components[0].buttons[0].disabled);
         assert!(!followups[0].components[0].buttons[1].disabled);
         followups[0].components[0].buttons[1].custom_id.clone()
@@ -633,53 +1097,65 @@ async fn migrated_sqlite_builds_all_sixteen_native_pages_and_live_navigation() {
             .all(|slide| slide.username == "Guild Owner")
     );
     assert!(
-        locked.slides[0]
-            .lines
-            .iter()
-            .any(|line| line.starts_with("TOP PERFORMER - Guild "))
-    );
-    assert_eq!(
         locked
             .slides
             .iter()
-            .map(|slide| slide.kind.as_str())
-            .collect::<Vec<_>>(),
-        vec![
-            "server_summary",
-            "awards",
-            "story_games",
-            "story_summary",
-            "records_combat",
-            "records_farming",
-            "records_impact",
-            "records_vision",
-            "records_endurance",
-            "story_hero",
-            "story_lanes",
-            "story_teammates",
-            "story_rivals",
-            "story_packages",
-            "chart_rating",
-            "chart_gamba",
-        ]
+            .find(|slide| slide.kind == "server_summary")
+            .unwrap()
+            .lines
+            .iter()
+            .any(|line| line.starts_with("QUEUE REGULAR - Guild "))
     );
-    for slide in &locked.slides {
+    let kinds = locked
+        .slides
+        .iter()
+        .chain(&locked.details)
+        .map(|slide| slide.kind.as_str())
+        .collect::<BTreeSet<_>>();
+    for kind in [
+        "server_summary",
+        "awards",
+        "story_games",
+        "story_summary",
+        "records_combat",
+        "records_farming",
+        "records_impact",
+        "records_vision",
+        "records_endurance",
+        "story_hero",
+        "story_lanes",
+        "story_teammates",
+        "story_rivals",
+        "story_packages",
+        "chart_rating",
+        "chart_gamba",
+    ] {
+        assert!(kinds.contains(kind), "missing {kind}");
+    }
+    assert_eq!(locked.slides.first().unwrap().kind, "story_intro");
+    assert_eq!(locked.slides.last().unwrap().kind, "story_finale");
+    for slide in locked.slides.iter().chain(&locked.details) {
         let bytes = render_wrapped_slide(slide).expect("render every native story page");
         assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
     }
+    let teammates = locked
+        .slides
+        .iter()
+        .find(|slide| slide.kind == "story_teammates")
+        .unwrap();
     assert!(
-        locked.slides[11]
+        teammates
             .lines
             .iter()
             .any(|line| line.contains("Guild Ally"))
     );
     assert!(
-        locked.slides[11]
+        teammates
             .lines
             .iter()
             .all(|line| !line.contains("Database Ally"))
     );
-    assert!(!locked.slides[11].avatars.is_empty());
+    assert!(!teammates.avatars.is_empty());
     let wrapped_gamba = locked
         .slides
         .iter()
@@ -703,7 +1179,7 @@ async fn migrated_sqlite_builds_all_sixteen_native_pages_and_live_navigation() {
     {
         let updates = responder.updates.lock().unwrap();
         assert_eq!(updates.len(), 1);
-        assert_native_png(&updates[0]);
+        assert_native_media(&updates[0]);
         assert!(!updates[0].components[0].buttons[0].disabled);
     }
     assert_eq!(session.lock().await.current, 1);
@@ -715,7 +1191,7 @@ async fn migrated_sqlite_builds_all_sixteen_native_pages_and_live_navigation() {
         .await
         .expect("reject another navigator");
     assert_eq!(
-        responder.immediate.lock().unwrap().last().unwrap().content,
+        responder.followups.lock().unwrap().last().unwrap().content,
         "Only the command invoker can navigate this wrapped."
     );
 
@@ -934,7 +1410,6 @@ fn awards_match_python_tie_exclusions_hero_thresholds_and_flavor() {
         }],
         bets_against: Vec::new(),
         bankruptcies: Vec::new(),
-        player_name: None,
         matches: Vec::new(),
         pairwise: PairwiseInput::default(),
         pairwise_names: BTreeMap::new(),
@@ -968,6 +1443,6 @@ fn awards_match_python_tie_exclusions_hero_thresholds_and_flavor() {
         .cloned()
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(rendered_lines.contains("TOP PERFORMER - Unknown player -"));
-    assert!(!rendered_lines.contains("TOP PERFORMER - One -"));
+    assert!(rendered_lines.contains("QUEUE REGULAR - Unknown player -"));
+    assert!(!rendered_lines.contains("QUEUE REGULAR - One -"));
 }
