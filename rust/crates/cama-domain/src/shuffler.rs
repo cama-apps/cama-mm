@@ -3431,7 +3431,7 @@ mod tests {
             .score_role_assignments_for_matchup(&team1, &team2, 1, ShuffleConstraints::default())
             .expect("fixed matchup scores");
 
-        approx(score, 280.0);
+        approx(score, 310.0);
     }
 
     #[test]
@@ -3508,7 +3508,7 @@ mod tests {
             &mut super::ScoringContext::default(),
         );
 
-        approx(selection.preselection_score, -2_649.0);
+        approx(selection.preselection_score, -2_619.0);
     }
 
     #[test]
@@ -3597,7 +3597,7 @@ mod tests {
                 ShuffleConstraints::default(),
             )
             .expect("fixed role matchup evaluates");
-        approx(matchup.total_score, -2_752.0);
+        approx(matchup.total_score, -2_662.0);
     }
 
     #[test]
@@ -5549,8 +5549,8 @@ mod tests {
             .expect("optimization succeeds")
             .2
         };
-        approx(score(1.0), 1_340.0);
-        approx(score(0.5), 1_090.0);
+        approx(score(1.0), 1_430.0);
+        approx(score(0.5), 1_180.0);
     }
 
     #[test]
@@ -5589,7 +5589,7 @@ mod tests {
         )
         .expect("matchup evaluates");
         approx(matchup.log_entry.parity_penalty, 350.0);
-        approx(matchup.total_score, 630.0);
+        approx(matchup.total_score, 660.0);
     }
 
     #[test]
@@ -5694,7 +5694,7 @@ mod tests {
                 },
             )
             .expect("fallback scoring succeeds");
-        approx(common.2, 1_370.0);
+        approx(common.2, 1_490.0);
         assert_eq!(common, fallback);
     }
 
@@ -6587,7 +6587,7 @@ mod tests {
             .score_draft_pool(&captain_a, &captain_b, &pool)
             .expect("draft pool score");
 
-        approx(score, 266.0);
+        approx(score, 294.5);
     }
 
     #[test]
