@@ -31,6 +31,7 @@ use cama_db::pairings_repository::{PairingsRepository, PairingsService};
 use cama_db::predictions_repository::{CONTRACT_VALUE, PredictionRepository};
 use cama_db::rating_history_repository::RatingHistoryRepository;
 use cama_db::tip_repository::TipRepository;
+use cama_db::wrapped_repository::WrappedRepository;
 use cama_domain::formatting::{
     JOPACOIN_EMOTE, TOMBSTONE_EMOJI, format_grouped, format_grouped_signed,
 };
@@ -702,6 +703,7 @@ struct ProfileDataSources {
     rating_history: RatingHistoryRepository,
     balance_history: BalanceHistoryService<profile_balance_history::SqliteBalanceHistoryPort>,
     tips: TipRepository,
+    wrapped: WrappedRepository,
     dota: Arc<LiveDotaProfileService>,
     opendota: Arc<OpenDotaRuntimeServices>,
 }
@@ -724,6 +726,7 @@ impl ProfileDataSources {
                 profile_balance_history::SqliteBalanceHistoryPort::new(database_path),
             ),
             tips: TipRepository::new(database_path),
+            wrapped: WrappedRepository::new(database_path),
             dota: Arc::new(opendota.profile_player_service(database_path)),
             opendota,
         }
@@ -808,6 +811,19 @@ impl ProfileDataSources {
                 format!("**OpenSkill:** {display:.0} ({certainty:.0}% certain)")
             },
         );
+        let apm = self
+            .wrapped
+            .get_player_apm_summary(discord_id, guild_id)
+            .map_err(|error| error.to_string())?
+            .map_or_else(
+                || "No completed enriched inhouse APM data yet!".to_owned(),
+                |summary| {
+                    format!(
+                        "Average: {:.1} APM ({} games)\nCompleted enriched inhouse matches",
+                        summary.average_apm, summary.games
+                    )
+                },
+            );
         let roles = player.preferred_roles.as_ref().map_or_else(
             || "Not set".to_owned(),
             |roles| {
@@ -821,6 +837,7 @@ impl ProfileDataSources {
         let mut page = ProfilePage::new(format!("Profile: {target_name}"), DISCORD_BLUE)
             .field("Rating", format!("{glicko}\n{openskill}"), true)
             .field("Record", record, true)
+            .field("APM", apm, true)
             .field(
                 "Balance",
                 format!("{} Jopacoin", player.jopacoin_balance),

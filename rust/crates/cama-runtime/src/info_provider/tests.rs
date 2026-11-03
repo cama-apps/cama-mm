@@ -507,7 +507,7 @@ fn command_schema_declares_every_live_info_surface_exactly() {
     assert!(commands["help"].options.is_empty());
     assert_eq!(
         commands["leaderboard"].description,
-        "View leaderboard (balance, gambling, ratings)"
+        "View leaderboard (balance, gambling, ratings, APM)"
     );
     assert_eq!(commands["leaderboard"].options.len(), 2);
     assert_eq!(commands["leaderboard"].options[0].name, "type");
@@ -524,6 +524,7 @@ fn command_schema_declares_every_live_info_surface_exactly() {
             string_choice("Gambling", "gambling"),
             string_choice("Tips", "tips"),
             string_choice("Trivia", "trivia"),
+            string_choice("Actions Per Minute", "apm"),
         ]
     );
     assert_eq!(commands["leaderboard"].options[1].name, "limit");
@@ -981,7 +982,7 @@ fn leaderboard_tab_load_never_waits_on_the_shared_view_lock() {
 }
 
 #[tokio::test]
-async fn migrated_sqlite_and_live_members_drive_all_six_lazy_tabs() {
+async fn migrated_sqlite_and_live_members_drive_all_seven_lazy_tabs() {
     let (_directory, path) = migrated_database();
     seed_leaderboard_data(&path);
     let discord = Arc::new(RecordingDiscord::with_members([
@@ -1031,11 +1032,11 @@ async fn migrated_sqlite_and_live_members_drive_all_six_lazy_tabs() {
     );
     assert_eq!(initial.components.len(), 2);
     assert_eq!(initial.components[0].buttons.len(), 4);
-    assert_eq!(initial.components[1].buttons.len(), 4);
-    assert_eq!(initial.components[1].buttons[2].label, " Previous");
-    assert_eq!(initial.components[1].buttons[3].label, "Next ");
-    assert!(initial.components[1].buttons[2].disabled);
+    assert_eq!(initial.components[1].buttons.len(), 5);
+    assert_eq!(initial.components[1].buttons[3].label, " Previous");
+    assert_eq!(initial.components[1].buttons[4].label, "Next ");
     assert!(initial.components[1].buttons[3].disabled);
+    assert!(initial.components[1].buttons[4].disabled);
 
     let buttons = initial
         .components
@@ -1049,6 +1050,7 @@ async fn migrated_sqlite_and_live_members_drive_all_six_lazy_tabs() {
         ("OpenSkill", "LEADERBOARD > OpenSkill Rating"),
         ("Tips", "LEADERBOARD > Tips"),
         ("Trivia", "LEADERBOARD > Trivia"),
+        ("APM", "LEADERBOARD > APM"),
     ]
     .into_iter()
     .enumerate()
@@ -1533,4 +1535,77 @@ async fn paging_a_leaderboard_postpones_its_deletion() {
         1,
         "the leaderboard is deleted once it goes idle"
     );
+}
+
+#[tokio::test]
+async fn apm_leaderboard_uses_enriched_matches_and_live_member_names() {
+    let (_directory, path) = migrated_database();
+    seed_leaderboard_data(&path);
+    let connection = Connection::open(&path).unwrap();
+    for (match_id, discord_id, apm) in [
+        (41, ALICE, 180.0),
+        (42, ALICE, 221.0),
+        (43, BOB_DEPARTED, 900.0),
+        (44, CAROL, 150.0),
+    ] {
+        connection.execute(
+            "INSERT INTO matches(match_id,guild_id,team1_players,team2_players,winning_team) VALUES (?1,?2,'[]','[]',1)",
+            params![match_id, i64::try_from(GUILD).unwrap()],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO match_participants(match_id,guild_id,discord_id,team_number,won) VALUES (?1,?2,?3,1,1)",
+            params![match_id, i64::try_from(GUILD).unwrap(), i64::try_from(discord_id).unwrap()],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO wrapped_enrichment_facts(match_id,guild_id,discord_id,actions_per_min) VALUES (?1,?2,?3,?4)",
+            params![match_id, i64::try_from(GUILD).unwrap(), i64::try_from(discord_id).unwrap(), apm],
+        ).unwrap();
+    }
+    let provider = InfoRegistrationProvider::new(
+        path,
+        &config(),
+        Arc::new(RecordingDiscord::with_members([
+            (ALICE, "AliceLive"),
+            (CAROL, "CarolLive"),
+        ])),
+    );
+    let handler = registry(&provider).command_handler("leaderboard").unwrap();
+    let responder = Arc::new(RecordingResponder::default());
+    handler
+        .handle(
+            command_request(
+                "leaderboard",
+                ALICE,
+                Some(GUILD),
+                None,
+                vec![
+                    InteractionOption {
+                        name: "type".to_owned(),
+                        value: InteractionValue::String("apm".to_owned()),
+                    },
+                    InteractionOption {
+                        name: "limit".to_owned(),
+                        value: InteractionValue::Integer(1),
+                    },
+                ],
+            ),
+            responder.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(*responder.deferrals.lock().unwrap(), [false]);
+    let responses = responder.followups.lock().unwrap();
+    let embed = &responses[0].embeds[0];
+    assert_eq!(embed.title.as_deref(), Some("LEADERBOARD > APM"));
+    let text = embed
+        .fields
+        .iter()
+        .map(|field| field.value.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("AliceLive"), "{text}");
+    assert!(text.contains("200.5"), "{text}");
+    assert!(text.contains("2 games"), "{text}");
+    assert!(!text.contains("CarolLive"));
+    assert!(!text.contains("900"));
 }

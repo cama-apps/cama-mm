@@ -31,16 +31,18 @@ pub enum LeaderboardTab {
     OpenSkill,
     Tips,
     Trivia,
+    Apm,
 }
 
 impl LeaderboardTab {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Balance,
         Self::Gambling,
         Self::Glicko,
         Self::OpenSkill,
         Self::Tips,
         Self::Trivia,
+        Self::Apm,
     ];
 
     #[must_use]
@@ -52,6 +54,7 @@ impl LeaderboardTab {
             Self::OpenSkill => "openskill",
             Self::Tips => "tips",
             Self::Trivia => "trivia",
+            Self::Apm => "apm",
         }
     }
 
@@ -67,6 +70,7 @@ impl LeaderboardTab {
             "openskill" => Self::OpenSkill,
             "tips" => Self::Tips,
             "trivia" => Self::Trivia,
+            "apm" => Self::Apm,
             _ => Self::Balance,
         }
     }
@@ -75,7 +79,7 @@ impl LeaderboardTab {
     pub const fn page_size(self) -> usize {
         match self {
             Self::Gambling | Self::Tips => MULTI_SECTION_PAGE_SIZE,
-            Self::Balance | Self::Glicko | Self::OpenSkill | Self::Trivia => {
+            Self::Balance | Self::Glicko | Self::OpenSkill | Self::Trivia | Self::Apm => {
                 SINGLE_SECTION_PAGE_SIZE
             }
         }
@@ -112,6 +116,7 @@ pub enum TabData {
     OpenSkill(RatingLeaderboard),
     Tips(TipsLeaderboard),
     Trivia(Vec<TriviaEntry>),
+    Apm(Vec<ApmEntry>),
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -263,6 +268,14 @@ pub struct TriviaEntry {
     pub best_streak: i64,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ApmEntry {
+    pub discord_id: i64,
+    pub guild_id: Option<i64>,
+    pub average_apm: f64,
+    pub games: i64,
+}
+
 /// Read contract for one existing-schema unified-leaderboard snapshot.
 ///
 /// Every method receives the selected guild explicitly. Implementations must
@@ -321,6 +334,12 @@ pub trait UnifiedLeaderboardRepositoryPort {
         days: i64,
         limit: usize,
     ) -> Result<Vec<TriviaEntry>, Self::Error>;
+
+    fn apm_candidates(
+        &mut self,
+        guild_id: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<ApmEntry>, Self::Error>;
 }
 
 #[derive(Debug)]
@@ -491,6 +510,7 @@ where
             LeaderboardTab::OpenSkill => self.fetch_rating(RatingKind::OpenSkill)?,
             LeaderboardTab::Tips => self.fetch_tips()?,
             LeaderboardTab::Trivia => self.fetch_trivia()?,
+            LeaderboardTab::Apm => self.fetch_apm()?,
         };
         state.loaded = true;
         self.tab_states.insert(tab, state);
@@ -808,6 +828,29 @@ where
         Ok(loaded_state(TabData::Trivia(entries), page))
     }
 
+    fn fetch_apm(&mut self) -> Result<TabState, R::Error> {
+        let candidate_limit = self.candidate_limit();
+        let mut entries = self
+            .repository
+            .apm_candidates(self.guild_id, candidate_limit)?;
+        entries.retain(|entry| {
+            same_guild(entry.guild_id, self.guild_id)
+                && self.is_visible_member(entry.discord_id)
+                && entry.average_apm.is_finite()
+                && entry.average_apm > 0.0
+                && entry.games > 0
+        });
+        entries.sort_by(|left, right| {
+            right
+                .average_apm
+                .total_cmp(&left.average_apm)
+                .then_with(|| left.discord_id.cmp(&right.discord_id))
+        });
+        entries.truncate(self.limit);
+        let page = max_page(entries.len(), SINGLE_SECTION_PAGE_SIZE);
+        Ok(loaded_state(TabData::Apm(entries), page))
+    }
+
     fn is_visible_member(&self, discord_id: i64) -> bool {
         self.members
             .as_ref()
@@ -834,6 +877,7 @@ where
             LeaderboardTab::OpenSkill => self.build_rating_embed(state, RatingKind::OpenSkill),
             LeaderboardTab::Tips => self.build_tips_embed(state),
             LeaderboardTab::Trivia => self.build_trivia_embed(state),
+            LeaderboardTab::Apm => self.build_apm_embed(state),
         }
     }
 
@@ -1162,6 +1206,48 @@ where
         // which rejects the whole embed; the sibling sections all truncate.
         embed.add_field(
             "Best Streaks",
+            truncate_field(&lines, FIELD_VALUE_LIMIT),
+            false,
+        );
+        embed.footer = Some(format!(
+            "Page {}/{}",
+            state.current_page + 1,
+            state.max_page + 1
+        ));
+        embed
+    }
+
+    fn build_apm_embed(&self, state: &TabState) -> EmbedModel {
+        let mut embed = titled_embed("LEADERBOARD > APM");
+        embed.description = Some(
+            "Average actions per minute across completed, enriched inhouse matches".to_owned(),
+        );
+        let Some(TabData::Apm(entries)) = state.data.as_ref() else {
+            embed.description = Some("No APM data yet!".to_owned());
+            return embed;
+        };
+        if entries.is_empty() {
+            embed.description = Some("No APM data yet!".to_owned());
+            return embed;
+        }
+        let (start, end) = page_bounds(state, SINGLE_SECTION_PAGE_SIZE, entries.len());
+        let lines = entries[start..end]
+            .iter()
+            .enumerate()
+            .map(|(offset, entry)| {
+                let rank = start + offset + 1;
+                format!(
+                    "{} **{}** — {:.1} APM ({} games)",
+                    rank_marker(rank),
+                    self.display_name(entry.discord_id),
+                    entry.average_apm,
+                    entry.games
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        embed.add_field(
+            "APM Rankings",
             truncate_field(&lines, FIELD_VALUE_LIMIT),
             false,
         );
