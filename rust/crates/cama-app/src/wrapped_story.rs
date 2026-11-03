@@ -7,6 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 include!("wrapped_story/flavor_catalog.rs");
 
+#[path = "wrapped_story/chapters.rs"]
+pub mod chapters;
 #[path = "wrapped_story/personal_moments.rs"]
 mod personal_moments;
 pub use personal_moments::{PersonalMoment, PersonalMomentMatch, PersonalStory, personal_moments};

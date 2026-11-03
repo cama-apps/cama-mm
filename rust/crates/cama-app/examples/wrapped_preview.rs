@@ -1,9 +1,352 @@
 //! Export deterministic Wrapped artwork for visual review.
-//! `cargo run -p cama-app --example wrapped_preview -- <output-directory>`
+//! `cargo run -p cama-app --example wrapped_preview -- <output-directory> [--still]`
+//!
+//! Every name and number here is invented. `--still` skips the GIFs for a quick
+//! layout pass.
+use cama_app::drawing::{GambaInfo, GambaPoint, GambaStats};
 use cama_app::wrapped_media::{
-    WrappedArtwork, WrappedGambaData, WrappedSlideData, render_wrapped_media, render_wrapped_slide,
+    WrappedArtwork, WrappedGambaData, WrappedLayout, WrappedRow, WrappedSlideData, WrappedTheme,
+    render_wrapped_media, render_wrapped_slide,
 };
 use std::path::PathBuf;
+use std::time::Instant;
+
+const PLAYER: &str = "Alexandria";
+
+fn card(kind: &str, title: &str) -> WrappedSlideData {
+    let mut slide = WrappedSlideData::new(kind, title);
+    slide.username = PLAYER.to_owned();
+    slide.year_label = "Cama Wrapped 2026".to_owned();
+    slide
+}
+
+fn styled(kind: &str, title: &str, layout: WrappedLayout, theme: WrappedTheme) -> WrappedSlideData {
+    let mut slide = card(kind, title);
+    slide.layout = layout;
+    slide.theme = theme;
+    slide
+}
+
+fn rows(values: &[(&str, &str)]) -> Vec<WrappedRow> {
+    values
+        .iter()
+        .map(|(primary, secondary)| WrappedRow::new(*primary, *secondary))
+        .collect()
+}
+
+fn lines(values: &[&str]) -> Vec<String> {
+    values.iter().map(|value| (*value).to_owned()).collect()
+}
+
+fn art(path: &str) -> Option<Vec<u8>> {
+    std::fs::read(path).ok()
+}
+
+/// A real Camagotchi card, drawn the way `/pet` draws one.
+fn pet_card(assets: &str) -> Vec<u8> {
+    use cama_app::pet_assets::{
+        FilesystemPetAssets, HybridPetRenderer, PetAssetLoader, PetRenderRequest,
+    };
+    use cama_domain::pet::{PetMood, PetStage};
+    let mut loader = PetAssetLoader::new(
+        FilesystemPetAssets::new(format!("{assets}/pets")),
+        HybridPetRenderer::new(format!("{assets}/pets/components")),
+    );
+    loader
+        .get_pet_card(&PetRenderRequest {
+            species_id: "common_cama",
+            stage: PetStage::Adult,
+            mood: PetMood::Happy,
+            seed: 7,
+            accessory: Some("red_bow"),
+            evolution: None,
+        })
+        .bytes()
+        .to_vec()
+}
+
+fn deck(assets: &str) -> Vec<WrappedSlideData> {
+    let mut deck = Vec::new();
+
+    let mut intro = card("story_intro", "This one is yours");
+    intro.headline = "Your\n2026\nWrapped".to_owned();
+    intro.stat_value = PLAYER.to_owned();
+    intro.lines = lines(&["The wins. The bad picks. The people who queued anyway."]);
+    deck.push(intro);
+
+    let mut hours = styled(
+        "story_moment",
+        "Time well spent?",
+        WrappedLayout::BigNumber,
+        WrappedTheme::Queue,
+    );
+    hours.headline = "One more game. Several times.".to_owned();
+    hours.stat_value = "185h".to_owned();
+    hours.stat_label = "in the Ancient business".to_owned();
+    hours.badge = "More than 89% of the server".to_owned();
+    hours.lines = lines(&["That's 7.7 straight days. Queue time not included."]);
+    hours.artwork = WrappedArtwork::Courier;
+    deck.push(hours);
+
+    let mut heroes = card("story_hero", "On repeat");
+    heroes.headline = "Your top heroes".to_owned();
+    heroes.badge = "#1 Queen of Pain on the server".to_owned();
+    heroes.rows = rows(&[
+        ("Queen of Pain", "81 games · 62% wins"),
+        ("Crystal Maiden", "46 games · 54% wins"),
+        ("Dark Willow", "28 games · 61% wins"),
+        ("Pudge", "19 games · 37% wins"),
+        ("Keeper of the Light", "12 games · 50% wins"),
+    ]);
+    deck.push(heroes);
+
+    let mut months = card("story_months", "Your year in queue");
+    months.headline = "March had you in a chokehold.".to_owned();
+    months.stat_value = "38".to_owned();
+    months.stat_label = "games in March. July was suspiciously quiet.".to_owned();
+    months.rows = ["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"]
+        .iter()
+        .zip([
+            12.0, 21.0, 38.0, 25.0, 19.0, 14.0, 3.0, 17.0, 29.0, 31.0, 4.0, 0.0,
+        ])
+        .map(|(label, games)| WrappedRow::bar(*label, games))
+        .collect();
+    deck.push(months);
+
+    let mut style = card("story_identity", "Your playstyle");
+    style.stat_value = "The mapmaker".to_owned();
+    style.headline = "You saw the bigger picture. The team saw nothing.".to_owned();
+    style.lines = lines(&["14.2 wards a game, recorded in 180 of 247 games."]);
+    deck.push(style);
+
+    let mut wards = styled(
+        "story_moment",
+        "You had notes",
+        WrappedLayout::BigNumber,
+        WrappedTheme::QueueAlt,
+    );
+    wards.headline = "The minimap heard you.".to_owned();
+    wards.stat_value = "9,412".to_owned();
+    wards.stat_label = "recorded pings".to_owned();
+    wards.lines = lines(&["52 a game. A very interactive presentation."]);
+    wards.artwork = WrappedArtwork::Ward;
+    deck.push(wards);
+
+    let mut duo = card("story_teammates", "Your duo of the year");
+    duo.headline = "Ride or die".to_owned();
+    duo.rows = rows(&[
+        ("Mirana Main", "41 games together · 68% wins"),
+        ("Tusk Enjoyer", "33 games together · 58% wins"),
+        ("definitely not smurf", "27 games together · 44% wins"),
+    ]);
+    deck.push(duo);
+
+    let mut rival = card("story_rivals", "Your nemesis");
+    rival.headline = "They live in your head.".to_owned();
+    rival.rows = rows(&[
+        ("Tusk Enjoyer", "Beat you 19 of 26 times"),
+        ("Mirana Main", "You own them: 15 of 21"),
+    ]);
+    deck.push(rival);
+
+    let mut rating = card("chart_rating", "Your rating arc");
+    rating.headline = "Up, down, and sideways.".to_owned();
+    rating.stat_value = "+214".to_owned();
+    rating.stat_label = "rating this year".to_owned();
+    rating.series = (0..60)
+        .map(|index| {
+            let x = f64::from(index);
+            1400.0 + x * 3.5 + (x / 4.0).sin() * 60.0 + (x / 9.0).cos() * 40.0
+        })
+        .collect();
+    rating.lines = lines(&["Peak 1,702 in October."]);
+    deck.push(rating);
+
+    let mut gamba = card("chart_gamba", "Gamba");
+    gamba.headline = "The house sends its regards.".to_owned();
+    gamba.stat_value = "-4,520".to_owned();
+    gamba.stat_label = "JC across 312 wagers".to_owned();
+    gamba.theme = WrappedTheme::GambaDown;
+    gamba.lines = lines(&["Peaked at +1,890. You kept going."]);
+    let mut total = 0_i64;
+    gamba.gamba = Some(WrappedGambaData {
+        degen_score: 73,
+        degen_title: "Certified Degen".to_owned(),
+        points: (0..140)
+            .map(|index| {
+                total += if index < 50 {
+                    38
+                } else {
+                    -48 + (index % 5) * 9
+                };
+                GambaPoint {
+                    event_number: index as i32 + 1,
+                    cumulative: total,
+                    info: GambaInfo {
+                        source: "bet".to_owned(),
+                        outcome: Some("won".to_owned()),
+                        leverage: 1,
+                        profit: 0,
+                    },
+                }
+            })
+            .collect(),
+        stats: GambaStats {
+            total_bets: 140,
+            win_rate: 0.42,
+            net_pnl: total,
+            roi: -0.2,
+        },
+    });
+    deck.push(gamba);
+
+    let mut degen = styled(
+        "story_gamba",
+        "Degen report",
+        WrappedLayout::Tiles,
+        WrappedTheme::GambaUp,
+    );
+    degen.headline = "Certified Degen".to_owned();
+    degen.rows = rows(&[
+        ("73", "degen score"),
+        ("+2,400", "best single bet"),
+        ("-3,100", "worst single bet"),
+        ("41", "wheel spins"),
+        ("3", "bankruptcies"),
+        ("11x", "loss chase streak"),
+    ]);
+    degen.lines = lines(&["You and the wheel are on a first-name basis."]);
+    deck.push(degen);
+
+    let mut dig = styled(
+        "story_dig",
+        "Dig",
+        WrappedLayout::BigNumber,
+        WrappedTheme::DigDeep,
+    );
+    dig.headline = "You went looking for trouble.".to_owned();
+    dig.stat_value = "1,284".to_owned();
+    dig.stat_label = "blocks down, deepest at 412".to_owned();
+    dig.badge = "You out-dug 92% of the server".to_owned();
+    dig.lines = lines(&["Caved in on yourself 37 times. Kept digging."]);
+    deck.push(dig);
+
+    let mut boss = styled(
+        "story_dig_boss",
+        "Your white whale",
+        WrappedLayout::Spotlight,
+        WrappedTheme::Dig,
+    );
+    boss.art_png = art(&format!("{assets}/dig/bosses/aegis_warden_victory.png"));
+    boss.headline = "Aegis Warden".to_owned();
+    boss.stat_value = "9 fights".to_owned();
+    boss.stat_label = "It won 7. You won the last one.".to_owned();
+    deck.push(boss);
+
+    let mut pet = styled(
+        "story_pet",
+        "Camagotchi",
+        WrappedLayout::Spotlight,
+        WrappedTheme::Pet,
+    );
+    pet.art_png = Some(pet_card(assets));
+    pet.headline = "Sir Fluffington".to_owned();
+    pet.stat_value = "412 meals".to_owned();
+    pet.stat_label = "served across 3 pets".to_owned();
+    pet.badge = "4,120 JC on snacks".to_owned();
+    pet.lines = lines(&["Won 12 brawls. Still judges you."]);
+    deck.push(pet);
+
+    let mut grave = styled(
+        "story_pet_grave",
+        "In loving memory",
+        WrappedLayout::BigNumber,
+        WrappedTheme::PetGrave,
+    );
+    grave.headline = "Not everyone made it.".to_owned();
+    grave.stat_value = "2".to_owned();
+    grave.stat_label = "pets lost this year".to_owned();
+    grave.lines = lines(&["One starved. One got eaten. You got a new one the next day."]);
+    deck.push(grave);
+
+    let mut mafia = styled(
+        "story_mafia",
+        "Mafia",
+        WrappedLayout::Tiles,
+        WrappedTheme::Mafia,
+    );
+    mafia.headline = "You lied to your friends.".to_owned();
+    mafia.rows = rows(&[
+        ("34", "games played"),
+        ("9", "times Mafia"),
+        ("7", "got away with it"),
+        ("3", "times MVP"),
+    ]);
+    mafia.lines = lines(&["Your friends voted you out 11 times. They were right 8."]);
+    deck.push(mafia);
+
+    let mut victim = styled(
+        "story_mafia_victim",
+        "Nothing personal",
+        WrappedLayout::BigNumber,
+        WrappedTheme::MafiaRed,
+    );
+    victim.headline = "Tusk Enjoyer should sleep with one eye open.".to_owned();
+    victim.stat_value = "6".to_owned();
+    victim.stat_label = "times you came for them".to_owned();
+    deck.push(victim);
+
+    let mut persona = styled(
+        "story_persona",
+        "Your Cama type",
+        WrappedLayout::Persona,
+        WrappedTheme::Persona,
+    );
+    persona.stat_value = "The Night Shift Mole".to_owned();
+    persona.headline = "You treat sleep as a suggestion and the ground as a rival.".to_owned();
+    persona.rows = rows(&[
+        ("1,284", "blocks dug"),
+        ("61%", "of games after midnight"),
+        ("3", "bankruptcies, zero regrets"),
+    ]);
+    deck.push(persona);
+
+    let mut finale = card("story_finale", "2026 Wrapped");
+    finale.stat_value = PLAYER.to_owned();
+    finale.headline = "The Night Shift Mole".to_owned();
+    finale.rows = rows(&[
+        ("Queen of Pain", ""),
+        ("Crystal Maiden", ""),
+        ("Dark Willow", ""),
+        ("Pudge", ""),
+        ("Keeper of the Light", ""),
+    ]);
+    finale.lines = lines(&[
+        "185h|in queue",
+        "247|games",
+        "1,284|blocks dug",
+        "-4,520|JC gamba",
+        "34|mafia games",
+    ]);
+    finale.stat_label = "See you next queue.".to_owned();
+    deck.push(finale);
+
+    let mut records = card("records_combat", "Combat records");
+    records.headline = "Your highest highs".to_owned();
+    records.lines = lines(&[
+        "Most kills: 24 as Queen of Pain",
+        "Most deaths: 19 as Pudge (we saw)",
+        "Best KDA: 18.0 as Crystal Maiden",
+    ]);
+    deck.push(records);
+
+    let count = deck.len();
+    for (index, slide) in deck.iter_mut().enumerate() {
+        slide.chapter_index = index;
+        slide.chapter_count = count;
+    }
+    deck
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output = PathBuf::from(
@@ -11,209 +354,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .nth(1)
             .ok_or("provide an output directory")?,
     );
+    let still_only = std::env::args().any(|argument| argument == "--still");
     std::fs::create_dir_all(&output)?;
-    type Preview = (
-        &'static str,
-        &'static str,
-        &'static str,
-        &'static str,
-        &'static str,
-        &'static [&'static str],
-    );
-    let cases: &[Preview] = &[
-        (
-            "story_intro",
-            "This one is yours",
-            "2026. You had to be there.",
-            "",
-            "",
-            &["The wins, the questionable picks, the people who queued again."],
-        ),
-        (
-            "story_games",
-            "One more game?",
-            "You had a recurring appointment.",
-            "247",
-            "games played",
-            &[
-                "More than 89% of this year's players.",
-                "At this point, the queue should pay you rent.",
-            ],
-        ),
-        (
-            "story_identity",
-            "Your playstyle",
-            "You gave the team the bigger picture.",
-            "The mapmaker",
-            "your style in the recorded games",
-            &[
-                "312 observer and sentry wards. You lit up the map; the team supplied the plot twists.",
-                "Based on ward data from 42 of 47 games.",
-            ],
-        ),
-        (
-            "story_moment",
-            "The Vision Budget",
-            "The map wasn't going to light itself.",
-            "1,234",
-            "recorded wards placed",
-            &[
-                "Observer and sentry wards. Someone had to fund the vision board. 14 per recorded game.",
-                "Recorded in 100 of 120 games",
-            ],
-        ),
-        (
-            "story_hero",
-            "Your heavy rotation",
-            "Queen of Pain",
-            "81 picks",
-            "33% of 247 recorded hero picks",
-            &[
-                "Queen of Pain · 81 picks · 62% win · 4.2 KDA",
-                "Crystal Maiden · 46 picks · 54% win · 2.8 KDA",
-                "Dark Willow · 28 picks · 61% win · 3.9 KDA",
-            ],
-        ),
-        (
-            "awards",
-            "The lobby superlatives",
-            "A little recognition.",
-            "",
-            "",
-            &[
-                "Alexandria the Unreasonably Determined · The Visionary · 312 wards · You lit up the map. The team still found a way to wander into the dark.",
-                "Morgan · Comeback Kid · 8 comeback wins · Apparently the first half was just the warm-up.",
-            ],
-        ),
-        (
-            "story_teammates",
-            "Your regulars",
-            "The party was the point.",
-            "",
-            "",
-            &[
-                "Alexandria the Unreasonably Determined · 41 games · 63% win",
-                "Morgan · 28 games · 54% win",
-                "Elliott · 19 games · 68% win",
-            ],
-        ),
-        (
-            "story_finale",
-            "This was your year.",
-            "The mapmaker",
-            "Alexandria",
-            "Save this card. See you next queue.",
-            &[
-                "247 games · 132 wins",
-                "185h 42m recorded match time",
-                "On repeat: Queen of Pain · 81 picks",
-                "23 heroes in your recorded rotation",
-                "312 observer and sentry wards. You lit up the map; the team supplied the plot twists.",
-            ],
-        ),
-        (
-            "story_intro",
-            "A story is starting.",
-            "Small sample.\nBig entrance.",
-            "",
-            "",
-            &["3 games played. A little early to call it a personality."],
-        ),
-        (
-            "story_moment",
-            "Express delivery",
-            "Somebody had to carry the parcels.",
-            "27",
-            "recorded courier takedowns",
-            &[
-                "You intercepted the delivery. Their shopping spree became your highlight reel.",
-                "Recorded in 64 of 72 matches.",
-            ],
-        ),
-    ];
-    for (index, (kind, title, headline, value, label, lines)) in cases.iter().enumerate() {
-        let mut slide = WrappedSlideData::new(*kind, *title);
-        slide.artwork = match index {
-            1 | 9 => WrappedArtwork::Courier,
-            2 | 3 => WrappedArtwork::Ward,
-            _ => WrappedArtwork::Rune,
-        };
-        slide.username = if index == 8 {
-            "Éloïse-The-Extraordinarily-Long-Player-Name"
-        } else {
-            "Alexandria"
-        }
-        .into();
-        slide.year_label = if *kind == "story_teammates" {
-            "Your regulars · All-time"
-        } else {
-            "Cama Wrapped 2026"
-        }
-        .into();
-        slide.headline = (*headline).into();
-        slide.stat_value = (*value).into();
-        slide.stat_label = (*label).into();
-        slide.lines = lines.iter().map(|s| (*s).into()).collect();
-        slide.chapter_index = index;
-        slide.chapter_count = cases.len();
+    let assets = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../assets");
+    for (index, slide) in deck(assets).iter().enumerate() {
+        let stem = format!("{index:02}-{}", slide.kind);
         std::fs::write(
-            output.join(format!("{index:02}-{kind}.png")),
-            render_wrapped_slide(&slide)?,
+            output.join(format!("{stem}.png")),
+            render_wrapped_slide(slide)?,
         )?;
-        if index == 1 {
-            let media = render_wrapped_media(&slide, true)?;
-            std::fs::write(output.join(media.filename), media.bytes)?;
+        if still_only {
+            continue;
+        }
+        let started = Instant::now();
+        let media = render_wrapped_media(slide, true)?;
+        println!(
+            "{stem}: {} {} KiB in {} ms",
+            media.filename,
+            media.bytes.len() / 1024,
+            started.elapsed().as_millis()
+        );
+        if media.filename.ends_with(".gif") {
+            std::fs::write(output.join(format!("{stem}.gif")), &media.bytes)?;
         }
     }
-    let mut gamba = WrappedSlideData::new("chart_gamba", "The financial subplot · All-time");
-    gamba.username = "Alexandria".into();
-    gamba.year_label = "Cama Wrapped 2026".into();
-    gamba.lines = vec!["+60 JC · 6 bets · Degen Score: 73".into()];
-    gamba.gamba = Some(WrappedGambaData {
-        degen_score: 73,
-        degen_title: "House Favorite".into(),
-        points: vec![
-            cama_app::drawing::GambaPoint {
-                event_number: 1,
-                cumulative: -20,
-                ..Default::default()
-            },
-            cama_app::drawing::GambaPoint {
-                event_number: 2,
-                cumulative: 60,
-                ..Default::default()
-            },
-        ],
-        stats: cama_app::drawing::GambaStats {
-            total_bets: 6,
-            win_rate: 0.5,
-            net_pnl: 60,
-            roi: 0.5,
-        },
-    });
-    std::fs::write(
-        output.join("09-chart_gamba.png"),
-        render_wrapped_slide(&gamba)?,
-    )?;
-    let mut package = WrappedSlideData::new("story_packages", "Package deals");
-    package.username = "Alexandria".into();
-    package.year_label = "Cama Wrapped 2026".into();
-    package.headline = "Friendship has a price".into();
-    package.stat_value = "18 deals".into();
-    package.stat_label = "Contract energy".into();
-    package.lines = [
-        "10 bought by you · 240 JC",
-        "8 bought on you · 180 JC",
-        "6 unique buyers",
-        "90 games committed",
-        "The group chat has a procurement department.",
-    ]
-    .iter()
-    .map(|s| (*s).into())
-    .collect();
-    std::fs::write(
-        output.join("10-story_packages.png"),
-        render_wrapped_slide(&package)?,
-    )?;
     Ok(())
 }

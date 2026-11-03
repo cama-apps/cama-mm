@@ -570,8 +570,14 @@ fn component(custom_id: &str, user_id: u64) -> InteractionRequest {
 fn assert_native_png(response: &InteractionResponse) {
     let bytes = &response.attachments[0].bytes;
     assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
-    assert_eq!(u32::from_be_bytes(bytes[16..20].try_into().unwrap()), 800);
-    assert_eq!(u32::from_be_bytes(bytes[20..24].try_into().unwrap()), 600);
+    assert_eq!(
+        u32::from_be_bytes(bytes[16..20].try_into().unwrap()) as usize,
+        cama_app::wrapped_media::WRAPPED_SLIDE_WIDTH
+    );
+    assert_eq!(
+        u32::from_be_bytes(bytes[20..24].try_into().unwrap()) as usize,
+        cama_app::wrapped_media::WRAPPED_SLIDE_HEIGHT
+    );
     assert!(bytes.len() > 1_000);
 }
 
@@ -720,7 +726,7 @@ async fn personal_story_offers_still_mode_recap_and_separate_details() {
             .unwrap()
             .lines
             .iter()
-            .any(|line| line.contains("3 games"))
+            .any(|line| line == "3|games played")
     );
     assert!(
         session
@@ -739,9 +745,16 @@ async fn personal_story_offers_still_mode_recap_and_separate_details() {
             .iter()
             .filter(|slide| matches!(
                 slide.kind.as_str(),
-                "story_teammates" | "story_rivals" | "chart_rating" | "chart_gamba"
+                "story_teammates" | "story_rivals" | "chart_rating"
             ))
             .all(|slide| slide.year_label == "All-Time")
+    );
+    assert!(
+        session
+            .slides
+            .iter()
+            .filter(|slide| slide.kind.starts_with("chart_gamba") || slide.kind == "story_gamba")
+            .all(|slide| slide.year_label == "Cama Wrapped 2026")
     );
     assert!(!session.animated);
     assert!(
@@ -771,12 +784,7 @@ fn missing_or_unreadable_profiles_never_show_discord_ids() {
         .iter()
         .filter(|slide| matches!(slide.kind.as_str(), "story_teammates" | "story_rivals"));
     for slide in peers {
-        assert!(
-            slide
-                .lines
-                .iter()
-                .all(|line| !line.contains("200 -") && !line.contains("300 -"))
-        );
+        assert!(slide.rows.iter().all(|row| row.primary == "Unknown player"));
     }
 }
 
@@ -822,7 +830,11 @@ fn sparse_wrapped_does_not_invent_zero_combat_or_identity() {
             .iter()
             .any(|line| line.contains("0/0/0") || line.contains("0m") || line.contains("+0"))
     );
-    assert_eq!(slides.last().unwrap().lines, ["3 games · 2 wins"]);
+    // No recorded durations: the recap never invents match time.
+    assert_eq!(
+        slides.last().unwrap().lines,
+        ["3|games played", "+140 JC|from gamba"]
+    );
 }
 
 #[test]
@@ -905,7 +917,7 @@ fn review_historical_matches_survive_a_missing_registration_row() {
             .unwrap()
             .lines
             .iter()
-            .any(|line| line.contains("3 games"))
+            .any(|line| line == "3|games played")
     );
 }
 
@@ -1100,6 +1112,7 @@ async fn migrated_sqlite_builds_personal_story_and_preserves_detailed_stats() {
         locked
             .slides
             .iter()
+            .chain(&locked.details)
             .find(|slide| slide.kind == "server_summary")
             .unwrap()
             .lines
@@ -1143,17 +1156,12 @@ async fn migrated_sqlite_builds_personal_story_and_preserves_detailed_stats() {
         .iter()
         .find(|slide| slide.kind == "story_teammates")
         .unwrap();
+    assert!(teammates.rows.iter().any(|row| row.primary == "Guild Ally"));
     assert!(
         teammates
-            .lines
+            .rows
             .iter()
-            .any(|line| line.contains("Guild Ally"))
-    );
-    assert!(
-        teammates
-            .lines
-            .iter()
-            .all(|line| !line.contains("Database Ally"))
+            .all(|row| !row.primary.contains("Database Ally"))
     );
     assert!(!teammates.avatars.is_empty());
     let wrapped_gamba = locked
@@ -1161,14 +1169,25 @@ async fn migrated_sqlite_builds_personal_story_and_preserves_detailed_stats() {
         .iter()
         .find(|slide| slide.kind == "chart_gamba")
         .expect("live Wrapped Gamba slide");
-    assert_eq!(wrapped_gamba.title, "Gamba (All-Time)");
-    assert_eq!(wrapped_gamba.lines, ["+140 JC · 3 bets · Degen Score: 47"]);
-    let gamba = wrapped_gamba.gamba.as_ref().expect("typed Gamba payload");
-    assert!(!gamba.points.is_empty());
-    assert_eq!(gamba.points[0].event_number, 1);
-    assert_eq!(gamba.stats.total_bets, 3);
-    assert_eq!(gamba.degen_score, 47);
-    assert_eq!(gamba.degen_title, "Committed");
+    // The year's settled bets, plotted from zero, with the lifetime degen
+    // score kept on its own clearly labeled tile.
+    assert_eq!(wrapped_gamba.title, "Gamba");
+    assert_eq!(wrapped_gamba.year_label, "Cama Wrapped 2026");
+    assert_eq!(wrapped_gamba.stat_value, "+140 JC");
+    assert_eq!(wrapped_gamba.stat_label, "across 3 gambles");
+    assert_eq!(wrapped_gamba.series, [0.0, 120.0, 20.0, 140.0]);
+    let report = locked
+        .slides
+        .iter()
+        .find(|slide| slide.kind == "story_gamba")
+        .expect("degen report");
+    assert_eq!(report.headline, "Committed");
+    assert!(
+        report
+            .rows
+            .iter()
+            .any(|row| row.primary == "47" && row.secondary == "degen score (lifetime)")
+    );
     drop(locked);
     assert!(discord.peak.load(AtomicOrdering::SeqCst) <= PROFILE_CONCURRENCY);
 
@@ -1416,7 +1435,7 @@ fn awards_match_python_tie_exclusions_hero_thresholds_and_flavor() {
         package_purchases: Vec::new(),
         rating_history: Vec::new(),
         gamba_stats: None,
-        gamba_points: Vec::new(),
+        activity: ActivityData::default(),
     };
     let awards = generate_awards(&raw, 3, 3);
     let titles = awards.iter().map(|award| award.title).collect::<Vec<_>>();
@@ -1445,4 +1464,308 @@ fn awards_match_python_tie_exclusions_hero_thresholds_and_flavor() {
         .join("\n");
     assert!(rendered_lines.contains("QUEUE REGULAR - Unknown player -"));
     assert!(!rendered_lines.contains("QUEUE REGULAR - One -"));
+}
+
+/// 2026-03-01T00:00:00Z
+const MARCH_2026: i64 = 1_772_323_200;
+
+fn seed_life_outside_the_queue(fixture: &Fixture) {
+    let connection = Connection::open(&fixture.path).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .unwrap();
+    for index in 0..6_i64 {
+        connection
+            .execute(
+                "INSERT INTO dig_actions(guild_id,actor_id,action_type,depth_before,depth_after,
+                     jc_delta,detail,created_at)
+                 VALUES(42,100,'dig',?1,?2,2,'{}',?3)",
+                params![index * 20, index * 20 + 20, MARCH_2026 + index],
+            )
+            .unwrap();
+    }
+    for won in [false, false, true] {
+        connection
+            .execute(
+                "INSERT INTO dig_actions(guild_id,actor_id,action_type,depth_before,depth_after,
+                     jc_delta,detail,created_at)
+                 VALUES(42,100,'boss_fight',100,100,0,json_object('boss_id','grothak','won',json(?1)),?2)",
+                params![if won { "true" } else { "false" }, MARCH_2026 + 100],
+            )
+            .unwrap();
+    }
+    for (actor, target) in [(100, 300), (100, 300), (300, 100)] {
+        connection
+            .execute(
+                "INSERT INTO dig_actions(guild_id,actor_id,target_id,action_type,depth_before,
+                     depth_after,jc_delta,detail,created_at)
+                 VALUES(42,?1,?2,'sabotage',0,0,-5,'{}',?3)",
+                params![actor, target, MARCH_2026 + 200],
+            )
+            .unwrap();
+    }
+    connection
+        .execute(
+            "INSERT INTO pets(pet_id,discord_id,guild_id,name,species,adopted_at,hatched_at,
+                 adopt_fee,last_fed_at,hunger_at_last_fed,times_fed,is_active)
+             VALUES(1,100,42,'Sir Fluff','common_cama',?1,?1,0,?1,80,14,1)",
+            params![MARCH_2026],
+        )
+        .unwrap();
+    for game in 1..=2_i64 {
+        connection
+            .execute(
+                "INSERT INTO mafia_games(game_id,guild_id,game_date,phase,started_at,winner,
+                     payout_per_winner,roster_size,status)
+                 VALUES(?1,42,'2026-03-01','RESOLVED',?2,'MAFIA',20,4,'ACTIVE')",
+                params![game, MARCH_2026 + game],
+            )
+            .unwrap();
+        for (who, role, eliminated) in [
+            (100, "MAFIA", None),
+            (300, "TOWNIE", Some("NIGHT")),
+            (200, "DOCTOR", None),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO mafia_players(game_id,discord_id,guild_id,role,is_alive,
+                         eliminated_phase)
+                     VALUES(?1,?2,42,?3,?4,?5)",
+                    params![game, who, role, i64::from(eliminated.is_none()), eliminated],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO mafia_actions(game_id,guild_id,actor_id,target_id,action_type,phase,
+                     day_number,created_at)
+                 VALUES(?1,42,100,300,'KILL','NIGHT',1,?2)",
+                params![game, MARCH_2026],
+            )
+            .unwrap();
+    }
+}
+
+fn named(profiles: &[(i64, &str)]) -> BTreeMap<i64, WrappedDiscordProfile> {
+    profiles
+        .iter()
+        .map(|(id, name)| {
+            (
+                *id,
+                WrappedDiscordProfile {
+                    display_name: (*name).to_owned(),
+                    avatar_png: None,
+                },
+            )
+        })
+        .collect()
+}
+
+fn repository_assets() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../assets")
+}
+
+#[test]
+fn life_outside_the_queue_gets_its_own_chapters_and_a_cama_type() {
+    let fixture = Fixture::migrated();
+    seed_life_outside_the_queue(&fixture);
+    let sources =
+        WrappedSources::with_art(&fixture.path, ArtSources::for_assets(&repository_assets()));
+    let raw = sources
+        .load(GUILD as i64, OWNER as i64, 2026)
+        .unwrap()
+        .unwrap();
+    assert_eq!(raw.activity.dig.digs, 6);
+    assert_eq!(raw.activity.mafia.games, 2);
+    assert!(
+        raw.activity.boss_art.contains_key("encounter"),
+        "the most-fought boss brings its authored scenes"
+    );
+    assert!(raw.activity.pet_art.is_some(), "the living pet is drawn");
+    let (profile_ids, _) = prefetch_ids(&raw, 3, 3);
+    assert!(
+        profile_ids.contains(&300),
+        "chapter subjects are prefetched"
+    );
+
+    let profiles = named(&[(100, "Guild Owner"), (300, "Guild Rival")]);
+    let slides = build_slides(raw, &profiles, OWNER as i64, "Guild Owner", 2026, 3, 3);
+    let kinds = slides
+        .iter()
+        .map(|slide| slide.kind.as_str())
+        .filter(|kind| !is_detail_page(kind))
+        .collect::<Vec<_>>();
+    for kind in [
+        "story_dig",
+        "story_dig_boss",
+        "story_dig_feud",
+        "story_pet",
+        "story_mafia",
+        "story_mafia_victim",
+        "story_persona",
+        "story_months",
+    ] {
+        assert!(kinds.contains(&kind), "missing {kind} in {kinds:?}");
+    }
+    let position = |kind| {
+        kinds
+            .iter()
+            .position(|candidate| *candidate == kind)
+            .unwrap()
+    };
+    assert!(position("story_hero") < position("story_dig"));
+    assert!(position("story_dig") < position("story_pet"));
+    assert!(position("story_pet") < position("story_mafia"));
+    assert_eq!(position("story_persona"), kinds.len() - 2);
+    assert_eq!(*kinds.last().unwrap(), "story_finale");
+
+    let find = |kind| slides.iter().find(|slide| slide.kind == kind).unwrap();
+    let boss = find("story_dig_boss");
+    assert_eq!(boss.layout, WrappedLayout::Spotlight);
+    assert!(boss.art_png.is_some());
+    assert_eq!(boss.stat_value, "3 fights");
+    let pet = find("story_pet");
+    assert_eq!(pet.headline, "Sir Fluff");
+    assert!(pet.art_png.is_some());
+    assert_eq!(
+        find("story_dig_feud").headline,
+        "Guild Rival was in your crosshairs."
+    );
+    assert_eq!(
+        find("story_mafia_victim").headline,
+        "Guild Rival should sleep with one eye open."
+    );
+    let persona = find("story_persona");
+    assert!(persona.stat_value.starts_with("The "));
+    let recap = slides.last().unwrap();
+    assert_eq!(recap.headline, persona.stat_value);
+    assert!(recap.lines.contains(&"2|Mafia games".to_owned()));
+    assert!(recap.lines.iter().any(|line| line.ends_with("|blocks dug")));
+    for slide in &slides {
+        render_wrapped_slide(slide).expect("every chapter renders");
+    }
+}
+
+#[test]
+fn chapters_never_name_people_without_a_readable_name() {
+    let fixture = Fixture::migrated();
+    seed_life_outside_the_queue(&fixture);
+    let raw = WrappedSources::new(&fixture.path)
+        .load(GUILD as i64, OWNER as i64, 2026)
+        .unwrap()
+        .unwrap();
+    // 300 only ever had mention markup where a name should be.
+    let profiles = named(&[(100, "Guild Owner"), (300, "<@300>")]);
+    let slides = build_slides(raw, &profiles, OWNER as i64, "Guild Owner", 2026, 3, 3);
+    assert!(
+        slides
+            .iter()
+            .all(|slide| slide.kind != "story_mafia_victim")
+    );
+    let feud = slides
+        .iter()
+        .find(|slide| slide.kind == "story_dig_feud")
+        .unwrap();
+    assert_eq!(feud.headline, "You made enemies underground.");
+    for slide in slides.iter().filter(|slide| {
+        matches!(
+            slide.kind.as_str(),
+            "story_dig" | "story_dig_feud" | "story_pet" | "story_mafia" | "story_persona"
+        )
+    }) {
+        for text in std::iter::once(&slide.headline)
+            .chain(&slide.lines)
+            .chain(std::iter::once(&slide.stat_label))
+        {
+            assert!(!text.contains("300"), "{}: {text}", slide.kind);
+            assert!(!text.contains(UNKNOWN_PLAYER), "{}: {text}", slide.kind);
+        }
+    }
+}
+
+#[tokio::test]
+async fn recap_can_be_shared_once_as_a_lasting_message() {
+    let fixture = Fixture::migrated();
+    let provider = build_provider(&fixture, FakeDiscord::production(), STORY_TIMEOUT);
+    let registry = build_registry(&provider);
+    let handler = registry.command_handler("wrapped").unwrap();
+    let responder = Arc::new(Responder::default());
+    handler
+        .handle(command(OWNER, Some(GUILD)), responder.clone())
+        .await
+        .unwrap();
+    let recap_id = responder.followups.lock().unwrap()[0].components[0]
+        .buttons
+        .iter()
+        .find(|button| button.label == "My recap")
+        .unwrap()
+        .custom_id
+        .clone();
+    handler
+        .handle(component(&recap_id, OWNER), responder.clone())
+        .await
+        .unwrap();
+    let share_id = {
+        let updates = responder.updates.lock().unwrap();
+        let share = updates.last().unwrap().components[0]
+            .buttons
+            .iter()
+            .find(|button| button.label == "Share recap")
+            .expect("the recap offers sharing")
+            .clone();
+        assert!(!share.disabled);
+        share.custom_id
+    };
+    // Someone else cannot share another player's story.
+    handler
+        .handle(component(&share_id, 999), responder.clone())
+        .await
+        .unwrap();
+    assert!(
+        responder
+            .followups
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .ephemeral
+    );
+    let posted_before = responder.followups.lock().unwrap().len();
+
+    handler
+        .handle(component(&share_id, OWNER), responder.clone())
+        .await
+        .unwrap();
+    {
+        let followups = responder.followups.lock().unwrap();
+        assert_eq!(followups.len(), posted_before + 1);
+        let shared = followups.last().unwrap();
+        assert!(!shared.ephemeral, "the recap is posted for everyone");
+        assert!(
+            shared.components.is_empty(),
+            "the shared card has no controls"
+        );
+        assert_eq!(shared.content, "**Cama Wrapped 2026** · Guild Owner");
+        assert_native_png(shared);
+        let updates = responder.updates.lock().unwrap();
+        let button = updates.last().unwrap().components[0]
+            .buttons
+            .iter()
+            .find(|button| button.custom_id == share_id)
+            .unwrap()
+            .clone();
+        assert_eq!(button.label, "Shared");
+        assert!(button.disabled);
+    }
+
+    handler
+        .handle(component(&share_id, OWNER), responder.clone())
+        .await
+        .unwrap();
+    let followups = responder.followups.lock().unwrap();
+    assert_eq!(followups.len(), posted_before + 2);
+    assert!(
+        followups.last().unwrap().ephemeral,
+        "a second share is refused privately"
+    );
 }

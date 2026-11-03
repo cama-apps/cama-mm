@@ -38,6 +38,8 @@ pub mod registration_repository;
 pub mod reminder_repository;
 #[path = "../../cama-db/src/survey.rs"]
 pub mod survey;
+#[path = "../../cama-db/src/wrapped_activity.rs"]
+pub mod wrapped_activity;
 #[path = "../../cama-db/src/wrapped_live.rs"]
 pub mod wrapped_live;
 #[path = "../../cama-db/src/wrapped.rs"]
