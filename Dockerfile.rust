@@ -47,6 +47,8 @@ WORKDIR /build/rust
 COPY .cama-build/fonts/ /app/assets/fonts/
 COPY rust/ ./
 COPY assets/dota_spectator/ /build/assets/dota_spectator/
+# Wrapped embeds its fonts and illustrations at compile time.
+COPY assets/wrapped/ /build/assets/wrapped/
 RUN cargo build --locked --release --package cama-runtime --bin cama-rust
 
 FROM runtime-base AS runtime

@@ -1,40 +1,40 @@
-//! Native 800×600 PNG renderer for the live Cama Wrapped story.
+//! Native story-card renderer for the live Cama Wrapped story.
 //!
-//! Semantic story data becomes fitted TrueType artwork, bounded GIF reveals,
-//! and static charts. Discord avatar PNGs are decoded fail-soft.
+//! Semantic story data becomes bold portrait cards. Every card is painted from
+//! one timeline, so an animated reveal always ends on exactly the still card.
+//! Discord avatar PNGs are decoded fail-soft.
 
 use std::io::{Read, Write};
 use std::sync::OnceLock;
 
-use crate::drawing::{GambaPoint, GambaStats, draw_gamba_chart};
+use crate::drawing::{GambaPoint, GambaStats};
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use fontdue::{Font, FontSettings};
 use thiserror::Error;
 
-use crate::font_assets::{DejaVuFace, load_dejavu_font};
-
 mod artwork;
-mod poster;
+mod cards;
+mod motifs;
+mod motion;
+mod shapes;
+mod stage;
 
-pub const WRAPPED_SLIDE_WIDTH: usize = 800;
-pub const WRAPPED_SLIDE_HEIGHT: usize = 600;
+pub const WRAPPED_SLIDE_WIDTH: usize = 720;
+pub const WRAPPED_SLIDE_HEIGHT: usize = 900;
 
-const PANEL: Rgba = Rgba::rgb(30, 31, 42);
-const WHITE: Rgba = Rgba::rgb(245, 245, 248);
-const GRID: Rgba = Rgba::rgb(62, 64, 78);
-const GREEN: Rgba = Rgba::rgb(46, 204, 113);
-const RED: Rgba = Rgba::rgb(237, 66, 69);
-const YELLOW: Rgba = Rgba::rgb(241, 196, 15);
+/// Larger reveals fall back to the still card rather than risk a slow upload.
+const MAX_ANIMATION_BYTES: usize = 4 * 1024 * 1024;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WrappedAvatar {
     pub discord_id: i64,
     pub png: Vec<u8>,
 }
 
-/// Exact typed payload for the all-time Gamba page in `/wrapped`.
+/// Exact typed payload for the Gamba page in `/wrapped`.
 ///
-/// This is deliberately separate from the live `/profile` chart payload. The
-/// wrapped command renders the 700×400 chart inside the 800×600 story canvas.
+/// The story draws its own profit curve from these points. `/profile` keeps
+/// its separate chart and attachment lifecycle.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WrappedGambaData {
     pub degen_score: i32,
@@ -43,9 +43,84 @@ pub struct WrappedGambaData {
     pub stats: GambaStats,
 }
 
+/// One ranked row, tile, or chart bar. `primary` is the loud half of the row.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WrappedRow {
+    pub primary: String,
+    pub secondary: String,
+    pub value: f64,
+}
+
+impl WrappedRow {
+    #[must_use]
+    pub fn new(primary: impl Into<String>, secondary: impl Into<String>) -> Self {
+        Self {
+            primary: primary.into(),
+            secondary: secondary.into(),
+            value: 0.0,
+        }
+    }
+
+    #[must_use]
+    pub fn bar(primary: impl Into<String>, value: f64) -> Self {
+        Self {
+            primary: primary.into(),
+            secondary: String::new(),
+            value,
+        }
+    }
+}
+
+/// How a card arranges its content.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WrappedLayout {
+    Cover,
+    BigNumber,
+    TopList,
+    Bars,
+    People,
+    Curve,
+    Tiles,
+    Spotlight,
+    Persona,
+    Recap,
+    #[default]
+    Details,
+}
+
+/// The color story and animated background of a card.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WrappedTheme {
+    #[default]
+    Plain,
+    Cover,
+    Queue,
+    QueueAlt,
+    Heroes,
+    Months,
+    Squad,
+    Rivals,
+    Rating,
+    GambaUp,
+    GambaDown,
+    Dig,
+    DigDeep,
+    Pet,
+    PetGrave,
+    Mafia,
+    MafiaRed,
+    Persona,
+    Recap,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct WrappedSlideData {
+    pub layout: WrappedLayout,
+    pub theme: WrappedTheme,
     pub artwork: WrappedArtwork,
+    /// Trusted bundled art for this player, such as their pet or a boss scene.
+    /// Never user-supplied bytes; those belong in `avatars`.
+    pub art_png: Option<Vec<u8>>,
     pub chapter_index: usize,
     pub chapter_count: usize,
     pub kind: String,
@@ -55,11 +130,12 @@ pub struct WrappedSlideData {
     pub headline: String,
     pub stat_value: String,
     pub stat_label: String,
+    pub badge: String,
     pub lines: Vec<String>,
+    pub rows: Vec<WrappedRow>,
     pub accent: [u8; 3],
     pub series: Vec<f64>,
     pub secondary_series: Vec<f64>,
-    pub outcomes: Vec<Option<bool>>,
     pub avatars: Vec<WrappedAvatar>,
     pub gamba: Option<WrappedGambaData>,
 }
@@ -67,32 +143,56 @@ pub struct WrappedSlideData {
 impl WrappedSlideData {
     #[must_use]
     pub fn new(kind: impl Into<String>, title: impl Into<String>) -> Self {
+        let kind = kind.into();
+        let (layout, theme) = default_style(&kind);
         Self {
-            artwork: WrappedArtwork::Rune,
+            layout,
+            theme,
+            artwork: WrappedArtwork::None,
+            art_png: None,
             chapter_index: 0,
             chapter_count: 1,
-            kind: kind.into(),
+            kind,
             title: title.into(),
             username: String::new(),
             year_label: String::new(),
             headline: String::new(),
             stat_value: String::new(),
             stat_label: String::new(),
+            badge: String::new(),
             lines: Vec::new(),
+            rows: Vec::new(),
             accent: [88, 101, 242],
             series: Vec::new(),
             secondary_series: Vec::new(),
-            outcomes: Vec::new(),
             avatars: Vec::new(),
             gamba: None,
         }
     }
 }
 
+fn default_style(kind: &str) -> (WrappedLayout, WrappedTheme) {
+    match kind {
+        "story_intro" => (WrappedLayout::Cover, WrappedTheme::Cover),
+        "story_finale" => (WrappedLayout::Recap, WrappedTheme::Recap),
+        "story_games" | "story_playtime" => (WrappedLayout::BigNumber, WrappedTheme::Queue),
+        "story_moment" | "story_packages" => (WrappedLayout::BigNumber, WrappedTheme::QueueAlt),
+        "story_identity" => (WrappedLayout::Persona, WrappedTheme::Persona),
+        "story_hero" => (WrappedLayout::TopList, WrappedTheme::Heroes),
+        "story_lanes" | "story_months" => (WrappedLayout::Bars, WrappedTheme::Months),
+        "story_teammates" => (WrappedLayout::People, WrappedTheme::Squad),
+        "story_rivals" => (WrappedLayout::People, WrappedTheme::Rivals),
+        "chart_rating" => (WrappedLayout::Curve, WrappedTheme::Rating),
+        "chart_gamba" => (WrappedLayout::Curve, WrappedTheme::GambaUp),
+        _ => (WrappedLayout::Details, WrappedTheme::Plain),
+    }
+}
+
+/// Bundled character art shown beside a big reveal.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum WrappedArtwork {
     #[default]
-    Rune,
+    None,
     Ward,
     Courier,
 }
@@ -111,31 +211,19 @@ pub struct WrappedRenderedMedia {
     pub bytes: Vec<u8>,
 }
 
-/// Animations reveal a single rendered image, with a complete final frame.
-/// Detailed chapters and still mode always use PNG.
+/// Animations play one reveal and end on the complete still card. Detail pages
+/// and still mode always use PNG.
 pub fn render_wrapped_media(
     slide: &WrappedSlideData,
     animated: bool,
 ) -> Result<WrappedRenderedMedia, WrappedMediaError> {
     validate_slide(slide)?;
-    let canvas = poster::render(slide);
-    if !animated
-        || !matches!(
-            slide.kind.as_str(),
-            "story_intro" | "story_games" | "story_identity" | "story_moment"
-        )
-    {
-        return Ok(WrappedRenderedMedia {
-            filename: "wrapped_slide.png",
-            bytes: encode_png(&canvas),
-        });
+    if !animated || slide.layout == WrappedLayout::Details {
+        return Ok(still(slide));
     }
-    let bytes = poster::animate(&canvas, slide)?;
-    if bytes.len() > 4 * 1024 * 1024 {
-        return Ok(WrappedRenderedMedia {
-            filename: "wrapped_slide.png",
-            bytes: encode_png(&canvas),
-        });
+    let bytes = motion::animate(slide)?;
+    if bytes.len() > MAX_ANIMATION_BYTES {
+        return Ok(still(slide));
     }
     Ok(WrappedRenderedMedia {
         filename: "wrapped_slide.gif",
@@ -143,16 +231,28 @@ pub fn render_wrapped_media(
     })
 }
 
+fn still(slide: &WrappedSlideData) -> WrappedRenderedMedia {
+    WrappedRenderedMedia {
+        filename: "wrapped_slide.png",
+        bytes: encode_png(&stage::render_still(slide)),
+    }
+}
+
 /// Render one story page as a seekable, Discord-ready RGBA PNG.
 pub fn render_wrapped_slide(slide: &WrappedSlideData) -> Result<Vec<u8>, WrappedMediaError> {
     validate_slide(slide)?;
-    Ok(encode_png(&poster::render(slide)))
+    Ok(encode_png(&stage::render_still(slide)))
 }
 
 fn validate_slide(slide: &WrappedSlideData) -> Result<(), WrappedMediaError> {
+    let row_text = slide
+        .rows
+        .iter()
+        .flat_map(|row| [&row.primary, &row.secondary]);
     if slide
         .lines
         .iter()
+        .chain(row_text)
         .chain([
             &slide.title,
             &slide.username,
@@ -160,6 +260,7 @@ fn validate_slide(slide: &WrappedSlideData) -> Result<(), WrappedMediaError> {
             &slide.headline,
             &slide.stat_value,
             &slide.stat_label,
+            &slide.badge,
         ])
         .any(|line| line.chars().count() > 500)
     {
@@ -168,133 +269,17 @@ fn validate_slide(slide: &WrappedSlideData) -> Result<(), WrappedMediaError> {
     Ok(())
 }
 
-fn draw_chart(canvas: &mut Canvas, slide: &WrappedSlideData, accent: Rgba) {
-    poster::text(
-        canvas,
-        &slide.headline,
-        (48, 100, 704, 64),
-        34.0,
-        accent,
-        true,
-    );
-    let (left, top, right, bottom) = (70, 175, 745, 475);
-    canvas.fill_rect(left, top, right, bottom, PANEL);
-    for line in 0..=5 {
-        let y = top + (bottom - top) * line / 5;
-        canvas.line((left, y), (right, y), GRID, 1);
-    }
-    let combined = slide
-        .series
-        .iter()
-        .chain(&slide.secondary_series)
-        .copied()
-        .filter(|value| value.is_finite())
-        .collect::<Vec<_>>();
-    if slide.series.len().max(slide.secondary_series.len()) >= 2 && !combined.is_empty() {
-        let minimum = combined.iter().copied().fold(f64::INFINITY, f64::min);
-        let maximum = combined.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let span = (maximum - minimum).max(1.0);
-        poster::text(
-            canvas,
-            &format!("{maximum:.0}"),
-            (14, top - 7, 50, 22),
-            12.0,
-            WHITE,
-            false,
-        );
-        poster::text(
-            canvas,
-            &format!("{minimum:.0}"),
-            (14, bottom - 12, 50, 22),
-            12.0,
-            WHITE,
-            false,
-        );
-        let point = |index: usize, value: f64, count: usize| {
-            let x = left
-                + (right - left) * i32::try_from(index).unwrap_or_default()
-                    / i32::try_from(count.saturating_sub(1)).unwrap_or(1).max(1);
-            let y = bottom - ((value - minimum) / span * f64::from(bottom - top)) as i32;
-            (x, y)
-        };
-        for (series, color) in [
-            (slide.series.as_slice(), accent),
-            (slide.secondary_series.as_slice(), YELLOW),
-        ] {
-            for index in 0..series.len().saturating_sub(1) {
-                if series[index].is_finite() && series[index + 1].is_finite() {
-                    canvas.line(
-                        point(index, series[index], series.len()),
-                        point(index + 1, series[index + 1], series.len()),
-                        color,
-                        3,
-                    );
-                }
-            }
-        }
-        let count = slide.series.len().max(slide.secondary_series.len());
-        for index in 0..count {
-            let value = slide
-                .series
-                .get(index)
-                .copied()
-                .filter(|value| value.is_finite())
-                .or_else(|| {
-                    slide
-                        .secondary_series
-                        .get(index)
-                        .copied()
-                        .filter(|value| value.is_finite())
-                });
-            if let Some(value) = value {
-                let color = match slide.outcomes.get(index).copied().flatten() {
-                    Some(true) => GREEN,
-                    Some(false) => RED,
-                    None => WHITE,
-                };
-                canvas.circle(point(index, value, count), 4, color);
-            }
-        }
-    }
-    for (index, (label, color)) in [("Glicko", accent), ("OpenSkill", YELLOW)]
-        .into_iter()
-        .enumerate()
-    {
-        let left = 78 + index as i32 * 170;
-        canvas.line((left, 490), (left + 23, 490), color, 3);
-        poster::text(canvas, label, (left + 32, 479, 130, 22), 15.0, WHITE, false);
-    }
-    draw_wrapped_lines(canvas, &slide.lines, 500, 2, 2, WHITE);
-}
-
-fn draw_wrapped_lines(
-    canvas: &mut Canvas,
-    lines: &[String],
-    top: i32,
-    maximum_lines: usize,
-    scale: i32,
-    color: Rgba,
-) {
-    let mut y = top;
-    for line in lines.iter().take(maximum_lines) {
-        poster::text(
-            canvas,
-            line,
-            (48, y, 704, 26),
-            (scale * 10) as f32,
-            color,
-            false,
-        );
-        y += 28;
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Rgba([u8; 4]);
 
 impl Rgba {
     const fn rgb(red: u8, green: u8, blue: u8) -> Self {
         Self([red, green, blue, 255])
+    }
+
+    fn scaled_alpha(self, coverage: f32) -> Self {
+        let alpha = (f32::from(self.0[3]) * coverage.clamp(0.0, 1.0)).round() as u8;
+        Self([self.0[0], self.0[1], self.0[2], alpha])
     }
 }
 
@@ -344,69 +329,6 @@ impl Canvas {
         self.pixels[offset + 3] = u8::MAX;
     }
 
-    fn fill_rect(&mut self, left: i32, top: i32, right: i32, bottom: i32, color: Rgba) {
-        for y in top.min(bottom)..top.max(bottom) {
-            for x in left.min(right)..left.max(right) {
-                self.set(x, y, color);
-            }
-        }
-    }
-
-    fn line(&mut self, start: (i32, i32), end: (i32, i32), color: Rgba, width: i32) {
-        let (mut x0, mut y0) = start;
-        let (x1, y1) = end;
-        let dx = (x1 - x0).abs();
-        let sx = if x0 < x1 { 1 } else { -1 };
-        let dy = -(y1 - y0).abs();
-        let sy = if y0 < y1 { 1 } else { -1 };
-        let mut error = dx + dy;
-        loop {
-            let radius = width.saturating_sub(1) / 2;
-            for y in -radius..=radius {
-                for x in -radius..=radius {
-                    self.set(x0 + x, y0 + y, color);
-                }
-            }
-            if x0 == x1 && y0 == y1 {
-                break;
-            }
-            let twice = error * 2;
-            if twice >= dy {
-                error += dy;
-                x0 += sx;
-            }
-            if twice <= dx {
-                error += dx;
-                y0 += sy;
-            }
-        }
-    }
-
-    fn circle(&mut self, center: (i32, i32), radius: i32, color: Rgba) {
-        for y in -radius..=radius {
-            for x in -radius..=radius {
-                if x * x + y * y <= radius * radius {
-                    self.set(center.0 + x, center.1 + y, color);
-                }
-            }
-        }
-    }
-
-    fn text_case_sensitive(&mut self, x: i32, y: i32, text: &str, color: Rgba, scale: i32) {
-        for (index, character) in text.chars().enumerate() {
-            let x = x + i32::try_from(index).unwrap_or_default() * 6 * scale;
-            for (row, bits) in case_sensitive_glyph(character).into_iter().enumerate() {
-                for column in 0..5_u8 {
-                    if bits & (1 << (4 - column)) != 0 {
-                        let left = x + i32::from(column) * scale;
-                        let top = y + i32::try_from(row).unwrap_or_default() * scale;
-                        self.fill_rect(left, top, left + scale, top + scale, color);
-                    }
-                }
-            }
-        }
-    }
-
     fn blit_scaled(
         &mut self,
         source: &DecodedPng,
@@ -436,24 +358,6 @@ impl Canvas {
         }
     }
 
-    fn blit_opaque(&mut self, source: &DecodedPng, left: i32, top: i32) {
-        for y in 0..source.height {
-            for x in 0..source.width {
-                let offset = (y * source.width + x) * 4;
-                let color = Rgba(
-                    source.pixels[offset..offset + 4]
-                        .try_into()
-                        .unwrap_or([0; 4]),
-                );
-                self.blend(
-                    left + i32::try_from(x).unwrap_or_default(),
-                    top + i32::try_from(y).unwrap_or_default(),
-                    color,
-                );
-            }
-        }
-    }
-
     fn blend(&mut self, x: i32, y: i32, source: Rgba) {
         let (Ok(x), Ok(y)) = (usize::try_from(x), usize::try_from(y)) else {
             return;
@@ -473,37 +377,6 @@ impl Canvas {
         }
         self.pixels[offset + 3] = 255;
     }
-}
-
-fn wrapped_font(bold: bool) -> Option<&'static Font> {
-    static REGULAR: OnceLock<Option<Font>> = OnceLock::new();
-    static BOLD: OnceLock<Option<Font>> = OnceLock::new();
-    let slot = if bold { &BOLD } else { &REGULAR };
-    slot.get_or_init(|| {
-        load_dejavu_font(if bold {
-            DejaVuFace::SansBold
-        } else {
-            DejaVuFace::Sans
-        })
-        .ok()
-        .and_then(|bytes| Font::from_bytes(bytes, FontSettings::default()).ok())
-    })
-    .as_ref()
-}
-
-fn truetype_text_width(text: &str, pixel_size: f32, font: &Font) -> i32 {
-    let mut width = 0.0_f32;
-    let mut previous = None;
-    for character in text.chars() {
-        if let Some(previous) = previous {
-            width += font
-                .horizontal_kern(previous, character, pixel_size)
-                .unwrap_or_default();
-        }
-        width += font.metrics(character, pixel_size).advance_width;
-        previous = Some(character);
-    }
-    width.ceil() as i32
 }
 
 #[derive(Clone, Debug)]
@@ -629,90 +502,6 @@ fn paeth(left: u8, up: u8, upper_left: u8) -> u8 {
     }
 }
 
-fn glyph(character: char) -> [u8; 7] {
-    match character.to_ascii_uppercase() {
-        'A' => [14, 17, 17, 31, 17, 17, 17],
-        'B' => [30, 17, 17, 30, 17, 17, 30],
-        'C' => [14, 17, 16, 16, 16, 17, 14],
-        'D' => [30, 17, 17, 17, 17, 17, 30],
-        'E' => [31, 16, 16, 30, 16, 16, 31],
-        'F' => [31, 16, 16, 30, 16, 16, 16],
-        'G' => [14, 17, 16, 23, 17, 17, 15],
-        'H' => [17, 17, 17, 31, 17, 17, 17],
-        'I' => [31, 4, 4, 4, 4, 4, 31],
-        'J' => [7, 2, 2, 2, 18, 18, 12],
-        'K' => [17, 18, 20, 24, 20, 18, 17],
-        'L' => [16, 16, 16, 16, 16, 16, 31],
-        'M' => [17, 27, 21, 21, 17, 17, 17],
-        'N' => [17, 25, 21, 19, 17, 17, 17],
-        'O' => [14, 17, 17, 17, 17, 17, 14],
-        'P' => [30, 17, 17, 30, 16, 16, 16],
-        'Q' => [14, 17, 17, 17, 21, 18, 13],
-        'R' => [30, 17, 17, 30, 20, 18, 17],
-        'S' => [15, 16, 16, 14, 1, 1, 30],
-        'T' => [31, 4, 4, 4, 4, 4, 4],
-        'U' => [17, 17, 17, 17, 17, 17, 14],
-        'V' => [17, 17, 17, 17, 17, 10, 4],
-        'W' => [17, 17, 17, 21, 21, 21, 10],
-        'X' => [17, 17, 10, 4, 10, 17, 17],
-        'Y' => [17, 17, 10, 4, 4, 4, 4],
-        'Z' => [31, 1, 2, 4, 8, 16, 31],
-        '0' => [14, 17, 19, 21, 25, 17, 14],
-        '1' => [4, 12, 4, 4, 4, 4, 14],
-        '2' => [14, 17, 1, 2, 4, 8, 31],
-        '3' => [30, 1, 1, 14, 1, 1, 30],
-        '4' => [2, 6, 10, 18, 31, 2, 2],
-        '5' => [31, 16, 16, 30, 1, 1, 30],
-        '6' => [14, 16, 16, 30, 17, 17, 14],
-        '7' => [31, 1, 2, 4, 8, 8, 8],
-        '8' => [14, 17, 17, 14, 17, 17, 14],
-        '9' => [14, 17, 17, 15, 1, 1, 14],
-        '-' => [0, 0, 0, 31, 0, 0, 0],
-        '.' => [0, 0, 0, 0, 0, 12, 12],
-        ':' => [0, 12, 12, 0, 12, 12, 0],
-        '%' => [25, 25, 2, 4, 8, 19, 19],
-        '/' => [1, 2, 2, 4, 8, 8, 16],
-        '+' => [0, 4, 4, 31, 4, 4, 0],
-        '(' => [2, 4, 8, 8, 8, 4, 2],
-        ')' => [8, 4, 2, 2, 2, 4, 8],
-        '·' => [0, 0, 0, 4, 0, 0, 0],
-        ' ' => [0; 7],
-        _ => [14, 17, 1, 2, 4, 0, 4],
-    }
-}
-
-fn case_sensitive_glyph(character: char) -> [u8; 7] {
-    match character {
-        'a' => [0, 0, 14, 1, 15, 17, 15],
-        'b' => [16, 16, 30, 17, 17, 17, 30],
-        'c' => [0, 0, 14, 17, 16, 17, 14],
-        'd' => [1, 1, 15, 17, 17, 17, 15],
-        'e' => [0, 0, 14, 17, 31, 16, 14],
-        'f' => [6, 9, 8, 28, 8, 8, 8],
-        'g' => [0, 0, 15, 17, 15, 1, 14],
-        'h' => [16, 16, 30, 17, 17, 17, 17],
-        'i' => [4, 0, 12, 4, 4, 4, 14],
-        'j' => [2, 0, 6, 2, 2, 18, 12],
-        'k' => [16, 16, 18, 20, 24, 20, 18],
-        'l' => [12, 4, 4, 4, 4, 4, 14],
-        'm' => [0, 0, 26, 21, 21, 21, 21],
-        'n' => [0, 0, 30, 17, 17, 17, 17],
-        'o' => [0, 0, 14, 17, 17, 17, 14],
-        'p' => [0, 0, 30, 17, 30, 16, 16],
-        'q' => [0, 0, 15, 17, 15, 1, 1],
-        'r' => [0, 0, 22, 25, 16, 16, 16],
-        's' => [0, 0, 15, 16, 14, 1, 30],
-        't' => [8, 8, 28, 8, 8, 9, 6],
-        'u' => [0, 0, 17, 17, 17, 19, 13],
-        'v' => [0, 0, 17, 17, 17, 10, 4],
-        'w' => [0, 0, 17, 17, 21, 21, 10],
-        'x' => [0, 0, 17, 10, 4, 10, 17],
-        'y' => [0, 0, 17, 17, 15, 1, 14],
-        'z' => [0, 0, 31, 2, 4, 8, 31],
-        _ => glyph(character),
-    }
-}
-
 fn encode_png(canvas: &Canvas) -> Vec<u8> {
     let mut filtered = Vec::with_capacity((canvas.width * 4 + 1) * canvas.height);
     for row in canvas.pixels.chunks_exact(canvas.width * 4) {
@@ -758,267 +547,5 @@ fn crc32(bytes: &[u8]) -> u32 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn wrapped_gamba_fixture_slide() -> WrappedSlideData {
-        let mut slide = WrappedSlideData::new("chart_gamba", "Gamba (All-Time)");
-        slide.username = "Wrapped Gambler".to_owned();
-        slide.lines = vec!["+60 JC · 6 bets · Degen Score: 73".to_owned()];
-        slide.gamba = Some(WrappedGambaData {
-            degen_score: 73,
-            degen_title: "House Favorite".to_owned(),
-            points: vec![
-                GambaPoint {
-                    event_number: 1,
-                    cumulative: -20,
-                    info: crate::drawing::GambaInfo {
-                        source: "bet".to_owned(),
-                        outcome: Some("lost".to_owned()),
-                        leverage: 1,
-                        profit: -20,
-                    },
-                },
-                GambaPoint {
-                    event_number: 2,
-                    cumulative: 60,
-                    info: crate::drawing::GambaInfo {
-                        source: "wheel".to_owned(),
-                        outcome: Some("won".to_owned()),
-                        leverage: 1,
-                        profit: 80,
-                    },
-                },
-            ],
-            stats: GambaStats {
-                total_bets: 1,
-                win_rate: 1.0,
-                net_pnl: 60,
-                roi: 0.5,
-            },
-        });
-        slide
-    }
-
-    #[test]
-    fn all_production_slide_kinds_are_native_rgba_pngs() {
-        for kind in [
-            "story_intro",
-            "story_identity",
-            "story_moment",
-            "story_finale",
-            "server_summary",
-            "awards",
-            "story_games",
-            "story_summary",
-            "records_combat",
-            "story_hero",
-            "story_lanes",
-            "story_teammates",
-            "story_rivals",
-            "story_packages",
-            "chart_rating",
-            "chart_gamba",
-        ] {
-            let mut slide = WrappedSlideData::new(kind, "Wrapped");
-            slide.year_label = "Cama Wrapped 2026".to_owned();
-            slide.headline = "Production semantic page".to_owned();
-            slide.stat_value = "42".to_owned();
-            slide.stat_label = "Games".to_owned();
-            slide.lines = vec![
-                "Alice - 10 games - 60%".to_owned(),
-                "Bob - 8 games".to_owned(),
-            ];
-            slide.series = vec![1.0, 4.0, 2.0, 8.0];
-            let png = render_wrapped_slide(&slide).unwrap();
-            let decoded = decode_png(&png).expect("native PNG");
-            assert_eq!((decoded.width, decoded.height), (800, 600));
-            assert!(png.len() > 1_000);
-        }
-    }
-
-    #[test]
-    fn wrapped_gamba_renders_typed_chart_inside_separate_story_canvas() {
-        let slide = wrapped_gamba_fixture_slide();
-        let png = render_wrapped_slide(&slide).expect("wrapped Gamba PNG");
-        let decoded = decode_png(&png).expect("wrapped Gamba native PNG");
-        assert_eq!((decoded.width, decoded.height), (800, 600));
-        assert_eq!(
-            &decoded.pixels[(123 * decoded.width + 50) * 4..][..4],
-            crate::drawing::DISCORD_BG.0,
-            "the typed 700x400 chart is preserved inside the new story frame"
-        );
-        let mut untitled = slide;
-        untitled.title.clear();
-        let untitled =
-            decode_png(&render_wrapped_slide(&untitled).expect("untitled Wrapped Gamba PNG"))
-                .expect("untitled Wrapped Gamba native PNG");
-        let title_start = 4 * decoded.width * 84;
-        let title_band = 4 * decoded.width * 122;
-        assert_ne!(
-            &decoded.pixels[title_start..title_band],
-            &untitled.pixels[title_start..title_band],
-            "the story title is drawn above the chart"
-        );
-    }
-
-    #[test]
-    fn wrapped_gamba_footer_preserves_authored_case_and_middle_dot() {
-        const FOOTER: &str = "+60 JC · 6 bets · Degen Score: 73";
-        assert_eq!(glyph('·'), [0, 0, 0, 4, 0, 0, 0]);
-        assert_ne!(case_sensitive_glyph('e'), glyph('e'));
-
-        let slide = wrapped_gamba_fixture_slide();
-        let rendered = render_wrapped_slide(&slide).expect("authored Wrapped Gamba copy");
-        let decoded = decode_png(&rendered).expect("native Wrapped Gamba PNG");
-        assert!(
-            decoded.pixels[(550 * decoded.width * 4)..(585 * decoded.width * 4)]
-                .chunks_exact(4)
-                .any(|pixel| pixel[..3] == [255, 249, 239]),
-            "the authored footer renders on the story canvas"
-        );
-
-        let mut upper_footer = slide.clone();
-        upper_footer.lines[0] = FOOTER.to_ascii_uppercase();
-        assert_ne!(
-            rendered,
-            render_wrapped_slide(&upper_footer).expect("uppercase sensitivity")
-        );
-        let mut fallback_dot = slide.clone();
-        fallback_dot.lines[0] = FOOTER.replace('·', "?");
-        assert_ne!(
-            rendered,
-            render_wrapped_slide(&fallback_dot).expect("middle-dot sensitivity")
-        );
-        let mut uppercase_title = slide;
-        uppercase_title.title = uppercase_title.title.to_ascii_uppercase();
-        assert_ne!(
-            rendered,
-            render_wrapped_slide(&uppercase_title).expect("title case sensitivity"),
-            "poster typography preserves authored casing"
-        );
-    }
-
-    #[test]
-    fn malformed_avatar_is_fail_soft() {
-        let mut slide = WrappedSlideData::new("story_teammates", "Teammates");
-        slide.lines.push("Alice - 3 games".to_owned());
-        slide.avatars.push(WrappedAvatar {
-            discord_id: 1,
-            png: b"not png".to_vec(),
-        });
-        assert!(render_wrapped_slide(&slide).is_ok());
-    }
-
-    #[test]
-    fn transparent_avatar_is_alpha_blended_and_clipped_to_a_circle() {
-        let mut avatar_canvas = Canvas::new(2, 2, Rgba([255, 0, 0, 128]));
-        avatar_canvas.set(1, 1, Rgba([0, 255, 0, 255]));
-        let avatar = encode_png(&avatar_canvas);
-        let mut slide = WrappedSlideData::new("story_teammates", "Teammates");
-        slide.lines.push("Alice - 3 games".to_owned());
-        slide.avatars.push(WrappedAvatar {
-            discord_id: 1,
-            png: avatar,
-        });
-        let png = render_wrapped_slide(&slide).unwrap();
-        let decoded = decode_png(&png).unwrap();
-        let pixel = |x: usize, y: usize| -> [u8; 4] {
-            decoded.pixels[(y * decoded.width + x) * 4..][..4]
-                .try_into()
-                .unwrap()
-        };
-        assert_eq!(
-            pixel(40, 201),
-            [255, 249, 239, 255],
-            "corner remains circularly clipped"
-        );
-        assert_ne!(pixel(69, 230), [255, 0, 0, 128]);
-        assert_eq!(pixel(69, 230)[3], 255, "final Discord PNG stays opaque");
-    }
-}
-
-#[cfg(test)]
-mod remix_tests {
-    use super::*;
-
-    #[test]
-    fn authored_art_decodes_with_alpha_without_relaxing_avatar_limits() {
-        assert!(decode_png(&encode_png(&Canvas::new(1025, 1, WHITE))).is_none());
-        for bytes in [
-            include_bytes!("../../../../assets/wrapped/ward.png").as_slice(),
-            include_bytes!("../../../../assets/wrapped/courier.png").as_slice(),
-        ] {
-            assert!(bytes.len() <= 450 * 1024);
-            let art = decode_png(bytes).expect("bundled artwork");
-            assert_eq!((art.width, art.height), (512, 512));
-            assert!(art.pixels.chunks_exact(4).any(|pixel| pixel[3] == 0));
-            assert!(art.pixels.chunks_exact(4).any(|pixel| pixel[3] == 255));
-        }
-        let bytes = include_bytes!("../../../../assets/wrapped/battlefield.png");
-        assert!(bytes.len() <= 900 * 1024);
-        let scene = decode_png(bytes).expect("bundled battlefield");
-        assert_eq!((scene.width, scene.height), (800, 600));
-    }
-
-    #[test]
-    fn illustrated_cover_and_character_chapters_have_real_art_detail() {
-        let intro = decode_png(
-            &render_wrapped_slide(&WrappedSlideData::new("story_intro", "Your year")).unwrap(),
-        )
-        .unwrap();
-        let colors = intro
-            .pixels
-            .chunks_exact(4)
-            .map(|p| [p[0], p[1], p[2]])
-            .collect::<std::collections::BTreeSet<_>>();
-        assert!(
-            colors.len() > 5_000,
-            "battlefield illustration is composited"
-        );
-        let mut moment = WrappedSlideData::new("story_moment", "Your vision budget");
-        moment.artwork = WrappedArtwork::Ward;
-        let ward = render_wrapped_slide(&moment).unwrap();
-        moment.artwork = WrappedArtwork::Courier;
-        assert_ne!(ward, render_wrapped_slide(&moment).unwrap());
-    }
-
-    #[test]
-    fn personal_chapters_use_distinct_poster_palettes() {
-        let intro =
-            render_wrapped_slide(&WrappedSlideData::new("story_intro", "Your year")).unwrap();
-        let moment =
-            render_wrapped_slide(&WrappedSlideData::new("story_moment", "Your habits")).unwrap();
-        let a = decode_png(&intro).unwrap();
-        let b = decode_png(&moment).unwrap();
-        assert_ne!(
-            &a.pixels[(80 * 800 + 20) * 4..][..3],
-            &b.pixels[(80 * 800 + 20) * 4..][..3]
-        );
-    }
-
-    #[test]
-    fn hero_and_lane_coverage_is_visible() {
-        for kind in ["story_hero", "story_lanes"] {
-            let mut slide = WrappedSlideData::new(kind, "Recorded picks");
-            slide.stat_label = "Recorded in 7 of 20 games".into();
-            let labeled = render_wrapped_slide(&slide).unwrap();
-            slide.stat_label.clear();
-            assert_ne!(labeled, render_wrapped_slide(&slide).unwrap());
-        }
-    }
-
-    #[test]
-    fn still_and_animation_reject_oversized_input_before_rendering() {
-        let mut slide = WrappedSlideData::new("story_intro", "Wrapped");
-        slide.username = "a".repeat(501);
-        assert!(matches!(
-            render_wrapped_slide(&slide),
-            Err(WrappedMediaError::OversizedText)
-        ));
-        assert!(matches!(
-            render_wrapped_media(&slide, true),
-            Err(WrappedMediaError::OversizedText)
-        ));
-    }
-}
+#[path = "wrapped_media/tests.rs"]
+mod tests;

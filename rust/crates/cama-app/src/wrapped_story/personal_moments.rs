@@ -14,6 +14,11 @@ pub struct PersonalMomentMatch {
     pub hero_healing: Option<i64>,
     pub tower_damage: Option<i64>,
     pub comeback: Option<f64>,
+    pub apm: Option<f64>,
+    /// Divine Rapiers bought, when the match was enriched.
+    pub rapiers: Option<i64>,
+    /// The biggest team gold lead held in a game that was then lost.
+    pub throw: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -214,6 +219,92 @@ pub fn personal_moments(matches: &[PersonalMomentMatch]) -> PersonalStory {
             },
         );
     }
+    let apm = matches
+        .iter()
+        .filter_map(|row| row.apm.filter(|value| value.is_finite() && *value > 0.0))
+        .collect::<Vec<_>>();
+    let average_apm = apm.iter().sum::<f64>() / apm.len().max(1) as f64;
+    if apm.len() >= 3 && average_apm >= 120.0 {
+        add(
+            5,
+            average_apm / 150.0,
+            PersonalMoment {
+                key: "apm",
+                title: "Keyboard warrior",
+                headline: "Your keyboard filed a complaint.",
+                value: format!("{average_apm:.0}"),
+                label: "actions per minute",
+                detail: "Averaged across your recorded games. Most of them were right-clicks."
+                    .to_owned(),
+                coverage: coverage(apm.len()),
+            },
+        );
+    }
+    let (rapiers, rapier_games) = observed(matches, |row| row.rapiers);
+    if rapiers > 0 {
+        let lost_with_rapier = matches
+            .iter()
+            .filter(|row| row.rapiers.is_some_and(|count| count > 0) && row.won == Some(false))
+            .count();
+        add(
+            6,
+            1.0 + rapiers as f64,
+            PersonalMoment {
+                key: "rapier",
+                title: "Divine intervention",
+                headline: if rapiers == 1 {
+                    "You bought a Divine Rapier."
+                } else {
+                    "You kept buying Divine Rapiers."
+                },
+                value: number(rapiers),
+                label: if rapiers == 1 {
+                    "Divine Rapier"
+                } else {
+                    "Divine Rapiers"
+                },
+                detail: if lost_with_rapier > 0 {
+                    "At least one of those games was lost anyway. Bold.".to_owned()
+                } else {
+                    "Every game with one in your inventory was a win.".to_owned()
+                },
+                coverage: coverage(rapier_games),
+            },
+        );
+    }
+    let throw_games = matches
+        .iter()
+        .filter(|row| {
+            row.won.is_some()
+                && row
+                    .throw
+                    .is_some_and(|value| value.is_finite() && value >= 0.0)
+        })
+        .count();
+    if let Some(lead) = matches
+        .iter()
+        .filter(|row| row.won == Some(false))
+        .filter_map(|row| {
+            row.throw
+                .filter(|value| value.is_finite() && *value >= 8000.0)
+        })
+        .max_by(f64::total_cmp)
+    {
+        add(
+            1,
+            lead / 8000.0,
+            PersonalMoment {
+                key: "throw",
+                title: "The other plot twist",
+                headline: "You were winning. Were.",
+                value: number(lead as i64),
+                label: "team gold lead, then a loss",
+                detail: "Your team led by this much and still lost. Ancients are fragile."
+                    .to_owned(),
+                coverage: coverage(throw_games),
+            },
+        );
+    }
     candidates.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.2.key.cmp(b.2.key)));
     let mut selected = Vec::new();
     let mut themes = std::collections::BTreeSet::new();
@@ -356,6 +447,62 @@ fn number(value: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apm_rapiers_and_throws_need_recorded_evidence() {
+        let mut rows = vec![
+            PersonalMomentMatch {
+                apm: Some(180.0),
+                rapiers: Some(0),
+                won: Some(true),
+                throw: Some(2_000.0),
+                ..Default::default()
+            };
+            3
+        ];
+        rows[1].rapiers = Some(2);
+        rows[1].won = Some(false);
+        rows[1].throw = Some(12_500.0);
+        let story = personal_moments(&rows);
+        let key = |key| story.moments.iter().find(|moment| moment.key == key);
+        let apm = key("apm").expect("fast hands");
+        assert_eq!(apm.value, "180");
+        assert_eq!(apm.coverage, "Recorded in 3 of 3 games");
+        let rapier = key("rapier").expect("rapier");
+        assert_eq!(rapier.value, "2");
+        assert!(rapier.detail.contains("lost anyway"));
+        let throw = key("throw").expect("thrown lead");
+        assert_eq!(throw.value, "12,500");
+
+        let quiet = vec![
+            PersonalMomentMatch {
+                apm: Some(60.0),
+                won: Some(false),
+                throw: Some(12_500.0),
+                ..Default::default()
+            };
+            2
+        ];
+        let story = personal_moments(&quiet);
+        assert!(story.moments.iter().all(|moment| moment.key != "apm"));
+        assert!(story.moments.iter().all(|moment| moment.key != "rapier"));
+        assert!(story.moments.iter().any(|moment| moment.key == "throw"));
+        let won_anyway = vec![
+            PersonalMomentMatch {
+                won: Some(true),
+                throw: Some(30_000.0),
+                ..Default::default()
+            };
+            3
+        ];
+        assert!(
+            personal_moments(&won_anyway)
+                .moments
+                .iter()
+                .all(|moment| moment.key != "throw"),
+            "a lead that was kept is not a throw"
+        );
+    }
 
     #[test]
     fn missing_enrichment_does_not_invent_habits_or_identity() {

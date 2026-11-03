@@ -45,3 +45,4 @@ pub mod tip_service;
 pub mod live_announcements;
 
 pub mod deadlock;
+pub mod wrapped_activity;
