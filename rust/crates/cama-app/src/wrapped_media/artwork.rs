@@ -7,6 +7,8 @@ use super::*;
 const SPOTLIGHT_FRAME: (usize, usize) = (640, 320);
 const CHARACTER_FRAME: (usize, usize) = (300, 300);
 const COVER_ART_HEIGHT: usize = 480;
+/// Hero portraits beside ranked rows: half of Steam's 256x144 portrait.
+pub(super) const ROW_FRAME: (usize, usize) = (128, 72);
 
 fn battlefield() -> Option<&'static DecodedPng> {
     static IMAGE: OnceLock<Option<DecodedPng>> = OnceLock::new();
@@ -51,6 +53,22 @@ pub(super) fn prepare(slide: &WrappedSlideData) -> Option<PreparedArt> {
         }
         _ => None,
     }
+}
+
+/// Resample each ranked row's picture once. Rows without one stay `None`.
+pub(super) fn prepare_rows(slide: &WrappedSlideData) -> Vec<Option<PreparedArt>> {
+    if slide.layout != WrappedLayout::TopList {
+        return Vec::new();
+    }
+    slide
+        .rows
+        .iter()
+        .map(|row| {
+            let image = decode_png(row.image_png.as_deref()?)?;
+            let (width, height) = fit_within(&image, ROW_FRAME);
+            Some(resample(&image, width, height))
+        })
+        .collect()
 }
 
 fn fit_within(image: &DecodedPng, frame: (usize, usize)) -> (usize, usize) {
@@ -138,9 +156,22 @@ pub(super) fn draw(
     reveal: (i32, i32, i32, i32),
     radius: f32,
 ) {
-    let Some(art) = stage.art.as_ref() else {
+    let Some(art) = stage.art.take() else {
         return;
     };
+    paint(&mut stage.canvas, &art, left, top, reveal, radius);
+    stage.art = Some(art);
+}
+
+/// Copy prepared art onto the canvas inside `reveal`, rounding its corners.
+pub(super) fn paint(
+    canvas: &mut Canvas,
+    art: &PreparedArt,
+    left: i32,
+    top: i32,
+    reveal: (i32, i32, i32, i32),
+    radius: f32,
+) {
     let (reveal_left, reveal_top, reveal_right, reveal_bottom) = reveal;
     let (art_width, art_height) = (art.width as i32, art.height as i32);
     for y in reveal_top.max(top).max(0)..reveal_bottom.min(top + art_height).min(HEIGHT) {
@@ -169,7 +200,7 @@ pub(super) fn draw(
                     art.pixels[offset + 2],
                     255,
                 ]);
-                stage.canvas.set(x, y, color.scaled_alpha(alpha));
+                canvas.set(x, y, color.scaled_alpha(alpha));
             }
         }
     }

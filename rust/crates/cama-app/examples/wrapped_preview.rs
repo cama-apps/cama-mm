@@ -2,7 +2,8 @@
 //! `cargo run -p cama-app --example wrapped_preview -- <output-directory> [--still]`
 //!
 //! Every name and number here is invented. `--still` skips the GIFs for a quick
-//! layout pass.
+//! layout pass. Hero portraits come from the Steam image cache that production
+//! warms (`STEAM_IMAGE_CACHE_ROOT`, default `.cache`) when it is present.
 use cama_app::drawing::{GambaInfo, GambaPoint, GambaStats};
 use cama_app::wrapped_media::{
     WrappedArtwork, WrappedGambaData, WrappedLayout, WrappedRow, WrappedSlideData, WrappedTheme,
@@ -98,6 +99,16 @@ fn deck(assets: &str) -> Vec<WrappedSlideData> {
         ("Pudge", "19 games · 37% wins"),
         ("Keeper of the Light", "12 games · 50% wins"),
     ]);
+    let portraits = cama_app::trivia_image_cache::production_trivia_cache_path().join("heroes");
+    for (row, slug) in heroes.rows.iter_mut().zip([
+        "queenofpain",
+        "crystal_maiden",
+        "dark_willow",
+        "pudge",
+        "keeper_of_the_light",
+    ]) {
+        row.image_png = std::fs::read(portraits.join(format!("{slug}.png"))).ok();
+    }
     deck.push(heroes);
 
     let mut months = card("story_months", "Your year in queue");

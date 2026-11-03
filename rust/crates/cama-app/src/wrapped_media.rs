@@ -49,6 +49,9 @@ pub struct WrappedRow {
     pub primary: String,
     pub secondary: String,
     pub value: f64,
+    /// A picture beside the row, such as a hero portrait. Images that do not
+    /// decode are skipped.
+    pub image_png: Option<Vec<u8>>,
 }
 
 impl WrappedRow {
@@ -58,6 +61,7 @@ impl WrappedRow {
             primary: primary.into(),
             secondary: secondary.into(),
             value: 0.0,
+            image_png: None,
         }
     }
 
@@ -67,6 +71,7 @@ impl WrappedRow {
             primary: primary.into(),
             secondary: String::new(),
             value,
+            image_png: None,
         }
     }
 }

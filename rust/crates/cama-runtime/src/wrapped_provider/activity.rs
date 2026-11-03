@@ -3,9 +3,11 @@
 
 use std::path::PathBuf;
 
+use cama_app::hero_lookup::{HeroImageSize, HeroLookup};
 use cama_app::pet_assets::{
     FilesystemPetAssets, HybridPetRenderer, PetAssetLoader, PetRenderRequest,
 };
+use cama_app::trivia_image_cache::{TriviaImageCache, production_trivia_cache_path};
 use cama_app::wrapped_media::{WrappedLayout, WrappedRow, WrappedTheme};
 use cama_app::wrapped_story::chapters::{
     CardArt, CardMood, CardStyle, ChapterCard, DigContext, PersonaActivity, PersonaSignal,
@@ -33,6 +35,9 @@ pub(super) struct ArtSources {
     dig_root: PathBuf,
     pets: Arc<Mutex<PetArtLoader>>,
     pet_decay_per_day: i64,
+    heroes: Arc<HeroLookup>,
+    /// The Steam image cache the trivia warm fills at startup.
+    hero_cache: PathBuf,
 }
 
 impl ArtSources {
@@ -44,6 +49,8 @@ impl ArtSources {
                 HybridPetRenderer::production(),
             ))),
             pet_decay_per_day,
+            heroes: Arc::new(HeroLookup::production()),
+            hero_cache: production_trivia_cache_path(),
         }
     }
 
@@ -62,7 +69,29 @@ impl ArtSources {
                 HybridPetRenderer::new(root.join("pets").join("components")),
             ))),
             pet_decay_per_day: DEFAULT_PET_DECAY_PER_DAY,
+            heroes: Arc::new(HeroLookup::production()),
+            hero_cache: root.join("no-hero-cache"),
         }
+    }
+
+    /// Hero metadata and a portrait cache from a test fixture.
+    #[cfg(all(test, feature = "runtime-test-core"))]
+    pub(super) fn with_hero_portraits(mut self, heroes: HeroLookup, cache: PathBuf) -> Self {
+        self.heroes = Arc::new(heroes);
+        self.hero_cache = cache;
+        self
+    }
+
+    /// The hero's Steam portrait when startup has already cached it. Wrapped
+    /// never downloads one; a missing file just leaves the row without art.
+    pub(super) fn hero_portrait(&self, hero_id: i64) -> Option<Vec<u8>> {
+        let url = self.heroes.image_url(hero_id, HeroImageSize::Full)?;
+        let path = TriviaImageCache::new(&self.hero_cache)
+            .ok()?
+            .path_for_url(&url);
+        let bytes = std::fs::read(path).ok()?;
+        // Steam portraits are well under this; anything larger is not one.
+        (bytes.len() <= 1024 * 1024).then_some(bytes)
     }
 
     fn boss_scene(&self, boss_id: &str, scene: &str) -> Option<Vec<u8>> {
@@ -318,6 +347,7 @@ pub(super) fn card_slide(
             primary,
             secondary,
             value: card.series.get(index).copied().unwrap_or_default(),
+            image_png: None,
         })
         .collect();
     if card.style == CardStyle::Curve {

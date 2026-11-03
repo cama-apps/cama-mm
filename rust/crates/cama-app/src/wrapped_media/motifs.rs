@@ -1,5 +1,6 @@
 //! Moving backgrounds. Each chapter has one idea that settles into a composition
-//! the type can sit on: rings for the queue, falling coins for gamba, strata for
+//! the type can sit on: rings for the queue, the Radiant treeline for your
+//! squad and Dire thorns for your rivals, falling coins for gamba, strata for
 //! the dig, a passing eclipse for mafia.
 
 use std::f32::consts::{PI, TAU};
@@ -14,9 +15,10 @@ pub(super) fn paint(stage: &mut Stage<'_>) {
     match stage.slide.theme {
         WrappedTheme::Plain => {}
         WrappedTheme::Cover | WrappedTheme::Months => waves(stage),
-        WrappedTheme::Queue | WrappedTheme::QueueAlt | WrappedTheme::Squad => rings(stage),
+        WrappedTheme::Queue | WrappedTheme::QueueAlt => rings(stage),
+        WrappedTheme::Squad => treeline(stage),
         WrappedTheme::Heroes | WrappedTheme::Persona => burst(stage),
-        WrappedTheme::Rivals => stripes(stage),
+        WrappedTheme::Rivals => thorns(stage),
         WrappedTheme::Rating => grid(stage),
         WrappedTheme::GambaUp | WrappedTheme::GambaDown => coins(stage),
         WrappedTheme::Dig | WrappedTheme::DigDeep => strata(stage),
@@ -77,6 +79,82 @@ fn rings(stage: &mut Stage<'_>) {
     }
 }
 
+/// The Radiant treeline: pines rise along the bottom edge, back row first.
+fn treeline(stage: &mut Stage<'_>) {
+    let soft = stage.palette.soft;
+    let mut scatter = Scatter::new(stage.slide.chapter_index + 11);
+    for (row, (count, ground, scale)) in [(9, H - 64.0, 0.78), (7, H + 18.0, 1.0)]
+        .into_iter()
+        .enumerate()
+    {
+        for index in 0..count {
+            let x = (index as f32 + 0.15 + scatter.next() * 0.7) / count as f32 * W;
+            let tall = (150.0 + scatter.next() * 90.0) * scale;
+            let start = 0.04 + row as f32 * 0.16 + index as f32 * 0.035;
+            let rise = stage.pop(start, start + 0.34);
+            if rise <= 0.0 {
+                continue;
+            }
+            let base = ground + (1.0 - rise) * (tall + 120.0);
+            pine(stage, (x, base), tall, soft);
+        }
+    }
+}
+
+/// The Dire's thorns: jagged spikes climb from the bottom edge, back row first.
+fn thorns(stage: &mut Stage<'_>) {
+    let soft = stage.palette.soft;
+    let mut scatter = Scatter::new(stage.slide.chapter_index + 23);
+    for (row, (count, ground, reach)) in [(11, H - 40.0, 150.0), (8, H + 10.0, 230.0)]
+        .into_iter()
+        .enumerate()
+    {
+        for index in 0..count {
+            let x = (index as f32 + 0.1 + scatter.next() * 0.8) / count as f32 * W;
+            let tall = reach * (0.55 + scatter.next() * 0.45);
+            let lean = (scatter.next() - 0.5) * tall * 0.35;
+            let half = 16.0 + scatter.next() * 14.0;
+            let start = 0.04 + row as f32 * 0.14 + index as f32 * 0.03;
+            let rise = stage.pop(start, start + 0.3);
+            if rise <= 0.0 {
+                continue;
+            }
+            let base = ground + (1.0 - rise) * (tall + 60.0);
+            stage.canvas.polygon(
+                &[(x - half, base), (x + half, base), (x + lean, base - tall)],
+                soft,
+            );
+        }
+    }
+}
+
+/// Three stacked tiers on a short trunk, `tall` pixels from ground to tip.
+fn pine(stage: &mut Stage<'_>, (x, ground): (f32, f32), tall: f32, color: Rgba) {
+    let trunk = tall * 0.14;
+    stage.canvas.polygon(
+        &[
+            (x - tall * 0.05, ground),
+            (x + tall * 0.05, ground),
+            (x + tall * 0.05, ground - trunk - 4.0),
+            (x - tall * 0.05, ground - trunk - 4.0),
+        ],
+        color,
+    );
+    for tier in 0..3 {
+        let tier = tier as f32;
+        let bottom = ground - trunk - tier * tall * 0.24;
+        let half = tall * (0.34 - tier * 0.07);
+        stage.canvas.polygon(
+            &[
+                (x - half, bottom),
+                (x + half, bottom),
+                (x, bottom - tall * 0.42),
+            ],
+            color,
+        );
+    }
+}
+
 fn waves(stage: &mut Stage<'_>) {
     let (bg, soft) = (stage.palette.bg, stage.palette.soft);
     let phase = stage.ease(0.0, 1.0) * PI * 1.6;
@@ -117,24 +195,6 @@ fn burst(stage: &mut Stage<'_>) {
                     center.0 + (angle + width / 2.0).cos() * 1100.0,
                     center.1 + (angle + width / 2.0).sin() * 1100.0,
                 ),
-            ],
-            soft,
-        );
-    }
-}
-
-fn stripes(stage: &mut Stage<'_>) {
-    let soft = stage.palette.soft;
-    for index in 0..6 {
-        let sweep = stage.ease(index as f32 * 0.06, 0.5 + index as f32 * 0.06);
-        let x = -500.0 + index as f32 * 240.0;
-        let drop = (1.0 - sweep) * -1000.0;
-        stage.canvas.polygon(
-            &[
-                (x + 300.0, drop),
-                (x + 420.0, drop),
-                (x + 120.0, drop + H),
-                (x, drop + H),
             ],
             soft,
         );

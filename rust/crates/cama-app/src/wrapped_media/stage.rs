@@ -235,6 +235,7 @@ const VIOLET: Rgba = Rgba::rgb(92, 33, 240);
 const COBALT: Rgba = Rgba::rgb(34, 40, 220);
 const PLUM: Rgba = Rgba::rgb(60, 12, 80);
 const AQUA: Rgba = Rgba::rgb(18, 216, 196);
+const RADIANT: Rgba = Rgba::rgb(46, 184, 92);
 
 pub(super) fn palette(theme: WrappedTheme) -> Palette {
     let (bg, fg, accent, soft, on_accent) = match theme {
@@ -250,7 +251,7 @@ pub(super) fn palette(theme: WrappedTheme) -> Palette {
             CREAM,
         ),
         WrappedTheme::Months => (ORANGE, INK, PLUM, Rgba::rgb(255, 148, 66), CREAM),
-        WrappedTheme::Squad => (AQUA, INK, PLUM, Rgba::rgb(66, 232, 214), CREAM),
+        WrappedTheme::Squad => (RADIANT, INK, PLUM, Rgba::rgb(74, 206, 116), CREAM),
         WrappedTheme::Rivals => (
             Rgba::rgb(196, 20, 52),
             CREAM,
@@ -351,6 +352,8 @@ pub(super) struct Stage<'a> {
     pub(super) palette: Palette,
     pub(super) t: f32,
     pub(super) art: Option<PreparedArt>,
+    /// Pictures for ranked rows, by row index.
+    pub(super) row_art: Vec<Option<PreparedArt>>,
     pub(super) avatars: Vec<Option<DecodedPng>>,
     glyphs: HashMap<(Face, char, u32), Glyph>,
     fits: HashMap<(String, Face, u32, i32, i32), Fit>,
@@ -365,6 +368,7 @@ impl<'a> Stage<'a> {
             palette,
             t: 1.0,
             art: artwork::prepare(slide),
+            row_art: artwork::prepare_rows(slide),
             avatars: slide
                 .avatars
                 .iter()
