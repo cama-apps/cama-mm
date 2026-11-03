@@ -493,6 +493,40 @@ fn insert_heroes_chart_fixture(database: &NamedTempFile) {
     }
 }
 
+fn insert_profile_apm_fixture(database: &NamedTempFile) {
+    let connection = Connection::open(database.path()).expect("open profile APM fixture");
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .expect("disable legacy foreign-key mismatch for fixture row");
+    for (match_id, apm) in [(40_i64, 180_i64), (41_i64, 221_i64), (42_i64, 0_i64)] {
+        connection
+            .execute(
+                "INSERT INTO matches (
+                     match_id, guild_id, team1_players, team2_players, winning_team,
+                     enrichment_data
+                 ) VALUES (?1, 42, '[100]', '[200]', 1, '{}')",
+                params![match_id],
+            )
+            .expect("insert APM match");
+        connection
+            .execute(
+                "INSERT INTO match_participants (
+                     match_id, discord_id, guild_id, team_number, won, side
+                 ) VALUES (?1, 100, 42, 1, 1, 'radiant')",
+                params![match_id],
+            )
+            .expect("insert APM participant");
+        connection
+            .execute(
+                "INSERT INTO wrapped_enrichment_facts (
+                     guild_id, match_id, discord_id, actions_per_min
+                 ) VALUES (42, ?1, 100, ?2)",
+                params![match_id, apm],
+            )
+            .expect("insert APM fact");
+    }
+}
+
 fn profile_page(database: &NamedTempFile, tab: ProfileTab) -> ProfilePage {
     ProfileDataSources::new(database.path(), offline_services())
         .build_page(tab, 100, Some(42), "Player")
@@ -1578,6 +1612,37 @@ fn test_overview_loads_badge_bankruptcy_and_hero_stats_concurrently() {
     assert_eq!(page.title, "Profile: Player");
     assert!(rating.value.contains("**OpenSkill:** 250"));
     assert!(rating.value.contains("64% certain"));
+}
+
+#[test]
+fn profile_overview_shows_average_apm_and_sample_games() {
+    let database = migrated_player_fixture();
+    insert_profile_apm_fixture(&database);
+
+    let page = profile_page(&database, ProfileTab::Overview);
+    let apm = page
+        .fields
+        .iter()
+        .find(|field| field.name == "APM")
+        .expect("overview APM field");
+
+    assert_eq!(
+        apm.value,
+        "Average: 200.5 APM (2 games)\nCompleted enriched inhouse matches"
+    );
+}
+
+#[test]
+fn profile_overview_explains_missing_apm_data() {
+    let database = migrated_player_fixture();
+    let page = profile_page(&database, ProfileTab::Overview);
+    let apm = page
+        .fields
+        .iter()
+        .find(|field| field.name == "APM")
+        .expect("overview APM field");
+
+    assert_eq!(apm.value, "No completed enriched inhouse APM data yet!");
 }
 
 #[test]

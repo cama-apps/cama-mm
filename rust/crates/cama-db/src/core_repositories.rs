@@ -422,8 +422,8 @@ impl PlayerRepository {
 
     /// Discord IDs with any activity footprint in the guild: the union of
     /// registered players, bettors, tip senders and recipients, and trivia
-    /// participants, deduplicated and in ascending ID order.  This backs the
-    /// unified leaderboard's member-candidate set.
+    /// participants, and Wrapped match facts, deduplicated and in ascending
+    /// ID order.  This backs the unified leaderboard's member-candidate set.
     pub fn candidate_discord_ids(
         &self,
         guild_id: Option<i64>,
@@ -435,6 +435,7 @@ impl PlayerRepository {
              UNION SELECT sender_id FROM tip_transactions WHERE guild_id = ?1
              UNION SELECT recipient_id FROM tip_transactions WHERE guild_id = ?1
              UNION SELECT discord_id FROM trivia_sessions WHERE guild_id = ?1
+             UNION SELECT discord_id FROM wrapped_enrichment_facts WHERE guild_id = ?1
              ORDER BY 1",
         )?;
         statement
@@ -9944,23 +9945,32 @@ mod tests {
                 params![TEST_GUILD_ID],
             )
             .expect("seed trivia");
+        connection
+            .execute(
+                "INSERT INTO wrapped_enrichment_facts
+                 (guild_id, match_id, discord_id, actions_per_min)
+                 VALUES (?1, 1, 17, 120), (?2, 2, 97, 140)",
+                params![TEST_GUILD_ID, TEST_GUILD_ID_SECONDARY],
+            )
+            .expect("seed Wrapped facts");
         drop(connection);
 
-        // Union of players, bettors, tip senders/recipients, and trivia
-        // participants, deduplicated and ascending; other guilds excluded.
+        // Union of players, bettors, tip senders/recipients, trivia
+        // participants, and Wrapped facts, deduplicated and ascending; other
+        // guilds excluded.
         assert_eq!(
             fixture
                 .players
                 .candidate_discord_ids(Some(TEST_GUILD_ID))
                 .expect("candidate ids"),
-            [11, 12, 13, 14, 15, 16]
+            [11, 12, 13, 14, 15, 16, 17]
         );
         assert_eq!(
             fixture
                 .players
                 .candidate_discord_ids(Some(TEST_GUILD_ID_SECONDARY))
                 .expect("secondary guild ids"),
-            [98, 99]
+            [97, 98, 99]
         );
         assert_eq!(
             fixture
@@ -10036,6 +10046,13 @@ mod tests {
             bonus_jc INTEGER, win_bonus_jc INTEGER, assigned_role TEXT,
             gold_at_10 INTEGER, derived_role TEXT, last_hits_at_10 INTEGER,
             PRIMARY KEY(match_id,discord_id)
+        );
+        CREATE TABLE wrapped_enrichment_facts (
+            guild_id INTEGER NOT NULL,
+            match_id INTEGER NOT NULL,
+            discord_id INTEGER NOT NULL,
+            actions_per_min NUMERIC,
+            PRIMARY KEY(guild_id,match_id,discord_id)
         );
         CREATE TABLE rating_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT, discord_id INTEGER, rating REAL,

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use cama_app::unified_leaderboard::{
-    BalanceLeaderboard, BankruptcyState, ButtonStyle, GamblingEntry, GamblingServerStats,
+    ApmEntry, BalanceLeaderboard, BankruptcyState, ButtonStyle, GamblingEntry, GamblingServerStats,
     GamblingSnapshot, GuildMemberDirectory, LeaderboardTab, NegativeBalanceEntry, RatingKind,
     ScopedTipLeaderboardEntry, TRIVIA_WINDOW_DAYS, TabData, TabState, TipsSnapshot, TriviaEntry,
     UnifiedLeaderboardRepositoryPort, UnifiedLeaderboardView,
@@ -24,6 +24,7 @@ use cama_db::core_repositories::PlayerRepository;
 use cama_db::gambling_stats_repository::{GamblingStatsRepository, GamblingStatsService};
 use cama_db::tip_repository::TipRepository;
 use cama_db::trivia_commands_repository::TriviaCommandsRepository;
+use cama_db::wrapped_repository::WrappedRepository;
 use cama_domain::embed_safety::EmbedModel;
 use cama_domain::formatting::JOPACOIN_EMOTE;
 use cama_domain::tip_service::{TipLeaderboardEntry, TipVolume};
@@ -42,6 +43,7 @@ pub struct InfoAnalyticsSnapshot {
     pub tip_sender_entries: usize,
     pub tip_receiver_entries: usize,
     pub trivia_entries: usize,
+    pub apm_entries: usize,
 }
 
 /// Read the production Info/profile analytics surfaces from an already
@@ -73,6 +75,7 @@ pub fn read_info_analytics_snapshot(
     let trivia_entries = repository
         .trivia_candidates(guild, TRIVIA_WINDOW_DAYS, limit)?
         .len();
+    let apm_entries = repository.apm_candidates(guild, limit)?.len();
     Ok(InfoAnalyticsSnapshot {
         player_count,
         balance_candidates,
@@ -82,6 +85,7 @@ pub fn read_info_analytics_snapshot(
         tip_sender_entries,
         tip_receiver_entries,
         trivia_entries,
+        apm_entries,
     })
 }
 
@@ -165,7 +169,7 @@ impl RegistrationProvider for InfoRegistrationProvider {
         })?;
         registry.command(CommandSpec {
             name: "leaderboard".to_owned(),
-            description: "View leaderboard (balance, gambling, ratings)".to_owned(),
+            description: "View leaderboard (balance, gambling, ratings, APM)".to_owned(),
             options: vec![
                 CommandOptionSpec::new(
                     "type",
@@ -179,6 +183,7 @@ impl RegistrationProvider for InfoRegistrationProvider {
                     string_choice("Gambling", "gambling"),
                     string_choice("Tips", "tips"),
                     string_choice("Trivia", "trivia"),
+                    string_choice("Actions Per Minute", "apm"),
                 ]),
                 CommandOptionSpec::new(
                     "limit",
@@ -909,6 +914,7 @@ fn parse_component_id(
             Some("openskill") => LeaderboardTab::OpenSkill,
             Some("tips") => LeaderboardTab::Tips,
             Some("trivia") => LeaderboardTab::Trivia,
+            Some("apm") => LeaderboardTab::Apm,
             _ => return Err("invalid leaderboard tab".into()),
         }),
         Some("previous") => LeaderboardAction::Previous,
@@ -946,6 +952,7 @@ fn interaction_embed(embed: EmbedModel, tab: LeaderboardTab) -> InteractionEmbed
         LeaderboardTab::Gambling => 0xFF_D7_00,
         LeaderboardTab::Tips => TIPS_PINK,
         LeaderboardTab::Trivia => TRIVIA_ORANGE,
+        LeaderboardTab::Apm => DISCORD_BLUE,
     };
     let mut converted = embed
         .title
@@ -982,6 +989,7 @@ fn leaderboard_action_rows(
         InteractionActionRow::buttons(vec![
             tab_button(view_id, LeaderboardTab::Tips, "Tips", style),
             tab_button(view_id, LeaderboardTab::Trivia, "Trivia", style),
+            tab_button(view_id, LeaderboardTab::Apm, "APM", style),
             InteractionButton::new(format!("info:{view_id}:previous"), " Previous")
                 .style(InteractionButtonStyle::Secondary)
                 .disabled(page.previous_disabled),
@@ -1118,6 +1126,7 @@ fn help_embed(
              `/leaderboard type:gambling` - Gambling rankings & Hall of Degen\n\
              `/leaderboard type:tips` - Tipping rankings (generous/popular)\n\
              `/leaderboard type:trivia` - Trivia best streaks (7-day)\n\
+             `/leaderboard type:apm` - Average actions per minute rankings\n\
              `/calibration` - Rating system health & calibration stats",
             false,
         );
@@ -1364,6 +1373,27 @@ impl UnifiedLeaderboardRepositoryPort for InfoLeaderboardRepository {
                 total_transactions: total_volume.total_transactions,
             },
         }))
+    }
+
+    fn apm_candidates(
+        &mut self,
+        guild_id: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<ApmEntry>, Self::Error> {
+        WrappedRepository::new(&self.path)
+            .get_apm_leaderboard(guild_id, sqlite_limit(limit))
+            .map(|entries| {
+                entries
+                    .into_iter()
+                    .map(|entry| ApmEntry {
+                        discord_id: entry.discord_id,
+                        guild_id,
+                        average_apm: entry.average_apm,
+                        games: entry.games,
+                    })
+                    .collect()
+            })
+            .map_err(|error| error.to_string())
     }
 
     fn trivia_candidates(

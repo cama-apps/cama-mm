@@ -46,6 +46,10 @@ enum RepositoryCall {
         days: i64,
         limit: usize,
     },
+    ApmCandidates {
+        guild_id: Option<i64>,
+        limit: usize,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -61,6 +65,7 @@ struct FakeRepository {
     openskill_count: usize,
     tips: Option<TipsSnapshot>,
     trivia: Vec<TriviaEntry>,
+    apm: Vec<ApmEntry>,
     calls: Vec<RepositoryCall>,
 }
 
@@ -78,6 +83,7 @@ impl Default for FakeRepository {
             openskill_count: 0,
             tips: None,
             trivia: Vec::new(),
+            apm: Vec::new(),
             calls: Vec::new(),
         }
     }
@@ -192,6 +198,16 @@ impl UnifiedLeaderboardRepositoryPort for FakeRepository {
             limit,
         });
         Ok(self.trivia.iter().take(limit).cloned().collect())
+    }
+
+    fn apm_candidates(
+        &mut self,
+        guild_id: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<ApmEntry>, Self::Error> {
+        self.calls
+            .push(RepositoryCall::ApmCandidates { guild_id, limit });
+        Ok(self.apm.iter().take(limit).cloned().collect())
     }
 }
 
@@ -318,14 +334,15 @@ fn test_tab_values() {
             "glicko",
             "openskill",
             "tips",
-            "trivia"
+            "trivia",
+            "apm"
         ]
     );
 }
 
 #[test]
 fn test_tab_count() {
-    assert_eq!(LeaderboardTab::ALL.len(), 6);
+    assert_eq!(LeaderboardTab::ALL.len(), 7);
 }
 
 #[test]
@@ -383,7 +400,7 @@ fn test_initial_tab_custom() {
 #[test]
 fn test_all_tabs_have_state() {
     let view = view(FakeRepository::default(), LeaderboardTab::Balance, 100);
-    assert_eq!(view.tab_count(), 6);
+    assert_eq!(view.tab_count(), 7);
     assert!(
         LeaderboardTab::ALL
             .into_iter()
@@ -402,6 +419,7 @@ fn test_active_tab_is_primary() {
         LeaderboardTab::Gambling,
         LeaderboardTab::Glicko,
         LeaderboardTab::OpenSkill,
+        LeaderboardTab::Apm,
     ] {
         assert_eq!(view.button_style(tab), ButtonStyle::Secondary);
     }
@@ -708,6 +726,84 @@ fn test_trivia_backfills_after_departed_member() {
 }
 
 #[test]
+fn test_apm_filters_sorts_and_backfills_after_departed_member() {
+    let repository = FakeRepository {
+        apm: vec![
+            ApmEntry {
+                discord_id: 789,
+                guild_id: Some(GUILD + 1),
+                average_apm: 500.0,
+                games: 10,
+            },
+            ApmEntry {
+                discord_id: 999,
+                guild_id: Some(GUILD),
+                average_apm: 400.0,
+                games: 10,
+            },
+            ApmEntry {
+                discord_id: 123,
+                guild_id: Some(GUILD),
+                average_apm: 200.0,
+                games: 10,
+            },
+            ApmEntry {
+                discord_id: 456,
+                guild_id: Some(GUILD),
+                average_apm: 200.0,
+                games: 10,
+            },
+            ApmEntry {
+                discord_id: 67_890,
+                guild_id: Some(GUILD),
+                average_apm: 0.0,
+                games: 10,
+            },
+            ApmEntry {
+                discord_id: 123,
+                guild_id: Some(GUILD),
+                average_apm: f64::NAN,
+                games: 10,
+            },
+            ApmEntry {
+                discord_id: 123,
+                guild_id: Some(GUILD),
+                average_apm: f64::INFINITY,
+                games: 10,
+            },
+            ApmEntry {
+                discord_id: 123,
+                guild_id: Some(GUILD),
+                average_apm: 350.0,
+                games: 0,
+            },
+        ],
+        ..FakeRepository::default()
+    };
+    let mut view = view(repository, LeaderboardTab::Apm, 2);
+    view.load_tab(LeaderboardTab::Apm).unwrap();
+    let Some(TabData::Apm(entries)) = &view.tab_state(LeaderboardTab::Apm).data else {
+        panic!("APM data");
+    };
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.discord_id)
+            .collect::<Vec<_>>(),
+        [123, 456]
+    );
+    assert_eq!(entries[0].average_apm, 200.0);
+    assert!(
+        view.repository()
+            .calls
+            .contains(&RepositoryCall::ApmCandidates {
+                guild_id: Some(GUILD),
+                limit: ALL_LEADERBOARD_ENTRIES_LIMIT
+            })
+    );
+}
+
+#[test]
 fn test_build_balance_embed_empty() {
     let mut view = view(FakeRepository::default(), LeaderboardTab::Balance, 100);
     view.load_tab(LeaderboardTab::Balance).unwrap();
@@ -789,6 +885,38 @@ fn test_build_openskill_embed_empty() {
 }
 
 #[test]
+fn test_build_apm_embed_empty() {
+    let mut view = view(FakeRepository::default(), LeaderboardTab::Apm, 100);
+    view.load_tab(LeaderboardTab::Apm).unwrap();
+    let embed = view.build_embed();
+    assert_eq!(title(&embed), "LEADERBOARD > APM");
+    assert_eq!(description(&embed), "No APM data yet!");
+}
+
+#[test]
+fn test_build_apm_embed_formats_average_and_games() {
+    let repository = FakeRepository {
+        apm: vec![ApmEntry {
+            discord_id: 123,
+            guild_id: Some(GUILD),
+            average_apm: 200.456,
+            games: 2,
+        }],
+        ..FakeRepository::default()
+    };
+    let mut view = view(repository, LeaderboardTab::Apm, 100);
+    view.load_tab(LeaderboardTab::Apm).unwrap();
+    let embed = view.build_embed();
+    assert_eq!(title(&embed), "LEADERBOARD > APM");
+    assert!(
+        embed
+            .fields
+            .iter()
+            .any(|field| { field.value.contains("200.5 APM") && field.value.contains("2 games") })
+    );
+}
+
+#[test]
 fn test_single_section_page_size() {
     assert_eq!(SINGLE_SECTION_PAGE_SIZE, 20);
 }
@@ -832,6 +960,11 @@ fn test_openskill_deep_link() {
 #[test]
 fn test_tips_deep_link() {
     assert_deep_link("tips", LeaderboardTab::Tips);
+}
+
+#[test]
+fn test_apm_deep_link() {
+    assert_deep_link("apm", LeaderboardTab::Apm);
 }
 
 #[test]
