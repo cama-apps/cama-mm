@@ -373,6 +373,33 @@ fn player_art_shows_on_spotlight_cards() {
 }
 
 #[test]
+fn top_heroes_show_portraits_and_keep_slots_for_missing_ones() {
+    let mut slide = WrappedSlideData::new("story_hero", "On repeat");
+    slide.headline = "Your top heroes".to_owned();
+    slide.rows = (1..=3)
+        .map(|index| WrappedRow::new(format!("Hero {index}"), "10 games"))
+        .collect();
+    let green = [0, 200, 0];
+    slide.rows[0].image_png = Some(encode_png(&Canvas::new(256, 144, Rgba::rgb(0, 200, 0))));
+    slide.rows[2].image_png = Some(b"not png".to_vec());
+    let count = |slide: &WrappedSlideData| {
+        decode_png(&render_wrapped_slide(slide).unwrap())
+            .unwrap()
+            .pixels
+            .chunks_exact(4)
+            .filter(|pixel| pixel[..3] == green)
+            .count()
+    };
+    // Half-size portrait with rounded corners.
+    let shown = count(&slide);
+    assert!(shown > 128 * 72 * 9 / 10 && shown <= 128 * 72, "{shown}");
+    for row in &mut slide.rows {
+        row.image_png = None;
+    }
+    assert_eq!(count(&slide), 0);
+}
+
+#[test]
 fn coverage_labels_stay_visible_on_lists_and_bars() {
     for kind in ["story_hero", "story_lanes"] {
         let mut slide = WrappedSlideData::new(kind, "Recorded picks");

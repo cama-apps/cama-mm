@@ -240,6 +240,7 @@ impl WrappedSources {
             .wrapped
             .player_hero_stats(guild_id, start_ts, end_ts)
             .map_err(|error| error.to_string())?;
+        let hero_art = self.top_hero_portraits(&player_heroes, target_id);
         let rating_changes = self
             .wrapped
             .rating_changes(guild_id, start_ts, end_ts)
@@ -345,7 +346,30 @@ impl WrappedSources {
             rating_history,
             gamba_stats,
             activity,
+            hero_art,
         }))
+    }
+
+    /// Portraits for every hero the top-heroes card could rank. Ties at the
+    /// cut all get one, so the card's own ordering never misses a portrait.
+    fn top_hero_portraits(
+        &self,
+        heroes: &[WrappedPlayerHeroStats],
+        target_id: i64,
+    ) -> BTreeMap<i64, Vec<u8>> {
+        let own = heroes
+            .iter()
+            .filter(|row| row.discord_id == target_id)
+            .collect::<Vec<_>>();
+        let mut picks = own.iter().map(|row| row.picks).collect::<Vec<_>>();
+        picks.sort_unstable_by(|left, right| right.cmp(left));
+        let Some(&cut) = picks.get(TOP_HEROES - 1).or(picks.last()) else {
+            return BTreeMap::new();
+        };
+        own.into_iter()
+            .filter(|row| row.picks >= cut)
+            .filter_map(|row| Some((row.hero_id, self.art.hero_portrait(row.hero_id)?)))
+            .collect()
     }
 }
 
@@ -387,6 +411,8 @@ struct WrappedRawData {
     rating_history: Vec<WrappedRatingPoint>,
     gamba_stats: Option<cama_db::gambling_stats_repository::GambaStats>,
     activity: ActivityData,
+    /// Cached Steam portraits for the player's top heroes, by hero id.
+    hero_art: BTreeMap<i64, Vec<u8>>,
 }
 
 #[async_trait]
@@ -1412,6 +1438,7 @@ fn build_slides(
         slides.push(hero_slide(
             hero,
             &app_heroes,
+            &raw.hero_art,
             &raw.matches,
             target_id,
             target_display_name,
@@ -1649,19 +1676,23 @@ fn build_slides(
 }
 
 /// The player's heroes by picks, most played first, as the spotlight orders them.
+/// How many heroes the top-heroes card ranks.
+const TOP_HEROES: usize = 5;
+
 fn top_heroes(heroes: &[HeroRow], target_id: i64) -> Vec<&HeroRow> {
     let mut own = heroes
         .iter()
         .filter(|row| row.discord_id == target_id)
         .collect::<Vec<_>>();
     own.sort_by_key(|row| std::cmp::Reverse(row.picks));
-    own.truncate(5);
+    own.truncate(TOP_HEROES);
     own
 }
 
 fn hero_slide(
     hero: &cama_app::wrapped_story::HeroSpotlightWrapped,
     heroes: &[HeroRow],
+    portraits: &BTreeMap<i64, Vec<u8>>,
     matches: &[WrappedYearMatch],
     target_id: i64,
     username: &str,
@@ -1702,7 +1733,9 @@ fn hero_slide(
                 let kda = (kills + assists) as f64 / deaths.max(1) as f64;
                 detail.push_str(&format!(" · {kda:.1} KDA"));
             }
-            WrappedRow::new(name, detail)
+            let mut ranked = WrappedRow::new(name, detail);
+            ranked.image_png = portraits.get(&row.hero_id).cloned();
+            ranked
         })
         .collect();
     // Spotify-style bragging rights: where this player ranks on their top hero.

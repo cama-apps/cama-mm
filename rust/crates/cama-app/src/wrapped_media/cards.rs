@@ -90,6 +90,7 @@ fn card_rows(slide: &WrappedSlideData) -> Vec<WrappedRow> {
             primary: line.clone(),
             secondary: String::new(),
             value: slide.series.get(index).copied().unwrap_or(0.0),
+            image_png: None,
         })
         .collect()
 }
@@ -260,6 +261,12 @@ fn top_list(stage: &mut Stage<'_>) {
         return;
     }
     let height = ((BOTTOM - y) / rows.len() as i32).min(112);
+    let (frame_width, frame_height) = (
+        super::artwork::ROW_FRAME.0 as i32,
+        super::artwork::ROW_FRAME.1 as i32,
+    );
+    let portraits = height >= frame_height + 8 && stage.row_art.iter().any(Option::is_some);
+    let number_width = if portraits { 54 } else { 76 };
     for (index, row) in rows.iter().enumerate() {
         let top = y + index as i32 * height;
         let start = 0.22 + index as f32 * 0.09;
@@ -272,13 +279,36 @@ fn top_list(stage: &mut Stage<'_>) {
         stage.stat(
             &number,
             &number,
-            (MARGIN + x, top, 76, height),
+            (MARGIN + x, top, number_width, height),
             72.0,
             p.accent,
             Align::Left,
             (0.0, 0.0),
         );
-        let text = MARGIN + 82 + x;
+        let mut text = MARGIN + number_width + 6 + x;
+        if portraits {
+            let (left, art_top) = (text, top + (height - frame_height) / 2);
+            // A hero without a cached portrait keeps its slot, so names line up.
+            match stage.row_art.get_mut(index).and_then(Option::take) {
+                Some(art) => {
+                    let (width, art_height) = (art.width as i32, art.height as i32);
+                    let frame = (left, art_top, left + width, art_top + art_height);
+                    super::artwork::paint(&mut stage.canvas, &art, left, art_top, frame, 12.0);
+                    stage.row_art[index] = Some(art);
+                }
+                None => stage.canvas.rounded_rect(
+                    (
+                        left as f32,
+                        art_top as f32,
+                        (left + frame_width) as f32,
+                        (art_top + frame_height) as f32,
+                    ),
+                    12.0,
+                    p.soft,
+                ),
+            }
+            text += frame_width + 18;
+        }
         let width = WIDTH - MARGIN - text;
         let name = if row.secondary.is_empty() {
             height - 6

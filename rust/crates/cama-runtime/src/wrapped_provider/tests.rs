@@ -1436,6 +1436,7 @@ fn awards_match_python_tie_exclusions_hero_thresholds_and_flavor() {
         rating_history: Vec::new(),
         gamba_stats: None,
         activity: ActivityData::default(),
+        hero_art: BTreeMap::new(),
     };
     let awards = generate_awards(&raw, 3, 3);
     let titles = awards.iter().map(|award| award.title).collect::<Vec<_>>();
@@ -1563,6 +1564,54 @@ fn named(profiles: &[(i64, &str)]) -> BTreeMap<i64, WrappedDiscordProfile> {
 
 fn repository_assets() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../assets")
+}
+
+#[test]
+fn top_heroes_wear_portraits_from_the_warm_cache_only() {
+    let fixture = Fixture::migrated();
+    let heroes = tempfile::tempdir().unwrap();
+    let dotabase = heroes.path().join("dotabase.db");
+    Connection::open(&dotabase)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE heroes (
+                 id INTEGER PRIMARY KEY,name TEXT,color TEXT,localized_name TEXT,roles TEXT
+             );
+             INSERT INTO heroes VALUES
+                 (1,'npc_dota_hero_antimage','#784094','Anti-Mage','Carry'),
+                 (2,'npc_dota_hero_axe','#b32b2b','Axe','Initiator');",
+        )
+        .unwrap();
+    let cache = heroes.path().join("trivia");
+    std::fs::create_dir_all(cache.join("heroes")).unwrap();
+    let portrait = std::fs::read(repository_assets().join("wrapped/ward.png")).unwrap();
+    std::fs::write(cache.join("heroes/antimage.png"), &portrait).unwrap();
+    let art = ArtSources::for_assets(&repository_assets()).with_hero_portraits(
+        cama_app::hero_lookup::HeroLookup::new(&dotabase),
+        cache.clone(),
+    );
+    let raw = WrappedSources::with_art(&fixture.path, art)
+        .load(GUILD as i64, OWNER as i64, 2026)
+        .unwrap()
+        .unwrap();
+    let slides = build_slides(raw, &BTreeMap::new(), OWNER as i64, "Player", 2026, 3, 3);
+    let card = slides
+        .iter()
+        .find(|slide| slide.kind == "story_hero")
+        .unwrap();
+    let image = |name: &str| {
+        card.rows
+            .iter()
+            .find(|row| row.primary == name)
+            .unwrap()
+            .image_png
+            .clone()
+    };
+    assert_eq!(image("Anti-Mage"), Some(portrait));
+    // Axe was never cached, and Wrapped does not download it.
+    assert_eq!(image("Axe"), None);
+    assert!(!cache.join("heroes/axe.png").exists());
+    assert!(render_wrapped_slide(card).is_ok());
 }
 
 #[test]
