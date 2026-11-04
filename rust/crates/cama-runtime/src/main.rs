@@ -1318,6 +1318,7 @@ async fn run_serve() -> ExitCode {
     .with_worker(dig_weather_worker)
     .with_worker(mafia_phase_worker)
     .with_worker(betting_view_timeout_worker)
+    .with_worker(betting_provider.disbursement_worker())
     .with_worker(survey_recovery_worker)
     .with_worker(match_setup_recovery_worker)
     .with_worker(curfew_sweep_worker)

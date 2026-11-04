@@ -734,7 +734,6 @@ pub struct BettingRuntimeConfig {
     /// Discord IDs remain checked against the live guild member snapshot.
     pub synthetic_members_enabled: bool,
     pub disburse_min_fund: i64,
-    pub disburse_quorum_percentage: f64,
     /// Recency window that admits a player to the `lottery` disbursement draw.
     pub lottery_activity_days: i64,
     /// Daily economy-event policy is read from the same existing-schema
@@ -782,7 +781,6 @@ impl BettingRuntimeConfig {
             prediction_initial_fair_default: values.prediction_initial_fair_default,
             synthetic_members_enabled: values.gamba_synthetic_members_enabled,
             disburse_min_fund: values.disburse_min_fund,
-            disburse_quorum_percentage: values.disburse_quorum_percentage,
             lottery_activity_days: values.lottery_activity_days,
             economy_events_enabled: values.economy_events_enabled,
             economy_normal_annual_rate: values.economy_normal_annual_rate,
@@ -960,6 +958,14 @@ impl BettingRegistrationProvider {
         )
     }
 
+    #[must_use]
+    pub fn disbursement_worker(&self) -> BackgroundWorkerSpec {
+        BackgroundWorkerSpec::new(
+            "disbursement-quorum",
+            Arc::new(DisbursementQuorumWorker(self.handler.clone())),
+        )
+    }
+
     /// Trigger the same free wheel spin used by the Dig bonus dispatcher.
     ///
     /// Dig owns the bonus selection and presentation; this narrow hook keeps
@@ -980,6 +986,21 @@ impl BettingRegistrationProvider {
 
 struct BettingViewTimeoutWorker {
     handler: Arc<BettingInteractionHandler>,
+}
+
+struct DisbursementQuorumWorker(Arc<BettingInteractionHandler>);
+
+#[async_trait]
+impl BackgroundWorker for DisbursementQuorumWorker {
+    async fn run(&self, mut context: WorkerContext) -> Result<(), String> {
+        while !context.shutdown_requested() {
+            self.0.reconcile_disbursements().await?;
+            if !context.sleep(Duration::from_secs(60)).await {
+                break;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -2971,7 +2992,6 @@ impl BettingInteractionHandler {
                 self.disburse(
                     user_id,
                     guild_id,
-                    channel_id,
                     member_permissions.unwrap_or_default(),
                     &options,
                     &responder,
@@ -3134,11 +3154,7 @@ impl BettingInteractionHandler {
                     .await
                     .map_err(|error| error.to_string());
             }
-            self.update_persistent_disbursement_message(
-                &proposal,
-                disbursement_proposal_response(&proposal),
-            )
-            .await;
+            self.publish_open_disbursement(&proposal).await?;
             return respond_ephemeral(
                 &responder,
                 &format!(
@@ -5875,21 +5891,19 @@ impl BettingInteractionHandler {
     async fn reserve_voting_restricted(&self, guild_id: i64) -> Result<bool, String> {
         let path = self.database_path.clone();
         let event_config = economy_event_config(&self.config);
-        Ok(sqlite("reserve voting restriction", move || {
+        sqlite("reserve voting restriction", move || {
             SqliteEconomyEventService::new(path, event_config)
                 .effects_at(guild_id, unix_seconds()?)
                 .map(|effects| effects.reserve_voting_disabled)
                 .map_err(|error| error.to_string())
         })
         .await
-        .unwrap_or(false))
     }
 
     async fn disburse(
         &self,
         user_id: i64,
         guild_id: Option<i64>,
-        channel_id: Option<u64>,
         permissions: u64,
         options: &[InteractionOption],
         responder: &Arc<dyn InteractionResponder>,
@@ -5914,7 +5928,6 @@ impl BettingInteractionHandler {
                     .await;
                 }
                 let path = self.database_path.clone();
-                let quorum_percentage = self.config.disburse_quorum_percentage;
                 let minimum = self.config.disburse_min_fund;
                 let result = sqlite("disbursement proposal", move || {
                     let players = PlayerRepository::new(&path);
@@ -5924,29 +5937,19 @@ impl BettingInteractionHandler {
                     if !registered.iter().any(|player| player.jopacoin_balance < 0) {
                         return Err("No players with negative balance to receive funds.".to_owned());
                     }
-                    let player_count = i64::try_from(registered.len())
-                        .map_err(|_| "registered player count exceeds SQLite range".to_owned())?;
-                    let quorum = ((player_count as f64 * quorum_percentage).ceil() as i64).max(1);
                     DisbursementRepository::new(&path)
                         .create_proposal_atomic(
                             Some(guild_id),
                             unix_seconds().map_err(|error| error.to_string())?,
                             minimum,
-                            quorum,
                         )
                         .map_err(|error| error.to_string())
                 })
                 .await;
                 match result {
                     Ok(proposal) => {
-                        self.send_persistent_disbursement_message(
-                            guild_id,
-                            proposal.proposal_id,
-                            channel_id,
-                            disbursement_proposal_response(&proposal),
-                            responder,
-                        )
-                        .await
+                        self.send_persistent_disbursement_message(proposal, responder)
+                            .await
                     }
                     Err(error) => respond_ephemeral(responder, &error).await,
                 }
@@ -5986,14 +5989,8 @@ impl BettingInteractionHandler {
                         .delete_message(previous_channel, message_id)
                         .await;
                 }
-                self.send_persistent_disbursement_message(
-                    guild_id,
-                    proposal.proposal_id,
-                    channel_id,
-                    disbursement_proposal_response(&proposal),
-                    responder,
-                )
-                .await
+                self.send_persistent_disbursement_message(proposal, responder)
+                    .await
             }
             "reset" => {
                 let path = self.database_path.clone();
@@ -6111,10 +6108,7 @@ impl BettingInteractionHandler {
 
     async fn send_persistent_disbursement_message(
         &self,
-        guild_id: i64,
-        proposal_id: i64,
-        _channel_id: Option<u64>,
-        response: InteractionResponse,
+        proposal: DisbursementProposal,
         responder: &Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
         responder
@@ -6122,7 +6116,7 @@ impl BettingInteractionHandler {
             .await
             .map_err(|error| error.to_string())?;
         let receipt = responder
-            .followup_with_receipt(response)
+            .followup_with_receipt(disbursement_proposal_response(&proposal))
             .await
             .map_err(|error| error.to_string())?;
         let Some(receipt) = receipt else {
@@ -6133,7 +6127,7 @@ impl BettingInteractionHandler {
         let path = self.database_path.clone();
         sqlite("disbursement message persistence", move || {
             DisbursementRepository::new(path)
-                .set_proposal_message(Some(guild_id), proposal_id, message_id, channel_id)
+                .set_proposal_message(&proposal, message_id, channel_id)
                 .map(|_| ())
                 .map_err(|error| error.to_string())
         })
@@ -6144,24 +6138,87 @@ impl BettingInteractionHandler {
         &self,
         proposal: &DisbursementProposal,
         response: InteractionResponse,
-    ) {
+    ) -> bool {
         let (Some(channel_id), Some(message_id)) = (proposal.channel_id, proposal.message_id)
         else {
-            return;
+            return true;
         };
         let (Ok(channel_id), Ok(message_id)) =
             (u64::try_from(channel_id), u64::try_from(message_id))
         else {
-            return;
+            return false;
         };
-        let _ = self
+        if let Err(error) = self
             .discord
             .edit_message(
                 channel_id,
                 message_id,
                 DiscordMessage::default_mentions(response).preserving_content(),
             )
-            .await;
+            .await
+        {
+            warn!(%error, channel_id, message_id, "could not update disbursement ballot");
+            return false;
+        }
+        true
+    }
+
+    async fn reconcile_disbursements(&self) -> Result<(), String> {
+        let repository = DisbursementRepository::new(&self.database_path);
+        let proposals = sqlite("open disbursement quorums", move || {
+            repository
+                .proposals_needing_refresh()
+                .map_err(|error| error.to_string())
+        })
+        .await?;
+        for proposal in proposals {
+            if let Err(error) = self.reconcile_disbursement(&proposal).await {
+                warn!(%error, guild_id = proposal.guild_id, proposal_id = proposal.proposal_id, "could not reconcile disbursement");
+            }
+        }
+        Ok(())
+    }
+
+    async fn reconcile_disbursement(&self, proposal: &DisbursementProposal) -> Result<(), String> {
+        if proposal.quorum_reached() {
+            if self.reserve_voting_restricted(proposal.guild_id).await? {
+                return Ok(());
+            }
+            let result = self
+                .execute_disbursement(proposal.guild_id, proposal, true)
+                .await?;
+            let mut response = disbursement_proposal_response_with_disabled_buttons(proposal);
+            response
+                .embeds
+                .extend(disbursement_response(&result, false).embeds);
+            self.update_persistent_disbursement_message(proposal, response)
+                .await;
+            return Ok(());
+        }
+        self.publish_open_disbursement(proposal).await
+    }
+
+    async fn publish_open_disbursement(
+        &self,
+        proposal: &DisbursementProposal,
+    ) -> Result<(), String> {
+        if self
+            .update_persistent_disbursement_message(
+                proposal,
+                disbursement_proposal_response(proposal),
+            )
+            .await
+        {
+            let repository = DisbursementRepository::new(&self.database_path);
+            let proposal = proposal.clone();
+            sqlite("publish disbursement quorum", move || {
+                repository
+                    .record_published_quorum(&proposal)
+                    .map_err(|error| error.to_string())
+            })
+            .await?;
+        }
+        Ok(())
     }
 
     async fn execute_disbursement(
@@ -6723,7 +6780,7 @@ fn disbursement_proposal_response_with_disabled_buttons_impl(
         .field(
             "🗳️ Petition Progress",
             format!(
-                "`{}{}` **{total_votes}/{quorum}** • **{percentage}%**\n{progress_note}",
+                "`{}{}` **{total_votes}/{quorum}** • **{percentage}%**\n{progress_note}\nQuorum is 36% of players who played here in the last 30 days, rounded up (minimum 1).",
                 "█".repeat(filled),
                 "░".repeat(empty),
             ),

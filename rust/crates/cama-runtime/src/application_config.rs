@@ -100,7 +100,6 @@ pub struct Values {
     pub calibration_rd_threshold: f64,
     pub dig_llm_enabled: bool,
     pub disburse_min_fund: i64,
-    pub disburse_quorum_percentage: f64,
     pub dota_bet_seed_amount: i64,
     pub double_or_nothing_cooldown_seconds: i64,
     pub economy_events_enabled: bool,
@@ -430,7 +429,6 @@ impl ApplicationConfig {
                 calibration_rd_threshold: p.f64("CALIBRATION_RD_THRESHOLD", 100.0),
                 dig_llm_enabled: p.bool("DIG_LLM_ENABLED", true),
                 disburse_min_fund: p.i64("DISBURSE_MIN_FUND", 250),
-                disburse_quorum_percentage: 0.36,
                 dota_bet_seed_amount: p.i64("DOTA_BET_SEED_AMOUNT", 50),
                 double_or_nothing_cooldown_seconds: p
                     .i64("DOUBLE_OR_NOTHING_COOLDOWN_SECONDS", 2592000),
@@ -875,12 +873,8 @@ mod tests {
     }
 
     #[test]
-    fn disburse_quorum_is_thirty_six_percent_and_ignores_environment() {
-        let config = parse(&[
-            ("DISCORD_BOT_TOKEN", "token"),
-            ("DISBURSE_QUORUM_PERCENTAGE", "0.9"),
-        ]);
-        assert_eq!(config.values.disburse_quorum_percentage, 0.36);
+    fn disburse_min_fund_defaults_to_250() {
+        let config = parse(&[("DISCORD_BOT_TOKEN", "token")]);
         assert_eq!(config.values.disburse_min_fund, 250);
     }
 
