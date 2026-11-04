@@ -133,14 +133,46 @@ impl DisbursementRepository {
         read_active_proposal(&connection, guild_id)
     }
 
+    /// The stored target tracks the last published quorum. Every decision uses the live one.
+    pub fn proposals_needing_refresh(
+        &self,
+    ) -> Result<Vec<DisbursementProposal>, DisbursementRepositoryError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT guild_id, quorum_required FROM disburse_proposals WHERE status='active'",
+        )?;
+        let rows =
+            statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
+        let mut proposals = Vec::new();
+        for row in rows {
+            let (guild_id, published_quorum) = row?;
+            if let Some(proposal) = read_active_proposal(&connection, guild_id)?
+                && (proposal.quorum_required != published_quorum || proposal.quorum_reached())
+            {
+                proposals.push(proposal);
+            }
+        }
+        Ok(proposals)
+    }
+
+    pub fn record_published_quorum(
+        &self,
+        proposal: &DisbursementProposal,
+    ) -> Result<(), DisbursementRepositoryError> {
+        self.connection()?.execute(
+            "UPDATE disburse_proposals SET quorum_required=?1 WHERE guild_id=?2 AND proposal_id=?3 AND message_id IS ?4 AND status='active'",
+            params![proposal.quorum_required, proposal.guild_id, proposal.proposal_id, proposal.message_id],
+        )?;
+        Ok(())
+    }
+
     /// Lock the current Reserve amount and create one active proposal in the
-    /// same transaction.  `quorum_required` is computed by the policy layer.
+    /// same transaction, using the guild's current match activity.
     pub fn create_proposal_atomic(
         &self,
         guild_id: Option<i64>,
         proposal_id: i64,
         minimum_fund: i64,
-        quorum_required: i64,
     ) -> Result<DisbursementProposal, DisbursementRepositoryError> {
         let guild_id = Self::normalize_guild_id(guild_id);
         let mut connection = self.connection()?;
@@ -179,6 +211,7 @@ impl DisbursementRepository {
                 minimum: minimum_fund,
             });
         }
+        let quorum_required = active_quorum(&transaction, guild_id)?;
         let fund_amount = available;
         let updated = available
             .checked_sub(fund_amount)
@@ -200,7 +233,7 @@ impl DisbursementRepository {
             "INSERT INTO disburse_proposals
                  (guild_id, proposal_id, fund_amount, quorum_required, status)
              VALUES (?1, ?2, ?3, ?4, 'active')",
-            params![guild_id, proposal_id, fund_amount, quorum_required.max(1)],
+            params![guild_id, proposal_id, fund_amount, quorum_required],
         )?;
         transaction.execute(
             "DELETE FROM disburse_votes WHERE guild_id = ?1 AND proposal_id != ?2",
@@ -213,7 +246,7 @@ impl DisbursementRepository {
             message_id: None,
             channel_id: None,
             fund_amount,
-            quorum_required: quorum_required.max(1),
+            quorum_required,
             status: "active".to_owned(),
             created_at: None,
             votes: zero_votes(),
@@ -222,20 +255,19 @@ impl DisbursementRepository {
 
     pub fn set_proposal_message(
         &self,
-        guild_id: Option<i64>,
-        proposal_id: i64,
+        proposal: &DisbursementProposal,
         message_id: i64,
         channel_id: i64,
     ) -> Result<bool, DisbursementRepositoryError> {
-        let connection = self.connection()?;
-        Ok(connection.execute(
-            "UPDATE disburse_proposals SET message_id = ?1, channel_id = ?2
-             WHERE guild_id = ?3 AND proposal_id = ?4 AND status = 'active'",
+        Ok(self.connection()?.execute(
+            "UPDATE disburse_proposals SET message_id=?1, channel_id=?2, quorum_required=?3
+             WHERE guild_id=?4 AND proposal_id=?5 AND status='active'",
             params![
                 message_id,
                 channel_id,
-                Self::normalize_guild_id(guild_id),
-                proposal_id
+                proposal.quorum_required,
+                proposal.guild_id,
+                proposal.proposal_id
             ],
         )? == 1)
     }
@@ -599,6 +631,21 @@ impl DisbursementRepository {
     }
 }
 
+/// Count each registered participant once, across recorded matches in the rolling window.
+fn active_quorum(connection: &Connection, guild_id: i64) -> rusqlite::Result<i64> {
+    let active: i64 = connection.query_row(
+        "SELECT COUNT(DISTINCT mp.discord_id)
+         FROM matches m
+         JOIN match_participants mp ON mp.match_id=m.match_id AND mp.guild_id=m.guild_id
+         JOIN players p ON p.discord_id=mp.discord_id AND p.guild_id=mp.guild_id
+         WHERE m.guild_id=?1 AND mp.team_number IN (1,2)
+           AND datetime(m.match_date, 'auto') BETWEEN datetime('now', '-30 days') AND datetime('now')",
+        [guild_id],
+        |row| row.get(0),
+    )?;
+    Ok(((active * 36 + 99) / 100).max(1))
+}
+
 fn read_active_proposal(
     connection: &Connection,
     guild_id: i64,
@@ -606,7 +653,7 @@ fn read_active_proposal(
     let Some(row) = connection
         .query_row(
             "SELECT guild_id, proposal_id, message_id, channel_id, fund_amount,
-                        quorum_required, status, created_at
+                        status, created_at
                  FROM disburse_proposals WHERE guild_id = ?1 AND status = 'active'",
             [guild_id],
             |row| {
@@ -616,9 +663,8 @@ fn read_active_proposal(
                     row.get::<_, Option<i64>>(2)?,
                     row.get::<_, Option<i64>>(3)?,
                     row.get::<_, i64>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(6)?,
                 ))
             },
         )
@@ -632,9 +678,9 @@ fn read_active_proposal(
         message_id: row.2,
         channel_id: row.3,
         fund_amount: row.4,
-        quorum_required: row.5,
-        status: row.6,
-        created_at: row.7,
+        quorum_required: active_quorum(connection, guild_id)?,
+        status: row.5,
+        created_at: row.6,
         votes: zero_votes(),
     };
     let mut statement = connection.prepare(
@@ -777,6 +823,48 @@ mod tests {
     use tempfile::NamedTempFile;
 
     #[test]
+    fn open_quorum_tracks_recent_match_participants_and_ignores_legacy_target() {
+        let database = NamedTempFile::new().unwrap();
+        copy_migrated_database(database.path()).unwrap();
+        let repository = DisbursementRepository::new(database.path());
+        let db = repository.connection().unwrap();
+        db.execute_batch(
+            "INSERT INTO disburse_proposals(guild_id,proposal_id,fund_amount,quorum_required,status)
+             VALUES(7,100,50,99,'active');
+             INSERT INTO players(guild_id,discord_id,discord_username)
+             VALUES(7,1,'one'),(7,2,'two'),(7,3,'three'),(7,4,'four'),(7,5,'five'),(8,5,'five');
+             INSERT INTO matches(match_id,guild_id,team1_players,team2_players,match_date)
+             VALUES(1,7,'[]','[]',datetime('now','-1 day')),
+                   (2,7,'[]','[]',unixepoch('now','-29 days')),
+                   (3,7,'[]','[]',datetime('now','-31 days')),
+                   (4,8,'[]','[]',CURRENT_TIMESTAMP);
+             INSERT INTO match_participants(match_id,guild_id,discord_id,team_number)
+             VALUES(1,7,1,1),(2,7,1,1),(2,7,2,1),(2,7,3,2),(2,7,99,2),
+                   (3,7,4,2),(4,8,5,1);",
+        ).unwrap();
+        let ballot = repository.add_vote(Some(7), 100, 1, "burn").unwrap();
+        assert_eq!(ballot.quorum_required, 2);
+        assert!(!ballot.quorum_reached());
+        db.execute(
+            "UPDATE matches SET match_date=datetime('now','-31 days') WHERE match_id=2",
+            [],
+        )
+        .unwrap();
+        let ballot = repository.get_active_proposal(Some(7)).unwrap().unwrap();
+        assert_eq!(ballot.quorum_required, 1);
+        assert!(ballot.quorum_reached());
+        db.execute(
+            "UPDATE matches SET match_date=CURRENT_TIMESTAMP WHERE match_id=2",
+            [],
+        )
+        .unwrap();
+        assert!(matches!(
+            repository.complete_reserve_allocation_atomic(Some(7), 100, "burn", true),
+            Err(DisbursementRepositoryError::QuorumNotReached)
+        ));
+    }
+
+    #[test]
     fn allocation_rejects_a_method_superseded_by_the_current_ballot() {
         let database = NamedTempFile::new().expect("temporary database");
         copy_migrated_database(database.path()).expect("schema");
@@ -784,9 +872,7 @@ mod tests {
         crate::loan_repository::LoanRepository::new(database.path())
             .add_to_nonprofit_fund(Some(7), 50, None)
             .expect("reserve");
-        repository
-            .create_proposal_atomic(Some(7), 100, 10, 1)
-            .unwrap();
+        repository.create_proposal_atomic(Some(7), 100, 10).unwrap();
         repository.add_vote(Some(7), 100, 1, "burn").unwrap();
         repository.add_vote(Some(7), 100, 1, "even").unwrap();
 
@@ -810,15 +896,11 @@ mod tests {
         let database = NamedTempFile::new().expect("temporary database");
         copy_migrated_database(database.path()).expect("schema");
         let repository = DisbursementRepository::new(database.path());
-        repository
-            .create_proposal_atomic(Some(7), 100, 0, 1)
-            .unwrap();
+        repository.create_proposal_atomic(Some(7), 100, 0).unwrap();
         repository
             .reset_and_return_fund_atomic(Some(7), "reset")
             .unwrap();
-        let replacement = repository
-            .create_proposal_atomic(Some(7), 100, 0, 1)
-            .unwrap();
+        let replacement = repository.create_proposal_atomic(Some(7), 100, 0).unwrap();
         assert_ne!(replacement.proposal_id, 100);
     }
 
@@ -829,15 +911,11 @@ mod tests {
         let repository = DisbursementRepository::new(database.path());
         let loans = crate::loan_repository::LoanRepository::new(database.path());
         loans.add_to_nonprofit_fund(Some(7), 50, None).unwrap();
-        repository
-            .create_proposal_atomic(Some(7), 100, 10, 1)
-            .unwrap();
+        repository.create_proposal_atomic(Some(7), 100, 10).unwrap();
         repository
             .reset_and_return_fund_atomic(Some(7), "reset")
             .unwrap();
-        repository
-            .create_proposal_atomic(Some(7), 100, 10, 1)
-            .unwrap();
+        repository.create_proposal_atomic(Some(7), 100, 10).unwrap();
         let replacement = repository.get_active_proposal(Some(7)).unwrap().unwrap();
 
         assert!(matches!(
@@ -871,9 +949,12 @@ mod tests {
         let database = NamedTempFile::new().expect("temporary database");
         copy_migrated_database(database.path()).expect("schema");
         let repository = DisbursementRepository::new(database.path());
-        repository
-            .create_proposal_atomic(Some(7), 100, 0, 2)
-            .unwrap();
+        repository.connection().unwrap().execute_batch(
+            "INSERT INTO players(guild_id,discord_id,discord_username) VALUES(7,1,'a'),(7,2,'b'),(7,3,'c');
+             INSERT INTO matches(match_id,guild_id,team1_players,team2_players) VALUES(1,7,'[]','[]');
+             INSERT INTO match_participants(match_id,guild_id,discord_id,team_number) VALUES(1,7,1,1),(1,7,2,1),(1,7,3,2);"
+        ).unwrap();
+        repository.create_proposal_atomic(Some(7), 100, 0).unwrap();
         repository.add_vote(Some(7), 100, 1, "burn").unwrap();
         assert!(matches!(
             repository.complete_reserve_allocation_atomic(Some(7), 100, "burn", true),
@@ -890,25 +971,13 @@ mod tests {
         let database = NamedTempFile::new().expect("temporary database");
         copy_migrated_database(database.path()).expect("schema");
         let repository = DisbursementRepository::new(database.path());
-        repository
-            .create_proposal_atomic(Some(7), 100, 0, 1)
-            .unwrap();
+        let old = repository.create_proposal_atomic(Some(7), 100, 0).unwrap();
         repository
             .reset_and_return_fund_atomic(Some(7), "reset")
             .unwrap();
-        repository
-            .create_proposal_atomic(Some(7), 200, 0, 1)
-            .unwrap();
-        assert!(
-            repository
-                .set_proposal_message(Some(7), 200, 22, 33)
-                .unwrap()
-        );
-        assert!(
-            !repository
-                .set_proposal_message(Some(7), 100, 44, 55)
-                .unwrap()
-        );
+        let new = repository.create_proposal_atomic(Some(7), 200, 0).unwrap();
+        assert!(repository.set_proposal_message(&new, 22, 33).unwrap());
+        assert!(!repository.set_proposal_message(&old, 44, 55).unwrap());
         let proposal = repository.get_active_proposal(Some(7)).unwrap().unwrap();
         assert_eq!(proposal.proposal_id, 200);
         assert_eq!(proposal.message_id, Some(22));
@@ -932,7 +1001,7 @@ mod tests {
             .expect("reserve");
         let repository = DisbursementRepository::new(database.path());
         let proposal = repository
-            .create_proposal_atomic(Some(7), 100, 10, 1)
+            .create_proposal_atomic(Some(7), 100, 10)
             .expect("proposal");
         assert_eq!(proposal.fund_amount, 50);
         let proposal = repository.add_vote(Some(7), 100, 1, "even").expect("vote");
@@ -981,7 +1050,7 @@ mod tests {
             .expect("reserve");
         let repository = DisbursementRepository::new(database.path());
         repository
-            .create_proposal_atomic(Some(7), 100, 10, 1)
+            .create_proposal_atomic(Some(7), 100, 10)
             .expect("proposal");
         repository.add_vote(Some(7), 100, 1, "even").expect("vote");
         repository
@@ -995,7 +1064,7 @@ mod tests {
         );
 
         let proposal = repository
-            .create_proposal_atomic(Some(7), 200, 10, 1)
+            .create_proposal_atomic(Some(7), 200, 10)
             .expect("second proposal");
         assert_eq!(proposal.proposal_id, 200);
         assert_eq!(proposal.fund_amount, 30);
@@ -1021,7 +1090,7 @@ mod tests {
             .expect("reserve");
         let repository = DisbursementRepository::new(database.path());
         repository
-            .create_proposal_atomic(Some(7), 100, 10, 1)
+            .create_proposal_atomic(Some(7), 100, 10)
             .expect("proposal");
         assert!(
             repository
@@ -1036,7 +1105,7 @@ mod tests {
         );
 
         let proposal = repository
-            .create_proposal_atomic(Some(7), 200, 10, 1)
+            .create_proposal_atomic(Some(7), 200, 10)
             .expect("second proposal");
         assert_eq!(proposal.proposal_id, 200);
         assert_eq!(proposal.fund_amount, 50);
@@ -1053,10 +1122,10 @@ mod tests {
             .expect("reserve");
         let repository = DisbursementRepository::new(database.path());
         repository
-            .create_proposal_atomic(Some(7), 100, 10, 1)
+            .create_proposal_atomic(Some(7), 100, 10)
             .expect("proposal");
         assert!(matches!(
-            repository.create_proposal_atomic(Some(7), 200, 10, 1),
+            repository.create_proposal_atomic(Some(7), 200, 10),
             Err(DisbursementRepositoryError::ActiveProposal)
         ));
         assert_eq!(

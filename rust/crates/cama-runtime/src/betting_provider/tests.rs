@@ -3400,7 +3400,6 @@ fn wheel_interaction_timeout_policy_matches_python_views() {
             prediction_initial_fair_default: 50,
             synthetic_members_enabled: false,
             disburse_min_fund: 0,
-            disburse_quorum_percentage: 0.0,
             lottery_activity_days: 14,
             economy_events_enabled: false,
             economy_normal_annual_rate: 0.0,
@@ -3691,6 +3690,45 @@ fn disbursement_petition_embed_explains_every_option_and_progress() {
 }
 
 #[tokio::test]
+async fn disbursement_worker_settles_a_legacy_ballot_without_another_vote() {
+    let database = NamedTempFile::new().unwrap();
+    initialize_or_migrate(database.path()).unwrap();
+    let db = Connection::open(database.path()).unwrap();
+    db.execute_batch(
+        "INSERT INTO disburse_proposals(guild_id,proposal_id,fund_amount,quorum_required,status)
+         VALUES(42,900,50,20,'active'),(43,901,10,20,'active');
+         INSERT INTO disburse_votes(guild_id,proposal_id,discord_id,vote_method,voted_at)
+         VALUES(42,900,1,'burn',1);",
+    )
+    .unwrap();
+    let config = ApplicationConfig::from_lookup(|name| {
+        (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
+    })
+    .unwrap();
+    let provider = BettingRegistrationProvider::new(
+        database.path(),
+        &config,
+        Arc::new(crate::serenity_transport::SerenityDiscordTransport::new()),
+    );
+    let repository = DisbursementRepository::new(database.path());
+    for _ in 0..2 {
+        provider.handler.reconcile_disbursements().await.unwrap();
+        assert!(repository.get_active_proposal(Some(42)).unwrap().is_none());
+        assert_eq!(
+            repository
+                .get_last_disbursement(Some(42))
+                .unwrap()
+                .unwrap()
+                .total_amount,
+            50
+        );
+        let empty = repository.get_active_proposal(Some(43)).unwrap().unwrap();
+        assert_eq!(empty.quorum_required, 1);
+        assert!(!empty.quorum_reached());
+    }
+}
+
+#[tokio::test]
 async fn disbursement_old_buttons_cannot_vote_on_a_replacement() {
     let database = NamedTempFile::new().expect("reserve button database");
     initialize_or_migrate(database.path()).expect("schema");
@@ -3698,15 +3736,11 @@ async fn disbursement_old_buttons_cannot_vote_on_a_replacement() {
         .add(&NewPlayer::new(1, "voter", Some(42)))
         .unwrap();
     let repository = DisbursementRepository::new(database.path());
-    repository
-        .create_proposal_atomic(Some(42), 900, 0, 1)
-        .unwrap();
+    repository.create_proposal_atomic(Some(42), 900, 0).unwrap();
     repository
         .reset_and_return_fund_atomic(Some(42), "reset")
         .unwrap();
-    repository
-        .create_proposal_atomic(Some(42), 901, 0, 1)
-        .unwrap();
+    repository.create_proposal_atomic(Some(42), 901, 0).unwrap();
     let config = ApplicationConfig::from_lookup(|name| {
         (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
     })
