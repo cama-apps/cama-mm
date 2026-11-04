@@ -69,6 +69,7 @@ use cama_db::wheel_spin_repository::{NewWheelSpin, WheelSpinRepository};
 use cama_domain::discord_content::UNKNOWN_PLAYER;
 use cama_domain::embed_safety::{FIELD_VALUE_LIMIT, MAX_FIELDS, TOTAL_LIMIT, truncate_field};
 use cama_domain::formatting::{JOPACOIN_EMOTE, format_grouped};
+use cama_domain::game_date::next_game_day_start_ts;
 use cama_domain::mana::{ManaEffects, format_mana_badge};
 use cama_domain::pet_evolution::PetActivity;
 use cama_domain::player::Player;
@@ -994,10 +995,15 @@ struct DisbursementQuorumWorker(Arc<BettingInteractionHandler>);
 impl BackgroundWorker for DisbursementQuorumWorker {
     async fn run(&self, mut context: WorkerContext) -> Result<(), String> {
         while !context.shutdown_requested() {
-            self.0.reconcile_disbursements().await?;
-            if !context.sleep(Duration::from_secs(60)).await {
+            let now = unix_seconds()?;
+            let reset = next_game_day_start_ts(now).map_err(|error| error.to_string())?;
+            if !context
+                .sleep(Duration::from_secs(reset.abs_diff(now)))
+                .await
+            {
                 break;
             }
+            self.0.reconcile_disbursements().await?;
         }
         Ok(())
     }
