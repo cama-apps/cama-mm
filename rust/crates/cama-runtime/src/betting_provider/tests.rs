@@ -3711,6 +3711,16 @@ async fn disbursement_worker_settles_a_legacy_ballot_without_another_vote() {
         Arc::new(crate::serenity_transport::SerenityDiscordTransport::new()),
     );
     let repository = DisbursementRepository::new(database.path());
+    // Starting the worker between daily checks must leave the existing ballot open.
+    let worker = provider.disbursement_worker();
+    let (shutdown, receiver) = tokio::sync::watch::channel(false);
+    let (result, ()) = tokio::join!(
+        biased;
+        worker.worker.run(WorkerContext::new(receiver)),
+        async { shutdown.send(true).unwrap() }
+    );
+    result.unwrap();
+    assert!(repository.get_active_proposal(Some(42)).unwrap().is_some());
     for _ in 0..2 {
         provider.handler.reconcile_disbursements().await.unwrap();
         assert!(repository.get_active_proposal(Some(42)).unwrap().is_none());
