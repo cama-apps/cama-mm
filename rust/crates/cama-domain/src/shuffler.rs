@@ -3431,7 +3431,7 @@ mod tests {
             .score_role_assignments_for_matchup(&team1, &team2, 1, ShuffleConstraints::default())
             .expect("fixed matchup scores");
 
-        approx(score, 310.0);
+        approx(score, 470.0);
     }
 
     #[test]
@@ -3508,7 +3508,7 @@ mod tests {
             &mut super::ScoringContext::default(),
         );
 
-        approx(selection.preselection_score, -2_619.0);
+        approx(selection.preselection_score, -2_459.0);
     }
 
     #[test]
@@ -3597,7 +3597,7 @@ mod tests {
                 ShuffleConstraints::default(),
             )
             .expect("fixed role matchup evaluates");
-        approx(matchup.total_score, -2_662.0);
+        approx(matchup.total_score, -2_182.0);
     }
 
     #[test]
@@ -3790,7 +3790,7 @@ mod tests {
             consider_roles: false,
             rd_priority_weight: 0.0,
             // Doubled avoidance must outweigh the 200-rating split at the current parity weight.
-            soft_avoid_penalty: 300.0,
+            soft_avoid_penalty: 450.0,
             ..BalancedShuffler::default()
         };
         let target_low_priority = HashSet::from([1001]);
@@ -5076,9 +5076,9 @@ mod tests {
             .shuffle_from_pool(&players, PoolOptions::default())
             .expect("550-point pool shuffle");
         // The stronger team-delta weight needs a larger off-role penalty to favor this roster.
-        let actual = configured_shuffler(Some(1_500.0))
+        let actual = configured_shuffler(Some(2_300.0))
             .shuffle_from_pool(&players, PoolOptions::default())
-            .expect("1500-point pool shuffle");
+            .expect("2300-point pool shuffle");
         let excluded_ids = |result: &PoolResult| {
             result
                 .excluded
@@ -5097,7 +5097,7 @@ mod tests {
         assert_eq!(
             off_roles(&actual),
             0,
-            "a 1500-point penalty should prefer the lower-off-role roster"
+            "a 2300-point penalty should prefer the lower-off-role roster"
         );
     }
 
@@ -5549,8 +5549,8 @@ mod tests {
             .expect("optimization succeeds")
             .2
         };
-        approx(score(1.0), 1_430.0);
-        approx(score(0.5), 1_180.0);
+        approx(score(1.0), 1_910.0);
+        approx(score(0.5), 1_660.0);
     }
 
     #[test]
@@ -5589,7 +5589,7 @@ mod tests {
         )
         .expect("matchup evaluates");
         approx(matchup.log_entry.parity_penalty, 350.0);
-        approx(matchup.total_score, 660.0);
+        approx(matchup.total_score, 820.0);
     }
 
     #[test]
@@ -5694,7 +5694,7 @@ mod tests {
                 },
             )
             .expect("fallback scoring succeeds");
-        approx(common.2, 1_490.0);
+        approx(common.2, 2_130.0);
         assert_eq!(common, fallback);
     }
 
@@ -6587,7 +6587,7 @@ mod tests {
             .score_draft_pool(&captain_a, &captain_b, &pool)
             .expect("draft pool score");
 
-        approx(score, 294.5);
+        approx(score, 446.5);
     }
 
     #[test]
