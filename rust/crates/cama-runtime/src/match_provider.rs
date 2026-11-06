@@ -118,7 +118,7 @@ use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
 use crate::ids::signed_id;
-use crate::lobby_provider::MatchLobbyPort;
+use crate::lobby_provider::{MatchLobbyPort, NewMatchReservation};
 use crate::option_ext::string_option;
 use crate::push_notification_provider::PushNotificationHooks;
 use crate::registration::{
@@ -2495,56 +2495,44 @@ impl MatchHandler {
         }
 
         let (player_ids, excluded_conditional_ids) = selected_roster(&snapshot);
-        let pending_repository = self.pending.clone();
-        let pending_ids = tokio::task::spawn_blocking(move || {
-            pending_repository.all_pending_player_ids(guild_id)
-        })
-        .await
-        .map_err(|error| format!("pending-player lookup task failed: {error}"))?
-        .map_err(|error| error.to_string())?;
-        let blocked = player_ids
-            .iter()
-            .copied()
-            .filter(|player_id| pending_ids.contains(player_id))
-            .collect::<Vec<_>>();
-        if !blocked.is_empty() {
-            let player_names = resolve_guild_player_names(
-                self.discord.as_ref(),
-                u64::try_from(guild_id).ok(),
-                &blocked,
-            )
-            .await;
-            let names = blocked
-                .iter()
-                .take(5)
-                .map(|player_id| escape_discord_text(&player_names.resolve(*player_id)))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let remainder = if blocked.len() > 5 {
-                format!(" and {} more", blocked.len() - 5)
-            } else {
-                String::new()
-            };
-            return followup_ephemeral(
-                &responder,
-                &format!(
-                    "❌ Cannot shuffle: {} players are already in a pending match: {names}{remainder}\nThey must complete their current match with `/record` first.",
-                    blocked.len()
-                ),
-            )
-            .await;
-        }
-
         let reserved_ids = player_ids.iter().copied().collect::<BTreeSet<_>>();
-        if !self
+        match self
             .lobbies
-            .reserve_players(context.guild_id, lobby_kind, &reserved_ids)
+            .reserve_new_match_players(guild_id, lobby_kind, &reserved_ids, &self.pending)
+            .await?
         {
-            return followup_ephemeral(
-                &responder,
-                "❌ The lobby changed while starting the shuffle. Please try again.",
-            )
-            .await;
+            NewMatchReservation::Reserved => {}
+            NewMatchReservation::Unavailable => {
+                return followup_ephemeral(
+                    &responder,
+                    "❌ The lobby changed while starting the shuffle. Please try again.",
+                )
+                .await;
+            }
+            NewMatchReservation::Pending(blocked) => {
+                let player_names = resolve_guild_player_names(
+                    self.discord.as_ref(),
+                    u64::try_from(guild_id).ok(),
+                    &blocked,
+                )
+                .await;
+                let names = blocked
+                    .iter()
+                    .take(5)
+                    .map(|player_id| escape_discord_text(&player_names.resolve(*player_id)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let remainder = if blocked.len() > 5 {
+                    format!(" and {} more", blocked.len() - 5)
+                } else {
+                    String::new()
+                };
+                let count = blocked.len();
+                let message = format!(
+                    "❌ Cannot shuffle: {count} players are already in a pending match: {names}{remainder}\nThey must complete their current match with `/record` first."
+                );
+                return followup_ephemeral(&responder, &message).await;
+            }
         }
 
         let requested_rating_system = string_option(&context.options, "rating_system")

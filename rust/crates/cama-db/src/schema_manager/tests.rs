@@ -92,6 +92,41 @@ fn pet_diary_hatches_backfill_once_without_recording_eggs() {
 }
 
 #[test]
+fn normalized_match_date_index_supports_fresh_and_upgraded_databases() {
+    let database = empty_database();
+    for upgrade in [false, true] {
+        if upgrade {
+            open_runtime_connection(database.path())
+                .unwrap()
+                .execute_batch(
+                    "DROP INDEX idx_matches_guild_normalized_date;
+                 DELETE FROM schema_migrations WHERE name='index_guild_normalized_match_dates';",
+                )
+                .unwrap();
+        }
+        let report = initialize_or_migrate(database.path()).unwrap();
+        assert!(
+            report
+                .newly_applied
+                .iter()
+                .any(|name| name == "index_guild_normalized_match_dates")
+        );
+        let connection = open_runtime_connection(database.path()).unwrap();
+        let plan: String = connection.query_row(
+            "EXPLAIN QUERY PLAN SELECT match_id FROM matches WHERE guild_id=7
+             AND datetime(match_date,'auto') BETWEEN datetime('now','-30 days') AND datetime('now')",
+            [], |row| row.get(3),
+        ).unwrap();
+        assert!(plan.contains("idx_matches_guild_normalized_date"), "{plan}");
+        assert!(
+            initialize_or_migrate(database.path())
+                .unwrap()
+                .was_current()
+        );
+    }
+}
+
+#[test]
 fn deadlock_lobby_publications_support_fresh_upgrade_and_idempotent_retry() {
     for upgrade in [false, true] {
         let database = empty_database();

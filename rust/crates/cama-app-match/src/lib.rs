@@ -1,7 +1,6 @@
 //! Independent match and economy application services compiled beside the other app slices.
 
-#[path = "../../cama-app/src/disburse_service.rs"]
-pub mod disburse_service;
+pub use cama_domain::disbursement as disburse_service;
 #[path = "../../cama-app/src/dota_info.rs"]
 pub mod dota_info;
 #[path = "../../cama-app/src/draft.rs"]

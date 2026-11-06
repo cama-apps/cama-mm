@@ -71,6 +71,29 @@ fn test_even_distribution_basic() {
 }
 
 #[test]
+fn proportional_payout_spends_the_reserve_while_debt_remains() {
+    let mut debtors: Vec<_> = (1..=10)
+        .map(|discord_id| Debtor {
+            discord_id,
+            balance: -100,
+        })
+        .collect();
+    debtors.push(Debtor {
+        discord_id: 11,
+        balance: -1,
+    });
+    let payouts = calculate_proportional_distribution(250, &debtors);
+    assert_eq!(payouts.iter().map(|p| p.amount).sum::<i64>(), 250);
+    for payout in payouts {
+        let debt = debtors
+            .iter()
+            .find(|p| p.discord_id == payout.discord_id)
+            .unwrap();
+        assert!(payout.amount <= -debt.balance);
+    }
+}
+
+#[test]
 fn test_proportional_distribution_capped() {
     let proportional = calculate_proportional_distribution(
         100,
@@ -183,16 +206,18 @@ fn test_stimulus_distribution_basic() {
 
 #[test]
 fn test_lottery_distribution_basic() {
-    let players = [1001, 1002, 1003];
-    let distributions = calculate_lottery_distribution(100, &players, 4);
-    assert_eq!(distributions.len(), 1);
-    assert_eq!(distributions[0].amount, 100);
-    assert!(players.contains(&distributions[0].discord_id));
-    assert_eq!(
-        calculate_lottery_distribution(100, &[1001], 999),
-        vec![Distribution::new(1001, 100)]
-    );
-    assert!(calculate_lottery_distribution(100, &[], 0).is_empty());
+    let mut roster = [snapshot(1, 0, 1), snapshot(2, 0, 1), snapshot(3, 0, 1)];
+    roster[0].last_match_at = Some(10);
+    roster[1].last_match_at = Some(9);
+    roster[2].last_match_at = Some(11);
+    for (index, winner) in [(0, 1), (1, 3)] {
+        let payouts = calculate_lottery_distribution(100, &roster, 10, |len| {
+            assert_eq!(len, 2);
+            index
+        });
+        assert_eq!(payouts, vec![Distribution::new(winner, 100)]);
+    }
+    assert!(calculate_lottery_distribution(100, &[], 10, |_| unreachable!()).is_empty());
 }
 
 #[test]
@@ -339,7 +364,8 @@ fn test_method_distributions_debtor_methods_target_debtors() {
             DistributionMethod::Even,
             200,
             &roster,
-            None
+            0,
+            |_| unreachable!()
         )),
         BTreeMap::from([(1, 100), (2, 100)])
     );
@@ -348,12 +374,19 @@ fn test_method_distributions_debtor_methods_target_debtors() {
             DistributionMethod::Proportional,
             100,
             &roster,
-            None
+            0,
+            |_| unreachable!()
         )),
         BTreeMap::from([(1, 25), (2, 75)])
     );
     assert_eq!(
-        calculate_method_distributions(DistributionMethod::Neediest, 150, &roster, None),
+        calculate_method_distributions(
+            DistributionMethod::Neediest,
+            150,
+            &roster,
+            0,
+            |_| unreachable!()
+        ),
         vec![Distribution::new(2, 150)]
     );
 }
@@ -364,7 +397,7 @@ fn test_method_distributions_even_remainder_goes_to_the_most_indebted() {
     // deliberately superseding the legacy unspecified roster order.
     let roster = [snapshot(1, -5, 1), snapshot(2, -9, 1)];
     assert_eq!(
-        calculate_method_distributions(DistributionMethod::Even, 1, &roster, None),
+        calculate_method_distributions(DistributionMethod::Even, 1, &roster, 0, |_| unreachable!()),
         vec![Distribution::new(2, 1)]
     );
 }
@@ -385,7 +418,8 @@ fn test_method_distributions_stimulus_skips_the_three_richest_players() {
             DistributionMethod::Stimulus,
             100,
             &roster,
-            None
+            0,
+            |_| unreachable!()
         )),
         BTreeMap::from([(4, 50), (5, 50)])
     );
@@ -403,20 +437,37 @@ fn test_method_distributions_social_security_excludes_richest_non_debtors() {
     // Debtors are never part of the richest exclusion, so 4 and 5 split the
     // fund 6:4 by games played.
     assert_eq!(
-        calculate_method_distributions(DistributionMethod::SocialSecurity, 100, &roster, None),
+        calculate_method_distributions(
+            DistributionMethod::SocialSecurity,
+            100,
+            &roster,
+            0,
+            |_| unreachable!()
+        ),
         vec![Distribution::new(4, 60), Distribution::new(5, 40)]
     );
 }
 
 #[test]
 fn test_method_distributions_lottery_pays_only_the_drawn_winner() {
-    let roster = [snapshot(1, 10, 1), snapshot(2, 20, 1)];
-    assert_eq!(
-        calculate_method_distributions(DistributionMethod::Lottery, 250, &roster, Some(2)),
-        vec![Distribution::new(2, 250)]
-    );
+    let mut roster = [snapshot(1, 10, 1), snapshot(2, 20, 1)];
     assert!(
-        calculate_method_distributions(DistributionMethod::Lottery, 250, &roster, None).is_empty()
+        calculate_method_distributions(
+            DistributionMethod::Lottery,
+            250,
+            &roster,
+            0,
+            |_| unreachable!()
+        )
+        .is_empty()
+    );
+    roster[1].last_match_at = Some(1);
+    assert_eq!(
+        calculate_method_distributions(DistributionMethod::Lottery, 250, &roster, 0, |len| {
+            assert_eq!(len, 1);
+            0
+        }),
+        vec![Distribution::new(2, 250)]
     );
 }
 
@@ -424,7 +475,13 @@ fn test_method_distributions_lottery_pays_only_the_drawn_winner() {
 fn test_method_distributions_richest_breaks_ties_on_the_lowest_id() {
     let roster = [snapshot(7, 250, 1), snapshot(3, 250, 1)];
     assert_eq!(
-        calculate_method_distributions(DistributionMethod::Richest, 90, &roster, None),
+        calculate_method_distributions(
+            DistributionMethod::Richest,
+            90,
+            &roster,
+            0,
+            |_| unreachable!()
+        ),
         vec![Distribution::new(3, 90)]
     );
 }
@@ -437,7 +494,12 @@ fn test_method_distributions_non_paying_methods_and_empty_fund() {
         DistributionMethod::NextMatchPot,
         DistributionMethod::Cancel,
     ] {
-        assert!(calculate_method_distributions(method, 100, &roster, None).is_empty());
+        assert!(
+            calculate_method_distributions(method, 100, &roster, 0, |_| unreachable!()).is_empty()
+        );
     }
-    assert!(calculate_method_distributions(DistributionMethod::Even, 0, &roster, None).is_empty());
+    assert!(
+        calculate_method_distributions(DistributionMethod::Even, 0, &roster, 0, |_| unreachable!())
+            .is_empty()
+    );
 }

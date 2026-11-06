@@ -8,6 +8,7 @@ pub mod dig_economy;
 pub mod dig_gear;
 pub mod dig_splash;
 pub mod dig_stats;
+pub mod disbursement;
 pub mod discord_content;
 pub mod dota_hosting;
 pub mod dota_lobby;

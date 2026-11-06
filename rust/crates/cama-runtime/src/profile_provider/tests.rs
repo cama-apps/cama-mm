@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
 use cama_app::opendota_http::OpenDotaHttpConfig;
@@ -663,6 +663,47 @@ fn component_request(user_id: u64, tab: &str) -> InteractionRequest {
         member_permissions: None,
         values: Vec::new(),
     }
+}
+
+#[tokio::test]
+async fn profile_views_use_the_command_id_and_reject_cross_guild_clicks() {
+    let database = migrated_player_fixture();
+    let provider = ProfileRegistrationProvider::new(database.path(), offline_services());
+    let registry = registry_for(&provider);
+    let responder = Arc::new(CapturingResponder::default());
+    let mut command = command_request(100, Vec::new());
+    if let InteractionRequest::Command { interaction_id, .. } = &mut command {
+        *interaction_id = 777;
+    }
+    registry
+        .command_handler("profile")
+        .unwrap()
+        .handle(command, responder.clone())
+        .await
+        .unwrap();
+    let id = responder.captured.lock().unwrap().followups[0].components[0].buttons[0]
+        .custom_id
+        .clone();
+    assert!(id.starts_with("profile:777:"));
+    let mut click = component_request(100, "overview");
+    if let InteractionRequest::Component {
+        custom_id,
+        guild_id,
+        ..
+    } = &mut click
+    {
+        *custom_id = id.clone();
+        *guild_id = Some(43);
+    }
+    registry
+        .component_handler(&id)
+        .unwrap()
+        .handle(click, responder.clone())
+        .await
+        .unwrap();
+    let captured = responder.captured.lock().unwrap();
+    assert!(captured.immediate[0].ephemeral);
+    assert!(captured.updates.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

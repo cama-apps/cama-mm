@@ -311,6 +311,39 @@ impl LobbyModerationPort for SqliteLobbyModeration {
             .get_active_suspension(player_id.0, Some(scope.guild_id.0), Some(kind), now)
             .map_err(|error| format!("{error:?}"))
     }
+
+    fn any_suspended(
+        &self,
+        player_ids: &BTreeSet<AppUserId>,
+        scope: LobbyScope,
+        now: i64,
+    ) -> Result<bool, String> {
+        let active = self
+            .repository
+            .list_suspensions(Some(scope.guild_id.0), true)
+            .map_err(|error| error.to_string())?;
+        let kind = match scope.kind {
+            LobbyKind::Open => SuspensionScope::Open,
+            LobbyKind::LowSkill => SuspensionScope::Lowskill,
+        };
+        for record in active
+            .into_iter()
+            .filter(|record| player_ids.contains(&AppUserId(record.discord_id)))
+        {
+            if record.is_active_at(now) {
+                if record.applies_to(Some(kind)) {
+                    return Ok(true);
+                }
+            } else if self
+                .active_suspension(AppUserId(record.discord_id), scope, now)?
+                .is_some()
+            {
+                // The ordinary expiry path records completion and handles a concurrent replacement.
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 impl SqlitePendingMatches {
@@ -349,10 +382,16 @@ impl PendingMatchPort for SqlitePendingMatches {
     }
 }
 
+#[async_trait]
 impl ResetPendingMatchPort for SqlitePendingMatches {
-    fn pending_matches(&self, guild_id: AppGuildId) -> Result<Vec<ScopedPendingMatch>, String> {
-        self.repository
-            .all_for_guild(guild_id.0)
+    async fn pending_matches(
+        &self,
+        guild_id: AppGuildId,
+    ) -> Result<Vec<ScopedPendingMatch>, String> {
+        let repository = self.repository.clone();
+        tokio::task::spawn_blocking(move || repository.all_for_guild(guild_id.0))
+            .await
+            .map_err(|error| error.to_string())?
             .map(|pending| {
                 pending
                     .into_iter()
@@ -1437,6 +1476,12 @@ pub struct MatchActiveDraft {
     pub captain_ids: BTreeSet<i64>,
 }
 
+pub enum NewMatchReservation {
+    Reserved,
+    Unavailable,
+    Pending(Vec<i64>),
+}
+
 /// Cloneable bridge from `/match` to the single production lobby runtime.
 ///
 /// Constructing another `LobbyService` would create independent in-flight
@@ -1770,18 +1815,68 @@ impl MatchLobbyPort {
         })
     }
 
-    #[must_use]
-    pub fn reserve_players(
+    pub async fn reserve_new_match_players(
+        &self,
+        guild_id: i64,
+        lobby_kind: LobbyKind,
+        player_ids: &BTreeSet<i64>,
+        pending: &cama_db::match_runtime::PendingMatchRepository,
+    ) -> Result<NewMatchReservation, String> {
+        let lobby = self.clone();
+        let ids = player_ids.clone();
+        let pending = pending.clone();
+        tokio::task::spawn_blocking(move || {
+            if !lobby.reserve_players_blocking(guild_id, lobby_kind, &ids) {
+                return Ok(NewMatchReservation::Unavailable);
+            }
+            // A sibling can commit a pending match and release its reservation
+            // while this caller is preparing its roster. Check once we hold it.
+            let taken = pending.all_pending_player_ids(guild_id);
+            if let Ok(taken) = &taken
+                && ids.is_disjoint(taken)
+            {
+                return Ok(NewMatchReservation::Reserved);
+            }
+            lobby.release_players(guild_id, lobby_kind, &ids);
+            taken
+                .map(|taken| {
+                    NewMatchReservation::Pending(ids.intersection(&taken).copied().collect())
+                })
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
+    // Rehydrate a previously reserved draft pool without applying new-match admission.
+    pub async fn reserve_players(
         &self,
         guild_id: i64,
         lobby_kind: LobbyKind,
         player_ids: &BTreeSet<i64>,
     ) -> bool {
-        let player_ids = player_ids.iter().copied().map(AppUserId).collect();
-        self.state.service.reserve_lobby_players(
-            &player_ids,
-            LobbyScope::new(AppGuildId(guild_id), lobby_kind),
-        )
+        let lobby = self.clone();
+        let ids = player_ids.clone();
+        tokio::task::spawn_blocking(move || {
+            lobby.reserve_players_blocking(guild_id, lobby_kind, &ids)
+        })
+        .await
+        .unwrap_or_else(|error| {
+            warn!(%error, guild_id, "lobby reservation task failed");
+            false
+        })
+    }
+
+    fn reserve_players_blocking(
+        &self,
+        guild_id: i64,
+        lobby_kind: LobbyKind,
+        player_ids: &BTreeSet<i64>,
+    ) -> bool {
+        let ids = player_ids.iter().copied().map(AppUserId).collect();
+        self.state
+            .service
+            .reserve_lobby_players(&ids, LobbyScope::new(AppGuildId(guild_id), lobby_kind))
     }
 
     pub fn release_players(
@@ -3410,9 +3505,18 @@ impl LobbyInteractionHandler {
             command.user_id,
             &command.user_display_name,
             responder,
-            true,
+            None,
         )
         .await
+    }
+
+    fn stale_lobby_button(&self, scope: LobbyScope, source: Option<AppMessageId>) -> bool {
+        source.is_some_and(|source| {
+            self.state.service.get_lobby(scope).is_some_and(|lobby| {
+                lobby.message_ids.message_id != Some(source)
+                    && lobby.message_ids.embed_message_id != Some(source)
+            })
+        })
     }
 
     /// `/join` and the Join button: seat the player through the shared core
@@ -3424,7 +3528,7 @@ impl LobbyInteractionHandler {
         player_id: AppUserId,
         user_display_name: &str,
         responder: Arc<dyn InteractionResponder>,
-        confirm_success: bool,
+        button_source: Option<AppMessageId>,
     ) -> Result<(), InteractionHandlerError> {
         let Some(player) = self
             .require_registered_player(player_id, scope.guild_id, &responder)
@@ -3439,10 +3543,17 @@ impl LobbyInteractionHandler {
         };
         let operation_lock = self.state.commands.scope_operation_lock(scope);
         let _guard = operation_lock.lock().await;
+        if self.stale_lobby_button(scope, button_source) {
+            return followup_ephemeral(
+                &responder,
+                "This control belongs to an older lobby. Use the current lobby message.",
+            )
+            .await;
+        }
         match self.seat_registered_player(scope, &joiner, None).await? {
             SeatOutcome::Refused { warning, .. } => followup_ephemeral(&responder, &warning).await,
             SeatOutcome::Joined { event } => {
-                if confirm_success {
+                if button_source.is_none() {
                     followup_ephemeral(&responder, &format!("✅ Joined {}!", scope.kind.label()))
                         .await?;
                 }
@@ -3477,10 +3588,27 @@ impl LobbyInteractionHandler {
             .defer(true)
             .await
             .map_err(|error| error.to_string())?;
+        let Some(source) = responder
+            .component_message_id()
+            .and_then(|id| i64::try_from(id).ok())
+            .map(AppMessageId)
+        else {
+            return followup_ephemeral(
+                &responder,
+                "Open the current lobby message to use its controls.",
+            )
+            .await;
+        };
         match action {
             LobbyButtonAction::Join => {
-                self.join_lobby_for_user(scope, player_id, user_display_name, responder, false)
-                    .await
+                self.join_lobby_for_user(
+                    scope,
+                    player_id,
+                    user_display_name,
+                    responder,
+                    Some(source),
+                )
+                .await
             }
             LobbyButtonAction::Leave => {
                 let memberships = self
@@ -3502,7 +3630,7 @@ impl LobbyInteractionHandler {
                     },
                     vec![scope.kind],
                     responder,
-                    false,
+                    Some(source),
                 )
                 .await
             }
@@ -3537,7 +3665,7 @@ impl LobbyInteractionHandler {
             },
             memberships,
             responder,
-            true,
+            None,
         )
         .await
     }
@@ -3552,7 +3680,7 @@ impl LobbyInteractionHandler {
         actor: LobbyActor<'_>,
         memberships: Vec<LobbyKind>,
         responder: Arc<dyn InteractionResponder>,
-        confirm_success: bool,
+        button_source: Option<AppMessageId>,
     ) -> Result<(), InteractionHandlerError> {
         let player_id = actor.id;
         let rate_limit_claim = match self.state.claim_membership_change(guild_id, player_id)? {
@@ -3568,6 +3696,14 @@ impl LobbyInteractionHandler {
             let scope = LobbyScope::new(guild_id, kind);
             let operation_lock = self.state.commands.scope_operation_lock(scope);
             let _guard = operation_lock.lock().await;
+            if self.stale_lobby_button(scope, button_source) {
+                self.state.refund_membership_change(rate_limit_claim);
+                return followup_ephemeral(
+                    &responder,
+                    "This control belongs to an older lobby. Use the current lobby message.",
+                )
+                .await;
+            }
             let state = Arc::clone(&self.state);
             let removal = tokio::task::spawn_blocking(move || {
                 state.service.try_leave_lobby(player_id, scope)
@@ -3604,7 +3740,7 @@ impl LobbyInteractionHandler {
         if left.is_empty() {
             self.state.refund_membership_change(rate_limit_claim);
         }
-        if !confirm_success && !left.is_empty() && pinned.is_empty() {
+        if button_source.is_some() && !left.is_empty() && pinned.is_empty() {
             return Ok(());
         }
         let content = if left.is_empty() {

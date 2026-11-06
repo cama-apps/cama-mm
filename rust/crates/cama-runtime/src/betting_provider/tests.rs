@@ -3739,6 +3739,42 @@ async fn disbursement_worker_settles_a_legacy_ballot_without_another_vote() {
 }
 
 #[tokio::test]
+async fn disbursement_status_links_to_the_original_ballot() {
+    let database = NamedTempFile::new().unwrap();
+    initialize_or_migrate(database.path()).unwrap();
+    let repository = DisbursementRepository::new(database.path());
+    let proposal = repository.create_proposal_atomic(Some(42), 900, 0).unwrap();
+    assert!(repository.set_proposal_message(&proposal, 55, 77).unwrap());
+    let config = ApplicationConfig::from_lookup(|name| {
+        (name == "DISCORD_BOT_TOKEN").then_some("test-token".to_owned())
+    })
+    .unwrap();
+    let provider = BettingRegistrationProvider::new(
+        database.path(),
+        &config,
+        Arc::new(crate::serenity_transport::SerenityDiscordTransport::new()),
+    );
+    let recording = RecordingResponder::default();
+    let responder: Arc<dyn InteractionResponder> = Arc::new(recording.clone());
+    provider
+        .handler
+        .disburse(1, Some(42), 0, &[], &responder)
+        .await
+        .unwrap();
+    let responses = recording.responses.lock().unwrap();
+    assert_eq!(responses.len(), 1);
+    assert!(responses[0].ephemeral);
+    assert!(
+        responses[0]
+            .content
+            .contains("https://discord.com/channels/42/77/55")
+    );
+    assert!(responses[0].components.is_empty());
+    let stored = repository.get_active_proposal(Some(42)).unwrap().unwrap();
+    assert_eq!((stored.channel_id, stored.message_id), (Some(77), Some(55)));
+}
+
+#[tokio::test]
 async fn disbursement_old_buttons_cannot_vote_on_a_replacement() {
     let database = NamedTempFile::new().expect("reserve button database");
     initialize_or_migrate(database.path()).expect("schema");
@@ -4562,151 +4598,6 @@ fn hostile_mechanics_only_target_visible_guild_members() {
         member_balance < 100,
         "the visible member funds the heist (was {member_balance})"
     );
-}
-
-/// Builds a disbursement candidate; only the fields the methods read matter.
-fn disburse_player(discord_id: i64, balance: i64, games: i64) -> Player {
-    let mut player = Player::new(format!("player{discord_id}"));
-    player.discord_id = Some(discord_id);
-    player.jopacoin_balance = balance;
-    player.wins = games;
-    player.losses = 0;
-    player
-}
-
-#[test]
-fn richest_disbursement_pays_the_highest_balance() {
-    let players = vec![
-        disburse_player(1, 1000, 5),
-        disburse_player(2, 100, 5),
-        disburse_player(3, -100, 5),
-    ];
-
-    let distributions = calculate_distributions("richest", 500, &players, None);
-
-    assert_eq!(distributions, vec![(1, 500)]);
-}
-
-#[test]
-fn richest_disbursement_breaks_balance_ties_on_the_lowest_id() {
-    let players = vec![disburse_player(7, 250, 1), disburse_player(3, 250, 1)];
-
-    let distributions = calculate_distributions("richest", 90, &players, None);
-
-    assert_eq!(distributions, vec![(3, 90)]);
-}
-
-#[test]
-fn stimulus_disbursement_requires_games_played() {
-    // Five non-debtors, but two never played: only three remain, which is not
-    // enough to survive the top-three exclusion.
-    let players = vec![
-        disburse_player(1, 900, 1),
-        disburse_player(2, 800, 1),
-        disburse_player(3, 700, 1),
-        disburse_player(4, 600, 0),
-        disburse_player(5, 500, 0),
-    ];
-
-    assert!(calculate_distributions("stimulus", 300, &players, None).is_empty());
-}
-
-#[test]
-fn stimulus_disbursement_skips_the_three_richest_players_who_played() {
-    let players = vec![
-        disburse_player(1, 900, 2),
-        disburse_player(2, 800, 2),
-        disburse_player(3, 700, 2),
-        disburse_player(4, 600, 2),
-        disburse_player(5, 500, 2),
-        // Unplayed accounts never displace a real player from the top three.
-        disburse_player(6, 5000, 0),
-    ];
-
-    let distributions = calculate_distributions("stimulus", 100, &players, None);
-
-    assert_eq!(distributions, vec![(4, 50), (5, 50)]);
-}
-
-#[test]
-fn social_security_excludes_the_three_richest_non_debtors() {
-    let players = vec![
-        disburse_player(1, 900, 10),
-        disburse_player(2, 800, 10),
-        disburse_player(3, 700, 10),
-        disburse_player(4, 50, 6),
-        disburse_player(5, -500, 4),
-    ];
-
-    let distributions = calculate_distributions("social_security", 100, &players, None);
-
-    // Debtors are never part of the richest exclusion, so 4 and 5 split the
-    // fund 6:4 by games played.
-    assert_eq!(distributions, vec![(4, 60), (5, 40)]);
-}
-
-#[test]
-fn lottery_disbursement_pays_the_drawn_winner_and_nothing_without_one() {
-    let players = vec![disburse_player(1, 10, 1), disburse_player(2, 20, 1)];
-
-    assert_eq!(
-        calculate_distributions("lottery", 250, &players, Some(2)),
-        vec![(2, 250)]
-    );
-    assert!(calculate_distributions("lottery", 250, &players, None).is_empty());
-}
-
-#[test]
-fn debtor_disbursements_route_through_the_disburse_service_math() {
-    let players = vec![
-        disburse_player(1, -100, 5),
-        disburse_player(2, -300, 5),
-        disburse_player(3, 900, 5),
-    ];
-
-    // Debtors are paid most-indebted first with a stable discord-id order.
-    assert_eq!(
-        calculate_distributions("even", 200, &players, None),
-        vec![(2, 100), (1, 100)]
-    );
-    assert_eq!(
-        calculate_distributions("proportional", 100, &players, None),
-        vec![(2, 75), (1, 25)]
-    );
-    assert_eq!(
-        calculate_distributions("neediest", 150, &players, None),
-        vec![(2, 150)]
-    );
-    // A lone remainder coin lands on the most indebted debtor: even splits
-    // follow the deterministic (balance asc, discord id asc) order, which
-    // intentionally supersedes the legacy unspecified roster order.
-    assert_eq!(
-        calculate_distributions("even", 1, &players, None),
-        vec![(2, 1)]
-    );
-}
-
-#[test]
-fn unknown_or_non_paying_disbursement_methods_pay_nobody() {
-    let players = vec![disburse_player(1, -100, 5)];
-
-    assert!(calculate_distributions("mystery", 100, &players, None).is_empty());
-    assert!(calculate_distributions("burn", 100, &players, None).is_empty());
-    assert!(calculate_distributions("even", 0, &players, None).is_empty());
-}
-
-#[test]
-fn lottery_draw_is_uniform_over_the_active_roster() {
-    let candidates = [11_i64, 22, 33];
-    let mut seen = std::collections::BTreeSet::new();
-    for _ in 0..500 {
-        let winner = draw_lottery_winner(&candidates).expect("non-empty roster draws a winner");
-        assert!(candidates.contains(&winner));
-        seen.insert(winner);
-    }
-
-    assert_eq!(seen.len(), candidates.len(), "every candidate can win");
-    assert_eq!(draw_lottery_winner(&[]), None);
 }
 
 /// Discord stub with a partial member cache: cached members render from the

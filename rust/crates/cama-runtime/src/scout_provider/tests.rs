@@ -365,7 +365,7 @@ fn registry(provider: &ScoutRegistrationProvider) -> Registry {
 
 fn command(subcommand_name: &str, children: Vec<InteractionOption>) -> InteractionRequest {
     InteractionRequest::Command {
-        interaction_id: 1,
+        interaction_id: 47_100,
         name: "scout".to_owned(),
         user_id: USER as u64,
         user_display_name: "Alice".to_owned(),
@@ -548,6 +548,7 @@ async fn migrated_sqlite_report_renders_native_png_pages_and_enforces_owner() {
         response.components[0].buttons[1].custom_id.clone()
     };
 
+    assert_eq!(next_id, "scout:page:47100:next");
     let component = registry
         .component_handler(&next_id)
         .expect("Scout component route");
@@ -567,6 +568,23 @@ async fn migrated_sqlite_report_renders_native_png_pages_and_enforces_owner() {
         )
         .await
         .expect("reject non-owner paging");
+    component
+        .handle(
+            InteractionRequest::Component {
+                interaction_id: 44,
+                custom_id: next_id.clone(),
+                user_id: USER as u64,
+                user_display_name: "Alice".to_owned(),
+                guild_id: Some(GUILD as u64 + 1),
+                channel_id: Some(9),
+                member_permissions: None,
+                values: Vec::new(),
+            },
+            responder.clone(),
+        )
+        .await
+        .expect("reject cross-guild paging");
+    assert!(responder.captured.lock().unwrap().updates.is_empty());
     component
         .handle(
             InteractionRequest::Component {

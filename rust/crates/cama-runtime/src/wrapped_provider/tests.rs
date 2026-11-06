@@ -1217,17 +1217,33 @@ async fn migrated_sqlite_builds_personal_story_and_preserves_detailed_stats() {
     let restarted = build_provider(&fixture, FakeDiscord::production(), STORY_TIMEOUT);
     let restarted_registry = build_registry(&restarted);
     let restarted_responder = Arc::new(Responder::default());
+    let mut new_command = command(OWNER, Some(GUILD));
+    if let InteractionRequest::Command { interaction_id, .. } = &mut new_command {
+        *interaction_id = 99;
+    }
     restarted_registry
         .command_handler("wrapped")
         .unwrap()
-        .handle(command(OWNER, Some(GUILD)), restarted_responder.clone())
+        .handle(new_command, restarted_responder.clone())
         .await
         .expect("create post-restart story");
     let restarted_next_id = restarted_responder.followups.lock().unwrap()[0].components[0].buttons
         [1]
     .custom_id
     .clone();
+    assert_eq!(restarted_next_id, "wrapped:99:next");
     assert_ne!(next_id, restarted_next_id);
+    let mut foreign = component(&restarted_next_id, OWNER);
+    if let InteractionRequest::Component { guild_id, .. } = &mut foreign {
+        *guild_id = Some(GUILD + 1);
+    }
+    restarted_registry
+        .component_handler(&restarted_next_id)
+        .unwrap()
+        .handle(foreign, restarted_responder.clone())
+        .await
+        .unwrap();
+    assert!(restarted_responder.updates.lock().unwrap().is_empty());
     restarted_registry
         .component_handler(&next_id)
         .expect("restart retains Wrapped component route")
@@ -1307,13 +1323,13 @@ async fn guild_guard_cooldown_and_no_data_paths_preserve_privacy_contracts() {
     assert_eq!(no_data.content, "No match data found for 2026.");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn timeout_deletes_public_followup_and_late_button_is_private() {
     let fixture = Fixture::migrated();
     let provider = build_provider(
         &fixture,
         FakeDiscord::production(),
-        Duration::from_millis(20),
+        Duration::from_secs(600),
     );
     let registry = build_registry(&provider);
     let handler = registry.command_handler("wrapped").unwrap();
@@ -1325,14 +1341,20 @@ async fn timeout_deletes_public_followup_and_late_button_is_private() {
     let next_id = responder.followups.lock().unwrap()[0].components[0].buttons[1]
         .custom_id
         .clone();
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    let navigator = Arc::new(Responder::default());
+    handler
+        .handle(component(&next_id, OWNER), navigator.clone())
+        .await
+        .unwrap();
+    tokio::time::advance(Duration::from_secs(601)).await;
+    tokio::task::yield_now().await;
     assert!(provider.handler.sessions.lock().unwrap().is_empty());
     assert_eq!(
-        *responder.deleted.lock().unwrap(),
+        *navigator.deleted.lock().unwrap(),
         vec![InteractionMessageReceipt {
             message_id: 77,
             channel_id: 88,
-            delivery: InteractionMessageDelivery::InteractionFollowup,
+            delivery: InteractionMessageDelivery::ChannelFallback,
         }]
     );
     handler

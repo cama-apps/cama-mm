@@ -8,7 +8,6 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -90,9 +89,7 @@ pub fn read_info_analytics_snapshot(
 }
 
 use crate::application_config::ApplicationConfig;
-use crate::discord_transport::{
-    DiscordTransport, GuildPlayerNameDirectory, resolve_guild_player_names,
-};
+use crate::discord_transport::{DiscordTransport, resolve_guild_player_names};
 use crate::embed_colors::{DISCORD_BLUE, DISCORD_GOLD};
 use crate::option_ext::{integer_option, string_option, user_option};
 use crate::registration::{
@@ -152,7 +149,6 @@ impl InfoRegistrationProvider {
                 pingedkevin_cost: config.values.pingedkevin_cost,
                 rate_limits: Mutex::new(CommandRateLimits::default()),
                 views: Arc::new(Mutex::new(BTreeMap::new())),
-                next_view_id: AtomicU64::new(1),
                 view_timeout,
             }),
         }
@@ -227,7 +223,6 @@ struct InfoHandler {
     pingedkevin_cost: i64,
     rate_limits: Mutex<CommandRateLimits>,
     views: Arc<Mutex<BTreeMap<u64, Arc<LeaderboardSession>>>>,
-    next_view_id: AtomicU64,
     view_timeout: Duration,
 }
 
@@ -358,13 +353,6 @@ impl InteractionHandler for InfoHandler {
     }
 }
 
-/// How a leaderboard's candidate ids were classified: from the guild's member
-/// cache snapshot, or not at all because this transport keeps no cache.
-enum MemberResolution {
-    Snapshot(GuildMemberDirectory),
-    Uncached(Vec<i64>),
-}
-
 impl InfoHandler {
     async fn handle_help(
         &self,
@@ -410,6 +398,7 @@ impl InfoHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
         let InteractionRequest::Command {
+            interaction_id: view_id,
             user_id,
             guild_id,
             options,
@@ -484,7 +473,6 @@ impl InfoHandler {
             }
         };
 
-        let view_id = self.next_view_id.fetch_add(1, Ordering::Relaxed);
         let response = leaderboard_response(view_id, &view);
         let session = Arc::new(LeaderboardSession {
             view: Mutex::new(view),
@@ -519,13 +507,9 @@ impl InfoHandler {
         Ok(())
     }
 
-    /// Classify every leaderboard candidate against the guild's member cache.
-    ///
-    /// This used to issue one live member request per unresolved candidate,
-    /// sequentially, on every `/leaderboard`: the candidate set is the union of
-    /// players, bettors, tip senders and recipients, and trivia participants,
-    /// so every departed player cost a round trip. Python filters against a
-    /// single `guild.members` snapshot, and so does this.
+    /// Resolve live membership separately from display names: a cached member
+    /// proves presence, but a missing member proves departure only after the
+    /// gateway has finished chunking the guild.
     async fn member_directory(
         &self,
         guild_id: u64,
@@ -533,66 +517,51 @@ impl InfoHandler {
     ) -> Result<GuildMemberDirectory, InteractionHandlerError> {
         let repository = self.leaderboard.clone();
         let discord = Arc::clone(&self.discord);
-        let resolution = tokio::task::spawn_blocking(move || {
-            let ids = repository
-                .candidate_discord_ids(signed_guild_id)
-                .map_err(|error| error.to_string())?;
-            let requested_ids = ids
+        let (ids, complete, cached) = tokio::task::spawn_blocking(move || {
+            let ids = repository.candidate_discord_ids(signed_guild_id)?;
+            let requested = ids
                 .iter()
-                .filter_map(|discord_id| u64::try_from(*discord_id).ok())
+                .filter_map(|id| u64::try_from(*id).ok())
                 .collect::<Vec<_>>();
-            Ok::<_, String>(
-                match discord.cached_guild_member_render_names(guild_id, &requested_ids)? {
-                    // A candidate absent from the snapshot has left the guild
-                    // and is simply not listed.
-                    Some(render_names) => {
-                        let names = GuildPlayerNameDirectory::new(Some(render_names));
-                        MemberResolution::Snapshot(GuildMemberDirectory::new(
-                            ids.into_iter()
-                                .filter(|discord_id| names.contains(*discord_id))
-                                .map(|discord_id| (discord_id, names.resolve(discord_id))),
-                        ))
-                    }
-                    None => MemberResolution::Uncached(ids),
-                },
-            )
+            let complete = discord.cached_guild_member_ids(guild_id)?;
+            let cached = discord
+                .cached_guild_member_render_names(guild_id, &requested)?
+                .unwrap_or_default();
+            Ok::<_, String>((ids, complete, cached))
         })
         .await
         .map_err(|error| {
             InteractionHandlerError::from(format!("leaderboard member-id task failed: {error}"))
         })?
         .map_err(InteractionHandlerError::from)?;
-        match resolution {
-            MemberResolution::Snapshot(directory) => Ok(directory),
-            MemberResolution::Uncached(ids) => {
-                Ok(self.member_directory_by_lookup(guild_id, ids).await)
-            }
-        }
-    }
-
-    /// Fallback for transports without a member cache: resolve each candidate
-    /// on its own, preserving the pre-snapshot behavior exactly.
-    async fn member_directory_by_lookup(
-        &self,
-        guild_id: u64,
-        candidates: Vec<i64>,
-    ) -> GuildMemberDirectory {
-        let mut members = Vec::with_capacity(candidates.len());
-        for discord_id in candidates {
+        let mut members = Vec::new();
+        for discord_id in ids {
             let Ok(user_id) = u64::try_from(discord_id) else {
                 continue;
             };
-            match self.discord.guild_member(guild_id, user_id).await {
-                Ok(Some(member)) => members.push((discord_id, member.display_name)),
-                Ok(None) => {}
-                Err(error) => {
-                    // A candidate that cannot be resolved is absent, not fatal
-                    // to every other leaderboard entry.
-                    warn!(%error, guild_id, user_id, "unable to resolve leaderboard member");
-                }
+            if complete.as_ref().is_some_and(|ids| !ids.contains(&user_id)) {
+                continue;
             }
+            let name = if let Some(name) = cached.get(&user_id) {
+                name.clone()
+            } else {
+                match self.discord.guild_member(guild_id, user_id).await {
+                    Ok(Some(member)) => member.display_name,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        warn!(%error, guild_id, user_id, "unable to resolve leaderboard member");
+                        continue;
+                    }
+                }
+            };
+            members.push((
+                discord_id,
+                cama_domain::discord_content::readable_player_name(&name)
+                    .unwrap_or(cama_domain::discord_content::UNKNOWN_PLAYER)
+                    .to_owned(),
+            ));
         }
-        GuildMemberDirectory::new(members)
+        Ok(GuildMemberDirectory::new(members))
     }
 
     async fn handle_leaderboard_component(
@@ -601,7 +570,10 @@ impl InfoHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
         let InteractionRequest::Component {
-            custom_id, user_id, ..
+            custom_id,
+            user_id,
+            guild_id,
+            ..
         } = request
         else {
             return Err("leaderboard component handler received a command".into());
@@ -613,7 +585,8 @@ impl InfoHandler {
             .map_err(|_| InteractionHandlerError::from("leaderboard registry lock poisoned"))?
             .get(&view_id)
             .cloned();
-        let Some(session) = session else {
+        let guild_id = signed_optional_id(guild_id, "guild")?;
+        let Some(session) = session.filter(|session| session.guild_id == guild_id) else {
             return responder
                 .respond(
                     InteractionResponse::message(

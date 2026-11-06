@@ -9210,66 +9210,63 @@ fn relic_recycle_response(
     nonce: &str,
 ) -> Option<InteractionResponse> {
     let catalog = cama_app::dig_loot::artifact_catalog();
-    let candidates = panel
-        .relics
-        .iter()
-        .filter(|relic| !relic.equipped)
-        .filter_map(|relic| {
-            catalog
-                .iter()
-                .find(|artifact| artifact.id == relic.artifact_id)
-                .copied()
-                .filter(|artifact| {
-                    cama_app::dig_relic_recycling::is_ordinary_relic(*artifact)
-                        && artifact.rarity != cama_app::dig_loot::Rarity::Legendary
-                })
-                .map(|artifact| (relic, artifact))
-        })
-        .collect::<Vec<_>>();
-    let rarity_counts = candidates.iter().fold(
-        BTreeMap::<cama_app::dig_loot::Rarity, usize>::new(),
-        |mut counts, (_, artifact)| {
-            *counts.entry(artifact.rarity).or_default() += 1;
-            counts
-        },
-    );
-    let options = candidates
-        .into_iter()
-        .filter(|(_, artifact)| rarity_counts.get(&artifact.rarity).copied().unwrap_or(0) >= 3)
-        .take(25)
-        .map(|(relic, artifact)| {
-            InteractionStringSelectOption::new(
-                format!(
-                    "[{}] {}",
-                    relic_rarity_label(artifact.rarity),
-                    artifact.name
-                )
-                .chars()
-                .take(100)
-                .collect::<String>(),
-                relic.row_id.to_string(),
-            )
-        })
-        .collect::<Vec<_>>();
-    if options.is_empty() {
-        return None;
+    // Copies of an unequipped relic are interchangeable. Three of a kind is
+    // the most a single recipe can consume; one menu per rarity keeps all
+    // recipes selectable even when a player owns hundreds of copies.
+    let mut copies = BTreeMap::new();
+    let mut groups = BTreeMap::<_, Vec<_>>::new();
+    for relic in panel.relics.iter().filter(|relic| !relic.equipped) {
+        let Some(artifact) = catalog
+            .iter()
+            .find(|artifact| artifact.id == relic.artifact_id)
+        else {
+            continue;
+        };
+        if !cama_app::dig_relic_recycling::is_ordinary_relic(*artifact)
+            || artifact.rarity == cama_app::dig_loot::Rarity::Legendary
+        {
+            continue;
+        }
+        let count = copies.entry(artifact.id).or_insert(0);
+        if *count < 3 {
+            *count += 1;
+            groups
+                .entry(artifact.rarity)
+                .or_default()
+                .push(InteractionStringSelectOption::new(
+                    format!(
+                        "[{}] {}",
+                        relic_rarity_label(artifact.rarity),
+                        artifact.name
+                    ),
+                    relic.row_id.to_string(),
+                ));
+        }
     }
     let prefix = format!("dig:gear:{nonce}:{owner_id}:{guild_id}");
-    let mut select = InteractionStringSelect::new(
-        format!("{prefix}:recycle"),
-        "Choose 3 relics of the same rarity",
-        options,
-    );
-    select.min_values = 3;
-    select.max_values = 3;
+    let mut rows = Vec::new();
+    for (rarity, options) in groups.into_iter().filter(|(_, options)| options.len() >= 3) {
+        let rarity = relic_rarity_label(rarity);
+        let mut select = InteractionStringSelect::new(
+            format!("{prefix}:recycle:{rarity}"),
+            format!("Choose 3 {rarity} relics to recycle"),
+            options,
+        );
+        select.min_values = 3;
+        select.max_values = 3;
+        rows.push(InteractionActionRow::string_select(select));
+    }
+    if rows.is_empty() {
+        return None;
+    }
+    rows.push(InteractionActionRow::buttons(vec![
+        InteractionButton::new(format!("{prefix}:back"), "Back")
+            .style(InteractionButtonStyle::Secondary),
+    ]));
     Some(
         InteractionResponse::message("")
             .embed(gear_panel_embed(panel))
-            .action_row(InteractionActionRow::string_select(select))
-            .action_row(InteractionActionRow::buttons(vec![
-                InteractionButton::new(format!("{prefix}:back"), "Back")
-                    .style(InteractionButtonStyle::Secondary),
-            ])),
+            .action_rows(rows),
     )
 }
 

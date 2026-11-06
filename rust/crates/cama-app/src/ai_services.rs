@@ -2025,6 +2025,28 @@ fn lex_sql(sql: &str) -> Vec<SqlToken> {
     tokens
 }
 
+// Punctuation in an identifier belongs to its name. In particular, an
+// apostrophe inside a quoted name must never start a new string literal.
+fn push_quoted_identifier(output: &mut String, identifier: &str) {
+    let lower = identifier.to_ascii_lowercase();
+    output.push(' ');
+    if FROM_TERMINATORS.contains(&lower.as_str())
+        || matches!(
+            lower.as_str(),
+            "select" | "from" | "with" | "join" | "using" | "in" | "values" | "all" | "distinct"
+        )
+    {
+        // A label such as AS "from" cannot terminate the projection list.
+        output.push('_');
+    }
+    output.extend(
+        identifier
+            .chars()
+            .map(|c| if is_word_character(c) { c } else { '_' }),
+    );
+    output.push(' ');
+}
+
 fn normalize_sql(sql: &str) -> String {
     let chars = sql.chars().collect::<Vec<_>>();
     let mut output = String::with_capacity(sql.len());
@@ -2056,22 +2078,22 @@ fn normalize_sql(sql: &str) -> String {
             _ => None,
         };
         if let Some(closing) = closing {
-            output.push(' ');
+            let mut identifier = String::new();
             index += 1;
             while index < chars.len() {
                 if chars[index] == closing {
                     if closing != ']' && chars.get(index + 1) == Some(&closing) {
-                        output.push(closing);
+                        identifier.push(closing);
                         index += 2;
                         continue;
                     }
-                    output.push(' ');
                     index += 1;
                     break;
                 }
-                output.push(chars[index]);
+                identifier.push(chars[index]);
                 index += 1;
             }
+            push_quoted_identifier(&mut output, &identifier);
         } else {
             output.push(character);
             index += 1;
@@ -2108,10 +2130,8 @@ fn mask_string_literals(sql: &str) -> String {
             index += 1;
         }
 
-        if single_quote_is_identifier(&output, &normalized, index) {
-            output.push(' ');
-            output.push_str(&contents);
-            output.push(' ');
+        if single_quote_is_identifier(&output, &chars[index..]) {
+            push_quoted_identifier(&mut output, &contents);
         } else {
             output.push('\'');
             output.extend(std::iter::repeat_n('x', contents.chars().count()));
@@ -2126,11 +2146,10 @@ fn mask_string_literals(sql: &str) -> String {
 /// validator needs this distinction so `FROM 'blocked_table'` and
 /// `USING ('blocked_column')` cannot bypass structural checks while ordinary
 /// values such as `WHERE label = 'blocked_table'` remain valid.
-fn single_quote_is_identifier(masked_prefix: &str, sql: &str, end: usize) -> bool {
+fn single_quote_is_identifier(masked_prefix: &str, suffix: &[char]) -> bool {
     let before = masked_prefix.trim_end();
-    let after = sql.get(end..).unwrap_or_default().trim_start();
 
-    if before.ends_with('.') || after.starts_with('.') {
+    if before.ends_with('.') || suffix.iter().find(|c| !c.is_whitespace()) == Some(&'.') {
         return true;
     }
 
@@ -2219,25 +2238,46 @@ fn is_word_character(character: char) -> bool {
 }
 
 fn word_at(chars: &[char], index: usize, word: &str) -> bool {
-    let word_chars = word.chars().collect::<Vec<_>>();
-    chars.get(index..index + word_chars.len()) == Some(word_chars.as_slice())
+    chars
+        .get(index..index + word.len())
+        .is_some_and(|candidate| candidate.iter().copied().eq(word.chars()))
         && (index == 0 || !is_word_character(chars[index - 1]))
         && chars
-            .get(index + word_chars.len())
+            .get(index + word.len())
             .is_none_or(|character| !is_word_character(*character))
 }
 
 fn projection_lists(masked_lower: &str) -> Vec<String> {
     let chars = masked_lower.chars().collect::<Vec<_>>();
     let mut projections = Vec::new();
-    for select_index in 0..chars.len() {
-        if !word_at(&chars, select_index, "select") {
+    for start in 0..chars.len() {
+        // VALUES rows and the arguments to SQLite's JSON table functions
+        // project data too, even when nested in another SELECT's FROM clause.
+        let mut index = if word_at(&chars, start, "select") || word_at(&chars, start, "values") {
+            start + 6
+        } else if chars[start] == 'j' {
+            let Some(name) = ["json_each", "json_tree", "jsonb_each", "jsonb_tree"]
+                .into_iter()
+                .find(|name| word_at(&chars, start, name))
+            else {
+                continue;
+            };
+            let after = start + name.len();
+            let Some(open) = chars[after..]
+                .iter()
+                .position(|c| !c.is_whitespace())
+                .map(|i| after + i)
+                .filter(|&i| chars[i] == '(')
+            else {
+                continue;
+            };
+            open + 1
+        } else {
             continue;
-        }
+        };
         let mut expression_depth = 0_usize;
         let mut subquery_depth = 0_usize;
         let mut output = String::new();
-        let mut index = select_index + "select".len();
         while index < chars.len() {
             match chars[index] {
                 '(' => {
@@ -2292,8 +2332,9 @@ fn projection_lists(masked_lower: &str) -> Vec<String> {
 fn strip_set_quantifier(column: &str) -> &str {
     let trimmed = column.trim();
     for quantifier in ["distinct", "all"] {
-        if trimmed.len() >= quantifier.len()
-            && trimmed[..quantifier.len()].eq_ignore_ascii_case(quantifier)
+        if trimmed
+            .get(..quantifier.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(quantifier))
             && trimmed
                 .chars()
                 .nth(quantifier.len())

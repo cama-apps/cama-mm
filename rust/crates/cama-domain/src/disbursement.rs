@@ -1,8 +1,7 @@
 //! Jopacoin Reserve governance policy: distribution methods, recipient
 //! selection and settlement math.
 //!
-//! The SQLite proposal/vote state machine lives in `cama_db::disbursement`;
-//! this module owns the storage-independent rules it and the runtime share.
+//! Pure rules used by the Reserve settlement transaction.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -296,24 +295,24 @@ pub fn calculate_proportional_distribution(fund: i64, debtors: &[Debtor]) -> Vec
     }
     let mut sorted = debtors.to_vec();
     sorted.sort_by_key(|debtor| (debtor.balance, debtor.discord_id));
-    let mut remaining = fund;
-    let last = sorted.len().saturating_sub(1);
-    let mut distributions = Vec::new();
-    for (index, debtor) in sorted.into_iter().enumerate() {
-        let debt = debtor.balance.saturating_abs();
-        let amount = if index == last {
-            remaining.min(debt)
-        } else {
-            let numerator = i128::from(debt) * i128::from(fund);
-            let share = i64::try_from(numerator / total_debt).unwrap_or(i64::MAX);
-            share.min(debt).min(remaining)
-        };
-        if amount > 0 {
-            distributions.push(Distribution::new(debtor.discord_id, amount));
-            remaining -= amount;
-        }
+    let available = i128::from(fund).min(total_debt);
+    let mut payouts = Vec::with_capacity(sorted.len());
+    let mut fractions = Vec::with_capacity(sorted.len());
+    let mut remaining = available;
+    for debtor in sorted {
+        let numerator = i128::from(debtor.balance.saturating_abs()) * available;
+        let amount = (numerator / total_debt) as i64;
+        remaining -= i128::from(amount);
+        fractions.push((payouts.len(), numerator % total_debt));
+        payouts.push(Distribution::new(debtor.discord_id, amount));
     }
-    distributions
+    // Largest remainder apportionment. Stable ties follow the debtor order above.
+    fractions.sort_by_key(|&(_, fraction)| std::cmp::Reverse(fraction));
+    for (index, _) in fractions.into_iter().take(remaining as usize) {
+        payouts[index].amount += 1;
+    }
+    payouts.retain(|payout| payout.amount > 0);
+    payouts
 }
 
 #[must_use]
@@ -358,15 +357,22 @@ pub fn calculate_stimulus_distribution(
 #[must_use]
 pub fn calculate_lottery_distribution(
     fund: i64,
-    players: &[DiscordId],
-    random_draw: u64,
+    players: &[PlayerSnapshot],
+    cutoff: i64,
+    draw: impl FnOnce(usize) -> usize,
 ) -> Vec<Distribution> {
-    if fund <= 0 || players.is_empty() {
+    if fund <= 0 {
         return Vec::new();
     }
-    let count = u64::try_from(players.len()).unwrap_or(u64::MAX);
-    let winner_index = usize::try_from(random_draw % count).unwrap_or(0);
-    vec![Distribution::new(players[winner_index], fund)]
+    let eligible: Vec<_> = players
+        .iter()
+        .filter(|player| player.last_match_at.is_some_and(|date| date >= cutoff))
+        .map(|player| player.discord_id)
+        .collect();
+    if eligible.is_empty() {
+        return Vec::new();
+    }
+    vec![Distribution::new(eligible[draw(eligible.len())], fund)]
 }
 
 #[must_use]
@@ -422,20 +428,15 @@ pub fn calculate_richest_distribution(
         .unwrap_or_default()
 }
 
-/// Recipient selection plus settlement math for one distribution method over
-/// a guild roster snapshot; the single owner of this policy for both the
-/// production runtime adapter.
-///
-/// `lottery_winner` is drawn by the caller from its recently-active roster so
-/// the calculation stays deterministic; `None` disburses nothing. `Burn`,
-/// `NextMatchPot`, and `Cancel` never pay players and always return no
-/// distributions.
+/// Allocate the reserve over the guild roster at settlement. Lottery draws
+/// receive the exclusive upper bound and must return an index below it.
 #[must_use]
 pub fn calculate_method_distributions(
     method: DistributionMethod,
     fund: i64,
     players: &[PlayerSnapshot],
-    lottery_winner: Option<DiscordId>,
+    lottery_cutoff: i64,
+    draw: impl FnOnce(usize) -> usize,
 ) -> Vec<Distribution> {
     match method {
         DistributionMethod::Even => calculate_even_distribution(fund, &select_debtors(players)),
@@ -448,9 +449,9 @@ pub fn calculate_method_distributions(
         DistributionMethod::Stimulus => {
             calculate_stimulus_distribution(fund, &select_stimulus_recipients(players))
         }
-        DistributionMethod::Lottery => lottery_winner
-            .map(|winner| calculate_lottery_distribution(fund, &[winner], 0))
-            .unwrap_or_default(),
+        DistributionMethod::Lottery => {
+            calculate_lottery_distribution(fund, players, lottery_cutoff, draw)
+        }
         DistributionMethod::SocialSecurity => calculate_social_security_distribution(
             fund,
             &select_social_security_recipients(players),
@@ -465,5 +466,5 @@ pub fn calculate_method_distributions(
 }
 
 #[cfg(test)]
-#[path = "disburse_service/tests.rs"]
+#[path = "disbursement/tests.rs"]
 mod tests;

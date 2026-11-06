@@ -255,3 +255,4 @@ create_deadlock_lobbies_and_betting
 create_deadlock_lobby_publications
 create_pet_keepsakes
 create_pet_diary_hatches
+index_guild_normalized_match_dates

@@ -6324,6 +6324,7 @@ async fn test_execute_shuffle_stops_if_lobby_changes_before_atomic_snapshot() {
             .handler
             .lobbies
             .reserve_players(GUILD, LobbyKind::Open, &reserved)
+            .await
     );
     let responder = Arc::new(RecordingMatchResponder::default());
 

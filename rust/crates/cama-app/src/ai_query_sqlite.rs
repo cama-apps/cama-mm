@@ -14,12 +14,14 @@ use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::time::Duration;
 
+use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+use rusqlite::limits::Limit;
 use rusqlite::types::{Value as SqlValue, ValueRef};
 use rusqlite::{Connection, OpenFlags, params_from_iter};
 
 use crate::ai_services::{
-    AIQueryRepository, ColumnSchema, ForeignKey, QueryRepositoryError, QueryRow, SchemaSnapshot,
-    TableSchema, Value,
+    AIQueryRepository, BLOCKED_TABLES, ColumnSchema, FORBIDDEN_QUERY_IDENTIFIERS, ForeignKey,
+    QueryRepositoryError, QueryRow, SchemaSnapshot, TableSchema, Value,
 };
 /// SQLite virtual-machine steps between progress callbacks.
 const GENERATED_QUERY_PROGRESS_INTERVAL: std::ffi::c_int = 10_000;
@@ -27,6 +29,10 @@ const GENERATED_QUERY_PROGRESS_INTERVAL: std::ffi::c_int = 10_000;
 /// hundred million virtual-machine steps -- far beyond any legitimate `/ask`
 /// over this schema, and short of hanging a blocking thread indefinitely.
 const GENERATED_QUERY_PROGRESS_BUDGET: u64 = 10_000;
+// A Discord answer is capped at a few thousand characters. Leave room for
+// intermediate SQL values, while bounding both a single value and the reply.
+const QUERY_BYTE_LIMIT: i32 = 256 * 1024;
+const GUILD_VIEW_SOURCE: &str = "__cama_guild_filtered_rows";
 
 /// Abort a generated query that runs away.
 ///
@@ -86,13 +92,16 @@ impl SqliteAIQueryRepository {
     }
 
     fn scoped_connection(&self, guild_id: i64) -> Result<Connection, QueryRepositoryError> {
-        let tables = self.get_guild_scoped_tables()?;
+        let mut tables = self.get_guild_scoped_tables()?;
+        tables.retain(|table| !BLOCKED_TABLES.contains(&table.as_str()));
         let connection = self.connection()?;
-        for table in tables {
-            let quoted = quote_identifier(&table);
+        for table in &tables {
+            let quoted = quote_identifier(table);
             connection
                 .execute_batch(&format!(
-                    "CREATE TEMP VIEW {quoted} AS SELECT * FROM main.{quoted} WHERE guild_id = {guild_id};"
+                    "CREATE TEMP VIEW {quoted} AS WITH {GUILD_VIEW_SOURCE} AS (
+                        SELECT * FROM main.{quoted} WHERE guild_id = {guild_id}
+                     ) SELECT * FROM {GUILD_VIEW_SOURCE};"
                 ))
                 .map_err(storage)?;
         }
@@ -100,6 +109,51 @@ impl SqliteAIQueryRepository {
             .pragma_update(None, "query_only", true)
             .map_err(storage)?;
         bound_generated_query_cost(&connection)?;
+        // Eponymous JSON table functions report their database as "main" too.
+        // Only allow those names when no real table/view shadows the function.
+        let json_functions = connection
+            .prepare(
+                "VALUES ('json_each'), ('json_tree'), ('jsonb_each'), ('jsonb_tree')
+             EXCEPT SELECT lower(name) FROM main.sqlite_schema WHERE type IN ('table', 'view')",
+            )
+            .map_err(storage)?
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(storage)?
+            .collect::<rusqlite::Result<BTreeSet<_>>>()
+            .map_err(storage)?;
+        // SQLite reports both view names and caller-defined CTE names as
+        // accessors. Only our private CTE (reserved from generated SQL) may
+        // read the underlying tables. All other reads go through TEMP views.
+        connection
+            .authorizer(Some(move |ctx: AuthContext<'_>| match ctx.action {
+                AuthAction::Select | AuthAction::Recursive | AuthAction::Function { .. } => {
+                    Authorization::Allow
+                }
+                // Views expand SELECT * at preparation time. Redact fields
+                // forbidden even in predicates before SQLite can join on them.
+                AuthAction::Read { column_name, .. }
+                    if ctx.database_name == Some("main")
+                        && ctx.accessor == Some(GUILD_VIEW_SOURCE)
+                        && FORBIDDEN_QUERY_IDENTIFIERS.contains(&column_name) =>
+                {
+                    Authorization::Ignore
+                }
+                AuthAction::Read { table_name, .. }
+                    if ctx.database_name == Some("main")
+                        && ((ctx.accessor == Some(GUILD_VIEW_SOURCE)
+                            && tables.contains(table_name))
+                            || json_functions.contains(table_name)) =>
+                {
+                    Authorization::Allow
+                }
+                AuthAction::Read { table_name, .. }
+                    if ctx.database_name == Some("temp") && tables.contains(table_name) =>
+                {
+                    Authorization::Allow
+                }
+                _ => Authorization::Deny,
+            }))
+            .map_err(storage)?;
         Ok(connection)
     }
 
@@ -113,6 +167,12 @@ impl SqliteAIQueryRepository {
         if !sql.trim_start().to_ascii_lowercase().starts_with("select") {
             return Err(QueryRepositoryError::ReadOnlyViolation);
         }
+        connection
+            .set_limit(Limit::SQLITE_LIMIT_LENGTH, QUERY_BYTE_LIMIT)
+            .map_err(storage)?;
+        connection
+            .set_limit(Limit::SQLITE_LIMIT_SQL_LENGTH, QUERY_BYTE_LIMIT)
+            .map_err(storage)?;
         let sql_params = params
             .iter()
             .map(sql_value)
@@ -127,16 +187,24 @@ impl SqliteAIQueryRepository {
             .query(params_from_iter(sql_params.iter()))
             .map_err(storage)?;
         let mut output = Vec::new();
+        let mut bytes_left = QUERY_BYTE_LIMIT as usize;
         while output.len() < max_rows {
             let Some(row) = rows.next().map_err(storage)? else {
                 break;
             };
             let mut projected = BTreeMap::new();
             for (index, name) in names.iter().enumerate() {
-                projected.insert(
-                    name.clone(),
-                    app_value(row.get_ref(index).map_err(storage)?),
-                );
+                let value = row.get_ref(index).map_err(storage)?;
+                let value_bytes = match value {
+                    ValueRef::Text(bytes) | ValueRef::Blob(bytes) => bytes.len(),
+                    _ => std::mem::size_of::<Value>(),
+                };
+                bytes_left = bytes_left
+                    .checked_sub(name.len().saturating_add(value_bytes))
+                    .ok_or_else(|| {
+                        QueryRepositoryError::InvalidQuery("query result is too large".into())
+                    })?;
+                projected.insert(name.clone(), app_value(value)?);
             }
             output.push(projected);
         }
@@ -225,6 +293,9 @@ impl AIQueryRepository for SqliteAIQueryRepository {
         params: &[Value],
         max_rows: usize,
     ) -> Result<Vec<QueryRow>, QueryRepositoryError> {
+        if sql.to_ascii_lowercase().contains(GUILD_VIEW_SOURCE) {
+            return Err(QueryRepositoryError::ReadOnlyViolation);
+        }
         let connection = self.scoped_connection(guild_id.unwrap_or_default())?;
         self.execute_on(&connection, sql, params, max_rows)
     }
@@ -321,19 +392,24 @@ fn sql_value(value: &Value) -> Result<SqlValue, QueryRepositoryError> {
     }
 }
 
-fn app_value(value: ValueRef<'_>) -> Value {
-    match value {
+fn app_value(value: ValueRef<'_>) -> Result<Value, QueryRepositoryError> {
+    Ok(match value {
         ValueRef::Null => Value::Null,
         ValueRef::Integer(value) => Value::Integer(value),
         ValueRef::Real(value) => Value::Real(value),
-        ValueRef::Text(value) => Value::Text(String::from_utf8_lossy(value).into_owned()),
-        ValueRef::Blob(value) => Value::List(
-            value
-                .iter()
-                .map(|byte| Value::Integer(i64::from(*byte)))
-                .collect(),
+        ValueRef::Text(value) => Value::Text(
+            std::str::from_utf8(value)
+                .map_err(|_| {
+                    QueryRepositoryError::InvalidQuery("invalid UTF-8 text result".into())
+                })?
+                .to_owned(),
         ),
-    }
+        ValueRef::Blob(_) => {
+            return Err(QueryRepositoryError::InvalidQuery(
+                "binary query result".into(),
+            ));
+        }
+    })
 }
 
 fn storage(error: rusqlite::Error) -> QueryRepositoryError {

@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -107,7 +106,6 @@ impl ScoutRegistrationProvider {
                 portrait_cache_root: cache_path.as_ref().to_path_buf(),
                 portrait_batch_lock: Arc::new(Mutex::new(())),
                 views: Arc::new(Mutex::new(BTreeMap::new())),
-                next_view_id: AtomicU64::new(1),
                 view_timeout,
             }),
         })
@@ -189,13 +187,13 @@ struct ScoutHandler {
     portrait_cache_root: std::path::PathBuf,
     portrait_batch_lock: Arc<Mutex<()>>,
     views: Arc<Mutex<BTreeMap<u64, Arc<tokio::sync::Mutex<ScoutViewState>>>>>,
-    next_view_id: AtomicU64,
     view_timeout: Duration,
 }
 
 #[derive(Clone)]
 struct ScoutViewState {
     owner_id: u64,
+    guild_id: i64,
     page: usize,
     scout_data: ScoutData,
     player_names: Vec<String>,
@@ -235,6 +233,7 @@ impl ScoutHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
         let InteractionRequest::Command {
+            interaction_id,
             name,
             user_id,
             guild_id,
@@ -293,6 +292,7 @@ impl ScoutHandler {
         match subcommand {
             "report" => {
                 self.handle_report(
+                    interaction_id,
                     user_id,
                     guild_id,
                     mentions,
@@ -338,6 +338,7 @@ impl ScoutHandler {
     #[allow(clippy::too_many_arguments)]
     async fn handle_report(
         &self,
+        view_id: u64,
         owner_id: u64,
         guild_id: i64,
         mentions: Option<String>,
@@ -411,9 +412,9 @@ impl ScoutHandler {
                 Some(player_names.resolve(discord_id))
             })
             .collect();
-        let view_id = self.next_view_id.fetch_add(1, Ordering::Relaxed);
         let state = ScoutViewState {
             owner_id,
+            guild_id,
             page: 0,
             scout_data: loaded.0,
             player_names,
@@ -567,7 +568,10 @@ impl ScoutHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
         let InteractionRequest::Component {
-            custom_id, user_id, ..
+            custom_id,
+            user_id,
+            guild_id,
+            ..
         } = request
         else {
             return Err("Scout component handler received a non-component".into());
@@ -579,11 +583,25 @@ impl ScoutHandler {
             .map_err(|_| "Scout view registry lock was poisoned")?
             .get(&view_id)
             .cloned();
-        let Some(view) = view else {
-            return Ok(());
-        };
+        let guild_id = guild_id
+            .map(|guild_id| signed_id(guild_id, "guild"))
+            .transpose()?;
         let snapshot = {
-            let mut state = view.lock().await;
+            let view = match view {
+                Some(view) => Some(view.lock_owned().await),
+                None => None,
+            };
+            let Some(mut state) = view.filter(|state| Some(state.guild_id) == guild_id) else {
+                return responder
+                    .respond(
+                        InteractionResponse::message(
+                            "This Scout report has expired. Run `/scout report` again.",
+                        )
+                        .ephemeral(),
+                    )
+                    .await
+                    .map_err(|error| error.to_string().into());
+            };
             if state.owner_id != user_id {
                 return responder
                     .respond(

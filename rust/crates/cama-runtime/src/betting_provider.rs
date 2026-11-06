@@ -13,9 +13,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use cama_app::dig_neon::{BigWinFlavor, BigWinSource};
-use cama_app::disburse_service::{
-    DistributionMethod, PlayerSnapshot as DisbursePlayerSnapshot, calculate_method_distributions,
-};
 use cama_app::dota_bet_seed::{BetTotals, bets_overview, betting_seed_without_lobby_bonus};
 use cama_app::economy_actions::apply_gamba_event_multiplier;
 use cama_app::economy_event_service::EconomyEventConfig;
@@ -5985,18 +5982,21 @@ impl BettingInteractionHandler {
                     )
                     .await;
                 };
-                if let (Some(message_id), Some(previous_channel)) =
-                    (proposal.message_id, proposal.channel_id)
-                    && let (Ok(previous_channel), Ok(message_id)) =
-                        (u64::try_from(previous_channel), u64::try_from(message_id))
+                if let (Some(channel_id), Some(message_id)) =
+                    (proposal.channel_id, proposal.message_id)
                 {
-                    let _ = self
-                        .discord
-                        .delete_message(previous_channel, message_id)
-                        .await;
+                    let message = format!(
+                        "Reserve ballot: {}/{} votes. [Open the ballot](https://discord.com/channels/{guild_id}/{channel_id}/{message_id})",
+                        proposal.total_votes(),
+                        proposal.quorum_required,
+                    );
+                    return respond_ephemeral(responder, &message).await;
                 }
-                self.send_persistent_disbursement_message(proposal, responder)
+                // A proposal whose original publication failed can still accept votes.
+                responder
+                    .respond(disbursement_proposal_response(&proposal).ephemeral())
                     .await
+                    .map_err(|error| error.to_string())
             }
             "reset" => {
                 let path = self.database_path.clone();
@@ -6237,7 +6237,6 @@ impl BettingInteractionHandler {
             .ok_or_else(|| "No votes have been cast yet".to_owned())?
             .to_owned();
         let path = self.database_path.clone();
-        let fund = proposal.fund_amount;
         let proposal_id = proposal.proposal_id;
         let days = self.config.lottery_activity_days;
         sqlite("disbursement execution", move || {
@@ -6283,31 +6282,17 @@ impl BettingInteractionHandler {
                     })
                 }
                 _ => {
-                    let player_repository = PlayerRepository::new(&path);
-                    let players = player_repository
-                        .get_all(Some(guild_id))
-                        .map_err(|error| error.to_string())?;
-                    // Only the lottery needs the activity roster, and it is a
-                    // second query, so it stays behind the method check.
-                    let lottery_winner = if method == "lottery" {
-                        let candidates = player_repository
-                            .lottery_candidates(Some(guild_id), &lottery_activity_cutoff(days))
-                            .map_err(|error| error.to_string())?;
-                        draw_lottery_winner(&candidates)
-                    } else {
-                        None
-                    };
-                    let distributions =
-                        calculate_distributions(&method, fund, &players, lottery_winner);
-                    let total = repository
+                    let payout = repository
                         .complete_and_disburse_atomic(
                             Some(guild_id),
                             proposal_id,
                             &method,
                             require_quorum,
-                            &distributions,
+                            lottery_activity_cutoff(days),
+                            |len| fastrand::usize(..len),
                         )
                         .map_err(|error| error.to_string())?;
+                    let distributions = payout.distributions;
                     let message = if distributions.is_empty() {
                         Some("No eligible players for this distribution method.".to_owned())
                     } else {
@@ -6315,7 +6300,7 @@ impl BettingInteractionHandler {
                     };
                     Ok(DisbursementExecution {
                         method: method.to_owned(),
-                        total_disbursed: total,
+                        total_disbursed: payout.total,
                         distributions,
                         cancelled: false,
                         message,
@@ -6845,69 +6830,14 @@ fn disbursement_response(execution: &DisbursementExecution, forced: bool) -> Int
     )
 }
 
-/// ISO-8601 cutoff admitting players whose last match is within `days`.
+/// Unix timestamp admitting players whose last match is within `days`.
 ///
 /// A non-positive window would admit nobody, so it is clamped to zero, which
 /// keeps only players who played at or after "now".
-fn lottery_activity_cutoff(days: i64) -> String {
-    (Utc::now() - chrono::Duration::days(days.max(0))).to_rfc3339()
-}
-
-/// Uniformly draws one lottery winner, mirroring the legacy `random.choice`.
-fn draw_lottery_winner(candidates: &[i64]) -> Option<i64> {
-    if candidates.is_empty() {
-        return None;
-    }
-    candidates.get(fastrand::usize(..candidates.len())).copied()
-}
-
-/// `lottery_winner` is drawn by the caller from the recently-active roster so
-/// the pure calculation stays deterministic under test; see
-/// `draw_lottery_winner`.
-///
-/// The recipient selection and settlement math are owned by
-/// `cama_app::disburse_service::calculate_method_distributions`; this adapter
-/// only parses the stored method code and reshapes database rows into the
-/// service's roster snapshot. Unknown method codes disburse nothing, matching
-/// the legacy fallthrough.
-fn calculate_distributions(
-    method: &str,
-    fund: i64,
-    players: &[Player],
-    lottery_winner: Option<i64>,
-) -> Vec<(i64, i64)> {
-    let Some(method) = DistributionMethod::from_code(method) else {
-        return Vec::new();
-    };
-    calculate_method_distributions(
-        method,
-        fund,
-        &disbursement_snapshots(players),
-        lottery_winner,
-    )
-    .into_iter()
-    .map(|distribution| (distribution.discord_id, distribution.amount))
-    .collect()
-}
-
-/// Adapts database player rows into the roster snapshot the application-layer
-/// settlement math consumes. Rows without a Discord ID can never receive
-/// funds, so they are dropped here, matching the legacy per-method filters.
-fn disbursement_snapshots(players: &[Player]) -> Vec<DisbursePlayerSnapshot> {
-    players
-        .iter()
-        .filter_map(|player| {
-            let discord_id = player.discord_id?;
-            Some(DisbursePlayerSnapshot {
-                discord_id,
-                username: player.name.clone(),
-                balance: player.jopacoin_balance,
-                wins: u32::try_from(player.wins.max(0)).unwrap_or(u32::MAX),
-                losses: u32::try_from(player.losses.max(0)).unwrap_or(u32::MAX),
-                last_match_at: None,
-            })
-        })
-        .collect()
+fn lottery_activity_cutoff(days: i64) -> i64 {
+    Utc::now()
+        .timestamp()
+        .saturating_sub(days.max(0).saturating_mul(86_400))
 }
 
 fn parse_team(value: &str) -> Result<BettingTeam, String> {
