@@ -163,6 +163,8 @@ pub trait AdminDiscordControl: Send + Sync {
 pub struct AdminRuntimePorts {
     pub discord: Arc<dyn DiscordTransport>,
     pub discord_control: Arc<dyn AdminDiscordControl>,
+    pub reminders: crate::reminder_provider::ReminderHooks,
+    pub classic_trivia: crate::trivia_provider::ClassicTriviaTransferGuard,
     pub lobby: Arc<dyn AdminLobbyControl>,
     pub matches: Arc<dyn AdminMatchControl>,
     pub match_corrections: Arc<dyn AdminMatchCorrectionControl>,
@@ -761,6 +763,7 @@ impl AdminHandler {
             }
             "extendbetting" => self.extend_betting(context, responder).await,
             "correctmatch" => self.correct_match(context, responder).await,
+            "transferaccount" => self.transfer_account(context, responder).await,
             "addsteamid" => self.add_steam_id(context, responder).await,
             "removesteamid" => self.remove_steam_id(context, responder).await,
             "setprimarysteam" => self.set_primary_steam(context, responder).await,
@@ -1432,6 +1435,122 @@ impl AdminHandler {
             ),
         )
         .await
+    }
+
+    async fn transfer_account(
+        &self,
+        context: AdminCommandContext,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), InteractionHandlerError> {
+        // The transfer includes global Steam ownership and data across guilds.
+        if !self.config.admin_user_ids.contains(&context.actor_id) {
+            return respond_ephemeral(
+                &responder,
+                "Only a configured bot admin can transfer accounts.",
+            )
+            .await;
+        }
+        if context.guild_id == 0 {
+            return respond_ephemeral(&responder, GUILD_ONLY).await;
+        }
+        let old = string(&context.options, "old_discord_id")
+            .filter(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
+            .and_then(|value| value.parse::<i64>().ok())
+            .filter(|id| *id > 0);
+        let Some(old) = old else {
+            return respond_ephemeral(
+                &responder,
+                "Enter the numeric Discord user ID of the old account.",
+            )
+            .await;
+        };
+        let user = required_user(&context.options, "new_account")?;
+        let new = signed_id(user.id, "new account")?;
+        if new == old || new == 0 || user.is_bot != Some(false) {
+            return respond_ephemeral(
+                &responder,
+                "Select a different human account as the replacement.",
+            )
+            .await;
+        }
+        defer(&responder, true).await?;
+        let guild_id = context.guild_id;
+        let member = match self
+            .ports
+            .discord
+            .guild_member(guild_id as u64, user.id)
+            .await
+        {
+            Ok(Some(member)) => member,
+            Ok(None) => {
+                return respond_ephemeral(
+                    &responder,
+                    "The replacement account must be a member of this server.",
+                )
+                .await;
+            }
+            Err(error) => {
+                warn!(guild_id, new, %error, "account transfer member lookup failed");
+                return respond_ephemeral(
+                    &responder,
+                    "Could not verify the replacement's server membership. Try again.",
+                )
+                .await;
+            }
+        };
+        let name = cama_domain::discord_content::readable_player_name(&member.display_name)
+            .unwrap_or(cama_domain::discord_content::UNKNOWN_PLAYER)
+            .to_owned();
+        let admin = self.admin.clone();
+        let destination_name = name.clone();
+        let Some(trivia_guard) = self.ports.classic_trivia.reserve_transfer(old, new) else {
+            return respond_ephemeral(
+                &responder,
+                "Finish the active classic trivia session or account transfer before retrying.",
+            )
+            .await;
+        };
+        let reminders = self.ports.reminders.clone();
+        let delivery_guard = reminders.pause_delivery_for_transfer().await;
+        let result = tokio::task::spawn_blocking(move || {
+            // The worker owns the guard even if the interaction is cancelled.
+            let _delivery_guard = delivery_guard;
+            let _trivia_guard = trivia_guard;
+            admin.transfer_account(guild_id, old, new, &destination_name)?;
+            if let Err(error) = reminders.transfer_pending_blocking(old, new) {
+                error!(%error, old, new, "account transferred but reminder timers could not be rearmed");
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|error| format!("account transfer task failed: {error}"))?;
+        match result {
+            Ok(()) => {
+                tracing::info!(
+                    actor_id = context.actor_id,
+                    guild_id,
+                    old,
+                    new,
+                    "transferred Discord account"
+                );
+                respond_ephemeral(
+                    &responder,
+                    format!("Transferred the player profile across all servers to **{name}**."),
+                )
+                .await
+            }
+            Err(cama_db::admin::TransferError::Conflict(reason)) => {
+                respond_ephemeral(&responder, reason).await
+            }
+            Err(error) => {
+                error!(actor_id = context.actor_id, guild_id, old, new, %error, "Discord account transfer failed");
+                respond_ephemeral(
+                    &responder,
+                    "Account transfer failed. See the bot logs for details.",
+                )
+                .await
+            }
+        }
     }
 
     async fn add_steam_id(
@@ -3247,6 +3366,22 @@ fn admin_options(admin_rating_max: f64) -> Vec<CommandOptionSpec> {
                         CommandOptionKind::String,
                     ),
                     &[("Radiant", "radiant"), ("Dire", "dire")],
+                ),
+            ],
+        ),
+        CommandOptionSpec::subcommand(
+            "transferaccount",
+            "Move a player's bot profile across all servers to a replacement Discord account (bot admin only)",
+            vec![
+                required(
+                    "old_discord_id",
+                    "Numeric Discord user ID of the old account",
+                    CommandOptionKind::String,
+                ),
+                required(
+                    "new_account",
+                    "Replacement server member to receive the profile",
+                    CommandOptionKind::User,
                 ),
             ],
         ),

@@ -110,6 +110,7 @@ impl ReminderRegistrationProvider {
             timers: Mutex::new(BTreeMap::new()),
             discord,
             recovery_guard: tokio::sync::Mutex::new(()),
+            delivery_gate: Arc::new(tokio::sync::RwLock::new(())),
             #[cfg(test)]
             sync_snapshot_barrier: Mutex::new(None),
             #[cfg(test)]
@@ -163,6 +164,8 @@ struct ReminderRuntimeState {
     timers: Mutex<BTreeMap<ReminderTaskKey, TimerGeneration>>,
     discord: Arc<dyn DiscordTransport>,
     recovery_guard: tokio::sync::Mutex<()>,
+    // Concurrent deliveries finish before account recovery exchanges recipients.
+    delivery_gate: Arc<tokio::sync::RwLock<()>>,
     #[cfg(test)]
     sync_snapshot_barrier: Mutex<Option<Arc<std::sync::Barrier>>>,
     #[cfg(test)]
@@ -245,6 +248,7 @@ impl ReminderRuntimeState {
     }
 
     async fn fire_task(self: Arc<Self>, key: ReminderTaskKey, task_id: TaskId) {
+        let _delivery = self.delivery_gate.read().await;
         let state = Arc::clone(&self);
         // The claim takes the service lock, which a startup recovery pass can
         // hold across a bulk rescan, so it never runs on this async worker.
@@ -256,7 +260,15 @@ impl ReminderRuntimeState {
                     return None;
                 }
             };
-            let claimed = service.claim_task(key, task_id);
+            let claimed = service.claim_task(key, task_id).filter(|_| {
+                match service.get_preferences(key.user_id, Some(key.guild_id)) {
+                    Ok(prefs) => prefs.enabled(key.kind),
+                    Err(error) => {
+                        warn!(%error, ?key, "could not verify reminder DM preference");
+                        false
+                    }
+                }
+            });
             #[cfg(test)]
             {
                 let barrier = state.fire_claim_barrier.lock().unwrap().take();
@@ -573,6 +585,25 @@ pub struct ReminderHooks {
 }
 
 impl ReminderHooks {
+    pub(crate) async fn pause_delivery_for_transfer(
+        &self,
+    ) -> tokio::sync::OwnedRwLockWriteGuard<()> {
+        Arc::clone(&self.state.delivery_gate).write_owned().await
+    }
+
+    /// Caller holds the exclusive delivery guard through the database commit
+    /// and this timer update. Must run on a blocking worker.
+    pub(crate) fn transfer_pending_blocking(&self, old: i64, new: i64) -> Result<(), String> {
+        let changed = self
+            .state
+            .lock_service()?
+            .transfer_pending_tasks(UserId::new(old), UserId::new(new));
+        for key in changed {
+            self.state.sync_task_blocking(key)?;
+        }
+        Ok(())
+    }
+
     #[cfg(all(test, feature = "runtime-test-dig"))]
     pub(crate) fn test_task_snapshot(
         &self,
@@ -718,6 +749,7 @@ impl ReminderHooks {
         lobby_kind: Option<LobbyKind>,
     ) -> Result<ReminderDeliveryReport, String> {
         let state = Arc::clone(&self.state);
+        let _delivery = self.state.delivery_gate.read().await;
         let delivery = tokio::task::spawn_blocking(move || {
             state
                 .lock_service()?

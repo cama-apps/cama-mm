@@ -1077,6 +1077,37 @@ where
         self.tasks.remove(&key)
     }
 
+    /// Move pending generations after a durable account transfer. Keep the
+    /// original deadlines, including timers that became due during the move.
+    pub fn transfer_pending_tasks(&mut self, old: UserId, new: UserId) -> Vec<ReminderTaskKey> {
+        let old_keys: Vec<_> = self
+            .tasks
+            .keys()
+            .filter(|key| key.user_id == old)
+            .copied()
+            .collect();
+        let mut changed = Vec::with_capacity(old_keys.len() * 2);
+        for key in old_keys {
+            let task = self.tasks.remove(&key).expect("collected pending task");
+            self.cancelled_tasks.insert(task.id);
+            changed.push(key);
+            let replacement = ReminderTaskKey {
+                user_id: new,
+                ..key
+            };
+            // READY recovery may already have armed the replacement using its
+            // newly transferred persistent cooldown anchor.
+            if !self.tasks.contains_key(&replacement) {
+                self.register_task(replacement, task.due_at, &task.message);
+            }
+            changed.push(replacement);
+        }
+        self.dig_reconcile_versions
+            .retain(|key, _| key.user_id != old);
+        self.dig_reference_times.retain(|key, _| key.user_id != old);
+        changed
+    }
+
     pub fn cancel_dig_reminder(
         &mut self,
         user_id: UserId,

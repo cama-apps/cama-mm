@@ -1221,3 +1221,66 @@ async fn trivia_gamba_lookup_error_is_a_failure_not_a_penalty() {
     assert!(responses.inner.followups.lock().unwrap().is_empty());
     assert_eq!(fixture.balance(), 3);
 }
+
+#[tokio::test]
+async fn account_recovery_waits_for_classic_trivia_timeout_to_record_the_streak() {
+    let fixture = MigratedFixture::new();
+    let cache = tempfile::tempdir().unwrap();
+    let provider = TriviaRegistrationProvider::from_catalog(
+        &fixture.path,
+        flow_catalog(cache.path()),
+        TriviaImageCache::new(cache.path()).unwrap(),
+        &flow_config(),
+        fixture.vanity_tax(),
+        Arc::new(FlowDiscord::default()),
+        None,
+    )
+    .unwrap();
+    let registry = flow_registry(&provider);
+    let recovery = provider.account_transfer_guard();
+    let replacement = 97001;
+
+    registry
+        .command_handler("trivia")
+        .unwrap()
+        .handle(trivia_command(), Arc::new(FlowResponses::with_receipt(700)))
+        .await
+        .unwrap();
+    let state = &provider.handler.state;
+    let correct = state.sessions_lock().unwrap()[&(FLOW_USER, FLOW_GUILD)]
+        .current
+        .question
+        .correct_index;
+    registry
+        .component_handler(&format!("trivia_{FLOW_USER}_1_{correct}"))
+        .unwrap()
+        .handle(
+            trivia_component(2, 1, correct),
+            Arc::new(FlowResponses::with_receipt(701)),
+        )
+        .await
+        .unwrap();
+    assert!(recovery.reserve_transfer(FLOW_USER, replacement).is_none());
+    assert!(recovery.reserve_transfer(replacement, FLOW_USER).is_none());
+    assert!(
+        recovery
+            .reserve_transfer(replacement, replacement + 1)
+            .is_some()
+    );
+
+    Arc::clone(state)
+        .timeout_question(FLOW_USER, FLOW_GUILD, 2)
+        .await;
+    let _reservation = recovery.reserve_transfer(FLOW_USER, replacement).unwrap();
+    cama_db::admin::AdminRepository::new(&fixture.path)
+        .transfer_account(FLOW_GUILD, FLOW_USER, replacement, "Replacement")
+        .unwrap();
+    let row: (i64, i64) = fixture
+        .connection()
+        .query_row("SELECT discord_id,streak FROM trivia_sessions", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(row, (replacement, 1));
+    assert!(recovery.player(replacement).try_read_owned().is_err());
+}

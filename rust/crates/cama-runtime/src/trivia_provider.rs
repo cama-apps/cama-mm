@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -27,6 +27,7 @@ use cama_domain::economy_scaling::scale_minigame_jc_delta;
 use cama_domain::mana::ManaEffects;
 use cama_domain::pet_evolution::PetActivity;
 use chrono::{Datelike, Duration as ChronoDuration, NaiveDate, Timelike, Weekday};
+use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
@@ -74,6 +75,42 @@ pub trait TriviaDiscordPort: Send + Sync {
     ) -> Result<(), InteractionResponseError>;
 
     async fn delete_trivia_message(&self, channel_id: u64, message_id: u64) -> Result<(), String>;
+}
+
+type TriviaPlayerLocks = BTreeMap<i64, Weak<RwLock<()>>>;
+
+/// A question in any guild holds its player's read guard from admission through
+/// the final leaderboard write. Recovery needs both players exclusively.
+#[derive(Clone, Default)]
+pub struct ClassicTriviaTransferGuard {
+    players: Arc<Mutex<TriviaPlayerLocks>>,
+}
+
+impl ClassicTriviaTransferGuard {
+    fn player(&self, user_id: i64) -> Arc<RwLock<()>> {
+        let mut players = self
+            .players
+            .lock()
+            .expect("trivia player lock map poisoned");
+        players.retain(|_, lock| lock.strong_count() != 0);
+        if let Some(lock) = players.get(&user_id).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(RwLock::new(()));
+        players.insert(user_id, Arc::downgrade(&lock));
+        lock
+    }
+
+    pub(crate) fn reserve_transfer(
+        &self,
+        old: i64,
+        new: i64,
+    ) -> Option<[OwnedRwLockWriteGuard<()>; 2]> {
+        Some([
+            self.player(old).try_write_owned().ok()?,
+            self.player(new).try_write_owned().ok()?,
+        ])
+    }
 }
 
 #[derive(Clone)]
@@ -154,6 +191,7 @@ impl TriviaRegistrationProvider {
             catalog: Arc::clone(&catalog),
             image_cache: Arc::clone(&image_cache),
             random: Mutex::new(FastrandTriviaRandom::new()),
+            transfer_guard: ClassicTriviaTransferGuard::default(),
             sessions: Mutex::new(BTreeMap::new()),
             command_cooldowns: Mutex::new(BTreeMap::new()),
             config: TriviaRuntimeConfig::from_application_config(config),
@@ -166,6 +204,11 @@ impl TriviaRegistrationProvider {
                 task: Mutex::new(None),
             }),
         })
+    }
+
+    #[must_use]
+    pub fn account_transfer_guard(&self) -> ClassicTriviaTransferGuard {
+        self.handler.state.transfer_guard.clone()
     }
 
     #[must_use]
@@ -260,6 +303,7 @@ struct TriviaRuntimeState {
     catalog: Arc<TriviaCatalog>,
     image_cache: Arc<TriviaImageCache>,
     random: Mutex<FastrandTriviaRandom>,
+    transfer_guard: ClassicTriviaTransferGuard,
     sessions: Mutex<TriviaSessions>,
     command_cooldowns: Mutex<BTreeMap<i64, Instant>>,
     config: TriviaRuntimeConfig,
@@ -269,6 +313,7 @@ type TriviaSessions = BTreeMap<(i64, i64), LiveTriviaSession>;
 type TriviaSessionsGuard<'a> = std::sync::MutexGuard<'a, TriviaSessions>;
 
 struct LiveTriviaSession {
+    player_guard: OwnedRwLockReadGuard<()>,
     user_id: i64,
     guild_id: i64,
     user_display_name: String,
@@ -400,6 +445,13 @@ impl TriviaRuntimeState {
             )
             .await;
         }
+        let Ok(player_guard) = self.transfer_guard.player(user_id).try_read_owned() else {
+            return followup_ephemeral(
+                &responder,
+                "Account recovery is in progress. Try again shortly.",
+            )
+            .await;
+        };
         if !self
             .require_gamba(user_id, guild_id, channel_id, &responder)
             .await?
@@ -485,6 +537,7 @@ impl TriviaRuntimeState {
         self.sessions_lock()?.insert(
             (user_id, guild_id),
             LiveTriviaSession {
+                player_guard,
                 user_id,
                 guild_id,
                 user_display_name: user_display_name.clone(),
@@ -503,6 +556,22 @@ impl TriviaRuntimeState {
             },
         );
 
+        let result = self
+            .send_first_question(user_id, guild_id, &user_display_name, responder)
+            .await;
+        if result.is_err() {
+            self.end_session(user_id, guild_id).await;
+        }
+        result
+    }
+
+    async fn send_first_question(
+        self: &Arc<Self>,
+        user_id: i64,
+        guild_id: i64,
+        user_display_name: &str,
+        responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
         let preparation = self.prepare_question(0, Vec::new());
         let avatar = self.discord.trivia_user_avatar_url(user_id, guild_id);
         let (prepared, avatar) = tokio::join!(preparation, avatar);
@@ -528,7 +597,7 @@ impl TriviaRuntimeState {
             1,
             0,
             0,
-            &user_display_name,
+            user_display_name,
             avatar.as_deref(),
             self.config.answer_timeout,
             user_id,
@@ -1009,7 +1078,6 @@ impl TriviaRuntimeState {
             && !error.is_not_found()
         {
             warn!(user_id, guild_id, %error, "trivia timeout result edit failed");
-            return;
         }
         self.end_session(user_id, guild_id).await;
     }
@@ -1046,6 +1114,9 @@ impl TriviaRuntimeState {
         let total_jc = session.total_jc;
         let played_at = unix_timestamp().unwrap_or_default();
         match tokio::task::spawn_blocking(move || {
+            // Removing the in-memory session must not let recovery run ahead of
+            // this blocking write, even if the caller or timeout task is cancelled.
+            let _player_guard = session.player_guard;
             trivia.record_trivia_session(user_id, Some(guild_id), streak, total_jc, played_at)
         })
         .await
