@@ -2748,3 +2748,172 @@ async fn admin_replies_fall_back_to_the_resolved_option_name_never_an_id() {
         .content;
     assert_eq!(unnamed, "⚠️ **Unknown player** is not registered.");
 }
+
+#[test]
+fn transferaccount_lookup_schema_keeps_both_modes_available() {
+    let options = admin_options(3000.0);
+    assert!(options.len() <= 25);
+    let command = options
+        .iter()
+        .find(|option| option.name == "transferaccount")
+        .unwrap();
+    assert!(command.options.iter().all(|option| !option.required));
+    let lookup = command
+        .options
+        .iter()
+        .find(|option| option.name == "lookup")
+        .unwrap();
+    assert_eq!(lookup.kind, CommandOptionKind::String);
+    assert_eq!((lookup.min_length, lookup.max_length), (Some(1), Some(100)));
+}
+
+#[tokio::test]
+async fn transferaccount_lookup_finds_departed_player_privately_without_moving_profile() {
+    let fixture = ProviderFixture::new();
+    fixture.player(TARGET, 9, 3, Some(1732.0), Some(64.0), Some(0.06));
+    let connection = Connection::open(fixture.database.path()).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE players SET discord_username='Bismi' WHERE discord_id=?1",
+            [i64::try_from(TARGET).unwrap()],
+        )
+        .unwrap();
+    connection.execute("INSERT INTO player_display_names(discord_id,guild_id,display_name,seen_at) VALUES(?1,?2,'Bismi archived',1)", params![i64::try_from(TARGET).unwrap(),i64::try_from(GUILD).unwrap()]).unwrap();
+    connection.execute("INSERT INTO player_steam_ids(discord_id,steam_id,is_primary,added_at) VALUES(?1,123456,1,1)", [i64::try_from(TARGET).unwrap()]).unwrap();
+    let response = fixture
+        .dispatch(
+            "transferaccount",
+            vec![string_option("lookup", "bismi")],
+            5000,
+        )
+        .await;
+    assert_eq!(*response.defers.lock().unwrap(), [true]);
+    let message = response.last();
+    assert!(message.ephemeral);
+    assert!(message.content.contains(&format!("Discord ID `{TARGET}`")));
+    assert!(
+        message
+            .content
+            .contains("[Dotabuff · Steam32 123456](https://www.dotabuff.com/players/123456)")
+    );
+    assert!(message.content.contains("Bismi archived"));
+    assert!(message.content.contains("9W/3L"));
+    assert!(message.content.contains("old_discord_id"));
+    assert!(message.content.contains("Lookup does not transfer"));
+    assert_eq!(fixture.rating(TARGET).0, Some(1732.0));
+    let by_steam = fixture
+        .dispatch(
+            "transferaccount",
+            vec![string_option("lookup", "123456")],
+            5001,
+        )
+        .await;
+    assert!(by_steam.last().content.contains(&TARGET.to_string()));
+}
+
+#[tokio::test]
+async fn transferaccount_lookup_requires_bot_admin_and_valid_exclusive_query() {
+    let fixture = ProviderFixture::new();
+    let denied = fixture
+        .dispatch_request(admin_command(
+            "transferaccount",
+            vec![string_option("lookup", "Bismi")],
+            5010,
+            TARGET,
+            Some(ADMINISTRATOR_PERMISSION),
+        ))
+        .await;
+    assert!(denied.last().content.contains("configured bot admin"));
+    assert!(denied.defers.lock().unwrap().is_empty());
+    for query in [" ".to_owned(), "x".repeat(101)] {
+        let response = fixture
+            .dispatch(
+                "transferaccount",
+                vec![string_option("lookup", &query)],
+                5011,
+            )
+            .await;
+        assert!(response.last().content.contains("1 and 100"));
+        assert!(response.defers.lock().unwrap().is_empty());
+    }
+    let mixed = fixture
+        .dispatch(
+            "transferaccount",
+            vec![
+                string_option("lookup", "Bismi"),
+                user_option("new_account", TARGET, "Target"),
+            ],
+            5012,
+        )
+        .await;
+    assert!(mixed.last().content.contains("lookup by itself"));
+    assert!(mixed.defers.lock().unwrap().is_empty());
+    let missing = fixture
+        .dispatch(
+            "transferaccount",
+            vec![string_option("old_discord_id", &TARGET.to_string())],
+            5013,
+        )
+        .await;
+    assert!(missing.last().content.contains("Select new_account"));
+    let empty = fixture
+        .dispatch(
+            "transferaccount",
+            vec![string_option("lookup", "unknown-player")],
+            5014,
+        )
+        .await;
+    assert!(empty.last().content.contains("No matching registrations"));
+}
+
+#[tokio::test]
+async fn transferaccount_lookup_caps_results_and_suggests_refining_without_guessing() {
+    let fixture = ProviderFixture::new();
+    let connection = Connection::open(fixture.database.path()).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .unwrap();
+    for offset in 0..12 {
+        fixture.player(TARGET + offset, 0, 0, None, None, None);
+        for alternate in 0..3 {
+            connection.execute(
+                "INSERT INTO player_steam_ids(discord_id,steam_id,is_primary,added_at) VALUES(?1,?2,?3,1)",
+                params![i64::try_from(TARGET + offset).unwrap(), i64::try_from(100000 + offset * 3 + alternate).unwrap(), alternate == 0],
+            ).unwrap();
+        }
+    }
+    let response = fixture
+        .dispatch(
+            "transferaccount",
+            vec![string_option("lookup", "Player")],
+            5020,
+        )
+        .await;
+    let messages = response.responses.lock().unwrap();
+    assert!(messages.len() > 1);
+    assert!(
+        messages
+            .iter()
+            .all(|message| message.ephemeral && message.content.chars().count() <= 2000)
+    );
+    let content = messages
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(content.matches("Discord ID `").count(), 10);
+    assert_eq!(
+        content.matches("https://www.dotabuff.com/players/").count(),
+        30
+    );
+    for steam_id in 100000..100030 {
+        assert!(content.contains(&format!(
+            "[Dotabuff · Steam32 {steam_id}](https://www.dotabuff.com/players/{steam_id})"
+        )));
+    }
+    assert!(content.contains("narrow your search"));
+    assert!(!content.contains("<@"));
+}

@@ -1453,6 +1453,86 @@ impl AdminHandler {
         if context.guild_id == 0 {
             return respond_ephemeral(&responder, GUILD_ONLY).await;
         }
+        if let Some(query) = string(&context.options, "lookup") {
+            if context
+                .options
+                .iter()
+                .any(|option| matches!(option.name.as_str(), "old_discord_id" | "new_account"))
+            {
+                return respond_ephemeral(&responder, "Use lookup by itself, then run transferaccount with the chosen old_discord_id and new_account.").await;
+            }
+            let query = query.trim();
+            if query.is_empty() || query.chars().count() > 100 {
+                return respond_ephemeral(
+                    &responder,
+                    "Enter a name, Discord ID, or Steam ID between 1 and 100 characters.",
+                )
+                .await;
+            }
+            defer(&responder, true).await?;
+            let admin = self.admin.clone();
+            let guild_id = context.guild_id;
+            let query = query.to_owned();
+            let matches =
+                tokio::task::spawn_blocking(move || admin.lookup_accounts(guild_id, &query))
+                    .await
+                    .map_err(|error| format!("account lookup task failed: {error}"))?
+                    .map_err(|error| error.to_string())?;
+            if matches.is_empty() {
+                return respond_ephemeral(&responder, "No matching registrations in this server. Try a stored name, last-seen display name, exact Discord ID, or Steam32/Steam64 ID.").await;
+            }
+            let ids: Vec<_> = matches
+                .iter()
+                .take(10)
+                .map(|player| player.discord_id)
+                .collect();
+            let names = self.render_player_names(guild_id, &ids).await;
+            let mut content = String::from("**Registered accounts in this server**\n");
+            for player in matches.iter().take(10) {
+                let resolved = names.resolve(player.discord_id);
+                let name = if resolved == cama_domain::discord_content::UNKNOWN_PLAYER {
+                    player
+                        .archived_display_name
+                        .as_deref()
+                        .and_then(cama_domain::discord_content::readable_player_name)
+                        .unwrap_or(cama_domain::discord_content::UNKNOWN_PLAYER)
+                } else {
+                    &resolved
+                };
+                let name: String = name
+                    .chars()
+                    .filter(|c| {
+                        !c.is_control() && !matches!(c, '`' | '*' | '_' | '~' | '|' | '\\' | '@')
+                    })
+                    .take(32)
+                    .collect();
+                let name = if name.trim().is_empty() {
+                    "Unknown player"
+                } else {
+                    &name
+                };
+                content.push_str(&format!(
+                    "• **{name}** — Discord ID `{}` · {}W/{}L\n",
+                    player.discord_id, player.wins, player.losses
+                ));
+                if player.steam_ids.is_empty() {
+                    content.push_str("  No linked Steam accounts.\n");
+                }
+                for steam_id in &player.steam_ids {
+                    content.push_str(&format!(
+                        "  [Dotabuff · Steam32 {steam_id}](https://www.dotabuff.com/players/{steam_id})\n"
+                    ));
+                }
+            }
+            if matches.len() > 10 {
+                content.push_str("More matches exist; narrow your search.\n");
+            }
+            content.push_str("\nVerify the Steam ID, then use `/admin transferaccount old_discord_id:<ID> new_account:@replacement`. Lookup does not transfer anything.");
+            for chunk in cama_domain::discord_content::chunk_default_discord_content(&content) {
+                respond_ephemeral(&responder, chunk).await?;
+            }
+            return Ok(());
+        }
         let old = string(&context.options, "old_discord_id")
             .filter(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
             .and_then(|value| value.parse::<i64>().ok())
@@ -1460,11 +1540,17 @@ impl AdminHandler {
         let Some(old) = old else {
             return respond_ephemeral(
                 &responder,
-                "Enter the numeric Discord user ID of the old account.",
+                "Enter the numeric Discord user ID of the old account, or use `/admin transferaccount lookup:<name or Steam ID>` to find it.",
             )
             .await;
         };
-        let user = required_user(&context.options, "new_account")?;
+        let Some(user) = user(&context.options, "new_account")? else {
+            return respond_ephemeral(
+                &responder,
+                "Select new_account to receive the profile. To search first, use lookup by itself.",
+            )
+            .await;
+        };
         let new = signed_id(user.id, "new account")?;
         if new == old || new == 0 || user.is_bot != Some(false) {
             return respond_ephemeral(
@@ -3373,12 +3459,22 @@ fn admin_options(admin_rating_max: f64) -> Vec<CommandOptionSpec> {
             "transferaccount",
             "Move a player's bot profile across all servers to a replacement Discord account (bot admin only)",
             vec![
-                required(
+                {
+                    let mut lookup = option(
+                        "lookup",
+                        "Find a registration by name, Discord ID, or Steam32/Steam64 ID; use alone",
+                        CommandOptionKind::String,
+                    );
+                    lookup.min_length = Some(1);
+                    lookup.max_length = Some(100);
+                    lookup
+                },
+                option(
                     "old_discord_id",
                     "Numeric Discord user ID of the old account",
                     CommandOptionKind::String,
                 ),
-                required(
+                option(
                     "new_account",
                     "Replacement server member to receive the profile",
                     CommandOptionKind::User,
