@@ -18,6 +18,10 @@ use thiserror::Error;
 
 use crate::open_runtime_connection;
 
+#[path = "admin/account_transfer.rs"]
+mod account_transfer;
+pub use account_transfer::TransferError;
+
 const OPENSKILL_ALGORITHM_VERSION: i64 = 5;
 
 #[derive(Clone, Debug, PartialEq)]

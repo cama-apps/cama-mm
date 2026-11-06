@@ -222,3 +222,237 @@ fn test_guild_isolation() {
     assert_eq!(result.count, 1);
     assert_eq!(fixture.rating(2, 99_999).1, 60.0);
 }
+
+#[test]
+fn transfer_account_recovers_both_guilds_and_can_only_consume_the_source_once() {
+    let f = Fixture::new();
+    let (old, new) = (100_000_001, 100_000_002);
+    f.player(old, GUILD, Some(1700.0), 100.0, 0.06);
+    f.player(old, GUILD + 1, Some(1250.0), 110.0, 0.07);
+    f.connection()
+        .execute(
+            "INSERT INTO player_steam_ids(discord_id, steam_id, is_primary, added_at)
+         VALUES (?1, 12345, 1, 50), (?1, 67890, 0, 55)",
+            [old],
+        )
+        .unwrap();
+    let before = f.rating_revision(GUILD);
+    f.repository
+        .transfer_account(GUILD, old, new, "Bismi")
+        .unwrap();
+    let profile = f.repository.player(new, GUILD).unwrap().unwrap();
+    assert_eq!(profile.username, "Bismi");
+    assert_eq!(profile.glicko_rating, Some(1700.0));
+    assert_eq!(f.rating(new, GUILD + 1), (Some(1250.0), 110.0, 0.07));
+    assert_eq!(f.rating_revision(GUILD), before + 1);
+    assert!(f.repository.player(old, GUILD).unwrap().is_none());
+    assert!(
+        f.repository
+            .transfer_account(GUILD, old, new, "Bismi")
+            .is_err()
+    );
+    let steam = crate::opendota_player::OpenDotaPlayerRepository::new(f.database.path());
+    assert_eq!(steam.get_steam_ids(new).unwrap(), [12345, 67890]);
+    assert!(steam.get_steam_ids(old).unwrap().is_empty());
+}
+
+#[test]
+fn transfer_account_checks_guild_destination_and_live_games_before_moving_data() {
+    let f = Fixture::new();
+    let (old, new) = (100_000_001, 100_000_002);
+    f.player(old, GUILD, Some(1500.0), 40.0, 0.06);
+    assert!(
+        f.repository
+            .transfer_account(GUILD + 1, old, new, "Bismi")
+            .is_err()
+    );
+    f.connection()
+        .execute(
+            "INSERT INTO deadlock_queue(guild_id, discord_id, joined_at) VALUES (?1,?2,0)",
+            params![GUILD, old],
+        )
+        .unwrap();
+    assert!(
+        f.repository
+            .transfer_account(GUILD, old, new, "Bismi")
+            .is_err()
+    );
+    f.connection()
+        .execute("DELETE FROM deadlock_queue", [])
+        .unwrap();
+    f.player(new, GUILD + 1, Some(1000.0), 50.0, 0.07);
+    assert!(
+        f.repository
+            .transfer_account(GUILD, old, new, "Bismi")
+            .is_err()
+    );
+    assert_eq!(f.rating(old, GUILD), (Some(1500.0), 40.0, 0.06));
+    assert_eq!(f.rating(new, GUILD + 1), (Some(1000.0), 50.0, 0.07));
+    assert_eq!(f.rating_revision(GUILD), 0);
+}
+
+#[test]
+fn transfer_account_keeps_match_history_wallet_dig_progress_and_pet_ownership() {
+    let f = Fixture::new();
+    let (old, new) = (123456789012345678_i64, 223456789012345678_i64);
+    f.player(old, GUILD, Some(1350.0), 60.0, 0.06);
+    let conn = f.connection();
+    conn.execute(
+        "UPDATE players SET jopacoin_balance=123 WHERE discord_id=?1",
+        [old],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO matches(team1_players,team2_players,guild_id) VALUES (?1,'[33]',?2)",
+        params![format!("[{old}]"), GUILD],
+    )
+    .unwrap();
+    let match_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO match_participants(match_id,discord_id,guild_id,won) VALUES (?1,?2,?3,1)",
+        params![match_id, old, GUILD],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO tunnels(discord_id,guild_id,total_digs) VALUES (?1,?2,407)",
+        [old, GUILD],
+    )
+    .unwrap();
+    conn.execute("INSERT INTO pets(discord_id,guild_id,name,species,adopted_at,hatched_at,adopt_fee,last_fed_at,hunger_at_last_fed)
+        VALUES (?1,?2,'Pip','cat',1,1,5,3,99)", [old,GUILD]).unwrap();
+    conn.execute(
+        "INSERT INTO player_display_names(discord_id,guild_id,display_name,seen_at)
+        VALUES (?1,?2,'Bismi',10)",
+        [new, GUILD],
+    )
+    .unwrap();
+    f.repository
+        .transfer_account(GUILD, old, new, "Bismi")
+        .unwrap();
+    assert_eq!(
+        f.repository.player(new, GUILD).unwrap().unwrap().balance,
+        123
+    );
+    let history: (i64, i64) = conn
+        .query_row(
+            "SELECT json_extract(team1_players,'$[0]'),discord_id
+        FROM matches JOIN match_participants USING (match_id) WHERE match_id=?1",
+            [match_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(history, (new, new));
+    assert_eq!(
+        conn.query_row(
+            "SELECT total_digs FROM tunnels WHERE discord_id=?1",
+            [new],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        407
+    );
+    assert_eq!(
+        conn.query_row("SELECT name FROM pets WHERE discord_id=?1", [new], |r| {
+            r.get::<_, String>(0)
+        })
+        .unwrap(),
+        "Pip"
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM economy_ledger_entries WHERE account_id=?1",
+            [old],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn transfer_account_rolls_back_every_change_on_late_failure() {
+    let f = Fixture::new();
+    let (old, new) = (100_000_001, 100_000_002);
+    f.player(old, GUILD, Some(1500.0), 40.0, 0.06);
+    let conn = f.connection();
+    conn.execute(
+        "INSERT INTO tunnels(discord_id,guild_id,total_digs) VALUES (?1,?2,35)",
+        [old, GUILD],
+    )
+    .unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER fail_transfer BEFORE INSERT ON openskill_rating_revisions
+        BEGIN SELECT RAISE(ABORT,'injected late failure'); END;",
+    )
+    .unwrap();
+    let err = f
+        .repository
+        .transfer_account(GUILD, old, new, "Bismi")
+        .unwrap_err();
+    assert!(err.to_string().contains("injected late failure"), "{err}");
+    assert!(f.repository.player(new, GUILD).unwrap().is_none());
+    assert!(f.repository.player(old, GUILD).unwrap().is_some());
+    assert_eq!(
+        conn.query_row("SELECT discord_id FROM tunnels", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        old
+    );
+}
+
+#[test]
+fn concurrent_transfers_can_only_move_the_source_once() {
+    use std::sync::{Arc, Barrier};
+
+    let fixture = Fixture::new();
+    let old = 123456789012345670_i64;
+    let destinations = [old + 1, old + 2];
+    fixture.player(old, GUILD, Some(1430.0), 40.0, 0.06);
+    let gate = Arc::new(Barrier::new(destinations.len()));
+    let jobs = destinations.map(|new| {
+        let gate = Arc::clone(&gate);
+        let repo = fixture.repository.clone();
+        std::thread::spawn(move || {
+            gate.wait();
+            (new, repo.transfer_account(GUILD, old, new, "Bismi"))
+        })
+    });
+    let outcomes = jobs.map(|job| job.join().unwrap());
+    assert_eq!(
+        outcomes.iter().filter(|(_, result)| result.is_ok()).count(),
+        1
+    );
+    for (new, result) in outcomes {
+        assert_eq!(
+            fixture.repository.player(new, GUILD).unwrap().is_some(),
+            result.is_ok()
+        );
+    }
+    assert!(fixture.repository.player(old, GUILD).unwrap().is_none());
+    assert_eq!(fixture.rating_revision(GUILD), 1);
+}
+
+#[test]
+fn recovery_closes_orphaned_player_trivia_session_and_preserves_earned_rewards() {
+    let fixture = Fixture::new();
+    let (old, new) = (100_000_001, 100_000_002);
+    fixture.player(old, GUILD, None, 50.0, 0.06);
+    let db = fixture.connection();
+    db.execute(
+        "INSERT INTO player_trivia_sessions(guild_id,discord_id,started_at,score,jc_earned)
+        VALUES (?1,?2,1,2,7)",
+        [GUILD, old],
+    )
+    .unwrap();
+    fixture
+        .repository
+        .transfer_account(GUILD, old, new, "Bismi")
+        .unwrap();
+    let session: (i64, String, i64, i64) = db
+        .query_row(
+            "SELECT discord_id,status,score,jc_earned FROM player_trivia_sessions",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(session, (new, "cancelled".to_owned(), 2, 7));
+}

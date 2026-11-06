@@ -62,6 +62,11 @@ async fn concurrent_timer_reconciliation_preserves_latest_delivery() {
     let provider = test_provider(file.path(), discord.clone(), ReminderCooldowns::default());
     let state = Arc::clone(&provider.hooks.state);
     let key = ReminderTaskKey::new(UserId::new(USER), GuildId::new(GUILD), ReminderKind::Wheel);
+    state
+        .lock_service()
+        .unwrap()
+        .set_preference(key.user_id, Some(key.guild_id), key.kind, true)
+        .unwrap();
     let ready_at = SystemReminderClock.now_seconds() + 10_000;
     state
         .lock_service()
@@ -138,6 +143,11 @@ async fn reconciliation_does_not_abort_a_claimed_delivery() {
     let provider = test_provider(file.path(), discord.clone(), ReminderCooldowns::default());
     let state = Arc::clone(&provider.hooks.state);
     let key = ReminderTaskKey::new(UserId::new(USER), GuildId::new(GUILD), ReminderKind::Wheel);
+    state
+        .lock_service()
+        .unwrap()
+        .set_preference(key.user_id, Some(key.guild_id), key.kind, true)
+        .unwrap();
     let task_id = state
         .lock_service()
         .unwrap()
@@ -599,6 +609,81 @@ async fn ready_recovery_isolates_invalid_guild_and_failed_dm_is_consumed_once() 
             .expect("task snapshot")
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn transfer_pending_cooldown_delivers_once_to_replacement_at_original_deadline() {
+    let file = migrated_database();
+    let recipient = USER + 1;
+    let connection = Connection::open(file.path()).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO players(discord_id,guild_id,discord_username) VALUES (?1,?2,'Original')",
+            (USER, GUILD),
+        )
+        .unwrap();
+    connection.execute("INSERT INTO reminder_preferences(discord_id,guild_id,wheel_enabled,updated_at) VALUES (?1,?2,1,0)", (USER, GUILD)).unwrap();
+    let discord = Arc::new(MockDiscord::default());
+    let provider = test_provider(file.path(), discord.clone(), ReminderCooldowns::default());
+    let hooks = provider.hooks();
+    let deadline = SystemReminderClock.now_seconds() + 3600;
+    hooks.schedule_wheel(USER, GUILD, deadline).await.unwrap();
+    let key = ReminderTaskKey::new(UserId::new(USER), GuildId::new(GUILD), ReminderKind::Wheel);
+    let original = hooks.state.task_snapshot(key).unwrap().unwrap();
+
+    let guard = hooks.pause_delivery_for_transfer().await;
+    let in_flight = tokio::spawn(Arc::clone(&hooks.state).fire_task(key, original.id));
+    cama_db::admin::AdminRepository::new(file.path())
+        .transfer_account(GUILD, USER, recipient, "Replacement")
+        .unwrap();
+    hooks.transfer_pending_blocking(USER, recipient).unwrap();
+    drop(guard);
+    in_flight.await.unwrap();
+    assert!(discord.dms().is_empty());
+    assert!(hooks.state.task_snapshot(key).unwrap().is_none());
+    let replacement_key = ReminderTaskKey {
+        user_id: UserId::new(recipient),
+        ..key
+    };
+    let reminder = hooks.state.task_snapshot(replacement_key).unwrap().unwrap();
+    assert_eq!(reminder.due_at, deadline);
+    assert_ne!(reminder.id, original.id);
+    Arc::clone(&hooks.state)
+        .fire_task(replacement_key, reminder.id)
+        .await;
+    Arc::clone(&hooks.state)
+        .fire_task(replacement_key, reminder.id)
+        .await;
+    let messages = discord.dms();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].0, recipient as u64);
+}
+
+#[tokio::test]
+async fn queued_reminder_requires_a_durable_preference_at_delivery() {
+    let file = migrated_database();
+    let connection = Connection::open(file.path()).unwrap();
+    connection.execute("INSERT INTO reminder_preferences(discord_id,guild_id,wheel_enabled,updated_at) VALUES (?1,?2,1,0)", (USER, GUILD)).unwrap();
+    let discord = Arc::new(MockDiscord::default());
+    let provider = test_provider(file.path(), discord.clone(), ReminderCooldowns::default());
+    let hooks = provider.hooks();
+    hooks
+        .schedule_wheel(USER, GUILD, SystemReminderClock.now_seconds() + 3600)
+        .await
+        .unwrap();
+    let key = ReminderTaskKey::new(UserId::new(USER), GuildId::new(GUILD), ReminderKind::Wheel);
+    let reminder = hooks.state.task_snapshot(key).unwrap().unwrap();
+    connection
+        .execute(
+            "DELETE FROM reminder_preferences WHERE discord_id=?1 AND guild_id=?2",
+            (USER, GUILD),
+        )
+        .unwrap();
+    Arc::clone(&hooks.state).fire_task(key, reminder.id).await;
+    assert!(discord.dms().is_empty());
 }
 
 // tests/test_dig_reminder_command.py::test_schedule_dig_reminder_delegates_to_reconciliation

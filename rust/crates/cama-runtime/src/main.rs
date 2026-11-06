@@ -782,19 +782,6 @@ async fn run_serve() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let admin_provider = AdminRegistrationProvider::new(
-        &config.db_path,
-        &application_config,
-        Arc::clone(&opendota),
-        AdminRuntimePorts {
-            discord: discord_transport.clone(),
-            discord_control: discord_transport.clone(),
-            lobby: lobby_provider.admin_control(),
-            matches: match_provider.admin_control(),
-            match_corrections: admin_match_correction.control(),
-        },
-        usage_monitor.clone(),
-    );
     let reminder_provider = ReminderRegistrationProvider::new(
         &config.db_path,
         &application_config,
@@ -879,6 +866,21 @@ async fn run_serve() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    let admin_provider = AdminRegistrationProvider::new(
+        &config.db_path,
+        &application_config,
+        Arc::clone(&opendota),
+        AdminRuntimePorts {
+            discord: discord_transport.clone(),
+            discord_control: discord_transport.clone(),
+            reminders: reminder_provider.hooks(),
+            classic_trivia: trivia_provider.account_transfer_guard(),
+            lobby: lobby_provider.admin_control(),
+            matches: match_provider.admin_control(),
+            match_corrections: admin_match_correction.control(),
+        },
+        usage_monitor.clone(),
+    );
     let dig_bonus_runtime = DigBonusRuntime::from_application_config(
         &config.db_path,
         &application_config,

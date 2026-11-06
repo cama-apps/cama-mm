@@ -80,9 +80,10 @@ fn production_admin_tree_preserves_legacy_leaves_and_adds_dota_controls() {
         "addsteamid",
         "removesteamid",
         "setprimarysteam",
+        "transferaccount",
         "seedherogrid",
     ];
-    assert_eq!(actual.len(), 41);
+    assert_eq!(actual.len(), 42);
     assert_eq!(
         actual.keys().cloned().collect::<BTreeSet<_>>(),
         expected.into_iter().map(str::to_owned).collect()
@@ -1021,13 +1022,20 @@ impl ProviderFixture {
         let matches = Arc::new(RecordingMatchControl::default());
         let corrections = Arc::new(RecordingCorrectionControl::default());
         let transport = Arc::new(RecordingTransport::default());
+        let reminders = crate::reminder_provider::ReminderRegistrationProvider::new(
+            database.path(),
+            &config,
+            transport.clone(),
+        );
         let provider = AdminRegistrationProvider::new(
             database.path(),
             &config,
             opendota,
             AdminRuntimePorts {
+                classic_trivia: Default::default(),
                 discord: transport.clone(),
                 discord_control: discord.clone(),
+                reminders: reminders.hooks(),
                 lobby: lobby.clone(),
                 matches: matches.clone(),
                 match_corrections: corrections.clone(),
@@ -1290,6 +1298,119 @@ fn number_option(name: &str, value: f64) -> InteractionOption {
         name: name.to_owned(),
         value: InteractionValue::Number(value),
     }
+}
+
+fn transfer_request(old: &str, replacement: u64, actor: u64) -> InteractionRequest {
+    admin_command(
+        "transferaccount",
+        vec![
+            string_option("old_discord_id", old),
+            user_option("new_account", replacement, "Discord name"),
+        ],
+        4001,
+        actor,
+        Some(ADMINISTRATOR_PERMISSION),
+    )
+}
+
+#[tokio::test]
+async fn transferaccount_moves_a_departed_players_profile_to_a_live_member() {
+    let fixture = ProviderFixture::new();
+    fixture.player(TARGET, 9, 3, Some(1732.0), Some(64.0), Some(0.06));
+    let replacement = TARGET + 1;
+    fixture.name_member(replacement, "New server nickname");
+    let request = transfer_request(&TARGET.to_string(), replacement, ADMIN);
+    let blocked = Arc::new(RecordingResponder::default());
+    blocked.fail_defer.store(true, Ordering::Release);
+    assert!(
+        fixture
+            .registry()
+            .command_handler("admin")
+            .unwrap()
+            .handle(request.clone(), blocked)
+            .await
+            .is_err()
+    );
+    assert_eq!(fixture.rating(TARGET).0, Some(1732.0));
+
+    let response = fixture.dispatch_request(request).await;
+    assert_eq!(*response.defers.lock().unwrap(), vec![true]);
+    assert!(response.last().ephemeral);
+    assert!(response.last().content.contains("New server nickname"));
+    assert_eq!(fixture.rating(replacement).0, Some(1732.0));
+    let connection = Connection::open(fixture.database.path()).unwrap();
+    assert!(
+        !connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM players WHERE discord_id=?1)",
+                [i64::try_from(TARGET).unwrap()],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn transferaccount_refuses_server_admins_absent_members_and_invalid_ids() {
+    let fixture = ProviderFixture::new();
+    fixture.player(TARGET, 9, 3, Some(1732.0), Some(64.0), Some(0.06));
+    let replacement = TARGET + 1;
+    let old = TARGET.to_string();
+    let unauthorized = fixture
+        .dispatch_request(transfer_request(&old, replacement, 999))
+        .await;
+    assert!(unauthorized.last().content.contains("configured bot admin"));
+    assert!(unauthorized.defers.lock().unwrap().is_empty());
+    let mut dm = transfer_request(&old, replacement, ADMIN);
+    if let InteractionRequest::Command { guild_id, .. } = &mut dm {
+        *guild_id = None;
+    }
+    assert_eq!(
+        fixture.dispatch_request(dm).await.last().content,
+        GUILD_ONLY
+    );
+    for id in ["", "0", "-1", "+1", "<@123>", "9223372036854775808"] {
+        let invalid = fixture
+            .dispatch_request(transfer_request(id, replacement, ADMIN))
+            .await;
+        assert!(invalid.last().content.contains("numeric Discord"));
+        assert!(invalid.defers.lock().unwrap().is_empty());
+    }
+    let same = fixture
+        .dispatch_request(transfer_request(&old, TARGET, ADMIN))
+        .await;
+    assert!(same.last().content.contains("different human"));
+    let bot = admin_command(
+        "transferaccount",
+        vec![
+            string_option("old_discord_id", &old),
+            InteractionOption {
+                name: "new_account".into(),
+                value: InteractionValue::User {
+                    id: replacement,
+                    display_name: None,
+                    is_bot: Some(true),
+                },
+            },
+        ],
+        4002,
+        ADMIN,
+        None,
+    );
+    assert!(
+        fixture
+            .dispatch_request(bot)
+            .await
+            .last()
+            .content
+            .contains("different human")
+    );
+    let missing = fixture
+        .dispatch_request(transfer_request(&old, replacement, ADMIN))
+        .await;
+    assert!(missing.last().content.contains("member of this server"));
+    assert_eq!(*missing.defers.lock().unwrap(), vec![true]);
+    assert_eq!(fixture.rating(TARGET).0, Some(1732.0));
 }
 
 #[tokio::test]
