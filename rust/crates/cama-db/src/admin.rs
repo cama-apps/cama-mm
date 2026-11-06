@@ -18,6 +18,10 @@ use thiserror::Error;
 
 use crate::open_runtime_connection;
 
+#[path = "admin/account_lookup.rs"]
+mod account_lookup;
+pub use account_lookup::AdminAccountLookup;
+
 #[path = "admin/account_transfer.rs"]
 mod account_transfer;
 pub use account_transfer::TransferError;
