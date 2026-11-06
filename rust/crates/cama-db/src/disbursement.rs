@@ -1,14 +1,14 @@
 //! Durable existing-schema Reserve proposal and ballot operations.
 //!
-//! Python's `DisburseService` keeps policy (eligibility and distribution
-//! calculations) above this boundary.  This repository owns the state
-//! machine: reserve locking, latest-vote replacement, vote-history archival,
-//! and all-or-nothing proposal completion.  Every mutating operation uses a
-//! SQLite immediate transaction so a restart cannot strand or duplicate funds.
+//! Reserve locking, ballots, and settlement share a transaction boundary.
+//! Settlement runs the domain allocation policy against the locked guild roster.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use cama_domain::disbursement::{
+    DistributionMethod, PlayerSnapshot, calculate_method_distributions,
+};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::json;
 use thiserror::Error;
@@ -51,6 +51,12 @@ impl DisbursementProposal {
     pub fn quorum_reached(&self) -> bool {
         self.total_votes() >= self.quorum_required
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisbursementPayout {
+    pub total: i64,
+    pub distributions: Vec<(i64, i64)>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -283,9 +289,15 @@ impl DisbursementRepository {
         let guild_id = Self::normalize_guild_id(guild_id);
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let proposal = read_active_proposal(&transaction, guild_id)?
+        let active_id: i64 = transaction
+            .query_row(
+                "SELECT proposal_id FROM disburse_proposals WHERE guild_id=?1 AND status='active'",
+                [guild_id],
+                |row| row.get(0),
+            )
+            .optional()?
             .ok_or(DisbursementRepositoryError::NoActiveProposal)?;
-        if proposal.proposal_id != proposal_id {
+        if active_id != proposal_id {
             return Err(DisbursementRepositoryError::StaleProposal);
         }
         let now = unix_seconds();
@@ -478,40 +490,42 @@ impl DisbursementRepository {
         proposal_id: i64,
         method: &str,
         require_quorum: bool,
-        distributions: &[(i64, i64)],
-    ) -> Result<i64, DisbursementRepositoryError> {
-        validate_method(method)?;
+        lottery_cutoff: i64,
+        draw: impl FnOnce(usize) -> usize,
+    ) -> Result<DisbursementPayout, DisbursementRepositoryError> {
+        let distribution_method = DistributionMethod::from_code(method)
+            .filter(|method| {
+                !matches!(
+                    method,
+                    DistributionMethod::Burn
+                        | DistributionMethod::Cancel
+                        | DistributionMethod::NextMatchPot
+                )
+            })
+            .ok_or_else(|| DisbursementRepositoryError::InvalidMethod(method.to_owned()))?;
         let guild_id = Self::normalize_guild_id(guild_id);
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let proposal =
+            validate_allocation(&transaction, guild_id, proposal_id, method, require_quorum)?;
+        let fund_amount = proposal.fund_amount;
+        let roster = read_distribution_roster(&transaction, guild_id)?;
+        let payouts = calculate_method_distributions(
+            distribution_method,
+            fund_amount,
+            &roster,
+            lottery_cutoff,
+            draw,
+        );
+        let distributions: Vec<_> = payouts
+            .into_iter()
+            .map(|p| (p.discord_id, p.amount))
+            .collect();
         let total = distributions.iter().try_fold(0_i64, |sum, (_, amount)| {
             sum.checked_add(*amount)
                 .ok_or(DisbursementRepositoryError::AmountOverflow)
         })?;
-        let recipients = distributions
-            .iter()
-            .map(|(discord_id, amount)| json!([discord_id, amount]))
-            .collect::<Vec<_>>();
-        let recipients_json = serde_json::to_string(&recipients)?;
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let expected_proposal_id = proposal_id;
-        let Some((proposal_id, fund_amount)) = transaction
-            .query_row(
-                "SELECT proposal_id, fund_amount FROM disburse_proposals
-                 WHERE guild_id = ?1 AND status = 'active'",
-                [guild_id],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-            )
-            .optional()?
-        else {
-            return Err(DisbursementRepositoryError::NoActiveProposal);
-        };
-        validate_allocation(
-            &transaction,
-            guild_id,
-            expected_proposal_id,
-            method,
-            require_quorum,
-        )?;
+        let recipients_json = serde_json::to_string(&distributions)?;
         archive_votes(&transaction, guild_id, proposal_id, method)?;
         transaction.execute(
             "UPDATE disburse_proposals SET status = 'completed'
@@ -553,7 +567,7 @@ impl DisbursementRepository {
                 proposal_id,
                 "Jopacoin Reserve disbursement payout",
                 || {
-                    for (discord_id, amount) in distributions {
+                    for (discord_id, amount) in &distributions {
                         let changed = transaction.execute(
                             "UPDATE players SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?1,
                              updated_at = CURRENT_TIMESTAMP
@@ -584,7 +598,10 @@ impl DisbursementRepository {
             )?;
         }
         transaction.commit()?;
-        Ok(total)
+        Ok(DisbursementPayout {
+            total,
+            distributions,
+        })
     }
 
     pub fn get_last_disbursement(
@@ -631,12 +648,35 @@ impl DisbursementRepository {
     }
 }
 
+fn read_distribution_roster(
+    connection: &Connection,
+    guild_id: i64,
+) -> rusqlite::Result<Vec<PlayerSnapshot>> {
+    let mut statement = connection.prepare(
+        "SELECT discord_id, COALESCE(discord_username,''), COALESCE(jopacoin_balance,0),
+                COALESCE(wins,0), COALESCE(losses,0), unixepoch(last_match_date)
+         FROM players WHERE guild_id=?1 AND discord_id IS NOT NULL ORDER BY discord_id",
+    )?;
+    statement
+        .query_map([guild_id], |row| {
+            Ok(PlayerSnapshot {
+                discord_id: row.get(0)?,
+                username: row.get(1)?,
+                balance: row.get(2)?,
+                wins: row.get::<_, i64>(3)?.clamp(0, i64::from(u32::MAX)) as u32,
+                losses: row.get::<_, i64>(4)?.clamp(0, i64::from(u32::MAX)) as u32,
+                last_match_at: row.get(5)?,
+            })
+        })?
+        .collect()
+}
+
 /// Count each registered participant once, across recorded matches in the rolling window.
 fn active_quorum(connection: &Connection, guild_id: i64) -> rusqlite::Result<i64> {
     let active: i64 = connection.query_row(
         "SELECT COUNT(DISTINCT mp.discord_id)
          FROM matches m
-         JOIN match_participants mp ON mp.match_id=m.match_id AND mp.guild_id=m.guild_id
+         CROSS JOIN match_participants mp ON mp.match_id=m.match_id AND mp.guild_id=m.guild_id
          JOIN players p ON p.discord_id=mp.discord_id AND p.guild_id=mp.guild_id
          WHERE m.guild_id=?1 AND mp.team_number IN (1,2)
            AND datetime(m.match_date, 'auto') BETWEEN datetime('now', '-30 days') AND datetime('now')",
@@ -705,7 +745,7 @@ fn validate_allocation(
     proposal_id: i64,
     method: &str,
     require_quorum: bool,
-) -> Result<(), DisbursementRepositoryError> {
+) -> Result<DisbursementProposal, DisbursementRepositoryError> {
     let proposal = read_active_proposal(connection, guild_id)?
         .ok_or(DisbursementRepositoryError::NoActiveProposal)?;
     if proposal.proposal_id != proposal_id {
@@ -721,7 +761,7 @@ fn validate_allocation(
     if winner != Some(method) {
         return Err(DisbursementRepositoryError::BallotChanged);
     }
-    Ok(())
+    Ok(proposal)
 }
 
 fn zero_votes() -> BTreeMap<String, i64> {
@@ -929,7 +969,14 @@ mod tests {
             ));
         }
         assert!(matches!(
-            repository.complete_and_disburse_atomic(Some(7), 100, "even", false, &[]),
+            repository.complete_and_disburse_atomic(
+                Some(7),
+                100,
+                "even",
+                false,
+                0,
+                |_| unreachable!()
+            ),
             Err(DisbursementRepositoryError::StaleProposal)
         ));
         assert!(matches!(
@@ -1008,8 +1055,9 @@ mod tests {
         assert!(proposal.quorum_reached());
         assert_eq!(
             repository
-                .complete_and_disburse_atomic(Some(7), 100, "even", true, &[(1, 20)])
-                .expect("complete"),
+                .complete_and_disburse_atomic(Some(7), 100, "even", true, 0, |_| unreachable!())
+                .expect("complete")
+                .total,
             20
         );
         assert!(
@@ -1028,9 +1076,119 @@ mod tests {
             0
         );
         assert!(matches!(
-            repository.complete_and_disburse_atomic(Some(7), 100, "even", true, &[(1, 1)]),
+            repository.complete_and_disburse_atomic(
+                Some(7),
+                100,
+                "even",
+                true,
+                0,
+                |_| unreachable!()
+            ),
             Err(DisbursementRepositoryError::NoActiveProposal)
         ));
+    }
+
+    #[test]
+    fn settlement_reads_lottery_eligibility_from_the_current_guild_roster() {
+        let database = NamedTempFile::new().unwrap();
+        copy_migrated_database(database.path()).unwrap();
+        let repository = DisbursementRepository::new(database.path());
+        repository
+            .connection()
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO players(guild_id,discord_id,discord_username,last_match_date)
+             VALUES(7,1,'old','2025-01-01'),(7,2,'rfc3339','2026-01-02T12:00:00+00:00'),
+                   (7,3,'none',NULL),(7,4,'sqlite','2026-01-02 12:00:00'),
+                   (8,5,'other','2026-01-02 12:00:00');",
+            )
+            .unwrap();
+        let loans = crate::loan_repository::LoanRepository::new(database.path());
+        for (proposal_id, index, winner) in [(100, 0, 2), (101, 1, 4)] {
+            loans.add_to_nonprofit_fund(Some(7), 250, None).unwrap();
+            repository
+                .create_proposal_atomic(Some(7), proposal_id, 250)
+                .unwrap();
+            repository
+                .add_vote(Some(7), proposal_id, 2, "lottery")
+                .unwrap();
+            let cutoff = 1_767_225_600; // 2026-01-01 UTC
+            let payout = repository
+                .complete_and_disburse_atomic(
+                    Some(7),
+                    proposal_id,
+                    "lottery",
+                    true,
+                    cutoff,
+                    |len| {
+                        assert_eq!(len, 2);
+                        index
+                    },
+                )
+                .unwrap();
+            assert_eq!(payout.distributions, vec![(winner, 250)]);
+        }
+    }
+
+    #[test]
+    fn settlement_uses_current_guild_balances_wins_and_losses() {
+        let database = NamedTempFile::new().unwrap();
+        copy_migrated_database(database.path()).unwrap();
+        let repository = DisbursementRepository::new(database.path());
+        repository.connection().unwrap().execute_batch(
+            "INSERT INTO players(guild_id,discord_id,discord_username,jopacoin_balance,wins,losses)
+             VALUES(7,1,'first',90,2,0),(7,2,'second',80,0,2),(7,3,'third',70,1,1),
+                   (7,4,'fourth',10,3,3),(7,5,'fifth',-50,0,4),(8,6,'other',999,99,99);"
+        ).unwrap();
+        let loans = crate::loan_repository::LoanRepository::new(database.path());
+        loans.add_to_nonprofit_fund(Some(7), 100, None).unwrap();
+        repository
+            .create_proposal_atomic(Some(7), 100, 100)
+            .unwrap();
+        repository
+            .add_vote(Some(7), 100, 4, "social_security")
+            .unwrap();
+        let payout = repository
+            .complete_and_disburse_atomic(
+                Some(7),
+                100,
+                "social_security",
+                true,
+                0,
+                |_| unreachable!(),
+            )
+            .unwrap();
+        assert_eq!(payout.distributions, vec![(4, 60), (5, 40)]);
+    }
+
+    #[test]
+    fn settlement_uses_balance_after_the_ballot_was_cast() {
+        let database = NamedTempFile::new().unwrap();
+        copy_migrated_database(database.path()).unwrap();
+        let repository = DisbursementRepository::new(database.path());
+        let players = PlayerRepository::new(database.path());
+        players.add(&NewPlayer::new(1, "one", Some(7))).unwrap();
+        players.update_balance(1, Some(7), -100).unwrap();
+        let loans = crate::loan_repository::LoanRepository::new(database.path());
+        loans.add_to_nonprofit_fund(Some(7), 250, None).unwrap();
+        repository
+            .create_proposal_atomic(Some(7), 100, 250)
+            .unwrap();
+        repository.add_vote(Some(7), 100, 1, "even").unwrap();
+        players.update_balance(1, Some(7), 0).unwrap();
+        let payout = repository
+            .complete_and_disburse_atomic(Some(7), 100, "even", true, 0, |_| unreachable!())
+            .unwrap();
+        assert!(payout.distributions.is_empty());
+        assert_eq!(loans.get_nonprofit_fund(Some(7)).unwrap(), 250);
+        assert_eq!(
+            players
+                .get_by_id(1, Some(7))
+                .unwrap()
+                .unwrap()
+                .jopacoin_balance,
+            0
+        );
     }
 
     #[test]
@@ -1054,7 +1212,7 @@ mod tests {
             .expect("proposal");
         repository.add_vote(Some(7), 100, 1, "even").expect("vote");
         repository
-            .complete_and_disburse_atomic(Some(7), 100, "even", true, &[(1, 20)])
+            .complete_and_disburse_atomic(Some(7), 100, "even", true, 0, |_| unreachable!())
             .expect("complete");
         assert!(
             repository

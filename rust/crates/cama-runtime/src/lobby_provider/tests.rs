@@ -159,11 +159,15 @@ async fn test_filllobby_refreshes_partial_lobby_message_without_fetch() {
 
 #[derive(Default)]
 struct CapturingResponder {
+    source_message_id: Option<u64>,
     captured: Mutex<CapturedResponses>,
 }
 
 #[async_trait]
 impl InteractionResponder for CapturingResponder {
+    fn component_message_id(&self) -> Option<u64> {
+        self.source_message_id
+    }
     async fn respond(&self, response: InteractionResponse) -> Result<(), InteractionResponseError> {
         self.captured
             .lock()
@@ -1659,6 +1663,107 @@ async fn legacy_sword_reaction_is_not_seeded_and_is_inert() {
         lobby_snapshot(&provider, LobbyKind::Open).players,
         BTreeSet::from([AppUserId(10)])
     );
+}
+
+#[tokio::test]
+async fn stale_sibling_roster_is_blocked_before_and_after_a_pending_match_commits() {
+    use cama_db::match_runtime::{PendingMatchRepository, PendingMatchState};
+
+    let database = database_with_players(&[(10, "Dual queue")]);
+    let provider = provider_for(&database, Arc::new(RecordingTransport::default()));
+    for kind in [LobbyKind::Open, LobbyKind::LowSkill] {
+        dispatch_command(
+            &provider,
+            "lobby",
+            10,
+            "Dual queue",
+            vec![lobby_option(kind)],
+        )
+        .await;
+    }
+    let lobbies = provider.match_lobby_port();
+    let pending = PendingMatchRepository::new(database.path());
+    let pool = BTreeSet::from([10]);
+    assert!(matches!(
+        lobbies
+            .reserve_new_match_players(42, LobbyKind::Open, &pool, &pending)
+            .await
+            .unwrap(),
+        NewMatchReservation::Reserved
+    ));
+    assert!(matches!(
+        lobbies
+            .reserve_new_match_players(42, LobbyKind::LowSkill, &pool, &pending)
+            .await
+            .unwrap(),
+        NewMatchReservation::Unavailable
+    ));
+    let match_row = pending
+        .create_pending_match(
+            42,
+            &PendingMatchState {
+                radiant_team_ids: vec![10],
+                ..PendingMatchState::default()
+            },
+        )
+        .unwrap();
+    lobbies.release_players(42, LobbyKind::Open, &pool);
+    assert!(
+        matches!(lobbies.reserve_new_match_players(42, LobbyKind::LowSkill, &pool, &pending).await.unwrap(), NewMatchReservation::Pending(ids) if ids == vec![10])
+    );
+    pending
+        .delete_pending_match(42, match_row.pending_match_id)
+        .unwrap();
+    assert!(matches!(
+        lobbies
+            .reserve_new_match_players(42, LobbyKind::LowSkill, &pool, &pending)
+            .await
+            .unwrap(),
+        NewMatchReservation::Reserved
+    ));
+}
+
+#[test]
+fn reservation_checks_only_selected_players_and_closes_expired_suspensions() {
+    let database = database_with_players(&[(10, "Expired"), (20, "Suspended")]);
+    let moderation = SqliteLobbyModeration::new(database.path());
+    let service = ModerationService::new(moderation.repository.clone());
+    for (id, expires_at) in [(10, 500), (20, 900)] {
+        service
+            .create_suspension(CreateSuspension {
+                discord_id: id,
+                guild_id: Some(42),
+                actor_id: 900,
+                reason: "test",
+                scope: SuspensionScope::Open,
+                completion: SuspensionCompletion::Time,
+                expires_at: Some(expires_at),
+                matches: None,
+                source: ModerationSource::Admin,
+                replace: false,
+                pending_match_watermark: None,
+                now: 100,
+            })
+            .unwrap();
+    }
+    let open = LobbyScope::new(AppGuildId(42), LobbyKind::Open);
+    let low = LobbyScope::new(AppGuildId(42), LobbyKind::LowSkill);
+    let both = BTreeSet::from([AppUserId(10), AppUserId(20)]);
+    assert!(
+        !moderation
+            .any_suspended(&BTreeSet::from([AppUserId(10)]), open, 600)
+            .unwrap()
+    );
+    assert!(
+        !moderation
+            .repository
+            .suspension(10, Some(42))
+            .unwrap()
+            .unwrap()
+            .active
+    );
+    assert!(!moderation.any_suspended(&both, low, 600).unwrap());
+    assert!(moderation.any_suspended(&both, open, 600).unwrap());
 }
 
 #[tokio::test]
@@ -4628,7 +4733,44 @@ async fn dispatch_component_in_channel(
     display_name: &str,
     channel_id: u64,
 ) -> Arc<CapturingResponder> {
-    let responder = Arc::new(CapturingResponder::default());
+    let source = parse_lobby_button_id(custom_id)
+        .and_then(|(_, scope)| provider.handler.state.service.get_lobby(scope))
+        .and_then(|lobby| {
+            let ids = lobby.message_ids;
+            if ids
+                .thread_id
+                .is_some_and(|id| to_u64(id.0).ok() == Some(channel_id))
+            {
+                ids.embed_message_id
+            } else {
+                ids.message_id
+            }
+        })
+        .and_then(|id| to_u64(id.0).ok())
+        .unwrap_or(11);
+    dispatch_component_on_message(
+        provider,
+        custom_id,
+        user_id,
+        display_name,
+        channel_id,
+        source,
+    )
+    .await
+}
+
+async fn dispatch_component_on_message(
+    provider: &LobbyRegistrationProvider,
+    custom_id: &str,
+    user_id: u64,
+    display_name: &str,
+    channel_id: u64,
+    source_message_id: u64,
+) -> Arc<CapturingResponder> {
+    let responder = Arc::new(CapturingResponder {
+        source_message_id: Some(source_message_id),
+        ..Default::default()
+    });
     registry_for(provider)
         .component_handler(custom_id)
         .expect("registered lobby button route")
@@ -5700,4 +5842,50 @@ async fn test_join_button_rejects_deadlock_wallet_without_dota_registration() {
             .contains(&AppUserId(5))
     );
     assert!(only_ephemeral_followup(&responder).contains("not registered"));
+}
+
+#[tokio::test]
+async fn old_lobby_controls_cannot_join_or_leave_the_replacement_roster() {
+    let database = database_with_players(&[(99, "Creator"), (1, "Player")]);
+    let provider = provider_for(&database, Arc::new(RecordingTransport::default()));
+    dispatch_command(&provider, "lobby", 99, "Creator", vec![]).await;
+    let old = lobby_message_id(&provider, LobbyKind::Open);
+    dispatch_command(&provider, "resetlobby", 99, "Creator", vec![]).await;
+    dispatch_command(&provider, "lobby", 99, "Creator", vec![]).await;
+    assert_ne!(old, lobby_message_id(&provider, LobbyKind::Open));
+    for (action, id, name) in [
+        (LobbyButtonAction::Join, 1, "Player"),
+        (LobbyButtonAction::Leave, 99, "Creator"),
+    ] {
+        let custom_id = lobby_button_id(LobbyScope::new(AppGuildId(42), LobbyKind::Open), action);
+        let result = dispatch_component_on_message(&provider, &custom_id, id, name, 700, old).await;
+        assert!(only_ephemeral_followup(&result).contains("older lobby"));
+    }
+    assert_eq!(
+        lobby_snapshot(&provider, LobbyKind::Open).players,
+        BTreeSet::from([AppUserId(99)])
+    );
+}
+
+#[tokio::test]
+async fn failed_reset_keeps_the_active_lobby_controls_and_thread() {
+    let database = database_with_players(&[(99, "Creator")]);
+    let transport = Arc::new(RecordingTransport::default());
+    let provider = provider_for(&database, transport.clone());
+    dispatch_command(&provider, "lobby", 99, "Creator", vec![]).await;
+    let edits = transport.edit_count();
+    rusqlite::Connection::open(database.path()).unwrap().execute_batch(
+        "CREATE TRIGGER fail_reset BEFORE DELETE ON lobby_state BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;"
+    ).unwrap();
+    let reply = dispatch_command(&provider, "resetlobby", 99, "Creator", vec![]).await;
+    assert!(only_ephemeral_followup(&reply).contains("Could not persist"));
+    assert_eq!(transport.edit_count(), edits);
+    let state = transport.state.lock().unwrap();
+    assert!(state.archived.is_empty());
+    assert!(state.unpinned.is_empty());
+    assert!(
+        lobby_snapshot(&provider, LobbyKind::Open)
+            .players
+            .contains(&AppUserId(99))
+    );
 }

@@ -2368,6 +2368,10 @@ impl CoordinatedResponder {
 
 #[async_trait]
 impl InteractionResponder for CoordinatedResponder {
+    fn component_message_id(&self) -> Option<u64> {
+        self.inner.component_message_id()
+    }
+
     async fn respond(&self, response: InteractionResponse) -> Result<(), InteractionResponseError> {
         match self.claim_initial().await? {
             InitialResponseClaim::Send => {
@@ -2526,6 +2530,10 @@ impl ComponentResponder {
 
 #[async_trait]
 impl InteractionResponder for ComponentResponder {
+    fn component_message_id(&self) -> Option<u64> {
+        Some(self.interaction.message.id.get())
+    }
+
     async fn respond(&self, response: InteractionResponse) -> Result<(), InteractionResponseError> {
         let result = self
             .interaction

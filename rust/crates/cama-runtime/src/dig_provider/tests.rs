@@ -7450,7 +7450,7 @@ async fn gear_panel_components_use_typed_atomic_service_and_restart_nonce() {
         )
         .await
         .expect("open recycle selector");
-    {
+    let recycle_id = {
         let updates = open_recycle.updates.lock().expect("recycle update");
         assert_eq!(updates.len(), 1);
         let select = updates[0].components[0]
@@ -7466,19 +7466,14 @@ async fn gear_panel_components_use_typed_atomic_service_and_restart_nonce() {
                 .iter()
                 .all(|option| option.label.starts_with("[Common]"))
         );
-    }
+        select.custom_id.clone()
+    };
 
     let recycle = Arc::new(TestResponder::default());
     provider
         .handler
         .handle(
-            component_request(
-                format!(
-                    "dig:gear:{}:{}:{}:recycle",
-                    provider.handler.state.view_nonce, USER, GUILD
-                ),
-                recycle_ids.iter().map(i64::to_string).collect(),
-            ),
+            component_request(recycle_id, recycle_ids.iter().map(i64::to_string).collect()),
             recycle.clone(),
         )
         .await
@@ -9097,4 +9092,52 @@ async fn boss_default_fight_rejects_wrong_owner_guild_and_invalid_risk() {
         assert!(responder.responses.lock().unwrap()[0].ephemeral);
         assert!(responder.modals.lock().unwrap().is_empty());
     }
+}
+
+#[test]
+fn recycling_picker_offers_every_recipe_in_a_large_inventory() {
+    use cama_app::dig_gear_runtime::{DigGearRuntimePanel, DigGearRuntimeRelic};
+    let mut panel = DigGearRuntimePanel {
+        pieces: Vec::new(),
+        relics: Vec::new(),
+        relic_cap: 1,
+        balance: 0,
+        trim_notice: false,
+    };
+    let mut expected = BTreeMap::new();
+    for artifact in cama_app::dig_loot::artifact_catalog()
+        .into_iter()
+        .filter(|artifact| {
+            cama_app::dig_relic_recycling::is_ordinary_relic(*artifact)
+                && artifact.rarity != cama_app::dig_loot::Rarity::Legendary
+        })
+    {
+        for _ in 0..28 {
+            panel.relics.push(DigGearRuntimeRelic {
+                row_id: panel.relics.len() as i64 + 1,
+                artifact_id: artifact.id.to_owned(),
+                equipped: false,
+            });
+        }
+        expected.insert(artifact.id.to_owned(), 3);
+    }
+    let response = super::relic_recycle_response(&panel, 100, 42, "nonce").unwrap();
+    let mut seen = BTreeMap::new();
+    let mut custom_ids = BTreeSet::new();
+    for select in response
+        .components
+        .iter()
+        .filter_map(|row| row.string_select.as_ref())
+    {
+        assert!((3..=25).contains(&select.options.len()));
+        assert!(custom_ids.insert(&select.custom_id));
+        for option in &select.options {
+            let row_id = option.value.parse::<usize>().unwrap();
+            *seen
+                .entry(panel.relics[row_id - 1].artifact_id.clone())
+                .or_insert(0) += 1;
+        }
+    }
+    assert_eq!(seen, expected);
+    assert!(response.components.len() <= 5);
 }

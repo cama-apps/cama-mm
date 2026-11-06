@@ -383,21 +383,18 @@ impl WrappedLiveRepository {
         end_ts: i64,
     ) -> Result<Vec<WrappedBettingStats>, WrappedLiveRepositoryError> {
         let connection = open_runtime_connection(&self.path)?;
-        let mut statement = connection.prepare(
-            "SELECT b.discord_id, p.discord_username, COUNT(*),
-                    COALESCE(SUM(b.amount * COALESCE(b.leverage, 1)), 0),
-                    COALESCE(SUM(CASE WHEN b.payout IS NOT NULL
-                         THEN b.payout - b.amount * COALESCE(b.leverage, 1)
-                         ELSE -b.amount * COALESCE(b.leverage, 1) END), 0),
-                    SUM(CASE WHEN b.payout IS NOT NULL AND b.payout > 0 THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN b.payout IS NULL OR b.payout = 0 THEN 1 ELSE 0 END)
-               FROM bets AS b
-               JOIN matches AS m ON m.match_id = b.match_id
-               JOIN players AS p ON p.discord_id = b.discord_id AND p.guild_id = ?1
-              WHERE m.winning_team IS NOT NULL AND b.guild_id = ?1
+        let mut statement = connection.prepare(concat!(
+            "WITH settled AS (",
+            include_str!("gambling_stats/settled_dota_bets.sql"),
+            ")
+             SELECT b.discord_id, p.discord_username, COUNT(*),
+                    SUM(b.effective_bet), SUM(b.net_profit), SUM(b.won), SUM(1 - b.won)
+               FROM settled AS b
+               JOIN players AS p ON p.discord_id = b.discord_id AND p.guild_id = b.guild_id
+              WHERE b.guild_id = ?1
                 AND b.bet_time >= ?2 AND b.bet_time < ?3
-           GROUP BY b.discord_id ORDER BY 4 DESC",
-        )?;
+           GROUP BY b.discord_id ORDER BY 4 DESC, b.discord_id"
+        ))?;
         statement
             .query_map(params![guild_id, start_ts, end_ts], |row| {
                 Ok(WrappedBettingStats {
@@ -593,6 +590,32 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
+
+    #[test]
+    fn annual_betting_uses_settled_outcomes_and_charges_tax_on_the_first_win() {
+        let file = NamedTempFile::new().unwrap();
+        copy_migrated_database(file.path()).unwrap();
+        let db = Connection::open(file.path()).unwrap();
+        db.execute_batch(
+            "PRAGMA foreign_keys=OFF;
+             INSERT INTO players(discord_id,guild_id,discord_username) VALUES(7,42,'Seven');
+             INSERT INTO matches(match_id,team1_players,team2_players,winning_team,guild_id)
+                VALUES(1,'[]','[]',1,42);
+             INSERT INTO bet_settlement_taxes(match_id,guild_id,discord_id,vanity_tax,bankruptcy_penalty)
+                VALUES(1,42,7,10,10);
+             INSERT INTO bets(guild_id,match_id,discord_id,team_bet_on,amount,bet_time,payout)
+                VALUES(42,1,7,'radiant',100,10,200),(42,1,7,'radiant',30,20,NULL),
+                      (42,1,7,'dire',10,21,0);",
+        ).unwrap();
+        let repo = WrappedLiveRepository::new(file.path());
+        let first = repo.betting_stats(42, 10, 20).unwrap().remove(0);
+        assert_eq!((first.net_pnl, first.wins), (80, 1));
+        let second = repo.betting_stats(42, 20, 22).unwrap().remove(0);
+        assert_eq!((second.net_pnl, second.wins, second.losses), (20, 1, 1));
+        let both = repo.betting_stats(42, 10, 22).unwrap().remove(0);
+        assert_eq!((both.net_pnl, both.total_wagered), (100, 140));
+        assert!(repo.betting_stats(99, 10, 22).unwrap().is_empty());
+    }
 
     #[test]
     fn migrated_sqlite_projects_annual_summary_and_compact_enrichment() {

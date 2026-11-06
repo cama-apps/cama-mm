@@ -91,6 +91,97 @@ fn guild_scoped_temp_views_hide_other_guild_without_trusting_generated_sql() {
 }
 
 #[test]
+fn scoped_sqlite_rejects_direct_reads_and_impersonated_views() {
+    let (_directory, path) = fixture();
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch("CREATE TABLE json_tree(private_value TEXT);")
+        .unwrap();
+    let repository = SqliteAIQueryRepository::new(&path);
+    for sql in [
+        r#"SELECT 1 AS "team's", wins FROM main.players"#,
+        "SELECT wins FROM (WITH players AS (SELECT wins FROM main.players) SELECT wins FROM players)",
+        "SELECT count(*) FROM main.players",
+        "SELECT count(*) FROM disburse_votes",
+        "SELECT private_value FROM json_tree",
+        "SELECT wins FROM (WITH __CAMA_GUILD_FILTERED_ROWS AS (SELECT wins FROM main.players) SELECT wins FROM __CAMA_GUILD_FILTERED_ROWS)",
+    ] {
+        assert!(
+            repository
+                .execute_readonly_guild_scoped(sql, Some(11), &[], 25)
+                .is_err(),
+            "{sql}"
+        );
+    }
+    for sql in [
+        "SELECT count(*) FROM players",
+        "SELECT wins FROM (WITH roster AS (SELECT wins FROM players) SELECT wins FROM roster)",
+        "SELECT value FROM json_each('[11]')",
+    ] {
+        assert_eq!(
+            repository
+                .execute_readonly_guild_scoped(sql, Some(11), &[], 25)
+                .unwrap()
+                .len(),
+            1,
+            "{sql}"
+        );
+    }
+}
+
+#[test]
+fn generated_queries_bound_values_and_total_bytes_before_copying() {
+    let (_directory, path) = fixture();
+    let repository = SqliteAIQueryRepository::new(&path);
+    for sql in [
+        "SELECT zeroblob(4)",
+        "SELECT CAST(X'80' AS TEXT)",
+        "SELECT length(zeroblob(1000000))",
+        "SELECT printf('%0200000d', 1) FROM (SELECT 1 UNION ALL SELECT 2)",
+    ] {
+        assert!(
+            repository
+                .execute_readonly_guild_scoped(sql, Some(11), &[], 25)
+                .is_err(),
+            "{sql}"
+        );
+    }
+}
+
+#[test]
+fn implicit_joins_cannot_probe_forbidden_guild_fields() {
+    let (_directory, path) = fixture();
+    Connection::open(&path).unwrap().execute_batch(
+        "CREATE TABLE private_probe(guild_id INTEGER, label TEXT, low_priority_gain_multiplier REAL);
+         INSERT INTO private_probe VALUES(11,'ordinary',1.0),(11,'restricted',2.0);"
+    ).unwrap();
+    let repository = Arc::new(SqliteAIQueryRepository::new(path));
+    let sql = "SELECT label FROM private_probe NATURAL JOIN (SELECT 2.0 AS 'low_priority_gain_multiplier')";
+    let raw = repository
+        .execute_readonly_guild_scoped(sql, Some(11), &[], 25)
+        .unwrap();
+    assert!(raw.is_empty());
+    let service = SQLQueryService::new(repository);
+    let result = service.query(&FixedSql { sql }, None, Some(11), "fixture", None);
+    assert!(result.results.is_empty());
+}
+
+#[test]
+fn ask_rejects_hidden_columns_in_quoted_aliases_and_row_sources() {
+    let (_directory, path) = fixture();
+    let service = SQLQueryService::new(Arc::new(SqliteAIQueryRepository::new(path)));
+    for sql in [
+        r#"SELECT 1 AS "from", players.* FROM players"#,
+        "SELECT 1 AS 'from', discord_id FROM players",
+        "SELECT (WITH ids(x) AS (VALUES(p.discord_id)) SELECT x FROM ids) FROM players p",
+        "SELECT j.value FROM players p, json_each(json_array(p.discord_id)) j",
+    ] {
+        let result = service.query(&FixedSql { sql }, None, Some(11), "fixture", None);
+        assert!(!result.success, "{sql}");
+    }
+}
+
+#[test]
 fn sql_query_service_executes_validated_projection_through_real_adapter() {
     let (_directory, path) = fixture();
     let repository: Arc<dyn AIQueryRepository> = Arc::new(SqliteAIQueryRepository::new(&path));

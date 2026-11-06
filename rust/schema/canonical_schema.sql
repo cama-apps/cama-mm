@@ -2055,6 +2055,9 @@ CREATE INDEX idx_match_participants_scout
 -- index: idx_matches_guild_date
 CREATE INDEX idx_matches_guild_date ON matches(guild_id, match_date DESC);
 
+-- index: idx_matches_guild_normalized_date
+CREATE INDEX idx_matches_guild_normalized_date ON matches(guild_id, datetime(match_date,'auto'));
+
 -- index: idx_matches_guild_id
 CREATE INDEX idx_matches_guild_id ON matches(guild_id);
 

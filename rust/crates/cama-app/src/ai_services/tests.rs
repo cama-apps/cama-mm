@@ -703,6 +703,18 @@ sql_validation_tests! {
     test_validate_sql_ignores_forbidden_identifier_text_in_string_literal,
     "SELECT discord_username FROM players WHERE discord_username = 'low_priority_gain_multiplier'", true, "";
 
+    test_validate_sql_apostrophe_in_alias_cannot_hide_raw_table,
+    r#"SELECT 1 AS "team's", wins FROM main.players"#, false, "schema-qualified";
+
+    test_validate_sql_apostrophe_in_alias_cannot_hide_private_projection,
+    r#"SELECT 1 AS "team's", discord_id FROM players"#, false, "blocked column";
+
+    test_validate_sql_escaped_apostrophe_in_table_alias_cannot_hide_raw_table,
+    "SELECT wins FROM players AS 'team''s' UNION SELECT wins FROM main.players", false, "schema-qualified";
+
+    test_validate_sql_handles_multibyte_alias_at_quantifier_boundary,
+    r#"SELECT "ééééé" FROM players"#, true, "";
+
     test_validate_sql_rejects_single_quoted_identifier_bypass_from_table,
     "SELECT reason FROM 'low_priority_state'", false, "not allowed";
     test_validate_sql_rejects_single_quoted_identifier_bypass_join_table,

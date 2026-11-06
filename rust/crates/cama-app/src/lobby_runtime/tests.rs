@@ -265,8 +265,9 @@ impl PendingMatches {
     }
 }
 
+#[async_trait]
 impl ResetPendingMatchPort for PendingMatches {
-    fn pending_matches(&self, _guild_id: GuildId) -> Result<Vec<ScopedPendingMatch>, String> {
+    async fn pending_matches(&self, _guild_id: GuildId) -> Result<Vec<ScopedPendingMatch>, String> {
         Ok(self
             .0
             .lock()
@@ -278,8 +279,9 @@ impl ResetPendingMatchPort for PendingMatches {
 #[derive(Clone, Copy, Debug)]
 struct BrokenPendingGuard;
 
+#[async_trait]
 impl ResetPendingMatchPort for BrokenPendingGuard {
-    fn pending_matches(&self, _guild_id: GuildId) -> Result<Vec<ScopedPendingMatch>, String> {
+    async fn pending_matches(&self, _guild_id: GuildId) -> Result<Vec<ScopedPendingMatch>, String> {
         Err("database credentials must stay private".to_owned())
     }
 }

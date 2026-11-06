@@ -28,6 +28,7 @@ const CAROL: u64 = 303;
 struct RecordingDiscord {
     members: BTreeMap<(u64, u64), DiscordGuildMemberSnapshot>,
     render_names: Option<BTreeMap<u64, String>>,
+    partial: bool,
     member_lookups: Mutex<Vec<(u64, u64)>>,
     snapshots: Mutex<Vec<u64>>,
 }
@@ -84,6 +85,7 @@ impl RecordingDiscord {
                 })
                 .collect(),
             render_names: None,
+            partial: false,
             member_lookups: Mutex::new(Vec::new()),
             snapshots: Mutex::new(Vec::new()),
         }
@@ -197,6 +199,14 @@ impl DiscordTransport for RecordingDiscord {
             .expect("member lookups")
             .push((guild_id, user_id));
         Ok(self.members.get(&(guild_id, user_id)).cloned())
+    }
+
+    fn cached_guild_member_ids(&self, _guild_id: u64) -> Result<Option<BTreeSet<u64>>, String> {
+        Ok(self
+            .render_names
+            .as_ref()
+            .filter(|_| !self.partial)
+            .map(|names| names.keys().copied().collect()))
     }
 
     fn cached_guild_member_render_names(
@@ -1105,6 +1115,53 @@ async fn migrated_sqlite_and_live_members_drive_all_seven_lazy_tabs() {
 }
 
 #[tokio::test]
+async fn partial_cache_fetches_missing_members_and_leaderboard_is_guild_bound() {
+    let (_directory, path) = migrated_database();
+    seed_leaderboard_data(&path);
+    let mut discord = RecordingDiscord::with_members([(ALICE, "AliceLive"), (CAROL, "CarolLive")]);
+    discord.partial = true;
+    discord.render_names.as_mut().unwrap().remove(&CAROL);
+    let discord = Arc::new(discord);
+    let provider = InfoRegistrationProvider::new(path, &config(), discord.clone());
+    let registry = registry(&provider);
+    let responder = Arc::new(RecordingResponder::default());
+    registry
+        .command_handler("leaderboard")
+        .unwrap()
+        .handle(
+            command_request("leaderboard", ALICE, Some(GUILD), None, Vec::new()),
+            responder.clone(),
+        )
+        .await
+        .unwrap();
+    let lookups = discord.member_lookups.lock().unwrap().clone();
+    assert!(lookups.contains(&(GUILD, CAROL)));
+    assert!(!lookups.contains(&(GUILD, ALICE)));
+    let published = responder.followups.lock().unwrap()[0].clone();
+    assert!(
+        published.embeds[0]
+            .description
+            .as_ref()
+            .unwrap()
+            .contains("<@303>")
+    );
+    let id = published.components[0].buttons[0].custom_id.clone();
+    assert!(id.starts_with(&format!("info:{}:", ALICE + 10_000)));
+    let mut click = component_request(&id, ALICE);
+    if let InteractionRequest::Component { guild_id, .. } = &mut click {
+        *guild_id = None;
+    }
+    registry
+        .component_handler(&id)
+        .unwrap()
+        .handle(click, responder.clone())
+        .await
+        .unwrap();
+    assert!(responder.responses.lock().unwrap()[0].ephemeral);
+    assert!(responder.updates.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn a_transport_without_a_member_cache_still_resolves_every_candidate() {
     let (_directory, path) = migrated_database();
     seed_leaderboard_data(&path);
@@ -1446,11 +1503,14 @@ async fn view_timeout_drops_session_and_deletes_followup_receipt() {
     let responder = Arc::new(RecordingResponder::with_receipt(4_242));
     handler
         .handle(
-            command_request("leaderboard", 999, None, None, Vec::new()),
+            command_request("leaderboard", 999, Some(GUILD), None, Vec::new()),
             responder.clone(),
         )
         .await
         .expect("leaderboard with expiring view");
+    let id = responder.followups.lock().unwrap()[0].components[0].buttons[0]
+        .custom_id
+        .clone();
     tokio::time::sleep(Duration::from_millis(30)).await;
     // Deleted through the channel, not the interaction followup: the timer can
     // outlive the interaction token once an interaction re-arms it.
@@ -1465,9 +1525,9 @@ async fn view_timeout_drops_session_and_deletes_followup_receipt() {
 
     let expired = Arc::new(RecordingResponder::default());
     registry
-        .component_handler("info:1:tab:glicko")
+        .component_handler(&id)
         .expect("info component route")
-        .handle(component_request("info:1:tab:glicko", 999), expired.clone())
+        .handle(component_request(&id, 999), expired.clone())
         .await
         .expect("expired component response");
     let response = expired.responses.lock().expect("responses")[0].clone();
@@ -1494,25 +1554,26 @@ async fn paging_a_leaderboard_postpones_its_deletion() {
         .command_handler("leaderboard")
         .expect("leaderboard handler")
         .handle(
-            command_request("leaderboard", 999, None, None, Vec::new()),
+            command_request("leaderboard", 999, Some(GUILD), None, Vec::new()),
             created.clone(),
         )
         .await
         .expect("leaderboard view");
 
-    let component = registry
-        .component_handler("info:1:tab:glicko")
-        .expect("info component route");
+    let buttons = created.followups.lock().unwrap()[0].components.clone();
     let responder = Arc::new(RecordingResponder::default());
-    for tab in [
-        "info:1:tab:glicko",
-        "info:1:tab:gambling",
-        "info:1:tab:tips",
-    ] {
+    for label in ["Glicko", "Gambling", "Tips"] {
+        let id = &buttons
+            .iter()
+            .flat_map(|row| &row.buttons)
+            .find(|button| button.label == label)
+            .unwrap()
+            .custom_id;
+        let component = registry.component_handler(id).unwrap();
         // Cross most of the current deadline, then use the view again.
         tokio::time::advance(timeout - Duration::from_secs(1)).await;
         component
-            .handle(component_request(tab, 999), responder.clone())
+            .handle(component_request(id, 999), responder.clone())
             .await
             .expect("switch leaderboard tab");
         tokio::task::yield_now().await;

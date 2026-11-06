@@ -52,7 +52,7 @@ use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
 };
 use crate::ids::{signed_id, unsigned_id};
-use crate::lobby_provider::MatchLobbyPort;
+use crate::lobby_provider::{MatchLobbyPort, NewMatchReservation};
 use crate::match_provider::MatchRegistrationProvider;
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
@@ -665,7 +665,7 @@ impl DraftRegistrationProvider {
                 } else {
                     let handle = self
                         .handler
-                        .reserve_and_restore_hydrated_state(&state, &operation_lock)?;
+                        .reserve_and_restore_hydrated_state(&state, &operation_lock).await?;
                     lock_recover(&self.handler.persisted_envelopes)
                         .insert((guild_id, session_id), envelope.clone());
                     (handle, state.clone(), envelope, true)
@@ -1020,7 +1020,7 @@ impl DraftHandler {
     /// startup step. The caller holds both the draft-session and lobby-scope
     /// operation locks. If manager insertion loses a race, unwind the newly
     /// acquired reservation before returning the error.
-    fn reserve_and_restore_hydrated_state(
+    async fn reserve_and_restore_hydrated_state(
         &self,
         state: &DraftState,
         operation_lock: &Arc<tokio::sync::Mutex<()>>,
@@ -1035,7 +1035,11 @@ impl DraftHandler {
             .collect::<BTreeSet<_>>();
         let reserved = if player_ids.is_empty() {
             false
-        } else if self.lobbies.reserve_players(guild_id, kind, &player_ids) {
+        } else if self
+            .lobbies
+            .reserve_players(guild_id, kind, &player_ids)
+            .await
+        {
             true
         } else {
             self.cleanup_unused_draft_operation_lock(guild_id, session_id, operation_lock);
@@ -1915,10 +1919,12 @@ impl DraftHandler {
             if lock_state(&handle).session_id == session_id {
                 *lock_state(&handle) = restored.clone();
             } else {
-                self.reserve_and_restore_hydrated_state(&restored, operation_lock)?;
+                self.reserve_and_restore_hydrated_state(&restored, operation_lock)
+                    .await?;
             }
         } else {
-            self.reserve_and_restore_hydrated_state(&restored, operation_lock)?;
+            self.reserve_and_restore_hydrated_state(&restored, operation_lock)
+                .await?;
         }
         lock_recover(&self.persisted_envelopes).insert(key, returned);
         self.restore_hydrated_receipt(&restored);
@@ -2821,13 +2827,26 @@ impl DraftHandler {
             )
             .map_err(|error| error.message)?;
         let selected = pool.selected_ids.iter().copied().collect::<BTreeSet<_>>();
-        if !self.lobbies.reserve_players(guild_id, kind, &selected) {
+        let refusal = match self
+            .lobbies
+            .reserve_new_match_players(guild_id, kind, &selected, &self.pending)
+            .await
+        {
+            Ok(NewMatchReservation::Reserved) => None,
+            Ok(NewMatchReservation::Unavailable) => {
+                Some("❌ The lobby changed while the draft was starting. Please try again.")
+            }
+            Ok(NewMatchReservation::Pending(_)) => Some(
+                "A selected player is already in a pending match. Use `/record` before starting a draft.",
+            ),
+            Err(error) => {
+                warn!(%error, guild_id, "draft roster eligibility lookup failed");
+                Some("Could not verify pending matches. Please try again.")
+            }
+        };
+        if let Some(message) = refusal {
             delete_followup(&responder, progress).await;
-            return followup_ephemeral(
-                &responder,
-                "❌ The lobby changed while the draft was starting. Please try again.",
-            )
-            .await;
+            return followup_ephemeral(&responder, message).await;
         }
 
         let state = match self

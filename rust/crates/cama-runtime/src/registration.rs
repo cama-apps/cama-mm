@@ -739,6 +739,11 @@ pub struct InteractionMessageReceipt {
 
 #[async_trait]
 pub trait InteractionResponder: Send + Sync {
+    /// The message whose controls generated this component interaction.
+    fn component_message_id(&self) -> Option<u64> {
+        None
+    }
+
     async fn respond(&self, response: InteractionResponse) -> Result<(), InteractionResponseError>;
     async fn defer(&self, ephemeral: bool) -> Result<(), InteractionResponseError>;
 

@@ -828,11 +828,15 @@ async fn persistent_completion_fixture() -> (
     let handle = drafts
         .restore_draft(state.clone())
         .expect("restore durable completion draft");
-    assert!(lobbies.reserve_players(
-        42,
-        AppLobbyKind::Open,
-        &state.player_pool_ids.iter().copied().collect()
-    ));
+    assert!(
+        lobbies
+            .reserve_players(
+                42,
+                AppLobbyKind::Open,
+                &state.player_pool_ids.iter().copied().collect()
+            )
+            .await
+    );
     let provider = DraftRegistrationProvider::new_with_reminder_scheduler_and_neon_and_persistence(
         database.path(),
         &config,
@@ -1264,9 +1268,17 @@ async fn hydration_reserves_nonempty_pool_and_repeated_ready_keeps_live_reservat
 
     assert_eq!(provider.hydrate().await.expect("first hydration"), 1);
     let player_ids = (1..=10).collect::<BTreeSet<_>>();
-    assert!(!lobbies.reserve_players(42, AppLobbyKind::Open, &player_ids));
+    assert!(
+        !lobbies
+            .reserve_players(42, AppLobbyKind::Open, &player_ids)
+            .await
+    );
     assert_eq!(provider.hydrate().await.expect("repeated hydration"), 1);
-    assert!(!lobbies.reserve_players(42, AppLobbyKind::Open, &player_ids));
+    assert!(
+        !lobbies
+            .reserve_players(42, AppLobbyKind::Open, &player_ids)
+            .await
+    );
     assert_eq!(
         drafts
             .get_state(Some(42))
@@ -1283,7 +1295,11 @@ async fn hydration_reserves_nonempty_pool_and_repeated_ready_keeps_live_reservat
         .expect_err("repeated repaint failure must be reported");
     assert!(error.contains("simulated Discord edit failure"));
     assert!(drafts.has_active_draft(Some(42)));
-    assert!(!lobbies.reserve_players(42, AppLobbyKind::Open, &player_ids));
+    assert!(
+        !lobbies
+            .reserve_players(42, AppLobbyKind::Open, &player_ids)
+            .await
+    );
 }
 
 #[tokio::test]
@@ -1358,7 +1374,11 @@ async fn initial_hydration_repaint_failure_unwinds_runtime_resources_but_retains
             .contains_key(&(42, persisted.session_id))
     );
     let player_ids = (1..=10).collect::<BTreeSet<_>>();
-    assert!(lobbies.reserve_players(42, AppLobbyKind::Open, &player_ids));
+    assert!(
+        lobbies
+            .reserve_players(42, AppLobbyKind::Open, &player_ids)
+            .await
+    );
     lobbies.release_players(42, AppLobbyKind::Open, &player_ids);
 
     discord.fail_edits.store(false, Ordering::Release);
@@ -1434,7 +1454,11 @@ async fn initial_hydration_missing_source_unwinds_runtime_resources_but_retains_
             .contains_key(&(42, persisted.session_id))
     );
     let player_ids = (1..=10).collect::<BTreeSet<_>>();
-    assert!(lobbies.reserve_players(42, AppLobbyKind::Open, &player_ids));
+    assert!(
+        lobbies
+            .reserve_players(42, AppLobbyKind::Open, &player_ids)
+            .await
+    );
     lobbies.release_players(42, AppLobbyKind::Open, &player_ids);
 }
 
@@ -3125,7 +3149,11 @@ async fn nonpersistent_final_pick_defer_failure_keeps_legacy_timeout_cleanup() {
         .iter()
         .copied()
         .collect::<BTreeSet<_>>();
-    assert!(lobbies.reserve_players(42, AppLobbyKind::Open, &player_ids));
+    assert!(
+        lobbies
+            .reserve_players(42, AppLobbyKind::Open, &player_ids)
+            .await
+    );
     drafts
         .restore_draft(state.clone())
         .expect("restore process-local draft");
@@ -3183,7 +3211,11 @@ async fn nonpersistent_final_pick_defer_failure_keeps_legacy_timeout_cleanup() {
             .expect("count nonpersistent finalization jobs"),
         0
     );
-    assert!(lobbies.reserve_players(42, AppLobbyKind::Open, &player_ids));
+    assert!(
+        lobbies
+            .reserve_players(42, AppLobbyKind::Open, &player_ids)
+            .await
+    );
     lobbies.release_players(42, AppLobbyKind::Open, &player_ids);
 }
 
@@ -3216,6 +3248,7 @@ async fn hydration_restore_failure_releases_new_reservation_and_session_lock() {
     let error = provider
         .handler
         .reserve_and_restore_hydrated_state(&state, &session_lock)
+        .await
         .expect_err("manager restore must lose the race");
     assert!(error.contains("already in progress"));
     assert!(
@@ -3227,7 +3260,11 @@ async fn hydration_restore_failure_releases_new_reservation_and_session_lock() {
             .contains_key(&(42, 99))
     );
     let player_ids = (1..=10).collect::<BTreeSet<_>>();
-    assert!(lobbies.reserve_players(42, AppLobbyKind::Open, &player_ids));
+    assert!(
+        lobbies
+            .reserve_players(42, AppLobbyKind::Open, &player_ids)
+            .await
+    );
     lobbies.release_players(42, AppLobbyKind::Open, &player_ids);
 }
 
@@ -3860,7 +3897,11 @@ async fn test_distinct_completion_channel_copies_start_together_after_edit() {
     )
     .expect("draft provider");
     let selected = (1..=10).collect::<BTreeSet<_>>();
-    assert!(lobbies.reserve_players(42, AppLobbyKind::Open, &selected));
+    assert!(
+        lobbies
+            .reserve_players(42, AppLobbyKind::Open, &selected)
+            .await
+    );
     let lobby_snapshot = lobbies
         .snapshot(42, AppLobbyKind::Open)
         .expect("lobby snapshot");
@@ -4462,6 +4503,56 @@ async fn restart_is_captain_or_admin_only_and_preserves_pending_matches() {
 }
 
 #[tokio::test]
+async fn draft_start_releases_its_reservation_when_a_selected_player_has_a_pending_match() {
+    let (database, _lobby, lobbies, drafts, discord) = populated_lobby_fixture().await;
+    let config = ApplicationConfig::from_lookup(|name| match name {
+        "DISCORD_BOT_TOKEN" => Some("test-token".to_owned()),
+        "ADMIN_USER_IDS" => Some("9001".to_owned()),
+        _ => None,
+    })
+    .expect("config");
+    let provider = DraftRegistrationProvider::new(
+        database.path(),
+        &config,
+        lobbies.clone(),
+        Arc::clone(&drafts),
+        discord,
+    )
+    .expect("draft provider");
+    let mut builder = RegistryBuilder::default();
+    provider.register(&mut builder).expect("register draft");
+    let registry = builder.build();
+    let handler = registry.command_handler("draft").expect("draft handler");
+    provider
+        .handler
+        .pending
+        .create_pending_match(
+            42,
+            &PendingMatchState {
+                radiant_team_ids: vec![1],
+                ..PendingMatchState::default()
+            },
+        )
+        .unwrap();
+    let reply = Arc::new(TestResponder::default());
+    handler
+        .handle(draft_request(1, Some(42), None, "start"), reply.clone())
+        .await
+        .unwrap();
+    assert!(!drafts.has_active_draft(Some(42)));
+    assert!(
+        reply
+            .responses
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.content.contains("already in a pending match"))
+    );
+    let ids = (1..=10).collect();
+    assert!(lobbies.reserve_players(42, AppLobbyKind::Open, &ids).await);
+}
+
+#[tokio::test]
 async fn start_reserves_the_shared_lobby_and_restart_releases_only_that_pool() {
     let (database, _lobby, lobbies, drafts, discord) = populated_lobby_fixture().await;
     let config = ApplicationConfig::from_lookup(|name| match name {
@@ -4496,7 +4587,11 @@ async fn start_reserves_the_shared_lobby_and_restart_releases_only_that_pool() {
         .iter()
         .copied()
         .collect::<BTreeSet<_>>();
-    assert!(!lobbies.reserve_players(42, AppLobbyKind::Open, &selected));
+    assert!(
+        !lobbies
+            .reserve_players(42, AppLobbyKind::Open, &selected)
+            .await
+    );
     assert_eq!(started.defers.lock().expect("defers").clone(), vec![false]);
 
     let restarted = Arc::new(TestResponder::default());
@@ -4508,7 +4603,11 @@ async fn start_reserves_the_shared_lobby_and_restart_releases_only_that_pool() {
         .await
         .expect("restart draft");
     assert!(!drafts.has_active_draft(Some(42)));
-    assert!(lobbies.reserve_players(42, AppLobbyKind::Open, &selected));
+    assert!(
+        lobbies
+            .reserve_players(42, AppLobbyKind::Open, &selected)
+            .await
+    );
     lobbies.release_players(42, AppLobbyKind::Open, &selected);
     assert_eq!(
         lobbies
@@ -4549,7 +4648,11 @@ async fn discord_opening_failure_unwinds_state_and_lobby_reservation() {
     assert!(!drafts.has_active_draft(Some(42)));
 
     let all_ids = (1..=10).collect::<BTreeSet<_>>();
-    assert!(lobbies.reserve_players(42, AppLobbyKind::Open, &all_ids));
+    assert!(
+        lobbies
+            .reserve_players(42, AppLobbyKind::Open, &all_ids)
+            .await
+    );
     lobbies.release_players(42, AppLobbyKind::Open, &all_ids);
 }
 

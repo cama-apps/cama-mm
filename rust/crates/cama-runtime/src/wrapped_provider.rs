@@ -8,7 +8,6 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -120,7 +119,6 @@ impl WrappedRegistrationProvider {
                 minimum_bets: config.values.wrapped_min_bets.max(0),
                 cooldowns: Mutex::new(HashMap::new()),
                 sessions: Arc::new(Mutex::new(BTreeMap::new())),
-                next_session: AtomicU64::new(fastrand::u64(1..u64::MAX)),
                 timeout,
                 fixed_year,
             }),
@@ -154,13 +152,13 @@ struct WrappedHandler {
     minimum_bets: i64,
     cooldowns: Mutex<HashMap<u64, Instant>>,
     sessions: Arc<Mutex<BTreeMap<u64, Arc<AsyncMutex<StorySession>>>>>,
-    next_session: AtomicU64,
     timeout: Duration,
     fixed_year: Option<i32>,
 }
 
 struct StorySession {
     owner_id: u64,
+    guild_id: u64,
     slides: Vec<WrappedSlideData>,
     details: Vec<WrappedSlideData>,
     rendered: BTreeMap<(bool, usize, bool), WrappedRenderedMedia>,
@@ -445,6 +443,7 @@ impl WrappedHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
         let InteractionRequest::Command {
+            interaction_id: session_id,
             user_id,
             user_display_name,
             guild_id,
@@ -573,9 +572,9 @@ impl WrappedHandler {
                     return wrapped_failure(&responder).await;
                 }
             };
-        let session_id = self.next_session.fetch_add(1, Ordering::Relaxed);
         let session = Arc::new(AsyncMutex::new(StorySession {
             owner_id: user_id,
+            guild_id,
             slides,
             details,
             rendered: BTreeMap::from([((false, 0, true), first.clone())]),
@@ -614,7 +613,10 @@ impl WrappedHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), InteractionHandlerError> {
         let InteractionRequest::Component {
-            custom_id, user_id, ..
+            custom_id,
+            user_id,
+            guild_id,
+            ..
         } = request
         else {
             return Err("wrapped component received non-component request".into());
@@ -639,7 +641,7 @@ impl WrappedHandler {
         // Acknowledge before waiting behind another click's render or delivery.
         responder.defer(false).await.map_err(response_error)?;
         let mut session = session.lock().await;
-        if !session.active {
+        if !session.active || Some(session.guild_id) != guild_id {
             return responder
                 .followup(
                     InteractionResponse::message("This wrapped has expired.")
@@ -891,7 +893,12 @@ impl WrappedHandler {
             }
             drop(locked);
             if let Some(receipt) = receipt
-                && let Err(error) = responder.delete_message(receipt).await
+                && let Err(error) = responder
+                    .delete_message(InteractionMessageReceipt {
+                        delivery: crate::registration::InteractionMessageDelivery::ChannelFallback,
+                        ..receipt
+                    })
+                    .await
             {
                 warn!(%error, session_id, "failed to delete expired wrapped story");
             }

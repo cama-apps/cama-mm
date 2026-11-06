@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -156,7 +155,6 @@ impl ProfileRegistrationProvider {
                 player_names: Arc::new(DiscordIdPlayerNameResolver),
                 command_rate_limit: Mutex::new(CommandRateLimit::default()),
                 views: Arc::new(Mutex::new(BTreeMap::new())),
-                next_view_id: AtomicU64::new(1),
                 view_timeout,
             }),
         }
@@ -195,7 +193,6 @@ struct ProfileHandler {
     player_names: Arc<dyn GuildPlayerNameResolver>,
     command_rate_limit: Mutex<CommandRateLimit>,
     views: Arc<Mutex<BTreeMap<u64, Arc<tokio::sync::Mutex<ProfileViewState>>>>>,
-    next_view_id: AtomicU64,
     view_timeout: Duration,
 }
 
@@ -272,6 +269,7 @@ impl ProfileHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
         let InteractionRequest::Command {
+            interaction_id: view_id,
             name,
             user_id,
             guild_id,
@@ -346,7 +344,6 @@ impl ProfileHandler {
         .await
         .map_err(|error| format!("profile overview task failed: {error}"))??;
 
-        let view_id = self.next_view_id.fetch_add(1, Ordering::Relaxed);
         let state = Arc::new(tokio::sync::Mutex::new(ProfileViewState {
             target_id,
             guild_id,
@@ -374,7 +371,10 @@ impl ProfileHandler {
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
         let InteractionRequest::Component {
-            custom_id, user_id, ..
+            custom_id,
+            user_id,
+            guild_id,
+            ..
         } = request
         else {
             return Err("profile component handler received a command".to_owned());
@@ -386,7 +386,12 @@ impl ProfileHandler {
             .map_err(|_| "profile view registry lock was poisoned".to_owned())?
             .get(&view_id)
             .cloned();
-        let Some(state) = state else {
+        let guild_id = signed_optional_discord_id(guild_id, "guild")?;
+        let state = match state {
+            Some(state) => Some(state.lock_owned().await),
+            None => None,
+        };
+        let Some(mut state) = state.filter(|state| state.guild_id == guild_id) else {
             return responder
                 .respond(
                     InteractionResponse::message(
@@ -398,7 +403,6 @@ impl ProfileHandler {
                 .map_err(|error| error.to_string());
         };
 
-        let mut state = state.lock().await;
         let now = Instant::now();
         if state
             .last_click

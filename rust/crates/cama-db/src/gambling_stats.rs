@@ -834,20 +834,16 @@ impl GamblingStatsPort for GamblingStatsRepository {
                     vec![Value::Integer(Self::normalize_guild_id(guild_id))],
                 )
             };
+            let dota_bets = include_str!("gambling_stats/settled_dota_bets.sql");
             let sql = format!(
                 "WITH all_bets AS (
-                     SELECT b.discord_id,b.guild_id,b.bet_id, 'dota:' || b.match_id AS match_id,b.bet_time,
-                            b.amount * COALESCE(b.leverage, 1) AS effective_bet,
-                            COALESCE(b.leverage, 1) AS leverage, b.payout,
-                            CASE WHEN (m.winning_team = 1 AND b.team_bet_on = 'radiant')
-                                      OR (m.winning_team = 2 AND b.team_bet_on = 'dire')
-                                 THEN 1 ELSE 0 END AS won
-                     FROM bets b JOIN matches m ON b.match_id = m.match_id
-                     WHERE b.match_id IS NOT NULL
+                     {dota_bets}
                      UNION ALL
                      SELECT b.discord_id,b.guild_id,b.wager_id,b.market_id,b.created_at,
-                            b.effective_stake,b.leverage,b.payout,
-                            CASE WHEN b.side=m.winner THEN 1 ELSE 0 END
+                            b.effective_stake,b.leverage,
+                            CASE WHEN b.side=m.winner THEN 1 ELSE 0 END,
+                            CASE WHEN b.side=m.winner THEN COALESCE(b.payout, b.effective_stake * 2) - b.effective_stake
+                                 ELSE -b.effective_stake END
                      FROM deadlock_wagers b JOIN deadlock_matches m
                        ON b.market_id='deadlock:' || m.match_id AND b.guild_id=m.guild_id
                      WHERE m.status='settled'
@@ -864,15 +860,7 @@ impl GamblingStatsPort for GamblingStatsRepository {
                  )
                  SELECT discord_id, COUNT(*), SUM(won), SUM(1 - won),
                         SUM(effective_bet), AVG(leverage),
-                        SUM(CASE WHEN won = 1
-                                 THEN COALESCE(payout, effective_bet * 2) - effective_bet
-                                 ELSE -effective_bet END)
-                          - COALESCE((SELECT SUM(bst.vanity_tax
-                                                 + bst.low_priority_tax
-                                                 + bst.bankruptcy_penalty)
-                                      FROM bet_settlement_taxes bst
-                                      WHERE bst.guild_id = ordered.guild_id
-                                        AND bst.discord_id = ordered.discord_id), 0)
+                        SUM(net_profit)
                           - COALESCE((SELECT SUM(r.amount) FROM deadlock_economic_receipts r
                                       WHERE r.guild_id=ordered.guild_id AND r.discord_id=ordered.discord_id
                                         AND r.kind IN ('vanity_tax','low_priority_tax','bankruptcy')),0),

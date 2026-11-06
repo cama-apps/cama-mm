@@ -169,12 +169,14 @@ pub struct ScopedPendingMatch {
     pub shuffle_message_jump_url: Option<String>,
 }
 
+#[async_trait]
 pub trait ResetPendingMatchPort: Send + Sync {
-    fn pending_matches(&self, guild_id: GuildId) -> Result<Vec<ScopedPendingMatch>, String>;
+    async fn pending_matches(&self, guild_id: GuildId) -> Result<Vec<ScopedPendingMatch>, String>;
 }
 
+#[async_trait]
 impl ResetPendingMatchPort for () {
-    fn pending_matches(&self, _guild_id: GuildId) -> Result<Vec<ScopedPendingMatch>, String> {
+    async fn pending_matches(&self, _guild_id: GuildId) -> Result<Vec<ScopedPendingMatch>, String> {
         Ok(Vec::new())
     }
 }
@@ -456,7 +458,12 @@ where
         pending_matches: &dyn ResetPendingMatchPort,
         drafts: &dyn ActiveDraftPort,
         transport: &dyn LobbyRuntimeTransport,
-    ) -> ResetLobbyOutcome {
+    ) -> ResetLobbyOutcome
+    where
+        P: Send + Sync + 'static,
+        M: Send + Sync + 'static,
+        C: Send + Sync + 'static,
+    {
         let memberships = self
             .service
             .get_lobby_kinds_for_player(request.user_id, request.guild_id);
@@ -481,7 +488,7 @@ where
             };
         let scope = LobbyScope::new(request.guild_id, kind);
 
-        match pending_refusal(pending_matches, scope) {
+        match pending_refusal(pending_matches, scope).await {
             Ok(Some(content)) => {
                 return self
                     .refuse(transport, Some(scope), ResetRefusal::PendingMatch, content)
@@ -557,7 +564,7 @@ where
         };
 
         // Repeat every volatile guard under the shared operation lock.
-        match pending_refusal(pending_matches, scope) {
+        match pending_refusal(pending_matches, scope).await {
             Ok(Some(content)) => {
                 return self
                     .refuse(transport, Some(scope), ResetRefusal::PendingMatch, content)
@@ -606,7 +613,36 @@ where
                 .await;
         };
 
+        if !request.is_admin && lobby.created_by != Some(request.user_id) {
+            return self
+                .refuse(
+                    transport,
+                    Some(scope),
+                    ResetRefusal::PermissionDenied,
+                    "❌ Permission denied. Admin or lobby creator only.".to_owned(),
+                )
+                .await;
+        }
         let ids = lobby.message_ids;
+        let service = Arc::clone(&self.service);
+        if !matches!(
+            tokio::task::spawn_blocking(move || service.try_reset_lobby(scope)).await,
+            Ok(Ok(true))
+        ) {
+            return self
+                .refuse(
+                    transport,
+                    Some(scope),
+                    ResetRefusal::Persistence,
+                    format!(
+                        "❌ Could not persist the {} reset. Please try again.",
+                        kind.label()
+                    ),
+                )
+                .await;
+        }
+        self.ready_notifications().remove(&scope);
+
         let mut publication_failures = Vec::new();
         collect_publication_failure(
             &mut publication_failures,
@@ -640,20 +676,6 @@ where
                 .await,
         );
 
-        if let Err(_error) = self.service.try_reset_lobby(scope) {
-            return self
-                .refuse(
-                    transport,
-                    Some(scope),
-                    ResetRefusal::Persistence,
-                    format!(
-                        "❌ Could not persist the {} reset. Please try again.",
-                        kind.label()
-                    ),
-                )
-                .await;
-        }
-        self.ready_notifications().remove(&scope);
         let content = format!(
             "✅ {} reset. You can create a new lobby with `/lobby`.",
             kind.label()
@@ -708,11 +730,11 @@ fn collect_publication_failure(
     }
 }
 
-fn pending_refusal(
+async fn pending_refusal(
     port: &dyn ResetPendingMatchPort,
     scope: LobbyScope,
 ) -> Result<Option<String>, ()> {
-    let pending = port.pending_matches(scope.guild_id).map_err(|_| ())?;
+    let pending = port.pending_matches(scope.guild_id).await.map_err(|_| ())?;
     let pending = pending
         .into_iter()
         .find(|pending| pending.lobby_kind.is_none() || pending.lobby_kind == Some(scope.kind));

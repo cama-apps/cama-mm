@@ -93,6 +93,19 @@ pub trait LobbyModerationPort: Send + Sync {
         scope: LobbyScope,
         now: i64,
     ) -> Result<Option<LobbySuspension>, String>;
+    fn any_suspended(
+        &self,
+        player_ids: &BTreeSet<UserId>,
+        scope: LobbyScope,
+        now: i64,
+    ) -> Result<bool, String> {
+        for &id in player_ids {
+            if self.active_suspension(id, scope, now)?.is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 pub trait LobbyClock {
@@ -751,9 +764,15 @@ where
     }
 
     pub fn reserve_lobby_players(&self, player_ids: &BTreeSet<UserId>, scope: LobbyScope) -> bool {
-        if player_ids
-            .iter()
-            .any(|player_id| !matches!(self.active_suspension(*player_id, scope), Ok(None)))
+        if let Some(moderation) = &self.moderation
+            && !matches!(
+                moderation.any_suspended(
+                    player_ids,
+                    scope,
+                    self.clock.now_ns().saturating_div(1_000_000_000)
+                ),
+                Ok(false)
+            )
         {
             return false;
         }
