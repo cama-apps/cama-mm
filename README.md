@@ -392,12 +392,10 @@ Additional settings can be configured in `.env` (see the Rust application config
 - `WHEEL_TARGET_EV` - Target expected value per spin (default: -27.5)
 
 **Rating:**
-- `OFF_ROLE_MULTIPLIER`, `OFF_ROLE_FLAT_VALUE_PENALTY` - Off-role effective
-  value adjustments, applied on top of the role win-rate factor
-  (defaults: 0.97 and 80)
-- `OFF_ROLE_FLAT_PENALTY` - Goodness penalty per off-role player (default: 740)
-- `EXCLUSION_PENALTY_WEIGHT` - Goodness penalty per excluded player (default: 80)
 - `RECALIBRATION_COOLDOWN_SECONDS` - Time between rating resets
+
+Shuffle balancing settings are fixed in the Rust application config and are
+not read from the environment.
 
 **Trivia:**
 - `TRIVIA_COOLDOWN_SECONDS` - Time between trivia questions (default: 6 hours)

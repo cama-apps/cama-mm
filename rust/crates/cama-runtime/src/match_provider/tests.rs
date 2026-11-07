@@ -4482,9 +4482,9 @@ fn production_goodness_weights_team_value_and_role_deltas() {
     let goodness =
         extra_f64(&prepared.pending.state, "goodness_score").expect("stored goodness score");
 
-    // 95 value difference at 4.7 plus a 95 lane-matchup delta at 0.30;
+    // 100 value difference at 4.7 plus a 100 lane-matchup delta at 0.30;
     // subtract 29% of the 15,100 total active rating.
-    assert!((goodness - (-3_904.0)).abs() < 1e-9, "{goodness}");
+    assert!((goodness - (-3_879.0)).abs() < 1e-9, "{goodness}");
 }
 
 #[test]
@@ -4737,13 +4737,11 @@ fn test_shuffle_display_uses_configured_flat_off_role_value_penalty() {
             .expect("calculate configured display value")
         })
         .collect::<Vec<_>>();
-    // These fixture players have no recorded role history, so every one takes
-    // the 0.95 unproven-role default, and the off-role multiplier still
-    // stacks on top of it. Radiant is fully on-role, so it is a flat 5% off
-    // 13_000; Dire carries one off-role player who now takes both factors,
-    // which is why it falls further than 5% from 11_300.
-    // Dire: 11_300 * 0.95 - 2_000 * 0.95 * 0.02 - 200 = 10_782.
-    assert_eq!(configured, [12_350.0, 10_782.0]);
+    // These fixture players have no recorded role history, so the role factor
+    // leaves every rating untouched. Radiant is fully on-role; Dire carries one
+    // off-role player who takes the off-role multiplier and flat penalty.
+    // Dire: 11_600 - 2_000 * 0.02 - 200 = 11_360.
+    assert_eq!(configured, [13_000.0, 11_360.0]);
 }
 
 #[test]
@@ -7024,7 +7022,7 @@ async fn shuffle_embed_omits_server_recommendation() {
 }
 
 #[tokio::test]
-async fn shuffle_embed_labels_adjusted_value_difference() {
+async fn shuffle_embed_omits_value_difference() {
     let fixture = MatchRuntimeFixture::new();
     let player_ids = fixture.add_shuffle_pool(10, false);
     let prepared = fixture.prepare_shuffle(player_ids, "glicko", Vec::new());
@@ -7041,8 +7039,11 @@ async fn shuffle_embed_labels_adjusted_value_difference() {
         .find(|field| field.name == "📊 Balance")
         .expect("balance field");
 
-    assert!(balance.value.contains("**Adjusted value diff:**"));
-    assert!(!balance.value.contains("\n**Value diff:**"));
+    // The shuffler's internal value applies role and low-priority multipliers
+    // the header's rating sums do not, so the two read as contradictory.
+    assert!(!balance.value.contains("value diff"));
+    assert!(!balance.value.contains("Value diff"));
+    assert!(balance.value.contains("**Off-role players:**"));
 }
 
 #[tokio::test]

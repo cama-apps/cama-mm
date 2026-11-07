@@ -118,9 +118,8 @@ impl Player {
     /// The rating multiplier for being assigned `role`, from this player's win
     /// rate in that role.
     ///
-    /// Replaces the flat off-role multiplier: a player assigned a role they
-    /// rarely play has no recorded sample and lands on the floor by itself,
-    /// while a proven specialist is scaled up.
+    /// A player without the minimum sample in `role` keeps their rating, while
+    /// a proven record scales it up or down.
     #[must_use]
     pub fn role_factor_for(&self, role: &str) -> f64 {
         role_factor(self.role_records.get(role).copied().unwrap_or_default())

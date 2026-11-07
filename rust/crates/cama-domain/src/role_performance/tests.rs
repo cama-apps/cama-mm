@@ -11,43 +11,45 @@ fn test_fifty_percent_winrate_leaves_the_rating_untouched() {
 
 #[test]
 fn test_zero_percent_winrate_takes_the_floor() {
-    approx(role_factor(RoleRecord::new(0, 4)), 0.85);
+    approx(role_factor(RoleRecord::new(0, 10)), 0.9);
 }
 
 #[test]
 fn test_hundred_percent_winrate_takes_the_ceiling() {
-    approx(role_factor(RoleRecord::new(4, 0)), 1.15);
+    approx(role_factor(RoleRecord::new(10, 0)), 1.1);
 }
 
 #[test]
-fn test_exactly_three_games_is_enough_sample() {
-    // 3 games is the documented threshold, so a 3-0 record reaches the top of
-    // the scale rather than falling back to the unproven factor.
-    approx(role_factor(RoleRecord::new(3, 0)), 1.15);
-    approx(role_factor(RoleRecord::new(0, 3)), 0.85);
+fn test_exactly_ten_games_is_enough_sample() {
+    // 10 games is the documented threshold, so a 10-0 record reaches the top
+    // of the scale rather than falling back to the unproven factor.
+    approx(role_factor(RoleRecord::new(10, 0)), 1.1);
+    approx(role_factor(RoleRecord::new(0, 10)), 0.9);
 }
 
 #[test]
-fn test_below_three_games_takes_the_unproven_factor_regardless_of_winrate() {
+fn test_below_ten_games_leaves_the_rating_untouched_regardless_of_winrate() {
     for record in [
         RoleRecord::new(0, 0),
         RoleRecord::new(1, 0),
-        RoleRecord::new(2, 0),
-        RoleRecord::new(0, 1),
-        RoleRecord::new(1, 1),
+        RoleRecord::new(3, 0),
+        RoleRecord::new(0, 3),
+        RoleRecord::new(9, 0),
+        RoleRecord::new(0, 9),
+        RoleRecord::new(5, 4),
     ] {
-        approx(role_factor(record), UNPROVEN_ROLE_FACTOR);
+        approx(role_factor(record), 1.0);
     }
 }
 
 #[test]
 fn test_scale_is_linear_in_winrate() {
     // 25% and 75% sit exactly a quarter in from each end.
-    approx(role_factor(RoleRecord::new(1, 3)), 0.925);
-    approx(role_factor(RoleRecord::new(3, 1)), 1.075);
+    approx(role_factor(RoleRecord::new(5, 15)), 0.95);
+    approx(role_factor(RoleRecord::new(15, 5)), 1.05);
     // Midpoints between those and the ends stay on the same line.
-    approx(role_factor(RoleRecord::new(1, 7)), 0.8875);
-    approx(role_factor(RoleRecord::new(7, 1)), 1.1125);
+    approx(role_factor(RoleRecord::new(2, 14)), 0.925);
+    approx(role_factor(RoleRecord::new(14, 2)), 1.075);
 }
 
 #[test]
@@ -66,8 +68,8 @@ fn test_factor_always_stays_inside_the_documented_band() {
 #[test]
 fn test_adjusted_value_scales_the_base_rating() {
     approx(adjusted_value(2_000.0, RoleRecord::new(5, 5)), 2_000.0);
-    approx(adjusted_value(2_000.0, RoleRecord::new(0, 5)), 1_700.0);
-    approx(adjusted_value(2_000.0, RoleRecord::new(5, 0)), 2_300.0);
+    approx(adjusted_value(2_000.0, RoleRecord::new(0, 10)), 1_800.0);
+    approx(adjusted_value(2_000.0, RoleRecord::new(10, 0)), 2_200.0);
 }
 
 #[test]

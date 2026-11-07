@@ -114,6 +114,7 @@ pub struct Values {
     pub enrichment_history_limit: i64,
     pub enrichment_refresh_interval_ms: i64,
     pub enrichment_retry_delays: Vec<i64>,
+    /// Hard-coded shuffler penalty per excluded player.
     pub exclusion_penalty_weight: f64,
     pub first_game_pool_daily_amount: i64,
     /// Explicit dev-only wheel fixture support. When enabled, negative
@@ -136,6 +137,7 @@ pub struct Values {
     pub lobby_ready_cooldown_seconds: i64,
     pub lobby_ready_threshold: i64,
     pub lottery_activity_days: i64,
+    /// Hard-coded shuffler strength multiplier for low-priority players.
     pub low_priority_mmr_multiplier: f64,
     pub low_priority_profit_tax_rate: f64,
     pub max_debt: i64,
@@ -150,14 +152,23 @@ pub struct Values {
     pub neon_cooldown_seconds: i64,
     pub neon_degen_enabled: bool,
     pub neon_dig_chance: f64,
+    /// Hard-coded exclusion count seeded at registration so new players get
+    /// shuffle selection priority.
     pub new_player_exclusion_boost: i64,
     pub new_player_mmr_discount: i64,
+    /// Hard-coded shuffler value penalty for an off-role player.
     pub off_role_flat_value_penalty: f64,
+    /// Hard-coded shuffler goodness penalty per off-role player.
     pub off_role_flat_penalty: f64,
+    /// Hard-coded shuffler value multiplier for an off-role player.
     pub off_role_multiplier: f64,
+    /// Hard-coded chance that a shuffle balances with OpenSkill.
     pub openskill_shuffle_chance: f64,
     pub package_deal_games_duration: i64,
+    /// Hard-coded shuffler penalty for a package-deal pair on opposite teams.
     pub package_deal_penalty: f64,
+    /// Hard-coded shuffler penalty for a package-deal pair split between the
+    /// lobby and the excluded players.
     pub package_deal_split_penalty: f64,
     pub pet_hunger_decay_per_day: i64,
     pub pingedash_cooldown_seconds: i64,
@@ -193,6 +204,7 @@ pub struct Values {
     pub prediction_tick_size: i64,
     pub rd_decay_constant: f64,
     pub rd_decay_grace_period_days: i64,
+    /// Hard-coded shuffler weight on rating uncertainty priority.
     pub rd_priority_weight: f64,
     pub recalibration_cooldown_seconds: i64,
     pub recalibration_initial_rd: f64,
@@ -206,6 +218,7 @@ pub struct Values {
     pub shop_package_deal_rating_divisor: f64,
     pub shop_recalibrate_cost: i64,
     pub shop_soft_avoid_cost: i64,
+    /// Hard-coded shuffler penalty for an avoid pair placed on the same team.
     pub soft_avoid_penalty: f64,
     pub streak_multiplier_per_game: f64,
     pub streak_threshold: i64,
@@ -450,7 +463,7 @@ impl ApplicationConfig {
                 enrichment_refresh_interval_ms: p.i64("ENRICHMENT_REFRESH_INTERVAL_MS", 1250),
                 enrichment_retry_delays: p
                     .i64_list("ENRICHMENT_RETRY_DELAYS", &[1, 5, 20, 60, 180]),
-                exclusion_penalty_weight: p.f64("EXCLUSION_PENALTY_WEIGHT", 72.0),
+                exclusion_penalty_weight: 72.0,
                 first_game_pool_daily_amount: p.i64("FIRST_GAME_POOL_DAILY_AMOUNT", 200),
                 gamba_synthetic_members_enabled: p.bool("GAMBA_SYNTHETIC_MEMBERS_ENABLED", false),
                 garnishment_percentage: p.f64("GARNISHMENT_PERCENTAGE", 1.0),
@@ -472,10 +485,7 @@ impl ApplicationConfig {
                 lobby_ready_cooldown_seconds: p.i64("LOBBY_READY_COOLDOWN_SECONDS", 60),
                 lobby_ready_threshold: p.i64("LOBBY_READY_THRESHOLD", 10),
                 lottery_activity_days: p.i64("LOTTERY_ACTIVITY_DAYS", 14),
-                // Not `clamped_rate`: that caps at 0.5, which would
-                // silently invert an above-one strength multiplier.
-                low_priority_mmr_multiplier: p
-                    .strength_multiplier("LOW_PRIORITY_MMR_MULTIPLIER", 1.10),
+                low_priority_mmr_multiplier: 1.10,
                 low_priority_profit_tax_rate: p.clamped_rate("LOW_PRIORITY_PROFIT_TAX_RATE", 0.10),
                 max_debt: p.i64("MAX_DEBT", 500),
                 max_rating_swing_per_game: p.f64("MAX_RATING_SWING_PER_GAME", 400.0),
@@ -489,15 +499,15 @@ impl ApplicationConfig {
                 neon_cooldown_seconds: p.i64("NEON_COOLDOWN_SECONDS", 60),
                 neon_degen_enabled: p.bool("NEON_DEGEN_ENABLED", true),
                 neon_dig_chance: p.f64("NEON_DIG_CHANCE", 0.12),
-                new_player_exclusion_boost: p.i64("NEW_PLAYER_EXCLUSION_BOOST", 4),
+                new_player_exclusion_boost: 4,
                 new_player_mmr_discount: i64::from(migration.new_player_mmr_discount),
-                off_role_flat_value_penalty: p.f64("OFF_ROLE_FLAT_VALUE_PENALTY", 72.0),
-                off_role_flat_penalty: p.f64("OFF_ROLE_FLAT_PENALTY", 740.0),
-                off_role_multiplier: p.f64("OFF_ROLE_MULTIPLIER", 0.98),
-                openskill_shuffle_chance: p.f64("OPENSKILL_SHUFFLE_CHANCE", 0.05),
+                off_role_flat_value_penalty: 72.0,
+                off_role_flat_penalty: 740.0,
+                off_role_multiplier: 0.98,
+                openskill_shuffle_chance: 0.05,
                 package_deal_games_duration: p.i64("PACKAGE_DEAL_GAMES_DURATION", 10),
-                package_deal_penalty: p.f64("PACKAGE_DEAL_PENALTY", 90.0),
-                package_deal_split_penalty: p.f64("PACKAGE_DEAL_SPLIT_PENALTY", 90.0),
+                package_deal_penalty: 80.0,
+                package_deal_split_penalty: 80.0,
                 pet_hunger_decay_per_day: p.i64("PET_HUNGER_DECAY_PER_DAY", 20),
                 pingedash_cooldown_seconds: p.i64("PINGEDASH_COOLDOWN_SECONDS", 86400),
                 pingedash_cost: p.i64("PINGEDASH_COST", 10),
@@ -536,7 +546,7 @@ impl ApplicationConfig {
                 prediction_tick_size: p.i64("PREDICTION_TICK_SIZE", 1),
                 rd_decay_constant: p.f64("RD_DECAY_CONSTANT", 100.0),
                 rd_decay_grace_period_days: p.i64("RD_DECAY_GRACE_PERIOD_DAYS", 7),
-                rd_priority_weight: p.f64("RD_PRIORITY_WEIGHT", 0.2),
+                rd_priority_weight: 0.2,
                 recalibration_cooldown_seconds: p.i64("RECALIBRATION_COOLDOWN_SECONDS", 7776000),
                 recalibration_initial_rd: p
                     .f64("RECALIBRATION_INITIAL_RD", MAX_GLICKO_RD)
@@ -551,7 +561,7 @@ impl ApplicationConfig {
                 shop_package_deal_rating_divisor: p.f64("SHOP_PACKAGE_DEAL_RATING_DIVISOR", 10.0),
                 shop_recalibrate_cost: p.i64("SHOP_RECALIBRATE_COST", 300),
                 shop_soft_avoid_cost: p.i64("SHOP_SOFT_AVOID_COST", SHOP_SOFT_AVOID_COST),
-                soft_avoid_penalty: p.f64("SOFT_AVOID_PENALTY", 180.0),
+                soft_avoid_penalty: 160.0,
                 streak_multiplier_per_game: migration.openskill.streak_multiplier_per_game,
                 streak_threshold: migration.streak_threshold,
                 streaming_bonus: p.i64("STREAMING_BONUS", 1),
@@ -683,21 +693,6 @@ impl Parser<'_> {
                 "1" | "true" | "yes" | "on"
             )
         })
-    }
-
-    /// A matchmaking strength multiplier, where 1.0 is neutral.
-    ///
-    /// Below one the setting would invert: a low-priority player would be
-    /// balanced as weaker and handed *easier* games. That failure is invisible
-    /// because the multiplier never touches stored ratings, so a value that
-    /// cannot mean what the name promises falls back to the default instead.
-    fn strength_multiplier(&self, name: &str, default: f64) -> f64 {
-        let value = self.f64(name, default);
-        if value.is_finite() && value >= 1.0 {
-            value
-        } else {
-            default
-        }
     }
 
     /// A share of a balance written as a fraction (`0.1` is 10%). A value
@@ -904,9 +899,9 @@ mod tests {
         assert_eq!(config.values.new_player_exclusion_boost, 4);
         assert_eq!(config.values.off_role_flat_value_penalty, 72.0);
         assert_eq!(config.values.off_role_flat_penalty, 740.0);
-        assert_eq!(config.values.soft_avoid_penalty, 180.0);
-        assert_eq!(config.values.package_deal_penalty, 90.0);
-        assert_eq!(config.values.package_deal_split_penalty, 90.0);
+        assert_eq!(config.values.soft_avoid_penalty, 160.0);
+        assert_eq!(config.values.package_deal_penalty, 80.0);
+        assert_eq!(config.values.package_deal_split_penalty, 80.0);
     }
 
     #[test]
@@ -1048,37 +1043,13 @@ mod tests {
     }
 
     #[test]
-    fn test_low_priority_mmr_multiplier_defaults_and_rejects_inverting_values() {
-        let default = parse(&[("DISCORD_BOT_TOKEN", "token")]);
-        assert_eq!(default.values.low_priority_mmr_multiplier, 1.10);
-
-        let raised = parse(&[
-            ("DISCORD_BOT_TOKEN", "token"),
-            ("LOW_PRIORITY_MMR_MULTIPLIER", "1.25"),
-        ]);
-        assert_eq!(raised.values.low_priority_mmr_multiplier, 1.25);
-
-        let neutral = parse(&[
-            ("DISCORD_BOT_TOKEN", "token"),
-            ("LOW_PRIORITY_MMR_MULTIPLIER", "1.0"),
-        ]);
-        assert_eq!(
-            neutral.values.low_priority_mmr_multiplier, 1.0,
-            "an operator must be able to switch the multiplier off"
-        );
-
-        // Anything below one would balance a low-priority player as weaker and
-        // hand them easier games, so it falls back rather than inverting.
-        for inverting in ["0", "-2", "0.5", "not-a-number", "NaN"] {
-            let config = parse(&[
-                ("DISCORD_BOT_TOKEN", "token"),
-                ("LOW_PRIORITY_MMR_MULTIPLIER", inverting),
-            ]);
-            assert_eq!(
-                config.values.low_priority_mmr_multiplier, 1.10,
-                "{inverting} must not invert low priority"
-            );
-        }
+    fn shuffle_settings_are_fixed_config_values() {
+        let config = parse(&[("DISCORD_BOT_TOKEN", "token")]);
+        assert_eq!(config.values.exclusion_penalty_weight, 72.0);
+        assert_eq!(config.values.low_priority_mmr_multiplier, 1.10);
+        assert_eq!(config.values.off_role_multiplier, 0.98);
+        assert_eq!(config.values.openskill_shuffle_chance, 0.05);
+        assert_eq!(config.values.rd_priority_weight, 0.2);
     }
 
     #[test]
@@ -1113,7 +1084,7 @@ mod tests {
     #[test]
     fn configuration_catalog_entries_are_unique() {
         let catalog = config_py_env_keys().collect::<BTreeSet<_>>();
-        assert_eq!(catalog.len(), 169, "catalog entries must remain unique");
+        assert_eq!(catalog.len(), 158, "catalog entries must remain unique");
     }
 
     #[test]
@@ -1121,8 +1092,19 @@ mod tests {
         const RETIRED_ENV_KEYS: &[&str] = &[
             "BET_UNDERDOG_PING_RATIO",
             "ENRICHMENT_MIN_PLAYER_MATCH",
+            "EXCLUSION_PENALTY_WEIGHT",
             "LIGHTNING_BOLT_PCT_MAX",
+            "LOW_PRIORITY_MMR_MULTIPLIER",
             "NEON_LLM_CHANCE",
+            "NEW_PLAYER_EXCLUSION_BOOST",
+            "OFF_ROLE_FLAT_PENALTY",
+            "OFF_ROLE_FLAT_VALUE_PENALTY",
+            "OFF_ROLE_MULTIPLIER",
+            "OPENSKILL_SHUFFLE_CHANCE",
+            "PACKAGE_DEAL_PENALTY",
+            "PACKAGE_DEAL_SPLIT_PENALTY",
+            "RD_PRIORITY_WEIGHT",
+            "SOFT_AVOID_PENALTY",
             "WHEEL_BANANA_PEEL_EST_EV",
             "WHEEL_GOLDEN_RECESSION_TOP_PCT",
             "WHEEL_LOSE_PENALTY_COOLDOWN",
