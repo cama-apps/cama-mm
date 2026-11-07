@@ -292,6 +292,41 @@ fn transfer_account_checks_guild_destination_and_live_games_before_moving_data()
 }
 
 #[test]
+fn recovery_distinguishes_active_wagers_from_passive_tax_eligibility() {
+    let f = Fixture::new();
+    let (old, new) = (1111, 2222);
+    f.player(old, GUILD, Some(1487.0), 70.0, 0.06);
+    let conn = f.connection();
+    let pending =
+        r#"{"shuffle_timestamp":100,"recording_policy":{"vanity_taxable_ids":[1111,2222]}}"#;
+    conn.execute(
+        "INSERT INTO pending_matches(pending_match_id,guild_id,payload) VALUES(8,?1,?2)",
+        params![GUILD, pending],
+    )
+    .unwrap();
+    conn.execute("INSERT INTO bets(guild_id,discord_id,team_bet_on,amount,bet_time) VALUES(?1,?2,'radiant',5,100)", [GUILD, old]).unwrap();
+    assert!(
+        f.repository
+            .transfer_account(GUILD, old, new, "New player")
+            .unwrap_err()
+            .to_string()
+            .contains("active Dota wager")
+    );
+    assert_eq!(f.rating(old, GUILD).0, Some(1487.0));
+    conn.execute("UPDATE bets SET bet_time=99", []).unwrap();
+    f.repository
+        .transfer_account(GUILD, old, new, "New player")
+        .unwrap();
+    assert_eq!(f.rating(new, GUILD).0, Some(1487.0));
+    assert_eq!(
+        conn.query_row("SELECT payload FROM pending_matches", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        pending
+    );
+}
+
+#[test]
 fn transfer_account_keeps_match_history_wallet_dig_progress_and_pet_ownership() {
     let f = Fixture::new();
     let (old, new) = (123456789012345678_i64, 223456789012345678_i64);

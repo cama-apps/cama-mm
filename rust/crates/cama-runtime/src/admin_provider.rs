@@ -22,7 +22,7 @@ use cama_app::moderation::{
 };
 use cama_app::opendota_http::{OpenDotaQuotaSnapshot, OpenDotaRuntimeServices};
 use cama_app::player_mmr_fallback::{RegisterPlayerError, RegisterPlayerInput, register_player};
-use cama_db::admin::{AdminRepository, SetBothDisplayRatingsRequest};
+use cama_db::admin::{AdminRepository, SetBothDisplayRatingsRequest, recovery_discord_id};
 use cama_db::bankruptcy_repository::BankruptcyRepository;
 use cama_db::core_repositories::PlayerRepository;
 use cama_db::loan_repository::{LoanRepository, LoanRepositoryError};
@@ -1453,14 +1453,24 @@ impl AdminHandler {
         if context.guild_id == 0 {
             return respond_ephemeral(&responder, GUILD_ONLY).await;
         }
-        if let Some(query) = string(&context.options, "lookup") {
-            if context
-                .options
-                .iter()
-                .any(|option| matches!(option.name.as_str(), "old_discord_id" | "new_account"))
+        let source = string(&context.options, "old_discord_id");
+        let source = source.as_deref().map(str::trim);
+        let old = source.and_then(recovery_discord_id);
+        let replacement = user(&context.options, "new_account")?;
+        let lookup = string(&context.options, "lookup");
+        let query = lookup.as_deref().or_else(|| match source {
+            Some(text)
+                if old.is_none()
+                    && !text.starts_with('<')
+                    && text.chars().any(char::is_alphabetic) =>
             {
-                return respond_ephemeral(&responder, "Use lookup by itself, then run transferaccount with the chosen old_discord_id and new_account.").await;
+                Some(text.trim_start_matches('@'))
             }
+            None => replacement.as_ref()?.display_name.as_deref(),
+            _ => None,
+        });
+        // Every search is read-only, even when a destination was also selected.
+        if let Some(query) = query {
             let query = query.trim();
             if query.is_empty() || query.chars().count() > 100 {
                 return respond_ephemeral(
@@ -1511,8 +1521,16 @@ impl AdminHandler {
                 } else {
                     &name
                 };
+                let destination = if replacement
+                    .as_ref()
+                    .is_some_and(|user| i64::try_from(user.id) == Ok(player.discord_id))
+                {
+                    " (selected replacement)"
+                } else {
+                    ""
+                };
                 content.push_str(&format!(
-                    "• **{name}** — Discord ID `{}` · {}W/{}L\n",
+                    "• **{name}**{destination} — Discord ID `{}` · {}W/{}L\n",
                     player.discord_id, player.wins, player.losses
                 ));
                 if player.steam_ids.is_empty() {
@@ -1533,33 +1551,48 @@ impl AdminHandler {
             }
             return Ok(());
         }
-        let old = string(&context.options, "old_discord_id")
-            .filter(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
-            .and_then(|value| value.parse::<i64>().ok())
-            .filter(|id| *id > 0);
         let Some(old) = old else {
             return respond_ephemeral(
                 &responder,
-                "Enter the numeric Discord user ID of the old account, or use `/admin transferaccount lookup:<name or Steam ID>` to find it.",
+                "Enter the old account’s numeric Discord ID or user mention. To find it, search by the old name or linked Steam ID using `/admin transferaccount lookup:<name or Steam ID>`.",
             )
             .await;
         };
-        let Some(user) = user(&context.options, "new_account")? else {
+        let Some(user) = replacement else {
+            return respond_ephemeral(&responder, "Select new_account to receive the old profile.")
+                .await;
+        };
+        let Some(new) = i64::try_from(user.id).ok().filter(|id| *id > 0) else {
             return respond_ephemeral(
                 &responder,
-                "Select new_account to receive the profile. To search first, use lookup by itself.",
+                "Select the replacement from the server member picker.",
             )
             .await;
         };
-        let new = signed_id(user.id, "new account")?;
-        if new == old || new == 0 || user.is_bot != Some(false) {
+        if old == new {
             return respond_ephemeral(
                 &responder,
-                "Select a different human account as the replacement.",
+                "Both fields identify the same Discord account. Use the old account’s ID for old_discord_id and select the new member for new_account.",
             )
             .await;
         }
         defer(&responder, true).await?;
+        let is_bot = match user.is_bot {
+            Some(is_bot) => Some(is_bot),
+            None => self
+                .ports
+                .discord
+                .user(user.id)
+                .await
+                .ok()
+                .flatten()
+                .map(|account| account.is_bot),
+        };
+        match is_bot {
+            Some(false) => {}
+            Some(true) => return respond_ephemeral(&responder, "The selected replacement is a bot. Select the player's new Discord account.").await,
+            None => return respond_ephemeral(&responder, "Discord could not verify the replacement account. Reselect the new member and try again.").await,
+        }
         let guild_id = context.guild_id;
         let member = match self
             .ports
@@ -3462,7 +3495,7 @@ fn admin_options(admin_rating_max: f64) -> Vec<CommandOptionSpec> {
                 {
                     let mut lookup = option(
                         "lookup",
-                        "Find a registration by name, Discord ID, or Steam32/Steam64 ID; use alone",
+                        "Search only by name, Discord ID, or Steam32/Steam64 ID, even when new_account is selected",
                         CommandOptionKind::String,
                     );
                     lookup.min_length = Some(1);
@@ -3471,7 +3504,7 @@ fn admin_options(admin_rating_max: f64) -> Vec<CommandOptionSpec> {
                 },
                 option(
                     "old_discord_id",
-                    "Numeric Discord user ID of the old account",
+                    "Old Discord ID or user mention to transfer, or old name to search",
                     CommandOptionKind::String,
                 ),
                 option(

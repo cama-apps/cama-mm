@@ -20,7 +20,7 @@ use crate::open_runtime_connection;
 
 #[path = "admin/account_lookup.rs"]
 mod account_lookup;
-pub use account_lookup::AdminAccountLookup;
+pub use account_lookup::{AdminAccountLookup, recovery_discord_id};
 
 #[path = "admin/account_transfer.rs"]
 mod account_transfer;

@@ -16,8 +16,6 @@ const PENDING: &[&str] = &[
     "half_exclusion_increment_ids.*",
     "record_streaming_ids.*",
     "shuffle_streaming_bonus_ids.*",
-    "recording_policy.low_priority_taxable_ids.*",
-    "recording_policy.vanity_taxable_ids.*",
     "_rust_match_easter_streaks.win_streak_records.*.discord_id",
     "blind_bets_result.bets.*.discord_id",
     "blind_bets_result.skipped.*.discord_id",
@@ -48,7 +46,13 @@ const DRAFT: &[&str] = &[
     "state.side_preferences.#",
 ];
 const TEAMS: &[&str] = &["team1.*.discord_id", "team2.*.discord_id"];
-const TAXABLE: &[&str] = &["low_priority_taxable_ids.*", "vanity_taxable_ids.*"];
+// Guild-wide eligibility lists also include people who have never played. Only
+// inherit the old account's frozen terms for matches they played or bet on.
+const DEADLOCK_PLAYER_TERMS: &str = "match_id IN (
+    SELECT match_id FROM deadlock_participants WHERE discord_id=?1
+    UNION SELECT m.match_id FROM deadlock_betting_markets m JOIN deadlock_wagers w
+        ON w.market_id=m.market_id AND w.guild_id=m.guild_id WHERE w.discord_id=?1
+)";
 
 pub(super) fn transfer(tx: &Transaction<'_>, old: i64, new: i64) -> Result<(), TransferError> {
     let ids = AccountIds {
@@ -148,9 +152,9 @@ pub(super) fn transfer(tx: &Transaction<'_>, old: i64, new: i64) -> Result<(), T
         (
             "deadlock_matches",
             "economy_terms_json",
-            "1",
+            DEADLOCK_PLAYER_TERMS,
             "status IN ('economic_setup','gathering','running','recorded')",
-            TAXABLE,
+            &[],
         ),
         (
             "deadlock_betting_markets",
@@ -162,9 +166,9 @@ pub(super) fn transfer(tx: &Transaction<'_>, old: i64, new: i64) -> Result<(), T
         (
             "deadlock_betting_markets",
             "terms_json",
-            "1",
+            DEADLOCK_PLAYER_TERMS,
             "status IN ('open','closed')",
-            TAXABLE,
+            &[],
         ),
         ("deadlock_economic_receipts", "detail_json", "kind IN ('settlement','refund')", "0",
             &["gross_payouts.#", "deductions.#", "refunds.#"]),
@@ -251,6 +255,7 @@ pub(super) fn transfer(tx: &Transaction<'_>, old: i64, new: i64) -> Result<(), T
         let mut update = tx.prepare(&update)?;
         let mut rows = statement.query(params![ids.old_text, ids.new_text])?;
         while let Some(row) = rows.next()? {
+            let row_id: i64 = row.get(0)?;
             let raw: String = row.get(1)?;
             let mut value: Value = serde_json::from_str(&raw).map_err(|_| {
                 TransferError::Conflict(format!(
@@ -259,7 +264,21 @@ pub(super) fn transfer(tx: &Transaction<'_>, old: i64, new: i64) -> Result<(), T
             })?;
             let mut changed = false;
             for path in paths {
-                changed |= ids.move_at(&mut value, path)?;
+                changed |= ids.move_at(&mut value, path).map_err(|()| {
+                    TransferError::Conflict(format!(
+                        "The replacement account already has stored player activity in {table}.{column} ({path}, row {row_id})."
+                    ))
+                })?;
+            }
+            if matches!(column, "economy_terms_json" | "terms_json") {
+                changed |= ids.inherit_tax_eligibility(&mut value);
+            } else if paths == PENDING
+                && let Some(policy) = value.get_mut("recording_policy")
+            {
+                let owned = changed || (table == "app_kv" && has_archived_wager(tx, row_id, old)?);
+                if owned {
+                    changed |= ids.inherit_tax_eligibility(policy);
+                }
             }
             if changed {
                 if row.get::<_, bool>(2)? {
@@ -267,7 +286,7 @@ pub(super) fn transfer(tx: &Transaction<'_>, old: i64, new: i64) -> Result<(), T
                         "The old account has an active operation in {table}. Finish it before transferring."
                     )));
                 }
-                update.execute(params![value.to_string(), row.get::<_, i64>(0)?])?;
+                update.execute(params![value.to_string(), row_id])?;
             }
         }
     }
@@ -281,6 +300,16 @@ pub(super) fn transfer(tx: &Transaction<'_>, old: i64, new: i64) -> Result<(), T
     Ok(())
 }
 
+fn has_archived_wager(tx: &Transaction<'_>, row_id: i64, old: i64) -> rusqlite::Result<bool> {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM app_kv k JOIN bets b ON b.guild_id=k.guild_id
+         WHERE k.rowid=?1 AND b.discord_id=?2 AND
+         (k.key='match-finalization:'||b.match_id OR k.key='pending-abort:'||b.pending_match_id))",
+        params![row_id, old],
+        |row| row.get(0),
+    )
+}
+
 struct AccountIds {
     old: i64,
     new: i64,
@@ -289,16 +318,40 @@ struct AccountIds {
 }
 
 impl AccountIds {
-    fn destination_conflict() -> TransferError {
-        TransferError::Conflict(
-            "The replacement account already has stored player activity.".into(),
-        )
+    fn inherit_tax_eligibility(&self, policy: &mut Value) -> bool {
+        let mut changed = false;
+        for field in ["low_priority_taxable_ids", "vanity_taxable_ids"] {
+            if let Some(entries) = policy.get_mut(field).and_then(Value::as_array_mut) {
+                let mut inherited = false;
+                entries.retain_mut(|id| {
+                    if id.as_i64() == Some(self.new) || id.as_str() == Some(&self.new_text) {
+                        changed = true;
+                        return false;
+                    }
+                    if id.as_i64() == Some(self.old) || id.as_str() == Some(&self.old_text) {
+                        changed = true;
+                        if inherited {
+                            return false;
+                        }
+                        inherited = true;
+                        *id = if id.is_string() {
+                            Value::from(self.new_text.clone())
+                        } else {
+                            Value::from(self.new)
+                        };
+                    }
+                    true
+                });
+            }
+        }
+        changed
     }
 
-    fn move_at(&self, value: &mut Value, path: &str) -> Result<bool, TransferError> {
+    // Err means the destination already owns this identity field.
+    fn move_at(&self, value: &mut Value, path: &str) -> Result<bool, ()> {
         if path.is_empty() {
             if value.as_i64() == Some(self.new) || value.as_str() == Some(&self.new_text) {
-                return Err(Self::destination_conflict());
+                return Err(());
             }
             if value.as_i64() == Some(self.old) {
                 *value = Value::from(self.new);
@@ -326,7 +379,7 @@ impl AccountIds {
                     return Ok(false);
                 };
                 if map.contains_key(&self.new_text) {
-                    return Err(Self::destination_conflict());
+                    return Err(());
                 }
                 if let Some(entry) = map.remove(&self.old_text) {
                     map.insert(self.new_text.clone(), entry);
@@ -365,6 +418,80 @@ mod tests {
             .query_row("SELECT value FROM app_kv WHERE key=?1", [key], |r| r.get(0))
             .unwrap();
         serde_json::from_str(&raw).unwrap()
+    }
+
+    #[test]
+    fn guild_tax_snapshots_are_not_player_activity() {
+        let db = fast_migrated_database();
+        let mut conn = crate::open_runtime_connection(db.path()).unwrap();
+        let unrelated =
+            json!({"radiant_team_ids":[25],"recording_policy":{"vanity_taxable_ids":[OLD,NEW,25]}});
+        conn.execute(
+            "INSERT INTO pending_matches(guild_id,payload) VALUES(1,?1)",
+            [unrelated.to_string()],
+        )
+        .unwrap();
+        kv(&conn, "match-finalization:2", &unrelated.to_string());
+        let prior = json!({"radiant_team_ids":[OLD],"recording_policy":{"vanity_taxable_ids":[NEW,25],"low_priority_taxable_ids":[OLD,NEW,26]}});
+        kv(&conn, "match-finalization:3", &prior.to_string());
+        let tx = conn.transaction().unwrap();
+        transfer(&tx, OLD, NEW).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(payload(&conn, "match-finalization:2"), unrelated);
+        let updated = payload(&conn, "match-finalization:3");
+        assert_eq!(updated["radiant_team_ids"], json!([NEW]));
+        assert_eq!(
+            updated["recording_policy"]["vanity_taxable_ids"],
+            json!([25])
+        );
+        assert_eq!(
+            updated["recording_policy"]["low_priority_taxable_ids"],
+            json!([NEW, 26])
+        );
+    }
+    #[test]
+    fn bettors_inherit_their_frozen_terms_only_for_their_own_matches() {
+        let db = fast_migrated_database();
+        let mut conn = crate::open_runtime_connection(db.path()).unwrap();
+        let terms =
+            json!({"vanity_taxable_ids":[NEW], "low_priority_taxable_ids":[OLD.to_string(),NEW]});
+        for (id, status) in [(1, "settled"), (2, "running")] {
+            conn.execute("INSERT INTO deadlock_matches(match_id,guild_id,format,status,roster_json,created_by,created_at,updated_at,economy_terms_json)
+                VALUES(?1,1,'standard',?2,'{}',42,0,0,?3)", params![id,status,terms.to_string()]).unwrap();
+        }
+        conn.execute("INSERT INTO deadlock_betting_markets(market_id,guild_id,match_id,format,roster_json,terms_json,deadline,status,created_at)
+            VALUES('m',1,1,'standard','{}',?1,0,'settled',0)",[terms.to_string()]).unwrap();
+        conn.execute("INSERT INTO deadlock_wagers(market_id,guild_id,discord_id,side,amount,leverage,effective_stake,request_key,kind,created_at)
+            VALUES('m',1,?1,1,1,1,1,'w','manual',0)",[OLD]).unwrap();
+        conn.execute("INSERT INTO bets(guild_id,match_id,discord_id,team_bet_on,amount,bet_time) VALUES(1,7,?1,'radiant',1,0)",[OLD]).unwrap();
+        kv(
+            &conn,
+            "match-finalization:7",
+            &json!({"recording_policy":terms}).to_string(),
+        );
+        let tx = conn.transaction().unwrap();
+        transfer(&tx, OLD, NEW).unwrap();
+        tx.commit().unwrap();
+        let expected =
+            json!({"vanity_taxable_ids":[], "low_priority_taxable_ids":[NEW.to_string()]});
+        assert_eq!(
+            payload(&conn, "match-finalization:7")["recording_policy"],
+            expected
+        );
+        for (sql, want) in [
+            ("SELECT terms_json FROM deadlock_betting_markets", &expected),
+            (
+                "SELECT economy_terms_json FROM deadlock_matches WHERE match_id=1",
+                &expected,
+            ),
+            (
+                "SELECT economy_terms_json FROM deadlock_matches WHERE match_id=2",
+                &terms,
+            ),
+        ] {
+            let raw: String = conn.query_row(sql, [], |r| r.get(0)).unwrap();
+            assert_eq!(&serde_json::from_str::<Value>(&raw).unwrap(), want);
+        }
     }
 
     #[test]
@@ -446,7 +573,7 @@ mod tests {
             transfer(&conn.transaction().unwrap(), OLD, NEW)
                 .unwrap_err()
                 .to_string()
-                .contains("replacement")
+                .contains("app_kv.value (record_submissions.#")
         );
         conn.execute("DELETE FROM app_kv WHERE key='pending-abort:3'", [])
             .unwrap();
