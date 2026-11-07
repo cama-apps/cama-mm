@@ -412,9 +412,9 @@ impl Default for BalancedShuffler {
             exclusion_penalty_weight: 72.0,
             rd_priority_weight: 0.2,
             recent_match_penalty_weight: 340.0,
-            soft_avoid_penalty: 180.0,
-            package_deal_penalty: 90.0,
-            package_deal_split_penalty: 90.0,
+            soft_avoid_penalty: 160.0,
+            package_deal_penalty: 80.0,
+            package_deal_split_penalty: 80.0,
             rating_spread_multiplier: 0.18,
             role_assignment_provider: Arc::new(GlobalRoleAssignmentProvider),
             diagnostics: Arc::new(DiagnosticCounters::default()),
@@ -3203,7 +3203,7 @@ mod tests {
                 Some(&avoids),
                 None,
             ),
-            180.0
+            160.0
         );
     }
 
@@ -3790,7 +3790,7 @@ mod tests {
             consider_roles: false,
             rd_priority_weight: 0.0,
             // Doubled avoidance must outweigh the 200-rating split at the current parity weight.
-            soft_avoid_penalty: 450.0,
+            soft_avoid_penalty: 500.0,
             ..BalancedShuffler::default()
         };
         let target_low_priority = HashSet::from([1001]);
@@ -3967,7 +3967,7 @@ mod tests {
         let shuffler = BalancedShuffler::default();
         assert_eq!(
             shuffler.calculate_package_deal_penalty(&team1_ids, &team2_ids, Some(&deals), None,),
-            90.0
+            80.0
         );
     }
 
@@ -4311,12 +4311,12 @@ mod tests {
         assert_eq!(
             shuffler
                 .calculate_package_deal_split_penalty(&selected, &excluded, Some(&deals), None,),
-            90.0
+            80.0
         );
     }
 
     #[test]
-    fn test_package_deal_split_adds_90_goodness() {
+    fn test_package_deal_split_adds_80_goodness() {
         let players = package_players(14, 2_000);
         let deals = [PackageDeal {
             buyer_discord_id: 100,
@@ -6587,7 +6587,7 @@ mod tests {
             .score_draft_pool(&captain_a, &captain_b, &pool)
             .expect("draft pool score");
 
-        approx(score, 446.5);
+        approx(score, 470.0);
     }
 
     #[test]

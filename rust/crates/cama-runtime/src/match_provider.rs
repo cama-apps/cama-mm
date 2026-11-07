@@ -5302,10 +5302,9 @@ impl MatchHandler {
             &players_by_id,
         );
         let mut balance_info = format!(
-            "**Shuffle mode:** {}\n**Balanced with:** {rating_display}\n**Goodness score:** {:.1} (lower = better)\n**Adjusted value diff:** {:.0}\n**Off-role players:** Radiant: {radiant_off}, Dire: {dire_off} (Total: {})",
+            "**Shuffle mode:** {}\n**Balanced with:** {rating_display}\n**Goodness score:** {:.1} (lower = better)\n**Off-role players:** Radiant: {radiant_off}, Dire: {dire_off} (Total: {})",
             "Balanced",
             extra_f64(&pending.state, "goodness_score").unwrap_or_default(),
-            pending.state.value_diff,
             radiant_off + dire_off,
         );
         if !pending.state.excluded_player_ids.is_empty() {
