@@ -814,6 +814,23 @@ impl DiscordTransport for RecordingTransport {
         Ok(())
     }
 
+    async fn user(
+        &self,
+        user_id: u64,
+    ) -> Result<Option<crate::discord_transport::DiscordUserSnapshot>, String> {
+        Ok(self
+            .member_names
+            .lock()
+            .expect("member name lock")
+            .get(&user_id)
+            .map(|name| crate::discord_transport::DiscordUserSnapshot {
+                user_id,
+                display_name: name.clone(),
+                account_username: name.clone(),
+                is_bot: false,
+            }))
+    }
+
     async fn guild_member(
         &self,
         guild_id: u64,
@@ -1319,7 +1336,24 @@ async fn transferaccount_moves_a_departed_players_profile_to_a_live_member() {
     fixture.player(TARGET, 9, 3, Some(1732.0), Some(64.0), Some(0.06));
     let replacement = TARGET + 1;
     fixture.name_member(replacement, "New server nickname");
-    let request = transfer_request(&TARGET.to_string(), replacement, ADMIN);
+    // Discord can resolve a member pick without including its User payload.
+    let request = admin_command(
+        "transferaccount",
+        vec![
+            string_option("old_discord_id", &format!("  <@!{TARGET}>  ")),
+            InteractionOption {
+                name: "new_account".into(),
+                value: InteractionValue::User {
+                    id: replacement,
+                    display_name: None,
+                    is_bot: None,
+                },
+            },
+        ],
+        4001,
+        ADMIN,
+        None,
+    );
     let blocked = Arc::new(RecordingResponder::default());
     blocked.fail_defer.store(true, Ordering::Release);
     assert!(
@@ -1369,7 +1403,15 @@ async fn transferaccount_refuses_server_admins_absent_members_and_invalid_ids() 
         fixture.dispatch_request(dm).await.last().content,
         GUILD_ONLY
     );
-    for id in ["", "0", "-1", "+1", "<@123>", "9223372036854775808"] {
+    for id in [
+        "",
+        "0",
+        "-1",
+        "+1",
+        "<@123",
+        "<@&123>",
+        "9223372036854775808",
+    ] {
         let invalid = fixture
             .dispatch_request(transfer_request(id, replacement, ADMIN))
             .await;
@@ -1379,32 +1421,34 @@ async fn transferaccount_refuses_server_admins_absent_members_and_invalid_ids() 
     let same = fixture
         .dispatch_request(transfer_request(&old, TARGET, ADMIN))
         .await;
-    assert!(same.last().content.contains("different human"));
-    let bot = admin_command(
-        "transferaccount",
-        vec![
-            string_option("old_discord_id", &old),
-            InteractionOption {
-                name: "new_account".into(),
-                value: InteractionValue::User {
-                    id: replacement,
-                    display_name: None,
-                    is_bot: Some(true),
+    assert!(same.last().content.contains("same Discord account"));
+    for (is_bot, message) in [(Some(true), "is a bot"), (None, "could not verify")] {
+        let unresolved = admin_command(
+            "transferaccount",
+            vec![
+                string_option("old_discord_id", &old),
+                InteractionOption {
+                    name: "new_account".into(),
+                    value: InteractionValue::User {
+                        id: replacement,
+                        display_name: None,
+                        is_bot,
+                    },
                 },
-            },
-        ],
-        4002,
-        ADMIN,
-        None,
-    );
-    assert!(
-        fixture
-            .dispatch_request(bot)
-            .await
-            .last()
-            .content
-            .contains("different human")
-    );
+            ],
+            4002,
+            ADMIN,
+            None,
+        );
+        assert!(
+            fixture
+                .dispatch_request(unresolved)
+                .await
+                .last()
+                .content
+                .contains(message)
+        );
+    }
     let missing = fixture
         .dispatch_request(transfer_request(&old, replacement, ADMIN))
         .await;
@@ -2750,6 +2794,26 @@ async fn admin_replies_fall_back_to_the_resolved_option_name_never_an_id() {
 }
 
 #[test]
+fn transferaccount_parses_pasted_ids_and_user_mentions_exactly() {
+    for source in ["  1234  ", "<@1234>", " <@!1234> "] {
+        assert_eq!(recovery_discord_id(source), Some(1234));
+    }
+    for source in [
+        "0",
+        "<@&1234>",
+        "<#1234>",
+        "<@+1234>",
+        "<@1234",
+        "<@1234> extra",
+        "1234 5678",
+        "@Bismi",
+        "18446744073709551615",
+    ] {
+        assert_eq!(recovery_discord_id(source), None);
+    }
+}
+
+#[test]
 fn transferaccount_lookup_schema_keeps_both_modes_available() {
     let options = admin_options(3000.0);
     assert!(options.len() <= 25);
@@ -2804,6 +2868,32 @@ async fn transferaccount_lookup_finds_departed_player_privately_without_moving_p
     assert!(message.content.contains("old_discord_id"));
     assert!(message.content.contains("Lookup does not transfer"));
     assert_eq!(fixture.rating(TARGET).0, Some(1732.0));
+    fixture.name_member(TARGET + 1, "Bismi");
+    let destination = user_option("new_account", TARGET + 1, "Bismi");
+    for options in [
+        vec![string_option("lookup", "bismi"), destination.clone()],
+        vec![
+            string_option("lookup", "bismi"),
+            string_option("old_discord_id", &TARGET.to_string()),
+            destination.clone(),
+        ],
+        vec![
+            string_option("old_discord_id", "@Bismi"),
+            destination.clone(),
+        ],
+        vec![destination],
+    ] {
+        let result = fixture.dispatch("transferaccount", options, 5002).await;
+        assert!(result.last().ephemeral);
+        assert!(
+            result
+                .last()
+                .content
+                .contains(&format!("Discord ID `{TARGET}`"))
+        );
+        assert!(result.last().content.contains("Lookup does not transfer"));
+        assert_eq!(fixture.rating(TARGET).0, Some(1732.0));
+    }
     let by_steam = fixture
         .dispatch(
             "transferaccount",
@@ -2815,7 +2905,7 @@ async fn transferaccount_lookup_finds_departed_player_privately_without_moving_p
 }
 
 #[tokio::test]
-async fn transferaccount_lookup_requires_bot_admin_and_valid_exclusive_query() {
+async fn transferaccount_lookup_requires_bot_admin_and_valid_query() {
     let fixture = ProviderFixture::new();
     let denied = fixture
         .dispatch_request(admin_command(
@@ -2839,18 +2929,6 @@ async fn transferaccount_lookup_requires_bot_admin_and_valid_exclusive_query() {
         assert!(response.last().content.contains("1 and 100"));
         assert!(response.defers.lock().unwrap().is_empty());
     }
-    let mixed = fixture
-        .dispatch(
-            "transferaccount",
-            vec![
-                string_option("lookup", "Bismi"),
-                user_option("new_account", TARGET, "Target"),
-            ],
-            5012,
-        )
-        .await;
-    assert!(mixed.last().content.contains("lookup by itself"));
-    assert!(mixed.defers.lock().unwrap().is_empty());
     let missing = fixture
         .dispatch(
             "transferaccount",

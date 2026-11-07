@@ -81,6 +81,10 @@ fn ensure_sessions_finished(
 ) -> Result<(), TransferError> {
     let busy: Option<String> = transaction.query_row(
         "SELECT 'Dota lobby' FROM lobby_state WHERE created_by IN (?1,?2) AND lower(status)='open'
+         UNION ALL SELECT 'Dota wager' FROM bets b JOIN pending_matches p ON p.guild_id=b.guild_id
+           AND (b.pending_match_id=p.pending_match_id OR (b.pending_match_id IS NULL
+                AND b.bet_time >= coalesce(json_extract(p.payload,'$.shuffle_timestamp'),0)))
+           WHERE b.match_id IS NULL AND b.discord_id IN (?1,?2)
          UNION ALL SELECT 'match correction' FROM match_correction_claims c JOIN match_participants p USING(match_id)
            WHERE p.discord_id IN (?1,?2)
          UNION ALL SELECT 'Deadlock queue' FROM deadlock_queue WHERE discord_id IN (?1,?2)
