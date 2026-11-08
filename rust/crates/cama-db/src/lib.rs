@@ -14,13 +14,16 @@ use thiserror::Error;
 #[doc(hidden)]
 pub mod json_numeric;
 pub mod profit_deductions;
+mod runtime_connection;
 pub mod schema_manager;
 pub mod schema_manager_contracts;
 pub mod steam_identity;
+
 #[cfg(test)]
 pub(crate) use cama_db_match::core_repositories;
 #[cfg(test)]
 pub(crate) use cama_db_platform::low_priority_repository;
+pub use runtime_connection::{RuntimeConnection, RuntimeConnectionReuse, open_runtime_connection};
 #[cfg(test)]
 #[allow(dead_code)]
 mod test_support;
@@ -196,24 +199,6 @@ pub enum AuditError {
     MissingDatabase(PathBuf),
     #[error("SQLite integrity/schema audit failed: {0}")]
     Sqlite(#[from] rusqlite::Error),
-}
-
-/// Open an existing database for normal repository reads and writes.
-///
-/// Schema creation and migration are handled by the startup schema manager,
-/// never by repository construction. The explicit foreign-key pragma enforces
-/// the canonical runtime setting (`OFF`) regardless of bundled SQLite defaults.
-#[doc(hidden)]
-pub fn open_runtime_connection(path: &Path) -> Result<Connection, rusqlite::Error> {
-    let connection = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX
-            | OpenFlags::SQLITE_OPEN_URI,
-    )?;
-    connection.busy_timeout(Duration::from_secs(5))?;
-    connection.pragma_update(None, "foreign_keys", false)?;
-    Ok(connection)
 }
 
 /// Return the ordered, unique migration contract embedded in the Rust build.

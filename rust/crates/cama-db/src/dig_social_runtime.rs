@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use cama_db_core::profit_deductions::{
     DeductionLedgerContext, ProfitDeductionPolicy, ProfitDeductions, withhold_profit_deductions,
 };
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1027,7 +1027,7 @@ impl DigSocialRuntimeRepository {
         }))
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         crate::open_runtime_connection(&self.path)
     }
 }

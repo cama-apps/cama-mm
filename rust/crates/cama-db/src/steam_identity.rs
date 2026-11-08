@@ -121,12 +121,11 @@ fn placeholders(count: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use rusqlite::Connection;
     use tempfile::NamedTempFile;
 
     use super::*;
 
-    fn database() -> (NamedTempFile, Connection) {
+    fn database() -> (NamedTempFile, crate::RuntimeConnection) {
         let file = NamedTempFile::new().expect("temporary database");
         crate::schema_manager::initialize_or_migrate(file.path()).expect("migrate");
         let connection = crate::open_runtime_connection(file.path()).expect("connection");

@@ -34,7 +34,7 @@ impl GuildConfigRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.path)
     }
 
@@ -42,7 +42,7 @@ impl GuildConfigRepository {
         &self,
         guild_id: i64,
     ) -> Result<DotaHostingOptions, GuildConfigRepositoryError> {
-        read_dota_hosting_options(&self.connection()?, guild_id)
+        read_dota_hosting_options(&*self.connection()?, guild_id)
     }
 
     /// Merge under the writer lock so concurrent changes cannot erase one another.

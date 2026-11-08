@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use cama_db_core::profit_deductions::{
     DeductionLedgerContext, ProfitDeductionPolicy, ProfitDeductions, withhold_profit_deductions,
 };
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use thiserror::Error;
 
 use crate::open_runtime_connection;
@@ -82,7 +82,7 @@ impl DotaStreakRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.path)
     }
 

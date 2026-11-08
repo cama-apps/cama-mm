@@ -301,7 +301,7 @@ impl MafiaRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.path)
     }
 
@@ -791,7 +791,7 @@ impl MafiaRepository {
 
     pub fn get_players(&self, game_id: i64) -> Result<Vec<MafiaPlayer>, MafiaRepositoryError> {
         query_players(
-            &self.connection()?,
+            &*self.connection()?,
             "SELECT * FROM mafia_players WHERE game_id=?1 ORDER BY discord_id",
             params![game_id],
         )

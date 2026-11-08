@@ -254,7 +254,7 @@ impl PlayerRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, CoreRepositoryError> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, CoreRepositoryError> {
         Ok(open_runtime_connection(&self.path)?)
     }
 
@@ -2749,7 +2749,7 @@ impl MatchRepository {
         PlayerRepository::normalize_guild_id(guild_id)
     }
 
-    fn connection(&self) -> Result<Connection, CoreRepositoryError> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, CoreRepositoryError> {
         Ok(open_runtime_connection(&self.path)?)
     }
 

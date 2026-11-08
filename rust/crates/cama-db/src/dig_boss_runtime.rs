@@ -292,7 +292,7 @@ impl DigBossRuntimeRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.database_path)
     }
 
@@ -300,7 +300,7 @@ impl DigBossRuntimeRepository {
         &self,
         key: DigBossRuntimeKey,
     ) -> Result<Option<DigBossRuntimeSnapshot>, DigBossRuntimeRepositoryError> {
-        query_snapshot(&self.connection()?, key)
+        query_snapshot(&*self.connection()?, key)
     }
 
     pub fn commit(
@@ -675,7 +675,7 @@ impl DigBossRuntimeRepository {
         &self,
         key: DigBossRuntimeKey,
     ) -> Result<Option<DigBossPausedDuelRow>, DigBossRuntimeRepositoryError> {
-        query_active_duel(&self.connection()?, key)
+        query_active_duel(&*self.connection()?, key)
     }
 
     pub fn claim_active_duel(

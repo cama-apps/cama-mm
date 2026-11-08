@@ -19,7 +19,7 @@ use cama_domain::pet::{
 };
 use cama_domain::pet_brawl::PetBrawl;
 use rusqlite::{
-    Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params, params_from_iter,
+    OptionalExtension, Row, Transaction, TransactionBehavior, params, params_from_iter,
 };
 use thiserror::Error;
 
@@ -145,7 +145,7 @@ impl PetBrawlRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.path)
     }
 

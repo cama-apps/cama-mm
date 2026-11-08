@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, TransactionBehavior, params};
+use rusqlite::{TransactionBehavior, params};
 
 use crate::open_runtime_connection;
 
@@ -31,7 +31,7 @@ impl PlayerDisplayNameRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.path)
     }
 

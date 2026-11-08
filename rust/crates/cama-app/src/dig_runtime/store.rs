@@ -14,7 +14,7 @@ impl SqliteDigRuntimeStore {
         }
     }
 
-    pub(super) fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    pub(super) fn connection(&self) -> Result<cama_db::RuntimeConnection, rusqlite::Error> {
         cama_db::open_runtime_connection(&self.path)
     }
 
