@@ -6,6 +6,8 @@ use crate::test_support::copy_migrated_database;
 use super::*;
 
 const GUILD: i64 = 84_001;
+/// A configured OpenSkill system's fingerprint, distinct from the default.
+const CONFIGURED_FINGERPRINT: &str = "0123456789abcdef";
 
 struct Fixture {
     database: NamedTempFile,
@@ -101,7 +103,7 @@ fn test_glicko_only_bump_invalidates_in_flight_match_recordings() {
     let before = fixture.rating_revision(GUILD);
     let result = fixture
         .repository
-        .bump_uncertainties(GUILD, 100.0, 9)
+        .bump_uncertainties(GUILD, 100.0, 9, CONFIGURED_FINGERPRINT)
         .expect("bump uncertainty")
         .expect("summary");
     assert_eq!(result.openskill_count, 0);
@@ -117,7 +119,7 @@ fn test_bumps_all_rated_players() {
 
     let result = fixture
         .repository
-        .bump_uncertainties(GUILD, 100.0, 9)
+        .bump_uncertainties(GUILD, 100.0, 9, CONFIGURED_FINGERPRINT)
         .expect("bump uncertainty")
         .expect("rated-player summary");
     assert_eq!(result.count, 3);
@@ -135,7 +137,7 @@ fn test_caps_rd_at_shared_limit() {
     fixture.player(2, GUILD, Some(1_200.0), 340.0, 0.06);
     let result = fixture
         .repository
-        .bump_uncertainties(GUILD, 100.0, 9)
+        .bump_uncertainties(GUILD, 100.0, 9, CONFIGURED_FINGERPRINT)
         .expect("bump uncertainty")
         .expect("summary");
     assert_eq!(result.average_rd_after, 250.0);
@@ -149,7 +151,7 @@ fn test_preserves_rating_and_volatility() {
     fixture.player(1, GUILD, Some(1_500.0), 50.0, 0.07);
     fixture
         .repository
-        .bump_uncertainties(GUILD, 100.0, 9)
+        .bump_uncertainties(GUILD, 100.0, 9, CONFIGURED_FINGERPRINT)
         .expect("bump uncertainty");
     assert_eq!(fixture.rating(1, GUILD), (Some(1_500.0), 150.0, 0.07));
 }
@@ -168,7 +170,7 @@ fn test_bumps_openskill_sigma_on_same_display_scale() {
         .expect("seed OpenSkill rating");
     let result = fixture
         .repository
-        .bump_uncertainties(GUILD, 100.0, 9)
+        .bump_uncertainties(GUILD, 100.0, 9, CONFIGURED_FINGERPRINT)
         .expect("bump uncertainty")
         .expect("summary");
     assert_eq!(result.openskill_count, 1);
@@ -190,7 +192,7 @@ fn test_skips_unrated_players() {
     fixture.player(2, GUILD, None, 350.0, 0.06);
     let result = fixture
         .repository
-        .bump_uncertainties(GUILD, 100.0, 9)
+        .bump_uncertainties(GUILD, 100.0, 9, CONFIGURED_FINGERPRINT)
         .expect("bump uncertainty")
         .expect("summary");
     assert_eq!(result.count, 1);
@@ -203,7 +205,7 @@ fn test_returns_none_for_no_rated_players() {
     assert_eq!(
         fixture
             .repository
-            .bump_uncertainties(GUILD, 100.0, 9)
+            .bump_uncertainties(GUILD, 100.0, 9, CONFIGURED_FINGERPRINT)
             .expect("empty uncertainty bump"),
         None
     );
@@ -216,7 +218,7 @@ fn test_guild_isolation() {
     fixture.player(2, 99_999, Some(1_200.0), 60.0, 0.06);
     let result = fixture
         .repository
-        .bump_uncertainties(GUILD, 100.0, 9)
+        .bump_uncertainties(GUILD, 100.0, 9, CONFIGURED_FINGERPRINT)
         .expect("bump uncertainty")
         .expect("summary");
     assert_eq!(result.count, 1);
@@ -490,4 +492,64 @@ fn recovery_closes_orphaned_player_trivia_session_and_preserves_earned_rewards()
         )
         .unwrap();
     assert_eq!(session, (new, "cancelled".to_owned(), 2, 7));
+}
+
+fn fingerprint_stamps(fixture: &Fixture, discord_id: i64) -> (Option<String>, Vec<String>) {
+    let connection = fixture.connection();
+    let player = connection
+        .query_row(
+            "SELECT os_algorithm_fingerprint FROM players WHERE discord_id=?1 AND guild_id=?2",
+            params![discord_id, GUILD],
+            |row| row.get(0),
+        )
+        .expect("player stamp");
+    let events = connection
+        .prepare(
+            "SELECT os_algorithm_fingerprint FROM openskill_rating_events
+             WHERE discord_id=?1 AND guild_id=?2 ORDER BY event_id",
+        )
+        .expect("event stamps")
+        .query_map(params![discord_id, GUILD], |row| row.get(0))
+        .expect("event rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect event stamps");
+    (player, events)
+}
+
+#[test]
+fn rating_overrides_stamp_the_configured_openskill_fingerprint() {
+    let fixture = Fixture::new();
+    fixture.player(1, GUILD, Some(1_500.0), 50.0, 0.06);
+    fixture
+        .connection()
+        .execute(
+            "UPDATE players SET os_mu=25.0, os_sigma=5.0 WHERE discord_id=1 AND guild_id=?1",
+            [GUILD],
+        )
+        .expect("seed OpenSkill rating");
+    fixture
+        .repository
+        .set_both_display_ratings(SetBothDisplayRatingsRequest {
+            discord_id: 1,
+            guild_id: GUILD,
+            display_rating: 1_600.0,
+            rd: 80.0,
+            volatility: 0.06,
+            reason: "admin override",
+            actor_id: 9,
+            openskill_algorithm_fingerprint: CONFIGURED_FINGERPRINT,
+        })
+        .expect("set both ratings");
+    fixture
+        .repository
+        .bump_uncertainties(GUILD, 100.0, 9, CONFIGURED_FINGERPRINT)
+        .expect("bump uncertainty")
+        .expect("summary");
+    assert_eq!(
+        fingerprint_stamps(&fixture, 1),
+        (
+            Some(CONFIGURED_FINGERPRINT.to_owned()),
+            vec![CONFIGURED_FINGERPRINT.to_owned(); 2]
+        )
+    );
 }

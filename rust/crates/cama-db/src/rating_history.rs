@@ -136,7 +136,7 @@ pub enum RecalibrationRepositoryError {
     Sqlite(#[from] rusqlite::Error),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RecalibrationRequest {
     pub discord_id: i64,
     pub guild_id: Option<i64>,
@@ -145,6 +145,8 @@ pub struct RecalibrationRequest {
     pub new_rd: f64,
     pub new_volatility: f64,
     pub new_os_sigma: Option<f64>,
+    /// Fingerprint of the deployment's configured OpenSkill system.
+    pub openskill_algorithm_fingerprint: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -156,12 +158,14 @@ pub struct RecalibrationStateUpsert {
     pub rating_at_recalibration: Option<f64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RecalibrationServiceConfig {
     pub cooldown_seconds: i64,
     pub initial_rd: f64,
     pub initial_volatility: f64,
     pub min_games: i64,
+    /// Fingerprint of the deployment's configured OpenSkill system.
+    pub openskill_algorithm_fingerprint: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -391,7 +395,7 @@ impl RatingHistoryRepository {
             }
         }
 
-        let fingerprint = CamaOpenSkillSystem::default().algorithm_fingerprint();
+        let fingerprint = request.openskill_algorithm_fingerprint.as_str();
         let new_rd = request.new_rd.min(MAX_GLICKO_RD);
         // Recalibration resets deviation, volatility and sigma; it preserves
         // the rating itself. Leaving glicko_rating out of the SET list keeps a
@@ -882,6 +886,10 @@ impl RecalibrationService {
                 new_rd,
                 new_volatility: self.config.initial_volatility,
                 new_os_sigma,
+                openskill_algorithm_fingerprint: self
+                    .config
+                    .openskill_algorithm_fingerprint
+                    .clone(),
             }) {
             Ok(settled) => settled,
             Err(RecalibrationRepositoryError::OnCooldown { remaining_seconds }) => {
@@ -997,6 +1005,8 @@ mod tests {
     use tempfile::NamedTempFile;
 
     const TEST_GUILD_ID: i64 = 987_654_321;
+    /// A configured OpenSkill system's fingerprint, distinct from the default.
+    const CONFIGURED_FINGERPRINT: &str = "0123456789abcdef";
 
     enum FixtureDatabase {
         Fast(FastTestDatabase),
@@ -1277,6 +1287,7 @@ mod tests {
                 initial_rd: 350.0,
                 initial_volatility: 0.06,
                 min_games: 5,
+                openskill_algorithm_fingerprint: CONFIGURED_FINGERPRINT.to_owned(),
             },
         )
     }
@@ -1435,6 +1446,46 @@ mod tests {
                 games_played: 5,
                 current_os_sigma: None,
             }
+        );
+    }
+
+    #[test]
+    fn recalibration_stamps_the_configured_openskill_fingerprint() {
+        let fixture = Fixture::new();
+        fixture.seed_recalibration_player(
+            12_345,
+            Some(1_500.0),
+            Some(200.0),
+            Some(0.06),
+            Some(4.0),
+            5,
+        );
+        assert!(matches!(
+            recalibration_service(&fixture)
+                .recalibrate_at(12_345, Some(TEST_GUILD_ID), 10_000)
+                .expect("recalibrate"),
+            RecalibrationExecution::Success(_)
+        ));
+        let connection = Connection::open(fixture._file.path()).expect("inspect stamps");
+        let player: String = connection
+            .query_row(
+                "SELECT os_algorithm_fingerprint FROM players
+                 WHERE discord_id = 12345 AND guild_id = ?1",
+                [TEST_GUILD_ID],
+                |row| row.get(0),
+            )
+            .expect("player stamp");
+        let event: String = connection
+            .query_row(
+                "SELECT os_algorithm_fingerprint FROM openskill_rating_events
+                 WHERE discord_id = 12345 AND guild_id = ?1",
+                [TEST_GUILD_ID],
+                |row| row.get(0),
+            )
+            .expect("event stamp");
+        assert_eq!(
+            (player.as_str(), event.as_str()),
+            (CONFIGURED_FINGERPRINT, CONFIGURED_FINGERPRINT)
         );
     }
 
@@ -1939,6 +1990,8 @@ mod tests {
                 new_rd: 300.0,
                 new_volatility: 0.06,
                 new_os_sigma: None,
+
+                openskill_algorithm_fingerprint: CONFIGURED_FINGERPRINT.to_owned(),
             })
             .expect("recalibrate");
 
@@ -2022,6 +2075,8 @@ mod tests {
                         new_rd: 300.0,
                         new_volatility: 0.06,
                         new_os_sigma: Some(7.5),
+
+                        openskill_algorithm_fingerprint: CONFIGURED_FINGERPRINT.to_owned(),
                     })
                 })
             })

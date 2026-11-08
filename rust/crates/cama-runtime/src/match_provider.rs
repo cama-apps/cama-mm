@@ -5720,6 +5720,7 @@ impl MatchHandler {
             let role_count = fastrand::usize(1..=3);
             let mut player =
                 NewPlayer::new(player_id, format!("GridTest{}", index + 1), Some(guild_id));
+            player.openskill_algorithm_fingerprint = self.openskill.algorithm_fingerprint();
             player.glicko_rating = Some(fastrand::i64(1000..=2000) as f64);
             player.glicko_rd = Some(fastrand::f64() * 150.0 + 50.0);
             player.glicko_volatility = Some(0.06);

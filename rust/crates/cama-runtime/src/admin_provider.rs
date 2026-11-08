@@ -1880,6 +1880,7 @@ impl AdminHandler {
         };
         let repository = self.admin.clone();
         let actor_id = signed_id(context.actor_id, "actor")?;
+        let fingerprint = self.config.registration_openskill.algorithm_fingerprint();
         tokio::task::spawn_blocking(move || {
             repository.set_both_display_ratings(SetBothDisplayRatingsRequest {
                 discord_id: target_id,
@@ -1889,6 +1890,7 @@ impl AdminHandler {
                 volatility,
                 reason: "admin_rating_override",
                 actor_id,
+                openskill_algorithm_fingerprint: &fingerprint,
             })
         })
         .await
@@ -2003,6 +2005,7 @@ impl AdminHandler {
         let volatility = snapshot.glicko_volatility.unwrap_or(0.06);
         let actor_id = signed_id(context.actor_id, "actor")?;
         let repository = self.admin.clone();
+        let fingerprint = self.config.registration_openskill.algorithm_fingerprint();
         tokio::task::spawn_blocking(move || {
             repository.set_both_display_ratings(SetBothDisplayRatingsRequest {
                 discord_id: target_id,
@@ -2012,6 +2015,7 @@ impl AdminHandler {
                 volatility,
                 reason: "admin_initial_rating",
                 actor_id,
+                openskill_algorithm_fingerprint: &fingerprint,
             })
         })
         .await
@@ -2043,8 +2047,9 @@ impl AdminHandler {
         let repository = self.admin.clone();
         let actor_id = signed_id(context.actor_id, "actor")?;
         let guild_id = context.guild_id;
+        let fingerprint = self.config.registration_openskill.algorithm_fingerprint();
         let result = tokio::task::spawn_blocking(move || {
-            repository.bump_uncertainties(guild_id, amount as f64, actor_id)
+            repository.bump_uncertainties(guild_id, amount as f64, actor_id, &fingerprint)
         })
         .await
         .map_err(|error| format!("RD bump task failed: {error}"))?
@@ -2121,6 +2126,10 @@ impl AdminHandler {
             new_rd,
             new_volatility: self.config.recalibration_initial_volatility,
             new_os_sigma,
+            openskill_algorithm_fingerprint: self
+                .config
+                .registration_openskill
+                .algorithm_fingerprint(),
         };
         let (total, settled_rating) = match tokio::task::spawn_blocking(move || {
             repository.execute_recalibration_atomic(request)
