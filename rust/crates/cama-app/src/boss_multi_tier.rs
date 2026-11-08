@@ -49,18 +49,7 @@ pub const BOSS_LOSS_EXTRA_COOLDOWN_SECONDS: i64 = 3_600;
 pub const ECHO_WINDOW_SECONDS: i64 = 86_400;
 pub const ECHO_WAGER_PROFIT_MULTIPLIER: f64 = 0.70;
 
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
-pub struct GuildId(pub i64);
-
-impl GuildId {
-    #[must_use]
-    pub const fn from_optional(value: Option<i64>) -> Self {
-        match value {
-            Some(value) => Self(value),
-            None => Self(0),
-        }
-    }
-}
+pub use cama_domain::guild::GuildId;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct PlayerKey {
