@@ -2,6 +2,7 @@ use std::sync::Mutex;
 
 use super::*;
 use cama_db::dig_event_threats::PersistedCurse;
+use cama_domain::economy_scaling::DEFAULT_MINIGAME_JC_DELTA_SCALE;
 
 const ACTOR: i64 = 10_001;
 const GUILD: i64 = 12_345;
@@ -177,7 +178,7 @@ fn resolve(
                 success_roll,
                 ..ThreatRolls::default()
             },
-            minigame_jc_delta_scale: default_economy_scale(),
+            minigame_jc_delta_scale: DEFAULT_MINIGAME_JC_DELTA_SCALE,
             now: 1_000_000,
         })
         .expect("resolve event");
@@ -275,35 +276,6 @@ mod test_curse_threat {
     }
 
     #[test]
-    fn test_capped_fractional_effects_do_not_exceed_active_limits() {
-        let effects = ThreatCurseEffects {
-            cave_in_bonus: Some(0.104),
-            cooldown_penalty: Some(0.26),
-            ..ThreatCurseEffects::default()
-        };
-        assert_eq!(
-            capped_curse_effect(effects, FractionalCurseEffect::CaveIn),
-            0.10
-        );
-        assert_eq!(
-            capped_curse_effect(effects, FractionalCurseEffect::Cooldown),
-            0.25
-        );
-    }
-
-    #[test]
-    fn test_cave_in_curse_matches_live_and_precondition_paths() {
-        let effects = ThreatCurseEffects {
-            cave_in_bonus: Some(0.50),
-            ..ThreatCurseEffects::default()
-        };
-        let preview = cursed_cave_in_chance(0.05, effects);
-        let live = cursed_cave_in_chance(0.05, effects);
-        assert_eq!(preview, live);
-        assert!(preview > cursed_cave_in_chance(0.05, ThreatCurseEffects::default()));
-    }
-
-    #[test]
     fn test_curse_applied_and_persisted() {
         let service = DigEventThreatService::new(FakePort::new(0, 500));
         let result = resolve(
@@ -340,106 +312,6 @@ mod test_curse_threat {
             current.temp_buff_json.as_deref(),
             Some(r#"{"id":"power","digs_remaining":3}"#)
         );
-    }
-
-    #[test]
-    fn test_curse_advance_drain_reduces_a_dig() {
-        let cursed = apply_curse_to_dig(
-            3,
-            2,
-            100,
-            ThreatCurseEffects {
-                advance_bonus: Some(-1),
-                ..ThreatCurseEffects::default()
-            },
-        );
-        let clean = apply_curse_to_dig(3, 2, 100, ThreatCurseEffects::default());
-        assert_eq!(cursed.advance, clean.advance - 1);
-    }
-
-    #[test]
-    fn test_curse_jc_drain_reduces_earnings_floored_at_zero() {
-        let result = apply_curse_to_dig(
-            3,
-            5,
-            100,
-            ThreatCurseEffects {
-                jc_bonus: Some(-9_999),
-                ..ThreatCurseEffects::default()
-            },
-        );
-        assert_eq!(result.jc_earned, 0);
-    }
-
-    #[test]
-    fn test_curse_luminosity_drain_burns_extra_light() {
-        let cursed = apply_curse_to_dig(
-            3,
-            2,
-            100,
-            ThreatCurseEffects {
-                luminosity_drain: Some(15),
-                ..ThreatCurseEffects::default()
-            },
-        );
-        let clean = apply_curse_to_dig(3, 2, 100, ThreatCurseEffects::default());
-        assert_eq!(cursed.luminosity_after, clean.luminosity_after - 15);
-    }
-
-    #[test]
-    fn test_curse_decrements_each_dig_and_expires() {
-        let service = DigEventThreatService::new(FakePort::new(0, 500));
-        let mut short = slow_curse();
-        short.duration_digs = 2;
-        service.set_temp_curse(key(), &short).expect("set curse");
-        let first = service
-            .apply_cursed_dig(
-                key(),
-                CursedDigInput {
-                    base_advance: 3,
-                    base_jc: 0,
-                    clean_luminosity_after: 100,
-                    now: 1,
-                },
-            )
-            .expect("first dig");
-        assert!(matches!(
-            first,
-            CursedDigOutcome::Applied(CursedDigApplied {
-                curse_remaining: Some(1),
-                ..
-            })
-        ));
-        service
-            .apply_cursed_dig(
-                key(),
-                CursedDigInput {
-                    base_advance: 3,
-                    base_jc: 0,
-                    clean_luminosity_after: 100,
-                    now: 2,
-                },
-            )
-            .expect("second dig");
-        assert!(service.port().current().temp_curse.active().is_none());
-    }
-
-    #[test]
-    fn test_expired_curse_no_longer_drains() {
-        let expired = ThreatCurse {
-            id: "expired".to_owned(),
-            name: "Expired".to_owned(),
-            digs_remaining: 0,
-            effects: ThreatCurseEffects {
-                advance_bonus: Some(-2),
-                ..ThreatCurseEffects::default()
-            },
-        };
-        let persisted = PersistedCurse::Stored(expired);
-        let effects = persisted
-            .active()
-            .map_or_else(ThreatCurseEffects::default, |curse| curse.effects);
-        assert_eq!(apply_curse_to_dig(3, 0, 100, effects).advance, 3);
     }
 
     #[test]
@@ -552,7 +424,7 @@ mod test_jc_threat {
         );
         let expected = scale_deflationary_minigame_jc_delta(
             strengthen_dig_event_penalty(-260) as f64,
-            default_economy_scale(),
+            DEFAULT_MINIGAME_JC_DELTA_SCALE,
         );
         assert_eq!(result.jc_delta, expected);
         assert_eq!(service.port().current().balance, 30 + expected);
@@ -566,97 +438,12 @@ mod test_jc_threat {
         let mut event_option = option(outcome(-200, 0, None));
         event_option.success.jc = 40;
         let result = resolve(&service, &event_option, EventThreatChoice::Risky, 0.01);
-        let expected =
-            scale_positive_dig_jc(scale_minigame_jc_delta(40.0, default_economy_scale()));
+        let expected = scale_positive_dig_jc(scale_minigame_jc_delta(
+            40.0,
+            DEFAULT_MINIGAME_JC_DELTA_SCALE,
+        ));
         assert_eq!(result.jc_delta, expected);
         assert_eq!(service.port().current().balance, 30 + expected);
         assert_eq!(result.balance_after, None);
-    }
-}
-
-mod test_event_result_embed {
-    use super::*;
-
-    fn field_map(embed: &EmbedModel) -> Vec<(&str, &str)> {
-        embed
-            .fields
-            .iter()
-            .map(|field| (field.name.as_str(), field.value.as_str()))
-            .collect()
-    }
-
-    #[test]
-    fn test_embed_surfaces_streak_loss() {
-        let embed = build_threat_result_embed(&ThreatResolution {
-            choice: EventThreatChoice::Risky,
-            succeeded: false,
-            message: "Momentum lost".to_owned(),
-            depth_delta: 0,
-            jc_delta: 0,
-            streak_loss: 3,
-            curse_applied: None,
-            balance_after: None,
-        });
-        let fields = field_map(&embed);
-        assert!(
-            fields
-                .iter()
-                .any(|(name, value)| { *name == "Outcome" && value.contains("3 streak days") })
-        );
-    }
-
-    #[test]
-    fn test_embed_surfaces_curse() {
-        let embed = build_threat_result_embed(&ThreatResolution {
-            choice: EventThreatChoice::Risky,
-            succeeded: false,
-            message: "Hexed".to_owned(),
-            depth_delta: 0,
-            jc_delta: 0,
-            streak_loss: 0,
-            curse_applied: Some(slow_curse()),
-            balance_after: None,
-        });
-        let fields = field_map(&embed);
-        assert!(fields.iter().any(|(name, value)| {
-            name.starts_with("Curse:") && name.contains("Slowing Hex") && value.contains("2 digs")
-        }));
-    }
-
-    #[test]
-    fn test_embed_surfaces_debt() {
-        let embed = build_threat_result_embed(&ThreatResolution {
-            choice: EventThreatChoice::Risky,
-            succeeded: false,
-            message: "Pockets emptied".to_owned(),
-            depth_delta: 0,
-            jc_delta: -200,
-            streak_loss: 0,
-            curse_applied: None,
-            balance_after: Some(-170),
-        });
-        assert!(
-            field_map(&embed)
-                .iter()
-                .any(|(name, value)| { *name == "In Debt" && value.contains("red") })
-        );
-    }
-
-    #[test]
-    fn test_embed_omits_threat_fields_on_clean_success() {
-        let embed = build_threat_result_embed(&ThreatResolution {
-            choice: EventThreatChoice::Risky,
-            succeeded: true,
-            message: "Clean win".to_owned(),
-            depth_delta: 0,
-            jc_delta: 13,
-            streak_loss: 0,
-            curse_applied: None,
-            balance_after: None,
-        });
-        let fields = field_map(&embed);
-        assert!(!fields.iter().any(|(name, _)| name.starts_with("Curse:")));
-        assert!(!fields.iter().any(|(name, _)| *name == "In Debt"));
-        assert!(!fields.iter().any(|(_, value)| value.contains("streak")));
     }
 }

@@ -231,6 +231,23 @@ fn entry(status: BossStatus, boss_id: &str) -> BossProgressValue {
     })
 }
 
+/// Fight through the live start path, answering a mechanic prompt with its
+/// safe option.
+fn fight_through_prompt(service: &mut TestService, risk: RiskTier, wager: i64) -> ResolvedFight {
+    match service
+        .start_boss_duel(key(), risk, wager)
+        .expect("duel starts")
+    {
+        StartBossDuelOutcome::Resolved(resolved) => resolved,
+        StartBossDuelOutcome::Paused(paused) => {
+            let safe = mechanic_by_id(&paused.mechanic_id)
+                .expect("registered mechanic")
+                .safe_option_index;
+            service.resume_boss_duel(key(), safe).expect("duel resumes")
+        }
+    }
+}
+
 fn stored_boss_id(progress: &BossProgress, boundary: i32) -> Option<&str> {
     match progress.get(&boundary.to_string()) {
         Some(BossProgressValue::Entry(entry)) => entry.boss_id.as_deref(),
@@ -1027,9 +1044,7 @@ fn test_loss_write_preserves_other_boundaries() {
         wounded_entry(BossStatus::Active, "void_warden", 2, 10),
     );
     set_progress(&mut service, progress, 49);
-    let result = service
-        .fight_boss(key(), RiskTier::Cautious, 10)
-        .expect("fight resolves");
+    let result = fight_through_prompt(&mut service, RiskTier::Cautious, 10);
     assert!(!result.won);
     let fresh = service
         .repository
@@ -1390,9 +1405,7 @@ fn test_halves_legacy_fight_wager_and_consumes_curse() {
         .stinger_curse
         .insert(CurseKind::HalveNextWager, "crystal_maiden");
     service.repository.insert_tunnel(key(), current);
-    let result = service
-        .fight_boss(key(), RiskTier::Cautious, 101)
-        .expect("fight resolves");
+    let result = fight_through_prompt(&mut service, RiskTier::Cautious, 101);
     assert!(!result.won);
     assert_eq!(result.jc_delta, -51);
     let fresh = service

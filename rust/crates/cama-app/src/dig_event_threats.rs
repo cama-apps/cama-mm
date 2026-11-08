@@ -11,10 +11,7 @@ use cama_db::dig_event_threats::{
 };
 use cama_domain::dig_economy::scale_positive_dig_jc;
 use cama_domain::dig_splash::strengthen_dig_event_penalty;
-use cama_domain::economy_scaling::{
-    DEFAULT_MINIGAME_JC_DELTA_SCALE, scale_deflationary_minigame_jc_delta, scale_minigame_jc_delta,
-};
-use cama_domain::embed_safety::EmbedModel;
+use cama_domain::economy_scaling::{scale_deflationary_minigame_jc_delta, scale_minigame_jc_delta};
 use thiserror::Error;
 
 pub const CURSE_STRENGTH_MULTIPLIER: f64 = 1.5;
@@ -133,31 +130,6 @@ pub struct ThreatResolution {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ResolveThreatOutcome {
     Applied(Box<ThreatResolution>),
-    Conflict,
-    MissingTunnel,
-    MissingPlayer,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CursedDigInput {
-    pub base_advance: i64,
-    pub base_jc: i64,
-    /// Luminosity after the ordinary layer/weather drain.
-    pub clean_luminosity_after: i64,
-    pub now: i64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CursedDigApplied {
-    pub advance: i64,
-    pub jc_earned: i64,
-    pub luminosity_after: i64,
-    pub curse_remaining: Option<i64>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CursedDigOutcome {
-    Applied(CursedDigApplied),
     Conflict,
     MissingTunnel,
     MissingPlayer,
@@ -335,93 +307,6 @@ where
             ThreatSettlementOutcome::MissingPlayer => ResolveThreatOutcome::MissingPlayer,
         })
     }
-
-    /// Apply one active curse exactly once, decrementing/clearing it in the
-    /// same guarded transaction as the resulting dig state and wallet credit.
-    pub fn apply_cursed_dig(
-        &self,
-        key: ThreatTunnelKey,
-        input: CursedDigInput,
-    ) -> Result<CursedDigOutcome, P::Error> {
-        let Some(snapshot) = self.port.snapshot(key)? else {
-            return Ok(CursedDigOutcome::MissingTunnel);
-        };
-        let active = snapshot.temp_curse.active();
-        let effects = active.map_or_else(ThreatCurseEffects::default, |curse| curse.effects);
-        let applied = apply_curse_to_dig(
-            input.base_advance,
-            input.base_jc,
-            input.clean_luminosity_after,
-            effects,
-        );
-        let curse_after = active.and_then(|curse| {
-            let mut next = curse.clone();
-            next.digs_remaining -= 1;
-            (next.digs_remaining > 0).then_some(next)
-        });
-        let detail = format!(
-            "{{\"curse_id\":{},\"advance\":{},\"jc\":{}}}",
-            active.map_or_else(
-                || "null".to_owned(),
-                |curse| format!("\"{}\"", escape_json(&curse.id)),
-            ),
-            applied.advance,
-            applied.jc_earned,
-        );
-        let settlement = self.port.settle_atomic(AtomicThreatSettlement {
-            expected: &snapshot,
-            depth_after: snapshot.depth.saturating_add(applied.advance),
-            streak_days_after: snapshot.streak_days,
-            luminosity_after: applied.luminosity_after,
-            curse_mutation: curse_after
-                .as_ref()
-                .map_or(ThreatCurseMutation::Clear, ThreatCurseMutation::Replace),
-            balance_delta: applied.jc_earned,
-            action_type: "dig",
-            related_id: "temp_curse",
-            reason: "dig reward after temporary curse",
-            detail_json: &detail,
-            created_at: input.now,
-        })?;
-        Ok(match settlement {
-            ThreatSettlementOutcome::Applied { .. } => {
-                CursedDigOutcome::Applied(CursedDigApplied {
-                    advance: applied.advance,
-                    jc_earned: applied.jc_earned,
-                    luminosity_after: applied.luminosity_after,
-                    curse_remaining: curse_after.map(|curse| curse.digs_remaining),
-                })
-            }
-            ThreatSettlementOutcome::Conflict => CursedDigOutcome::Conflict,
-            ThreatSettlementOutcome::MissingTunnel => CursedDigOutcome::MissingTunnel,
-            ThreatSettlementOutcome::MissingPlayer => CursedDigOutcome::MissingPlayer,
-        })
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AppliedCurseDig {
-    pub advance: i64,
-    pub jc_earned: i64,
-    pub luminosity_after: i64,
-}
-
-#[must_use]
-pub fn apply_curse_to_dig(
-    base_advance: i64,
-    base_jc: i64,
-    clean_luminosity_after: i64,
-    effects: ThreatCurseEffects,
-) -> AppliedCurseDig {
-    AppliedCurseDig {
-        advance: base_advance
-            .saturating_add(effects.advance_bonus.unwrap_or(0))
-            .max(1),
-        jc_earned: base_jc.saturating_add(effects.jc_bonus.unwrap_or(0)).max(0),
-        luminosity_after: clean_luminosity_after
-            .saturating_sub(effects.luminosity_drain.unwrap_or(0).max(0))
-            .max(0),
-    }
 }
 
 #[must_use]
@@ -439,29 +324,6 @@ pub fn scale_curse_effects(effects: ThreatCurseEffects, multiplier: f64) -> Thre
             .luminosity_drain
             .map(|value| round_half_even(value as f64 * multiplier)),
     }
-}
-
-#[must_use]
-pub fn capped_curse_effect(effects: ThreatCurseEffects, effect: FractionalCurseEffect) -> f64 {
-    let (value, cap) = match effect {
-        FractionalCurseEffect::CaveIn => (effects.cave_in_bonus, CAVE_IN_CURSE_CAP),
-        FractionalCurseEffect::Cooldown => (effects.cooldown_penalty, COOLDOWN_CURSE_CAP),
-    };
-    value
-        .filter(|value| value.is_finite())
-        .unwrap_or(0.0)
-        .clamp(0.0, cap)
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FractionalCurseEffect {
-    CaveIn,
-    Cooldown,
-}
-
-#[must_use]
-pub fn cursed_cave_in_chance(base_chance: f64, effects: ThreatCurseEffects) -> f64 {
-    base_chance + capped_curse_effect(effects, FractionalCurseEffect::CaveIn)
 }
 
 #[must_use]
@@ -488,63 +350,6 @@ pub fn event_jc_delta(authored: i64, jitter_multiplier: f64, scale: f64) -> i64 
         scale_minigame_jc_delta(jittered as f64, scale)
     };
     scale_positive_dig_jc(structurally_scaled)
-}
-
-#[must_use]
-pub fn build_threat_result_embed(resolution: &ThreatResolution) -> EmbedModel {
-    let mut embed = EmbedModel {
-        description: Some(resolution.message.clone()),
-        ..EmbedModel::default()
-    };
-    let mut outcome = Vec::new();
-    if resolution.depth_delta != 0 {
-        outcome.push(format!(
-            "{}{value} blocks",
-            if resolution.depth_delta > 0 { "+" } else { "" },
-            value = resolution.depth_delta,
-        ));
-    }
-    if resolution.jc_delta != 0 {
-        outcome.push(format!(
-            "{}{value} JC",
-            if resolution.jc_delta > 0 { "+" } else { "" },
-            value = resolution.jc_delta,
-        ));
-    }
-    if resolution.streak_loss > 0 {
-        let noun = if resolution.streak_loss == 1 {
-            "day"
-        } else {
-            "days"
-        };
-        outcome.push(format!("-{} streak {noun}", resolution.streak_loss));
-    }
-    if !outcome.is_empty() {
-        embed.add_field("Outcome", outcome.join(" | "), false);
-    }
-    if let Some(curse) = resolution.curse_applied.as_ref() {
-        let noun = if curse.duration_digs == 1 {
-            "dig"
-        } else {
-            "digs"
-        };
-        embed.add_field(
-            format!("Curse: {}", curse.name),
-            format!(
-                "A hex clings to you for the next {} {noun}.",
-                curse.duration_digs
-            ),
-            false,
-        );
-    }
-    if let Some(balance) = resolution.balance_after.filter(|balance| *balance < 0) {
-        embed.add_field(
-            "In Debt",
-            format!("That cost dropped you to {balance} JC. You're in the red."),
-            false,
-        );
-    }
-    embed
 }
 
 fn validate_request(request: &ResolveThreatRequest<'_>) -> Result<(), ThreatPolicyError> {
@@ -603,11 +408,6 @@ fn escape_json(value: &str) -> String {
         .replace('\n', "\\n")
         .replace('\r', "\\r")
         .replace('\t', "\\t")
-}
-
-#[must_use]
-pub fn default_economy_scale() -> f64 {
-    DEFAULT_MINIGAME_JC_DELTA_SCALE
 }
 
 #[cfg(test)]

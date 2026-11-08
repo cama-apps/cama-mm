@@ -3029,20 +3029,6 @@ impl DigBossRuntimeService {
         Ok(result)
     }
 
-    pub fn fight_regular<E: EntropyPort>(
-        &self,
-        request: DigBossRuntimeRequest,
-        risk: RiskTier,
-        wager: i64,
-        entropy: E,
-    ) -> Result<DigBossRuntimeResult<ResolvedFight>, DigBossRuntimeError> {
-        let mut service = self.compose(request.now, entropy);
-        let outcome = service.fight_boss(request.player_key(), risk, wager);
-        let mut result = finish_composed(&mut service, outcome)?;
-        self.enrich_regular_runtime_result(request, &mut result, &mut service.entropy);
-        Ok(result)
-    }
-
     pub fn scout_regular<E: EntropyPort>(
         &self,
         request: DigBossRuntimeRequest,

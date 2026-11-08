@@ -3245,15 +3245,6 @@ where
         })
     }
 
-    pub fn fight_boss(
-        &mut self,
-        key: PlayerKey,
-        risk_tier: RiskTier,
-        wager: i64,
-    ) -> Result<ResolvedFight, BossServiceError> {
-        self.fight_boss_with_override(key, risk_tier, wager, None)
-    }
-
     pub fn fight_boss_with_override(
         &mut self,
         key: PlayerKey,

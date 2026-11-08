@@ -1724,6 +1724,115 @@ fn event_splash_victims_render_readable_names_on_a_cold_cache() {
     assert!(!field.value.contains("<@"), "{}", field.value);
 }
 
+fn threat_outcome(
+    jc: i64,
+    streak_loss: i64,
+    curse: Option<cama_app::dig_loot::CanonicalTempCurse>,
+    balance_after: i64,
+) -> cama_app::dig_event_runtime::DigEventRuntimeOutcome {
+    cama_app::dig_event_runtime::DigEventRuntimeOutcome {
+        success: true,
+        error: None,
+        resolution: Some(cama_app::dig_loot::CanonicalEventResolution {
+            event_id: "synthetic".to_owned(),
+            event_name: "Synthetic Threat".to_owned(),
+            choice: "risky".to_owned(),
+            complexity: cama_app::dig_loot::EventComplexity::Choice,
+            descriptions: Vec::new(),
+            steps: Vec::new(),
+            boon_options: Vec::new(),
+            ascii_art: None,
+            social: false,
+            succeeded: jc > 0,
+            message: "The tunnel answers.".to_owned(),
+            advance: 0,
+            jc,
+            cave_in: false,
+            streak_loss,
+            streak_days_after: None,
+            curse,
+            persisted_curse: None,
+            buff: None,
+            black_wax_seal_spent: false,
+            active_curse_remaining_after: None,
+            curse_cleared: false,
+            gear_reward_pool: Vec::new(),
+            consumable_reward_pool: Vec::new(),
+            artifact_reward_pool: Vec::new(),
+            splash: None,
+            guild_modifier_on_success: None,
+            quest_id: None,
+            quest_step: None,
+            next_event_id: None,
+            chained_event_id: None,
+            reward: None,
+            duplicate_gear_reward: false,
+            splash_payout_ratio: None,
+            economy_gross_jc: jc,
+            cruel_echoes: false,
+            boss_encounter: false,
+            random_plan: cama_app::dig_loot::CanonicalEventRandomPlan::default(),
+        }),
+        depth_before: 40,
+        depth_after: 40,
+        balance_after,
+        action_id: Some(18),
+        reward_row_id: None,
+        applied_now: true,
+        splash: None,
+        guild_modifier: None,
+        chain_event: None,
+        chain_prompt: None,
+        quest_finale: None,
+        retryable: false,
+    }
+}
+
+fn event_fields(
+    outcome: &cama_app::dig_event_runtime::DigEventRuntimeOutcome,
+) -> Vec<(String, String)> {
+    super::event_resolution_response(outcome, "test-nonce", &GuildPlayerNameDirectory::default())
+        .embeds[0]
+        .fields
+        .iter()
+        .map(|field| (field.name.clone(), field.value.clone()))
+        .collect()
+}
+
+#[test]
+fn event_result_embed_surfaces_streak_loss_curse_and_debt() {
+    let curse = cama_app::dig_loot::CanonicalTempCurse {
+        id: "slow_hex".to_owned(),
+        name: "Slowing Hex".to_owned(),
+        duration_digs: 2,
+        effect: serde_json::json!({"advance_bonus": -1}),
+    };
+    let fields = event_fields(&threat_outcome(-200, 3, Some(curse), -170));
+    assert!(
+        fields
+            .iter()
+            .any(|(name, value)| name == "Outcome" && value.contains("-3 streak days")),
+        "{fields:?}"
+    );
+    assert!(
+        fields
+            .iter()
+            .any(|(name, value)| { name == "Curse: Slowing Hex" && value.contains("next 2 digs") }),
+        "{fields:?}"
+    );
+    assert!(
+        fields
+            .iter()
+            .any(|(name, value)| name == "In Debt" && value.contains("-170")),
+        "{fields:?}"
+    );
+
+    let clean = event_fields(&threat_outcome(13, 0, None, 513));
+    assert!(clean.iter().all(|(name, _)| !name.starts_with("Curse:")));
+    assert!(clean.iter().all(|(name, _)| name != "In Debt"));
+    assert!(clean.iter().all(|(_, value)| !value.contains("streak")));
+}
+
 // tests/test_dig_event_messaging.py::test_event_result_embed_surfaces_gear_drop_details
 #[test]
 fn event_result_embed_surfaces_exact_unique_gear_drop_details() {

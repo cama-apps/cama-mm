@@ -142,10 +142,9 @@ pub(super) fn active_curse_effects(raw: Option<&str>) -> Option<(ActiveCurseEffe
     Some((
         ActiveCurseEffects {
             advance_bonus: number_i64("advance_bonus").unwrap_or(0),
-            // Clamp the two rate penalties once at decode time with the same
-            // caps `capped_curse_effect` enforces, so the applied roll and the
-            // displayed summary read structurally identical values even for an
-            // over-cap persisted curse.
+            // Clamp the two rate penalties once at decode time with the shared
+            // curse caps, so the applied roll and the displayed summary read
+            // structurally identical values even for an over-cap persisted curse.
             cave_in_bonus: number_f64("cave_in_bonus")
                 .unwrap_or(0.0)
                 .clamp(0.0, CAVE_IN_CURSE_CAP),
