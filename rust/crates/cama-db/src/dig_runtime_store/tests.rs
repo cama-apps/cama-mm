@@ -508,3 +508,48 @@ fn delivery_scan_cursor_resumes_after_the_previous_page() {
         "a cursor before the first row's second still finds every row"
     );
 }
+
+#[test]
+fn placeholder_tunnel_names_are_repaired_once_and_chosen_names_are_kept() {
+    let database = fixture();
+    let mut connection = open(&database);
+    let rows = [
+        (USER, GUILD, format!("Miner {USER}")),
+        (-USER, GUILD, format!("Miner {}", -USER)),
+        // Another player's ID, a near miss, and a chosen name stay as they are.
+        (USER + 1, GUILD, format!("Miner {USER}")),
+        (USER + 2, GUILD, format!("Miner {} ", USER + 2)),
+        (USER + 3, GUILD, "Miner Joe".to_owned()),
+    ];
+    for (discord_id, guild_id, name) in &rows {
+        let mut row = DigRuntimeTunnel::new(*discord_id, *guild_id, name.clone());
+        row.depth = 3;
+        insert_tunnel(&connection, &row).expect("insert");
+    }
+    let mut counter = 0;
+    let renamed = repair_placeholder_tunnel_names(&mut connection, || {
+        counter += 1;
+        format!("The Repaired Burrow {counter}")
+    })
+    .expect("repair");
+    assert_eq!(renamed, 2);
+    let name = |discord_id: i64| -> String {
+        connection
+            .query_row(
+                "SELECT tunnel_name FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
+                rusqlite::params![discord_id, GUILD],
+                |row| row.get(0),
+            )
+            .expect("tunnel name")
+    };
+    assert!(name(USER).starts_with("The Repaired Burrow"));
+    assert!(name(-USER).starts_with("The Repaired Burrow"));
+    assert_eq!(name(USER + 1), format!("Miner {USER}"));
+    assert_eq!(name(USER + 2), format!("Miner {} ", USER + 2));
+    assert_eq!(name(USER + 3), "Miner Joe");
+    assert_eq!(
+        repair_placeholder_tunnel_names(&mut connection, || unreachable!("nothing left"))
+            .expect("idempotent retry"),
+        0
+    );
+}

@@ -8,7 +8,7 @@
 //! serves both the in-transaction (`*_in`-style) and standalone paths.
 
 use cama_domain::pet::PetDigWorkClaim;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 /// A single migrated inventory row needed by the Dig application aggregate.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -390,6 +390,36 @@ pub fn tunnel(
             load_tunnel_row(row, discord_id, guild_id)
         })
         .optional()
+}
+
+/// Rename every tunnel still stored under the old `Miner <owner id>`
+/// placeholder, which showed the owner's Discord ID in public titles.
+///
+/// Only an exact match on the owner's own ID is renamed, so a name a player
+/// chose is never touched. Renamed rows no longer match, which makes the
+/// repair idempotent; it returns how many tunnels were renamed.
+pub fn repair_placeholder_tunnel_names(
+    connection: &mut Connection,
+    mut next_name: impl FnMut() -> String,
+) -> Result<usize, rusqlite::Error> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let placeholders = transaction
+        .prepare(
+            "SELECT discord_id,guild_id FROM tunnels
+              WHERE tunnel_name = 'Miner ' || discord_id",
+        )?
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut renamed = 0;
+    for (discord_id, guild_id) in placeholders {
+        renamed += transaction.execute(
+            "UPDATE tunnels SET tunnel_name=?1
+              WHERE discord_id=?2 AND guild_id=?3 AND tunnel_name = 'Miner ' || discord_id",
+            params![next_name(), discord_id, guild_id],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(renamed)
 }
 
 /// Insert a brand-new tunnel aggregate row.

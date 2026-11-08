@@ -548,6 +548,20 @@ async fn run_serve() -> ExitCode {
         rebuilt_tables = database_initialization.rebuilt_tables,
         "Rust database schema initialization and integrity check complete"
     );
+    // Older versions stored new tunnels as `Miner <owner id>`, which public
+    // Dig titles then showed. The repair is idempotent, so every start runs it.
+    let tunnel_name_path = config.db_path.clone();
+    match tokio::task::spawn_blocking(move || {
+        cama_app::dig_miner_runtime::DigMinerRuntimeService::sqlite(tunnel_name_path)
+            .repair_placeholder_tunnel_names()
+    })
+    .await
+    {
+        Ok(Ok(0)) => {}
+        Ok(Ok(renamed)) => info!(renamed, "renamed placeholder Dig tunnel names"),
+        Ok(Err(error)) => warn!(%error, "Dig tunnel name repair failed"),
+        Err(error) => warn!(%error, "Dig tunnel name repair task failed"),
+    }
 
     // Freeze hosting admission when a shuffle/draft creates its pending row.
     // Existing sessions recover separately; historical pending rows stay manual.
