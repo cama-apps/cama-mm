@@ -457,6 +457,27 @@ impl PetSweepWorker {
         Ok(())
     }
 
+    /// Re-check, right before sending, that no direct `/pet eat` delivery
+    /// owns or has announced this death since the sweep read it. The direct
+    /// path holds its guard until its `death_announced_at` stamp is durable,
+    /// so checking the guard before the stamp leaves no window in which both
+    /// could post: a released guard means the stamp is already final.
+    async fn death_still_unannounced(&self, pet: &Pet) -> Result<bool, NoticeFailure> {
+        if direct_death_delivery_active(&self.database_path, pet.pet_id) {
+            return Ok(false);
+        }
+        let database_path = self.database_path.clone();
+        let (pet_id, guild_id) = (pet.pet_id, pet.guild_id);
+        let current = tokio::task::spawn_blocking(move || {
+            PetRepository::new(database_path)
+                .get_pet_by_id(pet_id, Some(guild_id))
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| format!("pet death re-check task failed: {error}"))??;
+        Ok(current.is_some_and(|pet| pet.death_announced_at.is_none()))
+    }
+
     async fn deliver_death(
         &self,
         context: &WorkerContext,
@@ -502,6 +523,9 @@ impl PetSweepWorker {
                 ),
                 false,
             );
+        }
+        if !self.death_still_unannounced(&pet).await? {
+            return Ok(());
         }
         if let Some(channel_id) = channel_id {
             self.deliver_channel(

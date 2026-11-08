@@ -2413,3 +2413,559 @@ fn default_boss_risk_supports_fresh_upgrade_and_idempotent_retry() {
         assert_eq!(stored.as_deref(), Some("reckless"));
     }
 }
+
+fn query_plan(connection: &Connection, sql: &str) -> String {
+    let mut statement = connection
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .expect("explain query");
+    let parameter_count = statement.parameter_count();
+    statement
+        .query_map(
+            rusqlite::params_from_iter(std::iter::repeat_n(1_i64, parameter_count)),
+            |row| row.get::<_, String>(3),
+        )
+        .expect("query plan rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("query plan text")
+        .join("\n")
+}
+
+fn insert_pending_match(connection: &Connection) -> i64 {
+    connection
+        .execute(
+            "INSERT INTO pending_matches(guild_id,payload) VALUES (1,'{}')",
+            [],
+        )
+        .expect("insert pending match");
+    connection.last_insert_rowid()
+}
+
+#[test]
+fn table_rebuild_keeps_the_autoincrement_high_water_mark() {
+    // Both an emptied table (whose sequence row DROP TABLE deletes outright)
+    // and one whose newest rows were deleted must keep issuing fresh ids.
+    for surviving in [0_i64, 3] {
+        let database = empty_database();
+        initialize_or_migrate(database.path()).unwrap();
+        let connection = open_runtime_connection(database.path()).unwrap();
+        for expected in 1..=5 {
+            assert_eq!(insert_pending_match(&connection), expected);
+        }
+        connection
+            .execute(
+                "DELETE FROM pending_matches WHERE pending_match_id>?1",
+                [surviving],
+            )
+            .unwrap();
+        // The pre-completion-key shape forces the historical rebuild.
+        connection
+            .execute_batch(
+                "DROP INDEX idx_pending_matches_completion_key;
+                 ALTER TABLE pending_matches DROP COLUMN completion_key;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let report = initialize_or_migrate(database.path()).unwrap();
+        assert!(
+            report
+                .rebuilt_tables
+                .contains(&"pending_matches".to_owned()),
+            "{report:?}"
+        );
+        let connection = open_runtime_connection(database.path()).unwrap();
+        assert_eq!(
+            insert_pending_match(&connection),
+            6,
+            "a rebuild must never reissue a deleted pending match id"
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM pending_matches", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            surviving + 1
+        );
+        drop(connection);
+        assert!(
+            initialize_or_migrate(database.path())
+                .unwrap()
+                .was_current()
+        );
+    }
+}
+
+#[test]
+fn pending_match_high_water_mark_restore_covers_durable_references() {
+    let references = [
+        (
+            "INSERT INTO matches(team1_players,team2_players,guild_id,pending_match_id)
+             VALUES ('[]','[]',1,41)",
+            41,
+        ),
+        (
+            "INSERT INTO app_kv(guild_id,key,value) VALUES (1,'pending-abort:42','{}')",
+            42,
+        ),
+        (
+            "INSERT INTO app_kv(guild_id,key,value)
+             VALUES (0,'dota_host_withdrawn:9:43','true')",
+            43,
+        ),
+        (
+            "INSERT INTO app_kv(guild_id,key,value)
+             VALUES (1,'draft:state','{\"active\":false,\"pending_match_id\":44}')",
+            44,
+        ),
+        (
+            "INSERT INTO economy_ledger_entries(
+                 guild_id,account_type,account_id,delta,balance_before,balance_after,
+                 source,related_type,related_id
+             ) VALUES (1,'player',5,1,0,1,'bet_settlement','pending_match','45')",
+            45,
+        ),
+        (
+            "INSERT INTO low_priority_state(discord_id,guild_id,start_pending_match_id,set_by)
+             VALUES (5,1,46,9)",
+            46,
+        ),
+    ];
+    for (reference, highest) in references {
+        let database = empty_database();
+        let report = initialize_or_migrate(database.path()).unwrap();
+        assert!(
+            report
+                .newly_applied
+                .iter()
+                .any(|name| name == "restore_pending_match_id_high_water_mark")
+        );
+        let connection = open_runtime_connection(database.path()).unwrap();
+        assert_eq!(
+            insert_pending_match(&connection),
+            1,
+            "a fresh database starts at the first id"
+        );
+        // A rebuild made before sequence preservation left the counter at
+        // the largest surviving pending row while older references remain.
+        connection
+            .execute_batch(&format!(
+                "{reference};
+                 DELETE FROM schema_migrations
+                 WHERE name='restore_pending_match_id_high_water_mark';"
+            ))
+            .unwrap();
+        drop(connection);
+
+        let report = initialize_or_migrate(database.path()).unwrap();
+        assert!(
+            report
+                .newly_applied
+                .iter()
+                .any(|name| name == "restore_pending_match_id_high_water_mark")
+        );
+        let connection = open_runtime_connection(database.path()).unwrap();
+        assert_eq!(
+            insert_pending_match(&connection),
+            highest + 1,
+            "{reference}"
+        );
+        drop(connection);
+        assert!(
+            initialize_or_migrate(database.path())
+                .unwrap()
+                .was_current()
+        );
+        let connection = open_runtime_connection(database.path()).unwrap();
+        assert_eq!(
+            insert_pending_match(&connection),
+            highest + 2,
+            "the retry must not lower the counter"
+        );
+    }
+}
+
+/// Change a column's declared type in place, as an older release would have
+/// left it, so the next startup must rebuild the table.
+fn redeclare_column(path: &Path, table: &str, from: &str, to: &str) {
+    let connection = Connection::open(path).unwrap();
+    connection
+        .pragma_update(None, "writable_schema", true)
+        .unwrap();
+    let changed = connection
+        .execute(
+            "UPDATE sqlite_master SET sql=replace(sql, ?2, ?3)
+             WHERE type='table' AND name=?1 AND instr(sql, ?2) > 0",
+            params![table, from, to],
+        )
+        .unwrap();
+    assert_eq!(changed, 1, "{table} declares {from}");
+    connection
+        .pragma_update(None, "writable_schema", false)
+        .unwrap();
+}
+
+#[test]
+fn rebuilding_the_ledger_keeps_the_balance_triggers_that_write_to_it() {
+    let database = empty_database();
+    initialize_or_migrate(database.path()).unwrap();
+    let connection = open_runtime_connection(database.path()).unwrap();
+    connection
+        .execute(
+            "INSERT INTO players(discord_id,guild_id,discord_username,jopacoin_balance)
+             VALUES (7,1,'ledger-player',10)",
+            [],
+        )
+        .unwrap();
+    let opening_ledger_id: i64 = connection
+        .query_row(
+            "SELECT MAX(ledger_id) FROM economy_ledger_entries",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(connection);
+    redeclare_column(
+        database.path(),
+        "economy_ledger_entries",
+        "reason TEXT",
+        "reason VARCHAR(200)",
+    );
+
+    let report = initialize_or_migrate(database.path())
+        .expect("triggers on players and nonprofit_fund reference the rebuilt ledger");
+    assert!(
+        report
+            .rebuilt_tables
+            .contains(&"economy_ledger_entries".to_owned()),
+        "{report:?}"
+    );
+    let connection = open_runtime_connection(database.path()).unwrap();
+    connection
+        .execute(
+            "UPDATE players SET jopacoin_balance=25 WHERE discord_id=7 AND guild_id=1",
+            [],
+        )
+        .unwrap();
+    let (ledger_id, delta, before, after): (i64, i64, i64, i64) = connection
+        .query_row(
+            "SELECT ledger_id,delta,balance_before,balance_after FROM economy_ledger_entries
+             WHERE guild_id=1 AND account_type='player' AND account_id=7
+             ORDER BY ledger_id DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!((delta, before, after), (15, 10, 25));
+    assert!(ledger_id > opening_ledger_id);
+    connection
+        .execute(
+            "INSERT INTO nonprofit_fund(guild_id,total_collected) VALUES (1,4)",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM economy_ledger_entries WHERE account_type='nonprofit'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+    drop(connection);
+    assert!(
+        initialize_or_migrate(database.path())
+            .unwrap()
+            .was_current()
+    );
+}
+
+#[test]
+fn rebuilding_deadlock_matches_keeps_the_dota_reservation_guards() {
+    let database = empty_database();
+    initialize_or_migrate(database.path()).unwrap();
+    redeclare_column(
+        database.path(),
+        "deadlock_matches",
+        "abort_reason TEXT",
+        "abort_reason VARCHAR(80)",
+    );
+    let report = initialize_or_migrate(database.path())
+        .expect("triggers on pending_matches and app_kv reference the rebuilt table");
+    assert!(
+        report
+            .rebuilt_tables
+            .contains(&"deadlock_matches".to_owned()),
+        "{report:?}"
+    );
+    let connection = open_runtime_connection(database.path()).unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO deadlock_matches(
+                 guild_id,format,status,roster_json,created_by,created_at,updated_at
+             ) VALUES (1,'standard','running','[]',9,0,0);
+             INSERT INTO deadlock_participants(match_id,guild_id,discord_id,side,rating_revision)
+             VALUES (last_insert_rowid(),1,77,1,0);",
+        )
+        .unwrap();
+    let error = connection
+        .execute(
+            "INSERT INTO pending_matches(guild_id,payload)
+             VALUES (1,'{\"radiant_team_ids\":[77],\"dire_team_ids\":[]}')",
+            [],
+        )
+        .expect_err("the reservation guard still reads the rebuilt Deadlock tables");
+    assert!(
+        error
+            .to_string()
+            .contains("reserved by an active Deadlock match"),
+        "{error}"
+    );
+    assert_eq!(insert_pending_match(&connection), 1);
+}
+
+#[test]
+fn canonical_constraint_changes_reach_tables_that_keep_extra_columns() {
+    let database = empty_database();
+    initialize_or_migrate(database.path()).unwrap();
+    let connection = open_runtime_connection(database.path()).unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE autobet_investments;
+             CREATE TABLE autobet_investments (
+                 guild_id    INTEGER NOT NULL DEFAULT 0,
+                 investor_id INTEGER NOT NULL,
+                 target_id   INTEGER NOT NULL,
+                 legacy_note TEXT,
+                 direction   TEXT NOT NULL CHECK(direction IN ('long', 'short')),
+                 percentage  INTEGER NOT NULL,
+                 created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                 updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                 PRIMARY KEY (guild_id, investor_id, target_id)
+             );
+             INSERT INTO autobet_investments(
+                 guild_id,investor_id,target_id,legacy_note,direction,percentage
+             ) VALUES (1,2,3,'keep me','long',5);",
+        )
+        .unwrap();
+    drop(connection);
+
+    let report = initialize_or_migrate(database.path()).unwrap();
+    assert!(
+        report
+            .rebuilt_tables
+            .contains(&"autobet_investments".to_owned()),
+        "a missing CHECK must be applied even with an extra column: {report:?}"
+    );
+    let connection = open_runtime_connection(database.path()).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT legacy_note,percentage FROM autobet_investments
+                 WHERE guild_id=1 AND investor_id=2 AND target_id=3",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap(),
+        ("keep me".to_owned(), 5)
+    );
+    assert!(
+        connection
+            .execute(
+                "INSERT INTO autobet_investments(guild_id,investor_id,target_id,direction,percentage)
+                 VALUES (1,2,4,'long',50)",
+                [],
+            )
+            .is_err(),
+        "the canonical percentage CHECK is enforced"
+    );
+    assert!(
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                 WHERE type='index' AND name='idx_autobet_investments_target')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap(),
+        "the rebuilt table's canonical index is restored"
+    );
+    drop(connection);
+    assert!(
+        initialize_or_migrate(database.path())
+            .unwrap()
+            .was_current()
+    );
+}
+
+#[test]
+fn extra_columns_alone_do_not_rebuild_an_otherwise_canonical_table() {
+    let database = empty_database();
+    initialize_or_migrate(database.path()).unwrap();
+    let connection = open_runtime_connection(database.path()).unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE autobet_investments;
+             CREATE TABLE autobet_investments (
+                 guild_id    INTEGER NOT NULL DEFAULT 0,
+                 investor_id INTEGER NOT NULL,
+                 \"legacy, note\" TEXT DEFAULT 'a,b' /* retired, kept */,
+                 target_id   INTEGER NOT NULL,
+                 direction   TEXT NOT NULL CHECK(direction IN ('long', 'short')),
+                 percentage  INTEGER NOT NULL CHECK(percentage BETWEEN 1 AND 10),
+                 created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                 updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                 PRIMARY KEY (guild_id, investor_id, target_id)
+             );",
+        )
+        .unwrap();
+    drop(connection);
+    let report = initialize_or_migrate(database.path()).unwrap();
+    assert!(
+        !report
+            .rebuilt_tables
+            .contains(&"autobet_investments".to_owned()),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn column_definitions_are_removed_without_touching_literals_or_constraints() {
+    let columns = BTreeSet::from(["old".to_owned(), "quoted, name".to_owned()]);
+    assert_eq!(
+        without_column_definitions(
+            "CREATE TABLE t (a INTEGER CHECK(a IN (1,2)), old TEXT DEFAULT 'x,y', -- note, here\n\
+             \"Quoted, Name\" INTEGER, b TEXT /* c, d */, [old2] INTEGER, UNIQUE(a, b))",
+            &columns,
+        ),
+        "CREATE TABLE t (a INTEGER CHECK(a IN (1,2)), b TEXT /* c, d */, [old2] INTEGER, UNIQUE(a, b))"
+    );
+    let canonical = "CREATE TABLE t (a INTEGER)";
+    assert_eq!(
+        without_column_definitions(canonical, &BTreeSet::new()),
+        canonical
+    );
+}
+
+#[test]
+fn ledger_marker_index_supports_fresh_upgrade_and_idempotent_retry() {
+    let lookups = [
+        // Exactly-once award marker with its rollback watermark.
+        "SELECT 1 FROM economy_ledger_entries
+         WHERE guild_id=?1 AND account_type='player' AND account_id=?2
+           AND source=?3 AND related_type=?4 AND related_id=?5
+           AND ledger_id > COALESCE((
+               SELECT MAX(compensation.ledger_id) FROM economy_ledger_entries compensation
+               WHERE compensation.guild_id=?1 AND compensation.account_type='player'
+                 AND compensation.account_id=?2 AND compensation.source='match_bonus_rollback'
+                 AND compensation.related_type=?3 AND compensation.related_id=?5
+           ), 0)
+         LIMIT 1",
+        // Once-only nonprofit credit.
+        "SELECT delta,balance_after FROM economy_ledger_entries
+         WHERE guild_id=?1 AND account_type='nonprofit'
+           AND source=?2 AND related_type=?3 AND related_id=?4
+         ORDER BY ledger_id ASC LIMIT 1",
+        // Settlement and Blood Pact recovery.
+        "SELECT account_id, COALESCE(SUM(delta), 0) FROM economy_ledger_entries
+         WHERE guild_id=?1 AND account_type='player' AND source='bet_settlement'
+           AND related_type='pending_match' AND related_id=?2
+         GROUP BY account_id",
+    ];
+    for upgrade in [false, true] {
+        let database = empty_database();
+        if upgrade {
+            initialize_or_migrate(database.path()).unwrap();
+            open_runtime_connection(database.path())
+                .unwrap()
+                .execute_batch(
+                    "DROP INDEX idx_economy_ledger_related;
+                     DELETE FROM schema_migrations WHERE name='index_economy_ledger_related_markers';",
+                )
+                .unwrap();
+        }
+        let report = initialize_or_migrate(database.path()).unwrap();
+        assert!(
+            report
+                .newly_applied
+                .iter()
+                .any(|name| name == "index_economy_ledger_related_markers")
+        );
+        let connection = open_runtime_connection(database.path()).unwrap();
+        for lookup in lookups {
+            let plan = query_plan(&connection, lookup);
+            assert!(plan.contains("idx_economy_ledger_related"), "{plan}");
+            assert!(!plan.contains("SCAN economy_ledger_entries"), "{plan}");
+        }
+        drop(connection);
+        assert!(
+            initialize_or_migrate(database.path())
+                .unwrap()
+                .was_current()
+        );
+    }
+}
+
+#[test]
+fn pending_dig_delivery_index_supports_fresh_upgrade_and_idempotent_retry() {
+    let delivered = r#"{"delivery":{"blood_pact":"Skipped","render":{"kind":"Normal"},"main_delivered_at":1,"event_delivered_at":null}}"#;
+    let owed = r#"{"delivery":{"blood_pact":"Skipped","render":{"kind":"Event"},"main_delivered_at":1,"event_delivered_at":null}}"#;
+    for upgrade in [false, true] {
+        let database = empty_database();
+        if upgrade {
+            initialize_or_migrate(database.path()).unwrap();
+            open_runtime_connection(database.path())
+                .unwrap()
+                .execute_batch(
+                    "DROP INDEX idx_dig_actions_pending_delivery;
+                     DELETE FROM schema_migrations WHERE name='index_pending_dig_deliveries';",
+                )
+                .unwrap();
+        }
+        let report = initialize_or_migrate(database.path()).unwrap();
+        assert!(
+            report
+                .newly_applied
+                .iter()
+                .any(|name| name == "index_pending_dig_deliveries")
+        );
+        let connection = open_runtime_connection(database.path()).unwrap();
+        for (detail, created_at) in [(delivered, 1), (owed, 2), (delivered, 3)] {
+            connection
+                .execute(
+                    "INSERT INTO dig_actions(
+                         guild_id,actor_id,action_type,depth_before,depth_after,detail,created_at
+                     ) VALUES (1,2,'dig',0,1,?1,?2)",
+                    params![detail, created_at],
+                )
+                .unwrap();
+        }
+        let indexed = connection
+            .prepare(
+                "SELECT created_at FROM dig_actions INDEXED BY idx_dig_actions_pending_delivery
+                 WHERE guild_id=1 AND action_type='dig'
+                   AND json_valid(detail)
+                   AND json_type(detail,'$.delivery')='object'
+                   AND (
+                       COALESCE(json_extract(detail,'$.delivery.blood_pact'),'Pending')='Pending'
+                       OR json_extract(detail,'$.delivery.main_delivered_at') IS NULL
+                       OR (json_extract(detail,'$.delivery.render.kind')='Event'
+                           AND json_extract(detail,'$.delivery.event_delivered_at') IS NULL)
+                   )
+                 ORDER BY created_at",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(indexed, vec![2], "only owed deliveries are indexed");
+        drop(connection);
+        assert!(
+            initialize_or_migrate(database.path())
+                .unwrap()
+                .was_current()
+        );
+    }
+}

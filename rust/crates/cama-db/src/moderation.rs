@@ -170,15 +170,6 @@ pub struct LobbySuspension {
 
 impl LobbySuspension {
     #[must_use]
-    pub fn matches_completed(&self) -> i64 {
-        self.matches_required.map_or(0, |required| {
-            required
-                .saturating_sub(self.matches_remaining.unwrap_or(0))
-                .max(0)
-        })
-    }
-
-    #[must_use]
     pub fn applies_to(&self, lobby_kind: Option<SuspensionScope>) -> bool {
         lobby_kind.is_none() || self.scope == SuspensionScope::All || lobby_kind == Some(self.scope)
     }
@@ -346,7 +337,7 @@ impl ModerationRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.path)
     }
 

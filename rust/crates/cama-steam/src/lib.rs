@@ -29,6 +29,3 @@ pub const DOTA_APP_ID: u32 = 570;
 
 /// Shared-object type id for [`steam_vent_proto_dota2::dota_gcmessages_common_lobby::CSODOTALobby`].
 pub const SO_TYPE_LOBBY: i32 = 2004;
-
-/// Shared-object type id for a Dota lobby invite.
-pub const SO_TYPE_LOBBY_INVITE: i32 = 2011;

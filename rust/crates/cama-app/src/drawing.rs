@@ -10,13 +10,12 @@ pub use win_probability::draw_win_probability_graph;
 
 use std::collections::BTreeMap;
 use std::io::Cursor;
-use std::sync::OnceLock;
 
 use cama_domain::formatting::format_grouped_unsigned;
 use chrono::{TimeZone, Utc};
-use fontdue::{Font, FontSettings};
+use fontdue::Font;
 
-use crate::font_assets::{DejaVuFace, load_dejavu_font};
+use crate::font_assets::{DejaVuFace, dejavu_font};
 
 pub const DISCORD_BG: Rgba = Rgba::rgb(0x36, 0x39, 0x3f);
 pub const DISCORD_DARKER: Rgba = Rgba::rgb(0x2f, 0x31, 0x36);
@@ -413,13 +412,7 @@ impl Raster {
 }
 
 fn drawing_font() -> Option<&'static Font> {
-    static FONT: OnceLock<Option<Font>> = OnceLock::new();
-    FONT.get_or_init(|| {
-        load_dejavu_font(DejaVuFace::Sans)
-            .ok()
-            .and_then(|bytes| Font::from_bytes(bytes, FontSettings::default()).ok())
-    })
-    .as_ref()
+    dejavu_font(DejaVuFace::Sans)
 }
 
 fn font_pixel_size(scale: i32) -> f32 {
@@ -1088,14 +1081,6 @@ pub fn draw_hero_performance_chart(
         );
     }
     render(raster)
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct AttributeValues {
-    pub strength: f64,
-    pub agility: f64,
-    pub intelligence: f64,
-    pub universal: f64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -3367,71 +3352,11 @@ fn inverse_normal_cdf(probability: f64) -> f64 {
 }
 
 fn render(raster: Raster) -> Cursor<Vec<u8>> {
-    Cursor::new(encode_png(&raster))
-}
-
-fn encode_png(raster: &Raster) -> Vec<u8> {
-    let mut png = Vec::new();
-    png.extend_from_slice(b"\x89PNG\r\n\x1a\n");
-    let mut header = Vec::with_capacity(13);
-    header.extend_from_slice(&(raster.width as u32).to_be_bytes());
-    header.extend_from_slice(&(raster.height as u32).to_be_bytes());
-    header.extend_from_slice(&[8, 6, 0, 0, 0]);
-    append_png_chunk(&mut png, b"IHDR", &header);
-
-    let row_bytes = raster.width * 4;
-    let mut filtered = Vec::with_capacity((row_bytes + 1) * raster.height);
-    for row in raster.pixels.chunks_exact(row_bytes) {
-        filtered.push(0);
-        filtered.extend_from_slice(row);
-    }
-    let mut zlib = Vec::with_capacity(filtered.len() + filtered.len() / 65_535 * 5 + 16);
-    zlib.extend_from_slice(&[0x78, 0x01]);
-    let blocks = filtered.chunks(65_535).collect::<Vec<_>>();
-    for (index, block) in blocks.iter().enumerate() {
-        zlib.push(u8::from(index + 1 == blocks.len()));
-        let length = u16::try_from(block.len()).expect("stored DEFLATE block length");
-        zlib.extend_from_slice(&length.to_le_bytes());
-        zlib.extend_from_slice(&(!length).to_le_bytes());
-        zlib.extend_from_slice(block);
-    }
-    zlib.extend_from_slice(&adler32(&filtered).to_be_bytes());
-    append_png_chunk(&mut png, b"IDAT", &zlib);
-    append_png_chunk(&mut png, b"IEND", &[]);
-    png
-}
-
-fn append_png_chunk(output: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
-    output.extend_from_slice(&(data.len() as u32).to_be_bytes());
-    output.extend_from_slice(kind);
-    output.extend_from_slice(data);
-    let mut checksum = Vec::with_capacity(4 + data.len());
-    checksum.extend_from_slice(kind);
-    checksum.extend_from_slice(data);
-    output.extend_from_slice(&crc32(&checksum).to_be_bytes());
-}
-
-fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc = 0xffff_ffff_u32;
-    for byte in bytes {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            let mask = 0_u32.wrapping_sub(crc & 1);
-            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
-        }
-    }
-    !crc
-}
-
-fn adler32(bytes: &[u8]) -> u32 {
-    const MODULUS: u32 = 65_521;
-    let mut a = 1_u32;
-    let mut b = 0_u32;
-    for byte in bytes {
-        a = (a + u32::from(*byte)) % MODULUS;
-        b = (b + a) % MODULUS;
-    }
-    (b << 16) | a
+    Cursor::new(crate::png_encoder::encode_rgba_png(
+        raster.width,
+        raster.height,
+        &raster.pixels,
+    ))
 }
 
 #[cfg(test)]

@@ -548,6 +548,9 @@ async fn run_serve() -> ExitCode {
         rebuilt_tables = database_initialization.rebuilt_tables,
         "Rust database schema initialization and integrity check complete"
     );
+    // Repositories open a connection per call; keep idle connections to the
+    // live database for reuse for the life of the process.
+    let _connection_reuse = cama_db::RuntimeConnectionReuse::enable(&config.db_path);
 
     // Freeze hosting admission when a shuffle/draft creates its pending row.
     // Existing sessions recover separately; historical pending rows stay manual.

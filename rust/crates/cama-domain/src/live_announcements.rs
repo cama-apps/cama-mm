@@ -687,20 +687,6 @@ pub fn announcements(
     lines_with_memory(previous, current, &mut AnnouncementMemory::default())
 }
 
-#[must_use]
-pub fn announcement_message(
-    previous: Option<&LiveAnnouncementFrame>,
-    current: &LiveAnnouncementFrame,
-    delay_seconds: Option<i64>,
-) -> Option<String> {
-    announcement_message_with_memory(
-        previous,
-        current,
-        delay_seconds,
-        &mut AnnouncementMemory::default(),
-    )
-}
-
 /// Casual, deterministic commentary from measured changes. No LLM, invented
 /// fight grouping or guessed net worth. The caller persists memory with outbox.
 #[must_use]
@@ -782,7 +768,8 @@ mod tests {
             .collect();
     }
     fn text(a: &LiveAnnouncementFrame, b: &LiveAnnouncementFrame) -> String {
-        announcement_message(Some(a), b, Some(0)).unwrap()
+        announcement_message_with_memory(Some(a), b, Some(0), &mut AnnouncementMemory::default())
+            .unwrap()
     }
 
     #[test]
@@ -1060,14 +1047,24 @@ mod tests {
         b.dire_net_worth = Some(31_200);
         assert!(text(&a, &b).contains("Dire have flipped it — 1.2k gold ahead"));
         assert!(
-            announcement_message(Some(&a), &b, Some(120))
-                .unwrap()
-                .contains("feed 120s behind")
+            announcement_message_with_memory(
+                Some(&a),
+                &b,
+                Some(120),
+                &mut AnnouncementMemory::default()
+            )
+            .unwrap()
+            .contains("feed 120s behind")
         );
         assert!(
-            announcement_message(Some(&a), &b, None)
-                .unwrap()
-                .contains("feed delay unknown")
+            announcement_message_with_memory(
+                Some(&a),
+                &b,
+                None,
+                &mut AnnouncementMemory::default()
+            )
+            .unwrap()
+            .contains("feed delay unknown")
         );
     }
 

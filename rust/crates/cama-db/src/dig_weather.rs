@@ -386,6 +386,28 @@ impl DigWeatherRepository {
             params![guild_id, broadcast_key(game_date)],
         )? == 1)
     }
+
+    /// Retire every pending delivery for a game day other than
+    /// `current_game_date`. A forecast is only news on its own day, so a
+    /// marker that missed it is stamped `skipped` instead of being announced
+    /// late; returns how many markers were retired.
+    pub fn skip_stale_broadcasts(
+        &self,
+        current_game_date: &str,
+    ) -> Result<usize, DigWeatherRepositoryError> {
+        let connection = open_runtime_connection(&self.path)?;
+        let prefix_length = i64::try_from(DIG_WEATHER_BROADCAST_KEY_PREFIX.len())
+            .expect("broadcast key prefix length fits SQLite integer");
+        Ok(connection.execute(
+            "UPDATE app_kv SET value = 'skipped'
+             WHERE substr(key, 1, ?1) = ?2 AND key <> ?3 AND value = 'pending'",
+            params![
+                prefix_length,
+                DIG_WEATHER_BROADCAST_KEY_PREFIX,
+                broadcast_key(current_game_date)
+            ],
+        )?)
+    }
 }
 
 fn broadcast_key(game_date: &str) -> String {
@@ -717,6 +739,55 @@ mod tests {
                 game_date: TODAY.to_owned(),
             }]
         );
+    }
+
+    #[test]
+    fn stale_pending_broadcasts_are_skipped_and_never_revived() {
+        let fixture = Fixture::migrated();
+        let repository = DigWeatherRepository::new(&fixture.path);
+        for game_date in ["2033-05-15", "2033-05-16", "2033-05-17", TODAY] {
+            repository
+                .ensure_for_day_and_queue_broadcast(GUILD, game_date, NOW)
+                .expect("queue daily broadcast");
+        }
+        repository
+            .ensure_for_day_and_queue_broadcast(GUILD + 1, "2033-05-17", NOW)
+            .expect("queue other guild's stale broadcast");
+        let lookalike = Connection::open(&fixture.path).expect("open fixture");
+        lookalike
+            .execute(
+                "INSERT INTO app_kv(guild_id, key, value)
+                 VALUES (?1, 'digXweather_broadcast:2033-05-17', 'pending')",
+                params![GUILD],
+            )
+            .expect("insert lookalike namespace row");
+
+        assert_eq!(repository.skip_stale_broadcasts(TODAY).unwrap(), 4);
+        assert_eq!(
+            repository.pending_broadcasts().unwrap(),
+            vec![DigWeatherBroadcast {
+                guild_id: GUILD,
+                game_date: TODAY.to_owned(),
+            }]
+        );
+        let lookalike_value: String = lookalike
+            .query_row(
+                "SELECT value FROM app_kv WHERE key = 'digXweather_broadcast:2033-05-17'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read lookalike row");
+        assert_eq!(lookalike_value, "pending");
+        assert!(
+            !repository
+                .mark_broadcast_sent(GUILD, "2033-05-16")
+                .expect("skipped marker is not pending")
+        );
+        repository
+            .ensure_for_day_and_queue_broadcast(GUILD, "2033-05-16", NOW)
+            .expect("re-read skipped forecast");
+        assert_eq!(repository.skip_stale_broadcasts(TODAY).unwrap(), 0);
+        assert_eq!(repository.pending_broadcasts().unwrap().len(), 1);
     }
 
     #[test]

@@ -5,6 +5,7 @@
 //! Every card is backed by a recorded number. Copy is chosen from the numbers
 //! and a per-player seed, so a story reads the same every time it is replayed.
 
+use cama_domain::formatting::{format_grouped, format_grouped_signed};
 use cama_domain::wrapped_activity::{
     DigYear, GambaYear, GambleKind, MafiaYear, PetYear, ServerRank,
 };
@@ -86,35 +87,10 @@ impl ChapterCard {
 /// anyone rather than show an ID or a placeholder.
 pub type NameLookup<'a> = &'a dyn Fn(i64) -> Option<String>;
 
-#[must_use]
-pub fn thousands(value: i64) -> String {
-    let digits = value.unsigned_abs().to_string();
-    let mut output = String::with_capacity(digits.len() + 4);
-    if value < 0 {
-        output.push('-');
-    }
-    for (index, digit) in digits.chars().enumerate() {
-        if index != 0 && (digits.len() - index).is_multiple_of(3) {
-            output.push(',');
-        }
-        output.push(digit);
-    }
-    output
-}
-
-#[must_use]
-pub fn signed(value: i64) -> String {
-    if value > 0 {
-        format!("+{}", thousands(value))
-    } else {
-        thousands(value)
-    }
-}
-
 fn plural(count: i64, one: &str, many: &str) -> String {
     format!(
         "{} {}",
-        thousands(count),
+        format_grouped(count),
         if count == 1 { one } else { many }
     )
 }
@@ -199,7 +175,7 @@ pub fn months_card(match_dates: &[&str], seed: u64) -> Option<ChapterCard> {
         ],
     )
     .replace("{month}", MONTHS[peak]);
-    card.stat_value = thousands(shown[peak]);
+    card.stat_value = format_grouped(shown[peak]);
     card.stat_label = if shown[quiet] == 0 {
         format!(
             "games in {}. Then {} happened: zero games.",
@@ -319,18 +295,18 @@ pub fn gamba_cards(
         "Perfectly balanced, as all things should be."
     }
     .to_owned();
-    curve.stat_value = format!("{} JC", signed(summary.net));
+    curve.stat_value = format!("{} JC", format_grouped_signed(summary.net));
     curve.stat_label = format!("across {}", plural(summary.count, "gamble", "gambles"));
     curve.badge = rank_badge(year.rank, "Wagered more than", "bettor");
     if summary.peak > 0 && summary.net < summary.peak {
         curve.lines.push(format!(
             "Peaked at {} JC. You kept going.",
-            signed(summary.peak)
+            format_grouped_signed(summary.peak)
         ));
     } else if summary.trough < 0 && summary.net > 0 {
         curve.lines.push(format!(
             "Down {} JC at one point. Never in doubt.",
-            thousands(-summary.trough)
+            format_grouped(-summary.trough)
         ));
     }
     curve.series = summary.curve.clone();
@@ -355,19 +331,21 @@ pub fn gamba_cards(
             .push((score.to_string(), "degen score (lifetime)".to_owned()));
     }
     if summary.best > 0 {
-        report
-            .rows
-            .push((signed(summary.best), "best single gamble".to_owned()));
+        report.rows.push((
+            format_grouped_signed(summary.best),
+            "best single gamble".to_owned(),
+        ));
     }
     if summary.worst < 0 {
-        report
-            .rows
-            .push((thousands(summary.worst), "worst single gamble".to_owned()));
+        report.rows.push((
+            format_grouped(summary.worst),
+            "worst single gamble".to_owned(),
+        ));
     }
     if year.wheel.spins > 0 {
         report
             .rows
-            .push((thousands(year.wheel.spins), "wheel spins".to_owned()));
+            .push((format_grouped(year.wheel.spins), "wheel spins".to_owned()));
     }
     if summary.max_leverage > 1 {
         report.rows.push((
@@ -377,13 +355,13 @@ pub fn gamba_cards(
     }
     if summary.double_or_nothing > 0 {
         report.rows.push((
-            thousands(summary.double_or_nothing),
+            format_grouped(summary.double_or_nothing),
             "double or nothings".to_owned(),
         ));
     }
     if bankruptcies > 0 {
         report.rows.push((
-            thousands(bankruptcies),
+            format_grouped(bankruptcies),
             if bankruptcies == 1 {
                 "bankruptcy, lifetime"
             } else {
@@ -412,7 +390,7 @@ pub fn gamba_cards(
         report.lines.push(format!(
             "Your favorite charity: {}, with {} JC in tips.",
             friend.0,
-            thousands(friend.1)
+            format_grouped(friend.1)
         ));
     }
     let mut cards = vec![curve];
@@ -427,9 +405,9 @@ pub fn gamba_cards(
 #[must_use]
 pub fn dig_headline_number(year: &DigYear) -> (String, &'static str) {
     if year.blocks_dug > 0 {
-        (thousands(year.blocks_dug), "blocks dug")
+        (format_grouped(year.blocks_dug), "blocks dug")
     } else {
-        (thousands(year.digs), "digs")
+        (format_grouped(year.digs), "digs")
     }
 }
 
@@ -475,9 +453,9 @@ pub fn dig_cards(
         match context.deepest_layer {
             Some(layer) => format!(
                 "blocks down. Deepest: {} in {layer}.",
-                thousands(year.deepest)
+                format_grouped(year.deepest)
             ),
-            None => format!("blocks down. Deepest: {}.", thousands(year.deepest)),
+            None => format!("blocks down. Deepest: {}.", format_grouped(year.deepest)),
         }
     } else {
         "digs".to_owned()
@@ -500,7 +478,7 @@ pub fn dig_cards(
             1 => format!("Unearthed {found}, one before anyone else."),
             first => format!(
                 "Unearthed {found}, {} of them before anyone else.",
-                thousands(first)
+                format_grouped(first)
             ),
         });
     } else if let Some((day, digs)) = &year.busiest_day
@@ -540,8 +518,8 @@ pub fn dig_cards(
         } else {
             format!(
                 "You won {}. It won {}.",
-                thousands(boss.wins),
-                thousands(boss.losses)
+                format_grouped(boss.wins),
+                format_grouped(boss.losses)
             )
         };
         let others = year.bosses.len() - 1;
@@ -550,7 +528,7 @@ pub fn dig_cards(
             card.lines.push(format!(
                 "Plus {} more. {} boss wins all year.",
                 plural(others as i64, "boss", "bosses"),
-                thousands(won)
+                format_grouped(won)
             ));
         }
         cards.push(card);
@@ -572,10 +550,13 @@ pub fn dig_cards(
             None if year.sabotages_sent == 0 => "You never threw the first rock.".to_owned(),
             None => "You made enemies underground.".to_owned(),
         };
-        card.stat_value = thousands(year.sabotages_sent);
+        card.stat_value = format_grouped(year.sabotages_sent);
         card.stat_label = match &target {
             Some((name, count)) => {
-                format!("sabotages sent, {} of them at {name}", thousands(*count))
+                format!(
+                    "sabotages sent, {} of them at {name}",
+                    format_grouped(*count)
+                )
             }
             None => "sabotages sent".to_owned(),
         };
@@ -649,17 +630,17 @@ pub fn pet_cards(year: &PetYear, names: NameLookup<'_>, seed: u64) -> Vec<Chapte
     };
     pet.badge = rank_badge(year.rank, "Fed more than", "pet parent");
     if year.jc_spent > 0 && pet.badge.is_empty() {
-        pet.badge = format!("{} JC on pet care", thousands(year.jc_spent));
+        pet.badge = format!("{} JC on pet care", format_grouped(year.jc_spent));
     } else if year.jc_spent > 0 {
         pet.lines
-            .push(format!("{} JC on pet care.", thousands(year.jc_spent)));
+            .push(format!("{} JC on pet care.", format_grouped(year.jc_spent)));
     }
     let brawls = year.brawl_wins + year.brawl_losses + year.brawl_draws;
     if brawls > 0 {
         let mut line = format!(
             "Brawls: {} won, {} lost",
-            thousands(year.brawl_wins),
-            thousands(year.brawl_losses)
+            format_grouped(year.brawl_wins),
+            format_grouped(year.brawl_losses)
         );
         if let Some(rival) = year
             .brawl_rival
@@ -697,7 +678,7 @@ pub fn pet_cards(year: &PetYear, names: NameLookup<'_>, seed: u64) -> Vec<Chapte
             ],
         )
         .to_owned();
-        grave.stat_value = thousands(losses.len() as i64);
+        grave.stat_value = format_grouped(losses.len() as i64);
         grave.stat_label = if losses.len() == 1 {
             "pet lost this year".to_owned()
         } else {
@@ -747,8 +728,8 @@ pub fn mafia_cards(year: &MafiaYear, names: NameLookup<'_>, seed: u64) -> Vec<Ch
     }
     .to_owned();
     let mut tiles = vec![
-        (thousands(year.games), "games played".to_owned()),
-        (thousands(year.wins), "on the winning side".to_owned()),
+        (format_grouped(year.games), "games played".to_owned()),
+        (format_grouped(year.wins), "on the winning side".to_owned()),
     ];
     for (count, label) in [
         (year.mafia_games, "times Mafia"),
@@ -759,7 +740,7 @@ pub fn mafia_cards(year: &MafiaYear, names: NameLookup<'_>, seed: u64) -> Vec<Ch
         (year.jester_wins, "jester wins"),
     ] {
         if count > 0 {
-            tiles.push((thousands(count), label.to_owned()));
+            tiles.push((format_grouped(count), label.to_owned()));
         }
     }
     tiles.truncate(6);
@@ -790,7 +771,7 @@ pub fn mafia_cards(year: &MafiaYear, names: NameLookup<'_>, seed: u64) -> Vec<Ch
             "Nothing personal",
         );
         victim.headline = format!("{name} should sleep with one eye open.");
-        victim.stat_value = thousands(count);
+        victim.stat_value = format_grouped(count);
         victim.stat_label = "times you came for them at night".to_owned();
         cards.push(victim);
     } else if let Some((name, count)) = year
@@ -805,7 +786,7 @@ pub fn mafia_cards(year: &MafiaYear, names: NameLookup<'_>, seed: u64) -> Vec<Ch
             "Trust issues",
         );
         accuser.headline = format!("{name} never trusted you.");
-        accuser.stat_value = thousands(count);
+        accuser.stat_value = format_grouped(count);
         accuser.stat_label = "votes against you".to_owned();
         if year.mafia_games > 0 {
             accuser

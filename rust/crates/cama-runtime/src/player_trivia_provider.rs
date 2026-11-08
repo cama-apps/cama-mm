@@ -212,8 +212,8 @@ impl InteractionHandler for PlayerTriviaInteractionHandler {
 impl PlayerTriviaRuntimeState {
     async fn render_player_name(&self, user_id: i64, guild_id: i64) -> String {
         self.player_names
-            .names_for_guild(guild_id, &[user_id])
-            .unwrap_or_default()
+            .resolve_names(guild_id, &[user_id])
+            .await
             .resolve(user_id)
     }
 
@@ -351,6 +351,38 @@ impl PlayerTriviaRuntimeState {
                 None
             });
         let service = Arc::clone(&self.service);
+        let roster_members = member_ids.clone();
+        let roster = tokio::task::spawn_blocking(move || {
+            service
+                .eligible_player_ids(guild_id, roster_members.as_ref())
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| format!("player-trivia roster task failed: {error}"))?;
+        // Questions store their player names, so resolve them live (fetching
+        // members the gateway cache misses) before the set is generated.
+        let names = match roster {
+            Ok(player_ids) => {
+                let directory = self.player_names.resolve_names(guild_id, &player_ids).await;
+                player_ids
+                    .iter()
+                    .filter_map(|player_id| {
+                        directory
+                            .cached_name(*player_id)
+                            .map(|name| (*player_id, name))
+                    })
+                    .collect::<app::PlayerLabels>()
+            }
+            Err(error) => {
+                warn!(guild_id, %error, "failed to load the player-trivia roster");
+                return followup_ephemeral(
+                    &responder,
+                    "❌ Couldn't build today's player-trivia set right now — try again in a moment.",
+                )
+                .await;
+            }
+        };
+        let service = Arc::clone(&self.service);
         let count = self.config.question_count;
         let include_spicy = self.config.include_spicy;
         let recent_days = self.config.recent_days;
@@ -360,6 +392,7 @@ impl PlayerTriviaRuntimeState {
                     user_id,
                     guild_id,
                     member_ids.as_ref(),
+                    &names,
                     count,
                     include_spicy,
                     recent_days,

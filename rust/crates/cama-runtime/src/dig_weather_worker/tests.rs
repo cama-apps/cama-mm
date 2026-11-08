@@ -710,3 +710,87 @@ async fn pre_cancelled_worker_never_reads_clock_or_sqlite() {
         .expect("clean pre-start cancellation");
     assert_eq!(clock.0.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn stale_days_are_retired_so_a_new_channel_gets_only_todays_weather() {
+    let fixture = Fixture::migrated();
+    let stale_days = ["2033-05-15", "2033-05-16", "2033-05-17"];
+    {
+        let connection = Connection::open(&fixture.path).expect("open fixture");
+        for game_date in stale_days.into_iter().chain([TODAY]) {
+            connection
+                .execute(
+                    "INSERT INTO app_kv(guild_id, key, value) VALUES (1, ?1, 'pending')",
+                    [format!(
+                        "{}{game_date}",
+                        cama_db::dig_weather::DIG_WEATHER_BROADCAST_KEY_PREFIX
+                    )],
+                )
+                .expect("seed pending broadcast for a channel-less guild");
+        }
+    }
+
+    let channelless_discord = Arc::new(FakeDiscord::default());
+    let channelless = test_worker(
+        &fixture.path,
+        vec![1],
+        BTreeMap::new(),
+        channelless_discord.clone(),
+        Arc::new(SequenceClock::new([TODAY])),
+        Duration::from_secs(600),
+    );
+    let (_shutdown, mut context) = worker_context();
+    let mut last_weather_date = TODAY.to_owned();
+    channelless
+        .poll_once(&mut last_weather_date, &mut context)
+        .await
+        .expect("channel-less wake");
+    assert!(
+        channelless_discord
+            .sends
+            .lock()
+            .expect("send lock")
+            .is_empty()
+    );
+    assert_eq!(
+        fixture.weather_count(1, TODAY),
+        0,
+        "no forecast write happens before a channel exists"
+    );
+    assert_eq!(
+        fixture.repository().pending_broadcasts().unwrap(),
+        vec![DigWeatherBroadcast {
+            guild_id: 1,
+            game_date: TODAY.to_owned(),
+        }]
+    );
+
+    let discord = Arc::new(FakeDiscord::default());
+    let worker = test_worker(
+        &fixture.path,
+        vec![1],
+        BTreeMap::from([(1, 601)]),
+        discord.clone(),
+        Arc::new(SequenceClock::new([TODAY])),
+        Duration::from_secs(600),
+    );
+    worker
+        .poll_once(&mut last_weather_date, &mut context)
+        .await
+        .expect("wake after a channel appears");
+
+    let sends = discord.sends.lock().expect("send lock").clone();
+    assert_eq!(sends.len(), 1, "exactly one announcement, not a backlog");
+    assert_eq!(sends[0].0, 601);
+    assert!(sends[0].1.iter().all(|entry| entry.game_date == TODAY));
+    for game_date in stale_days {
+        assert_eq!(fixture.weather_count(1, game_date), 0);
+    }
+    assert!(
+        fixture
+            .repository()
+            .pending_broadcasts()
+            .unwrap()
+            .is_empty()
+    );
+}

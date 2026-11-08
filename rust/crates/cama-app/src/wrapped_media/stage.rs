@@ -65,14 +65,7 @@ impl Face {
         if primary.lookup_glyph_index(character) != 0 {
             return primary;
         }
-        static FALLBACK: OnceLock<Option<Font>> = OnceLock::new();
-        FALLBACK
-            .get_or_init(|| {
-                crate::font_assets::load_dejavu_font(crate::font_assets::DejaVuFace::SansBold)
-                    .ok()
-                    .and_then(|bytes| Font::from_bytes(bytes, FontSettings::default()).ok())
-            })
-            .as_ref()
+        crate::font_assets::dejavu_font(crate::font_assets::DejaVuFace::SansBold)
             .filter(|font| font.lookup_glyph_index(character) != 0)
             .unwrap_or(primary)
     }
@@ -191,25 +184,13 @@ pub(super) fn count_up(value: &str, progress: f32) -> String {
             Ok(number) => {
                 let current = (number as f64 * f64::from(progress.max(0.0))) as i64;
                 if run.contains(',') || digits.len() >= 4 {
-                    output.push_str(&thousands(current));
+                    output.push_str(&cama_domain::formatting::format_grouped(current));
                 } else {
                     output.push_str(&current.to_string());
                 }
             }
             Err(_) => output.push_str(&run),
         }
-    }
-    output
-}
-
-fn thousands(value: i64) -> String {
-    let digits = value.to_string();
-    let mut output = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, digit) in digits.chars().enumerate() {
-        if index != 0 && (digits.len() - index).is_multiple_of(3) {
-            output.push(',');
-        }
-        output.push(digit);
     }
     output
 }

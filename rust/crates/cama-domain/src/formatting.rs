@@ -51,32 +51,6 @@ pub struct BettingDisplayOptions {
     pub seed_bonus: i64,
 }
 
-/// Rank-band information for the two-tier rich-spectator wager policy.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SpectatorAutobetTiers {
-    /// Number of eligible rich spectators.
-    pub total_count: i64,
-    /// Number of top-ranked spectators using `top_percentage`.
-    pub top_count: i64,
-    /// Net-worth fraction wagered by top-ranked spectators.
-    pub top_percentage: f64,
-}
-
-/// Typed input for a rich-spectator auto-wager summary.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SpectatorAutobetSummaryInput {
-    /// Number of spectator wagers created.
-    pub created: i64,
-    /// Net-worth fraction wagered by the secondary or legacy tier.
-    pub percentage: f64,
-    /// Total Jopacoin wagered on Radiant.
-    pub total_radiant: i64,
-    /// Total Jopacoin wagered on Dire.
-    pub total_dire: i64,
-    /// Two-tier rank bands, or `None` for the legacy single-tier copy.
-    pub tiers: Option<SpectatorAutobetTiers>,
-}
-
 /// Escape Discord markdown characters and neutralize user-controlled mentions.
 #[must_use]
 pub fn escape_discord_text(value: &str) -> String {
@@ -212,41 +186,6 @@ pub fn format_betting_display(
     }
 }
 
-/// Format the compact shuffle or draft summary for rich spectator auto-wagers.
-#[must_use]
-pub fn format_spectator_autobet_summary(input: &SpectatorAutobetSummaryInput) -> String {
-    let secondary_percentage = format_python_general(input.percentage * 100.0);
-    let headline = if let Some(tiers) = input.tiers {
-        let top_percentage = format_python_general(tiers.top_percentage * 100.0);
-        let mut rank_bands = Vec::with_capacity(2);
-        if tiers.top_count > 0 {
-            rank_bands.push(format!("ranks 1–{} at {top_percentage}%", tiers.top_count));
-        }
-        if tiers.total_count > tiers.top_count {
-            rank_bands.push(format!(
-                "ranks {}–{} at {secondary_percentage}%",
-                tiers.top_count + 1,
-                tiers.total_count
-            ));
-        }
-        format!(
-            "**Rich spectator auto-wagers:** {} spectators ({})",
-            input.created,
-            rank_bands.join("; ")
-        )
-    } else {
-        format!(
-            "**Rich spectator auto-wagers:** {} spectators wagered {secondary_percentage}% of net worth",
-            input.created
-        )
-    };
-
-    format!(
-        "{headline}\n🟢 Radiant: {} {JOPACOIN_EMOTE} | 🔴 Dire: {} {JOPACOIN_EMOTE}",
-        input.total_radiant, input.total_dire
-    )
-}
-
 /// Format a duration as a concise string such as `1m`, `2h`, or `1d`.
 #[must_use]
 pub fn format_duration_short(seconds: f64) -> String {
@@ -325,57 +264,6 @@ fn format_pool_multiplier(multiplier: Option<f64>) -> String {
         .map_or_else(|| "(—)".to_owned(), |value| format!("({value:.2}x)"))
 }
 
-/// Match Python's default `:g` formatting for spectator percentages: six
-/// significant digits, trailing fractional zeroes removed, and scientific
-/// notation outside the `-4..6` exponent range.
-fn format_python_general(value: f64) -> String {
-    if value.is_nan() {
-        return "nan".to_owned();
-    }
-    if value == f64::INFINITY {
-        return "inf".to_owned();
-    }
-    if value == f64::NEG_INFINITY {
-        return "-inf".to_owned();
-    }
-    if value == 0.0 {
-        return if value.is_sign_negative() {
-            "-0".to_owned()
-        } else {
-            "0".to_owned()
-        };
-    }
-
-    const SIGNIFICANT_DIGITS: usize = 6;
-    let scientific = format!("{value:.5e}");
-    let (mantissa, exponent) = scientific
-        .split_once('e')
-        .expect("Rust scientific float formatting includes an exponent");
-    let exponent = exponent
-        .parse::<i32>()
-        .expect("Rust emits a numeric scientific exponent");
-
-    if !(-4..SIGNIFICANT_DIGITS as i32).contains(&exponent) {
-        let mantissa = trim_fractional_zeroes(mantissa.to_owned());
-        return format!("{mantissa}e{exponent:+03}");
-    }
-
-    let fractional_digits = (SIGNIFICANT_DIGITS as i32 - exponent - 1).max(0) as usize;
-    trim_fractional_zeroes(format!("{value:.fractional_digits$}"))
-}
-
-fn trim_fractional_zeroes(mut value: String) -> String {
-    if value.contains('.') {
-        while value.ends_with('0') {
-            value.pop();
-        }
-        if value.ends_with('.') {
-            value.pop();
-        }
-    }
-    value
-}
-
 /// CPython `round(value, ndigits)`: correctly-rounded decimal rounding of the
 /// exact binary value (ties to even). Multiplying by `10^n` and calling
 /// `round_ties_even` introduces an intermediate binary rounding that
@@ -393,10 +281,8 @@ pub fn python_round_decimals(value: f64, decimals: usize) -> f64 {
 mod tests {
     use super::{
         BettingDisplayOptions, JOPACOIN_EMOTE, PoolOddsSeeds, ROLE_EMOJIS, ROLE_NAMES,
-        SpectatorAutobetSummaryInput, SpectatorAutobetTiers, calculate_pool_odds,
-        format_betting_display, format_grouped, format_grouped_signed, format_grouped_unsigned,
-        format_role_display, format_spectator_autobet_summary, python_round_decimals,
-        truncate_utf8_bytes,
+        calculate_pool_odds, format_betting_display, format_grouped, format_grouped_signed,
+        format_grouped_unsigned, format_role_display, python_round_decimals, truncate_utf8_bytes,
     };
 
     #[test]
@@ -642,47 +528,6 @@ mod tests {
             )
         );
         assert!(!field_value.contains("<t:"));
-    }
-
-    #[test]
-    fn test_format_spectator_autobet_summary_shows_both_compact_tiers() {
-        let summary = format_spectator_autobet_summary(&SpectatorAutobetSummaryInput {
-            created: 10,
-            percentage: 0.01,
-            total_radiant: 48,
-            total_dire: 47,
-            tiers: Some(SpectatorAutobetTiers {
-                total_count: 10,
-                top_count: 5,
-                top_percentage: 0.02,
-            }),
-        });
-
-        assert_eq!(
-            summary,
-            format!(
-                "**Rich spectator auto-wagers:** 10 spectators (ranks 1–5 at 2%; ranks 6–10 at 1%)\n🟢 Radiant: 48 {JOPACOIN_EMOTE} | 🔴 Dire: 47 {JOPACOIN_EMOTE}"
-            )
-        );
-    }
-
-    #[test]
-    fn test_format_spectator_autobet_summary_preserves_legacy_pending_draft_copy() {
-        let summary = format_spectator_autobet_summary(&SpectatorAutobetSummaryInput {
-            created: 5,
-            percentage: 0.01,
-            total_radiant: 8,
-            total_dire: 7,
-            tiers: None,
-        });
-
-        assert_eq!(
-            summary,
-            format!(
-                "**Rich spectator auto-wagers:** 5 spectators wagered 1% of net worth\n🟢 Radiant: 8 {JOPACOIN_EMOTE} | 🔴 Dire: 7 {JOPACOIN_EMOTE}"
-            )
-        );
-        assert!(!summary.contains("top 0"));
     }
 
     #[test]

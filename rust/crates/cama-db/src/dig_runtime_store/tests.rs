@@ -412,7 +412,7 @@ fn slow_drip_claim_cas_and_insert_race_semantics() {
 }
 
 #[test]
-fn pending_delivery_scan_searches_the_guild_type_index() {
+fn pending_delivery_scan_searches_the_pending_delivery_index() {
     let database = fixture();
     let connection = open(&database);
     let mut statement = connection
@@ -434,14 +434,77 @@ fn pending_delivery_scan_searches_the_guild_type_index() {
         .expect("query plan text")
         .join("\n");
     assert!(
-        plan.contains("USING INDEX idx_dig_actions_guild_type_created_actor"),
-        "READY recovery must not scan the whole dig_actions table: {plan}"
+        plan.contains("USING INDEX idx_dig_actions_pending_delivery"),
+        "READY recovery and /dig go must only visit undelivered rows: {plan}"
     );
     assert!(!plan.contains("SCAN dig_actions"), "{plan}");
     assert!(
         !plan.contains("TEMP B-TREE FOR ORDER BY"),
         "the index must serve the scan order so LIMIT stops early instead of \
          sorting every dig row of the guild: {plan}"
+    );
+}
+
+#[test]
+fn delivery_scan_cost_does_not_grow_with_delivered_history() {
+    let delivered = r#"{"delivery":{"blood_pact":"Skipped","render":{"kind":"Normal"},"main_delivered_at":1700000001,"event_delivered_at":null}}"#;
+    let pending = r#"{"delivery":{"blood_pact":"Skipped","render":{"kind":"Normal"},"main_delivered_at":null,"event_delivered_at":null}}"#;
+    let scan_steps = |delivered_rows: i64| {
+        let database = fixture();
+        let connection = open(&database);
+        for index in 0..delivered_rows {
+            insert_dig_action(
+                &connection,
+                GUILD,
+                USER,
+                None,
+                "dig",
+                index,
+                index + 1,
+                1,
+                delivered,
+                1_700_000_000 + index,
+            )
+            .expect("delivered row");
+        }
+        insert_dig_action(
+            &connection,
+            GUILD,
+            USER,
+            None,
+            "dig",
+            0,
+            1,
+            1,
+            pending,
+            1_800_000_000,
+        )
+        .expect("pending row");
+        let mut statement = connection
+            .prepare(PENDING_DIG_DELIVERY_SQL)
+            .expect("prepare scan");
+        let rows = statement
+            .query_map(
+                params![
+                    GUILD,
+                    Some(USER),
+                    Option::<i64>::None,
+                    Option::<i64>::None,
+                    10_i64
+                ],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .expect("scan")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("scan rows");
+        assert_eq!(rows, vec![Some(pending.to_owned())]);
+        statement.get_status(rusqlite::StatementStatus::VmStep)
+    };
+    let without_history = scan_steps(0);
+    let with_history = scan_steps(500);
+    assert_eq!(
+        with_history, without_history,
+        "delivered rows must not be visited or JSON-parsed by the pending scan"
     );
 }
 

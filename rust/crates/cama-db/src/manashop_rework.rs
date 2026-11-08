@@ -324,7 +324,7 @@ impl ManashopRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.path)
     }
 
@@ -872,7 +872,7 @@ impl ManashopRepository {
         &self,
         request: GrantBuffRequest<'_>,
     ) -> Result<i64, ManashopRepositoryError> {
-        grant_buff_in(&self.connection()?, request)
+        grant_buff_in(&*self.connection()?, request)
     }
 
     pub fn refresh_buff_atomic(

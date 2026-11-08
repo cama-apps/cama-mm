@@ -9,10 +9,11 @@
 use std::path::{Path, PathBuf};
 
 use cama_domain::rating::cap_glicko_rd;
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use chrono::{DateTime, Utc};
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use thiserror::Error;
 
-use crate::open_runtime_connection;
+use crate::{open_runtime_connection, steam_identity};
 
 pub const STEAM_ACCOUNT_ID_UPPER_BOUND: i64 = 1_i64 << 32;
 
@@ -77,6 +78,8 @@ pub enum RegistrationRepositoryError {
     SteamAlreadyOwned { steam_id: i64, owner_id: i64 },
     #[error("invalid Steam32 account ID {0}")]
     InvalidSteamId(i64),
+    #[error("invalid persisted MMR prompt {nonce}: {value}")]
+    InvalidMmrPrompt { nonce: u64, value: String },
 }
 
 #[derive(Clone, Debug)]
@@ -100,7 +103,7 @@ impl RegistrationRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.path)
     }
 
@@ -170,7 +173,7 @@ impl RegistrationRepository {
                 guild_id,
             });
         }
-        if let Some(owner_id) = steam_owner(&transaction, request.steam_id)?
+        if let Some(owner_id) = steam_identity::steam_id_owner(&transaction, request.steam_id)?
             && owner_id != request.discord_id
         {
             return Err(RegistrationRepositoryError::SteamAlreadyOwned {
@@ -243,24 +246,7 @@ impl RegistrationRepository {
 
     pub fn steam_owner(&self, steam_id: i64) -> Result<Option<i64>, RegistrationRepositoryError> {
         let connection = self.connection()?;
-        steam_owner(&connection, steam_id).map_err(Into::into)
-    }
-
-    pub fn primary_steam_id(
-        &self,
-        discord_id: i64,
-    ) -> Result<Option<i64>, RegistrationRepositoryError> {
-        let connection = self.connection()?;
-        connection
-            .query_row(
-                "SELECT steam_id FROM player_steam_ids
-                 WHERE discord_id = ?1 AND is_primary = 1
-                 ORDER BY added_at, id LIMIT 1",
-                [discord_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(Into::into)
+        steam_identity::steam_id_owner(&connection, steam_id).map_err(Into::into)
     }
 
     pub fn player_exists(
@@ -382,20 +368,46 @@ impl RegistrationRepository {
         Ok(true)
     }
 
-    /// Persist a player's general timezone preference. Returns `false` if the
-    /// player isn't registered in this guild.
+    /// Persist a player's general timezone preference. Returns `None` if the
+    /// player isn't registered in this guild, otherwise the names of the
+    /// strict curfew windows held on their current timezone until their next
+    /// local morning, so the switch can't loosen one that inherits it (see
+    /// [`crate::curfew::hold_strict_windows_for_timezone_change`]).
     pub fn set_timezone(
         &self,
         discord_id: i64,
         guild_id: Option<i64>,
         timezone: &str,
-    ) -> Result<bool, RegistrationRepositoryError> {
-        let updated = self.connection()?.execute(
+        now: DateTime<Utc>,
+    ) -> Result<Option<Vec<String>>, RegistrationRepositoryError> {
+        let guild_id = Self::normalize_guild_id(guild_id);
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(previous) = transaction
+            .query_row(
+                "SELECT timezone FROM players WHERE discord_id=?1 AND guild_id=?2",
+                params![discord_id, guild_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let held = crate::curfew::hold_strict_windows_for_timezone_change(
+            &transaction,
+            discord_id,
+            guild_id,
+            previous.as_deref(),
+            timezone,
+            now,
+        )?;
+        transaction.execute(
             "UPDATE players SET timezone=?1,updated_at=CURRENT_TIMESTAMP
              WHERE discord_id=?2 AND guild_id=?3",
-            params![timezone, discord_id, Self::normalize_guild_id(guild_id)],
+            params![timezone, discord_id, guild_id],
         )?;
-        Ok(updated == 1)
+        transaction.commit()?;
+        Ok(Some(held))
     }
 
     /// A player's general timezone setting, or `None` if unset or unregistered.
@@ -497,10 +509,9 @@ fn decode_mmr_prompt(
     guild_id: i64,
     value: &str,
 ) -> Result<MmrPromptState, RegistrationRepositoryError> {
-    let invalid = || {
-        rusqlite::Error::InvalidParameterName(format!(
-            "invalid persisted MMR prompt {nonce}: {value}"
-        ))
+    let invalid = || RegistrationRepositoryError::InvalidMmrPrompt {
+        nonce,
+        value: value.to_owned(),
     };
     let mut values = value.split(':');
     let discord_id = values
@@ -526,10 +537,10 @@ fn decode_mmr_prompt(
     let completed = match values.next() {
         Some("0") => false,
         Some("1") => true,
-        _ => return Err(invalid().into()),
+        _ => return Err(invalid()),
     };
     if values.next().is_some() {
-        return Err(invalid().into());
+        return Err(invalid());
     }
     Ok(MmrPromptState {
         nonce,
@@ -547,26 +558,6 @@ fn validate_steam_id(steam_id: i64) -> Result<(), RegistrationRepositoryError> {
         return Err(RegistrationRepositoryError::InvalidSteamId(steam_id));
     }
     Ok(())
-}
-
-fn steam_owner(connection: &Connection, steam_id: i64) -> Result<Option<i64>, rusqlite::Error> {
-    let junction = connection
-        .query_row(
-            "SELECT discord_id FROM player_steam_ids WHERE steam_id = ?1",
-            [steam_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if junction.is_some() {
-        return Ok(junction);
-    }
-    connection
-        .query_row(
-            "SELECT discord_id FROM players WHERE steam_id = ?1 UNION SELECT discord_id FROM deadlock_players WHERE steam_id = ?1 LIMIT 1",
-            [steam_id],
-            |row| row.get(0),
-        )
-        .optional()
 }
 
 // Python writes and reads this column with `json`, so both directions

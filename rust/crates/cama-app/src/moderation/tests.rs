@@ -527,13 +527,6 @@ fn assert_invalid_duration(text: &str) {
 }
 
 #[test]
-fn test_schema_creates_private_moderation_tables_and_match_kind() {
-    let service = service();
-    let contract = service.port().schema_contract().expect("contract");
-    assert!(schema_contract_complete(&contract));
-}
-
-#[test]
 fn test_low_priority_rebuild_preserves_legacy_progress() {
     let service = service();
     let state = service
@@ -933,27 +926,43 @@ fn test_list_history_kick_and_low_priority_audit_are_guild_scoped() {
         })
         .expect("kick");
     service
-        .record_low_priority_event(RecordLowPriorityEvent {
+        .port()
+        .record_event(RecordModerationEventRequest {
             discord_id: 404,
             guild_id: Some(GUILD),
             event_type: ModerationEventType::LowprioAssign,
-            wins_required: 3,
-            wins_remaining: 3,
+            source: ModerationSource::Admin,
             actor_id: Some(902),
             reason: Some("Abandon"),
+            scope: None,
+            completion: None,
+            expires_at: None,
+            matches_required: None,
+            matches_remaining: None,
+            pending_match_watermark: None,
+            wins_required: Some(3),
+            wins_remaining: Some(3),
             match_id: None,
             now: NOW,
         })
         .expect("assign");
     service
-        .record_low_priority_event(RecordLowPriorityEvent {
+        .port()
+        .record_event(RecordModerationEventRequest {
             discord_id: 404,
             guild_id: Some(GUILD),
             event_type: ModerationEventType::LowprioComplete,
-            wins_required: 3,
-            wins_remaining: 0,
+            source: ModerationSource::System,
             actor_id: None,
             reason: None,
+            scope: None,
+            completion: None,
+            expires_at: None,
+            matches_required: None,
+            matches_remaining: None,
+            pending_match_watermark: None,
+            wins_required: Some(3),
+            wins_remaining: Some(0),
             match_id: Some(77),
             now: NOW + 1,
         })

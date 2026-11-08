@@ -8,12 +8,12 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use cama_app::dotabase_sqlite::DotabaseSqliteSource;
-use cama_app::font_assets::{DejaVuFace, load_dejavu_font};
+use cama_app::font_assets::{DejaVuFace, dejavu_font};
 use cama_app::hero_lookup::{HeroImageSize, HeroLookup, hero_name, hero_short_name};
 use cama_app::pet_assets::{RasterImage, Rgba, decode_png_raster};
 use cama_app::trivia_data::{TriviaDataSource, item_icon_url};
 use cama_app::trivia_image_cache::{TriviaImageCache, production_steam_image_cache_root};
-use fontdue::{Font, FontSettings};
+use fontdue::Font;
 
 use crate::dota_live::{LiveMapFrame, LiveMapHero};
 
@@ -242,7 +242,7 @@ fn render_with_cache(frame: &LiveMapFrame, cache: &Path) -> Result<Vec<u8>, Stri
             canvas.text(935, y + 42, &net_worth_label(hero.net_worth), 10.0, MUTED);
         }
     }
-    crate::dota_spectator_png::compress(&canvas.0.encode_png())
+    Ok(canvas.0.encode_png())
 }
 
 /// OpenDota's matching map transform: world units become 128-unit cells,
@@ -879,13 +879,7 @@ impl Canvas {
 }
 
 fn font() -> Option<&'static Font> {
-    static FONT: OnceLock<Option<Font>> = OnceLock::new();
-    FONT.get_or_init(|| {
-        load_dejavu_font(DejaVuFace::Sans)
-            .ok()
-            .and_then(|bytes| Font::from_bytes(bytes, FontSettings::default()).ok())
-    })
-    .as_ref()
+    dejavu_font(DejaVuFace::Sans)
 }
 
 fn glyph(c: char) -> [u8; 7] {
@@ -988,8 +982,7 @@ mod tests {
         let bytes = render_with_cache(&frame(), cache.path()).unwrap();
         let image = decode_png_raster(&bytes).unwrap();
         assert_eq!((image.width, image.height), (WIDTH, HEIGHT));
-        // Frequent Discord edits must use compressed uploads, not the 3.5 MB
-        // stored-RGBA encoding produced by the raster helper.
+        // Frequent Discord edits must stay well under the upload limit.
         assert!(bytes.len() < 2 * 1024 * 1024);
     }
     #[test]

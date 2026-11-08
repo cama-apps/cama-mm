@@ -123,7 +123,7 @@ impl Fixture {
         }
     }
 
-    fn connection(&self) -> Connection {
+    fn connection(&self) -> crate::RuntimeConnection {
         self.repository.connection().expect("runtime connection")
     }
 

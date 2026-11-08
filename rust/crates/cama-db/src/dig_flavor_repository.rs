@@ -208,7 +208,7 @@ impl DigFlavorRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, DigFlavorRepositoryError> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, DigFlavorRepositoryError> {
         Ok(open_runtime_connection(&self.path)?)
     }
 
@@ -423,7 +423,7 @@ impl DigFlavorRepository {
         actor_id: i64,
         guild_id: i64,
     ) -> Result<Option<DigFlavorReceipt>, DigFlavorRepositoryError> {
-        load_flavor_receipt(&self.connection()?, source_action_id, actor_id, guild_id)
+        load_flavor_receipt(&*self.connection()?, source_action_id, actor_id, guild_id)
     }
 
     /// Persist a validated flavor result, its optional memory rewrite, and

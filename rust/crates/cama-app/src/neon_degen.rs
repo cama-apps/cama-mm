@@ -7,14 +7,14 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use cama_domain::openskill::CamaOpenSkillSystem;
-use fontdue::{Font, FontSettings};
+use fontdue::Font;
 use gif::{Encoder, Frame, Repeat};
 
 use crate::dig_neon::{BigWinFlavor, BigWinSource};
-use crate::font_assets::{DejaVuFace, load_dejavu_font};
+use crate::font_assets::{DejaVuFace, dejavu_font};
 use crate::jopat_match_routing::{
     ContractGifRenderer, POST_MATCH_GIF_CHANCE, PostMatchGifPort, post_match_gif_theme,
 };
@@ -838,19 +838,11 @@ impl NeonCanvas {
 }
 
 fn neon_font(bold: bool) -> Option<&'static Font> {
-    static REGULAR: OnceLock<Option<Font>> = OnceLock::new();
-    static BOLD: OnceLock<Option<Font>> = OnceLock::new();
-    let slot = if bold { &BOLD } else { &REGULAR };
-    slot.get_or_init(|| {
-        load_dejavu_font(if bold {
-            DejaVuFace::SansMonoBold
-        } else {
-            DejaVuFace::SansMono
-        })
-        .ok()
-        .and_then(|bytes| Font::from_bytes(bytes, FontSettings::default()).ok())
+    dejavu_font(if bold {
+        DejaVuFace::SansMonoBold
+    } else {
+        DejaVuFace::SansMono
     })
-    .as_ref()
 }
 
 fn neon_text_width(text: &str, pixel_size: f32, font: &Font) -> f32 {
