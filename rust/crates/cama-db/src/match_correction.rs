@@ -127,17 +127,6 @@ pub struct RatingCorrection {
     pub streak_multiplier: Option<f64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct OpenSkillReplayUpdate {
-    pub match_id: i64,
-    pub discord_id: i64,
-    pub mu: f64,
-    pub sigma: f64,
-    pub streak_length: i64,
-    pub streak_multiplier: f64,
-    pub is_live_rating: bool,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OpenSkillReplaySummary {
     pub matches_processed: usize,
@@ -787,25 +776,6 @@ impl MatchCorrectionRepository {
              WHERE match_id=?1 AND owner_token=?2",
             params![match_id, owner_token],
         )? == 1;
-        transaction.commit()?;
-        Ok(changed)
-    }
-
-    /// Release every process-local correction lease during single-process
-    /// startup recovery. The durable `pending`/`core_applied` state and replay
-    /// jobs remain untouched; only an owner token from the dead process is
-    /// cleared. Production calls this on the first READY recovery pass after
-    /// acquiring the process lock, so no live correction can be displaced.
-    pub fn release_match_correction_leases_for_startup(
-        &self,
-    ) -> Result<usize, MatchCorrectionError> {
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let changed = transaction.execute(
-            "UPDATE match_correction_claims SET owner_token=NULL,claimed_at=0
-             WHERE owner_token IS NOT NULL",
-            [],
-        )?;
         transaction.commit()?;
         Ok(changed)
     }
@@ -1732,95 +1702,6 @@ impl MatchCorrectionRepository {
         )? == 1;
         transaction.commit()?;
         Ok(changed)
-    }
-
-    /// Persist a replay result and clear its durable job in the same writer
-    /// transaction. Chronological replay computation is supplied by the
-    /// coordinator; this boundary prevents a cleared job from disagreeing
-    /// with history/live ratings after a crash.
-    pub fn apply_openskill_replay_atomic(
-        &self,
-        guild_id: Option<i64>,
-        updates: &[OpenSkillReplayUpdate],
-        algorithm_version: i64,
-        algorithm_fingerprint: &str,
-    ) -> Result<(), MatchCorrectionError> {
-        if updates.is_empty() {
-            return Err(MatchCorrectionError::Invariant(
-                "an OpenSkill replay requires persisted updates",
-            ));
-        }
-        let guild_id = Self::normalize_guild_id(guild_id);
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let pending = transaction
-            .query_row(
-                "SELECT 1 FROM openskill_replay_jobs WHERE guild_id=?1",
-                [guild_id],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
-        if !pending {
-            return Err(MatchCorrectionError::Invariant(
-                "OpenSkill replay has no durable pending job",
-            ));
-        }
-        for update in updates {
-            transaction.execute(
-                "UPDATE rating_history
-                 SET os_mu_after=?1,os_sigma_after=?2,streak_length=?3,
-                     streak_multiplier=?4,os_algorithm_version=?5,
-                     os_algorithm_fingerprint=?6
-                 WHERE match_id=?7 AND discord_id=?8 AND guild_id=?9",
-                params![
-                    update.mu,
-                    update.sigma,
-                    update.streak_length,
-                    update.streak_multiplier,
-                    algorithm_version,
-                    algorithm_fingerprint,
-                    update.match_id,
-                    update.discord_id,
-                    guild_id
-                ],
-            )?;
-            if update.is_live_rating {
-                transaction.execute(
-                    "UPDATE players
-                     SET os_mu=?1,os_sigma=?2,os_rating_version=?3,
-                         os_algorithm_fingerprint=?4,updated_at=CURRENT_TIMESTAMP
-                     WHERE discord_id=?5 AND guild_id=?6",
-                    params![
-                        update.mu,
-                        update.sigma,
-                        algorithm_version,
-                        algorithm_fingerprint,
-                        update.discord_id,
-                        guild_id
-                    ],
-                )?;
-            }
-        }
-        transaction.execute(
-            "INSERT INTO openskill_rating_revisions(guild_id,revision,updated_at)
-             VALUES (?1,1,CURRENT_TIMESTAMP)
-             ON CONFLICT(guild_id) DO UPDATE SET
-                 revision=openskill_rating_revisions.revision+1,
-                 updated_at=CURRENT_TIMESTAMP",
-            [guild_id],
-        )?;
-        let cleared = transaction.execute(
-            "DELETE FROM openskill_replay_jobs WHERE guild_id=?1",
-            [guild_id],
-        )?;
-        if cleared != 1 {
-            return Err(MatchCorrectionError::Invariant(
-                "OpenSkill replay job changed before commit",
-            ));
-        }
-        transaction.commit()?;
-        Ok(())
     }
 
     pub fn current_winner(

@@ -177,16 +177,6 @@ fn split_by_farm(
     }
 }
 
-/// Pull creep score at [`FARM_PRIORITY_MINUTE`] out of OpenDota's `lh_t`
-/// series.
-///
-/// A series that ends before ten minutes means the game was shorter than the
-/// sample point, so there is no farm-priority reading to take.
-#[must_use]
-pub fn last_hits_at_ten(last_hits_series: &[i64]) -> Option<i64> {
-    last_hits_series.get(FARM_PRIORITY_MINUTE).copied()
-}
-
 #[cfg(test)]
 #[path = "role_derivation/tests.rs"]
 mod tests;
