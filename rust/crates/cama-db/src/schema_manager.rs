@@ -21,7 +21,6 @@ use cama_domain::rating::{
     CamaRatingSystem, LEGACY_STREAK_MULTIPLIER_PER_GAME, LEGACY_STREAK_THRESHOLD,
     NEW_PLAYER_MMR_DISCOUNT, STREAK_MULTIPLIER_PER_GAME, STREAK_THRESHOLD,
 };
-use cama_domain::wrapped_distinct::tracked_item_counts;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::{Connection, ErrorCode, OpenFlags, Transaction, TransactionBehavior, params};
 use serde_json::{Map as JsonMap, Value as JsonValue};
@@ -2106,19 +2105,7 @@ fn backfill_wrapped_enrichment(transaction: &Transaction<'_>) -> Result<(), rusq
                         .and_then(JsonValue::as_i64)
                         .is_some_and(|account_id| ids.contains(&account_id))
                 });
-            let purchase_keys = player
-                .and_then(|fields| fields.get("purchase_log"))
-                .and_then(JsonValue::as_array)
-                .map(|purchases| {
-                    purchases
-                        .iter()
-                        .filter_map(|item| item.get("key").and_then(JsonValue::as_str))
-                        .collect::<Vec<_>>()
-                });
-            let item_counts = purchase_keys
-                .map(tracked_item_counts)
-                .map(|counts| serde_json::to_string(&counts))
-                .transpose()
+            let item_counts = crate::json_numeric::wrapped_item_counts_json(player)
                 .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
             let rapier_count = player
                 .and_then(|fields| fields.get("purchase_log"))

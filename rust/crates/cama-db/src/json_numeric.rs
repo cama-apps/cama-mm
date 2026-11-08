@@ -8,6 +8,26 @@
 
 use serde_json::Value;
 
+/// `wrapped_enrichment_facts.item_counts` for one OpenDota player object:
+/// a JSON object of tracked-item purchase counts, or `None` (SQL NULL) when
+/// the player has no `purchase_log`. Shared by every writer of the facts table.
+pub fn wrapped_item_counts_json(
+    player: Option<&serde_json::Map<String, Value>>,
+) -> Result<Option<String>, serde_json::Error> {
+    let Some(purchases) = player
+        .and_then(|fields| fields.get("purchase_log"))
+        .and_then(Value::as_array)
+    else {
+        return Ok(None);
+    };
+    let counts = cama_domain::wrapped_distinct::tracked_item_counts(
+        purchases
+            .iter()
+            .filter_map(|purchase| purchase.get("key").and_then(Value::as_str)),
+    );
+    serde_json::to_string(&counts).map(Some)
+}
+
 /// Apply Python's useful `int(value)` semantics while staying inside `i64`.
 ///
 /// Values outside SQLite's signed-integer range are rejected instead of being

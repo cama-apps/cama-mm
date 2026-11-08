@@ -625,11 +625,14 @@ fn refresh_wrapped_enrichment_facts(
                 .and_then(|count| i64::try_from(count).ok())
                 .unwrap_or_default();
 
+            let item_counts = crate::json_numeric::wrapped_item_counts_json(player)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
             transaction.execute(
                 "INSERT INTO wrapped_enrichment_facts (
                      guild_id,match_id,discord_id,actions_per_min,
-                     courier_kills,pings,rapier_count,lane_role,comeback,throw
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                     courier_kills,pings,rapier_count,lane_role,comeback,throw,
+                     buybacks,item_counts
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
                 params![
                     guild_id,
                     match_id,
@@ -649,6 +652,10 @@ fn refresh_wrapped_enrichment_facts(
                         .and_then(JsonValue::as_i64),
                     number_f64(match_data.get("comeback")),
                     number_f64(match_data.get("throw")),
+                    player
+                        .and_then(|fields| fields.get("buyback_count"))
+                        .and_then(JsonValue::as_i64),
+                    item_counts,
                 ],
             )?;
         }
