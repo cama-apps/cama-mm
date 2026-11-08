@@ -67,7 +67,6 @@ pub mod economy_event_sqlite;
 pub mod golden_wheel;
 pub mod hero_lookup;
 pub mod herogrid;
-pub mod interaction_safety;
 pub mod jopat_match_routing;
 pub mod jopat_post_match;
 pub mod lobby_runtime;

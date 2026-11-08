@@ -10489,27 +10489,37 @@ fn paused_boss_response(
             )
         })
         .collect();
+    let mut embed = InteractionEmbed::titled(format!("{boss_name} — Round {}", paused.round_num))
+        .description(format!(
+            "**{}**\n*{}*",
+            paused.pending_prompt.prompt_title, paused.pending_prompt.prompt_description
+        ))
+        .field(
+            "State",
+            format!(
+                "You: **{}/{} HP**  |  {boss_name}: **{}/{} HP**",
+                paused.combat.player_hp.max(0),
+                paused.player_hp_max,
+                paused.combat.boss_hp.max(0),
+                paused.boss_hp_max
+            ),
+            false,
+        );
+    // Python's duel prompt names the assisting pet before the fight resolves.
+    if let Some(assist) = paused.combat.effects.pet_assist.as_ref().or_else(|| {
+        paused
+            .round_log
+            .iter()
+            .find_map(|round| round.pet_assist.as_ref())
+    }) {
+        embed = embed.field(
+            "Pet Assist",
+            cama_app::boss_encounter_view_guard::format_pet_assist(assist, None),
+            false,
+        );
+    }
     InteractionResponse::message("")
-        .embed(
-            InteractionEmbed::titled(format!("{boss_name} — Round {}", paused.round_num))
-                .description(format!(
-                    "**{}**\n*{}*",
-                    paused.pending_prompt.prompt_title, paused.pending_prompt.prompt_description
-                ))
-                .field(
-                    "State",
-                    format!(
-                        "You: **{}/{} HP**  |  {boss_name}: **{}/{} HP**",
-                        paused.combat.player_hp.max(0),
-                        paused.player_hp_max,
-                        paused.combat.boss_hp.max(0),
-                        paused.boss_hp_max
-                    ),
-                    false,
-                )
-                .field("Your choice", choices, false)
-                .color(GOLD_COLOR),
-        )
+        .embed(embed.field("Your choice", choices, false).color(GOLD_COLOR))
         .action_row(InteractionActionRow::buttons(buttons))
 }
 
@@ -10618,10 +10628,7 @@ fn regular_boss_result_embed(
             .sum::<i32>();
         embed = embed.field(
             "Pet Assist",
-            format!(
-                "**{}** ({}) lent a **{}%** damage assist and contributed **{damage} bonus damage**.",
-                assist.pet_name, assist.species_name, assist.bonus_percent
-            ),
+            cama_app::boss_encounter_view_guard::format_pet_assist(assist, Some(damage)),
             false,
         );
     }

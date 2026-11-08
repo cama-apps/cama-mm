@@ -1379,6 +1379,85 @@ fn boss_mechanic_prompt_shows_authored_copy_choices_and_live_hp() {
     );
 }
 
+/// Python's `_add_pet_assist_notice`: the species flavor on both the duel
+/// prompt and the result, with the damage outcome only once resolved.
+#[test]
+fn boss_pet_assist_uses_species_flavor_on_prompt_and_result() {
+    use cama_app::boss_duel::{PetAssist, RiskTier};
+    use cama_app::boss_multi_tier::{
+        CombatEffects, CombatState, GearSnapshot, PausedBossDuel, PendingPrompt, RoundEffectLog,
+        RoundRecord, mechanic_by_id,
+    };
+
+    let assist = PetAssist {
+        pet_name: "Dane".to_owned(),
+        species_id: "common_cama".to_owned(),
+        species_name: "Common Cama".to_owned(),
+        bonus_percent: 12,
+    };
+    let mechanic = mechanic_by_id("ogre_fireblast").expect("Ogre mechanic is bundled");
+    let paused = PausedBossDuel {
+        boss_id: "ogre_magi".to_owned(),
+        boundary: 75,
+        mechanic_id: mechanic.id.clone(),
+        risk_tier: RiskTier::Bold,
+        wager: 0,
+        combat: CombatState {
+            player_hp: 7,
+            boss_hp: 11,
+            player_hit: 0.5,
+            player_damage: 2,
+            boss_hit: 0.5,
+            boss_damage: 2,
+            critical_chance: 0.0,
+            critical_bonus: 0,
+            effects: CombatEffects {
+                pet_assist: Some(assist.clone()),
+                ..CombatEffects::default()
+            },
+        },
+        round_num: 2,
+        round_log: Vec::new(),
+        pending_prompt: PendingPrompt::from(&mechanic),
+        attempts_this_fight: 1,
+        initial_win_chance: 0.5,
+        payout_multiplier: 1.0,
+        player_hp_max: 10,
+        boss_hp_max: 14,
+        starting_boss_hp: 14,
+        gear_snapshot: GearSnapshot::default(),
+        forced_no_wager_phase: false,
+        echo_applied: false,
+        echo_killer_id: None,
+        wager_escrowed: true,
+    };
+    let prompt = super::paused_boss_response(&paused, USER as i64, GUILD as i64);
+    assert_eq!(
+        boss_projection_field(&prompt.embeds[0], "Pet Assist").map(|field| field.value.as_str()),
+        Some("**Dane** (Common Cama) barrels into the fray, lending a **12%** damage assist.")
+    );
+
+    let mut result = regular_boss_projection_fixture(true);
+    result.round_log.push(RoundRecord {
+        round: 1,
+        player_hp: 7,
+        boss_hp: 0,
+        player_hit: true,
+        boss_hit: None,
+        pet_assist: Some(assist),
+        pet_assist_damage: 0,
+        effect_log: RoundEffectLog::default(),
+        mechanic: None,
+    });
+    let embed = super::regular_boss_result_embed(&result, None, None, &[]);
+    assert_eq!(
+        boss_projection_field(&embed, "Pet Assist").map(|field| field.value.as_str()),
+        Some(
+            "**Dane** (Common Cama) barrels into the fray, lending a **12%** damage assist.\nNo opening appeared this time."
+        )
+    );
+}
+
 #[test]
 fn boss_defeat_reports_knockback_from_the_parked_depth() {
     // Parked at 99 before the boundary-100 fight, knocked back to 95.
