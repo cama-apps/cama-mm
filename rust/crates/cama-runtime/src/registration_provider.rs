@@ -45,6 +45,7 @@ use tracing::{debug, error, warn};
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{
     DiscordDirectMessageErrorKind, DiscordMessage, DiscordTransport, cached_guild_player_names,
+    resolve_guild_player_names,
 };
 use crate::ids::signed_id;
 use crate::option_ext::{boolean_option, integer_option, string_option, user_option};
@@ -1145,10 +1146,14 @@ impl PlayerRegistrationHandler {
                 .collect::<Vec<_>>()
                 .join(" or ")
         };
+        let target_name =
+            resolve_guild_player_names(self.discord.as_ref(), Some(guild_id), &[target])
+                .await
+                .resolve(target);
         responder
             .followup(
                 InteractionResponse::message(format!(
-                    "**Referral: <@{target_id}>**\n\
+                    "**Referral: {target_name}** <@{target_id}>\n\
                      1. If needed, run `/player register` with your Steam32 ID (the number in your Dotabuff URL).\n\
                      2. Run `/player roles` with your Dota positions (1-5).\n\
                      3. React in {lobby_destination} to join an active lobby, or run `/lobby` to start one."
@@ -1293,15 +1298,19 @@ impl PlayerRegistrationHandler {
         result: RegisterPlayerResult,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
+        let user_id = signed_id(context.user_id, "registered user")?;
+        let name = resolve_guild_player_names(self.discord.as_ref(), Some(guild_id), &[user_id])
+            .await
+            .resolve(user_id);
         responder
             .followup(
                 InteractionResponse::message(format!(
-                    "✅ Registered <@{}>!\n\
+                    "✅ Registered {name}!\n\
                      Cama Rating: {} ({:.0}% uncertainty)\n\
                      Use `/player roles` to set your preferred roles.",
-                    context.user_id, result.cama_rating, result.uncertainty
+                    result.cama_rating, result.uncertainty
                 ))
-                .with_user_mentions(vec![context.user_id]),
+                .without_mentions(),
             )
             .await
             .map_err(|error| error.to_string())?;
