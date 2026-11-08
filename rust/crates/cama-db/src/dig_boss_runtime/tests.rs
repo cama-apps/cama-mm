@@ -300,6 +300,7 @@ fn pinnacle_victory_fuses_generated_relic_with_state_balance_and_audit() {
         artifact_id: "pinnacle:Crown:Scales and Tribute:hp_plus_1:boss_payout_5",
         found_at: 1_700_000_000,
         is_relic: true,
+        only_if_unowned: false,
     });
     let DigBossRuntimeCommitOutcome::Applied(receipt) =
         repository.commit(commit).expect("pinnacle victory")
@@ -340,6 +341,68 @@ fn pinnacle_victory_fuses_generated_relic_with_state_balance_and_audit() {
     );
 }
 
+/// A signature trophy is fused into the victory and never duplicates: when
+/// the player already owns it, the rest of the settlement still applies.
+#[test]
+fn unowned_only_artifact_grant_skips_an_owned_trophy_but_settles_the_victory() {
+    let database = fixture();
+    let repository = DigBossRuntimeRepository::new(database.path());
+    let trophy = DigBossRuntimeArtifactGrant {
+        artifact_id: "weeping_fang",
+        found_at: 1_700_000_000,
+        is_relic: true,
+        only_if_unowned: true,
+    };
+    let snapshot = repository.snapshot(KEY).expect("snapshot").expect("player");
+    let state = victory_state(&snapshot);
+    let mut commit = victory_commit(&snapshot, &state);
+    commit.artifact = Some(trophy);
+    let DigBossRuntimeCommitOutcome::Applied(first) = repository.commit(commit).expect("first")
+    else {
+        panic!("expected the first victory to apply");
+    };
+    assert!(
+        first.artifact_database_id.is_some(),
+        "an unowned trophy carves"
+    );
+
+    let snapshot = repository.snapshot(KEY).expect("snapshot").expect("player");
+    let mut state = DigBossRuntimeState::from(&snapshot);
+    state.balance += 10;
+    let mut commit = victory_commit(&snapshot, &state);
+    commit.artifact = Some(trophy);
+    let DigBossRuntimeCommitOutcome::Applied(second) = repository.commit(commit).expect("second")
+    else {
+        panic!("expected the second victory to apply");
+    };
+    assert_eq!(
+        second.artifact_database_id, None,
+        "an owned trophy is skipped"
+    );
+    let connection = Connection::open(database.path()).expect("verify DB");
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM dig_artifacts WHERE artifact_id='weeping_fang'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("trophy count"),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT jopacoin_balance FROM players WHERE discord_id=?1 AND guild_id=?2",
+                params![PLAYER, GUILD],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("balance"),
+        175,
+        "the settlement still applies without the duplicate"
+    );
+}
+
 #[test]
 fn pinnacle_relic_insert_failure_rolls_back_entire_victory() {
     let database = fixture();
@@ -358,6 +421,7 @@ fn pinnacle_relic_insert_failure_rolls_back_entire_victory() {
         artifact_id: "pinnacle:Crown:Scales and Tribute:hp_plus_1:boss_payout_5",
         found_at: 1_700_000_000,
         is_relic: true,
+        only_if_unowned: false,
     });
     assert!(repository.commit(commit).is_err());
     assert_eq!(

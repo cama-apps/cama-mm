@@ -194,6 +194,8 @@ fn boss_scout_echo_killer_is_a_readable_name_on_a_cold_cache() {
         abandoned_gear_wear: Default::default(),
         gear_drop: None,
         prestige_relic_drop: None,
+        trophy_relic_drop: None,
+        stat_point_awarded: false,
         broken_gear: Vec::new(),
         warnings: Vec::new(),
         notices: Vec::new(),
@@ -514,6 +516,8 @@ fn boss_reminder_predicate_requires_a_committed_resolution() {
         abandoned_gear_wear: Default::default(),
         gear_drop: None,
         prestige_relic_drop: None,
+        trophy_relic_drop: None,
+        stat_point_awarded: false,
         broken_gear: Vec::new(),
         warnings: Vec::new(),
         notices: Vec::new(),
@@ -539,6 +543,8 @@ fn boss_call_result<T>(
         abandoned_gear_wear: Default::default(),
         gear_drop: None,
         prestige_relic_drop: None,
+        trophy_relic_drop: None,
+        stat_point_awarded: false,
         broken_gear: Vec::new(),
         warnings: Vec::new(),
         notices: Vec::new(),
@@ -670,6 +676,123 @@ fn boss_neon_prestige_relic_does_not_masquerade_as_trophy_boost() {
     });
     let victory = super::boss_start_neon_victory(&result).expect("terminal victory");
     assert!(!victory.trophy_relic_drop);
+}
+
+fn carved_trophy_fixture() -> cama_app::dig_boss_runtime::DigBossPrestigeRelicDrop {
+    cama_app::dig_boss_runtime::DigBossPrestigeRelicDrop {
+        database_id: 8,
+        artifact_id: "weeping_fang".to_owned(),
+        name: "Weeping Fang".to_owned(),
+        rarity: "Uncommon".to_owned(),
+    }
+}
+
+// boss_views.py `_send_boss_victory_neon` forwards `trophy_relic_drop`.
+#[test]
+fn boss_neon_carved_trophy_signals_the_trophy_boost() {
+    let mut start = boss_call_result(
+        cama_app::dig_boss_runtime::DigBossStartOutcome::RegularResolved(Box::new(
+            regular_boss_projection_fixture(true),
+        )),
+        Some(108),
+    );
+    start.trophy_relic_drop = Some(carved_trophy_fixture());
+    assert!(
+        super::boss_start_neon_victory(&start)
+            .expect("terminal start victory")
+            .trophy_relic_drop
+    );
+    let mut resume = boss_call_result(
+        cama_app::dig_boss_runtime::DigBossResolvedOutcome::Regular(Box::new(
+            regular_boss_projection_fixture(true),
+        )),
+        Some(109),
+    );
+    resume.trophy_relic_drop = Some(carved_trophy_fixture());
+    assert!(
+        super::boss_resume_neon_victory(&resume)
+            .expect("terminal resume victory")
+            .trophy_relic_drop
+    );
+}
+
+// boss_views.py `_build_boss_fight_result_embed`: the victory names the
+// withheld profit, the first-clear S point, and the carved trophy.
+#[test]
+fn regular_boss_victory_shows_withheld_profit_s_point_and_carved_trophy() {
+    let mut resolved = regular_boss_projection_fixture(true);
+    resolved.bankruptcy_penalty = 25;
+    resolved.vanity_tax = 10;
+    resolved.low_priority_tax = 5;
+    let trophy = carved_trophy_fixture();
+    let embed = super::regular_boss_result_embed(&resolved, None, None, Some(&trophy), true, &[]);
+
+    let coin = JOPACOIN_EMOTE;
+    assert_eq!(
+        embed.description.as_deref(),
+        Some(
+            format!(
+                "Victory! You defeated **Grothak the Unbreakable** and won **+500** {coin} profit!\
+                 \n−25 {coin} withheld while bankrupt.\
+                 \n−10 {coin} vanity tax.\
+                 \n−5 {coin} low priority tax."
+            )
+            .as_str()
+        )
+    );
+    assert_eq!(
+        boss_projection_field(&embed, "S Point Earned").map(|field| field.value.as_str()),
+        Some("First clear bonus: use `/dig miner build` to allocate it.")
+    );
+    assert_eq!(
+        boss_projection_field(&embed, "Trophy Carved").map(|field| field.value.as_str()),
+        Some("**Weeping Fang**")
+    );
+
+    let plain = super::regular_boss_result_embed(
+        &regular_boss_projection_fixture(true),
+        None,
+        None,
+        None,
+        false,
+        &[],
+    );
+    assert!(
+        plain
+            .description
+            .as_deref()
+            .is_some_and(|text| text.ends_with("profit!")),
+        "no deduction lines without deductions: {:?}",
+        plain.description
+    );
+    assert!(boss_projection_field(&plain, "S Point Earned").is_none());
+    assert!(boss_projection_field(&plain, "Trophy Carved").is_none());
+
+    let loss = super::regular_boss_result_embed(
+        &regular_boss_projection_fixture(false),
+        None,
+        None,
+        Some(&trophy),
+        true,
+        &[],
+    );
+    assert!(boss_projection_field(&loss, "S Point Earned").is_none());
+    assert!(boss_projection_field(&loss, "Trophy Carved").is_none());
+}
+
+#[test]
+fn pinnacle_boss_victory_shows_withheld_profit() {
+    let mut resolved = pinnacle_boss_projection_fixture(true, 3, 0);
+    resolved.bankruptcy_penalty = 40;
+    resolved.vanity_tax = 12;
+    let media = DigMediaRuntime::production(&DigRuntimeConfig::default());
+    let response = super::pinnacle_boss_result_response(&resolved, &media);
+    let description = response.embeds[0].description.as_deref().expect("result");
+
+    assert!(description.ends_with(&format!(
+        "profit!\n−40 {} withheld while bankrupt.\n−12 {} vanity tax.",
+        JOPACOIN_EMOTE, JOPACOIN_EMOTE
+    )));
 }
 
 #[test]
@@ -1449,7 +1572,7 @@ fn boss_pet_assist_uses_species_flavor_on_prompt_and_result() {
         effect_log: RoundEffectLog::default(),
         mechanic: None,
     });
-    let embed = super::regular_boss_result_embed(&result, None, None, &[]);
+    let embed = super::regular_boss_result_embed(&result, None, None, None, false, &[]);
     assert_eq!(
         boss_projection_field(&embed, "Pet Assist").map(|field| field.value.as_str()),
         Some(
@@ -1461,8 +1584,14 @@ fn boss_pet_assist_uses_species_flavor_on_prompt_and_result() {
 #[test]
 fn boss_defeat_reports_knockback_from_the_parked_depth() {
     // Parked at 99 before the boundary-100 fight, knocked back to 95.
-    let embed =
-        super::regular_boss_result_embed(&regular_boss_projection_fixture(false), None, None, &[]);
+    let embed = super::regular_boss_result_embed(
+        &regular_boss_projection_fixture(false),
+        None,
+        None,
+        None,
+        false,
+        &[],
+    );
     assert!(
         embed
             .description
@@ -1497,7 +1626,7 @@ fn boss_result_shows_selected_outcome_and_softened_hp() {
         }),
     });
 
-    let embed = super::regular_boss_result_embed(&result, None, None, &[]);
+    let embed = super::regular_boss_result_embed(&result, None, None, None, false, &[]);
     assert_eq!(
         boss_projection_field(&embed, "You chose: Stand in front and grin")
             .map(|field| field.value.as_str()),
@@ -1522,7 +1651,7 @@ fn boss_projection_field<'a>(
 #[test]
 fn regular_boss_victory_without_drop_omits_both_loud_drop_fields() {
     let resolved = regular_boss_projection_fixture(true);
-    let embed = super::regular_boss_result_embed(&resolved, None, None, &[]);
+    let embed = super::regular_boss_result_embed(&resolved, None, None, None, false, &[]);
 
     assert!(boss_projection_field(&embed, "Boss Drop").is_none());
     assert!(boss_projection_field(&embed, "Relic Found").is_none());
@@ -1538,7 +1667,7 @@ fn regular_boss_victory_projects_gear_drop_name_and_slot() {
         tier: 6,
         name: "Void-Touched Pickaxe".to_owned(),
     };
-    let embed = super::regular_boss_result_embed(&resolved, Some(&drop), None, &[]);
+    let embed = super::regular_boss_result_embed(&resolved, Some(&drop), None, None, false, &[]);
     let field = boss_projection_field(&embed, "Boss Drop").expect("boss drop field");
 
     assert!(field.value.contains("Void-Touched Pickaxe"));
@@ -1555,7 +1684,7 @@ fn regular_boss_victory_projects_prestige_relic_name() {
         name: "Echo Stone".to_owned(),
         rarity: "Rare".to_owned(),
     };
-    let embed = super::regular_boss_result_embed(&resolved, None, Some(&drop), &[]);
+    let embed = super::regular_boss_result_embed(&resolved, None, Some(&drop), None, false, &[]);
     let field = boss_projection_field(&embed, "Relic Found").expect("relic field");
 
     assert!(field.value.contains("Echo Stone"));
@@ -1577,7 +1706,8 @@ fn regular_boss_loss_suppresses_loud_drop_fields() {
         name: "Also Hidden".to_owned(),
         rarity: "Rare".to_owned(),
     };
-    let embed = super::regular_boss_result_embed(&resolved, Some(&gear), Some(&relic), &[]);
+    let embed =
+        super::regular_boss_result_embed(&resolved, Some(&gear), Some(&relic), None, false, &[]);
 
     assert!(boss_projection_field(&embed, "Boss Drop").is_none());
     assert!(boss_projection_field(&embed, "Relic Found").is_none());
@@ -1591,7 +1721,7 @@ fn regular_boss_broken_gear_projects_name_disabled_effects_and_repair_all() {
         gear_id: 3,
         name: "Ironclad Armor".to_owned(),
     }];
-    let embed = super::regular_boss_result_embed(&resolved, None, None, &broken);
+    let embed = super::regular_boss_result_embed(&resolved, None, None, None, false, &broken);
     let field = boss_projection_field(&embed, "Gear Broken").expect("broken gear field");
 
     assert!(field.value.contains("Ironclad Armor"));

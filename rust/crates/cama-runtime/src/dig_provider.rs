@@ -8030,7 +8030,7 @@ fn boss_start_neon_victory(
                 gear_drop: result.gear_drop.is_some(),
                 // `prestige_relic_drop` is a separate Pinnacle/relic reward,
                 // not the Python trophy-relic boost signal.
-                trophy_relic_drop: false,
+                trophy_relic_drop: result.trophy_relic_drop.is_some(),
             })
         }
         DigBossStartOutcome::PinnacleResolved(resolved)
@@ -8064,7 +8064,7 @@ fn boss_resume_neon_victory(
                 layer_name: layer_at(i64::from(resolved.boundary)).name.to_owned(),
                 jc_delta: resolved.jc_delta,
                 gear_drop: result.gear_drop.is_some(),
-                trophy_relic_drop: false,
+                trophy_relic_drop: result.trophy_relic_drop.is_some(),
             })
         }
         DigBossResolvedOutcome::Pinnacle(resolved)
@@ -10527,10 +10527,19 @@ fn regular_boss_result_response(
     result: &ResolvedFight,
     gear_drop: Option<&DigBossGearDrop>,
     prestige_relic_drop: Option<&DigBossPrestigeRelicDrop>,
+    trophy_relic_drop: Option<&DigBossPrestigeRelicDrop>,
+    stat_point_awarded: bool,
     broken_gear: &[DigBossBrokenGear],
     media: &DigMediaRuntime,
 ) -> InteractionResponse {
-    let mut embed = regular_boss_result_embed(result, gear_drop, prestige_relic_drop, broken_gear);
+    let mut embed = regular_boss_result_embed(
+        result,
+        gear_drop,
+        prestige_relic_drop,
+        trophy_relic_drop,
+        stat_point_awarded,
+        broken_gear,
+    );
     let layer_name = layer_at(i64::from(result.boundary)).name;
     let art = media.boss_art(
         BossIdentity::Id(&result.boss_id),
@@ -10553,6 +10562,8 @@ fn regular_boss_result_embed(
     result: &ResolvedFight,
     gear_drop: Option<&DigBossGearDrop>,
     prestige_relic_drop: Option<&DigBossPrestigeRelicDrop>,
+    trophy_relic_drop: Option<&DigBossPrestigeRelicDrop>,
+    stat_point_awarded: bool,
     broken_gear: &[DigBossBrokenGear],
 ) -> InteractionEmbed {
     let boss_name = cama_app::dig_bosses::boss_by_id(&result.boss_id)
@@ -10562,8 +10573,13 @@ fn regular_boss_result_embed(
         format!("You broke **{boss_name}** — it staggers...")
     } else if result.won {
         format!(
-            "Victory! You defeated **{boss_name}** and won **{:+}** {JOPACOIN_EMOTE} profit!",
-            result.jc_delta
+            "Victory! You defeated **{boss_name}** and won **{:+}** {JOPACOIN_EMOTE} profit!{}",
+            result.jc_delta,
+            boss_profit_deduction_lines(
+                result.bankruptcy_penalty,
+                result.vanity_tax,
+                result.low_priority_tax,
+            )
         )
     } else {
         format!(
@@ -10633,6 +10649,13 @@ fn regular_boss_result_embed(
         );
     }
     if result.won {
+        if stat_point_awarded {
+            embed = embed.field(
+                "S Point Earned",
+                "First clear bonus: use `/dig miner build` to allocate it.",
+                false,
+            );
+        }
         if let Some(drop) = gear_drop {
             embed = embed.field(
                 "Boss Drop",
@@ -10642,6 +10665,9 @@ fn regular_boss_result_embed(
         }
         if let Some(drop) = prestige_relic_drop {
             embed = embed.field("Relic Found", format!("**{}**", drop.name), false);
+        }
+        if let Some(drop) = trophy_relic_drop {
+            embed = embed.field("Trophy Carved", format!("**{}**", drop.name), false);
         }
     }
     if !broken_gear.is_empty() {
@@ -10659,6 +10685,24 @@ fn regular_boss_result_embed(
     embed
 }
 
+/// Python's victory lines for the profit a boss win withheld, plus Rust's
+/// low-priority sink taken from the same profit.
+fn boss_profit_deduction_lines(
+    bankruptcy_penalty: i64,
+    vanity_tax: i64,
+    low_priority_tax: i64,
+) -> String {
+    [
+        (bankruptcy_penalty, "withheld while bankrupt"),
+        (vanity_tax, "vanity tax"),
+        (low_priority_tax, "low priority tax"),
+    ]
+    .into_iter()
+    .filter(|(amount, _)| *amount > 0)
+    .map(|(amount, label)| format!("\n−{amount} {JOPACOIN_EMOTE} {label}."))
+    .collect()
+}
+
 fn pinnacle_boss_result_response(
     result: &DigPinnacleResolved,
     media: &DigMediaRuntime,
@@ -10668,8 +10712,14 @@ fn pinnacle_boss_result_response(
         format!("You broke **{}** — it staggers...", result.boss_name)
     } else if result.won {
         format!(
-            "Victory! You defeated **{}** and won **{:+}** {JOPACOIN_EMOTE} profit!",
-            result.boss_name, result.jc_delta
+            "Victory! You defeated **{}** and won **{:+}** {JOPACOIN_EMOTE} profit!{}",
+            result.boss_name,
+            result.jc_delta,
+            boss_profit_deduction_lines(
+                result.bankruptcy_penalty,
+                result.vanity_tax,
+                result.low_priority_tax,
+            )
         )
     } else {
         format!(
@@ -10750,6 +10800,8 @@ fn boss_start_response(
             resolved,
             result.gear_drop.as_ref(),
             result.prestige_relic_drop.as_ref(),
+            result.trophy_relic_drop.as_ref(),
+            result.stat_point_awarded,
             &result.broken_gear,
             media,
         ),
@@ -10776,6 +10828,8 @@ fn boss_resume_response(
             resolved,
             result.gear_drop.as_ref(),
             result.prestige_relic_drop.as_ref(),
+            result.trophy_relic_drop.as_ref(),
+            result.stat_point_awarded,
             &result.broken_gear,
             media,
         ),

@@ -949,10 +949,15 @@ fn final_victory_atomically_awards_stat_point_and_keeps_run_scoped_ledger() {
                     boundary: 25,
                 },
                 paused_duel: None,
+                trophy_relic: None,
             },
         )
         .expect("victory");
     assert!(repository.last_action_id().is_some());
+    assert!(
+        repository.stat_point_awarded(),
+        "the result reports the first-clear S point"
+    );
 
     let connection = Connection::open(database.path()).expect("verify DB");
     let row = connection
@@ -1159,6 +1164,129 @@ fn live_boss_victory_gates_the_next_dig_until_a_route_is_chosen() {
         Some(chosen.as_str())
     );
     assert!(!runtime.dig(dig).expect("ungated dig").route_choice_required);
+}
+
+/// Park the tunnel before a one-HP Nameless Depth, the trophy boss every
+/// prestige meets at 275, with every earlier boss cleared.
+fn set_trophy_boss_encounter(database: &FastTestDatabase) {
+    Connection::open(database.path())
+        .expect("trophy boss DB")
+        .execute(
+            "UPDATE tunnels
+                SET depth=274,max_depth=274,boss_progress=?1,cheer_data=NULL,
+                    stat_survival=20
+              WHERE discord_id=?2 AND guild_id=?3",
+            params![
+                r#"{"25":"defeated","50":"defeated","75":"defeated","100":"defeated","150":"defeated","200":"defeated","275":{"boss_id":"nameless_depth","status":"active","hp_remaining":1,"hp_max":1}}"#,
+                PLAYER,
+                GUILD,
+            ],
+        )
+        .expect("trophy boss encounter");
+}
+
+fn owned_artifact_count(database: &FastTestDatabase, artifact_id: &str) -> i64 {
+    Connection::open(database.path())
+        .expect("artifact DB")
+        .query_row(
+            "SELECT COUNT(*) FROM dig_artifacts
+              WHERE discord_id=?1 AND guild_id=?2 AND artifact_id=?3 AND is_relic=1",
+            params![PLAYER, GUILD, artifact_id],
+            |row| row.get(0),
+        )
+        .expect("artifact count")
+}
+
+/// Python's `_maybe_carve_trophy_relic`: a full kill of a trophy boss carves
+/// its signature trophy at the carve rate, inside the victory commit, and the
+/// result reports it beside the first-clear S point.
+#[test]
+fn trophy_boss_kill_carves_its_signature_trophy_in_the_victory_commit() {
+    let database = fixture();
+    set_trophy_boss_encounter(&database);
+    let victory = pinnacle_runtime(&database)
+        .fight_live_regular(
+            pinnacle_request(1_700_000_000),
+            RiskTier::Cautious,
+            0,
+            SequenceEntropy::constant(0.0),
+        )
+        .expect("trophy boss victory");
+    assert!(victory.outcome.won);
+    assert!(victory.outcome.phase_transition.is_none());
+    assert!(victory.stat_point_awarded, "first clear of 275");
+    let trophy = victory.trophy_relic_drop.expect("carved trophy");
+    assert_eq!(trophy.artifact_id, "deaths_door");
+    assert_eq!(trophy.name, "Death's Door");
+    assert_eq!(trophy.rarity, "legendary");
+    let stored: (String, i64, i64, i64) = Connection::open(database.path())
+        .expect("trophy DB")
+        .query_row(
+            "SELECT artifact_id,is_relic,equipped,found_at FROM dig_artifacts WHERE id=?1",
+            [trophy.database_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("stored trophy");
+    assert_eq!(stored, ("deaths_door".to_owned(), 1, 0, 1_700_000_000));
+}
+
+#[test]
+fn trophy_carve_misses_at_the_rate_and_never_duplicates_an_owned_trophy() {
+    let database = fixture();
+    set_trophy_boss_encounter(&database);
+    let missed = pinnacle_runtime(&database)
+        .fight_live_regular(
+            pinnacle_request(1_700_000_000),
+            RiskTier::Cautious,
+            0,
+            SequenceEntropy::constant(crate::dig_relic_rework::TROPHY_CARVE_RATE),
+        )
+        .expect("victory at the carve rate");
+    assert!(missed.outcome.won);
+    assert_eq!(missed.trophy_relic_drop, None);
+    assert_eq!(owned_artifact_count(&database, "deaths_door"), 0);
+
+    let database = fixture();
+    set_trophy_boss_encounter(&database);
+    Connection::open(database.path())
+        .expect("owned trophy DB")
+        .execute(
+            "INSERT INTO dig_artifacts
+             (discord_id,guild_id,artifact_id,found_at,is_relic,equipped)
+             VALUES (?1,?2,'deaths_door',1,1,0)",
+            params![PLAYER, GUILD],
+        )
+        .expect("owned trophy");
+    let owned = pinnacle_runtime(&database)
+        .fight_live_regular(
+            pinnacle_request(1_700_000_000),
+            RiskTier::Cautious,
+            0,
+            SequenceEntropy::constant(0.0),
+        )
+        .expect("victory with the trophy owned");
+    assert!(owned.outcome.won);
+    assert!(owned.action_id.is_some(), "the victory still settles");
+    assert_eq!(owned.trophy_relic_drop, None);
+    assert_eq!(owned_artifact_count(&database, "deaths_door"), 1);
+}
+
+/// A boss without a signature trophy never carves one.
+#[test]
+fn non_trophy_boss_kill_carves_nothing() {
+    let database = fixture();
+    set_minimal_accuracy_encounter(&database, 20);
+    let victory = pinnacle_runtime(&database)
+        .fight_live_regular(
+            pinnacle_request(1_700_000_000),
+            RiskTier::Cautious,
+            0,
+            SequenceEntropy::constant(0.0),
+        )
+        .expect("grothak victory");
+    assert!(victory.outcome.won);
+    assert_eq!(victory.trophy_relic_drop, None);
+    assert!(victory.stat_point_awarded);
 }
 
 fn paused_duel() -> PausedBossDuel {

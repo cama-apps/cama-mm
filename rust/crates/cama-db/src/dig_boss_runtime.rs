@@ -121,6 +121,9 @@ pub struct DigBossRuntimeArtifactGrant<'a> {
     pub artifact_id: &'a str,
     pub found_at: i64,
     pub is_relic: bool,
+    /// Skip the grant, leaving the rest of the settlement intact, when the
+    /// player already owns this artifact. Signature trophies never duplicate.
+    pub only_if_unowned: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -411,7 +414,8 @@ impl DigBossRuntimeRepository {
         let artifact_database_id = request
             .artifact
             .map(|artifact| insert_artifact(&transaction, request.expected.key, artifact))
-            .transpose()?;
+            .transpose()?
+            .flatten();
         if let Some(echo) = request.echo {
             upsert_echo(&transaction, request.expected.key.guild_id, echo)?;
         }
@@ -1200,7 +1204,17 @@ fn insert_artifact(
     transaction: &Transaction<'_>,
     key: DigBossRuntimeKey,
     artifact: DigBossRuntimeArtifactGrant<'_>,
-) -> Result<i64, rusqlite::Error> {
+) -> Result<Option<i64>, rusqlite::Error> {
+    if artifact.only_if_unowned
+        && transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM dig_artifacts
+              WHERE discord_id=?1 AND guild_id=?2 AND artifact_id=?3)",
+            params![key.discord_id, key.guild_id, artifact.artifact_id],
+            |row| row.get::<_, bool>(0),
+        )?
+    {
+        return Ok(None);
+    }
     transaction.execute(
         "INSERT INTO dig_artifacts
          (discord_id,guild_id,artifact_id,found_at,is_relic,equipped)
@@ -1213,7 +1227,7 @@ fn insert_artifact(
             i64::from(artifact.is_relic),
         ],
     )?;
-    Ok(transaction.last_insert_rowid())
+    Ok(Some(transaction.last_insert_rowid()))
 }
 
 fn upsert_echo(

@@ -31,7 +31,7 @@ use crate::dig_bosses::{
 };
 use crate::dig_relic_rework::{
     RelicEntropy, RelicSet, SHIFTING_IDOL_PLAYER_HIT_CEILING, ShiftingIdolBonus, ShiftingIdolStats,
-    apply_shifting_idol_stats,
+    TROPHY_CARVE_RATE, apply_shifting_idol_stats, trophy_relic_for_boss,
 };
 
 pub const PHASE_TWO_MIN_PRESTIGE: i32 = 2;
@@ -1275,6 +1275,9 @@ pub struct RepositoryCommit {
     /// The commit fails with [`RepositoryError::DuelAlreadyActive`] instead of
     /// replacing a duel that is already paused.
     pub paused_duel: Option<PausedBossDuel>,
+    /// Signature trophy carved by this full kill, granted in the same guarded
+    /// commit and skipped there when the player already owns it.
+    pub trophy_relic: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -2721,6 +2724,7 @@ where
                         low_priority_tax: 0,
                         preparation_mutation: BossPreparationMutation::Preserve,
                         paused_duel: None,
+                        trophy_relic: None,
                     },
                 )?;
                 let gear_wear =
@@ -2793,6 +2797,11 @@ where
             entry.last_outcome = Some("defeated".to_owned());
             entry.first_meet_seen = true;
             entry.pending_phase_event_id = None;
+            // Python's `_maybe_carve_trophy_relic`: every full kill of a
+            // trophy boss carves its signature trophy at the carve rate. The
+            // guarded commit skips one the player already owns.
+            let trophy_relic = trophy_relic_for_boss(&input.boss_id)
+                .filter(|_| self.entropy.next_unit() < TROPHY_CARVE_RATE);
             self.repository.commit(
                 input.key,
                 tunnel.revision,
@@ -2818,6 +2827,7 @@ where
                         boundary: input.boundary,
                     },
                     paused_duel: None,
+                    trophy_relic,
                 },
             )?;
             let gear_wear =
@@ -2929,6 +2939,7 @@ where
                     boundary: input.boundary,
                 },
                 paused_duel: None,
+                trophy_relic: None,
             },
         )?;
         let gear_wear =
@@ -3511,6 +3522,7 @@ where
                 low_priority_tax: 0,
                 preparation_mutation: BossPreparationMutation::Preserve,
                 paused_duel: None,
+                trophy_relic: None,
             },
         )?;
         Ok(loss)

@@ -6,6 +6,7 @@ use crate::dig_bosses::{boss_by_id, boss_pool_for_tier, mechanic, regular_phase}
 use crate::dig_loot::{
     CanonicalEventPolicy, CanonicalEventRolls, canonical_event, resolve_canonical_event_with_policy,
 };
+use crate::dig_relic_rework::trophy_relic_for_boss;
 
 #[derive(Debug, Default)]
 struct ScriptedEntropy {
@@ -84,28 +85,43 @@ fn test_new_bosses_gated_to_prestige_4() {
 #[test]
 fn test_new_bosses_fields() {
     let expected = [
-        ("blightcoil", 150, "The Blightcoil", "bruiser"),
-        ("rimebound_king", 200, "The Rimebound King", "tank"),
-        ("spineback", 275, "The Spineback", "bruiser"),
+        (
+            "blightcoil",
+            150,
+            "The Blightcoil",
+            "bruiser",
+            "weeping_fang",
+        ),
+        (
+            "rimebound_king",
+            200,
+            "The Rimebound King",
+            "tank",
+            "runebitten_shard",
+        ),
+        ("spineback", 275, "The Spineback", "bruiser", "aching_spine"),
     ];
-    for (id, depth, name, archetype) in expected {
+    for (id, depth, name, archetype, trophy) in expected {
         let boss = boss_by_id(id).expect("prestige boss");
         assert_eq!(boss.depth, depth);
         assert_eq!(boss.name, name);
         assert_eq!(boss.prestige_required, 4);
         assert_eq!(boss.archetype, archetype);
+        assert_eq!(trophy_relic_for_boss(id), Some(trophy));
     }
 }
 
 #[test]
-fn test_reskins_keep_ids_and_change_names() {
+fn test_reskins_keep_ids_change_names_and_add_trophies() {
     let whisper = boss_by_id("xalatath").expect("whisper");
     let red = boss_by_id("lilith").expect("red mother");
     assert_eq!(whisper.boss_id, "xalatath");
     assert_eq!(whisper.name, "The Whispering Edge");
     assert_eq!(whisper.prestige_required, 3);
+    assert_eq!(trophy_relic_for_boss("xalatath"), Some("listening_shard"));
     assert_eq!(red.boss_id, "lilith");
     assert_eq!(red.name, "The Red Mother");
+    assert_eq!(trophy_relic_for_boss("lilith"), Some("hateborn_ember"));
 }
 
 #[test]
