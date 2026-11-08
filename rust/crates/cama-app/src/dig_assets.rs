@@ -6,7 +6,7 @@
 //! runtime adapter can implement [`DigRenderPort`] with an image library without
 //! coupling Discord or filesystem concerns to the application service.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -22,6 +22,7 @@ pub const PHASE_THREE_LIMIT: usize = 750 * 1024;
 pub const SCENE_SIZE: (u32, u32) = (320, 180);
 pub const LAYER_THUMBNAIL_SIZE: (u32, u32) = (128, 128);
 pub const PINNACLE_SIZE: (u32, u32) = (512, 288);
+#[cfg(test)]
 pub const EVENT_ASSET_SIZE: (u32, u32) = (1024, 576);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -174,6 +175,8 @@ impl RenderedMedia {
 }
 
 /// Inspect the header-level media contract used for repository asset audits.
+/// Test support: production renderers report their own [`MediaInfo`].
+#[cfg(any(test, feature = "test-support"))]
 pub fn inspect_media(bytes: &[u8]) -> Result<MediaInfo, MediaError> {
     if bytes.starts_with(MediaFormat::Png.signature()) {
         inspect_png(bytes)
@@ -184,6 +187,7 @@ pub fn inspect_media(bytes: &[u8]) -> Result<MediaInfo, MediaError> {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn inspect_png(bytes: &[u8]) -> Result<MediaInfo, MediaError> {
     if bytes.len() < 29 || &bytes[12..16] != b"IHDR" {
         return Err(MediaError::InvalidHeader);
@@ -202,6 +206,7 @@ fn inspect_png(bytes: &[u8]) -> Result<MediaInfo, MediaError> {
     Ok(MediaInfo::still(MediaFormat::Png, (width, height), mode))
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn inspect_gif(bytes: &[u8]) -> Result<MediaInfo, MediaError> {
     if bytes.len() < 13 {
         return Err(MediaError::InvalidHeader);
@@ -294,6 +299,7 @@ fn inspect_gif(bytes: &[u8]) -> Result<MediaInfo, MediaError> {
     })
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn skip_gif_data_sub_blocks(bytes: &[u8], mut index: usize) -> Result<usize, MediaError> {
     loop {
         let size = usize::from(*bytes.get(index).ok_or(MediaError::InvalidFrameContract)?);
@@ -434,6 +440,7 @@ pub const EVENT_SCENE_IDS: [&str; 27] = [
     "the_eye_opens",
 ];
 
+#[cfg(test)]
 pub const ROGUELIKE_EVENT_ASSET_IDS: [&str; 18] = [
     "collapsed_armory",
     "dead_prospectors_pack",
@@ -455,14 +462,17 @@ pub const ROGUELIKE_EVENT_ASSET_IDS: [&str; 18] = [
     "red_thread_shrine",
 ];
 
+#[cfg(test)]
 pub const PRESSURE_EVENT_ASSET_IDS: [&str; 3] = [
     "second_life_ledger",
     "twin_scar_altar",
     "ember_clearinghouse",
 ];
 
+#[cfg(test)]
 pub const NEW_PRESTIGE_TWO_BOSS_IDS: [&str; 3] =
     ["cairn_general", "brass_croupier", "saltveil_commodore"];
+#[cfg(test)]
 pub const NEW_PINNACLE_BOSS_IDS: [&str; 3] = ["bastion_below", "pale_surveyor", "lantern_engine"];
 
 #[must_use]
@@ -987,6 +997,7 @@ impl DigAssetService {
         }
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn phase_cache_counts(&self) -> (usize, usize, usize) {
         let state = self
@@ -1002,8 +1013,9 @@ impl DigAssetService {
 }
 
 /// Audit that every application boss definition has an asset slug.
+#[cfg(any(test, feature = "test-support"))]
 #[must_use]
-pub fn boss_ids_missing_asset_slugs() -> BTreeSet<&'static str> {
+pub fn boss_ids_missing_asset_slugs() -> std::collections::BTreeSet<&'static str> {
     crate::dig_bosses::BOSSES
         .iter()
         .map(|boss| boss.boss_id)

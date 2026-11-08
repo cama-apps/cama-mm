@@ -8,9 +8,7 @@
 //! parity policy can run locally without starting a second bot or DB writer.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::future::Future;
 use std::path::Path;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -19,7 +17,7 @@ use crate::ai_services::{
     ToolChoice as AiToolChoice, ToolDefinition as AiToolDefinition, ToolProperty as AiToolProperty,
     ToolPropertySchema as AiToolPropertySchema, ToolRequest, Value as AiValue,
 };
-use crate::dig_service::{BASE_DIG_JC_PAYOUT_CAP, DigOutcomeInput, TunnelState, apply_dig_outcome};
+use crate::dig_service::BASE_DIG_JC_PAYOUT_CAP;
 use cama_domain::formatting::truncate_utf8_bytes;
 use cama_domain::guild_config::GuildConfigStore;
 
@@ -32,7 +30,6 @@ pub const BONUS_CAP_SMALL_PCT: f64 = 5.0;
 pub const BONUS_CAP_BIG_CHANCE: f64 = 0.10;
 pub const NARRATE_DIG_TOOL_NAME: &str = "narrate_dig";
 pub const NARRATE_SPLASH_TOOL_NAME: &str = "narrate_splash";
-pub const CATASTROPHIC_PREFIX: &str = "💥";
 
 pub const CATASTROPHIC_LINES: [&str; 8] = [
     "Far below, a tunnel folds shut. Stone settles for a long time.",
@@ -44,78 +41,6 @@ pub const CATASTROPHIC_LINES: [&str; 8] = [
     "The hill shifts. Birds lift from leagues away.",
     "Below the bones of the world, a chamber that was now isn't.",
 ];
-
-/// Narrow entropy seam for canonical catastrophic-line selection.
-pub trait FlameEntropy {
-    /// Return an index in `0..upper_exclusive`.
-    fn index(&mut self, upper_exclusive: usize) -> usize;
-}
-
-#[must_use]
-pub fn pick_catastrophic_line<E: FlameEntropy + ?Sized>(entropy: &mut E) -> &'static str {
-    CATASTROPHIC_LINES[entropy.index(CATASTROPHIC_LINES.len())]
-}
-
-/// Failure returned when a channel cannot create its detached send future.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FlameSendError;
-
-/// Failure returned when no runtime task can be detached.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FlameTaskError;
-
-pub type FlameSendFuture =
-    Pin<Box<dyn Future<Output = Result<(), FlameSendError>> + Send + 'static>>;
-
-/// Discord-neutral channel seam. `Ok(None)` represents a channel-like value
-/// without a usable `send` method; `Err` represents a synchronous send error.
-pub trait AtmosphericChannel {
-    fn send(&self, content: String) -> Result<Option<FlameSendFuture>, FlameSendError>;
-}
-
-/// Runtime-neutral fire-and-forget task seam. A caller without a running
-/// event loop passes `None`, causing the already-created future to be dropped.
-pub trait AtmosphericTaskSpawner {
-    fn spawn(&self, task: FlameSendFuture) -> Result<(), FlameTaskError>;
-}
-
-/// Format and detach one atmospheric channel post without letting transport
-/// or scheduler failure escape into the committed Dig flow.
-pub fn post_atmospheric<C, S>(channel: Option<&C>, spawner: Option<&S>, prefix: &str, line: &str)
-where
-    C: AtmosphericChannel,
-    S: AtmosphericTaskSpawner,
-{
-    if channel.is_none() || line.is_empty() {
-        return;
-    }
-    let formatted = format!("{prefix} *{}*", line.trim());
-    let Some(channel) = channel else {
-        return;
-    };
-    let Ok(Some(task)) = channel.send(formatted) else {
-        return;
-    };
-    let Some(spawner) = spawner else {
-        return;
-    };
-    let _ = spawner.spawn(task);
-}
-
-/// Pick and detach one canonical catastrophic cave-in post.
-pub fn post_catastrophic<C, S, E>(channel: Option<&C>, spawner: Option<&S>, entropy: &mut E)
-where
-    C: AtmosphericChannel,
-    S: AtmosphericTaskSpawner,
-    E: FlameEntropy + ?Sized,
-{
-    post_atmospheric(
-        channel,
-        spawner,
-        CATASTROPHIC_PREFIX,
-        pick_catastrophic_line(entropy),
-    );
-}
 
 /// Immutable canonical NPC entry used in Dig DM prompt context.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -223,12 +148,8 @@ pub const NPCS: &[DigNpc] = &[
     },
 ];
 
+#[cfg(test)]
 pub const VALID_VOICES: [&str; 3] = ["cosmic_dread", "industrial_grim", "cryptic_folkloric"];
-
-#[must_use]
-pub fn npc_by_id(npc_id: &str) -> Option<DigNpc> {
-    NPCS.iter().copied().find(|npc| npc.npc_id() == npc_id)
-}
 
 /// Flatten the canon roster into the prompt-injection bullet representation.
 #[must_use]
@@ -271,30 +192,6 @@ pub const TONE_PROFILES: [(&str, &str); 3] = [
         "cryptic_folkloric",
         "Cryptic / folkloric. Local superstition, half-remembered rules, things you don't say aloud. Oblique and rhythmic, repetition and refrains. Reference Annie Proulx, regional folklore, weird Americana. The narration is allowed to speak in fragments.",
     ),
-];
-
-pub const PLAY_STYLE_DESCRIPTIONS: [(&str, &str); 6] = [
-    (
-        "cautious_grinder",
-        "plays it safe, rarely takes risky event options, steady and methodical",
-    ),
-    (
-        "reckless_degen",
-        "takes every desperate option, thrill-seeker, high risk tolerance",
-    ),
-    (
-        "calculated_risk_taker",
-        "balances risk and reward, picks risky options when odds favor them",
-    ),
-    (
-        "balanced_explorer",
-        "mixes safe and risky choices evenly, no strong preference",
-    ),
-    (
-        "social_butterfly",
-        "frequently helps other players and cheers in boss fights, community-oriented",
-    ),
-    ("unknown", "new player, still developing their style"),
 ];
 
 pub const NARRATE_DIG_PROPERTIES: [&str; 7] = [
@@ -458,26 +355,6 @@ pub struct FlavorResult {
     pub npc_appearance: Option<NpcAppearance>,
     pub flavor_bonus_pct: f64,
     pub memory_update: Option<String>,
-}
-
-#[must_use]
-pub fn classify_play_style(histogram: &BTreeMap<String, i64>) -> &'static str {
-    let total = histogram.values().sum::<i64>();
-    if total < 5 {
-        return "unknown";
-    }
-    let fraction = |key: &str| *histogram.get(key).unwrap_or(&0) as f64 / total as f64;
-    if fraction("help") > 0.3 {
-        "social_butterfly"
-    } else if fraction("safe") > 0.7 {
-        "cautious_grinder"
-    } else if fraction("desperate") > 0.15 {
-        "reckless_degen"
-    } else if fraction("risky") > 0.4 {
-        "calculated_risk_taker"
-    } else {
-        "balanced_explorer"
-    }
 }
 
 fn truncate_chars(value: &str, maximum: usize) -> String {
@@ -793,71 +670,9 @@ pub fn build_player_state_context(tunnel: &TunnelFlavorState, balance: i64) -> S
     lines.join("\n")
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct DigPersonality {
-    pub play_style: String,
-    pub choice_histogram: BTreeMap<String, i64>,
-    pub notable_moments: Vec<String>,
-    pub social_summary: BTreeMap<String, i64>,
-}
-
-impl DigPersonality {
-    fn is_blank(&self) -> bool {
-        self.play_style.is_empty()
-            && self.choice_histogram.is_empty()
-            && self.notable_moments.is_empty()
-            && self.social_summary.is_empty()
-    }
-}
-
-fn play_style_description(style: &str) -> &'static str {
-    PLAY_STYLE_DESCRIPTIONS
-        .iter()
-        .find_map(|(key, description)| (*key == style).then_some(*description))
-        .unwrap_or(PLAY_STYLE_DESCRIPTIONS[5].1)
-}
-
-#[must_use]
-pub fn build_personality_context(personality: Option<&DigPersonality>) -> String {
-    let Some(personality) = personality.filter(|personality| !personality.is_blank()) else {
-        return "New player, no history yet.".to_owned();
-    };
-    let style = if personality.play_style.is_empty() {
-        "unknown"
-    } else {
-        &personality.play_style
-    };
-    let mut parts = vec![format!(
-        "Play style: {style} ({})",
-        play_style_description(style)
-    )];
-    let histogram = personality
-        .choice_histogram
-        .iter()
-        .filter(|(_, count)| **count != 0)
-        .map(|(choice, count)| format!("{choice}: {count}"))
-        .collect::<Vec<_>>();
-    if !histogram.is_empty() {
-        parts.push(format!("Choice history: {}", histogram.join(", ")));
-    }
-    if !personality.notable_moments.is_empty() {
-        let start = personality.notable_moments.len().saturating_sub(5);
-        parts.push(format!(
-            "Notable moments: {}",
-            personality.notable_moments[start..].join(" | ")
-        ));
-    }
-    let social = personality
-        .social_summary
-        .iter()
-        .filter(|(_, count)| **count != 0)
-        .map(|(name, count)| format!("{}: {count}", name.replace('_', " ")))
-        .collect::<Vec<_>>();
-    if !social.is_empty() {
-        parts.push(format!("Social: {}", social.join(", ")));
-    }
-    parts.join("\n")
-}
+/// The personality section of every flavor prompt. No play-style history is
+/// recorded, so each miner reads as a newcomer.
+pub const NEW_PLAYER_PERSONALITY: &str = "New player, no history yet.";
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CaveInFlavorDetail {
@@ -1094,11 +909,6 @@ pub struct DigAction {
     pub jc_delta: i64,
     pub detail: SocialActionDetail,
     pub created_at: i64,
-}
-
-#[must_use]
-pub fn build_multiplayer_context(actions: &[DigAction], names: &BTreeMap<i64, String>) -> String {
-    build_multiplayer_context_with_state(actions, &TunnelFlavorState::default(), 0, names)
 }
 
 #[must_use]
@@ -1698,18 +1508,10 @@ impl DigFlavorRng for SeededDigFlavorRng {
     }
 }
 
-impl FlameEntropy for SeededDigFlavorRng {
-    fn index(&mut self, upper_exclusive: usize) -> usize {
-        assert!(upper_exclusive > 0, "cannot pick from an empty flame pool");
-        self.choose_tone(upper_exclusive)
-    }
-}
-
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct GatheredFlavorData {
     pub tunnel: Option<TunnelFlavorState>,
     pub balance: i64,
-    pub personality: Option<DigPersonality>,
     pub social_actions: Vec<DigAction>,
     pub recent_actions: Vec<DigAction>,
     pub player_rank: i64,
@@ -1717,7 +1519,7 @@ pub struct GatheredFlavorData {
 }
 
 /// The intentionally narrow read set needed by splash narration.  Unlike a
-/// full flavor gather this contains no balance, personality, action history,
+/// full flavor gather this contains no balance, action history,
 /// rank, or DM context; production adapters can therefore resolve display
 /// names and the digger's layer with two small guild-scoped queries.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1807,17 +1609,6 @@ pub trait DigFlavorDataPort: Send + Sync {
     }
 
     fn set_dm_memory(&self, discord_id: i64, guild_id: i64, value: &str) -> Result<(), String>;
-    fn get_personality(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-    ) -> Result<Option<DigPersonality>, String>;
-    fn upsert_personality(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-        personality: DigPersonality,
-    ) -> Result<(), String>;
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1966,38 +1757,6 @@ impl DigFlavorDataPort for SqliteDigFlavorDataAdapter {
     fn set_dm_memory(&self, discord_id: i64, guild_id: i64, value: &str) -> Result<(), String> {
         self.repository
             .set_dm_memory(discord_id, guild_id, value, unix_now())
-            .map_err(|error| error.to_string())
-    }
-
-    fn get_personality(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-    ) -> Result<Option<DigPersonality>, String> {
-        self.repository
-            .get_personality(discord_id, guild_id)
-            .map(|personality| personality.map(map_db_personality))
-            .map_err(|error| error.to_string())
-    }
-
-    fn upsert_personality(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-        personality: DigPersonality,
-    ) -> Result<(), String> {
-        self.repository
-            .upsert_personality(
-                discord_id,
-                guild_id,
-                &cama_db::dig_flavor_repository::DigFlavorPersonality {
-                    play_style: personality.play_style,
-                    choice_histogram: personality.choice_histogram,
-                    notable_moments: personality.notable_moments,
-                    social_summary: personality.social_summary,
-                },
-                unix_now(),
-            )
             .map_err(|error| error.to_string())
     }
 }
@@ -2180,7 +1939,6 @@ fn map_db_gathered(
     GatheredFlavorData {
         tunnel: gathered.tunnel.map(map_db_tunnel),
         balance: gathered.balance,
-        personality: gathered.personality.map(map_db_personality),
         social_actions: gathered
             .social_actions
             .into_iter()
@@ -2241,17 +1999,6 @@ fn map_db_tunnel(tunnel: cama_db::dig_flavor_repository::DigFlavorTunnel) -> Tun
         insured_until: tunnel.insured_until,
         reinforced_until: tunnel.reinforced_until,
         injury_state: tunnel.injury_state,
-    }
-}
-
-fn map_db_personality(
-    personality: cama_db::dig_flavor_repository::DigFlavorPersonality,
-) -> DigPersonality {
-    DigPersonality {
-        play_style: personality.play_style,
-        choice_histogram: personality.choice_histogram,
-        notable_moments: personality.notable_moments,
-        social_summary: personality.social_summary,
     }
 }
 
@@ -2547,7 +2294,7 @@ impl DigFlavorService {
         let messages = build_messages(
             &build_dig_flavor_system_prompt(tone, bonus_cap),
             &build_player_state_context(tunnel, gathered.balance),
-            &build_personality_context(gathered.personality.as_ref()),
+            NEW_PLAYER_PERSONALITY,
             &outcome_context,
             OptionalMessageSections {
                 multiplayer: &multiplayer_context,
@@ -2659,46 +2406,6 @@ impl DigFlavorService {
         }
         delta
     }
-
-    pub fn update_personality(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-        choice: Option<&str>,
-        details: Option<&BTreeMap<String, bool>>,
-    ) {
-        let Ok(existing) = self.data.get_personality(discord_id, guild_id) else {
-            return;
-        };
-        let mut personality = existing.unwrap_or_else(|| DigPersonality {
-            play_style: "unknown".to_owned(),
-            ..DigPersonality::default()
-        });
-        const VALID_CHOICES: [&str; 7] = [
-            "safe",
-            "risky",
-            "desperate",
-            "fight",
-            "retreat",
-            "scout",
-            "help",
-        ];
-        if let Some(choice) = choice.filter(|choice| VALID_CHOICES.contains(choice)) {
-            *personality
-                .choice_histogram
-                .entry(choice.to_owned())
-                .or_default() += 1;
-        }
-        if let Some(moment) = details.and_then(extract_notable_moment) {
-            personality.notable_moments.push(moment.to_owned());
-            let drain = personality.notable_moments.len().saturating_sub(10);
-            personality.notable_moments.drain(..drain);
-        }
-        personality.play_style = classify_play_style(&personality.choice_histogram).to_owned();
-        let _ignored = self
-            .data
-            .upsert_personality(discord_id, guild_id, personality);
-    }
 }
 
 fn python_round(value: f64) -> i64 {
@@ -2712,41 +2419,24 @@ fn python_round(value: f64) -> i64 {
     }
 }
 
-fn extract_notable_moment(details: &BTreeMap<String, bool>) -> Option<&'static str> {
-    [
-        ("first_boss_kill", "Slew their first boss"),
-        ("prestige", "Ascended to a new prestige level"),
-        ("artifact_found", "Discovered a rare artifact"),
-        ("cave_in_streak", "Suffered a devastating cave-in streak"),
-    ]
-    .into_iter()
-    .find_map(|(key, description)| {
-        details
-            .get(key)
-            .copied()
-            .unwrap_or(false)
-            .then_some(description)
-    })
-}
-
+#[cfg(test)]
 #[derive(Default)]
 struct MemoryRepositoryState {
     balances: BTreeMap<(i64, i64), i64>,
     names: BTreeMap<(i64, i64), String>,
     tunnels: BTreeMap<(i64, i64), TunnelFlavorState>,
     memories: BTreeMap<(i64, i64), String>,
-    personalities: BTreeMap<(i64, i64), DigPersonality>,
     actions: Vec<DigAction>,
 }
 
-/// Reference in-memory adapter used by parity tests and local prompt previews.
-/// Production cutover still requires a `rusqlite` adapter over the Python
-/// schema; this type intentionally never opens the shared database.
+/// Reference in-memory adapter for the parity tests.
+#[cfg(test)]
 #[derive(Default)]
 pub struct MemoryDigFlavorRepository {
     state: Mutex<MemoryRepositoryState>,
 }
 
+#[cfg(test)]
 impl MemoryDigFlavorRepository {
     pub fn register_player(&self, discord_id: i64, guild_id: i64, name: &str, balance: i64) {
         let mut state = self
@@ -2802,24 +2492,6 @@ impl MemoryDigFlavorRepository {
             .insert((discord_id, guild_id), value);
     }
 
-    #[must_use]
-    pub fn personality(&self, discord_id: i64, guild_id: i64) -> Option<DigPersonality> {
-        self.state
-            .lock()
-            .expect("memory repository is not poisoned")
-            .personalities
-            .get(&(discord_id, guild_id))
-            .cloned()
-    }
-
-    pub fn write_personality(&self, discord_id: i64, guild_id: i64, personality: DigPersonality) {
-        self.state
-            .lock()
-            .expect("memory repository is not poisoned")
-            .personalities
-            .insert((discord_id, guild_id), personality);
-    }
-
     pub fn log_action(&self, action: DigAction) {
         self.state
             .lock()
@@ -2846,6 +2518,7 @@ impl MemoryDigFlavorRepository {
     }
 }
 
+#[cfg(test)]
 impl DigFlavorDataPort for MemoryDigFlavorRepository {
     fn gather(&self, discord_id: i64, guild_id: i64) -> Result<GatheredFlavorData, String> {
         let state = self.state.lock().map_err(|error| error.to_string())?;
@@ -2877,7 +2550,6 @@ impl DigFlavorDataPort for MemoryDigFlavorRepository {
         Ok(GatheredFlavorData {
             tunnel: state.tunnels.get(&(discord_id, guild_id)).cloned(),
             balance: *state.balances.get(&(discord_id, guild_id)).unwrap_or(&0),
-            personality: state.personalities.get(&(discord_id, guild_id)).cloned(),
             social_actions,
             recent_actions,
             player_rank: 0,
@@ -2922,113 +2594,6 @@ impl DigFlavorDataPort for MemoryDigFlavorRepository {
     fn set_dm_memory(&self, discord_id: i64, guild_id: i64, value: &str) -> Result<(), String> {
         self.write_dm_memory(discord_id, guild_id, value);
         Ok(())
-    }
-
-    fn get_personality(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-    ) -> Result<Option<DigPersonality>, String> {
-        Ok(self.personality(discord_id, guild_id))
-    }
-
-    fn upsert_personality(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-        personality: DigPersonality,
-    ) -> Result<(), String> {
-        self.write_personality(discord_id, guild_id, personality);
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DigTerminalFailure {
-    pub success: bool,
-    pub message: String,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct DigPreconditions {
-    pub depth_before: i64,
-}
-
-#[must_use]
-pub fn dig_with_preconditions(
-    tunnel: Option<&TunnelState>,
-) -> (Option<DigTerminalFailure>, Option<DigPreconditions>) {
-    tunnel.map_or_else(
-        || {
-            (
-                Some(DigTerminalFailure {
-                    success: false,
-                    message: "You need to register first.".to_owned(),
-                }),
-                None,
-            )
-        },
-        |tunnel| {
-            (
-                None,
-                Some(DigPreconditions {
-                    depth_before: tunnel.depth,
-                }),
-            )
-        },
-    )
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AppliedDigFlavorOutcome {
-    pub success: bool,
-    pub advance: i64,
-    pub depth_after: i64,
-    pub cave_in: bool,
-    pub cave_in_detail: Option<CaveInFlavorDetail>,
-    pub llm_narrative: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct ResolvedDigFlavorInput {
-    pub advance: i64,
-    pub jc_earned: i64,
-    pub cave_in: bool,
-    pub cave_in_block_loss: i64,
-    pub cave_in_type: String,
-}
-
-#[must_use]
-pub fn apply_resolved_dig_outcome(
-    tunnel: &mut TunnelState,
-    input: &ResolvedDigFlavorInput,
-    now: i64,
-) -> AppliedDigFlavorOutcome {
-    let resolved = apply_dig_outcome(
-        tunnel,
-        DigOutcomeInput {
-            advance: input.advance,
-            gross_jc: input.jc_earned,
-            cave_in_loss: if input.cave_in {
-                input.cave_in_block_loss
-            } else {
-                0
-            },
-            ..DigOutcomeInput::default()
-        },
-        now,
-    );
-    AppliedDigFlavorOutcome {
-        success: true,
-        advance: resolved.advance,
-        depth_after: resolved.depth_after,
-        cave_in: resolved.cave_in,
-        cave_in_detail: resolved.cave_in.then(|| CaveInFlavorDetail {
-            block_loss: input.cave_in_block_loss,
-            message: String::new(),
-            kind: input.cave_in_type.clone(),
-        }),
-        llm_narrative: None,
     }
 }
 

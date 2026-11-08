@@ -45,6 +45,7 @@ use tracing::{debug, error, warn};
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{
     DiscordDirectMessageErrorKind, DiscordMessage, DiscordTransport, cached_guild_player_names,
+    resolve_guild_player_names,
 };
 use crate::ids::signed_id;
 use crate::option_ext::{boolean_option, integer_option, string_option, user_option};
@@ -146,6 +147,11 @@ impl PlayerRegistrationProvider {
             repository: NeonEventRepository::new(path),
         });
         let mut neon = NeonDegenService::with_event_port(now_nanos(), neon_port);
+        neon.set_player_names(Arc::new(crate::discord_transport::GuildCacheNeonNames(
+            Arc::new(
+                crate::discord_transport::DiscordGuildPlayerNameResolver::new(Arc::clone(&discord)),
+            ),
+        )));
         neon.set_enabled(config.neon_degen_enabled);
         Self {
             handler: Arc::new(PlayerRegistrationHandler {
@@ -1140,10 +1146,14 @@ impl PlayerRegistrationHandler {
                 .collect::<Vec<_>>()
                 .join(" or ")
         };
+        let target_name =
+            resolve_guild_player_names(self.discord.as_ref(), Some(guild_id), &[target])
+                .await
+                .resolve(target);
         responder
             .followup(
                 InteractionResponse::message(format!(
-                    "**Referral: <@{target_id}>**\n\
+                    "**Referral: {target_name}** <@{target_id}>\n\
                      1. If needed, run `/player register` with your Steam32 ID (the number in your Dotabuff URL).\n\
                      2. Run `/player roles` with your Dota positions (1-5).\n\
                      3. React in {lobby_destination} to join an active lobby, or run `/lobby` to start one."
@@ -1288,15 +1298,19 @@ impl PlayerRegistrationHandler {
         result: RegisterPlayerResult,
         responder: Arc<dyn InteractionResponder>,
     ) -> Result<(), String> {
+        let user_id = signed_id(context.user_id, "registered user")?;
+        let name = resolve_guild_player_names(self.discord.as_ref(), Some(guild_id), &[user_id])
+            .await
+            .resolve(user_id);
         responder
             .followup(
                 InteractionResponse::message(format!(
-                    "✅ Registered <@{}>!\n\
+                    "✅ Registered {name}!\n\
                      Cama Rating: {} ({:.0}% uncertainty)\n\
                      Use `/player roles` to set your preferred roles.",
-                    context.user_id, result.cama_rating, result.uncertainty
+                    result.cama_rating, result.uncertainty
                 ))
-                .with_user_mentions(vec![context.user_id]),
+                .without_mentions(),
             )
             .await
             .map_err(|error| error.to_string())?;
@@ -1993,19 +2007,29 @@ impl PlayerRegistrationHandler {
         let user_id = signed_id(context.user_id, "user")?;
         let guild = signed_id(guild_id, "guild")?;
         let service = TimezoneService::new(self.registration.clone());
+        let now = chrono::Utc::now();
         let result = tokio::task::spawn_blocking(move || {
-            service.set_timezone(user_id, Some(guild), &timezone)
+            service.set_timezone(user_id, Some(guild), &timezone, now)
         })
         .await
         .map_err(|error| format!("timezone set task failed: {error}"))?;
         match result {
-            Ok(()) => {
-                followup_ephemeral(
-                    &responder,
-                    "✅ Timezone set. Curfew windows will use this unless a window was given \
-                     its own timezone with `/player curfew add`.",
-                )
-                .await
+            Ok(held) => {
+                let mut message = "✅ Timezone set. Curfew windows will use this unless a window \
+                                   was given its own timezone with `/player curfew add`."
+                    .to_owned();
+                if !held.is_empty() {
+                    let names = held
+                        .iter()
+                        .map(|name| format!("\"{name}\""))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    message.push_str(&format!(
+                        "\nStrict window(s) {names} keep your previous timezone until the next \
+                         morning, like any other strict-mode edit."
+                    ));
+                }
+                followup_ephemeral(&responder, message).await
             }
             Err(TimezoneServiceError::PlayerNotRegistered) => {
                 followup_ephemeral(&responder, "❌ Player not registered.").await

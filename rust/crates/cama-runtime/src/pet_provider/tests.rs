@@ -1948,14 +1948,63 @@ async fn live_trinket_roll_persists_equipment_and_autocomplete() {
         .handle(autocomplete_request(""), autocomplete.clone())
         .await
         .expect("trinket autocomplete");
-    assert_eq!(
-        autocomplete
-            .autocompletes
-            .lock()
-            .expect("trinket choices")
-            .len(),
-        1
+    provider
+        .handler
+        .handle(
+            autocomplete_request("no trinket has this name"),
+            autocomplete.clone(),
+        )
+        .await
+        .expect("filtered trinket autocomplete");
+    let choices = autocomplete.autocompletes.lock().expect("trinket choices");
+    assert_eq!(choices.len(), 2);
+    let owned = choices[0]
+        .iter()
+        .map(|choice| match choice {
+            CommandOptionChoice::String { value, .. } => value.clone(),
+            other => panic!("trinket choices are strings: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(owned, vec![accessory.expect("owned trinket")]);
+    assert!(
+        choices[1].is_empty(),
+        "only matching owned trinkets are offered"
     );
+}
+
+#[tokio::test]
+async fn status_buttons_reject_other_users_without_touching_the_panel() {
+    let (_database, provider, _pet_id) = fixture(false);
+    let initial = Arc::new(TestResponder::new(false));
+    provider
+        .handler
+        .handle(status_command(), initial.clone())
+        .await
+        .expect("status response");
+    let intruder = Arc::new(TestResponder::new(false));
+    provider
+        .handler
+        .handle(
+            component_as(initial.button_id_containing(":buy:"), RECIPIENT),
+            intruder.clone(),
+        )
+        .await
+        .expect("foreign click");
+    let replies = intruder
+        .responses
+        .lock()
+        .expect("responses")
+        .iter()
+        .chain(intruder.followups.lock().expect("followups").iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        replies
+            .iter()
+            .any(|reply| reply.ephemeral && reply.content.contains("not your cama")),
+        "{replies:?}"
+    );
+    assert!(initial.edits.lock().expect("edits").is_empty());
 }
 
 #[tokio::test]
@@ -2519,4 +2568,136 @@ async fn a_void_tombstone_still_tells_the_clicker_why_the_brawl_died() {
     );
     assert!(reason.ephemeral, "the failure notice is private");
     assert_eq!(click.call_log(), vec!["update", "followup"]);
+}
+
+#[tokio::test]
+async fn brawl_challenge_names_an_unnamed_target_without_ids_or_mentions() {
+    let (_database, provider, _challenger_pet, _recipient_pet) = brawl_fixture();
+    let mut request = brawl_command(RECIPIENT, 0);
+    let InteractionRequest::Command { options, .. } = &mut request else {
+        panic!("brawl command");
+    };
+    let InteractionValue::Subcommand(sub_options) = &mut options[0].value else {
+        panic!("brawl subcommand");
+    };
+    sub_options[0].value = InteractionValue::User {
+        id: RECIPIENT,
+        display_name: None,
+        is_bot: Some(false),
+    };
+    let responder = Arc::new(TestResponder::new(false));
+
+    provider
+        .handler
+        .handle(request, responder.clone())
+        .await
+        .expect("challenge delivery");
+
+    let followups = responder.followups.lock().expect("challenge followups");
+    let embed = followups
+        .iter()
+        .find_map(|response| response.embeds.first())
+        .expect("challenge embed");
+    let text = format!(
+        "{}\n{}\n{}",
+        embed.title.as_deref().unwrap_or_default(),
+        embed.description.as_deref().unwrap_or_default(),
+        embed
+            .fields
+            .iter()
+            .map(|field| format!("{}\n{}", field.name, field.value))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    assert!(!text.contains("<@"), "{text}");
+    assert!(!text.contains(&RECIPIENT.to_string()), "{text}");
+}
+
+#[tokio::test]
+async fn status_rate_limit_replies_before_any_other_work() {
+    let (_database, provider, _pet_id) = fixture(true);
+    let mut retry = None;
+    for _ in 0..20 {
+        let responder = Arc::new(TestResponder::new(false));
+        provider
+            .handler
+            .handle(status_command(), responder.clone())
+            .await
+            .expect("status");
+        let limited = responder
+            .responses
+            .lock()
+            .expect("status responses")
+            .iter()
+            .find(|response| response.content.starts_with("⏳ Please wait "))
+            .cloned();
+        if let Some(limited) = limited {
+            assert!(responder.defers.lock().expect("defers").is_empty());
+            assert!(responder.followups.lock().expect("followups").is_empty());
+            retry = Some(limited);
+            break;
+        }
+    }
+    let limited = retry.expect("repeated status calls are rate limited");
+    assert!(limited.ephemeral);
+}
+
+#[tokio::test]
+async fn an_unhatched_species_discount_stays_hidden_in_the_shop_and_status_buttons() {
+    let (database, provider, pet_id) = fixture(false);
+    // An egg whose rolled species would pay 90% for food.
+    rusqlite::Connection::open(database.path())
+        .expect("open fixture")
+        .execute(
+            "UPDATE pets SET species='crystal_cama', hatched_at=?1, hatch_announced_at=NULL
+             WHERE pet_id=?2",
+            rusqlite::params![SystemPetClock.now() + 3_600, pet_id],
+        )
+        .expect("return the pet to its egg");
+
+    let shop = Arc::new(TestResponder::new(false));
+    provider
+        .handler
+        .handle(leaf_request("shop", Vec::new()), shop.clone())
+        .await
+        .expect("shop");
+    let shop_fields = shop
+        .followups
+        .lock()
+        .expect("shop followups")
+        .iter()
+        .flat_map(|response| response.embeds.iter())
+        .flat_map(|embed| embed.fields.iter())
+        .map(|field| field.name.clone())
+        .collect::<Vec<_>>();
+    assert!(
+        shop_fields.iter().any(|name| name.contains("Cheese — 30")),
+        "{shop_fields:?}"
+    );
+    assert!(
+        shop_fields.iter().all(|name| !name.contains("discounted!")),
+        "{shop_fields:?}"
+    );
+
+    let status = Arc::new(TestResponder::new(false));
+    provider
+        .handler
+        .handle(status_command(), status.clone())
+        .await
+        .expect("status");
+    let labels = status
+        .followups
+        .lock()
+        .expect("status followups")
+        .iter()
+        .flat_map(|response| response.components.iter())
+        .flat_map(|row| row.buttons.iter())
+        .map(|button| button.label.clone())
+        .collect::<Vec<_>>();
+    assert!(
+        labels
+            .iter()
+            .any(|label| label == "Buy Roshan's Cheese (30)"),
+        "{labels:?}"
+    );
 }

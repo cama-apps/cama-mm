@@ -279,6 +279,19 @@ impl SurveyRuntimeState {
             .expect("survey active guild registry poisoned") = guilds;
     }
 
+    /// Register guilds that joined an established session alongside the
+    /// guilds already being recovered.
+    fn add_active_guilds(&self, guild_ids: &[u64]) {
+        self.active_guilds
+            .lock()
+            .expect("survey active guild registry poisoned")
+            .extend(
+                guild_ids
+                    .iter()
+                    .filter_map(|&guild_id| i64::try_from(guild_id).ok()),
+            );
+    }
+
     fn recovery_scopes(&self, scope: Option<(i64, i64)>) -> Vec<SurveyRecoveryScope> {
         match scope {
             Some((guild_id, survey_id)) => {
@@ -925,12 +938,18 @@ impl GatewayEventObserver for SurveyReadyRecoveryObserver {
             report.guilds_superseded = context.guild_ids().len();
             return report;
         };
-        self.state.replace_active_guilds(context.guild_ids());
-        self.state
-            .response_edit_retries
-            .lock()
-            .expect("survey response retry registry poisoned")
-            .clear();
+        if context.is_session_snapshot() {
+            self.state.replace_active_guilds(context.guild_ids());
+            self.state
+                .response_edit_retries
+                .lock()
+                .expect("survey response retry registry poisoned")
+                .clear();
+        } else {
+            // A newly joined guild must not evict the session's other guilds
+            // or reset their response-edit backoff.
+            self.state.add_active_guilds(context.guild_ids());
+        }
         let mut report = ReadyRecoveryReport::empty(self.name(), context.guild_ids().len());
         match self.state.recover(None).await {
             Ok(recovered) => {

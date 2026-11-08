@@ -12,6 +12,10 @@ use std::fmt::Write as _;
 
 use crate::rating::low_mmr_win_multiplier;
 
+/// Version stamped beside every persisted OpenSkill rating. Bump it together
+/// with the replay migration that rewrites stored ratings for a new algorithm.
+pub const OPENSKILL_ALGORITHM_VERSION: i64 = 5;
+
 /// A player's Gaussian OpenSkill belief.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rating {
@@ -130,6 +134,76 @@ impl Default for OpenSkillConfig {
             display_origin: 25.0,
             display_scale: 50.0,
         }
+    }
+}
+
+impl OpenSkillConfig {
+    /// Canonical compact JSON for every setting that changes persisted results.
+    #[must_use]
+    pub fn algorithm_spec_json(&self) -> String {
+        let mut json = String::new();
+        write!(
+            json,
+            concat!(
+                "{{\"balance\":false,",
+                "\"beta\":{},",
+                "\"display_origin\":{},",
+                "\"display_scale\":{},",
+                "\"family\":\"weng_lin.plackett_luce\",",
+                "\"fantasy_max\":{},",
+                "\"fantasy_min\":{},",
+                "\"kappa\":{},",
+                "\"limit_sigma\":false,",
+                "\"low_mmr_win_policy\":\"{}\",",
+                "\"low_priority_gain_multiplier\":{},",
+                "\"mu\":{},",
+                "\"openskill_package\":\"{}\",",
+                "\"performance_strength\":{},",
+                "\"positive_gain_policy\":\"posthoc_positive_mu_delta\",",
+                "\"sigma\":{},",
+                "\"sigma_decay_grace_days\":{},",
+                "\"sigma_decay_per_week\":{},",
+                "\"streak_multiplier_per_game\":{},",
+                "\"streak_policy\":\"posthoc_mu_delta\",",
+                "\"streak_threshold\":{},",
+                "\"tau\":{},",
+                "\"weight_bounds\":null,",
+                "\"win_probability_temperature\":{}}}"
+            ),
+            python_json_number(CamaOpenSkillSystem::BETA),
+            python_json_number(self.display_origin),
+            python_json_number(self.display_scale),
+            python_json_number(CamaOpenSkillSystem::FANTASY_MAX),
+            python_json_number(CamaOpenSkillSystem::FANTASY_MIN),
+            python_json_number(CamaOpenSkillSystem::KAPPA),
+            if self.low_mmr_win_bonus {
+                "pre_match_display_0_1000_step100_2_to_1.1_v1"
+            } else {
+                "disabled"
+            },
+            python_json_number(self.low_priority_gain_multiplier),
+            python_json_number(CamaOpenSkillSystem::DEFAULT_MU),
+            CamaOpenSkillSystem::OPENSKILL_PACKAGE_VERSION,
+            python_json_number(self.performance_strength),
+            python_json_number(CamaOpenSkillSystem::DEFAULT_SIGMA),
+            self.sigma_decay_grace_period_days,
+            python_json_number(self.sigma_decay_per_week),
+            python_json_number(self.streak_multiplier_per_game),
+            self.streak_threshold,
+            python_json_number(CamaOpenSkillSystem::TAU),
+            python_json_number(self.win_probability_temperature),
+        )
+        .expect("writing to a String cannot fail");
+        json
+    }
+
+    /// Provenance stamp for ratings produced under these settings.
+    ///
+    /// The fingerprint hashes settings only, so writers that never run the
+    /// model can still stamp the deployment's configured algorithm.
+    #[must_use]
+    pub fn algorithm_fingerprint(&self) -> String {
+        sha256_hex(self.algorithm_spec_json().as_bytes())[..16].to_owned()
     }
 }
 
@@ -582,66 +656,13 @@ impl CamaOpenSkillSystem {
     /// Canonical compact JSON for every setting that changes persisted results.
     #[must_use]
     pub fn algorithm_spec_json(&self) -> String {
-        let mut json = String::new();
-        write!(
-            json,
-            concat!(
-                "{{\"balance\":false,",
-                "\"beta\":{},",
-                "\"display_origin\":{},",
-                "\"display_scale\":{},",
-                "\"family\":\"weng_lin.plackett_luce\",",
-                "\"fantasy_max\":{},",
-                "\"fantasy_min\":{},",
-                "\"kappa\":{},",
-                "\"limit_sigma\":false,",
-                "\"low_mmr_win_policy\":\"{}\",",
-                "\"low_priority_gain_multiplier\":{},",
-                "\"mu\":{},",
-                "\"openskill_package\":\"{}\",",
-                "\"performance_strength\":{},",
-                "\"positive_gain_policy\":\"posthoc_positive_mu_delta\",",
-                "\"sigma\":{},",
-                "\"sigma_decay_grace_days\":{},",
-                "\"sigma_decay_per_week\":{},",
-                "\"streak_multiplier_per_game\":{},",
-                "\"streak_policy\":\"posthoc_mu_delta\",",
-                "\"streak_threshold\":{},",
-                "\"tau\":{},",
-                "\"weight_bounds\":null,",
-                "\"win_probability_temperature\":{}}}"
-            ),
-            python_json_number(Self::BETA),
-            python_json_number(self.config.display_origin),
-            python_json_number(self.config.display_scale),
-            python_json_number(Self::FANTASY_MAX),
-            python_json_number(Self::FANTASY_MIN),
-            python_json_number(Self::KAPPA),
-            if self.config.low_mmr_win_bonus {
-                "pre_match_display_0_1000_step100_2_to_1.1_v1"
-            } else {
-                "disabled"
-            },
-            python_json_number(self.config.low_priority_gain_multiplier),
-            python_json_number(Self::DEFAULT_MU),
-            Self::OPENSKILL_PACKAGE_VERSION,
-            python_json_number(self.config.performance_strength),
-            python_json_number(Self::DEFAULT_SIGMA),
-            self.config.sigma_decay_grace_period_days,
-            python_json_number(self.config.sigma_decay_per_week),
-            python_json_number(self.config.streak_multiplier_per_game),
-            self.config.streak_threshold,
-            python_json_number(Self::TAU),
-            python_json_number(self.config.win_probability_temperature),
-        )
-        .expect("writing to a String cannot fail");
-        json
+        self.config.algorithm_spec_json()
     }
 
     /// First 16 hexadecimal characters of SHA-256, matching Python exactly.
     #[must_use]
     pub fn algorithm_fingerprint(&self) -> String {
-        sha256_hex(self.algorithm_spec_json().as_bytes())[..16].to_owned()
+        self.config.algorithm_fingerprint()
     }
 }
 
@@ -1499,6 +1520,28 @@ mod tests {
     fn default_algorithm_fingerprint_includes_low_mmr_win_policy() {
         let system = CamaOpenSkillSystem::new();
         assert_eq!(system.algorithm_fingerprint(), "2cbce22ae3a3ded5");
+    }
+
+    #[test]
+    fn config_fingerprint_matches_the_system_built_from_it() {
+        let configured = OpenSkillConfig {
+            performance_strength: 0.5,
+            streak_threshold: 5,
+            ..OpenSkillConfig::default()
+        };
+        let system = CamaOpenSkillSystem::with_config(configured.clone()).unwrap();
+        assert_eq!(
+            configured.algorithm_fingerprint(),
+            system.algorithm_fingerprint()
+        );
+        assert_eq!(
+            configured.algorithm_spec_json(),
+            system.algorithm_spec_json()
+        );
+        assert_eq!(
+            OpenSkillConfig::default().algorithm_fingerprint(),
+            "2cbce22ae3a3ded5"
+        );
     }
 
     #[test]

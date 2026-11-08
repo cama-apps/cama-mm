@@ -996,6 +996,62 @@ fn test_correction_without_corrected_by_returns_none() {
 }
 
 #[test]
+fn test_correction_keeps_live_openskill_of_players_with_later_matches() {
+    let fixture = Fixture::new();
+    let seeded = fixture.seed_match_at(2_150, NOW - 10, MatchSide::Radiant);
+    fixture.add_match_for_teams(&seeded, NOW, MatchSide::Radiant);
+    // A malformed later match makes the follow-up full replay fail, which is
+    // exactly when a rolled-back live rating would otherwise stick.
+    fixture
+        .connection()
+        .execute(
+            "INSERT INTO matches (
+                 guild_id,winning_team,match_date,team1_players,team2_players
+             ) VALUES (?1,1,?2,'[]','[]')",
+            params![GUILD, NOW + 10],
+        )
+        .expect("insert malformed later match");
+    let live = |discord_id: i64| -> (f64, f64) {
+        fixture
+            .connection()
+            .query_row(
+                "SELECT os_mu,os_sigma FROM players WHERE discord_id=?1 AND guild_id=?2",
+                params![discord_id, GUILD],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read live OpenSkill")
+    };
+    let player = seeded.radiant_ids[0];
+    let before = live(player);
+
+    fixture.claim(&seeded, MatchSide::Dire, "later-guard");
+    fixture.apply_core(
+        &seeded,
+        MatchSide::Radiant,
+        MatchSide::Dire,
+        "later-guard",
+        &flat_updates(&seeded, MatchSide::Dire),
+    );
+    let summary = fixture
+        .repository
+        .replay_openskill_atomic(Some(GUILD))
+        .expect("run failing replay");
+    assert!(!summary.errors.is_empty());
+
+    assert_eq!(live(player), before);
+    let corrected_after: f64 = fixture
+        .connection()
+        .query_row(
+            "SELECT os_mu_after FROM rating_history
+             WHERE match_id=?1 AND discord_id=?2 AND guild_id=?3",
+            params![seeded.match_id, player, GUILD],
+            |row| row.get(0),
+        )
+        .expect("read corrected history");
+    assert_eq!(corrected_after, 33.75);
+}
+
+#[test]
 fn test_correction_reverses_bet_payouts() {
     let fixture = Fixture::new();
     let seeded = fixture.seed_match(3_000);
@@ -1390,12 +1446,12 @@ fn test_correction_never_withholds_more_than_the_bet_profit() {
             BetCorrectionOptions::pool(0.90, &taxable, 0.90, &taxable),
         )
         .unwrap();
-    // 100 profit, 90 of it to the vanity tax, and the low-priority share
-    // clamped to the 10 that remains rather than the 90 its rate asks for.
+    // The shared split caps each tax rate at 50%, so the 100 profit is split
+    // evenly between the two taxes and never exceeded.
     assert_eq!(fixture.balance(dire_bettor), 200);
     assert_eq!(
         fixture.settlement_taxes(seeded.match_id),
-        vec![(dire_bettor, 90, 10)]
+        vec![(dire_bettor, 50, 50)]
     );
 }
 
@@ -1489,8 +1545,8 @@ fn test_correction_clamps_low_priority_share_after_bankruptcy_and_vanity() {
         Some(200),
     );
     fixture.bet(seeded.match_id, dire_bettor, MatchSide::Dire, 100, None);
-    // 20 games left at 5% each withhold the full profit, so vanity still
-    // takes its 10 and the low-priority share is clamped to nothing.
+    // 20 games left at 5% each withhold the full profit, so both the vanity
+    // and low-priority shares are trimmed to nothing and the stake survives.
     fixture.set_penalty_games(dire_bettor, 20);
     let taxable = BTreeSet::from([dire_bettor]);
     fixture
@@ -1502,11 +1558,65 @@ fn test_correction_clamps_low_priority_share_after_bankruptcy_and_vanity() {
             correction_deductions(&taxable, &taxable),
         )
         .unwrap();
-    assert_eq!(fixture.balance(dire_bettor), 190);
+    assert_eq!(fixture.balance(dire_bettor), 200);
     assert_eq!(
         fixture.settlement_withholdings(seeded.match_id),
-        vec![(dire_bettor, 100, 10, 0)]
+        vec![(dire_bettor, 100, 0, 0)]
     );
+}
+
+#[test]
+fn test_correction_reuses_the_rates_the_original_settlement_froze() {
+    let fixture = Fixture::new();
+    let seeded = fixture.seed_match(3_750);
+    let radiant_bettor = 3_848;
+    let dire_bettor = 3_849;
+    fixture.add_spectator(radiant_bettor, 300);
+    fixture.add_spectator(dire_bettor, 100);
+    fixture.bet(
+        seeded.match_id,
+        radiant_bettor,
+        MatchSide::Radiant,
+        100,
+        Some(200),
+    );
+    fixture.bet(seeded.match_id, dire_bettor, MatchSide::Dire, 100, None);
+    // At settlement the dire bettor had two penalty games (10%) and was on
+    // neither tax roster.
+    cama_db_core::profit_deductions::record_bet_settlement_rates(
+        &fixture.connection(),
+        GUILD,
+        seeded.match_id,
+        &BTreeMap::from([
+            (
+                dire_bettor,
+                cama_db_core::profit_deductions::ProfitDeductionRates {
+                    bankruptcy: 0.10,
+                    ..Default::default()
+                },
+            ),
+            (radiant_bettor, Default::default()),
+        ]),
+    )
+    .unwrap();
+    // By correction time the penalty grew and the bettor joined both rosters;
+    // neither may change what the corrected settlement withholds.
+    fixture.set_penalty_games(dire_bettor, 12);
+    let taxable = BTreeSet::from([dire_bettor]);
+    fixture
+        .repository
+        .settle_bet_correction_atomic(
+            seeded.match_id,
+            Some(GUILD),
+            MatchSide::Dire,
+            correction_deductions(&taxable, &taxable),
+        )
+        .unwrap();
+    assert_eq!(
+        fixture.settlement_withholdings(seeded.match_id),
+        vec![(dire_bettor, 10, 0, 0)]
+    );
+    assert_eq!(fixture.balance(dire_bettor), 290);
 }
 
 #[test]
@@ -2764,6 +2874,362 @@ fn test_correction_retry_does_not_repay_a_credited_winner() {
     assert_eq!(fixture.balance(victim), after_first);
 }
 
+const RESUME_FIRST_PLAYER: i64 = 30_000;
+const DAY: i64 = 86_400;
+
+/// One match of the resume scenario, rosters as offsets from the first player.
+struct ResumeMatch {
+    day: i64,
+    radiant: [i64; 5],
+    dire: [i64; 5],
+    winner: MatchSide,
+    fantasy: bool,
+}
+
+/// Overlapping rosters, fantasy-weighted and equal-weight matches, a long gap
+/// that decays sigma, and admin events between, before, and after matches.
+fn resume_scenario() -> [ResumeMatch; 5] {
+    [
+        ResumeMatch {
+            day: 0,
+            radiant: [0, 1, 2, 3, 4],
+            dire: [5, 6, 7, 8, 9],
+            winner: MatchSide::Radiant,
+            fantasy: true,
+        },
+        ResumeMatch {
+            day: 2,
+            radiant: [5, 6, 10, 11, 12],
+            dire: [0, 1, 13, 14, 2],
+            winner: MatchSide::Dire,
+            fantasy: false,
+        },
+        ResumeMatch {
+            day: 4,
+            radiant: [3, 4, 7, 8, 9],
+            dire: [10, 11, 12, 13, 14],
+            winner: MatchSide::Radiant,
+            fantasy: false,
+        },
+        ResumeMatch {
+            day: 70,
+            radiant: [0, 1, 2, 5, 6],
+            dire: [3, 4, 7, 8, 14],
+            winner: MatchSide::Dire,
+            fantasy: true,
+        },
+        ResumeMatch {
+            day: 72,
+            radiant: [9, 10, 11, 12, 13],
+            dire: [0, 1, 2, 3, 4],
+            winner: MatchSide::Radiant,
+            fantasy: false,
+        },
+    ]
+}
+
+/// Build the scenario and replay it once in full, so every stored snapshot
+/// is one a replay produced. Returns the match IDs in replay order.
+fn resume_fixture() -> (Fixture, Vec<i64>) {
+    let fixture = Fixture::new();
+    let connection = fixture.connection();
+    for offset in 0..15 {
+        connection
+            .execute(
+                "INSERT INTO players (discord_id,guild_id,discord_username,initial_mmr)
+                 VALUES (?1,?2,?3,?4)",
+                params![
+                    RESUME_FIRST_PLAYER + offset,
+                    GUILD,
+                    format!("resume{offset}"),
+                    1_000 + 150 * offset
+                ],
+            )
+            .expect("insert resume player");
+    }
+    let mut match_ids = Vec::new();
+    for entry in resume_scenario() {
+        let radiant = entry.radiant.map(|offset| RESUME_FIRST_PLAYER + offset);
+        let dire = entry.dire.map(|offset| RESUME_FIRST_PLAYER + offset);
+        connection
+            .execute(
+                "INSERT INTO matches (
+                     guild_id,winning_team,match_date,win_reward_jc,betting_mode,
+                     team1_players,team2_players
+                 ) VALUES (?1,?2,datetime(?3,'unixepoch'),?4,'pool',?5,?6)",
+                params![
+                    GUILD,
+                    entry.winner.number(),
+                    NOW + entry.day * DAY,
+                    WIN_REWARD,
+                    json_ids(&radiant),
+                    json_ids(&dire)
+                ],
+            )
+            .expect("insert resume match");
+        let match_id = connection.last_insert_rowid();
+        for (team, ids) in [(MatchSide::Radiant, radiant), (MatchSide::Dire, dire)] {
+            for (index, discord_id) in ids.into_iter().enumerate() {
+                let won = team == entry.winner;
+                let fantasy = entry
+                    .fantasy
+                    .then_some(4.0 + 1.5 * index as f64 + if won { 6.0 } else { 0.0 });
+                connection
+                    .execute(
+                        "INSERT INTO match_participants (
+                             match_id,discord_id,team_number,won,side,guild_id,fantasy_points
+                         ) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                        params![
+                            match_id,
+                            discord_id,
+                            team.number(),
+                            won,
+                            team.label(),
+                            GUILD,
+                            fantasy
+                        ],
+                    )
+                    .expect("insert resume participant");
+                connection
+                    .execute(
+                        "INSERT INTO rating_history (
+                             discord_id,won,match_id,team_number,
+                             os_mu_before,os_mu_after,os_sigma_before,os_sigma_after,
+                             streak_multiplier_per_game,streak_threshold,
+                             low_priority_gain_multiplier,guild_id
+                         ) VALUES (?1,?2,?3,?4,25.0,25.0,8.0,8.0,0.20,3,1.0,?5)",
+                        params![discord_id, won, match_id, team.number(), GUILD],
+                    )
+                    .expect("insert resume history placeholder");
+            }
+        }
+        match_ids.push(match_id);
+    }
+    for (offset, event_type, value, day_seconds) in [
+        (13, "set_mu", 31.5, 3 * DAY),
+        (0, "add_sigma", 0.75, 3 * DAY + DAY / 2),
+        (1, "add_sigma", 1.25, 80 * DAY),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO openskill_rating_events (
+                     guild_id,discord_id,event_type,value,event_at
+                 ) VALUES (?1,?2,?3,?4,datetime(?5,'unixepoch'))",
+                params![
+                    GUILD,
+                    RESUME_FIRST_PLAYER + offset,
+                    event_type,
+                    value,
+                    NOW + day_seconds
+                ],
+            )
+            .expect("insert resume event");
+    }
+    drop(connection);
+    fixture.request_openskill_replay("resume-baseline");
+    let baseline = fixture
+        .repository
+        .replay_openskill_atomic(Some(GUILD))
+        .expect("establish replayed snapshots");
+    assert!(baseline.errors.is_empty(), "{:?}", baseline.errors);
+    (fixture, match_ids)
+}
+
+/// Give one match a new complete fantasy set and its enrichment replay job.
+fn enrich_resume_match(fixture: &Fixture, match_id: i64) {
+    fixture
+        .connection()
+        .execute(
+            "UPDATE match_participants
+             SET fantasy_points = 11.0 + (discord_id % 7) * 2.25
+             WHERE match_id=?1 AND guild_id=?2",
+            params![match_id, GUILD],
+        )
+        .expect("enrich resume match");
+    fixture.request_openskill_replay(&format!("match_enrichment:{match_id}"));
+}
+
+type PlayerSnapshot = (i64, Option<f64>, Option<f64>, Option<i64>, Option<String>);
+type HistorySnapshot = (
+    i64,
+    i64,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<i64>,
+    Option<String>,
+);
+type PredictionSnapshot = (i64, Option<f64>, Option<f64>, Option<i64>, Option<String>);
+
+/// Everything an OpenSkill replay persists, compared bit-for-bit.
+fn replay_snapshot(
+    fixture: &Fixture,
+) -> (
+    Vec<PlayerSnapshot>,
+    Vec<HistorySnapshot>,
+    Vec<PredictionSnapshot>,
+) {
+    let connection = fixture.connection();
+    let players = connection
+        .prepare(
+            "SELECT discord_id,os_mu,os_sigma,os_rating_version,os_algorithm_fingerprint
+             FROM players WHERE guild_id=?1 ORDER BY discord_id",
+        )
+        .expect("prepare player snapshot")
+        .query_map([GUILD], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .expect("query player snapshot")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect player snapshot");
+    let history = connection
+        .prepare(
+            "SELECT match_id,discord_id,os_mu_before,os_mu_after,os_sigma_before,
+                    os_sigma_after,fantasy_weight,os_algorithm_version,
+                    os_algorithm_fingerprint
+             FROM rating_history WHERE guild_id=?1 ORDER BY match_id,discord_id",
+        )
+        .expect("prepare history snapshot")
+        .query_map([GUILD], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+            ))
+        })
+        .expect("query history snapshot")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect history snapshot");
+    let predictions = connection
+        .prepare(
+            "SELECT match_id,openskill_radiant_win_prob,openskill_raw_radiant_win_prob,
+                    openskill_algorithm_version,openskill_algorithm_fingerprint
+             FROM match_predictions ORDER BY match_id",
+        )
+        .expect("prepare prediction snapshot")
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .expect("query prediction snapshot")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect prediction snapshot");
+    (players, history, predictions)
+}
+
+fn replay_enriched(fixture: &Fixture, match_id: i64) -> OpenSkillReplaySummary {
+    let (summary, _) = fixture
+        .repository
+        .replay_openskill_for_enriched_match_atomic_configured(
+            Some(GUILD),
+            match_id,
+            &CamaOpenSkillSystem::default(),
+            &CamaRatingSystem::default(),
+            NEW_PLAYER_MMR_DISCOUNT,
+        )
+        .expect("replay enriched match");
+    assert!(summary.errors.is_empty(), "{:?}", summary.errors);
+    summary
+}
+
+#[test]
+fn test_replay_resumed_at_each_enriched_match_equals_the_full_replay() {
+    let total = 5;
+    for index in 0..total {
+        let (resumed, match_ids) = resume_fixture();
+        let (full, full_ids) = resume_fixture();
+        assert_eq!(match_ids, full_ids);
+        let baseline = replay_snapshot(&full);
+        let target = match_ids[index];
+        enrich_resume_match(&resumed, target);
+        enrich_resume_match(&full, target);
+
+        let resumed_summary = replay_enriched(&resumed, target);
+        let full_summary = full
+            .repository
+            .replay_openskill_atomic(Some(GUILD))
+            .expect("full replay after enrichment");
+        assert!(full_summary.errors.is_empty());
+
+        assert_eq!(
+            resumed_summary.matches_processed,
+            total - index,
+            "the replay resumes at the enriched match"
+        );
+        assert_eq!(full_summary.matches_processed, total);
+        let expected = replay_snapshot(&full);
+        assert_ne!(expected, baseline, "the enrichment must change ratings");
+        assert_eq!(replay_snapshot(&resumed), expected, "resumed at {index}");
+        assert_eq!(
+            resumed
+                .repository
+                .pending_openskill_replay(Some(GUILD))
+                .expect("read cleared job"),
+            None
+        );
+    }
+}
+
+#[test]
+fn test_resumed_replay_falls_back_to_full_when_a_stored_snapshot_disagrees() {
+    let (resumed, match_ids) = resume_fixture();
+    let (full, _) = resume_fixture();
+    // A snapshot no replay produced, before the enriched match, for a player
+    // who plays in it.
+    for fixture in [&resumed, &full] {
+        fixture
+            .connection()
+            .execute(
+                "UPDATE rating_history SET os_mu_after=os_mu_after+0.5
+                 WHERE match_id=?1 AND discord_id=?2 AND guild_id=?3",
+                params![match_ids[1], RESUME_FIRST_PLAYER + 10, GUILD],
+            )
+            .expect("drift one stored snapshot");
+        enrich_resume_match(fixture, match_ids[2]);
+    }
+
+    let resumed_summary = replay_enriched(&resumed, match_ids[2]);
+    full.repository
+        .replay_openskill_atomic(Some(GUILD))
+        .expect("full replay after drift");
+    assert_eq!(resumed_summary.matches_processed, 5, "fell back to full");
+    assert_eq!(replay_snapshot(&resumed), replay_snapshot(&full));
+}
+
+#[test]
+fn test_enriched_replay_is_full_unless_that_match_is_the_only_reason() {
+    let (fixture, match_ids) = resume_fixture();
+    enrich_resume_match(&fixture, match_ids[3]);
+    fixture.request_openskill_replay("match_enrichment:multiple");
+    assert_eq!(replay_enriched(&fixture, match_ids[3]).matches_processed, 5);
+
+    enrich_resume_match(&fixture, match_ids[3]);
+    assert_eq!(
+        replay_enriched(&fixture, match_ids[2]).matches_processed,
+        5,
+        "a job for another match is not this match's resume point"
+    );
+}
+
 const FIXTURE_SCHEMA: &str = r#"
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=OFF;
@@ -2972,6 +3438,12 @@ CREATE TABLE low_priority_state (
     guild_id INTEGER NOT NULL,
     active INTEGER NOT NULL,
     PRIMARY KEY(discord_id,guild_id)
+);
+CREATE TABLE app_kv (
+    guild_id INTEGER NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    PRIMARY KEY (guild_id, key)
 );
 "#;
 

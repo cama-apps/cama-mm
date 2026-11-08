@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 
 use cama_db::pet_brawl_repository::SweepResult;
+use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
 use cama_domain::pet::{PET_BRAWL_TURN_SECONDS, Pet, SpeciesTier, get_species};
 use cama_domain::pet_brawl::{
     BrawlRng, Duelist, MAX_ROUNDS, PetBrawl, PetBrawlMove, PetBrawlState, SHELL_BLURB, move_name,
@@ -197,6 +198,7 @@ impl InMemoryDiscord {
         })
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn defer_count(&self) -> usize {
         self.events
@@ -266,9 +268,11 @@ impl InteractionModel {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TargetMember {
     pub id: i64,
+    /// Readable display text for the challenged player; never a mention.
+    pub display_name: String,
     pub is_bot: bool,
 }
 
@@ -508,21 +512,25 @@ where
         &mut self.service
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn has_session(&self, brawl_id: i64) -> bool {
         self.sessions.contains_key(&brawl_id)
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn session_state(&self, brawl_id: i64) -> Option<&PetBrawlState> {
         self.sessions.get(&brawl_id).map(|session| &session.state)
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn session_picks(&self, brawl_id: i64) -> Option<&BTreeMap<&'static str, PetBrawlMove>> {
         self.sessions.get(&brawl_id).map(|session| &session.picks)
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn session_last_log(&self, brawl_id: i64) -> Option<&[String]> {
         self.sessions
@@ -530,6 +538,7 @@ where
             .map(|session| session.last_log.as_slice())
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn session_full_timeouts(&self, brawl_id: i64) -> Option<u8> {
         self.sessions
@@ -537,12 +546,14 @@ where
             .map(|session| session.consecutive_full_timeouts)
     }
 
+    #[cfg(test)]
     pub fn set_session_state(&mut self, brawl_id: i64, state: PetBrawlState) {
         if let Some(session) = self.sessions.get_mut(&brawl_id) {
             session.state = state;
         }
     }
 
+    #[cfg(test)]
     pub fn set_session_lock_held(&mut self, brawl_id: i64, held: bool) {
         if let Some(session) = self.sessions.get_mut(&brawl_id) {
             session.lock_held = held;
@@ -662,6 +673,8 @@ where
                 &challenge.brawl,
                 &challenge.challenger_pet,
                 &challenge.recipient_pet,
+                &interaction.display_name,
+                &target.display_name,
             )),
             view: Some(ViewModel::Challenge(view)),
             attachments: vec!["pet-brawl-versus.png".to_owned()],
@@ -792,7 +805,7 @@ where
             ServiceResult::Success(()) => discord.edit_or_send(
                 challenge.message_id,
                 OutboundMessage {
-                    embed: Some(build_declined_embed(interaction.user_id)),
+                    embed: Some(build_declined_embed(&interaction.display_name)),
                     ..OutboundMessage::default()
                 },
             ),
@@ -1099,17 +1112,19 @@ pub fn build_challenge_embed(
     brawl: &PetBrawl,
     challenger_pet: &Pet,
     recipient_pet: &Pet,
+    challenger_name: &str,
+    recipient_name: &str,
 ) -> EmbedModel {
     let challenger_species = get_species(&challenger_pet.species);
     let recipient_species = get_species(&recipient_pet.species);
     EmbedModel {
         title: "⚔️ A pet brawl challenge!".to_owned(),
         description: format!(
-            "<@{}>'s {}**{}** challenges <@{}>'s {}**{}** to single combat!\n\nExpires <t:{}:R>.",
-            brawl.challenger_id,
+            "{}'s {}**{}** challenges {}'s {}**{}** to single combat!\n\nExpires <t:{}:R>.",
+            readable_player_name(challenger_name).unwrap_or(UNKNOWN_PLAYER),
             tier_badge(challenger_species.tier),
             challenger_pet.name,
-            brawl.recipient_id,
+            readable_player_name(recipient_name).unwrap_or(UNKNOWN_PLAYER),
             tier_badge(recipient_species.tier),
             recipient_pet.name,
             brawl.expires_at
@@ -1401,36 +1416,13 @@ fn progression_line(
 }
 
 #[must_use]
-pub fn build_training_field(
-    career: &crate::pet_brawl::CareerSummary,
-    solo_training_sessions: i64,
-) -> EmbedField {
-    let titles = [career.rank.as_deref(), career.build.as_deref()]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" · ");
-    let level = career.strength + career.intelligence + career.dexterity;
-    let title_line = if titles.is_empty() {
-        String::new()
-    } else {
-        format!("\n{titles}")
-    };
-    EmbedField {
-        name: "🏋️ Training".to_owned(),
-        value: format!(
-            "Level {level}/4 · {}/20 XP\nSTR {} · INT {} · DEX {}\nSolo: {solo_training_sessions}/3 banked · `/pet train`{title_line}",
-            career.xp, career.strength, career.intelligence, career.dexterity
-        ),
-        inline: false,
-    }
-}
-
-#[must_use]
-pub fn build_declined_embed(recipient_id: i64) -> EmbedModel {
+pub fn build_declined_embed(recipient_name: &str) -> EmbedModel {
     EmbedModel {
         title: "🐫 Challenge declined".to_owned(),
-        description: format!("<@{recipient_id}> politely declines. The camas graze on."),
+        description: format!(
+            "{} politely declines. The camas graze on.",
+            readable_player_name(recipient_name).unwrap_or(UNKNOWN_PLAYER)
+        ),
         color: Some(COLOR_BLUE),
         ..EmbedModel::default()
     }
@@ -1802,6 +1794,7 @@ mod tests {
             &interaction(CHALLENGER, PET_CHANNEL),
             TargetMember {
                 id: RECIPIENT,
+                display_name: "Rival Keeper".to_owned(),
                 is_bot: false,
             },
             wager,
@@ -1881,6 +1874,10 @@ mod tests {
         );
         assert_eq!(app.service().status, "pending");
         assert_eq!(challenge.brawl.status, "pending");
+        let description = &last_embed(&discord).description;
+        assert!(description.contains("Owner's"), "{description}");
+        assert!(description.contains("Rival Keeper's"), "{description}");
+        assert!(!description.contains("<@"), "{description}");
     }
 
     #[test]
@@ -1906,6 +1903,7 @@ mod tests {
             &interaction(CHALLENGER, PET_CHANNEL),
             TargetMember {
                 id: RECIPIENT,
+                display_name: "Rival Keeper".to_owned(),
                 is_bot: false,
             },
             Some(20),
@@ -1925,6 +1923,7 @@ mod tests {
             &interaction(CHALLENGER, 123),
             TargetMember {
                 id: RECIPIENT,
+                display_name: "Rival Keeper".to_owned(),
                 is_bot: false,
             },
             None,
@@ -1944,6 +1943,7 @@ mod tests {
             &interaction(CHALLENGER, PET_CHANNEL),
             TargetMember {
                 id: RECIPIENT,
+                display_name: "Rival Keeper".to_owned(),
                 is_bot: true,
             },
             None,
@@ -1952,28 +1952,6 @@ mod tests {
 
         assert!(challenge.is_none());
         assert!(last_content(&discord).contains("Bots"));
-    }
-
-    #[test]
-    fn test_status_embed_shows_training_stats_rank_and_build() {
-        let career = CareerSummary {
-            xp: 20,
-            strength: 2,
-            intelligence: 1,
-            dexterity: 1,
-            rank: Some("Champion".to_owned()),
-            build: Some("Bruiser".to_owned()),
-        };
-
-        let training = build_training_field(&career, 3);
-
-        assert!(training.value.contains("20/20 XP"));
-        assert!(training.value.contains("STR 2"));
-        assert!(training.value.contains("INT 1"));
-        assert!(training.value.contains("DEX 1"));
-        assert!(training.value.contains("Champion"));
-        assert!(training.value.contains("Bruiser"));
-        assert!(training.value.contains("3/3 banked"));
     }
 
     #[test]
@@ -2031,6 +2009,23 @@ mod tests {
 
         assert_eq!(app.service().status, "declined");
         assert!(last_embed(&discord).title.contains("declined"));
+        let description = &last_embed(&discord).description;
+        assert!(
+            description.starts_with("Owner politely declines"),
+            "{description}"
+        );
+        assert!(!description.contains("<@"), "{description}");
+    }
+
+    #[test]
+    fn test_brawl_embeds_never_fall_back_to_mentions_or_ids() {
+        let declined = build_declined_embed("<@123456789>");
+        assert_eq!(
+            declined.description,
+            "Unknown player politely declines. The camas graze on."
+        );
+        let declined = build_declined_embed("123456789");
+        assert!(declined.description.starts_with("Unknown player"));
     }
 
     #[test]

@@ -10,7 +10,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use chrono::{DateTime, NaiveDateTime, Utc};
+
 use cama_db_core::profit_deductions::OwnedProfitDeductionPolicy;
+use cama_domain::openskill::{CamaOpenSkillSystem, OPENSKILL_ALGORITHM_VERSION};
 use cama_domain::player::{OPENSKILL_DISPLAY_SCALE, Player};
 use cama_domain::rating::cap_glicko_rd;
 use cama_domain::role_derivation::{
@@ -31,8 +34,6 @@ use crate::referrals::{
 
 const BULK_CHUNK_SIZE: usize = 900;
 const NEW_PLAYER_EXCLUSION_BOOST: i64 = 4;
-const OPENSKILL_ALGORITHM_VERSION: i64 = 5;
-const OPENSKILL_ALGORITHM_FINGERPRINT: &str = "2cbce22ae3a3ded5";
 const DEFAULT_STREAK_MULTIPLIER_PER_GAME: f64 = 0.36;
 const DEFAULT_STREAK_THRESHOLD: i64 = 3;
 
@@ -153,6 +154,8 @@ pub struct NewPlayer {
     pub glicko_volatility: Option<f64>,
     pub os_mu: Option<f64>,
     pub os_sigma: Option<f64>,
+    /// Fingerprint of the deployment's configured OpenSkill system.
+    pub openskill_algorithm_fingerprint: String,
 }
 
 impl NewPlayer {
@@ -176,6 +179,7 @@ impl NewPlayer {
             glicko_volatility: None,
             os_mu: None,
             os_sigma: None,
+            openskill_algorithm_fingerprint: CamaOpenSkillSystem::default().algorithm_fingerprint(),
         }
     }
 }
@@ -193,10 +197,11 @@ pub struct MatchRatingInput {
     pub first_calibrated_at: Value,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+/// Reminder cooldown anchors as Unix seconds; unreadable legacy values are `None`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ReminderTimestamps {
-    pub last_wheel_spin: Value,
-    pub last_trivia_session: Value,
+    pub last_wheel_spin: Option<i64>,
+    pub last_trivia_session: Option<i64>,
 }
 
 /// Result of the atomic regular-wheel cooldown claim.
@@ -207,29 +212,12 @@ pub enum WheelSpinClaim {
     Cooldown { last_spin: i64 },
 }
 
-/// Python tuple order: `(rating, rating_deviation, volatility)`.
-pub type GlickoRating = (f64, Option<f64>, Option<f64>);
-
-impl Default for ReminderTimestamps {
-    fn default() -> Self {
-        Self {
-            last_wheel_spin: Value::Null,
-            last_trivia_session: Value::Null,
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShuffleInputs {
     pub players: Vec<Player>,
-    pub last_match_dates: OrderedMap<i64, Value>,
+    /// Last recorded match per player; `None` when absent or unparseable.
+    pub last_match_dates: OrderedMap<i64, Option<DateTime<Utc>>>,
     pub exclusion_counts: OrderedMap<i64, i64>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct UsernameMatch {
-    pub discord_id: i64,
-    pub discord_username: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -260,7 +248,7 @@ impl PlayerRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, CoreRepositoryError> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, CoreRepositoryError> {
         Ok(open_runtime_connection(&self.path)?)
     }
 
@@ -288,6 +276,7 @@ impl PlayerRepository {
             .filter(|roles| !roles.is_empty())
             .map(encode_string_array);
         let glicko_rd = player.glicko_rd.map(cap_glicko_rd);
+        let fingerprint = &player.openskill_algorithm_fingerprint;
         match connection.execute(
             "INSERT INTO players (
                 discord_id, guild_id, discord_username, dotabuff_url, steam_id,
@@ -314,7 +303,7 @@ impl PlayerRepository {
                 player.os_mu,
                 player.os_sigma,
                 OPENSKILL_ALGORITHM_VERSION,
-                OPENSKILL_ALGORITHM_FINGERPRINT,
+                fingerprint,
                 NEW_PLAYER_EXCLUSION_BOOST,
             ],
         ) {
@@ -427,129 +416,6 @@ impl PlayerRepository {
             )
             .optional()?
             .is_some())
-    }
-
-    pub fn update_roles(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-        roles: &[String],
-    ) -> Result<(), CoreRepositoryError> {
-        let connection = self.connection()?;
-        connection.execute(
-            "UPDATE players
-             SET preferred_roles = ?1, updated_at = CURRENT_TIMESTAMP
-             WHERE discord_id = ?2 AND guild_id = ?3",
-            params![
-                encode_string_array(roles),
-                discord_id,
-                Self::normalize_guild_id(guild_id)
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn update_glicko_rating(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-        rating: f64,
-        rd: f64,
-        volatility: f64,
-    ) -> Result<(), CoreRepositoryError> {
-        let connection = self.connection()?;
-        connection.execute(
-            "UPDATE players
-             SET glicko_rating = ?1, glicko_rd = ?2, glicko_volatility = ?3,
-                 updated_at = CURRENT_TIMESTAMP
-             WHERE discord_id = ?4 AND guild_id = ?5",
-            params![
-                rating,
-                cap_glicko_rd(rd),
-                volatility,
-                discord_id,
-                Self::normalize_guild_id(guild_id)
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn get_glicko_rating(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-    ) -> Result<Option<GlickoRating>, CoreRepositoryError> {
-        let connection = self.connection()?;
-        let row = connection
-            .query_row(
-                "SELECT glicko_rating, glicko_rd, glicko_volatility
-                 FROM players WHERE discord_id = ?1 AND guild_id = ?2",
-                params![discord_id, Self::normalize_guild_id(guild_id)],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<f64>>(0)?,
-                        row.get::<_, Option<f64>>(1)?,
-                        row.get::<_, Option<f64>>(2)?,
-                    ))
-                },
-            )
-            .optional()?;
-        Ok(row.and_then(|(rating, rd, volatility)| {
-            rating.map(|rating| (rating, rd.map(cap_glicko_rd), volatility))
-        }))
-    }
-
-    pub fn get_match_rating_inputs(
-        &self,
-        discord_ids: &[i64],
-        guild_id: Option<i64>,
-    ) -> Result<OrderedMap<i64, MatchRatingInput>, CoreRepositoryError> {
-        let unique_ids = unique_i64(discord_ids);
-        let mut result = OrderedMap::new();
-        if unique_ids.is_empty() {
-            return Ok(result);
-        }
-        let guild_id = Self::normalize_guild_id(guild_id);
-        let connection = self.connection()?;
-        let mut found = HashMap::new();
-        for chunk in unique_ids.chunks(BULK_CHUNK_SIZE) {
-            let sql = format!(
-                "SELECT discord_id, current_mmr, glicko_rating, glicko_rd,
-                        glicko_volatility, os_mu, os_sigma, last_match_date,
-                        created_at, first_calibrated_at
-                 FROM players
-                 WHERE guild_id = ? AND discord_id IN ({})",
-                placeholders(chunk.len())
-            );
-            let mut statement = connection.prepare(&sql)?;
-            let parameters = std::iter::once(guild_id).chain(chunk.iter().copied());
-            let rows = statement.query_map(params_from_iter(parameters), |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    MatchRatingInput {
-                        current_mmr: row.get(1)?,
-                        glicko_rating: row.get(2)?,
-                        glicko_rd: row.get(3)?,
-                        glicko_volatility: row.get(4)?,
-                        os_mu: row.get(5)?,
-                        os_sigma: row.get(6)?,
-                        last_match_date: row.get(7)?,
-                        created_at: row.get(8)?,
-                        first_calibrated_at: row.get(9)?,
-                    },
-                ))
-            })?;
-            for row in rows {
-                let (discord_id, input) = row?;
-                found.insert(discord_id, input);
-            }
-        }
-        for discord_id in unique_ids {
-            if let Some(input) = found.remove(&discord_id) {
-                result.insert(discord_id, input);
-            }
-        }
-        Ok(result)
     }
 
     /// Snapshot every rating input and the guild OpenSkill revision from one
@@ -675,8 +541,8 @@ impl PlayerRepository {
                 Ok((
                     row.get::<_, i64>(0)?,
                     ReminderTimestamps {
-                        last_wheel_spin: row.get(1)?,
-                        last_trivia_session: row.get(2)?,
+                        last_wheel_spin: sqlite_unix_seconds(row.get_ref(1)?),
+                        last_trivia_session: sqlite_unix_seconds(row.get_ref(2)?),
                     },
                 ))
             })?;
@@ -718,7 +584,12 @@ impl PlayerRepository {
                 Ok((
                     player.discord_id.unwrap_or_default(),
                     player,
-                    row.get::<_, Value>(23)?,
+                    match row.get_ref(23)? {
+                        ValueRef::Text(text) => {
+                            std::str::from_utf8(text).ok().and_then(parse_sql_datetime)
+                        }
+                        _ => None,
+                    },
                     row.get::<_, Option<i64>>(24)?.unwrap_or(0),
                 ))
             })?;
@@ -734,7 +605,7 @@ impl PlayerRepository {
         for discord_id in discord_ids {
             if let Some((player, last_match_date, exclusions)) = rows_by_id.get(discord_id) {
                 players.push(player.clone());
-                last_match_dates.insert(*discord_id, last_match_date.clone());
+                last_match_dates.insert(*discord_id, *last_match_date);
                 exclusion_counts.insert(*discord_id, *exclusions);
             }
         }
@@ -743,32 +614,6 @@ impl PlayerRepository {
             last_match_dates,
             exclusion_counts,
         })
-    }
-
-    pub fn get_by_username(
-        &self,
-        username: &str,
-        guild_id: Option<i64>,
-    ) -> Result<Vec<UsernameMatch>, CoreRepositoryError> {
-        if username.is_empty() {
-            return Ok(Vec::new());
-        }
-        let connection = self.connection()?;
-        let search = format!("%{}%", username.to_lowercase());
-        let mut statement = connection.prepare(
-            "SELECT discord_id, discord_username
-             FROM players
-             WHERE LOWER(discord_username) LIKE ?1 AND guild_id = ?2",
-        )?;
-        statement
-            .query_map(params![search, Self::normalize_guild_id(guild_id)], |row| {
-                Ok(UsernameMatch {
-                    discord_id: row.get(0)?,
-                    discord_username: row.get(1)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(Into::into)
     }
 
     pub fn get_exclusion_counts(
@@ -809,30 +654,7 @@ impl PlayerRepository {
         Ok(ordered)
     }
 
-    pub fn increment_exclusion_count(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-    ) -> Result<(), CoreRepositoryError> {
-        self.update_counter(
-            "exclusion_count = COALESCE(exclusion_count, 0) + 5",
-            discord_id,
-            guild_id,
-        )
-    }
-
-    pub fn decay_exclusion_count(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-    ) -> Result<(), CoreRepositoryError> {
-        self.update_counter(
-            "exclusion_count = MAX(COALESCE(exclusion_count, 0) - 1, 0)",
-            discord_id,
-            guild_id,
-        )
-    }
-
+    #[cfg(test)]
     pub fn increment_wins(
         &self,
         discord_id: i64,
@@ -841,6 +663,7 @@ impl PlayerRepository {
         self.update_counter("wins = wins + 1", discord_id, guild_id)
     }
 
+    #[cfg(test)]
     fn update_counter(
         &self,
         assignment: &str,
@@ -911,6 +734,7 @@ impl PlayerRepository {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn update_personal_best_win_streak(
         &self,
         discord_id: i64,
@@ -1067,44 +891,6 @@ impl PlayerRepository {
         increment_openskill_revision(&transaction, guild_id)?;
         transaction.commit()?;
         Ok(true)
-    }
-
-    /// Delete every synthetic player (`discord_id < 0`) and its dependent
-    /// records in one guild, matching the retained Python maintenance path.
-    ///
-    /// Foreign keys remain disabled in production, so the dependent deletes
-    /// are explicit and share the same immediate transaction as the player
-    /// rows and OpenSkill revision bump.
-    pub fn delete_fake_users(&self, guild_id: Option<i64>) -> Result<usize, CoreRepositoryError> {
-        let guild_id = Self::normalize_guild_id(guild_id);
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let count: i64 = transaction.query_row(
-            "SELECT COUNT(*) FROM players WHERE discord_id < 0 AND guild_id = ?1",
-            [guild_id],
-            |row| row.get(0),
-        )?;
-        if count == 0 {
-            transaction.commit()?;
-            return Ok(0);
-        }
-        for table in [
-            "match_participants",
-            "rating_history",
-            "bets",
-            "openskill_rating_events",
-        ] {
-            let sql = format!("DELETE FROM {table} WHERE discord_id < 0 AND guild_id = ?1");
-            transaction.execute(&sql, [guild_id])?;
-        }
-        transaction.execute(
-            "DELETE FROM players WHERE discord_id < 0 AND guild_id = ?1",
-            [guild_id],
-        )?;
-        increment_openskill_revision(&transaction, guild_id)?;
-        transaction.commit()?;
-        usize::try_from(count)
-            .map_err(|_| CoreRepositoryError::InvalidInput("negative fake user count".to_owned()))
     }
 
     pub fn get_leaderboard(
@@ -1284,16 +1070,6 @@ impl PlayerRepository {
             .map_err(Into::into)
     }
 
-    pub fn steal_atomic(
-        &self,
-        thief_discord_id: i64,
-        victim_discord_id: i64,
-        guild_id: Option<i64>,
-        amount: i64,
-    ) -> Result<StealResult, CoreRepositoryError> {
-        self.steal_atomic_with_context(thief_discord_id, victim_discord_id, guild_id, amount, None)
-    }
-
     /// Transfer JC atomically and annotate the victim debit and thief credit
     /// separately in the central economy ledger.
     pub fn steal_atomic_with_context(
@@ -1470,24 +1246,6 @@ impl PlayerRepository {
         Ok(())
     }
 
-    /// Read the one-shot Comeback pardon carried by the existing players row.
-    pub fn get_wheel_pardon(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-    ) -> Result<bool, CoreRepositoryError> {
-        let connection = self.connection()?;
-        Ok(connection
-            .query_row(
-                "SELECT COALESCE(has_wheel_pardon, 0) FROM players
-                 WHERE discord_id = ?1 AND guild_id = ?2",
-                params![discord_id, Self::normalize_guild_id(guild_id)],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .is_some_and(|value| value != 0))
-    }
-
     /// Set or clear the one-shot Comeback pardon.
     pub fn set_wheel_pardon(
         &self,
@@ -1544,6 +1302,30 @@ const PLAYER_SELECT: &str = "SELECT discord_username, current_mmr, initial_mmr, 
             solo_grinder_checked_at,
             last_match_date, exclusion_count
      FROM players";
+
+/// Parse a stored match timestamp: RFC 3339, or SQLite's naive UTC text.
+#[must_use]
+pub fn parse_sql_datetime(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|date| date.with_timezone(&Utc))
+        .ok()
+        .or_else(|| {
+            NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f")
+                .ok()
+                .map(|date| date.and_utc())
+        })
+}
+
+/// Coerce a dynamically typed reminder anchor to Unix seconds, as Python's
+/// `int()` did for integers, finite reals, and integral text.
+fn sqlite_unix_seconds(value: ValueRef<'_>) -> Option<i64> {
+    match value {
+        ValueRef::Integer(value) => Some(value),
+        ValueRef::Real(value) if value.is_finite() => Some(value as i64),
+        ValueRef::Text(value) => std::str::from_utf8(value).ok()?.parse().ok(),
+        ValueRef::Null | ValueRef::Blob(_) | ValueRef::Real(_) => None,
+    }
+}
 
 fn query_player_by_id(
     connection: &Connection,
@@ -2507,6 +2289,9 @@ pub struct CoreMatchRecord {
     pub streak_defaults: StreakInsertDefaults,
     pub glicko_updates: Vec<CoreGlickoUpdate>,
     pub openskill_updates: Vec<CoreOpenSkillUpdate>,
+    /// Fingerprint of the configured OpenSkill system that produced the
+    /// updates, stamped on player ratings, rating history, and the prediction.
+    pub openskill_algorithm_fingerprint: String,
     pub first_calibration_ids: Vec<i64>,
     pub first_calibration_unix: i64,
     pub exclusion_decay_ids: Vec<i64>,
@@ -2556,6 +2341,7 @@ impl CoreMatchRecord {
             streak_defaults: StreakInsertDefaults::default(),
             glicko_updates: Vec::new(),
             openskill_updates: Vec::new(),
+            openskill_algorithm_fingerprint: CamaOpenSkillSystem::default().algorithm_fingerprint(),
             first_calibration_ids: Vec::new(),
             first_calibration_unix: 0,
             exclusion_decay_ids: Vec::new(),
@@ -2616,14 +2402,6 @@ pub struct HeroVersusHeroStat {
     pub opponent_hero: i64,
     pub games: i64,
     pub wins: i64,
-}
-
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct HeroPairwiseStats {
-    pub nemesis: Vec<EnemyHeroStat>,
-    pub easy: Vec<EnemyHeroStat>,
-    pub synergies: Vec<AllyHeroStat>,
-    pub hero_vs_hero: Vec<HeroVersusHeroStat>,
 }
 
 #[derive(Clone, Debug)]
@@ -2721,7 +2499,7 @@ impl MatchRepository {
         PlayerRepository::normalize_guild_id(guild_id)
     }
 
-    fn connection(&self) -> Result<Connection, CoreRepositoryError> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, CoreRepositoryError> {
         Ok(open_runtime_connection(&self.path)?)
     }
 
@@ -3462,6 +3240,7 @@ impl MatchRepository {
         &self,
         guild_id: Option<i64>,
         entry: &NewCoreRatingHistory,
+        openskill_algorithm_fingerprint: &str,
     ) -> Result<i64, CoreRepositoryError> {
         let connection = self.connection()?;
         insert_sparse_rating_history(
@@ -3469,6 +3248,7 @@ impl MatchRepository {
             Self::normalize_guild_id(guild_id),
             entry,
             entry.match_id,
+            openskill_algorithm_fingerprint,
         )?;
         Ok(connection.last_insert_rowid())
     }
@@ -3650,18 +3430,6 @@ impl MatchRepository {
             }
         }
         Ok(result)
-    }
-
-    pub fn get_os_ratings_for_match(
-        &self,
-        match_id: i64,
-        guild_id: Option<i64>,
-    ) -> Result<TeamOpenSkillRatings, CoreRepositoryError> {
-        Ok(self
-            .get_os_ratings_for_matches(&[match_id], guild_id)?
-            .get(&match_id)
-            .cloned()
-            .unwrap_or_default())
     }
 
     pub fn get_most_recent_match(
@@ -3931,138 +3699,7 @@ impl MatchRepository {
             .map_err(Into::into)
     }
 
-    pub fn get_player_hero_pairwise_stats(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-        min_games: i64,
-    ) -> Result<HeroPairwiseStats, CoreRepositoryError> {
-        let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT subject.team_number = other.team_number AS is_ally,
-                    subject.hero_id, other.hero_id, COUNT(*),
-                    SUM(CASE WHEN subject.won = 1 THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN subject.won = 0 THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN subject.won THEN 1 ELSE 0 END)
-             FROM match_participants AS subject
-             JOIN match_participants AS other
-               ON other.match_id = subject.match_id
-              AND other.discord_id != subject.discord_id
-              AND other.guild_id = subject.guild_id
-             WHERE subject.discord_id = ?1 AND subject.guild_id = ?2
-               AND subject.team_number IS NOT NULL AND other.team_number IS NOT NULL
-               AND other.hero_id IS NOT NULL AND other.hero_id > 0
-             GROUP BY is_ally, subject.hero_id, other.hero_id",
-        )?;
-        let rows = statement.query_map(
-            params![discord_id, Self::normalize_guild_id(guild_id)],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)? != 0,
-                    row.get::<_, Option<i64>>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, i64>(6)?,
-                ))
-            },
-        )?;
-        let mut enemy_totals: BTreeMap<i64, (i64, i64, i64)> = BTreeMap::new();
-        let mut ally_totals: BTreeMap<i64, (i64, i64)> = BTreeMap::new();
-        let mut hero_vs_hero = Vec::new();
-        for row in rows {
-            let (is_ally, my_hero, other_hero, games, wins, losses, truthy_wins) = row?;
-            if is_ally {
-                let totals = ally_totals.entry(other_hero).or_default();
-                totals.0 += games;
-                totals.1 += wins;
-            } else {
-                let totals = enemy_totals.entry(other_hero).or_default();
-                totals.0 += games;
-                totals.1 += wins;
-                totals.2 += losses;
-                if let Some(my_hero) = my_hero.filter(|hero| *hero > 0)
-                    && games >= min_games
-                {
-                    hero_vs_hero.push(HeroVersusHeroStat {
-                        my_hero,
-                        opponent_hero: other_hero,
-                        games,
-                        wins: truthy_wins,
-                    });
-                }
-            }
-        }
-        let enemies = enemy_totals
-            .into_iter()
-            .filter(|(_, (games, _, _))| *games >= min_games)
-            .map(|(enemy_hero, (games, wins, losses))| EnemyHeroStat {
-                enemy_hero,
-                games,
-                wins,
-                losses,
-                rate: 0.0,
-            })
-            .collect::<Vec<_>>();
-        let mut nemesis = enemies.clone();
-        for stat in &mut nemesis {
-            stat.rate = stat.losses as f64 / stat.games as f64;
-        }
-        nemesis.sort_by(|left, right| {
-            right
-                .rate
-                .total_cmp(&left.rate)
-                .then_with(|| right.games.cmp(&left.games))
-                .then_with(|| left.enemy_hero.cmp(&right.enemy_hero))
-        });
-        nemesis.truncate(10);
-        let mut easy = enemies;
-        for stat in &mut easy {
-            stat.rate = stat.wins as f64 / stat.games as f64;
-        }
-        easy.sort_by(|left, right| {
-            right
-                .rate
-                .total_cmp(&left.rate)
-                .then_with(|| right.games.cmp(&left.games))
-                .then_with(|| left.enemy_hero.cmp(&right.enemy_hero))
-        });
-        easy.truncate(10);
-        let mut synergies = ally_totals
-            .into_iter()
-            .filter(|(_, (games, _))| *games >= min_games)
-            .map(|(ally_hero, (games, wins))| AllyHeroStat {
-                ally_hero,
-                games,
-                wins,
-                win_rate: wins as f64 / games as f64,
-            })
-            .collect::<Vec<_>>();
-        synergies.sort_by(|left, right| {
-            right
-                .win_rate
-                .total_cmp(&left.win_rate)
-                .then_with(|| right.games.cmp(&left.games))
-                .then_with(|| left.ally_hero.cmp(&right.ally_hero))
-        });
-        synergies.truncate(10);
-        hero_vs_hero.sort_by(|left, right| {
-            right
-                .games
-                .cmp(&left.games)
-                .then_with(|| left.my_hero.cmp(&right.my_hero))
-                .then_with(|| left.opponent_hero.cmp(&right.opponent_hero))
-        });
-        hero_vs_hero.truncate(30);
-        Ok(HeroPairwiseStats {
-            nemesis,
-            easy,
-            synergies,
-            hero_vs_hero,
-        })
-    }
-
+    #[cfg(test)]
     pub fn save_pending_match(
         &self,
         guild_id: Option<i64>,
@@ -4310,7 +3947,7 @@ impl MatchRepository {
                     update.mu,
                     update.sigma,
                     OPENSKILL_ALGORITHM_VERSION,
-                    OPENSKILL_ALGORITHM_FINGERPRINT,
+                    core.openskill_algorithm_fingerprint,
                     update.discord_id,
                     guild_id
                 ],
@@ -4358,7 +3995,12 @@ impl MatchRepository {
             match_id,
             &core.winning_ids,
         )?;
-        upsert_match_prediction(&transaction, match_id, &core.match_prediction)?;
+        upsert_match_prediction(
+            &transaction,
+            match_id,
+            &core.match_prediction,
+            &core.openskill_algorithm_fingerprint,
+        )?;
         for history in &core.rating_history_rows {
             insert_rating_history(
                 &transaction,
@@ -4366,6 +4008,7 @@ impl MatchRepository {
                 history,
                 Some(match_id),
                 core.streak_defaults,
+                &core.openskill_algorithm_fingerprint,
             )?;
         }
         decrement_match_consumables(
@@ -4564,6 +4207,7 @@ fn insert_rating_history(
     entry: &NewCoreRatingHistory,
     match_id: Option<i64>,
     defaults: StreakInsertDefaults,
+    openskill_algorithm_fingerprint: &str,
 ) -> Result<(), rusqlite::Error> {
     connection.execute(
         "INSERT INTO rating_history (
@@ -4597,7 +4241,7 @@ fn insert_rating_history(
             entry.os_sigma_after,
             entry.fantasy_weight,
             OPENSKILL_ALGORITHM_VERSION,
-            OPENSKILL_ALGORITHM_FINGERPRINT,
+            openskill_algorithm_fingerprint,
             entry.streak_length,
             entry.streak_multiplier,
             entry
@@ -4620,6 +4264,7 @@ fn insert_sparse_rating_history(
     guild_id: i64,
     entry: &NewCoreRatingHistory,
     match_id: Option<i64>,
+    openskill_algorithm_fingerprint: &str,
 ) -> Result<(), rusqlite::Error> {
     connection.execute(
         "INSERT INTO rating_history (
@@ -4652,7 +4297,7 @@ fn insert_sparse_rating_history(
             entry.os_sigma_after,
             entry.fantasy_weight,
             OPENSKILL_ALGORITHM_VERSION,
-            OPENSKILL_ALGORITHM_FINGERPRINT,
+            openskill_algorithm_fingerprint,
             entry.streak_length,
             entry.streak_multiplier,
         ],
@@ -4913,6 +4558,7 @@ fn upsert_match_prediction(
     transaction: &Transaction<'_>,
     match_id: i64,
     prediction: &MatchPredictionSnapshot,
+    openskill_algorithm_fingerprint: &str,
 ) -> Result<(), rusqlite::Error> {
     transaction.execute(
         "INSERT INTO match_predictions (
@@ -4942,7 +4588,7 @@ fn upsert_match_prediction(
             prediction.openskill_radiant_win_prob,
             prediction.openskill_raw_radiant_win_prob,
             OPENSKILL_ALGORITHM_VERSION,
-            OPENSKILL_ALGORITHM_FINGERPRINT,
+            openskill_algorithm_fingerprint,
         ],
     )?;
     Ok(())
@@ -5077,6 +4723,7 @@ mod tests {
                         won,
                         ..NewCoreRatingHistory::default()
                     },
+                    &CamaOpenSkillSystem::default().algorithm_fingerprint(),
                 )
                 .expect("insert fixture rating history")
         }
@@ -5448,91 +5095,6 @@ mod tests {
     }
 
     #[test]
-    fn test_update_roles() {
-        let fixture = Fixture::new();
-        fixture.add_player(12_345, TEST_GUILD_ID);
-        fixture
-            .players
-            .update_roles(
-                12_345,
-                Some(TEST_GUILD_ID),
-                &["3".to_owned(), "4".to_owned(), "5".to_owned()],
-            )
-            .unwrap();
-        assert_eq!(
-            fixture
-                .players
-                .get_by_id(12_345, Some(TEST_GUILD_ID))
-                .unwrap()
-                .unwrap()
-                .preferred_roles,
-            Some(vec!["3".to_owned(), "4".to_owned(), "5".to_owned()])
-        );
-    }
-
-    #[test]
-    fn test_update_glicko_rating() {
-        let fixture = Fixture::new();
-        fixture.add_player(12_345, TEST_GUILD_ID);
-        fixture
-            .players
-            .update_glicko_rating(12_345, Some(TEST_GUILD_ID), 1_600.0, 300.0, 0.05)
-            .unwrap();
-        assert_eq!(
-            fixture
-                .players
-                .get_glicko_rating(12_345, Some(TEST_GUILD_ID))
-                .unwrap(),
-            Some((1_600.0, Some(250.0), Some(0.05)))
-        );
-    }
-
-    #[test]
-    fn test_get_match_rating_inputs_bulk() {
-        let fixture = Fixture::new();
-        let mut player = configured_player(12_345, "MatchPlayer", TEST_GUILD_ID);
-        player.initial_mmr = Some(3_200);
-        player.glicko_rating = Some(1_550.0);
-        player.glicko_rd = Some(120.0);
-        player.glicko_volatility = Some(0.05);
-        player.os_mu = Some(27.5);
-        player.os_sigma = Some(7.25);
-        fixture.players.add(&player).unwrap();
-        fixture
-            .connection()
-            .execute(
-                "UPDATE players SET last_match_date=?1, first_calibrated_at=?2
-             WHERE discord_id=?3 AND guild_id=?4",
-                params![
-                    "2026-07-20T12:00:00+00:00",
-                    1_750_000_000_i64,
-                    12_345,
-                    TEST_GUILD_ID
-                ],
-            )
-            .unwrap();
-        let inputs = fixture
-            .players
-            .get_match_rating_inputs(&[12_345, 99_999, 12_345], Some(TEST_GUILD_ID))
-            .unwrap();
-        assert_eq!(inputs.keys().copied().collect::<Vec<_>>(), [12_345]);
-        let input = inputs.get(&12_345).unwrap();
-        assert_eq!(input.current_mmr, Value::Real(3_200.0));
-        assert_eq!(input.os_mu, Value::Real(27.5));
-        assert_eq!(
-            input.last_match_date,
-            Value::Text("2026-07-20T12:00:00+00:00".to_owned())
-        );
-        assert!(
-            fixture
-                .players
-                .get_match_rating_inputs(&[], None)
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    #[test]
     fn test_get_balances_bulk_is_single_query_and_guild_scoped() {
         let fixture = Fixture::new();
         for (discord_id, balance) in [(12_346, 75), (12_347, -25)] {
@@ -5602,17 +5164,49 @@ mod tests {
             [12_349, 99_999, 12_348]
         );
         assert_eq!(
-            timestamps.get(&12_349).unwrap().last_wheel_spin,
-            Value::Text("three hundred".to_owned())
+            timestamps.get(&12_349).unwrap(),
+            &ReminderTimestamps::default(),
+            "non-numeric legacy text and NULL read as no timestamp"
         );
         assert_eq!(
             timestamps.get(&99_999),
             Some(&ReminderTimestamps::default())
         );
         assert_eq!(
-            timestamps.get(&12_348).unwrap().last_wheel_spin,
-            Value::Integer(100)
+            timestamps.get(&12_348),
+            Some(&ReminderTimestamps {
+                last_wheel_spin: Some(100),
+                last_trivia_session: Some(200),
+            })
         );
+    }
+
+    #[test]
+    fn reminder_timestamps_coerce_dynamic_sqlite_values() {
+        for (value, expected) in [
+            (Value::Integer(7), Some(7)),
+            (Value::Real(8.9), Some(8)),
+            (Value::Real(f64::NAN), None),
+            (Value::Text("9".to_owned()), Some(9)),
+            (Value::Text("9.5".to_owned()), None),
+            (Value::Blob(vec![1]), None),
+            (Value::Null, None),
+        ] {
+            assert_eq!(sqlite_unix_seconds((&value).into()), expected, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn stored_match_dates_parse_rfc3339_and_sqlite_text() {
+        assert_eq!(
+            parse_sql_datetime("2026-08-12T01:02:03+02:00").map(|date| date.to_rfc3339()),
+            Some("2026-08-11T23:02:03+00:00".to_owned())
+        );
+        assert_eq!(
+            parse_sql_datetime("2026-08-12 01:02:03.5").map(|date| date.to_rfc3339()),
+            Some("2026-08-12T01:02:03.500+00:00".to_owned())
+        );
+        assert_eq!(parse_sql_datetime("yesterday"), None);
     }
 
     #[test]
@@ -5723,84 +5317,6 @@ mod tests {
         );
         assert_eq!(inputs.exclusion_counts.get(&10_102), Some(&11));
         assert_eq!(inputs.exclusion_counts.get(&10_101), Some(&7));
-    }
-
-    #[test]
-    fn test_get_by_username_partial_case_insensitive() {
-        let fixture = Fixture::new();
-        for (discord_id, name) in [
-            (2_001, "AlphaUser"),
-            (2_002, "betaUser"),
-            (2_003, "GammaTester"),
-        ] {
-            fixture
-                .players
-                .add(&NewPlayer::new(discord_id, name, Some(TEST_GUILD_ID)))
-                .unwrap();
-        }
-        assert_eq!(
-            fixture
-                .players
-                .get_by_username("alpha", Some(TEST_GUILD_ID))
-                .unwrap()[0]
-                .discord_id,
-            2_001
-        );
-        let matches = fixture
-            .players
-            .get_by_username("USER", Some(TEST_GUILD_ID))
-            .unwrap();
-        assert_eq!(
-            matches
-                .into_iter()
-                .map(|row| row.discord_id)
-                .collect::<HashSet<_>>(),
-            HashSet::from([2_001, 2_002])
-        );
-    }
-
-    #[test]
-    fn test_exclusion_counts() {
-        let fixture = Fixture::new();
-        fixture.add_player(12_345, TEST_GUILD_ID);
-        assert_eq!(
-            fixture
-                .players
-                .get_exclusion_counts(&[12_345], Some(TEST_GUILD_ID))
-                .unwrap()
-                .get(&12_345),
-            Some(&4)
-        );
-        fixture
-            .players
-            .increment_exclusion_count(12_345, Some(TEST_GUILD_ID))
-            .unwrap();
-        fixture
-            .players
-            .increment_exclusion_count(12_345, Some(TEST_GUILD_ID))
-            .unwrap();
-        assert_eq!(
-            fixture
-                .players
-                .get_exclusion_counts(&[12_345], Some(TEST_GUILD_ID))
-                .unwrap()
-                .get(&12_345),
-            Some(&(NEW_PLAYER_EXCLUSION_BOOST + 10))
-        );
-        for _ in 0..20 {
-            fixture
-                .players
-                .decay_exclusion_count(12_345, Some(TEST_GUILD_ID))
-                .unwrap();
-        }
-        assert_eq!(
-            fixture
-                .players
-                .get_exclusion_counts(&[12_345], Some(TEST_GUILD_ID))
-                .unwrap()
-                .get(&12_345),
-            Some(&0)
-        );
     }
 
     #[test]
@@ -5953,11 +5469,6 @@ mod tests {
     #[test]
     fn test_get_player_not_found() {
         test_player_not_found();
-    }
-
-    #[test]
-    fn test_update_player_glicko_rating() {
-        test_update_glicko_rating();
     }
 
     #[test]
@@ -6805,11 +6316,6 @@ mod tests {
     }
 
     #[test]
-    fn test_get_exclusion_counts() {
-        test_exclusion_counts();
-    }
-
-    #[test]
     fn test_get_by_ids_skips_missing_players() {
         let fixture = Fixture::new();
         for (discord_id, name) in [(7_001, "Player1"), (7_002, "Player2")] {
@@ -6881,72 +6387,6 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_fake_users_cascades_related_tables() {
-        let fixture = Fixture::new();
-        fixture.add_player(100, TEST_GUILD_ID);
-        fixture.add_player(-1, TEST_GUILD_ID);
-        fixture.add_player(-2, TEST_GUILD_ID);
-        let match_id = fixture.record(&[-1, -2], &[100], 1, TEST_GUILD_ID);
-        let connection = fixture.connection();
-        connection
-            .execute(
-                "INSERT INTO rating_history(discord_id,rating,match_id,guild_id)
-                 VALUES(-1,1200,?1,?2)",
-                params![match_id, TEST_GUILD_ID],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO bets(guild_id,match_id,discord_id,team_bet_on,amount,bet_time)
-                 VALUES(?1,NULL,-2,'radiant',10,0)",
-                [TEST_GUILD_ID],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO openskill_rating_events(
-                    guild_id,discord_id,event_type,value,event_at,
-                    os_algorithm_version,os_algorithm_fingerprint
-                 ) VALUES(?1,-1,'test',1,0,5,'test')",
-                [TEST_GUILD_ID],
-            )
-            .unwrap();
-        drop(connection);
-
-        assert_eq!(
-            fixture
-                .players
-                .delete_fake_users(Some(TEST_GUILD_ID))
-                .unwrap(),
-            2
-        );
-        let connection = fixture.connection();
-        for table in [
-            "players",
-            "match_participants",
-            "rating_history",
-            "bets",
-            "openskill_rating_events",
-        ] {
-            let count: i64 = connection
-                .query_row(
-                    &format!("SELECT COUNT(*) FROM {table} WHERE discord_id < 0"),
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(count, 0, "fake rows remain in {table}");
-        }
-        assert!(
-            fixture
-                .players
-                .get_by_id(100, Some(TEST_GUILD_ID))
-                .unwrap()
-                .is_some()
-        );
-    }
-
-    #[test]
     fn test_clear_all_players_compatibility_operation() {
         let fixture = Fixture::new();
         for discord_id in 10_001..10_006 {
@@ -6974,118 +6414,6 @@ mod tests {
                 .get_by_id(10_001, Some(TEST_GUILD_ID))
                 .unwrap()
                 .is_none()
-        );
-    }
-
-    #[test]
-    fn test_remove_fake_users_across_guilds() {
-        let fixture = Fixture::new();
-        fixture.add_player(-1, TEST_GUILD_ID);
-        fixture.add_player(-2, TEST_GUILD_ID_SECONDARY);
-        fixture.add_player(200, TEST_GUILD_ID);
-        let total = [TEST_GUILD_ID, TEST_GUILD_ID_SECONDARY]
-            .into_iter()
-            .map(|guild_id| fixture.players.delete_fake_users(Some(guild_id)).unwrap())
-            .sum::<usize>();
-        assert_eq!(total, 2);
-        assert!(
-            fixture
-                .players
-                .get_by_id(-1, Some(TEST_GUILD_ID))
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            fixture
-                .players
-                .get_by_id(-2, Some(TEST_GUILD_ID_SECONDARY))
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            fixture
-                .players
-                .get_by_id(200, Some(TEST_GUILD_ID))
-                .unwrap()
-                .is_some()
-        );
-    }
-
-    #[test]
-    fn test_increment_exclusion_count() {
-        let fixture = Fixture::new();
-        fixture.add_player(11_101, TEST_GUILD_ID);
-        fixture
-            .players
-            .increment_exclusion_count(11_101, Some(TEST_GUILD_ID))
-            .unwrap();
-        assert_eq!(
-            fixture
-                .players
-                .get_exclusion_counts(&[11_101], Some(TEST_GUILD_ID))
-                .unwrap()
-                .get(&11_101),
-            Some(&(NEW_PLAYER_EXCLUSION_BOOST + 5))
-        );
-        fixture
-            .players
-            .increment_exclusion_count(11_101, Some(TEST_GUILD_ID))
-            .unwrap();
-        assert_eq!(
-            fixture
-                .players
-                .get_exclusion_counts(&[11_101], Some(TEST_GUILD_ID))
-                .unwrap()
-                .get(&11_101),
-            Some(&(NEW_PLAYER_EXCLUSION_BOOST + 10))
-        );
-    }
-
-    #[test]
-    fn test_decay_exclusion_count() {
-        let fixture = Fixture::new();
-        fixture.add_player(11_201, TEST_GUILD_ID);
-        for _ in 0..10 {
-            fixture
-                .players
-                .increment_exclusion_count(11_201, Some(TEST_GUILD_ID))
-                .unwrap();
-        }
-        let mut expected = NEW_PLAYER_EXCLUSION_BOOST + 50;
-        for _ in 0..6 {
-            fixture
-                .players
-                .decay_exclusion_count(11_201, Some(TEST_GUILD_ID))
-                .unwrap();
-            expected -= 1;
-            assert_eq!(
-                fixture
-                    .players
-                    .get_exclusion_counts(&[11_201], Some(TEST_GUILD_ID))
-                    .unwrap()
-                    .get(&11_201),
-                Some(&expected)
-            );
-        }
-    }
-
-    #[test]
-    fn test_exclusion_count_decay_stops_at_zero() {
-        let fixture = Fixture::new();
-        fixture.add_player(11_301, TEST_GUILD_ID);
-        for _ in 0..=NEW_PLAYER_EXCLUSION_BOOST {
-            fixture
-                .players
-                .decay_exclusion_count(11_301, Some(TEST_GUILD_ID))
-                .unwrap();
-        }
-        assert_eq!(
-            fixture
-                .players
-                .get_exclusion_counts(&[11_301], Some(TEST_GUILD_ID))
-                .unwrap()
-                .get(&11_301),
-            Some(&0)
         );
     }
 
@@ -7412,7 +6740,7 @@ mod tests {
         assert_eq!(
             fixture
                 .players
-                .steal_atomic(5_001, 5_002, Some(TEST_GUILD_ID), 50)
+                .steal_atomic_with_context(5_001, 5_002, Some(TEST_GUILD_ID), 50, None)
                 .unwrap(),
             StealResult {
                 amount: 50,
@@ -7434,7 +6762,7 @@ mod tests {
         assert_eq!(
             fixture
                 .players
-                .steal_atomic(5_001, 5_002, Some(TEST_GUILD_ID), 120)
+                .steal_atomic_with_context(5_001, 5_002, Some(TEST_GUILD_ID), 120, None)
                 .unwrap()
                 .victim_new_balance,
             -20
@@ -8227,6 +7555,7 @@ mod tests {
                             os_sigma_before: Some(5.0),
                             ..NewCoreRatingHistory::default()
                         },
+                        &CamaOpenSkillSystem::default().algorithm_fingerprint(),
                     )
                     .unwrap();
             }
@@ -8244,6 +7573,7 @@ mod tests {
                     os_sigma_before: Some(5.0),
                     ..NewCoreRatingHistory::default()
                 },
+                &CamaOpenSkillSystem::default().algorithm_fingerprint(),
             )
             .unwrap();
         let ratings = fixture
@@ -8369,7 +7699,11 @@ mod tests {
         ] {
             fixture
                 .matches
-                .add_rating_history(Some(TEST_GUILD_ID), &entry)
+                .add_rating_history(
+                    Some(TEST_GUILD_ID),
+                    &entry,
+                    &CamaOpenSkillSystem::default().algorithm_fingerprint(),
+                )
                 .unwrap();
         }
         let stats = fixture
@@ -8416,7 +7750,11 @@ mod tests {
         ] {
             fixture
                 .matches
-                .add_rating_history(Some(TEST_GUILD_ID), &entry)
+                .add_rating_history(
+                    Some(TEST_GUILD_ID),
+                    &entry,
+                    &CamaOpenSkillSystem::default().algorithm_fingerprint(),
+                )
                 .unwrap();
         }
         let stats = fixture
@@ -8454,6 +7792,7 @@ mod tests {
                     os_mu_after: Some(39.8),
                     ..NewCoreRatingHistory::default()
                 },
+                &CamaOpenSkillSystem::default().algorithm_fingerprint(),
             )
             .unwrap();
         fixture.connection().execute("INSERT INTO match_predictions(match_id, expected_radiant_win_prob, openskill_radiant_win_prob) VALUES(?1,0.70,0.65)", [match_id]).unwrap();
@@ -8506,7 +7845,11 @@ mod tests {
         ] {
             fixture
                 .matches
-                .add_rating_history(Some(TEST_GUILD_ID), &entry)
+                .add_rating_history(
+                    Some(TEST_GUILD_ID),
+                    &entry,
+                    &CamaOpenSkillSystem::default().algorithm_fingerprint(),
+                )
                 .unwrap();
         }
         let p1 = &fixture
@@ -8541,6 +7884,7 @@ mod tests {
                     os_mu_after: Some(40.5),
                     ..NewCoreRatingHistory::default()
                 },
+                &CamaOpenSkillSystem::default().algorithm_fingerprint(),
             )
             .unwrap();
         let stats = &fixture
@@ -8580,7 +7924,11 @@ mod tests {
         ] {
             fixture
                 .matches
-                .add_rating_history(Some(TEST_GUILD_ID), &entry)
+                .add_rating_history(
+                    Some(TEST_GUILD_ID),
+                    &entry,
+                    &CamaOpenSkillSystem::default().algorithm_fingerprint(),
+                )
                 .unwrap();
         }
         let stats = fixture
@@ -8602,40 +7950,6 @@ mod tests {
                 .unwrap()
                 .avg_swing,
             Some(40.0)
-        );
-    }
-
-    #[test]
-    fn test_hero_pairwise_batch_matches_legacy_views() {
-        let fixture = Fixture::new();
-        let mut connection = fixture.connection();
-        let transaction = connection
-            .transaction()
-            .expect("seed hero pairwise fixture");
-        for index in 0..36_i64 {
-            for repeat in 0..2_i64 {
-                let match_id = 10_000 + index * 2 + repeat;
-                transaction.execute("INSERT INTO matches(match_id,team1_players,team2_players,winning_team,guild_id) VALUES(?1,'[1, 2]','[3]',1,?2)", params![match_id, TEST_GUILD_ID]).unwrap();
-                transaction.execute("INSERT INTO match_participants(match_id,discord_id,guild_id,team_number,won,hero_id) VALUES(?1,1,?2,1,?3,?4)", params![match_id, TEST_GUILD_ID, repeat, 10 + index / 12]).unwrap();
-                transaction.execute("INSERT INTO match_participants(match_id,discord_id,guild_id,team_number,won,hero_id) VALUES(?1,2,?2,1,?3,?4)", params![match_id, TEST_GUILD_ID, repeat, 200 + index % 3]).unwrap();
-                transaction.execute("INSERT INTO match_participants(match_id,discord_id,guild_id,team_number,won,hero_id) VALUES(?1,3,?2,2,?3,?4)", params![match_id, TEST_GUILD_ID, 1-repeat, 100 + index % 12]).unwrap();
-            }
-        }
-        transaction.commit().expect("commit hero pairwise fixture");
-        let stats = fixture
-            .matches
-            .get_player_hero_pairwise_stats(1, Some(TEST_GUILD_ID), 2)
-            .unwrap();
-        assert_eq!(stats.nemesis.len(), 10);
-        assert_eq!(stats.easy.len(), 10);
-        assert_eq!(stats.synergies.len(), 3);
-        assert_eq!(stats.hero_vs_hero.len(), 30);
-        assert_eq!(
-            fixture
-                .matches
-                .get_player_hero_pairwise_stats(1, Some(999_999), 2)
-                .unwrap(),
-            HeroPairwiseStats::default()
         );
     }
 
@@ -9370,10 +8684,14 @@ mod tests {
             .unwrap();
         let left = fixture.players.clone();
         let right = fixture.players.clone();
-        let first =
-            std::thread::spawn(move || left.steal_atomic(-1, -3, Some(TEST_GUILD_ID), 30).unwrap());
+        let first = std::thread::spawn(move || {
+            left.steal_atomic_with_context(-1, -3, Some(TEST_GUILD_ID), 30, None)
+                .unwrap()
+        });
         let second = std::thread::spawn(move || {
-            right.steal_atomic(-2, -3, Some(TEST_GUILD_ID), 40).unwrap()
+            right
+                .steal_atomic_with_context(-2, -3, Some(TEST_GUILD_ID), 40, None)
+                .unwrap()
         });
         first.join().unwrap();
         second.join().unwrap();
@@ -9604,6 +8922,94 @@ mod tests {
             assert!(player.glicko_rd.unwrap() < 350.0);
             assert_eq!((player.wins, player.losses), (0, 1));
         }
+    }
+
+    #[test]
+    fn player_and_history_writes_stamp_the_supplied_openskill_fingerprint() {
+        let fixture = Fixture::new();
+        let mut player = configured_player(93_201, "Stamped", TEST_GUILD_ID);
+        player.openskill_algorithm_fingerprint = "0123456789abcdef".to_owned();
+        fixture.players.add(&player).unwrap();
+        fixture
+            .matches
+            .add_rating_history(
+                Some(TEST_GUILD_ID),
+                &NewCoreRatingHistory {
+                    discord_id: 93_201,
+                    rating: Some(1_500.0),
+                    ..NewCoreRatingHistory::default()
+                },
+                "0123456789abcdef",
+            )
+            .unwrap();
+        let stamps: (String, String) = fixture
+            .connection()
+            .query_row(
+                "SELECT p.os_algorithm_fingerprint, h.os_algorithm_fingerprint
+                 FROM players p JOIN rating_history h ON h.discord_id=p.discord_id
+                 WHERE p.discord_id=93201 AND p.guild_id=?1",
+                [TEST_GUILD_ID],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            stamps,
+            ("0123456789abcdef".to_owned(), "0123456789abcdef".to_owned())
+        );
+    }
+
+    #[test]
+    fn match_recording_stamps_the_configured_openskill_fingerprint() {
+        let fixture = Fixture::new();
+        let player_ids = (93_101..93_111).collect::<Vec<_>>();
+        for discord_id in player_ids.iter().copied() {
+            add_rated_player(
+                &fixture,
+                discord_id,
+                format!("P{discord_id}"),
+                1_500.0,
+                None,
+            );
+        }
+        let configured =
+            CamaOpenSkillSystem::with_config(cama_domain::openskill::OpenSkillConfig {
+                performance_strength: 0.5,
+                ..cama_domain::openskill::OpenSkillConfig::default()
+            })
+            .unwrap()
+            .algorithm_fingerprint();
+        assert_ne!(
+            configured,
+            CamaOpenSkillSystem::default().algorithm_fingerprint()
+        );
+        let mut core = core_match(&player_ids[..5], &player_ids[5..], 1);
+        core.openskill_algorithm_fingerprint.clone_from(&configured);
+        core.openskill_updates.push(CoreOpenSkillUpdate {
+            discord_id: player_ids[0],
+            mu: 27.0,
+            sigma: 7.0,
+        });
+        core.rating_history_rows.push(NewCoreRatingHistory {
+            discord_id: player_ids[0],
+            rating: Some(1_510.0),
+            won: Some(true),
+            ..NewCoreRatingHistory::default()
+        });
+        let match_id = fixture.matches.record_match_core_atomic(&core).unwrap();
+        let connection = fixture.connection();
+        let stamps: (String, String, String) = connection
+            .query_row(
+                "SELECT p.os_algorithm_fingerprint, h.os_algorithm_fingerprint,
+                        m.openskill_algorithm_fingerprint
+                 FROM players p
+                 JOIN rating_history h ON h.discord_id=p.discord_id AND h.match_id=?2
+                 JOIN match_predictions m ON m.match_id=?2
+                 WHERE p.discord_id=?1 AND p.guild_id=?3",
+                params![player_ids[0], match_id, TEST_GUILD_ID],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(stamps, (configured.clone(), configured.clone(), configured));
     }
 
     #[test]

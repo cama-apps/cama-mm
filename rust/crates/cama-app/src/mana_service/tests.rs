@@ -1,7 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use chrono::TimeZone;
-
 use super::*;
 
 const GUILD: i64 = 9_001;
@@ -345,114 +343,6 @@ fn service(
     ManaService::new(store, data, entropy, protection)
 }
 
-fn la_time(hour: u32, minute: u32) -> DateTime<FixedOffset> {
-    FixedOffset::west_opt(7 * 60 * 60)
-        .expect("valid Pacific offset")
-        .with_ymd_and_hms(2025, 6, 15, hour, minute, 0)
-        .single()
-        .expect("valid test timestamp")
-}
-
-#[test]
-fn test_after_reset_hour_returns_today() {
-    assert_eq!(mana_day_label(la_time(10, 0)), TODAY);
-}
-
-#[test]
-fn test_before_reset_hour_returns_yesterday() {
-    assert_eq!(mana_day_label(la_time(2, 0)), "2025-06-14");
-}
-
-#[test]
-fn test_exactly_at_reset_hour_returns_today() {
-    assert_eq!(mana_day_label(la_time(4, 0)), TODAY);
-}
-
-#[test]
-fn test_mana_day_start_timestamp_observes_four_am_boundary() {
-    assert_eq!(
-        mana_day_start_timestamp(la_time(2, 30)),
-        la_time(4, 0).timestamp() - 86_400
-    );
-    assert_eq!(
-        mana_day_start_timestamp(la_time(10, 30)),
-        la_time(4, 0).timestamp()
-    );
-}
-
-#[test]
-fn test_plains_embed_shows_guardian_capacity_and_retro_refund() {
-    let embed = build_single_embed(
-        "Guardian",
-        &ManaDetails {
-            land: Land::Plains,
-            color: "White",
-            emoji: "🌾",
-            assigned_date: TODAY.to_owned(),
-            retro_refund: 9,
-            guardian_remaining: 16,
-            consumed: false,
-        },
-        TODAY,
-    );
-    let guardian = embed
-        .fields
-        .iter()
-        .find(|field| field.name == "🌾 Guardian Aura")
-        .expect("Guardian field");
-    assert!(guardian.value.contains("16/25 JC"));
-    assert!(guardian.value.contains("Recovered **9 JC**"));
-}
-
-#[test]
-fn test_has_assigned_today_false_when_no_row() {
-    let mut service = service(
-        MockStore::default(),
-        MockData::default(),
-        ScriptedEntropy::default(),
-        MockProtection::default(),
-    );
-    assert!(
-        !service
-            .has_assigned_today(9_999, GUILD, TODAY)
-            .expect("lookup")
-    );
-}
-
-#[test]
-fn test_has_assigned_today_false_when_different_date() {
-    let mut store = MockStore::default();
-    store.seed(9_999, GUILD, Land::Forest, "2025-06-14");
-    let mut service = service(
-        store,
-        MockData::default(),
-        ScriptedEntropy::default(),
-        MockProtection::default(),
-    );
-    assert!(
-        !service
-            .has_assigned_today(9_999, GUILD, TODAY)
-            .expect("lookup")
-    );
-}
-
-#[test]
-fn test_has_assigned_today_true() {
-    let mut store = MockStore::default();
-    store.seed(9_999, GUILD, Land::Island, TODAY);
-    let mut service = service(
-        store,
-        MockData::default(),
-        ScriptedEntropy::default(),
-        MockProtection::default(),
-    );
-    assert!(
-        service
-            .has_assigned_today(9_999, GUILD, TODAY)
-            .expect("lookup")
-    );
-}
-
 #[test]
 fn test_get_current_mana_none_when_never_assigned() {
     let mut service = service(
@@ -487,128 +377,6 @@ fn test_get_current_mana_returns_dict() {
     assert_eq!(details.color, "White");
     assert_eq!(details.emoji, "🌾");
     assert_eq!(details.assigned_date, TODAY);
-}
-
-#[test]
-fn test_assigns_mana_and_returns_dict() {
-    let mut service = service(
-        MockStore::default(),
-        MockData::default(),
-        ScriptedEntropy::new([Land::Island]),
-        MockProtection::default(),
-    );
-    let details = service
-        .assign_daily_mana(42, GUILD, TODAY, 1_750_000_000, false)
-        .expect("assign mana");
-    assert_eq!(
-        (details.land, details.color, details.emoji),
-        (Land::Island, "Blue", "🏝️")
-    );
-    let stored = service
-        .repository()
-        .rows
-        .get(&(42, GUILD))
-        .expect("stored assignment");
-    assert_eq!(
-        (stored.land, stored.assigned_date.as_str()),
-        (Land::Island, TODAY)
-    );
-}
-
-#[test]
-fn test_raises_if_already_assigned() {
-    let mut store = MockStore::default();
-    store.seed(42, GUILD, Land::Forest, TODAY);
-    let mut service = service(
-        store,
-        MockData::default(),
-        ScriptedEntropy::new([Land::Mountain]),
-        MockProtection::default(),
-    );
-    assert_eq!(
-        service.assign_daily_mana(42, GUILD, TODAY, 1_750_000_000, false),
-        Err(ManaServiceError::AlreadyAssigned)
-    );
-    assert_eq!(service.repository().rows[&(42, GUILD)].land, Land::Forest);
-}
-
-#[test]
-fn test_can_reassign_next_day() {
-    let mut store = MockStore::default();
-    store.seed(42, GUILD, Land::Mountain, "2025-06-14");
-    let mut service = service(
-        store,
-        MockData::default(),
-        ScriptedEntropy::new([Land::Swamp]),
-        MockProtection::default(),
-    );
-    let details = service
-        .assign_daily_mana(42, GUILD, TODAY, 1_750_000_000, false)
-        .expect("next-day assignment");
-    assert_eq!(details.land, Land::Swamp);
-    assert_eq!(service.repository().rows[&(42, GUILD)].assigned_date, TODAY);
-}
-
-#[test]
-fn test_result_is_always_valid_land() {
-    let mut service = ManaService::new(
-        MockStore::default(),
-        MockData::default(),
-        XorShift64Entropy::new(0xC0FFEE),
-        MockProtection::default(),
-    );
-    for discord_id in 1_000..1_020 {
-        let details = service
-            .assign_daily_mana(discord_id, GUILD, TODAY, 1_750_000_000, false)
-            .expect("valid assignment");
-        assert!(Land::ORDERED.contains(&details.land));
-    }
-}
-
-#[test]
-fn test_plains_assignment_reconciles_guardian_since_daily_reset() {
-    let mut service = service(
-        MockStore::default(),
-        MockData::default(),
-        ScriptedEntropy::new([Land::Plains]),
-        MockProtection {
-            refund: 9,
-            ..MockProtection::default()
-        },
-    );
-    let details = service
-        .assign_daily_mana(42, GUILD, TODAY, 1_750_000_000, false)
-        .expect("Plains assignment");
-    assert_eq!(
-        service.protection().single_calls,
-        [(42, GUILD, 1_750_000_000)]
-    );
-    assert_eq!(details.retro_refund, 9);
-    assert_eq!(details.guardian_remaining, 25);
-}
-
-#[test]
-fn test_single_assignment_reuses_one_bet_history() {
-    let data = MockData {
-        history: vec![BetOutcome::Lost, BetOutcome::Won],
-        ..MockData::default()
-    };
-    let mut service = service(
-        MockStore::default(),
-        data,
-        ScriptedEntropy::new([Land::Forest]),
-        MockProtection::default(),
-    );
-    service
-        .assign_daily_mana(43, GUILD, TODAY, 1_750_000_000, false)
-        .expect("assignment");
-    assert_eq!(service.data().calls.history, 1);
-    assert_eq!(service.data().calls.degen, 1);
-    assert_eq!(
-        service.data().degen_history_seen,
-        [BetOutcome::Lost, BetOutcome::Won]
-    );
-    assert_eq!(current_streak(&service.data().degen_history_seen), 1);
 }
 
 #[test]
@@ -795,5 +563,6 @@ fn test_all_weights_positive() {
         penalty_games_remaining: 3,
         last_bankruptcy_at: Some(1),
     };
-    assert!(calculate_land_weights(&inputs).all_positive());
+    let weights = calculate_land_weights(&inputs);
+    assert!(weights.values.values().all(|value| *value > 0.0));
 }

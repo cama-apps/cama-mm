@@ -308,10 +308,33 @@ fn insert_profile_pairing(
         .expect("insert profile pairing aggregate");
 }
 
+/// Only player 200 has a cached name; player 300 has none at all.
+struct PairedPlayerNames;
+
+impl GuildPlayerNameResolver for PairedPlayerNames {
+    fn names_for_guild(
+        &self,
+        _guild_id: i64,
+        _player_ids: &[i64],
+    ) -> Result<crate::discord_transport::GuildPlayerNameDirectory, String> {
+        Ok(crate::discord_transport::GuildPlayerNameDirectory::new(
+            Some(BTreeMap::from([(200, "Teammate Two".to_owned())])),
+        ))
+    }
+}
+
 fn teammates_page(database: &NamedTempFile, target_id: i64, target_name: &str) -> ProfilePage {
-    ProfileDataSources::new(database.path(), offline_services())
+    let mut sources = ProfileDataSources::new(database.path(), offline_services());
+    sources.player_names = Arc::new(PairedPlayerNames);
+    let page = sources
         .teammates(target_id, Some(42), target_name)
-        .expect("render teammates profile page")
+        .expect("render teammates profile page");
+    for field in &page.fields {
+        assert!(!field.value.contains("<@"), "{}", field.value);
+        assert!(!field.value.contains("200 "), "{}", field.value);
+        assert!(!field.value.contains("300 "), "{}", field.value);
+    }
+    page
 }
 
 fn teammates_field<'a>(page: &'a ProfilePage, name: &str) -> &'a ProfileField {
@@ -1386,10 +1409,10 @@ fn test_teammates_embed_with_data() {
     let page = teammates_page(&database, 100, "Database Name");
 
     let best = &teammates_field(&page, "Best Teammates").value;
-    assert!(best.contains("<@200>"));
+    assert!(best.contains("Teammate Two - "));
     assert!(best.contains("100%"));
     let worst = &teammates_field(&page, "Worst Teammates").value;
-    assert!(worst.contains("<@300>"));
+    assert!(worst.contains("Unknown player - "));
     assert!(worst.contains("0%"));
     assert!(
         page.footer
@@ -1406,10 +1429,10 @@ fn test_teammates_embed_dominates_and_struggles_sections() {
     let page = teammates_page(&database, 100, "Database Name");
 
     let dominates = &teammates_field(&page, "Dominates").value;
-    assert!(dominates.contains("<@200>"));
+    assert!(dominates.contains("Teammate Two - "));
     assert!(dominates.contains("100%"));
     let struggles = &teammates_field(&page, "Struggles").value;
-    assert!(struggles.contains("<@300>"));
+    assert!(struggles.contains("Unknown player - "));
     assert!(struggles.contains("0%"));
 }
 
@@ -1421,10 +1444,10 @@ fn test_teammates_embed_most_played_sections() {
     let page = teammates_page(&database, 100, "Database Name");
 
     let most_with = &teammates_field(&page, "Most Played With").value;
-    assert!(most_with.contains("<@200>"));
+    assert!(most_with.contains("Teammate Two - "));
     assert!(most_with.contains("6g"));
     let most_against = &teammates_field(&page, "Most Played Against").value;
-    assert!(most_against.contains("<@300>"));
+    assert!(most_against.contains("Unknown player - "));
     assert!(most_against.contains("6g"));
 }
 
@@ -1436,7 +1459,7 @@ fn test_teammates_embed_evenly_matched() {
 
     let even = &teammates_field(&page, "Even Teammates").value;
     assert_ne!(even, "No data yet");
-    assert!(even.contains("<@200>"));
+    assert!(even.contains("Teammate Two (2W/2L)"));
     assert!(even.contains("2W/2L"));
 }
 

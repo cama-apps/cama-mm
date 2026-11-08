@@ -310,7 +310,7 @@ impl PendingMatchRepository {
         routing: Option<DotaHostRouting>,
     ) -> Result<(), PendingMatchRepositoryError> {
         cama_db_core::dota_host_routing::configure(
-            &mut open_runtime_connection(&self.path)?,
+            &mut *open_runtime_connection(&self.path)?,
             routing,
         )
         .map_err(Into::into)
@@ -714,58 +714,6 @@ impl PendingMatchRepository {
         }
         transaction.commit()?;
         Ok(changed == 1)
-    }
-
-    /// Delete every pending row for a guild. The count is returned so callers
-    /// can distinguish a no-op from a legacy bulk clear.
-    pub fn delete_pending_matches(
-        &self,
-        guild_id: i64,
-    ) -> Result<usize, PendingMatchRepositoryError> {
-        let connection = open_runtime_connection(&self.path)?;
-        connection
-            .execute(
-                "DELETE FROM pending_matches WHERE guild_id=?1",
-                params![guild_id],
-            )
-            .map_err(Into::into)
-    }
-
-    /// Atomically return and delete one pending match.
-    ///
-    /// With an explicit ID this consumes only that guild-scoped row. Without
-    /// an ID it preserves the legacy Python contract and consumes only when
-    /// the guild has exactly one pending match.
-    pub fn consume_pending_match(
-        &self,
-        guild_id: i64,
-        pending_match_id: Option<i64>,
-    ) -> Result<Option<PendingMatchRecord>, PendingMatchRepositoryError> {
-        let mut connection = open_runtime_connection(&self.path)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut rows = if let Some(pending_match_id) = pending_match_id {
-            query_raw(&transaction, guild_id, pending_match_id)?
-                .into_iter()
-                .collect::<Vec<_>>()
-        } else {
-            query_all_raw(&transaction, guild_id)?
-        };
-        if rows.len() != 1 {
-            transaction.commit()?;
-            return Ok(None);
-        }
-        let pending = decode_raw(rows.pop().expect("one pending row"))?;
-        let changed = transaction.execute(
-            "DELETE FROM pending_matches WHERE guild_id=?1 AND pending_match_id=?2",
-            params![guild_id, pending.pending_match_id],
-        )?;
-        if changed != 1 {
-            return Err(PendingMatchRepositoryError::PendingMatchNotFound(
-                pending.pending_match_id,
-            ));
-        }
-        transaction.commit()?;
-        Ok(Some(pending))
     }
 
     /// Extend betting from `max(current_lock, now)` under one immediate
@@ -2552,35 +2500,6 @@ mod tests {
                 .pending_match(GUILD_A, second.pending_match_id)
                 .unwrap()
                 .is_some()
-        );
-    }
-
-    #[test]
-    fn test_consume_pending_match_is_single_use_idempotent() {
-        let (_file, repository) = fixture();
-        let mut payload = state(&[1, 2, 3]);
-        payload.extra.insert("test".to_owned(), json!("data"));
-        payload.extra.insert("winning_team".to_owned(), json!(2));
-        let created = repository
-            .create_pending_match(GUILD_A, &payload)
-            .expect("save distinctive pending match");
-        let consumed = repository
-            .consume_pending_match(GUILD_A, None)
-            .expect("consume pending match")
-            .expect("first consume returns payload");
-        assert_eq!(consumed.pending_match_id, created.pending_match_id);
-        assert_eq!(consumed.state, payload);
-        assert!(
-            repository
-                .consume_pending_match(GUILD_A, None)
-                .expect("second consume")
-                .is_none()
-        );
-        assert!(
-            repository
-                .consume_pending_match(GUILD_A, None)
-                .expect("third consume")
-                .is_none()
         );
     }
 }

@@ -1,9 +1,9 @@
 //! Daily mana assignment policy and adapter-neutral orchestration.
 //!
-//! The module keeps the four-AM mana clock, weighted land selection, batch
-//! loading, Guardian reconciliation, and presentation model independent from
-//! Discord. SQLite integration delegates to `cama-db`, which only opens the
-//! existing Python-managed schema.
+//! The module keeps weighted land selection, batch loading, Guardian
+//! reconciliation, and presentation model independent from Discord. The
+//! four-AM mana day lives in `cama_domain::mana`. SQLite integration delegates
+//! to `cama-db`, which only opens the existing Python-managed schema.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -12,13 +12,11 @@ use cama_db::mana_service_repository::{
     GuildManaRow as DbGuildManaRow, ManaClaim as DbManaClaim,
     ManaRepository as SqliteManaRepository, ManaRow as DbManaRow,
 };
-use chrono::{DateTime, Duration, FixedOffset, Timelike};
 use thiserror::Error;
 
 pub type DiscordId = i64;
 pub type GuildId = i64;
 
-pub const RESET_HOUR: u32 = 4;
 pub const PLAINS_GUARDIAN_CAPACITY: i64 = 25;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -102,37 +100,6 @@ impl fmt::Display for Land {
     }
 }
 
-/// Resolve the date label for a caller-provided Los Angeles local instant.
-///
-/// `FixedOffset` makes the offset explicit and deterministic. Runtime wiring
-/// is responsible for constructing the instant with the correct LA offset for
-/// that date.
-#[must_use]
-pub fn mana_day_label(now_la: DateTime<FixedOffset>) -> String {
-    let effective = if now_la.hour() < RESET_HOUR {
-        now_la - Duration::days(1)
-    } else {
-        now_la
-    };
-    effective.format("%Y-%m-%d").to_string()
-}
-
-/// Return the Unix timestamp of the four-AM boundary containing `now_la`.
-#[must_use]
-pub fn mana_day_start_timestamp(now_la: DateTime<FixedOffset>) -> i64 {
-    let boundary = now_la
-        .with_hour(RESET_HOUR)
-        .and_then(|value| value.with_minute(0))
-        .and_then(|value| value.with_second(0))
-        .and_then(|value| value.with_nanosecond(0))
-        .expect("four AM is valid for a fixed-offset timestamp");
-    if now_la < boundary {
-        (boundary - Duration::days(1)).timestamp()
-    } else {
-        boundary.timestamp()
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredMana {
     pub land: Land,
@@ -207,47 +174,6 @@ pub struct EmbedField {
     pub name: String,
     pub value: String,
     pub inline: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ManaEmbed {
-    pub title: String,
-    pub color: u32,
-    pub fields: Vec<EmbedField>,
-}
-
-/// Build the Discord-neutral payload used by the single-player mana embed.
-#[must_use]
-pub fn build_single_embed(display_name: &str, mana: &ManaDetails, today: &str) -> ManaEmbed {
-    let mut fields = vec![EmbedField {
-        name: "Land".to_owned(),
-        value: format!("{} **{}** · {} Mana", mana.emoji, mana.land, mana.color),
-        inline: false,
-    }];
-    if mana.land == Land::Plains && mana.assigned_date == today && !mana.consumed {
-        let retro = if mana.retro_refund > 0 {
-            format!(
-                " Recovered **{} JC** from earlier hostile losses.",
-                mana.retro_refund
-            )
-        } else {
-            String::new()
-        };
-        fields.push(EmbedField {
-            name: "🌾 Guardian Aura".to_owned(),
-            value: format!(
-                "Absorbs 50% of hostile JC losses until the 4 AM reset \
-                 (**{}/25 JC** capacity remaining).{}",
-                mana.guardian_remaining, retro
-            ),
-            inline: false,
-        });
-    }
-    ManaEmbed {
-        title: format!("🔮 Daily Mana — {display_name}"),
-        color: mana.land.embed_color(),
-        fields,
-    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -329,11 +255,6 @@ impl LandWeights {
     #[must_use]
     pub fn max(&self) -> f64 {
         self.values.values().copied().fold(0.0, f64::max)
-    }
-
-    #[must_use]
-    pub fn all_positive(&self) -> bool {
-        self.values.values().all(|value| *value > 0.0)
     }
 
     fn total(&self) -> f64 {
@@ -758,29 +679,6 @@ pub trait GuardianProtection {
     ) -> Result<BTreeMap<DiscordId, i64>, ManaServiceError>;
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct NoopGuardianProtection;
-
-impl GuardianProtection for NoopGuardianProtection {
-    fn reconcile_guardian(
-        &mut self,
-        _discord_id: DiscordId,
-        _guild_id: GuildId,
-        _since: i64,
-    ) -> Result<i64, ManaServiceError> {
-        Ok(0)
-    }
-
-    fn reconcile_guardians(
-        &mut self,
-        _discord_ids: &[DiscordId],
-        _guild_id: GuildId,
-        _since: i64,
-    ) -> Result<BTreeMap<DiscordId, i64>, ManaServiceError> {
-        Ok(BTreeMap::new())
-    }
-}
-
 pub struct ManaService<R, D, E, P> {
     repository: R,
     data: D,
@@ -827,18 +725,6 @@ where
     E: LandEntropy,
     P: GuardianProtection,
 {
-    pub fn has_assigned_today(
-        &mut self,
-        discord_id: DiscordId,
-        guild_id: GuildId,
-        today: &str,
-    ) -> Result<bool, ManaServiceError> {
-        Ok(self
-            .repository
-            .get_mana(discord_id, guild_id)?
-            .is_some_and(|row| row.assigned_date == today))
-    }
-
     pub fn get_current_mana(
         &mut self,
         discord_id: DiscordId,
@@ -850,60 +736,6 @@ where
             .get_mana(discord_id, guild_id)?
             .as_ref()
             .map(|row| ManaDetails::from_stored(row, today)))
-    }
-
-    pub fn assign_daily_mana(
-        &mut self,
-        discord_id: DiscordId,
-        guild_id: GuildId,
-        today: &str,
-        day_start_timestamp: i64,
-        is_ash_fan: bool,
-    ) -> Result<ManaDetails, ManaServiceError> {
-        let history = self.data.bet_history(discord_id, guild_id)?;
-        let inputs = WeightInputs {
-            player: self.data.player(discord_id, guild_id)?.unwrap_or_default(),
-            lowest_balance: self.data.lowest_balance(discord_id, guild_id)?,
-            degen: self.data.degen_score(discord_id, guild_id, &history)?,
-            bankruptcy: self.data.bankruptcy_state(discord_id, guild_id)?,
-            tips: self.data.tip_stats(discord_id, guild_id)?,
-            current_streak: current_streak(&history),
-            is_ash_fan,
-        };
-        let land = self.entropy.choose(&calculate_land_weights(&inputs));
-        if !self
-            .repository
-            .claim_mana_atomic(discord_id, guild_id, land, today)?
-        {
-            return Err(ManaServiceError::AlreadyAssigned);
-        }
-
-        // Matching Python, post-claim reconciliation is best effort: a
-        // protection failure never invalidates the committed daily claim.
-        let retro_refund = if land == Land::Plains {
-            self.protection
-                .reconcile_guardian(discord_id, guild_id, day_start_timestamp)
-                .unwrap_or_default()
-        } else {
-            0
-        };
-        let guardian_remaining = self
-            .repository
-            .get_mana(discord_id, guild_id)?
-            .map_or(0, |row| row.white_shield_remaining);
-        Ok(ManaDetails {
-            land,
-            color: land.color(),
-            emoji: land.emoji(),
-            assigned_date: today.to_owned(),
-            retro_refund,
-            guardian_remaining: if land == Land::Plains {
-                guardian_remaining
-            } else {
-                0
-            },
-            consumed: false,
-        })
     }
 
     pub fn assign_all_daily_mana_with_board(

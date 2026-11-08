@@ -568,6 +568,33 @@ async fn restarted_provider_recovers_panel_and_refreshes_expired_readiness_and_n
 }
 
 #[tokio::test]
+async fn member_changes_outside_the_queue_do_not_touch_discord() {
+    let f = Fixture::new();
+    f.queue(1, DeadlockFormat::StreetBrawl);
+    f.provider.handler.publish_lobby(42, None).await.unwrap();
+    let events = f.transport.events.lock().unwrap().len();
+    let observer = f.provider.gateway_observer();
+    observer
+        .member_update(crate::gateway_events::GatewayMember::new(
+            42,
+            77,
+            Some("Someone else".into()),
+        ))
+        .await
+        .unwrap();
+    observer.member_remove(42, 77).await.unwrap();
+    assert_eq!(f.transport.events.lock().unwrap().len(), events);
+    assert_eq!(f.transport.sent.lock().unwrap().len(), 1);
+    assert_eq!(
+        f.repo()
+            .queue(42, DeadlockFormat::StreetBrawl)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn ready_recovery_reconciles_only_enabled_guilds_and_reuses_the_panel_on_reconnect() {
     use crate::gateway_events::ReadyRecoveryContext;
     let f = Fixture::new();

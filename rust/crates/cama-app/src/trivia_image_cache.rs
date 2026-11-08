@@ -3,6 +3,11 @@
 //! The path mapping, ten-second HTTP timeout, eager warm, and remote-image
 //! fallback mirror `services/trivia_image_cache.py`. Callers perform these
 //! blocking operations on a worker thread.
+//!
+//! Only complete PNG/JPEG bodies are cached, and they land through a
+//! temporary file and a rename, so a reader never sees a partial image. A
+//! cached file that is unreadable or not a complete image counts as a miss
+//! and is downloaded again.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -16,7 +21,6 @@ use thiserror::Error;
 
 use crate::trivia_questions::TriviaCatalog;
 
-pub const PRODUCTION_TRIVIA_CACHE_PATH: &str = ".cache/trivia";
 pub const STEAM_IMAGE_CACHE_ROOT_ENV: &str = "STEAM_IMAGE_CACHE_ROOT";
 pub const DEFAULT_STEAM_IMAGE_CACHE_ROOT: &str = ".cache";
 
@@ -65,6 +69,8 @@ pub enum TriviaImageCacheError {
         #[source]
         source: reqwest::Error,
     },
+    #[error("trivia image URL {url:?} did not return a complete PNG or JPEG")]
+    InvalidImage { url: String },
     #[error("trivia image cache I/O failed at {}: {source}", path.display())]
     Io {
         path: PathBuf,
@@ -133,14 +139,10 @@ impl TriviaImageCache {
     /// question's remote thumbnail URL, matching Python.
     pub fn get_or_download(&self, url: &str) -> Result<CachedTriviaImage, TriviaImageCacheError> {
         let path = self.path_for_url(url);
-        if !path.exists() {
-            let client = http_client()?;
-            self.ensure_cached(url, &path, &client)?;
-        }
-        let bytes = fs::read(&path).map_err(|source| TriviaImageCacheError::Io {
-            path: path.clone(),
-            source,
-        })?;
+        let bytes = match read_cached_image(&path) {
+            Some(bytes) => bytes,
+            None => self.ensure_cached(url, &path, &http_client()?)?,
+        };
         let filename = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -175,7 +177,8 @@ impl TriviaImageCache {
         let client = http_client()?;
         for url in &urls {
             let path = self.path_for_url(url);
-            if !path.exists() && self.ensure_cached(url, &path, &client).is_ok() {
+            if read_cached_image(&path).is_none() && self.ensure_cached(url, &path, &client).is_ok()
+            {
                 newly_cached += 1;
             }
         }
@@ -185,24 +188,20 @@ impl TriviaImageCache {
         })
     }
 
+    /// Download `url` into `path` unless another caller cached a complete
+    /// image there first, and return the cached bytes.
     fn ensure_cached(
         &self,
         url: &str,
         path: &Path,
         client: &Client,
-    ) -> Result<(), TriviaImageCacheError> {
+    ) -> Result<Vec<u8>, TriviaImageCacheError> {
         let _write = self
             .writes
             .lock()
             .map_err(|_| TriviaImageCacheError::Lock)?;
-        if path.exists() {
-            return Ok(());
-        }
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|source| TriviaImageCacheError::Io {
-                path: parent.to_path_buf(),
-                source,
-            })?;
+        if let Some(bytes) = read_cached_image(path) {
+            return Ok(bytes);
         }
         let bytes = client
             .get(url)
@@ -213,11 +212,53 @@ impl TriviaImageCache {
                 url: url.to_owned(),
                 source,
             })?;
-        fs::write(path, &bytes).map_err(|source| TriviaImageCacheError::Io {
-            path: path.to_path_buf(),
-            source,
-        })
+        if !is_complete_image(&bytes) {
+            return Err(TriviaImageCacheError::InvalidImage {
+                url: url.to_owned(),
+            });
+        }
+        let io_error = |path: &Path| {
+            let path = path.to_path_buf();
+            move |source| TriviaImageCacheError::Io { path, source }
+        };
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(io_error(parent))?;
+        }
+        let mut partial = path.as_os_str().to_owned();
+        partial.push(".partial");
+        let partial = PathBuf::from(partial);
+        fs::write(&partial, &bytes).map_err(io_error(&partial))?;
+        if let Err(source) = fs::rename(&partial, path) {
+            let _ = fs::remove_file(&partial);
+            return Err(TriviaImageCacheError::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+        Ok(bytes.to_vec())
     }
+}
+
+/// The cached bytes at `path`, or `None` when the file is missing,
+/// unreadable, or not a complete image.
+fn read_cached_image(path: &Path) -> Option<Vec<u8>> {
+    fs::read(path).ok().filter(|bytes| is_complete_image(bytes))
+}
+
+/// Whether `bytes` holds a whole PNG (signature through the `IEND` chunk) or
+/// JPEG (start-of-image through end-of-image marker). Checking both ends
+/// rejects error pages served with a 200 and files cut short mid-write.
+fn is_complete_image(bytes: &[u8]) -> bool {
+    const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+    // The `IEND` chunk type followed by its fixed CRC-32.
+    const PNG_END: &[u8] = &[b'I', b'E', b'N', b'D', 0xae, 0x42, 0x60, 0x82];
+    let png = bytes.starts_with(PNG_SIGNATURE)
+        && bytes.len() >= PNG_SIGNATURE.len() + 12
+        && bytes.ends_with(PNG_END);
+    let jpeg = bytes.len() >= 4
+        && bytes.starts_with(&[0xff, 0xd8, 0xff])
+        && bytes.ends_with(&[0xff, 0xd9]);
+    png || jpeg
 }
 
 fn http_client() -> Result<Client, TriviaImageCacheError> {

@@ -1,7 +1,7 @@
 //! Cached Dota hero names and read-only Dotabase metadata.
 //!
-//! Names are compiled from the checked-in `data/heroes.json` snapshot this
-//! crate owns. Rich metadata is loaded once from the immutable Dotabase SQLite
+//! Names come from the bundled catalog in [`cama_domain::hero_catalog`]. Rich
+//! metadata is loaded once from the immutable Dotabase SQLite
 //! artifact and detached before the connection closes.
 
 use std::{
@@ -15,10 +15,10 @@ use thiserror::Error;
 
 use crate::dotabase_sqlite::PRODUCTION_DOTABASE_PATH;
 
+pub use cama_domain::hero_catalog::hero_name;
+
 const STEAM_CDN_BASE: &str =
     "https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react/heroes";
-
-static HERO_NAMES: OnceLock<BTreeMap<String, String>> = OnceLock::new();
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HeroMetadata {
@@ -122,14 +122,6 @@ impl HeroRoleClass {
 }
 
 #[must_use]
-pub fn hero_name(hero_id: i64) -> String {
-    hero_names()
-        .get(&hero_id.to_string())
-        .cloned()
-        .unwrap_or_else(|| format!("Hero {hero_id}"))
-}
-
-#[must_use]
 pub fn hero_short_name(hero_id: i64) -> String {
     if let Some(abbreviation) = hero_abbreviation(hero_id) {
         return abbreviation.to_owned();
@@ -140,13 +132,10 @@ pub fn hero_short_name(hero_id: i64) -> String {
 
 #[must_use]
 pub fn all_heroes() -> BTreeMap<String, String> {
-    hero_names().clone()
-}
-
-fn hero_names() -> &'static BTreeMap<String, String> {
-    HERO_NAMES.get_or_init(|| {
-        serde_json::from_str(include_str!("../data/heroes.json")).unwrap_or_default()
-    })
+    cama_domain::hero_catalog::hero_names()
+        .iter()
+        .map(|(hero_id, name)| (hero_id.to_string(), name.clone()))
+        .collect()
 }
 
 const fn hero_abbreviation(hero_id: i64) -> Option<&'static str> {
@@ -310,9 +299,9 @@ mod tests {
 
     #[test]
     fn test_hero_lookup_is_cached() {
-        let first = hero_names() as *const _;
+        let first = cama_domain::hero_catalog::hero_names() as *const _;
         assert_eq!(hero_name(1), "Anti-Mage");
-        let second = hero_names() as *const _;
+        let second = cama_domain::hero_catalog::hero_names() as *const _;
         assert_eq!(first, second);
     }
 

@@ -173,12 +173,6 @@ impl Player {
         self.volatility = new_volatility;
         Ok(())
     }
-
-    /// Increase RD for an inactive rating period, matching Glicko-2 step 6.
-    pub fn did_not_compete(&mut self) {
-        let phi = self.rd / GLICKO2_SCALE;
-        self.rd = (phi * phi + self.volatility * self.volatility).sqrt() * GLICKO2_SCALE;
-    }
 }
 
 /// One opponent observation in a Glicko-2 rating period.

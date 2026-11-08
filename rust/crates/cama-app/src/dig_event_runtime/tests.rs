@@ -161,25 +161,6 @@ impl Fixture {
         connection.last_insert_rowid()
     }
 
-    fn seed_legacy_event_dig_action(&self, event_id: &str) -> i64 {
-        let connection = self.connection();
-        connection
-            .execute(
-                "INSERT INTO dig_actions (
-                     guild_id, actor_id, target_id, action_type, depth_before,
-                     depth_after, jc_delta, detail, created_at
-                 ) VALUES (?1, ?2, NULL, 'dig', 24, 24, 0, ?3, ?4)",
-                params![
-                    GUILD,
-                    ACTOR,
-                    serde_json::json!({"event": event_id}).to_string(),
-                    NOW - 1
-                ],
-            )
-            .expect("seed legacy event Dig action");
-        connection.last_insert_rowid()
-    }
-
     fn balance(&self, discord_id: i64) -> i64 {
         self.connection()
             .query_row(
@@ -204,7 +185,7 @@ impl Fixture {
 
     fn snapshot(&self) -> DigEventActorSnapshot {
         DigEventRuntimeRepository::new(self.database.path())
-            .actor_snapshot(DigEventActorKey {
+            .actor_snapshot_for_event(DigEventActorKey {
                 discord_id: ACTOR,
                 guild_id: Some(GUILD),
             })
@@ -236,7 +217,7 @@ fn request<'a>(
 }
 
 #[test]
-fn event_service_keeps_live_runtime_config_without_an_extra_finale_tax_hook() {
+fn event_service_keeps_live_runtime_config() {
     let fixture = Fixture::new();
     let config = DigRuntimeConfig::default().with_runtime_policy(
         0.5,
@@ -250,11 +231,8 @@ fn event_service_keeps_live_runtime_config_without_an_extra_finale_tax_hook() {
             trigger_hour_local: 4,
         },
     );
-    let service = DigEventRuntimeService::sqlite_with_config_and_finale_tax_hook(
-        fixture.database.path(),
-        config.clone(),
-        None,
-    );
+    let service =
+        DigEventRuntimeService::sqlite_with_config(fixture.database.path(), config.clone());
     assert_eq!(service.config().minigame_jc_delta_scale, 0.5);
     assert_eq!(
         service.config().economy_event.normal_annual_rate,
@@ -264,10 +242,6 @@ fn event_service_keeps_live_runtime_config_without_an_extra_finale_tax_hook() {
         service.config().economy_event.trigger_hour_local,
         config.economy_event.trigger_hour_local
     );
-    // Quest finales apply the built-in ManaRepository policy. A provider must
-    // pass this configured service through rather than constructing a second
-    // default event service (and must not bind an unrelated second tax_fn).
-    assert!(service.finale_tax_hook.is_none());
 }
 
 fn key_for_outcome(
@@ -510,168 +484,6 @@ fn test_economy_event_reward_is_scaled_once_and_audited() {
 }
 
 // tests/test_dig_reward_policy.py::test_legacy_event_reward_is_scaled_once_and_audited
-#[test]
-fn test_legacy_event_reward_is_scaled_once_and_audited() {
-    let fixture = Fixture::new();
-    fixture.seed_actor(ACTOR, 100, 24, 0);
-    let dig_action_id = fixture.seed_legacy_event_dig_action("legacy_reward_policy_event");
-    let event_date =
-        cama_domain::game_date::game_date_for_timestamp(NOW as f64).expect("event date");
-    EconomyEventRepository::new(fixture.database.path())
-        .activate_event_atomic(
-            Some(GUILD),
-            &EventDraft {
-                event_date,
-                name: "Double legacy reward".to_owned(),
-                hero: "Earthshaker".to_owned(),
-                direction: EventDirection::Neutral,
-                severity: 1,
-                target_effect_jc: 0,
-                forecast_flow_jc: 0,
-                expected_effect_jc: 0,
-                monetary_stock_before: 0,
-                effects: EventEffects {
-                    reward_multiplier: 2.0,
-                    ..EventEffects::default()
-                },
-                announcement: "Double legacy reward".to_owned(),
-                starts_at: NOW - 60,
-                ends_at: NOW + 60,
-                created_at: NOW - 60,
-            },
-        )
-        .expect("persist doubling economy event");
-    let mut config = DigRuntimeConfig::default();
-    config.economy_event.enabled = true;
-    let service = DigEventRuntimeService::sqlite_with_config(fixture.database.path(), config);
-    let catalog = DigLegacyEventCatalog::from_json_str(
-        &serde_json::json!([{
-            "id": "legacy_reward_policy_event",
-            "name": "Legacy Reward Policy Event",
-            "outcomes": {
-                "inspect": {
-                    "message": "A compact reward.",
-                    "jc": 15,
-                    "advance": 0
-                }
-            }
-        }])
-        .to_string(),
-    )
-    .expect("parse legacy EVENT_POOL shape");
-    let request = DigEventActionRequest {
-        discord_id: ACTOR,
-        guild_id: GUILD,
-        dig_action_id,
-        choice: "inspect",
-        now: NOW,
-    };
-    let outcome = service
-        .resolve_action_event_with_legacy_catalog(request, &catalog)
-        .expect("legacy event reward");
-    let resolution = outcome.resolution.as_ref().expect("legacy resolution");
-    assert!(outcome.success && outcome.applied_now);
-    assert_eq!(resolution.economy_gross_jc, 15);
-    assert_eq!(
-        resolution.jc,
-        cama_domain::dig_economy::scale_positive_dig_jc(30)
-    );
-    assert_eq!(fixture.balance(ACTOR), 100 + resolution.jc);
-    let detail: String = fixture
-        .connection()
-        .query_row(
-            "SELECT detail FROM dig_actions WHERE id=?1",
-            params![outcome.action_id.expect("legacy event action")],
-            |row| row.get(0),
-        )
-        .expect("legacy event audit detail");
-    let value: serde_json::Value = serde_json::from_str(&detail).expect("legacy detail JSON");
-    assert_eq!(value["gross_jc"], 15);
-    assert_eq!(value["reward_multiplier"], 0.65);
-    assert_eq!(value["jc"], resolution.jc);
-    let retry = service
-        .resolve_action_event_with_legacy_catalog(request, &catalog)
-        .expect("legacy event retry");
-    assert!(!retry.applied_now);
-    assert_eq!(retry.action_id, outcome.action_id);
-    assert_eq!(fixture.count_actions(ACTOR, "event"), 1);
-}
-
-#[test]
-fn legacy_catalog_dispatches_ranges_clamps_at_boss_and_retries_idempotently() {
-    let fixture = Fixture::new();
-    fixture.seed_actor(ACTOR, 100, 24, 0);
-    let action_id = fixture.seed_legacy_event_dig_action("legacy_range_event");
-    let catalog = DigLegacyEventCatalog::from_json_str(
-        &serde_json::json!([{
-            "id": "legacy_range_event",
-            "name": "Legacy Range Event",
-            "outcomes": {
-                "inspect": {
-                    "message": "The old catalog still speaks.",
-                    "jc": [10, 12],
-                    "depth": [3, 9]
-                }
-            }
-        }])
-        .to_string(),
-    )
-    .expect("legacy catalog parse");
-    assert_eq!(catalog.len(), 1);
-    assert_eq!(
-        catalog.event("legacy_range_event").unwrap().outcomes["inspect"].jc,
-        DigLegacyIntegerRange {
-            minimum: 10,
-            maximum: 12
-        }
-    );
-
-    let service = fixture.service();
-    let request = DigEventActionRequest {
-        discord_id: ACTOR,
-        guild_id: GUILD,
-        dig_action_id: action_id,
-        choice: "inspect",
-        now: NOW,
-    };
-    let first = service
-        .resolve_action_event_with_legacy_catalog(request, &catalog)
-        .expect("legacy catalog dispatch");
-    let resolution = first.resolution.as_ref().expect("legacy resolution");
-    assert!(first.success && first.applied_now);
-    assert!(resolution.economy_gross_jc >= 10 && resolution.economy_gross_jc <= 12);
-    assert_eq!(resolution.advance, 0);
-    assert!(resolution.boss_encounter);
-    assert_eq!(first.depth_before, 24);
-    assert_eq!(first.depth_after, 24);
-    assert_eq!(
-        fixture.balance(ACTOR),
-        100 + first.resolution.as_ref().unwrap().jc
-    );
-
-    let retry = service
-        .resolve_action_event_with_legacy_catalog(request, &catalog)
-        .expect("legacy catalog retry");
-    assert!(retry.success && !retry.applied_now);
-    assert_eq!(retry.action_id, first.action_id);
-    assert_eq!(retry.balance_after, first.balance_after);
-    assert_eq!(fixture.count_actions(ACTOR, "event"), 1);
-}
-
-#[test]
-fn legacy_catalog_rejects_malformed_range_and_missing_outcomes() {
-    let malformed = serde_json::json!([{
-        "id": "bad_range",
-        "name": "Bad Range",
-        "outcomes": {"inspect": {"jc": [4], "message": "nope"}}
-    }]);
-    let error = DigLegacyEventCatalog::from_json(&malformed).expect_err("malformed range");
-    assert!(error.contains("range must contain two integers"));
-
-    let missing = serde_json::json!([{"id": "missing_outcomes", "name": "Missing"}]);
-    let error = DigLegacyEventCatalog::from_json(&missing).expect_err("missing outcomes");
-    assert!(error.contains("outcomes object"));
-}
 
 #[test]
 fn action_identity_drives_presentation_and_idempotent_component_settlement() {
@@ -681,13 +493,13 @@ fn action_identity_drives_presentation_and_idempotent_component_settlement() {
     let service = fixture.service();
 
     let presentation = service
-        .presentation_for_action(ACTOR, GUILD, action_id)
+        .action_presentation(ACTOR, GUILD, action_id, NOW)
         .expect("presentation lookup")
         .expect("pending event");
-    assert_eq!(presentation.event_id, "underground_stream");
+    assert_eq!(presentation.event.event_id, "underground_stream");
     assert!(
         service
-            .presentation_for_action(ACTOR + 1, GUILD, action_id)
+            .action_presentation(ACTOR + 1, GUILD, action_id, NOW)
             .expect("wrong actor lookup")
             .is_none()
     );
@@ -1382,8 +1194,13 @@ fn unique_gear_repair_preview_matches_prorated_debit() {
         "event:collapsed_armory",
         Some("glassbreaker_pick"),
     );
-    let preview =
-        service.compute_repair_cost(GearSlot::Weapon, 3, Some("glassbreaker_pick"), 4, Some(8));
+    let preview = cama_domain::dig_gear::repair_cost(
+        GearSlot::Weapon,
+        3,
+        Some("glassbreaker_pick"),
+        4,
+        Some(8),
+    );
     assert_eq!(preview, 5);
     let result = service.repair_gear(111, 0, gear_id);
     assert!(result.success);
@@ -2211,4 +2028,296 @@ fn pending_legacy_relic_finale_uses_already_granted_artifact_metadata() {
     assert_eq!(relic_stat_ids, old_stats);
     assert_eq!(reward_row_id, Some(relic_row));
     assert_eq!(fixture.count_actions(ACTOR, "quest_finale_relic"), 1);
+}
+
+/// The first authored, non-splash event whose `choice` failure satisfies
+/// `wanted` while its success neither costs streak days nor curses.
+fn authored_failure(
+    choice: &str,
+    wanted: impl Fn(&crate::dig_loot::CanonicalEventOutcome) -> bool,
+) -> (String, crate::dig_loot::CanonicalEventOutcome) {
+    crate::dig_loot::canonical_event_catalog()
+        .iter()
+        .filter(|event| event.splash.is_none())
+        .find_map(|event| {
+            let option = match choice {
+                "risky" => event.risky_option.as_ref(),
+                "desperate" => event.desperate_option.as_ref(),
+                _ => None,
+            }?;
+            let failure = option.failure.as_ref()?;
+            (wanted(failure)
+                && !failure.cave_in
+                && option.success.streak_loss == 0
+                && option.success.curse.is_none())
+            .then(|| (event.id.clone(), failure.clone()))
+        })
+        .unwrap_or_else(|| panic!("an authored {choice} failure"))
+}
+
+fn set_streak(fixture: &Fixture, streak_days: i64) {
+    fixture
+        .connection()
+        .execute(
+            "UPDATE tunnels SET streak_days=?1 WHERE discord_id=?2 AND guild_id=?3",
+            params![streak_days, ACTOR, GUILD],
+        )
+        .expect("seed streak");
+}
+
+#[test]
+fn event_streak_setback_is_partial_grows_with_the_streak_and_stops_at_zero() {
+    let (event_id, failure) = authored_failure("risky", |outcome| {
+        outcome.streak_loss > 0 && outcome.curse.is_none()
+    });
+    let loss = failure.streak_loss;
+    for streak in [10, 45, 60, 1] {
+        let fixture = Fixture::new();
+        fixture.seed_actor(ACTOR, 100, 50, 0);
+        set_streak(&fixture, streak);
+        let key = key_for_outcome(&fixture.snapshot(), &event_id, "risky", false);
+
+        let outcome = fixture
+            .service()
+            .resolve_event(request(&event_id, "risky", &key))
+            .expect("streak failure");
+
+        // One extra day of setback per twenty days already banked.
+        let expected_after = (streak - (loss + streak / 20)).max(0);
+        let resolution = outcome.resolution.as_ref().expect("resolution");
+        assert!(!resolution.succeeded);
+        assert_eq!(
+            fixture.snapshot().streak_days,
+            expected_after,
+            "streak {streak}"
+        );
+        assert_eq!(
+            resolution.streak_loss,
+            streak - expected_after,
+            "streak {streak}"
+        );
+    }
+
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 100, 50, 0);
+    set_streak(&fixture, 10);
+    let key = key_for_outcome(&fixture.snapshot(), &event_id, "risky", true);
+    let outcome = fixture
+        .service()
+        .resolve_event(request(&event_id, "risky", &key))
+        .expect("streak success");
+    assert_eq!(
+        outcome.resolution.as_ref().expect("resolution").streak_loss,
+        0
+    );
+    assert_eq!(fixture.snapshot().streak_days, 10);
+}
+
+#[test]
+fn event_curse_is_strengthened_replaces_the_old_curse_and_keeps_the_buff() {
+    const BUFF: &str = r#"{"id":"power","digs_remaining":3}"#;
+    for choice in ["risky", "desperate"] {
+        let (event_id, failure) = authored_failure(choice, |outcome| {
+            outcome.curse.is_some() && outcome.streak_loss == 0
+        });
+        let curse = failure.curse.expect("authored curse");
+        let fixture = Fixture::new();
+        fixture.seed_actor(ACTOR, 100, 50, 0);
+        fixture
+            .connection()
+            .execute(
+                "UPDATE tunnels SET temp_buffs=?1, temp_curses=?2
+                     WHERE discord_id=?3 AND guild_id=?4",
+                params![
+                    BUFF,
+                    r#"{"id":"old_hex","name":"Old Hex","digs_remaining":9,"effect":{"advance_bonus":-1}}"#,
+                    ACTOR,
+                    GUILD
+                ],
+            )
+            .expect("seed buff and old curse");
+        let key = key_for_outcome(&fixture.snapshot(), &event_id, choice, false);
+
+        let outcome = fixture
+            .service()
+            .resolve_event(request(&event_id, choice, &key))
+            .expect("curse failure");
+
+        // The result names the authored curse; the stored one runs two digs
+        // longer at one and a half times the strength.
+        let resolution = outcome.resolution.as_ref().expect("resolution");
+        assert_eq!(resolution.curse.as_ref(), Some(&curse), "{event_id}");
+        let snapshot = fixture.snapshot();
+        assert_eq!(snapshot.temp_buff_json.as_deref(), Some(BUFF), "{event_id}");
+        let stored: serde_json::Value =
+            serde_json::from_str(snapshot.temp_curse_json.as_deref().expect("stored curse"))
+                .expect("curse JSON");
+        assert_eq!(stored["id"], curse.id.as_str(), "{event_id}");
+        assert_eq!(
+            stored["digs_remaining"],
+            curse.duration_digs + 2,
+            "{event_id}"
+        );
+        let authored = curse.effect.as_object().expect("authored effect");
+        let strengthened = stored["effect"].as_object().expect("stored effect");
+        assert_eq!(
+            strengthened.keys().collect::<Vec<_>>(),
+            authored.keys().collect::<Vec<_>>()
+        );
+        for (name, value) in authored {
+            let scaled = value.as_f64().expect("numeric effect") * 1.5;
+            if matches!(name.as_str(), "cave_in_bonus" | "cooldown_penalty") {
+                let stored = strengthened[name].as_f64().expect("fractional effect");
+                assert!((stored - scaled).abs() < 1e-9, "{event_id} {name}");
+            } else {
+                assert_eq!(
+                    strengthened[name].as_i64(),
+                    Some(scaled.round_ties_even() as i64),
+                    "{event_id} {name}"
+                );
+            }
+        }
+    }
+}
+
+/// The live burn for one authored splash victim at the runtime's scale.
+fn live_burn(penalty_jc: i64) -> i64 {
+    scale_deflationary_minigame_jc_delta(
+        strengthen_dig_event_penalty(penalty_jc) as f64,
+        DigRuntimeConfig::default().minigame_jc_delta_scale,
+    )
+}
+
+fn authored_splash(event_id: &str) -> crate::dig_loot::CanonicalSplash {
+    crate::dig_loot::canonical_event_catalog()
+        .iter()
+        .find(|event| event.id == event_id)
+        .and_then(|event| event.splash.clone())
+        .unwrap_or_else(|| panic!("{event_id} splash"))
+}
+
+#[test]
+fn themed_burn_events_hit_only_the_richest_and_destroy_more_than_they_pay() {
+    for (event_id, actor_balance, depth, others, victims) in [
+        (
+            "underworld_reclaims",
+            500,
+            80,
+            vec![(1, 1_300), (2, 1_200), (3, 1_100), (4, 900)],
+            vec![1, 2, 3],
+        ),
+        (
+            "ember_clearinghouse",
+            500,
+            80,
+            vec![(1, 1_300), (2, 1_200), (3, 1_100), (4, 1_000)],
+            vec![1, 2, 3],
+        ),
+        (
+            "hungering_dark",
+            10_000,
+            120,
+            vec![(1, 1_000), (2, 1_000), (3, 1_000)],
+            vec![1, 2],
+        ),
+    ] {
+        let fixture = Fixture::new();
+        fixture.seed_actor(ACTOR, actor_balance, depth, 0);
+        for (offset, balance) in &others {
+            fixture.seed_actor(ACTOR + offset, *balance, 10, 0);
+        }
+        let splash = authored_splash(event_id);
+        assert_eq!(
+            (splash.mode.as_str(), splash.strategy.as_str()),
+            ("burn", "richest_n")
+        );
+        let key = key_for_outcome(&fixture.snapshot(), event_id, "risky", true);
+
+        let outcome = fixture
+            .service()
+            .resolve_event(request(event_id, "risky", &key))
+            .expect("themed burn");
+
+        let burn = live_burn(splash.penalty_jc);
+        let burned = outcome.splash.as_ref().expect("burn splash");
+        assert_eq!(
+            burned.victims,
+            victims
+                .iter()
+                .map(|offset| (ACTOR + offset, burn))
+                .collect::<Vec<_>>(),
+            "{event_id}"
+        );
+        for (offset, balance) in &others {
+            let expected = if victims.contains(offset) {
+                balance - burn
+            } else {
+                *balance
+            };
+            assert_eq!(fixture.balance(ACTOR + offset), expected, "{event_id}");
+        }
+        let actor_gain = fixture.balance(ACTOR) - actor_balance;
+        let resolution = outcome.resolution.as_ref().expect("resolution");
+        assert_eq!(actor_gain, resolution.jc, "{event_id}");
+        assert!(actor_gain > 0, "{event_id}");
+        assert!(
+            burned.total_moved > actor_gain,
+            "{event_id} stays deflationary"
+        );
+    }
+}
+
+#[test]
+fn burn_event_pays_nothing_when_no_one_can_be_burned() {
+    // No other miners, or only miners under the hostile-loss floor.
+    for others in [vec![], vec![(1, 3), (2, 3)]] {
+        let fixture = Fixture::new();
+        fixture.seed_actor(ACTOR, 500, 80, 0);
+        for (offset, balance) in &others {
+            fixture.seed_actor(ACTOR + offset, *balance, 10, 0);
+        }
+        let key = key_for_outcome(&fixture.snapshot(), "wealth_siphon", "risky", true);
+
+        let outcome = fixture
+            .service()
+            .resolve_event(request("wealth_siphon", "risky", &key))
+            .expect("unfunded burn");
+
+        assert!(outcome.resolution.as_ref().expect("resolution").succeeded);
+        assert_eq!(outcome.resolution.as_ref().expect("resolution").jc, 0);
+        assert!(
+            outcome
+                .splash
+                .as_ref()
+                .is_none_or(|splash| splash.victims.is_empty() && splash.total_moved == 0)
+        );
+        assert_eq!(fixture.balance(ACTOR), 500);
+        for (offset, balance) in &others {
+            assert_eq!(fixture.balance(ACTOR + offset), *balance);
+        }
+    }
+}
+
+#[test]
+fn failed_burn_event_burns_no_one() {
+    let fixture = Fixture::new();
+    fixture.seed_actor(ACTOR, 500, 80, 0);
+    fixture.seed_actor(ACTOR + 1, 1_000, 10, 0);
+    let key = key_for_outcome(&fixture.snapshot(), "wealth_siphon", "risky", false);
+
+    let outcome = fixture
+        .service()
+        .resolve_event(request("wealth_siphon", "risky", &key))
+        .expect("failed burn");
+
+    let resolution = outcome.resolution.as_ref().expect("resolution");
+    assert!(!resolution.succeeded);
+    assert!(
+        outcome
+            .splash
+            .as_ref()
+            .is_none_or(|splash| splash.victims.is_empty())
+    );
+    assert_eq!(fixture.balance(ACTOR + 1), 1_000);
+    assert_eq!(fixture.balance(ACTOR), 500 + resolution.jc);
 }

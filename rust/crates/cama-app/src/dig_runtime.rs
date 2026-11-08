@@ -42,10 +42,10 @@ use cama_domain::dig_cave_in::{
 use cama_domain::dig_economy::scale_positive_dig_jc;
 use cama_domain::dig_gear::{AMULET_TIERS, ARMOR_TIERS, BOOTS_TIERS, WEAPON_TIERS, unique_gear};
 use cama_domain::game_date::game_date_for_timestamp;
-use cama_domain::mana::{ManaEffects, weather_combo_modifiers};
+use cama_domain::mana::{ManaEffects, mana_day_label_at, weather_combo_modifiers};
 use cama_domain::pet::{PetDigWork, PetDigWorkClaim};
 use chrono::NaiveDate;
-use rusqlite::{Connection, Transaction, TransactionBehavior};
+use rusqlite::{Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -74,6 +74,7 @@ use crate::dig_service::{
     defeated_boundaries_from_json, effective_dig_cooldown, layer_at, next_undefeated_boss,
     paid_dig_cost, scale_dig_minigame_jc, scale_dig_yield_once,
 };
+use crate::dig_tunnel_naming::DigTunnelNamingService;
 use crate::dig_tunnels::{
     aggregate_prestige_perk_effects, ascension_effects, mutation_effects, mutations_from_json,
     roll_corruption, round_prestige_perk_bonus_half_up,
@@ -195,14 +196,6 @@ impl DigRuntimeConfig {
         }
     }
 
-    #[must_use]
-    pub fn with_asset_root(root: impl Into<PathBuf>) -> Self {
-        Self {
-            asset_root: root.into(),
-            ..Self::default()
-        }
-    }
-
     /// Set the secret mixed into dig seeds; zero keeps the legacy seed.
     #[must_use]
     pub const fn with_entropy_secret(mut self, secret: u64) -> Self {
@@ -234,11 +227,6 @@ impl DigRuntimeConfig {
             0
         };
         self
-    }
-
-    #[must_use]
-    pub fn authored_asset_root(&self, relative: impl AsRef<Path>) -> PathBuf {
-        self.asset_root.join(relative)
     }
 }
 
@@ -323,11 +311,15 @@ pub struct DigRuntimeCanonicalEventRequest<'a> {
 
 impl DigRuntimeSnapshot {
     #[must_use]
-    pub fn fresh(discord_id: i64, guild_id: i64, balance: i64, now: i64) -> Self {
+    pub fn fresh(discord_id: i64, guild_id: i64, balance: i64, _now: i64) -> Self {
         Self {
             registered: true,
             balance,
-            tunnel: Some(DigRuntimeTunnel::new(discord_id, guild_id, now)),
+            tunnel: Some(DigRuntimeTunnel::new(
+                discord_id,
+                guild_id,
+                DigTunnelNamingService::default().generate_tunnel_name(),
+            )),
             inventory: Vec::new(),
             artifacts: Vec::new(),
             gear: Vec::new(),
@@ -556,11 +548,12 @@ pub trait DigRuntimeStore: Send + Sync {
     /// Resolve one immutable Mana snapshot for the whole admitted Dig.
     /// Every paid-cost, cooldown, hazard, yield, and tax policy reuses this
     /// value so a request cannot observe two different daily assignments.
+    /// `_mana_day` is the `cama_domain::mana` day label, not the game day.
     fn mana_effects(
         &self,
         _discord_id: i64,
         _guild_id: i64,
-        _today: &str,
+        _mana_day: &str,
     ) -> Result<ManaEffects, DigRuntimeStoreError> {
         Ok(ManaEffects::default())
     }
@@ -734,8 +727,9 @@ pub use delivery::{
 use effects::{
     CaveInLootRng, DigPrestige4Entropy, LootRelicEntropy, active_buff_effects,
     active_curse_effects, active_curse_summary, active_pickaxe_tier, apply_mana_base_yield,
-    bonus_basis_points, event_chance_factor, gear_effects, luminosity_jc_multiplier,
-    multiplier_millionths, proportional_mana_yield_tax, weather_code, weather_effects,
+    bonus_basis_points, effective_cave_in_loss_cap, event_chance_factor, gear_effects,
+    luminosity_jc_multiplier, multiplier_millionths, proportional_mana_yield_tax, weather_code,
+    weather_effects,
 };
 pub use effects::{DigWeatherEffects, apply_cave_in_gear_ticks, catastrophic_cave_in_depth};
 pub use store::SqliteDigRuntimeStore;
@@ -756,11 +750,6 @@ impl DigRuntimeLootRepository {
     #[must_use]
     pub const fn snapshot(&self) -> &DigRuntimeSnapshot {
         &self.snapshot
-    }
-
-    #[must_use]
-    pub fn into_snapshot(self) -> DigRuntimeSnapshot {
-        self.snapshot
     }
 }
 
@@ -1048,6 +1037,22 @@ pub struct DigRuntimeOutcome {
     /// means no curse is active once this Dig's decrement is accounted for.
     #[serde(default)]
     pub active_curse: Option<ActiveCurseSummary>,
+    /// A Streak Charm was spent to keep the daily streak across one missed day.
+    #[serde(default)]
+    pub streak_charm_used: bool,
+    /// What auto-buy queued or bought for this Dig, in selection order.
+    #[serde(default)]
+    pub auto_purchases: Vec<DigRuntimeAutoPurchase>,
+}
+
+/// One auto-buy decision made for a Dig, as shown on its result card.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DigRuntimeAutoPurchase {
+    /// Shop display name of the consumable.
+    pub item: String,
+    /// The auto-buy status token, such as `purchased` or `skipped_inventory_full`.
+    pub status: String,
+    pub cost: i64,
 }
 
 /// A curse currently afflicting the miner, with what it costs per Dig.
@@ -1146,6 +1151,8 @@ impl DigRuntimeOutcome {
             relic_trim_notice: false,
             weather: None,
             active_curse: None,
+            streak_charm_used: false,
+            auto_purchases: Vec::new(),
         }
     }
 }
@@ -1613,7 +1620,7 @@ where
             current.tunnel = Some(DigRuntimeTunnel::new(
                 request.discord_id,
                 request.guild_id,
-                now,
+                DigTunnelNamingService::default().generate_tunnel_name(),
             ));
         }
         let tunnel = current
@@ -1671,6 +1678,8 @@ where
                 relic_trim_notice: false,
                 weather: None,
                 active_curse: None,
+                streak_charm_used: false,
+                auto_purchases: Vec::new(),
             });
         }
 
@@ -1762,6 +1771,8 @@ where
                 relic_trim_notice: false,
                 weather: None,
                 active_curse: None,
+                streak_charm_used: false,
+                auto_purchases: Vec::new(),
             });
         }
 
@@ -1776,8 +1787,11 @@ where
         let mana_effects = if first_dig {
             ManaEffects::default()
         } else {
+            // Mana is assigned on the daylight-saving 4 AM Los Angeles day,
+            // not the fixed UTC-8 game day used for Dig's own daily limits.
+            let mana_day = mana_day_label_at(now).unwrap_or_else(|| "unknown".to_owned());
             self.store
-                .mana_effects(request.discord_id, request.guild_id, &today)?
+                .mana_effects(request.discord_id, request.guild_id, &mana_day)?
         };
         let paid_count = if tunnel.paid_dig_date.as_deref() == Some(today.as_str()) {
             usize::try_from(tunnel.paid_digs_today.max(0)).unwrap_or(usize::MAX)
@@ -2043,6 +2057,8 @@ where
                 relic_trim_notice: false,
                 weather: None,
                 active_curse: None,
+                streak_charm_used: false,
+                auto_purchases: Vec::new(),
             };
             let receipt =
                 self.commit_dig(commit, first_outcome.clone(), delivery_context.as_ref())?;
@@ -2227,6 +2243,8 @@ where
                 + curse_fx.advance_bonus
                 + gear_fx.advance_bonus
                 + buff_fx.advance_bonus
+                // Pathfinder's Spur: +1 advance in the deep layers.
+                + i64::from(depth_before >= 150 && relics.contains("pathfinders_spur"))
                 + if layer_at(depth_before).name == "The Hollow" {
                     perk_fx.get("hollow_advance_bonus").copied().unwrap_or(0.0) as i64
                 } else {
@@ -2263,11 +2281,12 @@ where
             } else {
                 weather_fx.cave_in_loss_bonus + route_number("cave_in_loss_bonus") as i64
             },
-            cave_in_loss_cap: weather_fx.cave_in_loss_cap.or_else(|| {
+            cave_in_loss_cap: effective_cave_in_loss_cap(&[
+                weather_fx.cave_in_loss_cap,
                 active_route
                     .and_then(|route| route_effect(route, "cave_in_loss_cap"))
-                    .map(|value| value as i64)
-            }),
+                    .map(|value| value as i64),
+            ]),
             cave_in_policy: Some(cave_in_policy),
             defer_event_selection: true,
         };
@@ -2379,7 +2398,14 @@ where
             &self.config.economy_event,
         )?;
         let economy_multiplier_basis_points = (economy_multiplier.max(0.0) * 10_000.0 + 0.5) as i64;
-        let streak_days = next_daily_streak(&tunnel, &today);
+        let streak_charm_id = current
+            .inventory
+            .iter()
+            .rev()
+            .find(|item| item.item_type == "streak_charm")
+            .map(|item| item.id);
+        let (streak_days, streak_charm_needed) =
+            next_daily_streak(&tunnel, &today, streak_charm_id.is_some());
         let streak_reward = crate::dig_service::streak_bonus(streak_days);
         let next_cavein_free_streak = tunnel.cavein_free_streak.max(0).saturating_add(1);
         let mut gross_jc = 0_i64;
@@ -2581,10 +2607,14 @@ where
             } else if catastrophic {
                 catastrophic_cave_in = true;
                 let insured = tunnel.insured_until.is_some_and(|expires| expires > now);
+                // Reinforcement also bounds the catastrophic rollback.
                 let (depth_after, insurance_saved, total_loss) = catastrophic_cave_in_depth(
                     depth_before,
                     cave_loss,
-                    loot_modifiers.cave_in_loss_cap,
+                    effective_cave_in_loss_cap(&[
+                        loot_modifiers.cave_in_loss_cap,
+                        (tunnel.reinforced_until > now).then_some(8),
+                    ]),
                     insured,
                 );
                 catastrophic_depth_after = Some(depth_after);
@@ -3085,9 +3115,20 @@ where
                 }
             }
         }
-        if let Some(next_tunnel) = staged.tunnel.as_mut() {
+        // A cave-in leaves the daily streak untouched, so only a dig that
+        // lands records the day and spends the charm that bridged a missed
+        // one. The charm row is burned in the same commit as the streak it
+        // bought.
+        let streak_charm_used = streak_charm_needed && !outcome.cave_in;
+        if !outcome.cave_in
+            && let Some(next_tunnel) = staged.tunnel.as_mut()
+        {
             next_tunnel.streak_days = streak_days;
             next_tunnel.streak_last_date = Some(today.clone());
+        }
+        if streak_charm_used && let Some(charm_id) = streak_charm_id {
+            staged.inventory.retain(|item| item.id != charm_id);
+            consumed_item_ids.push(charm_id);
         }
         if let Some((_, remaining)) = active_curse_effects(tunnel.temp_curses.as_deref())
             && let Some(next_tunnel) = staged.tunnel.as_mut()
@@ -3263,6 +3304,7 @@ where
             "gross_jc": outcome.gross_jc,
             "economy_adjusted_jc": outcome.economy_adjusted_jc,
             "economy_reward_multiplier": economy_multiplier,
+            "streak_charm_used": streak_charm_used,
             "auto_purchases": auto_purchases.iter().map(|purchase| serde_json::json!({
                 "item": purchase.item_type,
                 "status": purchase.status.as_str(),
@@ -3387,6 +3429,17 @@ where
                 })
             }),
             active_curse,
+            streak_charm_used,
+            auto_purchases: auto_purchases
+                .iter()
+                .map(|purchase| DigRuntimeAutoPurchase {
+                    item: consumable(&purchase.item_type)
+                        .map_or(purchase.item_type.as_str(), |definition| definition.name)
+                        .to_owned(),
+                    status: purchase.status.as_str().to_owned(),
+                    cost: purchase.cost,
+                })
+                .collect(),
         };
         let receipt =
             self.commit_dig(commit, runtime_outcome.clone(), delivery_context.as_ref())?;
@@ -3435,6 +3488,11 @@ where
                 action_id: None,
             });
         }
+        let detail = serde_json::json!({
+            "route_id": route_id,
+            "layer": selected_state.as_ref().map(|state| state.layer.as_str()),
+        })
+        .to_string();
         let mut next = snapshot.clone();
         next.tunnel
             .as_mut()
@@ -3454,7 +3512,7 @@ where
             low_priority_tax: 0,
             balance_cost: 0,
             action_type: "route_choice".to_owned(),
-            detail: serde_json::json!({"route_id": route_id}).to_string(),
+            detail,
             now,
         })?;
         Ok(DigRuntimeActionResult {
@@ -3617,24 +3675,32 @@ fn apply_luminosity_refill(tunnel: &mut DigRuntimeTunnel, now: i64) {
     tunnel.last_lum_update_at = Some(now);
 }
 
-fn next_daily_streak(tunnel: &DigRuntimeTunnel, today: &str) -> i64 {
+/// Today's daily streak and whether a Streak Charm paid for it.
+///
+/// A charm forgives exactly one missed day of a running streak; a longer gap
+/// resets the streak whether or not the miner holds one.
+fn next_daily_streak(
+    tunnel: &DigRuntimeTunnel,
+    today: &str,
+    has_streak_charm: bool,
+) -> (i64, bool) {
     let existing = tunnel.streak_days.max(0);
     let Some(last) = tunnel.streak_last_date.as_deref() else {
-        return 1;
+        return (1, false);
     };
     if last == today {
-        return existing.max(1);
+        return (existing.max(1), false);
     }
     let (Ok(today), Ok(last)) = (
         NaiveDate::parse_from_str(today, "%Y-%m-%d"),
         NaiveDate::parse_from_str(last, "%Y-%m-%d"),
     ) else {
-        return 1;
+        return (1, false);
     };
-    if today.signed_duration_since(last).num_days() == 1 {
-        existing.saturating_add(1).max(1)
-    } else {
-        1
+    match today.signed_duration_since(last).num_days() {
+        1 => (existing.saturating_add(1).max(1), false),
+        2 if existing > 0 && has_streak_charm => (existing.saturating_add(1), true),
+        _ => (1, false),
     }
 }
 

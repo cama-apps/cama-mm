@@ -15,6 +15,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+#[cfg(test)]
 use cama_domain::pet::ADULT_AGE_SECONDS;
 use cama_domain::pet_evolution::{
     ActivityRule, EvolutionDecision, InstinctScores, PetActivity, PetInstinct,
@@ -34,6 +35,7 @@ pub struct EvolutionWindow {
     pub due_at: i64,
 }
 
+#[cfg(test)]
 /// Return the exact hatch-to-adulthood score window used by pet adoption.
 pub fn adoption_evolution_window(
     hatched_at: i64,
@@ -90,7 +92,7 @@ impl PetEvolutionRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.path)
     }
 

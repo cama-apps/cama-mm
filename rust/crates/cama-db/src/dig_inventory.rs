@@ -184,7 +184,7 @@ impl DigInventoryRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.path)
     }
 
@@ -243,6 +243,7 @@ impl DigInventoryRepository {
         Ok(Some(query_inventory(&connection, discord_id, guild_id)?))
     }
 
+    #[cfg(test)]
     /// Insert an existing-schema inventory row. This is also used by reward
     /// settlement adapters; it is not schema initialization.
     pub fn add_item(

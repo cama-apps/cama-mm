@@ -4,7 +4,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::discord_transport::{
-    DiscordGuildMemberSnapshot, DiscordMessageReceipt, DiscordMessageSnapshot, DiscordUserSnapshot,
+    DiscordAllowedMentions, DiscordGuildMemberSnapshot, DiscordMessageReceipt,
+    DiscordMessageSnapshot, DiscordUserSnapshot,
 };
 use crate::gateway_events::{GatewayMember, GuildMemberPageSource};
 use crate::push_notification_provider::{PushNotificationRegistrationProvider, PushPublisher};
@@ -826,6 +827,8 @@ fn registration_exposes_the_complete_lobby_command_surface() {
             max_players: 20,
             first_game_pool_daily_amount: 100,
             min_readycheck_players: 0,
+            openskill_algorithm_fingerprint: cama_domain::openskill::OpenSkillConfig::default()
+                .algorithm_fingerprint(),
         },
         Arc::new(DraftStateManager::default()),
         Arc::new(UnusedTransport),
@@ -856,6 +859,8 @@ fn runtime_config() -> LobbyRuntimeConfig {
         max_players: 20,
         first_game_pool_daily_amount: 100,
         min_readycheck_players: 0,
+        openskill_algorithm_fingerprint: cama_domain::openskill::OpenSkillConfig::default()
+            .algorithm_fingerprint(),
     }
 }
 

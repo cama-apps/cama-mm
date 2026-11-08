@@ -7,32 +7,17 @@ fn close(left: f64, right: f64) {
     assert!((left - right).abs() < 1.0e-10, "{left} != {right}");
 }
 
-fn round(
-    round_num: i64,
-    player_hp: i64,
-    boss_hp: i64,
-    player_hit: f64,
-    player_damage: i64,
-    boss_hit: f64,
-    boss_damage: i64,
-) -> RelicRoundInput {
-    RelicRoundInput {
-        round_num,
-        player_hp,
-        boss_hp,
-        player_hit,
-        player_damage,
-        boss_hit,
-        boss_damage,
-    }
+fn relic_ids() -> BTreeSet<&'static str> {
+    artifact_catalog()
+        .into_iter()
+        .filter(|artifact| artifact.is_relic)
+        .map(|relic| relic.id)
+        .collect()
 }
 
 #[test]
 fn test_new_relics_present_in_catalog() {
-    let ids = relic_catalog()
-        .into_iter()
-        .map(|relic| relic.id)
-        .collect::<BTreeSet<_>>();
+    let ids = relic_ids();
     assert!(NEW_RELIC_IDS.iter().all(|id| ids.contains(id)));
 }
 
@@ -51,26 +36,13 @@ fn test_slow_drip_tracks_gross_cap_but_credits_scaled_reward() {
 
 #[test]
 fn test_dormant_relics_present_in_catalog() {
-    let ids = relic_catalog()
-        .into_iter()
-        .map(|relic| relic.id)
-        .collect::<BTreeSet<_>>();
+    let ids = relic_ids();
     assert!(DORMANT_RELIC_IDS.iter().all(|id| ids.contains(id)));
 }
 
 #[test]
-fn test_new_relics_have_lore_and_effects() {
-    for relic_id in NEW_RELIC_IDS {
-        let content = relic_content(relic_id).expect("new relic content");
-        assert!(content.definition.is_relic);
-        assert!(!content.text.effect.is_empty());
-        assert!(!content.text.lore.is_empty());
-    }
-}
-
-#[test]
 fn test_total_artifact_count_matches_expected() {
-    assert_eq!(relic_catalog().len(), 45);
+    assert_eq!(relic_ids().len(), 45);
     assert_eq!(artifact_catalog().len(), 47);
 }
 
@@ -166,13 +138,9 @@ fn test_relic_yield_helper_bloodstone_random_only_when_enabled() {
 }
 
 #[test]
-fn test_buff_fun_relics_present_with_lore_and_effects() {
-    for relic_id in BUFF_FUN_RELIC_IDS {
-        let content = relic_content(relic_id).expect("buff-fun relic content");
-        assert!(content.definition.is_relic);
-        assert!(!content.text.effect.is_empty());
-        assert!(!content.text.lore.is_empty());
-    }
+fn test_buff_fun_relics_present_in_catalog() {
+    let ids = relic_ids();
+    assert!(BUFF_FUN_RELIC_IDS.iter().all(|id| ids.contains(id)));
 }
 
 #[test]
@@ -196,6 +164,22 @@ fn test_deaths_door_renamed_off_the_second_wind_mutation() {
 fn test_deaths_door_is_the_nameless_depth_trophy() {
     assert!(TROPHY_RELIC_IDS.contains(&"deaths_door"));
     assert_eq!(trophy_relic_for_boss("nameless_depth"), Some("deaths_door"));
+}
+
+/// Python's `BossDef.trophy_relic_id`: each signature trophy is carved by
+/// exactly one catalog boss, and no other boss carves one.
+#[test]
+fn test_every_trophy_is_carved_by_exactly_one_catalog_boss() {
+    let mut carved = crate::dig_bosses::BOSSES
+        .iter()
+        .filter_map(|boss| trophy_relic_for_boss(boss.boss_id))
+        .collect::<Vec<_>>();
+    carved.sort_unstable();
+    let mut expected = TROPHY_RELIC_IDS.to_vec();
+    expected.sort_unstable();
+    assert_eq!(carved, expected);
+    assert_eq!(trophy_relic_for_boss("grothak"), None);
+    assert!((TROPHY_CARVE_RATE - 0.25).abs() < f64::EPSILON);
 }
 
 #[test]
@@ -359,90 +343,4 @@ fn test_shifting_idol_rolls_a_fresh_attempt_bonus() {
     close(second.player_hit, 0.60);
     close(second.crit_chance, 0.15);
     assert_eq!(second.bonus, Some(ShiftingIdolBonus::Crit));
-}
-
-#[test]
-fn test_gamblers_edge_doubles_a_hit() {
-    let mut status = relic_combat_status(&RelicSet::new(["gamblers_edge"]));
-    assert!(status.double_hit_enabled);
-    let result = run_relic_round(
-        round(1, 10, 100, 1.0, 2, 0.0, 1),
-        &mut status,
-        &mut ScriptedRelicEntropy::constant(0.0),
-    );
-    assert_eq!(result.boss_hp, 96);
-    assert!(result.events.double_hit);
-}
-
-#[test]
-fn test_berserkers_mark_ramps_and_caps() {
-    let mut status = relic_combat_status(&RelicSet::new(["berserkers_mark"]));
-    let mut entropy = ScriptedRelicEntropy::constant(0.0);
-    let first = run_relic_round(round(1, 20, 100, 1.0, 2, 1.0, 1), &mut status, &mut entropy);
-    let second = run_relic_round(
-        round(2, first.player_hp, first.boss_hp, 1.0, 2, 1.0, 1),
-        &mut status,
-        &mut entropy,
-    );
-    let third = run_relic_round(
-        round(3, second.player_hp, second.boss_hp, 1.0, 2, 1.0, 1),
-        &mut status,
-        &mut entropy,
-    );
-    assert_eq!(
-        (
-            100 - first.boss_hp,
-            first.boss_hp - second.boss_hp,
-            second.boss_hp - third.boss_hp,
-        ),
-        (2, 3, 4)
-    );
-    assert_eq!(status.berserk_rage, Some(2));
-}
-
-#[test]
-fn test_deaths_door_survives_once_then_dies() {
-    let mut status = relic_combat_status(&RelicSet::new(["deaths_door"]));
-    assert!(status.deaths_door_available);
-    let mut entropy = ScriptedRelicEntropy::constant(0.0);
-    let first = run_relic_round(round(1, 1, 100, 0.0, 2, 1.0, 5), &mut status, &mut entropy);
-    assert_eq!(first.terminal, None);
-    assert_eq!(first.player_hp, 1);
-    assert!(first.events.deaths_door);
-    assert!(!status.deaths_door_available);
-    let second = run_relic_round(
-        round(2, 1, first.boss_hp, 0.0, 2, 1.0, 5),
-        &mut status,
-        &mut entropy,
-    );
-    assert_eq!(second.terminal, Some(RelicRoundTerminal::PlayerLost));
-    assert!(second.player_hp <= 0);
-}
-
-#[test]
-fn test_deaths_door_saves_from_a_dot_death() {
-    let mut status = relic_combat_status(&RelicSet::new(["deaths_door"]));
-    status.bleed_rounds_remaining = 1;
-    let result = run_relic_round(
-        round(1, 1, 100, 1.0, 2, 0.0, 1),
-        &mut status,
-        &mut ScriptedRelicEntropy::constant(0.0),
-    );
-    assert_eq!(result.terminal, None);
-    assert_eq!(result.player_hp, 1);
-    assert!(result.events.deaths_door);
-    assert_eq!(result.events.player_hp, 1);
-    assert!(!status.deaths_door_available);
-}
-
-#[test]
-fn test_gamblers_edge_does_not_double_when_roll_misses() {
-    let mut status = relic_combat_status(&RelicSet::new(["gamblers_edge"]));
-    let result = run_relic_round(
-        round(1, 10, 100, 1.0, 2, 0.0, 1),
-        &mut status,
-        &mut ScriptedRelicEntropy::constant(0.99),
-    );
-    assert_eq!(result.boss_hp, 98);
-    assert!(!result.events.double_hit);
 }

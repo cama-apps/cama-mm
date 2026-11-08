@@ -13,9 +13,7 @@ struct FakePortError(String);
 
 #[derive(Debug)]
 struct FakePort {
-    tunnel_exists: Cell<bool>,
     rows: RefCell<Vec<OwnedRelicRow>>,
-    persisted_raw: RefCell<Vec<String>>,
     fail_atomic: Cell<bool>,
     next_row_id: Cell<i64>,
 }
@@ -23,13 +21,40 @@ struct FakePort {
 impl Default for FakePort {
     fn default() -> Self {
         Self {
-            tunnel_exists: Cell::new(true),
             rows: RefCell::new(Vec::new()),
-            persisted_raw: RefCell::new(Vec::new()),
             fail_atomic: Cell::new(false),
             next_row_id: Cell::new(1),
         }
     }
+}
+
+/// Entropy for the live Dig artifact-roll stage.
+struct StageEntropy(std::collections::VecDeque<f64>);
+
+impl dig_prestige4_content::Prestige4Entropy for StageEntropy {
+    fn unit(&mut self) -> f64 {
+        self.0.pop_front().unwrap_or(1.0)
+    }
+
+    fn choose_index(&mut self, _upper_bound: usize) -> usize {
+        0
+    }
+}
+
+fn live_artifact_roll(
+    depth: i64,
+    owned: &BTreeSet<String>,
+    units: impl IntoIterator<Item = f64>,
+) -> Option<dig_prestige4_content::ArtifactStagePlan> {
+    dig_prestige4_content::roll_artifact_stage(
+        dig_prestige4_content::ArtifactRollPlan {
+            depth,
+            rate_modifier: 1.0,
+            skip_artifact: false,
+        },
+        owned,
+        &mut StageEntropy(units.into_iter().collect()),
+    )
 }
 
 impl FakePort {
@@ -55,33 +80,6 @@ impl FakePort {
             .iter()
             .map(|row| row.artifact_id.clone())
             .collect()
-    }
-}
-
-impl RawRelicFindPort for FakePort {
-    type Error = FakePortError;
-
-    fn tunnel_exists(&self, _discord_id: i64, _guild_id: i64) -> Result<bool, Self::Error> {
-        Ok(self.tunnel_exists.get())
-    }
-
-    fn owned_artifact_ids(
-        &self,
-        _discord_id: i64,
-        _guild_id: i64,
-    ) -> Result<BTreeSet<String>, Self::Error> {
-        Ok(self.artifact_ids().into_iter().collect())
-    }
-
-    fn persist_raw_relic(
-        &self,
-        _discord_id: i64,
-        _guild_id: i64,
-        artifact_id: &str,
-    ) -> Result<(), Self::Error> {
-        self.persisted_raw.borrow_mut().push(artifact_id.to_owned());
-        self.add(artifact_id);
-        Ok(())
     }
 }
 
@@ -138,35 +136,14 @@ fn rarity_name(rarity: Rarity) -> &'static str {
 }
 
 fn assert_rarity_roll(roll: f64, expected: Rarity) {
-    assert_eq!(relic_rarity_for_roll(roll), Ok(expected));
+    assert_eq!(dig_prestige4_content::rarity_for_roll(roll), expected);
 }
 
 fn assert_raw_find_rarity(rarity_roll: f64, expected: Rarity) {
-    let service = DigRelicRecyclingService::new(FakePort::default());
-    let mut entropy = ScriptedRelicEntropy::new([0.0, rarity_roll], [0]);
-    let result = service
-        .roll_raw_relic_find(
-            RawRelicFindRequest {
-                discord_id: ACTOR,
-                guild_id: GUILD,
-                depth: 160,
-                extra_rate_mod: 1.0,
-            },
-            &mut entropy,
-        )
-        .expect("raw relic roll")
-        .expect("relic found");
-    assert_eq!(result.rarity, expected);
-    let definition = artifact_catalog()
-        .into_iter()
-        .find(|artifact| artifact.id == result.artifact_id)
-        .expect("selected catalog relic");
-    assert_eq!(definition.rarity, expected);
-    assert!(is_ordinary_relic(definition));
-    assert_eq!(
-        service.port().persisted_raw.borrow().as_slice(),
-        [result.artifact_id]
-    );
+    let stage = live_artifact_roll(160, &BTreeSet::new(), [0.0, rarity_roll]).expect("relic found");
+    assert_eq!(stage.definition.rarity, expected);
+    assert!(is_ordinary_relic(stage.definition));
+    assert_eq!(stage.current_run_artifacts_delta, 1);
 }
 
 fn common_rows(port: &FakePort) -> Vec<i64> {
@@ -509,42 +486,13 @@ fn test_recycle_rejects_equipped_input_without_consuming_anything() {
 }
 
 #[test]
-fn invalid_nan_and_upper_bound_rolls_are_rejected() {
-    assert_eq!(
-        relic_rarity_for_roll(f64::NAN),
-        Err(RelicFindError::InvalidUnitRoll)
-    );
-    assert_eq!(
-        relic_rarity_for_roll(1.0),
-        Err(RelicFindError::InvalidUnitRoll)
-    );
-}
-
-#[test]
 fn raw_find_excludes_owned_relics_and_returns_none_when_rarity_pool_is_exhausted() {
-    let port = FakePort::default();
-    for artifact in artifact_catalog()
+    let owned = artifact_catalog()
         .into_iter()
         .filter(|artifact| is_ordinary_relic(*artifact) && artifact.rarity == Rarity::Common)
-    {
-        port.add(artifact.id);
-    }
-    let service = DigRelicRecyclingService::new(port);
-    let mut entropy = ScriptedRelicEntropy::new([0.0, 0.1], [0]);
-    assert_eq!(
-        service
-            .roll_raw_relic_find(
-                RawRelicFindRequest {
-                    discord_id: ACTOR,
-                    guild_id: GUILD,
-                    depth: 10,
-                    extra_rate_mod: 1.0,
-                },
-                &mut entropy,
-            )
-            .expect("exhausted roll"),
-        None
-    );
+        .map(|artifact| artifact.id.to_owned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(live_artifact_roll(10, &owned, [0.0, 0.1]), None);
 }
 
 #[test]

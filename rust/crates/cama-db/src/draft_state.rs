@@ -39,9 +39,6 @@ pub struct DraftStateRecord {
     pub envelope_json: String,
 }
 
-/// Backwards-friendly name for a loaded raw draft row.
-pub type StoredDraftState = DraftStateRecord;
-
 impl DraftStateRecord {
     /// Return the persisted raw envelope without parsing its application
     /// payload.
@@ -116,7 +113,7 @@ impl DraftStateRepository {
         }
     }
 
-    fn connection(&self) -> Result<rusqlite::Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.path)
     }
 
@@ -214,16 +211,6 @@ impl DraftStateRepository {
             revision: 1,
             envelope_json,
         })
-    }
-
-    /// Alias making the payload-vs-envelope distinction explicit at call
-    /// sites that persist a serde snapshot.
-    pub fn create_from_state_json(
-        &self,
-        guild_id: i64,
-        state_json: &str,
-    ) -> Result<DraftStateRecord, DraftStateRepositoryError> {
-        self.create(guild_id, state_json)
     }
 
     /// Replace a guild's payload only when `expected_revision` is current.

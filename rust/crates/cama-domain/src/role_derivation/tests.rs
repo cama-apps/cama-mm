@@ -192,16 +192,3 @@ fn test_every_accepted_result_is_a_permutation_of_one_through_five() {
         assert_eq!(positions, ["1", "2", "3", "4", "5"]);
     }
 }
-
-#[test]
-fn test_last_hits_at_ten_reads_the_tenth_minute_sample() {
-    let series: Vec<i64> = (0..=15).map(|minute| minute * 4).collect();
-    assert_eq!(last_hits_at_ten(&series), Some(40));
-}
-
-#[test]
-fn test_last_hits_at_ten_is_absent_for_a_game_shorter_than_the_sample() {
-    let series: Vec<i64> = (0..8).map(|minute| minute * 4).collect();
-    assert_eq!(last_hits_at_ten(&series), None);
-    assert_eq!(last_hits_at_ten(&[]), None);
-}

@@ -13,9 +13,6 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use cama_app::betting_service::{
-    AutomaticSpectatorConfig, WealthSnapshot, plan_automatic_spectator_bets,
-};
 use cama_app::draft::{
     DRAFT_FINALIZATION_PUBLICATION_COMPLETE_STAGE, DRAFT_FINANCIAL_SETUP_COMPLETE_STAGE,
     DRAFT_FINANCIAL_SETUP_PLAN_VERSION, DRAFT_TOTAL_PICKS, DRAFTING_TIMEOUT_SECONDS, DraftEmbed,
@@ -23,30 +20,23 @@ use cama_app::draft::{
     DraftFinalizationPlanSeed, DraftFinancialSetupPolicy, DraftFinancialSetupStage, DraftPhase,
     DraftState, DraftStateEnvelope, DraftStateManager, DraftStatePersistencePort,
     LobbyKind as DraftLobbyKind, PRE_DRAFT_TIMEOUT_SECONDS, PlayerPoolEntry,
-    SqliteDraftStatePersistence, draft_finalization_process_owner,
+    draft_finalization_process_owner,
 };
 use cama_app::embeds::LobbyKind as AppLobbyKind;
-use cama_db::autobet_investments::AutobetInvestmentRepository;
-use cama_db::betting_service_repository::{
-    AutomaticBasisPointBetRequest, BettingServiceRepository, BlindBetCandidate, BlindBetPolicy,
-};
 use cama_db::core_repositories::{CoreRepositoryError, NewPlayer, PlayerRepository};
-use cama_db::dota_bet_seed_repository::{
-    BettingMode as SeedBettingMode, BettingTeam, DotaBetSeedRepository, FirstGameLobby,
-};
 use cama_db::match_runtime::{PendingMatchRecord, PendingMatchRepository, PendingMatchState};
-use cama_domain::economy_scaling::{rate_basis_points, rate_percentage_points};
-use cama_domain::formatting::JOPACOIN_EMOTE;
+use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
+use cama_domain::formatting::{JOPACOIN_EMOTE, escape_discord_text};
 use cama_domain::player::Player;
 use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::task::{JoinHandle, spawn_blocking};
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::application_config::ApplicationConfig;
 use crate::discord_transport::{
     DiscordDestinationStatus, DiscordMessage, DiscordMessageReceipt, DiscordTransport,
-    GuildPlayerNameDirectory, cached_guild_player_names,
+    GuildPlayerNameDirectory, cached_guild_player_names, resolve_guild_player_names,
 };
 use crate::gateway_events::{
     GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryFailure, ReadyRecoveryReport,
@@ -67,17 +57,17 @@ pub use crate::runtime_ports::{DraftNeonObserver, DraftNeonResult};
 const ADMINISTRATOR_PERMISSION: u64 = 1 << 3;
 const MANAGE_GUILD_PERMISSION: u64 = 1 << 5;
 const OPERATION_LOCK_TIMEOUT: Duration = Duration::from_millis(500);
+/// The final pick is acknowledged before completion waits for its lobby
+/// scope, so this wait is not bound by Discord's initial-response window.
+/// Lobby joins and ready checks hold the scope lock across Discord calls.
+const COMPLETION_LOBBY_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 const DRAFT_COMPONENT_PREFIX: &str = "draft";
 const COMPLETION_ERROR_WITHOUT_MATCH: &str = "⚠️ Draft complete but encountered an error during match setup. Use `/draft start` to try again.";
+const FINAL_PICK_REOPENED: &str =
+    "⚠️ The draft could not be finalized, so the last pick was undone. Pick again to finish it.";
+const FINAL_PICK_REOPEN_FAILED: &str =
+    "⚠️ The draft could not be finalized. An admin can run `/draft resume` to recover it.";
 const DRAFT_FINALIZATION_LEASE_SECONDS: i64 = 120;
-
-fn same_database_path(left: &Path, right: &Path) -> bool {
-    left == right
-        || matches!(
-            (left.canonicalize(), right.canonicalize()),
-            (Ok(left), Ok(right)) if left == right
-        )
-}
 
 /// Runtime-facing build failures are configuration or construction errors;
 /// ordinary command failures remain user-visible interaction responses.
@@ -307,12 +297,8 @@ impl DraftRegistrationProvider {
         }
         let handler = Arc::new(DraftHandler {
             config: DraftConfig::from_application(config),
-            database_path: path.clone(),
             players: PlayerRepository::new(&path),
             pending: PendingMatchRepository::new(&path),
-            seeds: DotaBetSeedRepository::new(&path),
-            bets: BettingServiceRepository::new(&path),
-            investments: AutobetInvestmentRepository::new(&path),
             lobbies,
             drafts,
             discord,
@@ -327,25 +313,6 @@ impl DraftRegistrationProvider {
             draft_operation_locks: Arc::new(Mutex::new(BTreeMap::new())),
         });
         Ok(Self { handler })
-    }
-
-    /// Attach the canonical SQLite persistence adapter to a provider that was
-    /// composed with the source-compatible constructor.  Keeping this as a
-    /// consuming step lets older tests and embedders retain `persistence=None`
-    /// while production can make the durable boundary explicit at composition.
-    pub fn with_sqlite_persistence(
-        self,
-        persistence_database_path: impl AsRef<Path>,
-    ) -> Result<Self, DraftProviderBuildError> {
-        let persistence_database_path = persistence_database_path.as_ref();
-        if !same_database_path(&self.handler.database_path, persistence_database_path) {
-            return Err(DraftProviderBuildError::Database(
-                "draft persistence and pending matches must share one SQLite database".to_owned(),
-            ));
-        }
-        self.with_persistence(Arc::new(SqliteDraftStatePersistence::new(
-            persistence_database_path,
-        )))
     }
 
     /// Attach an already-constructed durable persistence port.  Production
@@ -377,37 +344,6 @@ impl DraftRegistrationProvider {
         })
     }
 
-    /// Build a provider with SQLite-backed draft persistence and the default
-    /// reminder/Neon adapters.  The caller still owns startup hydration.
-    pub fn new_with_persistence(
-        database_path: impl AsRef<Path>,
-        config: &ApplicationConfig,
-        lobbies: MatchLobbyPort,
-        drafts: Arc<DraftStateManager>,
-        discord: Arc<dyn DiscordTransport>,
-        persistence_database_path: impl AsRef<Path>,
-    ) -> Result<Self, DraftProviderBuildError> {
-        let database_path = database_path.as_ref();
-        let persistence_database_path = persistence_database_path.as_ref();
-        if !same_database_path(database_path, persistence_database_path) {
-            return Err(DraftProviderBuildError::Database(
-                "draft persistence and pending matches must share one SQLite database".to_owned(),
-            ));
-        }
-        Self::new_with_reminder_scheduler_and_neon_and_persistence(
-            database_path,
-            config,
-            lobbies,
-            drafts,
-            discord,
-            Arc::new(NoopDraftReminderScheduler),
-            Arc::new(NoopDraftNeonObserver),
-            Some(Arc::new(SqliteDraftStatePersistence::new(
-                persistence_database_path,
-            ))),
-        )
-    }
-
     /// Explicitly resume only the durable financial-setup stage for a
     /// finalizing Draft after process recreation.
     ///
@@ -421,14 +357,6 @@ impl DraftRegistrationProvider {
         self.handler
             .resume_finalizing_financial_setup(guild_id)
             .await
-    }
-
-    /// Reconcile every durable finalization row after a process restart.
-    /// Financial effects are resumed from their immutable job stage, Discord
-    /// deliveries use the plan's deterministic nonce, and the final envelope
-    /// deletion is a leased revision/stage CAS.
-    pub async fn recover_finalizing(&self) -> Result<usize, String> {
-        self.recover_finalizing_scoped(None).await
     }
 
     async fn recover_finalizing_for_guilds(
@@ -751,6 +679,8 @@ struct DraftConfig {
     max_debt: i64,
     dota_bet_seed_amount: i64,
     first_game_pool_daily_amount: i64,
+    /// Fingerprint of the deployment's configured OpenSkill system.
+    openskill_algorithm_fingerprint: String,
 }
 
 impl DraftConfig {
@@ -777,18 +707,15 @@ impl DraftConfig {
             max_debt: config.values.max_debt,
             dota_bet_seed_amount: config.values.dota_bet_seed_amount,
             first_game_pool_daily_amount: config.values.first_game_pool_daily_amount,
+            openskill_algorithm_fingerprint: config.migration.openskill.algorithm_fingerprint(),
         }
     }
 }
 
 struct DraftHandler {
     config: DraftConfig,
-    database_path: std::path::PathBuf,
     players: PlayerRepository,
     pending: PendingMatchRepository,
-    seeds: DotaBetSeedRepository,
-    bets: BettingServiceRepository,
-    investments: AutobetInvestmentRepository,
     lobbies: MatchLobbyPort,
     drafts: Arc<DraftStateManager>,
     discord: Arc<dyn DiscordTransport>,
@@ -1451,9 +1378,8 @@ impl DraftHandler {
                 return Err("linked Draft financial plan names another pending match".to_owned());
             }
             let pending = self
-                .pending
-                .pending_match(state.guild_id, pending_match_id)
-                .map_err(|error| error.to_string())?
+                .load_pending_match(state.guild_id, pending_match_id)
+                .await?
                 .ok_or_else(|| {
                     format!(
                         "atomically linked pending match {pending_match_id} could not be reloaded"
@@ -1532,9 +1458,8 @@ impl DraftHandler {
         }
         lock_recover(&self.persisted_envelopes).insert(key, linked.envelope);
         let pending = self
-            .pending
-            .pending_match(state.guild_id, linked.pending_match_id)
-            .map_err(|error| error.to_string())?
+            .load_pending_match(state.guild_id, linked.pending_match_id)
+            .await?
             .ok_or_else(|| {
                 format!(
                     "atomically linked pending match {} could not be reloaded",
@@ -1542,6 +1467,19 @@ impl DraftHandler {
                 )
             })?;
         Ok(LinkedDraftFinalization { pending, plan })
+    }
+
+    /// Read a pending match on the blocking pool.
+    async fn load_pending_match(
+        &self,
+        guild_id: i64,
+        pending_match_id: i64,
+    ) -> Result<Option<PendingMatchRecord>, String> {
+        let pending = self.pending.clone();
+        spawn_blocking(move || pending.pending_match(guild_id, pending_match_id))
+            .await
+            .map_err(|error| format!("pending match load task failed: {error}"))?
+            .map_err(|error| error.to_string())
     }
 
     fn financial_setup_policy(
@@ -1670,9 +1608,8 @@ impl DraftHandler {
         let state = envelope.state.clone().into_state();
         self.run_persisted_financial_setup(&state, pending_match_id)
             .await?;
-        self.pending
-            .pending_match(guild_id, pending_match_id)
-            .map_err(|error| error.to_string())?
+        self.load_pending_match(guild_id, pending_match_id)
+            .await?
             .ok_or_else(|| format!("linked pending match {pending_match_id} disappeared"))
     }
 
@@ -1790,9 +1727,8 @@ impl DraftHandler {
         }
 
         let pending = self
-            .pending
-            .pending_match(guild_id, pending_match_id)
-            .map_err(|error| error.to_string())?
+            .load_pending_match(guild_id, pending_match_id)
+            .await?
             .ok_or_else(|| format!("linked pending match {pending_match_id} disappeared"))?;
         self.reconcile_finalizing_lobby(&state).await;
         if job.stage == DRAFT_FINALIZATION_PUBLICATION_COMPLETE_STAGE {
@@ -1847,7 +1783,8 @@ impl DraftHandler {
             lobby_channel_id: plan.lobby.channel_id.and_then(|id| u64::try_from(id).ok()),
             origin_channel_id: plan.origin.channel_id.and_then(|id| u64::try_from(id).ok()),
             draft_receipt: source_receipt.as_ref(),
-        })?;
+        })
+        .await?;
         let _ = thread_ping_receipt;
         self.schedule_persisted_betting_reminders(&mut job, &owner, pending.clone(), true)
             .await?;
@@ -1933,6 +1870,59 @@ impl DraftHandler {
         }
         self.schedule_timeout(guild_id, session_id, DRAFTING_TIMEOUT_SECONDS);
         Ok(())
+    }
+
+    /// Undo a live final pick whose completion stopped before a pending match
+    /// was linked, so the draft reopens instead of waiting for READY.  The
+    /// durable row is reloaded so a link that committed despite a reported
+    /// failure is never rolled back.  Callers hold the draft operation lock.
+    async fn reopen_unlinked_final_pick(&self, state: &DraftState) -> Result<(), String> {
+        let envelope = self
+            .reload_durable_envelope(state.guild_id)
+            .await?
+            .filter(|envelope| {
+                envelope.session_id == state.session_id
+                    && envelope.finalizing
+                    && envelope.pending_match_id.is_none()
+            })
+            .ok_or_else(|| "draft row is not an unlinked final pick".to_owned())?;
+        let operation_lock = self.draft_operation_lock(state.guild_id, state.session_id);
+        self.recover_unlinked_finalization_envelope(envelope, &operation_lock)
+            .await
+    }
+
+    /// Answer a completion that failed before its pending match was linked.
+    async fn abandon_unlinked_completion(
+        &self,
+        state: &DraftState,
+        responder: &Arc<dyn InteractionResponder>,
+        deferred: bool,
+    ) -> Result<(), String> {
+        if self.persistence.is_none() {
+            return completion_response(
+                responder,
+                None,
+                "draft completion stopped before match setup".to_owned(),
+                deferred,
+            )
+            .await;
+        }
+        let content = match self.reopen_unlinked_final_pick(state).await {
+            Ok(()) => FINAL_PICK_REOPENED,
+            Err(error) => {
+                warn!(%error, guild_id = state.guild_id, session_id = state.session_id, "unlinked final draft pick could not be reopened");
+                FINAL_PICK_REOPEN_FAILED
+            }
+        };
+        let response = InteractionResponse::message(content)
+            .ephemeral()
+            .without_mentions();
+        if deferred {
+            responder.followup(response).await
+        } else {
+            responder.respond(response).await
+        }
+        .map_err(|error| error.to_string())
     }
 
     async fn reconcile_finalizing_lobby(&self, state: &DraftState) {
@@ -2060,7 +2050,8 @@ impl DraftHandler {
             lobby_channel_id: plan.lobby.channel_id.and_then(|id| u64::try_from(id).ok()),
             origin_channel_id: plan.origin.channel_id.and_then(|id| u64::try_from(id).ok()),
             draft_receipt: source_receipt.as_ref(),
-        })?;
+        })
+        .await?;
         self.schedule_persisted_betting_reminders(&mut job, &owner, pending.clone(), false)
             .await?;
         let completion_persistence = Arc::clone(&persistence);
@@ -2638,7 +2629,7 @@ impl DraftHandler {
             return followup_ephemeral(&responder, "No saved Draft finalization needs recovery.")
                 .await;
         };
-        if !envelope.finalizing || envelope.pending_match_id.is_none() {
+        if !envelope.finalizing {
             return followup_ephemeral(
                 &responder,
                 "The Draft has not reached match finalization yet.",
@@ -2655,6 +2646,23 @@ impl DraftHandler {
         let Some(current) = self.reload_durable_envelope(guild_id).await? else {
             return followup_ephemeral(&responder, "Draft finalization already completed.").await;
         };
+        if !current.finalizing {
+            return followup_ephemeral(
+                &responder,
+                "The Draft has not reached match finalization yet.",
+            )
+            .await;
+        }
+        if current.pending_match_id.is_none() {
+            // The final pick was saved but no match was created: reopen it.
+            return match self
+                .recover_unlinked_finalization_envelope(current, &operation)
+                .await
+            {
+                Ok(()) => followup_ephemeral(&responder, "Draft reopened; the last pick was undone so the captain can pick again.").await,
+                Err(error) => followup_ephemeral(&responder, format!("Draft remains safely paused. Fix the reported service failure and retry `/draft resume`: {error}")).await,
+            };
+        }
         match self.recover_finalizing_envelope(current).await {
             Ok(()) => followup_ephemeral(&responder,"Draft finalization completed; the match is ready.").await,
             Err(error) => followup_ephemeral(&responder,format!("Draft remains safely paused. Fix the reported service failure and retry `/draft resume`: {error}")).await,
@@ -2729,21 +2737,23 @@ impl DraftHandler {
             )
             .await;
         }
-        if let Some(captain) = context.captain1
-            && !snapshot.player_ids.contains(&captain)
+        if let Some(captain) = [context.captain1, context.captain2]
+            .into_iter()
+            .flatten()
+            .find(|captain| !snapshot.player_ids.contains(captain))
         {
-            return followup_ephemeral(
-                &responder,
-                &format!("❌ Captain {captain} is not in the lobby."),
+            let names = resolve_guild_player_names(
+                self.discord.as_ref(),
+                u64::try_from(context.guild_id).ok(),
+                &[captain],
             )
             .await;
-        }
-        if let Some(captain) = context.captain2
-            && !snapshot.player_ids.contains(&captain)
-        {
             return followup_ephemeral(
                 &responder,
-                &format!("❌ Captain {captain} is not in the lobby."),
+                &format!(
+                    "❌ Captain {} is not in the lobby.",
+                    escape_discord_text(&names.resolve(captain))
+                ),
             )
             .await;
         }
@@ -2794,13 +2804,17 @@ impl DraftHandler {
                     .map(|id| (id, player.glicko_rating.unwrap_or(1500.0)))
             })
             .collect::<BTreeMap<_, _>>();
-        let exclusions = self
-            .players
-            .get_exclusion_counts(&regular_ids, Some(guild_id))
-            .map_err(|error| error.to_string())?
-            .iter()
-            .map(|(id, count)| (*id, *count))
-            .collect::<BTreeMap<_, _>>();
+        let exclusion_players = self.players.clone();
+        let exclusion_ids = regular_ids.clone();
+        let exclusions = spawn_blocking(move || {
+            exclusion_players.get_exclusion_counts(&exclusion_ids, Some(guild_id))
+        })
+        .await
+        .map_err(|error| format!("draft exclusion load task failed: {error}"))?
+        .map_err(|error| error.to_string())?
+        .iter()
+        .map(|(id, count)| (*id, *count))
+        .collect::<BTreeMap<_, _>>();
         let captain_candidates = regular_ids.clone();
         let captain_pair = self
             .service
@@ -3507,6 +3521,7 @@ impl DraftHandler {
             Err(message) => return respond_ephemeral(responder, message).await,
         };
         let next = lock_state(&handle).clone();
+        let session = next.session_id;
         let timeout = if drafting_session.is_some() {
             DRAFTING_TIMEOUT_SECONDS
         } else {
@@ -3520,15 +3535,15 @@ impl DraftHandler {
             false,
         )
         .await?;
+        // The saved deadline was just reset, so the live timer must match it
+        // for both the winner's and the loser's choice.
+        self.cancel_timeout(guild_id);
+        self.schedule_timeout(guild_id, session, timeout);
         // The update below is this interaction's initial callback, so it has to
         // land before any followup: the component auto-ack only fires after a
         // 1.5s deadline, and on the fast path Discord rejects a followup sent
         // while the interaction is still unacknowledged.
         let symmetry_session = drafting_session;
-        if let Some(session) = symmetry_session {
-            self.cancel_timeout(guild_id);
-            self.schedule_timeout(guild_id, session, DRAFTING_TIMEOUT_SECONDS);
-        }
         responder
             .update(response)
             .await
@@ -3599,6 +3614,7 @@ impl DraftHandler {
             Err(message) => return respond_ephemeral(responder, message).await,
         };
         let next = lock_state(&handle).clone();
+        let session = next.session_id;
         let timeout = if drafting_session.is_some() {
             DRAFTING_TIMEOUT_SECONDS
         } else {
@@ -3612,15 +3628,15 @@ impl DraftHandler {
             false,
         )
         .await?;
+        // The saved deadline was just reset, so the live timer must match it
+        // for both the winner's and the loser's choice.
+        self.cancel_timeout(guild_id);
+        self.schedule_timeout(guild_id, session, timeout);
         // The update below is this interaction's initial callback, so it has to
         // land before any followup: the component auto-ack only fires after a
         // 1.5s deadline, and on the fast path Discord rejects a followup sent
         // while the interaction is still unacknowledged.
         let symmetry_session = drafting_session;
-        if let Some(session) = symmetry_session {
-            self.cancel_timeout(guild_id);
-            self.schedule_timeout(guild_id, session, DRAFTING_TIMEOUT_SECONDS);
-        }
         responder
             .update(response)
             .await
@@ -3681,10 +3697,15 @@ impl DraftHandler {
             if self.persistence.is_some() {
                 self.cancel_timeout(guild_id);
             }
-            responder
-                .defer(false)
-                .await
-                .map_err(|error| error.to_string())?;
+            if let Err(error) = responder.defer(false).await {
+                if self.persistence.is_some()
+                    && let Err(reopen_error) =
+                        self.reopen_unlinked_final_pick(&state_snapshot).await
+                {
+                    warn!(%reopen_error, guild_id, session_id = session, "final draft pick could not be reopened after a failed acknowledgement");
+                }
+                return Err(error.to_string());
+            }
             self.complete(guild_id, handle, state_snapshot, responder.clone(), true)
                 .await
         } else {
@@ -3802,15 +3823,16 @@ impl DraftHandler {
         let kind = to_runtime_kind(state.lobby_kind);
         let operation_lock = self.lobbies.operation_lock(guild_id, kind);
         let Ok(_operation_guard) =
-            tokio::time::timeout(OPERATION_LOCK_TIMEOUT, operation_lock.lock()).await
+            tokio::time::timeout(COMPLETION_LOBBY_LOCK_TIMEOUT, operation_lock.lock()).await
         else {
-            return completion_response(
-                &responder,
-                None,
-                "A draft or shuffle is already being finalized.".to_owned(),
-                deferred,
-            )
-            .await;
+            warn!(
+                guild_id,
+                session_id = state.session_id,
+                "draft completion timed out waiting for the lobby operation lock"
+            );
+            return self
+                .abandon_unlinked_completion(&state, &responder, deferred)
+                .await;
         };
         let snapshot = self.lobbies.snapshot(guild_id, kind);
         let thread_id = snapshot.as_ref().and_then(|snapshot| snapshot.thread_id);
@@ -3818,150 +3840,69 @@ impl DraftHandler {
             .as_ref()
             .and_then(|snapshot| snapshot.origin_channel_id)
             .or_else(|| state.draft_channel_id.and_then(|id| u64::try_from(id).ok()));
-        let linked_retry = self.persistence.is_some()
-            && lock_recover(&self.persisted_envelopes)
-                .get(&(state.guild_id, state.session_id))
-                .and_then(|envelope| envelope.pending_match_id)
-                .is_some();
+        let linked_retry = lock_recover(&self.persisted_envelopes)
+            .get(&(state.guild_id, state.session_id))
+            .and_then(|envelope| envelope.pending_match_id)
+            .is_some();
         let prepared_pending = if linked_retry {
             None
         } else {
-            let now = unix_now();
             let is_bomb_pot = fastrand::f64() < self.config.bomb_pot_chance;
-            Some((
-                now,
+            Some(db_pending_state(
+                &state,
+                unix_now(),
+                self.config.bet_lock_seconds,
                 is_bomb_pot,
-                db_pending_state(&state, now, self.config.bet_lock_seconds, is_bomb_pot)?,
-            ))
+            )?)
         };
         if let Err(error) = self.mark_finalizing(&state, None).await {
             warn!(%error, guild_id, session_id = state.session_id, "draft finalization fence failed before pending match creation");
-            return completion_response(&responder, None, error, deferred).await;
+            return self
+                .abandon_unlinked_completion(&state, &responder, deferred)
+                .await;
         }
-        let mut finalization_plan = None;
-        let (pending, effective_is_bomb_pot) = if self.persistence.is_some() {
-            let linked = match self
-                .link_finalizing_pending_match(
-                    &state,
-                    prepared_pending.as_ref().map(|(_, _, pending)| pending),
-                    snapshot
-                        .as_ref()
-                        .and_then(|snapshot| snapshot.lobby_channel_id),
-                    origin_channel_id,
-                    thread_id,
-                )
-                .await
-            {
-                Ok(linked) => linked,
-                Err(error) => {
-                    warn!(%error, guild_id, session_id = state.session_id, "atomic draft pending-match link failed");
-                    return completion_response(&responder, None, error, deferred).await;
-                }
-            };
-            let pending_match_id = linked.pending.pending_match_id;
-            finalization_plan = Some(linked.plan.clone());
-            if let Err(error) = self
-                .run_persisted_financial_setup(&state, pending_match_id)
-                .await
-            {
-                warn!(
-                    %error,
-                    pending_match_id,
-                    "durable draft financial setup failed and remains retryable"
-                );
-                return financial_setup_retry_response(
-                    &responder,
-                    pending_match_id,
-                    error,
-                    deferred,
-                )
-                .await;
-            }
-            let pending = self
-                .pending
-                .pending_match(guild_id, pending_match_id)
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| {
-                    "pending draft match disappeared after financial setup".to_owned()
-                })?;
-            (pending, linked.plan.is_bomb_pot)
-        } else {
-            let (now, is_bomb_pot, pending_state) = prepared_pending
-                .as_ref()
-                .expect("non-persistent Draft completion always prepares pending state");
-            let pending = match self
-                .pending
-                .create_pending_match(guild_id, pending_state)
-                .map_err(|error| error.to_string())
-            {
-                Ok(pending) => pending,
-                Err(error) => {
-                    if let Err(cleanup_error) = self.delete_persisted(&state).await {
-                        warn!(%cleanup_error, guild_id, "failed to delete failed draft finalization fence");
-                    }
-                    self.finish_draft_without_match(&handle, &state);
-                    return completion_response(&responder, None, error, deferred).await;
-                }
-            };
-            if let Err(error) =
-                self.pending
-                    .mutate_pending_match(guild_id, pending.pending_match_id, |state| {
-                        state.origin_channel_id =
-                            origin_channel_id.and_then(|id| i64::try_from(id).ok());
-                        state.thread_shuffle_thread_id =
-                            thread_id.and_then(|id| i64::try_from(id).ok());
-                    })
-            {
-                warn!(%error, pending_match_id = pending.pending_match_id, "draft thread metadata persistence failed");
-            }
-            if let Err(error) = self
-                .reserve_seed_and_bets(&pending, kind, &state, *now, *is_bomb_pot)
-                .await
-            {
-                warn!(
-                    %error,
-                    pending_match_id = pending.pending_match_id,
-                    "draft seed/bet setup failed"
-                );
-                let bets = self.bets.clone();
-                let failed_id = pending.pending_match_id;
-                let cleanup = tokio::task::spawn_blocking(move || {
-                    bets.abort_pending_match_atomic(Some(guild_id), failed_id, &[])
-                })
-                .await
-                .map_err(|e| e.to_string())?
-                .map_err(|e| e.to_string());
-                if let Err(cleanup) = cleanup {
-                    return completion_response(
-                        &responder,
-                        Some(failed_id),
-                        format!(
-                            "Draft setup remains paused: {error}; refund retry failed: {cleanup}"
-                        ),
-                        deferred,
-                    )
+        let linked = match self
+            .link_finalizing_pending_match(
+                &state,
+                prepared_pending.as_ref(),
+                snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.lobby_channel_id),
+                origin_channel_id,
+                thread_id,
+            )
+            .await
+        {
+            Ok(linked) => linked,
+            Err(error) => {
+                warn!(%error, guild_id, session_id = state.session_id, "atomic draft pending-match link failed");
+                return self
+                    .abandon_unlinked_completion(&state, &responder, deferred)
                     .await;
-                }
-                self.finish_draft_without_match(&handle, &state);
-                return completion_response(
-                    &responder,
-                    Some(pending.pending_match_id),
-                    error,
-                    deferred,
-                )
-                .await;
             }
-            let pending = self
-                .pending
-                .pending_match(guild_id, pending.pending_match_id)
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| {
-                    "pending draft match disappeared after seed reservation".to_owned()
-                })?;
-            (pending, *is_bomb_pot)
         };
+        let pending_match_id = linked.pending.pending_match_id;
+        if let Err(error) = self
+            .run_persisted_financial_setup(&state, pending_match_id)
+            .await
+        {
+            warn!(
+                %error,
+                pending_match_id,
+                "durable draft financial setup failed and remains retryable"
+            );
+            return financial_setup_retry_response(&responder, pending_match_id, error, deferred)
+                .await;
+        }
+        let pending = self
+            .load_pending_match(guild_id, pending_match_id)
+            .await?
+            .ok_or_else(|| "pending draft match disappeared after financial setup".to_owned())?;
+        let plan = linked.plan;
 
-        if effective_is_bomb_pot && let Some(blind) = pending.state.blind_bets_result.as_ref() {
+        if plan.is_bomb_pot
+            && let Some(blind) = pending.state.blind_bets_result.as_ref()
+        {
             let pool_amount = blind
                 .get("total_radiant")
                 .and_then(Value::as_i64)
@@ -4010,9 +3951,6 @@ impl DraftHandler {
             warn!(%error, "draft lobby reset failed after pending match creation");
         }
         self.cancel_timeout(guild_id);
-        let draft_receipt = lock_recover(&self.draft_messages)
-            .get(&(guild_id, state.session_id))
-            .cloned();
         lock_recover(&self.draft_messages).remove(&(guild_id, state.session_id));
         self.drafts.clear_state(Some(guild_id), Some(&handle));
         self.remove_draft_operation_lock(guild_id, state.session_id);
@@ -4023,7 +3961,7 @@ impl DraftHandler {
         );
 
         let embed = self.render_completion(&state, &pending);
-        let completion_message = InteractionResponse::message("").embed(embed.clone());
+        let completion_message = InteractionResponse::message("").embed(embed);
         let edit_result = if deferred {
             responder.edit_original(completion_message).await
         } else {
@@ -4041,104 +3979,8 @@ impl DraftHandler {
             )
             .await;
         }
-        if let Some(plan) = finalization_plan.as_ref() {
-            self.publish_persisted_completion(&state, &pending, plan)
-                .await?;
-            // The refresh helper acquires both lobby operation locks itself.
-            // Do not hold the source-scope guard while calling it or a
-            // successful completion deadlocks on the same open-lobby mutex.
-            drop(_operation_guard);
-            let _ = self.lobbies.refresh_first_game_pool_lobbies(guild_id).await;
-            self.complete_persisted_finalization(&state, pending.pending_match_id)
-                .await?;
-            return Ok(());
-        }
-        let destinations = [
-            snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.lobby_channel_id),
-            origin_channel_id,
-        ]
-        .into_iter()
-        .flatten()
-        .filter(|channel_id| {
-            Some(*channel_id) != state.draft_channel_id.and_then(|id| u64::try_from(id).ok())
-        })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-        let mut published = Vec::new();
-        if let [first, second] = destinations.as_slice() {
-            // Python publishes distinct lobby/origin copies with one gather,
-            // so a slow or failed channel cannot serialize the other copy.
-            let first_key = finalization_plan.as_ref().and_then(|plan| {
-                (plan.lobby.channel_id == i64::try_from(*first).ok())
-                    .then_some(plan.lobby.delivery_key.as_str())
-                    .or_else(|| {
-                        (plan.origin.channel_id == i64::try_from(*first).ok())
-                            .then_some(plan.origin.delivery_key.as_str())
-                    })
-            });
-            let second_key = finalization_plan.as_ref().and_then(|plan| {
-                (plan.lobby.channel_id == i64::try_from(*second).ok())
-                    .then_some(plan.lobby.delivery_key.as_str())
-                    .or_else(|| {
-                        (plan.origin.channel_id == i64::try_from(*second).ok())
-                            .then_some(plan.origin.delivery_key.as_str())
-                    })
-            });
-            let (first_result, second_result) = tokio::join!(
-                self.send_completion_copy(*first, embed.clone(), first_key),
-                self.send_completion_copy(*second, embed.clone(), second_key),
-            );
-            if let Ok(receipt) = first_result {
-                published.push((*first, receipt));
-            }
-            if let Ok(receipt) = second_result {
-                published.push((*second, receipt));
-            }
-        } else if let Some(channel_id) = destinations.first().copied() {
-            let delivery_key = finalization_plan.as_ref().and_then(|plan| {
-                [
-                    (&plan.lobby, &plan.lobby.delivery_key),
-                    (&plan.origin, &plan.origin.delivery_key),
-                ]
-                .into_iter()
-                .find(|(delivery, _)| delivery.channel_id == i64::try_from(channel_id).ok())
-                .map(|(_, key)| key.as_str())
-            });
-            if let Ok(receipt) = self
-                .send_completion_copy(channel_id, embed.clone(), delivery_key)
-                .await
-            {
-                published.push((channel_id, receipt));
-            }
-        }
-        self.store_completion_message_info(CompletionMessageContext {
-            guild_id,
-            pending_match_id: pending.pending_match_id,
-            state: &state,
-            published: &published,
-            thread_receipt: None,
-            lobby_channel_id: snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.lobby_channel_id),
-            origin_channel_id,
-            draft_receipt: draft_receipt.as_ref(),
-        })?;
-        if let Some(thread_id) = thread_id {
-            self.publish_thread(
-                thread_id,
-                &state,
-                &embed,
-                pending.pending_match_id,
-                finalization_plan.as_ref(),
-            )
-            .await;
-        }
-        if let Err(error) = self.schedule_betting_reminders(pending.clone()).await {
-            warn!(%error, pending_match_id = pending.pending_match_id, "draft betting reminder scheduling failed");
-        }
+        self.publish_persisted_completion(&state, &pending, &plan)
+            .await?;
         // The refresh helper acquires both lobby operation locks itself. Do
         // not hold the source-scope guard while calling it or a successful
         // completion deadlocks on the same open-lobby mutex.
@@ -4147,369 +3989,6 @@ impl DraftHandler {
         self.complete_persisted_finalization(&state, pending.pending_match_id)
             .await?;
         Ok(())
-    }
-
-    async fn send_completion_copy(
-        &self,
-        channel_id: u64,
-        embed: InteractionEmbed,
-        delivery_key: Option<&str>,
-    ) -> Result<DiscordMessageReceipt, String> {
-        let message =
-            DiscordMessage::default_mentions(InteractionResponse::message("").embed(embed));
-        if let Some(delivery_key) = delivery_key {
-            self.discord
-                .send_message_with_delivery_key(channel_id, delivery_key, message)
-                .await
-        } else {
-            self.discord.send_message(channel_id, message).await
-        }
-    }
-
-    async fn reserve_seed_and_bets(
-        &self,
-        pending: &PendingMatchRecord,
-        kind: AppLobbyKind,
-        state: &DraftState,
-        now: i64,
-        is_bomb_pot: bool,
-    ) -> Result<(), String> {
-        let first_game_reserved = if self.config.first_game_pool_daily_amount > 0 {
-            let date = cama_domain::game_date::get_game_date();
-            self.seeds
-                .fund_first_game_pools(
-                    Some(pending.guild_id),
-                    &date,
-                    self.config.first_game_pool_daily_amount,
-                )
-                .map_err(|error| error.to_string())?;
-            self.seeds
-                .claim_first_game_pool(
-                    Some(pending.guild_id),
-                    match kind {
-                        AppLobbyKind::Open => FirstGameLobby::Open,
-                        AppLobbyKind::LowSkill => FirstGameLobby::LowSkill,
-                    },
-                    &date,
-                    pending.pending_match_id,
-                )
-                .map_err(|error| error.to_string())?
-        } else {
-            0
-        };
-        self.seeds
-            .reserve_seed_atomic(
-                Some(pending.guild_id),
-                pending.pending_match_id,
-                self.config.dota_bet_seed_amount,
-                first_game_reserved,
-                SeedBettingMode::Pool,
-            )
-            .map_err(|error| error.to_string())?;
-        let candidates = state
-            .radiant_player_ids
-            .iter()
-            .copied()
-            .map(|discord_id| BlindBetCandidate {
-                discord_id,
-                team: BettingTeam::Radiant,
-                ante_override: None,
-            })
-            .chain(
-                state
-                    .dire_player_ids
-                    .iter()
-                    .copied()
-                    .map(|discord_id| BlindBetCandidate {
-                        discord_id,
-                        team: BettingTeam::Dire,
-                        ante_override: None,
-                    }),
-            )
-            .collect::<Vec<_>>();
-        let investment_starting_balances =
-            self.investment_starting_balances(pending.guild_id, state)?;
-
-        // Individual ineligible candidates are skipped by the repositories.
-        // Infrastructure failures must compensate the entire unpublished setup.
-        let mut blind_result = json!({
-            "created": 0,
-            "total_radiant": 0,
-            "total_dire": 0,
-            "percentage": if is_bomb_pot {
-                self.config.bomb_pot_blind_percentage
-            } else {
-                self.config.auto_blind_percentage
-            },
-            "is_bomb_pot": is_bomb_pot,
-            "bets": [],
-            "skipped": [],
-        });
-        if self.config.auto_blind_enabled {
-            match self.bets.create_auto_blind_bets_atomic(
-                Some(pending.guild_id),
-                Some(pending.pending_match_id),
-                now,
-                &candidates,
-                BlindBetPolicy {
-                    is_bomb_pot,
-                    normal_threshold: self.config.auto_blind_threshold,
-                    normal_percentage: rate_percentage_points(self.config.auto_blind_percentage),
-                    bomb_percentage: rate_percentage_points(self.config.bomb_pot_blind_percentage),
-                    bomb_ante: self.config.bomb_pot_ante,
-                    max_debt: self.config.max_debt,
-                },
-            ) {
-                Ok(outcome) => {
-                    blind_result = blind_outcome_json(&outcome);
-                    blind_result["percentage"] = json!(if is_bomb_pot {
-                        self.config.bomb_pot_blind_percentage
-                    } else {
-                        self.config.auto_blind_percentage
-                    });
-                }
-                Err(error) => {
-                    return Err(format!("draft blind-bet setup: {error}"));
-                }
-            }
-        }
-
-        let investment_result =
-            match self.create_investment_bets(pending, state, now, &investment_starting_balances) {
-                Ok(result) => Some(result),
-                Err(error) => {
-                    return Err(format!("draft configured-investment setup: {error}"));
-                }
-            };
-
-        let spectator_result = self
-            .create_spectator_bets(pending, state, now)
-            .map_err(|error| {
-                warn!(%error, pending_match_id = pending.pending_match_id, "draft spectator auto-wager hook failed");
-                error
-            })
-            .map(Some)?;
-
-        if let Some(result) = investment_result {
-            blind_result["investment_bets"] = result;
-        }
-        if let Some(result) = spectator_result {
-            blind_result["spectator_bets"] = result;
-        }
-        let has_automatic_bets = blind_result
-            .get("created")
-            .and_then(Value::as_i64)
-            .unwrap_or_default()
-            > 0
-            || blind_result
-                .get("investment_bets")
-                .and_then(|result| result.get("created"))
-                .and_then(Value::as_i64)
-                .unwrap_or_default()
-                > 0
-            || blind_result
-                .get("spectator_bets")
-                .and_then(|result| result.get("created"))
-                .and_then(Value::as_i64)
-                .unwrap_or_default()
-                > 0;
-        self.pending
-            .mutate_pending_match(pending.guild_id, pending.pending_match_id, |state| {
-                if has_automatic_bets {
-                    state.blind_bets_result = Some(blind_result);
-                }
-                state
-                    .extra
-                    .insert("draft_setup_complete".into(), json!(true));
-            })
-            .map_err(|e| e.to_string())?
-            .ok_or("draft was aborted during setup")?;
-        Ok(())
-    }
-
-    fn create_investment_bets(
-        &self,
-        pending: &PendingMatchRecord,
-        state: &DraftState,
-        now: i64,
-        starting_balances: &BTreeMap<i64, i64>,
-    ) -> Result<Value, String> {
-        let targets = state
-            .radiant_player_ids
-            .iter()
-            .chain(&state.dire_player_ids)
-            .copied()
-            .collect::<Vec<_>>();
-        let positions = self
-            .investments
-            .for_targets(Some(pending.guild_id), &targets)
-            .map_err(|e| e.to_string())?;
-        let outcome = self
-            .bets
-            .create_configured_investment_bets_for_shuffle(
-                cama_db::betting_service_repository::ConfiguredInvestmentRequest {
-                    guild_id: Some(pending.guild_id),
-                    pending_match_id: Some(pending.pending_match_id),
-                    bet_time: pending.state.shuffle_timestamp.unwrap_or(now),
-                    radiant_ids: state.radiant_player_ids.clone(),
-                    dire_ids: state.dire_player_ids.clone(),
-                    max_debt: self.config.max_debt,
-                    starting_balances: starting_balances.clone(),
-                },
-            )
-            .map_err(|e| e.to_string())?;
-        let mut radiant = 0_i64;
-        let mut dire = 0_i64;
-        let created = outcome
-            .created
-            .iter()
-            .map(|record| {
-                match record.team {
-                    BettingTeam::Radiant => radiant = radiant.saturating_add(record.amount),
-                    BettingTeam::Dire => dire = dire.saturating_add(record.amount),
-                };
-                let percentage = positions
-                    .iter()
-                    .find(|p| {
-                        p.investor_id == record.discord_id
-                            && Some(p.target_id) == record.investment_target_id
-                            && Some(p.direction.as_str()) == record.investment_direction.as_deref()
-                    })
-                    .map(|p| p.percentage);
-                json!({"investor_id":record.discord_id,"target_id":record.investment_target_id,
-                "direction":record.investment_direction,"percentage":percentage,
-                "team":betting_team_name(record.team),"amount":record.amount})
-            })
-            .collect::<Vec<_>>();
-        Ok(
-            json!({"created":created.len(),"total_radiant":radiant,"total_dire":dire,
-            "bets":created,"skipped":outcome.skipped}),
-        )
-    }
-
-    fn investment_starting_balances(
-        &self,
-        guild_id: i64,
-        state: &DraftState,
-    ) -> Result<BTreeMap<i64, i64>, String> {
-        let target_ids = state
-            .radiant_player_ids
-            .iter()
-            .chain(&state.dire_player_ids)
-            .copied()
-            .collect::<Vec<_>>();
-        let positions = self
-            .investments
-            .for_targets(Some(guild_id), &target_ids)
-            .map_err(|error| error.to_string())?;
-        let investor_ids = positions
-            .iter()
-            .map(|position| position.investor_id)
-            .collect::<Vec<_>>();
-        self.players
-            .get_balances_bulk(&investor_ids, Some(guild_id))
-            .map_err(|error| error.to_string())
-            .map(|balances| balances.into_iter().collect())
-    }
-
-    fn create_spectator_bets(
-        &self,
-        pending: &PendingMatchRecord,
-        state: &DraftState,
-        now: i64,
-    ) -> Result<Value, String> {
-        let candidates = self
-            .players
-            .get_all(Some(pending.guild_id))
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .filter_map(|player| {
-                player.discord_id.map(|discord_id| WealthSnapshot {
-                    discord_id,
-                    balance: player.jopacoin_balance,
-                })
-            })
-            .collect::<Vec<_>>();
-        let participants = state
-            .radiant_player_ids
-            .iter()
-            .chain(&state.dire_player_ids)
-            .copied()
-            .collect::<BTreeSet<_>>();
-        let plan = plan_automatic_spectator_bets(
-            &candidates,
-            &participants,
-            AutomaticSpectatorConfig {
-                enabled: self.config.auto_spectator_bet_enabled,
-                total_count: self.config.auto_spectator_bet_count,
-                top_count: self.config.auto_spectator_bet_top_count,
-                base_basis_points: rate_basis_points(self.config.auto_spectator_bet_percentage),
-                top_basis_points: rate_basis_points(self.config.auto_spectator_bet_top_percentage),
-            },
-        );
-        let requests = plan
-            .bets
-            .iter()
-            .map(|bet| AutomaticBasisPointBetRequest {
-                discord_id: bet.discord_id,
-                team: bet.team,
-                basis_points: bet.basis_points,
-            })
-            .collect::<Vec<_>>();
-        let outcome = self
-            .bets
-            .place_automatic_basis_point_bets_atomic(
-                Some(pending.guild_id),
-                Some(pending.pending_match_id),
-                now,
-                &requests,
-                self.config.max_debt,
-            )
-            .map_err(|error| error.to_string())?;
-        let plan_by_id = plan
-            .bets
-            .iter()
-            .map(|bet| (bet.discord_id, *bet))
-            .collect::<BTreeMap<_, _>>();
-        let total_radiant = outcome
-            .created
-            .iter()
-            .filter(|bet| bet.team == BettingTeam::Radiant)
-            .map(|bet| bet.amount)
-            .sum::<i64>();
-        let total_dire = outcome
-            .created
-            .iter()
-            .filter(|bet| bet.team == BettingTeam::Dire)
-            .map(|bet| bet.amount)
-            .sum::<i64>();
-        let bets = outcome
-            .created
-            .iter()
-            .map(|bet| {
-                let plan = plan_by_id.get(&bet.discord_id);
-                json!({
-                    "discord_id": bet.discord_id,
-                    "team": betting_team_name(bet.team),
-                    "amount": bet.amount,
-                    "networth": plan.map_or(0, |plan| plan.networth),
-                    "percentage": plan.map_or(0.0, |plan| {
-                        plan.basis_points as f64 / 10_000.0
-                    }),
-                })
-            })
-            .collect::<Vec<_>>();
-        Ok(json!({
-            "created": outcome.created.len(),
-            "total_radiant": total_radiant,
-            "total_dire": total_dire,
-            "percentage": self.config.auto_spectator_bet_percentage,
-            "top_percentage": self.config.auto_spectator_bet_top_percentage,
-            "total_count": plan.total_count,
-            "top_count": plan.top_count,
-            "bets": bets,
-            "skipped": outcome.skipped,
-        }))
     }
 
     fn finish_draft_without_match(&self, handle: &Arc<Mutex<DraftState>>, state: &DraftState) {
@@ -4524,7 +4003,7 @@ impl DraftHandler {
         );
     }
 
-    fn store_completion_message_info(
+    async fn store_completion_message_info(
         &self,
         context: CompletionMessageContext<'_>,
     ) -> Result<(), String> {
@@ -4538,10 +4017,16 @@ impl DraftHandler {
             origin_channel_id,
             draft_receipt,
         } = context;
-        self.pending
-            .mutate_pending_match(guild_id, pending_match_id, |pending| {
-                pending.shuffle_channel_id = state.draft_channel_id;
-                pending.shuffle_message_id = state.draft_message_id;
+        let (draft_channel_id, draft_message_id) = (state.draft_channel_id, state.draft_message_id);
+        let published = published.to_vec();
+        let thread_receipt = thread_receipt.cloned();
+        let draft_receipt = draft_receipt.cloned();
+        let repository = self.pending.clone();
+        spawn_blocking(move || {
+            let draft_receipt = draft_receipt.as_ref();
+            repository.mutate_pending_match(guild_id, pending_match_id, |pending| {
+                pending.shuffle_channel_id = draft_channel_id;
+                pending.shuffle_message_id = draft_message_id;
                 pending.origin_channel_id = origin_channel_id.and_then(|id| i64::try_from(id).ok());
                 let primary = lobby_channel_id
                     .and_then(|channel_id| {
@@ -4581,101 +4066,16 @@ impl DraftHandler {
                     pending.cmd_shuffle_channel_id = i64::try_from(channel_id).ok();
                     pending.cmd_shuffle_message_id = i64::try_from(receipt.message_id).ok();
                 }
-                if let Some(receipt) = thread_receipt {
+                if let Some(receipt) = thread_receipt.as_ref() {
                     pending.thread_shuffle_thread_id = i64::try_from(receipt.channel_id).ok();
                     pending.thread_shuffle_message_id = i64::try_from(receipt.message_id).ok();
                 }
             })
-            .map_err(|error| error.to_string())?;
+        })
+        .await
+        .map_err(|error| format!("draft completion message task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
         Ok(())
-    }
-
-    async fn publish_thread(
-        &self,
-        thread_id: u64,
-        state: &DraftState,
-        embed: &InteractionEmbed,
-        pending_match_id: i64,
-        plan: Option<&DraftFinalizationPlan>,
-    ) {
-        let kind = to_runtime_kind(state.lobby_kind);
-        let name = format!("🔒 {} Draft Complete - Awaiting Results", kind.label());
-        // Renaming is independent of the ordered embed -> player-ping path;
-        // Python starts both before waiting, then locks only after publication.
-        let rename = self.discord.edit_thread(thread_id, &name, false, false);
-        let post = async {
-            let embed_message = DiscordMessage::default_mentions(
-                InteractionResponse::message("").embed(embed.clone()),
-            );
-            let receipt = if let Some(plan) = plan {
-                self.discord
-                    .send_message_with_delivery_key(
-                        thread_id,
-                        &plan.thread_embed.delivery_key,
-                        embed_message,
-                    )
-                    .await?
-            } else {
-                self.discord.send_message(thread_id, embed_message).await?
-            };
-            let mentions = state
-                .radiant_player_ids
-                .iter()
-                .chain(&state.dire_player_ids)
-                .copied()
-                .filter(|id| *id > 0)
-                .filter_map(|id| u64::try_from(id).ok())
-                .collect::<Vec<_>>();
-            let content = mentions
-                .iter()
-                .map(|id| format!("<@{id}>"))
-                .collect::<Vec<_>>()
-                .join(" ");
-            if !content.is_empty() {
-                let ping_message = DiscordMessage::mentioning(
-                    InteractionResponse::message(format!(
-                        "{content}\nPlayers, please take your starting positions!"
-                    )),
-                    mentions.into_iter().collect(),
-                );
-                if let Some(plan) = plan {
-                    self.discord
-                        .send_message_with_delivery_key(
-                            thread_id,
-                            &plan.thread_ping.delivery_key,
-                            ping_message,
-                        )
-                        .await?;
-                } else {
-                    self.discord.send_message(thread_id, ping_message).await?;
-                }
-            }
-            self.pending
-                .mutate_pending_match(state.guild_id, pending_match_id, |pending| {
-                    pending.thread_shuffle_thread_id =
-                        Some(i64::try_from(thread_id).unwrap_or_default());
-                    pending.thread_shuffle_message_id =
-                        Some(i64::try_from(receipt.message_id).unwrap_or_default());
-                })
-                .map_err(|error| error.to_string())?;
-            Ok::<(), String>(())
-        };
-        let (rename_result, post_result) = tokio::join!(rename, post);
-        if let Err(error) = rename_result {
-            debug!(%error, thread_id, "draft thread rename failed");
-        }
-        if let Err(error) = post_result {
-            debug!(%error, thread_id, "draft thread publication failed");
-        }
-        if let Err(error) = self
-            .discord
-            .edit_thread(thread_id, &name, false, true)
-            .await
-        {
-            debug!(%error, thread_id, "draft thread lock failed");
-        }
-        // The production Python path leaves the thread locked but not
-        // archived until `/record` or `/record abort` finalizes it.
     }
 
     fn schedule_timeout(&self, guild_id: i64, session_id: u64, seconds: u64) {
@@ -4817,11 +4217,15 @@ impl DraftHandler {
         if !is_admin(&self.config, user_id, permissions) {
             return respond_ephemeral(&responder, "❌ Admin only command.").await;
         }
-        let state = sample_state(guild_id, false);
-        let players = sample_players();
-        self.ensure_sample_players(guild_id, &players)?;
+        // Seeding the sample players is SQLite work, so acknowledge first.
         responder
-            .respond(
+            .defer(false)
+            .await
+            .map_err(|error| error.to_string())?;
+        let state = sample_state(guild_id, false);
+        self.ensure_sample_players(guild_id).await?;
+        responder
+            .edit_original(
                 InteractionResponse::message("**[SAMPLE UI - Not a real draft]**")
                     .embed(sample_live_embed(&state))
                     .action_rows(drafting_sample_view(&state)),
@@ -4840,8 +4244,13 @@ impl DraftHandler {
         if !is_admin(&self.config, user_id, permissions) {
             return respond_ephemeral(&responder, "❌ Admin only command.").await;
         }
+        // Seeding the sample players is SQLite work, so acknowledge first.
+        responder
+            .defer(false)
+            .await
+            .map_err(|error| error.to_string())?;
         let state = sample_state(guild_id, true);
-        self.ensure_sample_players(guild_id, &sample_players())?;
+        self.ensure_sample_players(guild_id).await?;
         let pending = db_pending_state(&state, unix_now(), self.config.bet_lock_seconds, false)?;
         let mut pending = PendingMatchRecord {
             pending_match_id: 0,
@@ -4858,7 +4267,7 @@ impl DraftHandler {
             "is_bomb_pot": false,
         }));
         responder
-            .respond(
+            .edit_original(
                 InteractionResponse::message("**[SAMPLE UI - Not a real draft]**")
                     .embed(completion_embed(&state, &pending)),
             )
@@ -4866,31 +4275,36 @@ impl DraftHandler {
             .map_err(|error| error.to_string())
     }
 
-    fn ensure_sample_players(
-        &self,
-        guild_id: i64,
-        players: &[(i64, &str, f64, &[&str])],
-    ) -> Result<(), String> {
-        for (id, name, rating, roles) in players {
-            if self
-                .players
-                .get_by_id(*id, Some(guild_id))
-                .map_err(|error| error.to_string())?
-                .is_some()
-            {
-                continue;
+    async fn ensure_sample_players(&self, guild_id: i64) -> Result<(), String> {
+        let players = self.players.clone();
+        let fingerprint = self.config.openskill_algorithm_fingerprint.clone();
+        spawn_blocking(move || {
+            for (id, name, rating, roles) in sample_players() {
+                if players
+                    .get_by_id(id, Some(guild_id))
+                    .map_err(|error| error.to_string())?
+                    .is_some()
+                {
+                    continue;
+                }
+                let mut player = NewPlayer::new(id, name, Some(guild_id));
+                player
+                    .openskill_algorithm_fingerprint
+                    .clone_from(&fingerprint);
+                player.glicko_rating = Some(rating);
+                player.glicko_rd = Some(100.0);
+                player.glicko_volatility = Some(0.06);
+                player.preferred_roles =
+                    Some(roles.iter().map(|role| (*role).to_owned()).collect());
+                match players.add(&player) {
+                    Ok(()) | Err(CoreRepositoryError::DuplicatePlayer { .. }) => {}
+                    Err(error) => return Err(error.to_string()),
+                }
             }
-            let mut player = NewPlayer::new(*id, *name, Some(guild_id));
-            player.glicko_rating = Some(*rating);
-            player.glicko_rd = Some(100.0);
-            player.glicko_volatility = Some(0.06);
-            player.preferred_roles = Some(roles.iter().map(|role| (*role).to_owned()).collect());
-            match self.players.add(&player) {
-                Ok(()) | Err(CoreRepositoryError::DuplicatePlayer { .. }) => {}
-                Err(error) => return Err(error.to_string()),
-            }
-        }
-        Ok(())
+            Ok(())
+        })
+        .await
+        .map_err(|error| format!("draft sample player task failed: {error}"))?
     }
 
     async fn load_players(
@@ -4905,10 +4319,6 @@ impl DraftHandler {
             .map_err(|error| {
                 CoreRepositoryError::InvalidInput(format!("player load task failed: {error}"))
             })?
-    }
-
-    async fn schedule_betting_reminders(&self, pending: PendingMatchRecord) -> Result<(), String> {
-        self.reminders.schedule_betting_reminders(pending).await
     }
 }
 
@@ -5602,7 +5012,9 @@ fn team_field(state: &DraftState, ids: &[i64]) -> String {
             let captain =
                 Some(*id) == state.radiant_captain_id || Some(*id) == state.dire_captain_id;
             let player = state.player_pool_data.get(id);
-            let name = player.map_or_else(|| id.to_string(), |player| player.name.clone());
+            let name = player
+                .and_then(|player| readable_player_name(&player.name))
+                .unwrap_or(UNKNOWN_PLAYER);
             let rating = player.map_or(1500.0, |player| player.rating);
             format!(
                 "{} {} ({rating:.0})",
@@ -5873,46 +5285,6 @@ fn title_case(value: &str) -> String {
 
 fn f64_bits(value: f64) -> String {
     format!("{:016x}", value.to_bits())
-}
-
-fn betting_team_name(team: BettingTeam) -> &'static str {
-    match team {
-        BettingTeam::Radiant => "radiant",
-        BettingTeam::Dire => "dire",
-    }
-}
-
-fn blind_outcome_json(outcome: &cama_db::betting_service_repository::BlindBetOutcome) -> Value {
-    let bets = outcome
-        .created
-        .iter()
-        .map(|bet| {
-            json!({
-                "discord_id": bet.discord_id,
-                "team": betting_team_name(bet.team),
-                "amount": bet.amount,
-            })
-        })
-        .collect::<Vec<_>>();
-    let skipped = outcome
-        .skipped
-        .iter()
-        .map(|skip| {
-            json!({
-                "discord_id": skip.discord_id,
-                "reason": skip.reason,
-            })
-        })
-        .collect::<Vec<_>>();
-    json!({
-        "created": outcome.created.len(),
-        "total_radiant": outcome.total_radiant,
-        "total_dire": outcome.total_dire,
-        "is_bomb_pot": outcome.is_bomb_pot,
-        "bets": bets,
-        "skipped": skipped,
-        "percentage": if outcome.is_bomb_pot { 0.15 } else { 0.1 },
-    })
 }
 
 fn unix_now() -> i64 {

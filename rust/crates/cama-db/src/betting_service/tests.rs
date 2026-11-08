@@ -85,6 +85,12 @@ fn fixture() -> FastTestDatabase {
                  created_at TEXT,
                  updated_at TEXT,
                  PRIMARY KEY (guild_id, investor_id, target_id)
+             );
+             CREATE TABLE app_kv (
+                 guild_id INTEGER NOT NULL,
+                 key TEXT NOT NULL,
+                 value TEXT NOT NULL,
+                 PRIMARY KEY (guild_id, key)
              );",
             )
             .expect("create disposable schema template");
@@ -2484,6 +2490,61 @@ fn migrated_settlement_vanity_tax_never_takes_the_stake_of_a_fully_penalized_win
         balance(file.path(), 91_001),
         staked + winner.effective_amount
     );
+}
+
+#[test]
+fn migrated_settlement_freezes_every_bettors_rates_for_a_later_correction() {
+    let match_id = 9_114;
+    let pending_match_id = 9_014;
+    let file = migrated_seed_fixture(match_id, pending_match_id, BettingMode::Pool);
+    let repository = repo(file.path());
+    repository
+        .place_bet_atomic(request(pending_match_id, 91_001, BettingTeam::Radiant, 20))
+        .expect("place winning pool bet");
+    repository
+        .place_bet_atomic(request(pending_match_id, 91_002, BettingTeam::Dire, 30))
+        .expect("place losing pool bet");
+    Connection::open(file.path())
+        .expect("open bankruptcy state")
+        .execute(
+            "INSERT INTO bankruptcy_state(
+                 discord_id,guild_id,last_bankruptcy_at,
+                 penalty_games_remaining,bankruptcy_count
+             ) VALUES (91002,?1,0,3,1)",
+            [GUILD],
+        )
+        .expect("insert penalized loser");
+    repository
+        .settle_pending_bets_with_adjustments_atomic(
+            match_id,
+            Some(GUILD),
+            NOW,
+            Some(pending_match_id),
+            BettingTeam::Radiant,
+            BettingMode::Pool,
+            &BetSettlementAdjustments {
+                bankruptcy_penalty_rate_per_game: Some(0.05),
+                vanity_tax_rate: Some(0.10),
+                vanity_taxable_ids: BTreeSet::from([91_001]),
+                consume_seed: true,
+                ..BetSettlementAdjustments::default()
+            },
+        )
+        .expect("settle pool");
+    let rates = cama_db_core::profit_deductions::bet_settlement_rates(
+        &Connection::open(file.path()).expect("open frozen rates"),
+        GUILD,
+        match_id,
+    )
+    .expect("read frozen rates")
+    .expect("settlement froze rates");
+    assert_eq!(rates.len(), 2);
+    assert_eq!(rates[&91_001].bankruptcy, 0.0);
+    assert!((rates[&91_001].vanity_tax - 0.10).abs() < 1e-12);
+    // The loser had no profit to withhold, but a winner-flip correction
+    // needs the three-game share they would have paid.
+    assert!((rates[&91_002].bankruptcy - 0.15).abs() < 1e-12);
+    assert_eq!(rates[&91_002].vanity_tax, 0.0);
 }
 
 #[test]

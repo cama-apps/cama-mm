@@ -18,12 +18,14 @@ use cama_db::prediction_worker_repository::{
     PredictionDigestPublication, PredictionRefreshPublication, PredictionRefreshPublicationKind,
     PredictionRefreshSettings, PredictionWorkerRepository,
 };
-use cama_db::predictions_repository::{Book, MarketSnapshot, Trade};
+use cama_db::predictions_repository::{Book, MarketSnapshot};
+use cama_domain::discord_content::UNKNOWN_PLAYER;
 use chrono::{DateTime, TimeZone, Utc};
 use tracing::{info, warn};
 
 use crate::discord_transport::{
-    DiscordAllowedMentions, DiscordMessage, DiscordTransport, resolve_guild_player_names,
+    DiscordAllowedMentions, DiscordDestinationStatus, DiscordMessage, DiscordTransport,
+    GuildPlayerNameDirectory, resolve_guild_player_names,
 };
 use crate::first_game_pool_worker::FirstGamePoolGuildSource;
 use crate::gamba_guild_source::{GambaDestination, GambaGuildSource};
@@ -96,6 +98,53 @@ pub trait PredictionDiscordPort: FirstGamePoolGuildSource + Send + Sync {
         thread_id: i64,
         message: DiscordMessage,
     ) -> Result<(), String>;
+
+    /// Market text with mentions rendered as readable player and role
+    /// names, never as IDs or mention markup.
+    async fn prediction_market_text(&self, guild_id: i64, text: &str) -> String;
+
+    /// Readable names for the traders listed on a market message.
+    async fn prediction_player_names(
+        &self,
+        guild_id: i64,
+        player_ids: &[i64],
+    ) -> GuildPlayerNameDirectory;
+
+    /// Whether Discord reports a market thread deleted or inaccessible.
+    /// Asked only after a delivery failed; only that proof lets a
+    /// publication be acknowledged without being delivered.
+    async fn prediction_thread_status(&self, thread_id: i64) -> DiscordDestinationStatus;
+}
+
+/// Render prediction text for display: user mentions become player names
+/// resolved like rosters (cache, member fetch, last-seen name, then
+/// `Unknown player`) and role mentions use `role_name`.
+pub(crate) async fn resolve_prediction_text<R>(
+    transport: &dyn DiscordTransport,
+    guild_id: i64,
+    text: &str,
+    role_name: R,
+) -> String
+where
+    R: Fn(i64) -> Option<String>,
+{
+    let player_ids = summary_mention_users(text)
+        .into_iter()
+        .filter_map(|id| i64::try_from(id).ok())
+        .collect::<Vec<_>>();
+    let names =
+        resolve_guild_player_names(transport, u64::try_from(guild_id).ok(), &player_ids).await;
+    resolve_and_neutralize_discord_mentions(text, |id| Some(names.resolve(id)), role_name)
+}
+
+/// Display text for when Discord cannot be asked for names at all: mentions
+/// become placeholders rather than IDs or mention markup.
+pub(crate) fn unresolved_prediction_text(text: &str) -> String {
+    resolve_and_neutralize_discord_mentions(
+        text,
+        |_| Some(UNKNOWN_PLAYER.to_owned()),
+        |_| Some("unknown-role".to_owned()),
+    )
 }
 
 trait PredictionClock: Send + Sync {
@@ -257,14 +306,44 @@ impl PredictionRefreshWorker {
                 let Some(message_id) = display.snapshot.market.embed_message_id else {
                     return Ok(());
                 };
-                let message = prediction_market_message(
-                    &display.snapshot,
-                    &display.fair_history,
-                    now,
-                    self.contract_value,
-                );
-                self.discord
+                let snapshot = display.snapshot;
+                let guild_id = snapshot.market.guild_id;
+                let question = self
+                    .discord
+                    .prediction_market_text(guild_id, &snapshot.market.question)
+                    .await;
+                let trader_ids = snapshot
+                    .recent_trades
+                    .iter()
+                    .map(|trade| trade.discord_id)
+                    .collect::<Vec<_>>();
+                let names = self
+                    .discord
+                    .prediction_player_names(guild_id, &trader_ids)
+                    .await;
+                let trader_names = trader_ids
+                    .into_iter()
+                    .map(|discord_id| (discord_id, names.resolve(discord_id)))
+                    .collect::<BTreeMap<_, _>>();
+                let fair_history = display.fair_history;
+                let contract_value = self.contract_value;
+                // Rasterizing the chart is CPU work; keep it off the async worker.
+                let message = blocking("prediction market chart render blocking", move || {
+                    Ok(prediction_market_message(
+                        &snapshot,
+                        &question,
+                        &trader_names,
+                        &fair_history,
+                        now,
+                        contract_value,
+                    ))
+                })
+                .await?;
+                let delivered = self
+                    .discord
                     .edit_prediction_market_message(thread_id, message_id, message)
+                    .await;
+                self.skip_if_thread_undeliverable(thread_id, delivered)
                     .await
             }
             PredictionRefreshPublicationKind::ThreadSummary {
@@ -283,20 +362,61 @@ impl PredictionRefreshWorker {
                 if !open {
                     return Ok(());
                 }
-                let mut users = summary_mention_users(content);
-                users.sort_unstable();
-                users.dedup();
-                let response = InteractionResponse::message(content.clone());
+                // The stored summary names its biggest trader by mention:
+                // render the readable name, then keep that trader's ping on a
+                // trailing mention line.
+                let users = summary_mention_users(content)
+                    .into_iter()
+                    .collect::<BTreeSet<_>>();
+                let mut rendered = self
+                    .discord
+                    .prediction_market_text(publication.guild_id, content)
+                    .await;
                 let message = if users.is_empty() {
-                    DiscordMessage::silent(response)
+                    DiscordMessage::silent(InteractionResponse::message(rendered))
                 } else {
-                    DiscordMessage::mentioning(response, users.into_iter().collect::<BTreeSet<_>>())
+                    let pings = users
+                        .iter()
+                        .map(|user_id| format!("<@{user_id}>"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    rendered.push('\n');
+                    rendered.push_str(&pings);
+                    DiscordMessage::mentioning(InteractionResponse::message(rendered), users)
                 };
-                self.discord
+                let delivered = self
+                    .discord
                     .send_prediction_thread_message(*thread_id, message)
+                    .await;
+                self.skip_if_thread_undeliverable(*thread_id, delivered)
                     .await
             }
         }
+    }
+
+    /// A failed delivery counts as done only when Discord proves the market
+    /// thread is deleted or inaccessible: no retry could ever land it, and
+    /// leaving it pending would fail every later wake. Anything else stays
+    /// pending for the next wake.
+    async fn skip_if_thread_undeliverable(
+        &self,
+        thread_id: i64,
+        delivered: Result<(), String>,
+    ) -> Result<(), String> {
+        let Err(error) = delivered else {
+            return Ok(());
+        };
+        if self.discord.prediction_thread_status(thread_id).await
+            == DiscordDestinationStatus::Undeliverable
+        {
+            warn!(
+                thread_id,
+                %error,
+                "prediction market thread is deleted or inaccessible; acknowledging undelivered"
+            );
+            return Ok(());
+        }
+        Err(error)
     }
 
     async fn acknowledge(&self, publication: PredictionRefreshPublication) -> Result<(), String> {
@@ -360,15 +480,15 @@ impl PredictionRefreshWorker {
                                     .push(format!("{} acknowledgement: {error}", publication.key));
                             }
                         }
-                        Err(error) => {
-                            warn!(
-                                guild_id = publication.guild_id,
-                                key = publication.key,
-                                %error,
-                                "prediction refresh publication remains pending"
-                            );
-                            failures.push(format!("{} delivery: {error}", publication.key));
-                        }
+                        // One publication's Discord failure stays pending for
+                        // the next wake without failing this one: a failed wake
+                        // backs the worker off and delays every guild's refresh.
+                        Err(error) => warn!(
+                            guild_id = publication.guild_id,
+                            key = publication.key,
+                            %error,
+                            "prediction refresh publication remains pending"
+                        ),
                     }
                 }
             }
@@ -508,14 +628,17 @@ impl PredictionDigestWorker {
         let attachment = if let Some(market) = &biggest {
             let repository = self.repository.clone();
             let guild_id = publication.guild_id;
-            let prediction_id = market.prediction_id;
-            let history = blocking("prediction digest chart history blocking", move || {
-                repository
-                    .digest_market_history(guild_id, prediction_id)
-                    .map_err(|error| error.to_string())
-            })
-            .await?;
-            Some(prediction_chart_attachment(market, &history, now))
+            let market = market.clone();
+            // Load the history and rasterize the chart on the blocking pool.
+            Some(
+                blocking("prediction digest chart blocking", move || {
+                    let history = repository
+                        .digest_market_history(guild_id, market.prediction_id)
+                        .map_err(|error| error.to_string())?;
+                    Ok(prediction_chart_attachment(&market, &history, now))
+                })
+                .await?,
+            )
         } else {
             None
         };
@@ -523,7 +646,7 @@ impl PredictionDigestWorker {
         let message = prediction_digest_message(&payload, biggest.as_ref(), attachment);
         let channel_id = u64::try_from(channel_id)
             .map_err(|_| "Discord gamba channel ID exceeds u64".to_owned())?;
-        match self.discord.send_message(channel_id, message).await {
+        let delivered = match self.discord.send_message(channel_id, message).await {
             Ok(_) => Ok(()),
             Err(error) if has_attachment => {
                 warn!(
@@ -543,7 +666,24 @@ impl PredictionDigestWorker {
                     })
             }
             Err(error) => Err(error),
+        };
+        let Err(error) = delivered else {
+            return Ok(());
+        };
+        // A deleted or inaccessible channel can never take this digest, and
+        // a stuck publication would fail every later wake.
+        if self.discord.destination_status(channel_id).await
+            == DiscordDestinationStatus::Undeliverable
+        {
+            warn!(
+                guild_id = publication.guild_id,
+                channel_id,
+                %error,
+                "prediction digest channel is deleted or inaccessible; acknowledging undelivered"
+            );
+            return Ok(());
         }
+        Err(error)
     }
 
     async fn acknowledge(&self, publication: PredictionDigestPublication) -> Result<(), String> {
@@ -597,15 +737,14 @@ impl PredictionDigestWorker {
                                     .push(format!("{} acknowledgement: {error}", publication.key));
                             }
                         }
-                        Err(error) => {
-                            warn!(
-                                guild_id = publication.guild_id,
-                                key = publication.key,
-                                %error,
-                                "prediction digest publication remains pending"
-                            );
-                            failures.push(format!("{} delivery: {error}", publication.key));
-                        }
+                        // Stays pending for the next wake; see the refresh
+                        // worker for why a delivery failure does not fail it.
+                        Err(error) => warn!(
+                            guild_id = publication.guild_id,
+                            key = publication.key,
+                            %error,
+                            "prediction digest publication remains pending"
+                        ),
                     }
                 }
             }
@@ -688,8 +827,12 @@ fn latest_digest_slot(now: i64, anchor_hour_utc: u32) -> Result<i64, String> {
     latest.ok_or_else(|| "could not calculate prediction digest slot".to_owned())
 }
 
+/// `question` and `trader_names` are already display text: mentions are
+/// resolved to readable names before the message is rendered.
 fn prediction_market_message(
     snapshot: &MarketSnapshot,
+    question: &str,
+    trader_names: &BTreeMap<i64, String>,
     fair_history: &[(i64, i64)],
     now: i64,
     contract_value: i64,
@@ -698,7 +841,7 @@ fn prediction_market_message(
     let chart = prediction_chart_attachment(
         &PredictionDigestMarket {
             prediction_id: market.prediction_id,
-            question: market.question.clone(),
+            question: question.to_owned(),
             current_price: market.current_price,
             prev_price: market.prev_price,
             guild_id: market.guild_id,
@@ -710,7 +853,13 @@ fn prediction_market_message(
         fair_history,
         now,
     );
-    let embed = market_embed(snapshot, &chart.filename, contract_value);
+    let embed = market_embed(
+        snapshot,
+        question,
+        trader_names,
+        &chart.filename,
+        contract_value,
+    );
     let response = InteractionResponse::message("")
         .embed(embed)
         .attachment(chart);
@@ -719,6 +868,8 @@ fn prediction_market_message(
 
 fn market_embed(
     snapshot: &MarketSnapshot,
+    question: &str,
+    trader_names: &BTreeMap<i64, String>,
     chart_filename: &str,
     contract_value: i64,
 ) -> InteractionEmbed {
@@ -727,10 +878,7 @@ fn market_embed(
         .current_price
         .map_or_else(|| "?".to_owned(), |value| format!("{value}%"));
     InteractionEmbed::titled(format!("📈 Market #{}", market.prediction_id))
-        .description(format!(
-            "\"{}\"",
-            neutralize_discord_mentions(&market.question)
-        ))
+        .description(format!("\"{question}\""))
         .color(0x3498DB)
         .field(
             "Current",
@@ -743,7 +891,7 @@ fn market_embed(
         .field("Order book", format_ladder(&snapshot.book), false)
         .field(
             "Recent",
-            format_recent_trades(&snapshot.recent_trades),
+            crate::prediction_provider::recent_trade_text(&snapshot.recent_trades, trader_names),
             false,
         )
         .image(format!("attachment://{chart_filename}"))
@@ -752,34 +900,6 @@ fn market_embed(
 
 fn format_ladder(book: &Book) -> String {
     crate::prediction_provider::ladder_body(book)
-}
-
-fn format_recent_trades(trades: &[Trade]) -> String {
-    if trades.is_empty() {
-        return "_no trades yet_".to_owned();
-    }
-    trades
-        .iter()
-        .map(|trade| {
-            let verb = if trade.action.starts_with("buy") {
-                "bought"
-            } else {
-                "sold"
-            };
-            let side = if trade.action.ends_with("yes") {
-                "YES"
-            } else {
-                "NO"
-            };
-            format!(
-                "  <@{}> {verb} {} {side} @ {}",
-                trade.discord_id,
-                trade.contracts,
-                (trade.vwap_x100 + 50) / 100
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 fn prediction_chart_attachment(
@@ -918,7 +1038,7 @@ fn digest_market_field(market: &PredictionDigestMarket) -> (String, String) {
     (name, value)
 }
 
-fn summary_mention_users(content: &str) -> Vec<u64> {
+pub(crate) fn summary_mention_users(content: &str) -> Vec<u64> {
     let mut users = Vec::new();
     let mut remaining = content;
     while let Some(start) = remaining.find("<@") {

@@ -121,6 +121,9 @@ pub struct DigBossRuntimeArtifactGrant<'a> {
     pub artifact_id: &'a str,
     pub found_at: i64,
     pub is_relic: bool,
+    /// Skip the grant, leaving the rest of the settlement intact, when the
+    /// player already owns this artifact. Signature trophies never duplicate.
+    pub only_if_unowned: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -153,6 +156,14 @@ pub struct DigBossRuntimeCommit<'a> {
     /// settlement that had already committed, and callers read `Conflict` as
     /// "nothing was applied, reload and retry".
     pub consume_lantern_id: Option<i64>,
+    /// Paused duel saved in the same guarded transaction, so the stake it
+    /// escrows and the duel that owns the stake commit together. Fails with
+    /// [`DigBossRuntimeRepositoryError::DuelAlreadyActive`] rather than
+    /// replacing another paused duel and its stake.
+    pub save_duel: Option<&'a DigBossPausedDuelRow>,
+    /// Paused duel abandoned by this settlement. It is deleted in the same
+    /// transaction; the commit reports `Conflict` if it is no longer active.
+    pub abandon_duel: Option<&'a DigBossPausedDuelRow>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -232,6 +243,22 @@ pub struct DigBossPausedDuelRow {
     pub last_interaction_at: i64,
 }
 
+impl DigBossPausedDuelRow {
+    /// Whether the duel's stake was debited when it paused. Rows saved
+    /// before stakes were escrowed carry no marker and settle the legacy way.
+    #[must_use]
+    pub fn wager_escrowed(&self) -> bool {
+        serde_json::from_str::<serde_json::Value>(&self.status_effects_json)
+            .ok()
+            .and_then(|status| {
+                status
+                    .get("wager_escrowed")
+                    .and_then(serde_json::Value::as_bool)
+            })
+            .unwrap_or(false)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DigBossGearSnapshot {
     pub gear_ids: Vec<i64>,
@@ -277,6 +304,8 @@ pub enum DigBossRuntimeRepositoryError {
     Sqlite(#[from] rusqlite::Error),
     #[error("Dig boss proposed state is invalid: {0}")]
     InvalidState(&'static str),
+    #[error("a paused boss duel is already active")]
+    DuelAlreadyActive,
 }
 
 #[derive(Clone, Debug)]
@@ -292,7 +321,7 @@ impl DigBossRuntimeRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.database_path)
     }
 
@@ -300,7 +329,7 @@ impl DigBossRuntimeRepository {
         &self,
         key: DigBossRuntimeKey,
     ) -> Result<Option<DigBossRuntimeSnapshot>, DigBossRuntimeRepositoryError> {
-        query_snapshot(&self.connection()?, key)
+        query_snapshot(&*self.connection()?, key)
     }
 
     pub fn commit(
@@ -352,6 +381,29 @@ impl DigBossRuntimeRepository {
                 return Ok(DigBossRuntimeCommitOutcome::Conflict);
             }
         }
+        if let Some(duel) = request.abandon_duel {
+            if duel.key != request.expected.key {
+                return Err(DigBossRuntimeRepositoryError::InvalidState(
+                    "abandoned duel belongs to another tunnel",
+                ));
+            }
+            let abandoned = transaction.execute(
+                "DELETE FROM dig_active_duels
+                  WHERE discord_id=?1 AND guild_id=?2 AND boss_id=?3 AND tier=?4
+                    AND created_at=?5",
+                params![
+                    duel.key.discord_id,
+                    duel.key.guild_id,
+                    duel.boss_id,
+                    duel.boundary,
+                    duel.created_at,
+                ],
+            )?;
+            if abandoned != 1 {
+                transaction.rollback()?;
+                return Ok(DigBossRuntimeCommitOutcome::Conflict);
+            }
+        }
 
         apply_tunnel(&transaction, request.expected, request.proposed)?;
         apply_balance(&transaction, request)?;
@@ -362,9 +414,20 @@ impl DigBossRuntimeRepository {
         let artifact_database_id = request
             .artifact
             .map(|artifact| insert_artifact(&transaction, request.expected.key, artifact))
-            .transpose()?;
+            .transpose()?
+            .flatten();
         if let Some(echo) = request.echo {
             upsert_echo(&transaction, request.expected.key.guild_id, echo)?;
+        }
+        if let Some(duel) = request.save_duel {
+            if duel.key != request.expected.key {
+                return Err(DigBossRuntimeRepositoryError::InvalidState(
+                    "paused duel belongs to another tunnel",
+                ));
+            }
+            if !insert_active_duel(&transaction, duel)? {
+                return Err(DigBossRuntimeRepositoryError::DuelAlreadyActive);
+            }
         }
         transaction.commit()?;
         Ok(DigBossRuntimeCommitOutcome::Applied(
@@ -582,13 +645,6 @@ impl DigBossRuntimeRepository {
             .optional()?)
     }
 
-    pub fn save_active_duel(
-        &self,
-        duel: &DigBossPausedDuelRow,
-    ) -> Result<(), DigBossRuntimeRepositoryError> {
-        self.write_active_duel(duel, true).map(|_| ())
-    }
-
     /// Put back a duel that [`Self::claim_active_duel`] removed when the
     /// resolution failed before anything was settled. A pause saved since the
     /// claim is newer and wins, so this never overwrites an existing row.
@@ -597,30 +653,6 @@ impl DigBossRuntimeRepository {
         &self,
         duel: &DigBossPausedDuelRow,
     ) -> Result<bool, DigBossRuntimeRepositoryError> {
-        self.write_active_duel(duel, false)
-    }
-
-    fn write_active_duel(
-        &self,
-        duel: &DigBossPausedDuelRow,
-        overwrite: bool,
-    ) -> Result<bool, DigBossRuntimeRepositoryError> {
-        let conflict = if overwrite {
-            "DO UPDATE SET
-              boss_id=excluded.boss_id,tier=excluded.tier,
-              mechanic_id=excluded.mechanic_id,risk_tier=excluded.risk_tier,
-              wager=excluded.wager,player_hp=excluded.player_hp,
-              boss_hp=excluded.boss_hp,round_num=excluded.round_num,
-              round_log=excluded.round_log,pending_prompt=excluded.pending_prompt,
-              rng_state=excluded.rng_state,status_effects=excluded.status_effects,
-              echo_applied=excluded.echo_applied,echo_killer_id=excluded.echo_killer_id,
-              player_hit=excluded.player_hit,player_dmg=excluded.player_dmg,
-              boss_hit=excluded.boss_hit,boss_dmg=excluded.boss_dmg,
-              crit_chance=excluded.crit_chance,crit_bonus=excluded.crit_bonus,
-              last_interaction_at=excluded.last_interaction_at"
-        } else {
-            "DO NOTHING"
-        };
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if !tunnel_exists(&transaction, duel.key)? {
@@ -629,62 +661,36 @@ impl DigBossRuntimeRepository {
                 "paused duel owner has no tunnel",
             ));
         }
-        let written = transaction.execute(
-            &format!(
-                "INSERT INTO dig_active_duels
-                 (discord_id,guild_id,boss_id,tier,mechanic_id,risk_tier,wager,
-                  player_hp,boss_hp,round_num,round_log,pending_prompt,rng_state,
-                  status_effects,echo_applied,echo_killer_id,player_hit,player_dmg,
-                  boss_hit,boss_dmg,crit_chance,crit_bonus,created_at,last_interaction_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,
-                         ?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)
-                 ON CONFLICT(discord_id,guild_id) {conflict}"
-            ),
-            params![
-                duel.key.discord_id,
-                duel.key.guild_id,
-                duel.boss_id,
-                duel.boundary,
-                duel.mechanic_id,
-                duel.risk_tier,
-                duel.wager,
-                duel.player_hp,
-                duel.boss_hp,
-                duel.round_num,
-                duel.round_log_json,
-                duel.pending_prompt_json,
-                duel.rng_state,
-                duel.status_effects_json,
-                i64::from(duel.echo_applied),
-                duel.echo_killer_id,
-                duel.player_hit,
-                duel.player_damage,
-                duel.boss_hit,
-                duel.boss_damage,
-                duel.critical_chance,
-                duel.critical_bonus,
-                duel.created_at,
-                duel.last_interaction_at,
-            ],
-        )?;
+        let written = insert_active_duel(&transaction, duel)?;
         transaction.commit()?;
-        Ok(written == 1)
+        Ok(written)
     }
 
     pub fn active_duel(
         &self,
         key: DigBossRuntimeKey,
     ) -> Result<Option<DigBossPausedDuelRow>, DigBossRuntimeRepositoryError> {
-        query_active_duel(&self.connection()?, key)
+        query_active_duel(&*self.connection()?, key)
     }
 
     pub fn claim_active_duel(
         &self,
         key: DigBossRuntimeKey,
     ) -> Result<Option<DigBossPausedDuelRow>, DigBossRuntimeRepositoryError> {
+        self.claim_active_duel_saved_by(key, i64::MAX)
+    }
+
+    /// Claim the paused duel only when it was saved at or before `saved_by`.
+    /// A prompt deadline therefore never claims the newer pause that answering
+    /// the prompt opened, and the claim still happens exactly once.
+    pub fn claim_active_duel_saved_by(
+        &self,
+        key: DigBossRuntimeKey,
+        saved_by: i64,
+    ) -> Result<Option<DigBossPausedDuelRow>, DigBossRuntimeRepositoryError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let duel = query_active_duel(&transaction, key)?;
+        let duel = query_active_duel(&transaction, key)?.filter(|duel| duel.created_at <= saved_by);
         if duel.is_some() {
             transaction.execute(
                 "DELETE FROM dig_active_duels WHERE discord_id=?1 AND guild_id=?2",
@@ -1209,7 +1215,17 @@ fn insert_artifact(
     transaction: &Transaction<'_>,
     key: DigBossRuntimeKey,
     artifact: DigBossRuntimeArtifactGrant<'_>,
-) -> Result<i64, rusqlite::Error> {
+) -> Result<Option<i64>, rusqlite::Error> {
+    if artifact.only_if_unowned
+        && transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM dig_artifacts
+              WHERE discord_id=?1 AND guild_id=?2 AND artifact_id=?3)",
+            params![key.discord_id, key.guild_id, artifact.artifact_id],
+            |row| row.get::<_, bool>(0),
+        )?
+    {
+        return Ok(None);
+    }
     transaction.execute(
         "INSERT INTO dig_artifacts
          (discord_id,guild_id,artifact_id,found_at,is_relic,equipped)
@@ -1222,7 +1238,7 @@ fn insert_artifact(
             i64::from(artifact.is_relic),
         ],
     )?;
-    Ok(transaction.last_insert_rowid())
+    Ok(Some(transaction.last_insert_rowid()))
 }
 
 fn upsert_echo(
@@ -1246,6 +1262,52 @@ fn upsert_echo(
         ],
     )?;
     Ok(())
+}
+
+/// Insert a paused duel unless one is already active for the tunnel. Returns
+/// whether the row was written; an existing duel is never replaced, because it
+/// may hold an escrowed stake.
+fn insert_active_duel(
+    transaction: &Transaction<'_>,
+    duel: &DigBossPausedDuelRow,
+) -> Result<bool, rusqlite::Error> {
+    let written = transaction.execute(
+        "INSERT INTO dig_active_duels
+         (discord_id,guild_id,boss_id,tier,mechanic_id,risk_tier,wager,
+          player_hp,boss_hp,round_num,round_log,pending_prompt,rng_state,
+          status_effects,echo_applied,echo_killer_id,player_hit,player_dmg,
+          boss_hit,boss_dmg,crit_chance,crit_bonus,created_at,last_interaction_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,
+                 ?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)
+         ON CONFLICT(discord_id,guild_id) DO NOTHING",
+        params![
+            duel.key.discord_id,
+            duel.key.guild_id,
+            duel.boss_id,
+            duel.boundary,
+            duel.mechanic_id,
+            duel.risk_tier,
+            duel.wager,
+            duel.player_hp,
+            duel.boss_hp,
+            duel.round_num,
+            duel.round_log_json,
+            duel.pending_prompt_json,
+            duel.rng_state,
+            duel.status_effects_json,
+            i64::from(duel.echo_applied),
+            duel.echo_killer_id,
+            duel.player_hit,
+            duel.player_damage,
+            duel.boss_hit,
+            duel.boss_damage,
+            duel.critical_chance,
+            duel.critical_bonus,
+            duel.created_at,
+            duel.last_interaction_at,
+        ],
+    )?;
+    Ok(written == 1)
 }
 
 fn query_active_duel(

@@ -117,23 +117,12 @@ fn seat(runtime: &TestRuntime, player_id: i64, kinds: &[LobbyKind]) {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ThreadMessage {
-    thread_id: ChannelId,
-    content: String,
-    allowed_mentions: AllowedMentions,
-}
-
 #[derive(Debug, Default)]
 struct TransportState {
-    display_syncs: Vec<LobbyScope>,
-    thread_messages: Vec<ThreadMessage>,
     closes: Vec<LobbyScope>,
     archives: Vec<(LobbyScope, ChannelId)>,
     unpins: Vec<(LobbyScope, Option<ChannelId>, Option<MessageId>, ChannelId)>,
     responses: Vec<(String, AllowedMentions)>,
-    fail_display: bool,
-    fail_thread: bool,
     fail_cleanup: bool,
 }
 
@@ -162,35 +151,6 @@ impl RecordingTransport {
 
 #[async_trait]
 impl LobbyRuntimeTransport for RecordingTransport {
-    async fn sync_lobby_display(&self, scope: LobbyScope) -> Result<(), String> {
-        let mut state = self.state();
-        state.display_syncs.push(scope);
-        if state.fail_display {
-            Err("display failed".to_owned())
-        } else {
-            Ok(())
-        }
-    }
-
-    async fn send_thread_message(
-        &self,
-        thread_id: ChannelId,
-        content: &str,
-        allowed_mentions: AllowedMentions,
-    ) -> Result<(), String> {
-        let mut state = self.state();
-        state.thread_messages.push(ThreadMessage {
-            thread_id,
-            content: content.to_owned(),
-            allowed_mentions,
-        });
-        if state.fail_thread {
-            Err("discord is down".to_owned())
-        } else {
-            Ok(())
-        }
-    }
-
     async fn close_lobby_message(
         &self,
         scope: LobbyScope,
@@ -388,240 +348,6 @@ fn test_rating_gate_still_bars_the_second_queue() {
     );
 }
 
-#[tokio::test]
-async fn test_pop_evicts_only_the_players_who_got_a_match() {
-    let runtime = runtime();
-    open_lobby(&runtime, LobbyKind::Open, 99);
-    open_lobby(&runtime, LobbyKind::LowSkill, 99);
-    for player_id in [1, 2, 3] {
-        seat(&runtime, player_id, &[LobbyKind::Open, LobbyKind::LowSkill]);
-    }
-
-    let report = runtime
-        .evict_matched_players_from_other_lobbies(
-            &users([1, 2]),
-            scope(LobbyKind::Open),
-            &RecordingTransport::default(),
-        )
-        .await;
-
-    assert_eq!(
-        report.evicted,
-        BTreeMap::from([(LobbyKind::LowSkill, users([1, 2]))])
-    );
-    assert_eq!(
-        runtime
-            .service()
-            .get_lobby(scope(LobbyKind::LowSkill))
-            .expect("low-skill lobby")
-            .players,
-        users([3])
-    );
-    assert_eq!(
-        runtime
-            .service()
-            .get_lobby(scope(LobbyKind::Open))
-            .expect("popped lobby remains")
-            .players,
-        users([1, 2, 3])
-    );
-}
-
-#[tokio::test]
-async fn test_pop_announces_the_departure_in_the_drained_lobbys_thread() {
-    let runtime = runtime();
-    open_lobby(&runtime, LobbyKind::Open, 99);
-    open_lobby(&runtime, LobbyKind::LowSkill, 99);
-    seat(&runtime, 1, &[LobbyKind::Open, LobbyKind::LowSkill]);
-    assert!(runtime.service().set_lobby_message_ids(
-        scope(LobbyKind::LowSkill),
-        LobbyMessageIds {
-            thread_id: Some(ChannelId(999)),
-            ..LobbyMessageIds::default()
-        }
-    ));
-    let transport = RecordingTransport::default();
-
-    runtime
-        .evict_matched_players_from_other_lobbies(&users([1]), scope(LobbyKind::Open), &transport)
-        .await;
-
-    let state = transport.state();
-    assert_eq!(state.thread_messages.len(), 1);
-    assert!(state.thread_messages[0].content.contains("<@1>"));
-    assert!(
-        state.thread_messages[0]
-            .content
-            .contains(LobbyKind::Open.label())
-    );
-    assert_eq!(
-        state.thread_messages[0].allowed_mentions,
-        AllowedMentions::None
-    );
-}
-
-#[tokio::test]
-async fn test_pop_reopens_the_ready_check_notice_when_quorum_breaks() {
-    let runtime = runtime();
-    open_lobby(&runtime, LobbyKind::Open, 99);
-    open_lobby(&runtime, LobbyKind::LowSkill, 99);
-    seat(&runtime, 1, &[LobbyKind::Open, LobbyKind::LowSkill]);
-    assert!(runtime.service().set_readycheck_state(
-        scope(LobbyKind::LowSkill),
-        MessageId(555),
-        ChannelId(456),
-        users([1]),
-        BTreeMap::from([(UserId(1), "<@1>".to_owned())]),
-    ));
-    runtime.mark_ready_notification(scope(LobbyKind::LowSkill), MessageId(555));
-    runtime.mark_ready_notification(scope(LobbyKind::Open), MessageId(777));
-
-    runtime
-        .evict_matched_players_from_other_lobbies(
-            &users([1]),
-            scope(LobbyKind::Open),
-            &RecordingTransport::default(),
-        )
-        .await;
-
-    assert_eq!(runtime.ready_notification(scope(LobbyKind::LowSkill)), None);
-    assert_eq!(
-        runtime.ready_notification(scope(LobbyKind::Open)),
-        Some(MessageId(777))
-    );
-}
-
-#[tokio::test]
-async fn test_pop_keeps_the_memo_when_the_lobby_is_still_ready() {
-    let runtime = runtime();
-    open_lobby(&runtime, LobbyKind::Open, 99);
-    open_lobby(&runtime, LobbyKind::LowSkill, 99);
-    for player_id in 1..=12 {
-        seat(&runtime, player_id, &[LobbyKind::LowSkill]);
-    }
-    seat(&runtime, 1, &[LobbyKind::Open]);
-    assert!(
-        runtime.service().set_readycheck_state(
-            scope(LobbyKind::LowSkill),
-            MessageId(555),
-            ChannelId(456),
-            users(1..=12),
-            (1..=11)
-                .map(|id| (UserId(id), format!("<@{id}>")))
-                .collect(),
-        )
-    );
-    runtime.mark_ready_notification(scope(LobbyKind::LowSkill), MessageId(555));
-
-    runtime
-        .evict_matched_players_from_other_lobbies(
-            &users([1]),
-            scope(LobbyKind::Open),
-            &RecordingTransport::default(),
-        )
-        .await;
-
-    assert_eq!(
-        runtime.ready_notification(scope(LobbyKind::LowSkill)),
-        Some(MessageId(555))
-    );
-    assert_eq!(
-        runtime
-            .service()
-            .readycheck_confirmed_count(scope(LobbyKind::LowSkill)),
-        10
-    );
-}
-
-#[tokio::test]
-async fn test_pop_is_a_no_op_when_nobody_was_double_queued() {
-    let runtime = runtime();
-    open_lobby(&runtime, LobbyKind::Open, 99);
-    open_lobby(&runtime, LobbyKind::LowSkill, 99);
-    seat(&runtime, 1, &[LobbyKind::Open]);
-    let transport = RecordingTransport::default();
-
-    let report = runtime
-        .evict_matched_players_from_other_lobbies(&users([1]), scope(LobbyKind::Open), &transport)
-        .await;
-
-    assert!(report.evicted.is_empty());
-    assert!(transport.state().thread_messages.is_empty());
-}
-
-#[tokio::test]
-async fn test_pop_survives_a_broken_thread_post() {
-    let runtime = runtime();
-    open_lobby(&runtime, LobbyKind::Open, 99);
-    open_lobby(&runtime, LobbyKind::LowSkill, 99);
-    seat(&runtime, 1, &[LobbyKind::Open, LobbyKind::LowSkill]);
-    assert!(runtime.service().set_lobby_message_ids(
-        scope(LobbyKind::LowSkill),
-        LobbyMessageIds {
-            thread_id: Some(ChannelId(999)),
-            ..LobbyMessageIds::default()
-        }
-    ));
-    let transport = RecordingTransport::default();
-    transport.state().fail_thread = true;
-
-    let report = runtime
-        .evict_matched_players_from_other_lobbies(&users([1]), scope(LobbyKind::Open), &transport)
-        .await;
-
-    assert_eq!(
-        report.evicted,
-        BTreeMap::from([(LobbyKind::LowSkill, users([1]))])
-    );
-    assert!(
-        report
-            .publication_failures
-            .iter()
-            .any(|failure| failure.stage == PublicationStage::Thread)
-    );
-    assert!(
-        runtime
-            .service()
-            .get_lobby(scope(LobbyKind::LowSkill))
-            .expect("lobby remains")
-            .players
-            .is_empty()
-    );
-}
-
-#[tokio::test]
-async fn display_failure_does_not_undo_committed_cross_lobby_eviction() {
-    let runtime = runtime();
-    open_lobby(&runtime, LobbyKind::Open, 99);
-    open_lobby(&runtime, LobbyKind::LowSkill, 99);
-    seat(&runtime, 1, &[LobbyKind::Open, LobbyKind::LowSkill]);
-    let transport = RecordingTransport::default();
-    transport.state().fail_display = true;
-
-    let report = runtime
-        .evict_matched_players_from_other_lobbies(&users([1]), scope(LobbyKind::Open), &transport)
-        .await;
-
-    assert_eq!(
-        report.evicted,
-        BTreeMap::from([(LobbyKind::LowSkill, users([1]))])
-    );
-    assert!(
-        report
-            .publication_failures
-            .iter()
-            .any(|failure| failure.stage == PublicationStage::Display)
-    );
-    assert!(
-        runtime
-            .service()
-            .get_lobby(scope(LobbyKind::LowSkill))
-            .expect("lobby remains")
-            .players
-            .is_empty()
-    );
-}
-
 #[test]
 fn test_a_reserved_player_blocks_the_other_lobbys_shuffle() {
     let runtime = runtime();
@@ -637,39 +363,6 @@ fn test_a_reserved_player_blocks_the_other_lobbys_shuffle() {
             .service()
             .reserve_lobby_players(&selected, scope(LobbyKind::Open))
     );
-    assert!(
-        !runtime
-            .service()
-            .reserve_lobby_players(&selected, scope(LobbyKind::LowSkill))
-    );
-}
-
-#[tokio::test]
-async fn test_eviction_keeps_blocking_the_other_shuffle_after_the_release() {
-    let runtime = runtime();
-    open_lobby(&runtime, LobbyKind::Open, 99);
-    open_lobby(&runtime, LobbyKind::LowSkill, 99);
-    for player_id in [1, 2] {
-        seat(&runtime, player_id, &[LobbyKind::Open, LobbyKind::LowSkill]);
-    }
-    let selected = users([1, 2]);
-    assert!(
-        runtime
-            .service()
-            .reserve_lobby_players(&selected, scope(LobbyKind::Open))
-    );
-
-    runtime
-        .evict_matched_players_from_other_lobbies(
-            &selected,
-            scope(LobbyKind::Open),
-            &RecordingTransport::default(),
-        )
-        .await;
-    runtime
-        .service()
-        .release_lobby_players(&selected, scope(LobbyKind::Open));
-
     assert!(
         !runtime
             .service()
@@ -698,57 +391,6 @@ fn test_the_other_lobbys_reservation_does_not_pin_this_seat() {
         !runtime
             .service()
             .leave_lobby(UserId(1), scope(LobbyKind::Open))
-    );
-}
-
-#[test]
-fn test_leave_clears_every_lobby_at_once() {
-    let runtime = runtime();
-    open_lobby(&runtime, LobbyKind::Open, 99);
-    open_lobby(&runtime, LobbyKind::LowSkill, 99);
-    seat(&runtime, 1, &[LobbyKind::Open, LobbyKind::LowSkill]);
-
-    let outcome = runtime.leave_every_lobby(UserId(1), GUILD);
-
-    assert_eq!(outcome.left, [LobbyKind::Open, LobbyKind::LowSkill]);
-    for kind in [LobbyKind::Open, LobbyKind::LowSkill] {
-        assert!(
-            !runtime
-                .service()
-                .get_lobby(scope(kind))
-                .expect("lobby remains")
-                .players
-                .contains(&UserId(1))
-        );
-        assert!(outcome.content.contains(kind.label()));
-    }
-}
-
-#[test]
-fn test_leave_keeps_the_seat_its_own_shuffle_is_holding() {
-    let runtime = runtime();
-    open_lobby(&runtime, LobbyKind::Open, 99);
-    open_lobby(&runtime, LobbyKind::LowSkill, 99);
-    seat(&runtime, 1, &[LobbyKind::Open, LobbyKind::LowSkill]);
-    assert!(
-        runtime
-            .service()
-            .reserve_lobby_players(&users([1]), scope(LobbyKind::Open))
-    );
-
-    let outcome = runtime.leave_every_lobby(UserId(1), GUILD);
-
-    assert_eq!(outcome.left, [LobbyKind::LowSkill]);
-    assert_eq!(outcome.pinned, [LobbyKind::Open]);
-    assert!(
-        outcome
-            .content
-            .contains(&format!("Left {}", LobbyKind::LowSkill.label()))
-    );
-    assert!(
-        outcome
-            .content
-            .contains(&format!("Still in {}", LobbyKind::Open.label()))
     );
 }
 
@@ -1075,11 +717,14 @@ async fn test_resetlobby_serializes_discord_cleanup_with_match_start() {
     });
     close_started.notified().await;
 
+    // A match start reserves while holding the same scope operation lock.
     let reserve_runtime = Arc::clone(&runtime);
     let mut reserve_task = tokio::spawn(async move {
+        let lock = reserve_runtime.scope_operation_lock(scope(LobbyKind::Open));
+        let _guard = lock.lock().await;
         reserve_runtime
-            .reserve_for_match(&users([7, 8]), scope(LobbyKind::Open))
-            .await
+            .service()
+            .reserve_lobby_players(&users([7, 8]), scope(LobbyKind::Open))
     });
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(20), &mut reserve_task)
@@ -1166,16 +811,21 @@ async fn test_abort_resets_lobby_message_id() {
     for player_id in 1..=10 {
         seat(&runtime, player_id, &[LobbyKind::Open]);
     }
-    assert!(runtime.service().set_lobby_message_ids(
-        open,
-        LobbyMessageIds {
-            channel_id: Some(ChannelId(456)),
-            message_id: Some(MessageId(12_345)),
-            ..LobbyMessageIds::default()
-        }
-    ));
+    assert!(
+        runtime.service().try_set_lobby_message_ids(
+            open,
+            LobbyMessageIds {
+                channel_id: Some(ChannelId(456)),
+                message_id: Some(MessageId(12_345)),
+                ..LobbyMessageIds::default()
+            }
+        ) == Ok(true)
+    );
     assert_eq!(
-        runtime.service().get_lobby_message_id(open),
+        runtime
+            .service()
+            .get_lobby(open)
+            .and_then(|lobby| lobby.message_ids.message_id),
         Some(MessageId(12_345))
     );
 
@@ -1188,7 +838,13 @@ async fn test_abort_resets_lobby_message_id() {
     )
     .await;
     assert!(matches!(outcome, ResetLobbyOutcome::Reset { .. }));
-    assert_eq!(runtime.service().get_lobby_message_id(open), None);
+    assert_eq!(
+        runtime
+            .service()
+            .get_lobby(open)
+            .and_then(|lobby| lobby.message_ids.message_id),
+        None
+    );
     assert!(runtime.service().get_lobby(open).is_none());
 
     let fresh = runtime
@@ -1196,16 +852,21 @@ async fn test_abort_resets_lobby_message_id() {
         .get_or_create_lobby(Some(UserId(99)), open)
         .expect("create fresh lobby after abort/reset");
     assert!(fresh.players.is_empty());
-    assert!(runtime.service().set_lobby_message_ids(
-        open,
-        LobbyMessageIds {
-            channel_id: Some(ChannelId(456)),
-            message_id: Some(MessageId(99_999)),
-            ..LobbyMessageIds::default()
-        }
-    ));
+    assert!(
+        runtime.service().try_set_lobby_message_ids(
+            open,
+            LobbyMessageIds {
+                channel_id: Some(ChannelId(456)),
+                message_id: Some(MessageId(99_999)),
+                ..LobbyMessageIds::default()
+            }
+        ) == Ok(true)
+    );
     assert_eq!(
-        runtime.service().get_lobby_message_id(open),
+        runtime
+            .service()
+            .get_lobby(open)
+            .and_then(|lobby| lobby.message_ids.message_id),
         Some(MessageId(99_999))
     );
 }
@@ -1314,15 +975,17 @@ async fn reset_cleanup_failures_are_reported_but_do_not_resurrect_the_lobby() {
     let runtime = runtime();
     open_lobby(&runtime, LobbyKind::Open, 7);
     seat(&runtime, 7, &[LobbyKind::Open]);
-    assert!(runtime.service().set_lobby_message_ids(
-        scope(LobbyKind::Open),
-        LobbyMessageIds {
-            message_id: Some(MessageId(10)),
-            channel_id: Some(ChannelId(20)),
-            thread_id: Some(ChannelId(30)),
-            ..LobbyMessageIds::default()
-        }
-    ));
+    assert!(
+        runtime.service().try_set_lobby_message_ids(
+            scope(LobbyKind::Open),
+            LobbyMessageIds {
+                message_id: Some(MessageId(10)),
+                channel_id: Some(ChannelId(20)),
+                thread_id: Some(ChannelId(30)),
+                ..LobbyMessageIds::default()
+            }
+        ) == Ok(true)
+    );
     let transport = RecordingTransport::default();
     transport.state().fail_cleanup = true;
 

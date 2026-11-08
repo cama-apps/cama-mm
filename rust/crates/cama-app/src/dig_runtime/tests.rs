@@ -5,7 +5,6 @@ use cama_db::dig_carry_wager::CARRY_BOUNDARIES;
 use cama_db::dig_event_runtime::{
     DigEventActorKey, DigEventQuestMutation, DigEventRuntimeRepository,
 };
-use cama_db::dig_guild_modifiers::DigGuildModifierRepository;
 use cama_db::economy_event_repository::{
     EconomyEventRepository, EventDirection, EventDraft, EventEffects,
 };
@@ -2244,13 +2243,13 @@ fn test_helltide_modifier_taxes_dig_yield() {
 
     let helltide_db = fast_migrated_database();
     seed(&helltide_db);
-    DigGuildModifierRepository::new(helltide_db.path())
-        .set_modifier_at(
-            Some(51_002),
-            "helltide_active",
-            600,
-            &serde_json::json!({"tax_per_dig": 5}),
-            1_910_000_000,
+    Connection::open(helltide_db.path())
+        .expect("helltide connection")
+        .execute(
+            "INSERT INTO dig_guild_modifiers
+                (guild_id,modifier_id,expires_at,payload_json,created_at)
+             VALUES (?1,'helltide_active',?2,'{\"tax_per_dig\":5}',?3)",
+            params![51_002, 1_910_000_600_i64, 1_910_000_000_i64],
         )
         .expect("activate helltide");
     let taxed = DigRuntimeService::sqlite(helltide_db.path())
@@ -3845,6 +3844,544 @@ fn sqlite_live_event_gate_multiplies_ascension_weather_and_route_factors() {
             )
             .expect("event counter"),
         1,
+    );
+}
+
+#[test]
+fn sqlite_text_stored_tunnel_integers_load_as_integers() {
+    let database = fast_migrated_database();
+    let (actor, guild) = (60_305, 60_306);
+    PlayerRepository::new(database.path())
+        .add(&NewPlayer::new(actor, "text-columns", Some(guild)))
+        .expect("seed text-column player");
+    Connection::open(database.path())
+        .expect("text-column connection")
+        .execute(
+            "INSERT INTO tunnels
+                 (discord_id,guild_id,tunnel_name,depth,luminosity,prestige_level,last_dig_at)
+             VALUES (?1,?2,'Test Tunnel','49','100','2',NULL)",
+            params![actor, guild],
+        )
+        .expect("seed text-stored integers");
+    let info = DigRuntimeService::sqlite(database.path())
+        .tunnel_info(actor, guild)
+        .expect("load text-column tunnel")
+        .expect("text-column tunnel");
+    assert_eq!(
+        (
+            info.depth,
+            info.luminosity,
+            info.prestige_level,
+            info.last_dig_at
+        ),
+        (49, 100, 2, None)
+    );
+    assert_eq!(info.tunnel_name, "Test Tunnel");
+}
+
+fn selected_fungal_route_state(route_id: &str) -> String {
+    format!(
+        r#"{{"end_depth":200,"layer":"Fungal Depths","offered":["{route_id}","mycelial_track","rotcap_hollow"],"selected":"{route_id}","start_depth":150}}"#
+    )
+}
+
+fn seed_route_state(database: &FastTestDatabase, discord_id: i64, guild_id: i64, state: &str) {
+    Connection::open(database.path())
+        .expect("route state connection")
+        .execute(
+            "UPDATE tunnels SET route_state=?1 WHERE discord_id=?2 AND guild_id=?3",
+            params![state, discord_id, guild_id],
+        )
+        .expect("seed route state");
+}
+
+#[test]
+fn sqlite_pending_route_choice_blocks_paid_dig_before_cost_or_consumables() {
+    let database = fast_migrated_database();
+    let actor = 60_301;
+    let guild = 60_302;
+    let now = 1_900_087_000;
+    seed_live_runtime_tunnel(&database, actor, guild, now, 30, 1, Some(now - 60));
+    let connection = Connection::open(database.path()).expect("pending route connection");
+    connection
+        .execute(
+            "UPDATE players SET jopacoin_balance=500 WHERE discord_id=?1 AND guild_id=?2",
+            params![actor, guild],
+        )
+        .expect("seed pending route balance");
+    connection
+        .execute(
+            "INSERT INTO dig_inventory (discord_id,guild_id,item_type,queued,created_at)
+                 VALUES (?1,?2,'hard_hat',1,?3)",
+            params![actor, guild, now],
+        )
+        .expect("queue pending route consumable");
+    drop(connection);
+    seed_route_state(
+        &database,
+        actor,
+        guild,
+        r#"{"end_depth":50,"layer":"Stone","offered":["shored_passage","old_supports","fossil_seam"],"selected":null,"start_depth":25}"#,
+    );
+
+    let outcome = DigRuntimeService::sqlite(database.path())
+        .dig(DigRuntimeRequest {
+            discord_id: actor,
+            guild_id: guild,
+            now,
+            paid: true,
+            forced_event: false,
+        })
+        .expect("pending route Dig");
+    assert!(!outcome.success && outcome.route_choice_required);
+    assert_eq!(outcome.paid_dig_cost, 0);
+    assert!(outcome.consumed_item_ids.is_empty());
+    let persisted: (i64, i64, i64, i64) = Connection::open(database.path())
+        .expect("reload pending route")
+        .query_row(
+            "SELECT (SELECT jopacoin_balance FROM players WHERE discord_id=?1 AND guild_id=?2),
+                    (SELECT depth FROM tunnels WHERE discord_id=?1 AND guild_id=?2),
+                    (SELECT COUNT(*) FROM dig_inventory
+                      WHERE discord_id=?1 AND guild_id=?2 AND queued=1),
+                    (SELECT COUNT(*) FROM dig_actions WHERE actor_id=?1 AND guild_id=?2)",
+            params![actor, guild],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("pending route state");
+    assert_eq!(persisted, (500, 30, 1, 0));
+}
+
+/// Run one non-catastrophic live cave-in at depth 180 with a selected route
+/// and return the rolled loss beside the loss the Dig applied.
+fn live_route_cave_loss(
+    actor: i64,
+    guild: i64,
+    seed_now: i64,
+    route_id: &str,
+    active_weather: Option<&str>,
+    prestige_perks: &str,
+    reinforced: bool,
+) -> (i64, i64) {
+    let roll = find_live_cave_roll(actor, guild, seed_now, 180, Some(false), None, false);
+    let database = fast_migrated_database();
+    seed_live_cave_in_fixture(
+        &database, actor, guild, seed_now, roll.now, 180, 0, None, None,
+    );
+    let connection = Connection::open(database.path()).expect("route cave connection");
+    connection
+        .execute(
+            "UPDATE tunnels SET route_state=?1,prestige_perks=?2,reinforced_until=?3
+                 WHERE discord_id=?4 AND guild_id=?5",
+            params![
+                selected_fungal_route_state(route_id),
+                prestige_perks,
+                if reinforced { roll.now + 3_600 } else { 0 },
+                actor,
+                guild,
+            ],
+        )
+        .expect("seed route cave tunnel");
+    if let Some(weather) = active_weather {
+        connection
+            .execute(
+                "UPDATE dig_weather SET weather_id=?1
+                     WHERE guild_id=?2 AND layer_name='Fungal Depths'",
+                params![weather, guild],
+            )
+            .expect("seed route cave weather");
+    }
+    drop(connection);
+
+    let outcome = DigRuntimeService::sqlite(database.path())
+        .dig(DigRuntimeRequest {
+            discord_id: actor,
+            guild_id: guild,
+            now: roll.now,
+            paid: false,
+            forced_event: false,
+        })
+        .expect("route cave Dig");
+    assert!(outcome.success && outcome.cave_in, "{:?}", outcome.error);
+    let detail = serde_json::from_str::<Value>(
+        outcome
+            .cave_in_detail
+            .as_deref()
+            .expect("route cave detail"),
+    )
+    .expect("route cave detail JSON");
+    let loss = detail["block_loss"].as_i64().expect("route cave loss");
+    assert_eq!(outcome.depth_after, 180 - loss);
+    (roll.block_loss, loss)
+}
+
+#[test]
+fn sqlite_selected_route_caps_live_cave_loss() {
+    let (rolled, loss) = live_route_cave_loss(
+        62_301,
+        62_302,
+        1_900_093_000,
+        "old_supports",
+        None,
+        "[]",
+        false,
+    );
+    assert!(rolled > 6);
+    assert_eq!(loss, 6);
+}
+
+#[test]
+fn sqlite_weather_cap_bounds_route_cave_loss_bonus() {
+    let (_, loss) = live_route_cave_loss(
+        62_303,
+        62_304,
+        1_900_093_500,
+        "fractured_shortcut",
+        Some("mudslide_warning"),
+        "[]",
+        false,
+    );
+    assert_eq!(loss, 3);
+}
+
+#[test]
+fn sqlite_route_cave_loss_bonus_applies_before_steady_hands_and_reinforcement() {
+    let (actor, guild, seed_now) = (62_305, 62_306, 1_900_094_000);
+    let (rolled, loss) = live_route_cave_loss(
+        actor,
+        guild,
+        seed_now,
+        "fractured_shortcut",
+        None,
+        "[]",
+        false,
+    );
+    assert_eq!(loss, rolled + 2);
+    let steady = r#"["steady_hands"]"#;
+    let (rolled, loss) = live_route_cave_loss(
+        actor,
+        guild,
+        seed_now,
+        "fractured_shortcut",
+        None,
+        steady,
+        false,
+    );
+    assert_eq!(loss, ((rolled + 2) as f64 * 0.75) as i64);
+    let (_, loss) = live_route_cave_loss(
+        actor,
+        guild,
+        seed_now,
+        "fractured_shortcut",
+        None,
+        steady,
+        true,
+    );
+    assert_eq!(loss, 8);
+}
+
+#[test]
+fn thick_skin_zeroes_cave_chance_even_on_a_risky_route() {
+    let risky = crate::dig_loot::CaveInChanceRequest {
+        base_layer: super::layer_at(300).cave_in_chance,
+        route_bonus: crate::dig_routes::route_by_id("maws_shortcut")
+            .and_then(|route| crate::dig_routes::route_effect(route, "cave_in_bonus"))
+            .expect("Maw's Shortcut cave bonus"),
+        mana_hazard_modifier: 0.09,
+        ..Default::default()
+    };
+    assert!(risky.resolve() > 0.5);
+    let shielded = crate::dig_loot::CaveInChanceRequest {
+        thick_skin: true,
+        ..risky
+    };
+    assert_eq!(shielded.resolve(), 0.0);
+}
+
+#[test]
+fn catastrophic_cave_in_keeps_the_route_loss_cap_above_the_milestone() {
+    assert_eq!(
+        super::catastrophic_cave_in_depth(148, 14, Some(6), false),
+        (142, false, 14)
+    );
+    assert_eq!(
+        super::catastrophic_cave_in_depth(148, 14, None, false),
+        (125, false, 23)
+    );
+    assert_eq!(
+        super::catastrophic_cave_in_depth(148, 14, Some(6), true),
+        (134, true, 14)
+    );
+}
+
+/// Python's `_effective_cave_in_loss_cap` keeps the tightest active cap; a
+/// looser weather cap never overrides a stricter route cap.
+#[test]
+fn cave_in_loss_caps_combine_to_the_tightest_one() {
+    assert_eq!(
+        super::effective_cave_in_loss_cap(&[Some(9), Some(6)]),
+        Some(6)
+    );
+    assert_eq!(
+        super::effective_cave_in_loss_cap(&[Some(3), Some(7)]),
+        Some(3)
+    );
+    assert_eq!(super::effective_cave_in_loss_cap(&[None, Some(7)]), Some(7));
+    assert_eq!(super::effective_cave_in_loss_cap(&[None, None]), None);
+}
+
+/// Python passed the reinforcement cap into the catastrophic rollback, so a
+/// reinforced tunnel loses at most 8 blocks instead of falling to the
+/// milestone.
+#[test]
+fn reinforcement_bounds_a_live_catastrophic_rollback() {
+    let actor = 62_391;
+    let guild = 62_392;
+    let seed_now = 1_900_096_000;
+    let roll = find_live_cave_roll(actor, guild, seed_now, 240, Some(true), None, false);
+    let database = fast_migrated_database();
+    seed_live_cave_in_fixture(
+        &database, actor, guild, seed_now, roll.now, 240, 100, None, None,
+    );
+    Connection::open(database.path())
+        .expect("reinforced cave connection")
+        .execute(
+            "UPDATE tunnels SET reinforced_until=?1 WHERE discord_id=?2 AND guild_id=?3",
+            params![roll.now + 3_600, actor, guild],
+        )
+        .expect("seed reinforcement");
+
+    let outcome = DigRuntimeService::sqlite(database.path())
+        .dig(DigRuntimeRequest {
+            discord_id: actor,
+            guild_id: guild,
+            now: roll.now,
+            paid: false,
+            forced_event: false,
+        })
+        .expect("reinforced catastrophic Dig");
+    let detail = serde_json::from_str::<Value>(
+        outcome
+            .cave_in_detail
+            .as_deref()
+            .expect("reinforced cave detail"),
+    )
+    .expect("reinforced cave detail JSON");
+    assert!(outcome.success && outcome.cave_in);
+    assert_eq!(detail["type"], "catastrophic");
+    assert_eq!(detail["depth_after"], 232);
+    assert_eq!(outcome.depth_after, 232);
+}
+
+/// Run one non-cave Dig at depth 180 under neutral weather, optionally on a
+/// selected route.
+fn live_route_plain_dig(route_id: Option<&str>, now: i64) -> super::DigRuntimeOutcome {
+    let (actor, guild) = (60_303, 60_304);
+    let database = fast_migrated_database();
+    seed_live_runtime_tunnel(&database, actor, guild, now, 180, 1, Some(now - 7_200));
+    if let Some(route_id) = route_id {
+        seed_route_state(
+            &database,
+            actor,
+            guild,
+            &selected_fungal_route_state(route_id),
+        );
+    }
+    let today = game_date_for_timestamp(now as f64).expect("route plain Dig date");
+    Connection::open(database.path())
+        .expect("route plain weather connection")
+        .execute(
+            "INSERT INTO dig_weather(guild_id,game_date,layer_name,weather_id)
+                 VALUES (?1,?2,'Fungal Depths','route_neutral'),
+                        (?1,?2,'Dirt','route_neutral_other')",
+            params![guild, today],
+        )
+        .expect("seed neutral route weather");
+    let outcome = DigRuntimeService::sqlite(database.path())
+        .dig(DigRuntimeRequest {
+            discord_id: actor,
+            guild_id: guild,
+            now,
+            paid: false,
+            forced_event: false,
+        })
+        .expect("route plain Dig");
+    assert!(outcome.success && !outcome.cave_in, "{:?}", outcome.error);
+    outcome
+}
+
+/// Python's `choose_route`: one guarded claim per junction, audited once with
+/// the route and layer. Repeating the chosen route is a no-op, another route
+/// is refused, and another guild's junction for the same signed ID is untouched.
+#[test]
+fn route_choice_is_claimed_once_audited_and_guild_scoped() {
+    let (actor, guild, other_guild, now) = (-62_395, 62_396, -62_397, 1_900_097_000);
+    let pending = r#"{"end_depth": 50, "layer": "Stone", "offered": ["shored_passage", "old_supports", "fossil_seam"], "selected": null, "start_depth": 25}"#;
+    let database = fast_migrated_database();
+    for guild_id in [guild, other_guild] {
+        seed_live_runtime_tunnel(&database, actor, guild_id, now, 30, 1, Some(now - 7_200));
+        seed_route_state(&database, actor, guild_id, pending);
+    }
+    let runtime = DigRuntimeService::sqlite(database.path());
+
+    let chosen = runtime
+        .choose_route(actor, guild, "old_supports", now)
+        .expect("route choice");
+    assert!(chosen.success, "{:?}", chosen.error);
+    assert!(chosen.action_id.is_some());
+    let repeated = runtime
+        .choose_route(actor, guild, "old_supports", now + 1)
+        .expect("repeated route choice");
+    assert!(repeated.success && repeated.action_id.is_none());
+    let switched = runtime
+        .choose_route(actor, guild, "fossil_seam", now + 2)
+        .expect("switched route choice");
+    assert!(!switched.success);
+    assert!(
+        switched
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("already locked in"))
+    );
+    let unoffered = runtime
+        .choose_route(actor, other_guild, "lava_tube", now + 3)
+        .expect("unoffered route choice");
+    assert!(!unoffered.success);
+
+    let connection = Connection::open(database.path()).expect("route choice verify DB");
+    let details = connection
+        .prepare(
+            "SELECT detail FROM dig_actions
+              WHERE actor_id=?1 AND guild_id=?2 AND action_type='route_choice'",
+        )
+        .expect("route choice audit query")
+        .query_map(params![actor, guild], |row| row.get::<_, String>(0))
+        .expect("route choice audit rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("route choice audit details");
+    assert_eq!(details.len(), 1);
+    assert_eq!(
+        serde_json::from_str::<Value>(&details[0]).expect("route choice detail JSON"),
+        serde_json::json!({"route_id": "old_supports", "layer": "Stone"})
+    );
+    let route_state = |guild_id: i64| {
+        connection
+            .query_row(
+                "SELECT route_state FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
+                params![actor, guild_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .expect("route state")
+    };
+    assert_eq!(
+        crate::dig_routes::route_status(route_state(guild).as_deref())
+            .active_route
+            .map(|route| route.id),
+        Some("old_supports")
+    );
+    assert_eq!(route_state(other_guild).as_deref(), Some(pending));
+}
+
+/// Run one non-cave Dig at `depth` under neutral weather, with or without an
+/// equipped Pathfinder's Spur, and return its advance.
+fn live_pathfinder_advance(depth: i64, equipped: bool, now: i64) -> i64 {
+    let (actor, guild) = (62_393, 62_394);
+    let database = fast_migrated_database();
+    seed_live_runtime_tunnel(&database, actor, guild, now, depth, 1, Some(now - 7_200));
+    let connection = Connection::open(database.path()).expect("pathfinder connection");
+    if equipped {
+        connection
+            .execute(
+                "INSERT INTO dig_artifacts(
+                     discord_id,guild_id,artifact_id,found_at,is_relic,equipped
+                 ) VALUES(?1,?2,'pathfinders_spur',?3,1,1)",
+                params![actor, guild, now - 5_000],
+            )
+            .expect("equip Pathfinder's Spur");
+    }
+    let today = game_date_for_timestamp(now as f64).expect("pathfinder Dig date");
+    connection
+        .execute(
+            "INSERT INTO dig_weather(guild_id,game_date,layer_name,weather_id)
+                 VALUES (?1,?2,?3,'pathfinder_neutral'),
+                        (?1,?2,'Dirt','pathfinder_neutral_other')",
+            params![guild, today, super::layer_at(depth).name],
+        )
+        .expect("seed neutral pathfinder weather");
+    drop(connection);
+    let outcome = DigRuntimeService::sqlite(database.path())
+        .dig(DigRuntimeRequest {
+            discord_id: actor,
+            guild_id: guild,
+            now,
+            paid: false,
+            forced_event: false,
+        })
+        .expect("pathfinder Dig");
+    assert!(outcome.success && !outcome.cave_in, "{:?}", outcome.error);
+    outcome.advance
+}
+
+/// Python's `dig_core_mixin`: Pathfinder's Spur adds one advance per Dig that
+/// starts at depth 150 or deeper.
+#[test]
+fn pathfinders_spur_adds_one_advance_from_depth_150() {
+    let (actor, guild) = (62_393, 62_394);
+    let now = (1_900_096_000..1_900_196_000)
+        .find(|candidate| {
+            let mut entropy = SeededLootEntropy::new(super::seed_for(
+                DigRuntimeRequest {
+                    discord_id: actor,
+                    guild_id: guild,
+                    now: *candidate,
+                    paid: false,
+                    forced_event: false,
+                },
+                0,
+            ));
+            entropy.unit() > 0.8
+        })
+        .expect("deterministic non-cave seed");
+    for depth in [150, 180] {
+        assert_eq!(
+            live_pathfinder_advance(depth, true, now),
+            live_pathfinder_advance(depth, false, now) + 1,
+            "depth {depth}"
+        );
+    }
+    assert_eq!(
+        live_pathfinder_advance(140, true, now),
+        live_pathfinder_advance(140, false, now)
+    );
+}
+
+#[test]
+fn sqlite_selected_route_shapes_live_advance_and_luminosity_drain() {
+    let (actor, guild) = (60_303, 60_304);
+    let now = (1_900_095_000..1_900_195_000)
+        .find(|candidate| {
+            let mut entropy = SeededLootEntropy::new(super::seed_for(
+                DigRuntimeRequest {
+                    discord_id: actor,
+                    guild_id: guild,
+                    now: *candidate,
+                    paid: false,
+                    forced_event: false,
+                },
+                0,
+            ));
+            entropy.unit() > 0.6 && entropy.advance(1, 2) == 2
+        })
+        .expect("deterministic two-block non-cave seed");
+    let baseline = live_route_plain_dig(None, now);
+    assert_eq!(baseline.advance, 2);
+    assert!(baseline.luminosity_drained > 0);
+
+    // Shored Passage lowers the maximum advance by one block.
+    assert_eq!(live_route_plain_dig(Some("shored_passage"), now).advance, 1);
+    // Lantern Road halves the layer's luminosity drain.
+    assert_eq!(
+        live_route_plain_dig(Some("lantern_road"), now).luminosity_drained,
+        baseline.luminosity_drained / 2
     );
 }
 
@@ -5900,6 +6437,17 @@ fn sqlite_auto_buy_hard_hat_charges_the_shop_catalog_price() {
             .expect("hard hat catalog entry")
             .cost
     );
+    // The result card shows the same purchase under the shop name.
+    assert_eq!(
+        outcome.auto_purchases,
+        [super::DigRuntimeAutoPurchase {
+            item: "Hard Hat".to_owned(),
+            status: "purchased".to_owned(),
+            cost: crate::dig_loot::consumable("hard_hat")
+                .expect("hard hat catalog entry")
+                .cost,
+        }]
+    );
 }
 
 #[test]
@@ -6407,6 +6955,104 @@ fn sqlite_reduced_injury_ticks_and_slower_cooldown_does_not_halve_advance() {
 }
 
 #[test]
+fn sqlite_active_curse_drains_the_dig_and_expires_after_its_digs() {
+    let actor = 61_021;
+    let guild = 61_022;
+    let depth = 10;
+    let now = find_dig_time_with_unit_between(actor, guild, 1_900_016_000, 0.95, 0.99);
+    let seed = |database: &FastTestDatabase, curse: Option<&str>| {
+        seed_live_runtime_tunnel(database, actor, guild, now, depth, 1, Some(now - 7_200));
+        Connection::open(database.path())
+            .expect("curse connection")
+            .execute(
+                "UPDATE tunnels SET temp_curses=?1 WHERE discord_id=?2 AND guild_id=?3",
+                params![curse, actor, guild],
+            )
+            .expect("seed curse");
+        seed_two_weather_rows(
+            database,
+            guild,
+            &game_date_for_timestamp(now as f64).unwrap(),
+            super::layer_at(depth).name,
+            "earthworm_migration",
+        );
+    };
+    let dig = |database: &FastTestDatabase, at: i64| {
+        DigRuntimeService::sqlite(database.path())
+            .dig(DigRuntimeRequest {
+                discord_id: actor,
+                guild_id: guild,
+                now: at,
+                paid: false,
+                forced_event: false,
+            })
+            .expect("dig resolves")
+    };
+    let stored_curse = |database: &FastTestDatabase| -> Option<String> {
+        Connection::open(database.path())
+            .expect("curse readback")
+            .query_row(
+                "SELECT temp_curses FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
+                params![actor, guild],
+                |row| row.get(0),
+            )
+            .expect("tunnel row")
+    };
+
+    let control_db = fast_migrated_database();
+    seed(&control_db, None);
+    let cursed_db = fast_migrated_database();
+    seed(
+        &cursed_db,
+        Some(
+            r#"{"id":"hex","name":"Hex","digs_remaining":2,"effects":{"advance_bonus":-1,"luminosity_drain":15}}"#,
+        ),
+    );
+
+    let control = dig(&control_db, now);
+    let cursed = dig(&cursed_db, now);
+    assert!(control.success && cursed.success);
+    assert!(!control.cave_in && !cursed.cave_in);
+    assert_eq!(cursed.advance, (control.advance - 1).max(1));
+    assert_eq!(
+        cursed.luminosity_after,
+        (control.luminosity_after - 15).max(0)
+    );
+    let remaining: Value =
+        serde_json::from_str(&stored_curse(&cursed_db).expect("curse still active"))
+            .expect("curse JSON");
+    assert_eq!(remaining["digs_remaining"], 1);
+
+    let later = find_dig_time_with_unit_between(actor, guild, now + 86_400, 0.95, 0.99);
+    assert!(dig(&cursed_db, later).success);
+    assert_eq!(
+        stored_curse(&cursed_db),
+        None,
+        "the last cursed dig clears it"
+    );
+}
+
+#[test]
+fn sqlite_unregistered_dig_is_blocked_with_a_register_prompt() {
+    let database = fast_migrated_database();
+    let outcome = DigRuntimeService::sqlite(database.path())
+        .dig(DigRuntimeRequest {
+            discord_id: 60_501,
+            guild_id: 60_502,
+            now: 1_900_060_000,
+            paid: false,
+            forced_event: false,
+        })
+        .expect("unregistered Dig resolves");
+    assert!(!outcome.success);
+    assert_eq!(
+        outcome.error.as_deref(),
+        Some("You need to register first. Use /player register.")
+    );
+    assert_eq!((outcome.depth_before, outcome.depth_after), (0, 0));
+}
+
+#[test]
 fn sqlite_first_dig_pet_work_respects_live_boss_boundary_cap() {
     let database = fast_migrated_database();
     let actor = 7;
@@ -6805,4 +7451,210 @@ fn test_boss_is_never_reopened_on_the_dig_right_after_a_fight() {
         })
         .expect("boss reopen");
     assert_eq!(reopened.boss_boundary, Some(25));
+}
+
+/// Seed a running daily streak whose last dig was `days_ago` game days before
+/// the Dig at `now`, plus `charms` Streak Charms in the satchel.
+fn seed_streak_charm_tunnel(
+    database: &FastTestDatabase,
+    discord_id: i64,
+    guild_id: i64,
+    now: i64,
+    days_ago: i64,
+    charms: usize,
+) -> String {
+    seed_live_runtime_tunnel(
+        database,
+        discord_id,
+        guild_id,
+        now,
+        10,
+        1,
+        Some(now - 7_200),
+    );
+    let today = super::game_date_for_timestamp(now as f64).expect("game date");
+    let last = (chrono::NaiveDate::parse_from_str(&today, "%Y-%m-%d").expect("game date")
+        - chrono::Duration::days(days_ago))
+    .format("%Y-%m-%d")
+    .to_string();
+    let connection = Connection::open(database.path()).expect("open database");
+    connection
+        .execute(
+            "UPDATE tunnels SET streak_days=5, streak_last_date=?1
+                 WHERE discord_id=?2 AND guild_id=?3",
+            params![last, discord_id, guild_id],
+        )
+        .expect("seed streak");
+    for _ in 0..charms {
+        connection
+            .execute(
+                "INSERT INTO dig_inventory (discord_id,guild_id,item_type,queued,created_at)
+                     VALUES (?1,?2,'streak_charm',0,?3)",
+                params![discord_id, guild_id, now - 86_400],
+            )
+            .expect("seed streak charm");
+    }
+    last
+}
+
+/// The persisted `(streak_days, streak_last_date, streak charms held)`.
+fn streak_charm_state(
+    database: &FastTestDatabase,
+    discord_id: i64,
+    guild_id: i64,
+) -> (i64, String, i64) {
+    let connection = Connection::open(database.path()).expect("open database");
+    let (days, last) = connection
+        .query_row(
+            "SELECT streak_days, streak_last_date FROM tunnels
+                 WHERE discord_id=?1 AND guild_id=?2",
+            params![discord_id, guild_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .expect("streak state");
+    let charms = connection
+        .query_row(
+            "SELECT COUNT(*) FROM dig_inventory
+                 WHERE discord_id=?1 AND guild_id=?2 AND item_type='streak_charm'",
+            params![discord_id, guild_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("streak charm count");
+    (days, last, charms)
+}
+
+fn streak_charm_dig(
+    database: &FastTestDatabase,
+    discord_id: i64,
+    guild_id: i64,
+    now: i64,
+) -> super::DigRuntimeOutcome {
+    DigRuntimeService::sqlite(database.path())
+        .dig(DigRuntimeRequest {
+            discord_id,
+            guild_id,
+            now,
+            paid: false,
+            forced_event: false,
+        })
+        .expect("streak dig")
+}
+
+#[test]
+fn streak_charm_keeps_the_streak_across_one_missed_day_and_spends_one_charm() {
+    let database = fast_migrated_database();
+    let (actor, guild) = (60_101, 60_102);
+    let now = find_non_cave_dig_time(actor, guild, 1_900_100_000);
+    seed_streak_charm_tunnel(&database, actor, guild, now, 2, 2);
+
+    let outcome = streak_charm_dig(&database, actor, guild, now);
+
+    assert!(outcome.success, "{outcome:?}");
+    assert!(!outcome.cave_in);
+    assert!(outcome.streak_charm_used);
+    let today = super::game_date_for_timestamp(now as f64).expect("game date");
+    assert_eq!(
+        streak_charm_state(&database, actor, guild),
+        (6, today, 1),
+        "the streak continues and exactly one charm is spent"
+    );
+    assert_eq!(
+        latest_dig_detail(&database, actor, guild)["streak_charm_used"],
+        true
+    );
+}
+
+#[test]
+fn missed_day_without_a_streak_charm_resets_the_streak() {
+    let database = fast_migrated_database();
+    let (actor, guild) = (60_103, 60_104);
+    let now = find_non_cave_dig_time(actor, guild, 1_900_110_000);
+    seed_streak_charm_tunnel(&database, actor, guild, now, 2, 0);
+
+    let outcome = streak_charm_dig(&database, actor, guild, now);
+
+    assert!(outcome.success, "{outcome:?}");
+    assert!(!outcome.streak_charm_used);
+    let today = super::game_date_for_timestamp(now as f64).expect("game date");
+    assert_eq!(streak_charm_state(&database, actor, guild), (1, today, 0));
+}
+
+#[test]
+fn streak_charm_is_kept_when_no_day_was_missed() {
+    for (days_ago, streak_after) in [(1, 6), (0, 5)] {
+        let database = fast_migrated_database();
+        let (actor, guild) = (60_105, 60_106);
+        let now = find_non_cave_dig_time(actor, guild, 1_900_120_000);
+        seed_streak_charm_tunnel(&database, actor, guild, now, days_ago, 1);
+
+        let outcome = streak_charm_dig(&database, actor, guild, now);
+
+        assert!(outcome.success, "{outcome:?}");
+        assert!(!outcome.streak_charm_used, "days ago {days_ago}");
+        let today = super::game_date_for_timestamp(now as f64).expect("game date");
+        assert_eq!(
+            streak_charm_state(&database, actor, guild),
+            (streak_after, today, 1),
+            "days ago {days_ago}"
+        );
+    }
+}
+
+#[test]
+fn streak_charm_cannot_bridge_two_missed_days() {
+    let database = fast_migrated_database();
+    let (actor, guild) = (60_107, 60_108);
+    let now = find_non_cave_dig_time(actor, guild, 1_900_130_000);
+    seed_streak_charm_tunnel(&database, actor, guild, now, 3, 1);
+
+    let outcome = streak_charm_dig(&database, actor, guild, now);
+
+    assert!(outcome.success, "{outcome:?}");
+    assert!(!outcome.streak_charm_used);
+    let today = super::game_date_for_timestamp(now as f64).expect("game date");
+    assert_eq!(streak_charm_state(&database, actor, guild), (1, today, 1));
+}
+
+#[test]
+fn cave_in_leaves_the_streak_and_the_streak_charm_untouched() {
+    let database = fast_migrated_database();
+    let (actor, guild) = (60_109, 60_110);
+    let now = find_cave_dig_time(actor, guild, 1_900_140_000);
+    let last = seed_streak_charm_tunnel(&database, actor, guild, now, 2, 1);
+
+    let outcome = streak_charm_dig(&database, actor, guild, now);
+
+    assert!(outcome.success, "{outcome:?}");
+    assert!(outcome.cave_in);
+    assert!(!outcome.streak_charm_used);
+    assert_eq!(streak_charm_state(&database, actor, guild), (5, last, 1));
+}
+
+#[test]
+fn streak_charm_rolls_back_with_a_failed_dig_commit() {
+    let database = fast_migrated_database();
+    let (actor, guild) = (60_111, 60_112);
+    let now = find_non_cave_dig_time(actor, guild, 1_900_150_000);
+    let last = seed_streak_charm_tunnel(&database, actor, guild, now, 2, 1);
+    // Fail the dig's own audit insert, which runs after the charm row is
+    // deleted inside the same transaction.
+    Connection::open(database.path())
+        .expect("open database")
+        .execute_batch(
+            "CREATE TRIGGER fail_dig_audit BEFORE INSERT ON dig_actions
+                 BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END;",
+        )
+        .expect("install failing audit trigger");
+
+    DigRuntimeService::sqlite(database.path())
+        .dig(DigRuntimeRequest {
+            discord_id: actor,
+            guild_id: guild,
+            now,
+            paid: false,
+            forced_event: false,
+        })
+        .expect_err("the dig commit fails");
+
+    assert_eq!(streak_charm_state(&database, actor, guild), (5, last, 1));
 }

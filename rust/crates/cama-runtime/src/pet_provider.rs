@@ -27,8 +27,8 @@ use cama_app::pet_brawl_commands::{
     InteractionModel, PetBrawlCommands, TargetMember, ViewModel,
 };
 use cama_app::pet_commands::{
-    Embed, EmbedColor, PetCommandService, PetFlavorEvent, StatusAction, StatusEmbedRequest,
-    StatusView, build_adoption_embed, build_altar_cancel_embed, build_altar_preview_embed,
+    Embed, EmbedColor, PetCommandService, StatusAction, StatusEmbedRequest, StatusView,
+    build_adoption_embed, build_altar_cancel_embed, build_altar_preview_embed,
     build_altar_success_embed, build_aspca_embed, build_eating_outcome_embed,
     build_graveyard_embed_with_dex, build_leaderboard_embed_with_records, build_shop_embed,
     build_status_embed_with_details,
@@ -39,7 +39,7 @@ use cama_app::pet_eating::{
     PetEatingService,
 };
 use cama_app::pet_evolution_app::{PetEvolutionService, SystemEvolutionClock};
-use cama_app::pet_flavor::{PetFlavorEvent as FlavorEvent, PetFlavorService};
+use cama_app::pet_flavor::{PetFlavorEvent, PetFlavorService};
 use cama_app::pet_keepsake_commands::{
     DIARY_PAGE_SIZE, build_album_embed, build_diary_embed, gift_text,
 };
@@ -186,6 +186,7 @@ impl PetRegistrationProvider {
         }
     }
 
+    #[cfg(test)]
     /// Test/embedding convenience for callers without a configured AI
     /// provider. It still uses the live SQLite repositories and deterministic
     /// fallback flavor lines.
@@ -1638,6 +1639,12 @@ impl PetInteractionHandler {
         }
         let target_member = TargetMember {
             id: target.0,
+            display_name: self
+                .state
+                .player_names
+                .resolve_names(guild_id, &[target.0])
+                .await
+                .resolve_or(target.0, &target.1),
             is_bot: target.2,
         };
         let (handle, recorder) = self
@@ -3339,7 +3346,7 @@ fn optional_user(
     Ok(crate::option_ext::user_option(options, name)?.map(|user| {
         (
             user.id,
-            user.display_name_or_id(),
+            user.readable_display_name(),
             user.is_bot.unwrap_or(false),
         )
     }))
@@ -3736,15 +3743,6 @@ impl ProductionPetFlavorRuntime {
         pet: &Pet,
         status: Option<&cama_domain::pet::PetStatus>,
     ) -> Option<String> {
-        let event = match event {
-            PetFlavorEvent::Adopted => FlavorEvent::Adopted,
-            PetFlavorEvent::Status => FlavorEvent::Status,
-            PetFlavorEvent::Fed => FlavorEvent::Fed,
-            PetFlavorEvent::Spat => FlavorEvent::Spat,
-            PetFlavorEvent::Hatched => FlavorEvent::Hatched,
-            PetFlavorEvent::Evolved => FlavorEvent::Evolved,
-            PetFlavorEvent::Died => FlavorEvent::Died,
-        };
         Some(self.service.generate(event, pet, status))
     }
 }

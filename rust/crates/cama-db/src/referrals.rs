@@ -4,7 +4,7 @@
 //! an existing SQLite database through [`crate::open_runtime_connection`]. Enrollment and match
 //! settlement use `BEGIN IMMEDIATE`; all DDL in this tranche lives in disposable test fixtures.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use cama_db_core::profit_deductions::{
@@ -21,12 +21,14 @@ use crate::open_runtime_connection;
 
 pub const REFERRAL_REWARD: i64 = 100;
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MatchSide {
     Radiant,
     Dire,
 }
 
+#[cfg(test)]
 impl MatchSide {
     #[must_use]
     pub const fn number(self) -> i64 {
@@ -37,6 +39,7 @@ impl MatchSide {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 pub struct RecordReferralMatchRequest<'a> {
     pub guild_id: Option<i64>,
@@ -72,6 +75,7 @@ pub struct ReferralReward {
     pub referrer_net: i64,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecordReferralMatchOutcome {
     pub match_id: i64,
@@ -131,7 +135,7 @@ impl ReferralRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.path)
     }
 
@@ -180,6 +184,7 @@ impl ReferralRepository {
         }
     }
 
+    #[cfg(test)]
     /// Persist the bounded match core and settle all eligible first-match referrals together.
     ///
     /// The pending-match lookup is the retry guard. An existing row returns its persisted reward
@@ -265,6 +270,7 @@ impl ReferralRepository {
         })
     }
 
+    #[cfg(test)]
     /// Correct the winner while deliberately leaving referral claims, balances, and JC metadata
     /// untouched. Referral rewards are a first-record event, not a reversible result payout.
     pub fn correct_match_result(
@@ -367,6 +373,7 @@ impl ReferralRepository {
             .map_err(Into::into)
     }
 
+    #[cfg(test)]
     pub fn referral_rewards_for_match(
         &self,
         match_id: i64,
@@ -393,6 +400,7 @@ impl ReferralRepository {
             .map_err(Into::into)
     }
 
+    #[cfg(test)]
     pub fn match_jc_changes_json(
         &self,
         match_id: i64,
@@ -437,12 +445,15 @@ impl ReferralRepository {
             .map_err(Into::into)
     }
 
-    pub fn referral_schema_columns(&self) -> Result<BTreeSet<String>, ReferralRepositoryError> {
+    #[cfg(test)]
+    pub fn referral_schema_columns(
+        &self,
+    ) -> Result<std::collections::BTreeSet<String>, ReferralRepositoryError> {
         let connection = self.connection()?;
         let mut statement = connection.prepare("PRAGMA table_info(referrals)")?;
         statement
             .query_map([], |row| row.get(1))?
-            .collect::<Result<BTreeSet<_>, _>>()
+            .collect::<Result<std::collections::BTreeSet<_>, _>>()
             .map_err(Into::into)
     }
 }
@@ -500,6 +511,7 @@ fn is_constraint_violation(error: &rusqlite::Error) -> bool {
     )
 }
 
+#[cfg(test)]
 fn validate_participants(
     radiant_ids: &[i64],
     dire_ids: &[i64],
@@ -509,13 +521,17 @@ fn validate_participants(
         .chain(dire_ids)
         .copied()
         .collect::<Vec<_>>();
-    let unique = all.iter().copied().collect::<BTreeSet<_>>();
+    let unique = all
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
     if all.is_empty() || all.len() != unique.len() {
         return Err(ReferralRepositoryError::InvalidParticipants);
     }
     Ok(())
 }
 
+#[cfg(test)]
 fn insert_participants(
     transaction: &Transaction<'_>,
     match_id: i64,
@@ -723,6 +739,7 @@ pub(crate) fn encode_referral_jc_changes(changes: &BTreeMap<i64, i64>) -> String
     )
 }
 
+#[cfg(test)]
 fn update_match_counters(
     transaction: &Transaction<'_>,
     guild_id: i64,
@@ -747,6 +764,7 @@ fn update_match_counters(
     Ok(())
 }
 
+#[cfg(test)]
 fn referral_rewards_on(
     connection: &Connection,
     match_id: i64,
@@ -791,6 +809,7 @@ fn referral_rewards_on(
         .collect()
 }
 
+#[cfg(test)]
 /// The reward one beneficiary kept: the gross credit and every withheld
 /// share land on the ledger under the same referral attribution.
 fn referral_net_on_ledger(
@@ -808,6 +827,7 @@ fn referral_net_on_ledger(
     )
 }
 
+#[cfg(test)]
 fn encode_ids(ids: &[i64]) -> String {
     format!(
         "[{}]",

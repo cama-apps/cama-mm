@@ -26,7 +26,6 @@ use cama_db::trivia_commands_repository::TriviaCommandsRepository;
 use cama_domain::economy_scaling::scale_minigame_jc_delta;
 use cama_domain::mana::ManaEffects;
 use cama_domain::pet_evolution::PetActivity;
-use chrono::{Datelike, Duration as ChronoDuration, NaiveDate, Timelike, Weekday};
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -35,6 +34,7 @@ use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResol
 use crate::economy_events_worker::EconomyEventsWorkerConfig;
 use crate::gateway_events::{GatewayEventObserver, ReadyRecoveryContext, ReadyRecoveryReport};
 use crate::ids::signed_id;
+use crate::match_provider::pacific_mana_day;
 use crate::profit_deductions::ProfitDeductionSource;
 use crate::registration::{
     CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute, InteractionActionRow,
@@ -1256,7 +1256,7 @@ fn parse_component_id(custom_id: &str) -> Result<ParsedComponentId, String> {
 
 fn user_option(options: &[InteractionOption]) -> Result<(i64, String), String> {
     crate::option_ext::user_option(options, "user")?
-        .map(|user| (user.id, user.display_name_or_id()))
+        .map(|user| (user.id, user.readable_display_name()))
         .ok_or_else(|| "trivia reset requires a user".to_owned())
 }
 
@@ -1466,44 +1466,6 @@ fn unix_timestamp() -> Result<i64, String> {
             i64::try_from(duration.as_secs())
                 .map_err(|_| "system clock exceeds SQLite INTEGER".to_owned())
         })
-}
-
-fn pacific_mana_day(timestamp: i64) -> Result<String, String> {
-    let utc = chrono::DateTime::from_timestamp(timestamp, 0)
-        .ok_or_else(|| format!("invalid Unix timestamp {timestamp}"))?;
-    let year = utc.year();
-    let start = nth_weekday(year, 3, Weekday::Sun, 2)
-        .and_hms_opt(10, 0, 0)
-        .expect("valid DST transition")
-        .and_utc()
-        .timestamp();
-    let end = nth_weekday(year, 11, Weekday::Sun, 1)
-        .and_hms_opt(9, 0, 0)
-        .expect("valid DST transition")
-        .and_utc()
-        .timestamp();
-    let offset = if (start..end).contains(&timestamp) {
-        -7 * 3_600
-    } else {
-        -8 * 3_600
-    };
-    let local = chrono::DateTime::from_timestamp(timestamp + offset, 0)
-        .ok_or_else(|| format!("invalid Pacific timestamp {timestamp}"))?
-        .naive_utc();
-    let effective = if local.hour() < 4 {
-        local - ChronoDuration::days(1)
-    } else {
-        local
-    };
-    Ok(effective.format("%Y-%m-%d").to_string())
-}
-
-fn nth_weekday(year: i32, month: u32, weekday: Weekday, occurrence: u32) -> NaiveDate {
-    let first = NaiveDate::from_ymd_opt(year, month, 1).expect("valid fixed month");
-    let delta = (7 + i64::from(weekday.num_days_from_sunday())
-        - i64::from(first.weekday().num_days_from_sunday()))
-        % 7;
-    first + ChronoDuration::days(delta + 7 * i64::from(occurrence - 1))
 }
 
 struct TriviaImageCacheWarmObserver {

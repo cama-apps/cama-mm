@@ -148,6 +148,19 @@ impl Fixture {
         Connection::open(self.database.path()).expect("open Shop fixture connection")
     }
 
+    /// Settle one hostile loss through the production batch path.
+    fn settle_hostile_loss(
+        &self,
+        request: &HostileLossRequest,
+    ) -> Result<HostileLossSettlement, String> {
+        let mut results = self
+            .repository
+            .apply_hostile_losses(std::slice::from_ref(request))
+            .expect("hostile loss batch");
+        assert_eq!(results.len(), 1);
+        results.remove(0)
+    }
+
     fn player(&self, discord_id: i64, balance: i64) {
         self.connection()
             .execute(
@@ -707,8 +720,7 @@ fn test_protection_guardian_halves_current_loss_and_spends_absorbed_capacity() {
         .expect("seed Plains Guardian");
 
     let result = fixture
-        .repository
-        .apply_hostile_loss(&HostileLossRequest {
+        .settle_hostile_loss(&HostileLossRequest {
             victim_id: VICTIM,
             guild_id: GUILD,
             requested: 20,
@@ -784,8 +796,7 @@ fn test_protection_counterspell_does_not_absorb_self_inflicted_wheel_loss() {
         .expect("seed Plains Guardian");
 
     let result = fixture
-        .repository
-        .apply_hostile_loss(&HostileLossRequest {
+        .settle_hostile_loss(&HostileLossRequest {
             victim_id: VICTIM,
             guild_id: GUILD,
             requested: 100,
@@ -848,8 +859,7 @@ fn test_protection_aegis_capacity_reduces_both_sides_of_player_transfer() {
         .expect("seed Aegis");
 
     let result = fixture
-        .repository
-        .apply_hostile_loss(&HostileLossRequest {
+        .settle_hostile_loss(&HostileLossRequest {
             victim_id: VICTIM,
             guild_id: GUILD,
             requested: 100,
@@ -894,8 +904,7 @@ fn test_protection_aegis_capacity_reduces_both_sides_of_player_transfer() {
         25
     );
     let duplicate = fixture
-        .repository
-        .apply_hostile_loss(&HostileLossRequest {
+        .settle_hostile_loss(&HostileLossRequest {
             event_key: "red-shell:one".to_owned(),
             ..HostileLossRequest {
                 victim_id: VICTIM,
@@ -966,12 +975,10 @@ fn test_protection_shared_sanctuary_pool_is_consumed_by_caster_and_ally() {
         mana_date: "2033-05-18".to_owned(),
     };
     let caster = fixture
-        .repository
-        .apply_hostile_loss(&request(VICTIM, 100, "bolt:caster"))
+        .settle_hostile_loss(&request(VICTIM, 100, "bolt:caster"))
         .expect("caster Sanctuary settlement");
     let ally = fixture
-        .repository
-        .apply_hostile_loss(&request(303, 80, "bolt:ally"))
+        .settle_hostile_loss(&request(303, 80, "bolt:ally"))
         .expect("ally Sanctuary settlement");
 
     assert_eq!((caster.absorbed, caster.applied), (100, 0));
@@ -1236,8 +1243,7 @@ fn test_protection_reprieve_then_guardian_compound_in_documented_order() {
         .expect("seed Guardian");
 
     let result = fixture
-        .repository
-        .apply_hostile_loss(&HostileLossRequest {
+        .settle_hostile_loss(&HostileLossRequest {
             victim_id: VICTIM,
             guild_id: GUILD,
             requested: 20,
@@ -1318,8 +1324,7 @@ fn test_protection_self_caused_loss_bypasses_shields_and_retro() {
         )
         .expect("seed Guardian");
     let result = fixture
-        .repository
-        .apply_hostile_loss(&HostileLossRequest {
+        .settle_hostile_loss(&HostileLossRequest {
             victim_id: VICTIM,
             guild_id: GUILD,
             requested: 20,
@@ -1377,17 +1382,66 @@ fn hostile_retry_rejects_a_changed_self_protection_semantic() {
         mana_date: "2033-05-18".to_owned(),
     };
     fixture
-        .repository
-        .apply_hostile_loss(&request)
+        .settle_hostile_loss(&request)
         .expect("initial self loss");
     let changed_semantics = HostileLossRequest {
         protect_self: true,
         ..request
     };
-    assert!(matches!(
-        fixture.repository.apply_hostile_loss(&changed_semantics),
-        Err(ShopRuntimeRepositoryError::EventPayloadConflict)
-    ));
+    assert_eq!(
+        fixture.settle_hostile_loss(&changed_semantics),
+        Err(ShopRuntimeRepositoryError::EventPayloadConflict.to_string())
+    );
+}
+
+#[test]
+fn hostile_batch_once_returns_recorded_losses_and_settles_only_new_victims() {
+    const SECOND: i64 = VICTIM + 1;
+    let fixture = Fixture::new();
+    fixture.player(VICTIM, 100);
+    fixture.player(SECOND, 100);
+    let request = |victim_id: i64, requested: i64| HostileLossRequest {
+        victim_id,
+        guild_id: GUILD,
+        requested,
+        kind: "recession".to_owned(),
+        actor_id: Some(VICTIM + 99),
+        event_key: format!("spin:{victim_id}"),
+        destination: HostileDestination::Reserve,
+        recipient_id: None,
+        clamp_to_balance: true,
+        min_balance: None,
+        protect_self: false,
+        metadata: json!({}),
+        occurred_at: NOW,
+        mana_date: "2033-05-18".to_owned(),
+    };
+    fixture
+        .repository
+        .apply_hostile_losses_once(&[request(VICTIM, 20)])
+        .expect("first partial batch");
+    // The retry re-derives a smaller amount from the already-debited balance;
+    // the recorded loss is reused instead of conflicting or charging again.
+    let retry = fixture
+        .repository
+        .apply_hostile_losses_once(&[request(VICTIM, 16), request(SECOND, 20)])
+        .expect("retried batch");
+    let first = retry[0].as_ref().expect("recorded settlement");
+    assert!(first.duplicate);
+    assert_eq!(first.applied, 20);
+    let second = retry[1].as_ref().expect("new settlement");
+    assert!(!second.duplicate);
+    assert_eq!(second.applied, 20);
+    let balance = |discord_id| {
+        fixture
+            .repository
+            .player(discord_id, GUILD)
+            .unwrap()
+            .unwrap()
+            .balance
+    };
+    assert_eq!(balance(VICTIM), 80);
+    assert_eq!(balance(SECOND), 80);
 }
 
 #[test]
@@ -1395,8 +1449,7 @@ fn test_protection_reprieve_retro_uses_rolling_pool_and_is_idempotent() {
     let fixture = Fixture::new();
     fixture.player(VICTIM, 100);
     let loss = fixture
-        .repository
-        .apply_hostile_loss(&HostileLossRequest {
+        .settle_hostile_loss(&HostileLossRequest {
             victim_id: VICTIM,
             guild_id: GUILD,
             requested: 20,
@@ -1499,8 +1552,7 @@ fn test_protection_min_balance_short_circuits_before_spending_pool() {
         )
         .expect("seed Aegis");
     let result = fixture
-        .repository
-        .apply_hostile_loss(&HostileLossRequest {
+        .settle_hostile_loss(&HostileLossRequest {
             victim_id: VICTIM,
             guild_id: GUILD,
             requested: 20,
@@ -1636,8 +1688,7 @@ fn test_protection_is_guild_isolated() {
         )
         .expect("seed primary-guild Aegis");
     let result = fixture
-        .repository
-        .apply_hostile_loss(&HostileLossRequest {
+        .settle_hostile_loss(&HostileLossRequest {
             victim_id: VICTIM,
             guild_id: PROTECTION_OTHER_GUILD,
             requested: 20,
@@ -1722,8 +1773,7 @@ fn hostile_transfer_consumes_protection_once_and_attributes_both_ledger_sides() 
         mana_date: "2033-05-18".to_owned(),
     };
     let first = fixture
-        .repository
-        .apply_hostile_loss(&request)
+        .settle_hostile_loss(&request)
         .expect("hostile transfer");
     assert_eq!((first.absorbed, first.applied), (75, 25));
     assert_eq!(
@@ -1731,8 +1781,7 @@ fn hostile_transfer_consumes_protection_once_and_attributes_both_ledger_sides() 
         (75, Some(35))
     );
     let duplicate = fixture
-        .repository
-        .apply_hostile_loss(&request)
+        .settle_hostile_loss(&request)
         .expect("idempotent hostile retry");
     assert!(duplicate.duplicate);
     let connection = fixture.connection();
@@ -1816,10 +1865,10 @@ fn hostile_batch_uses_per_request_savepoints_and_detects_conflicting_retry() {
         requested: 11,
         ..first
     };
-    assert!(matches!(
-        fixture.repository.apply_hostile_loss(&conflict),
-        Err(ShopRuntimeRepositoryError::EventPayloadConflict)
-    ));
+    assert_eq!(
+        fixture.settle_hostile_loss(&conflict),
+        Err(ShopRuntimeRepositoryError::EventPayloadConflict.to_string())
+    );
     assert_eq!(
         fixture
             .repository

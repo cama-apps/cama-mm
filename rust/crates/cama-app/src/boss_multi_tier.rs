@@ -31,7 +31,7 @@ use crate::dig_bosses::{
 };
 use crate::dig_relic_rework::{
     RelicEntropy, RelicSet, SHIFTING_IDOL_PLAYER_HIT_CEILING, ShiftingIdolBonus, ShiftingIdolStats,
-    apply_shifting_idol_stats,
+    TROPHY_CARVE_RATE, apply_shifting_idol_stats, trophy_relic_for_boss,
 };
 
 pub const PHASE_TWO_MIN_PRESTIGE: i32 = 2;
@@ -49,18 +49,7 @@ pub const BOSS_LOSS_EXTRA_COOLDOWN_SECONDS: i64 = 3_600;
 pub const ECHO_WINDOW_SECONDS: i64 = 86_400;
 pub const ECHO_WAGER_PROFIT_MULTIPLIER: f64 = 0.70;
 
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
-pub struct GuildId(pub i64);
-
-impl GuildId {
-    #[must_use]
-    pub const fn from_optional(value: Option<i64>) -> Self {
-        match value {
-            Some(value) => Self(value),
-            None => Self(0),
-        }
-    }
-}
+pub use cama_domain::guild::GuildId;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct PlayerKey {
@@ -735,6 +724,7 @@ impl Default for InMemoryGearRepair {
 }
 
 impl InMemoryGearRepair {
+    #[cfg(test)]
     pub fn add_piece(&mut self, key: PlayerKey, slot: GearSlot, durability: i32) -> i64 {
         self.next_id += 1;
         let id = self.next_id;
@@ -761,10 +751,6 @@ impl InMemoryGearRepair {
     #[must_use]
     pub fn piece(&self, key: PlayerKey, gear_id: i64) -> Option<&GearRecord> {
         self.pieces.get(&(key, gear_id))
-    }
-
-    pub fn set_repair_bill(&mut self, amount: i64) {
-        self.repair_bill = amount.max(0);
     }
 }
 
@@ -1213,6 +1199,9 @@ pub struct PausedBossDuel {
     pub forced_no_wager_phase: bool,
     pub echo_applied: bool,
     pub echo_killer_id: Option<i64>,
+    /// Whether the stake was debited when the duel paused. Duels paused before
+    /// stakes were escrowed read as `false` and settle the legacy way.
+    pub wager_escrowed: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1282,6 +1271,13 @@ pub struct RepositoryCommit {
     /// Sibling debit for a player in low priority, recorded on its own row.
     pub low_priority_tax: i64,
     pub preparation_mutation: BossPreparationMutation,
+    /// Paused duel saved in the same guarded commit that escrows its stake.
+    /// The commit fails with [`RepositoryError::DuelAlreadyActive`] instead of
+    /// replacing a duel that is already paused.
+    pub paused_duel: Option<PausedBossDuel>,
+    /// Signature trophy carved by this full kill, granted in the same guarded
+    /// commit and skipped there when the player already owns it.
+    pub trophy_relic: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1304,6 +1300,8 @@ pub enum RepositoryError {
     Conflict,
     #[error("an injected repository failure occurred")]
     InjectedFailure,
+    #[error("a paused boss duel is already active")]
+    DuelAlreadyActive,
 }
 
 pub trait BossRepositoryPort {
@@ -1313,11 +1311,6 @@ pub trait BossRepositoryPort {
         key: PlayerKey,
         expected_revision: u64,
         commit: RepositoryCommit,
-    ) -> Result<(), RepositoryError>;
-    fn save_active_duel(
-        &mut self,
-        key: PlayerKey,
-        duel: PausedBossDuel,
     ) -> Result<(), RepositoryError>;
     fn claim_active_duel(
         &mut self,
@@ -1350,6 +1343,7 @@ impl InMemoryBossRepository {
         self.tunnels.insert(key, tunnel);
     }
 
+    #[cfg(test)]
     pub fn inject_commit_failure(&mut self) {
         self.fail_next_commit = true;
     }
@@ -1377,6 +1371,9 @@ impl BossRepositoryPort for InMemoryBossRepository {
         if current.revision != expected_revision {
             return Err(RepositoryError::Conflict);
         }
+        if commit.paused_duel.is_some() && self.active_duels.contains_key(&key) {
+            return Err(RepositoryError::DuelAlreadyActive);
+        }
         commit.next_tunnel.revision = expected_revision.saturating_add(1);
         self.tunnels.insert(key, commit.next_tunnel);
         if let Some(audit) = commit.audit {
@@ -1386,18 +1383,9 @@ impl BossRepositoryPort for InMemoryBossRepository {
             self.echoes
                 .insert((key.guild_id, echo.boss_id.clone()), echo);
         }
-        Ok(())
-    }
-
-    fn save_active_duel(
-        &mut self,
-        key: PlayerKey,
-        duel: PausedBossDuel,
-    ) -> Result<(), RepositoryError> {
-        if !self.tunnels.contains_key(&key) {
-            return Err(RepositoryError::MissingTunnel);
+        if let Some(duel) = commit.paused_duel {
+            self.active_duels.insert(key, duel);
         }
-        self.active_duels.insert(key, duel);
         Ok(())
     }
 
@@ -1527,6 +1515,7 @@ pub struct ScoutOdds {
 }
 
 impl ScoutOdds {
+    #[cfg(test)]
     #[must_use]
     pub const fn for_risk(&self, risk: RiskTier) -> &ScoutRiskDetails {
         match risk {
@@ -1561,8 +1550,104 @@ pub enum BossServiceError {
     LanternRequired,
     #[error("a boss curse blocks this scout; the Lantern was not consumed")]
     ScoutCurseBlocked,
+    #[error("this boss fight ended before the duel was answered, so its wager was forfeited")]
+    DuelEncounterEnded,
+    /// Python's `_boss_resolution_conflict_result`: the encounter this fight
+    /// started on was settled before its outcome could be.
+    #[error("This boss fight was already resolved by another view.")]
+    FightResolvedElsewhere,
     #[error(transparent)]
     Repository(#[from] RepositoryError),
+}
+
+/// A new boss stake after the halve-next-wager curse. This is the one policy
+/// every regular and pinnacle start uses to price a fresh wager.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BossStake {
+    pub amount: i64,
+    pub consumes_halving_curse: bool,
+}
+
+impl BossStake {
+    /// Reject a negative wager, round a cursed wager up to half, and require
+    /// the balance to cover the effective stake. Nothing is committed here:
+    /// the curse is consumed by the commit that escrows the stake.
+    pub fn resolve(tunnel: &TunnelState, requested: i64) -> Result<Self, BossServiceError> {
+        if requested < 0 {
+            return Err(BossServiceError::NegativeWager);
+        }
+        if requested == 0 {
+            return Ok(Self {
+                amount: 0,
+                consumes_halving_curse: false,
+            });
+        }
+        let cursed = tunnel.stinger_curse.contains(CurseKind::HalveNextWager);
+        let amount = if cursed {
+            requested / 2 + requested % 2
+        } else {
+            requested
+        };
+        if tunnel.balance < amount {
+            return Err(BossServiceError::InsufficientBalance {
+                wager: amount,
+                balance: tunnel.balance,
+            });
+        }
+        Ok(Self {
+            amount,
+            consumes_halving_curse: cursed,
+        })
+    }
+
+    /// Debit the stake from `tunnel` and consume the curse that halved it, for
+    /// the commit that escrows the stake. The balance must still cover it.
+    pub fn escrow(self, tunnel: &mut TunnelState) -> Result<(), BossServiceError> {
+        // A free fight stakes nothing, so a player in debt can still take it.
+        if self.amount > 0 && tunnel.balance < self.amount {
+            return Err(BossServiceError::InsufficientBalance {
+                wager: self.amount,
+                balance: tunnel.balance,
+            });
+        }
+        tunnel.balance -= self.amount;
+        if self.consumes_halving_curse {
+            tunnel.stinger_curse.consume(CurseKind::HalveNextWager);
+        }
+        Ok(())
+    }
+}
+
+/// Where a fight's wager stands when the fight settles.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WagerEscrow {
+    /// The stake left the balance when the duel paused (or was carried
+    /// escrowed from an earlier pinnacle phase). A win returns it with the
+    /// profit; a loss or forfeit moves nothing more.
+    Escrowed,
+    /// The fight never paused, so the settlement escrows the stake in its own
+    /// commit and then settles it exactly like [`Self::Escrowed`].
+    Pending { consumes_halving_curse: bool },
+    /// Paused before stakes were escrowed: a loss debits what the balance
+    /// still holds and a win pays only the profit.
+    Legacy,
+}
+
+impl WagerEscrow {
+    #[must_use]
+    pub const fn for_paused(wager_escrowed: bool) -> Self {
+        if wager_escrowed {
+            Self::Escrowed
+        } else {
+            Self::Legacy
+        }
+    }
+
+    /// Whether the settled stake was (or is now being) escrowed.
+    #[must_use]
+    pub const fn escrows(self) -> bool {
+        !matches!(self, Self::Legacy)
+    }
 }
 
 #[must_use]
@@ -1626,19 +1711,6 @@ pub fn at_boss_boundary(depth: i32, progress: &BossProgress) -> Option<i32> {
                 .unwrap_or(BossStatus::Active)
                 .unfinished()
     })
-}
-
-#[must_use]
-pub fn locked_boss_id(progress: &BossProgress, boundary: i32, prestige_level: i32) -> Option<&str> {
-    if let Some(BossProgressValue::Entry(entry)) = progress.get(&boundary.to_string())
-        && let Some(boss_id) = entry.boss_id.as_deref()
-        && !boss_id.is_empty()
-    {
-        return Some(boss_id);
-    }
-    boss_pool_for_tier(boundary, prestige_level)
-        .first()
-        .map(|boss| boss.boss_id)
 }
 
 #[must_use]
@@ -2271,44 +2343,37 @@ where
         }
     }
 
-    fn resolve_new_wager(&mut self, key: PlayerKey, wager: i64) -> Result<i64, BossServiceError> {
-        if wager < 0 {
-            return Err(BossServiceError::NegativeWager);
-        }
-        if wager == 0 {
-            return Ok(0);
-        }
-        loop {
+    /// Save a freshly paused duel in the same guarded commit that escrows its
+    /// stake and consumes the curse that halved it, so a paused duel always
+    /// owns money already taken from the balance.
+    fn escrow_paused_duel(
+        &mut self,
+        key: PlayerKey,
+        stake: BossStake,
+        paused: &PausedBossDuel,
+    ) -> Result<(), BossServiceError> {
+        for _ in 0..RESOLVE_FIGHT_COMMIT_ATTEMPTS {
             let tunnel = self
                 .repository
                 .load_tunnel(key)
                 .ok_or(BossServiceError::MissingTunnel)?;
-            let cursed = tunnel.stinger_curse.contains(CurseKind::HalveNextWager);
-            let effective = if cursed { wager / 2 + wager % 2 } else { wager };
-            if tunnel.balance < effective {
-                return Err(BossServiceError::InsufficientBalance {
-                    wager: effective,
-                    balance: tunnel.balance,
-                });
-            }
-            if !cursed {
-                return Ok(effective);
-            }
             let mut next = tunnel.clone();
-            next.stinger_curse.consume(CurseKind::HalveNextWager);
+            stake.escrow(&mut next)?;
             match self.repository.commit(
                 key,
                 tunnel.revision,
                 RepositoryCommit {
                     next_tunnel: next,
+                    paused_duel: Some(paused.clone()),
                     ..RepositoryCommit::default()
                 },
             ) {
-                Ok(()) => return Ok(effective),
-                Err(RepositoryError::Conflict) => continue,
+                Ok(()) => return Ok(()),
+                Err(RepositoryError::Conflict) => {}
                 Err(error) => return Err(error.into()),
             }
         }
+        Err(BossServiceError::Repository(RepositoryError::Conflict))
     }
 
     fn build_combat(&mut self, request: BuildCombatRequest<'_>) -> (CombatState, i32, bool, bool) {
@@ -2562,7 +2627,7 @@ where
     ///
     /// A resume has already claimed (deleted) the paused duel row, so a
     /// concurrent write that loses the revision race must not abandon the
-    /// settlement: the wager would escape and no later start could forfeit it.
+    /// settlement: a won fight would never pay back its escrowed stake.
     /// The fight outcome, round log, and gear snapshot are fixed inputs, and
     /// nothing is committed before the guarded commit, so replaying the
     /// settlement against the fresh tunnel is safe.
@@ -2587,10 +2652,40 @@ where
             .repository
             .load_tunnel(input.key)
             .ok_or(BossServiceError::MissingTunnel)?;
+        // The fight only settles against the encounter it started on. A tunnel
+        // that retreated, abandoned, or was knocked off the boundary since the
+        // pause must not have its depth restored or its wager paid.
+        let still_engaged = at_boss_boundary(tunnel.depth, &tunnel.boss_progress)
+            == Some(input.boundary)
+            && matches!(
+                tunnel.boss_progress.get(&input.boundary.to_string()),
+                Some(BossProgressValue::Entry(entry))
+                    if entry.boss_id.as_deref() == Some(input.boss_id.as_str())
+            );
+        if !still_engaged {
+            return Err(BossServiceError::FightResolvedElsewhere);
+        }
         if input.consumed_phase_event {
             progress_entry_mut(&mut tunnel.boss_progress, input.boundary).pending_phase_event_id =
                 None;
         }
+        // A stake that was escrowed comes back with a win. A fight that never
+        // paused escrows its stake in this same commit first, so it settles
+        // identically.
+        let returned_stake = match input.escrow {
+            WagerEscrow::Escrowed => input.wager,
+            WagerEscrow::Pending {
+                consumes_halving_curse,
+            } => {
+                BossStake {
+                    amount: input.wager,
+                    consumes_halving_curse,
+                }
+                .escrow(&mut tunnel)?;
+                input.wager
+            }
+            WagerEscrow::Legacy => 0,
+        };
         let status = tunnel
             .boss_progress
             .get(&input.boundary.to_string())
@@ -2601,6 +2696,7 @@ where
             if let Some(next_phase) = phase_after_win(status, input.boundary, tunnel.prestige_level)
             {
                 let mut next = tunnel.clone();
+                next.balance = next.balance.saturating_add(returned_stake);
                 let entry = progress_entry_mut(&mut next.boss_progress, input.boundary);
                 entry.status = next_phase;
                 entry.hp_remaining = None;
@@ -2631,6 +2727,8 @@ where
                         vanity_tax: 0,
                         low_priority_tax: 0,
                         preparation_mutation: BossPreparationMutation::Preserve,
+                        paused_duel: None,
+                        trophy_relic: None,
                     },
                 )?;
                 let gear_wear =
@@ -2683,7 +2781,10 @@ where
                 },
             );
             let mut next = tunnel.clone();
-            next.balance = next.balance.saturating_add(economy.credited);
+            next.balance = next
+                .balance
+                .saturating_add(economy.credited)
+                .saturating_add(returned_stake);
             next.depth = input.boundary;
             next.max_depth = next.max_depth.max(input.boundary);
             next.boss_attempts = 0;
@@ -2700,6 +2801,11 @@ where
             entry.last_outcome = Some("defeated".to_owned());
             entry.first_meet_seen = true;
             entry.pending_phase_event_id = None;
+            // Python's `_maybe_carve_trophy_relic`: every full kill of a
+            // trophy boss carves its signature trophy at the carve rate. The
+            // guarded commit skips one the player already owns.
+            let trophy_relic = trophy_relic_for_boss(&input.boss_id)
+                .filter(|_| self.entropy.next_unit() < TROPHY_CARVE_RATE);
             self.repository.commit(
                 input.key,
                 tunnel.revision,
@@ -2724,6 +2830,8 @@ where
                     preparation_mutation: BossPreparationMutation::Clear {
                         boundary: input.boundary,
                     },
+                    paused_duel: None,
+                    trophy_relic,
                 },
             )?;
             let gear_wear =
@@ -2780,14 +2888,21 @@ where
         } else {
             raw_knockback
         };
-        let requested_debit = if input.wager > 0 {
-            input.wager
+        // An escrowed stake is already gone, so a loss takes nothing more. Only
+        // a legacy pause, or a free fight's repair bill, still debits here.
+        let (stake_lost, requested_debit) = if input.wager > 0 {
+            if input.escrow.escrows() {
+                (input.wager, 0)
+            } else {
+                (0, input.wager)
+            }
         } else if input.forced_no_wager_phase {
-            0
+            (0, 0)
         } else {
-            self.gear_repair.repair_bill()
+            (0, self.gear_repair.repair_bill())
         };
         let actual_debit = requested_debit.min(tunnel.balance.max(0));
+        let jc_delta = -stake_lost.saturating_add(actual_debit);
         let mut next = tunnel.clone();
         next.balance = next.balance.saturating_sub(actual_debit);
         next.depth = (next.depth - knockback).max(0);
@@ -2817,7 +2932,7 @@ where
                     boss_id: input.boss_id.clone(),
                     boundary: input.boundary,
                     won: false,
-                    jc_delta: -actual_debit,
+                    jc_delta,
                     depth_after,
                 }),
                 echo: None,
@@ -2827,6 +2942,8 @@ where
                 preparation_mutation: BossPreparationMutation::Clear {
                     boundary: input.boundary,
                 },
+                paused_duel: None,
+                trophy_relic: None,
             },
         )?;
         let gear_wear =
@@ -2838,7 +2955,7 @@ where
             boundary: input.boundary,
             wager: input.wager,
             win_chance: input.win_chance,
-            jc_delta: -actual_debit,
+            jc_delta,
             gross_payout: 0,
             bankruptcy_penalty: 0,
             vanity_tax: 0,
@@ -2882,7 +2999,8 @@ where
         {
             return Err(BossServiceError::WagerNotAllowed);
         }
-        let wager = self.resolve_new_wager(key, wager)?;
+        let stake = BossStake::resolve(&initial, wager)?;
+        let wager = stake.amount;
         self.preparation_activation.activate(key, boundary)?;
         let boss = self.ensure_boss_locked(key, boundary)?;
         let mut tunnel = self
@@ -2939,8 +3057,9 @@ where
                     forced_no_wager_phase: forced,
                     echo_applied,
                     echo_killer_id: active_echo.as_ref().map(|echo| echo.killer_id),
+                    wager_escrowed: true,
                 };
-                self.repository.save_active_duel(key, paused.clone())?;
+                self.escrow_paused_duel(key, stake, &paused)?;
                 self.outcome_sink.emit(BossNotice::PromptReady {
                     key,
                     boss_id: paused.boss_id.clone(),
@@ -2965,6 +3084,9 @@ where
                         win_chance: initial_win_chance,
                         echo_applied,
                         forced_no_wager_phase: forced,
+                        escrow: WagerEscrow::Pending {
+                            consumes_halving_curse: stake.consumes_halving_curse,
+                        },
                         consumed_phase_event,
                         boss_preparation: combat.effects.boss_preparation.clone(),
                         warding_salts_blocked: false,
@@ -2987,6 +3109,9 @@ where
             win_chance: initial_win_chance,
             echo_applied,
             forced_no_wager_phase: forced,
+            escrow: WagerEscrow::Pending {
+                consumes_halving_curse: stake.consumes_halving_curse,
+            },
             consumed_phase_event,
             boss_preparation: combat.effects.boss_preparation.clone(),
             warding_salts_blocked: false,
@@ -3126,103 +3251,12 @@ where
             win_chance: paused.initial_win_chance,
             echo_applied: paused.echo_applied,
             forced_no_wager_phase: paused.forced_no_wager_phase,
+            escrow: WagerEscrow::for_paused(paused.wager_escrowed),
             consumed_phase_event: false,
             boss_preparation: paused.combat.effects.boss_preparation,
             warding_salts_blocked,
             gear_snapshot: paused.gear_snapshot,
             round_log: paused.round_log,
-        })
-    }
-
-    pub fn fight_boss(
-        &mut self,
-        key: PlayerKey,
-        risk_tier: RiskTier,
-        wager: i64,
-    ) -> Result<ResolvedFight, BossServiceError> {
-        self.fight_boss_with_override(key, risk_tier, wager, None)
-    }
-
-    pub fn fight_boss_with_override(
-        &mut self,
-        key: PlayerKey,
-        risk_tier: RiskTier,
-        wager: i64,
-        combat_override: Option<CombatState>,
-    ) -> Result<ResolvedFight, BossServiceError> {
-        let initial = self
-            .repository
-            .load_tunnel(key)
-            .ok_or(BossServiceError::MissingTunnel)?;
-        let boundary = at_boss_boundary(initial.depth, &initial.boss_progress)
-            .ok_or(BossServiceError::NotAtBossBoundary)?;
-        if wager > 0
-            && !regular_boss_wager_allowed(&initial.boss_progress, boundary, initial.prestige_level)
-        {
-            return Err(BossServiceError::WagerNotAllowed);
-        }
-        let wager = self.resolve_new_wager(key, wager)?;
-        self.preparation_activation.activate(key, boundary)?;
-        let boss = self.ensure_boss_locked(key, boundary)?;
-        let mut tunnel = self
-            .repository
-            .load_tunnel(key)
-            .ok_or(BossServiceError::MissingTunnel)?;
-        let echo = self
-            .repository
-            .active_echo(key.guild_id, boss.boss_id, self.clock.now());
-        let echo_applied = echo
-            .as_ref()
-            .is_some_and(|record| record.killer_id != key.player_id);
-        let (default_combat, boss_hp_max, forced, consumed_phase_event) =
-            self.build_combat(BuildCombatRequest {
-                key,
-                tunnel: &mut tunnel,
-                boss,
-                boundary,
-                risk: risk_tier,
-                wager,
-                echo_applied,
-                consume_phase_event: true,
-            });
-        let has_override = combat_override.is_some();
-        let mut combat = combat_override.unwrap_or(default_combat);
-        let boss_hp_max = if has_override {
-            combat.boss_hp.max(1)
-        } else {
-            boss_hp_max
-        };
-        let starting_boss_hp = combat.boss_hp;
-        let win_chance = combat_win_probability(&combat);
-        let gear_snapshot = self.gear_repair.snapshot(key);
-        let mut round_log = Vec::new();
-        let mut won = None;
-        for round_num in 1..=BOSS_ROUND_CAP {
-            let (record, terminal) = run_combat_round(round_num, &mut combat, &mut self.entropy);
-            round_log.push(record);
-            if terminal.is_some() {
-                won = terminal;
-                break;
-            }
-        }
-        self.resolve_fight(ResolveFightInput {
-            key,
-            boss_id: boss.boss_id.to_owned(),
-            boundary,
-            risk_tier,
-            wager,
-            won: won.unwrap_or(false),
-            ending_boss_hp: combat.boss_hp,
-            boss_hp_max,
-            starting_boss_hp,
-            win_chance,
-            echo_applied,
-            forced_no_wager_phase: forced,
-            consumed_phase_event,
-            boss_preparation: combat.effects.boss_preparation.clone(),
-            warding_salts_blocked: false,
-            gear_snapshot,
-            round_log,
         })
     }
 
@@ -3404,6 +3438,8 @@ where
                 vanity_tax: 0,
                 low_priority_tax: 0,
                 preparation_mutation: BossPreparationMutation::Preserve,
+                paused_duel: None,
+                trophy_relic: None,
             },
         )?;
         Ok(loss)
@@ -3450,6 +3486,7 @@ struct ResolveFightInput {
     win_chance: f64,
     echo_applied: bool,
     forced_no_wager_phase: bool,
+    escrow: WagerEscrow,
     consumed_phase_event: bool,
     boss_preparation: Option<BossPreparationState>,
     warding_salts_blocked: bool,

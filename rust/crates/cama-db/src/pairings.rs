@@ -114,7 +114,7 @@ impl PairingsRepository {
         if id1 < id2 { (id1, id2) } else { (id2, id1) }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         #[cfg(test)]
         self.connection_count.fetch_add(1, AtomicOrdering::Relaxed);
         open_runtime_connection(&self.path)
@@ -254,23 +254,6 @@ impl PairingsRepository {
         )
     }
 
-    pub fn get_evenly_matched_teammates(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-        min_games: i64,
-        limit: i64,
-    ) -> Result<Vec<TeammatePairing>, rusqlite::Error> {
-        self.query_teammates(
-            discord_id,
-            guild_id,
-            min_games,
-            limit,
-            "AND CAST(wins_together AS REAL) / games_together = 0.5
-             ORDER BY games_together DESC",
-        )
-    }
-
     fn query_teammates(
         &self,
         discord_id: i64,
@@ -369,27 +352,6 @@ impl PairingsRepository {
         )
     }
 
-    pub fn get_evenly_matched_opponents(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-        min_games: i64,
-        limit: i64,
-    ) -> Result<Vec<OpponentPairing>, rusqlite::Error> {
-        self.query_opponents(
-            discord_id,
-            guild_id,
-            min_games,
-            limit,
-            "AND CAST(
-                 CASE WHEN player1_id = ?1
-                      THEN player1_wins_against
-                      ELSE games_against - player1_wins_against END AS REAL
-             ) / games_against = 0.5
-             ORDER BY games_against DESC",
-        )
-    }
-
     fn query_opponents(
         &self,
         discord_id: i64,
@@ -435,28 +397,6 @@ impl PairingsRepository {
                 },
             )?
             .collect()
-    }
-
-    pub fn get_pairing_counts(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-        min_games: i64,
-    ) -> Result<PairingCounts, rusqlite::Error> {
-        let connection = self.connection()?;
-        connection.query_row(
-            "SELECT COUNT(CASE WHEN games_together >= ?1 THEN 1 END),
-                    COUNT(CASE WHEN games_against >= ?1 THEN 1 END)
-             FROM player_pairings
-             WHERE guild_id = ?2 AND (player1_id = ?3 OR player2_id = ?3)",
-            params![min_games, Self::normalize_guild_id(guild_id), discord_id],
-            |row| {
-                Ok(PairingCounts {
-                    unique_teammates: row.get(0)?,
-                    unique_opponents: row.get(1)?,
-                })
-            },
-        )
     }
 
     pub fn get_head_to_head(
@@ -1331,45 +1271,6 @@ mod tests {
         assert_eq!(
             (most_played[0].opponent_id, most_played[0].games_against),
             (10, 5)
-        );
-    }
-
-    #[test]
-    fn test_get_evenly_matched_teammates_and_opponents() {
-        let file = database();
-        let repository = PairingsRepository::new(file.path());
-        insert_pairing(&file, GUILD_ID, 1, 2, 4, 2, 0, 0);
-        insert_pairing(&file, GUILD_ID, 1, 6, 0, 0, 4, 2);
-
-        let teammates = repository
-            .get_evenly_matched_teammates(1, Some(GUILD_ID), 4, 5)
-            .expect("get even teammates");
-        assert!(teammates.iter().any(|row| row.teammate_id == 2));
-        let opponents = repository
-            .get_evenly_matched_opponents(1, Some(GUILD_ID), 4, 5)
-            .expect("get even opponents");
-        assert!(opponents.iter().any(|row| row.opponent_id == 6));
-    }
-
-    #[test]
-    fn test_get_pairing_counts() {
-        let file = database();
-        let repository = PairingsRepository::new(file.path());
-        for teammate_id in 2..=5 {
-            insert_pairing(&file, GUILD_ID, 1, teammate_id, 1, 1, 0, 0);
-        }
-        for opponent_id in 6..=10 {
-            insert_pairing(&file, GUILD_ID, 1, opponent_id, 0, 0, 1, 1);
-        }
-
-        assert_eq!(
-            repository
-                .get_pairing_counts(1, Some(GUILD_ID), 1)
-                .expect("get pairing counts"),
-            PairingCounts {
-                unique_teammates: 4,
-                unique_opponents: 5,
-            }
         );
     }
 

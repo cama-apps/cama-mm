@@ -66,18 +66,6 @@ fn test_factor_always_stays_inside_the_documented_band() {
 }
 
 #[test]
-fn test_adjusted_value_scales_the_base_rating() {
-    approx(adjusted_value(2_000.0, RoleRecord::new(5, 5)), 2_000.0);
-    approx(adjusted_value(2_000.0, RoleRecord::new(0, 10)), 1_800.0);
-    approx(adjusted_value(2_000.0, RoleRecord::new(10, 0)), 2_200.0);
-}
-
-#[test]
-fn test_adjusted_value_clamps_negative_ratings_at_zero() {
-    approx(adjusted_value(-100.0, RoleRecord::new(5, 5)), 0.0);
-}
-
-#[test]
 fn test_games_counts_both_columns() {
     assert_eq!(RoleRecord::new(4, 3).games(), 7);
     assert_eq!(RoleRecord::default().games(), 0);

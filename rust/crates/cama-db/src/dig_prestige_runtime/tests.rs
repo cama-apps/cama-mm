@@ -164,6 +164,14 @@ fn atomic_settlement_resets_exact_fields_and_commits_grant_and_relic() {
     assert_eq!(state.5, r#"["advance_boost"]"#);
     assert_eq!(state.6, r#"{"prestige_level":1,"awards":[]}"#);
     assert_eq!(state.7, None);
+    let route_state: Option<String> = connection
+        .query_row(
+            "SELECT route_state FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
+            params![ACTOR, GUILD],
+            |row| row.get(0),
+        )
+        .expect("settled route state");
+    assert_eq!(route_state, None);
     assert_eq!(
         connection
             .query_row(

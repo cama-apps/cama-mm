@@ -1,6 +1,5 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
-use std::convert::Infallible;
 
 use crate::trivia_questions::Difficulty;
 
@@ -126,22 +125,6 @@ impl PackageDealBonusPort for FakePackagePort {
     }
 }
 
-#[derive(Debug, Default)]
-struct FakeEditor {
-    updates: Vec<MessageUpdate>,
-    error: Option<MessageEditError>,
-}
-
-impl MessageEditor for FakeEditor {
-    fn edit(&mut self, update: &MessageUpdate) -> Result<(), MessageEditError> {
-        self.updates.push(update.clone());
-        match self.error.take() {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
-    }
-}
-
 fn question() -> TriviaQuestion {
     TriviaQuestion {
         text: "Which hero says this?".to_owned(),
@@ -260,18 +243,6 @@ fn test_package_deal_timeout_disables_expired_choices() {
 }
 
 #[test]
-fn test_package_deal_ignores_a_deleted_confirmation_message() {
-    let mut session = PackageDealSession::new(1, 99, candidates());
-    let update = session.select_partner(2, &FakePackagePort::success(3, 3));
-    let mut editor = FakeEditor {
-        error: Some(MessageEditError::NotFound),
-        ..FakeEditor::default()
-    };
-    assert_eq!(edit_message_best_effort(&mut editor, &update), Ok(()));
-    assert_eq!(editor.updates.len(), 1);
-}
-
-#[test]
 fn test_package_deal_view_only_accepts_the_digger() {
     let session = PackageDealSession::new(1, 99, candidates());
     assert_eq!(session.candidates.len(), 4);
@@ -322,17 +293,6 @@ fn test_dig_trivia_answer_surfaces_settlement_failure() {
     );
     assert!(embed.description.unwrap().contains("mine's rune tablet"));
     assert!(update.clear_view);
-}
-
-#[test]
-fn test_dig_trivia_answer_ignores_a_deleted_message() {
-    let economy = FakeEconomy::default();
-    let update = trivia_session(10).answer(1, &economy);
-    let mut editor = FakeEditor {
-        error: Some(MessageEditError::NotFound),
-        ..FakeEditor::default()
-    };
-    assert_eq!(edit_message_best_effort(&mut editor, &update), Ok(()));
 }
 
 #[test]
@@ -390,103 +350,6 @@ fn test_dig_trivia_timeout_surfaces_settlement_failure() {
     );
     assert!(embed.description.unwrap().contains("mine's rune tablet"));
     assert!(update.clear_view);
-}
-
-#[test]
-fn test_dig_trivia_timeout_ignores_a_deleted_message() {
-    let economy = FakeEconomy::default();
-    let update = trivia_session(10).on_timeout(&economy).unwrap();
-    let mut editor = FakeEditor {
-        error: Some(MessageEditError::NotFound),
-        ..FakeEditor::default()
-    };
-    assert_eq!(edit_message_best_effort(&mut editor, &update), Ok(()));
-}
-
-#[derive(Debug, Default)]
-struct FakeBonusDispatch {
-    sent: Vec<DigBonus>,
-    reports: Vec<String>,
-    fail_send: bool,
-    fail_report: bool,
-}
-
-impl BonusDispatchPort for FakeBonusDispatch {
-    fn send_bonus(&mut self, bonus: DigBonus) -> Result<(), DigBonusPortError> {
-        self.sent.push(bonus);
-        if self.fail_send {
-            Err(DigBonusPortError::Backend("bonus failed".to_owned()))
-        } else {
-            Ok(())
-        }
-    }
-
-    fn report_partial_failure(&mut self, content: &str) -> Result<(), DigBonusPortError> {
-        self.reports.push(content.to_owned());
-        if self.fail_report {
-            Err(DigBonusPortError::Backend("followup failed".to_owned()))
-        } else {
-            Ok(())
-        }
-    }
-}
-
-#[test]
-fn test_maybe_send_dig_bonus_only_rolls_for_consumed_digs() {
-    let mut port = FakeBonusDispatch::default();
-    assert_eq!(
-        maybe_send_dig_bonus(false, 0.0, &mut port),
-        BonusDispatchOutcome::NotConsumed
-    );
-    assert!(port.sent.is_empty());
-    assert_eq!(
-        maybe_send_dig_bonus(true, 0.015, &mut port),
-        BonusDispatchOutcome::Sent(DigBonus::PackageDeal)
-    );
-    assert_eq!(port.sent, [DigBonus::PackageDeal]);
-}
-
-#[test]
-fn test_bonus_dispatch_failure_never_masks_a_successful_dig() {
-    let mut port = FakeBonusDispatch {
-        fail_send: true,
-        fail_report: true,
-        ..FakeBonusDispatch::default()
-    };
-    assert_eq!(
-        maybe_send_dig_bonus(true, 0.0, &mut port),
-        BonusDispatchOutcome::FailedButDigPreserved(DigBonus::Wheel)
-    );
-}
-
-#[test]
-fn test_bonus_dispatch_failure_does_not_claim_reward_was_rolled_back() {
-    let mut port = FakeBonusDispatch {
-        fail_send: true,
-        ..FakeBonusDispatch::default()
-    };
-    maybe_send_dig_bonus(true, 0.0, &mut port);
-    assert_eq!(port.reports.len(), 1);
-    assert!(port.reports[0].contains("may already be recorded"));
-}
-
-#[derive(Debug, Default)]
-struct FakeWheel {
-    bonus_spins: usize,
-}
-
-impl WheelBonusPort for FakeWheel {
-    fn trigger_bonus_spin(&mut self) -> Result<(), DigBonusPortError> {
-        self.bonus_spins += 1;
-        Ok(())
-    }
-}
-
-#[test]
-fn test_send_dig_bonus_routes_wheel_to_bonus_mode() {
-    let mut wheel = FakeWheel::default();
-    send_wheel_bonus(&mut wheel).unwrap();
-    assert_eq!(wheel.bonus_spins, 1);
 }
 
 fn guild_members(range: std::ops::RangeInclusive<i64>) -> Vec<GuildMember> {
@@ -574,89 +437,4 @@ fn test_send_dig_trivia_freezes_active_edict_reward_for_display_and_settlement()
         Some("⛏️ Unearthed Rune Tablet — Correct! +20 JC")
     );
     assert_eq!(economy.settlements.borrow()[0].delta, 20);
-}
-
-#[derive(Debug, Default)]
-struct FakeResultDispatch {
-    calls: Vec<&'static str>,
-}
-
-impl DigResultDispatchPort for FakeResultDispatch {
-    type Error = Infallible;
-
-    fn send_normal(&mut self) -> Result<(), Self::Error> {
-        self.calls.push("normal");
-        Ok(())
-    }
-
-    fn send_boss(&mut self) -> Result<(), Self::Error> {
-        self.calls.push("boss");
-        Ok(())
-    }
-
-    fn send_boon(&mut self) -> Result<(), Self::Error> {
-        self.calls.push("boon");
-        Ok(())
-    }
-
-    fn send_choice(&mut self) -> Result<(), Self::Error> {
-        self.calls.push("choice");
-        Ok(())
-    }
-
-    fn send_bonus_after_ui(&mut self, dig_consumed: bool) -> Result<(), Self::Error> {
-        assert!(dig_consumed);
-        self.calls.push("bonus");
-        Ok(())
-    }
-}
-
-fn dispatch_shape(
-    boss_encounter: bool,
-    event_complexity: Option<EventComplexity>,
-) -> FakeResultDispatch {
-    let mut port = FakeResultDispatch::default();
-    dispatch_dig_result(
-        DigDispatchResult {
-            boss_encounter,
-            event_complexity,
-            dig_consumed: true,
-        },
-        &mut port,
-    )
-    .unwrap();
-    port
-}
-
-#[test]
-fn test_dig_result_dispatch_runs_bonus_after_existing_ui_normal() {
-    assert_eq!(dispatch_shape(false, None).calls, ["normal", "bonus"]);
-}
-
-#[test]
-fn test_dig_result_dispatch_runs_bonus_after_existing_ui_boss() {
-    assert_eq!(dispatch_shape(true, None).calls, ["boss", "bonus"]);
-}
-
-#[test]
-fn test_dig_result_dispatch_runs_bonus_after_existing_ui_boon() {
-    assert_eq!(
-        dispatch_shape(false, Some(EventComplexity::Boon)).calls,
-        ["boon", "bonus"]
-    );
-}
-
-#[test]
-fn test_dig_result_dispatch_runs_bonus_after_existing_ui_choice() {
-    assert_eq!(
-        dispatch_shape(false, Some(EventComplexity::Choice)).calls,
-        ["choice", "bonus"]
-    );
-}
-
-#[test]
-fn test_paid_dig_dispatches_bonus_for_the_consumed_paid_result() {
-    let mut port = FakeResultDispatch::default();
-    dispatch_paid_dig_bonus(true, &mut port).unwrap();
-    assert_eq!(port.calls, ["bonus"]);
 }

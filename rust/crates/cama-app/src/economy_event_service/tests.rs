@@ -456,72 +456,6 @@ fn test_policy_targets_two_percent_without_a_recovery_override() {
     assert!(policy.recovery_started_at.is_none());
 }
 
-#[test]
-fn test_active_level_three_deflationary_edict_suspends_reserve_voting() {
-    let now = local_timestamp(2026, 7, 18, 12, 0);
-    let (service, store, economy, _) = service_at(now, EconomyEventConfig::default());
-    let mut draft = ravage_draft(&service, "2026-07-18", 2_500, now);
-    draft.severity = 3;
-    draft.starts_at = local_timestamp(2026, 7, 18, 10, 0);
-    draft.ends_at = local_timestamp(2026, 7, 19, 10, 0);
-    let (event, _) = activate_draft(&store, &economy, GuildId(TEST_GUILD_ID), draft);
-    assert_eq!(
-        service
-            .get_reserve_voting_restriction(Some(TEST_GUILD_ID), Some(now))
-            .expect("restriction"),
-        Some(ReserveVotingRestriction {
-            event_id: event.event_id,
-            name: "Ravage".into(),
-            severity: 3,
-        })
-    );
-}
-
-fn assert_voting_open(direction: Direction, severity: u8, active: bool, enabled: bool) {
-    let now = local_timestamp(2026, 7, 18, 12, 0);
-    let config = EconomyEventConfig {
-        enabled,
-        ..EconomyEventConfig::default()
-    };
-    let (service, store, economy, _) = service_at(now, config);
-    let mut draft = ravage_draft(&service, "2026-07-18", 2_500, now);
-    draft.direction = direction;
-    draft.severity = severity;
-    draft.starts_at = local_timestamp(2026, 7, 18, 10, 0);
-    draft.ends_at = if active {
-        local_timestamp(2026, 7, 19, 10, 0)
-    } else {
-        now - 1
-    };
-    activate_draft(&store, &economy, GuildId(TEST_GUILD_ID), draft);
-    assert!(
-        service
-            .get_reserve_voting_restriction(Some(TEST_GUILD_ID), Some(now))
-            .expect("restriction lookup")
-            .is_none()
-    );
-}
-
-#[test]
-fn test_nonrestrictive_or_inactive_edict_keeps_reserve_voting_open_deflationary_2_true_true() {
-    assert_voting_open(Direction::Deflationary, 2, true, true);
-}
-
-#[test]
-fn test_nonrestrictive_or_inactive_edict_keeps_reserve_voting_open_boon_5_true_true() {
-    assert_voting_open(Direction::Boon, 5, true, true);
-}
-
-#[test]
-fn test_nonrestrictive_or_inactive_edict_keeps_reserve_voting_open_deflationary_5_false_true() {
-    assert_voting_open(Direction::Deflationary, 5, false, true);
-}
-
-#[test]
-fn test_nonrestrictive_or_inactive_edict_keeps_reserve_voting_open_deflationary_5_true_false() {
-    assert_voting_open(Direction::Deflationary, 5, true, false);
-}
-
 macro_rules! weekly_band_case {
     ($name:ident, $deviation:expr, $direction:expr, $severity:expr) => {
         #[test]
@@ -809,17 +743,6 @@ fn test_event_announcement_omits_fixed_prediction_depth() {
 }
 
 #[test]
-fn test_format_event_supports_level_five() {
-    let now = local_timestamp(2026, 7, 29, 10, 0);
-    let (service, store, economy, _) = service_at(now, EconomyEventConfig::default());
-    let mut draft = ravage_draft(&service, "2026-07-29", 1_000, now);
-    draft.severity = 5;
-    let (event, _) = activate_draft(&store, &economy, GuildId(TEST_GUILD_ID), draft);
-    let (title, _) = TestService::format_event(&event);
-    assert_eq!(title, "Ravage — Level V");
-}
-
-#[test]
 fn test_pre_trigger_missing_prior_card_stays_neutral() {
     let now = local_timestamp(2026, 7, 18, 9, 59);
     let (mut service, store, _, _) = service_at(now, EconomyEventConfig::default());
@@ -922,9 +845,53 @@ fn test_explicit_event_date_bypasses_pre_trigger_creation_guard() {
         "2030-01-16T10:00:00"
     );
     assert_eq!(
-        pacific_offset_for_local(parse_event_date("2030-01-15").unwrap(), 10),
-        -28_800
+        pacific_timestamp(parse_event_date("2030-01-15").unwrap(), 10).unwrap(),
+        utc_timestamp("2030-01-15T18:00:00Z")
     );
+}
+
+fn utc_timestamp(text: &str) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(text)
+        .expect("valid RFC 3339 instant")
+        .timestamp()
+}
+
+#[test]
+fn test_pacific_wall_clock_hours_resolve_across_dst_transitions() {
+    let local =
+        |date: &str, hour: u8| pacific_timestamp(parse_event_date(date).unwrap(), hour).unwrap();
+    // Spring forward 2026-03-08: the skipped 02:00 reads as 03:00 PDT.
+    assert_eq!(
+        local("2026-03-08", 1),
+        utc_timestamp("2026-03-08T09:00:00Z")
+    );
+    assert_eq!(
+        local("2026-03-08", 2),
+        utc_timestamp("2026-03-08T10:00:00Z")
+    );
+    assert_eq!(
+        local("2026-03-08", 3),
+        utc_timestamp("2026-03-08T10:00:00Z")
+    );
+    // Fall back 2026-11-01: the repeated 01:00 is its PDT occurrence.
+    assert_eq!(
+        local("2026-11-01", 1),
+        utc_timestamp("2026-11-01T08:00:00Z")
+    );
+    assert_eq!(
+        local("2026-11-01", 2),
+        utc_timestamp("2026-11-01T10:00:00Z")
+    );
+    let wall = |instant: &str| {
+        pacific_local(utc_timestamp(instant))
+            .unwrap()
+            .format("%Y-%m-%dT%H:%M")
+            .to_string()
+    };
+    assert_eq!(wall("2026-03-08T09:59:00Z"), "2026-03-08T01:59");
+    assert_eq!(wall("2026-03-08T10:00:00Z"), "2026-03-08T03:00");
+    assert_eq!(wall("2026-11-01T08:59:00Z"), "2026-11-01T01:59");
+    assert_eq!(wall("2026-11-01T09:00:00Z"), "2026-11-01T01:00");
 }
 
 fn assert_dst_window(event_date: &str, expected_duration: i64) {

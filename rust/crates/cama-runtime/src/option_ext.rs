@@ -16,6 +16,8 @@
 //! wrong-typed value and treat the transport's `Unknown` decode fallback as
 //! absent.
 
+use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
+
 use crate::registration::{InteractionOption, InteractionValue};
 
 /// Find the raw value of a top-level option by name.
@@ -79,18 +81,15 @@ pub struct UserOptionValue {
 }
 
 impl UserOptionValue {
-    /// The resolved display name, falling back to the numeric ID.
-    pub fn display_name_or_id(&self) -> String {
+    /// The payload's readable display name, else `Unknown player`. Never an
+    /// ID or mention markup.
+    #[must_use]
+    pub fn readable_display_name(&self) -> String {
         self.display_name
-            .clone()
-            .unwrap_or_else(|| self.raw_id.to_string())
-    }
-
-    /// The resolved display name, falling back to a `<@id>` mention.
-    pub fn display_name_or_mention(&self) -> String {
-        self.display_name
-            .clone()
-            .unwrap_or_else(|| format!("<@{}>", self.raw_id))
+            .as_deref()
+            .and_then(readable_player_name)
+            .unwrap_or(UNKNOWN_PLAYER)
+            .to_owned()
     }
 }
 
@@ -231,8 +230,7 @@ mod tests {
             .expect("present user");
         assert_eq!(user.id, 5);
         assert_eq!(user.raw_id, 5);
-        assert_eq!(user.display_name_or_id(), "Miner");
-        assert_eq!(user.display_name_or_mention(), "Miner");
+        assert_eq!(user.readable_display_name(), "Miner");
     }
 
     #[test]
@@ -257,13 +255,14 @@ mod tests {
     }
 
     #[test]
-    fn user_display_name_falls_back_to_id_or_mention() {
-        let options = vec![user("target", 7, None)];
-        let user = user_option(&options, "target")
-            .expect("valid user")
-            .expect("present user");
-        assert_eq!(user.display_name_or_id(), "7");
-        assert_eq!(user.display_name_or_mention(), "<@7>");
+    fn readable_display_name_never_exposes_ids_or_mentions() {
+        for display_name in [None, Some("7"), Some("<@7>"), Some("  ")] {
+            let options = vec![user("target", 7, display_name)];
+            let user = user_option(&options, "target")
+                .expect("valid user")
+                .expect("present user");
+            assert_eq!(user.readable_display_name(), "Unknown player");
+        }
     }
 
     #[test]

@@ -9,8 +9,6 @@ use cama_db::moderation::{SuspensionCompletion, SuspensionScope};
 
 const GUILD: GuildId = GuildId(99);
 
-type PlayerLoadCall = (Vec<UserId>, GuildId);
-
 fn scope(kind: LobbyKind) -> LobbyScope {
     LobbyScope::new(GUILD, kind)
 }
@@ -23,7 +21,6 @@ fn users(ids: &[i64]) -> BTreeSet<UserId> {
 struct FakePlayers {
     ratings: Arc<Mutex<BTreeMap<(GuildId, UserId), f64>>>,
     default_rating: Option<f64>,
-    load_calls: Arc<Mutex<Vec<PlayerLoadCall>>>,
 }
 
 impl Default for FakePlayers {
@@ -31,7 +28,6 @@ impl Default for FakePlayers {
         Self {
             ratings: Arc::new(Mutex::new(BTreeMap::new())),
             default_rating: Some(1_200.0),
-            load_calls: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -42,13 +38,6 @@ impl FakePlayers {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .insert((guild_id, player_id), rating);
-    }
-
-    fn load_calls(&self) -> Vec<PlayerLoadCall> {
-        self.load_calls
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone()
     }
 }
 
@@ -63,10 +52,6 @@ impl LobbyPlayerPort for FakePlayers {
     }
 
     fn get_by_ids(&self, player_ids: &[UserId], guild_id: GuildId) -> Vec<LobbyPlayer> {
-        self.load_calls
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .push((player_ids.to_vec(), guild_id));
         player_ids
             .iter()
             .map(|player_id| {
@@ -460,7 +445,7 @@ fn assert_bonus_pool(kind: LobbyKind, expected_amount: i64) {
         .get_or_create_lobby(None, scope(kind))
         .expect("lobby created");
     let previews = FakePreviews::default();
-    let embed = service.build_lobby_embed(&lobby, Some(&previews));
+    let embed = service.build_lobby_embed_with_name_overrides(&lobby, Some(&previews), None);
     let field = embed
         .fields
         .iter()
@@ -753,7 +738,7 @@ fn test_high_rated_player_can_view_but_not_create_lowskill_lobby() {
 }
 
 #[test]
-fn test_lobby_metadata_and_readychecks_are_isolated_by_kind() {
+fn test_lobby_metadata_is_isolated_by_kind() {
     let service = service(FakePlayers::default(), 12);
     let open = scope(LobbyKind::Open);
     let low_skill = scope(LobbyKind::LowSkill);
@@ -761,52 +746,43 @@ fn test_lobby_metadata_and_readychecks_are_isolated_by_kind() {
     service
         .get_or_create_lobby(None, low_skill)
         .expect("low-skill lobby");
-    assert!(service.set_lobby_message_ids(
-        open,
-        LobbyMessageIds {
-            message_id: Some(MessageId(101)),
-            channel_id: Some(ChannelId(201)),
-            ..LobbyMessageIds::default()
-        }
-    ));
-    assert!(service.set_lobby_message_ids(
-        low_skill,
-        LobbyMessageIds {
-            message_id: Some(MessageId(102)),
-            channel_id: Some(ChannelId(202)),
-            ..LobbyMessageIds::default()
-        }
-    ));
-    assert!(service.set_readycheck_state(
-        open,
-        MessageId(301),
-        ChannelId(401),
-        users(&[1]),
-        BTreeMap::new(),
-    ));
-    assert!(service.set_readycheck_state(
-        low_skill,
-        MessageId(302),
-        ChannelId(402),
-        users(&[2]),
-        BTreeMap::new(),
-    ));
-    assert_eq!(service.get_lobby_message_id(open), Some(MessageId(101)));
+    assert!(
+        service.try_set_lobby_message_ids(
+            open,
+            LobbyMessageIds {
+                message_id: Some(MessageId(101)),
+                channel_id: Some(ChannelId(201)),
+                ..LobbyMessageIds::default()
+            }
+        ) == Ok(true)
+    );
+    assert!(
+        service.try_set_lobby_message_ids(
+            low_skill,
+            LobbyMessageIds {
+                message_id: Some(MessageId(102)),
+                channel_id: Some(ChannelId(202)),
+                ..LobbyMessageIds::default()
+            }
+        ) == Ok(true)
+    );
     assert_eq!(
-        service.get_lobby_message_id(low_skill),
+        service
+            .get_lobby(open)
+            .and_then(|lobby| lobby.message_ids.message_id),
+        Some(MessageId(101))
+    );
+    assert_eq!(
+        service
+            .get_lobby(low_skill)
+            .and_then(|lobby| lobby.message_ids.message_id),
         Some(MessageId(102))
     );
     assert_eq!(
-        service.get_readycheck_message_id(open),
-        Some(MessageId(301))
-    );
-    assert_eq!(
-        service.get_readycheck_message_id(low_skill),
-        Some(MessageId(302))
-    );
-    assert_eq!(
-        service.get_readycheck_channel_id(low_skill),
-        Some(ChannelId(402))
+        service
+            .get_lobby(low_skill)
+            .and_then(|lobby| lobby.message_ids.channel_id),
+        Some(ChannelId(202))
     );
 }
 
@@ -962,92 +938,6 @@ fn two_post_add_moderation_errors_fail_open_without_stranding_the_join() {
             .is_some_and(|lobby| lobby.players.contains(&UserId(10)))
     );
     assert_eq!(moderation.call_count(), 3);
-}
-
-#[test]
-fn test_join_lobby_conditional_returns_deprecated_reason() {
-    let service = service(FakePlayers::default(), 12);
-    assert_eq!(
-        service.join_lobby_conditional(),
-        JoinOutcome::failed(JoinFailure::ConditionalJoinDeprecated)
-    );
-}
-
-#[test]
-fn test_readycheck_confirmation_snapshot_is_available_through_lobby_service() {
-    let service = service(FakePlayers::default(), 12);
-    let open = scope(LobbyKind::Open);
-    service.get_or_create_lobby(None, open).expect("open lobby");
-    assert!(service.set_readycheck_state(
-        open,
-        MessageId(111),
-        ChannelId(222),
-        users(&[1]),
-        BTreeMap::new(),
-    ));
-    assert!(service.add_readycheck_reaction(open, UserId(1), "<@1>"));
-    assert_eq!(
-        service.get_readycheck_confirmation_snapshot(open),
-        Some(ReadycheckConfirmationSnapshot {
-            message_id: MessageId(111),
-            reacted: users(&[1]),
-        })
-    );
-}
-
-#[test]
-fn test_lobby_readycheck_snapshot_loads_players_from_atomic_manager_snapshot() {
-    let players = FakePlayers::default();
-    let observed_players = players.clone();
-    let service = LobbyService::new(
-        players,
-        Some(FakePendingMatches::default()),
-        FakeClock::from_values([1_000_000_000, 100_500_000_000, 200_500_000_000]),
-        10,
-        12,
-    );
-    let open = scope(LobbyKind::Open);
-    service
-        .get_or_create_lobby(Some(UserId(1)), open)
-        .expect("open lobby");
-    assert_joined(&service.join_lobby(UserId(1), open));
-    assert_joined(&service.join_lobby(UserId(2), open));
-    assert!(service.set_readycheck_state(
-        open,
-        MessageId(111),
-        ChannelId(222),
-        users(&[1, 2]),
-        BTreeMap::new(),
-    ));
-    assert!(service.add_readycheck_reaction(open, UserId(1), "<@1>"));
-
-    let snapshot = service
-        .get_lobby_players_and_readycheck_snapshot(open)
-        .expect("atomic snapshot");
-    assert_eq!(snapshot.player_ids, vec![UserId(1), UserId(2)]);
-    assert_eq!(
-        snapshot
-            .players
-            .iter()
-            .map(|player| player.discord_id)
-            .collect::<Vec<_>>(),
-        vec![1, 2]
-    );
-    assert_eq!(
-        snapshot.player_join_times,
-        BTreeMap::from([(UserId(1), 100.5), (UserId(2), 200.5)])
-    );
-    assert_eq!(
-        snapshot.readycheck,
-        Some(ReadycheckConfirmationSnapshot {
-            message_id: MessageId(111),
-            reacted: users(&[1]),
-        })
-    );
-    assert_eq!(
-        observed_players.load_calls(),
-        vec![(vec![UserId(1), UserId(2)], GUILD)]
-    );
 }
 
 #[test]
@@ -1408,7 +1298,7 @@ fn test_durable_writes_never_hold_the_reader_lock() {
 }
 
 #[test]
-fn test_a_concurrent_readycheck_survives_a_durable_write() {
+fn test_a_join_survives_a_concurrent_removal_that_cloned_before_it() {
     let persistence = Arc::new(HookPersistence::default());
     let service = Arc::new(
         service(FakePlayers::default(), 12)
@@ -1416,44 +1306,69 @@ fn test_a_concurrent_readycheck_survives_a_durable_write() {
             .expect("hydrate hook persistence"),
     );
     assert_joined(&service.join_lobby(UserId(10), scope(LobbyKind::Open)));
+    assert_joined(&service.join_lobby(UserId(11), scope(LobbyKind::Open)));
+
+    // The removal cloned {10, 11} under the writer lock and is now inside its
+    // save. A join seats player 12 provisionally, then waits for the writer
+    // lock while the removal publishes its stale clone.
+    let join = Arc::new(Mutex::new(None));
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let weak_service = Arc::downgrade(&service);
-    persistence.set_hook(move || {
-        // Stand in for a ready-check mutation landing while the durable write
-        // is in flight: it touches only in-memory state, so publishing the
-        // persisted record must not roll it back.
-        let service = weak_service.upgrade().expect("service remains alive");
-        // try_lock, not lock: a durable write that still held the state lock
-        // would deadlock here instead of failing the assertion.
-        let mut state = service
-            .state
-            .try_lock()
-            .expect("the state lock is free during a durable write");
-        if let Some(lobby) = state.lobbies.get_mut(&scope(LobbyKind::Open)) {
-            lobby
-                .readycheck
-                .reacted
-                .insert(UserId(10), "yes".to_owned());
+    persistence.set_hook({
+        let join = Arc::clone(&join);
+        move || {
+            if !armed.swap(false, Ordering::SeqCst) {
+                return;
+            }
+            let service = weak_service.upgrade().expect("service remains alive");
+            let joiner = Arc::clone(&service);
+            *join.lock().unwrap_or_else(|error| error.into_inner()) =
+                Some(std::thread::spawn(move || {
+                    joiner.join_lobby(UserId(12), scope(LobbyKind::Open))
+                }));
+            for _ in 0..1_000 {
+                if service
+                    .get_lobby(scope(LobbyKind::Open))
+                    .is_some_and(|lobby| lobby.players.contains(&UserId(12)))
+                {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            panic!("the join never seated its provisional member");
         }
     });
 
-    assert!(
+    assert_eq!(
         service
-            .try_set_lobby_message_ids(scope(LobbyKind::Open), LobbyMessageIds::default())
-            .expect("set message ids")
+            .try_remove_players_from_lobby(&users(&[11]), scope(LobbyKind::Open))
+            .expect("remove players"),
+        users(&[11])
     );
+    let outcome = join
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take()
+        .expect("join thread started")
+        .join()
+        .expect("join thread");
+    assert_joined(&outcome);
 
     assert_eq!(
         service
-            .lock_state()
-            .lobbies
-            .get(&scope(LobbyKind::Open))
+            .get_lobby(scope(LobbyKind::Open))
             .expect("lobby remains")
-            .readycheck
-            .reacted
-            .len(),
-        1,
-        "the publish preserved the in-memory ready-check reaction"
+            .players,
+        users(&[10, 12])
     );
+    let saved = persistence
+        .inner
+        .rows()
+        .into_iter()
+        .find(|row| row.lobby_id == scope(LobbyKind::Open).lobby_id())
+        .expect("saved lobby row");
+    assert_eq!(saved.players, vec![10, 12]);
+    assert!(saved.player_join_times.contains_key(&12));
 }
 
 #[test]

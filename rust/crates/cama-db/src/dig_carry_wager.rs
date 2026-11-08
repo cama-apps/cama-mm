@@ -68,9 +68,28 @@ impl CarryTunnelSnapshot {
             .iter()
             .find_map(|(candidate, entry)| (*candidate == boundary).then_some(entry))
     }
+
+    /// Whether the wager carried at `boundary` was escrowed when it was
+    /// carried. A carry without the marker predates escrow.
+    #[must_use]
+    pub fn carried_wager_escrowed(&self, boundary: i64) -> bool {
+        serde_json::from_str::<serde_json::Value>(&self.boss_progress)
+            .ok()
+            .and_then(|progress| {
+                progress
+                    .get(boundary.to_string())
+                    .and_then(|entry| entry.get(CARRIED_WAGER_ESCROWED_KEY))
+                    .and_then(serde_json::Value::as_bool)
+            })
+            .unwrap_or(false)
+    }
 }
 
-/// JSON mutation applied by an atomic settlement.
+/// Progress-entry marker set beside `carried_wager` when the carried stake is
+/// already escrowed.
+pub const CARRIED_WAGER_ESCROWED_KEY: &str = "carried_wager_escrowed";
+
+/// JSON mutation applied when stale carry markers are cleared.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CarryProgressMutation<'a> {
     /// Remove only the carry fields, optionally changing the encounter status.
@@ -78,38 +97,14 @@ pub enum CarryProgressMutation<'a> {
         boundary: i64,
         status_after: Option<&'a str>,
     },
-    /// Preserve the entry and carry the stake into the next phase.
-    Forward {
-        boundary: i64,
-        status_after: &'a str,
-        wager: i64,
-        risk_tier: &'a str,
-    },
 }
 
 impl CarryProgressMutation<'_> {
     const fn boundary(self) -> i64 {
         match self {
-            Self::Clear { boundary, .. } | Self::Forward { boundary, .. } => boundary,
+            Self::Clear { boundary, .. } => boundary,
         }
     }
-}
-
-/// One tunnel-and-balance transition guarded by a prior snapshot.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AtomicCarrySettlement<'a> {
-    pub key: CarryTunnelKey,
-    pub expected_depth: i64,
-    pub expected_pinnacle_phase: i64,
-    pub expected_boss_progress: &'a str,
-    pub depth_after: i64,
-    pub pinnacle_phase_after: i64,
-    pub requested_balance_delta: i64,
-    pub mutation: CarryProgressMutation<'a>,
-    pub ledger_related_type: &'a str,
-    pub ledger_related_id: &'a str,
-    pub ledger_reason: &'a str,
-    pub ledger_metadata: &'a str,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,19 +112,6 @@ pub enum ClearCarryOutcome {
     Cleared { boss_progress: String },
     Conflict,
     MissingTunnel,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CarrySettlementOutcome {
-    Applied {
-        boss_progress: String,
-        balance_before: i64,
-        balance_after: i64,
-        actual_balance_delta: i64,
-    },
-    Conflict,
-    MissingTunnel,
-    MissingPlayer,
 }
 
 #[derive(Debug, Error)]
@@ -164,7 +146,7 @@ impl DigCarryWagerRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.path)
     }
 
@@ -223,86 +205,6 @@ impl DigCarryWagerRepository {
             ClearCarryOutcome::Conflict
         } else {
             ClearCarryOutcome::MissingTunnel
-        })
-    }
-
-    /// Atomically mutate the carry JSON and settle its balance effect.
-    ///
-    /// Negative deltas are clamped at the current non-negative balance, as in
-    /// Python's loss-debit helper. The tunnel CAS runs before the balance
-    /// update, making duplicate phase buttons and retries idempotent.
-    pub fn settle_atomic(
-        &self,
-        request: AtomicCarrySettlement<'_>,
-    ) -> Result<CarrySettlementOutcome, DigCarryWagerRepositoryError> {
-        validate_boundary(request.mutation.boundary())?;
-        let guild_id = Self::normalize_guild_id(request.key.guild_id);
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-
-        let balance_before = query_balance(&transaction, request.key.discord_id, guild_id)?;
-        let Some(balance_before) = balance_before else {
-            let tunnel_present = tunnel_exists(&transaction, request.key.discord_id, guild_id)?;
-            transaction.commit()?;
-            return Ok(if tunnel_present {
-                CarrySettlementOutcome::MissingPlayer
-            } else {
-                CarrySettlementOutcome::MissingTunnel
-            });
-        };
-        let actual_balance_delta = clamped_delta(balance_before, request.requested_balance_delta)?;
-        let balance_after = balance_before
-            .checked_add(actual_balance_delta)
-            .ok_or(DigCarryWagerRepositoryError::AmountOverflow)?;
-        let progress_after = mutate_progress(
-            &transaction,
-            request.expected_boss_progress,
-            request.mutation,
-        )?;
-
-        let changed = transaction.execute(
-            "UPDATE tunnels
-             SET depth = ?1, pinnacle_phase = ?2, boss_progress = ?3
-             WHERE discord_id = ?4 AND guild_id = ?5
-               AND COALESCE(depth, 0) = ?6
-               AND COALESCE(pinnacle_phase, 1) = ?7
-               AND COALESCE(boss_progress, '{}') = ?8",
-            params![
-                request.depth_after,
-                request.pinnacle_phase_after,
-                progress_after,
-                request.key.discord_id,
-                guild_id,
-                request.expected_depth,
-                request.expected_pinnacle_phase,
-                request.expected_boss_progress
-            ],
-        )?;
-        if changed == 0 {
-            let exists = tunnel_exists(&transaction, request.key.discord_id, guild_id)?;
-            transaction.commit()?;
-            return Ok(if exists {
-                CarrySettlementOutcome::Conflict
-            } else {
-                CarrySettlementOutcome::MissingTunnel
-            });
-        }
-
-        if actual_balance_delta != 0 {
-            update_balance_with_context(
-                &transaction,
-                request.key.discord_id,
-                guild_id,
-                balance_after,
-                request,
-            )?;
-        }
-        transaction.commit()?;
-        Ok(CarrySettlementOutcome::Applied {
-            boss_progress: progress_after,
-            balance_before,
-            balance_after,
-            actual_balance_delta,
         })
     }
 }
@@ -449,6 +351,7 @@ fn mutate_progress(
     let status_path = format!(r#"{entry_path}.status"#);
     let wager_path = format!(r#"{entry_path}.carried_wager"#);
     let risk_path = format!(r#"{entry_path}.carried_risk_tier"#);
+    let escrow_path = format!(r#"{entry_path}.{CARRIED_WAGER_ESCROWED_KEY}"#);
     let base = if transaction.query_row("SELECT json_valid(?1)", params![raw_progress], |row| {
         row.get::<_, bool>(0)
     })? {
@@ -477,8 +380,8 @@ fn mutate_progress(
     match mutation {
         CarryProgressMutation::Clear { status_after, .. } => {
             let cleared: String = transaction.query_row(
-                "SELECT json_remove(?1, ?2, ?3)",
-                params![normalized, wager_path, risk_path],
+                "SELECT json_remove(?1, ?2, ?3, ?4)",
+                params![normalized, wager_path, risk_path, escrow_path],
                 |row| row.get(0),
             )?;
             if let Some(status_after) = status_after {
@@ -491,56 +394,7 @@ fn mutate_progress(
                 Ok(cleared)
             }
         }
-        CarryProgressMutation::Forward {
-            status_after,
-            wager,
-            risk_tier,
-            ..
-        } => transaction.query_row(
-            "SELECT json_set(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                normalized,
-                status_path,
-                status_after,
-                wager_path,
-                wager,
-                risk_path,
-                risk_tier
-            ],
-            |row| row.get(0),
-        ),
     }
-}
-
-fn clamped_delta(
-    balance_before: i64,
-    requested_delta: i64,
-) -> Result<i64, DigCarryWagerRepositoryError> {
-    if requested_delta >= 0 {
-        balance_before
-            .checked_add(requested_delta)
-            .ok_or(DigCarryWagerRepositoryError::AmountOverflow)?;
-        return Ok(requested_delta);
-    }
-    let requested_debit = requested_delta
-        .checked_abs()
-        .ok_or(DigCarryWagerRepositoryError::AmountOverflow)?;
-    Ok(-requested_debit.min(balance_before.max(0)))
-}
-
-fn query_balance(
-    transaction: &Transaction<'_>,
-    discord_id: i64,
-    guild_id: i64,
-) -> Result<Option<i64>, rusqlite::Error> {
-    transaction
-        .query_row(
-            "SELECT jopacoin_balance FROM players
-             WHERE discord_id = ?1 AND guild_id = ?2",
-            params![discord_id, guild_id],
-            |row| row.get(0),
-        )
-        .optional()
 }
 
 fn tunnel_exists(
@@ -556,37 +410,6 @@ fn tunnel_exists(
         )
         .optional()
         .map(|row| row.is_some())
-}
-
-fn update_balance_with_context(
-    transaction: &Transaction<'_>,
-    discord_id: i64,
-    guild_id: i64,
-    balance_after: i64,
-    request: AtomicCarrySettlement<'_>,
-) -> Result<(), rusqlite::Error> {
-    transaction.execute("DELETE FROM economy_ledger_context", [])?;
-    transaction.execute(
-        "INSERT INTO economy_ledger_context
-             (id, source, actor_id, related_type, related_id, reason, metadata)
-         VALUES (1, 'dig', ?1, ?2, ?3, ?4, ?5)",
-        params![
-            discord_id,
-            request.ledger_related_type,
-            request.ledger_related_id,
-            request.ledger_reason,
-            request.ledger_metadata
-        ],
-    )?;
-    let update = transaction.execute(
-        "UPDATE players SET jopacoin_balance = ?1, updated_at = CURRENT_TIMESTAMP
-         WHERE discord_id = ?2 AND guild_id = ?3",
-        params![balance_after, discord_id, guild_id],
-    );
-    let clear = transaction.execute("DELETE FROM economy_ledger_context", []);
-    update?;
-    clear?;
-    Ok(())
 }
 
 #[cfg(test)]

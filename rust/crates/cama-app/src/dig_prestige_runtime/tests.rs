@@ -222,28 +222,6 @@ fn display_names_match_override_and_titlecase_fallback() {
 }
 
 #[test]
-fn picking_past_cap_rejects_without_mutating_the_tunnel() {
-    let key = crate::dig_tunnels::TunnelKey::new(10_001, 12_345);
-    let mut tunnel = crate::dig_tunnels::Tunnel::new(key, "Amber Descent", 3_000);
-    tunnel.mark_prestige_ready();
-    tunnel.prestige_perks = owned_perks(&["loot_multiplier"; PRESTIGE_PERK_STACK_CAP]);
-    let expected = tunnel.clone();
-    let mut repository = crate::dig_tunnels::InMemoryTunnelRepository::default();
-    repository.insert(tunnel);
-    let mut service = crate::dig_tunnels::TunnelService::new(
-        repository,
-        crate::dig_tunnels::SplitMixEntropy::new(7),
-    );
-
-    assert_eq!(
-        service.prestige(key, "loot_multiplier", None, 1_000_000),
-        Err(crate::dig_tunnels::TunnelError::PerkAtCap)
-    );
-    assert_eq!(service.repository().tunnel(key), Some(&expected));
-    assert!(service.repository().actions().is_empty());
-}
-
-#[test]
 fn loot_multiplier_display_name_is_loot_bonus() {
     assert_eq!(prestige_perk_display_name("loot_multiplier"), "Loot Bonus");
 }
@@ -630,6 +608,26 @@ fn migrated_settlement_commits_full_reset_grant_relic_and_audit() {
     assert_eq!(tunnel.2, 4, "pickaxe carries across prestige");
     assert!(tunnel.3.contains(&selected));
     assert_eq!(tunnel.4, None);
+    let (boss_progress, pinnacle_phase): (String, i64) = connection
+        .query_row(
+            "SELECT boss_progress, CAST(pinnacle_phase AS INTEGER)
+               FROM tunnels WHERE discord_id=123 AND guild_id=5",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(pinnacle_phase, 0);
+    let boss_progress: serde_json::Map<String, Value> =
+        serde_json::from_str(&boss_progress).unwrap();
+    assert_eq!(
+        boss_progress.keys().cloned().collect::<BTreeSet<_>>(),
+        BOSS_BOUNDARIES
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>(),
+        "prestige drops every pinnacle key"
+    );
+    assert!(boss_progress.values().all(|status| status == "active"));
     let detail: Value = connection
         .query_row(
             "SELECT detail FROM dig_actions WHERE id=?1",
@@ -833,4 +831,159 @@ fn post_commit_audit_failure_preserves_python_visible_failure_boundary() {
     ));
     assert_eq!(fixture.balance(), 1_150);
     assert_eq!(service.preview(123, 5).unwrap().current_level, 1);
+}
+
+fn run_score_snapshot(
+    depth: i64,
+    prestige_level: i64,
+    run_jc: i64,
+    events: i64,
+) -> DigPrestigeSnapshot {
+    DigPrestigeSnapshot {
+        key: DigPrestigeKey {
+            discord_id: 123,
+            guild_id: 5,
+        },
+        depth,
+        prestige_level,
+        prestige_perks_json: "[]".to_owned(),
+        boss_progress_json: "{}".to_owned(),
+        current_run_jc: run_jc,
+        current_run_artifacts: 0,
+        current_run_events: events,
+        best_run_score: 0,
+        total_prestige_score: 0,
+        balance: 0,
+        owned_artifact_ids: BTreeSet::new(),
+    }
+}
+
+#[test]
+fn run_score_counts_depth_bosses_run_jc_and_events_with_prestige_multipliers() {
+    let two_bosses = json!({"25": "defeated", "50": {"status": "defeated"}, "75": "active"});
+    assert_eq!(
+        calculate_run_score(&run_score_snapshot(100, 0, 40, 5), &two_bosses),
+        270
+    );
+    let one_boss = json!({"25": "defeated"});
+    let p0 = calculate_run_score(&run_score_snapshot(50, 0, 20, 3), &one_boss);
+    let p5 = calculate_run_score(&run_score_snapshot(50, 5, 20, 3), &one_boss);
+    assert_eq!(p5, (p0 as f64 * 1.5) as i64);
+    // P10 adds the ascension score bonus on top of the per-level multiplier.
+    assert_eq!(
+        calculate_run_score(&run_score_snapshot(100, 10, 0, 0), &json!({})),
+        400
+    );
+}
+
+#[test]
+fn prestige_past_p10_reaches_the_cap_and_banks_the_run_score() {
+    for level in [10, 19] {
+        let fixture = SqliteFixture::new(level, &[]);
+        let mut service = fixture.service();
+        let preview = service.preview(123, 5).unwrap();
+        assert!(preview.can_prestige, "P{level}: {:?}", preview.reason);
+        let perk = preview.offered_perks[0].id.clone();
+        let result = service
+            .prestige(DigPrestigeRequest {
+                discord_id: 123,
+                guild_id: 5,
+                perk_choice: &perk,
+                mutation_choice: None,
+                now: 1_700_000_000,
+            })
+            .unwrap();
+        assert_eq!(i64::from(result.prestige_level), level + 1);
+        assert_eq!(result.run_score, preview.run_score);
+        let stored: (i64, i64, i64, i64, i64, i64) = fixture
+            .connection()
+            .query_row(
+                "SELECT CAST(prestige_level AS INTEGER), best_run_score,
+                        total_prestige_score, current_run_jc,
+                        current_run_artifacts, current_run_events
+                   FROM tunnels WHERE discord_id=123 AND guild_id=5",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            stored,
+            (
+                level + 1,
+                preview.run_score.max(10),
+                20 + preview.run_score,
+                0,
+                0,
+                0
+            )
+        );
+    }
+}
+
+#[test]
+fn seeded_mutation_roll_forces_one_and_offers_three_others() {
+    let roll = python_seeded_mutation_roll(&prestige_mutation_seed(4_242, 99, 8));
+    assert!(!roll.forced.id.is_empty() && !roll.forced.name.is_empty());
+    assert_eq!(roll.choices.len(), 3);
+    assert!(!roll.choices.contains(&roll.forced));
+    assert_eq!(
+        roll.choices
+            .iter()
+            .map(|choice| choice.id)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        3
+    );
+}
+
+/// Python's prestige grant draws only rare-or-better relics and never a
+/// signature trophy, which stays carve-only.
+#[test]
+fn prestige_relic_grant_never_offers_a_signature_trophy() {
+    let fixture = SqliteFixture::new(0, &[]);
+    let catalog = artifact_catalog();
+    for trophy in crate::dig_relic_rework::TROPHY_RELIC_IDS {
+        assert!(
+            catalog
+                .iter()
+                .any(|artifact| artifact.id == trophy && artifact.is_relic && artifact.trophy),
+            "{trophy}"
+        );
+    }
+    // Own every other rare-or-better relic so only trophies remain unowned.
+    let connection = fixture.connection();
+    for artifact in catalog.iter().filter(|artifact| {
+        artifact.is_relic
+            && !artifact.trophy
+            && matches!(artifact.rarity, Rarity::Rare | Rarity::Legendary)
+    }) {
+        connection
+            .execute(
+                "INSERT INTO dig_artifacts(discord_id,guild_id,artifact_id,found_at,is_relic,equipped)
+                 VALUES (123,5,?1,1,1,0)",
+                [artifact.id],
+            )
+            .unwrap();
+    }
+    let mut service = fixture.service();
+    let perk = service.preview(123, 5).unwrap().offered_perks[0].id.clone();
+    let result = service
+        .prestige(DigPrestigeRequest {
+            discord_id: 123,
+            guild_id: 5,
+            perk_choice: &perk,
+            mutation_choice: None,
+            now: 1_700_000_000,
+        })
+        .unwrap();
+    assert_eq!(result.prestige_grant.relic, None);
 }

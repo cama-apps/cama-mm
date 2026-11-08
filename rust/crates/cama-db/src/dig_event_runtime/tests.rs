@@ -239,7 +239,7 @@ fn event_delivery_is_present_when_process_stops_after_actor_commit() {
     fixture.seed(ACTOR, GUILD, 100);
     let expected = fixture
         .repository
-        .actor_snapshot(key(ACTOR, Some(GUILD)))
+        .actor_snapshot_for_event(key(ACTOR, Some(GUILD)))
         .expect("actor snapshot")
         .expect("seeded actor");
     let mut request = gear_request(&expected, "event:crash-safe");
@@ -374,13 +374,13 @@ fn atomic_tunnel_update_can_grant_unique_gear() {
     fixture.seed(ACTOR, GUILD, 20);
     let expected = fixture
         .repository
-        .actor_snapshot(key(ACTOR, Some(GUILD)))
+        .actor_snapshot_for_event(key(ACTOR, Some(GUILD)))
         .expect("snapshot")
         .expect("actor state");
 
     let outcome = fixture
         .repository
-        .settle_actor_atomic(gear_request(&expected, "interaction:100"))
+        .settle_actor_atomic_for_event(gear_request(&expected, "interaction:100"))
         .expect("settlement");
     let DigEventSettlementOutcome::Applied(receipt) = outcome else {
         panic!("unexpected outcome: {outcome:?}");
@@ -499,17 +499,17 @@ fn duplicate_delivery_returns_original_receipt_without_second_write() {
     fixture.seed(ACTOR, GUILD, 20);
     let expected = fixture
         .repository
-        .actor_snapshot(key(ACTOR, Some(GUILD)))
+        .actor_snapshot_for_event(key(ACTOR, Some(GUILD)))
         .unwrap()
         .unwrap();
     let request = gear_request(&expected, "interaction:duplicate");
     let first = fixture
         .repository
-        .settle_actor_atomic(request)
+        .settle_actor_atomic_for_event(request)
         .expect("first settlement");
     let second = fixture
         .repository
-        .settle_actor_atomic(request)
+        .settle_actor_atomic_for_event(request)
         .expect("duplicate settlement");
     let DigEventSettlementOutcome::Applied(first) = first else {
         panic!("first settlement not applied");
@@ -541,19 +541,19 @@ fn duplicate_delivery_returns_first_receipt_when_environment_changed() {
     fixture.seed(ACTOR, GUILD, 20);
     let expected = fixture
         .repository
-        .actor_snapshot(key(ACTOR, Some(GUILD)))
+        .actor_snapshot_for_event(key(ACTOR, Some(GUILD)))
         .unwrap()
         .unwrap();
     let request = gear_request(&expected, "interaction:collision");
     fixture
         .repository
-        .settle_actor_atomic(request)
+        .settle_actor_atomic_for_event(request)
         .expect("first settlement");
     let mut changed = request;
     changed.balance_delta = 14;
     let outcome = fixture
         .repository
-        .settle_actor_atomic(changed)
+        .settle_actor_atomic_for_event(changed)
         .expect("first committed receipt wins");
     assert!(matches!(
         outcome,
@@ -568,24 +568,28 @@ fn reused_event_key_for_different_event_or_choice_is_rejected() {
     fixture.seed(ACTOR, GUILD, 20);
     let expected = fixture
         .repository
-        .actor_snapshot(key(ACTOR, Some(GUILD)))
+        .actor_snapshot_for_event(key(ACTOR, Some(GUILD)))
         .unwrap()
         .unwrap();
     let request = gear_request(&expected, "interaction:collision");
     fixture
         .repository
-        .settle_actor_atomic(request)
+        .settle_actor_atomic_for_event(request)
         .expect("first settlement");
     let mut changed_event = request;
     changed_event.event_id = "different_event";
     assert!(matches!(
-        fixture.repository.settle_actor_atomic(changed_event),
+        fixture
+            .repository
+            .settle_actor_atomic_for_event(changed_event),
         Err(DigEventRuntimeRepositoryError::IdempotencyConflict)
     ));
     let mut changed_choice = request;
     changed_choice.choice = "safe";
     assert!(matches!(
-        fixture.repository.settle_actor_atomic(changed_choice),
+        fixture
+            .repository
+            .settle_actor_atomic_for_event(changed_choice),
         Err(DigEventRuntimeRepositoryError::IdempotencyConflict)
     ));
 }
@@ -596,7 +600,7 @@ fn stale_snapshot_rejects_every_actor_side_effect() {
     fixture.seed(ACTOR, GUILD, 20);
     let expected = fixture
         .repository
-        .actor_snapshot(key(ACTOR, Some(GUILD)))
+        .actor_snapshot_for_event(key(ACTOR, Some(GUILD)))
         .unwrap()
         .unwrap();
     fixture
@@ -611,7 +615,7 @@ fn stale_snapshot_rejects_every_actor_side_effect() {
     assert_eq!(
         fixture
             .repository
-            .settle_actor_atomic(gear_request(&expected, "interaction:stale"))
+            .settle_actor_atomic_for_event(gear_request(&expected, "interaction:stale"))
             .unwrap(),
         DigEventSettlementOutcome::Conflict
     );
@@ -640,7 +644,7 @@ fn atomic_unique_gear_grant_rolls_back_with_event_failure() {
     fixture.seed(ACTOR, GUILD, 20);
     let expected = fixture
         .repository
-        .actor_snapshot(key(ACTOR, Some(GUILD)))
+        .actor_snapshot_for_event(key(ACTOR, Some(GUILD)))
         .unwrap()
         .unwrap();
     fixture
@@ -658,13 +662,13 @@ fn atomic_unique_gear_grant_rolls_back_with_event_failure() {
     assert!(matches!(
         fixture
             .repository
-            .settle_actor_atomic(gear_request(&expected, "interaction:rollback")),
+            .settle_actor_atomic_for_event(gear_request(&expected, "interaction:rollback")),
         Err(DigEventRuntimeRepositoryError::Sqlite(_))
     ));
     assert_eq!(
         fixture
             .repository
-            .actor_snapshot(key(ACTOR, Some(GUILD)))
+            .actor_snapshot_for_event(key(ACTOR, Some(GUILD)))
             .unwrap()
             .unwrap(),
         expected
@@ -693,13 +697,13 @@ fn repository_persists_unique_item_identity_and_custom_durability() {
     fixture.seed(ACTOR, GUILD, 20);
     let expected = fixture
         .repository
-        .actor_snapshot(key(ACTOR, Some(GUILD)))
+        .actor_snapshot_for_event(key(ACTOR, Some(GUILD)))
         .expect("snapshot")
         .expect("actor state");
 
     let outcome = fixture
         .repository
-        .settle_actor_atomic(gear_request(&expected, "interaction:identity"))
+        .settle_actor_atomic_for_event(gear_request(&expected, "interaction:identity"))
         .expect("gear settlement");
     let DigEventSettlementOutcome::Applied(receipt) = outcome else {
         panic!("unexpected outcome");
@@ -739,7 +743,7 @@ fn concurrent_duplicate_event_key_commits_once() {
     let expected = Arc::new(
         fixture
             .repository
-            .actor_snapshot(key(ACTOR, Some(GUILD)))
+            .actor_snapshot_for_event(key(ACTOR, Some(GUILD)))
             .unwrap()
             .unwrap(),
     );
@@ -753,7 +757,10 @@ fn concurrent_duplicate_event_key_commits_once() {
             thread::spawn(move || {
                 barrier.wait();
                 repository
-                    .settle_actor_atomic(gear_request(expected.as_ref(), "interaction:concurrent"))
+                    .settle_actor_atomic_for_event(gear_request(
+                        expected.as_ref(),
+                        "interaction:concurrent",
+                    ))
                     .expect("concurrent settlement")
             })
         })
@@ -801,7 +808,7 @@ fn consumable_and_artifact_rewards_use_the_same_atomic_boundary() {
 
     let first = fixture
         .repository
-        .actor_snapshot(key(ACTOR, Some(GUILD)))
+        .actor_snapshot_for_event(key(ACTOR, Some(GUILD)))
         .unwrap()
         .unwrap();
     let mut consumable = gear_request(&first, "interaction:consumable");
@@ -810,12 +817,12 @@ fn consumable_and_artifact_rewards_use_the_same_atomic_boundary() {
     });
     fixture
         .repository
-        .settle_actor_atomic(consumable)
+        .settle_actor_atomic_for_event(consumable)
         .expect("consumable settlement");
 
     let second = fixture
         .repository
-        .actor_snapshot(key(ACTOR - 1, Some(GUILD)))
+        .actor_snapshot_for_event(key(ACTOR - 1, Some(GUILD)))
         .unwrap()
         .unwrap();
     let mut artifact = gear_request(&second, "interaction:artifact");
@@ -825,7 +832,7 @@ fn consumable_and_artifact_rewards_use_the_same_atomic_boundary() {
     });
     fixture
         .repository
-        .settle_actor_atomic(artifact)
+        .settle_actor_atomic_for_event(artifact)
         .expect("artifact settlement");
 
     let connection = fixture.connection();
@@ -857,7 +864,7 @@ fn missing_player_and_tunnel_are_reported_without_writes() {
     fixture.seed(ACTOR, GUILD, 20);
     let expected = fixture
         .repository
-        .actor_snapshot(key(ACTOR, Some(GUILD)))
+        .actor_snapshot_for_event(key(ACTOR, Some(GUILD)))
         .unwrap()
         .unwrap();
 
@@ -871,7 +878,7 @@ fn missing_player_and_tunnel_are_reported_without_writes() {
     assert_eq!(
         fixture
             .repository
-            .settle_actor_atomic(gear_request(&expected, "interaction:no-player"))
+            .settle_actor_atomic_for_event(gear_request(&expected, "interaction:no-player"))
             .unwrap(),
         DigEventSettlementOutcome::MissingPlayer
     );
@@ -897,7 +904,7 @@ fn missing_player_and_tunnel_are_reported_without_writes() {
     assert_eq!(
         fixture
             .repository
-            .settle_actor_atomic(gear_request(&missing, "interaction:no-tunnel"))
+            .settle_actor_atomic_for_event(gear_request(&missing, "interaction:no-tunnel"))
             .unwrap(),
         DigEventSettlementOutcome::MissingTunnel
     );
@@ -1162,7 +1169,7 @@ fn actor_snapshot_includes_every_event_policy_input() {
 
     let snapshot = fixture
         .repository
-        .actor_snapshot(key(ACTOR, Some(GUILD)))
+        .actor_snapshot_for_event(key(ACTOR, Some(GUILD)))
         .unwrap()
         .unwrap();
     assert_eq!(snapshot.luminosity, 0);
@@ -1173,10 +1180,22 @@ fn actor_snapshot_includes_every_event_policy_input() {
         r#"["veteran_miner","veteran_miner","tunnel_mastery"]"#
     );
     assert!(snapshot.boss_progress_json.contains("defeated"));
-    assert!(snapshot.owned_gear.contains("ruinwager_signet"));
+    // Ownership collections load only when a selected reward needs them.
+    let rewards = fixture
+        .repository
+        .reward_snapshot(
+            key(ACTOR, Some(GUILD)),
+            DigEventRewardQueryPlan {
+                owned_gear: true,
+                inventory_count: true,
+                owned_artifacts: true,
+            },
+        )
+        .unwrap();
+    assert!(rewards.owned_gear.contains("ruinwager_signet"));
     assert!(snapshot.equipped_gear.contains("surveyors_loop"));
     assert!(!snapshot.equipped_gear.contains("ruinwager_signet"));
-    assert!(snapshot.owned_artifacts.contains("black_wax_seal"));
+    assert!(rewards.owned_artifacts.contains("black_wax_seal"));
     assert!(snapshot.equipped_relics.contains("diviners_knot"));
     assert!(!snapshot.equipped_relics.contains("black_wax_seal"));
 }
@@ -1291,6 +1310,36 @@ fn artifact_reward_pool_uses_one_owned_artifact_query() {
         1,
         "artifact reward admission uses one owned-set query"
     );
+}
+
+#[test]
+fn quest_snapshot_recent_bet_uses_an_inclusive_seven_day_window() {
+    let fixture = Fixture::new();
+    fixture.seed(ACTOR, GUILD, 20);
+    let now = 2_000_000_000;
+    let actor = key(ACTOR, Some(GUILD));
+    let recent_bet = || {
+        fixture
+            .repository
+            .quest_snapshot(actor, now)
+            .unwrap()
+            .recent_bet
+    };
+    assert!(!recent_bet(), "no bet");
+
+    let insert_bet = |bet_time: i64| {
+        fixture
+            .connection()
+            .execute(
+                "INSERT INTO bets (guild_id,discord_id,bet_time) VALUES (?1,?2,?3)",
+                params![GUILD, ACTOR, bet_time],
+            )
+            .unwrap();
+    };
+    insert_bet(now - 7 * 86_400 - 1);
+    assert!(!recent_bet(), "a bet older than seven days");
+    insert_bet(now - 7 * 86_400);
+    assert!(recent_bet(), "a bet exactly seven days old");
 }
 
 #[test]

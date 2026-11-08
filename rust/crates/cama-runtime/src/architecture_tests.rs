@@ -515,6 +515,33 @@ fn reminder_runtime_locks_stay_off_async_workers() {
     }
 }
 
+/// Betting's Neon hooks read SQLite through the event port and can render a
+/// multi-frame GIF while holding the service's `std::sync::Mutex`, so the lock
+/// may only be taken inside `run_neon`, which runs the hook on the blocking
+/// pool.
+#[test]
+fn betting_neon_hooks_stay_off_async_workers() {
+    let source = read("rust/crates/cama-runtime/src/betting_provider.rs");
+    let allowed = block_region(
+        &source,
+        source
+            .find("async fn run_neon<")
+            .expect("run_neon is declared"),
+    );
+    let mut locks = 0;
+    for (index, _) in source.match_indices(".lock()") {
+        if !source[..index].trim_end().ends_with("neon") {
+            continue;
+        }
+        locks += 1;
+        assert!(
+            allowed.contains(&index),
+            "betting_provider.rs locks the Neon service outside run_neon at byte {index}"
+        );
+    }
+    assert_eq!(locks, 1, "run_neon is the single Neon lock site");
+}
+
 #[test]
 fn synchronous_sqlite_adapters_are_marked_for_blocking_callers() {
     for file in [

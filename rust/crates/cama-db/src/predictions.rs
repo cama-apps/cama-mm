@@ -17,8 +17,6 @@ use thiserror::Error;
 use crate::open_runtime_connection;
 
 pub const CONTRACT_VALUE: i64 = 10;
-pub const PRICE_LOW: i64 = 5;
-pub const PRICE_HIGH: i64 = 95;
 pub const MAX_CONTRACTS_PER_TRADE: i64 = 1_000;
 pub const REFRESH_SECONDS: i64 = 86_400;
 
@@ -260,14 +258,6 @@ pub struct PnlHistoryPoint {
     pub delta: i64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NetWorthEntry {
-    pub discord_id: i64,
-    pub name: String,
-    pub jopacoin_balance: i64,
-    pub net_worth: i64,
-}
-
 #[derive(Debug, Error)]
 pub enum PredictionRepositoryError {
     #[error("Prediction not found.")]
@@ -345,7 +335,7 @@ impl PredictionRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.path)
     }
 
@@ -506,35 +496,6 @@ impl PredictionRepository {
             market_from_row,
         )?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
-    }
-
-    /// Match `require_gamba_channel`: missing players are a silent no-op, and
-    /// a debit updates the historical low-water mark without overdraft checks.
-    pub fn debit_gamba_channel_penalty(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-    ) -> Result<bool, PredictionRepositoryError> {
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let guild_id = Self::normalize_guild_id(guild_id);
-        let changed = transaction.execute(
-            "UPDATE players
-             SET jopacoin_balance=COALESCE(jopacoin_balance,0)-1,
-                 updated_at=CURRENT_TIMESTAMP
-             WHERE discord_id=?1 AND guild_id=?2",
-            params![discord_id, guild_id],
-        )?;
-        if changed == 1 {
-            transaction.execute(
-                "UPDATE players SET lowest_balance_ever=jopacoin_balance
-                 WHERE discord_id=?1 AND guild_id=?2
-                   AND (lowest_balance_ever IS NULL OR jopacoin_balance<lowest_balance_ever)",
-                params![discord_id, guild_id],
-            )?;
-        }
-        transaction.commit()?;
-        Ok(changed == 1)
     }
 
     /// Test fixture: replace a market's book with explicit levels.
@@ -3007,22 +2968,8 @@ mod tests {
     }
 
     #[test]
-    fn gamba_penalty_and_event_effects_match_python_fail_soft_policy() {
+    fn event_effects_match_python_fail_soft_policy() {
         let fixture = Fixture::new();
-        fixture.player(1, GUILD, 0);
-        assert!(
-            fixture
-                .repository
-                .debit_gamba_channel_penalty(1, Some(GUILD))
-                .expect("debit")
-        );
-        assert_eq!(fixture.balance(1, GUILD), -1);
-        assert!(
-            !fixture
-                .repository
-                .debit_gamba_channel_penalty(99, Some(GUILD))
-                .expect("missing player is no-op")
-        );
         fixture
             .connection()
             .execute(

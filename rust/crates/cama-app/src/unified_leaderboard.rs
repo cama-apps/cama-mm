@@ -433,11 +433,6 @@ where
     }
 
     #[must_use]
-    pub const fn tab_count(&self) -> usize {
-        LeaderboardTab::ALL.len()
-    }
-
-    #[must_use]
     pub fn button_style(&self, tab: LeaderboardTab) -> ButtonStyle {
         if tab == self.current_tab {
             ButtonStyle::Primary
@@ -898,7 +893,7 @@ where
             .map(|entry| {
                 let marker = rank_marker(entry.rank);
                 let name = if entry.discord_id > 0 {
-                    format!("<@{}>", entry.discord_id)
+                    self.display_name(entry.discord_id)
                 } else {
                     entry.username.clone()
                 };
@@ -927,7 +922,7 @@ where
                 .enumerate()
                 .map(|(index, debtor)| {
                     let name = if debtor.discord_id > 0 {
-                        format!("<@{}>", debtor.discord_id)
+                        self.display_name(debtor.discord_id)
                     } else {
                         debtor.username.clone()
                     };
@@ -1097,7 +1092,7 @@ where
             .iter()
             .map(|entry| {
                 let name = if entry.discord_id > 0 {
-                    format!("<@{}>", entry.discord_id)
+                    self.display_name(entry.discord_id)
                 } else {
                     entry.username.clone()
                 };

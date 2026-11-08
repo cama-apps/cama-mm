@@ -15,9 +15,9 @@ use async_trait::async_trait;
 use cama_app::economy_event_sqlite::SqliteEconomyEventService;
 use cama_app::player_trivia_service as app;
 use cama_app::service_container::PersistentVanityTaxService;
+use cama_db::loan_repository::LoanRepository;
 use cama_db::pet_evolution_repository::PetEvolutionRepository;
 use cama_db::player_trivia as db;
-use cama_db::predictions_repository::PredictionRepository;
 use cama_domain::economy_scaling::scale_minigame_jc_delta;
 use cama_domain::pet_evolution::PetActivity;
 use tokio::task::JoinHandle;
@@ -97,7 +97,7 @@ impl PlayerTriviaRegistrationProvider {
                     player_names: Arc::new(DiscordIdPlayerNameResolver),
                     repository,
                     service,
-                    penalties: PredictionRepository::new(database_path.as_ref()),
+                    penalties: LoanRepository::new(database_path.as_ref()),
                     pets: PetEvolutionRepository::new(database_path.as_ref()),
                     economy_events: Arc::new(SqliteEconomyEventService::new(
                         database_path.as_ref(),
@@ -177,7 +177,7 @@ struct PlayerTriviaRuntimeState {
     player_names: Arc<dyn GuildPlayerNameResolver>,
     repository: RuntimePlayerTriviaRepository,
     service: Arc<app::PlayerTriviaService<RuntimePlayerTriviaRepository>>,
-    penalties: PredictionRepository,
+    penalties: LoanRepository,
     pets: PetEvolutionRepository,
     economy_events: Arc<SqliteEconomyEventService>,
     discord: Arc<dyn PlayerTriviaDiscordPort>,
@@ -212,8 +212,8 @@ impl InteractionHandler for PlayerTriviaInteractionHandler {
 impl PlayerTriviaRuntimeState {
     async fn render_player_name(&self, user_id: i64, guild_id: i64) -> String {
         self.player_names
-            .names_for_guild(guild_id, &[user_id])
-            .unwrap_or_default()
+            .resolve_names(guild_id, &[user_id])
+            .await
             .resolve(user_id)
     }
 
@@ -351,6 +351,38 @@ impl PlayerTriviaRuntimeState {
                 None
             });
         let service = Arc::clone(&self.service);
+        let roster_members = member_ids.clone();
+        let roster = tokio::task::spawn_blocking(move || {
+            service
+                .eligible_player_ids(guild_id, roster_members.as_ref())
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| format!("player-trivia roster task failed: {error}"))?;
+        // Questions store their player names, so resolve them live (fetching
+        // members the gateway cache misses) before the set is generated.
+        let names = match roster {
+            Ok(player_ids) => {
+                let directory = self.player_names.resolve_names(guild_id, &player_ids).await;
+                player_ids
+                    .iter()
+                    .filter_map(|player_id| {
+                        directory
+                            .cached_name(*player_id)
+                            .map(|name| (*player_id, name))
+                    })
+                    .collect::<app::PlayerLabels>()
+            }
+            Err(error) => {
+                warn!(guild_id, %error, "failed to load the player-trivia roster");
+                return followup_ephemeral(
+                    &responder,
+                    "❌ Couldn't build today's player-trivia set right now — try again in a moment.",
+                )
+                .await;
+            }
+        };
+        let service = Arc::clone(&self.service);
         let count = self.config.question_count;
         let include_spicy = self.config.include_spicy;
         let recent_days = self.config.recent_days;
@@ -360,6 +392,7 @@ impl PlayerTriviaRuntimeState {
                     user_id,
                     guild_id,
                     member_ids.as_ref(),
+                    &names,
                     count,
                     include_spicy,
                     recent_days,
@@ -756,7 +789,7 @@ impl PlayerTriviaRuntimeState {
         let penalties = self.penalties.clone();
         tokio::task::spawn_blocking(move || {
             penalties
-                .debit_gamba_channel_penalty(user_id, Some(guild_id))
+                .charge_gamba_channel_penalty_atomic(user_id, Some(guild_id))
                 .map(|_| ())
                 .map_err(|error| error.to_string())
         })

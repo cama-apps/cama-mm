@@ -5,16 +5,17 @@
 //! upload policies stay testable without a live bot process.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
+use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
 use cama_domain::openskill::CamaOpenSkillSystem;
-use fontdue::{Font, FontSettings};
+use fontdue::Font;
 use gif::{Encoder, Frame, Repeat};
 
 use crate::dig_neon::{BigWinFlavor, BigWinSource};
-use crate::font_assets::{DejaVuFace, load_dejavu_font};
+use crate::font_assets::{DejaVuFace, dejavu_font};
 use crate::jopat_match_routing::{
     ContractGifRenderer, POST_MATCH_GIF_CHANCE, PostMatchGifPort, post_match_gif_theme,
 };
@@ -241,14 +242,6 @@ pub fn render_cooldown_hit(command: &str) -> String {
 }
 
 #[must_use]
-pub fn render_match_recorded() -> String {
-    terminal_lines(&[
-        "[JOPA-T] MATCH DEBRIEF".into(),
-        "Replay ledger accepted.".into(),
-    ])
-}
-
-#[must_use]
 pub fn render_bankruptcy_filing(name: &str, debt: i64, filing_number: u32) -> String {
     terminal_lines(&[
         "BANKRUPTCY FILING ACCEPTED".into(),
@@ -280,20 +273,6 @@ pub fn render_balance_zero(name: &str) -> String {
     terminal_lines(&[
         "BALANCE ZERO".into(),
         format!("Client {name} has no remaining collateral."),
-    ])
-}
-
-#[must_use]
-pub fn render_streak(name: &str, streak: u32, is_win: bool) -> String {
-    let status = if is_win {
-        "WIN STREAK HOT"
-    } else {
-        "LOSS STREAK ANOMALY"
-    };
-    terminal_lines(&[
-        status.into(),
-        format!("Client: {name}"),
-        format!("Run: {streak}"),
     ])
 }
 
@@ -416,48 +395,6 @@ pub fn render_gamba_spectator(name: &str) -> String {
         "SPECTATOR MODE".into(),
         format!("Client: {name}"),
         "Not playing. Just watching.".into(),
-    ])
-}
-
-#[must_use]
-pub fn render_prediction_resolved(question: &str, outcome: &str, total_pool: i64) -> String {
-    terminal_lines(&[
-        "PREDICTION RESOLVED".into(),
-        format!("Market: {question}"),
-        format!("Outcome: {outcome}. Pool: {total_pool} JC"),
-    ])
-}
-
-#[must_use]
-pub fn render_prediction_market_crash(
-    question: &str,
-    total_pool: i64,
-    outcome: &str,
-    winners: u32,
-    losers: u32,
-) -> String {
-    terminal_lines(&[
-        "MARKET SETTLEMENT CRASH".into(),
-        format!("Market: {question}"),
-        format!("Outcome: {outcome}. Pool: {total_pool} JC"),
-        format!("Winners: {winners}. Losers: {losers}."),
-    ])
-}
-
-#[must_use]
-pub fn render_soft_avoid(cost: i64, games: u32) -> String {
-    terminal_lines(&[
-        "SOFT AVOID PURCHASED".into(),
-        format!("Anonymous cost: {cost} JC. Duration: {games} games."),
-    ])
-}
-
-#[must_use]
-pub fn render_soft_avoid_surveillance(cost: i64, games: u32) -> String {
-    terminal_lines(&[
-        "SOCIAL SURVEILLANCE".into(),
-        format!("Avoid window: {games} games."),
-        format!("Anonymous settlement: {cost} JC."),
     ])
 }
 
@@ -838,19 +775,11 @@ impl NeonCanvas {
 }
 
 fn neon_font(bold: bool) -> Option<&'static Font> {
-    static REGULAR: OnceLock<Option<Font>> = OnceLock::new();
-    static BOLD: OnceLock<Option<Font>> = OnceLock::new();
-    let slot = if bold { &BOLD } else { &REGULAR };
-    slot.get_or_init(|| {
-        load_dejavu_font(if bold {
-            DejaVuFace::SansMonoBold
-        } else {
-            DejaVuFace::SansMono
-        })
-        .ok()
-        .and_then(|bytes| Font::from_bytes(bytes, FontSettings::default()).ok())
+    dejavu_font(if bold {
+        DejaVuFace::SansMonoBold
+    } else {
+        DejaVuFace::SansMono
     })
-    .as_ref()
 }
 
 fn neon_text_width(text: &str, pixel_size: f32, font: &Font) -> f32 {
@@ -1291,86 +1220,6 @@ pub fn create_don_coin_flip_gif(name: &str, balance_lost: i64) -> GifAsset {
 }
 
 #[must_use]
-pub fn create_market_crash_gif(
-    total_pool: i64,
-    outcome: &str,
-    winners: u32,
-    losers: u32,
-) -> GifAsset {
-    let mut durations = vec![100; 15];
-    durations.extend([80; 15]);
-    durations.extend([200; 14]);
-    durations.push(60_000);
-    render_neon_animation(
-        "market_crash",
-        &durations,
-        scene_seed(&(total_pool, outcome, winners, losers)),
-        |frame, canvas| {
-            if frame < 30 {
-                let crash = frame >= 15;
-                let progress = (frame % 15) as i32;
-                let peak_x = 280;
-                let end_x = if crash { 370 } else { 40 + progress * 20 };
-                let end_y = if crash {
-                    210 - progress * 8
-                } else {
-                    190 - progress * 6
-                };
-                canvas.text_centered(
-                    "PREDICTION MARKET",
-                    10,
-                    if crash { COLOR_RED } else { COLOR_GREEN },
-                    1,
-                );
-                canvas.text_centered(&format!("POOL: {total_pool} JC"), 32, COLOR_DIM_GREEN, 1);
-                canvas.line(40, 220, 370, 220, COLOR_DIM_GREEN);
-                canvas.line(40, 80, 40, 220, COLOR_DIM_GREEN);
-                canvas.line(
-                    40,
-                    220,
-                    peak_x,
-                    100,
-                    if crash { COLOR_RED } else { COLOR_GREEN },
-                );
-                canvas.line(
-                    peak_x,
-                    100,
-                    end_x,
-                    end_y,
-                    if crash { COLOR_RED } else { COLOR_GREEN },
-                );
-                canvas.text_left(
-                    if crash {
-                        "STATUS: SETTLING"
-                    } else {
-                        "STATUS: ACTIVE"
-                    },
-                    20,
-                    235,
-                    COLOR_YELLOW,
-                    1,
-                );
-                if crash && frame.is_multiple_of(2) {
-                    canvas.text_centered("MARKET CRASH", 130, COLOR_RED, 2);
-                }
-            } else {
-                canvas.text_centered("MARKET SETTLED", 20, COLOR_YELLOW, 2);
-                canvas.text_centered(
-                    &format!("OUTCOME: {}", outcome.to_ascii_uppercase()),
-                    75,
-                    COLOR_YELLOW,
-                    1,
-                );
-                canvas.text_centered(&format!("TOTAL POOL: {total_pool} JC"), 105, COLOR_RED, 1);
-                canvas.text_left(&format!("WINNERS: {winners}"), 60, 145, COLOR_GREEN, 1);
-                canvas.text_left(&format!("LOSERS: {losers}"), 60, 170, COLOR_RED, 1);
-                canvas.text_centered("WEALTH REDISTRIBUTED", 220, COLOR_GREEN, 1);
-            }
-        },
-    )
-}
-
-#[must_use]
 pub fn create_bomb_pot_gif(pool: i64, contributors: i64) -> GifAsset {
     let mut durations = vec![100; 15];
     durations.extend([60; 10]);
@@ -1532,41 +1381,6 @@ pub fn render_win_streak_record(name: &str, streak: i64) -> String {
     ])
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct PaletteFrame {
-    pub colors: Vec<[u8; 3]>,
-    pub palette: Vec<[u8; 3]>,
-    pub indexed: bool,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct QuantizationStats {
-    pub adaptive_searches: usize,
-    pub palette_remaps: usize,
-}
-
-/// Select one animation-wide palette, then remap every full frame into it.
-#[must_use]
-pub fn quantize_frames_with_shared_palette(frames: &mut [PaletteFrame]) -> QuantizationStats {
-    if frames.is_empty() {
-        return QuantizationStats::default();
-    }
-    let mut palette = Vec::new();
-    for color in frames.iter().flat_map(|frame| frame.colors.iter().copied()) {
-        if !palette.contains(&color) && palette.len() < 256 {
-            palette.push(color);
-        }
-    }
-    for frame in &mut *frames {
-        frame.palette.clone_from(&palette);
-        frame.indexed = true;
-    }
-    QuantizationStats {
-        adaptive_searches: 1,
-        palette_remaps: frames.len(),
-    }
-}
-
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct EventKey {
     pub discord_id: u64,
@@ -1691,7 +1505,14 @@ pub struct NeonDegenService {
     cooldowns: HashMap<(u64, u64), u64>,
     one_time_seen: HashSet<EventKey>,
     event_port: Option<Arc<dyn NeonEventPort>>,
+    player_names: Option<Arc<dyn NeonPlayerNames>>,
     pub rolls: RollSource,
+}
+
+/// Readable display names for the players Neon copy names. Lookups must be
+/// cache-only, because Neon runs under its service lock on async paths.
+pub trait NeonPlayerNames: Send + Sync {
+    fn cached_display_name(&self, guild_id: Option<u64>, discord_id: u64) -> Option<String>;
 }
 
 impl fmt::Debug for NeonDegenService {
@@ -1723,6 +1544,7 @@ impl NeonDegenService {
             cooldowns: HashMap::new(),
             one_time_seen: HashSet::new(),
             event_port: None,
+            player_names: None,
             rolls: RollSource::seeded(seed),
         }
     }
@@ -1737,6 +1559,21 @@ impl NeonDegenService {
             .collect();
         service.event_port = Some(event_port);
         service
+    }
+
+    /// Resolve player names for Neon copy; without one, players read as
+    /// `Unknown player`.
+    pub fn set_player_names(&mut self, player_names: Arc<dyn NeonPlayerNames>) {
+        self.player_names = Some(player_names);
+    }
+
+    /// The readable name Neon shows for a player: never an ID or part of one.
+    fn player_label(&self, discord_id: u64, guild_id: Option<u64>) -> String {
+        self.player_names
+            .as_ref()
+            .and_then(|names| names.cached_display_name(guild_id, discord_id))
+            .and_then(|name| readable_player_name(&name).map(str::to_owned))
+            .unwrap_or_else(|| UNKNOWN_PLAYER.to_owned())
     }
 
     pub fn set_enabled(&mut self, enabled: bool) {
@@ -1822,16 +1659,6 @@ impl NeonDegenService {
     }
 
     #[must_use]
-    pub fn check_one_time(
-        &mut self,
-        discord_id: u64,
-        guild_id: Option<u64>,
-        event_type: &str,
-    ) -> bool {
-        self.unseen(&EventKey::new(discord_id, guild_id, event_type))
-    }
-
-    #[must_use]
     pub fn on_balance_check(
         &mut self,
         discord_id: u64,
@@ -1844,7 +1671,7 @@ impl NeonDegenService {
         self.set_cooldown(discord_id, guild_id);
         Some(NeonResult::text(
             1,
-            render_balance_check(&client_name(discord_id), balance),
+            render_balance_check(&self.player_label(discord_id, guild_id), balance),
         ))
     }
 
@@ -1893,7 +1720,7 @@ impl NeonDegenService {
             self.set_cooldown(discord_id, guild_id);
             return Some(NeonResult::text(
                 2,
-                render_wheel_bankrupt(&client_name(discord_id), result_value),
+                render_wheel_bankrupt(&self.player_label(discord_id, guild_id), result_value),
             ));
         }
         let freefall_eligible = prior_balance.is_some_and(|balance| balance >= 100)
@@ -1908,7 +1735,7 @@ impl NeonDegenService {
                     footer_text: None,
                 }
                 .with_gif(create_freefall_gif(
-                    &client_name(discord_id),
+                    &self.player_label(discord_id, guild_id),
                     prior_balance.unwrap_or(100),
                     new_balance,
                 )),
@@ -1942,7 +1769,7 @@ impl NeonDegenService {
             return None;
         }
         let gif = render_big_win(
-            &format!("Client-{}", discord_id % 10_000),
+            &self.player_label(discord_id, guild_id),
             payout,
             source,
             flavor,
@@ -1980,14 +1807,14 @@ impl NeonDegenService {
             self.set_cooldown(discord_id, guild_id);
             return Some(NeonResult::text(
                 2,
-                render_system_breach(&client_name(discord_id)),
+                render_system_breach(&self.player_label(discord_id, guild_id)),
             ));
         }
         if new_balance == 0 && !won && self.rolls.roll(0.70) {
             self.set_cooldown(discord_id, guild_id);
             return Some(NeonResult::text(
                 2,
-                render_balance_zero(&client_name(discord_id)),
+                render_balance_zero(&self.player_label(discord_id, guild_id)),
             ));
         }
         None
@@ -2010,11 +1837,13 @@ impl NeonDegenService {
         }
         self.set_cooldown(discord_id, guild_id);
         let debt = new_balance.saturating_abs();
-        let text = render_debt_collector(&client_name(discord_id), debt);
+        let text = render_debt_collector(&self.player_label(discord_id, guild_id), debt);
         if leverage >= 5 && new_balance <= -self.max_debt && self.rolls.roll(0.30) {
             return Some(
-                NeonResult::text(3, text)
-                    .with_gif(create_debt_collector_gif(&client_name(discord_id), debt)),
+                NeonResult::text(3, text).with_gif(create_debt_collector_gif(
+                    &self.player_label(discord_id, guild_id),
+                    debt,
+                )),
             );
         }
         let _ = amount;
@@ -2049,7 +1878,7 @@ impl NeonDegenService {
         debt_cleared: i64,
         filing_number: u32,
     ) -> Option<NeonResult> {
-        let display_name = client_name(discord_id);
+        let display_name = self.player_label(discord_id, guild_id);
         self.on_bankruptcy_named(
             discord_id,
             guild_id,
@@ -2132,7 +1961,7 @@ impl NeonDegenService {
         self.set_cooldown(discord_id, guild_id);
         Some(NeonResult::text(
             2,
-            render_all_in_bet(&client_name(discord_id), amount, percentage),
+            render_all_in_bet(&self.player_label(discord_id, guild_id), amount, percentage),
         ))
     }
 
@@ -2156,7 +1985,7 @@ impl NeonDegenService {
         self.set_cooldown(discord_id, guild_id);
         Some(NeonResult::text(
             2,
-            render_last_second_bet(&client_name(discord_id), seconds_remaining),
+            render_last_second_bet(&self.player_label(discord_id, guild_id), seconds_remaining),
         ))
     }
 
@@ -2180,7 +2009,7 @@ impl NeonDegenService {
         self.set_cooldown(discord_id, guild_id);
         Some(NeonResult::text(
             1,
-            render_first_leverage(&client_name(discord_id), leverage),
+            render_first_leverage(&self.player_label(discord_id, guild_id), leverage),
         ))
     }
 
@@ -2202,7 +2031,7 @@ impl NeonDegenService {
         self.set_cooldown(discord_id, guild_id);
         Some(NeonResult::text(
             2,
-            render_bets_milestone(&client_name(discord_id), total_bets),
+            render_bets_milestone(&self.player_label(discord_id, guild_id), total_bets),
         ))
     }
 
@@ -2255,7 +2084,11 @@ impl NeonDegenService {
             }
             NeonResult::text(
                 2,
-                render_negative_loan(&client_name(discord_id), amount, -total_owed.abs()),
+                render_negative_loan(
+                    &self.player_label(discord_id, guild_id),
+                    amount,
+                    -total_owed.abs(),
+                ),
             )
         } else {
             if !self.check_cooldown(discord_id, guild_id) || !self.rolls.roll(0.50) {
@@ -2378,7 +2211,7 @@ impl NeonDegenService {
                 ]),
             )
             .with_gif(create_degen_certificate_gif(
-                &client_name(discord_id),
+                &self.player_label(discord_id, guild_id),
                 i64::from(degen_score),
             )),
         )
@@ -2402,7 +2235,7 @@ impl NeonDegenService {
             return None;
         }
         self.set_cooldown(discord_id, guild_id);
-        let name = client_name(discord_id);
+        let name = self.player_label(discord_id, guild_id);
         let text = render_games_milestone(&name, total_games);
         if total_games >= 100 {
             Some(
@@ -2435,7 +2268,7 @@ impl NeonDegenService {
             return None;
         }
         self.set_cooldown(discord_id, guild_id);
-        let name = client_name(discord_id);
+        let name = self.player_label(discord_id, guild_id);
         let text = render_win_streak_record(&name, current_streak);
         if current_streak >= 8 {
             Some(
@@ -2452,7 +2285,7 @@ impl NeonDegenService {
     #[must_use]
     pub fn on_rivalry_detected(
         &mut self,
-        _guild_id: Option<u64>,
+        guild_id: Option<u64>,
         player1_id: u64,
         player2_id: u64,
         games_against: i64,
@@ -2469,8 +2302,8 @@ impl NeonDegenService {
         Some(NeonResult::text(
             2,
             render_rivalry_detected(
-                &client_name(player1_id),
-                &client_name(player2_id),
+                &self.player_label(player1_id, guild_id),
+                &self.player_label(player2_id, guild_id),
                 u32::try_from(games_against.max(0)).unwrap_or(u32::MAX),
                 winrate_vs,
             ),
@@ -2489,7 +2322,7 @@ impl NeonDegenService {
         if !self.enabled {
             return None;
         }
-        let name = client_name(discord_id);
+        let name = self.player_label(discord_id, guild_id);
         let result = if won {
             NeonResult::text(1, render_don_win(&name, final_balance))
         } else if balance_at_risk > 100 && self.rolls.roll(0.18) {
@@ -2517,7 +2350,10 @@ impl NeonDegenService {
         let _ = guild_id;
         Some(NeonResult::text(
             1,
-            render_coinflip(&client_name(winner_id), &client_name(loser_id)),
+            render_coinflip(
+                &self.player_label(winner_id, guild_id),
+                &self.player_label(loser_id, guild_id),
+            ),
         ))
     }
 
@@ -2531,14 +2367,17 @@ impl NeonDegenService {
         captain2_id: u64,
         rating_diff: i64,
     ) -> Option<NeonResult> {
-        let _ = guild_id;
         let diff = rating_diff.saturating_abs();
         if !self.enabled || diff > 50 || !self.rolls.roll(0.20) {
             return None;
         }
         Some(NeonResult::text(
             1,
-            render_captain_symmetry(&client_name(captain1_id), &client_name(captain2_id), diff),
+            render_captain_symmetry(
+                &self.player_label(captain1_id, guild_id),
+                &self.player_label(captain2_id, guild_id),
+                diff,
+            ),
         ))
     }
 
@@ -2618,10 +2457,6 @@ impl NeonDegenService {
         self.set_cooldown(discord_id, guild_id);
         Some(NeonResult::text(1, render_gamba_spectator(display_name)))
     }
-}
-
-fn client_name(discord_id: u64) -> String {
-    format!("Client-{}", discord_id % 10_000)
 }
 
 /// Durable rating facts supplied by Match after settlement.  The Neon layer
@@ -2751,253 +2586,6 @@ pub fn choose_notable_winner(
     })
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum ContextValue {
-    Text(String),
-    Integer(i64),
-    Number(f64),
-    Bool(bool),
-}
-
-impl From<&str> for ContextValue {
-    fn from(value: &str) -> Self {
-        Self::Text(value.into())
-    }
-}
-
-impl From<i64> for ContextValue {
-    fn from(value: i64) -> Self {
-        Self::Integer(value)
-    }
-}
-
-pub type PlayerContext = BTreeMap<String, ContextValue>;
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AiRequest {
-    pub prompt: String,
-    pub system_prompt: String,
-    pub feature: &'static str,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct GenerationOptions {
-    pub anonymous: bool,
-    pub validate_facts: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GeneratedText {
-    pub text: String,
-    pub request: Option<AiRequest>,
-}
-
-const SYSTEM_PROMPT: &str = "You are JOPA-T/v3.7. Use verified facts only.";
-const STRICT_FACT_KEYS: &[&str] = &[
-    "winner_name",
-    "loser_name",
-    "hero",
-    "kills",
-    "deaths",
-    "assists",
-    "gpm",
-    "xpm",
-    "rating_change",
-    "expected_win_prob",
-    "payout",
-    "loss",
-    "leverage",
-    "bankruptcy_count",
-    "degen_score",
-    "streak",
-];
-
-#[must_use]
-pub fn build_player_context(player: Option<&PlayerSnapshot>) -> PlayerContext {
-    let mut context = PlayerContext::new();
-    if let Some(player) = player {
-        context.insert("name".into(), ContextValue::Text(player.name.clone()));
-        context.insert("balance".into(), ContextValue::Integer(player.balance));
-        if let Some(lowest) = player.lowest_balance {
-            context.insert("lowest_balance".into(), ContextValue::Integer(lowest));
-        }
-    }
-    context
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PlayerSnapshot {
-    pub discord_id: u64,
-    pub name: String,
-    pub balance: i64,
-    pub lowest_balance: Option<i64>,
-}
-
-#[must_use]
-pub fn generate_text(
-    ai_enabled: bool,
-    event_description: &str,
-    player_context: &PlayerContext,
-    fallback: &str,
-    model_output: Option<&str>,
-    options: GenerationOptions,
-) -> GeneratedText {
-    if !ai_enabled {
-        return GeneratedText {
-            text: fallback.into(),
-            request: None,
-        };
-    }
-    if options.validate_facts
-        && player_context
-            .keys()
-            .any(|key| !STRICT_FACT_KEYS.contains(&key.as_str()))
-    {
-        return GeneratedText {
-            text: fallback.into(),
-            request: None,
-        };
-    }
-
-    let effective_context = if options.anonymous {
-        PlayerContext::new()
-    } else {
-        player_context.clone()
-    };
-    let prompt_context = if options.validate_facts {
-        redact_strict_context(&effective_context)
-    } else {
-        effective_context.clone()
-    };
-    let context_json = serialize_context(&prompt_context);
-    let (prompt, system_prompt, feature) = if options.validate_facts {
-        let facts = structured_fact_lines(&effective_context);
-        (
-            format!(
-                "Event: {event_description}\nPlayer context:\n{context_json}\n\nReturn exactly one JSON object. fact must be one of {:?}.",
-                facts.keys().collect::<Vec<_>>()
-            ),
-            format!(
-                "{SYSTEM_PROMPT}\n\nCRITICAL: Select approved components only. Return exactly the requested JSON object."
-            ),
-            "neon.post_match",
-        )
-    } else if options.anonymous {
-        (
-            format!(
-                "Event: {event_description}\nPlayer context:\n{context_json}\n\nExample output:\n{fallback}\n\nDo NOT reference any player-specific stats."
-            ),
-            format!(
-                "{SYSTEM_PROMPT}\n\nCRITICAL: This is an ANONYMOUS event. DO NOT include any player names, usernames, balances, statistics, or identifying information."
-            ),
-            "neon.event",
-        )
-    } else {
-        (
-            format!(
-                "Event: {event_description}\nPlayer context:\n{context_json}\n\nExample output:\n{fallback}\n\nUse only the supplied context fields."
-            ),
-            SYSTEM_PROMPT.into(),
-            "neon.event",
-        )
-    };
-    let request = AiRequest {
-        prompt,
-        system_prompt,
-        feature,
-    };
-
-    let Some(model_output) = model_output else {
-        return GeneratedText {
-            text: fallback.into(),
-            request: Some(request),
-        };
-    };
-    let text = if options.validate_facts {
-        render_structured_selection(model_output, &effective_context)
-            .map_or_else(|| fallback.into(), |selected| ansi_block(&selected))
-    } else {
-        let stripped = strip_markdown_fence(model_output);
-        let sanitized = sanitize_llm_terminal_text(&stripped, 1800);
-        if sanitized.is_empty() {
-            fallback.into()
-        } else {
-            ansi_block(&sanitized)
-        }
-    };
-    GeneratedText {
-        text,
-        request: Some(request),
-    }
-}
-
-fn redact_strict_context(context: &PlayerContext) -> PlayerContext {
-    let mut redacted = context.clone();
-    if redacted.contains_key("winner_name") {
-        redacted.insert(
-            "winner_name".into(),
-            ContextValue::Text("[verified winner client]".into()),
-        );
-    }
-    if redacted.contains_key("loser_name") {
-        redacted.insert(
-            "loser_name".into(),
-            ContextValue::Text("[verified loser client]".into()),
-        );
-    }
-    redacted
-}
-
-fn serialize_context(context: &PlayerContext) -> String {
-    let entries = context
-        .iter()
-        .map(|(key, value)| {
-            let value = match value {
-                ContextValue::Text(value) => format!("\"{}\"", json_escape(value)),
-                ContextValue::Integer(value) => value.to_string(),
-                ContextValue::Number(value) if value.is_finite() => value.to_string(),
-                ContextValue::Number(_) => "null".into(),
-                ContextValue::Bool(value) => value.to_string(),
-            };
-            format!("\"{}\": {value}", json_escape(key))
-        })
-        .collect::<Vec<_>>();
-    format!("{{{}}}", entries.join(", "))
-}
-
-fn json_escape(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for character in text.chars() {
-        match character {
-            '\\' => escaped.push_str("\\\\"),
-            '"' => escaped.push_str("\\\""),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            character if character.is_control() => {
-                escaped.push_str(&format!("\\u{:04x}", character as u32));
-            }
-            character => escaped.push(character),
-        }
-    }
-    escaped
-}
-
-fn strip_markdown_fence(text: &str) -> String {
-    let trimmed = text.trim();
-    if !trimmed.starts_with("```") {
-        return trimmed.into();
-    }
-    let without_open = trimmed
-        .find('\n')
-        .map_or("", |newline| &trimmed[newline + 1..]);
-    without_open
-        .strip_suffix("```")
-        .unwrap_or(without_open)
-        .trim()
-        .into()
-}
-
 #[must_use]
 pub fn sanitize_llm_terminal_text(text: &str, max_chars: usize) -> String {
     let mut cleaned = String::with_capacity(text.len());
@@ -3124,141 +2712,6 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
     }
     output.push_str("...");
     output
-}
-
-fn structured_fact_lines(context: &PlayerContext) -> BTreeMap<&'static str, String> {
-    let mut lines = BTreeMap::new();
-    if let Some(payout) = positive_integer(context, "payout") {
-        lines.insert("payout", format!("SETTLEMENT: {payout} JC paid."));
-    }
-    if let Some(loss) = positive_integer(context, "loss") {
-        lines.insert("loss", format!("SETTLEMENT: {loss} JC lost."));
-    }
-    if let Some(kills) = integer(context, "kills")
-        && let (Some(deaths), Some(assists)) =
-            (integer(context, "deaths"), integer(context, "assists"))
-    {
-        lines.insert(
-            "kda",
-            format!("COMBAT LEDGER: {kills}/{deaths}/{assists} K/D/A."),
-        );
-    }
-    if context.contains_key("winner_name") && !context.contains_key("loser_name") {
-        lines.insert("outcome", "OUTCOME: Verified client victory.".into());
-    } else if context.contains_key("loser_name") && !context.contains_key("winner_name") {
-        lines.insert("outcome", "OUTCOME: Verified client loss.".into());
-    }
-    if lines.is_empty() {
-        lines.insert(
-            "telemetry",
-            "TELEMETRY: Verified post-match sample archived.".into(),
-        );
-    }
-    lines
-}
-
-fn integer(context: &PlayerContext, key: &str) -> Option<i64> {
-    match context.get(key) {
-        Some(ContextValue::Integer(value)) => Some(*value),
-        _ => None,
-    }
-}
-
-fn positive_integer(context: &PlayerContext, key: &str) -> Option<i64> {
-    integer(context, key).filter(|value| *value > 0)
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct StructuredSelection<'a> {
-    lead: usize,
-    fact: &'a str,
-    closer: usize,
-}
-
-fn parse_structured_selection(raw: &str) -> Option<StructuredSelection<'_>> {
-    let object = raw.trim().strip_prefix('{')?.strip_suffix('}')?;
-    let mut lead = None;
-    let mut fact = None;
-    let mut closer = None;
-    let mut count = 0;
-    for field in object.split(',') {
-        count += 1;
-        let (key, value) = field.split_once(':')?;
-        let key = key.trim().strip_prefix('"')?.strip_suffix('"')?;
-        let value = value.trim();
-        match key {
-            "lead" if lead.is_none() => lead = value.parse().ok(),
-            "fact" if fact.is_none() => fact = Some(value.strip_prefix('"')?.strip_suffix('"')?),
-            "closer" if closer.is_none() => closer = value.parse().ok(),
-            _ => return None,
-        }
-    }
-    (count == 3).then_some(StructuredSelection {
-        lead: lead?,
-        fact: fact?,
-        closer: closer?,
-    })
-}
-
-fn render_structured_selection(raw: &str, context: &PlayerContext) -> Option<String> {
-    const HYPE_LEADS: &[&str] = &[
-        "STATUS: ODDS DEFEATED",
-        "RISK ENGINE: CLIENT ASCENDING",
-        "MARKET ALERT: ANCIENT UNDER NEW MANAGEMENT",
-        "CASTER PROTOCOL: VOLUME APPROVED",
-    ];
-    const HYPE_CLOSERS: &[&str] = &[
-        "The house spreadsheet has entered the trees.",
-        "Risk controls have been asked to queue support.",
-        "The confidence index has achieved escape velocity.",
-        "JOPA-T upgrades this result from variance to cinema.",
-    ];
-    const ROAST_LEADS: &[&str] = &[
-        "STATUS: BUYBACK DENIED",
-        "RISK ENGINE: POSITION LIQUIDATED",
-        "COMPLIANCE: MMR COLLATERAL IMPAIRED",
-        "REPLAY AUDIT: EXPLANATIONS DEPRECIATED",
-    ];
-    const ROAST_CLOSERS: &[&str] = &[
-        "The replay has been classified as unsecured debt.",
-        "Buyback remains unavailable in both client and risk model.",
-        "The lane requested a responsible adult. Compliance sent a parlay.",
-        "JOPA-T marked the performance to market. The market objected.",
-    ];
-    const NEUTRAL_LEADS: &[&str] = &[
-        "STATUS: TELEMETRY INGESTED",
-        "MATCH LEDGER: SAMPLE ACCEPTED",
-        "REPLAY PARSER: CONCLUSIONS PENDING",
-        "RISK ENGINE: OUTCOME ARCHIVED",
-    ];
-    const NEUTRAL_CLOSERS: &[&str] = &[
-        "The system has kept the receipt.",
-        "Further confidence remains chance-gated.",
-        "No Ancient was consulted during this filing.",
-        "The queue may now resume pretending this was planned.",
-    ];
-
-    let selection = parse_structured_selection(raw)?;
-    let winner = context.contains_key("winner_name")
-        || positive_integer(context, "payout").is_some()
-        || integer(context, "rating_change").is_some_and(|value| value > 0);
-    let loser = context.contains_key("loser_name")
-        || positive_integer(context, "loss").is_some()
-        || integer(context, "rating_change").is_some_and(|value| value < 0);
-    let (leads, closers) = if winner && !loser {
-        (HYPE_LEADS, HYPE_CLOSERS)
-    } else if loser && !winner {
-        (ROAST_LEADS, ROAST_CLOSERS)
-    } else {
-        (NEUTRAL_LEADS, NEUTRAL_CLOSERS)
-    };
-    let fact_lines = structured_fact_lines(context);
-    Some(format!(
-        "[12:00:00.000] {}\n{}\n{}",
-        leads.get(selection.lead)?,
-        fact_lines.get(selection.fact)?,
-        closers.get(selection.closer)?
-    ))
 }
 
 #[cfg(test)]

@@ -44,6 +44,7 @@ use cama_db::match_draft::{MatchDraftAnalysis, MatchDraftRepository};
 use cama_db::match_recording_repository::MatchRecordingRepository;
 use cama_db::opendota_player::OpenDotaPlayerRepository;
 use cama_db::pairings_repository::{PairingsRepository, PairingsService};
+use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
 use cama_domain::embed_safety::EmbedModel;
 use cama_domain::guild_config::GuildConfigStore;
 use cama_domain::openskill::{CamaOpenSkillSystem, OpenSkillError};
@@ -567,8 +568,9 @@ impl OpenSkillEnrichmentPort for ConfiguredOpenSkillReplay {
         }
         let (summary, _) = self
             .correction
-            .replay_openskill_atomic_configured(
+            .replay_openskill_for_enriched_match_atomic_configured(
                 guild_id,
+                match_id.0,
                 &self.system,
                 &self.rating_system,
                 self.new_player_mmr_discount,
@@ -1887,7 +1889,7 @@ impl EnrichmentHandler {
         let selected_user = user_option(options, "user")?;
         let (target_id, _target_name, selected) = selected_user.map_or_else(
             || (context.user_id, context.user_display_name.clone(), false),
-            |user| (user.id, user.display_name_or_id(), true),
+            |user| (user.id, user.readable_display_name(), true),
         );
         let target_name = self.render_player_name(target_id, guild_id).await;
         let limit = integer_option(options, "limit").unwrap_or(5).clamp(1, 10);
@@ -2034,12 +2036,14 @@ impl EnrichmentHandler {
         if !defer(&responder, false).await {
             return Ok(());
         }
-        let (target_id, _target_name) = user_option(options, "user")?
-            .map(|user| (user.id, user.display_name_or_id()))
+        let (target_id, payload_name) = user_option(options, "user")?
+            .map(|user| (user.id, user.readable_display_name()))
             .unwrap_or((context.user_id, context.user_display_name));
         let target_name = match context.guild_id {
             Some(guild_id) => self.render_player_name(target_id, guild_id).await,
-            None => target_id.to_string(),
+            None => readable_player_name(&payload_name)
+                .unwrap_or(UNKNOWN_PLAYER)
+                .to_owned(),
         };
         let limit = integer_option(options, "limit").unwrap_or(10).clamp(1, 20);
         let limit = usize::try_from(limit).unwrap_or(10);
@@ -2127,7 +2131,7 @@ impl EnrichmentHandler {
         let invoking_user_id = context.user_id;
         let (target_id, _target_name, user_was_selected) = selected_user.map_or_else(
             || (context.user_id, context.user_display_name.clone(), false),
-            |user| (user.id, user.display_name_or_id(), true),
+            |user| (user.id, user.readable_display_name(), true),
         );
         let target_name = self.render_player_name(target_id, guild_id).await;
         let matches = self.matches.clone();

@@ -427,26 +427,8 @@ impl DigEventRuntimeRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.path)
-    }
-
-    /// Read all actor state used by event policy and reward admission.
-    pub fn actor_snapshot(
-        &self,
-        key: DigEventActorKey,
-    ) -> Result<Option<DigEventActorSnapshot>, DigEventRuntimeRepositoryError> {
-        let connection = self.connection()?;
-        query_actor_snapshot(
-            &connection,
-            key,
-            DigEventRewardQueryPlan {
-                owned_gear: true,
-                inventory_count: true,
-                owned_artifacts: true,
-            },
-        )
-        .map_err(Into::into)
     }
 
     /// Read the actor fields used by event policy without loading any reward
@@ -1257,16 +1239,6 @@ impl DigEventRuntimeRepository {
         })
     }
 
-    /// Commit one event actor outcome with optimistic state admission and a
-    /// durable event key. Duplicate delivery returns the original receipt
-    /// before checking the now-advanced snapshot.
-    pub fn settle_actor_atomic(
-        &self,
-        request: AtomicDigEventSettlement<'_>,
-    ) -> Result<DigEventSettlementOutcome, DigEventRuntimeRepositoryError> {
-        self.settle_actor_atomic_inner(request, true)
-    }
-
     /// Settle an event whose policy snapshot intentionally omitted reward
     /// ownership collections. The transaction still rechecks all tunnel,
     /// equipped-loadout, and wallet fields, while reward admission uses the
@@ -1276,14 +1248,6 @@ impl DigEventRuntimeRepository {
     pub fn settle_actor_atomic_for_event(
         &self,
         request: AtomicDigEventSettlement<'_>,
-    ) -> Result<DigEventSettlementOutcome, DigEventRuntimeRepositoryError> {
-        self.settle_actor_atomic_inner(request, false)
-    }
-
-    fn settle_actor_atomic_inner(
-        &self,
-        request: AtomicDigEventSettlement<'_>,
-        compare_reward_snapshot: bool,
     ) -> Result<DigEventSettlementOutcome, DigEventRuntimeRepositoryError> {
         validate_request(request)?;
         let buff_after = apply_json_mutation(
@@ -1327,15 +1291,7 @@ impl DigEventRuntimeRepository {
         let current = query_actor_snapshot(
             &transaction,
             request.expected.key,
-            if compare_reward_snapshot {
-                DigEventRewardQueryPlan {
-                    owned_gear: true,
-                    inventory_count: true,
-                    owned_artifacts: true,
-                }
-            } else {
-                DigEventRewardQueryPlan::default()
-            },
+            DigEventRewardQueryPlan::default(),
         )?;
         let Some(current) = current else {
             let tunnel_exists =
@@ -1351,12 +1307,7 @@ impl DigEventRuntimeRepository {
                 DigEventSettlementOutcome::Conflict
             });
         };
-        let matches = if compare_reward_snapshot {
-            current == *request.expected
-        } else {
-            event_policy_snapshot_matches(&current, request.expected)
-        };
-        if !matches {
+        if !event_policy_snapshot_matches(&current, request.expected) {
             transaction.rollback()?;
             return Ok(DigEventSettlementOutcome::Conflict);
         }

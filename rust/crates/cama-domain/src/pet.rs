@@ -90,7 +90,6 @@ pub const DIG_WORK_RATE_HUNGRY: i64 = 3;
 pub const DIG_WORK_CAP_BLOCKS: i64 = 36;
 pub const DIG_WORK_PER_DIG_CAP_BLOCKS: i64 = 12;
 
-pub const SPECIES_WEIGHT_TOTAL: i64 = 10_000;
 pub const GILDED_EGG_PREMIUM: i64 = 230;
 pub const MAX_LIVING_PETS: i64 = 5;
 pub const PET_SWITCH_COST: i64 = 25;
@@ -1002,11 +1001,6 @@ impl Pet {
         }
     }
 
-    #[must_use]
-    pub fn art_mood(&self, now: i64, decay_per_day: i64) -> &'static str {
-        self.mood(now, decay_per_day).art_key()
-    }
-
     pub fn dig_work_units_between(
         &self,
         start: i64,
@@ -1640,9 +1634,9 @@ mod tests {
     fn test_art_mood_collapses_to_three_keys() {
         let pet = make_pet();
         let feed = pet.last_fed_at;
-        assert_eq!(pet.art_mood(feed, RATE), "happy");
-        assert_eq!(pet.art_mood(feed + 2 * DAY, RATE), "neutral");
-        assert_eq!(pet.art_mood(feed + 4 * DAY, RATE), "hungry");
+        assert_eq!(pet.mood(feed, RATE).art_key(), "happy");
+        assert_eq!(pet.mood(feed + 2 * DAY, RATE).art_key(), "neutral");
+        assert_eq!(pet.mood(feed + 4 * DAY, RATE).art_key(), "hungry");
     }
 
     #[test]

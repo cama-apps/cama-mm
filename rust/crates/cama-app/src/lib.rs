@@ -8,21 +8,20 @@
 pub use cama_app_dig::{
     dig_assets, dig_bosses, dig_event_threats, dig_gear_runtime, dig_inventory, dig_loot,
     dig_new_events, dig_quest_policy, dig_relic_rework, dig_routes, dig_service, dig_sweep_fixes,
-    dig_tunnel_encounters, dig_tunnel_naming, dig_tunnels, dig_view_supplements,
+    dig_tunnel_naming, dig_tunnels, dig_view_supplements,
 };
 pub use cama_app_gameplay::{
     duel, mafia_service, mana_effects_service, mana_service, manashop_rework, pet, pet_assets,
     pet_brawl, pet_commands, pet_eating, pet_evolution_app, pet_flavor, pet_keepsake_commands,
-    pet_sqlite, shop_commands,
+    pet_sqlite, png_encoder, shop_commands,
 };
 pub use cama_app_match::{
     disburse_service, dota_info, draft, economy_actions, loan, match_recording,
-    match_voting_service, prediction_resolution, predictions, rating_comparison_service,
-    tax_commands, vanity_tax_service,
+    match_voting_service, predictions, rating_comparison_service, tax_commands, vanity_tax_service,
 };
 pub use cama_app_platform::{
     admin_low_priority, blame_luke_media, embeds, font_assets, moderation, player_mmr_fallback,
-    player_trivia_service, playtime_service, python_random, referrals, registration, reminders,
+    player_trivia_service, playtime_service, python_random, registration, reminders,
     survey_commands, timezone_service, trivia_questions, unified_leaderboard, wrapped_story,
 };
 
@@ -68,7 +67,6 @@ pub mod economy_event_sqlite;
 pub mod golden_wheel;
 pub mod hero_lookup;
 pub mod herogrid;
-pub mod interaction_safety;
 pub mod jopat_match_routing;
 pub mod jopat_post_match;
 pub mod lobby_runtime;
@@ -93,4 +91,6 @@ mod test_support;
 pub mod trivia_data;
 pub mod trivia_image_cache;
 pub mod wheel;
+pub mod wheel_media;
+pub mod wheel_settlement;
 pub mod wrapped_media;

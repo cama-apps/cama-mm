@@ -14,7 +14,7 @@ use cama_db_core::profit_deductions::{
     debit_profit_deductions, penalty_games_remaining,
 };
 use cama_domain::pet::{ADULT_AGE_SECONDS, Pet};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use thiserror::Error;
 
 use crate::open_runtime_connection;
@@ -133,7 +133,7 @@ impl PetEatingRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.path)
     }
 
@@ -459,6 +459,7 @@ impl PetEatingRepository {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    #[cfg(test)]
     pub fn find_unannounced_evolution_refs(
         &self,
         limit: i64,

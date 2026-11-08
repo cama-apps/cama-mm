@@ -9,15 +9,12 @@ use std::collections::BTreeSet;
 
 use cama_app::dig_loot::{
     CanonicalQuestDef, CanonicalQuestFinale, CanonicalQuestFinaleOutcome,
-    CanonicalQuestPrerequisite, CanonicalQuestProgress,
+    CanonicalQuestPrerequisite, CanonicalQuestProgress, resolve_canonical_quest_finale,
 };
 use cama_app::dig_quest_policy::{
-    QUEST_RECENT_BET_WINDOW_SECONDS, QuestProgressInput, advance_quest_on_desperate_success,
-    eligible_quest_event_ids, quest_for_event, quest_system_predicate_satisfied,
-    resolve_quest_finale_for_service,
+    QuestProgressInput, advance_quest_on_desperate_success, eligible_quest_event_ids,
+    quest_for_event,
 };
-
-const NOW: i64 = 2_000_000_000;
 
 fn quest(
     quest_id: &str,
@@ -126,11 +123,6 @@ fn test_system_predicate_bet_within_7d_negative() {
         },
     )];
     let empty = BTreeSet::new();
-    assert!(!quest_system_predicate_satisfied(
-        "bet_within_7d",
-        NOW,
-        None
-    ));
     assert!(eligible_quest_event_ids(&quests, 0, 0, None, None, &empty, &empty).is_empty());
 }
 
@@ -149,25 +141,10 @@ fn test_system_predicate_bet_within_7d_positive() {
         },
     )];
     let predicates = BTreeSet::from(["bet_within_7d".to_owned()]);
-    assert!(quest_system_predicate_satisfied(
-        "bet_within_7d",
-        NOW,
-        Some(NOW)
-    ));
     assert_eq!(
         eligible_quest_event_ids(&quests, 0, 0, None, None, &BTreeSet::new(), &predicates),
         BTreeSet::from(["qtest_s1".to_owned()])
     );
-}
-
-#[test]
-fn test_system_predicate_bet_outside_window_filters_out() {
-    let old_bet = NOW - QUEST_RECENT_BET_WINDOW_SECONDS - 1;
-    assert!(!quest_system_predicate_satisfied(
-        "bet_within_7d",
-        NOW,
-        Some(old_bet)
-    ));
 }
 
 #[test]
@@ -288,7 +265,7 @@ fn test_advance_through_to_finale_dispatches_relic() {
             CanonicalQuestProgress::Noop => panic!("quest progression stopped at stage {step}"),
         }
     }
-    let outcome = resolve_quest_finale_for_service(&finale.expect("relic finale"), &[0.0, 0.99])
+    let outcome = resolve_canonical_quest_finale(&finale.expect("relic finale"), &[0.0, 0.99])
         .expect("resolve relic finale");
     let CanonicalQuestFinaleOutcome::RelicGrant {
         relic_name,
@@ -309,7 +286,7 @@ fn test_advance_through_to_finale_dispatches_relic() {
 #[test]
 fn test_finale_jc_plus_modifier_grants_jc_and_sets_modifier() {
     let quest = jc_quest("agh");
-    let outcome = resolve_quest_finale_for_service(&quest.finale, &[]).expect("JC finale");
+    let outcome = resolve_canonical_quest_finale(&quest.finale, &[]).expect("JC finale");
     let CanonicalQuestFinaleOutcome::JcPlusGuildModifier {
         personal_jc,
         modifier_id,
@@ -319,7 +296,9 @@ fn test_finale_jc_plus_modifier_grants_jc_and_sets_modifier() {
     else {
         panic!("expected JC finale");
     };
-    assert_eq!(personal_jc, 49);
+    // Gross JC; the live dispatch applies the Dig minting scale (75 -> 49),
+    // which `dig_quest_policy_audit` pins end to end.
+    assert_eq!(personal_jc, 75);
     assert_eq!(modifier_id, "reagent_spill");
     assert_eq!(duration_seconds, 1_800);
     assert_eq!(

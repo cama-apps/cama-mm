@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use cama_db_core::profit_deductions::{
     DeductionLedgerContext, ProfitDeductionPolicy, ProfitDeductions, withhold_profit_deductions,
 };
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -976,7 +976,7 @@ impl DigSocialRuntimeRepository {
             .query_row(
                 "SELECT id,artifact_id,is_relic FROM dig_artifacts
                  WHERE discord_id=?1 AND guild_id=?2 AND artifact_id=?3
-                 ORDER BY id LIMIT 1",
+                 ORDER BY COALESCE(equipped,0), id LIMIT 1",
                 params![giver_id, guild_id, artifact_id],
                 |row| {
                     Ok((
@@ -995,11 +995,6 @@ impl DigSocialRuntimeRepository {
             transaction.commit()?;
             return Ok(DigGiftOutcome::NonRelic);
         }
-        transaction.execute(
-            "UPDATE dig_artifacts SET equipped=0
-             WHERE discord_id=?1 AND guild_id=?2 AND artifact_id=?3",
-            params![giver_id, guild_id, stored_artifact_id],
-        )?;
         let deleted = transaction.execute(
             "DELETE FROM dig_artifacts
              WHERE id=?1 AND discord_id=?2 AND guild_id=?3 AND artifact_id=?4 AND is_relic=1",
@@ -1027,8 +1022,8 @@ impl DigSocialRuntimeRepository {
         }))
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
-        Connection::open(&self.path)
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
+        crate::open_runtime_connection(&self.path)
     }
 }
 

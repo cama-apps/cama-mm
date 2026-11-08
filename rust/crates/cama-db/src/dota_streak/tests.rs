@@ -43,14 +43,22 @@ impl Fixture {
             .expect("insert player");
     }
 
-    fn set_streak(&self, discord_id: i64, guild_id: i64, days: i64, date: &str) {
+    fn streak(&self, discord_id: i64, guild_id: i64) -> DotaStreakState {
         self.connection()
-            .execute(
-                "UPDATE players SET dota_streak_days = ?1, dota_last_played_date = ?2
-                 WHERE discord_id = ?3 AND guild_id = ?4",
-                params![days, date, discord_id, guild_id],
+            .query_row(
+                "SELECT dota_streak_days, dota_last_played_date FROM players
+                 WHERE discord_id = ?1 AND guild_id = ?2",
+                params![discord_id, guild_id],
+                |row| {
+                    Ok(DotaStreakState {
+                        days: row.get(0)?,
+                        last_played_date: row.get(1)?,
+                    })
+                },
             )
-            .expect("prime streak");
+            .optional()
+            .expect("read streak")
+            .unwrap_or_default()
     }
 }
 
@@ -70,10 +78,7 @@ fn test_first_play_starts_at_one() {
         vec![1]
     );
     assert_eq!(
-        fixture
-            .repository
-            .get_streak(100, Some(GUILD))
-            .expect("state"),
+        fixture.streak(100, GUILD),
         DotaStreakState {
             days: 1,
             last_played_date: Some("2026-05-07".to_owned())
@@ -151,13 +156,7 @@ fn test_streak_is_per_guild() {
         .repository
         .advance_bulk_atomic(&[104], Some(GUILD), "2026-05-07", "2026-05-06")
         .expect("primary guild");
-    assert_eq!(
-        fixture
-            .repository
-            .get_streak(104, Some(OTHER_GUILD))
-            .expect("other guild"),
-        DotaStreakState::default()
-    );
+    assert_eq!(fixture.streak(104, OTHER_GUILD), DotaStreakState::default());
 }
 
 #[test]
@@ -181,22 +180,8 @@ fn test_bulk_preserves_order_duplicates_and_missing_players() {
             .expect("ordered bulk"),
         vec![0, 2, 2, 2]
     );
-    assert_eq!(
-        fixture
-            .repository
-            .get_streak(105, Some(GUILD))
-            .expect("105")
-            .days,
-        2
-    );
-    assert_eq!(
-        fixture
-            .repository
-            .get_streak(106, Some(GUILD))
-            .expect("106")
-            .days,
-        2
-    );
+    assert_eq!(fixture.streak(105, GUILD).days, 2);
+    assert_eq!(fixture.streak(106, GUILD).days, 2);
 }
 
 #[test]
@@ -211,13 +196,7 @@ fn test_bulk_streak_is_per_guild() {
             .expect("guild advance"),
         vec![1]
     );
-    assert_eq!(
-        fixture
-            .repository
-            .get_streak(107, Some(OTHER_GUILD))
-            .expect("other guild"),
-        DotaStreakState::default()
-    );
+    assert_eq!(fixture.streak(107, OTHER_GUILD), DotaStreakState::default());
 }
 
 #[test]
@@ -254,94 +233,12 @@ fn test_concurrent_bulk_advances_increment_once() {
     });
     assert_eq!((first, second), (vec![2], vec![2]));
     assert_eq!(
-        fixture
-            .repository
-            .get_streak(108, Some(GUILD))
-            .expect("state"),
+        fixture.streak(108, GUILD),
         DotaStreakState {
             days: 2,
             last_played_date: Some("2026-05-07".to_owned())
         }
     );
-}
-
-#[test]
-fn test_no_blood_pact_real_repository_uses_two_connections_and_exact_ledgers() {
-    let fixture = Fixture::new();
-    for (discord_id, streak) in [(301, 2), (302, 6), (303, 2)] {
-        fixture.player(discord_id, GUILD);
-        fixture.set_streak(discord_id, GUILD, streak, "2026-05-06");
-    }
-    let streaks = fixture
-        .repository
-        .advance_bulk_atomic(&[301, 302, 303], Some(GUILD), "2026-05-07", "2026-05-06")
-        .expect("first connection advances streaks");
-    assert_eq!(streaks, vec![3, 7, 3]);
-    let credits = [
-        DotaStreakCredit {
-            discord_id: 301,
-            streak_days: 3,
-            bonus: 1,
-        },
-        DotaStreakCredit {
-            discord_id: 302,
-            streak_days: 7,
-            bonus: 3,
-        },
-        DotaStreakCredit {
-            discord_id: 303,
-            streak_days: 3,
-            bonus: 1,
-        },
-    ];
-    let outcomes = fixture
-        .repository
-        .credit_awards_ordered_atomic(&credits, Some(GUILD), &ProfitDeductionPolicy::none())
-        .expect("second connection credits ordered awards");
-    assert_eq!(
-        outcomes.iter().map(|row| row.bonus).collect::<Vec<_>>(),
-        vec![1, 3, 1]
-    );
-
-    let ledger = {
-        let connection = fixture.connection();
-        let mut statement = connection
-            .prepare(
-                "SELECT account_id, delta, source, related_type, reason, metadata
-                 FROM economy_ledger_entries ORDER BY ledger_id",
-            )
-            .expect("ledger query");
-        statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                ))
-            })
-            .expect("ledger rows")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("collect ledger")
-    };
-    assert_eq!(ledger.len(), 3);
-    assert_eq!(ledger[0].0, 301);
-    assert_eq!(ledger[1].0, 302);
-    assert_eq!(ledger[2].0, 303);
-    assert_eq!(
-        ledger.iter().map(|row| row.1).collect::<Vec<_>>(),
-        vec![1, 3, 1]
-    );
-    for row in &ledger {
-        assert_eq!(row.2, "match_streak");
-        assert_eq!(row.3, "dota_streak");
-        assert_eq!(row.4, "Dota streak match bonus");
-    }
-    assert_eq!(ledger[0].5, "{\"streak_days\":3,\"bonus\":1}");
-    assert_eq!(ledger[1].5, "{\"streak_days\":7,\"bonus\":3}");
-    assert_eq!(ledger[2].5, "{\"streak_days\":3,\"bonus\":1}");
 }
 
 #[test]
@@ -588,7 +485,7 @@ fn match_streak_bonus_withholds_scaled_bankruptcy_penalty_and_taxes() {
 }
 
 #[test]
-fn ordered_streak_awards_withhold_the_low_priority_share() {
+fn match_streak_awards_withhold_the_low_priority_share() {
     let fixture = Fixture::new();
     fixture.player(601, GUILD);
     fixture
@@ -603,13 +500,14 @@ fn ordered_streak_awards_withhold_the_low_priority_share() {
     let empty = BTreeSet::new();
     let outcomes = fixture
         .repository
-        .credit_awards_ordered_atomic(
+        .credit_match_awards_ordered_atomic(
             &[DotaStreakCredit {
                 discord_id: 601,
                 streak_days: 30,
                 bonus: 120,
             }],
             Some(GUILD),
+            6_010,
             &deduction_policy(&empty, &low_priority),
         )
         .expect("credit low-priority streak");

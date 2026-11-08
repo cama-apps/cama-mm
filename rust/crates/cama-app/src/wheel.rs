@@ -517,6 +517,20 @@ pub fn requested_percentage_or_flat(balance: i64, roll: LossRoll, scale: f64) ->
     scale_minigame_jc_delta(percentage.max(roll.flat) as f64, scale)
 }
 
+/// Python parity: `scale_minigame_jc_delta(max(1, int(balance * roll)))` —
+/// truncate toward zero BEFORE minigame scaling.
+#[must_use]
+pub fn hostile_percentage_loss(balance: i64, roll: f64, scale: f64) -> i64 {
+    scale_minigame_jc_delta(1_i64.max((balance as f64 * roll) as i64) as f64, scale)
+}
+
+/// Python parity: `min(scale_minigame_jc_delta(amount), balance)` — the flat
+/// hostile losses scale first, then clamp to the victim's balance.
+#[must_use]
+pub fn hostile_flat_loss(amount: i64, balance: i64, scale: f64) -> i64 {
+    scale_minigame_jc_delta(amount as f64, scale).min(balance)
+}
+
 #[must_use]
 pub fn canonical_outcome_code(
     landed: &WheelWedge,

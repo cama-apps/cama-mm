@@ -122,6 +122,9 @@ fn prestige_five_bosses_pause_resume_and_advance_through_their_phases() {
         }));
         assert!(service.repository.active_duel(key()).is_none());
 
+        // Every hit lands and one blow fells the boss, so each phase is a win.
+        service = service.with_combat_preparation(FixedCombatPreparation(winning_override()));
+        service.entropy = SequenceEntropy::constant(0.0);
         for (before, after) in [
             (BossStatus::Active, BossStatus::PhaseOneDefeated),
             (BossStatus::PhaseOneDefeated, BossStatus::PhaseTwoDefeated),
@@ -141,14 +144,7 @@ fn prestige_five_bosses_pause_resume_and_advance_through_their_phases() {
                 .boss_progress
                 .insert(depth.to_string(), entry(before, id));
             service.repository.insert_tunnel(key(), current);
-            let result = service
-                .fight_boss_with_override(
-                    key(),
-                    RiskTier::Cautious,
-                    0,
-                    Some(combat(20, 1, 1.0, 0.0)),
-                )
-                .unwrap();
+            let result = fight_through_prompt(&mut service, RiskTier::Cautious, 0);
             assert!(result.won);
             let current = service.repository.load_tunnel(key()).unwrap();
             let BossProgressValue::Entry(progress) = &current.boss_progress[&depth.to_string()]
@@ -223,12 +219,50 @@ impl BossCombatPreparationPort for OneHpCombatPreparation {
     }
 }
 
+/// Replaces the authored base combat so a live duel's outcome is fixed.
+#[derive(Clone, Debug)]
+struct FixedCombatPreparation(CombatState);
+
+impl BossCombatPreparationPort for FixedCombatPreparation {
+    fn prepare(
+        &self,
+        _request: BossCombatPreparationRequest<'_>,
+        _base_combat: CombatState,
+    ) -> BossCombatPreparation {
+        BossCombatPreparation::neutral(self.0.clone())
+    }
+}
+
 fn entry(status: BossStatus, boss_id: &str) -> BossProgressValue {
     BossProgressValue::Entry(BossProgressEntry {
         status,
         boss_id: Some(boss_id.to_owned()),
         ..BossProgressEntry::default()
     })
+}
+
+/// Fight through the live start path, answering a mechanic prompt with its
+/// safe option.
+fn fight_through_prompt(service: &mut TestService, risk: RiskTier, wager: i64) -> ResolvedFight {
+    match service
+        .start_boss_duel(key(), risk, wager)
+        .expect("duel starts")
+    {
+        StartBossDuelOutcome::Resolved(resolved) => resolved,
+        StartBossDuelOutcome::Paused(paused) => {
+            let safe = mechanic_by_id(&paused.mechanic_id)
+                .expect("registered mechanic")
+                .safe_option_index;
+            service.resume_boss_duel(key(), safe).expect("duel resumes")
+        }
+    }
+}
+
+fn stored_boss_id(progress: &BossProgress, boundary: i32) -> Option<&str> {
+    match progress.get(&boundary.to_string()) {
+        Some(BossProgressValue::Entry(entry)) => entry.boss_id.as_deref(),
+        _ => None,
+    }
 }
 
 fn wounded_entry(
@@ -321,10 +355,20 @@ fn seed_paused(
         forced_no_wager_phase: false,
         echo_applied: false,
         echo_killer_id: None,
+        wager_escrowed: false,
     };
+    // A real pause always follows the boss lock at its boundary.
+    let mut tunnel = service
+        .repository
+        .load_tunnel(key())
+        .expect("test tunnel exists");
+    tunnel
+        .boss_progress
+        .insert("25".to_owned(), entry(BossStatus::Active, boss_id));
+    service.repository.insert_tunnel(key(), tunnel);
     service
         .repository
-        .save_active_duel(key(), duel)
+        .restore_claimed_duel(key(), duel)
         .expect("test duel saves");
 }
 
@@ -493,7 +537,7 @@ fn test_ensure_locks_on_first_call() {
         .repository
         .load_tunnel(key())
         .expect("tunnel remains");
-    assert_eq!(locked_boss_id(&stored.boss_progress, 25, 0), Some(first));
+    assert_eq!(stored_boss_id(&stored.boss_progress, 25), Some(first));
     let second = service
         .ensure_boss_locked(key(), 25)
         .expect("second lock succeeds")
@@ -516,22 +560,18 @@ fn test_rolls_when_locked_boss_id_is_empty() {
         .repository
         .load_tunnel(key())
         .expect("tunnel remains");
-    assert_eq!(
-        locked_boss_id(&stored.boss_progress, 25, 0),
-        Some("grothak")
-    );
+    assert_eq!(stored_boss_id(&stored.boss_progress, 25), Some("grothak"));
 }
 
 #[test]
 fn test_fight_boss_locks_boss_id_when_empty() {
-    let mut service = test_service(0.01);
+    let mut service =
+        test_service(0.01).with_combat_preparation(FixedCombatPreparation(winning_override()));
     seed_at_first_boss(&mut service);
     let mut progress = canonical_boss_progress();
     progress.insert("25".to_owned(), entry(BossStatus::Active, ""));
     set_progress(&mut service, progress, 24);
-    let result = service
-        .fight_boss_with_override(key(), RiskTier::Cautious, 10, Some(winning_override()))
-        .expect("fight resolves");
+    let result = fight_through_prompt(&mut service, RiskTier::Cautious, 10);
     assert!(result.won);
     assert_eq!(result.boss_id, "grothak");
     assert!(
@@ -598,18 +638,37 @@ fn test_reads_new_dict_format() {
 }
 
 #[test]
-fn test_get_locked_boss_id_legacy_fallback() {
-    let progress = BTreeMap::from([(
+fn test_ensure_boss_locked_rolls_for_legacy_progress() {
+    let mut service = test_service(0.99);
+    seed_at_first_boss(&mut service);
+    let mut progress = canonical_boss_progress();
+    progress.insert(
         "25".to_owned(),
         BossProgressValue::Legacy(BossStatus::Active),
-    )]);
-    assert_eq!(locked_boss_id(&progress, 25, 0), Some("grothak"));
+    );
+    set_progress(&mut service, progress, 24);
+    let boss = service
+        .ensure_boss_locked(key(), 25)
+        .expect("legacy progress is locked");
+    assert_eq!(boss.boss_id, "grothak");
+    let stored = service
+        .repository
+        .load_tunnel(key())
+        .expect("tunnel remains");
+    assert_eq!(stored_boss_id(&stored.boss_progress, 25), Some("grothak"));
 }
 
 #[test]
-fn test_get_locked_boss_id_from_new_format() {
-    let progress = BTreeMap::from([("25".to_owned(), entry(BossStatus::Active, "pudge"))]);
-    assert_eq!(locked_boss_id(&progress, 25, 0), Some("pudge"));
+fn test_ensure_boss_locked_keeps_new_format_boss() {
+    let mut service = test_service(0.99);
+    seed_at_first_boss(&mut service);
+    let mut progress = canonical_boss_progress();
+    progress.insert("25".to_owned(), entry(BossStatus::Active, "pudge"));
+    set_progress(&mut service, progress, 24);
+    let boss = service
+        .ensure_boss_locked(key(), 25)
+        .expect("stored lock is kept");
+    assert_eq!(boss.boss_id, "pudge");
 }
 
 #[test]
@@ -994,9 +1053,7 @@ fn test_loss_write_preserves_other_boundaries() {
         wounded_entry(BossStatus::Active, "void_warden", 2, 10),
     );
     set_progress(&mut service, progress, 49);
-    let result = service
-        .fight_boss(key(), RiskTier::Cautious, 10)
-        .expect("fight resolves");
+    let result = fight_through_prompt(&mut service, RiskTier::Cautious, 10);
     assert!(!result.won);
     let fresh = service
         .repository
@@ -1203,6 +1260,34 @@ fn test_berserk_gambler_bottled_quake_and_deaths_door_match_python() {
 }
 
 #[test]
+fn test_deaths_door_is_one_shot_and_gamblers_edge_needs_its_roll() {
+    let mut doomed = combat_for_effect_test(CombatEffects {
+        relic_deaths_door: true,
+        ..CombatEffects::default()
+    });
+    doomed.player_hp = 1;
+    doomed.boss_hit = 1.0;
+    doomed.boss_damage = 5;
+    let (first, terminal) = run_round(1, &mut doomed, &mut SequenceEntropy::constant(0.0));
+    assert_eq!(terminal, None);
+    assert_eq!(doomed.player_hp, 1);
+    assert!(first.effect_log.deaths_door);
+    let (second, terminal) = run_round(2, &mut doomed, &mut SequenceEntropy::constant(0.0));
+    assert_eq!(terminal, Some(false));
+    assert!(!second.effect_log.deaths_door);
+
+    let mut gambler = combat_for_effect_test(CombatEffects {
+        relic_double_hit: true,
+        ..CombatEffects::default()
+    });
+    gambler.player_hit = 1.0;
+    let (record, _) = run_round(1, &mut gambler, &mut SequenceEntropy::constant(0.99));
+    assert_eq!(gambler.boss_hp, 9);
+    assert!(record.player_hit);
+    assert!(!record.effect_log.double_hit);
+}
+
+#[test]
 fn test_mechanic_defenses_have_python_precedence_and_are_one_shot() {
     let option = MechanicOption {
         label: "Take it".to_owned(),
@@ -1329,9 +1414,7 @@ fn test_halves_legacy_fight_wager_and_consumes_curse() {
         .stinger_curse
         .insert(CurseKind::HalveNextWager, "crystal_maiden");
     service.repository.insert_tunnel(key(), current);
-    let result = service
-        .fight_boss(key(), RiskTier::Cautious, 101)
-        .expect("fight resolves");
+    let result = fight_through_prompt(&mut service, RiskTier::Cautious, 101);
     assert!(!result.won);
     assert_eq!(result.jc_delta, -51);
     let fresh = service
@@ -1418,14 +1501,13 @@ fn test_extra_knockback_widens_loss() {
 
 #[test]
 fn test_cursed_status_written_on_loss() {
-    let mut service = test_service(0.999);
+    let mut service =
+        test_service(0.999).with_combat_preparation(FixedCombatPreparation(losing_override()));
     seed_at_first_boss(&mut service);
     let mut progress = canonical_boss_progress();
     progress.insert("25".to_owned(), entry(BossStatus::Active, "ogre_magi"));
     set_progress(&mut service, progress, 24);
-    let result = service
-        .fight_boss_with_override(key(), RiskTier::Cautious, 10, Some(losing_override()))
-        .expect("fight resolves");
+    let result = fight_through_prompt(&mut service, RiskTier::Cautious, 10);
     assert!(!result.won);
     assert_eq!(result.extra_cooldown_seconds, 900);
     let fresh = service
@@ -1437,15 +1519,14 @@ fn test_cursed_status_written_on_loss() {
 
 #[test]
 fn test_cursed_status_writes_when_configured() {
-    let mut service = test_service(0.999);
+    let mut service =
+        test_service(0.999).with_combat_preparation(FixedCombatPreparation(losing_override()));
     service.repository.insert_tunnel(key(), tunnel(49, 0, 500));
     let mut progress = canonical_boss_progress();
     progress.insert("25".to_owned(), entry(BossStatus::Defeated, "grothak"));
     progress.insert("50".to_owned(), entry(BossStatus::Active, "crystal_maiden"));
     set_progress(&mut service, progress, 49);
-    let result = service
-        .fight_boss_with_override(key(), RiskTier::Cautious, 10, Some(losing_override()))
-        .expect("fight resolves");
+    let result = fight_through_prompt(&mut service, RiskTier::Cautious, 10);
     assert!(!result.won);
     let fresh = service
         .repository
@@ -1456,14 +1537,13 @@ fn test_cursed_status_writes_when_configured() {
 
 #[test]
 fn test_echo_written_under_specific_boss_id() {
-    let mut service = test_service(0.0);
+    let mut service =
+        test_service(0.0).with_combat_preparation(FixedCombatPreparation(winning_override()));
     seed_at_first_boss(&mut service);
     let mut progress = canonical_boss_progress();
     progress.insert("25".to_owned(), entry(BossStatus::Active, "pudge"));
     set_progress(&mut service, progress, 24);
-    let result = service
-        .fight_boss_with_override(key(), RiskTier::Cautious, 10, Some(winning_override()))
-        .expect("fight resolves");
+    let result = fight_through_prompt(&mut service, RiskTier::Cautious, 10);
     assert!(result.won);
     assert!(
         service
@@ -1500,10 +1580,15 @@ fn test_win_applies_economy_event_and_bankruptcy_debuff() {
         HalvingBankruptcy::default(),
         InMemoryGearRepair::default(),
         InMemoryBossOutcomeSink::default(),
-    );
-    let result = service
-        .fight_boss_with_override(key(), RiskTier::Cautious, 0, Some(winning_override()))
-        .expect("fight resolves");
+    )
+    .with_combat_preparation(FixedCombatPreparation(winning_override()));
+    let result = match service
+        .start_boss_duel(key(), RiskTier::Cautious, 0)
+        .expect("duel starts")
+    {
+        StartBossDuelOutcome::Resolved(resolved) => resolved,
+        StartBossDuelOutcome::Paused(_) => panic!("a one-hit win resolves before any mechanic"),
+    };
     assert!(result.won);
     let base = boss_base_reward(25, 0);
     assert_eq!(result.gross_payout, 2 * base);
@@ -1514,13 +1599,125 @@ fn test_win_applies_economy_event_and_bankruptcy_debuff() {
 }
 
 #[test]
+fn regular_win_enters_phase_two_only_from_prestige_two() {
+    for (prestige, expected) in [(1, BossStatus::Defeated), (2, BossStatus::PhaseOneDefeated)] {
+        let mut service =
+            test_service(0.01).with_combat_preparation(FixedCombatPreparation(winning_override()));
+        service
+            .repository
+            .insert_tunnel(key(), tunnel(24, prestige, 500));
+        let result = fight_through_prompt(&mut service, RiskTier::Cautious, 0);
+        assert!(result.won);
+        let current = service.repository.load_tunnel(key()).unwrap();
+        assert_eq!(
+            current.boss_progress["25"].status(),
+            expected,
+            "P{prestige}"
+        );
+    }
+}
+
+fn progress_with_hp(hp_remaining: i32, hp_max: i32, last_engaged_at: Option<i64>) -> BossProgress {
+    BossProgress::from([(
+        "25".to_owned(),
+        BossProgressValue::Entry(BossProgressEntry {
+            hp_remaining: Some(hp_remaining),
+            hp_max: Some(hp_max),
+            last_engaged_at,
+            ..BossProgressEntry::default()
+        }),
+    )])
+}
+
+#[test]
+fn persisted_hp_falls_back_to_fresh_without_a_wounded_entry() {
+    assert_eq!(
+        resolve_persisted_hp(&BossProgress::new(), 25, 10, 0),
+        (10, 10)
+    );
+    let legacy = BossProgress::from([(
+        "25".to_owned(),
+        BossProgressValue::Legacy(BossStatus::Active),
+    )]);
+    assert_eq!(resolve_persisted_hp(&legacy, 25, 10, 0), (10, 10));
+}
+
+#[test]
+fn persisted_hp_regenerates_one_point_per_complete_day_up_to_its_cap() {
+    let wounded = progress_with_hp(4, 12, Some(0));
+    assert_eq!(resolve_persisted_hp(&wounded, 25, 12, 0), (4, 12));
+    assert_eq!(resolve_persisted_hp(&wounded, 25, 12, 86_399).0, 4);
+    assert_eq!(resolve_persisted_hp(&wounded, 25, 12, 3 * 86_400).0, 7);
+    assert_eq!(
+        resolve_persisted_hp(&wounded, 25, 12, 100 * 86_400),
+        (12, 12)
+    );
+}
+
+#[test]
+fn persisted_hp_keeps_the_active_boss_cap_when_the_fresh_cap_changes() {
+    let wounded = progress_with_hp(7, 12, Some(0));
+    assert_eq!(resolve_persisted_hp(&wounded, 25, 9, 0), (7, 12));
+    assert_eq!(resolve_persisted_hp(&wounded, 25, 15, 0), (7, 12));
+    assert_eq!(resolve_persisted_hp(&wounded, 25, 9, 2 * 86_400), (9, 12));
+    assert_eq!(
+        resolve_persisted_hp(&progress_with_hp(20, 12, None), 25, 15, 0),
+        (12, 12)
+    );
+}
+
+#[test]
+fn persisting_boss_hp_writes_the_wound_and_keeps_the_phase_status() {
+    let mut progress = BossProgress::new();
+    persist_boss_hp(&mut progress, 25, "grothak", 3, 10, "loss", 42);
+    let BossProgressValue::Entry(stored) = &progress["25"] else {
+        panic!("entry expected")
+    };
+    assert_eq!(stored.hp_remaining, Some(3));
+    assert_eq!(stored.hp_max, Some(10));
+    assert_eq!(stored.last_engaged_at, Some(42));
+    assert_eq!(stored.last_outcome.as_deref(), Some("loss"));
+    assert!(stored.first_meet_seen);
+    assert_eq!(stored.status, BossStatus::Active);
+    assert_eq!(stored.boss_id.as_deref(), Some("grothak"));
+
+    let mut progress = BossProgress::from([(
+        "25".to_owned(),
+        BossProgressValue::Entry(BossProgressEntry {
+            status: BossStatus::PhaseOneDefeated,
+            boss_id: Some("pudge".to_owned()),
+            ..BossProgressEntry::default()
+        }),
+    )]);
+    persist_boss_hp(&mut progress, 25, "pudge", 2, 8, "loss", 100);
+    assert_eq!(progress["25"].status(), BossStatus::PhaseOneDefeated);
+}
+
+#[test]
+fn every_boss_stinger_and_phase_event_resolves_in_the_live_catalogs() {
+    for boss in &BOSSES {
+        assert!(
+            stinger_by_id(boss.stinger_id).is_some(),
+            "{} stinger {}",
+            boss.boss_id,
+            boss.stinger_id
+        );
+    }
+    assert!(PHASE_TRANSITION_EVENTS.len() >= 4);
+    let ids: BTreeSet<_> = PHASE_TRANSITION_EVENTS
+        .iter()
+        .map(|event| event.id)
+        .collect();
+    assert_eq!(ids.len(), PHASE_TRANSITION_EVENTS.len());
+}
+
+#[test]
 fn test_free_fight_loss_repair_bill_floors_at_live_balance() {
-    let mut service = test_service(0.5);
+    let mut service =
+        test_service(0.5).with_combat_preparation(FixedCombatPreparation(losing_override()));
     service.repository.insert_tunnel(key(), tunnel(24, 0, 2));
     assert!(service.gear_repair.repair_bill() > 2);
-    let result = service
-        .fight_boss_with_override(key(), RiskTier::Cautious, 0, Some(losing_override()))
-        .expect("fight resolves");
+    let result = fight_through_prompt(&mut service, RiskTier::Cautious, 0);
     assert!(!result.won);
     assert_eq!(result.jc_delta, -2);
     assert_eq!(
@@ -1531,4 +1728,79 @@ fn test_free_fight_loss_repair_bill_floors_at_live_balance() {
             .balance,
         0
     );
+}
+
+#[test]
+fn test_paused_wager_is_escrowed_and_a_drained_loss_takes_nothing_more() {
+    let mut service = test_service(0.99);
+    seed_at_first_boss(&mut service);
+    let StartBossDuelOutcome::Paused(paused) = service
+        .start_boss_duel(key(), RiskTier::Cautious, 40)
+        .expect("duel starts")
+    else {
+        panic!("expected the duel to pause on its mechanic");
+    };
+    assert!(paused.wager_escrowed);
+    let mut drained = service.repository.load_tunnel(key()).expect("tunnel");
+    assert_eq!(drained.balance, 460, "the stake is escrowed at the pause");
+    drained.balance = 0;
+    service.repository.insert_tunnel(key(), drained);
+    let resolved = service
+        .resume_boss_duel(key(), paused.pending_prompt.safe_option_index)
+        .expect("resume resolves");
+    assert!(!resolved.won);
+    assert_eq!(resolved.jc_delta, -40);
+    assert_eq!(
+        service
+            .repository
+            .load_tunnel(key())
+            .expect("tunnel")
+            .balance,
+        0
+    );
+}
+
+#[test]
+fn test_halving_curse_is_consumed_with_the_escrow_not_before() {
+    let mut service = test_service(0.99);
+    let mut cursed = tunnel(24, 0, 500);
+    cursed
+        .stinger_curse
+        .insert(CurseKind::HalveNextWager, "grothak");
+    service.repository.insert_tunnel(key(), cursed);
+    let StartBossDuelOutcome::Paused(paused) = service
+        .start_boss_duel(key(), RiskTier::Cautious, 41)
+        .expect("duel starts")
+    else {
+        panic!("expected the duel to pause on its mechanic");
+    };
+    assert_eq!(paused.wager, 21);
+    let after = service.repository.load_tunnel(key()).expect("tunnel");
+    assert_eq!(after.balance, 479);
+    assert!(!after.stinger_curse.contains(CurseKind::HalveNextWager));
+}
+
+#[test]
+fn test_resume_after_leaving_the_boundary_neither_restores_depth_nor_pays() {
+    let mut service = test_service(0.99);
+    seed_at_first_boss(&mut service);
+    let StartBossDuelOutcome::Paused(paused) = service
+        .start_boss_duel(key(), RiskTier::Cautious, 40)
+        .expect("duel starts")
+    else {
+        panic!("expected the duel to pause on its mechanic");
+    };
+    // The tunnel is reset while the prompt is open, as an abandon would.
+    let mut reset = service.repository.load_tunnel(key()).expect("tunnel");
+    reset.depth = 0;
+    reset.boss_progress = canonical_boss_progress();
+    service.repository.insert_tunnel(key(), reset);
+    assert_eq!(
+        service.resume_boss_duel(key(), paused.pending_prompt.safe_option_index),
+        Err(BossServiceError::FightResolvedElsewhere)
+    );
+    let after = service.repository.load_tunnel(key()).expect("tunnel");
+    assert_eq!(after.depth, 0, "the depth is not restored");
+    assert_eq!(after.balance, 460, "the escrowed stake is not paid back");
+    assert!(service.repository.audits().is_empty());
 }

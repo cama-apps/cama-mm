@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 #[cfg(test)]
 use rusqlite::trace::{TraceEvent, TraceEventCodes};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
+use rusqlite::{OptionalExtension, TransactionBehavior, params, params_from_iter};
 use thiserror::Error;
 
 use crate::open_runtime_connection;
@@ -58,7 +58,7 @@ impl MatchDiscoveryRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         let connection = open_runtime_connection(&self.path)?;
         #[cfg(test)]
         connection.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, self.trace);
@@ -194,6 +194,11 @@ impl MatchDiscoveryRepository {
             return Ok(false);
         }
 
+        request_replay_for_cleared_fantasy(
+            &transaction,
+            &[match_id],
+            &format!("enrichment_wipe:{match_id}"),
+        )?;
         clear_dependent_enrichment(&transaction, &[match_id])?;
         if let Some(guild_id) = guild_id {
             transaction.execute(
@@ -209,67 +214,6 @@ impl MatchDiscoveryRepository {
         }
         transaction.commit()?;
         Ok(true)
-    }
-
-    /// Wipe only auto-discovered matches in one normalized guild.
-    pub fn wipe_auto_discovered_enrichments(
-        &self,
-        guild_id: Option<i64>,
-    ) -> Result<usize, MatchDiscoveryRepositoryError> {
-        let guild_id = Self::normalize_guild_id(guild_id);
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let match_ids = {
-            let mut statement = transaction.prepare(
-                "SELECT match_id
-                   FROM matches
-                  WHERE guild_id = ?1 AND enrichment_source = 'auto'
-                  ORDER BY match_id",
-            )?;
-            statement
-                .query_map([guild_id], |row| row.get::<_, i64>(0))?
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        if match_ids.is_empty() {
-            transaction.commit()?;
-            return Ok(0);
-        }
-
-        transaction.execute(
-            &format!(
-                "{} WHERE guild_id = ?1 AND enrichment_source = 'auto'",
-                clear_match_enrichment_sql()
-            ),
-            [guild_id],
-        )?;
-        clear_dependent_enrichment(&transaction, &match_ids)?;
-
-        let placeholders = repeat_placeholders(match_ids.len());
-        let sql = format!(
-            "DELETE FROM wrapped_enrichment_facts
-              WHERE guild_id = ? AND match_id IN ({placeholders})"
-        );
-        let parameters = std::iter::once(guild_id).chain(match_ids.iter().copied());
-        transaction.execute(&sql, params_from_iter(parameters))?;
-        transaction.commit()?;
-        Ok(match_ids.len())
-    }
-
-    pub fn get_auto_discovered_count(
-        &self,
-        guild_id: Option<i64>,
-    ) -> Result<i64, MatchDiscoveryRepositoryError> {
-        let guild_id = Self::normalize_guild_id(guild_id);
-        let connection = self.connection()?;
-        connection
-            .query_row(
-                "SELECT COUNT(*)
-                   FROM matches
-                  WHERE guild_id = ?1 AND enrichment_source = 'auto'",
-                [guild_id],
-                |row| row.get(0),
-            )
-            .map_err(Into::into)
     }
 
     /// Count every enriched match in one normalized guild, regardless of
@@ -321,6 +265,7 @@ impl MatchDiscoveryRepository {
             ),
             [guild_id],
         )?;
+        request_replay_for_cleared_fantasy(&transaction, &match_ids, "enrichment_wipe:all")?;
         clear_dependent_enrichment(&transaction, &match_ids)?;
         let placeholders = repeat_placeholders(match_ids.len());
         let sql = format!(
@@ -385,6 +330,54 @@ fn clear_match_enrichment_sql() -> &'static str {
             enrichment_source = NULL,
             enrichment_confidence = NULL,
             parsed_refresh_attempts = 0"
+}
+
+/// A complete fantasy set weights its match in the OpenSkill replay, so
+/// clearing one changes what a replay derives from that match on. Record that
+/// durably before the fantasy points are cleared: a later replay must not
+/// resume from snapshots that still carry the old weights. A pending
+/// correction keeps its reason, which already forces a full replay.
+fn request_replay_for_cleared_fantasy(
+    transaction: &rusqlite::Transaction<'_>,
+    match_ids: &[i64],
+    reason: &str,
+) -> Result<(), rusqlite::Error> {
+    if match_ids.is_empty() {
+        return Ok(());
+    }
+    let placeholders = repeat_placeholders(match_ids.len());
+    let guild_ids = {
+        let mut statement = transaction.prepare(&format!(
+            "SELECT DISTINCT m.guild_id FROM matches m
+              WHERE m.match_id IN ({placeholders})
+                AND (SELECT COUNT(*) FROM match_participants mp
+                      WHERE mp.match_id = m.match_id) = 10
+                AND (SELECT COUNT(mp.fantasy_points) FROM match_participants mp
+                      WHERE mp.match_id = m.match_id) = 10"
+        ))?;
+        statement
+            .query_map(params_from_iter(match_ids.iter().copied()), |row| {
+                row.get::<_, i64>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for guild_id in guild_ids {
+        transaction.execute(
+            "INSERT INTO openskill_replay_jobs (
+                 guild_id, reason, requested_at, last_error
+             ) VALUES (?1, ?2, CURRENT_TIMESTAMP, NULL)
+             ON CONFLICT(guild_id) DO UPDATE SET
+                 reason = CASE
+                     WHEN substr(openskill_replay_jobs.reason, 1, 17) = 'match_correction:'
+                         THEN openskill_replay_jobs.reason
+                     ELSE excluded.reason
+                 END,
+                 requested_at = excluded.requested_at,
+                 last_error = NULL",
+            params![guild_id, reason],
+        )?;
+    }
+    Ok(())
 }
 
 fn clear_dependent_enrichment(
@@ -695,63 +688,6 @@ mod tests {
     }
 
     #[test]
-    fn test_wipe_auto_discovered_enrichments() {
-        let (file, repository) = repository();
-        insert_match(&file, 1, GUILD);
-        insert_match(&file, 2, GUILD);
-        insert_match(&file, 3, GUILD);
-        enrich(&repository, 1, GUILD, "manual", None);
-        enrich(&repository, 2, GUILD, "auto", Some(0.9));
-        enrich(&repository, 3, GUILD, "auto", Some(0.85));
-
-        assert_eq!(
-            repository
-                .wipe_auto_discovered_enrichments(Some(GUILD))
-                .expect("wipe auto discovery"),
-            2
-        );
-
-        assert_eq!(
-            repository
-                .enrichment_metadata(1, Some(GUILD))
-                .expect("manual metadata")
-                .expect("manual match")
-                .valve_match_id,
-            Some(100)
-        );
-        for match_id in [2, 3] {
-            assert_eq!(
-                repository
-                    .enrichment_metadata(match_id, Some(GUILD))
-                    .expect("auto metadata")
-                    .expect("auto match")
-                    .valve_match_id,
-                None
-            );
-        }
-    }
-
-    #[test]
-    fn test_get_auto_discovered_count() {
-        let (file, repository) = repository();
-        assert_eq!(
-            repository
-                .get_auto_discovered_count(Some(GUILD))
-                .expect("initial count"),
-            0
-        );
-        insert_match(&file, 1, GUILD);
-        enrich(&repository, 1, GUILD, "auto", Some(0.9));
-
-        assert_eq!(
-            repository
-                .get_auto_discovered_count(Some(GUILD))
-                .expect("auto count"),
-            1
-        );
-    }
-
-    #[test]
     fn all_enrichment_count_and_wipe_include_manual_and_auto_rows() {
         let (file, repository) = repository();
         for match_id in 1..=3 {
@@ -820,34 +756,6 @@ mod tests {
     }
 
     #[test]
-    fn stronger_wipe_is_guild_scoped_for_signed_ids() {
-        let (file, repository) = repository();
-        insert_match(&file, -1, -42);
-        insert_match(&file, -2, 42);
-        enrich(&repository, -1, -42, "auto", Some(1.0));
-        enrich(&repository, -2, 42, "auto", Some(1.0));
-
-        assert_eq!(
-            repository
-                .wipe_auto_discovered_enrichments(Some(-42))
-                .expect("wipe signed guild"),
-            1
-        );
-        assert_eq!(
-            repository
-                .get_auto_discovered_count(Some(-42))
-                .expect("signed count"),
-            0
-        );
-        assert_eq!(
-            repository
-                .get_auto_discovered_count(Some(42))
-                .expect("other count"),
-            1
-        );
-    }
-
-    #[test]
     fn test_enrichment_wipes_delete_normalized_bans() {
         let (file, repository) = repository();
         insert_match(&file, 11, GUILD);
@@ -867,27 +775,9 @@ mod tests {
 
         assert_eq!(
             repository
-                .wipe_auto_discovered_enrichments(Some(GUILD))
-                .expect("wipe automatic enrichment"),
-            1
-        );
-        let connection = Connection::open(file.path()).expect("inspect automatic wipe");
-        let rows = connection
-            .prepare("SELECT match_id FROM match_bans ORDER BY match_id")
-            .and_then(|mut statement| {
-                statement
-                    .query_map([], |row| row.get::<_, i64>(0))?
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .expect("read remaining bans");
-        assert_eq!(rows, [12]);
-        drop(connection);
-
-        assert_eq!(
-            repository
                 .wipe_all_enrichments(Some(GUILD))
                 .expect("wipe every enrichment"),
-            1
+            2
         );
         let remaining: i64 = Connection::open(file.path())
             .expect("inspect full wipe")
@@ -922,7 +812,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bulk_wipes_remove_only_their_compact_fact_rows() {
+    fn test_bulk_wipe_removes_compact_fact_rows() {
         let (file, repository) = repository();
         insert_match(&file, 31, GUILD);
         insert_match(&file, 32, GUILD);
@@ -943,27 +833,9 @@ mod tests {
 
         assert_eq!(
             repository
-                .wipe_auto_discovered_enrichments(Some(GUILD))
-                .expect("wipe automatic facts"),
-            1
-        );
-        let connection = Connection::open(file.path()).expect("inspect automatic wipe");
-        let rows = connection
-            .prepare("SELECT match_id FROM wrapped_enrichment_facts ORDER BY match_id")
-            .and_then(|mut statement| {
-                statement
-                    .query_map([], |row| row.get::<_, i64>(0))?
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .expect("read remaining facts");
-        assert_eq!(rows, [32]);
-        drop(connection);
-
-        assert_eq!(
-            repository
                 .wipe_all_enrichments(Some(GUILD))
                 .expect("wipe all facts"),
-            1
+            2
         );
         let remaining: i64 = Connection::open(file.path())
             .expect("inspect full wipe")
@@ -972,29 +844,6 @@ mod tests {
             })
             .expect("count compact facts");
         assert_eq!(remaining, 0);
-    }
-
-    #[test]
-    fn test_bulk_wipes_lock_before_selecting_match_ids_auto() {
-        let _serial = TRACE_TEST_LOCK.lock().expect("serialize trace test");
-        let (file, _) = repository();
-        let repository = MatchDiscoveryRepository::with_trace(file.path(), capture_trace);
-        insert_match(&file, 41, GUILD);
-        enrich(&repository, 41, GUILD, "auto", Some(1.0));
-        TRACE_STATEMENTS
-            .lock()
-            .expect("trace statements lock")
-            .clear();
-
-        assert_eq!(
-            repository
-                .wipe_auto_discovered_enrichments(Some(GUILD))
-                .expect("wipe automatic enrichment"),
-            1
-        );
-        assert_immediate_lock_precedes_match_selection(
-            &TRACE_STATEMENTS.lock().expect("trace statements lock"),
-        );
     }
 
     #[test]

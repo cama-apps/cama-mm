@@ -6,68 +6,11 @@ use super::*;
 const USER_ID: i64 = 10_001;
 const GUILD_ID: i64 = 123;
 
-#[derive(Clone, Copy)]
-enum FlameChannelMode {
-    Send,
-    MissingSend,
-    SynchronousFailure,
-}
-
-#[derive(Clone)]
-struct RecordingFlameChannel {
-    sent: Arc<Mutex<Vec<String>>>,
-    mode: FlameChannelMode,
-}
-
-impl RecordingFlameChannel {
-    fn new(mode: FlameChannelMode) -> (Self, Arc<Mutex<Vec<String>>>) {
-        let sent = Arc::new(Mutex::new(Vec::new()));
-        (
-            Self {
-                sent: Arc::clone(&sent),
-                mode,
-            },
-            sent,
-        )
-    }
-}
-
-impl AtmosphericChannel for RecordingFlameChannel {
-    fn send(&self, content: String) -> Result<Option<FlameSendFuture>, FlameSendError> {
-        match self.mode {
-            FlameChannelMode::Send => {
-                self.sent.lock().expect("flame channel lock").push(content);
-                Ok(Some(Box::pin(async { Ok(()) })))
-            }
-            FlameChannelMode::MissingSend => Ok(None),
-            FlameChannelMode::SynchronousFailure => Err(FlameSendError),
-        }
-    }
-}
-
-#[derive(Default)]
-struct RecordingFlameSpawner {
-    tasks: Mutex<Vec<FlameSendFuture>>,
-}
-
-impl AtmosphericTaskSpawner for RecordingFlameSpawner {
-    fn spawn(&self, task: FlameSendFuture) -> Result<(), FlameTaskError> {
-        self.tasks.lock().expect("flame spawner lock").push(task);
-        Ok(())
-    }
-}
-
-fn recorded_flame_messages(sent: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
-    sent.lock().expect("recorded flame lock").clone()
-}
-
-// tests/test_dig_flame.py::TestCatastrophicLinePool::test_pool_is_non_empty
 #[test]
 fn dig_flame_pool_is_non_empty() {
     assert!(!CATASTROPHIC_LINES.is_empty());
 }
 
-// tests/test_dig_flame.py::TestCatastrophicLinePool::test_lines_are_non_blank_strings
 #[test]
 fn dig_flame_lines_are_non_blank_strings() {
     for line in CATASTROPHIC_LINES {
@@ -75,14 +18,12 @@ fn dig_flame_lines_are_non_blank_strings() {
     }
 }
 
-// tests/test_dig_flame.py::TestCatastrophicLinePool::test_lines_are_unique
 #[test]
 fn dig_flame_lines_are_unique() {
     let unique = CATASTROPHIC_LINES.iter().copied().collect::<BTreeSet<_>>();
     assert_eq!(unique.len(), CATASTROPHIC_LINES.len());
 }
 
-// tests/test_dig_flame.py::TestCatastrophicLinePool::test_lines_contain_no_proper_nouns_marker
 #[test]
 fn dig_flame_lines_contain_no_mechanics_markers() {
     let banned = ["luminosity", "prestige", "jc", "jopacoin", "cave-in chance"];
@@ -94,135 +35,10 @@ fn dig_flame_lines_contain_no_mechanics_markers() {
     }
 }
 
-// tests/test_dig_flame.py::TestCatastrophicLinePool::test_pick_returns_member_of_pool
-#[test]
-fn dig_flame_pick_returns_member_of_pool() {
-    let mut rng = SeededDigFlavorRng::new(1);
-    for _ in 0..100 {
-        assert!(CATASTROPHIC_LINES.contains(&pick_catastrophic_line(&mut rng)));
-    }
-}
-
-// tests/test_dig_flame.py::TestCatastrophicLinePool::test_pick_is_seeded_deterministic
-#[test]
-fn dig_flame_pick_is_seeded_deterministic() {
-    let mut first_rng = SeededDigFlavorRng::new(1_234);
-    let first = pick_catastrophic_line(&mut first_rng);
-    let mut second_rng = SeededDigFlavorRng::new(1_234);
-    assert_eq!(pick_catastrophic_line(&mut second_rng), first);
-}
-
-// tests/test_dig_flame.py::TestCatastrophicLinePool::test_pick_covers_multiple_lines
-#[test]
-fn dig_flame_pick_covers_multiple_lines() {
-    let mut rng = SeededDigFlavorRng::new(99);
-    let seen = (0..400)
-        .map(|_| pick_catastrophic_line(&mut rng))
-        .collect::<BTreeSet<_>>();
-    assert!(seen.len() > 1);
-}
-
-// tests/test_dig_flame.py::TestPostAtmospheric::test_formats_with_prefix_and_italics
-#[test]
-fn dig_flame_formats_with_prefix_and_italics() {
-    let (channel, sent) = RecordingFlameChannel::new(FlameChannelMode::Send);
-    let spawner = RecordingFlameSpawner::default();
-    post_atmospheric(Some(&channel), Some(&spawner), "X", "a tunnel folds shut");
-    assert_eq!(recorded_flame_messages(&sent), ["X *a tunnel folds shut*"]);
-    assert_eq!(spawner.tasks.lock().expect("spawner lock").len(), 1);
-}
-
-// tests/test_dig_flame.py::TestPostAtmospheric::test_strips_surrounding_whitespace_from_line
-#[test]
-fn dig_flame_strips_surrounding_whitespace_from_line() {
-    let (channel, sent) = RecordingFlameChannel::new(FlameChannelMode::Send);
-    let spawner = RecordingFlameSpawner::default();
-    post_atmospheric(Some(&channel), Some(&spawner), "P", "   spaced line   ");
-    assert_eq!(recorded_flame_messages(&sent), ["P *spaced line*"]);
-}
-
-// tests/test_dig_flame.py::TestPostAtmospheric::test_none_channel_is_a_noop
-#[test]
-fn dig_flame_none_channel_is_a_noop() {
-    let spawner = RecordingFlameSpawner::default();
-    post_atmospheric::<RecordingFlameChannel, _>(None, Some(&spawner), "P", "line");
-    assert!(spawner.tasks.lock().expect("spawner lock").is_empty());
-}
-
-// tests/test_dig_flame.py::TestPostAtmospheric::test_empty_line_is_a_noop
-#[test]
-fn dig_flame_empty_line_is_a_noop() {
-    let (channel, sent) = RecordingFlameChannel::new(FlameChannelMode::Send);
-    let spawner = RecordingFlameSpawner::default();
-    post_atmospheric(Some(&channel), Some(&spawner), "P", "");
-    assert!(recorded_flame_messages(&sent).is_empty());
-    assert!(spawner.tasks.lock().expect("spawner lock").is_empty());
-}
-
-// tests/test_dig_flame.py::TestPostAtmospheric::test_channel_without_send_is_a_noop
-#[test]
-fn dig_flame_channel_without_send_is_a_noop() {
-    let (channel, sent) = RecordingFlameChannel::new(FlameChannelMode::MissingSend);
-    let spawner = RecordingFlameSpawner::default();
-    post_atmospheric(Some(&channel), Some(&spawner), "P", "line");
-    assert!(recorded_flame_messages(&sent).is_empty());
-    assert!(spawner.tasks.lock().expect("spawner lock").is_empty());
-}
-
-// tests/test_dig_flame.py::TestPostAtmospheric::test_send_raising_is_swallowed
-#[test]
-fn dig_flame_send_raising_is_swallowed() {
-    let (channel, sent) = RecordingFlameChannel::new(FlameChannelMode::SynchronousFailure);
-    let spawner = RecordingFlameSpawner::default();
-    post_atmospheric(Some(&channel), Some(&spawner), "P", "line");
-    assert!(recorded_flame_messages(&sent).is_empty());
-    assert!(spawner.tasks.lock().expect("spawner lock").is_empty());
-}
-
-// tests/test_dig_flame.py::TestPostAtmospheric::test_no_running_loop_is_swallowed
-#[test]
-fn dig_flame_no_running_loop_is_swallowed() {
-    let (channel, sent) = RecordingFlameChannel::new(FlameChannelMode::Send);
-    post_atmospheric::<_, RecordingFlameSpawner>(Some(&channel), None, "P", "line");
-    assert_eq!(recorded_flame_messages(&sent), ["P *line*"]);
-}
-
-// tests/test_dig_flame.py::TestPostCatastrophic::test_uses_catastrophic_prefix_and_pool_line
-#[test]
-fn dig_flame_catastrophic_post_uses_prefix_and_pool_line() {
-    let mut expected_rng = SeededDigFlavorRng::new(7);
-    let expected = pick_catastrophic_line(&mut expected_rng);
-    let (channel, sent) = RecordingFlameChannel::new(FlameChannelMode::Send);
-    let spawner = RecordingFlameSpawner::default();
-    let mut rng = SeededDigFlavorRng::new(7);
-    post_catastrophic(Some(&channel), Some(&spawner), &mut rng);
-    assert_eq!(
-        recorded_flame_messages(&sent),
-        [format!("{CATASTROPHIC_PREFIX} *{expected}*")]
-    );
-}
-
-// tests/test_dig_flame.py::TestPostCatastrophic::test_none_channel_is_a_noop
-#[test]
-fn dig_flame_catastrophic_none_channel_is_a_noop() {
-    let spawner = RecordingFlameSpawner::default();
-    let mut rng = SeededDigFlavorRng::new(1);
-    post_catastrophic::<RecordingFlameChannel, _, _>(None, Some(&spawner), &mut rng);
-    assert!(spawner.tasks.lock().expect("spawner lock").is_empty());
-}
-
 // tests/test_dig_npcs.py::TestRosterIntegrity::test_roster_is_non_empty
 #[test]
 fn dig_npcs_roster_is_non_empty() {
     assert!(!NPCS.is_empty());
-}
-
-// tests/test_dig_npcs.py::TestRosterIntegrity::test_dict_key_matches_npc_id
-#[test]
-fn dig_npcs_each_canonical_id_resolves_to_same_npc() {
-    for npc in NPCS {
-        assert_eq!(npc_by_id(npc.npc_id()), Some(*npc));
-    }
 }
 
 // tests/test_dig_npcs.py::TestRosterIntegrity::test_npc_ids_are_unique
@@ -336,54 +152,6 @@ fn dig_npcs_every_id_is_recoverable_from_output() {
         assert!(joined.contains(npc.npc_id()));
     }
 }
-
-fn histogram(entries: &[(&str, i64)]) -> BTreeMap<String, i64> {
-    entries
-        .iter()
-        .map(|(key, value)| ((*key).to_owned(), *value))
-        .collect()
-}
-
-macro_rules! play_style_case {
-    ($name:ident, $entries:expr, $expected:expr) => {
-        #[test]
-        fn $name() {
-            assert_eq!(classify_play_style(&histogram($entries)), $expected);
-        }
-    };
-}
-
-play_style_case!(
-    test_classify_play_style_histogram0_unknown,
-    &[("safe", 2), ("risky", 1)],
-    "unknown"
-);
-play_style_case!(test_classify_play_style_histogram1_unknown, &[], "unknown");
-play_style_case!(
-    test_classify_play_style_histogram2_cautious_grinder,
-    &[("safe", 80), ("risky", 10), ("desperate", 1)],
-    "cautious_grinder"
-);
-play_style_case!(
-    test_classify_play_style_histogram3_reckless_degen,
-    &[("safe", 10), ("risky", 20), ("desperate", 10)],
-    "reckless_degen"
-);
-play_style_case!(
-    test_classify_play_style_histogram4_calculated_risk_taker,
-    &[("safe", 10), ("risky", 50), ("desperate", 5)],
-    "calculated_risk_taker"
-);
-play_style_case!(
-    test_classify_play_style_histogram5_social_butterfly,
-    &[("safe", 5), ("risky", 5), ("help", 20)],
-    "social_butterfly"
-);
-play_style_case!(
-    test_classify_play_style_histogram6_balanced_explorer,
-    &[("safe", 10), ("risky", 8), ("desperate", 2)],
-    "balanced_explorer"
-);
 
 fn validation_context() -> (BTreeSet<String>, &'static str, f64) {
     (
@@ -645,24 +413,6 @@ fn test_narrate_dig_ai_schema_preserves_python_nested_contract() {
 }
 
 #[test]
-fn test_play_style_descriptions_complete() {
-    assert_eq!(
-        PLAY_STYLE_DESCRIPTIONS
-            .iter()
-            .map(|(style, _)| *style)
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            "cautious_grinder",
-            "reckless_degen",
-            "calculated_risk_taker",
-            "balanced_explorer",
-            "social_butterfly",
-            "unknown",
-        ])
-    );
-}
-
-#[test]
 fn test_tone_profiles_have_three_voices() {
     assert_eq!(
         TONE_PROFILES
@@ -724,36 +474,6 @@ fn test_empty_tunnel_uses_defaults() {
     let context = build_player_state_context(&TunnelFlavorState::default(), 0);
     assert!(context.contains("Dirt"));
     assert!(context.contains("Wooden"));
-}
-
-#[test]
-fn test_blank_personality_falls_back_to_default_blurb_none() {
-    assert_eq!(
-        build_personality_context(None),
-        "New player, no history yet."
-    );
-}
-
-#[test]
-fn test_blank_personality_falls_back_to_default_blurb_personality1() {
-    assert_eq!(
-        build_personality_context(Some(&DigPersonality::default())),
-        "New player, no history yet."
-    );
-}
-
-#[test]
-fn test_play_style_and_histogram_render() {
-    let personality = DigPersonality {
-        play_style: "balanced_explorer".to_owned(),
-        choice_histogram: histogram(&[("safe", 10), ("risky", 8)]),
-        notable_moments: vec!["Slew their first boss".to_owned()],
-        ..DigPersonality::default()
-    };
-    let context = build_personality_context(Some(&personality));
-    assert!(context.contains("balanced_explorer"));
-    assert!(context.contains("safe: 10"));
-    assert!(context.contains("first boss"));
 }
 
 macro_rules! outcome_context_case {
@@ -839,7 +559,15 @@ fn test_optional_sections_render() {
 
 #[test]
 fn test_blank_actions_returns_empty() {
-    assert_eq!(build_multiplayer_context(&[], &BTreeMap::new()), "");
+    assert_eq!(
+        build_multiplayer_context_with_state(
+            &[],
+            &TunnelFlavorState::default(),
+            0,
+            &BTreeMap::new()
+        ),
+        ""
+    );
 }
 
 #[test]
@@ -855,7 +583,15 @@ fn test_actions_render_with_serialized_details() {
         },
         ..DigAction::default()
     };
-    assert!(build_multiplayer_context(&[action], &BTreeMap::new()).contains("Sabotage"));
+    assert!(
+        build_multiplayer_context_with_state(
+            &[action],
+            &TunnelFlavorState::default(),
+            0,
+            &BTreeMap::new()
+        )
+        .contains("Sabotage")
+    );
 }
 
 #[test]
@@ -1085,23 +821,6 @@ impl DigFlavorDataPort for ReceiptMemoryRepository {
         Ok(())
     }
 
-    fn get_personality(
-        &self,
-        _discord_id: i64,
-        _guild_id: i64,
-    ) -> Result<Option<DigPersonality>, String> {
-        Ok(None)
-    }
-
-    fn upsert_personality(
-        &self,
-        _discord_id: i64,
-        _guild_id: i64,
-        _personality: DigPersonality,
-    ) -> Result<(), String> {
-        Ok(())
-    }
-
     fn get_flavor_receipt(
         &self,
         _dig_action_id: i64,
@@ -1293,6 +1012,13 @@ fn test_flavor_adds_narrative_keys() {
     let request = ai.request(0);
     assert_eq!(request.feature, "dig.flavor");
     assert_eq!(request.timeout_millis, 5_000);
+    assert!(
+        request.messages[1]
+            .content
+            .contains("=== PERSONALITY ===\nNew player, no history yet."),
+        "{}",
+        request.messages[1].content
+    );
 }
 
 #[test]
@@ -1499,65 +1225,6 @@ fn test_flavor_writes_dm_memory() {
 }
 
 #[test]
-fn test_update_personality_creates_new() {
-    let repository = registered_repository(100);
-    let service = service_with(
-        Arc::new(RecordingAi::success(default_ai_args())),
-        repository.clone(),
-        Arc::new(FixedContext::default()),
-    );
-    service.update_personality(USER_ID, GUILD_ID, Some("safe"), None);
-    assert_eq!(
-        repository
-            .personality(USER_ID, GUILD_ID)
-            .expect("personality")
-            .choice_histogram
-            .get("safe"),
-        Some(&1)
-    );
-}
-
-#[test]
-fn test_update_personality_records_notable_moment() {
-    let repository = registered_repository(100);
-    let service = service_with(
-        Arc::new(RecordingAi::success(default_ai_args())),
-        repository.clone(),
-        Arc::new(FixedContext::default()),
-    );
-    service.update_personality(
-        USER_ID,
-        GUILD_ID,
-        None,
-        Some(&BTreeMap::from([("first_boss_kill".to_owned(), true)])),
-    );
-    let moments = repository
-        .personality(USER_ID, GUILD_ID)
-        .expect("personality")
-        .notable_moments;
-    assert_eq!(moments.len(), 1);
-    assert!(moments[0].to_lowercase().contains("first boss"));
-}
-
-#[test]
-fn test_invalid_choice_ignored() {
-    let repository = registered_repository(100);
-    let service = service_with(
-        Arc::new(RecordingAi::success(default_ai_args())),
-        repository.clone(),
-        Arc::new(FixedContext::default()),
-    );
-    service.update_personality(USER_ID, GUILD_ID, Some("invalid_choice"), None);
-    assert!(
-        !repository
-            .personality(USER_ID, GUILD_ID)
-            .expect("personality")
-            .choice_histogram
-            .contains_key("invalid_choice")
-    );
-}
-
-#[test]
 fn test_get_returns_empty_when_missing() {
     assert_eq!(
         MemoryDigFlavorRepository::default().dm_memory(99_999, GUILD_ID),
@@ -1600,34 +1267,6 @@ fn test_per_guild_isolation() {
 }
 
 #[test]
-fn test_get_personality_none_when_missing() {
-    assert_eq!(
-        MemoryDigFlavorRepository::default().personality(99_999, GUILD_ID),
-        None
-    );
-}
-
-#[test]
-fn test_upsert_persists_and_round_trips() {
-    let repository = MemoryDigFlavorRepository::default();
-    repository.write_personality(
-        USER_ID,
-        GUILD_ID,
-        DigPersonality {
-            play_style: "cautious_grinder".to_owned(),
-            choice_histogram: histogram(&[("safe", 10), ("risky", 3)]),
-            notable_moments: vec!["Slew first boss".to_owned()],
-            ..DigPersonality::default()
-        },
-    );
-    let result = repository
-        .personality(USER_ID, GUILD_ID)
-        .expect("personality");
-    assert_eq!(result.play_style, "cautious_grinder");
-    assert_eq!(result.choice_histogram.get("safe"), Some(&10));
-}
-
-#[test]
 fn test_empty_when_none_logged() {
     assert!(
         MemoryDigFlavorRepository::default()
@@ -1665,67 +1304,4 @@ fn test_returns_only_social_actions() {
             .collect::<BTreeSet<_>>(),
         BTreeSet::from(["sabotage".to_owned()])
     );
-}
-
-#[test]
-fn test_returns_preconditions_for_normal_dig() {
-    let tunnel = TunnelState {
-        depth: 5,
-        ..TunnelState::default()
-    };
-    let (terminal, preconditions) = dig_with_preconditions(Some(&tunnel));
-    assert_eq!(terminal, None);
-    assert_eq!(preconditions.map(|value| value.depth_before), Some(5));
-}
-
-#[test]
-fn test_unregistered_returns_terminal_failure() {
-    let (terminal, _) = dig_with_preconditions(None);
-    let terminal = terminal.expect("terminal failure");
-    assert!(!terminal.success);
-}
-
-#[test]
-fn test_normal_outcome_advances_depth() {
-    let mut tunnel = TunnelState {
-        depth: 5,
-        max_depth: 5,
-        ..TunnelState::default()
-    };
-    let depth_before = tunnel.depth;
-    let result = apply_resolved_dig_outcome(
-        &mut tunnel,
-        &ResolvedDigFlavorInput {
-            advance: 2,
-            jc_earned: 3,
-            ..ResolvedDigFlavorInput::default()
-        },
-        1_000,
-    );
-    assert!(result.success);
-    assert_eq!(result.advance, 2);
-    assert_eq!(result.depth_after, depth_before + 2);
-    assert_eq!(result.llm_narrative, None);
-}
-
-#[test]
-fn test_cave_in_outcome_records_detail() {
-    let mut tunnel = TunnelState {
-        depth: 10,
-        max_depth: 10,
-        ..TunnelState::default()
-    };
-    let result = apply_resolved_dig_outcome(
-        &mut tunnel,
-        &ResolvedDigFlavorInput {
-            cave_in: true,
-            cave_in_block_loss: 4,
-            cave_in_type: "stun".to_owned(),
-            ..ResolvedDigFlavorInput::default()
-        },
-        1_000,
-    );
-    assert!(result.success);
-    assert!(result.cave_in);
-    assert_eq!(result.cave_in_detail.expect("cave-in detail").kind, "stun");
 }

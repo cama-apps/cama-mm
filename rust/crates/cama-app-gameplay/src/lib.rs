@@ -28,6 +28,8 @@ pub mod pet_flavor;
 pub mod pet_keepsake_commands;
 #[path = "../../cama-app/src/pet_sqlite.rs"]
 pub mod pet_sqlite;
+#[path = "../../cama-app/src/png_encoder.rs"]
+pub mod png_encoder;
 #[path = "../../cama-app/src/shop_commands.rs"]
 pub mod shop_commands;
 

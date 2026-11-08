@@ -35,7 +35,7 @@ use cama_domain::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::discord_transport::{DiscordMessage, DiscordTransport};
+use crate::discord_transport::{DiscordMessage, DiscordTransport, resolve_guild_player_names};
 use crate::dota_host_config::{DotaHostConfig, DotaHostTestMode};
 use crate::match_provider::{
     HostedMatchPlayer, HostedMatchResult, HostedMatchRosterEntry, MatchRegistrationProvider,
@@ -1306,12 +1306,19 @@ impl DotaHostWorker {
         record.last_error = None;
         state.cancel_requested = false;
         state.resume_requested = false;
+        let operator = i64::try_from(resolution.actor_id).unwrap_or_default();
+        let operator_name = resolve_guild_player_names(
+            self.discord.as_ref(),
+            u64::try_from(record.guild_id).ok(),
+            &[operator],
+        )
+        .await
+        .resolve(operator);
         state.pending_status = Some(format!(
-            "Hosting resolved as {} for pending #{} (Dota {}). Operator <@{}>: {}",
+            "Hosting resolved as {} for pending #{} (Dota {}). Operator {operator_name}: {}",
             resolution.outcome,
             record.pending_match_id,
             record.valve_match_id.as_deref().unwrap_or("unassigned"),
-            resolution.actor_id,
             resolution.reason
         ));
         self.save(record, state, now).await?;

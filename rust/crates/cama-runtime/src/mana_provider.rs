@@ -16,7 +16,6 @@ use async_trait::async_trait;
 use cama_app::mana_service::{
     BankruptcyState, BetOutcome, BoardRow, DegenScore, GuardianProtection, Land, ManaDataSource,
     ManaDetails, ManaService, ManaServiceError, PlayerProfile, TipStats, XorShift64Entropy,
-    mana_day_label, mana_day_start_timestamp,
 };
 use cama_app::wheel::{next_wheel_reset_at, wheel_spin_is_available};
 use cama_db::bankruptcy_repository::BankruptcyRepository;
@@ -25,14 +24,16 @@ use cama_db::gambling_stats_repository::{
     BetHistoryEntry, GamblingOutcome, GamblingStatsPort, GamblingStatsRepository,
     GamblingStatsService,
 };
+use cama_db::loan_repository::LoanRepository;
 use cama_db::mana_protection::ManaProtectionRepository;
 use cama_db::mana_service_repository::ManaRepository;
-use cama_db::predictions_repository::PredictionRepository;
 use cama_db::tip_repository::TipRepository;
-use chrono::{DateTime, FixedOffset, Utc};
+use cama_domain::mana::{mana_day_label_at, mana_day_start_at};
 
 use crate::ApplicationConfig;
-use crate::discord_transport::{DiscordIdPlayerNameResolver, GuildPlayerNameResolver};
+use crate::discord_transport::{
+    DiscordIdPlayerNameResolver, GuildPlayerNameDirectory, GuildPlayerNameResolver,
+};
 use crate::ids::signed_id;
 use crate::option_ext::{boolean_option, user_option};
 use crate::registration::{
@@ -75,6 +76,15 @@ pub trait ManaDiscordPort: Send + Sync {
 
     /// Return the guild member cache used by Python for Ash roles and names.
     fn mana_guild_members(&self, guild_id: i64) -> Result<Vec<ManaGuildMember>, String>;
+
+    /// Like [`Self::mana_guild_members`], but `None` unless the cache holds
+    /// every member of the guild. A partially chunked large guild is missing
+    /// its offline members, so callers that lock in a day's Ash-role weighting
+    /// must wait for the complete list.
+    fn mana_complete_guild_members(
+        &self,
+        guild_id: i64,
+    ) -> Result<Option<Vec<ManaGuildMember>>, String>;
 
     /// Resolve a selected target through the guild cache or Discord HTTP.
     async fn mana_guild_member(
@@ -160,7 +170,6 @@ impl RegistrationProvider for ManaRegistrationProvider {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ManaMoment {
     pub now: i64,
-    pub la_offset_seconds: i32,
 }
 
 pub(crate) trait ManaClock: Send + Sync {
@@ -172,29 +181,21 @@ pub(crate) struct SystemManaClock;
 
 impl ManaClock for SystemManaClock {
     fn moment(&self) -> Result<ManaMoment, String> {
-        let now = unix_timestamp()?;
         Ok(ManaMoment {
-            now,
-            la_offset_seconds: pacific_offset_seconds(now)?,
+            now: unix_timestamp()?,
         })
     }
 }
 
 impl ManaMoment {
-    fn local(self) -> Result<DateTime<FixedOffset>, String> {
-        let offset = FixedOffset::east_opt(self.la_offset_seconds)
-            .ok_or_else(|| "invalid Pacific time-zone offset".to_owned())?;
-        DateTime::<Utc>::from_timestamp(self.now, 0)
-            .ok_or_else(|| "system timestamp is outside chrono's range".to_owned())
-            .map(|time| time.with_timezone(&offset))
-    }
-
     pub(crate) fn today(self) -> Result<String, String> {
-        self.local().map(mana_day_label)
+        mana_day_label_at(self.now)
+            .ok_or_else(|| "system timestamp is outside chrono's range".to_owned())
     }
 
     pub(crate) fn day_start(self) -> Result<i64, String> {
-        self.local().map(mana_day_start_timestamp)
+        mana_day_start_at(self.now)
+            .ok_or_else(|| "system timestamp is outside chrono's range".to_owned())
     }
 }
 
@@ -277,7 +278,7 @@ impl ManaInteractionHandler {
         let target_id = target.as_ref().map_or(user_id, |target| target.id);
         let target_name = target.as_ref().map_or_else(
             || user_display_name.clone(),
-            |target| target.display_name_or_mention(),
+            |target| target.readable_display_name(),
         );
         let mut member = self
             .discord
@@ -314,6 +315,26 @@ impl ManaInteractionHandler {
             }
         }
         Ok(())
+    }
+
+    /// Last-seen names for board rows whose players left the member list.
+    fn departed_board_names(
+        &self,
+        guild_id: i64,
+        rows: &[BoardRow],
+        members: &[ManaGuildMember],
+    ) -> GuildPlayerNameDirectory {
+        let departed = rows
+            .iter()
+            .map(|row| row.discord_id)
+            .filter(|discord_id| !members.iter().any(|member| member.user_id == *discord_id))
+            .collect::<Vec<_>>();
+        if departed.is_empty() {
+            return GuildPlayerNameDirectory::default();
+        }
+        self.player_names
+            .names_for_guild(guild_id, &departed)
+            .unwrap_or_default()
     }
 
     async fn single_command(
@@ -410,7 +431,8 @@ impl ManaInteractionHandler {
         let mut members = self.discord.mana_guild_members(guild_id)?;
         self.render_member_names(guild_id, &mut members).await?;
         let rows = self.read_board_rows(guild_id, moment).await?;
-        let pages = board_pages(&rows, &members, &today);
+        let departed_names = self.departed_board_names(guild_id, &rows, &members);
+        let pages = board_pages(&rows, &members, &departed_names, &today);
         let mut response = InteractionResponse::message("").embed(pages[0].clone());
         if pages.len() > 1 {
             response = response.action_row(board_controls(owner_id, 0, pages.len()));
@@ -470,7 +492,8 @@ impl ManaInteractionHandler {
         let mut members = self.discord.mana_guild_members(guild_id)?;
         self.render_member_names(guild_id, &mut members).await?;
         let rows = self.read_board_rows(guild_id, moment).await?;
-        let pages = board_pages(&rows, &members, &today);
+        let departed_names = self.departed_board_names(guild_id, &rows, &members);
+        let pages = board_pages(&rows, &members, &departed_names, &today);
         let page = requested_page.min(pages.len().saturating_sub(1));
         responder
             .update(
@@ -502,8 +525,8 @@ impl ManaInteractionHandler {
         }
         let path = self.database_path.clone();
         spawn_sqlite("mana gamba-channel penalty", move || {
-            PredictionRepository::new(path)
-                .debit_gamba_channel_penalty(user_id, Some(guild_id))
+            LoanRepository::new(path)
+                .charge_gamba_channel_penalty_atomic(user_id, Some(guild_id))
                 .map(|_| ())
                 .map_err(|error| error.to_string())
         })
@@ -865,6 +888,7 @@ fn single_embed(
 fn board_pages(
     rows: &[BoardRow],
     members: &[ManaGuildMember],
+    departed_names: &GuildPlayerNameDirectory,
     today: &str,
 ) -> Vec<InteractionEmbed> {
     let names = members
@@ -897,7 +921,7 @@ fn board_pages(
         .iter()
         .map(|row| {
             let name = names.get(&row.discord_id).map_or_else(
-                || format!("<@{}>", row.discord_id),
+                || departed_names.resolve(row.discord_id),
                 |name| (*name).to_owned(),
             );
             format!("{} **{}** · {name}", row.land.emoji(), row.land)
@@ -978,60 +1002,6 @@ fn unix_timestamp() -> Result<i64, String> {
         .map_err(|_| "system clock is before the Unix epoch".to_owned())?
         .as_secs();
     i64::try_from(seconds).map_err(|_| "system clock exceeds SQLite range".to_owned())
-}
-
-/// Resolve America's DST rule without adding a time-zone database dependency.
-/// Post-2007 US rules are valid for every supported production timestamp.
-fn pacific_offset_seconds(timestamp: i64) -> Result<i32, String> {
-    use chrono::{Datelike, NaiveDate, TimeZone, Weekday};
-
-    let utc = DateTime::<Utc>::from_timestamp(timestamp, 0)
-        .ok_or_else(|| "system timestamp is outside chrono's range".to_owned())?;
-    let year = utc.year();
-    let march =
-        NaiveDate::from_ymd_opt(year, 3, 1).ok_or_else(|| "invalid March date".to_owned())?;
-    let november =
-        NaiveDate::from_ymd_opt(year, 11, 1).ok_or_else(|| "invalid November date".to_owned())?;
-    let to_sunday = |date: NaiveDate| -> i64 {
-        match date.weekday() {
-            Weekday::Sun => 0,
-            Weekday::Mon => 6,
-            Weekday::Tue => 5,
-            Weekday::Wed => 4,
-            Weekday::Thu => 3,
-            Weekday::Fri => 2,
-            Weekday::Sat => 1,
-        }
-    };
-    let second_sunday_march = march + chrono::Duration::days(to_sunday(march) + 7);
-    let first_sunday_november = november + chrono::Duration::days(to_sunday(november));
-    let standard = FixedOffset::west_opt(8 * 3_600)
-        .ok_or_else(|| "invalid Pacific standard offset".to_owned())?;
-    let daylight = FixedOffset::west_opt(7 * 3_600)
-        .ok_or_else(|| "invalid Pacific daylight offset".to_owned())?;
-    let starts = standard
-        .from_local_datetime(
-            &second_sunday_march
-                .and_hms_opt(2, 0, 0)
-                .ok_or_else(|| "invalid DST start time".to_owned())?,
-        )
-        .single()
-        .ok_or_else(|| "ambiguous DST start".to_owned())?
-        .timestamp();
-    let ends = daylight
-        .from_local_datetime(
-            &first_sunday_november
-                .and_hms_opt(2, 0, 0)
-                .ok_or_else(|| "invalid DST end time".to_owned())?,
-        )
-        .single()
-        .ok_or_else(|| "ambiguous DST end".to_owned())?
-        .timestamp();
-    Ok(if (starts..ends).contains(&timestamp) {
-        -7 * 3_600
-    } else {
-        -8 * 3_600
-    })
 }
 
 async fn respond_ephemeral(

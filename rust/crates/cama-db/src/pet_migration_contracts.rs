@@ -259,6 +259,7 @@ pub struct HatchRollRow {
     pub died_at: Option<i64>,
 }
 
+#[cfg(test)]
 pub fn model_hatch_roll_backfill(rows: &mut [HatchRollRow], now: i64) {
     for row in rows {
         row.egg_tier = if row.adopt_fee > 100 {
@@ -281,6 +282,7 @@ pub struct EvolutionBackfill {
     pub evolution_due_at: Option<i64>,
 }
 
+#[cfg(test)]
 #[must_use]
 pub fn model_evolution_backfill(mut row: EvolutionBackfill, now: i64) -> EvolutionBackfill {
     if row.died_at.is_some() {
@@ -294,6 +296,7 @@ pub fn model_evolution_backfill(mut row: EvolutionBackfill, now: i64) -> Evoluti
     row
 }
 
+#[cfg(test)]
 #[must_use]
 pub const fn model_dig_work_backfill(dig_work_at: i64, migration_time: i64) -> i64 {
     if dig_work_at == 0 {

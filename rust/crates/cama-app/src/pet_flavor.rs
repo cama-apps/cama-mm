@@ -286,6 +286,7 @@ impl PetFlavorService {
         }
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn bundle_cache_keys(&self) -> Vec<(i64, i64, String)> {
         self.state
@@ -297,6 +298,7 @@ impl PetFlavorService {
             .collect()
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn lifecycle_cache_len(&self) -> usize {
         self.state

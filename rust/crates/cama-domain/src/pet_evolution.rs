@@ -350,6 +350,8 @@ pub fn resolve_evolution(scores: &InstinctScores, pet_id: i64) -> EvolutionDecis
     }
 }
 
+/// The narrative key for an unresolved pet's leading instinct, shown as the
+/// status "Upbringing" hint. `None` until any instinct is meaningful.
 #[must_use]
 pub fn hint_key_for_scores(scores: &InstinctScores) -> Option<String> {
     let mut ranked = PetInstinct::ALL.map(|instinct| {
@@ -882,6 +884,15 @@ mod tests {
             .as_deref(),
             Some("balanced")
         );
+        for key in [
+            "balanced",
+            "delving",
+            "delving_strong",
+            "competition_strong",
+            "wisdom",
+        ] {
+            assert!(hint_text(Some(key)).is_some(), "{key} has player copy");
+        }
     }
 
     #[test]

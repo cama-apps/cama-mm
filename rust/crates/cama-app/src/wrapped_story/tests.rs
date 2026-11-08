@@ -292,6 +292,18 @@ fn test_returns_pairwise_data_with_resolved_names() {
 }
 
 #[test]
+fn test_pairwise_names_never_fall_back_to_ids_or_mentions() {
+    let input = full_pairwise_input();
+    let names = BTreeMap::from([(222, "Alice".to_owned()), (333, "<@333>".to_owned())]);
+    let result = pairwise_wrapped(Some(&input), &names).unwrap();
+    assert_eq!(result.best_teammates[0].username, "Alice");
+    assert_eq!(result.most_played_with[0].username, "Unknown player");
+    assert_eq!(result.nemesis.unwrap().username, "Unknown player");
+    assert_eq!(result.punching_bag.unwrap().username, "Unknown player");
+    assert_eq!(result.most_played_against[0].username, "Unknown player");
+}
+
+#[test]
 fn test_pairwise_name_lookup_deduplicates_overlapping_players() {
     let input = PairwiseInput {
         best_teammates: vec![pair(222, 10, 8, 0.8)],

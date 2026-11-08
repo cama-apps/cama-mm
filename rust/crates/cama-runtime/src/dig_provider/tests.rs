@@ -194,6 +194,8 @@ fn boss_scout_echo_killer_is_a_readable_name_on_a_cold_cache() {
         abandoned_gear_wear: Default::default(),
         gear_drop: None,
         prestige_relic_drop: None,
+        trophy_relic_drop: None,
+        stat_point_awarded: false,
         broken_gear: Vec::new(),
         warnings: Vec::new(),
         notices: Vec::new(),
@@ -514,6 +516,8 @@ fn boss_reminder_predicate_requires_a_committed_resolution() {
         abandoned_gear_wear: Default::default(),
         gear_drop: None,
         prestige_relic_drop: None,
+        trophy_relic_drop: None,
+        stat_point_awarded: false,
         broken_gear: Vec::new(),
         warnings: Vec::new(),
         notices: Vec::new(),
@@ -539,6 +543,8 @@ fn boss_call_result<T>(
         abandoned_gear_wear: Default::default(),
         gear_drop: None,
         prestige_relic_drop: None,
+        trophy_relic_drop: None,
+        stat_point_awarded: false,
         broken_gear: Vec::new(),
         warnings: Vec::new(),
         notices: Vec::new(),
@@ -672,6 +678,123 @@ fn boss_neon_prestige_relic_does_not_masquerade_as_trophy_boost() {
     assert!(!victory.trophy_relic_drop);
 }
 
+fn carved_trophy_fixture() -> cama_app::dig_boss_runtime::DigBossPrestigeRelicDrop {
+    cama_app::dig_boss_runtime::DigBossPrestigeRelicDrop {
+        database_id: 8,
+        artifact_id: "weeping_fang".to_owned(),
+        name: "Weeping Fang".to_owned(),
+        rarity: "Uncommon".to_owned(),
+    }
+}
+
+// boss_views.py `_send_boss_victory_neon` forwards `trophy_relic_drop`.
+#[test]
+fn boss_neon_carved_trophy_signals_the_trophy_boost() {
+    let mut start = boss_call_result(
+        cama_app::dig_boss_runtime::DigBossStartOutcome::RegularResolved(Box::new(
+            regular_boss_projection_fixture(true),
+        )),
+        Some(108),
+    );
+    start.trophy_relic_drop = Some(carved_trophy_fixture());
+    assert!(
+        super::boss_start_neon_victory(&start)
+            .expect("terminal start victory")
+            .trophy_relic_drop
+    );
+    let mut resume = boss_call_result(
+        cama_app::dig_boss_runtime::DigBossResolvedOutcome::Regular(Box::new(
+            regular_boss_projection_fixture(true),
+        )),
+        Some(109),
+    );
+    resume.trophy_relic_drop = Some(carved_trophy_fixture());
+    assert!(
+        super::boss_resume_neon_victory(&resume)
+            .expect("terminal resume victory")
+            .trophy_relic_drop
+    );
+}
+
+// boss_views.py `_build_boss_fight_result_embed`: the victory names the
+// withheld profit, the first-clear S point, and the carved trophy.
+#[test]
+fn regular_boss_victory_shows_withheld_profit_s_point_and_carved_trophy() {
+    let mut resolved = regular_boss_projection_fixture(true);
+    resolved.bankruptcy_penalty = 25;
+    resolved.vanity_tax = 10;
+    resolved.low_priority_tax = 5;
+    let trophy = carved_trophy_fixture();
+    let embed = super::regular_boss_result_embed(&resolved, None, None, Some(&trophy), true, &[]);
+
+    let coin = JOPACOIN_EMOTE;
+    assert_eq!(
+        embed.description.as_deref(),
+        Some(
+            format!(
+                "Victory! You defeated **Grothak the Unbreakable** and won **+500** {coin} profit!\
+                 \n−25 {coin} withheld while bankrupt.\
+                 \n−10 {coin} vanity tax.\
+                 \n−5 {coin} low priority tax."
+            )
+            .as_str()
+        )
+    );
+    assert_eq!(
+        boss_projection_field(&embed, "S Point Earned").map(|field| field.value.as_str()),
+        Some("First clear bonus: use `/dig miner build` to allocate it.")
+    );
+    assert_eq!(
+        boss_projection_field(&embed, "Trophy Carved").map(|field| field.value.as_str()),
+        Some("**Weeping Fang**")
+    );
+
+    let plain = super::regular_boss_result_embed(
+        &regular_boss_projection_fixture(true),
+        None,
+        None,
+        None,
+        false,
+        &[],
+    );
+    assert!(
+        plain
+            .description
+            .as_deref()
+            .is_some_and(|text| text.ends_with("profit!")),
+        "no deduction lines without deductions: {:?}",
+        plain.description
+    );
+    assert!(boss_projection_field(&plain, "S Point Earned").is_none());
+    assert!(boss_projection_field(&plain, "Trophy Carved").is_none());
+
+    let loss = super::regular_boss_result_embed(
+        &regular_boss_projection_fixture(false),
+        None,
+        None,
+        Some(&trophy),
+        true,
+        &[],
+    );
+    assert!(boss_projection_field(&loss, "S Point Earned").is_none());
+    assert!(boss_projection_field(&loss, "Trophy Carved").is_none());
+}
+
+#[test]
+fn pinnacle_boss_victory_shows_withheld_profit() {
+    let mut resolved = pinnacle_boss_projection_fixture(true, 3, 0);
+    resolved.bankruptcy_penalty = 40;
+    resolved.vanity_tax = 12;
+    let media = DigMediaRuntime::production(&DigRuntimeConfig::default());
+    let response = super::pinnacle_boss_result_response(&resolved, &media);
+    let description = response.embeds[0].description.as_deref().expect("result");
+
+    assert!(description.ends_with(&format!(
+        "profit!\n−40 {} withheld while bankrupt.\n−12 {} vanity tax.",
+        JOPACOIN_EMOTE, JOPACOIN_EMOTE
+    )));
+}
+
 #[test]
 fn boss_neon_pinnacle_gate_selects_terminal_mode_only() {
     let terminal = pinnacle_boss_projection_fixture(true, 3, 0);
@@ -745,6 +868,41 @@ async fn run_dig_returns_the_registered_typed_execution_and_delivery_notice() {
     assert_eq!(delivery.context.channel_id, CHANNEL as i64);
     assert_eq!(delivery.context.display_name, "Dig Test Miner");
     assert!(!delivery.render.description.is_empty());
+}
+
+#[tokio::test]
+async fn first_dig_names_the_new_tunnel_without_the_owner_id() {
+    let (database, provider, _discord) = fixture();
+    let execution = provider
+        .handler
+        .run_dig(
+            USER as i64,
+            GUILD as i64,
+            super::unix_now(),
+            false,
+            false,
+            cama_app::dig_runtime::DigRuntimeDeliveryContext::new(
+                0x1235,
+                CHANNEL as i64,
+                "Dig Test Miner",
+                None,
+            ),
+        )
+        .await
+        .expect("first dig execution");
+    assert!(execution.outcome.success);
+    let stored: String = Connection::open(database.path())
+        .expect("open Dig database")
+        .query_row(
+            "SELECT tunnel_name FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
+            params![USER as i64, GUILD as i64],
+            |row| row.get(0),
+        )
+        .expect("stored tunnel name");
+    assert!(!stored.trim().is_empty());
+    assert!(!stored.contains(&USER.to_string()), "{stored}");
+    assert!(!stored.starts_with("Miner "), "{stored}");
+    assert_eq!(execution.outcome.tunnel_name, stored);
 }
 
 #[tokio::test]
@@ -1320,6 +1478,7 @@ fn boss_mechanic_prompt_shows_authored_copy_choices_and_live_hp() {
         forced_no_wager_phase: false,
         echo_applied: false,
         echo_killer_id: None,
+        wager_escrowed: true,
     };
 
     let response = super::paused_boss_response(&paused, USER as i64, GUILD as i64);
@@ -1343,11 +1502,96 @@ fn boss_mechanic_prompt_shows_authored_copy_choices_and_live_hp() {
     );
 }
 
+/// Python's `_add_pet_assist_notice`: the species flavor on both the duel
+/// prompt and the result, with the damage outcome only once resolved.
+#[test]
+fn boss_pet_assist_uses_species_flavor_on_prompt_and_result() {
+    use cama_app::boss_duel::{PetAssist, RiskTier};
+    use cama_app::boss_multi_tier::{
+        CombatEffects, CombatState, GearSnapshot, PausedBossDuel, PendingPrompt, RoundEffectLog,
+        RoundRecord, mechanic_by_id,
+    };
+
+    let assist = PetAssist {
+        pet_name: "Dane".to_owned(),
+        species_id: "common_cama".to_owned(),
+        species_name: "Common Cama".to_owned(),
+        bonus_percent: 12,
+    };
+    let mechanic = mechanic_by_id("ogre_fireblast").expect("Ogre mechanic is bundled");
+    let paused = PausedBossDuel {
+        boss_id: "ogre_magi".to_owned(),
+        boundary: 75,
+        mechanic_id: mechanic.id.clone(),
+        risk_tier: RiskTier::Bold,
+        wager: 0,
+        combat: CombatState {
+            player_hp: 7,
+            boss_hp: 11,
+            player_hit: 0.5,
+            player_damage: 2,
+            boss_hit: 0.5,
+            boss_damage: 2,
+            critical_chance: 0.0,
+            critical_bonus: 0,
+            effects: CombatEffects {
+                pet_assist: Some(assist.clone()),
+                ..CombatEffects::default()
+            },
+        },
+        round_num: 2,
+        round_log: Vec::new(),
+        pending_prompt: PendingPrompt::from(&mechanic),
+        attempts_this_fight: 1,
+        initial_win_chance: 0.5,
+        payout_multiplier: 1.0,
+        player_hp_max: 10,
+        boss_hp_max: 14,
+        starting_boss_hp: 14,
+        gear_snapshot: GearSnapshot::default(),
+        forced_no_wager_phase: false,
+        echo_applied: false,
+        echo_killer_id: None,
+        wager_escrowed: true,
+    };
+    let prompt = super::paused_boss_response(&paused, USER as i64, GUILD as i64);
+    assert_eq!(
+        boss_projection_field(&prompt.embeds[0], "Pet Assist").map(|field| field.value.as_str()),
+        Some("**Dane** (Common Cama) barrels into the fray, lending a **12%** damage assist.")
+    );
+
+    let mut result = regular_boss_projection_fixture(true);
+    result.round_log.push(RoundRecord {
+        round: 1,
+        player_hp: 7,
+        boss_hp: 0,
+        player_hit: true,
+        boss_hit: None,
+        pet_assist: Some(assist),
+        pet_assist_damage: 0,
+        effect_log: RoundEffectLog::default(),
+        mechanic: None,
+    });
+    let embed = super::regular_boss_result_embed(&result, None, None, None, false, &[]);
+    assert_eq!(
+        boss_projection_field(&embed, "Pet Assist").map(|field| field.value.as_str()),
+        Some(
+            "**Dane** (Common Cama) barrels into the fray, lending a **12%** damage assist.\nNo opening appeared this time."
+        )
+    );
+}
+
 #[test]
 fn boss_defeat_reports_knockback_from_the_parked_depth() {
     // Parked at 99 before the boundary-100 fight, knocked back to 95.
-    let embed =
-        super::regular_boss_result_embed(&regular_boss_projection_fixture(false), None, None, &[]);
+    let embed = super::regular_boss_result_embed(
+        &regular_boss_projection_fixture(false),
+        None,
+        None,
+        None,
+        false,
+        &[],
+    );
     assert!(
         embed
             .description
@@ -1382,7 +1626,7 @@ fn boss_result_shows_selected_outcome_and_softened_hp() {
         }),
     });
 
-    let embed = super::regular_boss_result_embed(&result, None, None, &[]);
+    let embed = super::regular_boss_result_embed(&result, None, None, None, false, &[]);
     assert_eq!(
         boss_projection_field(&embed, "You chose: Stand in front and grin")
             .map(|field| field.value.as_str()),
@@ -1407,7 +1651,7 @@ fn boss_projection_field<'a>(
 #[test]
 fn regular_boss_victory_without_drop_omits_both_loud_drop_fields() {
     let resolved = regular_boss_projection_fixture(true);
-    let embed = super::regular_boss_result_embed(&resolved, None, None, &[]);
+    let embed = super::regular_boss_result_embed(&resolved, None, None, None, false, &[]);
 
     assert!(boss_projection_field(&embed, "Boss Drop").is_none());
     assert!(boss_projection_field(&embed, "Relic Found").is_none());
@@ -1423,7 +1667,7 @@ fn regular_boss_victory_projects_gear_drop_name_and_slot() {
         tier: 6,
         name: "Void-Touched Pickaxe".to_owned(),
     };
-    let embed = super::regular_boss_result_embed(&resolved, Some(&drop), None, &[]);
+    let embed = super::regular_boss_result_embed(&resolved, Some(&drop), None, None, false, &[]);
     let field = boss_projection_field(&embed, "Boss Drop").expect("boss drop field");
 
     assert!(field.value.contains("Void-Touched Pickaxe"));
@@ -1440,7 +1684,7 @@ fn regular_boss_victory_projects_prestige_relic_name() {
         name: "Echo Stone".to_owned(),
         rarity: "Rare".to_owned(),
     };
-    let embed = super::regular_boss_result_embed(&resolved, None, Some(&drop), &[]);
+    let embed = super::regular_boss_result_embed(&resolved, None, Some(&drop), None, false, &[]);
     let field = boss_projection_field(&embed, "Relic Found").expect("relic field");
 
     assert!(field.value.contains("Echo Stone"));
@@ -1462,7 +1706,8 @@ fn regular_boss_loss_suppresses_loud_drop_fields() {
         name: "Also Hidden".to_owned(),
         rarity: "Rare".to_owned(),
     };
-    let embed = super::regular_boss_result_embed(&resolved, Some(&gear), Some(&relic), &[]);
+    let embed =
+        super::regular_boss_result_embed(&resolved, Some(&gear), Some(&relic), None, false, &[]);
 
     assert!(boss_projection_field(&embed, "Boss Drop").is_none());
     assert!(boss_projection_field(&embed, "Relic Found").is_none());
@@ -1476,7 +1721,7 @@ fn regular_boss_broken_gear_projects_name_disabled_effects_and_repair_all() {
         gear_id: 3,
         name: "Ironclad Armor".to_owned(),
     }];
-    let embed = super::regular_boss_result_embed(&resolved, None, None, &broken);
+    let embed = super::regular_boss_result_embed(&resolved, None, None, None, false, &broken);
     let field = boss_projection_field(&embed, "Gear Broken").expect("broken gear field");
 
     assert!(field.value.contains("Ironclad Armor"));
@@ -1686,6 +1931,115 @@ fn event_splash_victims_render_readable_names_on_a_cold_cache() {
     );
     assert!(field.value.contains("Unknown player: 6"), "{}", field.value);
     assert!(!field.value.contains("<@"), "{}", field.value);
+}
+
+fn threat_outcome(
+    jc: i64,
+    streak_loss: i64,
+    curse: Option<cama_app::dig_loot::CanonicalTempCurse>,
+    balance_after: i64,
+) -> cama_app::dig_event_runtime::DigEventRuntimeOutcome {
+    cama_app::dig_event_runtime::DigEventRuntimeOutcome {
+        success: true,
+        error: None,
+        resolution: Some(cama_app::dig_loot::CanonicalEventResolution {
+            event_id: "synthetic".to_owned(),
+            event_name: "Synthetic Threat".to_owned(),
+            choice: "risky".to_owned(),
+            complexity: cama_app::dig_loot::EventComplexity::Choice,
+            descriptions: Vec::new(),
+            steps: Vec::new(),
+            boon_options: Vec::new(),
+            ascii_art: None,
+            social: false,
+            succeeded: jc > 0,
+            message: "The tunnel answers.".to_owned(),
+            advance: 0,
+            jc,
+            cave_in: false,
+            streak_loss,
+            streak_days_after: None,
+            curse,
+            persisted_curse: None,
+            buff: None,
+            black_wax_seal_spent: false,
+            active_curse_remaining_after: None,
+            curse_cleared: false,
+            gear_reward_pool: Vec::new(),
+            consumable_reward_pool: Vec::new(),
+            artifact_reward_pool: Vec::new(),
+            splash: None,
+            guild_modifier_on_success: None,
+            quest_id: None,
+            quest_step: None,
+            next_event_id: None,
+            chained_event_id: None,
+            reward: None,
+            duplicate_gear_reward: false,
+            splash_payout_ratio: None,
+            economy_gross_jc: jc,
+            cruel_echoes: false,
+            boss_encounter: false,
+            random_plan: cama_app::dig_loot::CanonicalEventRandomPlan::default(),
+        }),
+        depth_before: 40,
+        depth_after: 40,
+        balance_after,
+        action_id: Some(18),
+        reward_row_id: None,
+        applied_now: true,
+        splash: None,
+        guild_modifier: None,
+        chain_event: None,
+        chain_prompt: None,
+        quest_finale: None,
+        retryable: false,
+    }
+}
+
+fn event_fields(
+    outcome: &cama_app::dig_event_runtime::DigEventRuntimeOutcome,
+) -> Vec<(String, String)> {
+    super::event_resolution_response(outcome, "test-nonce", &GuildPlayerNameDirectory::default())
+        .embeds[0]
+        .fields
+        .iter()
+        .map(|field| (field.name.clone(), field.value.clone()))
+        .collect()
+}
+
+#[test]
+fn event_result_embed_surfaces_streak_loss_curse_and_debt() {
+    let curse = cama_app::dig_loot::CanonicalTempCurse {
+        id: "slow_hex".to_owned(),
+        name: "Slowing Hex".to_owned(),
+        duration_digs: 2,
+        effect: serde_json::json!({"advance_bonus": -1}),
+    };
+    let fields = event_fields(&threat_outcome(-200, 3, Some(curse), -170));
+    assert!(
+        fields
+            .iter()
+            .any(|(name, value)| name == "Outcome" && value.contains("-3 streak days")),
+        "{fields:?}"
+    );
+    assert!(
+        fields
+            .iter()
+            .any(|(name, value)| { name == "Curse: Slowing Hex" && value.contains("next 2 digs") }),
+        "{fields:?}"
+    );
+    assert!(
+        fields
+            .iter()
+            .any(|(name, value)| name == "In Debt" && value.contains("-170")),
+        "{fields:?}"
+    );
+
+    let clean = event_fields(&threat_outcome(13, 0, None, 513));
+    assert!(clean.iter().all(|(name, _)| !name.starts_with("Curse:")));
+    assert!(clean.iter().all(|(name, _)| name != "In Debt"));
+    assert!(clean.iter().all(|(_, value)| !value.contains("streak")));
 }
 
 // tests/test_dig_event_messaging.py::test_event_result_embed_surfaces_gear_drop_details
@@ -2435,9 +2789,10 @@ fn fixture_with_discord_and_config(
         .map(|ancestor| ancestor.join("assets/dig"))
         .find(|candidate| candidate.is_dir())
         .expect("repository Dig asset tree");
-    let media = Arc::new(DigMediaRuntime::production(
-        &DigRuntimeConfig::with_asset_root(root),
-    ));
+    let media = Arc::new(DigMediaRuntime::production(&DigRuntimeConfig {
+        asset_root: root,
+        ..DigRuntimeConfig::default()
+    }));
     let provider =
         DigRegistrationProvider::with_media(database.path(), &config, discord.clone(), None, media);
     (database, provider, discord)
@@ -2483,6 +2838,8 @@ fn hook_outcome() -> DigRuntimeOutcome {
         relic_trim_notice: false,
         weather: None,
         active_curse: None,
+        streak_charm_used: false,
+        auto_purchases: Vec::new(),
     }
 }
 
@@ -4888,6 +5245,38 @@ async fn boss_encounter_modal_and_durable_duel_execute_live_policy() {
         "authored or native boss art"
     );
 
+    const INTRUDER: u64 = USER + 2;
+    PlayerRepository::new(database.path())
+        .add(&NewPlayer::new(
+            INTRUDER as i64,
+            "provider-intruder",
+            Some(GUILD as i64),
+        ))
+        .expect("intruder player");
+    for (action, refusal) in [
+        ("scout", "Only the tunnel owner can scout."),
+        ("retreat", "Only the tunnel owner can retreat."),
+    ] {
+        let intruder = Arc::new(TestResponder::default());
+        provider
+            .handler
+            .handle(
+                component_request_as(
+                    INTRUDER,
+                    "Other Miner",
+                    format!("dig:boss:{action}:{USER}:{GUILD}"),
+                    Vec::new(),
+                ),
+                intruder.clone(),
+            )
+            .await
+            .expect("non-owner boss action is refused");
+        let responses = intruder.responses.lock().expect("non-owner responses");
+        assert_eq!(responses[0].content, refusal);
+        assert!(responses[0].ephemeral);
+        assert!(intruder.defers.lock().expect("non-owner defers").is_empty());
+    }
+
     let scout = Arc::new(TestResponder::default());
     provider
         .handler
@@ -4975,6 +5364,7 @@ async fn boss_encounter_modal_and_durable_duel_execute_live_policy() {
             .collect::<Vec<_>>(),
         vec![("wager", "Wager Amount (max 1,000 JC)")]
     );
+    assert_eq!(modal.inputs[0].placeholder.as_deref(), Some("0-1000"));
 
     let submitted = Arc::new(TestResponder::default());
     provider
@@ -5639,6 +6029,8 @@ fn paid_prompt_is_tokenized_owner_bound_one_shot_and_exactly_formatted() {
         relic_trim_notice: false,
         weather: None,
         active_curse: None,
+        streak_charm_used: false,
+        auto_purchases: Vec::new(),
     };
     let response = super::paid_dig_response(&result, "secret-token");
     assert_eq!(response.embeds[0].color, Some(0xFF_A5_00));
@@ -5798,6 +6190,173 @@ async fn unresolved_paid_prompt_is_actively_cancelled_at_timeout() {
             .expect("retired timeout view"),
         super::DigPaidViewAdmission::Expired
     );
+}
+
+/// Seed a one-HP Grothak encounter whose duel prompt was saved at `paused_at`.
+fn seed_paused_grothak_duel(database: &NamedTempFile, paused_at: i64) {
+    use cama_app::boss_duel::RiskTier;
+    use cama_app::boss_multi_tier::{
+        BossRepositoryPort, CombatEffects, CombatState, GearSnapshot, PausedBossDuel,
+        PendingPrompt, PlayerKey, mechanic_by_id,
+    };
+
+    Connection::open(database.path())
+        .expect("timeout boss fixture DB")
+        .execute(
+            "INSERT INTO tunnels
+             (discord_id,guild_id,depth,max_depth,prestige_level,boss_progress,
+              boss_attempts,last_dig_at,luminosity,stat_points,tunnel_name)
+             VALUES (?1,?2,24,24,0,?3,0,0,50,5,'Timeout Boss')",
+            params![
+                USER as i64,
+                GUILD as i64,
+                r#"{"25":{"boss_id":"grothak","status":"active","hp_remaining":1,"hp_max":4}}"#,
+            ],
+        )
+        .expect("timeout boss tunnel");
+    let mechanic = mechanic_by_id("grothak_earthquake").expect("Grothak mechanic is bundled");
+    let paused = PausedBossDuel {
+        boss_id: "grothak".to_owned(),
+        boundary: 25,
+        mechanic_id: mechanic.id.clone(),
+        risk_tier: RiskTier::Cautious,
+        wager: 0,
+        combat: CombatState {
+            player_hp: 7,
+            boss_hp: 1,
+            player_hit: 0.95,
+            player_damage: 2,
+            boss_hit: 0.05,
+            boss_damage: 1,
+            critical_chance: 0.0,
+            critical_bonus: 0,
+            effects: CombatEffects::default(),
+        },
+        round_num: 2,
+        round_log: Vec::new(),
+        pending_prompt: PendingPrompt::from(&mechanic),
+        attempts_this_fight: 1,
+        initial_win_chance: 0.5,
+        payout_multiplier: 1.0,
+        player_hp_max: 10,
+        boss_hp_max: 4,
+        starting_boss_hp: 4,
+        gear_snapshot: GearSnapshot::default(),
+        forced_no_wager_phase: false,
+        echo_applied: false,
+        echo_killer_id: None,
+        wager_escrowed: true,
+    };
+    cama_app::dig_boss_runtime::SqliteBossRepository::new(database.path(), paused_at)
+        .restore_claimed_duel(PlayerKey::new(USER as i64, Some(GUILD as i64)), paused)
+        .expect("paused duel");
+}
+
+fn boss_duel_counts(database: &NamedTempFile) -> (i64, i64) {
+    let connection = Connection::open(database.path()).expect("timeout verify DB");
+    let count = |sql: &str| {
+        connection
+            .query_row(sql, [], |row| row.get::<_, i64>(0))
+            .expect("count")
+    };
+    (
+        count("SELECT COUNT(*) FROM dig_active_duels"),
+        count("SELECT COUNT(*) FROM dig_actions WHERE action_type='boss_fight'"),
+    )
+}
+
+/// boss_views.py `BossDuelView.on_timeout`: an unanswered prompt resolves with
+/// its safe option, and the prompt message becomes the fight's result.
+#[tokio::test(start_paused = true)]
+async fn unanswered_boss_duel_prompt_resolves_with_its_safe_option_at_timeout() {
+    let (database, provider, _discord) = fixture();
+    provider.handler.state.boss_entropy.reseed(1);
+    seed_paused_grothak_duel(
+        &database,
+        super::unix_now() - cama_app::dig_boss_runtime::BOSS_DUEL_PROMPT_TIMEOUT_SECONDS,
+    );
+    let responder = Arc::new(TestResponder::default());
+    let receipt = InteractionMessageReceipt {
+        message_id: 99,
+        channel_id: CHANNEL,
+        delivery: crate::registration::InteractionMessageDelivery::InteractionFollowup,
+    };
+    provider
+        .handler
+        .schedule_boss_duel_timeout(USER as i64, GUILD as i64, responder.clone(), Some(receipt))
+        .await
+        .expect("timeout task");
+
+    assert_eq!(boss_duel_counts(&database), (0, 1), "settled exactly once");
+    let edits = responder
+        .message_edits
+        .lock()
+        .expect("timeout edits")
+        .clone();
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].0, receipt, "the prompt itself shows the result");
+    let embed = &edits[0].1.embeds[0];
+    // The seeded kill carries the junction it opened, as a clicked kill does.
+    assert_eq!(embed.title.as_deref(), Some("Stone Junction"));
+    assert!(
+        embed
+            .description
+            .as_deref()
+            .is_some_and(|text| text.starts_with("Victory!")),
+        "{:?}",
+        embed.description
+    );
+    let safe = cama_app::boss_multi_tier::mechanic_by_id("grothak_earthquake")
+        .expect("Grothak mechanic is bundled");
+    let safe_label = &safe.options[safe.safe_option_index].label;
+    assert!(
+        embed
+            .fields
+            .iter()
+            .any(|field| field.name == format!("You chose: {safe_label}")),
+        "the safe option was chosen: {:?}",
+        embed.fields
+    );
+    assert!(
+        edits[0]
+            .1
+            .components
+            .iter()
+            .flat_map(|row| &row.buttons)
+            .all(|button| !button.custom_id.starts_with("dig:boss:duel:")),
+        "the expired prompt keeps no duel buttons"
+    );
+    assert!(responder.followups.lock().expect("followups").is_empty());
+
+    // A second deadline for the same prompt settles nothing more.
+    provider
+        .handler
+        .schedule_boss_duel_timeout(USER as i64, GUILD as i64, responder.clone(), Some(receipt))
+        .await
+        .expect("repeat timeout task");
+    assert_eq!(boss_duel_counts(&database), (0, 1));
+    assert_eq!(
+        responder.message_edits.lock().expect("timeout edits").len(),
+        1
+    );
+}
+
+/// The deadline of an answered prompt never resolves the newer pause the
+/// answer opened.
+#[tokio::test(start_paused = true)]
+async fn boss_duel_timeout_leaves_a_pause_saved_after_its_prompt() {
+    let (database, provider, _discord) = fixture();
+    seed_paused_grothak_duel(&database, super::unix_now());
+    let responder = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .schedule_boss_duel_timeout(USER as i64, GUILD as i64, responder.clone(), None)
+        .await
+        .expect("timeout task");
+
+    assert_eq!(boss_duel_counts(&database), (1, 0), "the newer pause waits");
+    assert!(responder.message_edits.lock().expect("edits").is_empty());
+    assert!(responder.followups.lock().expect("followups").is_empty());
 }
 
 #[tokio::test]
@@ -6516,6 +7075,122 @@ async fn boss_default_risk_and_resume_live_path_sends_neon_after_primary_result(
     assert!(primary.is_some_and(|index| neon.is_some_and(|neon| index < neon)));
 }
 
+/// Python's victory embed carried the new junction (`add_route_choice_fields`
+/// plus a `RouteChoiceView`). A live tier-boss kill shows the offered routes
+/// and their buttons on the result, and a button locks the route.
+#[tokio::test]
+async fn tier_boss_victory_opens_the_next_route_junction() {
+    let (database, provider, _discord) = fixture();
+    Connection::open(database.path())
+        .expect("junction boss fixture DB")
+        .execute(
+            "INSERT INTO tunnels
+             (discord_id,guild_id,depth,max_depth,prestige_level,boss_progress,
+              boss_attempts,last_dig_at,luminosity,stat_points,tunnel_name)
+             VALUES (?1,?2,24,24,0,?3,0,0,50,5,'Junction Boss')",
+            params![
+                USER as i64,
+                GUILD as i64,
+                r#"{"25":{"boss_id":"grothak","status":"active","hp_remaining":1,"hp_max":4}}"#,
+            ],
+        )
+        .expect("junction boss tunnel");
+    provider.handler.state.boss_entropy.reseed(1);
+
+    let mut response = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(
+            component_request(
+                format!("dig:boss:default:risk:cautious:{USER}:{GUILD}"),
+                Vec::new(),
+            ),
+            response.clone(),
+        )
+        .await
+        .expect("live boss selection path");
+    for _ in 0..4 {
+        let next = response
+            .followups
+            .lock()
+            .expect("boss followups")
+            .iter()
+            .flat_map(|followup| &followup.components)
+            .flat_map(|row| &row.buttons)
+            .find(|button| button.custom_id.starts_with("dig:boss:duel:"))
+            .map(|button| button.custom_id.clone());
+        let Some(next) = next else {
+            break;
+        };
+        response = Arc::new(TestResponder::default());
+        provider
+            .handler
+            .handle(component_request(next, Vec::new()), response.clone())
+            .await
+            .expect("live boss resume path");
+    }
+
+    let followups = response.followups.lock().expect("final followups").clone();
+    assert_eq!(followups.len(), 1, "the junction rides on the boss result");
+    let embed = &followups[0].embeds[0];
+    assert_eq!(embed.title.as_deref(), Some("Stone Junction"));
+    assert!(
+        embed
+            .description
+            .as_deref()
+            .is_some_and(|description| description.starts_with("Victory!"))
+    );
+    let field_names = embed
+        .fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect::<Vec<_>>();
+    assert!(field_names.contains(&"Details"));
+    assert!(field_names.contains(&"The path splits toward Stone"));
+    let buttons = followups[0]
+        .components
+        .iter()
+        .flat_map(|row| &row.buttons)
+        .collect::<Vec<_>>();
+    assert_eq!(buttons.len(), 3);
+    assert!(
+        buttons
+            .iter()
+            .all(|button| button.custom_id.starts_with("dig_route_") && !button.disabled)
+    );
+    for button in &buttons {
+        assert!(field_names.contains(&button.label.as_str()));
+    }
+    let buttons = buttons
+        .into_iter()
+        .map(|button| button.custom_id.clone())
+        .collect::<Vec<_>>();
+
+    let route_responder = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(
+            component_request(buttons[0].clone(), Vec::new()),
+            route_responder.clone(),
+        )
+        .await
+        .expect("route choice component");
+    let route_state: Option<String> = Connection::open(database.path())
+        .expect("route verify DB")
+        .query_row(
+            "SELECT route_state FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
+            params![USER as i64, GUILD as i64],
+            |row| row.get(0),
+        )
+        .expect("route state");
+    let status = cama_app::dig_routes::route_status(route_state.as_deref());
+    assert!(!status.choice_required);
+    assert_eq!(
+        status.active_route.map(|route| route.id),
+        buttons[0].rsplit(':').next()
+    );
+}
+
 #[test]
 fn prestige_view_owner_timeout_transition_and_claim_are_exact() {
     let (_database, provider, _discord) = fixture();
@@ -6636,7 +7311,10 @@ fn rendered_media_keeps_stats_and_event_ui_separate_with_exact_attachments() {
         .map(|ancestor| ancestor.join("assets/dig"))
         .find(|candidate| candidate.is_dir())
         .expect("repository Dig asset tree");
-    let media = DigMediaRuntime::production(&DigRuntimeConfig::with_asset_root(root));
+    let media = DigMediaRuntime::production(&DigRuntimeConfig {
+        asset_root: root,
+        ..DigRuntimeConfig::default()
+    });
     let result = DigRuntimeOutcome {
         success: true,
         error: None,
@@ -6680,6 +7358,8 @@ fn rendered_media_keeps_stats_and_event_ui_separate_with_exact_attachments() {
                 .to_owned(),
         }),
         active_curse: None,
+        streak_charm_used: false,
+        auto_purchases: Vec::new(),
     };
 
     let (stats, event) =
@@ -6764,7 +7444,10 @@ fn event_prompt_applies_durable_darkness_and_reading_the_stone_policy() {
         .map(|ancestor| ancestor.join("assets/dig"))
         .find(|candidate| candidate.is_dir())
         .expect("repository Dig asset tree");
-    let media = DigMediaRuntime::production(&DigRuntimeConfig::with_asset_root(root));
+    let media = DigMediaRuntime::production(&DigRuntimeConfig {
+        asset_root: root,
+        ..DigRuntimeConfig::default()
+    });
     let result = DigRuntimeOutcome {
         success: true,
         error: None,
@@ -6804,6 +7487,8 @@ fn event_prompt_applies_durable_darkness_and_reading_the_stone_policy() {
         relic_trim_notice: false,
         weather: None,
         active_curse: None,
+        streak_charm_used: false,
+        auto_purchases: Vec::new(),
     };
     let prompt = cama_app::dig_event_runtime::DigEventActionPresentation {
         event: cama_app::dig_loot::canonical_event_presentation("underground_stream")
@@ -8574,6 +9259,91 @@ fn dig_result_embed_shows_an_active_curse_on_a_later_dig() {
 }
 
 #[test]
+fn route_choice_view_shows_the_persisted_offer() {
+    let route =
+        |id: &str, name: &str, description: &str, layer: Option<&str>| super::DigRouteOfferView {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            description: description.to_owned(),
+            layer: layer.map(str::to_owned),
+        };
+    let choice = super::DigRouteChoiceView {
+        layer: "Stone".to_owned(),
+        start_depth: 25,
+        end_depth: 50,
+        offered_routes: vec![
+            route(
+                "shored_passage",
+                "Shored Passage",
+                "Safer, but slower.",
+                None,
+            ),
+            route(
+                "old_supports",
+                "Old Supports",
+                "Old braces hold the stone back.",
+                Some("Stone"),
+            ),
+            route(
+                "fossil_seam",
+                "Fossil Seam",
+                "A rich but unstable seam.",
+                Some("Stone"),
+            ),
+        ],
+    };
+
+    let response =
+        super::route_choice_response(&choice, "nonce", USER as i64, GUILD as i64, "token");
+    let embed = &response.embeds[0];
+
+    assert_eq!(embed.title.as_deref(), Some("Stone Junction"));
+    let description = embed.description.as_deref().expect("junction description");
+    assert!(description.contains("**25**") && description.contains("**50**"));
+    assert_eq!(
+        embed.color,
+        Some(cama_app::dig_view_supplements::layer_color("Stone"))
+    );
+    assert_eq!(
+        embed
+            .fields
+            .iter()
+            .map(|field| (field.name.as_str(), field.value.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("Shored Passage", "Safer, but slower."),
+            ("Old Supports", "Old braces hold the stone back."),
+            ("Fossil Seam", "A rich but unstable seam."),
+        ]
+    );
+    assert_eq!(
+        embed.footer.as_deref(),
+        Some("No rerolls. If this view expires, use /dig go to reopen it.")
+    );
+}
+
+#[test]
+fn dig_result_embed_credits_pet_excavation_in_progress() {
+    let mut result = hook_outcome();
+    result.advance = 17;
+    result.pet_dig_bonus = 12;
+    result.pet_name = Some("Blep".to_owned());
+
+    let embed = super::python_dig_result_embed(&result, "Dig", "Miner", None, None, None);
+    let progress = embed
+        .fields
+        .iter()
+        .find(|field| field.name == "Progress")
+        .expect("progress field");
+
+    assert!(
+        progress.value.contains("Blep excavated +12 blocks"),
+        "{}",
+        progress.value
+    );
+}
+
+#[test]
 fn dig_result_embed_omits_the_curse_field_when_uncursed() {
     let result = hook_outcome();
 
@@ -8585,6 +9355,71 @@ fn dig_result_embed_omits_the_curse_field_when_uncursed() {
             .iter()
             .all(|field| !field.name.contains("Cursed")),
         "an uncursed dig must not render a curse field"
+    );
+}
+
+#[test]
+fn dig_result_embed_shows_the_streak_charm_and_auto_buy_results() {
+    let purchase =
+        |item: &str, status: &str, cost: i64| cama_app::dig_runtime::DigRuntimeAutoPurchase {
+            item: item.to_owned(),
+            status: status.to_owned(),
+            cost,
+        };
+    let mut result = hook_outcome();
+    result.streak_charm_used = true;
+    result.auto_purchases = vec![
+        purchase("Hard Hat", "purchased", 8),
+        purchase("Torch", "queued_from_inventory", 0),
+        purchase("Grappling Hook", "skipped_insufficient_balance", 25),
+        purchase("Hard Hat", "skipped_inventory_full", 0),
+        purchase("Torch", "skipped_error", 4),
+        purchase("Torch", "already_queued", 0),
+    ];
+
+    let embed = super::python_dig_result_embed(&result, "Dig", "Miner", None, None, None);
+    let field = |name: &str| {
+        embed
+            .fields
+            .iter()
+            .find(|field| field.name == name)
+            .unwrap_or_else(|| panic!("{name} field"))
+    };
+
+    assert_eq!(
+        field("Streak Charm").value,
+        "Saved your daily streak after the missed day."
+    );
+    let auto_buy = field("Auto-Buy");
+    assert!(auto_buy.inline);
+    assert_eq!(
+        auto_buy.value,
+        format!(
+            "Hard Hat: bought (8 {JOPACOIN_EMOTE})\nTorch: from inventory\n\
+             Grappling Hook: skipped (need 25 JC)\nHard Hat: skipped (inventory full)\n\
+             Torch: skipped"
+        )
+    );
+}
+
+#[test]
+fn dig_result_embed_omits_streak_charm_and_auto_buy_when_unused() {
+    let mut result = hook_outcome();
+    result.auto_purchases = vec![cama_app::dig_runtime::DigRuntimeAutoPurchase {
+        item: "Torch".to_owned(),
+        status: "already_queued".to_owned(),
+        cost: 0,
+    }];
+
+    let embed = super::python_dig_result_embed(&result, "Dig", "Miner", None, None, None);
+
+    assert!(
+        embed
+            .fields
+            .iter()
+            .all(|field| field.name != "Streak Charm" && field.name != "Auto-Buy"),
+        "{:?}",
+        embed.fields
     );
 }
 
@@ -8643,7 +9478,7 @@ async fn assert_stale_boss_delivery_posted_as_plain_result(
         let public = discord.public.lock().expect("public posts");
         assert_eq!(public.len(), 1, "exactly one replayed post");
         let embed = public[0].embeds.first().expect("result embed");
-        assert_eq!(embed.title.as_deref(), Some("Miner 77001 — Depth 24"));
+        assert_eq!(embed.title.as_deref(), Some("Unnamed Tunnel — Depth 24"));
         assert!(
             embed
                 .fields
@@ -8750,7 +9585,7 @@ async fn pending_boss_delivery_for_the_current_boss_still_opens_the_encounter() 
     let public = discord.public.lock().expect("public posts");
     assert_eq!(public.len(), 1);
     let embed = public[0].embeds.first().expect("encounter embed");
-    assert_ne!(embed.title.as_deref(), Some("Miner 77001 — Depth 24"));
+    assert_ne!(embed.title.as_deref(), Some("Unnamed Tunnel — Depth 24"));
     assert!(
         discord
             .reactions
@@ -9140,4 +9975,515 @@ fn recycling_picker_offers_every_recipe_in_a_large_inventory() {
     }
     assert_eq!(seen, expected);
     assert!(response.components.len() <= 5);
+}
+
+fn embed_text_length(embed: &crate::registration::InteractionEmbed) -> usize {
+    let count = |text: &Option<String>| text.as_deref().map_or(0, |text| text.chars().count());
+    count(&embed.title)
+        + count(&embed.description)
+        + count(&embed.footer)
+        + embed
+            .fields
+            .iter()
+            .map(|field| field.name.chars().count() + field.value.chars().count())
+            .sum::<usize>()
+}
+
+#[tokio::test]
+async fn artifacts_command_shows_names_lore_and_effects_instead_of_ids() {
+    let (database, provider, _discord) = fixture();
+    let go = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(go_request(), go)
+        .await
+        .expect("first dig creates a tunnel");
+    let connection = Connection::open(database.path()).expect("artifact database");
+    for (artifact_id, is_relic, equipped) in [
+        ("mole_claws", 1, 1),
+        ("mole_claws", 1, 0),
+        ("miner_s_lullaby", 0, 0),
+        ("pinnacle:Crown:Echoes:hp_plus_1:boss_payout_5", 1, 0),
+        ("retired_trinket", 0, 0),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO dig_artifacts
+                     (discord_id,guild_id,artifact_id,found_at,is_relic,equipped)
+                 VALUES (?1,?2,?3,0,?4,?5)",
+                params![USER as i64, GUILD as i64, artifact_id, is_relic, equipped],
+            )
+            .expect("seed artifact");
+    }
+    drop(connection);
+
+    let responder = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(
+            command_request(30, "artifacts", Vec::new()),
+            responder.clone(),
+        )
+        .await
+        .expect("artifacts render");
+
+    let followups = responder.followups.lock().expect("artifact followups");
+    let embeds = followups
+        .iter()
+        .flat_map(|response| response.embeds.iter())
+        .collect::<Vec<_>>();
+    let catalog = cama_app::dig_loot::artifact_catalog_entries();
+    let catalog_pages = catalog.len().div_ceil(20);
+    assert_eq!(embeds.len(), catalog_pages + 1);
+    for embed in &embeds {
+        assert!(embed.fields.len() <= 25);
+        assert!(embed_text_length(embed) <= 6_000);
+    }
+    let catalog_fields = embeds[..catalog_pages]
+        .iter()
+        .flat_map(|embed| embed.fields.iter())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        catalog_fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        catalog
+            .iter()
+            .map(|artifact| artifact.name.as_str())
+            .collect::<Vec<_>>()
+    );
+    for (field, artifact) in catalog_fields.iter().zip(catalog) {
+        assert!(!field.name.contains('_'), "{}", field.name);
+        assert!(field.value.contains(&artifact.lore_text), "{}", field.value);
+        let effect = artifact
+            .effect
+            .as_deref()
+            .unwrap_or("Collectible only (no equip effect).");
+        assert!(
+            field.value.ends_with(&format!("**Effect:** {effect}")),
+            "{}",
+            field.value
+        );
+    }
+    assert_eq!(
+        embeds[0].title.as_deref(),
+        Some(format!("Dig Artifact Catalog (1/{catalog_pages})").as_str())
+    );
+    assert_eq!(
+        embeds[0].footer.as_deref(),
+        Some(
+            format!(
+                "Catalog: {} artifacts • Page 1/{catalog_pages}",
+                catalog.len()
+            )
+            .as_str()
+        )
+    );
+
+    let mine = embeds[catalog_pages];
+    assert_eq!(mine.title.as_deref(), Some("Your Artifacts"));
+    assert_eq!(
+        mine.fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "Mole Claws — Owned ×2 • Equipped ×1",
+            "The Miner's Lullaby — Owned ×1",
+            "Crown of Scales and Tribute (Tougher skin, Bosses pay better) — Owned ×1",
+            "Retired Trinket — Owned ×1",
+        ]
+    );
+    assert!(
+        mine.fields[0]
+            .value
+            .starts_with("**Uncommon** • **Dirt** • **Relic**")
+    );
+    assert!(mine.fields[1].value.contains("**Curio**"));
+    assert!(
+        mine.fields[2]
+            .value
+            .starts_with("**Unique** • **Special reward** • **Relic**")
+    );
+    assert!(
+        mine.fields[3]
+            .value
+            .starts_with("**Legacy** • **Unknown layer** • **Curio**")
+    );
+    assert_eq!(
+        mine.footer.as_deref(),
+        Some("Your collection: 4 unique artifacts • Page 1/1")
+    );
+}
+
+#[tokio::test]
+async fn artifacts_command_without_finds_says_so_under_the_catalog() {
+    let (_database, provider, _discord) = fixture();
+    let go = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(go_request(), go)
+        .await
+        .expect("first dig creates a tunnel");
+
+    let responder = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(
+            command_request(31, "artifacts", Vec::new()),
+            responder.clone(),
+        )
+        .await
+        .expect("artifacts render");
+
+    let followups = responder.followups.lock().expect("artifact followups");
+    let mine = followups
+        .last()
+        .and_then(|response| response.embeds.first())
+        .expect("collection page");
+    assert_eq!(mine.title.as_deref(), Some("Your Artifacts"));
+    assert!(mine.fields.is_empty());
+    assert!(
+        mine.description
+            .as_deref()
+            .is_some_and(|text| text.ends_with("\n\nYou haven't found any artifacts yet.")),
+        "{:?}",
+        mine.description
+    );
+}
+
+const PENDING_STONE_ROUTE: &str = r#"{"layer":"Stone","start_depth":25,"end_depth":50,"offered":["shored_passage","old_supports","fossil_seam"],"selected":null}"#;
+
+fn set_route_state(database: &NamedTempFile, route_state: Option<&str>) {
+    Connection::open(database.path())
+        .expect("open route fixture")
+        .execute(
+            "UPDATE tunnels SET route_state=?1 WHERE discord_id=?2 AND guild_id=?3",
+            params![route_state, USER as i64, GUILD as i64],
+        )
+        .expect("seed route state");
+}
+
+fn selected_route(database: &NamedTempFile) -> Option<String> {
+    let raw: Option<String> = Connection::open(database.path())
+        .expect("open route state")
+        .query_row(
+            "SELECT route_state FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
+            params![USER as i64, GUILD as i64],
+            |row| row.get(0),
+        )
+        .expect("route state");
+    cama_app::dig_routes::parse_route_state(raw.as_deref()).and_then(|state| state.selected)
+}
+
+fn stone_route_choice() -> super::DigRouteChoiceView {
+    super::route_choice_from_state(Some(PENDING_STONE_ROUTE)).expect("pending Stone route")
+}
+
+#[tokio::test]
+async fn pending_route_dig_reopens_the_junction_and_one_click_locks_the_route() {
+    let (database, provider, _discord) = fixture();
+    let go = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(go_request(), go)
+        .await
+        .expect("first dig creates a tunnel");
+    set_route_state(&database, Some(PENDING_STONE_ROUTE));
+
+    // A dig with an unchosen route reopens the junction instead of digging.
+    let reopen = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(go_request(), reopen.clone())
+        .await
+        .expect("pending route reopens the junction");
+    let junction = reopen
+        .followups
+        .lock()
+        .expect("junction followups")
+        .iter()
+        .find(|response| {
+            response
+                .embeds
+                .first()
+                .is_some_and(|embed| embed.title.as_deref() == Some("Stone Junction"))
+        })
+        .cloned()
+        .expect("junction view");
+    let old_supports = junction.components[0]
+        .buttons
+        .iter()
+        .find(|button| button.custom_id.ends_with(":old_supports"))
+        .expect("Old Supports button")
+        .custom_id
+        .clone();
+
+    let click = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(
+            component_request(old_supports.clone(), Vec::new()),
+            click.clone(),
+        )
+        .await
+        .expect("route click");
+    let locked = click.original_edits.lock().expect("route edits").clone();
+    assert_eq!(locked.len(), 1);
+    assert_eq!(
+        locked[0].embeds[0].title.as_deref(),
+        Some("Route Locked: Old Supports")
+    );
+    assert!(
+        locked[0].components.is_empty(),
+        "the route buttons are removed"
+    );
+    assert_eq!(selected_route(&database).as_deref(), Some("old_supports"));
+
+    // A second click on the same view is acknowledged but settles nothing.
+    let again = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(component_request(old_supports, Vec::new()), again.clone())
+        .await
+        .expect("duplicate route click");
+    assert_eq!(again.defers.lock().unwrap().as_slice(), &[false]);
+    assert!(again.original_edits.lock().unwrap().is_empty());
+    assert!(again.followups.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn failed_route_choice_releases_the_view_for_another_try() {
+    let (database, provider, _discord) = fixture();
+    let go = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(go_request(), go)
+        .await
+        .expect("first dig creates a tunnel");
+    // The view offers a route, but the tunnel no longer has a pending choice.
+    set_route_state(&database, None);
+    let token = provider
+        .handler
+        .create_route_view(
+            USER as i64,
+            GUILD as i64,
+            stone_route_choice(),
+            super::unix_now(),
+        )
+        .expect("route view");
+    let custom_id = super::route_component_id(
+        &provider.handler.state.view_nonce,
+        USER as i64,
+        GUILD as i64,
+        &token,
+        "old_supports",
+    );
+
+    for attempt in 0..2 {
+        let click = Arc::new(TestResponder::default());
+        provider
+            .handler
+            .handle(
+                component_request(custom_id.clone(), Vec::new()),
+                click.clone(),
+            )
+            .await
+            .expect("failed route click");
+        let followups = click.followups.lock().unwrap();
+        assert_eq!(followups.len(), 1, "attempt {attempt}");
+        assert!(followups[0].ephemeral);
+        assert!(
+            !followups[0].content.contains("expired"),
+            "attempt {attempt}: {}",
+            followups[0].content
+        );
+        assert!(click.original_edits.lock().unwrap().is_empty());
+    }
+    assert_eq!(selected_route(&database), None);
+}
+
+#[tokio::test]
+async fn timed_out_route_view_never_selects_a_route() {
+    let (database, provider, _discord) = fixture();
+    let go = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(go_request(), go)
+        .await
+        .expect("first dig creates a tunnel");
+    set_route_state(&database, Some(PENDING_STONE_ROUTE));
+    let token = provider
+        .handler
+        .create_route_view(
+            USER as i64,
+            GUILD as i64,
+            stone_route_choice(),
+            super::unix_now() - super::ROUTE_VIEW_TIMEOUT_SECONDS,
+        )
+        .expect("route view");
+    let custom_id = super::route_component_id(
+        &provider.handler.state.view_nonce,
+        USER as i64,
+        GUILD as i64,
+        &token,
+        "fossil_seam",
+    );
+
+    let click = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .handle(component_request(custom_id, Vec::new()), click.clone())
+        .await
+        .expect("expired route click");
+    let responses = click.responses.lock().unwrap();
+    assert!(
+        responses
+            .last()
+            .is_some_and(|response| response.content.contains("This route view expired")),
+        "{responses:?}"
+    );
+    assert_eq!(selected_route(&database), None);
+}
+
+fn bonus_selecting_action_id(from: i64) -> i64 {
+    (from..from + 10_000)
+        .find(|action_id| {
+            cama_app::dig_bonus_events::pick_dig_bonus(super::deterministic_dig_bonus_roll(
+                *action_id,
+            ))
+            .is_some()
+        })
+        .expect("stable test action should select a bonus")
+}
+
+#[tokio::test]
+async fn dig_bonus_never_rolls_for_a_blocked_or_first_dig() {
+    let (_database, provider, _discord) = fixture();
+    let dispatcher = Arc::new(RecordingBonusDispatcher::default());
+    provider.set_bonus_dispatcher(dispatcher.clone());
+    for (success, first_dig) in [(false, false), (true, true)] {
+        let mut outcome = hook_outcome();
+        outcome.action_id = Some(bonus_selecting_action_id(1));
+        outcome.success = success;
+        outcome.first_dig = first_dig;
+        provider
+            .handler
+            .maybe_send_dig_bonus(
+                &outcome,
+                USER as i64,
+                GUILD as i64,
+                CHANNEL as i64,
+                Arc::new(TestResponder::default()),
+            )
+            .await;
+    }
+    assert!(dispatcher.bonuses.lock().expect("bonus calls").is_empty());
+}
+
+#[tokio::test]
+async fn failed_bonus_dispatch_says_the_reward_may_already_be_recorded() {
+    let (_database, provider, _discord) = fixture();
+    provider.set_bonus_dispatcher(Arc::new(FailingBonusDispatcher::default()));
+    let mut outcome = hook_outcome();
+    outcome.action_id = Some(bonus_selecting_action_id(1));
+    let responder = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .maybe_send_dig_bonus(
+            &outcome,
+            USER as i64,
+            GUILD as i64,
+            CHANNEL as i64,
+            responder.clone(),
+        )
+        .await;
+
+    let followups = responder.followups.lock().expect("bonus failure report");
+    assert_eq!(followups.len(), 1);
+    assert!(followups[0].ephemeral);
+    assert_eq!(
+        followups[0].content,
+        cama_app::dig_bonus_events::PARTIAL_BONUS_FAILURE
+    );
+    assert!(followups[0].content.contains("may already be recorded"));
+}
+
+/// Records how much of the dig result had been delivered when its bonus ran.
+struct OrderingBonusDispatcher {
+    responder: Arc<TestResponder>,
+    discord: Arc<TestDiscord>,
+    delivered_before_bonus: StdMutex<Vec<(i64, usize)>>,
+}
+
+#[async_trait]
+impl DigBonusDispatchPort for OrderingBonusDispatcher {
+    async fn dispatch_bonus(
+        &self,
+        action_id: i64,
+        _user_id: i64,
+        _guild_id: i64,
+        _channel_id: i64,
+        _bonus: cama_app::dig_bonus_events::DigBonus,
+        _responder: Arc<dyn InteractionResponder>,
+    ) -> Result<(), String> {
+        let delivered = self.responder.followups.lock().expect("followups").len()
+            + self.discord.public.lock().expect("public posts").len();
+        self.delivered_before_bonus
+            .lock()
+            .expect("bonus order")
+            .push((action_id, delivered));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn dig_bonus_runs_only_after_the_dig_result_is_delivered() {
+    let (database, provider, discord) = fixture();
+    provider
+        .handler
+        .handle(go_request(), Arc::new(TestResponder::default()))
+        .await
+        .expect("first dig creates a tunnel");
+    let action_id = bonus_selecting_action_id(100);
+    let connection = Connection::open(database.path()).expect("bonus fixture");
+    connection
+        .execute(
+            "UPDATE sqlite_sequence SET seq=?1 WHERE name='dig_actions'",
+            params![action_id - 1],
+        )
+        .expect("align the next dig action id");
+    connection
+        .execute(
+            "UPDATE tunnels SET last_dig_at=?1 WHERE discord_id=?2 AND guild_id=?3",
+            params![super::unix_now() - 86_400, USER as i64, GUILD as i64],
+        )
+        .expect("clear the dig cooldown");
+    drop(connection);
+    discord.public.lock().expect("public posts").clear();
+    let responder = Arc::new(TestResponder::default());
+    let dispatcher = Arc::new(OrderingBonusDispatcher {
+        responder: responder.clone(),
+        discord: discord.clone(),
+        delivered_before_bonus: StdMutex::new(Vec::new()),
+    });
+    provider.set_bonus_dispatcher(dispatcher.clone());
+
+    provider
+        .handler
+        .handle(go_request(), responder.clone())
+        .await
+        .expect("second dig");
+
+    let order = dispatcher
+        .delivered_before_bonus
+        .lock()
+        .expect("bonus order");
+    assert_eq!(order.len(), 1, "{order:?}");
+    assert_eq!(order[0].0, action_id);
+    assert!(
+        order[0].1 > 0,
+        "the dig result is delivered before its bonus"
+    );
 }

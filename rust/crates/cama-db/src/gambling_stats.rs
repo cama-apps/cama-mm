@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value};
+use rusqlite::{OptionalExtension, params, params_from_iter, types::Value};
 use thiserror::Error;
 
 use crate::open_runtime_connection;
@@ -378,7 +378,7 @@ impl GamblingStatsRepository {
         }
     }
 
-    fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    fn connection(&self) -> Result<crate::RuntimeConnection, rusqlite::Error> {
         open_runtime_connection(&self.path)
     }
 
@@ -1323,15 +1323,6 @@ pub fn leverage_distribution_from_history(history: &[BetHistoryEntry]) -> BTreeM
     let mut result = BTreeMap::new();
     for bet in history {
         *result.entry(bet.leverage).or_default() += 1;
-    }
-    result
-}
-
-#[must_use]
-pub fn leverage_distribution_from_nullable(values: &[Option<i64>]) -> BTreeMap<i64, i64> {
-    let mut result = BTreeMap::new();
-    for value in values {
-        *result.entry(value.unwrap_or(1)).or_default() += 1;
     }
     result
 }

@@ -60,6 +60,7 @@ impl Fixture {
                      guild_id INTEGER NOT NULL DEFAULT 0,
                      discord_username TEXT NOT NULL,
                      jopacoin_balance INTEGER DEFAULT 3,
+                     lowest_balance_ever INTEGER,
                      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                      PRIMARY KEY (discord_id, guild_id)
                  );
@@ -195,7 +196,7 @@ impl Fixture {
         }
     }
 
-    fn connection(&self) -> Connection {
+    fn connection(&self) -> crate::RuntimeConnection {
         self.repository.connection().expect("runtime connection")
     }
 
@@ -923,6 +924,136 @@ fn test_transfer_moves_exact_amount() {
     assert_eq!(total, 20);
     assert_eq!(fixture.balance(88_003), 30);
     assert_eq!(fixture.fund(), 20);
+}
+
+#[test]
+fn test_transfer_rejects_non_positive_amounts_without_moving_balance() {
+    let fixture = Fixture::new();
+    fixture.add_player(88_004, 50);
+    for amount in [0, -5] {
+        assert!(matches!(
+            fixture.repository.transfer_balance_to_nonprofit_atomic(
+                88_004,
+                Some(TEST_GUILD_ID),
+                amount,
+                &transfer_context()
+            ),
+            Err(LoanRepositoryError::InvalidFundAmount)
+        ));
+        assert!(matches!(
+            fixture
+                .repository
+                .transfer_balance_to_nonprofit_once_atomic(
+                    88_004,
+                    Some(TEST_GUILD_ID),
+                    amount,
+                    &LedgerContext {
+                        related_type: Some("wheel_spin".to_owned()),
+                        related_id: Some("spin".to_owned()),
+                        ..transfer_context()
+                    }
+                ),
+            Err(LoanRepositoryError::InvalidFundAmount)
+        ));
+    }
+    assert_eq!(fixture.balance(88_004), 50);
+    assert_eq!(fixture.fund(), 0);
+    assert_eq!(fixture.ledger_count(), 0);
+}
+
+#[test]
+fn test_transfer_once_debits_a_retried_identity_only_once() {
+    let fixture = Fixture::new();
+    fixture.add_player(88_005, 50);
+    let context = LedgerContext {
+        source: Some("gamba".to_owned()),
+        related_type: Some("wheel_spin".to_owned()),
+        related_id: Some("1:88005:abc".to_owned()),
+        reason: Some("gamba chain reaction loss reserve credit".to_owned()),
+        ..LedgerContext::default()
+    };
+    let first = fixture
+        .repository
+        .transfer_balance_to_nonprofit_once_atomic(88_005, Some(TEST_GUILD_ID), 20, &context)
+        .unwrap();
+    let retry = fixture
+        .repository
+        .transfer_balance_to_nonprofit_once_atomic(88_005, Some(TEST_GUILD_ID), 35, &context)
+        .unwrap();
+    assert_eq!(
+        first,
+        NonprofitCreditReceipt {
+            amount: 20,
+            total: 20,
+            applied: true,
+        }
+    );
+    assert_eq!(
+        retry,
+        NonprofitCreditReceipt {
+            amount: 20,
+            total: 20,
+            applied: false,
+        }
+    );
+    assert_eq!(fixture.balance(88_005), 30);
+    assert_eq!(fixture.fund(), 20);
+    assert!(matches!(
+        fixture
+            .repository
+            .transfer_balance_to_nonprofit_once_atomic(
+                88_005,
+                Some(TEST_GUILD_ID),
+                5,
+                &transfer_context()
+            ),
+        Err(LoanRepositoryError::MissingIdempotencyContext)
+    ));
+}
+
+#[test]
+fn test_gamba_channel_penalty_moves_one_coin_into_the_reserve_with_ledger_context() {
+    let fixture = Fixture::new();
+    fixture.add_player(88_006, 0);
+    assert!(
+        fixture
+            .repository
+            .charge_gamba_channel_penalty_atomic(88_006, Some(TEST_GUILD_ID))
+            .unwrap()
+    );
+    assert_eq!(fixture.balance(88_006), -1);
+    assert_eq!(fixture.fund(), 1);
+    let connection = fixture.connection();
+    let (sources, lowest): (String, Option<i64>) = (
+        connection
+            .query_row(
+                "SELECT group_concat(account_type||':'||source||':'||related_type||':'||delta, ',')
+                 FROM (SELECT * FROM economy_ledger_entries ORDER BY ledger_id)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        connection
+            .query_row(
+                "SELECT lowest_balance_ever FROM players WHERE discord_id=88006",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap(),
+    );
+    assert_eq!(
+        sources,
+        "player:gamba:wrong_channel_penalty:-1,nonprofit:gamba:wrong_channel_penalty:1"
+    );
+    assert_eq!(lowest, Some(-1));
+    // An unregistered user is silently ignored.
+    assert!(
+        !fixture
+            .repository
+            .charge_gamba_channel_penalty_atomic(99_999, Some(TEST_GUILD_ID))
+            .unwrap()
+    );
+    assert_eq!(fixture.fund(), 1);
 }
 
 #[test]

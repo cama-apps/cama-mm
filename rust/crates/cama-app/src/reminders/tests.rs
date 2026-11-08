@@ -35,10 +35,6 @@ impl FixedClock {
             nanoseconds: Arc::new(AtomicI64::new(seconds.saturating_mul(1_000_000_000))),
         }
     }
-
-    fn set_nanoseconds(&self, nanoseconds: i64) {
-        self.nanoseconds.store(nanoseconds, Ordering::SeqCst);
-    }
 }
 
 impl ReminderClock for FixedClock {
@@ -55,6 +51,11 @@ type TestService = ReminderService<InMemoryReminderStore, FixedClock>;
 
 fn fixture() -> TestService {
     ReminderService::new(InMemoryReminderStore::default(), FixedClock::new(NOW))
+}
+
+/// A cancelled or replaced task generation is no longer armed anywhere.
+fn is_pending(service: &TestService, task_id: TaskId) -> bool {
+    service.tasks().values().any(|task| task.id == task_id)
 }
 
 fn set_store_preference(
@@ -356,27 +357,6 @@ fn test_has_lobby_target_subscription_reflects_add_and_claim() {
 }
 
 #[test]
-fn test_service_pass_through_reads_target_subscription() {
-    let service = fixture();
-    service.clock().set_nanoseconds(100);
-    assert!(
-        !service
-            .has_lobby_player_subscription(user(1), user(10), Some(guild(TEST_GUILD_ID)))
-            .unwrap()
-    );
-    assert!(
-        service
-            .add_lobby_player_subscription(user(1), user(10), Some(guild(TEST_GUILD_ID)))
-            .unwrap()
-    );
-    assert!(
-        service
-            .has_lobby_player_subscription(user(1), user(10), Some(guild(TEST_GUILD_ID)))
-            .unwrap()
-    );
-}
-
-#[test]
 fn test_join_cutoff_leaves_subscriptions_created_after_the_join() {
     let store = InMemoryReminderStore::default();
     let guild_id = guild(TEST_GUILD_ID);
@@ -485,7 +465,7 @@ fn test_rescheduling_cancels_old_task() {
         .unwrap()
         .unwrap();
     assert_ne!(first, second);
-    assert!(service.was_cancelled(first));
+    assert!(!is_pending(&service, first));
     assert_eq!(
         service
             .task(task_key(1, TEST_GUILD_ID, ReminderKind::Trivia))
@@ -510,7 +490,7 @@ fn test_disabling_cancels_task() {
             .toggle_preference(user(1), Some(guild(TEST_GUILD_ID)), ReminderKind::Wheel)
             .unwrap()
     );
-    assert!(service.was_cancelled(task_id));
+    assert!(!is_pending(&service, task_id));
     assert!(
         service
             .task(task_key(1, TEST_GUILD_ID, ReminderKind::Wheel))
@@ -699,7 +679,7 @@ fn assert_reconcile_cancels_stale_task(ready_at: Option<i64>) {
         .reconcile_dig_reminder(user(1), Some(guild(TEST_GUILD_ID)), Some(NOW), None)
         .unwrap();
     assert_eq!(outcome, DigReconcileOutcome::Cancelled(Some(stale_task)));
-    assert!(service.was_cancelled(stale_task));
+    assert!(!is_pending(&service, stale_task));
     assert!(
         service
             .task(task_key(1, TEST_GUILD_ID, ReminderKind::Dig))
@@ -749,7 +729,7 @@ fn test_repeated_reconcile_replaces_with_one_task() {
         outcome => panic!("expected schedule, got {outcome:?}"),
     };
     assert_ne!(first, second);
-    assert!(service.was_cancelled(first));
+    assert!(!is_pending(&service, first));
     assert_eq!(service.tasks().len(), 1);
     assert_eq!(
         service
@@ -813,7 +793,6 @@ fn test_stale_r0_reconcile_cannot_overwrite_live_r1() {
     let live_read = service
         .read_authoritative_dig_ready_at(live_ticket)
         .unwrap();
-    assert_eq!(service.dig_reconcile_version(live_ticket.key()), Some(2));
     assert_eq!(
         service
             .finish_dig_reconcile(stale_ticket, stale_read, Some(true))
@@ -1231,5 +1210,53 @@ fn test_recovering_elapsed_pet_warning_cancels_stale_generation() {
         service
             .task(task_key(8, TEST_GUILD_ID, ReminderKind::Pet))
             .is_none()
+    );
+}
+
+#[test]
+fn pet_reminder_is_scheduled_only_when_enabled_and_still_ahead() {
+    let mut service = fixture();
+    let key = task_key(111, TEST_GUILD_ID, ReminderKind::Pet);
+
+    let disabled = service
+        .schedule_pet_reminder(
+            user(111),
+            Some(guild(TEST_GUILD_ID)),
+            NOW + 1_000,
+            "Blep",
+            Some(false),
+        )
+        .unwrap();
+    assert!(disabled.is_none());
+    assert!(service.task(key).is_none());
+
+    let past = service
+        .schedule_pet_reminder(
+            user(111),
+            Some(guild(TEST_GUILD_ID)),
+            NOW - 1,
+            "Blep",
+            Some(true),
+        )
+        .unwrap();
+    assert!(past.is_none());
+    assert!(service.task(key).is_none());
+
+    let armed = service
+        .schedule_pet_reminder(
+            user(111),
+            Some(guild(TEST_GUILD_ID)),
+            NOW + 1_000,
+            "Blep",
+            Some(true),
+        )
+        .unwrap()
+        .expect("armed pet reminder");
+    assert!(is_pending(&service, armed));
+    let task = service.task(key).expect("pet task");
+    assert!(
+        task.message.contains("**Blep** is getting hungry!"),
+        "{}",
+        task.message
     );
 }

@@ -14,7 +14,7 @@ use cama_domain::embed_safety::EmbedModel;
 use chrono::{Duration, Utc};
 use thiserror::Error;
 
-use crate::dig_loot::{EventComplexity, LootEntropy};
+use crate::dig_loot::LootEntropy;
 use crate::trivia_questions::TriviaQuestion;
 
 pub const PACKAGE_ACTIVITY_DAYS: i64 = 14;
@@ -237,32 +237,6 @@ pub struct MessageUpdate {
     pub clear_view: bool,
     pub clear_attachments: bool,
     pub ephemeral: bool,
-}
-
-#[derive(Clone, Debug, Error, Eq, PartialEq)]
-pub enum MessageEditError {
-    #[error("message no longer exists")]
-    NotFound,
-    #[error("Discord rejected the message edit")]
-    Http,
-    #[error("message edit failed: {0}")]
-    Other(String),
-}
-
-pub trait MessageEditor {
-    fn edit(&mut self, update: &MessageUpdate) -> Result<(), MessageEditError>;
-}
-
-/// Discord `NotFound`/`HTTPException` are presentation failures after state may
-/// already be committed, so callers deliberately suppress only those classes.
-pub fn edit_message_best_effort(
-    editor: &mut impl MessageEditor,
-    update: &MessageUpdate,
-) -> Result<(), MessageEditError> {
-    match editor.edit(update) {
-        Ok(()) | Err(MessageEditError::NotFound | MessageEditError::Http) => Ok(()),
-        Err(error @ MessageEditError::Other(_)) => Err(error),
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -569,89 +543,6 @@ pub fn prepare_trivia_bonus(
     let embed = trivia_question_embed(&question, correct_jc);
     let session = DigTriviaSession::new(user_id, guild_id, question, correct_jc);
     (embed, session)
-}
-
-pub trait WheelBonusPort {
-    fn trigger_bonus_spin(&mut self) -> Result<(), DigBonusPortError>;
-}
-
-pub fn send_wheel_bonus(port: &mut impl WheelBonusPort) -> Result<(), DigBonusPortError> {
-    port.trigger_bonus_spin()
-}
-
-pub trait BonusDispatchPort {
-    fn send_bonus(&mut self, bonus: DigBonus) -> Result<(), DigBonusPortError>;
-    fn report_partial_failure(&mut self, content: &str) -> Result<(), DigBonusPortError>;
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum BonusDispatchOutcome {
-    NotConsumed,
-    NoBonus,
-    Sent(DigBonus),
-    FailedButDigPreserved(DigBonus),
-}
-
-/// Bonus failures are isolated after the Dig transaction has already
-/// succeeded. Even failure reporting is best-effort and cannot mask the dig.
-pub fn maybe_send_dig_bonus(
-    dig_consumed: bool,
-    roll: f64,
-    port: &mut impl BonusDispatchPort,
-) -> BonusDispatchOutcome {
-    if !dig_consumed {
-        return BonusDispatchOutcome::NotConsumed;
-    }
-    let Some(bonus) = pick_dig_bonus(roll) else {
-        return BonusDispatchOutcome::NoBonus;
-    };
-    match port.send_bonus(bonus) {
-        Ok(()) => BonusDispatchOutcome::Sent(bonus),
-        Err(_) => {
-            let _ = port.report_partial_failure(PARTIAL_BONUS_FAILURE);
-            BonusDispatchOutcome::FailedButDigPreserved(bonus)
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct DigDispatchResult {
-    pub boss_encounter: bool,
-    pub event_complexity: Option<EventComplexity>,
-    pub dig_consumed: bool,
-}
-
-pub trait DigResultDispatchPort {
-    type Error;
-
-    fn send_normal(&mut self) -> Result<(), Self::Error>;
-    fn send_boss(&mut self) -> Result<(), Self::Error>;
-    fn send_boon(&mut self) -> Result<(), Self::Error>;
-    fn send_choice(&mut self) -> Result<(), Self::Error>;
-    fn send_bonus_after_ui(&mut self, dig_consumed: bool) -> Result<(), Self::Error>;
-}
-
-pub fn dispatch_dig_result<P: DigResultDispatchPort>(
-    result: DigDispatchResult,
-    port: &mut P,
-) -> Result<(), P::Error> {
-    if result.boss_encounter {
-        port.send_boss()?;
-    } else {
-        match result.event_complexity {
-            Some(EventComplexity::Boon) => port.send_boon()?,
-            Some(EventComplexity::Choice | EventComplexity::Complex) => port.send_choice()?,
-            Some(EventComplexity::Simple) | None => port.send_normal()?,
-        }
-    }
-    port.send_bonus_after_ui(result.dig_consumed)
-}
-
-pub fn dispatch_paid_dig_bonus<P: DigResultDispatchPort>(
-    paid_result_consumed: bool,
-    port: &mut P,
-) -> Result<(), P::Error> {
-    port.send_bonus_after_ui(paid_result_consumed)
 }
 
 #[cfg(test)]

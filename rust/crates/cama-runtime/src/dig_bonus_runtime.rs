@@ -490,11 +490,6 @@ impl DigBonusRuntime {
         self
     }
 
-    #[must_use]
-    pub fn component_prefix(&self) -> &'static str {
-        DIG_BONUS_COMPONENT_PREFIX
-    }
-
     /// Return the number of currently live process-local views.
     #[must_use]
     pub fn active_session_count(&self) -> usize {
@@ -1260,6 +1255,7 @@ mod tests {
         edits: Mutex<Vec<(InteractionMessageReceipt, InteractionResponse)>>,
         next_message_id: AtomicI64,
         send_failure: Mutex<Option<DigBonusSendFailure>>,
+        edit_failure: Mutex<Option<String>>,
     }
 
     #[async_trait]
@@ -1293,7 +1289,10 @@ mod tests {
                 .lock()
                 .expect("edit lock")
                 .push((receipt, response));
-            Ok(())
+            match self.edit_failure.lock().expect("edit failure lock").take() {
+                Some(error) => Err(error),
+                None => Ok(()),
+            }
         }
     }
 
@@ -1768,6 +1767,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn trivia_timeout_keeps_the_settlement_when_the_message_edit_fails() {
+        let database = fixture();
+        seed_player(&database, USER, GUILD, false);
+        let discord = Arc::new(FakeDiscord {
+            edit_failure: Mutex::new(Some("Unknown Message".to_owned())),
+            ..FakeDiscord::default()
+        });
+        let runtime = runtime(&database, Arc::clone(&discord));
+        let key = trivia_session_key(14);
+        runtime.state.sessions.lock().expect("session lock").insert(
+            key.clone(),
+            LiveBonusSession::Trivia {
+                owner_id: USER,
+                guild_id: GUILD,
+                receipt: InteractionMessageReceipt {
+                    message_id: 45,
+                    channel_id: CHANNEL as u64,
+                    delivery: InteractionMessageDelivery::InteractionFollowup,
+                },
+                view: DigTriviaSession::new(USER, GUILD, trivia_question(), 20),
+                expires_at: Instant::now() - Duration::from_secs(1),
+            },
+        );
+
+        let result = runtime.expire_session_key(&key, Instant::now()).await;
+
+        assert_eq!(result, Err("Unknown Message".to_owned()));
+        assert_eq!(runtime.active_session_count(), 0);
+        let balance = Connection::open(database.path())
+            .expect("open fixture")
+            .query_row(
+                "SELECT jopacoin_balance FROM players WHERE discord_id=?1 AND guild_id=?2",
+                rusqlite::params![USER, GUILD],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("read balance");
+        assert_eq!(
+            balance, 95,
+            "the timeout penalty is durable before the edit"
+        );
+        assert_eq!(discord.edits.lock().expect("edit lock").len(), 1);
+    }
+
+    #[tokio::test]
     async fn process_restart_drops_old_process_local_package_view() {
         let database = fixture();
         let discord = Arc::new(FakeDiscord::default());
@@ -1933,5 +1976,27 @@ mod tests {
             .await
             .expect("ambiguous wheel remains terminal");
         assert_eq!(wheel.calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn wheel_bonus_triggers_one_bonus_spin() {
+        let database = fixture();
+        let wheel = Arc::new(FakeWheel::default());
+        let discord = Arc::new(FakeDiscord::default());
+        let runtime = DigBonusRuntime::with_ports(
+            database.path(),
+            DigBonusRuntimeConfig::default(),
+            Arc::new(TriviaCatalog::default()),
+            wheel.clone(),
+            Arc::new(FakeRewardSource(15)),
+            discord.clone(),
+        );
+        let responder: Arc<dyn InteractionResponder> = Arc::new(FakeResponder::default());
+        runtime
+            .dispatch_bonus(15, USER, GUILD, CHANNEL, DigBonus::Wheel, responder)
+            .await
+            .expect("wheel bonus dispatches");
+        assert_eq!(wheel.calls.load(Ordering::Relaxed), 1);
+        assert!(discord.sent.lock().expect("sent lock").is_empty());
     }
 }

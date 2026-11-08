@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use cama_domain::openskill::CamaOpenSkillSystem;
+use cama_domain::openskill::{CamaOpenSkillSystem, OPENSKILL_ALGORITHM_VERSION};
 use cama_domain::player::{OPENSKILL_DISPLAY_SCALE, OPENSKILL_MIN_MU};
 use cama_domain::rating::{MAX_GLICKO_RD, cap_glicko_rd};
 use chrono::Utc;
@@ -25,8 +25,6 @@ pub use account_lookup::{AdminAccountLookup, recovery_discord_id};
 #[path = "admin/account_transfer.rs"]
 mod account_transfer;
 pub use account_transfer::TransferError;
-
-const OPENSKILL_ALGORITHM_VERSION: i64 = 5;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AdminPlayerSnapshot {
@@ -69,6 +67,8 @@ pub struct SetBothDisplayRatingsRequest<'a> {
     pub volatility: f64,
     pub reason: &'a str,
     pub actor_id: i64,
+    /// Fingerprint of the deployment's configured OpenSkill system.
+    pub openskill_algorithm_fingerprint: &'a str,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,7 +153,7 @@ impl AdminRepository {
         let mut connection = open_runtime_connection(&self.path)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let os_mu = OPENSKILL_MIN_MU + request.display_rating.max(0.0) / OPENSKILL_DISPLAY_SCALE;
-        let fingerprint = CamaOpenSkillSystem::default().algorithm_fingerprint();
+        let fingerprint = request.openskill_algorithm_fingerprint;
         let changed = transaction.execute(
             "UPDATE players
                 SET glicko_rating=?1,glicko_rd=?2,glicko_volatility=?3,
@@ -232,6 +232,7 @@ impl AdminRepository {
         guild_id: i64,
         rd_amount: f64,
         actor_id: i64,
+        openskill_algorithm_fingerprint: &str,
     ) -> Result<Option<UncertaintyBumpSummary>, AdminRepositoryError> {
         let mut connection = open_runtime_connection(&self.path)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -256,7 +257,7 @@ impl AdminRepository {
             return Ok(None);
         }
         let sigma_amount = rd_amount / OPENSKILL_DISPLAY_SCALE;
-        let fingerprint = CamaOpenSkillSystem::default().algorithm_fingerprint();
+        let fingerprint = openskill_algorithm_fingerprint;
         let event_at = Utc::now().to_rfc3339();
         let mut rd_before = 0.0;
         let mut rd_after = 0.0;

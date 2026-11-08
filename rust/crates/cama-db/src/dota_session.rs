@@ -477,17 +477,6 @@ impl DotaSessionRepository {
         Ok(updated)
     }
 
-    /// Alias with a descriptive name for callers that prefer explicit CAS
-    /// terminology.
-    pub fn update_session(
-        &self,
-        record: &DotaSessionRecord,
-        expected_revision: i64,
-        now: i64,
-    ) -> Result<DotaSessionRecord, DotaSessionRepositoryError> {
-        self.update(record, expected_revision, now)
-    }
-
     /// Change only the phase through the same optimistic update boundary.
     pub fn transition_phase(
         &self,

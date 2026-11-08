@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 
 use crate::test_support::copy_migrated_database as initialize_or_migrate;
 use cama_db::pet_repository::PetRepository;
-use cama_domain::game_date::get_game_date;
 use cama_domain::pet::WARNING_HUNGER;
 use rusqlite::Connection;
 use tempfile::NamedTempFile;
@@ -17,6 +16,92 @@ fn migrated_database() -> NamedTempFile {
     let file = NamedTempFile::new().expect("temporary database");
     initialize_or_migrate(file.path()).expect("migrate database");
     file
+}
+
+#[test]
+fn dig_reminder_reads_mana_on_the_day_the_mana_service_assigned_it() {
+    const WITH_MANA: i64 = 711;
+    const WITHOUT_MANA: i64 = 712;
+    let file = migrated_database();
+    let store = SqliteReminderStore::new(file.path(), 20);
+    let reduction =
+        ManaEffects::for_color(Some("Green"), Some("Forest")).dig_cooldown_reduction_seconds;
+    assert!(reduction > 0);
+    // 04:30 PDT (summer) and 04:30 PST (winter).
+    for instant in ["2026-07-18T11:30:00Z", "2026-01-15T12:30:00Z"] {
+        let now = chrono::DateTime::parse_from_rfc3339(instant)
+            .expect("valid instant")
+            .timestamp();
+        let connection = Connection::open(file.path()).expect("open migrated database");
+        connection
+            .pragma_update(None, "foreign_keys", false)
+            .expect("match runtime SQLite compatibility mode");
+        for user in [WITH_MANA, WITHOUT_MANA] {
+            connection
+                .execute(
+                    "INSERT INTO tunnels (discord_id,guild_id,last_dig_at) VALUES (?1,?2,?3)
+                     ON CONFLICT(discord_id,guild_id) DO UPDATE SET last_dig_at=excluded.last_dig_at",
+                    (user, GUILD, now),
+                )
+                .expect("seed dig anchor");
+        }
+        connection
+            .execute(
+                "INSERT INTO player_mana
+                    (discord_id,guild_id,current_land,assigned_date,consumed_today)
+                 VALUES (?1,?2,'Forest',?3,0)
+                 ON CONFLICT(discord_id,guild_id) DO UPDATE SET
+                    assigned_date=excluded.assigned_date",
+                (WITH_MANA, GUILD, mana_day_label_at(now).expect("mana day")),
+            )
+            .expect("seed mana");
+        drop(connection);
+        let ready = |user: i64| {
+            store
+                .get_free_dig_ready_at(UserId::new(user), GuildId::new(GUILD), now)
+                .expect("dig ready time")
+                .expect("cooling down")
+        };
+        assert_eq!(
+            ready(WITHOUT_MANA) - ready(WITH_MANA),
+            reduction,
+            "{instant}"
+        );
+    }
+}
+
+#[test]
+fn pet_warning_waits_for_a_hatched_species() {
+    let file = migrated_database();
+    let connection = Connection::open(file.path()).expect("open migrated database");
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .expect("match runtime SQLite compatibility mode");
+    connection
+        .execute(
+            "INSERT INTO pets
+                (discord_id,guild_id,name,species,adopted_at,hatched_at,adopt_fee,
+                 last_fed_at,hunger_at_last_fed,dig_work_at)
+             VALUES (?1,?2,'Later',?3,?4,?4,0,?4,100,?4)",
+            (USER, GUILD, cama_domain::pet::UNHATCHED_SPECIES, NOW - 60),
+        )
+        .expect("seed egg");
+    let store = SqliteReminderStore::new(file.path(), 20);
+    let warning = |store: &SqliteReminderStore| {
+        store
+            .get_pet_warning(UserId::new(USER), GuildId::new(GUILD), NOW)
+            .expect("pet warning")
+    };
+    assert!(warning(&store).is_none(), "an unhatched egg has no warning");
+
+    connection
+        .execute(
+            "UPDATE pets SET species='common_cama' WHERE discord_id=?1 AND guild_id=?2",
+            (USER, GUILD),
+        )
+        .expect("resolve species");
+    let resolved = warning(&store).expect("hatched pet warning");
+    assert_eq!(resolved.pet_name, "Later");
 }
 
 #[test]
@@ -55,7 +140,7 @@ fn migrated_sqlite_adapter_persists_preferences_and_reads_every_recovery_anchor(
             "INSERT INTO player_mana
                 (discord_id,guild_id,current_land,assigned_date,consumed_today)
              VALUES (?1,?2,'Forest',?3,0)",
-            (USER, GUILD, get_game_date()),
+            (USER, GUILD, mana_day_label_at(NOW).expect("mana day")),
         )
         .expect("seed mana");
     connection

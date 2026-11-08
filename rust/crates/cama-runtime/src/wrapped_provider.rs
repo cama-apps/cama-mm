@@ -37,6 +37,7 @@ use cama_db::wrapped_live::{
     WrappedRatingPoint, WrappedServerSummary, WrappedYearMatch,
 };
 use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
+use cama_domain::hero_catalog::hero_name;
 use chrono::{Datelike, Utc};
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 use tracing::warn;
@@ -479,7 +480,7 @@ impl WrappedHandler {
             return Ok(());
         }
         let (target_id, _target_name) = user_option(&options, "user")?
-            .map(|user| (user.raw_id, user.display_name_or_id()))
+            .map(|user| (user.raw_id, user.readable_display_name()))
             .unwrap_or((user_id, user_display_name));
         let (signed_guild, signed_target) =
             (signed_id(guild_id, "guild")?, signed_id(target_id, "user")?);
@@ -2691,22 +2692,6 @@ fn betting_roi(row: &WrappedBettingStats) -> f64 {
     }
 }
 
-fn hero_name(hero_id: i64) -> String {
-    static HERO_NAMES: std::sync::OnceLock<BTreeMap<i64, String>> = std::sync::OnceLock::new();
-    HERO_NAMES
-        .get_or_init(|| {
-            serde_json::from_str::<BTreeMap<String, String>>(include_str!(
-                "../../cama-app/data/heroes.json"
-            ))
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|(id, name)| id.parse().ok().map(|id| (id, name)))
-            .collect()
-        })
-        .get(&hero_id)
-        .cloned()
-        .unwrap_or_else(|| format!("Hero #{hero_id}"))
-}
 fn hero_name_or_na(hero_id: Option<i64>) -> String {
     hero_id.map(hero_name).unwrap_or_else(|| "N/A".to_owned())
 }

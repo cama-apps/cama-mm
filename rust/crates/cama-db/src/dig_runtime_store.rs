@@ -8,7 +8,7 @@
 //! serves both the in-transaction (`*_in`-style) and standalone paths.
 
 use cama_domain::pet::PetDigWorkClaim;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 /// A single migrated inventory row needed by the Dig application aggregate.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -114,7 +114,7 @@ pub struct DigRuntimeTunnel {
 
 impl DigRuntimeTunnel {
     #[must_use]
-    pub fn new(discord_id: i64, guild_id: i64, _now: i64) -> Self {
+    pub fn new(discord_id: i64, guild_id: i64, tunnel_name: impl Into<String>) -> Self {
         Self {
             discord_id,
             guild_id,
@@ -124,7 +124,7 @@ impl DigRuntimeTunnel {
             total_jc_earned: 0,
             last_dig_at: None,
             luminosity: 100,
-            tunnel_name: format!("Miner {discord_id}"),
+            tunnel_name: tunnel_name.into(),
             prestige_level: 0,
             prestige_perks: "[]".to_owned(),
             boss_progress: "{}".to_owned(),
@@ -286,7 +286,7 @@ pub fn clear_ledger_context(connection: &Connection) -> Result<(), rusqlite::Err
 // ---------------------------------------------------------------------------
 
 const TUNNEL_SELECT: &str = "SELECT depth,max_depth,total_digs,total_jc_earned,last_dig_at,
-        luminosity,COALESCE(tunnel_name,?3),prestige_level,
+        luminosity,COALESCE(tunnel_name,'Unnamed Tunnel'),prestige_level,
         COALESCE(prestige_perks,'[]'),COALESCE(boss_progress,'{}'),
         COALESCE(boss_attempts,'{}'),route_state,injury_state,
         hard_hat_charges,COALESCE(reinforced_until,0),void_bait_digs,
@@ -386,12 +386,40 @@ pub fn tunnel(
     guild_id: i64,
 ) -> Result<Option<DigRuntimeTunnel>, rusqlite::Error> {
     connection
-        .query_row(
-            TUNNEL_SELECT,
-            params![discord_id, guild_id, format!("Miner {discord_id}")],
-            |row| load_tunnel_row(row, discord_id, guild_id),
-        )
+        .query_row(TUNNEL_SELECT, params![discord_id, guild_id], |row| {
+            load_tunnel_row(row, discord_id, guild_id)
+        })
         .optional()
+}
+
+/// Rename every tunnel still stored under the old `Miner <owner id>`
+/// placeholder, which showed the owner's Discord ID in public titles.
+///
+/// Only an exact match on the owner's own ID is renamed, so a name a player
+/// chose is never touched. Renamed rows no longer match, which makes the
+/// repair idempotent; it returns how many tunnels were renamed.
+pub fn repair_placeholder_tunnel_names(
+    connection: &mut Connection,
+    mut next_name: impl FnMut() -> String,
+) -> Result<usize, rusqlite::Error> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let placeholders = transaction
+        .prepare(
+            "SELECT discord_id,guild_id FROM tunnels
+              WHERE tunnel_name = 'Miner ' || discord_id",
+        )?
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut renamed = 0;
+    for (discord_id, guild_id) in placeholders {
+        renamed += transaction.execute(
+            "UPDATE tunnels SET tunnel_name=?1
+              WHERE discord_id=?2 AND guild_id=?3 AND tunnel_name = 'Miner ' || discord_id",
+            params![next_name(), discord_id, guild_id],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(renamed)
 }
 
 /// Insert a brand-new tunnel aggregate row.
@@ -590,36 +618,6 @@ pub fn update_tunnel_cas(
     )
 }
 
-/// Read one tunnel's depth.
-pub fn tunnel_depth(
-    connection: &Connection,
-    discord_id: i64,
-    guild_id: i64,
-) -> Result<Option<i64>, rusqlite::Error> {
-    connection
-        .query_row(
-            "SELECT depth FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
-            params![discord_id, guild_id],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()
-}
-
-/// Depth-only CAS used by the actor-scoped balance update.
-pub fn update_tunnel_depth_cas(
-    connection: &Connection,
-    depth_after: i64,
-    discord_id: i64,
-    guild_id: i64,
-    expected_depth: i64,
-) -> Result<usize, rusqlite::Error> {
-    connection.execute(
-        "UPDATE tunnels SET depth=?1 WHERE discord_id=?2 AND guild_id=?3
-          AND depth=?4",
-        params![depth_after, discord_id, guild_id, expected_depth],
-    )
-}
-
 /// Clear the dig cooldown timestamp.
 pub fn reset_tunnel_cooldown(
     connection: &Connection,
@@ -646,9 +644,6 @@ pub fn set_tunnel_depth_reset_cooldown(
         params![depth, discord_id, guild_id],
     )
 }
-
-/// Strength, Smarts, Stamina, Survival, and the stat-point pool, in storage order.
-pub type TunnelStatAllocation = (i64, i64, i64, i64, i64);
 
 /// Depth-ordered top-ten tunnels for the runtime leaderboard rendering.
 pub fn top_tunnel_depth_rows(
@@ -807,13 +802,14 @@ pub fn update_dig_action_detail_for_actor(
 /// pending rows rather than over the player's oldest actions, which delivered
 /// rows would otherwise fill for good.
 ///
-/// The guild is required so the `(guild_id, action_type, ...)` index prefix
-/// bounds the scan; an optional guild would force a full table scan on every
-/// READY pass. Rows are ordered by `(created_at, id)`, which that index
-/// serves without sorting the guild's whole dig range first, and `after` is
-/// a keyset cursor over the same order: the `(created_at, id)` of the last
-/// row of the previous page, so a caller can walk every pending row even
-/// when earlier rows are retained rather than closed.
+/// The guild is required so the partial `idx_dig_actions_pending_delivery`
+/// index bounds the scan. That index holds only rows matching this exact
+/// pending rule, so delivered history is never visited or JSON-parsed. Rows
+/// are ordered by `(created_at, id)`, which that index serves without
+/// sorting, and `after` is a keyset cursor over the same order: the
+/// `(created_at, id)` of the last row of the previous page, so a caller can
+/// walk every pending row even when earlier rows are retained rather than
+/// closed.
 pub fn dig_action_details_for_delivery(
     connection: &Connection,
     guild_id: i64,
@@ -834,7 +830,9 @@ pub fn dig_action_details_for_delivery(
 }
 
 /// The pending-delivery scan, kept addressable so its query plan can be
-/// asserted to use the guild/type index and its order.
+/// asserted to use the partial pending-delivery index and its order. Its
+/// pending terms must stay textually identical to that index's `WHERE`
+/// clause in the canonical schema, or SQLite cannot use the index.
 pub const PENDING_DIG_DELIVERY_SQL: &str = "SELECT detail FROM dig_actions
          WHERE guild_id=?1
            AND action_type='dig'

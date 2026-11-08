@@ -24,8 +24,8 @@ use cama_domain::pet::{
     PITY_THRESHOLD, PITY_TIER_WEIGHTS, Pet, PetDigWork, PetError, PetMood, PetStage, PetStatus,
     REFUND_MULT_MAX, REFUND_MULT_MIN, RefundNotice, RefundPayout, SALT_LICK,
     SALT_LICK_DURATION_SECONDS, SPECIES, SUPPLY_STACK_CAP, SpeciesTier, TRINKET_COST,
-    TRINKET_DUPE_REFUND, TierWeights, TrinketOutcome, UNHATCHED_SPECIES, WARNING_HUNGER,
-    adoption_fee, food_cost, get_species, sacrifice_tier_weights, species_ids_by_tier,
+    TRINKET_DUPE_REFUND, TierWeights, TrinketOutcome, UNHATCHED_SPECIES, adoption_fee, food_cost,
+    get_species, sacrifice_tier_weights, species_ids_by_tier,
 };
 use cama_domain::pet_evolution::PetActivity;
 use cama_domain::service_result::ServiceResult;
@@ -131,6 +131,11 @@ pub trait PetEvolutionPort {
 
     fn get_unannounced(&mut self, _limit: i64) -> Vec<EvolutionNotice> {
         Vec::new()
+    }
+
+    /// The upbringing hint key for a pet still inside its evolution window.
+    fn hint_for(&mut self, _pet: &Pet) -> Option<String> {
+        None
     }
 }
 
@@ -430,10 +435,6 @@ where
         &self.evolution
     }
 
-    pub const fn evolution_mut(&mut self) -> &mut E {
-        &mut self.evolution
-    }
-
     #[must_use]
     pub const fn decay_per_day(&self) -> i64 {
         self.decay_per_day
@@ -639,27 +640,9 @@ where
             last_dead: None,
             dig_work_units: work_units,
             dig_work_rate: self.dig_work_rate(&pet, now)?,
-            evolution_hint: None,
+            evolution_hint: self.evolution.hint_for(&pet),
             pet: Some(pet),
         })
-    }
-
-    pub fn get_warning_crossing(
-        &mut self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-    ) -> Result<Option<(i64, String)>, PetApplicationError> {
-        let now = self.clock.now();
-        let Some(pet) = self.living_pet(discord_id, guild_id, now)? else {
-            return Ok(None);
-        };
-        if now < pet.hatched_at {
-            return Ok(None);
-        }
-        Ok(Some((
-            pet.hunger_crossing_time(WARNING_HUNGER, self.decay_per_day)?,
-            pet.name,
-        )))
     }
 
     pub fn adopt(
@@ -1797,9 +1780,16 @@ mod tests {
         events: Vec<PetCareEvent>,
         due: Vec<Pet>,
         unannounced: Vec<EvolutionNotice>,
+        hint: Option<String>,
+        hint_requests: Vec<i64>,
     }
 
     impl PetEvolutionPort for RecordingEvolution {
+        fn hint_for(&mut self, pet: &Pet) -> Option<String> {
+            self.hint_requests.push(pet.pet_id);
+            self.hint.clone()
+        }
+
         fn record_activity(&mut self, event: PetCareEvent) {
             self.events.push(event);
         }
@@ -2883,6 +2873,34 @@ mod tests {
         }
 
         #[test]
+        fn status_carries_the_upbringing_hint_for_the_living_pet() {
+            let mut store = FakeStore::default();
+            store.set_balance(OWNER, GUILD, 1_000);
+            let mut players = FakePlayers::default();
+            players.players.insert((OWNER, GUILD));
+            let mut service = PetService::new(
+                store,
+                players,
+                ScriptedRandom::default(),
+                FakeClock::new(T0),
+                RecordingEvolution {
+                    hint: Some("delving".to_owned()),
+                    ..RecordingEvolution::default()
+                },
+                20,
+            );
+            let none = service.get_status(OWNER, Some(GUILD)).unwrap();
+            assert_eq!(none.evolution_hint, None);
+            assert!(service.evolution().hint_requests.is_empty());
+
+            let pet = adopt_common(&mut service, "Blep");
+            let status = service.get_status(OWNER, Some(GUILD)).unwrap();
+
+            assert_eq!(status.evolution_hint.as_deref(), Some("delving"));
+            assert_eq!(service.evolution().hint_requests, vec![pet.pet_id]);
+        }
+
+        #[test]
         fn adopt_creates_egg_and_charges_first_fee() {
             let (mut service, _clock) = fixture();
             let pet = adopt_common(&mut service, "Blep");
@@ -3224,31 +3242,6 @@ mod tests {
             assert_eq!(first.species, "rama");
             assert_eq!(retried.species, "rama");
             assert_eq!(service.random().weighted.len(), 1);
-        }
-
-        #[test]
-        fn warning_crossing_is_deferred_until_species_resolves() {
-            let (mut service, clock) = fixture();
-            let egg = service
-                .adopt(OWNER, Some(GUILD), "Later", "standard")
-                .unwrap()
-                .pet;
-            assert_eq!(
-                service.get_warning_crossing(OWNER, Some(GUILD)).unwrap(),
-                None
-            );
-            clock.set(egg.hatched_at);
-            service.random_mut().push_weighted("dromedary_cross");
-
-            let crossing = service.get_warning_crossing(OWNER, Some(GUILD)).unwrap();
-
-            assert_eq!(
-                crossing,
-                Some((
-                    egg.hatched_at + 70 * DAY * 100 / (20 * 90),
-                    "Later".to_owned()
-                ))
-            );
         }
     }
 

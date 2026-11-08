@@ -71,7 +71,9 @@ impl GuildPlayerNameDirectory {
         })
     }
 
-    fn cached_name(&self, discord_id: i64) -> Option<String> {
+    /// The live or last-seen readable name, if the directory has one.
+    #[must_use]
+    pub fn cached_name(&self, discord_id: i64) -> Option<String> {
         self.members
             .as_ref()
             .and_then(|members| members.get(&discord_id))
@@ -286,6 +288,21 @@ impl GuildPlayerNameResolver for DiscordGuildPlayerNameResolver {
         self.discord
             .cached_guild_member_render_names(guild_id, &user_ids)
             .map(|names| GuildPlayerNameDirectory::new(names).with_last_seen(last_seen))
+    }
+}
+
+/// Neon's cache-only player names: the live guild cache, then the last name
+/// the bot saw. Neon falls back to a neutral label when neither exists.
+pub struct GuildCacheNeonNames(pub Arc<dyn GuildPlayerNameResolver>);
+
+impl cama_app::neon_degen::NeonPlayerNames for GuildCacheNeonNames {
+    fn cached_display_name(&self, guild_id: Option<u64>, discord_id: u64) -> Option<String> {
+        let guild_id = i64::try_from(guild_id?).ok()?;
+        let discord_id = i64::try_from(discord_id).ok()?;
+        self.0
+            .names_for_guild(guild_id, &[discord_id])
+            .ok()?
+            .cached_name(discord_id)
     }
 }
 

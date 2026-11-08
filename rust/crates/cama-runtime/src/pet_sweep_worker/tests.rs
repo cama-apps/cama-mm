@@ -202,6 +202,7 @@ struct FakeDiscord {
     dm_error: Mutex<Option<String>>,
     brawl_probe: Option<(PathBuf, i64)>,
     observed_brawl_statuses: Mutex<Vec<String>>,
+    unknown_names: bool,
 }
 
 impl FakeDiscord {
@@ -216,6 +217,7 @@ impl FakeDiscord {
             dm_error: Mutex::new(None),
             brawl_probe: None,
             observed_brawl_statuses: Mutex::new(Vec::new()),
+            unknown_names: false,
         }
     }
 
@@ -230,6 +232,12 @@ impl FakeDiscord {
 
     fn with_brawl_probe(mut self, path: &Path, brawl_id: i64) -> Self {
         self.brawl_probe = Some((path.to_path_buf(), brawl_id));
+        self
+    }
+
+    /// Behave like a cold member cache with no last-seen names.
+    fn with_unknown_names(mut self) -> Self {
+        self.unknown_names = true;
         self
     }
 
@@ -259,6 +267,9 @@ impl FirstGamePoolGuildSource for FakeDiscord {
 #[async_trait]
 impl PetSweepDiscordPort for FakeDiscord {
     async fn player_name(&self, _guild_id: i64, user_id: i64) -> String {
+        if self.unknown_names {
+            return cama_domain::discord_content::UNKNOWN_PLAYER.to_owned();
+        }
         format!("Owner {user_id}")
     }
 
@@ -868,6 +879,63 @@ async fn direct_eat_delivery_guard_suppresses_sweep_until_retry() {
 }
 
 #[tokio::test]
+async fn death_announced_directly_after_the_sweep_read_is_not_posted_again() {
+    let now = Utc::now().timestamp();
+    let database = migrated_database();
+    let pet = adopt_and_resolve(
+        database.path(),
+        361,
+        "Raced Dinner",
+        now - EGG_HATCH_SECONDS - 100,
+        "common_cama",
+    );
+    Connection::open(database.path())
+        .expect("open pet fixture")
+        .execute(
+            "UPDATE pets SET died_at=?1,death_cause='starvation',hatch_announced_at=?1,is_active=0
+             WHERE pet_id=?2",
+            params![now - 1, pet.pet_id],
+        )
+        .expect("persist unannounced death");
+    let assets = TempDir::new().expect("pet assets directory");
+    let discord = Arc::new(FakeDiscord::new(Some(CHANNEL)));
+    let reminders = Arc::new(FakeReminders::default());
+    reminders.enable(pet.discord_id, GUILD);
+    let worker = worker(
+        database.path(),
+        Arc::clone(&discord),
+        Arc::clone(&reminders),
+        &assets,
+    );
+    let (_shutdown, context) = worker_context();
+
+    let mut outcome = worker.sweep_pets().await.expect("sweep reads the death");
+    assert_eq!(outcome.deaths.len(), 1);
+    // A direct `/pet eat` delivery posts, stamps, and drops its guard after
+    // the sweep's read but before the sweep's own delivery.
+    Connection::open(database.path())
+        .expect("open pet fixture")
+        .execute(
+            "UPDATE pets SET death_announced_at=?1 WHERE pet_id=?2",
+            params![now, pet.pet_id],
+        )
+        .expect("direct delivery stamps the death");
+    let notice = outcome.deaths.remove(0);
+    assert!(
+        worker.deliver_death(&context, notice).await.is_ok(),
+        "an already announced death is a completed notice"
+    );
+
+    assert!(discord.messages().is_empty());
+    assert!(discord.dms().is_empty());
+    assert_eq!(
+        pet_announcement_times(database.path(), pet.pet_id).1,
+        Some(now),
+        "the direct delivery's stamp is left untouched"
+    );
+}
+
+#[tokio::test]
 async fn no_channel_death_marks_and_cancels_after_best_effort_native_tombstone_dm() {
     let now = Utc::now().timestamp();
     let database = migrated_database();
@@ -1226,4 +1294,93 @@ async fn worker_loop_uses_exact_interval_and_honors_pre_cancelled_context() {
     shutdown.send(true).expect("cancel worker");
 
     worker.run(context).await.expect("clean cancellation");
+}
+
+#[tokio::test]
+async fn evolution_posts_before_death_and_each_marks_with_readable_owner_text() {
+    const EVOLVED_OWNER: i64 = 987_650_001;
+    const DEAD_OWNER: i64 = 987_650_002;
+    let now = Utc::now().timestamp();
+    let database = migrated_database();
+    let evolved = adopt_and_resolve(
+        database.path(),
+        EVOLVED_OWNER,
+        "Sage",
+        now - ADULT_AGE_SECONDS - 100,
+        "common_cama",
+    );
+    let dead = adopt_and_resolve(
+        database.path(),
+        DEAD_OWNER,
+        "Gone",
+        now - EGG_HATCH_SECONDS - 100,
+        "common_cama",
+    );
+    let connection = Connection::open(database.path()).expect("open pet fixture");
+    connection
+        .execute(
+            "UPDATE pets SET hatch_announced_at=?1, last_fed_at=?1, hunger_at_last_fed=100,
+                 evolved_at=?1, evolution_calling='oracle', evolution_primary='fortune',
+                 evolution_secondary='wisdom'
+             WHERE pet_id=?2",
+            params![now - 1, evolved.pet_id],
+        )
+        .expect("persist unannounced evolution");
+    connection
+        .execute(
+            "UPDATE pets SET died_at=?1,death_cause='starvation',hatch_announced_at=?1,is_active=0
+             WHERE pet_id=?2",
+            params![now - 1, dead.pet_id],
+        )
+        .expect("persist unannounced death");
+    drop(connection);
+    let assets = TempDir::new().expect("empty pet assets directory");
+    let discord = Arc::new(FakeDiscord::new(Some(CHANNEL)).with_unknown_names());
+    let reminders = Arc::new(FakeReminders::default());
+    let worker = worker(
+        database.path(),
+        Arc::clone(&discord),
+        Arc::clone(&reminders),
+        &assets,
+    );
+    let (_shutdown, context) = worker_context();
+
+    worker.sweep_once(&context).await;
+
+    let messages = discord.messages();
+    let titles = messages
+        .iter()
+        .map(|(_, message)| message.response.embeds[0].title.clone().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert_eq!(titles.len(), 2, "{titles:?}");
+    assert!(titles[0].contains("Sage evolved"), "{titles:?}");
+    assert!(titles[1].contains("Gone has died"), "{titles:?}");
+    for (_, message) in &messages {
+        let description = message.response.embeds[0]
+            .description
+            .clone()
+            .expect("announcement description");
+        assert!(
+            description.starts_with("Unknown player's "),
+            "{description}"
+        );
+        assert!(!description.contains("<@"), "{description}");
+        for owner in [EVOLVED_OWNER, DEAD_OWNER] {
+            assert!(!description.contains(&owner.to_string()), "{description}");
+        }
+    }
+    let evolution_announced_at: Option<i64> = Connection::open(database.path())
+        .expect("reopen pet database")
+        .query_row(
+            "SELECT evolution_announced_at FROM pets WHERE pet_id=?1",
+            params![evolved.pet_id],
+            |row| row.get(0),
+        )
+        .expect("evolution stamp");
+    assert!(evolution_announced_at.is_some());
+    assert!(
+        pet_announcement_times(database.path(), dead.pet_id)
+            .1
+            .is_some()
+    );
 }

@@ -1,3 +1,6 @@
+use std::sync::{Arc, Barrier};
+use std::thread;
+
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
@@ -80,6 +83,8 @@ fn victory_commit<'a>(
         vanity_tax: 0,
         low_priority_tax: 0,
         consume_lantern_id: None,
+        save_duel: None,
+        abandon_duel: None,
     }
 }
 
@@ -295,6 +300,7 @@ fn pinnacle_victory_fuses_generated_relic_with_state_balance_and_audit() {
         artifact_id: "pinnacle:Crown:Scales and Tribute:hp_plus_1:boss_payout_5",
         found_at: 1_700_000_000,
         is_relic: true,
+        only_if_unowned: false,
     });
     let DigBossRuntimeCommitOutcome::Applied(receipt) =
         repository.commit(commit).expect("pinnacle victory")
@@ -335,6 +341,68 @@ fn pinnacle_victory_fuses_generated_relic_with_state_balance_and_audit() {
     );
 }
 
+/// A signature trophy is fused into the victory and never duplicates: when
+/// the player already owns it, the rest of the settlement still applies.
+#[test]
+fn unowned_only_artifact_grant_skips_an_owned_trophy_but_settles_the_victory() {
+    let database = fixture();
+    let repository = DigBossRuntimeRepository::new(database.path());
+    let trophy = DigBossRuntimeArtifactGrant {
+        artifact_id: "weeping_fang",
+        found_at: 1_700_000_000,
+        is_relic: true,
+        only_if_unowned: true,
+    };
+    let snapshot = repository.snapshot(KEY).expect("snapshot").expect("player");
+    let state = victory_state(&snapshot);
+    let mut commit = victory_commit(&snapshot, &state);
+    commit.artifact = Some(trophy);
+    let DigBossRuntimeCommitOutcome::Applied(first) = repository.commit(commit).expect("first")
+    else {
+        panic!("expected the first victory to apply");
+    };
+    assert!(
+        first.artifact_database_id.is_some(),
+        "an unowned trophy carves"
+    );
+
+    let snapshot = repository.snapshot(KEY).expect("snapshot").expect("player");
+    let mut state = DigBossRuntimeState::from(&snapshot);
+    state.balance += 10;
+    let mut commit = victory_commit(&snapshot, &state);
+    commit.artifact = Some(trophy);
+    let DigBossRuntimeCommitOutcome::Applied(second) = repository.commit(commit).expect("second")
+    else {
+        panic!("expected the second victory to apply");
+    };
+    assert_eq!(
+        second.artifact_database_id, None,
+        "an owned trophy is skipped"
+    );
+    let connection = Connection::open(database.path()).expect("verify DB");
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM dig_artifacts WHERE artifact_id='weeping_fang'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("trophy count"),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT jopacoin_balance FROM players WHERE discord_id=?1 AND guild_id=?2",
+                params![PLAYER, GUILD],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("balance"),
+        175,
+        "the settlement still applies without the duplicate"
+    );
+}
+
 #[test]
 fn pinnacle_relic_insert_failure_rolls_back_entire_victory() {
     let database = fixture();
@@ -353,6 +421,7 @@ fn pinnacle_relic_insert_failure_rolls_back_entire_victory() {
         artifact_id: "pinnacle:Crown:Scales and Tribute:hp_plus_1:boss_payout_5",
         found_at: 1_700_000_000,
         is_relic: true,
+        only_if_unowned: false,
     });
     assert!(repository.commit(commit).is_err());
     assert_eq!(
@@ -556,6 +625,76 @@ fn stale_actor_snapshot_rolls_back_every_boss_side_effect() {
 }
 
 #[test]
+fn concurrent_victory_and_loss_from_one_snapshot_commit_exactly_one_outcome() {
+    let database = fixture();
+    let repository = DigBossRuntimeRepository::new(database.path());
+    let snapshot = repository.snapshot(KEY).expect("snapshot").expect("player");
+    let victory = victory_state(&snapshot);
+    let mut loss = DigBossRuntimeState::from(&snapshot);
+    loss.depth = 20;
+    loss.boss_progress_json = Some(
+        r#"{"25":{"boss_id":"grothak","status":"active","hp_remaining":3,"future_field":17}}"#
+            .to_owned(),
+    );
+    let barrier = Arc::new(Barrier::new(2));
+    let handles: Vec<_> = [(victory, true), (loss, false)]
+        .into_iter()
+        .map(|(state, won)| {
+            let repository = repository.clone();
+            let snapshot = snapshot.clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                let mut commit = victory_commit(&snapshot, &state);
+                if !won {
+                    commit.echo = None;
+                    commit.audit = Some(DigBossRuntimeAudit {
+                        action_type: "boss_fight",
+                        target_id: None,
+                        detail_json: r#"{"boss_id":"grothak","won":false}"#,
+                        created_at: 1_700_000_000,
+                    });
+                }
+                barrier.wait();
+                repository.commit(commit).expect("boss outcome commit")
+            })
+        })
+        .collect();
+    let outcomes: Vec<_> = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("boss outcome thread"))
+        .collect();
+    let applied: Vec<_> = outcomes
+        .iter()
+        .map(|outcome| matches!(outcome, DigBossRuntimeCommitOutcome::Applied(_)))
+        .collect();
+    assert_eq!(applied.iter().filter(|applied| **applied).count(), 1);
+    assert!(outcomes.contains(&DigBossRuntimeCommitOutcome::Conflict));
+    let victory_applied = applied[0];
+    let connection = Connection::open(database.path()).expect("verify DB");
+    let (audits, echoes, balance, depth): (i64, i64, i64, i64) = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM dig_actions WHERE action_type='boss_fight'),
+                    (SELECT COUNT(*) FROM dig_boss_echoes),
+                    (SELECT jopacoin_balance FROM players
+                      WHERE discord_id=?1 AND guild_id=?2),
+                    (SELECT depth FROM tunnels WHERE discord_id=?1 AND guild_id=?2)",
+            params![PLAYER, GUILD],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("single boss outcome");
+    assert_eq!(audits, 1);
+    assert_eq!(echoes, i64::from(victory_applied));
+    assert_eq!(
+        (balance, depth),
+        if victory_applied {
+            (165, 25)
+        } else {
+            (100, 20)
+        }
+    );
+}
+
+#[test]
 fn audit_failure_rolls_back_actor_balance_tunnel_echo_and_ledger() {
     let database = fixture();
     let repository = DigBossRuntimeRepository::new(database.path());
@@ -638,7 +777,7 @@ fn paused_duel() -> DigBossPausedDuelRow {
 fn paused_duel_survives_repository_recreation_and_is_claimed_once() {
     let database = fixture();
     DigBossRuntimeRepository::new(database.path())
-        .save_active_duel(&paused_duel())
+        .restore_claimed_duel(&paused_duel())
         .expect("save duel");
     let recovered = DigBossRuntimeRepository::new(database.path())
         .active_duel(KEY)
@@ -657,20 +796,174 @@ fn paused_duel_survives_repository_recreation_and_is_claimed_once() {
 }
 
 #[test]
+fn deadline_claim_takes_only_a_pause_saved_by_its_cutoff_and_only_once() {
+    let database = fixture();
+    let repository = DigBossRuntimeRepository::new(database.path());
+    repository
+        .restore_claimed_duel(&paused_duel())
+        .expect("save duel");
+    assert_eq!(
+        repository
+            .claim_active_duel_saved_by(KEY, 1_699_999_999)
+            .expect("early claim"),
+        None,
+        "a pause saved after the cutoff is newer than the deadline"
+    );
+    assert!(repository.active_duel(KEY).expect("still paused").is_some());
+    assert_eq!(
+        repository
+            .claim_active_duel_saved_by(KEY, 1_700_000_000)
+            .expect("due claim"),
+        Some(paused_duel())
+    );
+    assert_eq!(
+        repository
+            .claim_active_duel_saved_by(KEY, i64::MAX)
+            .expect("second claim"),
+        None
+    );
+}
+
+fn stake_commit<'a>(
+    snapshot: &'a DigBossRuntimeSnapshot,
+    state: &'a DigBossRuntimeState,
+    save_duel: Option<&'a DigBossPausedDuelRow>,
+    abandon_duel: Option<&'a DigBossPausedDuelRow>,
+) -> DigBossRuntimeCommit<'a> {
+    DigBossRuntimeCommit {
+        expected: snapshot,
+        proposed: state,
+        audit: (state.balance != snapshot.balance).then_some(DigBossRuntimeAudit {
+            action_type: "boss_wager_escrow",
+            target_id: None,
+            detail_json: r#"{"boss_id":"grothak","wager":40}"#,
+            created_at: 1_700_000_000,
+        }),
+        echo: None,
+        artifact: None,
+        bankruptcy_penalty: 0,
+        vanity_tax: 0,
+        low_priority_tax: 0,
+        consume_lantern_id: None,
+        save_duel,
+        abandon_duel,
+    }
+}
+
+fn balance(database: &NamedTempFile) -> i64 {
+    Connection::open(database.path())
+        .expect("balance DB")
+        .query_row(
+            "SELECT jopacoin_balance FROM players WHERE discord_id=?1 AND guild_id=?2",
+            params![PLAYER, GUILD],
+            |row| row.get(0),
+        )
+        .expect("balance")
+}
+
+#[test]
+fn escrowed_stake_and_its_paused_duel_commit_together() {
+    let database = fixture();
+    let repository = DigBossRuntimeRepository::new(database.path());
+    let snapshot = repository.snapshot(KEY).expect("snapshot").expect("player");
+    let mut state = DigBossRuntimeState::from(&snapshot);
+    state.balance -= 40;
+    let mut duel = paused_duel();
+    duel.wager = 40;
+    let outcome = repository
+        .commit(stake_commit(&snapshot, &state, Some(&duel), None))
+        .expect("escrow");
+    assert!(matches!(outcome, DigBossRuntimeCommitOutcome::Applied(_)));
+    assert_eq!(balance(&database), 60);
+    assert_eq!(repository.active_duel(KEY).expect("read"), Some(duel));
+    let ledger: i64 = Connection::open(database.path())
+        .expect("ledger DB")
+        .query_row(
+            "SELECT COUNT(*) FROM dig_actions
+              WHERE actor_id=?1 AND guild_id=?2 AND action_type='boss_wager_escrow'
+                AND jc_delta=-40",
+            params![PLAYER, GUILD],
+            |row| row.get(0),
+        )
+        .expect("escrow audit");
+    assert_eq!(ledger, 1);
+}
+
+#[test]
+fn escrow_never_replaces_an_active_duel_and_rolls_its_stake_back() {
+    let database = fixture();
+    let repository = DigBossRuntimeRepository::new(database.path());
+    assert!(
+        repository
+            .restore_claimed_duel(&paused_duel())
+            .expect("existing duel")
+    );
+    let snapshot = repository.snapshot(KEY).expect("snapshot").expect("player");
+    let mut state = DigBossRuntimeState::from(&snapshot);
+    state.balance -= 40;
+    let mut newer = paused_duel();
+    newer.wager = 40;
+    assert!(matches!(
+        repository.commit(stake_commit(&snapshot, &state, Some(&newer), None)),
+        Err(DigBossRuntimeRepositoryError::DuelAlreadyActive)
+    ));
+    assert_eq!(balance(&database), 100);
+    assert_eq!(
+        repository.active_duel(KEY).expect("read"),
+        Some(paused_duel())
+    );
+}
+
+#[test]
+fn abandoning_a_duel_deletes_exactly_that_row_in_the_settlement() {
+    let database = fixture();
+    let repository = DigBossRuntimeRepository::new(database.path());
+    let snapshot = repository.snapshot(KEY).expect("snapshot").expect("player");
+    let state = DigBossRuntimeState::from(&snapshot);
+    assert!(matches!(
+        repository
+            .commit(stake_commit(&snapshot, &state, None, Some(&paused_duel())))
+            .expect("missing duel"),
+        DigBossRuntimeCommitOutcome::Conflict
+    ));
+    assert!(
+        repository
+            .restore_claimed_duel(&paused_duel())
+            .expect("paused duel")
+    );
+    assert!(matches!(
+        repository
+            .commit(stake_commit(&snapshot, &state, None, Some(&paused_duel())))
+            .expect("abandon"),
+        DigBossRuntimeCommitOutcome::Applied(_)
+    ));
+    assert_eq!(repository.active_duel(KEY).expect("read"), None);
+}
+
+#[test]
 fn restoring_a_claimed_duel_never_overwrites_a_newer_pause() {
     let database = fixture();
     let repository = DigBossRuntimeRepository::new(database.path());
-    repository.save_active_duel(&paused_duel()).expect("save");
+    assert!(
+        repository
+            .restore_claimed_duel(&paused_duel())
+            .expect("save")
+    );
     let claimed = repository
         .claim_active_duel(KEY)
         .expect("claim")
         .expect("claimed duel");
     assert!(repository.restore_claimed_duel(&claimed).expect("restore"));
     assert_eq!(repository.active_duel(KEY).expect("read"), Some(claimed));
+    repository.claim_active_duel(KEY).expect("claim again");
 
     let mut newer = paused_duel();
     newer.wager = 55;
-    repository.save_active_duel(&newer).expect("newer pause");
+    let snapshot = repository.snapshot(KEY).expect("snapshot").expect("player");
+    let state = DigBossRuntimeState::from(&snapshot);
+    repository
+        .commit(stake_commit(&snapshot, &state, Some(&newer), None))
+        .expect("newer pause");
     assert!(
         !repository
             .restore_claimed_duel(&paused_duel())
@@ -934,4 +1227,61 @@ fn a_lost_lantern_race_rolls_the_whole_settlement_back() {
         "Conflict must mean nothing was applied"
     );
     assert_eq!(after.depth, snapshot.depth);
+}
+
+/// Boss echoes are keyed by guild and boss, expire at `weakened_until`, and a
+/// newer kill overwrites the killer and restarts the window.
+#[test]
+fn boss_echoes_are_guild_and_boss_scoped_expire_and_overwrite() {
+    const OTHER_GUILD: i64 = -83_003;
+    let database = fixture();
+    let repository = DigBossRuntimeRepository::new(database.path());
+    assert_eq!(
+        repository.active_echo(GUILD, "grothak", 1_000).unwrap(),
+        None
+    );
+    let mut connection = Connection::open(database.path()).expect("echo connection");
+    let transaction = connection.transaction().expect("echo transaction");
+    for (guild_id, boss_id, depth, killer_id, weakened_until) in [
+        (GUILD, "magmus_rex", 75, 111, 1_060),
+        (GUILD, "magmus_rex", 75, 222, 4_610),
+        (GUILD, "crystalia", 50, 2, 1_060),
+        (OTHER_GUILD, "magmus_rex", 75, 333, 4_610),
+    ] {
+        upsert_echo(
+            &transaction,
+            guild_id,
+            DigBossRuntimeEcho {
+                boss_id,
+                depth,
+                killer_id,
+                weakened_until,
+            },
+        )
+        .expect("upsert echo");
+    }
+    transaction.commit().expect("commit echoes");
+
+    assert_eq!(
+        repository.active_echo(GUILD, "magmus_rex", 1_100).unwrap(),
+        Some((75, 222, 4_610))
+    );
+    assert_eq!(
+        repository.active_echo(GUILD, "crystalia", 1_001).unwrap(),
+        Some((50, 2, 1_060))
+    );
+    assert_eq!(
+        repository.active_echo(GUILD, "crystalia", 1_060).unwrap(),
+        None
+    );
+    assert_eq!(
+        repository.active_echo(GUILD, "grothak", 1_001).unwrap(),
+        None
+    );
+    assert_eq!(
+        repository
+            .active_echo(OTHER_GUILD, "magmus_rex", 1_100)
+            .unwrap(),
+        Some((75, 333, 4_610))
+    );
 }

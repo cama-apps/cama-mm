@@ -7,10 +7,10 @@
 use std::collections::BTreeSet;
 
 use cama_db::manashop_rework_repository::{
-    BloodPactClaim, BuffData, BuffRecord, DarkBargainSettlement, GrantBuffRequest,
-    ManashopBuffGrants, ManashopRepository, ManashopRepositoryError,
+    BuffData, BuffRecord, DarkBargainSettlement, GrantBuffRequest, ManashopBuffGrants,
+    ManashopRepository, ManashopRepositoryError,
 };
-use cama_domain::economy_scaling::{DEFAULT_MINIGAME_JC_DELTA_SCALE, scale_minigame_jc_delta};
+use cama_domain::economy_scaling::DEFAULT_MINIGAME_JC_DELTA_SCALE;
 
 pub const HOURS: i64 = 3_600;
 
@@ -60,60 +60,6 @@ pub struct HostileLossSettlement {
     pub attempted_loss: i64,
     pub absorbed_amount: i64,
     pub applied_loss: i64,
-}
-
-pub trait ProtectionGateway {
-    type Error;
-
-    fn apply_hostile_loss(
-        &mut self,
-        request: HostileLossRequest,
-    ) -> Result<HostileLossSettlement, Self::Error>;
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SiphonOutcome {
-    pub target_id: i64,
-    pub amount: i64,
-    pub attempted_amount: i64,
-    pub absorbed_amount: i64,
-    pub event_key: String,
-}
-
-/// Route a Swamp siphon through the shared hostile-loss gateway.
-pub fn execute_swamp_siphon<G: ProtectionGateway>(
-    actor_id: i64,
-    guild_id: i64,
-    target_id: i64,
-    target_balance: i64,
-    rolled_amount: i64,
-    event_nonce: u128,
-    gateway: &mut G,
-) -> Result<SiphonOutcome, G::Error> {
-    let generated = scale_minigame_jc_delta(
-        rolled_amount.clamp(1, 3) as f64,
-        DEFAULT_MINIGAME_JC_DELTA_SCALE,
-    );
-    let attempted = generated.min(target_balance.max(0));
-    let event_key = format!("swamp_siphon:{event_nonce:032x}:{target_id}");
-    let settlement = gateway.apply_hostile_loss(HostileLossRequest {
-        target_id,
-        guild_id,
-        attempted_loss: attempted,
-        kind: "swamp_siphon",
-        actor_id,
-        event_key: event_key.clone(),
-        destination: "player",
-        recipient_id: actor_id,
-        clamp_to_balance: true,
-    })?;
-    Ok(SiphonOutcome {
-        target_id,
-        amount: settlement.applied_loss,
-        attempted_amount: attempted,
-        absorbed_amount: settlement.absorbed_amount,
-        event_key,
-    })
 }
 
 #[derive(Clone, Debug)]
@@ -309,73 +255,6 @@ impl BuffService<ManashopRepository> {
             .active_for(discord_id, Some(guild_id), buff_type.as_str(), self.now)
     }
 
-    pub fn has_pvp_immunity(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-    ) -> Result<bool, ManashopRepositoryError> {
-        if !self
-            .active_for(discord_id, guild_id, BuffType::Counterspell)?
-            .is_empty()
-            || !self
-                .active_for(discord_id, guild_id, BuffType::Sanctuary)?
-                .is_empty()
-        {
-            return Ok(true);
-        }
-        Ok(!self
-            .repository
-            .active_targeted_at(
-                discord_id,
-                Some(guild_id),
-                BuffType::Sanctuary.as_str(),
-                self.now,
-            )?
-            .is_empty())
-    }
-
-    pub fn has_sanctuary_match_bonus(&self, _discord_id: i64, _guild_id: i64) -> bool {
-        false
-    }
-
-    pub fn consume_aegis_charge(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-    ) -> Result<bool, ManashopRepositoryError> {
-        for kind in [BuffType::Aegis, BuffType::FirstAegisToday] {
-            for buff in self.active_for(discord_id, guild_id, kind)? {
-                if self.repository.consume_buff_atomic(buff.id)? {
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
-    }
-
-    pub fn has_overgrowth(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-    ) -> Result<bool, ManashopRepositoryError> {
-        Ok(!self
-            .active_for(discord_id, guild_id, BuffType::Overgrowth)?
-            .is_empty())
-    }
-
-    pub fn consume_overgrowth_charge(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-    ) -> Result<bool, ManashopRepositoryError> {
-        self.repository.consume_data_charge_atomic(
-            discord_id,
-            Some(guild_id),
-            BuffType::Overgrowth.as_str(),
-            self.now,
-        )
-    }
-
     pub fn blood_pact_skimmer(
         &self,
         target_id: i64,
@@ -406,46 +285,10 @@ impl BuffService<ManashopRepository> {
         )
     }
 
-    pub fn record_blood_pact_skim(
-        &self,
-        buff_id: i64,
-        current: &BuffData,
-        new_total: i64,
-    ) -> Result<(), ManashopRepositoryError> {
-        let mut data = current.clone();
-        data.skimmed_total = Some(new_total);
-        self.repository.update_buff_data(buff_id, &data)
-    }
-
-    pub fn claim_blood_pact_skim(
-        &self,
-        target_id: i64,
-        guild_id: i64,
-        earning: i64,
-    ) -> Result<Option<BloodPactClaim>, ManashopRepositoryError> {
-        self.repository
-            .claim_blood_pact_skim_atomic(target_id, Some(guild_id), earning, self.now)
-    }
-
-    pub fn dark_bargain_debt(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-    ) -> Result<Option<BuffRecord>, ManashopRepositoryError> {
-        Ok(self
-            .active_for(discord_id, guild_id, BuffType::DarkBargain)?
-            .into_iter()
-            .next())
-    }
-
     pub fn settle_due_dark_bargains(
         &self,
     ) -> Result<Vec<DarkBargainSettlement>, ManashopRepositoryError> {
         self.repository.settle_due_dark_bargains(self.now)
-    }
-
-    pub fn cleanup_expired(&self) -> Result<usize, ManashopRepositoryError> {
-        self.repository.cleanup_expired_buffs(self.now)
     }
 }
 

@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use super::*;
 
 fn assert_close(left: f64, right: f64) {
@@ -15,15 +17,20 @@ fn base_stats() -> CombatStats {
     }
 }
 
-fn entry(status: BossStatus) -> BossProgressValue {
-    BossProgressValue::Entry(BossProgressEntry {
-        status,
-        ..BossProgressEntry::default()
-    })
-}
-
 fn boss_ids(pool: &[&BossDefinition]) -> BTreeSet<&'static str> {
     pool.iter().map(|boss| boss.boss_id).collect()
+}
+
+/// Production duel odds without a pet damage assist.
+fn win_probability(input: DuelOddsInput) -> f64 {
+    duel_win_probability_with_damage_bonus(input, 0)
+}
+
+/// Whether the prestige-gated pool production locks from offers this boss.
+fn pool_offers(depth: i32, prestige_level: i32, boss_id: &str) -> bool {
+    boss_pool_for_tier(depth, prestige_level)
+        .iter()
+        .any(|boss| boss.boss_id == boss_id)
 }
 
 #[test]
@@ -102,7 +109,7 @@ fn test_below_dim_threshold_uses_dark() {
 
 #[test]
 fn test_cap_applies_when_overwhelming_advantage() {
-    let win = approximate_duel_win_probability(DuelOddsInput {
+    let win = win_probability(DuelOddsInput {
         player_hp: 20,
         boss_hp: 2,
         player_hit: 0.95,
@@ -117,7 +124,7 @@ fn test_cap_applies_when_overwhelming_advantage() {
 
 #[test]
 fn test_low_win_unchanged() {
-    let win = approximate_duel_win_probability(DuelOddsInput {
+    let win = win_probability(DuelOddsInput {
         player_hp: 2,
         boss_hp: 20,
         player_hit: 0.10,
@@ -142,8 +149,8 @@ fn test_crit_raises_win_chance() {
         critical_chance: 0.0,
         critical_bonus: 1,
     };
-    let baseline = approximate_duel_win_probability(input);
-    let with_crit = approximate_duel_win_probability(DuelOddsInput {
+    let baseline = win_probability(input);
+    let with_crit = win_probability(DuelOddsInput {
         critical_chance: 1.0,
         ..input
     });
@@ -162,15 +169,15 @@ fn survival_halves_bold_win_rate_gain_at_every_point_and_caps_at_twenty() {
         critical_chance: 0.15,
         critical_bonus: 1,
     };
-    let baseline = approximate_duel_win_probability(input);
+    let baseline = win_probability(input);
     for points in 0..=25 {
         let full_hit = input.player_hit + cama_domain::dig_stats::survival_roll_bonus(points);
-        let full = approximate_duel_win_probability(DuelOddsInput {
+        let full = win_probability(DuelOddsInput {
             player_hit: full_hit,
             ..input
         });
         let hit = calibrate_player_hit_for_survival(input, full_hit, 0);
-        let actual = approximate_duel_win_probability(DuelOddsInput {
+        let actual = win_probability(DuelOddsInput {
             player_hit: hit,
             ..input
         });
@@ -244,7 +251,7 @@ fn survival_calibration_uses_raw_probability_below_display_floor() {
         },
         0,
     );
-    assert!(approximate_duel_win_probability(input) <= WIN_CHANCE_FLOOR + 1.0e-9);
+    assert!(win_probability(input) <= WIN_CHANCE_FLOOR + 1.0e-9);
     assert!((midpoint - (baseline + full) * 0.5).abs() < 1.0e-9);
 }
 
@@ -341,150 +348,6 @@ fn test_echo_applies_25pct_hp_discount() {
         echo.boss_hp,
         (f64::from(regular.boss_hp) * 0.75).round() as i32
     );
-}
-
-#[test]
-fn test_no_persisted_hp_returns_fresh() {
-    assert_eq!(
-        resolve_persisted_boss_hp(&BossProgress::new(), "25", 10, 0),
-        (10, 10)
-    );
-}
-
-#[test]
-fn test_legacy_string_treated_as_fresh() {
-    let progress = BTreeMap::from([(
-        "25".to_owned(),
-        BossProgressValue::Legacy(BossStatus::Active),
-    )]);
-    assert_eq!(resolve_persisted_boss_hp(&progress, "25", 10, 0), (10, 10));
-}
-
-fn progress_with_hp(hp_remaining: i32, hp_max: i32, last_engaged_at: Option<i64>) -> BossProgress {
-    BTreeMap::from([(
-        "25".to_owned(),
-        BossProgressValue::Entry(BossProgressEntry {
-            hp_remaining: Some(hp_remaining),
-            hp_max: Some(hp_max),
-            last_engaged_at,
-            ..BossProgressEntry::default()
-        }),
-    )])
-}
-
-#[test]
-fn test_persisted_hp_used_when_present() {
-    assert_eq!(
-        resolve_persisted_boss_hp(&progress_with_hp(4, 12, Some(0)), "25", 12, 0),
-        (4, 12)
-    );
-}
-
-#[test]
-fn test_regen_caps_at_hp_max() {
-    assert_eq!(
-        resolve_persisted_boss_hp(&progress_with_hp(4, 12, Some(0)), "25", 12, 100 * 86_400),
-        (12, 12)
-    );
-}
-
-#[test]
-fn test_regen_adds_one_hp_per_completed_day() {
-    assert_eq!(
-        resolve_persisted_boss_hp(&progress_with_hp(4, 12, Some(0)), "25", 12, 3 * 86_400).0,
-        7
-    );
-}
-
-#[test]
-fn test_regen_waits_for_a_complete_day() {
-    assert_eq!(
-        resolve_persisted_boss_hp(&progress_with_hp(4, 12, Some(0)), "25", 12, 86_399).0,
-        4
-    );
-}
-
-#[test]
-fn test_fresh_cap_reduction_does_not_replace_active_boss_hp() {
-    assert_eq!(
-        resolve_persisted_boss_hp(&progress_with_hp(7, 12, Some(0)), "25", 9, 0),
-        (7, 12)
-    );
-}
-
-#[test]
-fn test_fresh_cap_increase_does_not_heal_active_boss() {
-    assert_eq!(
-        resolve_persisted_boss_hp(&progress_with_hp(7, 12, Some(0)), "25", 15, 0),
-        (7, 12)
-    );
-}
-
-#[test]
-fn test_regen_uses_active_boss_cap_when_fresh_cap_changes() {
-    assert_eq!(
-        resolve_persisted_boss_hp(&progress_with_hp(7, 12, Some(0)), "25", 9, 2 * 86_400),
-        (9, 12)
-    );
-}
-
-#[test]
-fn test_missing_regen_timestamp_still_clamps_hp_to_active_cap() {
-    assert_eq!(
-        resolve_persisted_boss_hp(&progress_with_hp(20, 12, None), "25", 15, 0),
-        (12, 12)
-    );
-}
-
-#[test]
-fn test_persist_after_loss_writes_entry() {
-    let mut progress = BossProgress::new();
-    persist_boss_hp_after_fight(
-        &mut progress,
-        PersistBossHp {
-            key: "25",
-            boss_id: "grothak",
-            ending_hp: 3,
-            hp_max: 10,
-            won: false,
-            outcome: "loss",
-            now: 42,
-        },
-    );
-    let BossProgressValue::Entry(stored) = &progress["25"] else {
-        panic!("entry expected")
-    };
-    assert_eq!(stored.hp_remaining, Some(3));
-    assert_eq!(stored.hp_max, Some(10));
-    assert_eq!(stored.last_engaged_at, Some(42));
-    assert_eq!(stored.last_outcome.as_deref(), Some("loss"));
-    assert!(stored.first_meet_seen);
-    assert_eq!(stored.status, BossStatus::Active);
-}
-
-#[test]
-fn test_persist_preserves_existing_status() {
-    let mut progress = BTreeMap::from([(
-        "25".to_owned(),
-        BossProgressValue::Entry(BossProgressEntry {
-            status: BossStatus::PhaseOneDefeated,
-            boss_id: Some("pudge".to_owned()),
-            ..BossProgressEntry::default()
-        }),
-    )]);
-    persist_boss_hp_after_fight(
-        &mut progress,
-        PersistBossHp {
-            key: "25",
-            boss_id: "pudge",
-            ending_hp: 2,
-            hp_max: 8,
-            won: false,
-            outcome: "loss",
-            now: 100,
-        },
-    );
-    assert_eq!(progress["25"].status(), BossStatus::PhaseOneDefeated);
 }
 
 #[test]
@@ -641,12 +504,6 @@ fn test_each_pinnacle_has_three_phases() {
 #[test]
 fn test_relic_pool_non_empty() {
     assert!(PINNACLE_RELIC_STATS.len() >= 8);
-    assert!(PINNACLE_RELIC_SUFFIX_POOL.len() >= 6);
-}
-
-#[test]
-fn test_phase_event_pool_non_empty() {
-    assert!(PHASE_TRANSITION_EVENT_IDS.len() >= 4);
 }
 
 #[test]
@@ -657,130 +514,6 @@ fn test_known_archetypes_defined() {
         assert!(definition.hit_offset.abs() <= 0.10);
         assert!(definition.damage_offset >= 0);
     }
-}
-
-#[test]
-fn test_no_row_returns_none() {
-    let store = InMemoryBossStore::default();
-    assert!(store.active_boss_echo(Some(1), "grothak", 1_000).is_none());
-}
-
-#[test]
-fn test_record_then_read() {
-    let mut store = InMemoryBossStore::default();
-    store.record_boss_echo(Some(1), "grothak", 25, 777, 3_600, 1_000);
-    let echo = store
-        .active_boss_echo(Some(1), "grothak", 1_001)
-        .expect("active echo");
-    assert_eq!(echo.killer_discord_id, 777);
-    assert_eq!(echo.depth, 25);
-    assert!(echo.weakened_until > 1_001);
-}
-
-#[test]
-fn test_expired_row_returns_none() {
-    let mut store = InMemoryBossStore::default();
-    store.record_boss_echo(Some(1), "crystalia", 50, 111, 60, 1_000);
-    assert!(
-        store
-            .active_boss_echo(Some(1), "crystalia", 4_600)
-            .is_none()
-    );
-}
-
-#[test]
-fn test_overwrite_restarts_window() {
-    let mut store = InMemoryBossStore::default();
-    store.record_boss_echo(Some(1), "magmus_rex", 75, 111, 60, 1_000);
-    store.record_boss_echo(Some(1), "magmus_rex", 75, 222, 3_600, 1_010);
-    assert_eq!(
-        store
-            .active_boss_echo(Some(1), "magmus_rex", 1_011)
-            .expect("echo")
-            .killer_discord_id,
-        222
-    );
-}
-
-#[test]
-fn test_boss_id_isolation() {
-    let mut store = InMemoryBossStore::default();
-    store.record_boss_echo(Some(1), "pudge", 25, 1, 3_600, 1_000);
-    store.record_boss_echo(Some(1), "crystalia", 50, 2, 3_600, 1_000);
-    assert_eq!(
-        store
-            .active_boss_echo(Some(1), "pudge", 1_001)
-            .expect("pudge")
-            .killer_discord_id,
-        1
-    );
-    assert_eq!(
-        store
-            .active_boss_echo(Some(1), "crystalia", 1_001)
-            .expect("crystalia")
-            .killer_discord_id,
-        2
-    );
-    assert!(store.active_boss_echo(Some(1), "grothak", 1_001).is_none());
-    assert!(
-        store
-            .active_boss_echo(Some(1), "ogre_magi", 1_001)
-            .is_none()
-    );
-}
-
-#[test]
-fn test_guild_isolation() {
-    let mut store = InMemoryBossStore::default();
-    store.record_boss_echo(Some(1_000), "grothak", 25, 1, 3_600, 1_000);
-    store.record_boss_echo(Some(2_000), "grothak", 25, 2, 3_600, 1_000);
-    assert_eq!(
-        store
-            .active_boss_echo(Some(1_000), "grothak", 1_001)
-            .expect("guild one")
-            .killer_discord_id,
-        1
-    );
-    assert_eq!(
-        store
-            .active_boss_echo(Some(2_000), "grothak", 1_001)
-            .expect("guild two")
-            .killer_discord_id,
-        2
-    );
-    assert!(store.active_boss_echo(None, "grothak", 1_001).is_none());
-}
-
-#[test]
-fn test_lock_picks_from_pool_and_persists() {
-    let mut state = BossRunState::default();
-    let first = lock_pinnacle_boss(&mut state, None).expect("lock");
-    assert!(PINNACLE_POOL_IDS.contains(&first));
-    let second = lock_pinnacle_boss(&mut state, Some("lantern_engine")).expect("idempotent lock");
-    assert_eq!(first, second);
-}
-
-fn assert_pinnacle_lock(boss_id: &str) {
-    let mut state = BossRunState::default();
-    let locked = lock_pinnacle_boss(&mut state, Some(boss_id)).expect("lock chosen pinnacle");
-    assert_eq!(locked, boss_id);
-    assert_eq!(state.pinnacle_boss_id.as_deref(), Some(boss_id));
-    assert_eq!(lock_pinnacle_boss(&mut state, None), Ok(locked));
-}
-
-#[test]
-fn test_new_pinnacle_choice_is_locked_and_persisted_bastion_below() {
-    assert_pinnacle_lock("bastion_below");
-}
-
-#[test]
-fn test_new_pinnacle_choice_is_locked_and_persisted_pale_surveyor() {
-    assert_pinnacle_lock("pale_surveyor");
-}
-
-#[test]
-fn test_new_pinnacle_choice_is_locked_and_persisted_lantern_engine() {
-    assert_pinnacle_lock("lantern_engine");
 }
 
 #[test]
@@ -901,159 +634,6 @@ fn test_pinnacle_barks_are_phase_neutral_and_king_streak_is_grammatical() {
     );
 }
 
-fn pinnacle_state(boss_id: &str) -> BossRunState {
-    let mut state = BossRunState::with_all_tiers_defeated(PINNACLE_DEPTH - 1);
-    state.pinnacle_boss_id = Some(boss_id.to_owned());
-    state.pinnacle_phase = 1;
-    state
-}
-
-#[test]
-fn test_phase1_win_advances_to_phase2() {
-    let mut state = pinnacle_state("first_digger");
-    let result = start_pinnacle_fight(&mut state, PinnacleFightDirective::WinWithoutMechanic)
-        .expect("fight");
-    assert!(result.success);
-    assert_eq!(result.won, Some(true));
-    assert!(result.is_pinnacle);
-    assert_eq!(result.phase, 1);
-    assert!(result.phase_two_incoming);
-    assert_eq!(state.pinnacle_phase, 2);
-    assert_eq!(
-        state.boss_progress[&PINNACLE_DEPTH.to_string()].status(),
-        BossStatus::PhaseOneDefeated
-    );
-}
-
-#[test]
-fn test_pinnacle_mechanic_pauses_then_resume_resolves() {
-    let mut state = pinnacle_state("forgotten_king");
-    let pending = start_pinnacle_fight(
-        &mut state,
-        PinnacleFightDirective::PauseAtMechanic { mechanic_index: 0 },
-    )
-    .expect("start");
-    assert!(pending.pending_prompt);
-    assert_eq!(pending.mechanic_id.as_deref(), Some("king_decree"));
-    assert_eq!(pending.phase, 1);
-    assert_eq!(
-        state.active_duel.as_ref().expect("active duel").boss_id,
-        "forgotten_king"
-    );
-    let resumed = resume_pinnacle_fight(&mut state, 0, false).expect("resume");
-    assert!(resumed.success);
-    assert!(!resumed.pending_prompt);
-    assert_eq!(resumed.boss_id, "forgotten_king");
-    assert!(state.active_duel.is_none());
-}
-
-#[test]
-fn test_pinnacle_resume_processes_mechanic_status_effects() {
-    let mut state = pinnacle_state("forgotten_king");
-    let pending = start_pinnacle_fight(
-        &mut state,
-        PinnacleFightDirective::PauseAtMechanic { mechanic_index: 1 },
-    )
-    .expect("start");
-    assert_eq!(pending.mechanic_id.as_deref(), Some("king_crownfall"));
-    let resumed = resume_pinnacle_fight(&mut state, 2, true).expect("resume");
-    assert_eq!(resumed.observed_bleed_rounds, [3, 2]);
-}
-
-#[test]
-fn test_loss_persists_phase_hp() {
-    let mut state = pinnacle_state("forgotten_king");
-    let result = start_pinnacle_fight(
-        &mut state,
-        PinnacleFightDirective::LoseWithoutMechanic {
-            ending_boss_hp: 4,
-            boss_hp_max: 18,
-        },
-    )
-    .expect("fight");
-    assert_eq!(result.won, Some(false));
-    assert_eq!(result.boss_id, "forgotten_king");
-    assert_eq!(result.boundary, PINNACLE_DEPTH);
-    let phase_key = format!("{PINNACLE_DEPTH}:1");
-    let BossProgressValue::Entry(stored) = &state.boss_progress[&phase_key] else {
-        panic!("phase hp")
-    };
-    assert!(stored.hp_remaining.expect("hp") >= 0);
-}
-
-#[test]
-fn test_cannot_prestige_without_pinnacle_defeat() {
-    let state = BossRunState::with_all_tiers_defeated(PINNACLE_DEPTH);
-    let check = can_prestige(&state, 10);
-    assert!(!check.can_prestige);
-    assert!(check.reason.expect("reason").contains("stirs deeper"));
-}
-
-fn prestige_ready_state() -> BossRunState {
-    let mut state = BossRunState::with_all_tiers_defeated(PINNACLE_DEPTH);
-    state
-        .boss_progress
-        .insert(PINNACLE_DEPTH.to_string(), entry(BossStatus::Defeated));
-    state
-}
-
-#[test]
-fn test_can_prestige_with_pinnacle_defeated() {
-    assert!(can_prestige(&prestige_ready_state(), 10).can_prestige);
-}
-
-#[test]
-fn test_prestige_resets_pinnacle_state() {
-    let mut state = prestige_ready_state();
-    state.pinnacle_boss_id = Some("forgotten_king".to_owned());
-    state.pinnacle_phase = 3;
-    prestige_reset(&mut state, 10).expect("prestige");
-    assert!(state.pinnacle_boss_id.is_none());
-    assert_eq!(state.pinnacle_phase, 0);
-}
-
-#[test]
-fn test_prestige_clears_stale_pinnacle_phase_keys() {
-    let mut state = prestige_ready_state();
-    for phase in 1..=3 {
-        state.boss_progress.insert(
-            format!("{PINNACLE_DEPTH}:{phase}"),
-            entry(BossStatus::Active),
-        );
-    }
-    prestige_reset(&mut state, 10).expect("prestige");
-    for key in [
-        PINNACLE_DEPTH.to_string(),
-        format!("{PINNACLE_DEPTH}:1"),
-        format!("{PINNACLE_DEPTH}:2"),
-        format!("{PINNACLE_DEPTH}:3"),
-    ] {
-        assert!(!state.boss_progress.contains_key(&key), "{key}");
-    }
-}
-
-#[test]
-fn test_foreshadow_after_t275_cleared() {
-    let state = BossRunState::with_all_tiers_defeated(290);
-    let line = pinnacle_foreshadow_line(&state).expect("foreshadow");
-    assert!(PINNACLE_FORESHADOW_LINES.contains(&line));
-}
-
-#[test]
-fn test_no_foreshadow_when_pinnacle_defeated() {
-    let state = prestige_ready_state();
-    assert!(pinnacle_foreshadow_line(&state).is_none());
-}
-
-#[test]
-fn test_no_foreshadow_when_tiers_incomplete() {
-    let mut state = BossRunState::with_all_tiers_defeated(274);
-    state
-        .boss_progress
-        .insert("275".to_owned(), entry(BossStatus::Active));
-    assert!(pinnacle_foreshadow_line(&state).is_none());
-}
-
 #[test]
 fn test_drop_creates_artifact_with_two_stats() {
     let relic = roll_pinnacle_relic(0, "forgotten_king", 0, 1).expect("relic");
@@ -1061,24 +641,7 @@ fn test_drop_creates_artifact_with_two_stats() {
     assert_eq!(relic.stats.len(), 2);
     assert_eq!(relic.stat_ids.len(), 2);
     assert_ne!(relic.stat_ids[0], relic.stat_ids[1]);
-    let mut store = InMemoryBossStore::default();
-    assert!(
-        store.artifacts(10_001, 1).is_empty(),
-        "rolling alone must not persist"
-    );
-    let id = store.settle_relic(10_001, 1, &relic);
-    assert!(
-        store
-            .artifacts(10_001, 1)
-            .iter()
-            .any(|artifact| artifact.artifact_id.starts_with("pinnacle:"))
-    );
-    assert!(
-        store
-            .artifacts(10_001, 1)
-            .iter()
-            .any(|artifact| artifact.id == id)
-    );
+    assert!(relic.artifact_id.starts_with("pinnacle:"));
 }
 
 #[test]
@@ -1095,17 +658,6 @@ fn test_drop_name_derives_suffix_from_stats() {
     }
 }
 
-#[test]
-fn test_pinnacle_info_returns_phase_title() {
-    let mut state = pinnacle_state("forgotten_king");
-    state.pinnacle_phase = 2;
-    let info = build_pinnacle_info(&state).expect("info");
-    assert!(info.is_pinnacle);
-    assert_eq!(info.phase, 2);
-    assert_eq!(info.phase_total, 3);
-    assert_eq!(info.name, "The Crowned Hunger");
-}
-
 const AFFECTED_TIERS: [i32; 3] = [150, 200, 275];
 
 #[test]
@@ -1116,27 +668,10 @@ fn prestige_five_bosses_unlock_and_keep_their_identity() {
         (275, "hollow_cantor"),
     ] {
         for prestige in 0..=4 {
-            let mut state = BossRunState {
-                prestige_level: prestige,
-                ..BossRunState::default()
-            };
-            assert!(lock_regular_boss(&mut state, depth, Some(id)).is_err());
+            assert!(!pool_offers(depth, prestige, id));
         }
         for prestige in [5, 6, 8] {
-            let mut state = BossRunState {
-                prestige_level: prestige,
-                ..BossRunState::default()
-            };
-            assert_eq!(
-                lock_regular_boss(&mut state, depth, Some(id))
-                    .unwrap()
-                    .boss_id,
-                id
-            );
-            assert_eq!(
-                lock_regular_boss(&mut state, depth, None).unwrap().boss_id,
-                id
-            );
+            assert!(pool_offers(depth, prestige, id));
         }
         let boss = boss_by_id(id).expect("prestige five boss");
         assert_eq!(boss.prestige_required, 5);
@@ -1311,7 +846,6 @@ fn test_prestige2_boss_combat_content_registered() {
     for boss_id in AFFECTED_TIERS.into_iter().flat_map(expected_prestige_two) {
         let boss = boss_by_id(boss_id).expect("boss");
         assert!(boss.mechanic_pool.iter().all(|id| mechanic(id).is_some()));
-        assert!(stinger_registered(boss.stinger_id));
     }
     for (boss_id, mechanics, stinger) in [
         (
@@ -1453,85 +987,39 @@ fn test_phase_defs_match_their_boss_and_keep_the_tier_penalty() {
 
 #[test]
 fn test_p0_player_never_locks_late_prestige_boss() {
-    let mut state = BossRunState {
-        prestige_level: 0,
-        ..BossRunState::default()
-    };
-    let pool = boss_pool_for_tier(200, state.prestige_level);
+    let pool = boss_pool_for_tier(200, 0);
     assert_eq!(
         boss_ids(&pool),
         ["chronofrost", "faceless_void", "weaver"]
             .into_iter()
             .collect()
     );
-    let locked = lock_regular_boss(&mut state, 200, None).expect("lock");
-    assert_eq!(locked.boss_id, "chronofrost");
 }
 
 #[test]
 fn test_p3_player_can_lock_late_prestige_boss() {
-    let mut state = BossRunState {
-        prestige_level: 3,
-        ..BossRunState::default()
-    };
-    assert_eq!(
-        lock_regular_boss(&mut state, 200, Some("lilith"))
-            .expect("P3 lock")
-            .boss_id,
-        "lilith"
-    );
+    assert!(pool_offers(200, 3, "lilith"));
 }
 
 #[test]
 fn test_p1_player_never_locks_prestige2_boss() {
-    let mut state = BossRunState {
-        prestige_level: 1,
-        ..BossRunState::default()
-    };
-    let pool = boss_pool_for_tier(150, state.prestige_level);
+    let pool = boss_pool_for_tier(150, 1);
     assert_eq!(
         boss_ids(&pool),
         ["sporeling_sovereign", "treant_protector", "broodmother"]
             .into_iter()
             .collect()
     );
-    assert_eq!(
-        lock_regular_boss(&mut state, 150, None)
-            .expect("lock")
-            .boss_id,
-        "sporeling_sovereign"
-    );
 }
 
 #[test]
 fn test_p2_player_can_lock_prestige2_boss() {
-    let mut state = BossRunState {
-        prestige_level: 2,
-        ..BossRunState::default()
-    };
-    assert_eq!(
-        lock_regular_boss(&mut state, 150, Some("aegis_warden"))
-            .expect("P2 lock")
-            .boss_id,
-        "aegis_warden"
-    );
+    assert!(pool_offers(150, 2, "aegis_warden"));
 }
 
 fn assert_cannot_lock_new_prestige_two(tier: i32, boss_id: &str) {
-    let mut state = BossRunState {
-        prestige_level: 1,
-        ..BossRunState::default()
-    };
-    assert_eq!(
-        lock_regular_boss(&mut state, tier, Some(boss_id)),
-        Err(BossLockError::PreferredBossUnavailable(boss_id.to_owned())),
-    );
-    let locked = lock_regular_boss(&mut state, tier, None).expect("fallback lock");
-    assert_ne!(locked.boss_id, boss_id);
-    let BossProgressValue::Entry(stored) = &state.boss_progress[&tier.to_string()] else {
-        panic!("persisted lock")
-    };
-    assert_ne!(stored.boss_id.as_deref(), Some(boss_id));
+    assert!(!pool_offers(tier, 1, boss_id));
+    assert!(!boss_pool_for_tier(tier, 1).is_empty());
 }
 
 #[test]
@@ -1550,16 +1038,7 @@ fn test_p1_player_cannot_lock_new_prestige2_boss_275_saltveil_commodore() {
 }
 
 fn assert_new_prestige_two_locks(tier: i32, boss_id: &str, prestige_level: i32) {
-    let mut state = BossRunState {
-        prestige_level,
-        ..BossRunState::default()
-    };
-    let locked = lock_regular_boss(&mut state, tier, Some(boss_id)).expect("unlocked boss");
-    assert_eq!(locked.boss_id, boss_id);
-    let BossProgressValue::Entry(stored) = &state.boss_progress[&tier.to_string()] else {
-        panic!("persisted lock")
-    };
-    assert_eq!(stored.boss_id.as_deref(), Some(boss_id));
+    assert!(pool_offers(tier, prestige_level, boss_id));
 }
 
 macro_rules! lock_case {
@@ -1643,77 +1122,3 @@ lock_case!(
     "saltveil_commodore",
     8
 );
-
-fn wrapped_pinnacle_result() -> DictObject {
-    let relic = DictObject::new(BTreeMap::from([
-        (
-            "name".to_owned(),
-            NestedValue::Text("Knot of Voices".to_owned()),
-        ),
-        (
-            "stats".to_owned(),
-            NestedValue::TextList(vec!["Tougher skin".to_owned(), "Richer veins".to_owned()]),
-        ),
-    ]));
-    DictObject::new(BTreeMap::from([(
-        "pinnacle_relic".to_owned(),
-        NestedValue::Object(relic),
-    )]))
-}
-
-#[test]
-fn test_get_on_wrapped_nested_dict_returns_value() {
-    let wrapped = wrapped_pinnacle_result();
-    let Some(NestedValue::Object(relic)) = wrapped.get("pinnacle_relic") else {
-        panic!("nested relic")
-    };
-    assert_eq!(
-        relic.get("name"),
-        Some(&NestedValue::Text("Knot of Voices".to_owned()))
-    );
-    assert_eq!(
-        relic.get("stats"),
-        Some(&NestedValue::TextList(vec![
-            "Tougher skin".to_owned(),
-            "Richer veins".to_owned()
-        ])),
-    );
-    assert_eq!(
-        relic
-            .get("missing")
-            .unwrap_or(&NestedValue::Text("default".to_owned())),
-        &NestedValue::Text("default".to_owned())
-    );
-}
-
-#[test]
-fn test_pinnacle_phase3_result_renders_to_embed() {
-    let embed = build_pinnacle_victory_embed(&wrapped_pinnacle_result());
-    let relic_fields: Vec<&EmbedField> = embed
-        .fields
-        .iter()
-        .filter(|field| field.name.starts_with("Relic:"))
-        .collect();
-    assert_eq!(relic_fields.len(), 1);
-    assert!(relic_fields[0].name.contains("Knot of Voices"));
-}
-
-#[test]
-fn test_returns_true_when_lantern_in_inventory() {
-    let mut store = InMemoryBossStore::default();
-    assert!(!store.has_scout_lantern(10_001, 1));
-    store.add_inventory_item(10_001, 1, "lantern");
-    assert!(store.has_scout_lantern(10_001, 1));
-}
-
-#[test]
-fn test_returns_true_for_great_lantern_owner() {
-    let mut store = InMemoryBossStore::default();
-    store.add_inventory_item(10_001, 1, "great_lantern");
-    assert!(store.has_scout_lantern(10_001, 1));
-}
-
-#[test]
-fn test_false_when_no_lantern_owned() {
-    assert!(!InMemoryBossStore::default().has_scout_lantern(10_001, 1));
-}

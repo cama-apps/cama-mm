@@ -7,13 +7,11 @@
 //! attachment value, matching discord.py's consumed-file semantics.
 
 use std::borrow::Cow;
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read};
 use std::path::Path;
 use std::sync::Arc;
 
-use flate2::Compression;
 use flate2::read::ZlibDecoder;
-use flate2::write::ZlibEncoder;
 use gif::{ColorOutput, DecodeOptions, Encoder, Frame};
 use thiserror::Error;
 
@@ -1319,55 +1317,16 @@ fn paeth(left: u8, up: u8, upper_left: u8) -> u8 {
 }
 
 fn encode_png(image: &RgbaImage, mode: PixelMode) -> Vec<u8> {
-    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
-    let mut header = Vec::with_capacity(13);
-    header.extend_from_slice(&(image.width as u32).to_be_bytes());
-    header.extend_from_slice(&(image.height as u32).to_be_bytes());
-    header.extend_from_slice(&[8, if mode == PixelMode::Rgb { 2 } else { 6 }, 0, 0, 0]);
-    png_chunk(&mut png, b"IHDR", &header);
-    let channels = if mode == PixelMode::Rgb { 3 } else { 4 };
-    let mut filtered = Vec::with_capacity((image.width * channels + 1) * image.height);
-    for row in image.pixels.chunks_exact(image.width * 4) {
-        filtered.push(0);
-        if channels == 4 {
-            filtered.extend_from_slice(row);
-        } else {
-            for pixel in row.chunks_exact(4) {
-                filtered.extend_from_slice(&pixel[..3]);
-            }
-        }
+    if mode == PixelMode::Rgb {
+        let rgb = image
+            .pixels
+            .chunks_exact(4)
+            .flat_map(|pixel| [pixel[0], pixel[1], pixel[2]])
+            .collect::<Vec<_>>();
+        crate::png_encoder::encode_rgb_png(image.width, image.height, &rgb)
+    } else {
+        crate::png_encoder::encode_rgba_png(image.width, image.height, &image.pixels)
     }
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
-    encoder
-        .write_all(&filtered)
-        .expect("in-memory Dig PNG compression cannot fail");
-    let zlib = encoder
-        .finish()
-        .expect("in-memory Dig PNG compression cannot fail");
-    png_chunk(&mut png, b"IDAT", &zlib);
-    png_chunk(&mut png, b"IEND", &[]);
-    png
-}
-
-fn png_chunk(output: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
-    output.extend_from_slice(&(data.len() as u32).to_be_bytes());
-    output.extend_from_slice(kind);
-    output.extend_from_slice(data);
-    let mut checksum = kind.to_vec();
-    checksum.extend_from_slice(data);
-    output.extend_from_slice(&crc32(&checksum).to_be_bytes());
-}
-
-fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc = 0xffff_ffff_u32;
-    for byte in bytes {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            let mask = 0_u32.wrapping_sub(crc & 1);
-            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
-        }
-    }
-    !crc
 }
 
 fn rgba(color: (u8, u8, u8)) -> [u8; 4] {

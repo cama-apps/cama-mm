@@ -10,12 +10,12 @@ use cama_domain::dig_stats::{MinerStats, miner_stat_effects};
 use cama_domain::game_date::game_date_for_timestamp;
 
 use crate::dig_bosses::PINNACLE_DEPTH;
-use crate::dig_loot::{ArtifactDef, artifact_catalog};
 use crate::dig_service::{LuminosityLevel, luminosity_level};
 
 pub const RELIC_SLOTS_BASE: i64 = 1;
 pub const RELIC_SLOTS_MAX: i64 = 6;
 
+#[cfg(test)]
 pub const NEW_RELIC_IDS: [&str; 8] = [
     "prism_heart",
     "mana_conduit",
@@ -27,6 +27,7 @@ pub const NEW_RELIC_IDS: [&str; 8] = [
     "slow_drip",
 ];
 
+#[cfg(test)]
 pub const DORMANT_RELIC_IDS: [&str; 7] = [
     "root_network",
     "frozen_clock",
@@ -37,6 +38,7 @@ pub const DORMANT_RELIC_IDS: [&str; 7] = [
     "patient_stone",
 ];
 
+#[cfg(test)]
 pub const BUFF_FUN_RELIC_IDS: [&str; 7] = [
     "midas_splinter",
     "lucky_seam",
@@ -55,6 +57,25 @@ pub const TROPHY_RELIC_IDS: [&str; 6] = [
     "hateborn_ember",
     "deaths_door",
 ];
+
+/// Python's `TROPHY_CARVE_RATE`: the per-kill chance a boss's signature trophy
+/// carves, rolled on every full kill until the player owns it.
+pub const TROPHY_CARVE_RATE: f64 = 0.25;
+
+/// Python's `BossDef.trophy_relic_id`: the signature trophy each trophy boss
+/// carves on a full kill. Trophies come from nowhere else.
+#[must_use]
+pub fn trophy_relic_for_boss(boss_id: &str) -> Option<&'static str> {
+    match boss_id {
+        "blightcoil" => Some("weeping_fang"),
+        "rimebound_king" => Some("runebitten_shard"),
+        "spineback" => Some("aching_spine"),
+        "xalatath" => Some("listening_shard"),
+        "lilith" => Some("hateborn_ember"),
+        "nameless_depth" => Some("deaths_door"),
+        _ => None,
+    }
+}
 
 /// The lazy Slow Drip settlement used at the beginning of a live Dig.
 /// `gross_jc` is the daily-cap amount consumed by the claim row; `credit_jc`
@@ -85,158 +106,6 @@ pub fn settle_slow_drip_claim(
         gross_jc,
         credit_jc: scale_positive_dig_jc(adjusted.max(0)),
         claimed_after: already.saturating_add(gross_jc),
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RelicText {
-    pub lore: &'static str,
-    pub effect: &'static str,
-}
-
-const RELIC_TEXTS: [(&str, RelicText); 15] = [
-    (
-        "prism_heart",
-        RelicText {
-            lore: "A geode that drinks colour from the air. What it gives back depends on what you brought.",
-            effect: "Bonus shifts with today's mana color",
-        },
-    ),
-    (
-        "mana_conduit",
-        RelicText {
-            lore: "A filament of half-fused crystal. When you spend deeply, a thread of it returns to your pocket.",
-            effect: "Refund 25% of any tap-mana shop cost",
-        },
-    ),
-    (
-        "bloodstone",
-        RelicText {
-            lore: "It does not pulse. It bargains. Half the time it doubles your haul; the other half it's hungry.",
-            effect: "Coin-flip per dig: +50% or -25% JC",
-        },
-    ),
-    (
-        "gamblers_charm",
-        RelicText {
-            lore: "Won, lost, won again. A talisman that pays you for surviving the bad rolls.",
-            effect: "Survive a cave-in: gain 50% of would-be lost depth as JC",
-        },
-    ),
-    (
-        "vendetta_coin",
-        RelicText {
-            lore: "Two faces. Both yours. Both angry. It remembers every shove down the shaft.",
-            effect: "Sabotaged → reflect 50% damage and gain JC",
-        },
-    ),
-    (
-        "mentors_lantern",
-        RelicText {
-            lore: "Old miners say a lantern shared lights two paths. It pays the truth of that out, in coin.",
-            effect: "Helping another digger: both gain +10 JC",
-        },
-    ),
-    (
-        "stormcaller",
-        RelicText {
-            lore: "Threaded with copper veins. It hums on storm days and goes silent in fair weather.",
-            effect: "Storm: +50% yield, no hazard. Sunny: +10%",
-        },
-    ),
-    (
-        "slow_drip",
-        RelicText {
-            lore: "A clay jar that fills itself a coin at a time when no one is looking.",
-            effect: "Idle income: 0.5 JC/min while away (cap 100/day)",
-        },
-    ),
-    (
-        "midas_splinter",
-        RelicText {
-            lore: "A fleck of something that was never quite ore. It warms when the digging is good.",
-            effect: "Sometimes the rock just *gives* (chance to double a dig's coin)",
-        },
-    ),
-    (
-        "lucky_seam",
-        RelicText {
-            lore: "Old hands swear the mountain keeps one good secret for every thousand it buries.",
-            effect: "Most veins are ore; one in a great many is a fortune (rare jackpot strike)",
-        },
-    ),
-    (
-        "prospectors_streak",
-        RelicText {
-            lore: "A tally-stone worn smooth by a thumb that counted every safe step — until it didn't.",
-            effect: "Confidence compounds down here (more coin the longer you avoid a collapse; lose it all if one hits)",
-        },
-    ),
-    (
-        "first_light",
-        RelicText {
-            lore: "It holds a sliver of dawn that never fully goes out — brightest before anyone else has stirred.",
-            effect: "The first swing of the day rings truest (your first dig each day pays more)",
-        },
-    ),
-    (
-        "berserkers_mark",
-        RelicText {
-            lore: "A brand that drinks pain and asks for more. It was cut into someone once, against their will.",
-            effect: "It drinks your bruises and hits back (more damage to bosses the more you've been hit)",
-        },
-    ),
-    (
-        "gamblers_edge",
-        RelicText {
-            lore: "A coin filed to a blade on one edge. It has never once landed the way you feared.",
-            effect: "The dice like you in the dark (your hits sometimes land double against a boss)",
-        },
-    ),
-    (
-        "deaths_door",
-        RelicText {
-            lore: "You have died here before. You got up. The Nameless Depth remembers, and resents it.",
-            effect: "You got up last time (a chance to survive a killing blow)",
-        },
-    ),
-];
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RelicContent {
-    pub definition: ArtifactDef,
-    pub text: RelicText,
-}
-
-#[must_use]
-pub fn relic_catalog() -> Vec<ArtifactDef> {
-    artifact_catalog()
-        .into_iter()
-        .filter(|artifact| artifact.is_relic)
-        .collect()
-}
-
-#[must_use]
-pub fn relic_content(relic_id: &str) -> Option<RelicContent> {
-    let definition = artifact_catalog()
-        .into_iter()
-        .find(|artifact| artifact.id == relic_id && artifact.is_relic)?;
-    let text = RELIC_TEXTS
-        .iter()
-        .find_map(|(id, text)| (*id == relic_id).then_some(*text))?;
-    Some(RelicContent { definition, text })
-}
-
-#[must_use]
-pub fn trophy_relic_for_boss(boss_id: &str) -> Option<&'static str> {
-    match boss_id {
-        "blightcoil" => Some("weeping_fang"),
-        "rimebound_king" => Some("runebitten_shard"),
-        "spineback" => Some("aching_spine"),
-        "xalatath" => Some("listening_shard"),
-        "lilith" => Some("hateborn_ember"),
-        "nameless_depth" => Some("deaths_door"),
-        _ => None,
     }
 }
 
@@ -543,164 +412,6 @@ pub fn apply_shifting_idol_stats(
         }
     }
     result
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct RelicCombatStatus {
-    pub berserk_rage: Option<i64>,
-    pub double_hit_enabled: bool,
-    pub deaths_door_available: bool,
-    pub burn_rounds_remaining: i64,
-    pub bleed_rounds_remaining: i64,
-}
-
-#[must_use]
-pub fn relic_combat_status(relics: &RelicSet) -> RelicCombatStatus {
-    RelicCombatStatus {
-        berserk_rage: relics.contains("berserkers_mark").then_some(0),
-        double_hit_enabled: relics.contains("gamblers_edge"),
-        deaths_door_available: relics.contains("deaths_door"),
-        ..RelicCombatStatus::default()
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RelicRoundInput {
-    pub round_num: i64,
-    pub player_hp: i64,
-    pub boss_hp: i64,
-    pub player_hit: f64,
-    pub player_damage: i64,
-    pub boss_hit: f64,
-    pub boss_damage: i64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RelicRoundTerminal {
-    PlayerWon,
-    PlayerLost,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct RelicRoundEvents {
-    pub round_num: i64,
-    pub player_hit: bool,
-    pub boss_hit: bool,
-    pub double_hit: bool,
-    pub deaths_door: bool,
-    pub player_hp: i64,
-    pub boss_hp: i64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RelicRoundResult {
-    pub events: RelicRoundEvents,
-    pub player_hp: i64,
-    pub boss_hp: i64,
-    pub terminal: Option<RelicRoundTerminal>,
-}
-
-#[must_use]
-pub fn run_relic_round(
-    input: RelicRoundInput,
-    status: &mut RelicCombatStatus,
-    entropy: &mut impl RelicEntropy,
-) -> RelicRoundResult {
-    let mut events = RelicRoundEvents {
-        round_num: input.round_num,
-        ..RelicRoundEvents::default()
-    };
-    let mut player_hp = input.player_hp;
-    let mut boss_hp = input.boss_hp;
-    let hp_at_round_start = player_hp;
-
-    if status.burn_rounds_remaining > 0 {
-        player_hp -= 1;
-        status.burn_rounds_remaining -= 1;
-    }
-    if status.bleed_rounds_remaining > 0 {
-        player_hp -= 1;
-        status.bleed_rounds_remaining -= 1;
-    }
-    if player_hp <= 0 && !try_deaths_door(status, entropy, &mut events, &mut player_hp) {
-        events.player_hp = 0;
-        events.boss_hp = boss_hp.max(0);
-        return RelicRoundResult {
-            events,
-            player_hp,
-            boss_hp,
-            terminal: Some(RelicRoundTerminal::PlayerLost),
-        };
-    }
-
-    let player_landed = entropy.unit() < input.player_hit;
-    events.player_hit = player_landed;
-    if player_landed {
-        let mut damage = input.player_damage;
-        if let Some(rage) = status.berserk_rage.filter(|rage| *rage > 0) {
-            damage = damage.saturating_add(rage.min(2));
-        }
-        if status.double_hit_enabled && entropy.unit() < 0.10 {
-            damage = damage.saturating_mul(2);
-            events.double_hit = true;
-        }
-        boss_hp = boss_hp.saturating_sub(damage);
-    }
-    events.boss_hp = boss_hp.max(0);
-    if boss_hp <= 0 {
-        events.player_hp = player_hp.max(0);
-        return RelicRoundResult {
-            events,
-            player_hp,
-            boss_hp,
-            terminal: Some(RelicRoundTerminal::PlayerWon),
-        };
-    }
-
-    let boss_landed = entropy.unit() < input.boss_hit;
-    events.boss_hit = boss_landed;
-    if boss_landed {
-        player_hp = player_hp.saturating_sub(input.boss_damage);
-    }
-    if let Some(rage) = status.berserk_rage.as_mut()
-        && player_hp < hp_at_round_start
-    {
-        *rage = rage.saturating_add(1).min(2);
-    }
-    if player_hp <= 0 && !try_deaths_door(status, entropy, &mut events, &mut player_hp) {
-        events.player_hp = 0;
-        events.boss_hp = boss_hp.max(0);
-        return RelicRoundResult {
-            events,
-            player_hp,
-            boss_hp,
-            terminal: Some(RelicRoundTerminal::PlayerLost),
-        };
-    }
-    events.player_hp = player_hp.max(0);
-    events.boss_hp = boss_hp.max(0);
-    RelicRoundResult {
-        events,
-        player_hp,
-        boss_hp,
-        terminal: None,
-    }
-}
-
-fn try_deaths_door(
-    status: &mut RelicCombatStatus,
-    entropy: &mut impl RelicEntropy,
-    events: &mut RelicRoundEvents,
-    player_hp: &mut i64,
-) -> bool {
-    if status.deaths_door_available && entropy.unit() < 0.40 {
-        status.deaths_door_available = false;
-        events.deaths_door = true;
-        *player_hp = 1;
-        true
-    } else {
-        false
-    }
 }
 
 #[cfg(test)]

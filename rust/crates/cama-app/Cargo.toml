@@ -14,6 +14,7 @@ cama-app-platform = { path = "../cama-app-platform" }
 cama-db = { path = "../cama-db" }
 cama-domain = { path = "../cama-domain" }
 chrono.workspace = true
+chrono-tz.workspace = true
 fontdue.workspace = true
 flate2.workspace = true
 fastrand.workspace = true
@@ -27,7 +28,7 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-chrono-tz.workspace = true
+cama-app-dig = { path = "../cama-app-dig", features = ["test-support"] }
 tempfile.workspace = true
 
 [lints]

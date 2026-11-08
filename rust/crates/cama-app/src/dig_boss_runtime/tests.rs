@@ -3,6 +3,7 @@ use cama_db::core_repositories::{NewPlayer, PlayerRepository};
 use cama_db::economy_event_repository::{
     EconomyEventRepository, EventDirection, EventDraft, EventEffects,
 };
+use cama_domain::game_date::game_date_for_timestamp;
 use rusqlite::{Connection, params};
 
 use super::*;
@@ -52,6 +53,40 @@ fn fixture() -> FastTestDatabase {
         )
         .expect("tunnel");
     database
+}
+
+/// Fight a regular boss through the live start path, answering a mechanic
+/// prompt with its safe option, and return the settled fight.
+trait LiveRegularFight {
+    fn fight_live_regular(
+        &self,
+        request: DigBossRuntimeRequest,
+        risk: RiskTier,
+        wager: i64,
+        entropy: SequenceEntropy,
+    ) -> Result<DigBossRuntimeResult<ResolvedFight>, DigBossRuntimeError>;
+}
+
+impl LiveRegularFight for DigBossRuntimeService {
+    fn fight_live_regular(
+        &self,
+        request: DigBossRuntimeRequest,
+        risk: RiskTier,
+        wager: i64,
+        entropy: SequenceEntropy,
+    ) -> Result<DigBossRuntimeResult<ResolvedFight>, DigBossRuntimeError> {
+        let started = self.start_regular(request, risk, wager, entropy.clone())?;
+        if let StartBossDuelOutcome::Paused(paused) = &started.outcome {
+            let safe = mechanic_by_id(&paused.mechanic_id)
+                .expect("registered mechanic")
+                .safe_option_index;
+            return self.resume_regular(request, safe, entropy);
+        }
+        Ok(started.map_outcome(|outcome| match outcome {
+            StartBossDuelOutcome::Resolved(resolved) => resolved,
+            StartBossDuelOutcome::Paused(_) => unreachable!("paused duels resume above"),
+        }))
+    }
 }
 
 fn set_minimal_accuracy_encounter(database: &FastTestDatabase, survival: i64) {
@@ -266,6 +301,109 @@ fn regular_full_kill_persists_and_projects_both_loud_drop_policies() {
     );
 }
 
+/// Run the live post-settlement drop policy for one regular kill and return
+/// the gear drop it granted, if any.
+fn regular_kill_gear_drop(
+    runtime: &DigBossRuntimeService,
+    boundary: i32,
+    entropy: &mut SequenceEntropy,
+) -> Option<DigBossGearDrop> {
+    let mut resolved = regular_resolved_fixture(true, Vec::new());
+    resolved.boundary = boundary;
+    let mut gear_drop = None;
+    let mut relic_drop = None;
+    let mut broken = Vec::new();
+    let mut warnings = Vec::new();
+    runtime.enrich_regular_resolution(
+        pinnacle_request(1_700_000_000),
+        true,
+        &resolved,
+        &mut gear_drop,
+        &mut relic_drop,
+        &mut broken,
+        &mut warnings,
+        entropy,
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    gear_drop
+}
+
+fn boss_drop_rows(database: &FastTestDatabase) -> Vec<(String, i64, i64, i64)> {
+    let connection = Connection::open(database.path()).expect("boss drop DB");
+    let mut statement = connection
+        .prepare(
+            "SELECT slot,tier,durability,equipped FROM dig_gear
+              WHERE discord_id=?1 AND guild_id=?2 AND source='boss_drop'
+              ORDER BY id",
+        )
+        .expect("prepare boss drops");
+    statement
+        .query_map(params![PLAYER, GUILD], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .expect("query boss drops")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect boss drops")
+}
+
+#[test]
+fn regular_kill_gear_drop_misses_at_the_drop_rate_and_skips_unmapped_boundaries() {
+    let database = fixture();
+    let runtime = pinnacle_runtime(&database);
+
+    let mut at_rate = SequenceEntropy::new(vec![GEAR_BOSS_DROP_RATE], vec![2], Vec::new());
+    assert_eq!(regular_kill_gear_drop(&runtime, 100, &mut at_rate), None);
+
+    // Boundary 25 has no gear tier, so the drop gate never draws its roll.
+    let mut unmapped = SequenceEntropy::new(vec![0.0], vec![2], Vec::new());
+    assert_eq!(regular_kill_gear_drop(&runtime, 25, &mut unmapped), None);
+    assert_eq!(
+        unmapped.next_unit(),
+        0.0,
+        "the depth gate precedes the roll"
+    );
+    assert!(boss_drop_rows(&database).is_empty());
+
+    let mut below_rate = SequenceEntropy::new(
+        vec![GEAR_BOSS_DROP_RATE - f64::EPSILON],
+        vec![2],
+        Vec::new(),
+    );
+    let drop = regular_kill_gear_drop(&runtime, 150, &mut below_rate).expect("gear drop");
+    assert_eq!((drop.slot, drop.tier), (DomainGearSlot::Boots, 5));
+    assert_eq!(
+        boss_drop_rows(&database),
+        [("boots".to_owned(), 5, 20, 0)],
+        "the drop is stored unequipped at full durability"
+    );
+}
+
+#[test]
+fn regular_kill_gear_drop_rate_stays_in_band_over_many_kills() {
+    let database = fixture();
+    let runtime = pinnacle_runtime(&database);
+    let mut state = 42_u64;
+    let mut next_unit = || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (state >> 11) as f64 / (1_u64 << 53) as f64
+    };
+    let kills = 1_000;
+    let drops = (0..kills)
+        .filter(|_| {
+            let mut entropy = SequenceEntropy::new(vec![next_unit()], vec![0], Vec::new());
+            regular_kill_gear_drop(&runtime, 100, &mut entropy).is_some()
+        })
+        .count();
+    let rate = drops as f64 / f64::from(kills);
+    assert!(
+        (rate - GEAR_BOSS_DROP_RATE).abs() < 0.02,
+        "observed drop rate {rate}"
+    );
+    assert_eq!(boss_drop_rows(&database).len(), drops);
+}
+
 #[test]
 fn regular_phase_transition_and_loss_suppress_loud_drop_rolls() {
     let database = fixture();
@@ -393,6 +531,70 @@ fn encounters_repair_max_depth_lagging_behind_current_depth() {
         assert_eq!(depth, i64::from(info.boundary - 1));
         assert_eq!(max_depth, depth);
         assert_eq!(balance, 100);
+    }
+}
+
+#[test]
+fn pinnacle_encounter_locks_one_pool_boss_and_keeps_it() {
+    let database = fixture();
+    set_pinnacle(&database, 1, "active", None);
+    Connection::open(database.path())
+        .expect("pinnacle lock DB")
+        .execute_batch("UPDATE tunnels SET pinnacle_boss_id=NULL;")
+        .expect("unlocked pinnacle");
+    let runtime = pinnacle_runtime(&database);
+    let first = runtime
+        .encounter(
+            pinnacle_request(1_700_000_000),
+            SequenceEntropy::constant(0.99),
+        )
+        .expect("first pinnacle encounter");
+    assert!(first.is_pinnacle);
+    assert!(crate::dig_bosses::PINNACLE_POOL_IDS.contains(&first.boss_id.as_str()));
+    let again = runtime
+        .encounter(
+            pinnacle_request(1_700_000_100),
+            SequenceEntropy::constant(0.0),
+        )
+        .expect("repeat pinnacle encounter");
+    assert_eq!(again.boss_id, first.boss_id);
+    let stored: Option<String> = Connection::open(database.path())
+        .expect("reload pinnacle lock")
+        .query_row(
+            "SELECT pinnacle_boss_id FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
+            params![PLAYER, GUILD],
+            |row| row.get(0),
+        )
+        .expect("persisted pinnacle lock");
+    assert_eq!(stored.as_deref(), Some(first.boss_id.as_str()));
+    let boss = crate::dig_bosses::pinnacle_by_id(&again.boss_id).expect("pool boss");
+    assert_eq!(
+        again.boss_name,
+        boss.phases[usize::from(again.phase) - 1].title
+    );
+}
+
+#[test]
+fn encounter_reports_a_scout_lantern_only_when_one_is_owned() {
+    for item in [None, Some("lantern"), Some("great_lantern")] {
+        let database = fixture();
+        if let Some(item) = item {
+            Connection::open(database.path())
+                .expect("lantern DB")
+                .execute(
+                    "INSERT INTO dig_inventory (discord_id,guild_id,item_type,queued,created_at)
+                     VALUES (?1,?2,?3,0,100)",
+                    params![PLAYER, GUILD, item],
+                )
+                .expect("owned lantern");
+        }
+        let info = pinnacle_runtime(&database)
+            .encounter(
+                pinnacle_request(1_700_000_000),
+                SequenceEntropy::constant(0.5),
+            )
+            .expect("encounter");
+        assert_eq!(info.has_scout_lantern, item.is_some(), "{item:?}");
     }
 }
 
@@ -746,10 +948,16 @@ fn final_victory_atomically_awards_stat_point_and_keeps_run_scoped_ledger() {
                 preparation_mutation: crate::boss_multi_tier::BossPreparationMutation::Clear {
                     boundary: 25,
                 },
+                paused_duel: None,
+                trophy_relic: None,
             },
         )
         .expect("victory");
     assert!(repository.last_action_id().is_some());
+    assert!(
+        repository.stat_point_awarded(),
+        "the result reports the first-clear S point"
+    );
 
     let connection = Connection::open(database.path()).expect("verify DB");
     let row = connection
@@ -799,6 +1007,471 @@ fn final_victory_atomically_awards_stat_point_and_keeps_run_scoped_ledger() {
             .expect("bankruptcy ledger"),
         1
     );
+}
+
+const SELECTED_DIRT_ROUTE: &str = r#"{"end_depth": 25, "layer": "Dirt", "offered": ["shored_passage", "old_supports", "fossil_seam"], "selected": "shored_passage", "start_depth": 0}"#;
+
+fn set_route_state(database: &FastTestDatabase, route_state: &str) {
+    Connection::open(database.path())
+        .expect("route state DB")
+        .execute(
+            "UPDATE tunnels SET route_state=?1 WHERE discord_id=?2 AND guild_id=?3",
+            params![route_state, PLAYER, GUILD],
+        )
+        .expect("route state");
+}
+
+fn persisted_route_state(database: &FastTestDatabase) -> Option<String> {
+    Connection::open(database.path())
+        .expect("route verify DB")
+        .query_row(
+            "SELECT route_state FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
+            params![PLAYER, GUILD],
+            |row| row.get(0),
+        )
+        .expect("persisted route state")
+}
+
+fn commit_grothak_outcome(database: &FastTestDatabase, won: bool, status: BossStatus) {
+    let mut repository = SqliteBossRepository::new(database.path(), 1_700_000_000);
+    let tunnel = repository.load_tunnel(key()).expect("tunnel");
+    let mut next = tunnel.clone();
+    let BossProgressValue::Entry(entry) = next.boss_progress.get_mut("25").expect("boss progress")
+    else {
+        panic!("expected structured boss entry");
+    };
+    entry.status = status;
+    repository
+        .commit(
+            key(),
+            tunnel.revision,
+            RepositoryCommit {
+                next_tunnel: next,
+                audit: Some(BossAuditRecord {
+                    boss_id: "grothak".to_owned(),
+                    boundary: 25,
+                    won,
+                    jc_delta: 0,
+                    depth_after: 25,
+                }),
+                ..RepositoryCommit::default()
+            },
+        )
+        .expect("boss outcome");
+}
+
+/// Python's `_build_route_offer_state`: a tier-boss kill persists the next
+/// layer's offer (one universal route, never the previous universal route,
+/// plus two of that layer's routes) in the victory write.
+#[test]
+fn final_victory_offers_the_next_layer_routes_in_the_victory_commit() {
+    let database = fixture();
+    set_route_state(&database, SELECTED_DIRT_ROUTE);
+    commit_grothak_outcome(&database, true, BossStatus::Defeated);
+
+    let raw = persisted_route_state(&database).expect("route offer");
+    let offer = crate::dig_routes::parse_route_state(Some(&raw)).expect("valid route offer");
+    assert_eq!(offer.layer, "Stone");
+    assert_eq!((offer.start_depth, offer.end_depth), (25, 50));
+    assert_eq!(offer.selected, None);
+    let routes = offer
+        .offered
+        .iter()
+        .map(|route_id| crate::dig_routes::route_by_id(route_id).expect("catalog route"))
+        .collect::<Vec<_>>();
+    let universal = routes
+        .iter()
+        .filter(|route| route.layer.is_none())
+        .collect::<Vec<_>>();
+    assert_eq!(universal.len(), 1);
+    assert_ne!(universal[0].id, "shored_passage");
+    assert_eq!(
+        routes
+            .iter()
+            .filter(|route| route.layer == Some("Stone"))
+            .count(),
+        2
+    );
+    assert!(crate::dig_routes::route_status(Some(&raw)).choice_required);
+}
+
+#[test]
+fn phase_transitions_and_losses_keep_the_saved_route() {
+    let database = fixture();
+    set_route_state(&database, SELECTED_DIRT_ROUTE);
+    commit_grothak_outcome(&database, true, BossStatus::PhaseOneDefeated);
+    assert_eq!(
+        persisted_route_state(&database).as_deref(),
+        Some(SELECTED_DIRT_ROUTE)
+    );
+    commit_grothak_outcome(&database, false, BossStatus::Active);
+    assert_eq!(
+        persisted_route_state(&database).as_deref(),
+        Some(SELECTED_DIRT_ROUTE)
+    );
+}
+
+/// A live boss kill gates the next Dig on the new junction, and choosing one
+/// of the offered routes through the production runtime clears that gate.
+#[test]
+fn live_boss_victory_gates_the_next_dig_until_a_route_is_chosen() {
+    let database = fixture();
+    set_minimal_accuracy_encounter(&database, 20);
+    let now = 1_700_000_000;
+    let victory = DigBossRuntimeService::sqlite({
+        let mut config = DigBossRuntimeConfig::new(database.path(), 20);
+        config.economy_event.enabled = false;
+        config
+    })
+    .fight_live_regular(
+        DigBossRuntimeRequest {
+            discord_id: PLAYER,
+            guild_id: GUILD,
+            now,
+        },
+        RiskTier::Cautious,
+        0,
+        SequenceEntropy::new(vec![0.45, 0.99], vec![0], vec![]),
+    )
+    .expect("boss victory");
+    assert!(victory.outcome.won);
+    assert!(victory.outcome.phase_transition.is_none());
+
+    let runtime = crate::dig_runtime::DigRuntimeService::sqlite(database.path());
+    let dig = crate::dig_runtime::DigRuntimeRequest {
+        discord_id: PLAYER,
+        guild_id: GUILD,
+        now: now + 10,
+        paid: false,
+        forced_event: false,
+    };
+    let blocked = runtime.dig(dig).expect("gated dig");
+    assert!(!blocked.success);
+    assert!(blocked.route_choice_required);
+
+    let offer = crate::dig_routes::parse_route_state(persisted_route_state(&database).as_deref())
+        .expect("route offer");
+    assert_eq!(offer.layer, "Stone");
+    let chosen = offer.offered[1].clone();
+    let selected = runtime
+        .choose_route(PLAYER, GUILD, &chosen, now + 20)
+        .expect("route choice");
+    assert!(selected.success, "{:?}", selected.error);
+    let status = crate::dig_routes::route_status(persisted_route_state(&database).as_deref());
+    assert!(!status.choice_required);
+    assert_eq!(
+        status.active_route.map(|route| route.id),
+        Some(chosen.as_str())
+    );
+    assert!(!runtime.dig(dig).expect("ungated dig").route_choice_required);
+}
+
+/// Park the tunnel before a one-HP Nameless Depth, the trophy boss every
+/// prestige meets at 275, with every earlier boss cleared.
+fn set_trophy_boss_encounter(database: &FastTestDatabase) {
+    Connection::open(database.path())
+        .expect("trophy boss DB")
+        .execute(
+            "UPDATE tunnels
+                SET depth=274,max_depth=274,boss_progress=?1,cheer_data=NULL,
+                    stat_survival=20
+              WHERE discord_id=?2 AND guild_id=?3",
+            params![
+                r#"{"25":"defeated","50":"defeated","75":"defeated","100":"defeated","150":"defeated","200":"defeated","275":{"boss_id":"nameless_depth","status":"active","hp_remaining":1,"hp_max":1}}"#,
+                PLAYER,
+                GUILD,
+            ],
+        )
+        .expect("trophy boss encounter");
+}
+
+fn owned_artifact_count(database: &FastTestDatabase, artifact_id: &str) -> i64 {
+    Connection::open(database.path())
+        .expect("artifact DB")
+        .query_row(
+            "SELECT COUNT(*) FROM dig_artifacts
+              WHERE discord_id=?1 AND guild_id=?2 AND artifact_id=?3 AND is_relic=1",
+            params![PLAYER, GUILD, artifact_id],
+            |row| row.get(0),
+        )
+        .expect("artifact count")
+}
+
+/// Python's `_maybe_carve_trophy_relic`: a full kill of a trophy boss carves
+/// its signature trophy at the carve rate, inside the victory commit, and the
+/// result reports it beside the first-clear S point.
+#[test]
+fn trophy_boss_kill_carves_its_signature_trophy_in_the_victory_commit() {
+    let database = fixture();
+    set_trophy_boss_encounter(&database);
+    let victory = pinnacle_runtime(&database)
+        .fight_live_regular(
+            pinnacle_request(1_700_000_000),
+            RiskTier::Cautious,
+            0,
+            SequenceEntropy::constant(0.0),
+        )
+        .expect("trophy boss victory");
+    assert!(victory.outcome.won);
+    assert!(victory.outcome.phase_transition.is_none());
+    assert!(victory.stat_point_awarded, "first clear of 275");
+    let trophy = victory.trophy_relic_drop.expect("carved trophy");
+    assert_eq!(trophy.artifact_id, "deaths_door");
+    assert_eq!(trophy.name, "Death's Door");
+    assert_eq!(trophy.rarity, "legendary");
+    let stored: (String, i64, i64, i64) = Connection::open(database.path())
+        .expect("trophy DB")
+        .query_row(
+            "SELECT artifact_id,is_relic,equipped,found_at FROM dig_artifacts WHERE id=?1",
+            [trophy.database_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("stored trophy");
+    assert_eq!(stored, ("deaths_door".to_owned(), 1, 0, 1_700_000_000));
+}
+
+#[test]
+fn trophy_carve_misses_at_the_rate_and_never_duplicates_an_owned_trophy() {
+    let database = fixture();
+    set_trophy_boss_encounter(&database);
+    let missed = pinnacle_runtime(&database)
+        .fight_live_regular(
+            pinnacle_request(1_700_000_000),
+            RiskTier::Cautious,
+            0,
+            SequenceEntropy::constant(crate::dig_relic_rework::TROPHY_CARVE_RATE),
+        )
+        .expect("victory at the carve rate");
+    assert!(missed.outcome.won);
+    assert_eq!(missed.trophy_relic_drop, None);
+    assert_eq!(owned_artifact_count(&database, "deaths_door"), 0);
+
+    let database = fixture();
+    set_trophy_boss_encounter(&database);
+    Connection::open(database.path())
+        .expect("owned trophy DB")
+        .execute(
+            "INSERT INTO dig_artifacts
+             (discord_id,guild_id,artifact_id,found_at,is_relic,equipped)
+             VALUES (?1,?2,'deaths_door',1,1,0)",
+            params![PLAYER, GUILD],
+        )
+        .expect("owned trophy");
+    let owned = pinnacle_runtime(&database)
+        .fight_live_regular(
+            pinnacle_request(1_700_000_000),
+            RiskTier::Cautious,
+            0,
+            SequenceEntropy::constant(0.0),
+        )
+        .expect("victory with the trophy owned");
+    assert!(owned.outcome.won);
+    assert!(owned.action_id.is_some(), "the victory still settles");
+    assert_eq!(owned.trophy_relic_drop, None);
+    assert_eq!(owned_artifact_count(&database, "deaths_door"), 1);
+}
+
+/// A boss without a signature trophy never carves one.
+#[test]
+fn non_trophy_boss_kill_carves_nothing() {
+    let database = fixture();
+    set_minimal_accuracy_encounter(&database, 20);
+    let victory = pinnacle_runtime(&database)
+        .fight_live_regular(
+            pinnacle_request(1_700_000_000),
+            RiskTier::Cautious,
+            0,
+            SequenceEntropy::constant(0.0),
+        )
+        .expect("grothak victory");
+    assert!(victory.outcome.won);
+    assert_eq!(victory.trophy_relic_drop, None);
+    assert!(victory.stat_point_awarded);
+}
+
+/// Python's `_boss_resolution_conflict_result`: a duel answered after its
+/// encounter was settled elsewhere reports that, naming the waiting route
+/// junction when the settlement left one, and pays nothing.
+#[test]
+fn resume_after_the_encounter_settled_elsewhere_reports_the_conflict_copy() {
+    let database = fixture();
+    set_route_state(&database, SELECTED_DIRT_ROUTE);
+    SqliteBossRepository::new(database.path(), 1_700_000_000)
+        .restore_claimed_duel(key(), paused_duel())
+        .expect("paused duel");
+    // Another view kills the boss and opens the next layer's junction.
+    commit_grothak_outcome(&database, true, BossStatus::Defeated);
+    assert!(
+        crate::dig_routes::route_status(persisted_route_state(&database).as_deref())
+            .choice_required
+    );
+    let balance = player_balance(&database);
+    let error = pinnacle_runtime(&database)
+        .resume_regular(
+            pinnacle_request(1_700_000_010),
+            0,
+            SequenceEntropy::constant(0.0),
+        )
+        .expect_err("the encounter was already settled");
+    assert!(matches!(
+        error,
+        DigBossRuntimeError::FightResolvedRouteSaved
+    ));
+    assert_eq!(
+        error.to_string(),
+        "This boss fight was already resolved. The saved route remains available."
+    );
+    assert_eq!(player_balance(&database), balance, "nothing is paid twice");
+
+    let database = fixture();
+    SqliteBossRepository::new(database.path(), 1_700_000_000)
+        .restore_claimed_duel(key(), paused_duel())
+        .expect("paused duel");
+    Connection::open(database.path())
+        .expect("reset DB")
+        .execute(
+            "UPDATE tunnels SET depth=0,boss_progress='{}'
+              WHERE discord_id=?1 AND guild_id=?2",
+            params![PLAYER, GUILD],
+        )
+        .expect("tunnel left the encounter");
+    let error = pinnacle_runtime(&database)
+        .resume_regular(
+            pinnacle_request(1_700_000_010),
+            0,
+            SequenceEntropy::constant(0.0),
+        )
+        .expect_err("the encounter was already settled");
+    assert_eq!(
+        error.to_string(),
+        "This boss fight was already resolved by another view."
+    );
+}
+
+fn boss_fight_audit_count(database: &FastTestDatabase) -> i64 {
+    Connection::open(database.path())
+        .expect("audit DB")
+        .query_row(
+            "SELECT COUNT(*) FROM dig_actions
+              WHERE actor_id=?1 AND guild_id=?2 AND action_type='boss_fight'",
+            params![PLAYER, GUILD],
+            |row| row.get(0),
+        )
+        .expect("boss fight audits")
+}
+
+/// Python's `BossDuelView.on_timeout`: an unanswered prompt resolves with its
+/// safe option once the prompt deadline passes, and settles exactly once.
+#[test]
+fn timed_out_prompt_resolves_with_its_safe_option_exactly_once() {
+    let database = fixture();
+    let paused_at = 1_700_000_000;
+    SqliteBossRepository::new(database.path(), paused_at)
+        .restore_claimed_duel(key(), paused_duel())
+        .expect("paused duel");
+    let runtime = pinnacle_runtime(&database);
+
+    let early = runtime
+        .resume_timed_out(
+            pinnacle_request(paused_at + BOSS_DUEL_PROMPT_TIMEOUT_SECONDS - 1),
+            SequenceEntropy::constant(0.0),
+        )
+        .expect("early deadline check");
+    assert!(early.is_none(), "the prompt still has time");
+    assert_eq!(paused_duel_rows(&database).len(), 1);
+
+    let resolved = runtime
+        .resume_timed_out(
+            pinnacle_request(paused_at + BOSS_DUEL_PROMPT_TIMEOUT_SECONDS),
+            SequenceEntropy::constant(0.0),
+        )
+        .expect("due prompt")
+        .expect("the timed-out prompt resolves");
+    let DigBossResolvedOutcome::Regular(fight) = resolved.outcome else {
+        panic!("expected the regular duel to resolve");
+    };
+    let chosen = fight
+        .round_log
+        .iter()
+        .find_map(|round| round.mechanic.as_ref())
+        .expect("the timed-out choice is logged");
+    assert_eq!(
+        chosen.option_index,
+        paused_duel().pending_prompt.safe_option_index
+    );
+    assert!(resolved.action_id.is_some());
+    assert!(paused_duel_rows(&database).is_empty());
+    assert_eq!(boss_fight_audit_count(&database), 1);
+
+    assert!(
+        runtime
+            .resume_timed_out(
+                pinnacle_request(paused_at + 2 * BOSS_DUEL_PROMPT_TIMEOUT_SECONDS),
+                SequenceEntropy::constant(0.0),
+            )
+            .expect("repeat deadline")
+            .is_none(),
+        "a settled prompt never resolves twice"
+    );
+    assert_eq!(boss_fight_audit_count(&database), 1);
+}
+
+/// A prompt the player answered is never resolved by its old deadline, even
+/// when the answer opened a newer pause in the same duel.
+#[test]
+fn an_answered_prompt_deadline_never_resolves_the_newer_pause() {
+    let database = fixture();
+    let paused_at = 1_700_000_000;
+    let answered_at = paused_at + 60;
+    SqliteBossRepository::new(database.path(), answered_at)
+        .restore_claimed_duel(key(), paused_duel())
+        .expect("newer pause");
+    assert!(
+        pinnacle_runtime(&database)
+            .resume_timed_out(
+                pinnacle_request(paused_at + BOSS_DUEL_PROMPT_TIMEOUT_SECONDS),
+                SequenceEntropy::constant(0.0),
+            )
+            .expect("old deadline")
+            .is_none()
+    );
+    assert_eq!(paused_duel_rows(&database).len(), 1);
+    assert_eq!(boss_fight_audit_count(&database), 0);
+}
+
+#[test]
+fn timed_out_pinnacle_prompt_resolves_with_its_safe_option() {
+    let database = fixture();
+    set_pinnacle(&database, 1, "active", None);
+    let paused_at = 1_700_000_000;
+    let started = pinnacle_runtime(&database)
+        .start_pinnacle(
+            pinnacle_request(paused_at),
+            RiskTier::Reckless,
+            25,
+            SequenceEntropy::constant(0.99),
+        )
+        .expect("start pinnacle");
+    let DigPinnacleStartOutcome::Paused(paused) = started.outcome else {
+        panic!("expected durable pinnacle prompt")
+    };
+    let resolved = pinnacle_runtime(&database)
+        .resume_timed_out(
+            pinnacle_request(paused_at + BOSS_DUEL_PROMPT_TIMEOUT_SECONDS),
+            SequenceEntropy::constant(0.0),
+        )
+        .expect("due pinnacle prompt")
+        .expect("the timed-out pinnacle prompt resolves");
+    let DigBossResolvedOutcome::Pinnacle(fight) = resolved.outcome else {
+        panic!("expected the pinnacle duel to resolve");
+    };
+    let chosen = fight
+        .round_log
+        .iter()
+        .find_map(|round| round.mechanic.as_ref())
+        .expect("the timed-out choice is logged");
+    assert_eq!(chosen.option_index, paused.pending_prompt.safe_option_index);
+    assert!(paused_duel_rows(&database).is_empty());
 }
 
 fn paused_duel() -> PausedBossDuel {
@@ -901,6 +1574,7 @@ fn paused_duel() -> PausedBossDuel {
         forced_no_wager_phase: false,
         echo_applied: true,
         echo_killer_id: Some(99),
+        wager_escrowed: false,
     }
 }
 
@@ -908,7 +1582,7 @@ fn paused_duel() -> PausedBossDuel {
 fn paused_duel_round_trip_survives_adapter_restart_and_claims_once() {
     let database = fixture();
     SqliteBossRepository::new(database.path(), 1_700_000_000)
-        .save_active_duel(key(), paused_duel())
+        .restore_claimed_duel(key(), paused_duel())
         .expect("save duel");
     let mut restarted = SqliteBossRepository::new(database.path(), 1_700_000_100);
     assert_eq!(restarted.active_duel(key()), Some(paused_duel()));
@@ -1045,70 +1719,6 @@ fn phase_event_is_consumed_before_a_pause_and_stays_consumed_after_restart() {
     assert_eq!(paused.combat.player_hp, 3);
     let restarted = SqliteBossRepository::new(database.path(), 1_700_000_001);
     assert_eq!(restarted.active_duel(key()), Some(*paused));
-    assert_eq!(pending_phase_event(&database), None);
-}
-
-#[test]
-fn direct_fight_phase_event_consumption_rolls_back_with_failed_settlement() {
-    let database = fixture();
-    set_phase_two(&database, "void_pull");
-    let connection = Connection::open(database.path()).expect("trigger DB");
-    connection
-        .execute_batch(
-            "CREATE TRIGGER fail_boss_audit BEFORE INSERT ON dig_actions
-             WHEN NEW.action_type='boss_fight'
-             BEGIN SELECT RAISE(ABORT,'injected boss audit failure'); END;",
-        )
-        .expect("failure trigger");
-    let combat = CombatState {
-        player_hp: 5,
-        boss_hp: 1,
-        player_hit: 1.0,
-        player_damage: 9,
-        boss_hit: 0.0,
-        boss_damage: 1,
-        critical_chance: 0.0,
-        critical_bonus: 0,
-        effects: CombatEffects::default(),
-    };
-    let mut failed = crate::boss_multi_tier::BossMultiTierService::new(
-        SqliteBossRepository::new(database.path(), 1_700_000_000),
-        SequenceEntropy::constant(0.0),
-        crate::boss_multi_tier::FixedClock {
-            unix_seconds: 1_700_000_000,
-        },
-        crate::boss_multi_tier::NoEconomyEvent,
-        crate::boss_multi_tier::NoBankruptcy,
-        SqliteBossGearRepair::new(database.path()),
-        crate::boss_multi_tier::InMemoryBossOutcomeSink::default(),
-    );
-    assert!(
-        failed
-            .fight_boss_with_override(key(), RiskTier::Cautious, 10, Some(combat.clone()))
-            .is_err()
-    );
-    assert_eq!(pending_phase_event(&database).as_deref(), Some("void_pull"));
-
-    connection
-        .execute_batch("DROP TRIGGER fail_boss_audit;")
-        .expect("drop trigger");
-    let mut retry = crate::boss_multi_tier::BossMultiTierService::new(
-        SqliteBossRepository::new(database.path(), 1_700_000_001),
-        SequenceEntropy::constant(0.0),
-        crate::boss_multi_tier::FixedClock {
-            unix_seconds: 1_700_000_001,
-        },
-        crate::boss_multi_tier::NoEconomyEvent,
-        crate::boss_multi_tier::NoBankruptcy,
-        SqliteBossGearRepair::new(database.path()),
-        crate::boss_multi_tier::InMemoryBossOutcomeSink::default(),
-    );
-    assert!(
-        retry
-            .fight_boss_with_override(key(), RiskTier::Cautious, 10, Some(combat))
-            .expect("retry settlement")
-            .won
-    );
     assert_eq!(pending_phase_event(&database), None);
 }
 
@@ -1300,7 +1910,7 @@ fn survival_can_turn_a_regular_boss_roll_from_miss_to_hit() {
         config.economy_event.enabled = false;
         config
     })
-    .fight_regular(
+    .fight_live_regular(
         DigBossRuntimeRequest {
             discord_id: PLAYER,
             guild_id: GUILD,
@@ -1321,7 +1931,7 @@ fn survival_can_turn_a_regular_boss_roll_from_miss_to_hit() {
         config.economy_event.enabled = false;
         config
     })
-    .fight_regular(
+    .fight_live_regular(
         DigBossRuntimeRequest {
             discord_id: PLAYER,
             guild_id: GUILD,
@@ -1361,7 +1971,7 @@ fn regular_scout_preview_matches_the_live_survival_prepared_fight() {
         .scout_regular(request, SequenceEntropy::constant(0.99))
         .expect("preview");
     let fight = runtime
-        .fight_regular(
+        .fight_live_regular(
             request,
             RiskTier::Cautious,
             1,
@@ -1757,7 +2367,7 @@ fn rescue_line_halves_loss_knockback_skips_extra_armor_tick_and_clears_attempt()
     let mut config = DigBossRuntimeConfig::new(database.path(), 20);
     config.economy_event.enabled = false;
     let result = DigBossRuntimeService::sqlite(config)
-        .fight_regular(
+        .fight_live_regular(
             DigBossRuntimeRequest {
                 discord_id: PLAYER,
                 guild_id: GUILD,
@@ -1907,7 +2517,7 @@ fn abandoned_pause_ticks_its_snapshot_piece_before_replacement_fight() {
         armor_id: Some(armor_id),
     };
     SqliteBossRepository::new(database.path(), 1_700_000_000)
-        .save_active_duel(key(), stale)
+        .restore_claimed_duel(key(), stale)
         .expect("stale pause");
     let mut config = DigBossRuntimeConfig::new(database.path(), 20);
     config.economy_event.enabled = false;
@@ -1955,7 +2565,7 @@ fn legacy_abandoned_pause_without_snapshot_ticks_live_loadout_once() {
     stale.wager = 0;
     stale.gear_snapshot = GearSnapshot::default();
     SqliteBossRepository::new(database.path(), 1_700_000_000)
-        .save_active_duel(key(), stale)
+        .restore_claimed_duel(key(), stale)
         .expect("legacy stale pause");
     let mut config = DigBossRuntimeConfig::new(database.path(), 20);
     config.economy_event.enabled = false;
@@ -2004,7 +2614,7 @@ fn abandoned_wager_settles_once_before_replacement_validation() {
         armor_id: Some(armor_id),
     };
     SqliteBossRepository::new(database.path(), 1_700_000_000)
-        .save_active_duel(key(), stale)
+        .restore_claimed_duel(key(), stale)
         .expect("stale wager pause");
     let mut config = DigBossRuntimeConfig::new(database.path(), 20);
     config.economy_event.enabled = false;
@@ -2112,7 +2722,7 @@ fn runtime_service_applies_daily_profit_policies_and_returns_typed_receipt() {
     config.economy_event.enabled = false;
     let runtime = DigBossRuntimeService::sqlite(config).with_vanity_tax(vanity);
     let result = runtime
-        .fight_regular(
+        .fight_live_regular(
             DigBossRuntimeRequest {
                 discord_id: PLAYER,
                 guild_id: GUILD,
@@ -2184,7 +2794,7 @@ fn taxed_boss_victory(low_priority_percent: Option<i64>) -> (FastTestDatabase, i
         }));
     }
     let result = runtime
-        .fight_regular(
+        .fight_live_regular(
             DigBossRuntimeRequest {
                 discord_id: PLAYER,
                 guild_id: GUILD,
@@ -2232,7 +2842,7 @@ fn runtime_boss_loss_is_exempt_from_low_priority_tax() {
             guild_id: GUILD,
             percent: 10,
         }))
-        .fight_regular(
+        .fight_live_regular(
             DigBossRuntimeRequest {
                 discord_id: PLAYER,
                 guild_id: GUILD,
@@ -2391,6 +3001,9 @@ fn pinnacle_phase_event_changes_hp_and_is_consumed_before_restart_pause() {
         .run_pinnacle_attempt(
             pinnacle_request(1_700_000_000),
             event_attempt,
+            WagerEscrow::Pending {
+                consumes_halving_curse: false,
+            },
             &mut SequenceEntropy::constant(0.99),
         )
         .expect("pinnacle start");
@@ -2848,6 +3461,7 @@ fn pinnacle_final_victory_applies_the_persisted_bankruptcy_debuff() {
                 phase: 3,
                 risk_tier: RiskTier::Cautious,
                 wager: 0,
+                escrow: WagerEscrow::Legacy,
                 won: true,
                 ending_boss_hp: 0,
                 boss_hp_max: 8,
@@ -2887,6 +3501,7 @@ fn pinnacle_loss_debit_floors_at_the_live_balance() {
                 phase: 2,
                 risk_tier: RiskTier::Bold,
                 wager: 25,
+                escrow: WagerEscrow::Legacy,
                 won: false,
                 ending_boss_hp: 4,
                 boss_hp_max: 8,
@@ -2996,6 +3611,7 @@ fn pinnacle_final_victory_fuses_reward_relic_status_and_audit() {
                 phase: 3,
                 risk_tier: RiskTier::Bold,
                 wager: 0,
+                escrow: WagerEscrow::Legacy,
                 won: true,
                 ending_boss_hp: 0,
                 boss_hp_max: 12,
@@ -3107,6 +3723,7 @@ fn pinnacle_reward_applies_economy_event_to_base_and_wager_profit() {
                 phase: 3,
                 risk_tier: RiskTier::Cautious,
                 wager,
+                escrow: WagerEscrow::Legacy,
                 won: true,
                 ending_boss_hp: 0,
                 boss_hp_max: 8,
@@ -3322,6 +3939,7 @@ fn pinnacle_loss_never_credits_an_existing_negative_balance() {
                 phase: 1,
                 risk_tier: RiskTier::Bold,
                 wager: 25,
+                escrow: WagerEscrow::Legacy,
                 won: false,
                 ending_boss_hp: 4,
                 boss_hp_max: 8,
@@ -3368,6 +3986,7 @@ fn pinnacle_relic_insert_failure_rolls_back_reward_and_defeat() {
                 phase: 3,
                 risk_tier: RiskTier::Cautious,
                 wager: 0,
+                escrow: WagerEscrow::Legacy,
                 won: true,
                 ending_boss_hp: 0,
                 boss_hp_max: 8,
@@ -3441,13 +4060,11 @@ fn quiet_phase_event_does_not_change_pinnacle_hp() {
 }
 
 #[test]
-fn retreating_mid_mechanic_still_settles_the_claimed_pinnacle_wager() {
-    // The retreat button does not claim or clear a paused duel, so a player can
-    // start a wagered pinnacle fight, retreat off the boundary while the
-    // mechanic prompt is still live, and then answer it. The resume has already
-    // deleted the duel row by the time the boundary is re-checked, so failing
-    // there would drop the fight with no settlement at all -- the losing wager
-    // is never debited and no later start can forfeit it.
+fn leaving_the_pinnacle_mid_mechanic_forfeits_the_escrowed_wager() {
+    // A player can start a wagered pinnacle fight and be knocked off the
+    // boundary while the mechanic prompt is still live. The stake left the
+    // balance when the duel paused, so answering the prompt afterwards must
+    // neither pay the fight nor restore the depth: it forfeits the duel.
     let database = fixture();
     set_pinnacle(&database, 1, "active", None);
     let connection = Connection::open(database.path()).expect("pinnacle DB");
@@ -3470,37 +4087,66 @@ fn retreating_mid_mechanic_still_settles_the_claimed_pinnacle_wager() {
         panic!("expected durable pinnacle prompt")
     };
     assert_eq!(paused.wager, 25);
+    assert!(paused.wager_escrowed);
+    assert_eq!(player_balance(&database), 475, "the stake is escrowed");
 
-    // Retreat: the player is no longer at the pinnacle boundary, while the
-    // paused duel row survives untouched.
+    let off_boundary = i64::from(PINNACLE_DEPTH) - 3;
     connection
         .execute(
             "UPDATE tunnels SET depth=?1 WHERE discord_id=?2 AND guild_id=?3",
-            params![i64::from(PINNACLE_DEPTH) - 3, PLAYER, GUILD],
+            params![off_boundary, PLAYER, GUILD],
         )
-        .expect("retreat below the boundary");
+        .expect("knocked below the boundary");
 
-    let resolved = pinnacle_runtime(&database)
-        .resume_pinnacle(
+    // The guarded settlement refuses to pay and keeps the duel for the
+    // forfeit below.
+    assert!(matches!(
+        pinnacle_runtime(&database).resume_pinnacle(
             pinnacle_request(1_700_000_001),
             paused.pending_prompt.safe_option_index,
-            SequenceEntropy::constant(0.99),
-        )
-        .expect("a claimed duel settles even away from the boundary");
-    assert!(!resolved.outcome.won, "the fight is lost");
-    assert!(
-        resolved.outcome.jc_delta < 0,
-        "the wagered stake is debited rather than escaping settlement, got {}",
-        resolved.outcome.jc_delta
+            SequenceEntropy::constant(0.0),
+        ),
+        Err(DigBossRuntimeError::Policy(
+            BossServiceError::NotAtBossBoundary
+        ))
+    ));
+    assert_eq!(player_balance(&database), 475);
+    assert_eq!(paused_duel_rows(&database).len(), 1);
+
+    assert!(matches!(
+        pinnacle_runtime(&database).resume(
+            pinnacle_request(1_700_000_002),
+            paused.pending_prompt.safe_option_index,
+            SequenceEntropy::constant(0.0),
+        ),
+        Err(DigBossRuntimeError::Policy(
+            BossServiceError::DuelEncounterEnded
+        ))
+    ));
+    assert_eq!(
+        player_balance(&database),
+        475,
+        "no payout and no extra debit"
     );
-    let balance = connection
+    assert!(paused_duel_rows(&database).is_empty());
+    let depth: i64 = connection
         .query_row(
-            "SELECT jopacoin_balance FROM players WHERE discord_id=?1 AND guild_id=?2",
+            "SELECT depth FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
             params![PLAYER, GUILD],
-            |row| row.get::<_, i64>(0),
+            |row| row.get(0),
         )
-        .expect("balance");
-    assert_eq!(balance, 500 + resolved.outcome.jc_delta);
+        .expect("depth");
+    assert_eq!(depth, off_boundary, "the depth is not restored");
+    let forfeits: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM dig_actions
+              WHERE actor_id=?1 AND guild_id=?2 AND action_type='boss_duel_abandoned'
+                AND jc_delta=0",
+            params![PLAYER, GUILD],
+            |row| row.get(0),
+        )
+        .expect("forfeit audit");
+    assert_eq!(forfeits, 1);
 }
 
 fn stored_progress(database: &FastTestDatabase) -> Value {
@@ -3557,7 +4203,7 @@ fn regular_loss_marks_the_boss_resting_for_the_next_dig() {
     let database = fixture();
     clear_prep_and_set_balance(&database, 100);
     let result = pinnacle_runtime(&database)
-        .fight_regular(
+        .fight_live_regular(
             pinnacle_request(1_700_000_000),
             RiskTier::Cautious,
             0,
@@ -3688,7 +4334,7 @@ fn failed_abandoned_wager_forfeit_keeps_the_paused_duel() {
     let mut stale = paused_duel();
     stale.wager = 80;
     SqliteBossRepository::new(database.path(), 1_700_000_000)
-        .save_active_duel(key(), stale)
+        .restore_claimed_duel(key(), stale)
         .expect("stale wager pause");
     set_pinnacle(&database, 1, "active", None);
     let connection = Connection::open(database.path()).expect("failure DB");
@@ -3763,6 +4409,7 @@ fn pinnacle_profit_withholding_matches_the_shared_profit_deductions() {
                 phase: 3,
                 risk_tier: RiskTier::Reckless,
                 wager: 50,
+                escrow: WagerEscrow::Legacy,
                 won: true,
                 ending_boss_hp: 0,
                 boss_hp_max: 8,
@@ -3801,4 +4448,342 @@ fn pinnacle_profit_withholding_matches_the_shared_profit_deductions() {
     assert_eq!(outcome.vanity_tax, expected.vanity_tax);
     assert_eq!(outcome.low_priority_tax, expected.low_priority_tax);
     assert_eq!(outcome.jc_delta, expected.net());
+}
+
+fn player_balance(database: &FastTestDatabase) -> i64 {
+    Connection::open(database.path())
+        .expect("balance DB")
+        .query_row(
+            "SELECT jopacoin_balance FROM players WHERE discord_id=?1 AND guild_id=?2",
+            params![PLAYER, GUILD],
+            |row| row.get(0),
+        )
+        .expect("balance")
+}
+
+fn set_player_balance(database: &FastTestDatabase, balance: i64) {
+    Connection::open(database.path())
+        .expect("balance DB")
+        .execute(
+            "UPDATE players SET jopacoin_balance=?1 WHERE discord_id=?2 AND guild_id=?3",
+            params![balance, PLAYER, GUILD],
+        )
+        .expect("set balance");
+}
+
+fn dig_action_count(database: &FastTestDatabase, action_type: &str) -> i64 {
+    Connection::open(database.path())
+        .expect("actions DB")
+        .query_row(
+            "SELECT COUNT(*) FROM dig_actions
+              WHERE actor_id=?1 AND guild_id=?2 AND action_type=?3",
+            params![PLAYER, GUILD, action_type],
+            |row| row.get(0),
+        )
+        .expect("action count")
+}
+
+/// Start a wagered regular duel that pauses on its round-two mechanic.
+fn paused_regular_duel(database: &FastTestDatabase, wager: i64) -> PausedBossDuel {
+    let started = pinnacle_runtime(database)
+        .start_regular(
+            pinnacle_request(1_700_000_000),
+            RiskTier::Cautious,
+            wager,
+            SequenceEntropy::constant(0.99),
+        )
+        .expect("start regular duel");
+    let StartBossDuelOutcome::Paused(paused) = started.outcome else {
+        panic!("expected the duel to pause on its mechanic")
+    };
+    *paused
+}
+
+#[test]
+fn a_paused_wager_is_escrowed_so_draining_the_balance_cannot_dodge_the_loss() {
+    let database = fixture();
+    clear_prep_and_set_balance(&database, 100);
+    let paused = paused_regular_duel(&database, 40);
+    assert!(paused.wager_escrowed);
+    assert_eq!(player_balance(&database), 60, "the stake left the balance");
+    assert_eq!(dig_action_count(&database, "boss_wager_escrow"), 1);
+
+    // The balance is spent elsewhere while the prompt is open.
+    set_player_balance(&database, 0);
+    let resolved = pinnacle_runtime(&database)
+        .resume(
+            pinnacle_request(1_700_000_001),
+            paused.pending_prompt.safe_option_index,
+            SequenceEntropy::constant(0.99),
+        )
+        .expect("resume settles");
+    let DigBossResolvedOutcome::Regular(resolved) = resolved.outcome else {
+        panic!("expected a regular resolution")
+    };
+    assert!(!resolved.won);
+    assert_eq!(resolved.jc_delta, -40, "the loss is the escrowed stake");
+    assert_eq!(player_balance(&database), 0, "nothing more is debited");
+    assert!(paused_duel_rows(&database).is_empty());
+}
+
+#[test]
+fn an_escrowed_win_returns_the_stake_with_the_profit_exactly_once() {
+    let database = fixture();
+    clear_prep_and_set_balance(&database, 100);
+    let paused = paused_regular_duel(&database, 40);
+    assert_eq!(player_balance(&database), 60);
+    let resolved = pinnacle_runtime(&database)
+        .resume(
+            pinnacle_request(1_700_000_001),
+            paused.pending_prompt.safe_option_index,
+            SequenceEntropy::constant(0.0),
+        )
+        .expect("resume settles");
+    let DigBossResolvedOutcome::Regular(resolved) = resolved.outcome else {
+        panic!("expected a regular resolution")
+    };
+    assert!(resolved.won);
+    assert!(resolved.jc_delta > 0);
+    assert_eq!(player_balance(&database), 100 + resolved.jc_delta);
+    assert!(matches!(
+        pinnacle_runtime(&database).resume(
+            pinnacle_request(1_700_000_002),
+            0,
+            SequenceEntropy::constant(0.0),
+        ),
+        Err(DigBossRuntimeError::Policy(BossServiceError::NoActiveDuel))
+    ));
+    assert_eq!(player_balance(&database), 100 + resolved.jc_delta);
+}
+
+#[test]
+fn a_legacy_unescrowed_pause_still_settles_the_old_way() {
+    let database = fixture();
+    clear_prep_and_set_balance(&database, 100);
+    let mut legacy = paused_duel();
+    legacy.wager = 20;
+    legacy.wager_escrowed = false;
+    SqliteBossRepository::new(database.path(), 1_700_000_000)
+        .restore_claimed_duel(key(), legacy.clone())
+        .expect("legacy pause");
+    let resolved = pinnacle_runtime(&database)
+        .resume(
+            pinnacle_request(1_700_000_001),
+            legacy.pending_prompt.safe_option_index,
+            SequenceEntropy::constant(0.99),
+        )
+        .expect("legacy resume settles");
+    let DigBossResolvedOutcome::Regular(resolved) = resolved.outcome else {
+        panic!("expected a regular resolution")
+    };
+    assert!(!resolved.won);
+    assert_eq!(resolved.jc_delta, -20);
+    assert_eq!(player_balance(&database), 80, "the legacy loss debits once");
+}
+
+#[test]
+fn forfeiting_an_escrowed_pause_moves_no_more_money() {
+    let database = fixture();
+    clear_prep_and_set_balance(&database, 100);
+    paused_regular_duel(&database, 40);
+    assert_eq!(player_balance(&database), 60);
+    // A replacement Fight abandons the paused duel.
+    let replacement = pinnacle_runtime(&database)
+        .start_regular(
+            pinnacle_request(1_700_000_005),
+            RiskTier::Cautious,
+            0,
+            SequenceEntropy::constant(0.99),
+        )
+        .expect("replacement fight");
+    assert_eq!(replacement.abandoned_wager_forfeit, 40);
+    assert_eq!(player_balance(&database), 60, "the forfeit moves nothing");
+}
+
+#[test]
+fn retreating_from_a_paused_duel_forfeits_it_without_another_debit() {
+    let database = fixture();
+    clear_prep_and_set_balance(&database, 100);
+    paused_regular_duel(&database, 40);
+    let result = pinnacle_runtime(&database)
+        .retreat(
+            pinnacle_request(1_700_000_001),
+            SequenceEntropy::new(Vec::new(), Vec::new(), vec![2]),
+        )
+        .expect("retreat");
+    assert_eq!(result.abandoned_wager_forfeit, 40);
+    assert_eq!(result.outcome.actual_balance_delta, 0);
+    assert_eq!(player_balance(&database), 60);
+    assert!(paused_duel_rows(&database).is_empty());
+    assert!(matches!(
+        pinnacle_runtime(&database).resume(
+            pinnacle_request(1_700_000_002),
+            0,
+            SequenceEntropy::constant(0.0),
+        ),
+        Err(DigBossRuntimeError::Policy(BossServiceError::NoActiveDuel))
+    ));
+    assert_eq!(player_balance(&database), 60, "no payout after retreating");
+}
+
+#[test]
+fn retreating_with_an_escrowed_carry_returns_the_unforfeited_half() {
+    let database = fixture();
+    set_pinnacle(&database, 2, "phase1_defeated", None);
+    let connection = Connection::open(database.path()).expect("carry retreat DB");
+    let raw: String = connection
+        .query_row(
+            "SELECT boss_progress FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
+            params![PLAYER, GUILD],
+            |row| row.get(0),
+        )
+        .expect("progress");
+    let mut progress: Value = serde_json::from_str(&raw).expect("progress JSON");
+    progress[PINNACLE_DEPTH.to_string()]["carried_wager"] = Value::from(75);
+    progress[PINNACLE_DEPTH.to_string()]["carried_risk_tier"] = Value::from("bold");
+    progress[PINNACLE_DEPTH.to_string()][CARRIED_WAGER_ESCROWED_KEY] = Value::Bool(true);
+    connection
+        .execute(
+            "UPDATE tunnels SET boss_progress=?1 WHERE discord_id=?2 AND guild_id=?3",
+            params![progress.to_string(), PLAYER, GUILD],
+        )
+        .expect("seed escrowed carry");
+    let result = pinnacle_runtime(&database)
+        .retreat(
+            pinnacle_request(1_700_000_000),
+            SequenceEntropy::new(Vec::new(), Vec::new(), vec![3]),
+        )
+        .expect("pinnacle retreat");
+    assert_eq!(result.outcome.carried_wager_forfeit, 37);
+    assert_eq!(result.outcome.actual_balance_delta, 38);
+    assert_eq!(player_balance(&database), 138);
+    let progress = stored_progress(&database);
+    assert!(
+        progress[PINNACLE_DEPTH.to_string()]
+            .get(CARRIED_WAGER_ESCROWED_KEY)
+            .is_none()
+    );
+}
+
+#[test]
+fn an_escrowed_pinnacle_phase_win_carries_the_stake_without_paying_it_back() {
+    let database = fixture();
+    set_pinnacle(&database, 1, "active", None);
+    set_player_balance(&database, 500);
+    let started = pinnacle_runtime(&database)
+        .start_pinnacle(
+            pinnacle_request(1_700_000_000),
+            RiskTier::Reckless,
+            25,
+            SequenceEntropy::constant(0.99),
+        )
+        .expect("start pinnacle");
+    let DigPinnacleStartOutcome::Paused(paused) = started.outcome else {
+        panic!("expected durable pinnacle prompt")
+    };
+    assert_eq!(player_balance(&database), 475);
+    // Leave the paused boss one hit from defeat so the resume wins.
+    Connection::open(database.path())
+        .expect("duel DB")
+        .execute(
+            "UPDATE dig_active_duels SET boss_hp=1,player_hp=50,player_hit=0.9,boss_hit=0.05
+              WHERE discord_id=?1 AND guild_id=?2",
+            params![PLAYER, GUILD],
+        )
+        .expect("weaken the boss");
+    let resolved = pinnacle_runtime(&database)
+        .resume(
+            pinnacle_request(1_700_000_001),
+            paused.pending_prompt.safe_option_index,
+            SequenceEntropy::constant(0.0),
+        )
+        .expect("resume pinnacle");
+    let DigBossResolvedOutcome::Pinnacle(resolved) = resolved.outcome else {
+        panic!("expected a pinnacle resolution")
+    };
+    assert!(resolved.won);
+    assert_eq!(resolved.next_phase, 2);
+    assert_eq!(
+        player_balance(&database),
+        475,
+        "the carried stake stays escrowed"
+    );
+    let progress = stored_progress(&database);
+    let entry = &progress[PINNACLE_DEPTH.to_string()];
+    assert_eq!(entry["carried_wager"], 25);
+    assert_eq!(entry[CARRIED_WAGER_ESCROWED_KEY], true);
+}
+
+#[test]
+fn abandoning_a_paused_duel_forfeits_it_so_a_later_answer_neither_pays_nor_restores_depth() {
+    let database = fixture();
+    clear_prep_and_set_balance(&database, 100);
+    paused_regular_duel(&database, 40);
+    assert_eq!(player_balance(&database), 60, "the stake is escrowed");
+
+    let result = crate::dig_abandon_runtime::DigAbandonRuntimeService::sqlite(database.path())
+        .abandon(PLAYER, GUILD, 1_700_000_001)
+        .expect("abandon");
+    assert_eq!(result.balance_after, 60 + result.refund);
+    assert!(paused_duel_rows(&database).is_empty());
+
+    assert!(matches!(
+        pinnacle_runtime(&database).resume(
+            pinnacle_request(1_700_000_002),
+            0,
+            SequenceEntropy::constant(0.0),
+        ),
+        Err(DigBossRuntimeError::Policy(BossServiceError::NoActiveDuel))
+    ));
+    let depth: i64 = Connection::open(database.path())
+        .expect("depth DB")
+        .query_row(
+            "SELECT depth FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
+            params![PLAYER, GUILD],
+            |row| row.get(0),
+        )
+        .expect("depth");
+    assert_eq!(depth, 0, "the abandoned depth is not restored");
+    assert_eq!(player_balance(&database), 60 + result.refund, "no payout");
+}
+
+#[test]
+fn abandoning_a_legacy_paused_duel_forfeits_what_the_balance_holds() {
+    let database = fixture();
+    clear_prep_and_set_balance(&database, 30);
+    let mut legacy = paused_duel();
+    legacy.wager = 50;
+    legacy.wager_escrowed = false;
+    SqliteBossRepository::new(database.path(), 1_700_000_000)
+        .restore_claimed_duel(key(), legacy)
+        .expect("legacy pause");
+    let result = crate::dig_abandon_runtime::DigAbandonRuntimeService::sqlite(database.path())
+        .abandon(PLAYER, GUILD, 1_700_000_001)
+        .expect("abandon");
+    assert_eq!(
+        result.balance_after, result.refund,
+        "30 forfeited, never more"
+    );
+    assert!(paused_duel_rows(&database).is_empty());
+}
+
+#[test]
+fn abandoning_an_escrowed_carry_returns_the_unforfeited_half() {
+    let database = fixture();
+    set_pinnacle(&database, 2, "phase1_defeated", None);
+    let mut progress = stored_progress(&database);
+    progress[PINNACLE_DEPTH.to_string()]["carried_wager"] = Value::from(75);
+    progress[PINNACLE_DEPTH.to_string()]["carried_risk_tier"] = Value::from("bold");
+    progress[PINNACLE_DEPTH.to_string()][CARRIED_WAGER_ESCROWED_KEY] = Value::Bool(true);
+    Connection::open(database.path())
+        .expect("carry DB")
+        .execute(
+            "UPDATE tunnels SET boss_progress=?1 WHERE discord_id=?2 AND guild_id=?3",
+            params![progress.to_string(), PLAYER, GUILD],
+        )
+        .expect("seed escrowed carry");
+    let result = crate::dig_abandon_runtime::DigAbandonRuntimeService::sqlite(database.path())
+        .abandon(PLAYER, GUILD, 1_700_000_001)
+        .expect("abandon");
+    assert_eq!(result.balance_after, 100 + result.refund + 38);
 }

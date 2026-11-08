@@ -1,6 +1,7 @@
 use std::sync::Mutex as StdMutex;
 
 use cama_app::wheel::wheel_window_start_at;
+use chrono::DateTime;
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
@@ -100,10 +101,7 @@ struct FixedClock;
 
 impl ManaClock for FixedClock {
     fn moment(&self) -> Result<ManaMoment, String> {
-        Ok(ManaMoment {
-            now: NOW,
-            la_offset_seconds: -7 * 3_600,
-        })
+        Ok(ManaMoment { now: NOW })
     }
 }
 
@@ -125,6 +123,13 @@ impl ManaDiscordPort for FakeDiscord {
 
     fn mana_guild_members(&self, _guild_id: i64) -> Result<Vec<ManaGuildMember>, String> {
         Ok(self.members.clone())
+    }
+
+    fn mana_complete_guild_members(
+        &self,
+        _guild_id: i64,
+    ) -> Result<Option<Vec<ManaGuildMember>>, String> {
+        Ok(Some(self.members.clone()))
     }
 
     async fn mana_guild_member(
@@ -318,6 +323,13 @@ async fn wrong_channel_charges_one_before_defer_and_uses_exact_ephemeral_copy() 
         .expect("dispatch wrong-channel command");
 
     assert_eq!(fixture.balance(USER), before - 1);
+    assert_eq!(
+        crate::test_support::penance_ledger::gamba_channel_penance_ledger(
+            fixture.database.path(),
+            GUILD
+        ),
+        crate::test_support::penance_ledger::GAMBA_CHANNEL_PENANCE_LEDGER
+    );
     let captured = responder.captured.lock().expect("response capture");
     assert!(captured.defers.is_empty());
     assert_eq!(captured.immediate.len(), 1);
@@ -472,6 +484,51 @@ async fn board_skips_unknown_land_rows_and_renders_the_rest() {
     assert_eq!(
         embed.footer.as_deref(),
         Some("Page 1/1 · 1/1 assigned today · Resets 4 AM PST")
+    );
+}
+
+#[tokio::test]
+async fn board_names_departed_players_without_ids_or_mentions() {
+    let fixture = Fixture::new(2);
+    fixture.assign(USER, "Island", TODAY);
+    fixture.assign(USER + 1, "Plains", TODAY);
+    let provider = provider(
+        &fixture,
+        FakeDiscord {
+            gamba: true,
+            members: members(1),
+        },
+    );
+    let responder = Arc::new(CapturingResponder::default());
+    let options = vec![InteractionOption {
+        name: "all".to_owned(),
+        value: InteractionValue::Boolean(true),
+    }];
+
+    registry(&provider)
+        .command_handler("mana")
+        .expect("mana handler")
+        .handle(command(options), responder.clone())
+        .await
+        .expect("dispatch board with a departed player");
+
+    let captured = responder.captured.lock().expect("response capture");
+    let description = captured.followups[0].embeds[0]
+        .description
+        .clone()
+        .expect("board description");
+    assert!(
+        description.contains("**Island** · Player 01"),
+        "{description}"
+    );
+    assert!(
+        description.contains("**Plains** · Unknown player"),
+        "{description}"
+    );
+    assert!(!description.contains("<@"), "{description}");
+    assert!(
+        !description.contains(&(USER + 1).to_string()),
+        "{description}"
     );
 }
 
@@ -801,12 +858,17 @@ fn wheel_unlock_at(now: i64, last: Option<i64>) -> i64 {
 fn board_component_round_trip_and_pacific_clock_cover_dst_boundaries() {
     assert_eq!(parse_board_component("mana:board:42:3"), Ok((42, 3)));
     assert!(parse_board_component("mana:board:42").is_err());
-    let winter = DateTime::parse_from_rfc3339("2026-01-11T12:00:00Z")
-        .expect("winter timestamp")
-        .timestamp();
-    let summer = DateTime::parse_from_rfc3339("2026-07-11T12:00:00Z")
-        .expect("summer timestamp")
-        .timestamp();
-    assert_eq!(pacific_offset_seconds(winter), Ok(-8 * 3_600));
-    assert_eq!(pacific_offset_seconds(summer), Ok(-7 * 3_600));
+    let day = |instant: &str| {
+        ManaMoment {
+            now: DateTime::parse_from_rfc3339(instant)
+                .expect("valid instant")
+                .timestamp(),
+        }
+        .today()
+    };
+    // 4 AM PST is 12:00 UTC in winter; 4 AM PDT is 11:00 UTC in summer.
+    assert_eq!(day("2026-01-11T11:59:59Z").as_deref(), Ok("2026-01-10"));
+    assert_eq!(day("2026-01-11T12:00:00Z").as_deref(), Ok("2026-01-11"));
+    assert_eq!(day("2026-07-11T10:59:59Z").as_deref(), Ok("2026-07-10"));
+    assert_eq!(day("2026-07-11T11:00:00Z").as_deref(), Ok("2026-07-11"));
 }

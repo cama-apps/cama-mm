@@ -184,15 +184,6 @@ fn buy_and_queue(service: &mut TestService, item: &str) -> i64 {
     item_id
 }
 
-fn field<'a>(embed: &'a EmbedModel, name: &str) -> &'a str {
-    &embed
-        .fields
-        .iter()
-        .find(|field| field.name == name)
-        .expect("expected embed field")
-        .value
-}
-
 #[test]
 fn test_buy_item_deducts_jc() {
     let mut service = service(100);
@@ -451,10 +442,7 @@ fn test_autocomplete_value_gifts_successfully() {
         GUILD,
         ArtifactSelector::CatalogId(&choices[0].value),
     );
-    let reply = gift_command_reply(&result, "Receiver");
     assert!(result.success);
-    assert!(reply.content.contains("You gifted"));
-    assert!(!reply.ephemeral);
 }
 
 #[test]
@@ -469,20 +457,8 @@ fn test_failed_gift_reports_error_not_success() {
         GUILD,
         ArtifactSelector::CatalogId("Not An Owned Id"),
     );
-    let reply = gift_command_reply(&result, "Receiver");
     assert!(!result.success);
-    assert!(reply.ephemeral);
-    assert!(!reply.content.contains("You gifted"));
     assert_eq!(service.repository().artifacts(USER, GUILD).len(), 1);
-}
-
-#[test]
-fn test_failed_trap_reports_error() {
-    let result = LootActionResult::error("No trap placed.");
-    let reply = trap_command_reply(&result);
-    assert!(reply.ephemeral);
-    assert!(!reply.content.contains("Trap set"));
-    assert!(reply.content.contains("No trap placed."));
 }
 
 #[test]
@@ -710,67 +686,6 @@ fn test_resolve_event_boon_invalid_index() {
         &format!("boon_{}", event.boon_count + 10),
     );
     assert!(!result.success);
-}
-
-#[test]
-fn test_streak_charm_save_is_visible() {
-    let embed = build_dig_embed(&DigPresentation {
-        depth: 10,
-        advance: 1,
-        streak_charm_used: true,
-        ..DigPresentation::default()
-    });
-    assert!(field(&embed, "Streak Charm").contains("Saved your daily streak"));
-}
-
-#[test]
-fn test_pet_excavation_bonus_is_visible_in_progress() {
-    let embed = build_dig_embed(&DigPresentation {
-        depth: 17,
-        advance: 17,
-        pet_dig_bonus: 12,
-        pet_name: Some("Blep".to_owned()),
-        ..DigPresentation::default()
-    });
-    assert!(field(&embed, "Progress").contains("Blep excavated +12 blocks"));
-}
-
-#[test]
-fn test_auto_buy_outcomes_are_visible() {
-    let embed = build_dig_embed(&DigPresentation {
-        depth: 10,
-        advance: 1,
-        auto_purchases: vec![
-            AutoPurchasePresentation {
-                item: "Torch".to_owned(),
-                status: AutoBuyStatus::Purchased,
-                cost: 6,
-            },
-            AutoPurchasePresentation {
-                item: "Hard Hat".to_owned(),
-                status: AutoBuyStatus::SkippedInsufficientBalance,
-                cost: 8,
-            },
-        ],
-        ..DigPresentation::default()
-    });
-    let value = field(&embed, "Auto-Buy");
-    assert!(value.contains("Torch: bought"));
-    assert!(value.contains("Hard Hat: skipped (need 8 JC)"));
-}
-
-#[test]
-fn test_cave_in_broken_gear_renders_repair_notification() {
-    let embed = build_dig_embed(&DigPresentation {
-        depth: 180,
-        cave_in: true,
-        broken_gear: vec!["Ironclad Armor".to_owned()],
-        ..DigPresentation::default()
-    });
-    let value = field(&embed, "Gear Broken");
-    assert!(value.contains("Ironclad Armor"));
-    assert!(value.contains("effects disabled"));
-    assert!(value.contains("Repair All"));
 }
 
 #[test]
@@ -1481,4 +1396,185 @@ fn non_jc_full_inventory_falls_back_from_consumable_to_artifact() {
         selection.reward,
         Some(CanonicalReward::Artifact("miner_s_lullaby".to_owned()))
     );
+}
+
+/// The social burn encounters in the live event catalog: each one splashes a
+/// success-triggered burn whose authored cost covers the maximum +50% payout
+/// jitter, so a fully funded encounter always deflates.
+mod social_burn_encounters {
+    use super::*;
+
+    struct Expected {
+        id: &'static str,
+        rarity: Rarity,
+        min_depth: i64,
+        strategy: &'static str,
+        victim_count: usize,
+        penalty_jc: i64,
+        payout: i64,
+    }
+
+    fn assert_encounter(expected: Expected) {
+        let event = canonical_event(expected.id).expect("live encounter");
+        assert_eq!(event.rarity, expected.rarity);
+        assert_eq!(event.min_depth, Some(expected.min_depth));
+        assert_eq!(event.max_depth, None);
+        assert!(event.social);
+        let splash = event.splash.as_ref().expect("encounter splash");
+        assert_eq!(splash.trigger, "success");
+        assert_eq!(splash.mode, "burn");
+        assert_eq!(splash.strategy, expected.strategy);
+        assert_eq!(splash.victim_count, expected.victim_count);
+        assert_eq!(splash.penalty_jc, expected.penalty_jc);
+        let payout = event
+            .risky_option
+            .as_ref()
+            .expect("risky option")
+            .success
+            .jc;
+        assert_eq!(payout, expected.payout);
+        assert!(
+            splash.victim_count as f64 * splash.penalty_jc as f64 >= payout as f64 * 1.5,
+            "{} burn must cover the maximum payout",
+            expected.id
+        );
+    }
+
+    #[test]
+    fn hungering_dark() {
+        assert_encounter(Expected {
+            id: "hungering_dark",
+            rarity: Rarity::Uncommon,
+            min_depth: 10,
+            strategy: "richest_n",
+            victim_count: 2,
+            penalty_jc: 5,
+            payout: 5,
+        });
+    }
+
+    #[test]
+    fn deny_the_seam() {
+        assert_encounter(Expected {
+            id: "deny_the_seam",
+            rarity: Rarity::Uncommon,
+            min_depth: 20,
+            strategy: "richest_n",
+            victim_count: 2,
+            penalty_jc: 6,
+            payout: 6,
+        });
+    }
+
+    #[test]
+    fn turf_war() {
+        assert_encounter(Expected {
+            id: "turf_war",
+            rarity: Rarity::Uncommon,
+            min_depth: 35,
+            strategy: "active_diggers",
+            victim_count: 3,
+            penalty_jc: 6,
+            payout: 8,
+        });
+    }
+
+    #[test]
+    fn smoke_ambush() {
+        assert_encounter(Expected {
+            id: "smoke_ambush",
+            rarity: Rarity::Rare,
+            min_depth: 60,
+            strategy: "active_diggers",
+            victim_count: 3,
+            penalty_jc: 7,
+            payout: 10,
+        });
+    }
+
+    #[test]
+    fn the_tear() {
+        assert_encounter(Expected {
+            id: "the_tear",
+            rarity: Rarity::Rare,
+            min_depth: 90,
+            strategy: "random_active",
+            victim_count: 3,
+            penalty_jc: 8,
+            payout: 10,
+        });
+    }
+
+    #[test]
+    fn the_deep_hunter() {
+        assert_encounter(Expected {
+            id: "the_deep_hunter",
+            rarity: Rarity::Rare,
+            min_depth: 110,
+            strategy: "deepest_n",
+            victim_count: 2,
+            penalty_jc: 12,
+            payout: 12,
+        });
+    }
+}
+
+#[test]
+fn artifact_catalog_entries_carry_lore_and_effects_for_every_authored_artifact() {
+    let entries = artifact_catalog_entries();
+    let authored = artifact_catalog();
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| (entry.id.as_str(), entry.name.as_str(), entry.is_relic))
+            .collect::<Vec<_>>(),
+        authored
+            .iter()
+            .map(|artifact| (artifact.id, artifact.name, artifact.is_relic))
+            .collect::<Vec<_>>()
+    );
+    for entry in entries {
+        assert!(!entry.lore_text.is_empty(), "{}", entry.id);
+        assert_eq!(
+            entry
+                .effect
+                .as_deref()
+                .is_some_and(|effect| !effect.is_empty()),
+            entry.is_relic,
+            "{}",
+            entry.id
+        );
+    }
+    assert!(std::ptr::eq(entries, artifact_catalog_entries()));
+}
+
+#[test]
+fn artifact_display_label_never_shows_a_raw_id() {
+    assert_eq!(artifact_display_label("mole_claws", true), "Mole Claws");
+    assert_eq!(
+        artifact_display_label("miner_s_lullaby", false),
+        "The Miner's Lullaby"
+    );
+    // A legacy pool suffix is re-derived from the rolled stats.
+    assert_eq!(
+        artifact_display_label("pinnacle:Crown:Echoes:hp_plus_1:boss_payout_5", false),
+        "Crown of Scales and Tribute"
+    );
+    assert_eq!(
+        artifact_display_label("pinnacle:Crown:Echoes:hp_plus_1:boss_payout_5", true),
+        "Crown of Scales and Tribute (Tougher skin, Bosses pay better)"
+    );
+    // A bespoke quest suffix is kept.
+    assert_eq!(
+        artifact_display_label(
+            "pinnacle:Cloak of the Necropolis:Long Silence:streak_immunity:boss_hp_minus_10",
+            false
+        ),
+        "Cloak of the Necropolis of Long Silence"
+    );
+    assert_eq!(
+        artifact_display_label("retired_trinket", true),
+        "Retired Trinket"
+    );
+    assert_eq!(artifact_display_label("", true), "Unknown artifact");
 }

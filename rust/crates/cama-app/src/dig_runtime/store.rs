@@ -14,7 +14,7 @@ impl SqliteDigRuntimeStore {
         }
     }
 
-    pub(super) fn connection(&self) -> Result<Connection, rusqlite::Error> {
+    pub(super) fn connection(&self) -> Result<cama_db::RuntimeConnection, rusqlite::Error> {
         cama_db::open_runtime_connection(&self.path)
     }
 
@@ -277,7 +277,7 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
         &self,
         discord_id: i64,
         guild_id: i64,
-        today: &str,
+        mana_day: &str,
     ) -> Result<ManaEffects, DigRuntimeStoreError> {
         // Python treats a failed mana lookup as one neutral request-local
         // snapshot; it must not turn an otherwise valid Dig into an error or
@@ -286,7 +286,8 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
             Ok(row) => row,
             Err(_) => return Ok(ManaEffects::default()),
         };
-        let Some(row) = row.filter(|row| row.assigned_date == today && !row.consumed_today) else {
+        let Some(row) = row.filter(|row| row.assigned_date == mana_day && !row.consumed_today)
+        else {
             return Ok(ManaEffects::default());
         };
         let color = color_for_land(&row.current_land);
@@ -1139,8 +1140,11 @@ impl DigRuntimeStore for SqliteDigRuntimeStore {
                 "dig-blood-pact:{}:{}",
                 pending.action_id, pending.discord_id
             );
-            let mana_date = game_date_for_timestamp(request.occurred_at as f64)
-                .map_err(|error| DigRuntimeStoreError::BloodPact(error.to_string()))?;
+            let mana_date = mana_day_label_at(request.occurred_at).ok_or_else(|| {
+                DigRuntimeStoreError::BloodPact(
+                    "timestamp is outside the supported range".to_owned(),
+                )
+            })?;
             let mut settlement_request = DigBloodPactSettlementRequest::with_default_scale(
                 pending.discord_id,
                 pending.guild_id,

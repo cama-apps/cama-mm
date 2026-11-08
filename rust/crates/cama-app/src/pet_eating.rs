@@ -12,7 +12,7 @@ use cama_db::profit_deductions::ProfitDeductions;
 use cama_domain::formatting::format_grouped;
 use cama_domain::pet::{
     PET_EAT_PENALTY_GAMES_MAX, PET_EAT_PENALTY_GAMES_MIN, PET_EAT_REWARD_MAX, PET_EAT_REWARD_MIN,
-    Pet, PetStage, PetStatus,
+    Pet, PetStage,
 };
 use cama_domain::service_result::ServiceResult;
 
@@ -411,6 +411,7 @@ where
         &self.reminders
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn active_direct_deliveries(&self) -> &BTreeMap<i64, usize> {
         &self.direct_death_deliveries
@@ -547,42 +548,6 @@ pub fn build_eating_outcome_embed(outcome: &PetEatingOutcome) -> EatingEmbed {
         ),
         color: EatingEmbedColor::Dead,
     }
-}
-
-#[must_use]
-pub fn build_death_copy(pet: &Pet) -> String {
-    let cause = match pet.death_cause.as_deref() {
-        Some("sacrifice") => "was given to the altar",
-        Some("eaten") => "was eaten",
-        _ => "starved",
-    };
-    format!(
-        "<@{}>'s {} {cause}. Time of death: <t:{}:f>. F.",
-        pet.discord_id,
-        pet.name,
-        pet.died_at.unwrap_or_default()
-    )
-}
-
-#[must_use]
-pub fn build_petless_memorial_copy(status: &PetStatus, owner_name: &str, next_fee: i64) -> String {
-    let Some(dead) = status.last_dead.as_ref() else {
-        return format!(
-            "{owner_name} has no cama. Adopt a mysterious egg with `/pet adopt` — {next_fee} JC"
-        );
-    };
-    let death_phrase = if dead.death_cause.as_deref() == Some("eaten") {
-        "was eaten".to_owned()
-    } else {
-        format!(
-            "died of {}",
-            dead.death_cause.as_deref().unwrap_or("starvation")
-        )
-    };
-    format!(
-        "In memoriam: {} — {death_phrase}. F. Adopt again with `/pet adopt` — {next_fee} JC",
-        dead.name
-    )
 }
 
 #[cfg(test)]

@@ -13,10 +13,8 @@ use cama_db::mana_service_repository::ManaRepository;
 use cama_db::notifications::{NotificationKind, NotificationPreferences, NotificationRepository};
 use cama_db::pet_repository::PetRepository;
 use cama_db::reminder_repository::{DigReminderAnchor, ReminderRepository};
-use cama_domain::game_date::get_game_date;
-use cama_domain::mana::ManaEffects;
+use cama_domain::mana::{ManaEffects, mana_day_label_at};
 use cama_domain::pet::UNHATCHED_SPECIES;
-use rusqlite::types::Value;
 
 use crate::dig_service;
 use crate::reminders::{
@@ -66,7 +64,7 @@ impl SqliteReminderStore {
             .into_iter()
             .map(|row| (row.discord_id, row.mana))
             .collect::<BTreeMap<_, _>>();
-        let today = get_game_date();
+        let today = mana_day_label_at(now);
 
         Ok(user_ids
             .iter()
@@ -79,7 +77,7 @@ impl SqliteReminderStore {
                         let mana_reduction = mana
                             .get(&user_id.value())
                             .filter(|row| {
-                                row.assigned_date == today
+                                today.as_deref() == Some(row.assigned_date.as_str())
                                     && !row.consumed_today
                                     && row.current_land == "Forest"
                             })
@@ -248,10 +246,8 @@ impl ReminderStore for SqliteReminderStore {
                         (
                             UserId::new(user_id),
                             ReminderTimestamps {
-                                last_wheel_spin: optional_timestamp(&timestamps.last_wheel_spin),
-                                last_trivia_session: optional_timestamp(
-                                    &timestamps.last_trivia_session,
-                                ),
+                                last_wheel_spin: timestamps.last_wheel_spin,
+                                last_trivia_session: timestamps.last_trivia_session,
                             },
                         )
                     })
@@ -323,15 +319,6 @@ fn effective_dig_cooldown(anchor: &DigReminderAnchor, mana_reduction_seconds: i6
         anchor.temp_curse_json.as_deref(),
         mana_reduction_seconds,
     )
-}
-
-fn optional_timestamp(value: &Value) -> Option<i64> {
-    match value {
-        Value::Integer(value) => Some(*value),
-        Value::Real(value) if value.is_finite() => Some(*value as i64),
-        Value::Text(value) => value.parse().ok(),
-        Value::Null | Value::Blob(_) | Value::Real(_) => None,
-    }
 }
 
 fn preferences_from_database(database: NotificationPreferences) -> ReminderPreferences {

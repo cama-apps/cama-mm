@@ -663,6 +663,41 @@ async fn transfer_pending_cooldown_delivers_once_to_replacement_at_original_dead
 }
 
 #[tokio::test]
+async fn wheel_settlement_port_schedules_only_when_the_wheel_reminder_is_enabled() {
+    use cama_app::wheel_settlement::WheelReminderPort;
+
+    for (enabled, expected) in [(1, true), (0, false)] {
+        let file = migrated_database();
+        Connection::open(file.path())
+            .unwrap()
+            .execute(
+                "INSERT INTO reminder_preferences(discord_id,guild_id,wheel_enabled,updated_at)
+                 VALUES (?1,?2,?3,0)",
+                (USER, GUILD, enabled),
+            )
+            .unwrap();
+        let discord = Arc::new(MockDiscord::default());
+        let provider = test_provider(file.path(), discord, ReminderCooldowns::default());
+        let hooks = provider.hooks();
+        let deadline = SystemReminderClock.now_seconds() + 3600;
+        let port = hooks.clone();
+        // Wheel settlement calls the port from its blocking worker.
+        tokio::task::spawn_blocking(move || {
+            WheelReminderPort::schedule_wheel(&port, USER, GUILD, deadline)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let key = ReminderTaskKey::new(UserId::new(USER), GuildId::new(GUILD), ReminderKind::Wheel);
+        let scheduled = hooks.state.task_snapshot(key).unwrap();
+        assert_eq!(scheduled.is_some(), expected, "wheel_enabled={enabled}");
+        if let Some(reminder) = scheduled {
+            assert_eq!(reminder.due_at, deadline);
+        }
+    }
+}
+
+#[tokio::test]
 async fn queued_reminder_requires_a_durable_preference_at_delivery() {
     let file = migrated_database();
     let connection = Connection::open(file.path()).unwrap();

@@ -21,8 +21,8 @@
         {
           "status": 200,
           "content_type": "image/png",
-          "body": "hero_success.txt",
-          "sha256": "9349aa904b15dac763dc810c73154a7380e5c3811a58f761bad3f19295fba847"
+          "body": "hero_success.png",
+          "sha256": "680d6239db80d560205c76f88fe5d3b4e134feed78552b6810c0f463c5a15b3e"
         }
       ]
     },
@@ -39,8 +39,8 @@
         {
           "status": 200,
           "content_type": "image/png",
-          "body": "hero_success.txt",
-          "sha256": "9349aa904b15dac763dc810c73154a7380e5c3811a58f761bad3f19295fba847"
+          "body": "hero_success.png",
+          "sha256": "680d6239db80d560205c76f88fe5d3b4e134feed78552b6810c0f463c5a15b3e"
         }
       ]
     }

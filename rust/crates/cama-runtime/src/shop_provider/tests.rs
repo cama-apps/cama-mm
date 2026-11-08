@@ -465,7 +465,7 @@ async fn paid_ping_defers_before_debit_and_mentions_only_configured_target() {
     let followup = responder.followups.lock().expect("followups")[0].clone();
     assert_eq!(
         followup.content,
-        "<@555>\nhttps://tenor.com/view/hiash-gif-25282310"
+        "Buyer used Pingedash on Unknown player! <@555>\nhttps://tenor.com/view/hiash-gif-25282310"
     );
     assert_eq!(
         followup.allowed_mentions,
@@ -661,7 +661,7 @@ async fn failed_mana_effect_refunds_debit_releases_daily_slot_and_keeps_public_c
         .expect("compensated Insight failure");
     assert_eq!(responder.defers.lock().expect("defers").as_slice(), [false]);
     let followup = responder.followups.lock().expect("followups")[0].clone();
-    assert_eq!(followup.content, "<@404> is not registered.");
+    assert_eq!(followup.content, "Player 404 is not registered. <@404>");
     assert!(!followup.ephemeral);
     assert_eq!(
         followup.allowed_mentions,
@@ -956,6 +956,18 @@ async fn blood_pact_purchase_copy_advertises_an_uncapped_skim() {
 
     let followup = responder.followups.lock().expect("followups")[0].clone();
     assert!(
+        followup
+            .content
+            .starts_with("🌿🩸 **BLOOD PACT** — Buyer marks Player 202 for skim. <@202>\n"),
+        "{}",
+        followup.content
+    );
+    assert!(!followup.content.contains(&format!("<@{BUYER}>")));
+    assert_eq!(
+        followup.allowed_mentions,
+        InteractionAllowedMentions::Users(vec![TARGET])
+    );
+    assert!(
         followup.content.contains("with no cap"),
         "Blood Pact copy must state the skim is uncapped: {}",
         followup.content
@@ -1035,6 +1047,15 @@ async fn all_fifteen_mana_items_complete_durably_and_reject_replay_after_restart
             responder.followups.lock().expect("followups").len(),
             1,
             "{} must deliver exactly one result",
+            spec.key
+        );
+        let content = responder.followups.lock().expect("followups")[0]
+            .content
+            .clone();
+        assert!(content.contains("Buyer"), "{}: {content}", spec.key);
+        assert!(
+            !content.contains(&format!("<@{BUYER}>")),
+            "{}: {content}",
             spec.key
         );
         let purchase_id = format!("shop-mana:{GUILD}:{interaction_id}");
@@ -1155,6 +1176,12 @@ async fn all_simple_products_debit_once_deliver_publicly_and_survive_restart() {
             Some(*expected_title),
             "{item} embed"
         );
+        let description = followups[0].embeds[0]
+            .description
+            .as_deref()
+            .expect("product description");
+        assert!(description.contains("Buyer"), "{item}: {description}");
+        assert!(!description.contains("<@"), "{item}: {description}");
     }
 
     let expected_balance = starting_balance - products.iter().map(|(_, cost, _)| cost).sum::<i64>();
@@ -1203,6 +1230,11 @@ async fn double_or_nothing_settles_once_and_restart_enforces_cooldown() {
     {
         let followups = responder.followups.lock().expect("followups");
         assert_eq!(followups.len(), 1);
+        assert_eq!(followups[0].content, "Buyer");
+        assert_eq!(
+            followups[0].allowed_mentions,
+            InteractionAllowedMentions::None
+        );
         let title = followups[0].embeds[0]
             .title
             .as_deref()
@@ -1344,12 +1376,16 @@ async fn avoid_and_package_purchases_are_private_listable_and_restart_durable() 
         assert_eq!(immediate.len(), 1);
         assert!(immediate[0].ephemeral);
         assert_eq!(immediate[0].embeds[0].title.as_deref(), Some(title));
+        let description = immediate[0].embeds[0]
+            .description
+            .as_deref()
+            .expect("active list description");
         assert!(
-            immediate[0].embeds[0]
-                .description
-                .as_deref()
-                .is_some_and(|description| description.contains(&format!("<@{TARGET}>")))
+            description.starts_with("Unknown player - **"),
+            "{description}"
         );
+        assert!(!description.contains("<@"), "{description}");
+        assert!(!description.contains(&TARGET.to_string()), "{description}");
     }
 }
 
@@ -1574,7 +1610,10 @@ async fn cancel_package_deal_is_private_and_removes_eligible_deal_without_refund
     let followups = responder.followups.lock().expect("followups");
     assert_eq!(followups.len(), 1);
     assert!(followups[0].ephemeral);
-    assert!(followups[0].content.contains("No jopacoin were refunded"));
+    assert_eq!(
+        followups[0].content,
+        "Cancelled your Package Deal with Player 202. No jopacoin were refunded."
+    );
     assert_eq!(
         fixture
             .connection()
@@ -1844,6 +1883,13 @@ async fn recalibration_debit_and_uncertainty_reset_are_atomic_and_restart_durabl
             followups[0].embeds[0].title.as_deref(),
             Some("Rating Recalibration")
         );
+        assert_eq!(
+            followups[0].embeds[0]
+                .description
+                .as_deref()
+                .and_then(|description| description.lines().next()),
+            Some("Buyer has recalibrated their rating!")
+        );
     }
 
     let connection = fixture.connection();
@@ -1907,5 +1953,58 @@ async fn recalibration_debit_and_uncertainty_reset_are_atomic_and_restart_durabl
             )
             .unwrap(),
         balance
+    );
+}
+
+#[tokio::test]
+async fn insight_on_a_player_without_a_tunnel_names_and_pings_the_target() {
+    let fixture = Fixture::migrated();
+    fixture.player(BUYER, 10_000);
+    fixture.player(TARGET, 1_000);
+    let today =
+        pacific_mana_day(unix_timestamp().expect("current timestamp")).expect("Pacific mana day");
+    fixture
+        .connection()
+        .execute(
+            "INSERT INTO player_mana(
+               discord_id,guild_id,current_land,assigned_date,consumed_today,
+               white_shield_remaining)
+             VALUES(?1,?2,'Island',?3,0,0)",
+            params![
+                i64::try_from(BUYER).unwrap(),
+                i64::try_from(GUILD).unwrap(),
+                today
+            ],
+        )
+        .expect("seed Island mana");
+
+    let responder = Arc::new(Responder::default());
+    fixture
+        .registry()
+        .command_handler("shop")
+        .expect("Shop handler")
+        .handle(
+            command(
+                "mana",
+                vec![string("item", "insight"), user("target", TARGET)],
+                7_101,
+            ),
+            responder.clone(),
+        )
+        .await
+        .expect("Insight purchase");
+
+    let followup = responder.followups.lock().expect("followups")[0].clone();
+    assert!(
+        followup
+            .content
+            .starts_with("🏝️🔍 **INSIGHT** — Player 202 hasn't started digging. <@202>\n"),
+        "{}",
+        followup.content
+    );
+    assert!(followup.embeds.is_empty());
+    assert_eq!(
+        followup.allowed_mentions,
+        InteractionAllowedMentions::Users(vec![TARGET])
     );
 }

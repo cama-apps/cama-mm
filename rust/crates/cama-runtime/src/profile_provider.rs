@@ -162,9 +162,10 @@ impl ProfileRegistrationProvider {
 
     #[must_use]
     pub fn with_player_names(mut self, player_names: Arc<dyn GuildPlayerNameResolver>) -> Self {
-        Arc::get_mut(&mut self.handler)
-            .expect("new profile provider owns its handler")
-            .player_names = player_names;
+        let handler =
+            Arc::get_mut(&mut self.handler).expect("new profile provider owns its handler");
+        handler.sources.player_names = Arc::clone(&player_names);
+        handler.player_names = player_names;
         self
     }
 }
@@ -710,6 +711,9 @@ struct ProfileDataSources {
     wrapped: WrappedRepository,
     dota: Arc<LiveDotaProfileService>,
     opendota: Arc<OpenDotaRuntimeServices>,
+    /// Pages render on a blocking worker, so teammate and opponent names
+    /// come from the member cache and last-seen archive.
+    player_names: Arc<dyn GuildPlayerNameResolver>,
 }
 
 impl ProfileDataSources {
@@ -733,6 +737,7 @@ impl ProfileDataSources {
             wrapped: WrappedRepository::new(database_path),
             dota: Arc::new(opendota.profile_player_service(database_path)),
             opendota,
+            player_names: Arc::new(DiscordIdPlayerNameResolver),
         }
     }
 
@@ -1490,6 +1495,32 @@ impl ProfileDataSources {
                 ProfilePage::new("Error", DISCORD_RED).description("Pairings data unavailable")
             );
         };
+        let teammate_ids = [
+            &summary.best_teammates,
+            &summary.worst_teammates,
+            &summary.most_played_with,
+            &summary.even_teammates,
+        ]
+        .into_iter()
+        .flatten()
+        .map(|row| row.teammate_id);
+        let opponent_ids = [
+            &summary.best_matchups,
+            &summary.worst_matchups,
+            &summary.most_played_against,
+            &summary.even_opponents,
+        ]
+        .into_iter()
+        .flatten()
+        .map(|row| row.opponent_id);
+        let paired_ids = teammate_ids.chain(opponent_ids).collect::<Vec<_>>();
+        let names = guild_id
+            .and_then(|guild_id| {
+                self.player_names
+                    .names_for_guild(guild_id, &paired_ids)
+                    .ok()
+            })
+            .unwrap_or_default();
         let teammate_record_lines = |rows: &[cama_db::pairings_repository::TeammatePairing]| {
             if rows.is_empty() {
                 "No data yet".to_owned()
@@ -1497,8 +1528,8 @@ impl ProfileDataSources {
                 rows.iter()
                     .map(|row| {
                         format!(
-                            "<@{}> - {:.0}% ({}W/{}L)",
-                            row.teammate_id,
+                            "{} - {:.0}% ({}W/{}L)",
+                            names.resolve(row.teammate_id),
                             row.win_rate * 100.0,
                             row.wins_together,
                             row.games_together - row.wins_together
@@ -1515,8 +1546,8 @@ impl ProfileDataSources {
                 rows.iter()
                     .map(|row| {
                         format!(
-                            "<@{}> - {:.0}% ({}W/{}L)",
-                            row.opponent_id,
+                            "{} - {:.0}% ({}W/{}L)",
+                            names.resolve(row.opponent_id),
                             row.win_rate * 100.0,
                             row.wins_against,
                             row.games_against - row.wins_against
@@ -1533,8 +1564,8 @@ impl ProfileDataSources {
                 rows.iter()
                     .map(|row| {
                         format!(
-                            "<@{}> - {}g ({:.0}%)",
-                            row.teammate_id,
+                            "{} - {}g ({:.0}%)",
+                            names.resolve(row.teammate_id),
                             row.games_together,
                             row.win_rate * 100.0
                         )
@@ -1550,8 +1581,8 @@ impl ProfileDataSources {
                 rows.iter()
                     .map(|row| {
                         format!(
-                            "<@{}> - {}g ({:.0}%)",
-                            row.opponent_id,
+                            "{} - {}g ({:.0}%)",
+                            names.resolve(row.opponent_id),
                             row.games_against,
                             row.win_rate * 100.0
                         )
@@ -1567,8 +1598,8 @@ impl ProfileDataSources {
                 rows.iter()
                     .map(|row| {
                         format!(
-                            "<@{}> ({}W/{}L)",
-                            row.teammate_id,
+                            "{} ({}W/{}L)",
+                            names.resolve(row.teammate_id),
                             row.wins_together,
                             row.games_together - row.wins_together
                         )
@@ -1584,8 +1615,8 @@ impl ProfileDataSources {
                 rows.iter()
                     .map(|row| {
                         format!(
-                            "<@{}> ({}W/{}L)",
-                            row.opponent_id,
+                            "{} ({}W/{}L)",
+                            names.resolve(row.opponent_id),
                             row.wins_against,
                             row.games_against - row.wins_against
                         )

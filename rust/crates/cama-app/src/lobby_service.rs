@@ -183,7 +183,6 @@ pub enum JoinFailure {
     Persistence,
     PendingMatchGuard,
     ModerationGuard,
-    ConditionalJoinDeprecated,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -245,37 +244,6 @@ pub struct LobbySnapshot {
     pub message_ids: LobbyMessageIds,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReadycheckConfirmationSnapshot {
-    pub message_id: MessageId,
-    pub reacted: BTreeSet<UserId>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct LoadedLobbyReadycheckSnapshot {
-    pub player_ids: Vec<UserId>,
-    pub players: Vec<LobbyPlayer>,
-    pub player_join_times: BTreeMap<UserId, f64>,
-    pub readycheck: Option<ReadycheckConfirmationSnapshot>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct ReadycheckRecord {
-    message_id: Option<MessageId>,
-    channel_id: Option<ChannelId>,
-    lobby_ids: BTreeSet<UserId>,
-    reacted: BTreeMap<UserId, String>,
-}
-
-impl ReadycheckRecord {
-    fn confirmation_snapshot(&self) -> Option<ReadycheckConfirmationSnapshot> {
-        Some(ReadycheckConfirmationSnapshot {
-            message_id: self.message_id?,
-            reacted: self.reacted.keys().copied().collect(),
-        })
-    }
-}
-
 #[derive(Clone, Debug)]
 struct LobbyRecord {
     scope: LobbyScope,
@@ -284,7 +252,6 @@ struct LobbyRecord {
     players: BTreeSet<UserId>,
     player_join_times: BTreeMap<UserId, f64>,
     message_ids: LobbyMessageIds,
-    readycheck: ReadycheckRecord,
 }
 
 impl LobbyRecord {
@@ -296,7 +263,6 @@ impl LobbyRecord {
             players: BTreeSet::new(),
             player_join_times: BTreeMap::new(),
             message_ids: LobbyMessageIds::default(),
-            readycheck: ReadycheckRecord::default(),
         }
     }
 
@@ -311,26 +277,12 @@ impl LobbyRecord {
         }
     }
 
-    /// Replace only the fields a durable write republishes.
-    ///
-    /// `readycheck` is in-memory only and is never carried by a durable write,
-    /// so a ready-check mutation that landed while the persist was running is
-    /// preserved instead of being rolled back by the publish.
-    fn adopt_durable(&mut self, persisted: Self) {
-        self.scope = persisted.scope;
-        self.created_by = persisted.created_by;
-        self.created_at_ns = persisted.created_at_ns;
-        self.players = persisted.players;
-        self.player_join_times = persisted.player_join_times;
-        self.message_ids = persisted.message_ids;
-    }
-
     fn from_persisted(state: PersistedLobbyState) -> Option<Self> {
         if !state.status.eq_ignore_ascii_case("open") {
             return None;
         }
         let kind = if state.lobby_id
-            == LobbyScope::new(GuildId::DEFAULT, LobbyKind::LowSkill).lobby_id()
+            == LobbyScope::new(GuildId::DIRECT_MESSAGE, LobbyKind::LowSkill).lobby_id()
         {
             LobbyKind::LowSkill
         } else {
@@ -366,7 +318,6 @@ impl LobbyRecord {
                 embed_message_id: state.embed_message_id.map(MessageId),
                 origin_channel_id: state.origin_channel_id.map(ChannelId),
             },
-            readycheck: ReadycheckRecord::default(),
         })
     }
 
@@ -501,13 +452,7 @@ where
     /// Publish a record whose durable write already succeeded. Callers hold
     /// [`Self::lock_writes`].
     fn publish_record(&self, state: &mut LobbyState, record: LobbyRecord) {
-        let scope = record.scope;
-        match state.lobbies.get_mut(&scope) {
-            Some(live) => live.adopt_durable(record),
-            None => {
-                state.lobbies.insert(scope, record);
-            }
-        }
+        state.lobbies.insert(record.scope, record);
     }
 
     fn is_low_skill_eligible(&self, player_id: UserId, guild_id: GuildId) -> bool {
@@ -727,28 +672,45 @@ where
                 return JoinOutcome::suspended(suspension);
             }
         }
-        // The provisional add already mutated the live record; this clone only
-        // feeds the durable write, so there is nothing to publish afterwards.
-        let Some(candidate) = ({
+        // Another writer may have published a record it cloned before the
+        // provisional add, erasing this seat. Re-seat the joiner in the clone
+        // under the writer lock so the durable row and the published record
+        // both keep the join that is about to be reported.
+        let (reserved_elsewhere, live) = {
             let state = self.lock_state();
-            state.lobbies.get(&scope).cloned()
-        }) else {
+            (
+                state
+                    .in_flight
+                    .get(&(scope.guild_id, player_id))
+                    .is_some_and(|reserved_kind| *reserved_kind != scope.kind),
+                state.lobbies.get(&scope).cloned(),
+            )
+        };
+        if reserved_elsewhere {
+            self.rollback_provisional_join(scope, player_id, created_shell);
+            return JoinOutcome::failed(JoinFailure::InFlight);
+        }
+        let Some(mut candidate) = live else {
             return JoinOutcome::failed(JoinFailure::Persistence);
         };
+        if !candidate.players.contains(&player_id) {
+            if candidate.players.len() >= self.max_players {
+                self.rollback_provisional_join(scope, player_id, created_shell);
+                return JoinOutcome::failed(JoinFailure::LobbyFull);
+            }
+            candidate.players.insert(player_id);
+            #[allow(clippy::cast_precision_loss)]
+            candidate
+                .player_join_times
+                .insert(player_id, joined_at_ns as f64 / 1_000_000_000.0);
+        }
         if self.persist_record(&candidate).is_err() {
             self.rollback_provisional_join(scope, player_id, created_shell);
             return JoinOutcome::failed(JoinFailure::Persistence);
         }
+        let mut state = self.lock_state();
+        self.publish_record(&mut state, candidate);
         JoinOutcome::joined(joined_at_ns)
-    }
-
-    #[must_use]
-    pub const fn join_lobby_conditional(&self) -> JoinOutcome {
-        JoinOutcome {
-            success: false,
-            failure: Some(JoinFailure::ConditionalJoinDeprecated),
-            context: None,
-        }
     }
 
     #[must_use]
@@ -960,44 +922,9 @@ where
         Ok(removed)
     }
 
-    /// Reconcile one ready-check generation with the lobby's current roster.
-    ///
-    /// Cross-lobby match eviction mutates membership before any best-effort
-    /// Discord repaint.  Keeping this reconciliation inside the same typed
-    /// service means a failed display edit cannot leave departed players
-    /// counted toward the ready quorum.
-    pub fn prune_readycheck_to_lobby_members(&self, scope: LobbyScope) -> usize {
-        let mut state = self.lock_state();
-        let Some(lobby) = state.lobbies.get_mut(&scope) else {
-            return 0;
-        };
-        let players = lobby.players.clone();
-        lobby
-            .readycheck
-            .lobby_ids
-            .retain(|player_id| players.contains(player_id));
-        lobby
-            .readycheck
-            .reacted
-            .retain(|player_id, _| players.contains(player_id));
-        lobby.readycheck.reacted.len()
-    }
-
-    #[must_use]
-    pub fn readycheck_confirmed_count(&self, scope: LobbyScope) -> usize {
-        self.lock_state()
-            .lobbies
-            .get(&scope)
-            .map_or(0, |lobby| lobby.readycheck.reacted.len())
-    }
-
     #[must_use]
     pub const fn ready_threshold(&self) -> usize {
         self.ready_threshold
-    }
-
-    pub fn set_lobby_message_ids(&self, scope: LobbyScope, ids: LobbyMessageIds) -> bool {
-        self.try_set_lobby_message_ids(scope, ids).unwrap_or(false)
     }
 
     pub fn try_set_lobby_message_ids(
@@ -1017,106 +944,6 @@ where
         let mut state = self.lock_state();
         self.publish_record(&mut state, candidate);
         Ok(true)
-    }
-
-    #[must_use]
-    pub fn get_lobby_message_id(&self, scope: LobbyScope) -> Option<MessageId> {
-        self.lock_state()
-            .lobbies
-            .get(&scope)
-            .and_then(|lobby| lobby.message_ids.message_id)
-    }
-
-    pub fn set_readycheck_state(
-        &self,
-        scope: LobbyScope,
-        message_id: MessageId,
-        channel_id: ChannelId,
-        lobby_ids: BTreeSet<UserId>,
-        initial_reacted: BTreeMap<UserId, String>,
-    ) -> bool {
-        let mut state = self.lock_state();
-        let Some(lobby) = state.lobbies.get_mut(&scope) else {
-            return false;
-        };
-        lobby.readycheck = ReadycheckRecord {
-            message_id: Some(message_id),
-            channel_id: Some(channel_id),
-            lobby_ids,
-            reacted: initial_reacted,
-        };
-        true
-    }
-
-    #[must_use]
-    pub fn get_readycheck_message_id(&self, scope: LobbyScope) -> Option<MessageId> {
-        self.lock_state()
-            .lobbies
-            .get(&scope)
-            .and_then(|lobby| lobby.readycheck.message_id)
-    }
-
-    #[must_use]
-    pub fn get_readycheck_channel_id(&self, scope: LobbyScope) -> Option<ChannelId> {
-        self.lock_state()
-            .lobbies
-            .get(&scope)
-            .and_then(|lobby| lobby.readycheck.channel_id)
-    }
-
-    pub fn add_readycheck_reaction(
-        &self,
-        scope: LobbyScope,
-        player_id: UserId,
-        tag: impl Into<String>,
-    ) -> bool {
-        let mut state = self.lock_state();
-        let Some(lobby) = state.lobbies.get_mut(&scope) else {
-            return false;
-        };
-        if lobby.readycheck.message_id.is_none() || !lobby.readycheck.lobby_ids.contains(&player_id)
-        {
-            return false;
-        }
-        lobby
-            .readycheck
-            .reacted
-            .insert(player_id, tag.into())
-            .is_none()
-    }
-
-    #[must_use]
-    pub fn get_readycheck_confirmation_snapshot(
-        &self,
-        scope: LobbyScope,
-    ) -> Option<ReadycheckConfirmationSnapshot> {
-        self.lock_state()
-            .lobbies
-            .get(&scope)
-            .and_then(|lobby| lobby.readycheck.confirmation_snapshot())
-    }
-
-    #[must_use]
-    pub fn get_lobby_players_and_readycheck_snapshot(
-        &self,
-        scope: LobbyScope,
-    ) -> Option<LoadedLobbyReadycheckSnapshot> {
-        let (player_ids, player_join_times, readycheck) = {
-            let state = self.lock_state();
-            let lobby = state.lobbies.get(&scope)?;
-            (
-                lobby.players.iter().copied().collect::<Vec<_>>(),
-                lobby.player_join_times.clone(),
-                lobby.readycheck.confirmation_snapshot(),
-            )
-        };
-        let players = self.player_port.get_by_ids(&player_ids, scope.guild_id);
-        Some(LoadedLobbyReadycheckSnapshot {
-            player_ids,
-            players,
-            player_join_times,
-            readycheck,
-        })
     }
 
     pub fn reset_lobby(&self, scope: LobbyScope) -> bool {
@@ -1139,15 +966,6 @@ where
             .in_flight
             .retain(|(guild_id, _), kind| *guild_id != scope.guild_id || *kind != scope.kind);
         Ok(removed)
-    }
-
-    #[must_use]
-    pub fn build_lobby_embed(
-        &self,
-        lobby: &LobbySnapshot,
-        preview_port: Option<&dyn FirstGamePoolPreviewPort>,
-    ) -> EmbedModel {
-        self.build_lobby_embed_with_name_overrides(lobby, preview_port, None)
     }
 
     #[must_use]
