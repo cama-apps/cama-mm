@@ -218,6 +218,9 @@ impl ShopRegistrationProvider {
             )
         });
         let mut neon = NeonDegenService::new(shop_seed());
+        neon.set_player_names(Arc::new(crate::discord_transport::GuildCacheNeonNames(
+            Arc::clone(&player_name_resolver),
+        )));
         neon.set_enabled(config.values.neon_degen_enabled);
         neon.set_cooldown_seconds(
             u64::try_from(config.values.neon_cooldown_seconds.max(0)).unwrap_or(u64::MAX),

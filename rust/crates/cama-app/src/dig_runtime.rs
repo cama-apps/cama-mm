@@ -196,14 +196,6 @@ impl DigRuntimeConfig {
         }
     }
 
-    #[must_use]
-    pub fn with_asset_root(root: impl Into<PathBuf>) -> Self {
-        Self {
-            asset_root: root.into(),
-            ..Self::default()
-        }
-    }
-
     /// Set the secret mixed into dig seeds; zero keeps the legacy seed.
     #[must_use]
     pub const fn with_entropy_secret(mut self, secret: u64) -> Self {
@@ -235,11 +227,6 @@ impl DigRuntimeConfig {
             0
         };
         self
-    }
-
-    #[must_use]
-    pub fn authored_asset_root(&self, relative: impl AsRef<Path>) -> PathBuf {
-        self.asset_root.join(relative)
     }
 }
 
@@ -762,11 +749,6 @@ impl DigRuntimeLootRepository {
     #[must_use]
     pub const fn snapshot(&self) -> &DigRuntimeSnapshot {
         &self.snapshot
-    }
-
-    #[must_use]
-    pub fn into_snapshot(self) -> DigRuntimeSnapshot {
-        self.snapshot
     }
 }
 

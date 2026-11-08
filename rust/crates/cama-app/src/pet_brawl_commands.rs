@@ -198,6 +198,7 @@ impl InMemoryDiscord {
         })
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn defer_count(&self) -> usize {
         self.events
@@ -511,21 +512,25 @@ where
         &mut self.service
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn has_session(&self, brawl_id: i64) -> bool {
         self.sessions.contains_key(&brawl_id)
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn session_state(&self, brawl_id: i64) -> Option<&PetBrawlState> {
         self.sessions.get(&brawl_id).map(|session| &session.state)
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn session_picks(&self, brawl_id: i64) -> Option<&BTreeMap<&'static str, PetBrawlMove>> {
         self.sessions.get(&brawl_id).map(|session| &session.picks)
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn session_last_log(&self, brawl_id: i64) -> Option<&[String]> {
         self.sessions
@@ -533,6 +538,7 @@ where
             .map(|session| session.last_log.as_slice())
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn session_full_timeouts(&self, brawl_id: i64) -> Option<u8> {
         self.sessions
@@ -540,12 +546,14 @@ where
             .map(|session| session.consecutive_full_timeouts)
     }
 
+    #[cfg(test)]
     pub fn set_session_state(&mut self, brawl_id: i64, state: PetBrawlState) {
         if let Some(session) = self.sessions.get_mut(&brawl_id) {
             session.state = state;
         }
     }
 
+    #[cfg(test)]
     pub fn set_session_lock_held(&mut self, brawl_id: i64, held: bool) {
         if let Some(session) = self.sessions.get_mut(&brawl_id) {
             session.lock_held = held;

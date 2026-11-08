@@ -865,6 +865,11 @@ impl BettingRegistrationProvider {
             config.prediction_initial_fair_default,
         );
         let mut neon = NeonDegenService::with_event_port(fastrand::u64(..), neon_port);
+        neon.set_player_names(Arc::new(crate::discord_transport::GuildCacheNeonNames(
+            Arc::new(
+                crate::discord_transport::DiscordGuildPlayerNameResolver::new(Arc::clone(&discord)),
+            ),
+        )));
         neon.set_enabled(config.neon_degen_enabled);
         neon.set_cooldown_seconds(
             u64::try_from(config.neon_cooldown_seconds.max(0)).unwrap_or(u64::MAX),

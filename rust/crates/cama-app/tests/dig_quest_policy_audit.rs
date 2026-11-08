@@ -313,10 +313,6 @@ fn assert_only(ids: &BTreeSet<String>, expected: &str) {
     assert_eq!(ids, &BTreeSet::from([expected.to_owned()]));
 }
 
-fn subtract_five_tax(value: i64) -> i64 {
-    value - 5
-}
-
 // -------------------------------------------------------------------------
 // tests/test_dig_quest_service.py (17 cases)
 // -------------------------------------------------------------------------
@@ -546,7 +542,7 @@ fn roll_event_excludes_quest_events_without_player_context() {
             })
             .expect("actor snapshot")
             .expect("seeded actor");
-    let events = fixture.service().eligible_event_presentations_for_snapshot(
+    let events = eligible_events(
         &actor,
         &dig_event_runtime_quest_repository::DigEventQuestSnapshot::default(),
         false,
@@ -573,12 +569,7 @@ fn roll_event_includes_quest_starter_when_eligible() {
         })
         .expect("actor snapshot")
         .expect("seeded actor");
-    let events = fixture.service().eligible_event_presentations_for_snapshot(
-        &actor,
-        &fixture.quest_state(),
-        true,
-        false,
-    );
+    let events = eligible_events(&actor, &fixture.quest_state(), true, false);
     assert!(events.iter().any(|event| event.event_id == "agh_s1"));
 }
 
@@ -596,12 +587,7 @@ fn roll_event_excludes_quest_event_when_player_on_different_step() {
         })
         .expect("actor snapshot")
         .expect("seeded actor");
-    let events = fixture.service().eligible_event_presentations_for_snapshot(
-        &actor,
-        &fixture.quest_state(),
-        true,
-        false,
-    );
+    let events = eligible_events(&actor, &fixture.quest_state(), true, false);
     assert!(!events.iter().any(|event| event.event_id == "agh_s1"));
     assert!(events.iter().any(|event| event.event_id == "agh_s3"));
 }
@@ -619,12 +605,7 @@ fn roll_event_excludes_quest_event_during_boss_combat() {
         })
         .expect("actor snapshot")
         .expect("seeded actor");
-    let events = fixture.service().eligible_event_presentations_for_snapshot(
-        &actor,
-        &fixture.quest_state(),
-        true,
-        true,
-    );
+    let events = eligible_events(&actor, &fixture.quest_state(), true, true);
     assert!(
         events
             .iter()
@@ -760,41 +741,6 @@ fn audit_available_event_selector_excludes_quest_events() {
 }
 
 #[test]
-fn finale_jc_applies_tax_fn() {
-    let fixture = Fixture::new();
-    fixture.seed_actor(25, 0, 100);
-    fixture.set_active("agh_lost_trial", 5);
-    let key = event_key_for("agh_s5", "desperate", 0.40, true);
-    let outcome = fixture
-        .service()
-        .with_finale_tax_hook(subtract_five_tax)
-        .resolve_event(dig_runtime::DigRuntimeEventRequest {
-            discord_id: ACTOR,
-            guild_id: GUILD,
-            event_id: "agh_s5",
-            choice: "desperate",
-            event_key: &key,
-            now: NOW,
-            chained: false,
-        })
-        .expect("taxed finale");
-    let Some(dig_event_runtime_quest_under_test::DigEventQuestFinale::JcAndModifier {
-        gross_jc,
-        net_jc,
-        ..
-    }) = outcome.quest_finale
-    else {
-        panic!("expected Aghanim JC finale");
-    };
-    assert_eq!(gross_jc, 75);
-    assert_eq!(net_jc, 44);
-    assert_eq!(
-        fixture.balance(),
-        100 + outcome.resolution.expect("resolution").jc + 44
-    );
-}
-
-#[test]
 fn finale_completes_quest_before_dispatch() {
     let fixture = Fixture::new();
     fixture.seed_actor(25, 0, 100);
@@ -872,9 +818,7 @@ fn roll_event_passes_tunnel_through_to_quest_filter() {
         .expect("actor snapshot")
         .expect("seeded actor");
     let quest = fixture.quest_state();
-    let eligible = fixture
-        .service()
-        .eligible_event_presentations_for_snapshot(&actor, &quest, true, false);
+    let eligible = eligible_events(&actor, &quest, true, false);
     assert!(eligible.iter().any(|event| event.event_id == "agh_s1"));
 
     let mut entropy = dig_loot::SeededLootEntropy::new(0);
@@ -883,4 +827,44 @@ fn roll_event_passes_tunnel_through_to_quest_filter() {
         .roll_event_for_snapshot(&actor, &quest, true, false, &mut entropy)
         .expect("one eligible event");
     assert!(canonical_quest_for_event(&rolled.event_id).is_none() || rolled.event_id == "agh_s1");
+}
+
+/// One event the picker would offer. The production roll composes the same
+/// canonical quest and event eligibility policies before drawing.
+struct EligibleEvent {
+    event_id: String,
+}
+
+fn eligible_events(
+    actor: &dig_event_runtime_quest_repository::DigEventActorSnapshot,
+    quest: &dig_event_runtime_quest_repository::DigEventQuestSnapshot,
+    include_quest_events: bool,
+    in_boss: bool,
+) -> Vec<EligibleEvent> {
+    let predicates = if quest.recent_bet {
+        BTreeSet::from(["bet_within_7d".to_owned()])
+    } else {
+        BTreeSet::new()
+    };
+    let eligible_quest_ids = canonical_eligible_quest_event_ids(
+        actor.depth,
+        actor.prestige_level,
+        quest.active_quest_id.as_deref(),
+        quest.active_quest_step,
+        &quest.completed_quest_ids,
+        &predicates,
+    );
+    canonical_eligible_events(
+        actor.depth,
+        actor.luminosity,
+        actor.prestige_level,
+        &eligible_quest_ids,
+        include_quest_events,
+        in_boss,
+    )
+    .iter()
+    .map(|event| EligibleEvent {
+        event_id: event.id.to_owned(),
+    })
+    .collect()
 }

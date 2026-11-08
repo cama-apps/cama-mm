@@ -243,6 +243,7 @@ impl DigInventoryRepository {
         Ok(Some(query_inventory(&connection, discord_id, guild_id)?))
     }
 
+    #[cfg(test)]
     /// Insert an existing-schema inventory row. This is also used by reward
     /// settlement adapters; it is not schema initialization.
     pub fn add_item(

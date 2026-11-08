@@ -17,6 +17,7 @@ use crate::dig_service::layer_at;
 pub const BASE_ARTIFACT_FIND_RATE: f64 = 0.005;
 
 pub const PRESTIGE_FOUR_BOSS_IDS: [&str; 3] = ["blightcoil", "rimebound_king", "spineback"];
+#[cfg(test)]
 pub const BESPOKE_PHASE_BOSS_IDS: [&str; 5] = [
     "blightcoil",
     "rimebound_king",
@@ -42,6 +43,7 @@ pub const TROPHY_RELIC_IDS: [&str; 6] = [
     "hateborn_ember",
     "deaths_door",
 ];
+#[cfg(test)]
 pub const PRESTIGE_FOUR_TROPHY_IDS: [&str; 5] = [
     "weeping_fang",
     "runebitten_shard",
@@ -49,6 +51,7 @@ pub const PRESTIGE_FOUR_TROPHY_IDS: [&str; 5] = [
     "listening_shard",
     "hateborn_ember",
 ];
+#[cfg(test)]
 pub const PRESTIGE_FOUR_GENERAL_RELIC_IDS: [&str; 3] =
     ["deepveined_coal", "diviners_knot", "pathfinders_spur"];
 

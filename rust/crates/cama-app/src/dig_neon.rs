@@ -18,6 +18,7 @@ use crate::neon_degen::{
 
 pub const NEON_DIG_CHANCE: f64 = 0.12;
 pub const NEON_LLM_CHANCE: f64 = 0.60;
+#[cfg(test)]
 pub const DISCORD_GIF_LIMIT: usize = 4 * 1_024 * 1_024;
 
 pub const DIG_NARRATOR_SYSTEM_PROMPT: &str = concat!(
@@ -986,6 +987,7 @@ where
         }
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn with_caption(mut self, caption: Arc<dyn DigCaptionPort>) -> Self {
         self.caption = Some(caption);

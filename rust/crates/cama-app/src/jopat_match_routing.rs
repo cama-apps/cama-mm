@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
+use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
 use cama_domain::pet::get_species;
 
 use crate::dig_neon::BigWinFlavor;
@@ -469,7 +470,8 @@ where
             .player_name(discord_id, guild_id)
             .ok()
             .flatten()
-            .unwrap_or_else(|| format!("Client-{}", discord_id % 10_000))
+            .and_then(|name| readable_player_name(&name).map(str::to_owned))
+            .unwrap_or_else(|| UNKNOWN_PLAYER.to_owned())
     }
 
     fn render_context_text(&mut self, context: &JopatPostMatchContext) -> String {

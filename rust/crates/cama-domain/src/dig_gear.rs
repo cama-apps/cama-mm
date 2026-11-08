@@ -2067,6 +2067,7 @@ pub const PINNACLE_RELIC_SUFFIX_POOL: [&str; 12] = [
     "Forgotten Things",
 ];
 
+#[cfg(test)]
 pub const QUEST_RELIC_SUFFIXES: [&str; 2] = ["Long Silence", "Scheming Hand"];
 
 #[cfg(test)]

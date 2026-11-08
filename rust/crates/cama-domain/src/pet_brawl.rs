@@ -238,6 +238,7 @@ impl Default for BrawlTraits {
     }
 }
 
+#[cfg(test)]
 /// Species covered by the explicit combat-trait catalog. Quirkless entries
 /// are deliberately retained so adding a species cannot silently omit its
 /// combat-design decision.

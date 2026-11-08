@@ -186,6 +186,7 @@ impl PetRegistrationProvider {
         }
     }
 
+    #[cfg(test)]
     /// Test/embedding convenience for callers without a configured AI
     /// provider. It still uses the live SQLite repositories and deterministic
     /// fallback flavor lines.

@@ -22,6 +22,7 @@ pub const PHASE_THREE_LIMIT: usize = 750 * 1024;
 pub const SCENE_SIZE: (u32, u32) = (320, 180);
 pub const LAYER_THUMBNAIL_SIZE: (u32, u32) = (128, 128);
 pub const PINNACLE_SIZE: (u32, u32) = (512, 288);
+#[cfg(test)]
 pub const EVENT_ASSET_SIZE: (u32, u32) = (1024, 576);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -434,6 +435,7 @@ pub const EVENT_SCENE_IDS: [&str; 27] = [
     "the_eye_opens",
 ];
 
+#[cfg(test)]
 pub const ROGUELIKE_EVENT_ASSET_IDS: [&str; 18] = [
     "collapsed_armory",
     "dead_prospectors_pack",
@@ -455,14 +457,17 @@ pub const ROGUELIKE_EVENT_ASSET_IDS: [&str; 18] = [
     "red_thread_shrine",
 ];
 
+#[cfg(test)]
 pub const PRESSURE_EVENT_ASSET_IDS: [&str; 3] = [
     "second_life_ledger",
     "twin_scar_altar",
     "ember_clearinghouse",
 ];
 
+#[cfg(test)]
 pub const NEW_PRESTIGE_TWO_BOSS_IDS: [&str; 3] =
     ["cairn_general", "brass_croupier", "saltveil_commodore"];
+#[cfg(test)]
 pub const NEW_PINNACLE_BOSS_IDS: [&str; 3] = ["bastion_below", "pale_surveyor", "lantern_engine"];
 
 #[must_use]
@@ -987,6 +992,7 @@ impl DigAssetService {
         }
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn phase_cache_counts(&self) -> (usize, usize, usize) {
         let state = self

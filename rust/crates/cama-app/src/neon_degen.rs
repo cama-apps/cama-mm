@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
+use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
 use cama_domain::openskill::CamaOpenSkillSystem;
 use fontdue::Font;
 use gif::{Encoder, Frame, Repeat};
@@ -1683,7 +1684,14 @@ pub struct NeonDegenService {
     cooldowns: HashMap<(u64, u64), u64>,
     one_time_seen: HashSet<EventKey>,
     event_port: Option<Arc<dyn NeonEventPort>>,
+    player_names: Option<Arc<dyn NeonPlayerNames>>,
     pub rolls: RollSource,
+}
+
+/// Readable display names for the players Neon copy names. Lookups must be
+/// cache-only, because Neon runs under its service lock on async paths.
+pub trait NeonPlayerNames: Send + Sync {
+    fn cached_display_name(&self, guild_id: Option<u64>, discord_id: u64) -> Option<String>;
 }
 
 impl fmt::Debug for NeonDegenService {
@@ -1715,6 +1723,7 @@ impl NeonDegenService {
             cooldowns: HashMap::new(),
             one_time_seen: HashSet::new(),
             event_port: None,
+            player_names: None,
             rolls: RollSource::seeded(seed),
         }
     }
@@ -1729,6 +1738,21 @@ impl NeonDegenService {
             .collect();
         service.event_port = Some(event_port);
         service
+    }
+
+    /// Resolve player names for Neon copy; without one, players read as
+    /// `Unknown player`.
+    pub fn set_player_names(&mut self, player_names: Arc<dyn NeonPlayerNames>) {
+        self.player_names = Some(player_names);
+    }
+
+    /// The readable name Neon shows for a player: never an ID or part of one.
+    fn player_label(&self, discord_id: u64, guild_id: Option<u64>) -> String {
+        self.player_names
+            .as_ref()
+            .and_then(|names| names.cached_display_name(guild_id, discord_id))
+            .and_then(|name| readable_player_name(&name).map(str::to_owned))
+            .unwrap_or_else(|| UNKNOWN_PLAYER.to_owned())
     }
 
     pub fn set_enabled(&mut self, enabled: bool) {
@@ -1836,7 +1860,7 @@ impl NeonDegenService {
         self.set_cooldown(discord_id, guild_id);
         Some(NeonResult::text(
             1,
-            render_balance_check(&client_name(discord_id), balance),
+            render_balance_check(&self.player_label(discord_id, guild_id), balance),
         ))
     }
 
@@ -1885,7 +1909,7 @@ impl NeonDegenService {
             self.set_cooldown(discord_id, guild_id);
             return Some(NeonResult::text(
                 2,
-                render_wheel_bankrupt(&client_name(discord_id), result_value),
+                render_wheel_bankrupt(&self.player_label(discord_id, guild_id), result_value),
             ));
         }
         let freefall_eligible = prior_balance.is_some_and(|balance| balance >= 100)
@@ -1900,7 +1924,7 @@ impl NeonDegenService {
                     footer_text: None,
                 }
                 .with_gif(create_freefall_gif(
-                    &client_name(discord_id),
+                    &self.player_label(discord_id, guild_id),
                     prior_balance.unwrap_or(100),
                     new_balance,
                 )),
@@ -1934,7 +1958,7 @@ impl NeonDegenService {
             return None;
         }
         let gif = render_big_win(
-            &format!("Client-{}", discord_id % 10_000),
+            &self.player_label(discord_id, guild_id),
             payout,
             source,
             flavor,
@@ -1972,14 +1996,14 @@ impl NeonDegenService {
             self.set_cooldown(discord_id, guild_id);
             return Some(NeonResult::text(
                 2,
-                render_system_breach(&client_name(discord_id)),
+                render_system_breach(&self.player_label(discord_id, guild_id)),
             ));
         }
         if new_balance == 0 && !won && self.rolls.roll(0.70) {
             self.set_cooldown(discord_id, guild_id);
             return Some(NeonResult::text(
                 2,
-                render_balance_zero(&client_name(discord_id)),
+                render_balance_zero(&self.player_label(discord_id, guild_id)),
             ));
         }
         None
@@ -2002,11 +2026,13 @@ impl NeonDegenService {
         }
         self.set_cooldown(discord_id, guild_id);
         let debt = new_balance.saturating_abs();
-        let text = render_debt_collector(&client_name(discord_id), debt);
+        let text = render_debt_collector(&self.player_label(discord_id, guild_id), debt);
         if leverage >= 5 && new_balance <= -self.max_debt && self.rolls.roll(0.30) {
             return Some(
-                NeonResult::text(3, text)
-                    .with_gif(create_debt_collector_gif(&client_name(discord_id), debt)),
+                NeonResult::text(3, text).with_gif(create_debt_collector_gif(
+                    &self.player_label(discord_id, guild_id),
+                    debt,
+                )),
             );
         }
         let _ = amount;
@@ -2041,7 +2067,7 @@ impl NeonDegenService {
         debt_cleared: i64,
         filing_number: u32,
     ) -> Option<NeonResult> {
-        let display_name = client_name(discord_id);
+        let display_name = self.player_label(discord_id, guild_id);
         self.on_bankruptcy_named(
             discord_id,
             guild_id,
@@ -2124,7 +2150,7 @@ impl NeonDegenService {
         self.set_cooldown(discord_id, guild_id);
         Some(NeonResult::text(
             2,
-            render_all_in_bet(&client_name(discord_id), amount, percentage),
+            render_all_in_bet(&self.player_label(discord_id, guild_id), amount, percentage),
         ))
     }
 
@@ -2148,7 +2174,7 @@ impl NeonDegenService {
         self.set_cooldown(discord_id, guild_id);
         Some(NeonResult::text(
             2,
-            render_last_second_bet(&client_name(discord_id), seconds_remaining),
+            render_last_second_bet(&self.player_label(discord_id, guild_id), seconds_remaining),
         ))
     }
 
@@ -2172,7 +2198,7 @@ impl NeonDegenService {
         self.set_cooldown(discord_id, guild_id);
         Some(NeonResult::text(
             1,
-            render_first_leverage(&client_name(discord_id), leverage),
+            render_first_leverage(&self.player_label(discord_id, guild_id), leverage),
         ))
     }
 
@@ -2194,7 +2220,7 @@ impl NeonDegenService {
         self.set_cooldown(discord_id, guild_id);
         Some(NeonResult::text(
             2,
-            render_bets_milestone(&client_name(discord_id), total_bets),
+            render_bets_milestone(&self.player_label(discord_id, guild_id), total_bets),
         ))
     }
 
@@ -2247,7 +2273,11 @@ impl NeonDegenService {
             }
             NeonResult::text(
                 2,
-                render_negative_loan(&client_name(discord_id), amount, -total_owed.abs()),
+                render_negative_loan(
+                    &self.player_label(discord_id, guild_id),
+                    amount,
+                    -total_owed.abs(),
+                ),
             )
         } else {
             if !self.check_cooldown(discord_id, guild_id) || !self.rolls.roll(0.50) {
@@ -2370,7 +2400,7 @@ impl NeonDegenService {
                 ]),
             )
             .with_gif(create_degen_certificate_gif(
-                &client_name(discord_id),
+                &self.player_label(discord_id, guild_id),
                 i64::from(degen_score),
             )),
         )
@@ -2394,7 +2424,7 @@ impl NeonDegenService {
             return None;
         }
         self.set_cooldown(discord_id, guild_id);
-        let name = client_name(discord_id);
+        let name = self.player_label(discord_id, guild_id);
         let text = render_games_milestone(&name, total_games);
         if total_games >= 100 {
             Some(
@@ -2427,7 +2457,7 @@ impl NeonDegenService {
             return None;
         }
         self.set_cooldown(discord_id, guild_id);
-        let name = client_name(discord_id);
+        let name = self.player_label(discord_id, guild_id);
         let text = render_win_streak_record(&name, current_streak);
         if current_streak >= 8 {
             Some(
@@ -2444,7 +2474,7 @@ impl NeonDegenService {
     #[must_use]
     pub fn on_rivalry_detected(
         &mut self,
-        _guild_id: Option<u64>,
+        guild_id: Option<u64>,
         player1_id: u64,
         player2_id: u64,
         games_against: i64,
@@ -2461,8 +2491,8 @@ impl NeonDegenService {
         Some(NeonResult::text(
             2,
             render_rivalry_detected(
-                &client_name(player1_id),
-                &client_name(player2_id),
+                &self.player_label(player1_id, guild_id),
+                &self.player_label(player2_id, guild_id),
                 u32::try_from(games_against.max(0)).unwrap_or(u32::MAX),
                 winrate_vs,
             ),
@@ -2481,7 +2511,7 @@ impl NeonDegenService {
         if !self.enabled {
             return None;
         }
-        let name = client_name(discord_id);
+        let name = self.player_label(discord_id, guild_id);
         let result = if won {
             NeonResult::text(1, render_don_win(&name, final_balance))
         } else if balance_at_risk > 100 && self.rolls.roll(0.18) {
@@ -2509,7 +2539,10 @@ impl NeonDegenService {
         let _ = guild_id;
         Some(NeonResult::text(
             1,
-            render_coinflip(&client_name(winner_id), &client_name(loser_id)),
+            render_coinflip(
+                &self.player_label(winner_id, guild_id),
+                &self.player_label(loser_id, guild_id),
+            ),
         ))
     }
 
@@ -2523,14 +2556,17 @@ impl NeonDegenService {
         captain2_id: u64,
         rating_diff: i64,
     ) -> Option<NeonResult> {
-        let _ = guild_id;
         let diff = rating_diff.saturating_abs();
         if !self.enabled || diff > 50 || !self.rolls.roll(0.20) {
             return None;
         }
         Some(NeonResult::text(
             1,
-            render_captain_symmetry(&client_name(captain1_id), &client_name(captain2_id), diff),
+            render_captain_symmetry(
+                &self.player_label(captain1_id, guild_id),
+                &self.player_label(captain2_id, guild_id),
+                diff,
+            ),
         ))
     }
 
@@ -2610,10 +2646,6 @@ impl NeonDegenService {
         self.set_cooldown(discord_id, guild_id);
         Some(NeonResult::text(1, render_gamba_spectator(display_name)))
     }
-}
-
-fn client_name(discord_id: u64) -> String {
-    format!("Client-{}", discord_id % 10_000)
 }
 
 /// Durable rating facts supplied by Match after settlement.  The Neon layer

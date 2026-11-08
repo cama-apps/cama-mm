@@ -2471,9 +2471,10 @@ fn fixture_with_discord_and_config(
         .map(|ancestor| ancestor.join("assets/dig"))
         .find(|candidate| candidate.is_dir())
         .expect("repository Dig asset tree");
-    let media = Arc::new(DigMediaRuntime::production(
-        &DigRuntimeConfig::with_asset_root(root),
-    ));
+    let media = Arc::new(DigMediaRuntime::production(&DigRuntimeConfig {
+        asset_root: root,
+        ..DigRuntimeConfig::default()
+    }));
     let provider =
         DigRegistrationProvider::with_media(database.path(), &config, discord.clone(), None, media);
     (database, provider, discord)
@@ -6672,7 +6673,10 @@ fn rendered_media_keeps_stats_and_event_ui_separate_with_exact_attachments() {
         .map(|ancestor| ancestor.join("assets/dig"))
         .find(|candidate| candidate.is_dir())
         .expect("repository Dig asset tree");
-    let media = DigMediaRuntime::production(&DigRuntimeConfig::with_asset_root(root));
+    let media = DigMediaRuntime::production(&DigRuntimeConfig {
+        asset_root: root,
+        ..DigRuntimeConfig::default()
+    });
     let result = DigRuntimeOutcome {
         success: true,
         error: None,
@@ -6800,7 +6804,10 @@ fn event_prompt_applies_durable_darkness_and_reading_the_stone_policy() {
         .map(|ancestor| ancestor.join("assets/dig"))
         .find(|candidate| candidate.is_dir())
         .expect("repository Dig asset tree");
-    let media = DigMediaRuntime::production(&DigRuntimeConfig::with_asset_root(root));
+    let media = DigMediaRuntime::production(&DigRuntimeConfig {
+        asset_root: root,
+        ..DigRuntimeConfig::default()
+    });
     let result = DigRuntimeOutcome {
         success: true,
         error: None,

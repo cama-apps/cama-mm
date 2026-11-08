@@ -287,6 +287,7 @@ fn average_prestige_jc(value: &serde_json::Value) -> f64 {
     }
 }
 
+#[cfg(test)]
 pub const PRESTIGE_CROWNS: [&str; 21] = [
     "", "⛏️", "💎", "👑", "💠", "⭐", "🔱", "♾️", "🔥", "🌌", "🖤", "🖤", "🖤", "🖤", "🖤", "🖤",
     "🖤", "🖤", "🖤", "🖤", "🖤",
