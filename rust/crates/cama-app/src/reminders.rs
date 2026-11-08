@@ -56,11 +56,6 @@ impl UserId {
     pub const fn value(self) -> i64 {
         self.0
     }
-
-    #[must_use]
-    pub const fn is_deliverable(self) -> bool {
-        self.0 > 0
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -411,18 +406,6 @@ impl InMemoryReminderStore {
         self.state
             .lock()
             .map_err(|_| PortError::new("in_memory_reminder_store", "state lock poisoned"))
-    }
-
-    pub fn seed_player_rating(
-        &self,
-        user_id: UserId,
-        guild_id: GuildId,
-        rating: Option<f64>,
-    ) -> Result<(), PortError> {
-        self.lock_state()?
-            .ratings
-            .insert((guild_id, user_id), rating);
-        Ok(())
     }
 
     pub fn seed_reminder_timestamps(
@@ -865,11 +848,6 @@ where
         self.tasks.get(&key)
     }
 
-    #[must_use]
-    pub fn dig_reconcile_version(&self, key: ReminderTaskKey) -> Option<u64> {
-        self.dig_reconcile_versions.get(&key).copied()
-    }
-
     pub fn get_preferences(
         &self,
         user_id: UserId,
@@ -907,21 +885,6 @@ where
     }
 
     #[cfg(test)]
-    fn add_lobby_player_subscription(
-        &self,
-        subscriber_id: UserId,
-        target_id: UserId,
-        guild_id: Option<GuildId>,
-    ) -> Result<bool, PortError> {
-        self.store.add_lobby_target_subscription(
-            subscriber_id,
-            target_id,
-            GuildId::normalize(guild_id),
-            self.clock.now_nanoseconds(),
-        )
-    }
-
-    #[cfg(test)]
     fn schedule_dig_reminder(
         &mut self,
         user_id: UserId,
@@ -935,19 +898,6 @@ where
             ReminderKind::Dig,
             ready_at,
             preference_enabled,
-        )
-    }
-
-    pub fn has_lobby_player_subscription(
-        &self,
-        subscriber_id: UserId,
-        target_id: UserId,
-        guild_id: Option<GuildId>,
-    ) -> Result<bool, PortError> {
-        self.store.has_lobby_target_subscription(
-            subscriber_id,
-            target_id,
-            GuildId::normalize(guild_id),
         )
     }
 

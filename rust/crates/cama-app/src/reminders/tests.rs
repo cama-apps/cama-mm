@@ -35,10 +35,6 @@ impl FixedClock {
             nanoseconds: Arc::new(AtomicI64::new(seconds.saturating_mul(1_000_000_000))),
         }
     }
-
-    fn set_nanoseconds(&self, nanoseconds: i64) {
-        self.nanoseconds.store(nanoseconds, Ordering::SeqCst);
-    }
 }
 
 impl ReminderClock for FixedClock {
@@ -356,27 +352,6 @@ fn test_has_lobby_target_subscription_reflects_add_and_claim() {
     assert!(
         !store
             .has_lobby_target_subscription(user(1), user(10), guild_id)
-            .unwrap()
-    );
-}
-
-#[test]
-fn test_service_pass_through_reads_target_subscription() {
-    let service = fixture();
-    service.clock().set_nanoseconds(100);
-    assert!(
-        !service
-            .has_lobby_player_subscription(user(1), user(10), Some(guild(TEST_GUILD_ID)))
-            .unwrap()
-    );
-    assert!(
-        service
-            .add_lobby_player_subscription(user(1), user(10), Some(guild(TEST_GUILD_ID)))
-            .unwrap()
-    );
-    assert!(
-        service
-            .has_lobby_player_subscription(user(1), user(10), Some(guild(TEST_GUILD_ID)))
             .unwrap()
     );
 }
@@ -818,7 +793,6 @@ fn test_stale_r0_reconcile_cannot_overwrite_live_r1() {
     let live_read = service
         .read_authoritative_dig_ready_at(live_ticket)
         .unwrap();
-    assert_eq!(service.dig_reconcile_version(live_ticket.key()), Some(2));
     assert_eq!(
         service
             .finish_dig_reconcile(stale_ticket, stale_read, Some(true))
