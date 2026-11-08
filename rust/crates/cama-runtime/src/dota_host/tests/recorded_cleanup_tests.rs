@@ -726,3 +726,201 @@ async fn local_resume_withdraws_stale_void_and_allows_recorded_cleanup() {
     assert_eq!(f.state().resolution_history.len(), 1);
     assert_eq!(f.recorder.count.load(Ordering::SeqCst), 0);
 }
+
+fn missed_launch_fixture() -> Fixture {
+    let f = reviewed_fixture();
+    f.update_state(|record, state| {
+        record.lobby_id = Some("777".into());
+        state.launch_requested_at = Some(100);
+        // Historical sessions have neither allocation evidence nor launch history.
+        assert!(record.valve_match_id.is_none());
+        assert!(state.allocation_observed_at.is_none());
+        assert!(state.server_id.is_none());
+    });
+    let mut current = lobby(&f.state().settings);
+    current.game_state = Some(0);
+    *f.port.lobby.lock().unwrap() = Some(current);
+    f
+}
+
+#[tokio::test]
+async fn recorded_unassigned_launch_releases_idle_lobby_without_historical_allocation() {
+    for explicit in [false, true] {
+        let f = missed_launch_fixture();
+        commit_manual_result(&f, true);
+        record_replacement_identity(&f);
+        if explicit {
+            guild_resolution_command(
+                f.worker.path.clone(),
+                1,
+                f.pending,
+                42,
+                "recorded".into(),
+                0,
+                "Replacement finished; remove old idle lobby".into(),
+            )
+            .await
+            .unwrap();
+        }
+        tick_after_restart(&f, 200).await.unwrap();
+        assert_eq!(*f.port.calls.lock().unwrap(), vec!["destroy"]);
+        assert_eq!(f.session().phase, Phase::Finishing);
+        assert!(f.session().valve_match_id.is_none());
+        assert!(f.state().allocation_observed_at.is_none());
+        // Removal, rather than sending the request, releases the reservation.
+        assert_eq!(
+            DotaSessionRepository::new(&f.worker.path)
+                .active_sessions()
+                .unwrap()
+                .len(),
+            1
+        );
+        tick_after_restart(&f, 205).await.unwrap();
+        assert_eq!(f.session().phase, Phase::Recorded);
+        assert_eq!(f.state().recorded_match_id, Some(321));
+        assert!(
+            DotaSessionRepository::new(&f.worker.path)
+                .active_sessions()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(f.recorder.count.load(Ordering::SeqCst), 0);
+        let committed = MatchRepository::new(&f.worker.path)
+            .get_match(321, Some(1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(committed.winning_team, rusqlite::types::Value::Integer(2));
+        assert_eq!(committed.valve_match_id, Some(9002542581));
+    }
+}
+
+#[tokio::test]
+async fn recorded_unassigned_launch_waits_beyond_prelaunch_cache_freshness() {
+    let f = missed_launch_fixture();
+    commit_manual_result(&f, true);
+    assert!(GC_OBSERVATION_MAX_AGE.as_secs() < LAUNCH_CONFIRMATION_TIMEOUT_SECONDS as u64);
+    // A fresh snapshot could still predate launch. Settlement alone is insufficient.
+    for now in [100, 101, 145, 190] {
+        tick_after_restart(&f, now).await.unwrap();
+        assert!(f.port.calls.lock().unwrap().is_empty());
+        assert_eq!(f.session().phase, Phase::NeedsReview);
+    }
+    tick_after_restart(&f, 191).await.unwrap();
+    assert_eq!(*f.port.calls.lock().unwrap(), vec!["destroy"]);
+}
+
+#[tokio::test]
+async fn recorded_unassigned_launch_keeps_unsafe_or_unsettled_lobbies_reserved() {
+    for scenario in [
+        "unrecorded",
+        "unsettled",
+        "stale",
+        "foreign",
+        "settings",
+        "allocating",
+        "running",
+        "server",
+        "loading",
+        "gameplay",
+        "unknown",
+        "winner",
+    ] {
+        let f = missed_launch_fixture();
+        if scenario != "unrecorded" {
+            commit_manual_result(&f, scenario != "unsettled");
+        }
+        {
+            let mut current = f.port.lobby.lock().unwrap();
+            let current = current.as_mut().unwrap();
+            match scenario {
+                "foreign" => current.owner_account_id = 42,
+                "settings" => current.league_id = 999,
+                "allocating" => current.stage = LobbyStage::Allocating,
+                "running" => current.stage = LobbyStage::Running,
+                "server" => current.server_id = Some(999),
+                "loading" => current.game_state = Some(10),
+                "gameplay" => current.game_state = Some(5),
+                "unknown" => current.game_state = Some(99),
+                "winner" => current.winner = Some("radiant".into()),
+                "stale" => f.port.observation_stale.store(true, Ordering::SeqCst),
+                _ => {}
+            }
+        }
+        let result = tick_after_restart(&f, 1000).await;
+        if scenario == "stale" {
+            assert!(result.is_err());
+        } else {
+            result.unwrap();
+        }
+        assert!(f.port.calls.lock().unwrap().is_empty(), "{scenario}");
+        assert_eq!(f.session().phase, Phase::NeedsReview, "{scenario}");
+        assert_eq!(f.recorder.count.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn old_recorded_lobby_cleanup_does_not_touch_second_or_third_matches() {
+    for different_lobby in [false, true] {
+        let f = missed_launch_fixture();
+        commit_manual_result(&f, true);
+        let pending_repo = PendingMatchRepository::new(&f.worker.path);
+        let matches = MatchRepository::new(&f.worker.path);
+        let later_state = cama_db::match_runtime::PendingMatchState {
+            // Even identical teams must not make the later games cleanup targets.
+            radiant_team_ids: (1..=5).collect(),
+            dire_team_ids: (6..=10).collect(),
+            shuffle_timestamp: Some(150),
+            bet_lock_until: Some(1000),
+            extra: [(
+                "dota_hosting".into(),
+                serde_json::json!({"hosting":"manual"}),
+            )]
+            .into(),
+            ..Default::default()
+        };
+        let second = pending_repo.create_pending_match(1, &later_state).unwrap();
+        assert!(second.pending_match_id > f.pending);
+        cama_db::open_runtime_connection(&f.worker.path).unwrap().execute(
+            "INSERT INTO matches(match_id,team1_players,team2_players,winning_team,guild_id,pending_match_id,valve_match_id)
+             VALUES(322,'[1,2,3,4,5]','[6,7,8,9,10]',1,1,?1,9002542582)",
+            [second.pending_match_id],
+        ).unwrap();
+        pending_repo
+            .delete_pending_match(1, second.pending_match_id)
+            .unwrap();
+        let third = pending_repo.create_pending_match(1, &later_state).unwrap();
+        let first_before = matches.get_match(321, Some(1)).unwrap();
+        let second_before = matches.get_match(322, Some(1)).unwrap();
+        if different_lobby {
+            // Keep even the same name and host: the saved lobby ID must match.
+            f.port.lobby.lock().unwrap().as_mut().unwrap().id = 778;
+        }
+        for now in [200, 205, 210] {
+            tick_after_restart(&f, now).await.unwrap();
+        }
+        assert_eq!(matches.get_match(321, Some(1)).unwrap(), first_before);
+        assert_eq!(matches.get_match(322, Some(1)).unwrap(), second_before);
+        assert_eq!(
+            pending_repo
+                .pending_match(1, third.pending_match_id)
+                .unwrap(),
+            Some(third.clone())
+        );
+        assert!(third.state.betting_open(210));
+        assert!(
+            DotaSessionRepository::new(&f.worker.path)
+                .session(1, third.pending_match_id)
+                .unwrap()
+                .is_none(),
+            "releasing the old host must not adopt an existing manual game"
+        );
+        assert_eq!(f.recorder.count.load(Ordering::SeqCst), 0);
+        if different_lobby {
+            assert!(f.port.calls.lock().unwrap().is_empty());
+            assert_eq!(f.session().phase, Phase::NeedsReview);
+        } else {
+            assert_eq!(*f.port.calls.lock().unwrap(), vec!["destroy"]);
+            assert_eq!(f.session().phase, Phase::Recorded);
+        }
+    }
+}

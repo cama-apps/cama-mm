@@ -1,5 +1,7 @@
 use super::*;
 
+pub(super) const RETURNED_GAME_REVIEW: &str = "Dota returned to the lobby, but a safe pregame reset could not be confirmed; automatic recreation is paused";
+
 const MAX_REPLACEMENT_LOBBIES: usize = 3;
 const MAX_DESTROY_ATTEMPTS: u8 = 3;
 const CLEANUP_TIMEOUT_SECONDS: i64 = 90;
@@ -52,9 +54,22 @@ impl DotaHostWorker {
                     self.live
                         .gameplay_started(record.guild_id, record.pending_match_id, id)
                 });
+        if gameplay_started
+            && settings_match(&state.settings, lobby)
+            && let Some(match_id) = record
+                .valve_match_id
+                .as_deref()
+                .and_then(|id| id.parse().ok())
+        {
+            self.close_betting(record, state, now).await?;
+            record.phase = Phase::Finishing;
+            self.save(record, state, now).await?;
+            self.finish(port, record, state, match_id, now).await?;
+            return Ok(true);
+        }
         if gameplay_started || !settings_match(&state.settings, lobby) {
-            self.review(record, state,
-                "Dota returned to the lobby, but a safe pregame reset could not be confirmed; automatic recreation is paused", now).await?;
+            self.review(record, state, RETURNED_GAME_REVIEW, now)
+                .await?;
             return Ok(true);
         }
         if pending
@@ -176,7 +191,10 @@ impl DotaHostWorker {
             intent.destroy_attempts += 1;
             intent.last_destroy_at = Some(now);
             self.save(record, state, now).await?;
-            port.destroy(lobby.id).await?;
+            if !port.destroy_observed(&lobby).await? {
+                state.lobby_recreation = Some(attempt);
+                self.save(record, state, now).await?;
+            }
             return Ok(());
         }
         record.lobby_id = None;

@@ -15,6 +15,7 @@ pub(super) fn can_release_lobby(
     record: &DotaSessionRecord,
     state: &SessionState,
     lobby: &HostLobby,
+    now: i64,
 ) -> bool {
     if lobby.stage == LobbyStage::Postgame {
         return true;
@@ -27,7 +28,19 @@ pub(super) fn can_release_lobby(
         || state.server_id.is_some();
     let unlaunched = state.launch_requested_at.is_none()
         && !matches!(record.phase, Phase::Running | Phase::Finishing);
-    allocated || unlaunched || state.lobby_cleanup.destroy_attempts > 0
+    // A historical launch with no observed allocation can never satisfy the
+    // old `allocated` gate. After settlement, a fresh idle/unassigned snapshot
+    // is enough to release that orphan. The timeout exceeds the transport's
+    // freshness window, so a still-fresh prelaunch cache cannot authorize this.
+    // This exception never applies to void/cancel or unrecorded match recovery.
+    let recorded_unassigned_idle = state.recorded_match_id.is_some()
+        && record.valve_match_id.is_none()
+        && lobby.match_id.is_none()
+        && matches!(lobby.game_state, None | Some(0))
+        && state
+            .launch_requested_at
+            .is_some_and(|sent| now.saturating_sub(sent) > LAUNCH_CONFIRMATION_TIMEOUT_SECONDS);
+    allocated || unlaunched || recorded_unassigned_idle || state.lobby_cleanup.destroy_attempts > 0
 }
 
 impl DotaHostWorker {
@@ -65,7 +78,7 @@ impl DotaHostWorker {
         port: &dyn DotaHostPort,
         record: &mut DotaSessionRecord,
         state: &mut SessionState,
-        lobby_id: u64,
+        lobby: &HostLobby,
         now: i64,
     ) -> Result<(), String> {
         if state.lobby_cleanup.destroy_attempts >= 3
@@ -84,6 +97,7 @@ impl DotaHostWorker {
         {
             return Ok(());
         }
+        let previous_attempts = state.lobby_cleanup.clone();
         state.lobby_cleanup.destroy_attempts += 1;
         state.lobby_cleanup.first_destroy_at.get_or_insert(now);
         state.lobby_cleanup.last_destroy_at = Some(now);
@@ -93,6 +107,12 @@ impl DotaHostWorker {
             state.lobby_cleanup.destroy_attempts
         ));
         self.save(record, state, now).await?;
-        port.destroy(lobby_id).await
+        if !port.destroy_observed(lobby).await? {
+            // A newer cache revision invalidated the decision before any send.
+            // Do not consume the removal budget for an action we did not take.
+            state.lobby_cleanup = previous_attempts;
+            self.save(record, state, now).await?;
+        }
+        Ok(())
     }
 }

@@ -2,6 +2,7 @@ use super::*;
 mod configuration_tests;
 mod failed_launch_tests;
 mod manual_replacement_tests;
+mod reconciliation_tests;
 mod recorded_cleanup_tests;
 use std::sync::{
     Mutex,
@@ -145,6 +146,7 @@ struct FakePort {
     lobby: Mutex<Option<HostLobby>>,
     snapshot_error: Mutex<Option<String>>,
     observation_stale: std::sync::atomic::AtomicBool,
+    lobby_on_fresh_check: Mutex<Option<HostLobby>>,
     snapshot_calls: AtomicUsize,
     fail_snapshot_at: AtomicUsize,
     details: Mutex<Option<HostMatchDetails>>,
@@ -167,6 +169,9 @@ impl DotaHostPort for FakePort {
         Ok(())
     }
     async fn betting_observation_fresh(&self) -> bool {
+        if let Some(lobby) = self.lobby_on_fresh_check.lock().unwrap().take() {
+            *self.lobby.lock().unwrap() = Some(lobby);
+        }
         !self.observation_stale.load(Ordering::SeqCst)
     }
     async fn snapshot(&self) -> Result<Option<HostLobby>, String> {
@@ -315,6 +320,7 @@ impl HostedMatchRecorder for Recorder {
 
 fn lobby(settings: &LobbySettings) -> HostLobby {
     HostLobby {
+        launch_history: HostLaunchHistory::default(),
         id: 777,
         name: settings.name.clone(),
         owner_account_id: 99,
@@ -471,6 +477,7 @@ impl Fixture {
             lobby: Mutex::new(None),
             snapshot_error: Mutex::new(None),
             observation_stale: std::sync::atomic::AtomicBool::new(false),
+            lobby_on_fresh_check: Mutex::new(None),
             snapshot_calls: AtomicUsize::new(0),
             fail_snapshot_at: AtomicUsize::new(0),
             details: Mutex::new(None),
@@ -2240,7 +2247,7 @@ async fn final_snapshot_failure_never_persists_launch_intent() {
     let f = Fixture::new(false);
     f.worker.tick(&f.port, 100).await.unwrap();
     f.port.fail_snapshot_at.store(
-        f.port.snapshot_calls.load(Ordering::SeqCst) + 2,
+        f.port.snapshot_calls.load(Ordering::SeqCst) + 3,
         Ordering::SeqCst,
     );
     assert_eq!(

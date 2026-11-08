@@ -106,11 +106,68 @@ fn lobby_config(settings: &LobbySettings) -> LobbyConfig {
     }
 }
 
+fn map_host_lobby(s: cama_steam::LobbySnapshot) -> Result<HostLobby, String> {
+    let stage = match s.state {
+        LobbyState::Ui | LobbyState::ReadyUp | LobbyState::NotReady => LobbyStage::Gathering,
+        LobbyState::ServerSetup | LobbyState::ServerAssign => LobbyStage::Allocating,
+        LobbyState::Run => LobbyStage::Running,
+        LobbyState::PostGame => LobbyStage::Postgame,
+        LobbyState::Unknown(_) => {
+            return Err("GC reported an unsupported lobby state".to_owned());
+        }
+    };
+    let first_pick_radiant = match s.cm_pick {
+        0 => None,
+        1 => Some(true),
+        2 => Some(false),
+        _ => return Err("GC reported an unsupported pick priority".to_owned()),
+    };
+    Ok(HostLobby {
+        launch_history: HostLaunchHistory {
+            allocation_observed: s.launch_history.allocation_observed,
+            gameplay_observed: s.launch_history.postgame_observed
+                || s.launch_history
+                    .game_states
+                    .iter()
+                    .copied()
+                    .any(dota_lobby::gameplay_has_started),
+            match_id: s.launch_history.match_id,
+            conflicting_match_ids: s.launch_history.conflicting_match_ids,
+        },
+        id: s.lobby_id,
+        name: s.game_name,
+        owner_account_id: s
+            .leader_steam_id
+            .checked_sub(dota_lobby::STEAM_INDIVIDUAL_BASE)
+            .and_then(|id| u32::try_from(id).ok())
+            .ok_or("invalid lobby leader Steam ID")?,
+        league_id: s.league_id.unwrap_or(0),
+        game_mode: s.game_mode,
+        server_region: s.server_region,
+        first_pick_radiant,
+        cheats: s.allow_cheats,
+        fill_bots: s.fill_with_bots,
+        spectating: s.allow_spectating,
+        tv_delay: u32::try_from(s.dota_tv_delay).map_err(|_| "invalid TV delay")?,
+        visibility: s.visibility,
+        stage,
+        game_state: s.game_state,
+        match_id: s.match_id,
+        server_id: s.server_steam_id,
+        winner: match s.outcome {
+            LobbyOutcome::RadiantVictory => Some("radiant".into()),
+            LobbyOutcome::DireVictory => Some("dire".into()),
+            _ => None,
+        },
+        members: s.members.into_iter().map(lobby_seat).collect(),
+    })
+}
+
 #[async_trait]
 impl DotaHostPort for SteamHost {
     async fn betting_observation_fresh(&self) -> bool {
         self.0
-            .refresh_lobby_observation(Duration::from_secs(45))
+            .refresh_lobby_observation(GC_OBSERVATION_MAX_AGE)
             .await
     }
     async fn snapshot(&self) -> Result<Option<HostLobby>, String> {
@@ -118,53 +175,7 @@ impl DotaHostPort for SteamHost {
             .snapshot()
             .await
             .map_err(|e| e.to_string())?
-            .map(|s| {
-                let stage = match s.state {
-                    LobbyState::Ui | LobbyState::ReadyUp | LobbyState::NotReady => {
-                        LobbyStage::Gathering
-                    }
-                    LobbyState::ServerSetup | LobbyState::ServerAssign => LobbyStage::Allocating,
-                    LobbyState::Run => LobbyStage::Running,
-                    LobbyState::PostGame => LobbyStage::Postgame,
-                    LobbyState::Unknown(_) => {
-                        return Err("GC reported an unsupported lobby state".to_owned());
-                    }
-                };
-                let first_pick_radiant = match s.cm_pick {
-                    0 => None,
-                    1 => Some(true),
-                    2 => Some(false),
-                    _ => return Err("GC reported an unsupported pick priority".to_owned()),
-                };
-                Ok(HostLobby {
-                    id: s.lobby_id,
-                    name: s.game_name,
-                    owner_account_id: s
-                        .leader_steam_id
-                        .checked_sub(dota_lobby::STEAM_INDIVIDUAL_BASE)
-                        .and_then(|id| u32::try_from(id).ok())
-                        .ok_or("invalid lobby leader Steam ID")?,
-                    league_id: s.league_id.unwrap_or(0),
-                    game_mode: s.game_mode,
-                    server_region: s.server_region,
-                    first_pick_radiant,
-                    cheats: s.allow_cheats,
-                    fill_bots: s.fill_with_bots,
-                    spectating: s.allow_spectating,
-                    tv_delay: u32::try_from(s.dota_tv_delay).map_err(|_| "invalid TV delay")?,
-                    visibility: s.visibility,
-                    stage,
-                    game_state: s.game_state,
-                    match_id: s.match_id,
-                    server_id: s.server_steam_id,
-                    winner: match s.outcome {
-                        LobbyOutcome::RadiantVictory => Some("radiant".into()),
-                        LobbyOutcome::DireVictory => Some("dire".into()),
-                        _ => None,
-                    },
-                    members: s.members.into_iter().map(lobby_seat).collect(),
-                })
-            })
+            .map(map_host_lobby)
             .transpose()
     }
     async fn prepare_lobby_creation(&self) -> Result<(), String> {
@@ -224,6 +235,22 @@ impl DotaHostPort for SteamHost {
     }
     async fn destroy(&self, lobby: u64) -> Result<(), String> {
         self.0.destroy_lobby(lobby).await.map_err(|e| e.to_string())
+    }
+    async fn launch_observed(&self, expected: &HostLobby) -> Result<bool, String> {
+        self.0
+            .launch_lobby_checked(expected.id, 0, GC_OBSERVATION_MAX_AGE, |snapshot| {
+                map_host_lobby(snapshot.clone()).is_ok_and(|current| current == *expected)
+            })
+            .await
+            .map_err(|e| e.to_string())
+    }
+    async fn destroy_observed(&self, expected: &HostLobby) -> Result<bool, String> {
+        self.0
+            .destroy_lobby_checked(expected.id, GC_OBSERVATION_MAX_AGE, |snapshot| {
+                map_host_lobby(snapshot.clone()).is_ok_and(|current| current == *expected)
+            })
+            .await
+            .map_err(|e| e.to_string())
     }
     async fn match_details(&self, id: u64) -> Result<HostMatchDetails, String> {
         let details = self.0.match_details(id).await.map_err(|e| e.to_string())?;
