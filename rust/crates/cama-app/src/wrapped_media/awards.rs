@@ -1,4 +1,4 @@
-//! A personal prize ticket: setup, trophy stamp, then the earned reveal.
+//! A personal prize ticket: the award, its result, and data coverage.
 
 use std::f32::consts::TAU;
 
@@ -6,17 +6,7 @@ use super::stage::{Align, Face, Stage, count_up};
 
 pub(super) fn paint(stage: &mut Stage<'_>) {
     let (slide, p) = (stage.slide, stage.palette);
-    stage.block(
-        &slide.headline,
-        (64, 100, 592, 104),
-        35.0,
-        Face::Bold,
-        p.fg,
-        Align::Center,
-        (0.0, 0.2),
-    );
-
-    // The ticket snaps open only after the setup. Its fixed bands keep even
+    // The ticket opens beneath the trophy. Its fixed bands keep even
     // unusually long award names away from the evidence and player footer.
     let open = stage.ease(0.2, 0.46);
     let half = 320.0 * open;
@@ -63,24 +53,15 @@ pub(super) fn paint(stage: &mut Stage<'_>) {
         Align::Center,
         (0.56, 0.76),
     );
-    stage.block(
-        &slide.badge,
-        (72, 688, 576, 32),
-        22.0,
-        Face::Bold,
-        p.accent,
-        Align::Center,
-        (0.64, 0.82),
-    );
-    for (index, line) in slide.lines.iter().take(2).enumerate() {
+    if let Some(coverage) = slide.lines.get(1) {
         stage.block(
-            line,
-            (60, 728 + index as i32 * 48, 600, 44),
+            coverage,
+            (60, 728, 600, 44),
             23.0,
             Face::Medium,
             p.fg,
             Align::Center,
-            (0.7 + index as f32 * 0.06, 0.9 + index as f32 * 0.06),
+            (0.7, 0.9),
         );
     }
 }

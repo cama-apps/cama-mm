@@ -374,11 +374,11 @@ pub(super) fn persona_signals(
         personal.filter(|personal| personal.games_played >= minimum_games as i64)
     {
         let style = match identity {
-            Some("The enabler") => QueueStyle::Enabler,
-            Some("The headliner") => QueueStyle::Headliner,
-            Some("The mapmaker") => QueueStyle::Mapmaker,
-            Some("The loyalist") => QueueStyle::Loyalist,
-            Some("The sampler") => QueueStyle::Sampler,
+            Some("Team player") => QueueStyle::Enabler,
+            Some("High kills") => QueueStyle::Headliner,
+            Some("Wards") => QueueStyle::Mapmaker,
+            Some("Hero specialist") => QueueStyle::Loyalist,
+            Some("Hero variety") => QueueStyle::Sampler,
             _ => QueueStyle::Unknown,
         };
         signals.push(PersonaSignal {

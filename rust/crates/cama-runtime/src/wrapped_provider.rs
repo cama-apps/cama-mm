@@ -656,7 +656,7 @@ impl WrappedHandler {
             return responder
                 .followup(
                     InteractionResponse::message(
-                        "Only the command invoker can navigate this wrapped.",
+                        "Only the person who started this Wrapped can use its buttons.",
                     )
                     .ephemeral(),
                 )
@@ -728,8 +728,7 @@ impl WrappedHandler {
                     warn!(%error, session_id, target, "wrapped slide render failed");
                     return responder
                         .followup(
-                            InteractionResponse::message("Failed to render this slide.")
-                                .ephemeral(),
+                            InteractionResponse::message("Could not create this card.").ephemeral(),
                         )
                         .await
                         .map_err(response_error);
@@ -738,8 +737,7 @@ impl WrappedHandler {
                     warn!(%error, session_id, target, "wrapped slide task failed");
                     return responder
                         .followup(
-                            InteractionResponse::message("Failed to render this slide.")
-                                .ephemeral(),
+                            InteractionResponse::message("Could not create this card.").ephemeral(),
                         )
                         .await
                         .map_err(response_error);
@@ -787,13 +785,13 @@ impl WrappedHandler {
             Ok(Err(error)) => {
                 warn!(%error, "wrapped recap render failed");
                 return Ok(Some(
-                    InteractionResponse::message("Failed to render your recap.").ephemeral(),
+                    InteractionResponse::message("Could not create your recap.").ephemeral(),
                 ));
             }
             Err(error) => {
                 warn!(%error, "wrapped recap task failed");
                 return Ok(Some(
-                    InteractionResponse::message("Failed to render your recap.").ephemeral(),
+                    InteractionResponse::message("Could not create your recap.").ephemeral(),
                 ));
             }
         };
@@ -955,11 +953,9 @@ async fn wrapped_failure(
 ) -> Result<(), InteractionHandlerError> {
     responder
         .followup(
-            InteractionResponse::message(
-                "Something went wrong generating your wrapped. Please try again later.",
-            )
-            .ephemeral()
-            .without_mentions(),
+            InteractionResponse::message("Could not create your Wrapped. Try again later.")
+                .ephemeral()
+                .without_mentions(),
         )
         .await
         .map_err(response_error)
@@ -1179,28 +1175,23 @@ fn build_slides(
             .map(str::to_owned)
     };
 
-    let mut intro = base_slide(
-        "story_intro",
-        "This one is yours",
-        target_display_name,
-        &year_label,
-    );
+    let mut intro = base_slide("story_intro", "Your year", target_display_name, &year_label);
     intro.headline = format!("Your\n{year}\nWrapped");
     intro.stat_value = target_display_name.to_owned();
     intro.stat_label = "Your Cama Wrapped".to_owned();
-    intro.lines = vec![if raw.matches.is_empty() {
-        "No recorded games for you this year. Here's the community you were part of.".to_owned()
-    } else {
-        "The wins. The questionable decisions. The people who queued anyway.".to_owned()
-    }];
+    if raw.matches.is_empty() {
+        intro
+            .lines
+            .push("No games recorded for you this year. Here are the server stats.".to_owned());
+    }
     slides.push(intro);
     let mut server = base_slide(
         "server_summary",
-        "You were part of this",
+        "Server stats",
         target_display_name,
         &year_label,
     );
-    server.headline = "Same server. So many stories.".to_owned();
+    server.headline = "The server this year".to_owned();
     server.lines = vec![
         format!("{} MATCHES PLAYED", raw.summary.total_matches),
         format!("{} HEROES PICKED", raw.summary.unique_heroes),
@@ -1213,7 +1204,7 @@ fn build_slides(
         .find(|player| player.games_played >= minimum_games as i64)
     {
         server.lines.push(format!(
-            "QUEUE REGULAR - {} - {}W {}L ({:.0}% WR)",
+            "MOST GAMES - {} - {}W {}L ({:.0}% WR)",
             display_name(player.discord_id, &player.discord_username),
             player.wins,
             player.games_played - player.wins,
@@ -1285,13 +1276,9 @@ fn build_slides(
             })
             .collect::<Vec<_>>();
         for chunk in lines.chunks(2) {
-            let mut awards = base_slide(
-                "awards",
-                "The unofficial awards",
-                target_display_name,
-                &year_label,
-            );
-            awards.headline = "Acceptance speeches optional.".to_owned();
+            let mut awards =
+                base_slide("awards", "Server records", target_display_name, &year_label);
+            awards.headline = "Leaders in the recorded stats".to_owned();
             awards.lines = chunk.to_vec();
             slides.push(awards);
         }
@@ -1362,15 +1349,8 @@ fn build_slides(
             .player_stats
             .iter()
             .any(|row| row.discord_id == target_id);
-    let mut personal = personal_summary(&summary);
-    if let Some(personal) = &mut personal {
-        personal.flavor_text = random_flavor(if personal.games_played_percentile >= 75.0 {
-            "games_played_high"
-        } else if personal.games_played_percentile >= 30.0 {
-            "games_played_mid"
-        } else {
-            "games_played_low"
-        });
+    let personal = personal_summary(&summary);
+    if let Some(personal) = &personal {
         push_personal_slides(
             &mut slides,
             personal,
@@ -1480,11 +1460,11 @@ fn build_slides(
     {
         let mut slide = base_slide(
             "story_lanes",
-            "Your usual spot",
+            "Your lanes",
             target_display_name,
             &year_label,
         );
-        slide.headline = "You knew your way around.".to_owned();
+        slide.headline = "Where you played".to_owned();
         slide.stat_label = format!(
             "Lane data recorded in {} of {} games",
             roles.total_games,
@@ -1530,7 +1510,7 @@ fn build_slides(
             target_display_name,
             &year_label,
         );
-        slide.headline = "Friendship has a price.".to_owned();
+        slide.headline = "Who you queued with by package deal".to_owned();
         slide.stat_value = format!("{}", package.times_bought + package.times_bought_on_you);
         slide.stat_label = "package deals signed".to_owned();
         slide.theme = WrappedTheme::Squad;
@@ -1576,7 +1556,7 @@ fn build_slides(
     if raw.rating_history.len() >= 2 && rating_points >= 2 {
         let mut slide = base_slide(
             "chart_rating",
-            "Your rating arc",
+            "Your rating",
             target_display_name,
             "All-Time",
         );
@@ -1596,9 +1576,9 @@ fn build_slides(
             })
             .map(|personal| personal.rating_change);
         slide.headline = match change {
-            Some(change) if change > 0 => "Up and to the right.",
-            Some(change) if change < 0 => "Character development.",
-            _ => "Up, down, and sideways.",
+            Some(change) if change > 0 => "Your rating rose this year.",
+            Some(change) if change < 0 => "Your rating fell this year.",
+            _ => "Your rating history",
         }
         .to_owned();
         slide.stat_value = format!("{latest:.0}");
@@ -1667,12 +1647,11 @@ fn build_slides(
                 .as_ref()
                 .map(|identity| identity.value.clone())
         })
-        .unwrap_or_else(|| "One of a kind".to_owned());
+        .unwrap_or_else(|| "Your year in Cama".to_owned());
     finale.badge = superlatives
         .first()
         .map_or_else(String::new, |award| award.title.to_owned());
     finale.stat_value = target_display_name.to_owned();
-    finale.stat_label = "Save this card. See you next queue.".to_owned();
     finale.rows = top_heroes(&app_heroes, target_id)
         .into_iter()
         .map(|row| WrappedRow::new(hero_name(row.hero_id), ""))
@@ -1701,8 +1680,7 @@ fn build_slides(
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
     for (index, award) in superlatives.iter().enumerate() {
-        let mut slide = moment_slide(award, "story_superlative", target_display_name, &year_label);
-        slide.badge = "Your year award".to_owned();
+        let slide = moment_slide(award, "story_superlative", target_display_name, &year_label);
         let chapter =
             ((index + 1) * chapter_positions.len() / (superlatives.len() + 1)).saturating_sub(1);
         let position = chapter_positions.get(chapter).copied().unwrap_or(0) + index + 1;
@@ -1735,7 +1713,7 @@ fn hero_slide(
     username: &str,
     year_label: &str,
 ) -> WrappedSlideData {
-    let mut slide = base_slide("story_hero", "On repeat", username, year_label);
+    let mut slide = base_slide("story_hero", "Your heroes", username, year_label);
     slide.headline = "Your top heroes".to_owned();
     let recorded_picks: i64 = heroes
         .iter()
@@ -1788,10 +1766,10 @@ fn hero_slide(
             .filter(|(_, picks)| *picks > top.picks)
             .count();
         if rivals.len() >= 2 && ahead == 0 {
-            slide.badge = format!("#1 {} player on the server", hero.top_hero_name);
+            slide.badge = format!("#1 by {} games", hero.top_hero_name);
         } else if rivals.len() >= 4 && ahead < 3 {
             slide.badge = format!(
-                "#{} {} player of {}",
+                "#{} by {} games ({} players)",
                 ahead + 1,
                 hero.top_hero_name,
                 rivals.len()
@@ -1836,11 +1814,10 @@ fn push_personal_slides(
     raw: &WrappedRawData,
 ) {
     let mut reveal = base_slide("story_games", "Your Year", target_name, year_label);
-    reveal.headline = "You kept coming back.".to_owned();
+    reveal.headline = "Your games this year".to_owned();
     reveal.stat_value = personal.games_played.to_string();
-    reveal.stat_label = "games. Each one a story.".to_owned();
+    reveal.stat_label = "games played".to_owned();
     reveal.artwork = WrappedArtwork::Courier;
-    reveal.lines = vec![personal.flavor_text.clone()];
     if has_cohort && personal.games_played_percentile >= 50.0 {
         reveal.badge = format!(
             "More games than {:.0}% of the server",
@@ -1850,13 +1827,8 @@ fn push_personal_slides(
     reveal.accent = [241, 196, 15];
     slides.push(reveal);
 
-    let mut stats = base_slide(
-        "story_summary",
-        "The supporting evidence",
-        target_name,
-        year_label,
-    );
-    stats.headline = "Your year, by the numbers.".to_owned();
+    let mut stats = base_slide("story_summary", "Your stats", target_name, year_label);
+    stats.headline = "Your yearly totals".to_owned();
     stats.lines.push(format!(
         "{} games · {} wins · {} losses",
         personal.games_played, personal.wins, personal.losses
@@ -1926,7 +1898,7 @@ fn push_pairwise_slides(
         .map(|(index, entry)| PairwiseSlideEntry {
             entry,
             section: if index == 0 {
-                "Best teammate"
+                "Highest win rate together"
             } else {
                 "Teammate"
             },
@@ -1949,12 +1921,7 @@ fn push_pairwise_slides(
             }),
     );
     if !teammate_entries.is_empty() {
-        let mut slide = base_slide("story_teammates", "Your squad", target_name, "All-Time");
-        slide.headline = if pairwise.best_teammates.is_empty() {
-            "The usual suspects.".to_owned()
-        } else {
-            sentence(&random_flavor("teammate_best"), "Ride or die.")
-        };
+        let mut slide = base_slide("story_teammates", "Your teammates", target_name, "All-Time");
         add_pairwise_entries(&mut slide, &teammate_entries, profiles);
         slide.accent = [46, 204, 113];
         slides.push(slide);
@@ -1963,13 +1930,13 @@ fn push_pairwise_slides(
     if let Some(entry) = pairwise.nemesis.as_ref() {
         rivals.push(PairwiseSlideEntry {
             entry,
-            section: "Nemesis",
+            section: "Lowest win rate against",
         });
     }
     if let Some(entry) = pairwise.punching_bag.as_ref() {
         rivals.push(PairwiseSlideEntry {
             entry,
-            section: "Punching bag",
+            section: "Highest win rate against",
         });
     }
     let seen_rivals = rivals
@@ -1990,27 +1957,9 @@ fn push_pairwise_slides(
     );
     if !rivals.is_empty() {
         let mut slide = base_slide("story_rivals", "Your rivals", target_name, "All-Time");
-        slide.headline = if pairwise.nemesis.is_some() {
-            sentence(&random_flavor("rival_nemesis"), "They live in your head.")
-        } else {
-            "Worthy opponents.".to_owned()
-        };
         add_pairwise_entries(&mut slide, &rivals, profiles);
         slide.accent = [237, 66, 69];
         slides.push(slide);
-    }
-}
-
-/// Catalog flavor reads as a headline once it ends like a sentence.
-fn sentence(flavor: &str, fallback: &str) -> String {
-    let flavor = flavor.trim();
-    if flavor.is_empty() {
-        return fallback.to_owned();
-    }
-    if flavor.ends_with(['.', '!', '?']) {
-        flavor.to_owned()
-    } else {
-        format!("{flavor}.")
     }
 }
 
@@ -2084,7 +2033,7 @@ fn record_slides(
     push_record(&mut combat, "Best KDA", best(kda));
     push_record(
         &mut combat,
-        "Feeding Frenzy",
+        "Most deaths",
         best(|row| row.deaths.map(|value| value as f64)),
     );
     push_record(&mut combat, "Worst KDA", worst(kda));
@@ -2103,12 +2052,9 @@ fn record_slides(
             best(|row| row.denies.map(|value| value as f64)),
         ),
         ("Lowest GPM", worst(|row| row.gpm.map(|value| value as f64))),
+        ("Lowest XPM", worst(|row| row.xpm.map(|value| value as f64))),
         (
-            "AFK Simulator",
-            worst(|row| row.xpm.map(|value| value as f64)),
-        ),
-        (
-            "Allergic to Creeps",
+            "Fewest last hits",
             worst(|row| row.last_hits.map(|value| value as f64)),
         ),
     ] {
@@ -2143,14 +2089,14 @@ fn record_slides(
     );
     push_record_or_na(
         &mut impact,
-        "Charity Case",
+        "Largest lead lost",
         best(|row| row.throw.filter(|value| *value > 0.0)),
     );
 
     let mut vision = Vec::new();
     for (label, value) in [
         (
-            "Most Obs Placed",
+            "Most observer wards",
             best(|row| row.obs_placed.map(|value| value as f64)),
         ),
         (
@@ -2171,7 +2117,7 @@ fn record_slides(
             }),
         ),
         (
-            "Signal Spammer",
+            "Most pings",
             best(|row| row.pings.map(|value| value as f64)),
         ),
         (
@@ -2210,7 +2156,7 @@ fn record_slides(
     }
     if losses > 0 {
         endurance.push(format!(
-            "Tilt Master - {losses} losses - {}",
+            "Longest loss streak - {losses} losses - {}",
             hero_name_or_na(loss_breaker)
         ));
     }
@@ -2342,7 +2288,7 @@ fn generate_awards(
         &mut awards,
         &eligible,
         |row| row.avg_gpm,
-        "Gold Goblin",
+        "Highest average GPM",
         |row| format!("{:.0} GPM", row.avg_gpm),
         "award_gold_goblin",
     );
@@ -2353,7 +2299,7 @@ fn generate_awards(
         push_award(
             &mut awards,
             row,
-            "Immortal Hands",
+            "Highest average KDA",
             format!("{:.2} KDA", row.avg_kda),
             "award_immortal_hands",
         );
@@ -2366,7 +2312,7 @@ fn generate_awards(
         push_award(
             &mut awards,
             row,
-            "First Blood Enthusiast",
+            "Lowest average KDA",
             format!("{:.2} KDA", row.avg_kda),
             "award_first_blood_enthusiast",
         );
@@ -2375,7 +2321,7 @@ fn generate_awards(
         &mut awards,
         &eligible,
         |row| row.total_wards as f64,
-        "Ward Bot 9000",
+        "Most wards placed",
         |row| format!("{} placed", row.total_wards),
         "award_ward_bot",
     );
@@ -2383,7 +2329,7 @@ fn generate_awards(
         &mut awards,
         &eligible,
         |row| row.avg_xpm,
-        "XP Vacuum",
+        "Highest average XPM",
         |row| format!("{:.0} XPM", row.avg_xpm),
         "award_xp_vacuum",
     );
@@ -2391,7 +2337,7 @@ fn generate_awards(
         &mut awards,
         &eligible,
         |row| row.total_kills as f64,
-        "Serial Killer",
+        "Most kills",
         |row| format!("{} kills", row.total_kills),
         "award_serial_killer",
     );
@@ -2399,7 +2345,7 @@ fn generate_awards(
         &mut awards,
         &eligible,
         |row| row.total_assists as f64,
-        "Assist Machine",
+        "Most assists",
         |row| format!("{} assists", row.total_assists),
         "award_assist_machine",
     );
@@ -2410,7 +2356,7 @@ fn generate_awards(
         push_award(
             &mut awards,
             row,
-            "Win Merchant",
+            "Highest win rate",
             format!("{:.0}%", win_rate(row) * 100.0),
             "award_win_merchant",
         );
@@ -2422,7 +2368,7 @@ fn generate_awards(
         push_award(
             &mut awards,
             row,
-            "Charity Case",
+            "Lowest win rate",
             format!("{:.0}%", win_rate(row) * 100.0),
             "award_charity_case",
         );
@@ -2431,7 +2377,7 @@ fn generate_awards(
         &mut awards,
         &eligible,
         |row| row.total_fantasy,
-        "Fantasy King",
+        "Most fantasy points",
         |row| format!("{:.0} pts", row.total_fantasy),
         "award_fantasy_king",
     );
@@ -2441,7 +2387,7 @@ fn generate_awards(
     {
         awards.push(rating_award(
             row,
-            "Elo Inflation",
+            "Largest rating gain",
             format!("+{:.0} rating", row.rating_change),
             "award_elo_inflation",
         ));
@@ -2451,7 +2397,7 @@ fn generate_awards(
     {
         awards.push(rating_award(
             row,
-            "The Cliff",
+            "Largest rating loss",
             format!("{:.0} rating", row.rating_change),
             "award_the_cliff",
         ));
@@ -2467,7 +2413,7 @@ fn generate_awards(
     if let Some(row) = consistent {
         awards.push(rating_award(
             row,
-            "Steady Eddie",
+            "Smallest rating swings",
             format!(
                 "±{} rating std dev",
                 row.rating_variance.unwrap_or_default().sqrt() as i64
@@ -2481,7 +2427,7 @@ fn generate_awards(
     {
         awards.push(rating_award(
             row,
-            "Coin Flip Player",
+            "Largest rating swings",
             format!(
                 "±{} rating std dev",
                 row.rating_variance.unwrap_or_default().sqrt() as i64
@@ -2501,7 +2447,7 @@ fn generate_awards(
     {
         awards.push(betting_award(
             row,
-            "Diamond Hands",
+            "Best betting return",
             format!("+{:.1}%", betting_roi(row) * 100.0),
             "award_diamond_hands",
         ));
@@ -2512,7 +2458,7 @@ fn generate_awards(
     {
         awards.push(betting_award(
             row,
-            "House's Favorite",
+            "Lowest betting return",
             format!("{:.1}%", betting_roi(row) * 100.0),
             "award_house_favorite",
         ));
@@ -2520,7 +2466,7 @@ fn generate_awards(
     if let Some(row) = first_max_by(bettors.iter().copied(), |row| row.total_wagered as f64) {
         awards.push(betting_award(
             row,
-            "Degen Supreme",
+            "Most JC wagered",
             format!("{} JC", row.total_wagered),
             "award_degen_supreme",
         ));
@@ -2582,8 +2528,12 @@ fn generate_awards(
         awards.push(StoryAward {
             discord_id: candidate.discord_id,
             username: candidate.username.clone(),
-            title: "One-Trick Pony",
-            stat: format!("{}g on {}", candidate.picks, hero_name(candidate.hero_id)),
+            title: "Most focused hero pool",
+            stat: format!(
+                "{} games on {}",
+                candidate.picks,
+                hero_name(candidate.hero_id)
+            ),
             flavor: random_flavor("award_one_trick"),
         });
     }
@@ -2593,7 +2543,7 @@ fn generate_awards(
         awards.push(StoryAward {
             discord_id: candidate.discord_id,
             username: candidate.username.clone(),
-            title: "Jack of All Trades",
+            title: "Most heroes played",
             stat: format!("{} heroes", candidate.unique_heroes),
             flavor: random_flavor("award_jack_of_all_trades"),
         });
@@ -2604,7 +2554,7 @@ fn generate_awards(
         push_award(
             &mut awards,
             row,
-            "No Life",
+            "Most games played",
             format!("{} games", row.games_played),
             "award_no_life",
         );
@@ -2615,7 +2565,7 @@ fn generate_awards(
         push_award(
             &mut awards,
             row,
-            "Touched Grass",
+            "Fewest games played",
             format!("{} games", row.games_played),
             "award_touched_grass",
         );
@@ -2626,7 +2576,7 @@ fn generate_awards(
         awards.push(StoryAward {
             discord_id: row.discord_id,
             username: row.discord_username.clone(),
-            title: "Public Enemy #1",
+            title: "Most bets against",
             stat: format!("{} bets", row.bets_against),
             flavor: random_flavor("award_punching_bag"),
         });
@@ -2698,7 +2648,7 @@ fn bankruptcy_award(row: &WrappedBankruptcy) -> StoryAward {
     StoryAward {
         discord_id: row.discord_id,
         username: row.discord_username.clone(),
-        title: "Bankruptcy Speedrunner",
+        title: "Most bankruptcies",
         stat: format!(
             "{} bankruptcies all-time; active this year",
             row.bankruptcy_count

@@ -69,29 +69,28 @@ fn pet_card(assets: &str) -> Vec<u8> {
 fn deck(assets: &str) -> Vec<WrappedSlideData> {
     let mut deck = Vec::new();
 
-    let mut intro = card("story_intro", "This one is yours");
+    let mut intro = card("story_intro", "Your year");
     intro.headline = "Your\n2026\nWrapped".to_owned();
     intro.stat_value = PLAYER.to_owned();
-    intro.lines = lines(&["The wins. The bad picks. The people who queued anyway."]);
     deck.push(intro);
 
     let mut hours = styled(
         "story_moment",
-        "Time well spent?",
+        "Time played",
         WrappedLayout::BigNumber,
         WrappedTheme::Queue,
     );
     hours.headline = "One more game. Several times.".to_owned();
     hours.stat_value = "185h".to_owned();
-    hours.stat_label = "in the Ancient business".to_owned();
-    hours.badge = "More than 89% of the server".to_owned();
-    hours.lines = lines(&["That's 7.7 straight days. Queue time not included."]);
+    hours.stat_label = "in recorded matches".to_owned();
+    hours.badge = "More match time than 89% of players".to_owned();
+    hours.lines = lines(&["Queue time not included."]);
     hours.artwork = WrappedArtwork::Courier;
     deck.push(hours);
 
-    let mut heroes = card("story_hero", "On repeat");
+    let mut heroes = card("story_hero", "Top heroes");
     heroes.headline = "Your top heroes".to_owned();
-    heroes.badge = "#1 Queen of Pain on the server".to_owned();
+    heroes.badge = "Most Queen of Pain games on the server".to_owned();
     heroes.rows = rows(&[
         ("Queen of Pain", "81 games · 62% wins"),
         ("Crystal Maiden", "46 games · 54% wins"),
@@ -135,15 +134,14 @@ fn deck(assets: &str) -> Vec<WrappedSlideData> {
         slide.headline = award.headline.to_owned();
         slide.stat_value = award.value;
         slide.stat_label = award.label.to_owned();
-        slide.badge = "Your personal superlative".to_owned();
         slide.lines = vec![award.detail, award.coverage];
         deck.push(slide);
     }
 
-    let mut months = card("story_months", "Your year in queue");
-    months.headline = "March had you in a chokehold.".to_owned();
+    let mut months = card("story_months", "Games by month");
+    months.headline = "You played most in March.".to_owned();
     months.stat_value = "38".to_owned();
-    months.stat_label = "games in March. July was suspiciously quiet.".to_owned();
+    months.stat_label = "games in March; none in July".to_owned();
     months.rows = ["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"]
         .iter()
         .zip([
@@ -154,25 +152,25 @@ fn deck(assets: &str) -> Vec<WrappedSlideData> {
     deck.push(months);
 
     let mut style = card("story_identity", "Your playstyle");
-    style.stat_value = "The mapmaker".to_owned();
-    style.headline = "You saw the bigger picture. The team saw nothing.".to_owned();
+    style.stat_value = "Wards".to_owned();
+    style.headline = "You placed plenty of wards.".to_owned();
     style.lines = lines(&["14.2 wards a game, recorded in 180 of 247 games."]);
     deck.push(style);
 
     let mut wards = styled(
         "story_moment",
-        "You had notes",
+        "Pings",
         WrappedLayout::BigNumber,
         WrappedTheme::QueueAlt,
     );
     wards.headline = "The minimap heard you.".to_owned();
     wards.stat_value = "9,412".to_owned();
     wards.stat_label = "recorded pings".to_owned();
-    wards.lines = lines(&["52 a game. A very interactive presentation."]);
+    wards.lines = lines(&["52 pings per recorded game."]);
     wards.artwork = WrappedArtwork::Ward;
     deck.push(wards);
 
-    let mut duo = card("story_teammates", "Your duo of the year");
+    let mut duo = card("story_teammates", "Your teammates");
     duo.headline = "Ride or die".to_owned();
     duo.rows = rows(&[
         ("Mirana Main", "41 games together · 68% wins"),
@@ -181,15 +179,15 @@ fn deck(assets: &str) -> Vec<WrappedSlideData> {
     ]);
     deck.push(duo);
 
-    let mut rival = card("story_rivals", "Your nemesis");
+    let mut rival = card("story_rivals", "Your opponents");
     rival.headline = "They live in your head.".to_owned();
     rival.rows = rows(&[
         ("Tusk Enjoyer", "Beat you 19 of 26 times"),
-        ("Mirana Main", "You own them: 15 of 21"),
+        ("Mirana Main", "You won 15 of 21 games"),
     ]);
     deck.push(rival);
 
-    let mut rating = card("chart_rating", "Your rating arc");
+    let mut rating = card("chart_rating", "Rating");
     rating.headline = "Up, down, and sideways.".to_owned();
     rating.stat_value = "+214".to_owned();
     rating.stat_label = "rating this year".to_owned();
@@ -211,7 +209,7 @@ fn deck(assets: &str) -> Vec<WrappedSlideData> {
     let mut total = 0_i64;
     gamba.gamba = Some(WrappedGambaData {
         degen_score: 73,
-        degen_title: "Certified Degen".to_owned(),
+        degen_title: "Gambling stats".to_owned(),
         points: (0..140)
             .map(|index| {
                 total += if index < 50 {
@@ -242,20 +240,19 @@ fn deck(assets: &str) -> Vec<WrappedSlideData> {
 
     let mut degen = styled(
         "story_gamba",
-        "Degen report",
+        "Gambling stats",
         WrappedLayout::Tiles,
         WrappedTheme::GambaUp,
     );
-    degen.headline = "Certified Degen".to_owned();
+    degen.headline = "Gambling stats".to_owned();
     degen.rows = rows(&[
         ("73", "degen score"),
         ("+2,400", "best single bet"),
         ("-3,100", "worst single bet"),
         ("41", "wheel spins"),
         ("3", "bankruptcies"),
-        ("11x", "loss chase streak"),
+        ("11x", "losses in a row"),
     ]);
-    degen.lines = lines(&["You and the wheel are on a first-name basis."]);
     deck.push(degen);
 
     let mut dig = styled(
@@ -266,21 +263,21 @@ fn deck(assets: &str) -> Vec<WrappedSlideData> {
     );
     dig.headline = "You went looking for trouble.".to_owned();
     dig.stat_value = "1,284".to_owned();
-    dig.stat_label = "blocks down, deepest at 412".to_owned();
-    dig.badge = "You out-dug 92% of the server".to_owned();
-    dig.lines = lines(&["Caved in on yourself 37 times. Kept digging."]);
+    dig.stat_label = "blocks dug; deepest level 412".to_owned();
+    dig.badge = "Dug more than 92% of players".to_owned();
+    dig.lines = lines(&["37 cave-ins."]);
     deck.push(dig);
 
     let mut boss = styled(
         "story_dig_boss",
-        "Your white whale",
+        "Boss you fought most",
         WrappedLayout::Spotlight,
         WrappedTheme::Dig,
     );
     boss.art_png = art(&format!("{assets}/dig/bosses/aegis_warden_victory.png"));
     boss.headline = "Aegis Warden".to_owned();
     boss.stat_value = "9 fights".to_owned();
-    boss.stat_label = "It won 7. You won the last one.".to_owned();
+    boss.stat_label = "2 wins, 7 losses".to_owned();
     deck.push(boss);
 
     let mut pet = styled(
@@ -294,19 +291,19 @@ fn deck(assets: &str) -> Vec<WrappedSlideData> {
     pet.stat_value = "412 meals".to_owned();
     pet.stat_label = "served across 3 pets".to_owned();
     pet.badge = "4,120 JC on snacks".to_owned();
-    pet.lines = lines(&["Won 12 brawls. Still judges you."]);
+    pet.lines = lines(&["12 brawl wins."]);
     deck.push(pet);
 
     let mut grave = styled(
         "story_pet_grave",
-        "In loving memory",
+        "Pets lost",
         WrappedLayout::BigNumber,
         WrappedTheme::PetGrave,
     );
     grave.headline = "Not everyone made it.".to_owned();
     grave.stat_value = "2".to_owned();
     grave.stat_label = "pets lost this year".to_owned();
-    grave.lines = lines(&["One starved. One got eaten. You got a new one the next day."]);
+    grave.lines = lines(&["One starved. One was eaten."]);
     deck.push(grave);
 
     let mut mafia = styled(
@@ -319,7 +316,7 @@ fn deck(assets: &str) -> Vec<WrappedSlideData> {
     mafia.rows = rows(&[
         ("34", "games played"),
         ("9", "times Mafia"),
-        ("7", "got away with it"),
+        ("7", "wins as Mafia"),
         ("3", "times MVP"),
     ]);
     mafia.lines = lines(&["Your friends voted you out 11 times. They were right 8."]);
@@ -327,34 +324,34 @@ fn deck(assets: &str) -> Vec<WrappedSlideData> {
 
     let mut victim = styled(
         "story_mafia_victim",
-        "Nothing personal",
+        "Night kills",
         WrappedLayout::BigNumber,
         WrappedTheme::MafiaRed,
     );
-    victim.headline = "Tusk Enjoyer should sleep with one eye open.".to_owned();
+    victim.headline = "Tusk Enjoyer".to_owned();
     victim.stat_value = "6".to_owned();
-    victim.stat_label = "times you came for them".to_owned();
+    victim.stat_label = "night kills".to_owned();
     deck.push(victim);
 
     let mut persona = styled(
         "story_persona",
-        "Your Cama type",
+        "Your year",
         WrappedLayout::Persona,
         WrappedTheme::Persona,
     );
-    persona.stat_value = "The Night Shift Mole".to_owned();
-    persona.headline = "You treat sleep as a suggestion and the ground as a rival.".to_owned();
+    persona.stat_value = "Dig regular".to_owned();
+    persona.headline = "You also played Dota.".to_owned();
     persona.rows = rows(&[
         ("1,284", "blocks dug"),
-        ("61%", "of games after midnight"),
-        ("3", "bankruptcies, zero regrets"),
+        ("247", "Dota games"),
+        ("3", "bankruptcies"),
     ]);
     deck.push(persona);
 
     let mut finale = card("story_finale", "2026 Wrapped");
     finale.stat_value = PLAYER.to_owned();
-    finale.headline = "The Night Shift Mole".to_owned();
-    finale.badge = "Personal award: Escape Artist".to_owned();
+    finale.headline = "Dig regular".to_owned();
+    finale.badge = "Deathless wins".to_owned();
     finale.rows = rows(&[
         ("Queen of Pain", ""),
         ("Crystal Maiden", ""),
@@ -363,20 +360,19 @@ fn deck(assets: &str) -> Vec<WrappedSlideData> {
         ("Keeper of the Light", ""),
     ]);
     finale.lines = lines(&[
-        "185h|in queue",
+        "185h|in matches",
         "247|games",
         "1,284|blocks dug",
         "-4,520|JC gamba",
         "34|mafia games",
     ]);
-    finale.stat_label = "See you next queue.".to_owned();
     deck.push(finale);
 
     let mut records = card("records_combat", "Combat records");
-    records.headline = "Your highest highs".to_owned();
+    records.headline = "Your records".to_owned();
     records.lines = lines(&[
         "Most kills: 24 as Queen of Pain",
-        "Most deaths: 19 as Pudge (we saw)",
+        "Most deaths: 19 as Pudge",
         "Best KDA: 18.0 as Crystal Maiden",
     ]);
     deck.push(records);

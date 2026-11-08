@@ -50,14 +50,11 @@ pub fn personal_moments(matches: &[PersonalMomentMatch]) -> PersonalStory {
     let seconds = durations.iter().sum::<i64>();
     let playtime = (!durations.is_empty()).then(|| PersonalMoment {
         key: "playtime",
-        title: "You made time",
-        headline: "One more game. Several times.",
+        title: "Time played",
+        headline: "Your time in matches.",
         value: format!("{}h {}m", seconds / 3600, seconds % 3600 / 60),
         label: "recorded match time",
-        detail: format!(
-            "{} seconds in the Ancient business. Queue time not included.",
-            number(seconds)
-        ),
+        detail: "Queue time is not included.".to_owned(),
         coverage: coverage(durations.len()),
     });
     let identity = identity(matches);
@@ -72,12 +69,12 @@ pub fn personal_moments(matches: &[PersonalMomentMatch]) -> PersonalStory {
             pings as f64 / ping_games as f64 / 30.0,
             PersonalMoment {
                 key: "pings",
-                title: "You had notes",
-                headline: "The minimap heard you.",
+                title: "Pings",
+                headline: "You had a lot to say.",
                 value: number(pings),
                 label: "recorded pings",
                 detail: format!(
-                    "{:.1} pings per recorded game. A very interactive presentation.",
+                    "{:.1} pings per recorded game.",
                     pings as f64 / ping_games as f64
                 ),
                 coverage: coverage(ping_games),
@@ -107,12 +104,11 @@ pub fn personal_moments(matches: &[PersonalMomentMatch]) -> PersonalStory {
             deficit / 5000.0,
             PersonalMoment {
                 key: "comeback",
-                title: "The plot twist",
-                headline: "You weren't done yet.",
+                title: "Biggest comeback",
+                headline: "Your team won from behind.",
                 value: number(deficit as i64),
                 label: "team gold deficit overcome",
-                detail: "Your team won from this far behind. The comeback had an ensemble cast."
-                    .to_owned(),
+                detail: "Your largest recorded team gold deficit in a win.".to_owned(),
                 coverage: coverage(comeback_games),
             },
         );
@@ -129,11 +125,11 @@ pub fn personal_moments(matches: &[PersonalMomentMatch]) -> PersonalStory {
             f64::from(longest) / 5.0,
             PersonalMoment {
                 key: "streak",
-                title: "The encore",
-                headline: "Winning was becoming a habit.",
+                title: "Longest win streak",
+                headline: "You kept winning.",
                 value: longest.to_string(),
                 label: "wins in a row",
-                detail: "Your longest recorded win streak. Obviously, you queued again.".to_owned(),
+                detail: "Your longest run of consecutive wins.".to_owned(),
                 coverage: coverage(matches.iter().filter(|row| row.won.is_some()).count()),
             },
         );
@@ -145,11 +141,11 @@ pub fn personal_moments(matches: &[PersonalMomentMatch]) -> PersonalStory {
             couriers as f64 / courier_games as f64,
             PersonalMoment {
                 key: "couriers",
-                title: "Delivery interrupted",
+                title: "Courier kills",
                 headline: "Someone's items were late.",
                 value: number(couriers),
                 label: "recorded courier kills",
-                detail: "You took a hands-on approach to supply-chain management.".to_owned(),
+                detail: "Total enemy couriers killed.".to_owned(),
                 coverage: coverage(courier_games),
             },
         );
@@ -157,29 +153,29 @@ pub fn personal_moments(matches: &[PersonalMomentMatch]) -> PersonalStory {
     for (key, title, headline, label, detail, threshold, metric) in [
         (
             "healing",
-            "The health plan",
-            "Your team had coverage.",
+            "Healing",
+            "You kept your teammates alive.",
             "recorded hero healing",
-            "Keeping the group project alive, literally.",
+            "Total hero healing.",
             8000.0,
             (|row: &PersonalMomentMatch| row.hero_healing)
                 as fn(&PersonalMomentMatch) -> Option<i64>,
         ),
         (
             "wards",
-            "You brought receipts",
-            "The map wasn't going to light itself.",
+            "Wards placed",
+            "You kept the map lit.",
             "recorded wards placed",
-            "Observer and sentry wards. Someone had to fund the vision board.",
+            "Observer and sentry wards combined.",
             10.0,
             (|row: &PersonalMomentMatch| row.wards) as fn(&PersonalMomentMatch) -> Option<i64>,
         ),
         (
             "towers",
-            "Property damage",
-            "You understood the assignment.",
+            "Tower damage",
+            "You hit the towers.",
             "recorded tower damage",
-            "Ancients don't fall to a good KDA alone.",
+            "Total damage to towers.",
             5000.0,
             (|row: &PersonalMomentMatch| row.tower_damage)
                 as fn(&PersonalMomentMatch) -> Option<i64>,
@@ -209,12 +205,11 @@ pub fn personal_moments(matches: &[PersonalMomentMatch]) -> PersonalStory {
             *duration as f64 / 3600.0,
             PersonalMoment {
                 key: "marathon",
-                title: "The extended edition",
-                headline: "That quick game had other plans.",
+                title: "Longest game",
+                headline: "This one took a while.",
                 value: format!("{}:{:02}", duration / 60, duration % 60),
                 label: "your longest recorded game",
-                detail: "Minutes and seconds. Somewhere, a bedtime was quietly abandoned."
-                    .to_owned(),
+                detail: "Time shown in minutes and seconds.".to_owned(),
                 coverage: coverage(durations.len()),
             },
         );
@@ -230,12 +225,11 @@ pub fn personal_moments(matches: &[PersonalMomentMatch]) -> PersonalStory {
             average_apm / 150.0,
             PersonalMoment {
                 key: "apm",
-                title: "Keyboard warrior",
-                headline: "Your keyboard filed a complaint.",
+                title: "Actions per minute",
+                headline: "You kept busy.",
                 value: format!("{average_apm:.0}"),
                 label: "actions per minute",
-                detail: "Averaged across your recorded games. Most of them were right-clicks."
-                    .to_owned(),
+                detail: "Average across games with action data.".to_owned(),
                 coverage: coverage(apm.len()),
             },
         );
@@ -251,11 +245,11 @@ pub fn personal_moments(matches: &[PersonalMomentMatch]) -> PersonalStory {
             1.0 + rapiers as f64,
             PersonalMoment {
                 key: "rapier",
-                title: "Divine intervention",
+                title: "Divine Rapiers",
                 headline: if rapiers == 1 {
                     "You bought a Divine Rapier."
                 } else {
-                    "You kept buying Divine Rapiers."
+                    "You bought Divine Rapiers."
                 },
                 value: number(rapiers),
                 label: if rapiers == 1 {
@@ -264,9 +258,9 @@ pub fn personal_moments(matches: &[PersonalMomentMatch]) -> PersonalStory {
                     "Divine Rapiers"
                 },
                 detail: if lost_with_rapier > 0 {
-                    "At least one of those games was lost anyway. Bold.".to_owned()
+                    "You lost at least one game after buying a Rapier.".to_owned()
                 } else {
-                    "Every game with one in your inventory was a win.".to_owned()
+                    "No recorded losses after buying a Rapier.".to_owned()
                 },
                 coverage: coverage(rapier_games),
             },
@@ -295,12 +289,11 @@ pub fn personal_moments(matches: &[PersonalMomentMatch]) -> PersonalStory {
             lead / 8000.0,
             PersonalMoment {
                 key: "throw",
-                title: "The other plot twist",
-                headline: "You were winning. Were.",
+                title: "Biggest lost lead",
+                headline: "Your team lost from ahead.",
                 value: number(lead as i64),
                 label: "team gold lead, then a loss",
-                detail: "Your team led by this much and still lost. Ancients are fragile."
-                    .to_owned(),
+                detail: "Your largest recorded team gold lead in a loss.".to_owned(),
                 coverage: coverage(throw_games),
             },
         );
@@ -354,12 +347,11 @@ pub fn personal_superlatives(matches: &[PersonalMomentMatch]) -> Vec<PersonalMom
             1.0 + deathless as f64 / survival.len() as f64,
             PersonalMoment {
                 key: "deathless",
-                title: "Escape Artist",
-                headline: "The Ancient fell. You didn't.",
+                title: "Deathless wins",
+                headline: "You won without dying.",
                 value: deathless.to_string(),
                 label: "wins with zero deaths",
-                detail: "Victory screens without a single trip to the fountain the hard way."
-                    .to_owned(),
+                detail: "You stayed alive for the whole game.".to_owned(),
                 coverage: coverage(survival.len()),
             },
         ));
@@ -373,11 +365,11 @@ pub fn personal_superlatives(matches: &[PersonalMomentMatch]) -> Vec<PersonalMom
             *peak as f64 / 20.0,
             PersonalMoment {
                 key: "supporting_cast",
-                title: "Best Supporting Cast",
-                headline: "Somehow, you were in every scene.",
+                title: "Most assists",
+                headline: "Your best game for assists.",
                 value: number(*peak),
-                label: "most recorded assists in one game",
-                detail: "The kill feed had stars. You had the connecting credits.".to_owned(),
+                label: "assists in one game",
+                detail: "Your highest recorded assist total.".to_owned(),
                 coverage: coverage(assists.len()),
             },
         ));
@@ -397,12 +389,11 @@ pub fn personal_superlatives(matches: &[PersonalMomentMatch]) -> Vec<PersonalMom
             1800.0 / duration as f64,
             PersonalMoment {
                 key: "speedrun",
-                title: "The Speedrun Award",
-                headline: "You had somewhere else to be.",
+                title: "Fastest win",
+                headline: "You made it quick.",
                 value: format!("{}:{:02}", duration / 60, duration % 60),
-                label: "your fastest recorded win",
-                detail: "Minutes and seconds. Your team got straight to the Ancient-shaped point."
-                    .to_owned(),
+                label: "minutes : seconds",
+                detail: "Time shown in minutes and seconds.".to_owned(),
                 coverage: coverage(timed_results.len()),
             },
         ));
@@ -423,13 +414,18 @@ pub fn personal_superlatives(matches: &[PersonalMomentMatch]) -> Vec<PersonalMom
         .filter(|(won, kills, _, _)| !*won && *kills >= 15)
         .max_by_key(|(_, kills, deaths, assists)| (*kills, std::cmp::Reverse(*deaths), *assists))
     {
-        candidates.push((*kills as f64 / 15.0, PersonalMoment {
-            key: "bittersweet", title: "The Tragic Headliner",
-            headline: "A highlight reel with the wrong ending.",
-            value: format!("{kills} / {deaths} / {assists}"), label: "kills / deaths / assists in a loss",
-            detail: "Your highest-kill loss among games with a full recorded scoreline. The Ancient did not read the stats.".to_owned(),
-            coverage: coverage(scorelines.len()),
-        }));
+        candidates.push((
+            *kills as f64 / 15.0,
+            PersonalMoment {
+                key: "bittersweet",
+                title: "Most kills in a loss",
+                headline: "All those kills. Still a loss.",
+                value: format!("{kills} / {deaths} / {assists}"),
+                label: "kills / deaths / assists in a loss",
+                detail: "Your highest-kill loss with complete combat stats.".to_owned(),
+                coverage: coverage(scorelines.len()),
+            },
+        ));
     }
     let heroes = matches
         .iter()
@@ -440,13 +436,18 @@ pub fn personal_superlatives(matches: &[PersonalMomentMatch]) -> Vec<PersonalMom
         .collect::<std::collections::BTreeSet<_>>()
         .len();
     if unique >= 5 && unique as f64 / heroes.len() as f64 >= 0.6 {
-        candidates.push((unique as f64 / 5.0, PersonalMoment {
-            key: "hero_sampler", title: "Outstanding Range",
-            headline: "Why have a main when you can have a cast?",
-            value: unique.to_string(), label: "different heroes played",
-            detail: format!("{unique} heroes across {} recorded picks. The draft screen was your audition room.", heroes.len()),
-            coverage: coverage(heroes.len()),
-        }));
+        candidates.push((
+            unique as f64 / 5.0,
+            PersonalMoment {
+                key: "hero_sampler",
+                title: "Hero variety",
+                headline: "You tried plenty of heroes.",
+                value: unique.to_string(),
+                label: "different heroes played",
+                detail: format!("{unique} heroes across {} recorded picks.", heroes.len()),
+                coverage: coverage(heroes.len()),
+            },
+        ));
     }
     candidates.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.key.cmp(b.1.key)));
     candidates
@@ -491,24 +492,26 @@ fn identity(matches: &[PersonalMomentMatch]) -> Option<PersonalMoment> {
         let kills = combat.iter().map(|row| row.0).sum::<i64>() as f64 / combat.len() as f64;
         let assists = combat.iter().map(|row| row.1).sum::<i64>() as f64 / combat.len() as f64;
         if assists >= 15.0 && assists > kills * 1.5 {
-            candidates.push((assists / 15.0, make(
-                "The enabler",
-                "You made everyone else look good.",
-                format!(
-                    "{assists:.1} assists per recorded game. Main-character energy, shared generously."
+            candidates.push((
+                assists / 15.0,
+                make(
+                    "Team player",
+                    "You helped your teammates get kills.",
+                    format!("{assists:.1} assists per recorded game."),
+                    combat.len(),
                 ),
-                combat.len(),
-            )));
+            ));
         }
         if kills >= 10.0 && kills > assists {
-            candidates.push((kills / 10.0, make(
-                "The headliner",
-                "Your name kept making the feed.",
-                format!(
-                    "{kills:.1} kills per recorded game. The highlight reel had a recurring lead."
+            candidates.push((
+                kills / 10.0,
+                make(
+                    "High kills",
+                    "You got plenty of kills.",
+                    format!("{kills:.1} kills per recorded game."),
+                    combat.len(),
                 ),
-                combat.len(),
-            )));
+            ));
         }
     }
     let (wards, count) = observed(matches, |row| row.wards);
@@ -516,10 +519,10 @@ fn identity(matches: &[PersonalMomentMatch]) -> Option<PersonalMoment> {
         candidates.push((
             wards as f64 / count as f64 / 10.0,
             make(
-                "The mapmaker",
-                "You saw the bigger picture.",
+                "Wards",
+                "You placed plenty of wards.",
                 format!(
-                    "{:.1} wards per recorded game. Your team had a view.",
+                    "{:.1} wards per recorded game.",
                     wards as f64 / count as f64
                 ),
                 count,
@@ -540,26 +543,40 @@ fn identity(matches: &[PersonalMomentMatch]) -> Option<PersonalMoment> {
             candidates.push((
                 top as f64 / picks as f64 / 0.6,
                 make(
-                    "The loyalist",
-                    "You found your person. They have spells.",
-                    format!("One hero in {top} of {picks} recorded picks. Comfort is a strategy."),
+                    "Hero specialist",
+                    "You stuck with your favorite.",
+                    format!("One hero in {top} of {picks} recorded picks."),
                     picks,
                 ),
             ));
         }
         if heroes.len() >= 5 && heroes.len() as f64 / picks as f64 >= 0.6 {
-            candidates.push((heroes.len() as f64 / picks as f64 / 0.6, make(
-                "The sampler",
-                "The hero grid was a tasting menu.",
-                format!(
-                    "{} heroes across {picks} recorded picks. Commitment issues, excellent range.",
-                    heroes.len()
+            candidates.push((
+                heroes.len() as f64 / picks as f64 / 0.6,
+                make(
+                    "Hero variety",
+                    "You played a wide range of heroes.",
+                    format!("{} heroes across {picks} recorded picks.", heroes.len()),
+                    picks,
                 ),
-                picks,
-            )));
+            ));
         }
     }
-    candidates.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.value.cmp(&b.1.value)));
+    // Keep ties stable when display names change.
+    let tie_order = [
+        "Team player",
+        "High kills",
+        "Hero specialist",
+        "Wards",
+        "Hero variety",
+    ];
+    candidates.sort_by(|a, b| {
+        b.0.total_cmp(&a.0).then_with(|| {
+            let rank =
+                |moment: &PersonalMoment| tie_order.iter().position(|name| *name == moment.value);
+            rank(&a.1).cmp(&rank(&b.1))
+        })
+    });
     candidates.into_iter().next().map(|(_, moment)| moment)
 }
 
@@ -601,7 +618,7 @@ mod tests {
         assert_eq!(apm.coverage, "Recorded in 3 of 3 games");
         let rapier = key("rapier").expect("rapier");
         assert_eq!(rapier.value, "2");
-        assert!(rapier.detail.contains("lost anyway"));
+        assert!(rapier.detail.contains("lost at least one game"));
         let throw = key("throw").expect("thrown lead");
         assert_eq!(throw.value, "12,500");
 
@@ -665,7 +682,6 @@ mod tests {
         ];
         let time = personal_moments(&rows).playtime.expect("recorded time");
         assert_eq!(time.value, "1h 1m");
-        assert!(time.detail.contains("3,663 seconds"));
         assert_eq!(time.coverage, "Recorded in 2 of 5 games");
     }
 
@@ -693,8 +709,8 @@ mod tests {
             .identity
             .expect("support identity");
         let b = personal_moments(&carry).identity.expect("carry identity");
-        assert_eq!(a.value, "The enabler");
-        assert_eq!(b.value, "The headliner");
+        assert_eq!(a.value, "Team player");
+        assert_eq!(b.value, "High kills");
         assert!(a.detail.contains("22.0 assists"));
         assert!(b.detail.contains("16.0 kills"));
         assert_eq!(a.coverage, "Recorded in 6 of 6 games");
@@ -711,10 +727,23 @@ mod tests {
         ];
         rows.extend(vec![PersonalMomentMatch::default(); 7]);
         let identity = personal_moments(&rows).identity.expect("repeat hero");
-        assert_eq!(identity.value, "The loyalist");
+        assert_eq!(identity.value, "Hero specialist");
         assert!(identity.detail.contains("3 of 3 recorded picks"));
         assert_eq!(identity.coverage, "Recorded in 3 of 10 games");
         assert!(personal_moments(&rows[..2]).identity.is_none());
+    }
+
+    #[test]
+    fn renamed_playstyles_preserve_the_existing_tie_order() {
+        let rows = (0..5)
+            .map(|index| PersonalMomentMatch {
+                hero_id: Some(if index < 3 { 7 } else { 8 }),
+                wards: Some(10),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let identity = personal_moments(&rows).identity.unwrap();
+        assert!(identity.detail.starts_with("One hero in 3 of 5"));
     }
 
     #[test]
@@ -835,7 +864,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let identity = personal_moments(&rows).identity.expect("variety identity");
-        assert_eq!(identity.value, "The sampler");
+        assert_eq!(identity.value, "Hero variety");
         assert!(identity.detail.contains("6 heroes across 6 recorded picks"));
     }
 }
@@ -1031,7 +1060,7 @@ mod encore_tests {
         let identity = personal_moments(&rows)
             .identity
             .expect("strong vision identity");
-        assert_eq!(identity.value, "The mapmaker");
+        assert_eq!(identity.value, "Wards");
         assert!(identity.detail.contains("30.0 wards"));
     }
 }

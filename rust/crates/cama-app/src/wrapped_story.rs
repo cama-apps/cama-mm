@@ -537,7 +537,7 @@ pub fn generate_awards(
         awards.push(award_from_stats(
             stats,
             "performance",
-            "Gold Goblin",
+            "Highest average GPM",
             "Best GPM",
             format!("{:.0} avg", stats.avg_gpm),
             "💰",
@@ -547,7 +547,7 @@ pub fn generate_awards(
         awards.push(award_from_stats(
             stats,
             "fun",
-            "No Life",
+            "Most games played",
             "Most Games",
             stats.games_played.to_string(),
             "🕰️",
@@ -560,7 +560,7 @@ pub fn generate_awards(
     {
         awards.push(WrappedAward {
             category: "rating".to_owned(),
-            title: "Elo Inflation".to_owned(),
+            title: "Largest rating gain".to_owned(),
             stat_name: "Rating Gained".to_owned(),
             stat_value: format!("+{:.0}", change.rating_change),
             discord_id: change.discord_id,
@@ -576,7 +576,7 @@ pub fn generate_awards(
     {
         awards.push(WrappedAward {
             category: "rating".to_owned(),
-            title: "The Cliff".to_owned(),
+            title: "Largest rating loss".to_owned(),
             stat_name: "Rating Lost".to_owned(),
             stat_value: format!("{:.0}", change.rating_change),
             discord_id: change.discord_id,

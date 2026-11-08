@@ -1118,7 +1118,7 @@ async fn migrated_sqlite_builds_personal_story_and_preserves_detailed_stats() {
             .unwrap()
             .lines
             .iter()
-            .any(|line| line.starts_with("QUEUE REGULAR - Guild "))
+            .any(|line| line.starts_with("MOST GAMES - Guild "))
     );
     let kinds = locked
         .slides
@@ -1182,7 +1182,7 @@ async fn migrated_sqlite_builds_personal_story_and_preserves_detailed_stats() {
         .iter()
         .find(|slide| slide.kind == "story_gamba")
         .expect("degen report");
-    assert_eq!(report.headline, "Committed");
+    assert_eq!(report.headline, "Your biggest wins and losses.");
     assert!(
         report
             .rows
@@ -1212,7 +1212,7 @@ async fn migrated_sqlite_builds_personal_story_and_preserves_detailed_stats() {
         .expect("reject another navigator");
     assert_eq!(
         responder.followups.lock().unwrap().last().unwrap().content,
-        "Only the command invoker can navigate this wrapped."
+        "Only the person who started this Wrapped can use its buttons."
     );
 
     let restarted = build_provider(&fixture, FakeDiscord::production(), STORY_TIMEOUT);
@@ -1463,20 +1463,20 @@ fn awards_match_python_tie_exclusions_hero_thresholds_and_flavor() {
     };
     let awards = generate_awards(&raw, 3, 3);
     let titles = awards.iter().map(|award| award.title).collect::<Vec<_>>();
-    assert!(titles.contains(&"One-Trick Pony"));
-    assert!(titles.contains(&"Jack of All Trades"));
-    assert!(titles.contains(&"No Life"));
-    assert!(titles.contains(&"Touched Grass"));
+    assert!(titles.contains(&"Most focused hero pool"));
+    assert!(titles.contains(&"Most heroes played"));
+    assert!(titles.contains(&"Most games played"));
+    assert!(titles.contains(&"Fewest games played"));
     assert_eq!(
         titles
             .iter()
-            .filter(|title| **title == "Steady Eddie")
+            .filter(|title| **title == "Smallest rating swings")
             .count(),
         1
     );
-    assert!(!titles.contains(&"Coin Flip Player"));
-    assert!(!titles.contains(&"Diamond Hands"));
-    assert!(!titles.contains(&"House's Favorite"));
+    assert!(!titles.contains(&"Largest rating swings"));
+    assert!(!titles.contains(&"Best betting return"));
+    assert!(!titles.contains(&"Lowest betting return"));
     assert!(awards.iter().all(|award| !award.flavor.is_empty()));
 
     let slides = build_slides(raw, &BTreeMap::new(), 1, "1", 2026, 3, 3);
@@ -1486,8 +1486,8 @@ fn awards_match_python_tie_exclusions_hero_thresholds_and_flavor() {
         .cloned()
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(rendered_lines.contains("QUEUE REGULAR - Unknown player -"));
-    assert!(!rendered_lines.contains("QUEUE REGULAR - One -"));
+    assert!(rendered_lines.contains("MOST GAMES - Unknown player -"));
+    assert!(!rendered_lines.contains("MOST GAMES - One -"));
 }
 
 /// 2026-03-01T00:00:00Z
@@ -1701,14 +1701,19 @@ fn life_outside_the_queue_gets_its_own_chapters_and_a_cama_type() {
     assert!(pet.art_png.is_some());
     assert_eq!(
         find("story_dig_feud").headline,
-        "Guild Rival was in your crosshairs."
+        "You targeted Guild Rival most often."
     );
     assert_eq!(
         find("story_mafia_victim").headline,
-        "Guild Rival should sleep with one eye open."
+        "You targeted Guild Rival most often."
+    );
+    assert!(
+        find("story_mafia_victim")
+            .stat_label
+            .contains("Guild Rival")
     );
     let persona = find("story_persona");
-    assert!(persona.stat_value.starts_with("The "));
+    assert!(!persona.stat_value.is_empty());
     let recap = slides.last().unwrap();
     assert_eq!(recap.headline, persona.stat_value);
     assert!(recap.lines.contains(&"2|Mafia games".to_owned()));
@@ -1738,7 +1743,7 @@ fn chapters_never_name_people_without_a_readable_name() {
         .iter()
         .find(|slide| slide.kind == "story_dig_feud")
         .unwrap();
-    assert_eq!(feud.headline, "You made enemies underground.");
+    assert_eq!(feud.headline, "Your sabotage activity.");
     for slide in slides.iter().filter(|slide| {
         matches!(
             slide.kind.as_str(),
@@ -1882,7 +1887,7 @@ fn personal_superlatives_are_spaced_through_the_story_with_evidence_and_a_recap(
         "personal awards need breathing room between reveals"
     );
     for (_, award) in &awards {
-        assert_eq!(award.badge, "Your year award");
+        assert!(award.badge.is_empty());
         assert!(!award.headline.is_empty());
         assert!(!award.stat_value.is_empty());
         assert!(!award.stat_label.is_empty());
@@ -1890,11 +1895,11 @@ fn personal_superlatives_are_spaced_through_the_story_with_evidence_and_a_recap(
         assert!(!award.lines[0].is_empty());
         assert!(award.lines[1].contains("3 of 3"));
     }
-    assert_eq!(awards[0].1.title, "Escape Artist");
+    assert_eq!(awards[0].1.title, "Deathless wins");
     assert_eq!(awards[0].1.stat_value, "3");
-    assert_eq!(awards[1].1.title, "The Speedrun Award");
+    assert_eq!(awards[1].1.title, "Fastest win");
     assert_eq!(awards[1].1.stat_value, "20:00");
-    assert_eq!(awards[2].1.title, "Best Supporting Cast");
+    assert_eq!(awards[2].1.title, "Most assists");
     assert_eq!(awards[2].1.stat_value, "30");
     assert_eq!(story.last().unwrap().badge, awards[0].1.title);
     assert!(story.iter().all(|slide| slide.kind != "chart_rating"));

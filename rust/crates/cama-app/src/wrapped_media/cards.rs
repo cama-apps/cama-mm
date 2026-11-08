@@ -67,15 +67,17 @@ fn chrome(stage: &mut Stage<'_>) {
         Align::Left,
         (0.0, 0.0),
     );
-    stage.block(
-        &slide.username,
-        (MARGIN, HEIGHT - 50, COLUMN, 36),
-        23.0,
-        Face::Bold,
-        p.fg,
-        Align::Left,
-        (0.0, 0.0),
-    );
+    if slide.layout != WrappedLayout::Cover {
+        stage.block(
+            &slide.username,
+            (MARGIN, HEIGHT - 50, COLUMN, 36),
+            23.0,
+            Face::Bold,
+            p.fg,
+            Align::Left,
+            (0.0, 0.0),
+        );
+    }
 }
 
 /// The rows a layout should show, derived from legacy `lines`/`series` copy
@@ -149,19 +151,42 @@ fn cover(stage: &mut Stage<'_>) {
         Align::Left,
         (0.42, 0.72),
     );
-    let lines = slide.lines.iter().take(2).collect::<Vec<_>>();
-    let slot = ((HEIGHT - COVER_ART_BAND - 12 - y) / lines.len().max(1) as i32 - 8).max(0);
-    for line in lines {
-        y = stage.block(
-            line,
-            (MARGIN, y + 8, COLUMN, slot),
-            33.0,
-            Face::Bold,
+    // Normally empty; an empty-history disclosure still belongs on the cover.
+    if let Some(note) = slide.lines.first() {
+        stage.block(
+            note,
+            (
+                MARGIN,
+                y + 12,
+                COLUMN,
+                (HEIGHT - COVER_ART_BAND - 12 - y).max(0),
+            ),
+            28.0,
+            Face::Medium,
             p.fg,
             Align::Left,
             (0.55, 0.85),
         );
     }
+}
+
+/// A card gets one heading; its statistics carry the rest of the story.
+fn heading(stage: &mut Stage<'_>) -> i32 {
+    let slide = stage.slide;
+    let value = if slide.title.is_empty() {
+        &slide.headline
+    } else {
+        &slide.title
+    };
+    stage.block(
+        value,
+        (MARGIN, TOP, COLUMN, 146),
+        66.0,
+        Face::Black,
+        stage.palette.fg,
+        Align::Left,
+        (0.0, 0.3),
+    ) + 16
 }
 
 fn big_number(stage: &mut Stage<'_>) {
@@ -177,25 +202,7 @@ fn big_number(stage: &mut Stage<'_>) {
         super::artwork::draw(stage, left, top, (0, 0, WIDTH, HEIGHT), 0.0);
     }
     let has_art = stage.art.is_some();
-    let mut y = TOP;
-    y = stage.block(
-        &slide.title,
-        (MARGIN, y, COLUMN, 50),
-        34.0,
-        Face::Bold,
-        p.fg,
-        Align::Left,
-        (0.0, 0.22),
-    ) + 8;
-    y = stage.block(
-        &slide.headline,
-        (MARGIN, y, COLUMN, 232),
-        68.0,
-        Face::Black,
-        p.fg,
-        Align::Left,
-        (0.04, 0.34),
-    ) + 12;
+    let mut y = heading(stage);
     let spun = count_up(&slide.stat_value, stage.ease(0.3, 0.86));
     y = stage.stat(
         &slide.stat_value,
@@ -247,25 +254,7 @@ fn big_number(stage: &mut Stage<'_>) {
 
 fn top_list(stage: &mut Stage<'_>) {
     let (slide, p) = (stage.slide, stage.palette);
-    let mut y = TOP;
-    y = stage.block(
-        &slide.title,
-        (MARGIN, y, COLUMN, 50),
-        34.0,
-        Face::Bold,
-        p.fg,
-        Align::Left,
-        (0.0, 0.2),
-    ) + 4;
-    y = stage.block(
-        &slide.headline,
-        (MARGIN, y, COLUMN, 146),
-        66.0,
-        Face::Black,
-        p.fg,
-        Align::Left,
-        (0.03, 0.3),
-    ) + 4;
+    let mut y = heading(stage);
     y = stage.block(
         &slide.stat_label,
         (MARGIN, y, COLUMN, 44),
@@ -361,25 +350,7 @@ fn top_list(stage: &mut Stage<'_>) {
 
 fn bars(stage: &mut Stage<'_>) {
     let (slide, p) = (stage.slide, stage.palette);
-    let mut y = TOP;
-    y = stage.block(
-        &slide.title,
-        (MARGIN, y, COLUMN, 50),
-        34.0,
-        Face::Bold,
-        p.fg,
-        Align::Left,
-        (0.0, 0.2),
-    ) + 4;
-    y = stage.block(
-        &slide.headline,
-        (MARGIN, y, COLUMN, 216),
-        64.0,
-        Face::Black,
-        p.fg,
-        Align::Left,
-        (0.03, 0.3),
-    ) + 6;
+    let mut y = heading(stage);
     let spun = count_up(&slide.stat_value, stage.ease(0.3, 0.8));
     y = stage.stat(
         &slide.stat_value,
@@ -462,25 +433,7 @@ fn bars(stage: &mut Stage<'_>) {
 
 fn people(stage: &mut Stage<'_>) {
     let (slide, p) = (stage.slide, stage.palette);
-    let mut y = TOP;
-    y = stage.block(
-        &slide.title,
-        (MARGIN, y, COLUMN, 50),
-        34.0,
-        Face::Bold,
-        p.fg,
-        Align::Left,
-        (0.0, 0.2),
-    ) + 4;
-    y = stage.block(
-        &slide.headline,
-        (MARGIN, y, COLUMN, 160),
-        66.0,
-        Face::Black,
-        p.fg,
-        Align::Left,
-        (0.03, 0.3),
-    ) + 14;
+    let y = heading(stage);
     let rows = card_rows(slide);
     let rows = &rows[..rows.len().min(5)];
     if rows.is_empty() {
@@ -573,25 +526,7 @@ pub(super) fn curve_points(slide: &WrappedSlideData) -> Vec<f64> {
 
 fn curve(stage: &mut Stage<'_>) {
     let (slide, p) = (stage.slide, stage.palette);
-    let mut y = TOP;
-    y = stage.block(
-        &slide.title,
-        (MARGIN, y, COLUMN, 50),
-        34.0,
-        Face::Bold,
-        p.fg,
-        Align::Left,
-        (0.0, 0.2),
-    ) + 4;
-    y = stage.block(
-        &slide.headline,
-        (MARGIN, y, COLUMN, 150),
-        58.0,
-        Face::Black,
-        p.fg,
-        Align::Left,
-        (0.03, 0.3),
-    ) + 6;
+    let mut y = heading(stage);
     let spun = count_up(&slide.stat_value, stage.ease(0.1, 0.92));
     y = stage.stat(
         &slide.stat_value,
@@ -692,25 +627,7 @@ fn draw_curve(stage: &mut Stage<'_>, points: &[f64], chart: (f32, f32, f32, f32)
 
 fn tiles(stage: &mut Stage<'_>) {
     let (slide, p) = (stage.slide, stage.palette);
-    let mut y = TOP;
-    y = stage.block(
-        &slide.title,
-        (MARGIN, y, COLUMN, 50),
-        34.0,
-        Face::Bold,
-        p.fg,
-        Align::Left,
-        (0.0, 0.2),
-    ) + 4;
-    y = stage.block(
-        &slide.headline,
-        (MARGIN, y, COLUMN, 216),
-        62.0,
-        Face::Black,
-        p.fg,
-        Align::Left,
-        (0.03, 0.3),
-    ) + 16;
+    let y = heading(stage);
     let rows = card_rows(slide);
     let rows = &rows[..rows.len().min(6)];
     let lines = slide.lines.iter().take(2).collect::<Vec<_>>();
@@ -807,15 +724,6 @@ fn tiles(stage: &mut Stage<'_>) {
 fn spotlight(stage: &mut Stage<'_>) {
     let (slide, p) = (stage.slide, stage.palette);
     let mut y = TOP;
-    y = stage.block(
-        &slide.title,
-        (MARGIN, y, COLUMN, 50),
-        34.0,
-        Face::Bold,
-        p.fg,
-        Align::Left,
-        (0.0, 0.2),
-    ) + 8;
     if let Some((width, height)) = stage
         .art
         .as_ref()
@@ -830,8 +738,12 @@ fn spotlight(stage: &mut Stage<'_>) {
         y += height + 16;
     }
     y = stage.block(
-        &slide.headline,
-        (MARGIN, y, COLUMN, 150),
+        if slide.headline.is_empty() {
+            &slide.title
+        } else {
+            &slide.headline
+        },
+        (MARGIN, y, COLUMN, 100),
         60.0,
         Face::Black,
         p.fg,
@@ -887,16 +799,7 @@ fn spotlight(stage: &mut Stage<'_>) {
 
 fn persona(stage: &mut Stage<'_>) {
     let (slide, p) = (stage.slide, stage.palette);
-    let mut y = TOP + 8;
-    y = stage.block(
-        &slide.title,
-        (MARGIN, y, COLUMN, 50),
-        36.0,
-        Face::Bold,
-        p.fg,
-        Align::Center,
-        (0.0, 0.2),
-    ) + 8;
+    let mut y = TOP + 48;
     y = stage.block(
         &slide.stat_value,
         (MARGIN, y, COLUMN, 330),
@@ -905,16 +808,7 @@ fn persona(stage: &mut Stage<'_>) {
         p.accent,
         Align::Center,
         (0.14, 0.5),
-    ) + 8;
-    y = stage.block(
-        &slide.headline,
-        (MARGIN + 10, y, COLUMN - 20, 120),
-        38.0,
-        Face::Bold,
-        p.fg,
-        Align::Center,
-        (0.42, 0.66),
-    ) + 14;
+    ) + 32;
     // Evidence only: copy in `lines` is not repeated as pills.
     for (index, row) in slide.rows.iter().take(3).enumerate() {
         let start = 0.6 + index as f32 * 0.09;
@@ -946,15 +840,6 @@ fn persona(stage: &mut Stage<'_>) {
 fn recap(stage: &mut Stage<'_>) {
     let (slide, p) = (stage.slide, stage.palette);
     let mut y = 128;
-    y = stage.block(
-        &slide.title,
-        (MARGIN, y, COLUMN, 46),
-        30.0,
-        Face::Bold,
-        p.fg,
-        Align::Left,
-        (0.05, 0.25),
-    );
     y = stage.block(
         &slide.stat_value,
         (MARGIN, y, COLUMN, 72),
@@ -1040,15 +925,6 @@ fn recap(stage: &mut Stage<'_>) {
             (start, start + 0.2),
         );
     }
-    stage.block(
-        &slide.stat_label,
-        (MARGIN, limit + 4, COLUMN, 44),
-        27.0,
-        Face::Bold,
-        p.accent,
-        Align::Left,
-        (0.7, 0.9),
-    );
     if !slide.badge.is_empty() {
         let show = stage.ease(0.78, 0.96);
         stage.canvas.rounded_rect(

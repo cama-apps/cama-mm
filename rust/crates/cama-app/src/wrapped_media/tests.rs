@@ -445,7 +445,7 @@ fn still_and_animation_reject_oversized_input_before_rendering() {
 }
 
 #[test]
-fn personal_award_waits_for_the_setup_then_reveals_its_title_and_evidence() {
+fn personal_award_reveals_its_title_and_keeps_only_essential_copy() {
     let mut slide = busy("story_superlative");
     assert_eq!(slide.layout, WrappedLayout::Award);
     assert_eq!(slide.theme, WrappedTheme::Awards);
@@ -459,6 +459,16 @@ fn personal_award_waits_for_the_setup_then_reveals_its_title_and_evidence() {
     let mut second = stage::Stage::new(&changed);
     assert_eq!(first.paint(0.1).pixels, second.paint(0.1).pixels);
     assert_ne!(first.paint(1.0).pixels, second.paint(1.0).pixels);
+
+    let mut extra_copy = slide.clone();
+    extra_copy.headline = "An unnecessary second headline".into();
+    extra_copy.badge = "Your personal award".into();
+    extra_copy.lines[0] = "A repeat of the same achievement".into();
+    assert_eq!(
+        stage::render_still(&slide).pixels,
+        stage::render_still(&extra_copy).pixels,
+        "the award should read as title, result and coverage"
+    );
 
     // Even adversarial copy cannot enter the player's footer or leave its
     // evidence band. The coverage line changes its own rendered pixels.
@@ -479,8 +489,8 @@ fn personal_award_waits_for_the_setup_then_reveals_its_title_and_evidence() {
     let after = stage::render_still(&slide);
     assert_ne!(before.pixels, after.pixels);
     assert_eq!(
-        before.pixels[..776 * WRAPPED_SLIDE_WIDTH * 4],
-        after.pixels[..776 * WRAPPED_SLIDE_WIDTH * 4]
+        before.pixels[..728 * WRAPPED_SLIDE_WIDTH * 4],
+        after.pixels[..728 * WRAPPED_SLIDE_WIDTH * 4]
     );
 }
 
@@ -534,5 +544,90 @@ fn cover_reveals_the_bottom_of_the_illustration_inside_its_reserved_band() {
         at(final_card, 599),
         sky.0,
         "the illustration cannot enter the text band"
+    );
+}
+
+#[test]
+fn story_cards_have_one_heading_without_losing_their_data() {
+    for layout in [
+        WrappedLayout::BigNumber,
+        WrappedLayout::TopList,
+        WrappedLayout::Bars,
+        WrappedLayout::People,
+        WrappedLayout::Curve,
+        WrappedLayout::Tiles,
+    ] {
+        let mut slide = busy("custom");
+        slide.layout = layout;
+        slide.title = "Your heroes".into();
+        slide.rows = vec![WrappedRow::bar("Axe", 7.0)];
+        let first = stage::render_still(&slide);
+        slide.headline = "A redundant subtitle about your heroes".into();
+        assert_eq!(
+            first.pixels,
+            stage::render_still(&slide).pixels,
+            "{layout:?} adds no subtitle"
+        );
+        slide.title = "Your most played heroes".into();
+        assert_ne!(
+            first.pixels,
+            stage::render_still(&slide).pixels,
+            "{layout:?} keeps the heading"
+        );
+    }
+
+    let mut slide = busy("story_identity");
+    slide.stat_value = "Dota regular".into();
+    slide.rows = vec![WrappedRow::new("42", "games")];
+    let first = stage::render_still(&slide);
+    slide.title = "Your activity profile".into();
+    slide.headline = "You played quite a lot of Dota".into();
+    assert_eq!(first.pixels, stage::render_still(&slide).pixels);
+    slide.rows[0].primary = "64".into();
+    assert_ne!(
+        first.pixels,
+        stage::render_still(&slide).pixels,
+        "activity evidence remains visible"
+    );
+}
+
+#[test]
+fn cover_and_recap_remove_repeated_labels_but_keep_sparse_disclosure() {
+    let mut cover = WrappedSlideData::new("story_intro", "Your year");
+    cover.stat_value = "Alexandria".into();
+    let first = stage::render_still(&cover);
+    cover.username = "Alexandria".into();
+    cover.title = "Another introductory label".into();
+    assert_eq!(
+        first.pixels,
+        stage::render_still(&cover).pixels,
+        "the cover names the player once"
+    );
+    cover.lines = vec!["No games recorded for you this year. Here are the server stats.".into()];
+    assert_ne!(
+        first.pixels,
+        stage::render_still(&cover).pixels,
+        "empty-history scope stays visible"
+    );
+
+    let mut recap = busy("story_finale");
+    let first = stage::render_still(&recap);
+    recap.title = "Another Wrapped title".into();
+    recap.stat_label = "See you next queue!".into();
+    assert_eq!(
+        first.pixels,
+        stage::render_still(&recap).pixels,
+        "the recap needs neither repeated year nor closing subtitle"
+    );
+
+    let mut spotlight = busy("custom");
+    spotlight.layout = WrappedLayout::Spotlight;
+    spotlight.headline = "Mochi".into();
+    let first = stage::render_still(&spotlight);
+    spotlight.title = "Your pet".into();
+    assert_eq!(
+        first.pixels,
+        stage::render_still(&spotlight).pixels,
+        "the named spotlight needs no category subtitle"
     );
 }

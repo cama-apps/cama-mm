@@ -102,10 +102,10 @@ fn gamba_curve_and_report_tell_the_true_story() {
     assert_eq!(curve.stat_value, "-590 JC");
     assert_eq!(curve.stat_label, "across 10 gambles");
     assert_eq!(curve.badge, "#1 bettor on the server");
-    assert_eq!(curve.lines, ["Peaked at +500 JC. You kept going."]);
+    assert_eq!(curve.lines, ["Highest net profit: +500 JC."]);
     assert_eq!(curve.series.first(), Some(&0.0));
     assert_eq!(curve.series.last(), Some(&-590.0));
-    assert_eq!(report.headline, "Certified Degen");
+    assert_eq!(report.headline, "Your biggest wins and losses.");
     let labels = report
         .rows
         .iter()
@@ -115,8 +115,8 @@ fn gamba_curve_and_report_tell_the_true_story() {
         labels,
         [
             "degen score (lifetime)",
-            "best single gamble",
-            "worst single gamble",
+            "biggest win (JC)",
+            "biggest loss (JC)",
             "wheel spins",
             "highest leverage",
             "bankruptcies, lifetime"
@@ -130,7 +130,7 @@ fn gamba_curve_and_report_tell_the_true_story() {
         anonymous
             .iter()
             .flat_map(|card| &card.lines)
-            .all(|line| !line.contains("charity")),
+            .all(|line| !line.contains("You tipped")),
         "an unresolvable name is left out, never shown as an ID"
     );
 }
@@ -184,22 +184,22 @@ fn dig_chapter_spotlights_the_most_fought_boss_and_feuds() {
     let dig = &cards[0];
     assert_eq!(dig.mood, CardMood::DigDeep);
     assert_eq!(dig.stat_value, "1,284");
-    assert_eq!(dig.stat_label, "blocks down. Deepest: 412 in Magma.");
-    assert_eq!(dig.badge, "You out-dug 92% of the server");
-    assert!(dig.lines[0].contains("37 times"));
+    assert_eq!(dig.stat_label, "blocks dug. Deepest: 412 in Magma.");
+    assert_eq!(dig.badge, "Dug more than 92% of the server");
+    assert!(dig.lines[0].contains("37 cave-ins"));
     assert!(dig.lines[1].contains("3 artifacts, one before anyone else"));
     let boss = &cards[1];
     assert_eq!(boss.art, CardArt::BossEncounter("grothak".into()));
-    assert_eq!(boss.title, "Your white whale");
+    assert_eq!(boss.title, "Boss you fought most");
     assert_eq!(boss.stat_value, "7 fights");
-    assert_eq!(boss.stat_label, "You won 1. It won 6.");
-    assert_eq!(boss.lines, ["Plus 1 boss more. 3 boss wins all year."]);
+    assert_eq!(boss.stat_label, "Won: 1. Lost: 6.");
+    assert_eq!(boss.lines, ["Other bosses fought: 1. Total boss wins: 3."]);
     let feud = &cards[2];
-    assert_eq!(feud.headline, "Player 3 was in your crosshairs.");
-    assert_eq!(feud.lines, ["Player 4 got you back 2 times."]);
+    assert_eq!(feud.headline, "You targeted Player 3 most often.");
+    assert_eq!(feud.lines, ["Player 4 sabotaged you 2 times."]);
 
     let unnamed = dig_cards(&year, &context, &nobody, SEED);
-    assert_eq!(unnamed[2].headline, "You made enemies underground.");
+    assert_eq!(unnamed[2].headline, "Your sabotage activity.");
     let unknown_boss = DigContext {
         boss_name: &|_| None,
         ..context
@@ -290,13 +290,13 @@ fn undefeated_and_winless_boss_records_read_correctly() {
             0,
             3,
             CardArt::BossDefeat("grothak".into()),
-            "It won every one.",
+            "You lost every fight.",
         ),
         (
             4,
             0,
             CardArt::BossVictory("grothak".into()),
-            "You won every one.",
+            "You won every fight.",
         ),
     ] {
         let year = DigYear {
@@ -405,14 +405,14 @@ fn mafia_chapter_tiles_only_what_happened() {
         labels,
         [
             "games played",
-            "on the winning side",
-            "times Mafia",
+            "wins",
+            "games as Mafia",
             "night kills",
-            "times MVP"
+            "MVP awards"
         ]
     );
-    assert_eq!(tiles.lines, ["40% of your votes landed on actual Mafia."]);
-    assert_eq!(victim.headline, "Player 8 should sleep with one eye open.");
+    assert_eq!(tiles.lines, ["40% of your votes targeted Mafia."]);
+    assert_eq!(victim.headline, "You targeted Player 8 most often.");
     assert_eq!(victim.stat_value, "6");
 
     let honest = MafiaYear {
@@ -425,9 +425,9 @@ fn mafia_chapter_tiles_only_what_happened() {
         ..MafiaYear::default()
     };
     let cards = mafia_cards(&honest, &everyone, SEED);
-    assert_eq!(cards[0].headline, "Town's most suspicious citizen.");
+    assert_eq!(cards[0].headline, "You won fewer than half your games.");
     assert_eq!(cards[1].kind, "story_mafia_accuser");
-    assert_eq!(cards[1].headline, "Player 2 never trusted you.");
+    assert_eq!(cards[1].headline, "Player 2 voted against you most often.");
     assert!(mafia_cards(&honest, &nobody, SEED).len() == 1);
     assert!(
         mafia_cards(
@@ -459,11 +459,8 @@ fn persona_names_the_strongest_activity_and_its_runner_up() {
         signal(PersonaActivity::Pets, 10.0, "p"),
     ])
     .expect("persona");
-    assert_eq!(card.stat_value, "The Unhinged Mole");
-    assert_eq!(
-        card.headline,
-        "A year where the ground was a personal rival, and the wheel was a financial plan."
-    );
+    assert_eq!(card.stat_value, "Dig regular");
+    assert_eq!(card.headline, "You also played Gamba.");
     let evidence = card
         .rows
         .iter()
@@ -479,10 +476,10 @@ fn persona_skips_same_family_runner_ups_and_handles_one_activity() {
         signal(PersonaActivity::Queue(QueueStyle::Enabler), 80.0, "q2"),
     ])
     .unwrap();
-    assert_eq!(card.stat_value, "The Certified Enabler");
-    assert_eq!(card.headline, "A year where the queue was home.");
+    assert_eq!(card.stat_value, "Dota regular");
+    assert_eq!(card.headline, "Your main recorded activity this year.");
     let casual = persona_card(&[signal(PersonaActivity::Pets, 20.0, "p")]).unwrap();
-    assert_eq!(casual.stat_value, "The Part-Time Pet Parent");
+    assert_eq!(casual.stat_value, "Pet keeper");
     assert!(persona_card(&[]).is_none());
     assert!(persona_card(&[signal(PersonaActivity::Dig, f64::NAN, "d")]).is_none());
 }
