@@ -339,6 +339,47 @@ fn stale_depth_conflict_leaves_wallet_and_audit_untouched() {
 }
 
 #[test]
+fn abandonment_clears_the_route_only_in_the_settled_guild() {
+    const OTHER_GUILD: i64 = 83_003;
+    const ROUTE: &str = r#"{"selected":"old_supports"}"#;
+    let database = fixture(100);
+    Connection::open(database.path())
+        .unwrap()
+        .execute(
+            "INSERT INTO tunnels (discord_id,guild_id,depth,route_state)
+             VALUES (?1,?2,100,?3)",
+            params![USER, OTHER_GUILD, ROUTE],
+        )
+        .unwrap();
+    let repository = DigAbandonRuntimeRepository::new(database.path());
+    let snapshot = repository
+        .snapshot(DigAbandonKey {
+            discord_id: USER,
+            guild_id: GUILD,
+        })
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        repository
+            .atomic_settle(request(snapshot, "{}", "{}", 500_000))
+            .unwrap(),
+        DigAbandonSettlementOutcome::Applied(_)
+    ));
+    let connection = Connection::open(database.path()).unwrap();
+    let route_state = |guild_id: i64| -> Option<String> {
+        connection
+            .query_row(
+                "SELECT route_state FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
+                params![USER, guild_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(route_state(GUILD), None);
+    assert_eq!(route_state(OTHER_GUILD).as_deref(), Some(ROUTE));
+}
+
+#[test]
 fn injected_reset_failure_rolls_back_wallet_ledger_and_audit() {
     let database = fixture(100);
     let repository = DigAbandonRuntimeRepository::new(database.path());

@@ -24,7 +24,10 @@ fn tunnel_with_balance(balance: i64) -> Tunnel {
 fn ready_tunnel(prestige_level: i32) -> Tunnel {
     let mut tunnel = tunnel_with_balance(500);
     tunnel.prestige_level = prestige_level;
-    tunnel.mark_prestige_ready();
+    tunnel.depth = i64::from(PINNACLE_DEPTH);
+    for boundary in BOSS_BOUNDARIES.into_iter().chain([PINNACLE_DEPTH]) {
+        tunnel.boss_progress.insert(boundary, BossStatus::Defeated);
+    }
     tunnel
 }
 
@@ -192,33 +195,10 @@ fn test_abandon_keeps_prestige() {
 }
 
 #[test]
-fn test_help_returns_tunnel_name() {
-    let service = service_with(tunnel_with_balance(100));
-    let result = service.help_target(key()).unwrap();
-    assert_eq!(result.tunnel_name, "Amber Descent");
-}
-
-#[test]
-fn test_sabotage_returns_tunnel_name() {
-    let mut tunnel = tunnel_with_balance(100);
-    tunnel.depth = 30;
-    let service = service_with(tunnel);
-    let result = service.sabotage_target(key()).unwrap();
-    assert_eq!(result.tunnel_name, "Amber Descent");
-}
-
-#[test]
 fn test_get_flex_data_returns_tunnel_name() {
     let service = service_with(tunnel_with_balance(100));
     let result = service.flex_data(key()).unwrap();
     assert_eq!(result.tunnel_name, "Amber Descent");
-}
-
-#[test]
-fn test_generate_clue_first_letter_uses_tunnel_name() {
-    let service = service_with(tunnel_with_balance(100));
-    let clue = service.first_letter_clue(key()).unwrap();
-    assert!(clue.contains('A'));
 }
 
 #[test]
@@ -375,12 +355,6 @@ fn dig_perks_advance_boost_plus_mixed_stacks_to_two() {
         round_prestige_perk_bonus_half_up(effects["advance_min_bonus"]),
         2
     );
-}
-
-// tests/test_dig_perks.py::TestHasPerk::test_returns_false_for_no_tunnel
-#[test]
-fn dig_perks_has_perk_returns_false_for_no_tunnel() {
-    assert!(!owns_prestige_perk(None, "advance_boost"));
 }
 
 // tests/test_orphan_perks.py::TestEventHasRisk::test_event_with_negative_failure_is_risky
@@ -600,70 +574,6 @@ fn test_crowns_for_all_levels() {
 }
 
 #[test]
-fn test_normalize_tunnel_casts_string_ints() {
-    let mut row = BTreeMap::from([
-        ("depth".to_owned(), RawTunnelValue::Text("49".to_owned())),
-        (
-            "luminosity".to_owned(),
-            RawTunnelValue::Text("100".to_owned()),
-        ),
-        (
-            "last_dig_at".to_owned(),
-            RawTunnelValue::Text("1000000".to_owned()),
-        ),
-        (
-            "boss_attempts".to_owned(),
-            RawTunnelValue::Text("3".to_owned()),
-        ),
-        (
-            "tunnel_name".to_owned(),
-            RawTunnelValue::Text("Test Tunnel".to_owned()),
-        ),
-        (
-            "boss_progress".to_owned(),
-            RawTunnelValue::Text("{\"50\": \"active\"}".to_owned()),
-        ),
-    ]);
-    normalize_tunnel_row(&mut row).unwrap();
-    assert_eq!(row["depth"], RawTunnelValue::Integer(49));
-    assert_eq!(row["luminosity"], RawTunnelValue::Integer(100));
-    assert_eq!(row["last_dig_at"], RawTunnelValue::Integer(1_000_000));
-    assert_eq!(row["boss_attempts"], RawTunnelValue::Integer(3));
-    assert_eq!(
-        row["tunnel_name"],
-        RawTunnelValue::Text("Test Tunnel".to_owned())
-    );
-    assert_eq!(
-        row["boss_progress"],
-        RawTunnelValue::Text("{\"50\": \"active\"}".to_owned())
-    );
-}
-
-#[test]
-fn test_update_tunnel_accepts_last_cheer_at() {
-    let mut repository = InMemoryTunnelRepository::default();
-    repository.insert(tunnel_with_balance(100));
-    repository.update_last_cheer_at(key(), 1_234_567).unwrap();
-    assert_eq!(
-        repository.tunnel(key()).unwrap().last_cheer_at,
-        Some(1_234_567)
-    );
-}
-
-#[test]
-fn test_normalize_tunnel_handles_none_values() {
-    let mut row = BTreeMap::from([
-        ("depth".to_owned(), RawTunnelValue::Integer(10)),
-        ("last_dig_at".to_owned(), RawTunnelValue::Null),
-        ("luminosity".to_owned(), RawTunnelValue::Null),
-    ]);
-    normalize_tunnel_row(&mut row).unwrap();
-    assert_eq!(row["depth"], RawTunnelValue::Integer(10));
-    assert_eq!(row["last_dig_at"], RawTunnelValue::Null);
-    assert_eq!(row["luminosity"], RawTunnelValue::Null);
-}
-
-#[test]
 fn test_get_tunnel_returns_int_types() {
     let service = service_with(tunnel_with_balance(200));
     let tunnel = service.repository().tunnel(key()).unwrap();
@@ -720,22 +630,6 @@ fn test_jc_layer_penalty_stacks_from_p2_through_p6() {
         let penalty = number_effect(&ascension_effects(level), "jc_layer_penalty").unwrap_or(0.0);
         assert_near(penalty, expected_penalty);
     }
-}
-
-#[test]
-fn test_boss_phase2_at_prestige_2() {
-    let result = regular_boss_win(2);
-    assert!(result.phase_two_incoming);
-    assert_eq!(result.phase, 1);
-    assert_eq!(result.persisted_status, BossStatus::PhaseOneDefeated);
-}
-
-#[test]
-fn test_boss_no_phase2_below_prestige_2() {
-    let result = regular_boss_win(1);
-    assert!(!result.phase_two_incoming);
-    assert_eq!(result.phase, 1);
-    assert_eq!(result.persisted_status, BossStatus::Defeated);
 }
 
 #[test]

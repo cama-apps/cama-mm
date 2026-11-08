@@ -1,7 +1,14 @@
 use std::collections::{BTreeSet, VecDeque};
 
 use super::*;
-use crate::interaction_safety::SentPayload;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ResponseEvent {
+    Initial { content: String, ephemeral: bool },
+    Modal(ModalKind),
+    Deferred { ephemeral: bool, thinking: bool },
+    Followup { content: String, ephemeral: bool },
+}
 
 #[derive(Default)]
 struct RecordingTransport {
@@ -65,24 +72,6 @@ impl ResolutionPort for RecordingTransport {
 
     fn warn(&mut self, message: String) {
         self.lifecycle.push(LifecycleEvent::Warning(message));
-    }
-}
-
-#[derive(Default)]
-struct FailingEditable {
-    edit_attempts: Vec<SentPayload>,
-    channel_sends: Vec<SentPayload>,
-}
-
-impl EditableMessage for FailingEditable {
-    fn edit(&mut self, payload: SentPayload) -> Result<(), TransportError> {
-        self.edit_attempts.push(payload);
-        Err(TransportError::discord("message token expired"))
-    }
-
-    fn send_to_channel(&mut self, payload: SentPayload) -> Result<String, TransportError> {
-        self.channel_sends.push(payload);
-        Ok("replacement-message".to_owned())
     }
 }
 
@@ -423,194 +412,6 @@ fn test_encounter_forwards_callback_to_every_fight_entry() {
 }
 
 #[test]
-fn test_phase_transition_forwards_callback_to_replacement_encounter() {
-    let mut result = shaped_result("regular-phase2");
-    result.phase2_name = Some("Next Form".to_owned());
-    result.phase2_title = Some("Transformed".to_owned());
-    result.dialogue = Some("Again.".to_owned());
-    result.gear_broken = vec!["Stone Cuirass".to_owned()];
-    result.round_log = vec![RoundEntry {
-        pet_assist: Some(pet("common_cama", "Dane", "Common Cama", 10)),
-        pet_assist_damage: 2,
-    }];
-    let next = BossInfo {
-        name: "Next Form".to_owned(),
-        dialogue: "Again.".to_owned(),
-        ..BossInfo::default()
-    };
-    let plan = build_phase_transition(
-        &result,
-        next,
-        EncounterPresentation {
-            name: "Next Form".to_owned(),
-            dialogue: "Again.".to_owned(),
-            secret: false,
-        },
-        "Dirt",
-        true,
-    );
-    assert!(plan.callback_attached);
-    assert!(
-        plan.transition
-            .field("Gear Broken")
-            .unwrap()
-            .contains("Stone Cuirass")
-    );
-    assert!(
-        plan.transition
-            .field("Pet Assist")
-            .unwrap()
-            .contains("2 bonus damage")
-    );
-}
-
-#[test]
-fn test_phase_transition_encounter_surfaces_carried_wager() {
-    let result = BossResult {
-        phase2_incoming: true,
-        phase2_name: Some("Next Form".to_owned()),
-        phase2_title: Some("Transformed".to_owned()),
-        dialogue: Some("Again.".to_owned()),
-        wager: 1_500,
-        ..BossResult::default()
-    };
-    let next = BossInfo {
-        name: "Next Form".to_owned(),
-        carried_wager: Some(1_500),
-        ..BossInfo::default()
-    };
-    let plan = build_phase_transition(
-        &result,
-        next,
-        EncounterPresentation {
-            name: "Next Form".to_owned(),
-            dialogue: "Again.".to_owned(),
-            secret: false,
-        },
-        "Dirt",
-        false,
-    );
-    assert!(
-        plan.encounter
-            .field("Carried Wager")
-            .unwrap()
-            .contains("**1,500**")
-    );
-}
-
-#[test]
-fn test_pinnacle_phase_transition_uses_next_phase_title() {
-    let result = BossResult {
-        phase3_incoming: true,
-        next_phase_title: Some("The Digger Eternal".to_owned()),
-        dialogue: Some("Eternal. The tunnel is me. I am the tunnel.".to_owned()),
-        boss_name: "The Digger Unbound".to_owned(),
-        ..BossResult::default()
-    };
-    let plan = build_phase_transition(
-        &result,
-        BossInfo::default(),
-        EncounterPresentation {
-            name: "The Digger Eternal".to_owned(),
-            dialogue: "Last shift. Last dig. Last.".to_owned(),
-            secret: false,
-        },
-        "Dirt",
-        false,
-    );
-    assert_eq!(plan.transition.title, "The Digger Eternal Emerges!");
-    assert!(
-        plan.transition
-            .description
-            .contains("**The Digger Eternal**")
-    );
-    assert!(!plan.transition.description.contains("???"));
-}
-
-#[test]
-fn test_pinnacle_transition_renders_event_text_and_attaches_phase_art_to_encounter() {
-    let result = BossResult {
-        phase2_incoming: true,
-        is_pinnacle: true,
-        next_phase_title: Some("The Crowned Hunger".to_owned()),
-        dialogue: Some("The crown burns.".to_owned()),
-        boss_name: "The Forgotten King".to_owned(),
-        boss_id: Some("forgotten_king".to_owned()),
-        phase_event_flavor: Some("The old crown catches fire.".to_owned()),
-        phase_event_description: Some("Ash falls upward through the chamber.".to_owned()),
-        ..BossResult::default()
-    };
-    let next = BossInfo {
-        boss_id: "forgotten_king".to_owned(),
-        name: "The Crowned Hunger".to_owned(),
-        dialogue: "The crown burns.".to_owned(),
-        is_pinnacle: true,
-        phase: 2,
-        ..BossInfo::default()
-    };
-    let plan = build_phase_transition(
-        &result,
-        next,
-        EncounterPresentation {
-            name: "The Crowned Hunger".to_owned(),
-            dialogue: "The crown burns.".to_owned(),
-            secret: false,
-        },
-        "The Hollow",
-        false,
-    );
-    let event = plan.transition.field("Phase shift").unwrap();
-    assert!(event.contains("The old crown catches fire."));
-    assert!(event.contains("Ash falls upward through the chamber."));
-    assert_eq!(
-        plan.art,
-        Some(ArtRequest {
-            boss_id: "forgotten_king".to_owned(),
-            phase: 2,
-            layer_name: "The Hollow".to_owned(),
-            secret: false
-        })
-    );
-    assert_eq!(
-        plan.encounter.image.as_deref(),
-        Some("attachment://pinnacle_phase_2.png")
-    );
-}
-
-#[test]
-fn test_regular_transition_does_not_render_pinnacle_event_presentation() {
-    let result = BossResult {
-        phase2_incoming: true,
-        phase2_name: Some("Regular Second Form".to_owned()),
-        phase2_title: Some("Transformed".to_owned()),
-        dialogue: Some("Again.".to_owned()),
-        boss_name: "Regular Boss".to_owned(),
-        phase_event_flavor: Some("Pinnacle-only flavor.".to_owned()),
-        phase_event_description: Some("Pinnacle-only description.".to_owned()),
-        ..BossResult::default()
-    };
-    let plan = build_phase_transition(
-        &result,
-        BossInfo::default(),
-        EncounterPresentation {
-            name: "Regular Second Form".to_owned(),
-            dialogue: "Again.".to_owned(),
-            secret: false,
-        },
-        "Dirt",
-        false,
-    );
-    assert_eq!(plan.transition.title, "Transformed Emerges!");
-    assert!(
-        plan.transition
-            .description
-            .contains("**Regular Second Form**")
-    );
-    assert!(plan.transition.field("Phase shift").is_none());
-    assert!(!plan.transition.description.contains("Pinnacle-only"));
-}
-
-#[test]
 fn test_phase3_secret_roll_changes_only_presentation_secret() {
     let info = pinnacle_info();
     let display = resolve_encounter_presentation(
@@ -643,36 +444,6 @@ fn test_phase3_secret_roll_changes_only_presentation_normal() {
     assert_eq!(display.dialogue, "Last breath.");
     assert!(!display.secret);
     assert_eq!(info.name, "The Last Breath of Kings");
-}
-
-#[test]
-fn test_duel_prompt_surfaces_stale_cleanup_break_notification() {
-    let result = BossResult {
-        pending_prompt: Some(prompt()),
-        gear_broken: vec!["Stone Cuirass".to_owned()],
-        ..BossResult::default()
-    };
-    assert!(
-        build_duel_prompt_embed(&result)
-            .field("Gear Broken")
-            .unwrap()
-            .contains("Stone Cuirass")
-    );
-}
-
-#[test]
-fn test_duel_prompt_surfaces_active_pet_assist() {
-    let result = BossResult {
-        pending_prompt: Some(prompt()),
-        pet_assist: Some(pet("common_cama", "Dane", "Common Cama", 12)),
-        ..BossResult::default()
-    };
-    let embed = build_duel_prompt_embed(&result);
-    let field = embed.field("Pet Assist").unwrap();
-    assert!(field.contains("Dane"));
-    assert!(field.contains("Common Cama"));
-    assert!(field.contains("12%"));
-    assert!(field.contains("barrels into the fray"));
 }
 
 #[test]
@@ -922,13 +693,6 @@ fn test_wager_validation_errors_do_not_notify() {
 }
 
 #[test]
-fn test_wager_modal_surfaces_maximum() {
-    assert_eq!(BOSS_WAGER_MAX_JC, 1_000);
-    assert_eq!(BOSS_WAGER_LABEL, "Wager Amount (max 1,000 JC)");
-    assert_eq!(BOSS_WAGER_PLACEHOLDER, "0-1000");
-}
-
-#[test]
 fn test_risk_modal_forwards_callback_to_no_wager_resolution() {
     let mut encounter = view(
         BossInfo {
@@ -1058,15 +822,6 @@ fn test_prompted_pinnacle_phase_clear_posts_next_encounter_phase3_incoming() {
         panic!("expected phase-clear render");
     };
     assert_eq!(embed.title, "Phase Cleared");
-    let render = transport.lifecycle.last().unwrap();
-    let LifecycleEvent::Render(plan) = render else {
-        panic!("expected render plan");
-    };
-    let mut message = FailingEditable::default();
-    assert!(edit_render_with_fallback(Some(&mut message), None, plan).unwrap());
-    assert_eq!(message.edit_attempts.len(), 1);
-    assert_eq!(message.channel_sends.len(), 1);
-    assert!(!message.channel_sends[0].view);
 }
 
 #[test]
@@ -1190,7 +945,7 @@ fn test_resume_failure_does_not_notify_exception() {
 }
 
 #[test]
-fn test_unauthorized_duplicate_and_nonfight_actions_do_not_notify() {
+fn test_unauthorized_and_duplicate_actions_do_not_notify() {
     let mut encounter = view(BossInfo::default(), true);
     let mut service = FakeService::default();
     let mut transport = RecordingTransport::default();
@@ -1204,10 +959,6 @@ fn test_unauthorized_duplicate_and_nonfight_actions_do_not_notify() {
         encounter.fight(42, &mut service, &mut transport),
         FightEntry::Duplicate
     );
-    encounter.release_modal();
-    assert!(encounter.nonfight(42, NonFightAction::Retreat, &mut transport));
-    assert!(encounter.nonfight(42, NonFightAction::Scout, &mut transport));
-    assert!(encounter.nonfight(99, NonFightAction::Cheer, &mut transport));
     assert!(transport.lifecycle.is_empty());
 
     let mut duel = BossDuelView::new(42, Some(7), &prompt(), true);

@@ -1,3 +1,6 @@
+use std::sync::{Arc, Barrier};
+use std::thread;
+
 use rusqlite::{Connection, params};
 use tempfile::NamedTempFile;
 
@@ -554,6 +557,76 @@ fn stale_actor_snapshot_rolls_back_every_boss_side_effect() {
             })
             .expect("echoes"),
         0
+    );
+}
+
+#[test]
+fn concurrent_victory_and_loss_from_one_snapshot_commit_exactly_one_outcome() {
+    let database = fixture();
+    let repository = DigBossRuntimeRepository::new(database.path());
+    let snapshot = repository.snapshot(KEY).expect("snapshot").expect("player");
+    let victory = victory_state(&snapshot);
+    let mut loss = DigBossRuntimeState::from(&snapshot);
+    loss.depth = 20;
+    loss.boss_progress_json = Some(
+        r#"{"25":{"boss_id":"grothak","status":"active","hp_remaining":3,"future_field":17}}"#
+            .to_owned(),
+    );
+    let barrier = Arc::new(Barrier::new(2));
+    let handles: Vec<_> = [(victory, true), (loss, false)]
+        .into_iter()
+        .map(|(state, won)| {
+            let repository = repository.clone();
+            let snapshot = snapshot.clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                let mut commit = victory_commit(&snapshot, &state);
+                if !won {
+                    commit.echo = None;
+                    commit.audit = Some(DigBossRuntimeAudit {
+                        action_type: "boss_fight",
+                        target_id: None,
+                        detail_json: r#"{"boss_id":"grothak","won":false}"#,
+                        created_at: 1_700_000_000,
+                    });
+                }
+                barrier.wait();
+                repository.commit(commit).expect("boss outcome commit")
+            })
+        })
+        .collect();
+    let outcomes: Vec<_> = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("boss outcome thread"))
+        .collect();
+    let applied: Vec<_> = outcomes
+        .iter()
+        .map(|outcome| matches!(outcome, DigBossRuntimeCommitOutcome::Applied(_)))
+        .collect();
+    assert_eq!(applied.iter().filter(|applied| **applied).count(), 1);
+    assert!(outcomes.contains(&DigBossRuntimeCommitOutcome::Conflict));
+    let victory_applied = applied[0];
+    let connection = Connection::open(database.path()).expect("verify DB");
+    let (audits, echoes, balance, depth): (i64, i64, i64, i64) = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM dig_actions WHERE action_type='boss_fight'),
+                    (SELECT COUNT(*) FROM dig_boss_echoes),
+                    (SELECT jopacoin_balance FROM players
+                      WHERE discord_id=?1 AND guild_id=?2),
+                    (SELECT depth FROM tunnels WHERE discord_id=?1 AND guild_id=?2)",
+            params![PLAYER, GUILD],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("single boss outcome");
+    assert_eq!(audits, 1);
+    assert_eq!(echoes, i64::from(victory_applied));
+    assert_eq!(
+        (balance, depth),
+        if victory_applied {
+            (165, 25)
+        } else {
+            (100, 20)
+        }
     );
 }
 

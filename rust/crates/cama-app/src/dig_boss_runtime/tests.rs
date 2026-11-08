@@ -398,6 +398,70 @@ fn encounters_repair_max_depth_lagging_behind_current_depth() {
 }
 
 #[test]
+fn pinnacle_encounter_locks_one_pool_boss_and_keeps_it() {
+    let database = fixture();
+    set_pinnacle(&database, 1, "active", None);
+    Connection::open(database.path())
+        .expect("pinnacle lock DB")
+        .execute_batch("UPDATE tunnels SET pinnacle_boss_id=NULL;")
+        .expect("unlocked pinnacle");
+    let runtime = pinnacle_runtime(&database);
+    let first = runtime
+        .encounter(
+            pinnacle_request(1_700_000_000),
+            SequenceEntropy::constant(0.99),
+        )
+        .expect("first pinnacle encounter");
+    assert!(first.is_pinnacle);
+    assert!(crate::dig_bosses::PINNACLE_POOL_IDS.contains(&first.boss_id.as_str()));
+    let again = runtime
+        .encounter(
+            pinnacle_request(1_700_000_100),
+            SequenceEntropy::constant(0.0),
+        )
+        .expect("repeat pinnacle encounter");
+    assert_eq!(again.boss_id, first.boss_id);
+    let stored: Option<String> = Connection::open(database.path())
+        .expect("reload pinnacle lock")
+        .query_row(
+            "SELECT pinnacle_boss_id FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
+            params![PLAYER, GUILD],
+            |row| row.get(0),
+        )
+        .expect("persisted pinnacle lock");
+    assert_eq!(stored.as_deref(), Some(first.boss_id.as_str()));
+    let boss = crate::dig_bosses::pinnacle_by_id(&again.boss_id).expect("pool boss");
+    assert_eq!(
+        again.boss_name,
+        boss.phases[usize::from(again.phase) - 1].title
+    );
+}
+
+#[test]
+fn encounter_reports_a_scout_lantern_only_when_one_is_owned() {
+    for item in [None, Some("lantern"), Some("great_lantern")] {
+        let database = fixture();
+        if let Some(item) = item {
+            Connection::open(database.path())
+                .expect("lantern DB")
+                .execute(
+                    "INSERT INTO dig_inventory (discord_id,guild_id,item_type,queued,created_at)
+                     VALUES (?1,?2,?3,0,100)",
+                    params![PLAYER, GUILD, item],
+                )
+                .expect("owned lantern");
+        }
+        let info = pinnacle_runtime(&database)
+            .encounter(
+                pinnacle_request(1_700_000_000),
+                SequenceEntropy::constant(0.5),
+            )
+            .expect("encounter");
+        assert_eq!(info.has_scout_lantern, item.is_some(), "{item:?}");
+    }
+}
+
+#[test]
 fn encounter_preserves_boss_assignment_database_error() {
     let database = fixture();
     let connection = Connection::open(database.path()).expect("encounter DB");

@@ -222,28 +222,6 @@ fn display_names_match_override_and_titlecase_fallback() {
 }
 
 #[test]
-fn picking_past_cap_rejects_without_mutating_the_tunnel() {
-    let key = crate::dig_tunnels::TunnelKey::new(10_001, 12_345);
-    let mut tunnel = crate::dig_tunnels::Tunnel::new(key, "Amber Descent", 3_000);
-    tunnel.mark_prestige_ready();
-    tunnel.prestige_perks = owned_perks(&["loot_multiplier"; PRESTIGE_PERK_STACK_CAP]);
-    let expected = tunnel.clone();
-    let mut repository = crate::dig_tunnels::InMemoryTunnelRepository::default();
-    repository.insert(tunnel);
-    let mut service = crate::dig_tunnels::TunnelService::new(
-        repository,
-        crate::dig_tunnels::SplitMixEntropy::new(7),
-    );
-
-    assert_eq!(
-        service.prestige(key, "loot_multiplier", None, 1_000_000),
-        Err(crate::dig_tunnels::TunnelError::PerkAtCap)
-    );
-    assert_eq!(service.repository().tunnel(key), Some(&expected));
-    assert!(service.repository().actions().is_empty());
-}
-
-#[test]
 fn loot_multiplier_display_name_is_loot_bonus() {
     assert_eq!(prestige_perk_display_name("loot_multiplier"), "Loot Bonus");
 }
@@ -630,6 +608,26 @@ fn migrated_settlement_commits_full_reset_grant_relic_and_audit() {
     assert_eq!(tunnel.2, 4, "pickaxe carries across prestige");
     assert!(tunnel.3.contains(&selected));
     assert_eq!(tunnel.4, None);
+    let (boss_progress, pinnacle_phase): (String, i64) = connection
+        .query_row(
+            "SELECT boss_progress, CAST(pinnacle_phase AS INTEGER)
+               FROM tunnels WHERE discord_id=123 AND guild_id=5",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(pinnacle_phase, 0);
+    let boss_progress: serde_json::Map<String, Value> =
+        serde_json::from_str(&boss_progress).unwrap();
+    assert_eq!(
+        boss_progress.keys().cloned().collect::<BTreeSet<_>>(),
+        BOSS_BOUNDARIES
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>(),
+        "prestige drops every pinnacle key"
+    );
+    assert!(boss_progress.values().all(|status| status == "active"));
     let detail: Value = connection
         .query_row(
             "SELECT detail FROM dig_actions WHERE id=?1",

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use cama_db::{
     audit_database,
     dig_inventory_repository::{BuyItemOutcome, BuyItemRequest, DigInventoryRepository},
-    dig_routes_repository::{DigRouteRepository, RouteStateWriteOutcome},
+    dig_runtime_store,
     duel_repository::{DuelChallengeRepository, DuelStatus, DuelTrial},
     economy_event_repository::{EconomyEventRepository, PolicyMode},
     guild_config_repository::GuildConfigRepository,
@@ -343,22 +343,29 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err(format!("dig-inventory round-trip mismatch: {inventory:?}").into());
     }
 
-    let dig_route_repository = DigRouteRepository::new(&path);
+    let route_connection = Connection::open(&path)?;
     let route_state = r#"{"status":"active","route_id":"shored_passage"}"#;
-    if dig_route_repository.set_route_state(
-        DIG_INVENTORY_PLAYER_ID,
-        Some(SMOKE_GUILD_ID),
-        Some(route_state),
-    )? != RouteStateWriteOutcome::Updated
+    let mut route_tunnel =
+        dig_runtime_store::tunnel(&route_connection, DIG_INVENTORY_PLAYER_ID, SMOKE_GUILD_ID)?
+            .ok_or("dig-route sentinel tunnel disappeared")?;
+    route_tunnel.route_state = Some(route_state.to_owned());
+    if dig_runtime_store::update_tunnel_cas(
+        &route_connection,
+        &route_tunnel,
+        Some(route_tunnel.depth),
+        Some(route_tunnel.total_digs),
+        route_tunnel.last_dig_at,
+    )? != 1
     {
         return Err("dig-route sentinel tunnel was not updated".into());
     }
-    let route_tunnel = dig_route_repository
-        .tunnel(DIG_INVENTORY_PLAYER_ID, Some(SMOKE_GUILD_ID))?
-        .ok_or("dig-route sentinel tunnel disappeared")?;
+    let route_tunnel =
+        dig_runtime_store::tunnel(&route_connection, DIG_INVENTORY_PLAYER_ID, SMOKE_GUILD_ID)?
+            .ok_or("dig-route sentinel tunnel disappeared")?;
     if route_tunnel.route_state.as_deref() != Some(route_state) {
         return Err(format!("dig-route round-trip mismatch: {route_tunnel:?}").into());
     }
+    drop(route_connection);
 
     let pet_repository = PetRepository::new(&path);
     let pet = pet_repository.adopt_pet(&AdoptPetRequest {

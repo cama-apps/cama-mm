@@ -3849,6 +3849,340 @@ fn sqlite_live_event_gate_multiplies_ascension_weather_and_route_factors() {
 }
 
 #[test]
+fn sqlite_text_stored_tunnel_integers_load_as_integers() {
+    let database = fast_migrated_database();
+    let (actor, guild) = (60_305, 60_306);
+    PlayerRepository::new(database.path())
+        .add(&NewPlayer::new(actor, "text-columns", Some(guild)))
+        .expect("seed text-column player");
+    Connection::open(database.path())
+        .expect("text-column connection")
+        .execute(
+            "INSERT INTO tunnels
+                 (discord_id,guild_id,tunnel_name,depth,luminosity,prestige_level,last_dig_at)
+             VALUES (?1,?2,'Test Tunnel','49','100','2',NULL)",
+            params![actor, guild],
+        )
+        .expect("seed text-stored integers");
+    let info = DigRuntimeService::sqlite(database.path())
+        .tunnel_info(actor, guild)
+        .expect("load text-column tunnel")
+        .expect("text-column tunnel");
+    assert_eq!(
+        (
+            info.depth,
+            info.luminosity,
+            info.prestige_level,
+            info.last_dig_at
+        ),
+        (49, 100, 2, None)
+    );
+    assert_eq!(info.tunnel_name, "Test Tunnel");
+}
+
+fn selected_fungal_route_state(route_id: &str) -> String {
+    format!(
+        r#"{{"end_depth":200,"layer":"Fungal Depths","offered":["{route_id}","mycelial_track","rotcap_hollow"],"selected":"{route_id}","start_depth":150}}"#
+    )
+}
+
+fn seed_route_state(database: &FastTestDatabase, discord_id: i64, guild_id: i64, state: &str) {
+    Connection::open(database.path())
+        .expect("route state connection")
+        .execute(
+            "UPDATE tunnels SET route_state=?1 WHERE discord_id=?2 AND guild_id=?3",
+            params![state, discord_id, guild_id],
+        )
+        .expect("seed route state");
+}
+
+#[test]
+fn sqlite_pending_route_choice_blocks_paid_dig_before_cost_or_consumables() {
+    let database = fast_migrated_database();
+    let actor = 60_301;
+    let guild = 60_302;
+    let now = 1_900_087_000;
+    seed_live_runtime_tunnel(&database, actor, guild, now, 30, 1, Some(now - 60));
+    let connection = Connection::open(database.path()).expect("pending route connection");
+    connection
+        .execute(
+            "UPDATE players SET jopacoin_balance=500 WHERE discord_id=?1 AND guild_id=?2",
+            params![actor, guild],
+        )
+        .expect("seed pending route balance");
+    connection
+        .execute(
+            "INSERT INTO dig_inventory (discord_id,guild_id,item_type,queued,created_at)
+                 VALUES (?1,?2,'hard_hat',1,?3)",
+            params![actor, guild, now],
+        )
+        .expect("queue pending route consumable");
+    drop(connection);
+    seed_route_state(
+        &database,
+        actor,
+        guild,
+        r#"{"end_depth":50,"layer":"Stone","offered":["shored_passage","old_supports","fossil_seam"],"selected":null,"start_depth":25}"#,
+    );
+
+    let outcome = DigRuntimeService::sqlite(database.path())
+        .dig(DigRuntimeRequest {
+            discord_id: actor,
+            guild_id: guild,
+            now,
+            paid: true,
+            forced_event: false,
+        })
+        .expect("pending route Dig");
+    assert!(!outcome.success && outcome.route_choice_required);
+    assert_eq!(outcome.paid_dig_cost, 0);
+    assert!(outcome.consumed_item_ids.is_empty());
+    let persisted: (i64, i64, i64, i64) = Connection::open(database.path())
+        .expect("reload pending route")
+        .query_row(
+            "SELECT (SELECT jopacoin_balance FROM players WHERE discord_id=?1 AND guild_id=?2),
+                    (SELECT depth FROM tunnels WHERE discord_id=?1 AND guild_id=?2),
+                    (SELECT COUNT(*) FROM dig_inventory
+                      WHERE discord_id=?1 AND guild_id=?2 AND queued=1),
+                    (SELECT COUNT(*) FROM dig_actions WHERE actor_id=?1 AND guild_id=?2)",
+            params![actor, guild],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("pending route state");
+    assert_eq!(persisted, (500, 30, 1, 0));
+}
+
+/// Run one non-catastrophic live cave-in at depth 180 with a selected route
+/// and return the rolled loss beside the loss the Dig applied.
+fn live_route_cave_loss(
+    actor: i64,
+    guild: i64,
+    seed_now: i64,
+    route_id: &str,
+    active_weather: Option<&str>,
+    prestige_perks: &str,
+    reinforced: bool,
+) -> (i64, i64) {
+    let roll = find_live_cave_roll(actor, guild, seed_now, 180, Some(false), None, false);
+    let database = fast_migrated_database();
+    seed_live_cave_in_fixture(
+        &database, actor, guild, seed_now, roll.now, 180, 0, None, None,
+    );
+    let connection = Connection::open(database.path()).expect("route cave connection");
+    connection
+        .execute(
+            "UPDATE tunnels SET route_state=?1,prestige_perks=?2,reinforced_until=?3
+                 WHERE discord_id=?4 AND guild_id=?5",
+            params![
+                selected_fungal_route_state(route_id),
+                prestige_perks,
+                if reinforced { roll.now + 3_600 } else { 0 },
+                actor,
+                guild,
+            ],
+        )
+        .expect("seed route cave tunnel");
+    if let Some(weather) = active_weather {
+        connection
+            .execute(
+                "UPDATE dig_weather SET weather_id=?1
+                     WHERE guild_id=?2 AND layer_name='Fungal Depths'",
+                params![weather, guild],
+            )
+            .expect("seed route cave weather");
+    }
+    drop(connection);
+
+    let outcome = DigRuntimeService::sqlite(database.path())
+        .dig(DigRuntimeRequest {
+            discord_id: actor,
+            guild_id: guild,
+            now: roll.now,
+            paid: false,
+            forced_event: false,
+        })
+        .expect("route cave Dig");
+    assert!(outcome.success && outcome.cave_in, "{:?}", outcome.error);
+    let detail = serde_json::from_str::<Value>(
+        outcome
+            .cave_in_detail
+            .as_deref()
+            .expect("route cave detail"),
+    )
+    .expect("route cave detail JSON");
+    let loss = detail["block_loss"].as_i64().expect("route cave loss");
+    assert_eq!(outcome.depth_after, 180 - loss);
+    (roll.block_loss, loss)
+}
+
+#[test]
+fn sqlite_selected_route_caps_live_cave_loss() {
+    let (rolled, loss) = live_route_cave_loss(
+        62_301,
+        62_302,
+        1_900_093_000,
+        "old_supports",
+        None,
+        "[]",
+        false,
+    );
+    assert!(rolled > 6);
+    assert_eq!(loss, 6);
+}
+
+#[test]
+fn sqlite_weather_cap_bounds_route_cave_loss_bonus() {
+    let (_, loss) = live_route_cave_loss(
+        62_303,
+        62_304,
+        1_900_093_500,
+        "fractured_shortcut",
+        Some("mudslide_warning"),
+        "[]",
+        false,
+    );
+    assert_eq!(loss, 3);
+}
+
+#[test]
+fn sqlite_route_cave_loss_bonus_applies_before_steady_hands_and_reinforcement() {
+    let (actor, guild, seed_now) = (62_305, 62_306, 1_900_094_000);
+    let (rolled, loss) = live_route_cave_loss(
+        actor,
+        guild,
+        seed_now,
+        "fractured_shortcut",
+        None,
+        "[]",
+        false,
+    );
+    assert_eq!(loss, rolled + 2);
+    let steady = r#"["steady_hands"]"#;
+    let (rolled, loss) = live_route_cave_loss(
+        actor,
+        guild,
+        seed_now,
+        "fractured_shortcut",
+        None,
+        steady,
+        false,
+    );
+    assert_eq!(loss, ((rolled + 2) as f64 * 0.75) as i64);
+    let (_, loss) = live_route_cave_loss(
+        actor,
+        guild,
+        seed_now,
+        "fractured_shortcut",
+        None,
+        steady,
+        true,
+    );
+    assert_eq!(loss, 8);
+}
+
+#[test]
+fn thick_skin_zeroes_cave_chance_even_on_a_risky_route() {
+    let risky = crate::dig_loot::CaveInChanceRequest {
+        base_layer: super::layer_at(300).cave_in_chance,
+        route_bonus: crate::dig_routes::route_by_id("maws_shortcut")
+            .and_then(|route| crate::dig_routes::route_effect(route, "cave_in_bonus"))
+            .expect("Maw's Shortcut cave bonus"),
+        mana_hazard_modifier: 0.09,
+        ..Default::default()
+    };
+    assert!(risky.resolve() > 0.5);
+    let shielded = crate::dig_loot::CaveInChanceRequest {
+        thick_skin: true,
+        ..risky
+    };
+    assert_eq!(shielded.resolve(), 0.0);
+}
+
+#[test]
+fn catastrophic_cave_in_keeps_the_route_loss_cap_above_the_milestone() {
+    assert_eq!(
+        super::catastrophic_cave_in_depth(148, 14, Some(6), false),
+        (142, false, 14)
+    );
+    assert_eq!(
+        super::catastrophic_cave_in_depth(148, 14, None, false),
+        (125, false, 23)
+    );
+    assert_eq!(
+        super::catastrophic_cave_in_depth(148, 14, Some(6), true),
+        (134, true, 14)
+    );
+}
+
+/// Run one non-cave Dig at depth 180 under neutral weather, optionally on a
+/// selected route.
+fn live_route_plain_dig(route_id: Option<&str>, now: i64) -> super::DigRuntimeOutcome {
+    let (actor, guild) = (60_303, 60_304);
+    let database = fast_migrated_database();
+    seed_live_runtime_tunnel(&database, actor, guild, now, 180, 1, Some(now - 7_200));
+    if let Some(route_id) = route_id {
+        seed_route_state(
+            &database,
+            actor,
+            guild,
+            &selected_fungal_route_state(route_id),
+        );
+    }
+    let today = game_date_for_timestamp(now as f64).expect("route plain Dig date");
+    Connection::open(database.path())
+        .expect("route plain weather connection")
+        .execute(
+            "INSERT INTO dig_weather(guild_id,game_date,layer_name,weather_id)
+                 VALUES (?1,?2,'Fungal Depths','route_neutral'),
+                        (?1,?2,'Dirt','route_neutral_other')",
+            params![guild, today],
+        )
+        .expect("seed neutral route weather");
+    let outcome = DigRuntimeService::sqlite(database.path())
+        .dig(DigRuntimeRequest {
+            discord_id: actor,
+            guild_id: guild,
+            now,
+            paid: false,
+            forced_event: false,
+        })
+        .expect("route plain Dig");
+    assert!(outcome.success && !outcome.cave_in, "{:?}", outcome.error);
+    outcome
+}
+
+#[test]
+fn sqlite_selected_route_shapes_live_advance_and_luminosity_drain() {
+    let (actor, guild) = (60_303, 60_304);
+    let now = (1_900_095_000..1_900_195_000)
+        .find(|candidate| {
+            let mut entropy = SeededLootEntropy::new(super::seed_for(
+                DigRuntimeRequest {
+                    discord_id: actor,
+                    guild_id: guild,
+                    now: *candidate,
+                    paid: false,
+                    forced_event: false,
+                },
+                0,
+            ));
+            entropy.unit() > 0.6 && entropy.advance(1, 2) == 2
+        })
+        .expect("deterministic two-block non-cave seed");
+    let baseline = live_route_plain_dig(None, now);
+    assert_eq!(baseline.advance, 2);
+    assert!(baseline.luminosity_drained > 0);
+
+    // Shored Passage lowers the maximum advance by one block.
+    assert_eq!(live_route_plain_dig(Some("shored_passage"), now).advance, 1);
+    // Lantern Road halves the layer's luminosity drain.
+    assert_eq!(
+        live_route_plain_dig(Some("lantern_road"), now).luminosity_drained,
+        baseline.luminosity_drained / 2
+    );
+}
+
+#[test]
 fn sqlite_stamina_thirteen_caps_cooldown_after_mutations_plain() {
     assert_stamina_cooldown_boundary("[]", 1_800);
 }
