@@ -4,10 +4,12 @@
 //! Every name and number here is invented. `--still` skips the GIFs for a quick
 //! layout pass. Hero portraits come from the Steam image cache that production
 //! warms (`STEAM_IMAGE_CACHE_ROOT`, default `.cache`) when it is present.
+//! Two-beat cards show the full hero render at `WRAPPED_PREVIEW_HERO_RENDER`
+//! when that path is set.
 use cama_app::drawing::{GambaInfo, GambaPoint, GambaStats};
 use cama_app::wrapped_media::{
-    WrappedArtwork, WrappedGambaData, WrappedLayout, WrappedRow, WrappedSlideData, WrappedTheme,
-    render_wrapped_media, render_wrapped_slide,
+    WrappedArtwork, WrappedBeat, WrappedGambaData, WrappedLayout, WrappedPunch, WrappedRow,
+    WrappedSlideData, WrappedTheme, render_wrapped_media, render_wrapped_slide,
 };
 use std::path::PathBuf;
 use std::time::Instant;
@@ -64,6 +66,210 @@ fn pet_card(assets: &str) -> Vec<u8> {
         })
         .bytes()
         .to_vec()
+}
+
+/// One two-beat card. `art` places the hero render on it.
+fn two_beat(
+    theme: WrappedTheme,
+    treatment: WrappedPunch,
+    copy: [&str; 5],
+    art: bool,
+) -> WrappedSlideData {
+    let [setup, value, setup_label, punch, credit] = copy;
+    let mut slide = styled("story_distinct", "", WrappedLayout::TwoBeat, theme);
+    slide.beat = Some(WrappedBeat {
+        setup: setup.to_owned(),
+        value: value.to_owned(),
+        setup_label: setup_label.to_owned(),
+        punch: punch.to_owned(),
+        credit: credit.to_owned(),
+        treatment,
+    });
+    if art {
+        slide.art_png = std::env::var_os("WRAPPED_PREVIEW_HERO_RENDER")
+            .and_then(|path| std::fs::read(path).ok());
+    }
+    slide
+}
+
+/// One two-beat card per punchline treatment.
+fn two_beats() -> Vec<WrappedSlideData> {
+    use WrappedPunch::*;
+    use WrappedTheme::{BeatPopoff, BeatRoast};
+    let plain = two_beat(
+        BeatRoast,
+        Plain,
+        [
+            "You played",
+            "41",
+            "games of Pudge.",
+            "Hooks are optional.",
+            "41 Pudge games · 37% wins",
+        ],
+        false,
+    );
+    let plain_popoff = two_beat(
+        BeatPopoff,
+        Plain,
+        [
+            "You won",
+            "68%",
+            "of your games with Mirana Main.",
+            "Certified duo.",
+            "28 of 41 games won together",
+        ],
+        false,
+    );
+    let cinema = two_beat(
+        BeatPopoff,
+        Cinema,
+        [
+            "Your best game",
+            "27/2/14",
+            "Queen of Pain · Mar 14",
+            "Absolute cinema.",
+            "27 / 2 / 14 · Queen of Pain",
+        ],
+        true,
+    );
+    let mut gold = two_beat(
+        BeatRoast,
+        GoldGraph,
+        [
+            "You were up",
+            "23,400",
+            "gold. Your team, anyway.",
+            "this is fine.",
+            "Team gold lead +23,400",
+        ],
+        true,
+    );
+    gold.series = vec![
+        0.0, 250.0, 900.0, 1_800.0, 2_600.0, 4_100.0, 6_000.0, 8_200.0, 11_000.0, 13_500.0,
+        16_900.0, 19_800.0, 23_400.0, 21_000.0, 16_500.0, 11_200.0, 6_800.0, 1_900.0, -2_600.0,
+        -5_900.0, -9_400.0, -12_800.0,
+    ];
+    let mut stonks = two_beat(
+        BeatPopoff,
+        Stonks,
+        [
+            "You cashed out",
+            "+8,420",
+            "JC this year.",
+            "Stonks.",
+            "+8,420 JC across 96 bets",
+        ],
+        false,
+    );
+    stonks.series = (0..40)
+        .map(|index| {
+            let x = f64::from(index);
+            x * 210.0 + (x / 2.3).sin() * 700.0
+        })
+        .collect();
+    let mut not_stonks = two_beat(
+        BeatRoast,
+        NotStonks,
+        [
+            "You bet",
+            "3,100",
+            "JC on one game.",
+            "Not stonks.",
+            "-3,100 JC on one bet",
+        ],
+        false,
+    );
+    not_stonks.series = vec![
+        4_200.0, 3_900.0, 4_300.0, 3_100.0, 3_300.0, 2_000.0, 2_300.0, 400.0,
+    ];
+    let mut calculated = two_beat(
+        BeatPopoff,
+        Calculated,
+        [
+            "You won at",
+            "18%",
+            "win odds.",
+            "Calculated.",
+            "Won at 18% odds · Mar 2",
+        ],
+        false,
+    );
+    calculated.stat_value = "18%".to_owned();
+    let task_failed = two_beat(
+        BeatRoast,
+        TaskFailed,
+        [
+            "You went",
+            "31/4/9",
+            "on Queen of Pain. Then lost.",
+            "Task failed successfully.",
+            "31 / 4 / 9 · Queen of Pain · Defeat",
+        ],
+        true,
+    );
+    let mut losses = two_beat(
+        BeatRoast,
+        LossTiles,
+        [
+            "You lost",
+            "9",
+            "games in a row.",
+            "gg go next",
+            "9 straight losses · Feb 11",
+        ],
+        false,
+    );
+    losses.series = vec![-1.0; 9];
+    let press_f = two_beat(
+        BeatRoast,
+        PressF,
+        [
+            "Your pets lost",
+            "2",
+            "lives this year.",
+            "Press F.",
+            "2 pets lost in 2026",
+        ],
+        false,
+    );
+    let skill = two_beat(
+        BeatRoast,
+        SkillIssue,
+        [
+            "You averaged",
+            "1.8",
+            "kills a game.",
+            "Skill issue.",
+            "Fewest kills per game · 40th of 40",
+        ],
+        false,
+    );
+    let clock = two_beat(
+        BeatRoast,
+        Clock,
+        [
+            "Your latest queue",
+            "3:47 AM",
+            "on a Tuesday.",
+            "One more game.",
+            "Queued at 3:47 AM · Apr 8",
+        ],
+        false,
+    );
+    vec![
+        plain,
+        plain_popoff,
+        cinema,
+        gold,
+        stonks,
+        not_stonks,
+        calculated,
+        task_failed,
+        losses,
+        press_f,
+        skill,
+        clock,
+    ]
 }
 
 fn deck(assets: &str) -> Vec<WrappedSlideData> {
@@ -371,6 +577,8 @@ fn deck(assets: &str) -> Vec<WrappedSlideData> {
         "Best KDA: 18.0 as Crystal Maiden",
     ]);
     deck.push(records);
+
+    deck.extend(two_beats());
 
     let count = deck.len();
     for (index, slide) in deck.iter_mut().enumerate() {

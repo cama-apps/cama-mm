@@ -60,7 +60,7 @@ const ALL_KINDS: [&str; 17] = [
     "chart_gamba",
 ];
 
-const ALL_LAYOUTS: [WrappedLayout; 12] = [
+const ALL_LAYOUTS: [WrappedLayout; 13] = [
     WrappedLayout::Cover,
     WrappedLayout::BigNumber,
     WrappedLayout::TopList,
@@ -73,6 +73,7 @@ const ALL_LAYOUTS: [WrappedLayout; 12] = [
     WrappedLayout::Award,
     WrappedLayout::Recap,
     WrappedLayout::Details,
+    WrappedLayout::TwoBeat,
 ];
 
 fn busy(kind: &str) -> WrappedSlideData {
@@ -217,41 +218,263 @@ fn reveal_is_bounded_moves_and_ends_on_exactly_the_still_card() {
             "no frame is too fast for clients to honor"
         );
 
-        // The last frame is exactly the still card seen through the shared
-        // palette: every pixel holds the nearest color to the still's pixel.
-        let decoder = gif::DecodeOptions::new()
-            .read_info(media.bytes.as_slice())
-            .unwrap();
-        let palette = decoder.global_palette().unwrap().to_vec();
-        // The final slot means "unchanged" and is never drawn.
-        let colors = &palette[..palette.len() - 3];
-        let still = stage::render_still(&slide);
-        let mut nearest = std::collections::HashMap::new();
-        let expected = still
-            .pixels
-            .chunks_exact(4)
-            .map(|pixel| {
-                *nearest
-                    .entry([pixel[0], pixel[1], pixel[2]])
-                    .or_insert_with(|| {
-                        colors
-                            .chunks_exact(3)
-                            .enumerate()
-                            .min_by_key(|(_, entry)| {
-                                (0..3)
-                                    .map(|c| (i32::from(entry[c]) - i32::from(pixel[c])).pow(2))
-                                    .sum::<i32>()
-                            })
-                            .map(|(index, _)| index as u8)
-                            .unwrap()
-                    })
-            })
-            .collect::<Vec<_>>();
         assert!(
-            *frames.last().unwrap() == expected,
+            *frames.last().unwrap() == still_through_palette(&media.bytes, &slide),
             "{layout:?} final frame is not the still card"
         );
     }
+}
+
+/// The still card seen through a reveal's shared palette: every pixel holds
+/// the nearest palette color to the still's pixel.
+fn still_through_palette(gif_bytes: &[u8], slide: &WrappedSlideData) -> Vec<u8> {
+    let decoder = gif::DecodeOptions::new().read_info(gif_bytes).unwrap();
+    let palette = decoder.global_palette().unwrap().to_vec();
+    // The final slot means "unchanged" and is never drawn.
+    let colors = &palette[..palette.len() - 3];
+    let still = stage::render_still(slide);
+    let mut nearest = std::collections::HashMap::new();
+    still
+        .pixels
+        .chunks_exact(4)
+        .map(|pixel| {
+            *nearest
+                .entry([pixel[0], pixel[1], pixel[2]])
+                .or_insert_with(|| {
+                    colors
+                        .chunks_exact(3)
+                        .enumerate()
+                        .min_by_key(|(_, entry)| {
+                            (0..3)
+                                .map(|c| (i32::from(entry[c]) - i32::from(pixel[c])).pow(2))
+                                .sum::<i32>()
+                        })
+                        .map(|(index, _)| index as u8)
+                        .unwrap()
+                })
+        })
+        .collect()
+}
+
+fn two_beat(treatment: WrappedPunch) -> WrappedSlideData {
+    let mut slide = WrappedSlideData::new("story_distinct", "Biggest throw");
+    slide.layout = WrappedLayout::TwoBeat;
+    slide.theme = WrappedTheme::BeatRoast;
+    slide.username = "Alexandria".to_owned();
+    slide.year_label = "Cama Wrapped 2026".to_owned();
+    slide.chapter_index = 4;
+    slide.chapter_count = 14;
+    slide.stat_value = "18%".to_owned();
+    slide.series = vec![
+        0.0, 900.0, 2_400.0, 6_100.0, 11_800.0, 23_400.0, 15_000.0, 4_200.0, -3_900.0, -9_000.0,
+    ];
+    slide.beat = Some(WrappedBeat {
+        setup: "You were up".to_owned(),
+        value: "23,400".to_owned(),
+        setup_label: "gold. Your team, anyway.".to_owned(),
+        punch: "this is fine.".to_owned(),
+        credit: "Team gold lead +23,400".to_owned(),
+        treatment,
+    });
+    slide
+}
+
+/// A 1440x1440 render-sized RGBA image: a gradient figure on transparency.
+fn full_render() -> Vec<u8> {
+    const SIDE: usize = 1440;
+    let mut image = Canvas::new(SIDE, SIDE, Rgba([0, 0, 0, 0]));
+    for y in 0..SIDE {
+        for x in 0..SIDE {
+            let (dx, dy) = (x as f32 - 720.0, y as f32 - 760.0);
+            if (dx / 520.0).powi(2) + (dy / 640.0).powi(2) <= 1.0 {
+                let offset = (y * SIDE + x) * 4;
+                image.pixels[offset..offset + 4].copy_from_slice(&[
+                    (x * 255 / SIDE) as u8,
+                    (y * 255 / SIDE) as u8,
+                    ((x + y) * 255 / (SIDE * 2)) as u8,
+                    255,
+                ]);
+            }
+        }
+    }
+    encode_png(&image)
+}
+
+#[test]
+fn two_beat_still_is_the_punchline() {
+    let slide = two_beat(WrappedPunch::Plain);
+    let still = decode_png(&render_wrapped_slide(&slide).unwrap()).unwrap();
+    let setup = stage::palette(WrappedTheme::BeatRoast).bg;
+    let punch = beats::look(WrappedTheme::BeatRoast, WrappedPunch::Plain).bg;
+    assert_ne!(setup, punch, "the punchline flips the card's color");
+    for (x, y) in [(6, 300), (6, 620), (714, 880)] {
+        assert_eq!(pixel(&still, x, y), punch.0, "({x}, {y})");
+    }
+    let mut uncredited = slide.clone();
+    uncredited.beat.as_mut().unwrap().credit.clear();
+    assert_ne!(
+        render_wrapped_slide(&slide).unwrap(),
+        render_wrapped_slide(&uncredited).unwrap(),
+        "the punchline still carries the fact"
+    );
+    let mut other_setup = slide.clone();
+    other_setup.beat.as_mut().unwrap().setup = "Different setup".to_owned();
+    assert_eq!(
+        render_wrapped_slide(&slide).unwrap(),
+        render_wrapped_slide(&other_setup).unwrap(),
+        "the setup has left the finished card"
+    );
+}
+
+#[test]
+fn two_beat_gif_has_more_frames_and_ends_on_still() {
+    for treatment in [WrappedPunch::GoldGraph, WrappedPunch::Cinema] {
+        let mut slide = two_beat(treatment);
+        slide.art_png = Some(encode_png(&Canvas::new(256, 144, Rgba::rgb(160, 40, 60))));
+        let media = render_wrapped_media(&slide, true).unwrap();
+        assert_eq!(media.filename, "wrapped_slide.gif", "{treatment:?}");
+        let (frames, delays) = play(&media.bytes);
+        assert!(
+            frames.len() > motion::FRAMES,
+            "{treatment:?} plays a longer two-beat timeline: {} frames",
+            frames.len()
+        );
+        assert!(*delays.last().unwrap() >= 300, "the punchline holds");
+        assert!(
+            *frames.last().unwrap() == still_through_palette(&media.bytes, &slide),
+            "{treatment:?} final frame is not the still card"
+        );
+        // The opening frames show the setup's color, not the punchline's.
+        let mut stage = stage::Stage::new(&slide);
+        let setup = stage::palette(slide.theme).bg;
+        assert_eq!(
+            &stage.paint(0.4).pixels[(300 * 720 + 6) * 4..][..4],
+            setup.0
+        );
+    }
+}
+
+#[test]
+fn every_treatment_renders_without_oversize_error() {
+    // Worst-case copy at the authored limits: a 28-character setup, a
+    // 30-character punchline, and the longest placeholder values.
+    let setup = "Keeper of the Light, again.";
+    let punch = "Black King Bar didn't save you";
+    assert!(setup.chars().count() <= 28 && punch.chars().count() <= 30);
+    for treatment in WrappedPunch::ALL {
+        for theme in [WrappedTheme::BeatRoast, WrappedTheme::BeatPopoff] {
+            let mut slide = two_beat(treatment);
+            slide.theme = theme;
+            let beat = slide.beat.as_mut().unwrap();
+            beat.setup = setup.to_owned();
+            beat.punch = punch.to_owned();
+            beat.value = "12:59 AM".to_owned();
+            beat.setup_label = "Keeper of the Light · Mar 14".to_owned();
+            beat.credit = "27 / 2 / 14 · KEEPER OF THE LIGHT".to_owned();
+            let png = render_wrapped_slide(&slide).unwrap();
+            let decoded = decode_png(&png).unwrap();
+            assert!(decoded.pixels.chunks_exact(4).all(|p| p[3] == 255));
+            // Missing chart data and art never break a treatment.
+            slide.series.clear();
+            slide.stat_value.clear();
+            slide.art_png = Some(b"not png".to_vec());
+            assert!(render_wrapped_slide(&slide).is_ok(), "{treatment:?} bare");
+        }
+    }
+    let mut oversized = two_beat(WrappedPunch::Plain);
+    oversized.beat.as_mut().unwrap().credit = "a".repeat(501);
+    assert!(matches!(
+        render_wrapped_slide(&oversized),
+        Err(WrappedMediaError::OversizedText)
+    ));
+}
+
+#[test]
+fn two_beat_with_full_render_stays_under_cap() {
+    let mut slide = two_beat(WrappedPunch::Cinema);
+    slide.art_png = Some(full_render());
+    let stage = stage::Stage::new(&slide);
+    assert!(stage.art.is_some(), "the full render decodes for the setup");
+    assert!(stage.still_art.is_some(), "and for the letterboxed still");
+    let media = render_wrapped_media(&slide, true).unwrap();
+    assert_eq!(media.filename, "wrapped_slide.gif");
+    assert!(
+        media.bytes.len() <= MAX_ANIMATION_BYTES,
+        "{} bytes",
+        media.bytes.len()
+    );
+}
+
+#[test]
+fn two_beat_punchlines_settle_before_the_final_hold() {
+    // Below the progress bar, which fills across the whole reveal, the card
+    // is finished by 0.92 even with a two-line punchline.
+    let below_bar = 40 * WRAPPED_SLIDE_WIDTH * 4;
+    for treatment in WrappedPunch::ALL {
+        let mut slide = two_beat(treatment);
+        slide.beat.as_mut().unwrap().punch = "Black King Bar didn't save you".to_owned();
+        let mut stage = stage::Stage::new(&slide);
+        let held = stage.paint(0.925).pixels[below_bar..].to_vec();
+        assert!(
+            held == stage.paint(1.0).pixels[below_bar..],
+            "{treatment:?} is still moving during the hold"
+        );
+    }
+}
+
+#[test]
+fn every_punchline_keeps_its_text_readable() {
+    fn luminance(color: Rgba) -> f32 {
+        let channel = |value: u8| {
+            let value = f32::from(value) / 255.0;
+            if value <= 0.03928 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(color.0[0]) + 0.7152 * channel(color.0[1]) + 0.0722 * channel(color.0[2])
+    }
+    fn contrast(a: Rgba, b: Rgba) -> f32 {
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+    for treatment in WrappedPunch::ALL {
+        for theme in [WrappedTheme::BeatRoast, WrappedTheme::BeatPopoff] {
+            let look = beats::look(theme, treatment);
+            assert!(
+                contrast(look.ink, look.bg) >= 4.5,
+                "{treatment:?} punchline"
+            );
+            assert!(contrast(look.quiet, look.bg) >= 4.5, "{treatment:?} credit");
+            assert!(
+                contrast(look.signal, look.bg) >= 3.0,
+                "{treatment:?} graphic"
+            );
+        }
+    }
+}
+
+#[test]
+fn two_beat_copy_fits_rejects_overlong_lines() {
+    assert!(two_beat_copy_fits("You were up", "this is fine."));
+    assert!(two_beat_copy_fits("", "Absolute cinema."));
+    assert!(two_beat_copy_fits(
+        "Keeper of the Light, again.",
+        "Black King Bar didn't save you"
+    ));
+    assert!(!two_beat_copy_fits(
+        "You were up a frankly unreasonable amount of gold that game",
+        "this is fine."
+    ));
+    assert!(!two_beat_copy_fits(
+        "You were up",
+        "this is fine, absolutely fine, totally and completely fine."
+    ));
+    assert!(
+        !two_beat_copy_fits("You were up", "Supercalifragilisticexpialidoc"),
+        "a word too wide for the line would break mid-word"
+    );
 }
 
 #[test]

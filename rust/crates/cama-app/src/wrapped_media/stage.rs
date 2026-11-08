@@ -18,26 +18,37 @@ const POPPINS_BLACK: &[u8] =
 const POPPINS_BOLD: &[u8] = include_bytes!("../../../../../assets/wrapped/fonts/Poppins-Bold.ttf");
 const POPPINS_MEDIUM: &[u8] =
     include_bytes!("../../../../../assets/wrapped/fonts/Poppins-Medium.ttf");
+const ANTON: &[u8] = include_bytes!("../../../../../assets/wrapped/fonts/Anton-Regular.ttf");
+const PLAYFAIR_BLACK: &[u8] =
+    include_bytes!("../../../../../assets/wrapped/fonts/PlayfairDisplay-Black.ttf");
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) enum Face {
     Black,
     Bold,
     Medium,
+    /// Anton: condensed numbers and meme caps.
+    Display,
+    /// Playfair Display Black: the movie title.
+    Serif,
 }
 
 impl Face {
     fn font(self) -> &'static Font {
         fn parse(bytes: &'static [u8]) -> Font {
-            Font::from_bytes(bytes, FontSettings::default()).expect("bundled Poppins parses")
+            Font::from_bytes(bytes, FontSettings::default()).expect("bundled font parses")
         }
         static BLACK: OnceLock<Font> = OnceLock::new();
         static BOLD: OnceLock<Font> = OnceLock::new();
         static MEDIUM: OnceLock<Font> = OnceLock::new();
+        static DISPLAY: OnceLock<Font> = OnceLock::new();
+        static SERIF: OnceLock<Font> = OnceLock::new();
         match self {
             Self::Black => BLACK.get_or_init(|| parse(POPPINS_BLACK)),
             Self::Bold => BOLD.get_or_init(|| parse(POPPINS_BOLD)),
             Self::Medium => MEDIUM.get_or_init(|| parse(POPPINS_MEDIUM)),
+            Self::Display => DISPLAY.get_or_init(|| parse(ANTON)),
+            Self::Serif => SERIF.get_or_init(|| parse(PLAYFAIR_BLACK)),
         }
     }
 
@@ -47,6 +58,8 @@ impl Face {
             Self::Black => 1.02,
             Self::Bold => 1.12,
             Self::Medium => 1.22,
+            Self::Display => 0.95,
+            Self::Serif => 1.0,
         }
     }
 
@@ -55,6 +68,9 @@ impl Face {
             Self::Black => -0.025,
             Self::Bold => -0.01,
             Self::Medium => 0.0,
+            Self::Display => 0.01,
+            // Title-card caps are set wide.
+            Self::Serif => 0.08,
         }
     }
 
@@ -71,6 +87,17 @@ impl Face {
     }
 }
 
+/// How far the tallest glyph in `value` rises above the baseline.
+pub(super) fn ink_height(value: &str, size: f32, face: Face) -> f32 {
+    value
+        .chars()
+        .map(|character| {
+            let metrics = face.font_for(character).metrics(character, size);
+            metrics.height as f32 + metrics.ymin as f32
+        })
+        .fold(0.0, f32::max)
+}
+
 pub(super) fn text_width(value: &str, size: f32, face: Face) -> f32 {
     let tracking = face.tracking() * size;
     value
@@ -84,10 +111,10 @@ pub(super) fn text_width(value: &str, size: f32, face: Face) -> f32 {
         .sum()
 }
 
-const FIRST_BASELINE: f32 = 0.9;
+pub(super) const FIRST_BASELINE: f32 = 0.9;
 const DESCENT: f32 = 0.27;
 
-fn block_height(rows: usize, size: f32, face: Face) -> f32 {
+pub(super) fn block_height(rows: usize, size: f32, face: Face) -> f32 {
     if rows == 0 {
         return 0.0;
     }
@@ -312,6 +339,21 @@ pub(super) fn palette(theme: WrappedTheme) -> Palette {
             Rgba::rgb(60, 70, 240),
             INK,
         ),
+        // The two-beat setups use the approved mockup colors exactly.
+        WrappedTheme::BeatRoast => (
+            Rgba::rgb(255, 90, 54),
+            Rgba::rgb(20, 10, 46),
+            Rgba::rgb(20, 10, 46),
+            Rgba::rgb(255, 138, 107),
+            Rgba::rgb(255, 90, 54),
+        ),
+        WrappedTheme::BeatPopoff => (
+            Rgba::rgb(45, 70, 185),
+            Rgba::rgb(255, 255, 255),
+            Rgba::rgb(255, 225, 77),
+            Rgba::rgb(58, 85, 200),
+            Rgba::rgb(20, 10, 46),
+        ),
     };
     Palette {
         bg,
@@ -346,6 +388,8 @@ pub(super) struct Stage<'a> {
     pub(super) palette: Palette,
     pub(super) t: f32,
     pub(super) art: Option<PreparedArt>,
+    /// A two-beat Cinema punchline's letterboxed hero still.
+    pub(super) still_art: Option<PreparedArt>,
     /// Pictures for ranked rows, by row index.
     pub(super) row_art: Vec<Option<PreparedArt>>,
     pub(super) avatars: Vec<Option<DecodedPng>>,
@@ -356,12 +400,18 @@ pub(super) struct Stage<'a> {
 impl<'a> Stage<'a> {
     pub(super) fn new(slide: &'a WrappedSlideData) -> Self {
         let palette = palette(slide.theme);
+        let (art, still_art) = if slide.layout == WrappedLayout::TwoBeat {
+            artwork::prepare_beat(slide)
+        } else {
+            (artwork::prepare(slide), None)
+        };
         Self {
             canvas: Canvas::new(WRAPPED_SLIDE_WIDTH, WRAPPED_SLIDE_HEIGHT, palette.bg),
             slide,
             palette,
             t: 1.0,
-            art: artwork::prepare(slide),
+            art,
+            still_art,
             row_art: artwork::prepare_rows(slide),
             avatars: slide
                 .avatars
@@ -381,7 +431,7 @@ impl<'a> Stage<'a> {
         &self.canvas
     }
 
-    fn progress(&self, start: f32, end: f32) -> f32 {
+    pub(super) fn progress(&self, start: f32, end: f32) -> f32 {
         if self.t >= 1.0 {
             return 1.0;
         }
@@ -518,10 +568,35 @@ impl<'a> Stage<'a> {
         align: Align,
         rise: (f32, f32),
     ) -> i32 {
+        self.stat_in(
+            Face::Black,
+            final_value,
+            shown,
+            rect,
+            maximum,
+            color,
+            align,
+            rise,
+        )
+    }
+
+    /// `stat` set in another face.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn stat_in(
+        &mut self,
+        face: Face,
+        final_value: &str,
+        shown: &str,
+        rect: (i32, i32, i32, i32),
+        maximum: f32,
+        color: Rgba,
+        align: Align,
+        rise: (f32, f32),
+    ) -> i32 {
         if final_value.trim().is_empty() {
             return rect.1;
         }
-        let width = text_width(final_value, maximum, Face::Black);
+        let width = text_width(final_value, maximum, face);
         let fitted = if width > rect.2 as f32 {
             maximum * rect.2 as f32 / width
         } else {
@@ -532,8 +607,7 @@ impl<'a> Stage<'a> {
         let x = match align {
             Align::Left => rect.0 as f32,
             Align::Center => {
-                rect.0 as f32
-                    + (rect.2 as f32 - text_width(final_value, size, Face::Black)).max(0.0) / 2.0
+                rect.0 as f32 + (rect.2 as f32 - text_width(final_value, size, face)).max(0.0) / 2.0
             }
         };
         let shown_amount = self.ease(rise.0, rise.1);
@@ -544,7 +618,7 @@ impl<'a> Stage<'a> {
                 x,
                 baseline + (1.0 - shown_amount) * size,
                 size,
-                Face::Black,
+                face,
                 color,
                 clip,
             );
@@ -736,6 +810,8 @@ mod tests {
             WrappedTheme::Persona,
             WrappedTheme::Awards,
             WrappedTheme::Recap,
+            WrappedTheme::BeatRoast,
+            WrappedTheme::BeatPopoff,
         ] {
             let p = palette(theme);
             assert!(contrast(p.fg, p.bg) >= 4.5, "{theme:?} text on background");

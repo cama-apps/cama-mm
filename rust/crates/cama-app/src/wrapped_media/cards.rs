@@ -25,13 +25,21 @@ pub(super) fn paint(stage: &mut Stage<'_>) {
         WrappedLayout::Award => super::awards::paint(stage),
         WrappedLayout::Recap => recap(stage),
         WrappedLayout::Details => details(stage),
+        WrappedLayout::TwoBeat => super::beats::paint(stage),
     }
     chrome(stage);
 }
 
 /// Story progress across the top, like the segments on a phone-sized story.
 fn chrome(stage: &mut Stage<'_>) {
-    let (slide, p) = (stage.slide, stage.palette);
+    let slide = stage.slide;
+    // A two-beat card changes color mid-reveal; each piece of chrome takes the
+    // ink of whichever beat is behind it.
+    let ink = |stage: &Stage<'_>, y: i32| match slide.layout {
+        WrappedLayout::TwoBeat => super::beats::chrome_ink(stage, y),
+        _ => stage.palette.fg,
+    };
+    let (bar_ink, label_ink, name_ink) = (ink(stage, 32), ink(stage, 62), ink(stage, HEIGHT - 32));
     let count = slide.chapter_count.clamp(1, 40);
     let current = slide.chapter_index.min(count - 1);
     let gap = 5.0;
@@ -39,9 +47,9 @@ fn chrome(stage: &mut Stage<'_>) {
     for index in 0..count {
         let left = MARGIN as f32 + index as f32 * (width + gap);
         let track = if index < current {
-            p.fg
+            bar_ink
         } else {
-            p.fg.scaled_alpha(0.28)
+            bar_ink.scaled_alpha(0.28)
         };
         stage
             .canvas
@@ -50,7 +58,7 @@ fn chrome(stage: &mut Stage<'_>) {
             let filled = stage.ease(0.0, 1.0);
             stage
                 .canvas
-                .rounded_rect((left, 28.0, left + width * filled, 36.0), 4.0, p.fg);
+                .rounded_rect((left, 28.0, left + width * filled, 36.0), 4.0, bar_ink);
         }
     }
     let label = if slide.year_label.is_empty() {
@@ -63,7 +71,7 @@ fn chrome(stage: &mut Stage<'_>) {
         (MARGIN, 44, COLUMN, 36),
         23.0,
         Face::Bold,
-        p.fg,
+        label_ink,
         Align::Left,
         (0.0, 0.0),
     );
@@ -73,7 +81,7 @@ fn chrome(stage: &mut Stage<'_>) {
             (MARGIN, HEIGHT - 50, COLUMN, 36),
             23.0,
             Face::Bold,
-            p.fg,
+            name_ink,
             Align::Left,
             (0.0, 0.0),
         );

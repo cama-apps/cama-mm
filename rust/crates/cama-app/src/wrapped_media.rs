@@ -14,6 +14,7 @@ use thiserror::Error;
 
 mod artwork;
 mod awards;
+mod beats;
 mod cards;
 mod motifs;
 mod motion;
@@ -93,6 +94,8 @@ pub enum WrappedLayout {
     Recap,
     #[default]
     Details,
+    /// A setup beat with the number, then a full-card flip to a punchline.
+    TwoBeat,
 }
 
 /// The color story and animated background of a card.
@@ -119,6 +122,68 @@ pub enum WrappedTheme {
     Persona,
     Awards,
     Recap,
+    /// Two-beat setups: coral and ink for a roast.
+    BeatRoast,
+    /// Two-beat setups: cobalt and yellow for a popoff.
+    BeatPopoff,
+}
+
+/// How a two-beat card lands its punchline. Each look is type, hero art and
+/// clean graphics only.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WrappedPunch {
+    /// The punchline in big type on the setup's contrast colors.
+    #[default]
+    Plain,
+    /// A letterboxed hero still under a serif title.
+    Cinema,
+    /// A team gold lead line from `series`, green above zero and red below.
+    GoldGraph,
+    /// A rising `series` line under condensed caps.
+    Stonks,
+    /// A falling `series` line under condensed caps.
+    NotStonks,
+    /// A win-chance bar filled to the percent in `stat_value`.
+    Calculated,
+    /// A defeat banner over the K/D/A `value`.
+    TaskFailed,
+    /// One loss tile per `series` entry.
+    LossTiles,
+    /// A keycap pressed once.
+    PressF,
+    /// A rank bar with the player's marker at the bottom end.
+    SkillIssue,
+    /// A digital clock showing the `h:mm AM` `value`.
+    Clock,
+}
+
+impl WrappedPunch {
+    pub const ALL: [Self; 11] = [
+        Self::Plain,
+        Self::Cinema,
+        Self::GoldGraph,
+        Self::Stonks,
+        Self::NotStonks,
+        Self::Calculated,
+        Self::TaskFailed,
+        Self::LossTiles,
+        Self::PressF,
+        Self::SkillIssue,
+        Self::Clock,
+    ];
+}
+
+/// The copy of a two-beat card. The setup beat shows `setup` over the big
+/// `value` and `setup_label`; the punchline shows `punch` with `credit`, the
+/// small fact line that lets the finished still stand alone.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WrappedBeat {
+    pub setup: String,
+    pub value: String,
+    pub setup_label: String,
+    pub punch: String,
+    pub credit: String,
+    pub treatment: WrappedPunch,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -146,6 +211,8 @@ pub struct WrappedSlideData {
     pub secondary_series: Vec<f64>,
     pub avatars: Vec<WrappedAvatar>,
     pub gamba: Option<WrappedGambaData>,
+    /// Copy for a `TwoBeat` card. Its hero art travels in `art_png`.
+    pub beat: Option<WrappedBeat>,
 }
 
 impl WrappedSlideData {
@@ -175,6 +242,7 @@ impl WrappedSlideData {
             secondary_series: Vec::new(),
             avatars: Vec::new(),
             gamba: None,
+            beat: None,
         }
     }
 }
@@ -253,15 +321,33 @@ pub fn render_wrapped_slide(slide: &WrappedSlideData) -> Result<Vec<u8>, Wrapped
     Ok(encode_png(&stage::render_still(slide)))
 }
 
+/// Whether two-beat copy fits its card at the designed type size, without
+/// shrinking below the layout's minimum or breaking a word, under every
+/// punchline treatment.
+#[must_use]
+pub fn two_beat_copy_fits(setup: &str, punch: &str) -> bool {
+    beats::copy_fits(setup, punch)
+}
+
 fn validate_slide(slide: &WrappedSlideData) -> Result<(), WrappedMediaError> {
     let row_text = slide
         .rows
         .iter()
         .flat_map(|row| [&row.primary, &row.secondary]);
+    let beat_text = slide.beat.iter().flat_map(|beat| {
+        [
+            &beat.setup,
+            &beat.value,
+            &beat.setup_label,
+            &beat.punch,
+            &beat.credit,
+        ]
+    });
     if slide
         .lines
         .iter()
         .chain(row_text)
+        .chain(beat_text)
         .chain([
             &slide.title,
             &slide.username,
@@ -396,6 +482,16 @@ struct DecodedPng {
 }
 
 fn decode_png(bytes: &[u8]) -> Option<DecodedPng> {
+    decode_png_within(bytes, 1024)
+}
+
+/// Trusted hero art arrives as Steam's full 1440 px renders. The decoded size
+/// stays under the same memory bound as an avatar.
+fn decode_art_png(bytes: &[u8]) -> Option<DecodedPng> {
+    decode_png_within(bytes, 2048)
+}
+
+fn decode_png_within(bytes: &[u8], longest_side: usize) -> Option<DecodedPng> {
     if bytes.get(..8)? != b"\x89PNG\r\n\x1a\n" {
         return None;
     }
@@ -426,7 +522,7 @@ fn decode_png(bytes: &[u8]) -> Option<DecodedPng> {
             _ => {}
         }
     }
-    if width == 0 || height == 0 || width > 1024 || height > 1024 {
+    if width == 0 || height == 0 || width > longest_side || height > longest_side {
         return None;
     }
     if width.checked_mul(height)?.checked_mul(4)? > 8 * 1024 * 1024 {
