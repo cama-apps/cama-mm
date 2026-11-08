@@ -30,8 +30,6 @@ pub mod dig_inventory_repository;
 pub mod dig_migration_contracts;
 #[path = "../../cama-db/src/dig_miner_runtime.rs"]
 pub mod dig_miner_runtime;
-#[path = "../../cama-db/src/dig_prestige4_content.rs"]
-pub mod dig_prestige4_content;
 #[path = "../../cama-db/src/dig_prestige_runtime.rs"]
 pub mod dig_prestige_runtime;
 #[path = "../../cama-db/src/dig_relic_recycling.rs"]
@@ -44,8 +42,6 @@ pub mod dig_routes_repository;
 pub mod dig_runtime_store;
 #[path = "../../cama-db/src/dig_social_runtime.rs"]
 pub mod dig_social_runtime;
-#[path = "../../cama-db/src/dig_sweep_fixes.rs"]
-pub mod dig_sweep_fixes_repository;
 #[path = "../../cama-db/src/dig_tunnel_encounters.rs"]
 pub mod dig_tunnel_encounters_repository;
 #[path = "../../cama-db/src/dig_weather.rs"]

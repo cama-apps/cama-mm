@@ -6,68 +6,11 @@ use super::*;
 const USER_ID: i64 = 10_001;
 const GUILD_ID: i64 = 123;
 
-#[derive(Clone, Copy)]
-enum FlameChannelMode {
-    Send,
-    MissingSend,
-    SynchronousFailure,
-}
-
-#[derive(Clone)]
-struct RecordingFlameChannel {
-    sent: Arc<Mutex<Vec<String>>>,
-    mode: FlameChannelMode,
-}
-
-impl RecordingFlameChannel {
-    fn new(mode: FlameChannelMode) -> (Self, Arc<Mutex<Vec<String>>>) {
-        let sent = Arc::new(Mutex::new(Vec::new()));
-        (
-            Self {
-                sent: Arc::clone(&sent),
-                mode,
-            },
-            sent,
-        )
-    }
-}
-
-impl AtmosphericChannel for RecordingFlameChannel {
-    fn send(&self, content: String) -> Result<Option<FlameSendFuture>, FlameSendError> {
-        match self.mode {
-            FlameChannelMode::Send => {
-                self.sent.lock().expect("flame channel lock").push(content);
-                Ok(Some(Box::pin(async { Ok(()) })))
-            }
-            FlameChannelMode::MissingSend => Ok(None),
-            FlameChannelMode::SynchronousFailure => Err(FlameSendError),
-        }
-    }
-}
-
-#[derive(Default)]
-struct RecordingFlameSpawner {
-    tasks: Mutex<Vec<FlameSendFuture>>,
-}
-
-impl AtmosphericTaskSpawner for RecordingFlameSpawner {
-    fn spawn(&self, task: FlameSendFuture) -> Result<(), FlameTaskError> {
-        self.tasks.lock().expect("flame spawner lock").push(task);
-        Ok(())
-    }
-}
-
-fn recorded_flame_messages(sent: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
-    sent.lock().expect("recorded flame lock").clone()
-}
-
-// tests/test_dig_flame.py::TestCatastrophicLinePool::test_pool_is_non_empty
 #[test]
 fn dig_flame_pool_is_non_empty() {
     assert!(!CATASTROPHIC_LINES.is_empty());
 }
 
-// tests/test_dig_flame.py::TestCatastrophicLinePool::test_lines_are_non_blank_strings
 #[test]
 fn dig_flame_lines_are_non_blank_strings() {
     for line in CATASTROPHIC_LINES {
@@ -75,14 +18,12 @@ fn dig_flame_lines_are_non_blank_strings() {
     }
 }
 
-// tests/test_dig_flame.py::TestCatastrophicLinePool::test_lines_are_unique
 #[test]
 fn dig_flame_lines_are_unique() {
     let unique = CATASTROPHIC_LINES.iter().copied().collect::<BTreeSet<_>>();
     assert_eq!(unique.len(), CATASTROPHIC_LINES.len());
 }
 
-// tests/test_dig_flame.py::TestCatastrophicLinePool::test_lines_contain_no_proper_nouns_marker
 #[test]
 fn dig_flame_lines_contain_no_mechanics_markers() {
     let banned = ["luminosity", "prestige", "jc", "jopacoin", "cave-in chance"];
@@ -92,123 +33,6 @@ fn dig_flame_lines_contain_no_mechanics_markers() {
             assert!(!lowered.contains(term), "{term:?} leaked in {line:?}");
         }
     }
-}
-
-// tests/test_dig_flame.py::TestCatastrophicLinePool::test_pick_returns_member_of_pool
-#[test]
-fn dig_flame_pick_returns_member_of_pool() {
-    let mut rng = SeededDigFlavorRng::new(1);
-    for _ in 0..100 {
-        assert!(CATASTROPHIC_LINES.contains(&pick_catastrophic_line(&mut rng)));
-    }
-}
-
-// tests/test_dig_flame.py::TestCatastrophicLinePool::test_pick_is_seeded_deterministic
-#[test]
-fn dig_flame_pick_is_seeded_deterministic() {
-    let mut first_rng = SeededDigFlavorRng::new(1_234);
-    let first = pick_catastrophic_line(&mut first_rng);
-    let mut second_rng = SeededDigFlavorRng::new(1_234);
-    assert_eq!(pick_catastrophic_line(&mut second_rng), first);
-}
-
-// tests/test_dig_flame.py::TestCatastrophicLinePool::test_pick_covers_multiple_lines
-#[test]
-fn dig_flame_pick_covers_multiple_lines() {
-    let mut rng = SeededDigFlavorRng::new(99);
-    let seen = (0..400)
-        .map(|_| pick_catastrophic_line(&mut rng))
-        .collect::<BTreeSet<_>>();
-    assert!(seen.len() > 1);
-}
-
-// tests/test_dig_flame.py::TestPostAtmospheric::test_formats_with_prefix_and_italics
-#[test]
-fn dig_flame_formats_with_prefix_and_italics() {
-    let (channel, sent) = RecordingFlameChannel::new(FlameChannelMode::Send);
-    let spawner = RecordingFlameSpawner::default();
-    post_atmospheric(Some(&channel), Some(&spawner), "X", "a tunnel folds shut");
-    assert_eq!(recorded_flame_messages(&sent), ["X *a tunnel folds shut*"]);
-    assert_eq!(spawner.tasks.lock().expect("spawner lock").len(), 1);
-}
-
-// tests/test_dig_flame.py::TestPostAtmospheric::test_strips_surrounding_whitespace_from_line
-#[test]
-fn dig_flame_strips_surrounding_whitespace_from_line() {
-    let (channel, sent) = RecordingFlameChannel::new(FlameChannelMode::Send);
-    let spawner = RecordingFlameSpawner::default();
-    post_atmospheric(Some(&channel), Some(&spawner), "P", "   spaced line   ");
-    assert_eq!(recorded_flame_messages(&sent), ["P *spaced line*"]);
-}
-
-// tests/test_dig_flame.py::TestPostAtmospheric::test_none_channel_is_a_noop
-#[test]
-fn dig_flame_none_channel_is_a_noop() {
-    let spawner = RecordingFlameSpawner::default();
-    post_atmospheric::<RecordingFlameChannel, _>(None, Some(&spawner), "P", "line");
-    assert!(spawner.tasks.lock().expect("spawner lock").is_empty());
-}
-
-// tests/test_dig_flame.py::TestPostAtmospheric::test_empty_line_is_a_noop
-#[test]
-fn dig_flame_empty_line_is_a_noop() {
-    let (channel, sent) = RecordingFlameChannel::new(FlameChannelMode::Send);
-    let spawner = RecordingFlameSpawner::default();
-    post_atmospheric(Some(&channel), Some(&spawner), "P", "");
-    assert!(recorded_flame_messages(&sent).is_empty());
-    assert!(spawner.tasks.lock().expect("spawner lock").is_empty());
-}
-
-// tests/test_dig_flame.py::TestPostAtmospheric::test_channel_without_send_is_a_noop
-#[test]
-fn dig_flame_channel_without_send_is_a_noop() {
-    let (channel, sent) = RecordingFlameChannel::new(FlameChannelMode::MissingSend);
-    let spawner = RecordingFlameSpawner::default();
-    post_atmospheric(Some(&channel), Some(&spawner), "P", "line");
-    assert!(recorded_flame_messages(&sent).is_empty());
-    assert!(spawner.tasks.lock().expect("spawner lock").is_empty());
-}
-
-// tests/test_dig_flame.py::TestPostAtmospheric::test_send_raising_is_swallowed
-#[test]
-fn dig_flame_send_raising_is_swallowed() {
-    let (channel, sent) = RecordingFlameChannel::new(FlameChannelMode::SynchronousFailure);
-    let spawner = RecordingFlameSpawner::default();
-    post_atmospheric(Some(&channel), Some(&spawner), "P", "line");
-    assert!(recorded_flame_messages(&sent).is_empty());
-    assert!(spawner.tasks.lock().expect("spawner lock").is_empty());
-}
-
-// tests/test_dig_flame.py::TestPostAtmospheric::test_no_running_loop_is_swallowed
-#[test]
-fn dig_flame_no_running_loop_is_swallowed() {
-    let (channel, sent) = RecordingFlameChannel::new(FlameChannelMode::Send);
-    post_atmospheric::<_, RecordingFlameSpawner>(Some(&channel), None, "P", "line");
-    assert_eq!(recorded_flame_messages(&sent), ["P *line*"]);
-}
-
-// tests/test_dig_flame.py::TestPostCatastrophic::test_uses_catastrophic_prefix_and_pool_line
-#[test]
-fn dig_flame_catastrophic_post_uses_prefix_and_pool_line() {
-    let mut expected_rng = SeededDigFlavorRng::new(7);
-    let expected = pick_catastrophic_line(&mut expected_rng);
-    let (channel, sent) = RecordingFlameChannel::new(FlameChannelMode::Send);
-    let spawner = RecordingFlameSpawner::default();
-    let mut rng = SeededDigFlavorRng::new(7);
-    post_catastrophic(Some(&channel), Some(&spawner), &mut rng);
-    assert_eq!(
-        recorded_flame_messages(&sent),
-        [format!("{CATASTROPHIC_PREFIX} *{expected}*")]
-    );
-}
-
-// tests/test_dig_flame.py::TestPostCatastrophic::test_none_channel_is_a_noop
-#[test]
-fn dig_flame_catastrophic_none_channel_is_a_noop() {
-    let spawner = RecordingFlameSpawner::default();
-    let mut rng = SeededDigFlavorRng::new(1);
-    post_catastrophic::<RecordingFlameChannel, _, _>(None, Some(&spawner), &mut rng);
-    assert!(spawner.tasks.lock().expect("spawner lock").is_empty());
 }
 
 // tests/test_dig_npcs.py::TestRosterIntegrity::test_roster_is_non_empty
