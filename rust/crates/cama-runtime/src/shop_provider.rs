@@ -920,10 +920,22 @@ impl ShopInteractionHandler {
         }
         let unsigned_target =
             u64::try_from(target).map_err(|_| "configured target id is invalid")?;
+        // The mention is the purchased ping; the names keep the message
+        // readable when the client cannot resolve it.
+        let names = self
+            .rendered_player_names(
+                guild_id,
+                &[user_id, target],
+                &BTreeMap::from([(user_id, context.user_display_name.clone())]),
+            )
+            .await;
         responder
             .followup(
-                InteractionResponse::message(format!("<@{target}>\n{tenor_url}"))
-                    .with_user_mentions(vec![unsigned_target]),
+                InteractionResponse::message(format!(
+                    "{} used {display_name} on {}! <@{target}>\n{tenor_url}",
+                    names[&user_id], names[&target]
+                ))
+                .with_user_mentions(vec![unsigned_target]),
             )
             .await
             .map_err(|error| error.to_string().into())
@@ -948,12 +960,19 @@ impl ShopInteractionHandler {
         if avoids.is_empty() {
             return followup_ephemeral(&responder, "You have no active soft avoids.").await;
         }
+        let avoided_ids = avoids
+            .iter()
+            .map(|avoid| avoid.avoided_discord_id)
+            .collect::<Vec<_>>();
+        let names = self
+            .rendered_player_names(guild_id, &avoided_ids, &BTreeMap::new())
+            .await;
         let description = avoids
             .iter()
             .map(|avoid| {
                 format!(
-                    "<@{}> - **{}** games",
-                    avoid.avoided_discord_id, avoid.games_remaining
+                    "{} - **{}** games",
+                    names[&avoid.avoided_discord_id], avoid.games_remaining
                 )
             })
             .collect::<Vec<_>>()
@@ -992,12 +1011,19 @@ impl ShopInteractionHandler {
         if deals.is_empty() {
             return followup_ephemeral(&responder, "You have no active package deals.").await;
         }
+        let partner_ids = deals
+            .iter()
+            .map(|deal| deal.partner_discord_id)
+            .collect::<Vec<_>>();
+        let names = self
+            .rendered_player_names(guild_id, &partner_ids, &BTreeMap::new())
+            .await;
         let description = deals
             .iter()
             .map(|deal| {
                 format!(
-                    "<@{}> - **{}** games",
-                    deal.partner_discord_id, deal.games_remaining
+                    "{} - **{}** games",
+                    names[&deal.partner_discord_id], deal.games_remaining
                 )
             })
             .collect::<Vec<_>>()
@@ -1066,7 +1092,13 @@ impl ShopInteractionHandler {
         };
         let message = match result.reason {
             None if result.cancelled => format!(
-                "Cancelled your Package Deal with <@{partner_id}>. No jopacoin were refunded."
+                "Cancelled your Package Deal with {}. No jopacoin were refunded.",
+                self.rendered_player_names(
+                    guild_id,
+                    &[partner_id],
+                    &BTreeMap::from([(partner_id, target.display_name.clone())]),
+                )
+                .await[&partner_id]
             ),
             Some(PackageDealCancellationFailureReason::Ineligible) => format!(
                 "That Package Deal can only be cancelled after the target has not played for {PACKAGE_DEAL_CANCELLATION_INACTIVITY_DAYS} days and the deal has not been updated for {PACKAGE_DEAL_CANCELLATION_INACTIVITY_DAYS} days."
@@ -1286,10 +1318,11 @@ impl ShopInteractionHandler {
                 return Ok(());
             }
         };
-        let mut allowed = vec![u64::try_from(context.user_id).map_err(|_| "invalid user id")?];
-        if let Some(target) = &target {
-            allowed.push(target.unsigned_id);
-        }
+        // Only a targeted effect's ally or victim is pinged; the buyer is named.
+        let allowed = target
+            .as_ref()
+            .map(|target| vec![target.unsigned_id])
+            .unwrap_or_default();
         responder
             .followup(InteractionResponse::message(content).with_user_mentions(allowed))
             .await
@@ -1322,6 +1355,7 @@ impl ShopInteractionHandler {
         ult_refund: i64,
     ) -> Result<String, String> {
         let user_id = context.user_id;
+        let user_name = context.user_display_name.as_str();
         let guild_id = context.guild_id;
         let new_balance = balance_after_purchase.saturating_add(ult_refund);
         let hostile = HostileEffectContext {
@@ -1420,7 +1454,7 @@ impl ShopInteractionHandler {
                     String::new()
                 };
                 Ok(format!(
-                    "⛰️🔥 **PYROCLASM** — <@{user_id}> unleashes chaos!\n{victims}\n**{total_destroyed} {JOPACOIN_EMOTE} burned**.{shield} You claim **{bounty} {JOPACOIN_EMOTE}** from the ash.\n(cost: {} {JOPACOIN_EMOTE}, balance: {})",
+                    "⛰️🔥 **PYROCLASM** — {user_name} unleashes chaos!\n{victims}\n**{total_destroyed} {JOPACOIN_EMOTE} burned**.{shield} You claim **{bounty} {JOPACOIN_EMOTE}** from the ash.\n(cost: {} {JOPACOIN_EMOTE}, balance: {})",
                     spec.cost,
                     balance_after_purchase + bounty
                 ))
@@ -1434,7 +1468,7 @@ impl ShopInteractionHandler {
                     .map_err(|error| error.to_string())?
                     .is_none()
                 {
-                    return Err(format!("<@{}> is not registered.", target.id));
+                    return Err(format!("{} is not registered.", target.display_name));
                 }
                 let repository = self.repository.clone();
                 let target_id = target.id;
@@ -1447,8 +1481,8 @@ impl ShopInteractionHandler {
                     .await?;
                 let Some(info) = info else {
                     return Ok(format!(
-                        "🏝️🔍 **INSIGHT** — <@{}> hasn't started digging.\n(cost: {} {JOPACOIN_EMOTE}, balance: {new_balance})",
-                        target.id, spec.cost
+                        "🏝️🔍 **INSIGHT** — {} hasn't started digging.\n(cost: {} {JOPACOIN_EMOTE}, balance: {new_balance})",
+                        target.display_name, spec.cost
                     ));
                 };
                 let catalog = artifact_catalog()
@@ -1465,7 +1499,7 @@ impl ShopInteractionHandler {
                         .join(", ")
                 };
                 Ok(format!(
-                    "🏝️🔍 **INSIGHT** — <@{user_id}> reads the threads of fate.\n**{}** depth `{}` luminosity `{}` prestige `{}`\nEquipped relics: {relics}\n(cost: {} {JOPACOIN_EMOTE}, balance: {new_balance})",
+                    "🏝️🔍 **INSIGHT** — {user_name} reads the threads of fate.\n**{}** depth `{}` luminosity `{}` prestige `{}`\nEquipped relics: {relics}\n(cost: {} {JOPACOIN_EMOTE}, balance: {new_balance})",
                     target.display_name,
                     info.depth,
                     info.luminosity,
@@ -1480,7 +1514,7 @@ impl ShopInteractionHandler {
                     })
                     .await?;
                 Ok(format!(
-                    "🌲🌱 **SAPLING** — <@{user_id}> accelerates growth.\n`/dig` cooldown reduced by {}m.\n(cost: {} {JOPACOIN_EMOTE}, balance: {new_balance})",
+                    "🌲🌱 **SAPLING** — {user_name} accelerates growth.\n`/dig` cooldown reduced by {}m.\n(cost: {} {JOPACOIN_EMOTE}, balance: {new_balance})",
                     shaved / 60,
                     spec.cost
                 ))
@@ -1500,7 +1534,7 @@ impl ShopInteractionHandler {
                     })
                     .await?;
                 Ok(format!(
-                    "🌾🕊️ **REPRIEVE** — <@{user_id}> raises a rolling ward.\nRecovered **{recovered} {JOPACOIN_EMOTE}** from eligible losses in the past 24h. Remaining capacity protects 50% of hostile losses for 24h, up to **25 {JOPACOIN_EMOTE}** total.\n(cost: {} {JOPACOIN_EMOTE}, balance: {})",
+                    "🌾🕊️ **REPRIEVE** — {user_name} raises a rolling ward.\nRecovered **{recovered} {JOPACOIN_EMOTE}** from eligible losses in the past 24h. Remaining capacity protects 50% of hostile losses for 24h, up to **25 {JOPACOIN_EMOTE}** total.\n(cost: {} {JOPACOIN_EMOTE}, balance: {})",
                     spec.cost,
                     new_balance + recovered
                 ))
@@ -1532,7 +1566,7 @@ impl ShopInteractionHandler {
                     String::new()
                 };
                 Ok(format!(
-                    "🌿💀 **SOUL HARVEST** — <@{user_id}> drains the living!\nDrained up to **3 {JOPACOIN_EMOTE}** from **{}** players. Gained **{total} {JOPACOIN_EMOTE}**.{shield}\n(cost: {} {JOPACOIN_EMOTE}, balance: {})",
+                    "🌿💀 **SOUL HARVEST** — {user_name} drains the living!\nDrained up to **3 {JOPACOIN_EMOTE}** from **{}** players. Gained **{total} {JOPACOIN_EMOTE}**.{shield}\n(cost: {} {JOPACOIN_EMOTE}, balance: {})",
                     eligible.len(),
                     spec.cost,
                     balance_after_purchase + total
@@ -1554,7 +1588,7 @@ impl ShopInteractionHandler {
                 .await
                 .map_err(|_| "Could not pack the cache; refunded.".to_owned())?;
                 Ok(format!(
-                    "⛰️🧨 **DYNAMITE CACHE** — <@{user_id}> packs the next 3 digs hot.\nYield +75% on your next 3 swings.\n(cost: {} {JOPACOIN_EMOTE}, balance: {new_balance})",
+                    "⛰️🧨 **DYNAMITE CACHE** — {user_name} packs the next 3 digs hot.\nYield +75% on your next 3 swings.\n(cost: {} {JOPACOIN_EMOTE}, balance: {new_balance})",
                     spec.cost
                 ))
             }
@@ -1610,7 +1644,7 @@ impl ShopInteractionHandler {
                 })
                 .await?;
                 Ok(format!(
-                    "{emoji} **{title}** — <@{user_id}> reclaims {reward} {JOPACOIN_EMOTE}.\n({percent} in the past 24h, capped at 120. Cost: {} {JOPACOIN_EMOTE}, balance: {})",
+                    "{emoji} **{title}** — {user_name} reclaims {reward} {JOPACOIN_EMOTE}.\n({percent} in the past 24h, capped at 120. Cost: {} {JOPACOIN_EMOTE}, balance: {})",
                     spec.cost,
                     new_balance + reward
                 ))
@@ -1622,7 +1656,7 @@ impl ShopInteractionHandler {
                 .await
                 .map_err(|_| "Could not raise the ward; refunded.".to_owned())?;
                 Ok(format!(
-                    "🌾🛡️ **AEGIS** — <@{user_id}> raises a fortified ward.\nFor 24h, it fully absorbs up to **75 {JOPACOIN_EMOTE}** of hostile losses (or one non-JC sabotage).\n(cost: {} {JOPACOIN_EMOTE}, balance: {new_balance})",
+                    "🌾🛡️ **AEGIS** — {user_name} raises a fortified ward.\nFor 24h, it fully absorbs up to **75 {JOPACOIN_EMOTE}** of hostile losses (or one non-JC sabotage).\n(cost: {} {JOPACOIN_EMOTE}, balance: {new_balance})",
                     spec.cost
                 ))
             }
@@ -1636,8 +1670,8 @@ impl ShopInteractionHandler {
                 .await
                 .map_err(|_| "Could not seal the pact; refunded.".to_owned())?;
                 Ok(format!(
-                    "🌿🩸 **BLOOD PACT** — <@{user_id}> marks <@{}> for skim.\nFor 24h, you receive 25% of {}'s match/wheel/dig earnings, with no cap.\n(cost: {} {JOPACOIN_EMOTE}, balance: {new_balance})",
-                    target.id, target.display_name, spec.cost
+                    "🌿🩸 **BLOOD PACT** — {user_name} marks {} for skim. <@{}>\nFor 24h, you receive 25% of {}'s match/wheel/dig earnings, with no cap.\n(cost: {} {JOPACOIN_EMOTE}, balance: {new_balance})",
+                    target.display_name, target.id, target.display_name, spec.cost
                 ))
             }
             "wildfire" => {
@@ -1674,7 +1708,7 @@ impl ShopInteractionHandler {
                     String::new()
                 };
                 Ok(format!(
-                    "⛰️🔥🔥 **WILDFIRE** — <@{user_id}> consumes the day's color in flame.\nDrained **{total} {JOPACOIN_EMOTE}** from {} players. You claim **{gain} {JOPACOIN_EMOTE}** of the harvest.{shield}\n(cost: {} {JOPACOIN_EMOTE}, mana spent, balance: {})",
+                    "⛰️🔥🔥 **WILDFIRE** — {user_name} consumes the day's color in flame.\nDrained **{total} {JOPACOIN_EMOTE}** from {} players. You claim **{gain} {JOPACOIN_EMOTE}** of the harvest.{shield}\n(cost: {} {JOPACOIN_EMOTE}, mana spent, balance: {})",
                     eligible.len(),
                     spec.cost,
                     new_balance + gain
@@ -1687,7 +1721,7 @@ impl ShopInteractionHandler {
                 .await
                 .map_err(|_| "Could not weave the ward; refunded.".to_owned())?;
                 Ok(format!(
-                    "🏝️🜨 **COUNTERSPELL** — <@{user_id}> weaves a 24h ward.\nAll Pyroclasm / Soul Harvest / Sabotage / Blood Pact / Wildfire targeting you is repelled for the next 24 hours.\n(cost: {} {JOPACOIN_EMOTE}, mana spent, balance: {new_balance})",
+                    "🏝️🜨 **COUNTERSPELL** — {user_name} weaves a 24h ward.\nAll Pyroclasm / Soul Harvest / Sabotage / Blood Pact / Wildfire targeting you is repelled for the next 24 hours.\n(cost: {} {JOPACOIN_EMOTE}, mana spent, balance: {new_balance})",
                     spec.cost
                 ))
             }
@@ -1698,7 +1732,7 @@ impl ShopInteractionHandler {
                 .await
                 .map_err(|_| "Could not seed the overgrowth; refunded.".to_owned())?;
                 Ok(format!(
-                    "🌲🌳 **OVERGROWTH** — <@{user_id}> burns the day's mana into the soil.\nFor 12h: your next 10 digs get +10 JC and cave-in chance halved.\n(cost: {} {JOPACOIN_EMOTE}, mana spent, balance: {new_balance})",
+                    "🌲🌳 **OVERGROWTH** — {user_name} burns the day's mana into the soil.\nFor 12h: your next 10 digs get +10 JC and cave-in chance halved.\n(cost: {} {JOPACOIN_EMOTE}, mana spent, balance: {new_balance})",
                     spec.cost
                 ))
             }
@@ -1711,7 +1745,10 @@ impl ShopInteractionHandler {
                     .map_err(|error| error.to_string())?
                     .is_none()
                 {
-                    return Err(format!("<@{}> is not registered; refunded.", target.id));
+                    return Err(format!(
+                        "{} is not registered; refunded.",
+                        target.display_name
+                    ));
                 }
                 let ally_id = target.id;
                 self.settle_mana_effect(purchase_id, now, ult_refund, move |effects| {
@@ -1720,8 +1757,8 @@ impl ShopInteractionHandler {
                 .await
                 .map_err(|_| "Could not bind the sanctuary; refunded.".to_owned())?;
                 Ok(format!(
-                    "🌾🕊️ **SANCTUARY** — <@{user_id}> shelters <@{}>.\nFor 24h, both of you share **150 {JOPACOIN_EMOTE}** of full hostile-loss protection and non-JC PvP immunity.\n(cost: {} {JOPACOIN_EMOTE}, mana spent, balance: {new_balance})",
-                    target.id, spec.cost
+                    "🌾🕊️ **SANCTUARY** — {user_name} shelters {}. <@{}>\nFor 24h, both of you share **150 {JOPACOIN_EMOTE}** of full hostile-loss protection and non-JC PvP immunity.\n(cost: {} {JOPACOIN_EMOTE}, mana spent, balance: {new_balance})",
+                    target.display_name, target.id, spec.cost
                 ))
             }
             "dark_bargain" => {
@@ -1738,7 +1775,7 @@ impl ShopInteractionHandler {
                 .await
                 .map_err(|_| "Could not strike the bargain; refunded.".to_owned())?;
                 Ok(format!(
-                    "🌿💀 **DARK BARGAIN** — <@{user_id}> signs in red ink.\n+800 {JOPACOIN_EMOTE} now. 700 due in 7 days. Default: -1600 + bankruptcy +5 matches.\n(cost: {} {JOPACOIN_EMOTE}, mana spent, balance: {})",
+                    "🌿💀 **DARK BARGAIN** — {user_name} signs in red ink.\n+800 {JOPACOIN_EMOTE} now. 700 due in 7 days. Default: -1600 + bankruptcy +5 matches.\n(cost: {} {JOPACOIN_EMOTE}, mana spent, balance: {})",
                     spec.cost,
                     new_balance + DARK_BARGAIN_PRINCIPAL
                 ))
@@ -1956,6 +1993,7 @@ impl ShopInteractionHandler {
         product: SimpleProduct,
     ) -> Result<(), InteractionHandlerError> {
         let cost = product.cost(&self.config);
+        let user_name = context.user_display_name.clone();
         let Some(player) = self.load_player(context.user_id, context.guild_id).await? else {
             let copy = if matches!(
                 product,
@@ -2009,7 +2047,7 @@ impl ShopInteractionHandler {
         let (title, description, color, footer, thumbnail, field) = match product {
             SimpleProduct::JopaCoin => (
                 "🪙 Jopa Coin(TM) Minted!",
-                format!("<@{user_id}> has minted a **Jopa Coin(TM)**!"),
+                format!("{user_name} has minted a **Jopa Coin(TM)**!"),
                 JOPA_COIN_COLOR,
                 format!("Cost: {cost} jopacoin"),
                 None,
@@ -2017,9 +2055,7 @@ impl ShopInteractionHandler {
             ),
             SimpleProduct::MysteryGift => (
                 "🎁 Arcana/Immortal Gift Redeemed!",
-                format!(
-                    "<@{user_id}> has redeemed a **random Arcana or Immortal** of pf's choice!"
-                ),
+                format!("{user_name} has redeemed a **random Arcana or Immortal** of pf's choice!"),
                 0x9B_59_B6,
                 format!("Cost: {cost} jopacoin"),
                 None,
@@ -2082,8 +2118,8 @@ impl ShopInteractionHandler {
                         10
                     };
                     template
-                        .replace("{user}", &format!("<@{user_id}>"))
-                        .replace("{target}", &format!("<@{}>", target.id))
+                        .replace("{user}", &user_name)
+                        .replace("{target}", &target.display_name)
                         .replace("{cost}", &cost.to_string())
                         .replace("{emote}", JOPACOIN_EMOTE)
                         .replace("{ratio}", &ratio.to_string())
@@ -2118,7 +2154,7 @@ impl ShopInteractionHandler {
                 (
                     "WEALTH ANNOUNCEMENT",
                     format!(
-                        "*{opening}*\n\n━━━━━━━━━━━━━━━━━━━━━━━━━\n\n<@{user_id}> has\n\n**{new_balance}** {JOPACOIN_EMOTE}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━"
+                        "*{opening}*\n\n━━━━━━━━━━━━━━━━━━━━━━━━━\n\n{user_name} has\n\n**{new_balance}** {JOPACOIN_EMOTE}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━"
                     ),
                     BOUNTY_HUNTER_ANNOUNCE_COLOR,
                     format!("This flex cost {cost} jopacoin"),
@@ -2292,10 +2328,8 @@ impl ShopInteractionHandler {
         }
         responder
             .followup(
-                InteractionResponse::message(format!("<@{}>", context.user_id))
-                    .with_user_mentions(vec![
-                        u64::try_from(context.user_id).map_err(|_| "invalid user id")?,
-                    ])
+                InteractionResponse::message(context.user_display_name.clone())
+                    .without_mentions()
                     .embed(embed),
             )
             .await
@@ -2703,7 +2737,8 @@ impl ShopInteractionHandler {
                     .embed(
                         InteractionEmbed::titled("Rating Recalibration")
                             .description(format!(
-                                "<@{user_id}> has recalibrated their rating!\n\nTheir rating deviation has been reset — expect bigger rating swings for the next ~20 games."
+                                "{} has recalibrated their rating!\n\nTheir rating deviation has been reset — expect bigger rating swings for the next ~20 games.",
+                                context.user_display_name
                             ))
                             .color(0xE7_4C_3C)
                             .thumbnail("https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react/heroes/bounty_hunter.png")
@@ -3142,7 +3177,7 @@ fn user_option(context: &CommandContext, name: &str) -> Result<Option<UserOption
         .rendered_user_names
         .get(&user.id)
         .cloned()
-        .unwrap_or_else(|| user.display_name_or_id());
+        .unwrap_or_else(|| user.readable_display_name());
     Ok(Some(UserOption {
         id: user.id,
         unsigned_id: user.raw_id,
