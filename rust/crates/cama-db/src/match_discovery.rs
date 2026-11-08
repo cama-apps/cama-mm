@@ -194,6 +194,11 @@ impl MatchDiscoveryRepository {
             return Ok(false);
         }
 
+        request_replay_for_cleared_fantasy(
+            &transaction,
+            &[match_id],
+            &format!("enrichment_wipe:{match_id}"),
+        )?;
         clear_dependent_enrichment(&transaction, &[match_id])?;
         if let Some(guild_id) = guild_id {
             transaction.execute(
@@ -321,6 +326,7 @@ impl MatchDiscoveryRepository {
             ),
             [guild_id],
         )?;
+        request_replay_for_cleared_fantasy(&transaction, &match_ids, "enrichment_wipe:all")?;
         clear_dependent_enrichment(&transaction, &match_ids)?;
         let placeholders = repeat_placeholders(match_ids.len());
         let sql = format!(
@@ -385,6 +391,54 @@ fn clear_match_enrichment_sql() -> &'static str {
             enrichment_source = NULL,
             enrichment_confidence = NULL,
             parsed_refresh_attempts = 0"
+}
+
+/// A complete fantasy set weights its match in the OpenSkill replay, so
+/// clearing one changes what a replay derives from that match on. Record that
+/// durably before the fantasy points are cleared: a later replay must not
+/// resume from snapshots that still carry the old weights. A pending
+/// correction keeps its reason, which already forces a full replay.
+fn request_replay_for_cleared_fantasy(
+    transaction: &rusqlite::Transaction<'_>,
+    match_ids: &[i64],
+    reason: &str,
+) -> Result<(), rusqlite::Error> {
+    if match_ids.is_empty() {
+        return Ok(());
+    }
+    let placeholders = repeat_placeholders(match_ids.len());
+    let guild_ids = {
+        let mut statement = transaction.prepare(&format!(
+            "SELECT DISTINCT m.guild_id FROM matches m
+              WHERE m.match_id IN ({placeholders})
+                AND (SELECT COUNT(*) FROM match_participants mp
+                      WHERE mp.match_id = m.match_id) = 10
+                AND (SELECT COUNT(mp.fantasy_points) FROM match_participants mp
+                      WHERE mp.match_id = m.match_id) = 10"
+        ))?;
+        statement
+            .query_map(params_from_iter(match_ids.iter().copied()), |row| {
+                row.get::<_, i64>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for guild_id in guild_ids {
+        transaction.execute(
+            "INSERT INTO openskill_replay_jobs (
+                 guild_id, reason, requested_at, last_error
+             ) VALUES (?1, ?2, CURRENT_TIMESTAMP, NULL)
+             ON CONFLICT(guild_id) DO UPDATE SET
+                 reason = CASE
+                     WHEN substr(openskill_replay_jobs.reason, 1, 17) = 'match_correction:'
+                         THEN openskill_replay_jobs.reason
+                     ELSE excluded.reason
+                 END,
+                 requested_at = excluded.requested_at,
+                 last_error = NULL",
+            params![guild_id, reason],
+        )?;
+    }
+    Ok(())
 }
 
 fn clear_dependent_enrichment(
