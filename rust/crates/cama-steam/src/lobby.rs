@@ -8,13 +8,15 @@
 //! [`DotaSteamClient::subscribe`].
 
 use crate::{AuthenticatedSteam, SO_TYPE_LOBBY, SteamAuth, SteamAuthConfig};
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use std::fmt::{Debug, Formatter};
 use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use steam_vent::message::{EncodableMessage, MalformedBody};
-use steam_vent::{ConnectionTrait, GameCoordinator, NetMessage, NetMessageHeader, NetworkError};
+use steam_vent::{
+    ConnectionTrait, GameCoordinator, NetMessage, NetMessageHeader, NetworkError, RawNetMessage,
+};
 use steam_vent_proto_common::protobuf::{Enum, EnumOrUnknown, Message, MessageField};
 use steam_vent_proto_dota2::base_gcmessages::CMsgInviteToLobby;
 use steam_vent_proto_dota2::dota_gcmessages_client::{
@@ -40,7 +42,7 @@ use steam_vent_proto_dota2::gcsdk_gcmessages::{
 };
 use steam_vent_proto_dota2::gcsystemmsgs::{EGCBaseClientMsg, ESOMsg};
 use thiserror::Error;
-use tokio::sync::{Mutex, RwLock, broadcast, oneshot};
+use tokio::sync::{Mutex, RwLock, broadcast};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tracing::warn;
@@ -606,6 +608,7 @@ struct ClientState {
     // Keep milestones through an unsubscribe/resubscribe of the same lobby.
     // A different lobby ID replaces this, bounding retained history to one lobby.
     lobby_launch_history: Option<(u64, LobbyLaunchHistory)>,
+    cache_versions: std::collections::BTreeMap<(u32, u64), u64>,
     lobby_observed_at: Option<Instant>,
     lobby_refresh_requested_at: Option<Instant>,
     welcome_generation: u64,
@@ -613,7 +616,31 @@ struct ClientState {
 }
 
 impl ClientState {
+    fn accept_lobby_version(
+        &mut self,
+        owner: Option<&CMsgSOIDOwner>,
+        lobby_id: Option<u64>,
+        version: Option<u64>,
+    ) -> bool {
+        let Some(version) = version else { return true };
+        let key = owner
+            .and_then(|owner| owner.type_.zip(owner.id))
+            .or_else(|| lobby_id.map(|id| (SO_OWNER_LOBBY, id)));
+        let Some(key) = key else { return true };
+        if self
+            .cache_versions
+            .get(&key)
+            .is_some_and(|old| *old > version)
+        {
+            return false;
+        }
+        self.cache_versions.insert(key, version);
+        true
+    }
+
     fn observe_lobby(&mut self, lobby: &mut LobbySnapshot) {
+        self.cache_versions
+            .retain(|(kind, id), _| *kind != SO_OWNER_LOBBY || *id == lobby.lobby_id);
         lobby.retain_launch_history(self.lobby_launch_history.as_ref());
         log_lobby_transition(self.lobby.as_ref(), lobby);
         self.lobby_launch_history = Some((lobby.lobby_id, lobby.launch_history.clone()));
@@ -702,24 +729,24 @@ impl DotaSteamClient {
         let steam_id = auth.connection.steam_id();
         let own_steam_id = steam_id.steam64();
         let own_account_id = steam_id.account_id();
-        let (gc, welcome) = crate::handshake::connect(&auth.connection).await?;
+        // One envelope subscription preserves ordering across GC message kinds.
+        // Register before admission so updates adjacent to Welcome are retained.
+        let messages = auth.connection.on::<crate::handshake::FromGc>();
+        let (gc, _welcome) = crate::handshake::connect(&auth.connection).await?;
         let (events, _) = broadcast::channel(EVENT_BUFFER);
         let state = Arc::new(RwLock::new(ClientState {
             own_steam_id,
             status: CacheStatus::Hydrating,
             lobby: None,
             lobby_launch_history: None,
+            cache_versions: Default::default(),
             welcome_generation: 0,
             welcome_observed_at: None,
             lobby_observed_at: None,
             lobby_refresh_requested_at: None,
         }));
         let gc = Arc::new(Mutex::new(gc));
-        let (watcher_ready, watcher_start) = oneshot::channel();
-        // Register all message streams before processing the handshake result.
-        // GameCoordinator's filter broadcasts each message to subscribers and
-        // drops messages that arrive before a kind subscription exists.
-        let watcher = spawn_watchers(&gc, &state, &events, watcher_start).await;
+        let watcher = spawn_watchers(messages, &state, &events);
         let client = Self {
             _connection: auth.connection,
             gc,
@@ -731,15 +758,7 @@ impl DotaSteamClient {
             command_timeout: INITIAL_CACHE_TIMEOUT,
         };
 
-        // Dota commonly includes the initial SOCache snapshot in the welcome
-        // envelope itself.  It is not replayed through GameCoordinator's
-        // message streams, so hydrate it explicitly before waiting for ready.
-        apply_welcome(welcome, &client.state, &client.events).await;
-        // Do not let a post-welcome SOCache update race the welcome snapshot.
-        // The streams were registered above, so messages remain eligible for
-        // delivery while the initial envelope is applied; only their state
-        // handlers are gated until that ordering point is complete.
-        let _ = watcher_ready.send(());
+        // The same ordered stream applies Welcome and every subsequent update.
         client.wait_for_initial_cache().await?;
         Ok(client)
     }
@@ -946,6 +965,47 @@ impl DotaSteamClient {
         self.send(request).await
     }
 
+    /// Send a launch only while the exact authorized observation remains fresh.
+    /// Hold the cache read lock through enqueueing so an update cannot replace
+    /// the checked state between validation and the command send.
+    pub async fn launch_lobby_checked(
+        &self,
+        lobby_id: u64,
+        client_version: u32,
+        max_age: Duration,
+        predicate: impl FnOnce(&LobbySnapshot) -> bool + Send,
+    ) -> Result<bool, DotaSteamError> {
+        let gc = self.gc.lock().await;
+        let state = self.state.read().await;
+        if !authorized_lobby_action(&state, self.own_steam_id, lobby_id, max_age, predicate) {
+            return Ok(false);
+        }
+        let mut request = CMsgPracticeLobbyLaunch::new();
+        request.set_client_version(client_version);
+        gc.send(request).await.map_err(DotaSteamError::from)?;
+        drop(state);
+        Ok(true)
+    }
+
+    /// Destroy only the fresh owned snapshot authorized by the caller.
+    pub async fn destroy_lobby_checked(
+        &self,
+        lobby_id: u64,
+        max_age: Duration,
+        predicate: impl FnOnce(&LobbySnapshot) -> bool + Send,
+    ) -> Result<bool, DotaSteamError> {
+        let gc = self.gc.lock().await;
+        let state = self.state.read().await;
+        if !authorized_lobby_action(&state, self.own_steam_id, lobby_id, max_age, predicate) {
+            return Ok(false);
+        }
+        gc.send(DestroyLobbyWire::default())
+            .await
+            .map_err(DotaSteamError::from)?;
+        drop(state);
+        Ok(true)
+    }
+
     /// Leave the current lobby as the authenticated account.
     pub async fn leave_lobby(&self, lobby_id: u64) -> Result<(), DotaSteamError> {
         self.require_lobby(lobby_id).await?;
@@ -1064,6 +1124,19 @@ impl DotaSteamClient {
         .await
         .map_err(|_| DotaSteamError::Timeout)?
     }
+}
+
+fn authorized_lobby_action(
+    state: &ClientState,
+    own_steam_id: u64,
+    lobby_id: u64,
+    max_age: Duration,
+    predicate: impl FnOnce(&LobbySnapshot) -> bool,
+) -> bool {
+    state.lobby_observation_is_fresh(max_age)
+        && state.lobby.as_ref().is_some_and(|lobby| {
+            lobby.lobby_id == lobby_id && lobby.leader_steam_id == own_steam_id && predicate(lobby)
+        })
 }
 
 fn creation_session_is_fresh(state: &ClientState) -> Result<bool, DotaSteamError> {
@@ -1204,145 +1277,102 @@ fn lobby_config_matches(config: &LobbyConfig, snapshot: &LobbySnapshot) -> bool 
         && (config.league_id == 0 || snapshot.league_id == Some(config.league_id))
 }
 
-async fn spawn_watchers(
-    gc: &Arc<Mutex<GameCoordinator>>,
+fn spawn_watchers(
+    messages: impl Stream<Item = Result<crate::handshake::FromGc, NetworkError>> + Send + 'static,
     state: &Arc<RwLock<ClientState>>,
     events: &broadcast::Sender<DotaSteamEvent>,
-    watcher_start: oneshot::Receiver<()>,
 ) -> WatcherTask {
-    let gc = Arc::clone(gc);
     let state = Arc::clone(state);
     let events = events.clone();
-    // Constructing these receivers is the synchronization point that
-    // prevents a post-welcome SOCache update from being lost between the
-    // handshake and watcher task startup.
-    let (
-        mut welcomes,
-        mut connection_status,
-        mut suspended,
-        mut subscribed,
-        mut up_to_date,
-        mut multiple,
-        mut single_create,
-        mut single_update,
-        mut single_destroy,
-        mut unsubscribed,
-        mut scoreboard,
-    ) = {
-        let gc = gc.lock().await;
-        (
-            gc.on::<CMsgClientWelcome>(),
-            gc.on::<ConnectionStatusWire>(),
-            gc.on::<CMsgClientSuspended>(),
-            gc.on::<CMsgSOCacheSubscribed>(),
-            gc.on::<CMsgSOCacheSubscribedUpToDate>(),
-            gc.on::<SOMultipleObjectsWire>(),
-            gc.on::<SOSingleObjectCreateWire>(),
-            gc.on::<SOSingleObjectUpdateWire>(),
-            gc.on::<SOSingleObjectDestroyWire>(),
-            gc.on::<CMsgSOCacheUnsubscribed>(),
-            gc.on::<LiveScoreboardWire>(),
-        )
-    };
     let task = tokio::spawn(async move {
-        // The initial CMsgClientWelcome snapshot is applied by the caller.
-        // Keep all stream handlers paused until that snapshot is authoritative.
-        if watcher_start.await.is_err() {
-            return;
-        }
+        futures_util::pin_mut!(messages);
         let reason = loop {
-            tokio::select! {
-                message = welcomes.next() => {
-                    match message {
-                        Some(Ok(message)) => apply_welcome(message, &state, &events).await,
-                        Some(Err(error)) => break error.to_string(),
-                        None => break "Dota coordinator message stream closed".to_owned(),
-                    }
+            let message = match messages.next().await {
+                Some(Ok(message)) => message.0,
+                Some(Err(error)) => break error.to_string(),
+                None => break "Dota coordinator message stream closed".to_owned(),
+            };
+            if message.appid() != crate::DOTA_APP_ID {
+                continue;
+            }
+            let expected_kind = message.msgtype() & 0x7fff_ffff;
+            let expected_protobuf = message.msgtype() & 0x8000_0000 != 0;
+            let raw = match RawNetMessage::read(message.payload().to_vec()) {
+                Ok(raw)
+                    if raw.kind.0 as u32 == expected_kind
+                        && raw.is_protobuf == expected_protobuf =>
+                {
+                    raw
                 }
-                message = connection_status.next() => {
-                    match message {
-                        Some(Ok(message)) => {
-                            if let Some(reason) = lost_session_reason(&message.0) {
-                                break reason;
-                            }
-                        }
-                        Some(Err(error)) => break error.to_string(),
-                        None => break "Dota coordinator message stream closed".to_owned(),
-                    }
-                }
-                message = suspended.next() => {
-                    break match message {
-                        Some(Ok(message)) => DotaSteamError::SessionSuspended {
-                            time_end: message.time_end,
-                        }.to_string(),
-                        Some(Err(error)) => error.to_string(),
-                        None => "Dota coordinator message stream closed".to_owned(),
-                    };
-                }
-                message = subscribed.next() => {
-                    match message {
-                        Some(Ok(message)) => apply_subscribed(message, &state, &events).await,
-                        Some(Err(error)) => break error.to_string(),
-                        None => break "Dota coordinator message stream closed".to_owned(),
-                    }
-                }
-                message = up_to_date.next() => {
-                    match message {
-                        Some(Ok(_message)) => apply_cache_up_to_date(&state, &events).await,
-                        Some(Err(error)) => break error.to_string(),
-                        None => break "Dota coordinator message stream closed".to_owned(),
-                    }
-                }
-                message = multiple.next() => {
-                    match message {
-                        Some(Ok(message)) => apply_multiple(message, &state, &events).await,
-                        Some(Err(error)) => break error.to_string(),
-                        None => break "Dota coordinator message stream closed".to_owned(),
-                    }
-                }
-                message = single_create.next() => {
-                    match message {
-                        Some(Ok(message)) => apply_single(message.0, &state, &events).await,
-                        Some(Err(error)) => break error.to_string(),
-                        None => break "Dota coordinator message stream closed".to_owned(),
-                    }
-                }
-                message = single_update.next() => {
-                    match message {
-                        Some(Ok(message)) => apply_single(message.0, &state, &events).await,
-                        Some(Err(error)) => break error.to_string(),
-                        None => break "Dota coordinator message stream closed".to_owned(),
-                    }
-                }
-                message = single_destroy.next() => {
-                    match message {
-                        Some(Ok(message)) => apply_single(message.0, &state, &events).await,
-                        Some(Err(error)) => break error.to_string(),
-                        None => break "Dota coordinator message stream closed".to_owned(),
-                    }
-                }
-                message = unsubscribed.next() => {
-                    match message {
-                        Some(Ok(message)) => apply_unsubscribed(message, &state, &events).await,
-                        Some(Err(error)) => break error.to_string(),
-                        None => break "Dota coordinator message stream closed".to_owned(),
-                    }
-                }
-                message = scoreboard.next() => {
-                    match message {
-                        Some(Ok(message)) => {
-                            let scoreboard = map_live_scoreboard(&message.0);
-                            let _ = events.send(DotaSteamEvent::LiveScoreboard(scoreboard));
-                        }
-                        Some(Err(error)) => break error.to_string(),
-                        None => break "Dota coordinator message stream closed".to_owned(),
-                    }
-                }
+                Ok(_) => break NetworkError::InvalidHeader.to_string(),
+                Err(error) => break error.to_string(),
+            };
+            if let Err(reason) = apply_gc_message(raw, &state, &events).await {
+                break reason;
             }
         };
         emit_disconnect(&state, &events, reason).await;
     });
     WatcherTask(task)
+}
+
+async fn apply_gc_message(
+    raw: RawNetMessage,
+    state: &Arc<RwLock<ClientState>>,
+    events: &broadcast::Sender<DotaSteamEvent>,
+) -> Result<(), String> {
+    macro_rules! decode {
+        ($ty:ty) => {
+            raw.into_message::<$ty>()
+                .map_err(|error| error.to_string())?
+        };
+    }
+    let kind = raw.kind;
+    let valid = if kind == CMsgClientWelcome::KIND {
+        apply_welcome(decode!(CMsgClientWelcome), state, events).await
+    } else if kind == ConnectionStatusWire::KIND {
+        if let Some(reason) = lost_session_reason(&decode!(ConnectionStatusWire).0) {
+            let state = state.read().await;
+            // The ordered subscription starts before admission. Retry/queue
+            // statuses preceding the first Welcome are historical handshake
+            // traffic, whereas any loss after hydration invalidates the cache.
+            if state.status != CacheStatus::Hydrating || state.welcome_generation != 0 {
+                return Err(reason);
+            }
+        }
+        true
+    } else if kind == CMsgClientSuspended::KIND {
+        return Err(DotaSteamError::SessionSuspended {
+            time_end: decode!(CMsgClientSuspended).time_end,
+        }
+        .to_string());
+    } else if kind == CMsgSOCacheSubscribed::KIND {
+        apply_subscribed(decode!(CMsgSOCacheSubscribed), state, events).await
+    } else if kind == CMsgSOCacheSubscribedUpToDate::KIND {
+        let _ = decode!(CMsgSOCacheSubscribedUpToDate);
+        apply_cache_up_to_date(state, events).await;
+        true
+    } else if kind == SOMultipleObjectsWire::KIND {
+        apply_multiple(decode!(SOMultipleObjectsWire), state, events).await
+    } else if kind == SOSingleObjectCreateWire::KIND {
+        apply_single(decode!(SOSingleObjectCreateWire).0, state, events).await
+    } else if kind == SOSingleObjectUpdateWire::KIND {
+        apply_single(decode!(SOSingleObjectUpdateWire).0, state, events).await
+    } else if kind == SOSingleObjectDestroyWire::KIND {
+        apply_single_destroy(decode!(SOSingleObjectDestroyWire).0, state, events).await
+    } else if kind == CMsgSOCacheUnsubscribed::KIND {
+        apply_unsubscribed(decode!(CMsgSOCacheUnsubscribed), state, events).await;
+        true
+    } else if kind == LiveScoreboardWire::KIND {
+        let scoreboard = map_live_scoreboard(&decode!(LiveScoreboardWire).0);
+        let _ = events.send(DotaSteamEvent::LiveScoreboard(scoreboard));
+        true
+    } else {
+        true // Match-detail job replies are consumed by GameCoordinator.
+    };
+    valid
+        .then_some(())
+        .ok_or_else(|| "invalid Dota lobby cache payload".to_owned())
 }
 
 fn lost_session_reason(message: &CMsgConnectionStatus) -> Option<String> {
@@ -1367,7 +1397,7 @@ async fn apply_subscribed(
     message: CMsgSOCacheSubscribed,
     state: &Arc<RwLock<ClientState>>,
     events: &broadcast::Sender<DotaSteamEvent>,
-) {
+) -> bool {
     let mut lobby = None;
     let mut contains_lobby_type = false;
     for object_type in &message.objects {
@@ -1377,8 +1407,11 @@ async fn apply_subscribed(
         contains_lobby_type = true;
         for data in &object_type.object_data {
             match CSODOTALobby::parse_from_bytes(data) {
-                Ok(value) => lobby = Some(map_lobby(&value)),
-                Err(error) => warn!(error = %error, "could not decode initial Dota lobby object"),
+                Ok(value) if value.lobby_id() != 0 => lobby = Some(map_lobby(&value)),
+                _ => {
+                    invalidate_lobby_cache(state, events).await;
+                    return false;
+                }
             }
         }
     }
@@ -1386,6 +1419,15 @@ async fn apply_subscribed(
     let previous = {
         let mut state = state.write().await;
         let previous = state.lobby.as_ref().map(|lobby| lobby.lobby_id);
+        if contains_lobby_type
+            && !state.accept_lobby_version(
+                message.owner_soid.as_ref(),
+                lobby.as_ref().map(|lobby| lobby.lobby_id).or(previous),
+                message.version,
+            )
+        {
+            return true;
+        }
         state.status = CacheStatus::Ready;
         if contains_lobby_type {
             if let Some(lobby) = &mut lobby {
@@ -1408,17 +1450,29 @@ async fn apply_subscribed(
             None => {}
         }
     }
+    true
+}
+
+async fn invalidate_lobby_cache(
+    state: &Arc<RwLock<ClientState>>,
+    events: &broadcast::Sender<DotaSteamEvent>,
+) {
+    // Retain the last known identity for diagnostics, but never expose a
+    // decode failure as authoritative absence or a usable stale snapshot.
+    emit_disconnect(state, events, "invalid Dota lobby cache payload".to_owned()).await;
 }
 
 async fn apply_welcome(
     welcome: CMsgClientWelcome,
     state: &Arc<RwLock<ClientState>>,
     events: &broadcast::Sender<DotaSteamEvent>,
-) {
+) -> bool {
     let hydrated = !welcome.outofdate_subscribed_caches.is_empty()
         || !welcome.uptodate_subscribed_caches.is_empty();
     for cache in welcome.outofdate_subscribed_caches {
-        apply_subscribed(cache, state, events).await;
+        if !apply_subscribed(cache, state, events).await {
+            return false;
+        }
     }
     // A cache with a matching version is represented by a subscription check
     // in the welcome.  We do not keep a local cache between runs, so the
@@ -1434,6 +1488,7 @@ async fn apply_welcome(
         drop(state);
         let _ = events.send(DotaSteamEvent::CacheHydrated);
     }
+    true
 }
 
 async fn apply_cache_up_to_date(
@@ -1452,7 +1507,9 @@ async fn apply_multiple(
     message: SOMultipleObjectsWire,
     state: &Arc<RwLock<ClientState>>,
     events: &broadcast::Sender<DotaSteamEvent>,
-) {
+) -> bool {
+    let mut updates = Vec::new();
+    let mut removals = Vec::new();
     for object in message
         .0
         .objects_added
@@ -1463,33 +1520,117 @@ async fn apply_multiple(
             continue;
         }
         match CSODOTALobby::parse_from_bytes(object.object_data()) {
-            Ok(value) => apply_lobby(map_lobby(&value), state, events).await,
-            Err(error) => warn!(error = %error, "could not decode Dota lobby update"),
+            Ok(value) if value.lobby_id() != 0 => updates.push(map_lobby(&value)),
+            _ => {
+                invalidate_lobby_cache(state, events).await;
+                return false;
+            }
         }
     }
     for object in &message.0.objects_removed {
-        if object.type_id() == SO_TYPE_LOBBY {
-            clear_lobby(state, events).await;
+        if object.type_id() != SO_TYPE_LOBBY {
+            continue;
+        }
+        match CSODOTALobby::parse_from_bytes(object.object_data()) {
+            Ok(value) if value.lobby_id() != 0 => removals.push(value.lobby_id()),
+            _ => {
+                invalidate_lobby_cache(state, events).await;
+                return false;
+            }
         }
     }
+    let lobby_id = updates
+        .first()
+        .map(|lobby| lobby.lobby_id)
+        .or_else(|| removals.first().copied());
+    if lobby_id.is_some()
+        && !state.write().await.accept_lobby_version(
+            message.0.owner_soid.as_ref(),
+            lobby_id,
+            message.0.version,
+        )
+    {
+        return true;
+    }
+    for lobby in updates {
+        apply_lobby(lobby, state, events).await;
+    }
+    for lobby_id in removals {
+        clear_matching_lobby(lobby_id, state, events).await;
+    }
+    true
 }
 
 async fn apply_single(
     message: CMsgSOSingleObject,
     state: &Arc<RwLock<ClientState>>,
     events: &broadcast::Sender<DotaSteamEvent>,
-) {
+) -> bool {
     if message.type_id() != SO_TYPE_LOBBY {
+        return true;
+    }
+    let lobby = match CSODOTALobby::parse_from_bytes(message.object_data()) {
+        Ok(value) if value.lobby_id() != 0 => map_lobby(&value),
+        _ => {
+            invalidate_lobby_cache(state, events).await;
+            return false;
+        }
+    };
+    if state.write().await.accept_lobby_version(
+        message.owner_soid.as_ref(),
+        Some(lobby.lobby_id),
+        message.version,
+    ) {
+        apply_lobby(lobby, state, events).await;
+    }
+    true
+}
+
+async fn apply_single_destroy(
+    message: CMsgSOSingleObject,
+    state: &Arc<RwLock<ClientState>>,
+    events: &broadcast::Sender<DotaSteamEvent>,
+) -> bool {
+    if message.type_id() != SO_TYPE_LOBBY {
+        return true;
+    }
+    let lobby_id = match CSODOTALobby::parse_from_bytes(message.object_data()) {
+        Ok(value) if value.lobby_id() != 0 => value.lobby_id(),
+        _ => {
+            invalidate_lobby_cache(state, events).await;
+            return false;
+        }
+    };
+    if state.write().await.accept_lobby_version(
+        message.owner_soid.as_ref(),
+        Some(lobby_id),
+        message.version,
+    ) {
+        clear_matching_lobby(lobby_id, state, events).await;
+    }
+    true
+}
+
+async fn clear_matching_lobby(
+    lobby_id: u64,
+    state: &Arc<RwLock<ClientState>>,
+    events: &broadcast::Sender<DotaSteamEvent>,
+) {
+    let mut state = state.write().await;
+    if state
+        .lobby
+        .as_ref()
+        .is_none_or(|lobby| lobby.lobby_id != lobby_id)
+    {
         return;
     }
-    if message.has_object_data() && !message.object_data().is_empty() {
-        match CSODOTALobby::parse_from_bytes(message.object_data()) {
-            Ok(value) => apply_lobby(map_lobby(&value), state, events).await,
-            Err(error) => warn!(error = %error, "could not decode Dota single-object update"),
-        }
-    } else {
-        clear_lobby(state, events).await;
-    }
+    state.status = CacheStatus::Ready;
+    state.lobby_observed_at = None;
+    state.lobby = None;
+    drop(state);
+    let _ = events.send(DotaSteamEvent::LobbyCleared {
+        lobby_id: Some(lobby_id),
+    });
 }
 
 async fn apply_unsubscribed(
@@ -1546,6 +1687,7 @@ async fn apply_lobby(
     let _ = events.send(DotaSteamEvent::LobbyUpdated(lobby));
 }
 
+#[cfg(test)]
 async fn clear_lobby(state: &Arc<RwLock<ClientState>>, events: &broadcast::Sender<DotaSteamEvent>) {
     let previous = {
         let mut state = state.write().await;
@@ -2024,11 +2166,206 @@ mod tests {
             status: CacheStatus::Ready,
             lobby: Some(map_lobby(&lobby)),
             lobby_launch_history: None,
+            cache_versions: Default::default(),
             welcome_generation: 0,
             welcome_observed_at: None,
             lobby_observed_at: Some(Instant::now()),
             lobby_refresh_requested_at: None,
         }))
+    }
+
+    fn lobby_subscription(lobby: &CSODOTALobby, version: u64) -> CMsgSOCacheSubscribed {
+        let mut object =
+            steam_vent_proto_dota2::gcsdk_gcmessages::cmsg_socache_subscribed::SubscribedType::new(
+            );
+        object.set_type_id(SO_TYPE_LOBBY);
+        object.object_data.push(lobby.write_to_bytes().unwrap());
+        let mut message = CMsgSOCacheSubscribed::new();
+        message.set_version(version);
+        message.objects.push(object);
+        message
+    }
+
+    fn lobby_update(lobby: &CSODOTALobby, version: u64) -> CMsgSOSingleObject {
+        let mut message = CMsgSOSingleObject::new();
+        message.set_type_id(SO_TYPE_LOBBY);
+        message.set_version(version);
+        message.set_object_data(lobby.write_to_bytes().unwrap());
+        message
+    }
+
+    fn gc_envelope<Msg: NetMessage>(message: Msg) -> crate::handshake::FromGc {
+        assert!(Msg::IS_PROTOBUF);
+        let kind: steam_vent_proto_common::MsgKind = Msg::KIND.into();
+        let mut payload = (kind.0 as u32 | 0x8000_0000).to_le_bytes().to_vec();
+        payload.extend_from_slice(&0_u32.to_le_bytes());
+        message.write_body(&mut payload).unwrap();
+        crate::handshake::FromGc(
+            steam_vent_proto_steam::steammessages_clientserver_2::CMsgGCClient {
+                appid: Some(crate::DOTA_APP_ID),
+                msgtype: Some(kind.0 as u32 | if Msg::IS_PROTOBUF { 0x8000_0000 } else { 0 }),
+                payload: Some(payload),
+                ..Default::default()
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn ordered_gc_stream_preserves_fast_allocation_return_across_message_kinds() {
+        let state = ready_lobby_state();
+        state.write().await.status = CacheStatus::Hydrating;
+        let mut no_session = CMsgConnectionStatus::new();
+        no_session.set_status(GCConnectionStatus::GCConnectionStatus_NO_SESSION);
+        let admission_retry = gc_envelope(ConnectionStatusWire(no_session.clone()));
+        let disconnected = gc_envelope(ConnectionStatusWire(no_session));
+        let (events, mut receiver) = broadcast::channel(EVENT_BUFFER);
+        let mut lobby = CSODOTALobby::new();
+        lobby.set_lobby_id(7001);
+        lobby.set_state(csodotalobby::State::UI);
+        let mut welcome = CMsgClientWelcome::new();
+        welcome
+            .outofdate_subscribed_caches
+            .push(lobby_subscription(&lobby, 1));
+        let initial = gc_envelope(welcome);
+        lobby.set_state(csodotalobby::State::RUN);
+        lobby.set_match_id(888);
+        lobby.set_server_id(999);
+        let running = gc_envelope(SOSingleObjectUpdateWire(lobby_update(&lobby, 2)));
+        lobby.set_state(csodotalobby::State::UI);
+        lobby.clear_server_id();
+        let returned = gc_envelope(lobby_subscription(&lobby, 3));
+        let _watcher = spawn_watchers(
+            futures_util::stream::iter([
+                Ok(admission_retry),
+                Ok(initial),
+                Ok(running),
+                Ok(returned),
+                Ok(disconnected),
+            ]),
+            &state,
+            &events,
+        );
+        let (stages, reason) = timeout(Duration::from_secs(1), async {
+            let mut stages = Vec::new();
+            loop {
+                match receiver.recv().await.unwrap() {
+                    DotaSteamEvent::LobbyUpdated(lobby) => stages.push(lobby.state),
+                    DotaSteamEvent::TransportDisconnected { reason } => break (stages, reason),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            stages,
+            vec![LobbyState::Ui, LobbyState::Run, LobbyState::Ui]
+        );
+        assert!(reason.contains("session unavailable"), "{reason}");
+        let state = state.read().await;
+        assert_eq!(state.status, CacheStatus::Disconnected);
+        let current = state.lobby.as_ref().unwrap();
+        assert_eq!(current.state, LobbyState::Ui);
+        assert!(current.launch_history.allocation_observed);
+        assert_eq!(current.launch_history.match_id, Some(888));
+    }
+
+    #[tokio::test]
+    async fn older_subscription_and_destroy_cannot_replace_a_newer_running_observation() {
+        let state = ready_lobby_state();
+        let (events, _) = broadcast::channel(EVENT_BUFFER);
+        let mut lobby = CSODOTALobby::new();
+        lobby.set_lobby_id(7001);
+        lobby.set_state(csodotalobby::State::UI);
+        let old = lobby_subscription(&lobby, 1);
+        let old_destroy = lobby_update(&lobby, 1);
+        lobby.set_state(csodotalobby::State::RUN);
+        lobby.set_match_id(888);
+        lobby.set_server_id(999);
+        assert!(apply_single(lobby_update(&lobby, 2), &state, &events).await);
+        let observed_at = state.read().await.lobby_observed_at;
+        assert!(apply_subscribed(old, &state, &events).await);
+        assert!(apply_single_destroy(old_destroy, &state, &events).await);
+        let state = state.read().await;
+        assert_eq!(state.lobby.as_ref().unwrap().state, LobbyState::Run);
+        assert_eq!(state.lobby_observed_at, observed_at);
+    }
+
+    #[tokio::test]
+    async fn single_destroy_dispatch_removes_only_its_matching_lobby() {
+        for id in [7001, 7002] {
+            let state = ready_lobby_state();
+            let (events, _) = broadcast::channel(EVENT_BUFFER);
+            let mut key = CSODOTALobby::new();
+            key.set_lobby_id(id);
+            let raw = RawNetMessage::from_message(
+                NetMessageHeader::default(),
+                SOSingleObjectDestroyWire(lobby_update(&key, 1)),
+            )
+            .unwrap();
+            apply_gc_message(raw, &state, &events).await.unwrap();
+            assert_eq!(
+                state
+                    .read()
+                    .await
+                    .lobby
+                    .as_ref()
+                    .map(|lobby| lobby.lobby_id),
+                if id == 7001 { None } else { Some(7001) }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_subscription_is_unavailable_instead_of_authoritative_absence() {
+        for payload in [vec![0xff], Vec::new()] {
+            let state = ready_lobby_state();
+            let (events, mut receiver) = broadcast::channel(EVENT_BUFFER);
+            let mut lobby = CSODOTALobby::new();
+            lobby.set_lobby_id(7001);
+            let mut cache = lobby_subscription(&lobby, 1);
+            cache.objects[0].object_data = vec![payload];
+            // A later unrelated cache in this Welcome must not re-authorize it.
+            let mut welcome = CMsgClientWelcome::new();
+            welcome.outofdate_subscribed_caches = vec![cache, CMsgSOCacheSubscribed::new()];
+            assert!(!apply_welcome(welcome, &state, &events).await);
+            assert_eq!(state.read().await.status, CacheStatus::Disconnected);
+            assert_eq!(state.read().await.lobby.as_ref().unwrap().lobby_id, 7001);
+            assert!(matches!(
+                receiver.recv().await.unwrap(),
+                DotaSteamEvent::TransportDisconnected { .. }
+            ));
+            assert!(receiver.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn checked_actions_reject_changed_stale_foreign_and_unavailable_observations() {
+        let state = ready_lobby_state();
+        let mut state = state.write().await;
+        state.lobby.as_mut().unwrap().leader_steam_id = TEST_STEAM_ID;
+        let expected = state.lobby.clone().unwrap();
+        let authorized = |state: &ClientState| {
+            authorized_lobby_action(
+                state,
+                TEST_STEAM_ID,
+                7001,
+                Duration::from_secs(45),
+                |current| current == &expected,
+            )
+        };
+        assert!(authorized(&state));
+        state.lobby.as_mut().unwrap().state = LobbyState::Run;
+        assert!(!authorized(&state));
+        state.lobby = Some(expected.clone());
+        state.lobby_observed_at = Some(Instant::now() - Duration::from_secs(46));
+        assert!(!authorized(&state));
+        state.lobby_observed_at = Some(Instant::now());
+        state.lobby.as_mut().unwrap().leader_steam_id = TEST_STEAM_ID + 1;
+        assert!(!authorized(&state));
+        state.lobby = Some(expected.clone());
+        state.status = CacheStatus::Disconnected;
+        assert!(!authorized(&state));
     }
 
     #[tokio::test]
@@ -2716,6 +3053,7 @@ mod tests {
             status: CacheStatus::Hydrating,
             lobby: None,
             lobby_launch_history: None,
+            cache_versions: Default::default(),
             welcome_generation: 0,
             welcome_observed_at: None,
             lobby_observed_at: None,

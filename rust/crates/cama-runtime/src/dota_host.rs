@@ -78,7 +78,7 @@ pub enum LobbyStage {
     Postgame,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct HostLaunchHistory {
     pub allocation_observed: bool,
     pub gameplay_observed: bool,
@@ -86,7 +86,7 @@ pub struct HostLaunchHistory {
     pub conflicting_match_ids: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HostLobby {
     pub launch_history: HostLaunchHistory,
     pub id: u64,
@@ -108,6 +108,18 @@ pub struct HostLobby {
     pub match_id: Option<u64>,
     pub server_id: Option<u64>,
     pub winner: Option<String>,
+}
+
+fn lobby_is_unlaunched(lobby: &HostLobby) -> bool {
+    lobby.stage == LobbyStage::Gathering
+        && lobby.server_id.is_none()
+        && lobby.match_id.is_none()
+        && lobby.winner.is_none()
+        && matches!(lobby.game_state, None | Some(0))
+        && !lobby.launch_history.allocation_observed
+        && !lobby.launch_history.gameplay_observed
+        && lobby.launch_history.match_id.is_none()
+        && !lobby.launch_history.conflicting_match_ids
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -174,6 +186,26 @@ pub trait DotaHostPort: Send + Sync {
     async fn kick(&self, lobby_id: u64, account_id: u32) -> Result<(), String>;
     async fn launch(&self, lobby_id: u64) -> Result<(), String>;
     async fn destroy(&self, lobby_id: u64) -> Result<(), String>;
+    /// False guarantees that no command was sent. Production transports must
+    /// compare the authorized snapshot while holding their cache read lock.
+    async fn launch_observed(&self, expected: &HostLobby) -> Result<bool, String> {
+        if !self.betting_observation_fresh().await
+            || self.snapshot().await?.as_ref() != Some(expected)
+        {
+            return Ok(false);
+        }
+        self.launch(expected.id).await?;
+        Ok(true)
+    }
+    async fn destroy_observed(&self, expected: &HostLobby) -> Result<bool, String> {
+        if !self.betting_observation_fresh().await
+            || self.snapshot().await?.as_ref() != Some(expected)
+        {
+            return Ok(false);
+        }
+        self.destroy(expected.id).await?;
+        Ok(true)
+    }
     async fn match_details(&self, match_id: u64) -> Result<HostMatchDetails, String>;
 }
 
@@ -412,25 +444,41 @@ impl DotaHostWorker {
             state.recorded_match_id = Some(id);
             self.save(&mut record, &state, now).await?;
         }
-        if record.phase == Phase::NeedsReview && state.recorded_match_id.is_none() {
-            if state.resume_requested {
-                configuration::reset_retry(&mut state);
-                state.resume_requested = false;
-                state.cancel_requested = false;
-                state.recording_failures = 0;
+        if record.phase == Phase::NeedsReview && state.resume_requested {
+            configuration::reset_retry(&mut state);
+            state.resume_requested = false;
+            state.cancel_requested = false;
+            state.recording_failures = 0;
+            state.lobby_cleanup = Default::default();
+            record.last_error = None;
+            record.phase = if state.recorded_match_id.is_some() {
+                Phase::Finishing
+            } else if record.valve_match_id.is_some() {
+                Phase::Running
+            } else {
+                Phase::Creating
+            };
+            state.lobby_deadline = now.saturating_add(self.config.lobby_timeout_seconds as i64);
+            // A recorded session resumes cleanup with its original identities.
+            if state.recorded_match_id.is_none() && record.valve_match_id.is_none() {
+                state.create_requested_at = None;
+                state.launch_requested_at = None;
+            }
+            self.save(&mut record, &state, now).await?;
+        } else if record.phase == Phase::NeedsReview
+            && state.recorded_match_id.is_none()
+            && !state.cancel_requested
+        {
+            // Heal sessions paused by the old return-to-lobby branch, without
+            // bypassing review of conflicting identities, rosters or results.
+            if state.betting_closed
+                && record.valve_match_id.is_some()
+                && record.last_error.as_deref() == Some(failed_launch::RETURNED_GAME_REVIEW)
+            {
+                record.phase = Phase::Finishing;
                 record.last_error = None;
-                record.phase = if record.valve_match_id.is_some() {
-                    Phase::Running
-                } else {
-                    Phase::Creating
-                };
-                state.lobby_deadline = now.saturating_add(self.config.lobby_timeout_seconds as i64);
-                if record.valve_match_id.is_none() {
-                    state.create_requested_at = None;
-                    state.launch_requested_at = None;
-                }
                 self.save(&mut record, &state, now).await?;
-            } else if !state.cancel_requested {
+            } else {
                 self.monitor_review_betting(port, &mut record, &mut state, now)
                     .await?;
                 return Ok(());
@@ -476,11 +524,14 @@ impl DotaHostWorker {
             }
         }
         let server_launched = record.valve_match_id.is_some()
+            || state.server_id.is_some()
+            || state.allocation_observed_at.is_some()
+            || state.betting_closed
             || state.launch_requested_at.is_some()
             || matches!(record.phase, Phase::Running | Phase::Finishing)
             || lobby
                 .as_ref()
-                .is_some_and(|lobby| lobby.stage != LobbyStage::Gathering);
+                .is_some_and(|lobby| !lobby_is_unlaunched(lobby));
         let deadline = if state.lobby_deadline > 0 {
             state.lobby_deadline
         } else {
@@ -583,7 +634,7 @@ impl DotaHostWorker {
                     return self.review(&mut record, &mut state, &reason, now).await;
                 }
                 return self
-                    .destroy_recorded_lobby(port, &mut record, &mut state, lobby.id, now)
+                    .destroy_recorded_lobby(port, &mut record, &mut state, &lobby, now)
                     .await;
             }
             record.phase = Phase::Recorded;
@@ -606,7 +657,8 @@ impl DotaHostWorker {
             return Ok(());
         }
         if state.cancel_requested {
-            if record.valve_match_id.is_some()
+            if server_launched
+                || record.valve_match_id.is_some()
                 || state.launch_requested_at.is_some()
                 || matches!(record.phase, Phase::Running | Phase::Finishing)
                 || lobby
@@ -620,7 +672,7 @@ impl DotaHostWorker {
                 if !port.betting_observation_fresh().await {
                     return Err("refreshing stale GC ownership before lobby cleanup".into());
                 }
-                port.destroy(lobby.id).await?;
+                port.destroy_observed(&lobby).await?;
                 return Ok(());
             }
             if record.lobby_id.is_none() && state.create_requested_at.is_some() {
@@ -736,7 +788,11 @@ impl DotaHostWorker {
                 Phase::Running
             };
             self.save(&mut record, &state, now).await?;
-            if let Some(match_id) = lobby.match_id {
+            if let Some(match_id) = record
+                .valve_match_id
+                .as_deref()
+                .and_then(|id| id.parse().ok())
+            {
                 let summary = self.match_status_summary(&record, now).await?;
                 self.announce(
                     &mut record,
@@ -793,6 +849,25 @@ impl DotaHostWorker {
         if !settings_match(&state.settings, &lobby) {
             return self.review(&mut record,&mut state,"league, game mode, pick priority, or safety settings differ from the saved lobby settings",now).await;
         }
+        // The lifecycle enum can lag allocation/gameplay. A known game must
+        // be reconciled, never admitted to the prelaunch roster/launch path.
+        if !lobby_is_unlaunched(&lobby)
+            || record.valve_match_id.is_some()
+            || state.server_id.is_some()
+            || state.allocation_observed_at.is_some()
+            || state.betting_closed
+        {
+            if let Some(match_id) = record
+                .valve_match_id
+                .as_deref()
+                .and_then(|id| id.parse().ok())
+            {
+                return self
+                    .finish(port, &mut record, &mut state, match_id, now)
+                    .await;
+            }
+            return Ok(());
+        }
         if let Some(sent) = state.launch_requested_at {
             if now.saturating_sub(sent) > LAUNCH_CONFIRMATION_TIMEOUT_SECONDS {
                 return self
@@ -806,6 +881,11 @@ impl DotaHostWorker {
             }
             // Do not resend an ambiguous launch or change its roster while
             // waiting for the allocation update.
+            return Ok(());
+        }
+        if !port.betting_observation_fresh().await
+            || port.snapshot().await?.as_ref() != Some(&lobby)
+        {
             return Ok(());
         }
         let Some(pending) = pending else {
@@ -960,13 +1040,16 @@ impl DotaHostWorker {
         else {
             return Ok(());
         };
+        if !port.betting_observation_fresh().await {
+            return Ok(());
+        }
         let latest = port
             .snapshot()
             .await?
             .ok_or("lobby disappeared during launch checks")?;
         if !owns_lobby(&record, &state, &latest, self.config.account_id)
             || !settings_match(&state.settings, &latest)
-            || latest.stage != LobbyStage::Gathering
+            || !lobby_is_unlaunched(&latest)
             || !dota_lobby::assess_admission(
                 &state.expected(),
                 &latest.members,
@@ -1003,7 +1086,13 @@ impl DotaHostWorker {
             league_id = state.settings.league_id,
             "Requesting Dota lobby launch"
         );
-        port.launch(lobby.id).await?;
+        if !port.launch_observed(&latest).await? {
+            // Unlike a lost response, a failed precondition guarantees no send.
+            state.launch_requested_at = None;
+            record.phase = Phase::Gathering;
+            self.save(&mut record, &state, now).await?;
+            return Ok(());
+        }
         self.announce(
             &mut record,
             &mut state,
@@ -1203,10 +1292,10 @@ impl DotaHostWorker {
             // Confirm removal in the next snapshot before releasing the account.
             if resolution.outcome == "recorded" {
                 return self
-                    .destroy_recorded_lobby(port, record, state, lobby.id, now)
+                    .destroy_recorded_lobby(port, record, state, &lobby, now)
                     .await;
             }
-            port.destroy(lobby.id).await?;
+            port.destroy_observed(&lobby).await?;
             return Ok(());
         }
         record.phase = if resolution.outcome == "recorded" {
@@ -1528,7 +1617,7 @@ impl DotaHostWorker {
             {
                 // Never settle/void the replacement while cleaning up the old
                 // lobby. Keep the account leased until disappearance is seen.
-                port.destroy(lobby.id).await?;
+                port.destroy_observed(&lobby).await?;
             }
             return Ok(());
         }
