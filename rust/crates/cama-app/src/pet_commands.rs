@@ -153,17 +153,6 @@ impl StatusView {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum PetFlavorEvent {
-    Adopted,
-    Status,
-    Fed,
-    Spat,
-    Hatched,
-    Evolved,
-    Died,
-}
-
 /// Command-facing contract.  Return values are shared with the already ported
 /// pet application service, while command-only reads/writes remain explicit so
 /// a live adapter cannot silently invent behavior.
