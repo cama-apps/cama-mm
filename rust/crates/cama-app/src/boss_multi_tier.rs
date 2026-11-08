@@ -1707,19 +1707,6 @@ pub fn at_boss_boundary(depth: i32, progress: &BossProgress) -> Option<i32> {
 }
 
 #[must_use]
-pub fn locked_boss_id(progress: &BossProgress, boundary: i32, prestige_level: i32) -> Option<&str> {
-    if let Some(BossProgressValue::Entry(entry)) = progress.get(&boundary.to_string())
-        && let Some(boss_id) = entry.boss_id.as_deref()
-        && !boss_id.is_empty()
-    {
-        return Some(boss_id);
-    }
-    boss_pool_for_tier(boundary, prestige_level)
-        .first()
-        .map(|boss| boss.boss_id)
-}
-
-#[must_use]
 pub fn regular_boss_wager_allowed(
     progress: &BossProgress,
     boundary: i32,
@@ -3256,15 +3243,6 @@ where
             gear_snapshot: paused.gear_snapshot,
             round_log: paused.round_log,
         })
-    }
-
-    pub fn fight_boss(
-        &mut self,
-        key: PlayerKey,
-        risk_tier: RiskTier,
-        wager: i64,
-    ) -> Result<ResolvedFight, BossServiceError> {
-        self.fight_boss_with_override(key, risk_tier, wager, None)
     }
 
     pub fn fight_boss_with_override(

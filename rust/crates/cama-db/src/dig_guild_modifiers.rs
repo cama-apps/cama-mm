@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -17,16 +17,8 @@ pub struct DigGuildModifier {
 
 #[derive(Debug, Error)]
 pub enum DigGuildModifierError {
-    #[error("modifier id cannot be empty")]
-    EmptyModifierId,
-    #[error("modifier duration cannot be negative")]
-    NegativeDuration,
     #[error("SQLite guild modifier operation failed: {0}")]
     Sqlite(#[from] rusqlite::Error),
-    #[error("guild modifier payload must be a JSON object")]
-    InvalidPayload,
-    #[error("guild modifier expiry overflowed")]
-    ExpiryOverflow,
 }
 
 #[derive(Clone, Debug)]
@@ -48,52 +40,6 @@ impl DigGuildModifierRepository {
             Some(guild_id) => guild_id,
             None => 0,
         }
-    }
-
-    pub fn set_modifier_at(
-        &self,
-        guild_id: Option<i64>,
-        modifier_id: &str,
-        duration_seconds: i64,
-        payload: &Value,
-        now: i64,
-    ) -> Result<i64, DigGuildModifierError> {
-        if modifier_id.trim().is_empty() {
-            return Err(DigGuildModifierError::EmptyModifierId);
-        }
-        if duration_seconds < 0 {
-            return Err(DigGuildModifierError::NegativeDuration);
-        }
-        if !payload.is_object() {
-            return Err(DigGuildModifierError::InvalidPayload);
-        }
-        let guild_id = Self::normalize_guild_id(guild_id);
-        let mut connection = open_runtime_connection(&self.path)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let prior_expiry = transaction
-            .query_row(
-                "SELECT expires_at FROM dig_guild_modifiers
-                  WHERE guild_id=?1 AND modifier_id=?2",
-                params![guild_id, modifier_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?;
-        let expires_at = prior_expiry
-            .unwrap_or(now)
-            .max(now)
-            .checked_add(duration_seconds)
-            .ok_or(DigGuildModifierError::ExpiryOverflow)?;
-        transaction.execute(
-            "INSERT INTO dig_guild_modifiers
-                (guild_id,modifier_id,expires_at,payload_json,created_at)
-             VALUES (?1,?2,?3,?4,?5)
-             ON CONFLICT(guild_id,modifier_id) DO UPDATE SET
-                 expires_at=excluded.expires_at,
-                 payload_json=excluded.payload_json",
-            params![guild_id, modifier_id, expires_at, payload.to_string(), now],
-        )?;
-        transaction.commit()?;
-        Ok(expires_at)
     }
 
     pub fn get_active(
@@ -146,7 +92,8 @@ impl DigGuildModifierRepository {
     #[cfg(test)]
     pub fn clear_expired(&self, now: i64) -> Result<usize, DigGuildModifierError> {
         let mut connection = open_runtime_connection(&self.path)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let removed = transaction.execute(
             "DELETE FROM dig_guild_modifiers WHERE expires_at<=?1",
             [now],
@@ -176,20 +123,34 @@ mod tests {
         (database, repository)
     }
 
+    /// Persist a modifier row the way the live event settlement writes it.
+    fn seed(
+        database: &NamedTempFile,
+        guild_id: i64,
+        modifier_id: &str,
+        expires_at: i64,
+        payload: &str,
+    ) {
+        Connection::open(database.path())
+            .unwrap()
+            .execute(
+                "INSERT INTO dig_guild_modifiers
+                    (guild_id,modifier_id,expires_at,payload_json,created_at)
+                 VALUES (?1,?2,?3,?4,?5)",
+                params![guild_id, modifier_id, expires_at, payload, NOW],
+            )
+            .unwrap();
+    }
+
     #[test]
     fn test_set_then_active() {
-        let (_database, repository) = fixture();
-        assert_eq!(
-            repository
-                .set_modifier_at(
-                    Some(GUILD),
-                    "helltide_active",
-                    600,
-                    &serde_json::json!({"tax_per_dig": 5}),
-                    NOW,
-                )
-                .unwrap(),
-            NOW + 600
+        let (database, repository) = fixture();
+        seed(
+            &database,
+            GUILD,
+            "helltide_active",
+            NOW + 600,
+            r#"{"tax_per_dig":5}"#,
         );
         assert!(
             repository
@@ -210,16 +171,14 @@ mod tests {
 
     #[test]
     fn test_get_active_returns_payload() {
-        let (_database, repository) = fixture();
-        repository
-            .set_modifier_at(
-                Some(GUILD),
-                "helltide_active",
-                600,
-                &serde_json::json!({"tax_per_dig": 7}),
-                NOW,
-            )
-            .unwrap();
+        let (database, repository) = fixture();
+        seed(
+            &database,
+            GUILD,
+            "helltide_active",
+            NOW + 600,
+            r#"{"tax_per_dig":7}"#,
+        );
         let rows = repository.get_active(Some(GUILD), NOW).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].modifier_id, "helltide_active");
@@ -227,36 +186,9 @@ mod tests {
     }
 
     #[test]
-    fn test_re_set_extends_expiry() {
-        let (_database, repository) = fixture();
-        let first = repository
-            .set_modifier_at(
-                Some(GUILD),
-                "helltide_active",
-                300,
-                &serde_json::json!({}),
-                NOW,
-            )
-            .unwrap();
-        let second = repository
-            .set_modifier_at(
-                Some(GUILD),
-                "helltide_active",
-                300,
-                &serde_json::json!({}),
-                NOW,
-            )
-            .unwrap();
-        assert_eq!(first, NOW + 300);
-        assert_eq!(second, NOW + 600);
-    }
-
-    #[test]
     fn test_get_active_filters_expired() {
-        let (_database, repository) = fixture();
-        repository
-            .set_modifier_at(Some(GUILD), "stale", 600, &serde_json::json!({}), NOW)
-            .unwrap();
+        let (database, repository) = fixture();
+        seed(&database, GUILD, "stale", NOW + 600, "{}");
         assert!(
             repository
                 .get_active(Some(GUILD), NOW + 600)
@@ -268,9 +200,7 @@ mod tests {
     #[test]
     fn test_clear_expired_drops_rows() {
         let (database, repository) = fixture();
-        repository
-            .set_modifier_at(Some(GUILD), "stale", 600, &serde_json::json!({}), NOW)
-            .unwrap();
+        seed(&database, GUILD, "stale", NOW + 600, "{}");
         assert_eq!(repository.clear_expired(NOW + 600).unwrap(), 1);
         let count = Connection::open(database.path())
             .unwrap()
@@ -283,16 +213,8 @@ mod tests {
 
     #[test]
     fn test_modifier_scoped_to_guild() {
-        let (_database, repository) = fixture();
-        repository
-            .set_modifier_at(
-                Some(GUILD),
-                "helltide_active",
-                600,
-                &serde_json::json!({}),
-                NOW,
-            )
-            .unwrap();
+        let (database, repository) = fixture();
+        seed(&database, GUILD, "helltide_active", NOW + 600, "{}");
         assert!(
             repository
                 .is_active(Some(GUILD), "helltide_active", NOW)

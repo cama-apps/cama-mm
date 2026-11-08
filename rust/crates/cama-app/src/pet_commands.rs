@@ -7,7 +7,7 @@
 //! adapter only has to translate Discord objects and the few command-only
 //! service operations that have not yet moved into the Rust core service.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use cama_domain::formatting::{JOPACOIN_EMOTE, format_grouped};
 use cama_domain::pet::{
@@ -515,64 +515,6 @@ pub struct PetCommandConfig {
     pub pet_channel_id: Option<i64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SetupError {
-    MissingBrawlService,
-}
-
-pub fn setup_decision(
-    pet_service_present: bool,
-    pet_brawl_service_present: bool,
-) -> Result<bool, SetupError> {
-    if !pet_service_present {
-        return Ok(false);
-    }
-    if !pet_brawl_service_present {
-        return Err(SetupError::MissingBrawlService);
-    }
-    Ok(true)
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct PetFeatureComponents {
-    pub pet_service: bool,
-    pub evolution_service: bool,
-    pub flavor_service: bool,
-    pub flavor_ai_service: bool,
-    pub shares_evolution_service: bool,
-    pub shares_guild_config_repo: bool,
-    pub shares_economy_ledger_repo: bool,
-    pub shares_player_repo: bool,
-}
-
-impl PetFeatureComponents {
-    #[must_use]
-    pub const fn for_channel(channel_id: Option<i64>) -> Self {
-        if channel_id.is_none() {
-            return Self {
-                pet_service: false,
-                evolution_service: false,
-                flavor_service: false,
-                flavor_ai_service: false,
-                shares_evolution_service: false,
-                shares_guild_config_repo: false,
-                shares_economy_ledger_repo: false,
-                shares_player_repo: false,
-            };
-        }
-        Self {
-            pet_service: true,
-            evolution_service: true,
-            flavor_service: true,
-            flavor_ai_service: false,
-            shares_evolution_service: true,
-            shares_guild_config_repo: true,
-            shares_economy_ledger_repo: true,
-            shares_player_repo: true,
-        }
-    }
-}
-
 pub struct PetCommands<S, F, M, L> {
     service: S,
     flavor: F,
@@ -905,31 +847,6 @@ where
         }
     }
 
-    #[must_use]
-    pub fn trinket_autocomplete(
-        &mut self,
-        context: &InteractionContext,
-        current: &str,
-    ) -> Vec<AutocompleteChoice> {
-        let current = current.to_lowercase();
-        self.service
-            .owned_trinkets(context.user_id, context.guild_id)
-            .into_iter()
-            .filter_map(|accessory_id| {
-                let accessory = get_accessory(&accessory_id);
-                accessory
-                    .display_name
-                    .to_lowercase()
-                    .contains(&current)
-                    .then(|| AutocompleteChoice {
-                        name: format!("{} ({})", accessory.display_name, accessory.tier.as_str()),
-                        value: accessory_id,
-                    })
-            })
-            .take(25)
-            .collect()
-    }
-
     pub fn graveyard<I: InteractionPort>(
         &mut self,
         interaction: &mut I,
@@ -959,68 +876,6 @@ where
                 format!("<@{id}>")
             });
         let _ = interaction.send_followup(ResponsePayload::embed(embed, Visibility::Public));
-    }
-
-    pub fn activate_status_button<I: InteractionPort>(
-        &mut self,
-        interaction: &mut I,
-        context: &InteractionContext,
-        view: &StatusView,
-        action: &StatusAction,
-    ) {
-        if let Err(payload) = view.interaction_check(context.user_id) {
-            let _ = interaction.send_immediate(*payload);
-            return;
-        }
-        if !interaction.defer(Visibility::Public) {
-            return;
-        }
-        let flavor_event = match action {
-            StatusAction::Feed(item_id) => {
-                let result = self.service.feed(view.owner_id, view.guild_id, item_id);
-                match result {
-                    ServiceResult::Success(outcome) => {
-                        if outcome.spat {
-                            PetFlavorEvent::Spat
-                        } else {
-                            PetFlavorEvent::Fed
-                        }
-                    }
-                    ServiceResult::Failure { error, .. } => {
-                        let _ = interaction.send_followup(error_payload(error));
-                        return;
-                    }
-                }
-            }
-            StatusAction::Buy(item_id) => {
-                let result = self.service.buy(view.owner_id, view.guild_id, item_id, 1);
-                if let ServiceResult::Failure { error, .. } = result {
-                    let _ = interaction.send_followup(error_payload(error));
-                    return;
-                }
-                PetFlavorEvent::Status
-            }
-            StatusAction::SaltLick => {
-                let result = self
-                    .service
-                    .buy(view.owner_id, view.guild_id, SALT_LICK.item_id, 1);
-                if let ServiceResult::Failure { error, .. } = result {
-                    let _ = interaction.send_followup(error_payload(error));
-                    return;
-                }
-                PetFlavorEvent::Status
-            }
-        };
-        let payload = self.compose_status(
-            view.owner_id,
-            view.guild_id,
-            &context.display_name,
-            true,
-            flavor_event,
-            Visibility::Public,
-            context.now,
-        );
-        let _ = interaction.edit_original(payload);
     }
 
     pub fn sweep_once<D: DiscordDeliveryPort>(&mut self, discord: &mut D) {
@@ -1301,43 +1156,6 @@ where
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AutocompleteChoice {
-    pub name: String,
-    pub value: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct NotificationPreferences {
-    pet_enabled: BTreeSet<(i64, i64)>,
-}
-
-impl NotificationPreferences {
-    #[must_use]
-    pub fn pet_enabled(&self, discord_id: i64, guild_id: i64) -> bool {
-        self.pet_enabled.contains(&(discord_id, guild_id))
-    }
-
-    #[cfg(test)]
-    pub fn set_pet_enabled(&mut self, discord_id: i64, guild_id: i64, enabled: bool) {
-        if enabled {
-            self.pet_enabled.insert((discord_id, guild_id));
-        } else {
-            self.pet_enabled.remove(&(discord_id, guild_id));
-        }
-    }
-
-    #[must_use]
-    pub fn enabled_pet_users(&self, guild_id: i64) -> Vec<i64> {
-        self.pet_enabled
-            .iter()
-            .filter_map(|(discord_id, candidate_guild)| {
-                (*candidate_guild == guild_id).then_some(*discord_id)
-            })
-            .collect()
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReminderTask {
     pub crossing: i64,
     pub pet_name: String,
@@ -1384,37 +1202,6 @@ impl ReminderCoordinator {
     pub fn has_pet_task(&self, discord_id: i64, guild_id: i64) -> bool {
         self.tasks.contains_key(&(discord_id, guild_id, "pet"))
     }
-
-    pub fn reschedule_pet_warnings<P: PetWarningSource>(
-        &mut self,
-        preferences: &NotificationPreferences,
-        guild_ids: &[i64],
-        mut pet_service: Option<&mut P>,
-    ) {
-        let Some(service) = pet_service.as_mut() else {
-            return;
-        };
-        for guild_id in guild_ids {
-            for discord_id in preferences.enabled_pet_users(*guild_id) {
-                if let Some((crossing, name)) = service.warning_crossing(discord_id, *guild_id) {
-                    self.schedule_pet_reminder(discord_id, *guild_id, crossing, name, true);
-                }
-            }
-        }
-    }
-}
-
-pub trait PetWarningSource {
-    fn warning_crossing(&mut self, discord_id: i64, guild_id: i64) -> Option<(i64, String)>;
-}
-
-#[must_use]
-pub fn configured_pet_channel<D: DiscordDeliveryPort>(
-    configured_channel_id: Option<i64>,
-    guild_id: i64,
-    discord: &mut D,
-) -> Option<i64> {
-    configured_channel_id.and_then(|channel_id| discord.resolve_text_channel(guild_id, channel_id))
 }
 
 #[must_use]
@@ -2410,7 +2197,7 @@ fn format_work_blocks(units: i64) -> String {
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
     use std::cell::RefCell;
-    use std::collections::VecDeque;
+    use std::collections::{BTreeSet, VecDeque};
     use std::rc::Rc;
 
     use cama_domain::pet::{
@@ -2598,13 +2385,6 @@ mod tests {
 
         fn active_pet(&self, discord_id: i64, guild_id: i64) -> Option<&Pet> {
             self.active.get(&(discord_id, guild_id))
-        }
-
-        fn stock(&self, discord_id: i64, guild_id: i64) -> BTreeMap<String, i64> {
-            self.supplies
-                .get(&(discord_id, guild_id))
-                .cloned()
-                .unwrap_or_default()
         }
     }
 
@@ -3109,37 +2889,6 @@ mod tests {
         }
     }
 
-    struct TraceInteraction {
-        trace: Rc<RefCell<Vec<&'static str>>>,
-        events: Vec<InteractionEvent>,
-    }
-
-    impl InteractionPort for TraceInteraction {
-        fn send_immediate(&mut self, payload: ResponsePayload) -> Result<(), TransportError> {
-            self.trace.borrow_mut().push("immediate");
-            self.events.push(InteractionEvent::Immediate(payload));
-            Ok(())
-        }
-
-        fn defer(&mut self, visibility: Visibility) -> bool {
-            self.trace.borrow_mut().push("defer");
-            self.events.push(InteractionEvent::Deferred(visibility));
-            true
-        }
-
-        fn send_followup(&mut self, payload: ResponsePayload) -> Result<(), TransportError> {
-            self.trace.borrow_mut().push("followup");
-            self.events.push(InteractionEvent::Followup(payload));
-            Ok(())
-        }
-
-        fn edit_original(&mut self, payload: ResponsePayload) -> Result<(), TransportError> {
-            self.trace.borrow_mut().push("edit");
-            self.events.push(InteractionEvent::EditOriginal(payload));
-            Ok(())
-        }
-    }
-
     #[derive(Clone, Debug, Default)]
     struct FakeReminder {
         enabled: bool,
@@ -3239,17 +2988,6 @@ mod tests {
         ) -> Result<(), DeliveryError> {
             self.dms.push((discord_id, payload));
             Ok(())
-        }
-    }
-
-    #[derive(Default)]
-    struct FakeWarningSource {
-        warnings: VecDeque<Option<(i64, String)>>,
-    }
-
-    impl PetWarningSource for FakeWarningSource {
-        fn warning_crossing(&mut self, _discord_id: i64, _guild_id: i64) -> Option<(i64, String)> {
-            self.warnings.pop_front().flatten()
         }
     }
 
@@ -3818,33 +3556,6 @@ mod tests {
     }
 
     #[test]
-    fn test_setup_skips_when_feature_disabled() {
-        assert_eq!(setup_decision(false, false), Ok(false));
-    }
-
-    #[test]
-    fn test_setup_loads_cog_when_service_present() {
-        assert_eq!(setup_decision(true, true), Ok(true));
-    }
-
-    #[test]
-    fn test_container_gates_service_on_channel_id() {
-        assert_eq!(
-            PetFeatureComponents::for_channel(None),
-            PetFeatureComponents::default()
-        );
-        let components = PetFeatureComponents::for_channel(Some(123_456));
-        assert!(components.pet_service);
-        assert!(components.evolution_service);
-        assert!(components.flavor_service);
-        assert!(!components.flavor_ai_service);
-        assert!(components.shares_evolution_service);
-        assert!(components.shares_guild_config_repo);
-        assert!(components.shares_economy_ledger_repo);
-        assert!(components.shares_player_repo);
-    }
-
-    #[test]
     fn test_adopt_happy_path_sends_egg_embed() {
         let mut app = make_app(FakeService::default());
 
@@ -4129,29 +3840,6 @@ mod tests {
     }
 
     #[test]
-    fn test_trinket_autocomplete_lists_owned_only() {
-        let mut app = make_app(FakeService::default());
-        let _ = adopt_via_handler(&mut app, "Blep", "standard");
-        let hatched = T0 + EGG_HATCH_SECONDS + 3_600;
-        app.service_mut().now = hatched;
-        app.service_mut().next_accessory = "wool_scarf".to_owned();
-        let mut roll = InteractionRecorder::default();
-        app.trinket(&mut roll, &context(OWNER, hatched), None);
-
-        let choices = app.trinket_autocomplete(&context(OWNER, hatched), "");
-        let no_choices = app.trinket_autocomplete(&context(OWNER, hatched), "top hat");
-
-        assert_eq!(
-            choices
-                .iter()
-                .map(|choice| choice.value.as_str())
-                .collect::<Vec<_>>(),
-            vec!["wool_scarf"]
-        );
-        assert!(no_choices.is_empty());
-    }
-
-    #[test]
     fn test_shop_rename_graveyard_leaderboard_handlers() {
         let mut app = make_app(FakeService::default());
         let _ = adopt_via_handler(&mut app, "Blep", "standard");
@@ -4213,6 +3901,73 @@ mod tests {
             .map(|button| button.label.as_str())
             .collect::<BTreeSet<_>>();
         assert!(labels.contains("Buy Roshan's Cheese (30)"));
+    }
+
+    #[test]
+    fn test_status_embed_shows_training_stats_rank_and_build() {
+        let pet = make_pet();
+        let status = PetStatus {
+            pet: Some(pet.clone()),
+            hunger: 55,
+            stage: Some(PetStage::Baby),
+            mood: Some(PetMood::Content),
+            age_seconds: DAY,
+            supplies: None,
+            last_dead: None,
+            dig_work_units: 0,
+            dig_work_rate: 0,
+            evolution_hint: None,
+        };
+        let career = crate::pet_brawl::CareerSummary {
+            xp: 20,
+            strength: 2,
+            intelligence: 1,
+            dexterity: 1,
+            rank: Some("Champion".to_owned()),
+            build: Some("Bruiser".to_owned()),
+        };
+
+        let embed = build_status_embed_with_details(StatusEmbedRequest {
+            status: &status,
+            decay_per_day: 20,
+            now: pet.hatched_at + DAY,
+            owner_name: "Owner",
+            next_fee: 20,
+            brawl_record: None,
+            career: Some(&career),
+            solo_training_sessions: Some(3),
+        });
+
+        assert_eq!(
+            embed.field_value("🏋️ Training"),
+            Some(
+                "Level 4/4 · 20/20 XP\nSTR 2 · INT 1 · DEX 1\nSolo: 3/3 banked · `/pet train`\nChampion · Bruiser"
+            )
+        );
+    }
+
+    #[test]
+    fn test_living_status_embed_shows_the_upbringing_hint() {
+        let pet = make_pet();
+        let status = PetStatus {
+            pet: Some(pet.clone()),
+            hunger: 55,
+            stage: Some(PetStage::Baby),
+            mood: Some(PetMood::Content),
+            age_seconds: DAY,
+            supplies: None,
+            last_dead: None,
+            dig_work_units: 0,
+            dig_work_rate: 0,
+            evolution_hint: Some("delving_strong".to_owned()),
+        };
+
+        let embed = build_status_embed(&status, 20, pet.hatched_at + DAY, "Owner", 20);
+
+        assert_eq!(
+            embed.field_value("Upbringing"),
+            hint_text(Some("delving_strong"))
+        );
     }
 
     #[test]
@@ -4295,151 +4050,6 @@ mod tests {
     }
 
     #[test]
-    fn test_buy_button_purchases_and_refreshes_panel() {
-        let mut app = make_app(FakeService::default());
-        let _ = adopt_via_handler(&mut app, "Blep", "standard");
-        let view = StatusView::new(OWNER, Some(GUILD), None, "", false);
-        let action = view
-            .buttons
-            .iter()
-            .find(|button| button.label.starts_with("Buy Tango"))
-            .expect("buy Tango button")
-            .action
-            .clone();
-        let mut interaction = InteractionRecorder::default();
-
-        app.activate_status_button(&mut interaction, &context(OWNER, T0), &view, &action);
-
-        assert!(matches!(
-            interaction.events.first(),
-            Some(InteractionEvent::Deferred(_))
-        ));
-        assert!(
-            interaction
-                .events
-                .iter()
-                .any(|event| matches!(event, InteractionEvent::EditOriginal(_)))
-        );
-        assert_eq!(
-            app.service().stock(OWNER, GUILD),
-            BTreeMap::from([("tango".to_owned(), 1)])
-        );
-    }
-
-    #[test]
-    fn test_feed_button_failure_reports_ephemerally() {
-        let mut app = make_app(FakeService::default());
-        let _ = adopt_via_handler(&mut app, "Blep", "standard");
-        let supplies = BTreeMap::from([("tango".to_owned(), 1)]);
-        let view = StatusView::new(OWNER, Some(GUILD), Some(&supplies), "", true);
-        let action = view
-            .buttons
-            .iter()
-            .find(|button| button.label.starts_with("Feed Tango"))
-            .expect("feed Tango button")
-            .action
-            .clone();
-        let mut interaction = InteractionRecorder::default();
-
-        app.activate_status_button(&mut interaction, &context(OWNER, T0), &view, &action);
-
-        assert!(matches!(
-            interaction.events.first(),
-            Some(InteractionEvent::Deferred(_))
-        ));
-        assert!(payload_content(&interaction).starts_with("❌"));
-        assert!(
-            !interaction
-                .events
-                .iter()
-                .any(|event| matches!(event, InteractionEvent::EditOriginal(_)))
-        );
-    }
-
-    #[test]
-    fn test_feed_button_refresh_uses_feed_flavor() {
-        let mut app = make_app(FakeService::default());
-        let _ = adopt_via_handler(&mut app, "Blep", "standard");
-        let _purchase = app.service_mut().buy(OWNER, Some(GUILD), "tango", 1);
-        let feeding_time = T0 + EGG_HATCH_SECONDS + DAY;
-        app.service_mut().now = feeding_time;
-        app.flavor.responses.insert(
-            PetFlavorEvent::Fed,
-            "Button snack complete. Wool remains at maximum fluff.".to_owned(),
-        );
-        let supplies = BTreeMap::from([("tango".to_owned(), 1)]);
-        let view = StatusView::new(OWNER, Some(GUILD), Some(&supplies), "common_cama", true);
-        let action = StatusAction::Feed("tango".to_owned());
-        let mut interaction = InteractionRecorder::default();
-
-        app.activate_status_button(
-            &mut interaction,
-            &context(OWNER, feeding_time),
-            &view,
-            &action,
-        );
-
-        let embed = interaction
-            .events
-            .iter()
-            .find_map(|event| match event {
-                InteractionEvent::EditOriginal(payload) => payload.embed.as_ref(),
-                _ => None,
-            })
-            .expect("refreshed status embed");
-        assert_eq!(
-            embed.field_value("💬 Cama chatter"),
-            Some("Button snack complete. Wool remains at maximum fluff.")
-        );
-    }
-
-    #[test]
-    fn test_feed_button_defers_before_waiting_for_cold_flavor() {
-        let trace = Rc::new(RefCell::new(Vec::new()));
-        let mut app = make_app(FakeService::default());
-        let _ = adopt_via_handler(&mut app, "Blep", "standard");
-        let _purchase = app.service_mut().buy(OWNER, Some(GUILD), "tango", 1);
-        let feeding_time = T0 + EGG_HATCH_SECONDS + DAY;
-        app.service_mut().now = feeding_time;
-        app.flavor.trace = Some(Rc::clone(&trace));
-        app.flavor.responses.insert(
-            PetFlavorEvent::Fed,
-            "The snack committee has reached a fluffy consensus.".to_owned(),
-        );
-        let supplies = BTreeMap::from([("tango".to_owned(), 1)]);
-        let view = StatusView::new(OWNER, Some(GUILD), Some(&supplies), "common_cama", true);
-        let action = StatusAction::Feed("tango".to_owned());
-        let mut interaction = TraceInteraction {
-            trace: Rc::clone(&trace),
-            events: Vec::new(),
-        };
-
-        app.activate_status_button(
-            &mut interaction,
-            &context(OWNER, feeding_time),
-            &view,
-            &action,
-        );
-
-        let events = trace.borrow();
-        let defer_index = events
-            .iter()
-            .position(|event| *event == "defer")
-            .expect("defer event");
-        let flavor_index = events
-            .iter()
-            .position(|event| *event == "flavor")
-            .expect("flavor event");
-        assert!(defer_index < flavor_index);
-        assert!(
-            interaction
-                .events
-                .iter()
-                .any(|event| matches!(event, InteractionEvent::EditOriginal(_)))
-        );
-    }
-
-    #[test]
     fn altar_embeds_preserve_exact_preview_cancel_and_success_copy() {
         let mut service = FakeService::default();
         let adopted = service
@@ -4492,15 +4102,6 @@ mod tests {
     }
 
     #[test]
-    fn test_notification_repo_supports_pet_type() {
-        let mut preferences = NotificationPreferences::default();
-        assert!(!preferences.pet_enabled(111, GUILD));
-        preferences.set_pet_enabled(111, GUILD, true);
-        assert!(preferences.pet_enabled(111, GUILD));
-        assert_eq!(preferences.enabled_pet_users(GUILD), vec![111]);
-    }
-
-    #[test]
     fn test_schedule_pet_reminder_is_pref_gated() {
         let mut coordinator = ReminderCoordinator::new(T0);
         coordinator.schedule_pet_reminder(111, GUILD, T0 + 1_000, "Blep", false);
@@ -4517,31 +4118,6 @@ mod tests {
     }
 
     #[test]
-    fn test_reschedule_all_recovers_pet_warning_after_restart() {
-        let mut preferences = NotificationPreferences::default();
-        preferences.set_pet_enabled(OWNER, GUILD, true);
-        let mut source = FakeWarningSource::default();
-        source.warnings.push_back(None);
-        source
-            .warnings
-            .push_back(Some((T0 + 10_000, "Blep".to_owned())));
-        let mut coordinator = ReminderCoordinator::new(T0);
-        coordinator.reschedule_pet_warnings(&preferences, &[GUILD], Some(&mut source));
-        assert!(!coordinator.has_pet_task(OWNER, GUILD));
-        coordinator.reschedule_pet_warnings(&preferences, &[GUILD], Some(&mut source));
-        assert!(coordinator.has_pet_task(OWNER, GUILD));
-    }
-
-    #[test]
-    fn test_reschedule_all_skips_pets_when_service_disabled() {
-        let mut preferences = NotificationPreferences::default();
-        preferences.set_pet_enabled(OWNER, GUILD, true);
-        let mut coordinator = ReminderCoordinator::new(T0);
-        coordinator.reschedule_pet_warnings(&preferences, &[GUILD], None::<&mut FakeWarningSource>);
-        assert!(!coordinator.has_pet_task(OWNER, GUILD));
-    }
-
-    #[test]
     fn test_rearm_warning_schedules_at_crossing() {
         let pet = owner_pet();
         let mut app = make_app(FakeService::default());
@@ -4555,21 +4131,5 @@ mod tests {
         assert_eq!(schedules[0].2, pet.last_fed_at + 3 * DAY + DAY / 2);
         assert_eq!(schedules[0].3, "Blep");
         assert!(schedules[0].4);
-    }
-
-    #[test]
-    fn test_returns_none_when_unconfigured() {
-        let mut discord = FakeDiscord::default().with_channel(GUILD, 42);
-        let channel = configured_pet_channel(None, GUILD, &mut discord);
-        assert_eq!(channel, None);
-        assert!(discord.resolution_requests.is_empty());
-    }
-
-    #[test]
-    fn test_returns_channel_when_configured() {
-        let mut discord = FakeDiscord::default().with_channel(GUILD, 42);
-        let channel = configured_pet_channel(Some(42), GUILD, &mut discord);
-        assert_eq!(channel, Some(42));
-        assert_eq!(discord.resolution_requests, vec![(GUILD, 42)]);
     }
 }

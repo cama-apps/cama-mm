@@ -153,17 +153,6 @@ impl<E: TunnelNameEntropy> DigTunnelNamingService<E> {
     }
 }
 
-#[must_use]
-pub fn is_known_tunnel_name(name: &str) -> bool {
-    TUNNEL_NAME_SILLY.contains(&name)
-        || (0..TITLE_COUNT).any(|index| title_at(index) == name)
-        || TUNNEL_NAME_ADJECTIVES.iter().any(|adjective| {
-            TUNNEL_NAME_NOUNS
-                .iter()
-                .any(|noun| name == format!("The {adjective} {noun}"))
-        })
-}
-
 fn title_at(index: usize) -> String {
     let bounded = index % TITLE_COUNT;
     let x = TUNNEL_NAME_TITLE_X[bounded / TUNNEL_NAME_TITLE_Y.len()];

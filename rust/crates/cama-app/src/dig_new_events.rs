@@ -60,17 +60,6 @@ pub const HOLLOW_CHAIN_IDS: [&str; 3] = [
     "hollow_court_recess",
 ];
 
-pub const EVENT_RATES: [(&str, f64); 8] = [
-    ("Dirt", 0.22),
-    ("Stone", 0.22),
-    ("Crystal", 0.27),
-    ("Magma", 0.27),
-    ("Abyss", 0.31),
-    ("Fungal Depths", 0.38),
-    ("Frozen Core", 0.31),
-    ("The Hollow", 0.45),
-];
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SplashStrategy {
     RandomActive,
@@ -1046,137 +1035,10 @@ const fn rarity_rank(rarity: Rarity) -> u8 {
     }
 }
 
-#[must_use]
-pub fn event_rate(layer_name: &str) -> f64 {
-    EVENT_RATES
-        .iter()
-        .find_map(|(layer, rate)| (*layer == layer_name).then_some(*rate))
-        .unwrap_or(0.22)
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SplashCandidate {
     pub discord_id: u64,
     pub balance: i64,
-}
-
-/// A tunnel row used by the pure deepest-target selector.
-///
-/// The Python ``_select_deepest_n`` helper receives rows already ordered by
-/// ``depth DESC`` from ``DigRepository.get_leaderboard``.  Keeping the depth
-/// in a small policy value lets the Rust seam reproduce that selection
-/// without coupling the event policy to a database implementation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SplashDepthCandidate {
-    pub discord_id: u64,
-    pub depth: i64,
-}
-
-/// Select the wealthiest positive-balance player, optionally excluding the
-/// caster.  This mirrors ``pick_splash_target(..., mode="wealthiest")``.
-///
-/// ``candidates`` represents the positive-balance rows returned by the player
-/// repository.  The helper sorts locally so callers do not have to rely on a
-/// particular SQL tie order.
-#[must_use]
-pub fn select_wealthiest_target(
-    candidates: &[SplashCandidate],
-    exclude_id: Option<u64>,
-) -> Option<u64> {
-    candidates
-        .iter()
-        .filter(|candidate| candidate.balance > 0 && Some(candidate.discord_id) != exclude_id)
-        .max_by(|left, right| {
-            left.balance
-                .cmp(&right.balance)
-                .then_with(|| right.discord_id.cmp(&left.discord_id))
-        })
-        .map(|candidate| candidate.discord_id)
-}
-
-/// Select one recent digger with probability proportional to positive
-/// balance.  If no candidate has a positive balance, selection falls back to
-/// a uniform choice, matching the Python splash helper.
-///
-/// The candidate list is expected to be the recent-digger query result.  The
-/// optional exclusion is applied here as a second defensive boundary so the
-/// caster can never be selected by this pure policy seam.
-pub fn select_random_recent_weighted(
-    candidates: &[SplashCandidate],
-    exclude_id: Option<u64>,
-    entropy: &mut impl SplashEntropy,
-) -> Option<u64> {
-    let pool = candidates
-        .iter()
-        .filter(|candidate| Some(candidate.discord_id) != exclude_id)
-        .collect::<Vec<_>>();
-    if pool.is_empty() {
-        return None;
-    }
-
-    let weighted = pool
-        .iter()
-        .filter_map(|candidate| {
-            (candidate.balance > 0).then_some((candidate.discord_id, candidate.balance as u64))
-        })
-        .collect::<Vec<_>>();
-    if weighted.is_empty() {
-        return Some(pool[entropy.index(pool.len()) % pool.len()].discord_id);
-    }
-
-    let weights = weighted
-        .iter()
-        .map(|(_, weight)| *weight)
-        .collect::<Vec<_>>();
-    let index = weighted_index(&weights, entropy);
-    Some(weighted[index].0)
-}
-
-/// Select the deepest positive-depth players in descending depth order,
-/// excluding the caster.  This mirrors ``_select_deepest_n`` and returns at
-/// most ``count`` IDs.
-#[must_use]
-pub fn select_deepest_n(
-    candidates: &[SplashDepthCandidate],
-    exclude_id: u64,
-    count: usize,
-) -> Vec<u64> {
-    let mut pool = candidates
-        .iter()
-        .filter(|candidate| candidate.discord_id != exclude_id && candidate.depth > 0)
-        .copied()
-        .collect::<Vec<_>>();
-    pool.sort_by(|left, right| {
-        right
-            .depth
-            .cmp(&left.depth)
-            .then_with(|| left.discord_id.cmp(&right.discord_id))
-    });
-    pool.into_iter()
-        .take(count)
-        .map(|candidate| candidate.discord_id)
-        .collect()
-}
-
-fn weighted_index(weights: &[u64], entropy: &mut impl SplashEntropy) -> usize {
-    debug_assert!(!weights.is_empty());
-    let total = weights.iter().copied().sum::<u64>();
-    if total == 0 {
-        return entropy.index(weights.len()) % weights.len();
-    }
-    // ``index`` takes a usize while balances are persisted as i64.  The
-    // normal application range is far below usize::MAX; saturating here keeps
-    // malformed/extreme fixture values deterministic and fail-soft.
-    let cursor = entropy.index(total.try_into().unwrap_or(usize::MAX)) as u64;
-    let cursor = cursor.min(total.saturating_sub(1));
-    let mut offset = cursor;
-    for (index, weight) in weights.iter().copied().enumerate() {
-        if offset < weight {
-            return index;
-        }
-        offset -= weight;
-    }
-    weights.len() - 1
 }
 
 pub trait SplashCandidatePort {
@@ -1234,26 +1096,6 @@ pub struct SplashResult {
     pub victims: Vec<(u64, i64)>,
     pub total_burned: i64,
     pub mode: SplashMode,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SplashPayload {
-    pub strategy: SplashStrategy,
-    pub event_name: String,
-    pub victims: Vec<(u64, i64)>,
-    pub total_burned: i64,
-    pub mode: &'static str,
-}
-
-#[must_use]
-pub fn splash_to_payload(result: &SplashResult) -> SplashPayload {
-    SplashPayload {
-        strategy: result.strategy,
-        event_name: result.event_name.clone(),
-        victims: result.victims.clone(),
-        total_burned: result.total_burned,
-        mode: result.mode.as_str(),
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

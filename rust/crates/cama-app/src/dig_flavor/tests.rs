@@ -41,14 +41,6 @@ fn dig_npcs_roster_is_non_empty() {
     assert!(!NPCS.is_empty());
 }
 
-// tests/test_dig_npcs.py::TestRosterIntegrity::test_dict_key_matches_npc_id
-#[test]
-fn dig_npcs_each_canonical_id_resolves_to_same_npc() {
-    for npc in NPCS {
-        assert_eq!(npc_by_id(npc.npc_id()), Some(*npc));
-    }
-}
-
 // tests/test_dig_npcs.py::TestRosterIntegrity::test_npc_ids_are_unique
 #[test]
 fn dig_npcs_ids_are_unique() {
@@ -167,47 +159,6 @@ fn histogram(entries: &[(&str, i64)]) -> BTreeMap<String, i64> {
         .map(|(key, value)| ((*key).to_owned(), *value))
         .collect()
 }
-
-macro_rules! play_style_case {
-    ($name:ident, $entries:expr, $expected:expr) => {
-        #[test]
-        fn $name() {
-            assert_eq!(classify_play_style(&histogram($entries)), $expected);
-        }
-    };
-}
-
-play_style_case!(
-    test_classify_play_style_histogram0_unknown,
-    &[("safe", 2), ("risky", 1)],
-    "unknown"
-);
-play_style_case!(test_classify_play_style_histogram1_unknown, &[], "unknown");
-play_style_case!(
-    test_classify_play_style_histogram2_cautious_grinder,
-    &[("safe", 80), ("risky", 10), ("desperate", 1)],
-    "cautious_grinder"
-);
-play_style_case!(
-    test_classify_play_style_histogram3_reckless_degen,
-    &[("safe", 10), ("risky", 20), ("desperate", 10)],
-    "reckless_degen"
-);
-play_style_case!(
-    test_classify_play_style_histogram4_calculated_risk_taker,
-    &[("safe", 10), ("risky", 50), ("desperate", 5)],
-    "calculated_risk_taker"
-);
-play_style_case!(
-    test_classify_play_style_histogram5_social_butterfly,
-    &[("safe", 5), ("risky", 5), ("help", 20)],
-    "social_butterfly"
-);
-play_style_case!(
-    test_classify_play_style_histogram6_balanced_explorer,
-    &[("safe", 10), ("risky", 8), ("desperate", 2)],
-    "balanced_explorer"
-);
 
 fn validation_context() -> (BTreeSet<String>, &'static str, f64) {
     (
@@ -663,7 +614,15 @@ fn test_optional_sections_render() {
 
 #[test]
 fn test_blank_actions_returns_empty() {
-    assert_eq!(build_multiplayer_context(&[], &BTreeMap::new()), "");
+    assert_eq!(
+        build_multiplayer_context_with_state(
+            &[],
+            &TunnelFlavorState::default(),
+            0,
+            &BTreeMap::new()
+        ),
+        ""
+    );
 }
 
 #[test]
@@ -679,7 +638,15 @@ fn test_actions_render_with_serialized_details() {
         },
         ..DigAction::default()
     };
-    assert!(build_multiplayer_context(&[action], &BTreeMap::new()).contains("Sabotage"));
+    assert!(
+        build_multiplayer_context_with_state(
+            &[action],
+            &TunnelFlavorState::default(),
+            0,
+            &BTreeMap::new()
+        )
+        .contains("Sabotage")
+    );
 }
 
 #[test]
@@ -915,15 +882,6 @@ impl DigFlavorDataPort for ReceiptMemoryRepository {
         _guild_id: i64,
     ) -> Result<Option<DigPersonality>, String> {
         Ok(None)
-    }
-
-    fn upsert_personality(
-        &self,
-        _discord_id: i64,
-        _guild_id: i64,
-        _personality: DigPersonality,
-    ) -> Result<(), String> {
-        Ok(())
     }
 
     fn get_flavor_receipt(
@@ -1323,65 +1281,6 @@ fn test_flavor_writes_dm_memory() {
 }
 
 #[test]
-fn test_update_personality_creates_new() {
-    let repository = registered_repository(100);
-    let service = service_with(
-        Arc::new(RecordingAi::success(default_ai_args())),
-        repository.clone(),
-        Arc::new(FixedContext::default()),
-    );
-    service.update_personality(USER_ID, GUILD_ID, Some("safe"), None);
-    assert_eq!(
-        repository
-            .personality(USER_ID, GUILD_ID)
-            .expect("personality")
-            .choice_histogram
-            .get("safe"),
-        Some(&1)
-    );
-}
-
-#[test]
-fn test_update_personality_records_notable_moment() {
-    let repository = registered_repository(100);
-    let service = service_with(
-        Arc::new(RecordingAi::success(default_ai_args())),
-        repository.clone(),
-        Arc::new(FixedContext::default()),
-    );
-    service.update_personality(
-        USER_ID,
-        GUILD_ID,
-        None,
-        Some(&BTreeMap::from([("first_boss_kill".to_owned(), true)])),
-    );
-    let moments = repository
-        .personality(USER_ID, GUILD_ID)
-        .expect("personality")
-        .notable_moments;
-    assert_eq!(moments.len(), 1);
-    assert!(moments[0].to_lowercase().contains("first boss"));
-}
-
-#[test]
-fn test_invalid_choice_ignored() {
-    let repository = registered_repository(100);
-    let service = service_with(
-        Arc::new(RecordingAi::success(default_ai_args())),
-        repository.clone(),
-        Arc::new(FixedContext::default()),
-    );
-    service.update_personality(USER_ID, GUILD_ID, Some("invalid_choice"), None);
-    assert!(
-        !repository
-            .personality(USER_ID, GUILD_ID)
-            .expect("personality")
-            .choice_histogram
-            .contains_key("invalid_choice")
-    );
-}
-
-#[test]
 fn test_get_returns_empty_when_missing() {
     assert_eq!(
         MemoryDigFlavorRepository::default().dm_memory(99_999, GUILD_ID),
@@ -1489,67 +1388,4 @@ fn test_returns_only_social_actions() {
             .collect::<BTreeSet<_>>(),
         BTreeSet::from(["sabotage".to_owned()])
     );
-}
-
-#[test]
-fn test_returns_preconditions_for_normal_dig() {
-    let tunnel = TunnelState {
-        depth: 5,
-        ..TunnelState::default()
-    };
-    let (terminal, preconditions) = dig_with_preconditions(Some(&tunnel));
-    assert_eq!(terminal, None);
-    assert_eq!(preconditions.map(|value| value.depth_before), Some(5));
-}
-
-#[test]
-fn test_unregistered_returns_terminal_failure() {
-    let (terminal, _) = dig_with_preconditions(None);
-    let terminal = terminal.expect("terminal failure");
-    assert!(!terminal.success);
-}
-
-#[test]
-fn test_normal_outcome_advances_depth() {
-    let mut tunnel = TunnelState {
-        depth: 5,
-        max_depth: 5,
-        ..TunnelState::default()
-    };
-    let depth_before = tunnel.depth;
-    let result = apply_resolved_dig_outcome(
-        &mut tunnel,
-        &ResolvedDigFlavorInput {
-            advance: 2,
-            jc_earned: 3,
-            ..ResolvedDigFlavorInput::default()
-        },
-        1_000,
-    );
-    assert!(result.success);
-    assert_eq!(result.advance, 2);
-    assert_eq!(result.depth_after, depth_before + 2);
-    assert_eq!(result.llm_narrative, None);
-}
-
-#[test]
-fn test_cave_in_outcome_records_detail() {
-    let mut tunnel = TunnelState {
-        depth: 10,
-        max_depth: 10,
-        ..TunnelState::default()
-    };
-    let result = apply_resolved_dig_outcome(
-        &mut tunnel,
-        &ResolvedDigFlavorInput {
-            cave_in: true,
-            cave_in_block_loss: 4,
-            cave_in_type: "stun".to_owned(),
-            ..ResolvedDigFlavorInput::default()
-        },
-        1_000,
-    );
-    assert!(result.success);
-    assert!(result.cave_in);
-    assert_eq!(result.cave_in_detail.expect("cave-in detail").kind, "stun");
 }

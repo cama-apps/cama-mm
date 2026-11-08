@@ -126,22 +126,6 @@ impl PackageDealBonusPort for FakePackagePort {
     }
 }
 
-#[derive(Debug, Default)]
-struct FakeEditor {
-    updates: Vec<MessageUpdate>,
-    error: Option<MessageEditError>,
-}
-
-impl MessageEditor for FakeEditor {
-    fn edit(&mut self, update: &MessageUpdate) -> Result<(), MessageEditError> {
-        self.updates.push(update.clone());
-        match self.error.take() {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
-    }
-}
-
 fn question() -> TriviaQuestion {
     TriviaQuestion {
         text: "Which hero says this?".to_owned(),
@@ -260,18 +244,6 @@ fn test_package_deal_timeout_disables_expired_choices() {
 }
 
 #[test]
-fn test_package_deal_ignores_a_deleted_confirmation_message() {
-    let mut session = PackageDealSession::new(1, 99, candidates());
-    let update = session.select_partner(2, &FakePackagePort::success(3, 3));
-    let mut editor = FakeEditor {
-        error: Some(MessageEditError::NotFound),
-        ..FakeEditor::default()
-    };
-    assert_eq!(edit_message_best_effort(&mut editor, &update), Ok(()));
-    assert_eq!(editor.updates.len(), 1);
-}
-
-#[test]
 fn test_package_deal_view_only_accepts_the_digger() {
     let session = PackageDealSession::new(1, 99, candidates());
     assert_eq!(session.candidates.len(), 4);
@@ -322,17 +294,6 @@ fn test_dig_trivia_answer_surfaces_settlement_failure() {
     );
     assert!(embed.description.unwrap().contains("mine's rune tablet"));
     assert!(update.clear_view);
-}
-
-#[test]
-fn test_dig_trivia_answer_ignores_a_deleted_message() {
-    let economy = FakeEconomy::default();
-    let update = trivia_session(10).answer(1, &economy);
-    let mut editor = FakeEditor {
-        error: Some(MessageEditError::NotFound),
-        ..FakeEditor::default()
-    };
-    assert_eq!(edit_message_best_effort(&mut editor, &update), Ok(()));
 }
 
 #[test]
@@ -390,17 +351,6 @@ fn test_dig_trivia_timeout_surfaces_settlement_failure() {
     );
     assert!(embed.description.unwrap().contains("mine's rune tablet"));
     assert!(update.clear_view);
-}
-
-#[test]
-fn test_dig_trivia_timeout_ignores_a_deleted_message() {
-    let economy = FakeEconomy::default();
-    let update = trivia_session(10).on_timeout(&economy).unwrap();
-    let mut editor = FakeEditor {
-        error: Some(MessageEditError::NotFound),
-        ..FakeEditor::default()
-    };
-    assert_eq!(edit_message_best_effort(&mut editor, &update), Ok(()));
 }
 
 #[derive(Debug, Default)]
@@ -468,25 +418,6 @@ fn test_bonus_dispatch_failure_does_not_claim_reward_was_rolled_back() {
     maybe_send_dig_bonus(true, 0.0, &mut port);
     assert_eq!(port.reports.len(), 1);
     assert!(port.reports[0].contains("may already be recorded"));
-}
-
-#[derive(Debug, Default)]
-struct FakeWheel {
-    bonus_spins: usize,
-}
-
-impl WheelBonusPort for FakeWheel {
-    fn trigger_bonus_spin(&mut self) -> Result<(), DigBonusPortError> {
-        self.bonus_spins += 1;
-        Ok(())
-    }
-}
-
-#[test]
-fn test_send_dig_bonus_routes_wheel_to_bonus_mode() {
-    let mut wheel = FakeWheel::default();
-    send_wheel_bonus(&mut wheel).unwrap();
-    assert_eq!(wheel.bonus_spins, 1);
 }
 
 fn guild_members(range: std::ops::RangeInclusive<i64>) -> Vec<GuildMember> {
@@ -652,11 +583,4 @@ fn test_dig_result_dispatch_runs_bonus_after_existing_ui_choice() {
         dispatch_shape(false, Some(EventComplexity::Choice)).calls,
         ["choice", "bonus"]
     );
-}
-
-#[test]
-fn test_paid_dig_dispatches_bonus_for_the_consumed_paid_result() {
-    let mut port = FakeResultDispatch::default();
-    dispatch_paid_dig_bonus(true, &mut port).unwrap();
-    assert_eq!(port.calls, ["bonus"]);
 }

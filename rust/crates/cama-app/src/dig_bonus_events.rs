@@ -239,32 +239,6 @@ pub struct MessageUpdate {
     pub ephemeral: bool,
 }
 
-#[derive(Clone, Debug, Error, Eq, PartialEq)]
-pub enum MessageEditError {
-    #[error("message no longer exists")]
-    NotFound,
-    #[error("Discord rejected the message edit")]
-    Http,
-    #[error("message edit failed: {0}")]
-    Other(String),
-}
-
-pub trait MessageEditor {
-    fn edit(&mut self, update: &MessageUpdate) -> Result<(), MessageEditError>;
-}
-
-/// Discord `NotFound`/`HTTPException` are presentation failures after state may
-/// already be committed, so callers deliberately suppress only those classes.
-pub fn edit_message_best_effort(
-    editor: &mut impl MessageEditor,
-    update: &MessageUpdate,
-) -> Result<(), MessageEditError> {
-    match editor.edit(update) {
-        Ok(()) | Err(MessageEditError::NotFound | MessageEditError::Http) => Ok(()),
-        Err(error @ MessageEditError::Other(_)) => Err(error),
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackageDealSession {
     pub buyer_id: i64,
@@ -571,14 +545,6 @@ pub fn prepare_trivia_bonus(
     (embed, session)
 }
 
-pub trait WheelBonusPort {
-    fn trigger_bonus_spin(&mut self) -> Result<(), DigBonusPortError>;
-}
-
-pub fn send_wheel_bonus(port: &mut impl WheelBonusPort) -> Result<(), DigBonusPortError> {
-    port.trigger_bonus_spin()
-}
-
 pub trait BonusDispatchPort {
     fn send_bonus(&mut self, bonus: DigBonus) -> Result<(), DigBonusPortError>;
     fn report_partial_failure(&mut self, content: &str) -> Result<(), DigBonusPortError>;
@@ -645,13 +611,6 @@ pub fn dispatch_dig_result<P: DigResultDispatchPort>(
         }
     }
     port.send_bonus_after_ui(result.dig_consumed)
-}
-
-pub fn dispatch_paid_dig_bonus<P: DigResultDispatchPort>(
-    paid_result_consumed: bool,
-    port: &mut P,
-) -> Result<(), P::Error> {
-    port.send_bonus_after_ui(paid_result_consumed)
 }
 
 #[cfg(test)]

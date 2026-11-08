@@ -496,10 +496,22 @@ fn placeholder_tunnel_names_are_replaced_with_generated_names() {
             |row| row.get(0),
         )
         .unwrap();
-    assert!(
-        crate::dig_tunnel_naming::is_known_tunnel_name(&name),
-        "{name}"
-    );
+    use crate::dig_tunnel_naming::{
+        TUNNEL_NAME_ADJECTIVES, TUNNEL_NAME_NOUNS, TUNNEL_NAME_SILLY, TUNNEL_NAME_TITLE_X,
+        TUNNEL_NAME_TITLE_Y,
+    };
+    let generated = TUNNEL_NAME_SILLY.contains(&name.as_str())
+        || TUNNEL_NAME_TITLE_X.iter().any(|x| {
+            TUNNEL_NAME_TITLE_Y
+                .iter()
+                .any(|y| name == format!("{x} of {y}"))
+        })
+        || TUNNEL_NAME_ADJECTIVES.iter().any(|adjective| {
+            TUNNEL_NAME_NOUNS
+                .iter()
+                .any(|noun| name == format!("The {adjective} {noun}"))
+        });
+    assert!(generated, "{name}");
     assert!(!name.contains(&USER.abs().to_string()));
     assert_eq!(service.repair_placeholder_tunnel_names().expect("retry"), 0);
 }

@@ -5,7 +5,6 @@ use cama_db::dig_carry_wager::CARRY_BOUNDARIES;
 use cama_db::dig_event_runtime::{
     DigEventActorKey, DigEventQuestMutation, DigEventRuntimeRepository,
 };
-use cama_db::dig_guild_modifiers::DigGuildModifierRepository;
 use cama_db::economy_event_repository::{
     EconomyEventRepository, EventDirection, EventDraft, EventEffects,
 };
@@ -2244,13 +2243,13 @@ fn test_helltide_modifier_taxes_dig_yield() {
 
     let helltide_db = fast_migrated_database();
     seed(&helltide_db);
-    DigGuildModifierRepository::new(helltide_db.path())
-        .set_modifier_at(
-            Some(51_002),
-            "helltide_active",
-            600,
-            &serde_json::json!({"tax_per_dig": 5}),
-            1_910_000_000,
+    Connection::open(helltide_db.path())
+        .expect("helltide connection")
+        .execute(
+            "INSERT INTO dig_guild_modifiers
+                (guild_id,modifier_id,expires_at,payload_json,created_at)
+             VALUES (?1,'helltide_active',?2,'{\"tax_per_dig\":5}',?3)",
+            params![51_002, 1_910_000_600_i64, 1_910_000_000_i64],
         )
         .expect("activate helltide");
     let taxed = DigRuntimeService::sqlite(helltide_db.path())
@@ -6942,6 +6941,104 @@ fn sqlite_reduced_injury_ticks_and_slower_cooldown_does_not_halve_advance() {
     assert!(admitted.success);
     assert!(control.success);
     assert_eq!(admitted.advance, control.advance);
+}
+
+#[test]
+fn sqlite_active_curse_drains_the_dig_and_expires_after_its_digs() {
+    let actor = 61_021;
+    let guild = 61_022;
+    let depth = 10;
+    let now = find_dig_time_with_unit_between(actor, guild, 1_900_016_000, 0.95, 0.99);
+    let seed = |database: &FastTestDatabase, curse: Option<&str>| {
+        seed_live_runtime_tunnel(database, actor, guild, now, depth, 1, Some(now - 7_200));
+        Connection::open(database.path())
+            .expect("curse connection")
+            .execute(
+                "UPDATE tunnels SET temp_curses=?1 WHERE discord_id=?2 AND guild_id=?3",
+                params![curse, actor, guild],
+            )
+            .expect("seed curse");
+        seed_two_weather_rows(
+            database,
+            guild,
+            &game_date_for_timestamp(now as f64).unwrap(),
+            super::layer_at(depth).name,
+            "earthworm_migration",
+        );
+    };
+    let dig = |database: &FastTestDatabase, at: i64| {
+        DigRuntimeService::sqlite(database.path())
+            .dig(DigRuntimeRequest {
+                discord_id: actor,
+                guild_id: guild,
+                now: at,
+                paid: false,
+                forced_event: false,
+            })
+            .expect("dig resolves")
+    };
+    let stored_curse = |database: &FastTestDatabase| -> Option<String> {
+        Connection::open(database.path())
+            .expect("curse readback")
+            .query_row(
+                "SELECT temp_curses FROM tunnels WHERE discord_id=?1 AND guild_id=?2",
+                params![actor, guild],
+                |row| row.get(0),
+            )
+            .expect("tunnel row")
+    };
+
+    let control_db = fast_migrated_database();
+    seed(&control_db, None);
+    let cursed_db = fast_migrated_database();
+    seed(
+        &cursed_db,
+        Some(
+            r#"{"id":"hex","name":"Hex","digs_remaining":2,"effects":{"advance_bonus":-1,"luminosity_drain":15}}"#,
+        ),
+    );
+
+    let control = dig(&control_db, now);
+    let cursed = dig(&cursed_db, now);
+    assert!(control.success && cursed.success);
+    assert!(!control.cave_in && !cursed.cave_in);
+    assert_eq!(cursed.advance, (control.advance - 1).max(1));
+    assert_eq!(
+        cursed.luminosity_after,
+        (control.luminosity_after - 15).max(0)
+    );
+    let remaining: Value =
+        serde_json::from_str(&stored_curse(&cursed_db).expect("curse still active"))
+            .expect("curse JSON");
+    assert_eq!(remaining["digs_remaining"], 1);
+
+    let later = find_dig_time_with_unit_between(actor, guild, now + 86_400, 0.95, 0.99);
+    assert!(dig(&cursed_db, later).success);
+    assert_eq!(
+        stored_curse(&cursed_db),
+        None,
+        "the last cursed dig clears it"
+    );
+}
+
+#[test]
+fn sqlite_unregistered_dig_is_blocked_with_a_register_prompt() {
+    let database = fast_migrated_database();
+    let outcome = DigRuntimeService::sqlite(database.path())
+        .dig(DigRuntimeRequest {
+            discord_id: 60_501,
+            guild_id: 60_502,
+            now: 1_900_060_000,
+            paid: false,
+            forced_event: false,
+        })
+        .expect("unregistered Dig resolves");
+    assert!(!outcome.success);
+    assert_eq!(
+        outcome.error.as_deref(),
+        Some("You need to register first. Use /player register.")
+    );
+    assert_eq!((outcome.depth_before, outcome.depth_after), (0, 0));
 }
 
 #[test]

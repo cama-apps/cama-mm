@@ -63,6 +63,56 @@ fn production_service_admits_migrated_sqlite_and_recovers_pet_after_restart() {
 }
 
 #[test]
+fn production_status_surfaces_the_upbringing_hint_from_recorded_activity() {
+    const NOW: i64 = 1_800_000_000;
+    const GUILD: i64 = 42;
+    const OWNER: i64 = 7;
+
+    let file = NamedTempFile::new().expect("temporary SQLite database");
+    initialize_or_migrate(file.path()).expect("initialize canonical schema");
+    let players = PlayerRepository::new(file.path());
+    players
+        .add(&NewPlayer::new(OWNER, "Pet Owner", Some(GUILD)))
+        .expect("register pet owner");
+    players
+        .update_balance(OWNER, Some(GUILD), 1_000)
+        .expect("fund pet owner");
+    let mut service =
+        SqlitePetCommandService::new(file.path(), SeededPetRandom::new(11), FixedClock(NOW), 20);
+    service
+        .adopt(OWNER, Some(GUILD), "Blep", "standard")
+        .unwrap();
+
+    let hatched = NOW + EGG_HATCH_SECONDS;
+    let mut service = SqlitePetCommandService::new(
+        file.path(),
+        SeededPetRandom::new(11),
+        FixedClock(hatched + 100),
+        20,
+    );
+    assert_eq!(
+        service.status(OWNER, Some(GUILD)).unwrap().evolution_hint,
+        None,
+        "no upbringing activity yet"
+    );
+    let evolution = PetEvolutionRepository::new(file.path());
+    for (key, at) in [("dig:1", hatched + 10), ("dig:2", hatched + 20)] {
+        evolution
+            .record_activity(
+                OWNER,
+                Some(GUILD),
+                cama_domain::pet_evolution::PetActivity::DigCompleted,
+                key,
+                at,
+            )
+            .expect("record upbringing activity");
+    }
+
+    let status = service.status(OWNER, Some(GUILD)).unwrap();
+    assert_eq!(status.evolution_hint.as_deref(), Some("delving"));
+}
+
+#[test]
 fn production_altar_is_atomic_and_recovers_the_rebirth_after_restart() {
     const NOW: i64 = 1_800_000_000;
     const GUILD: i64 = 42;

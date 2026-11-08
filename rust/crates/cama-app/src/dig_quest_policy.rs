@@ -16,12 +16,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 
-use crate::dig_loot::{CanonicalQuestDef, CanonicalQuestFinale, CanonicalQuestProgress};
-
-/// Python's cross-system starter predicate considers bets from this inclusive
-/// look-back window.  The repository/service adapter supplies the timestamp;
-/// this policy owns only the boundary and comparison.
-pub const QUEST_RECENT_BET_WINDOW_SECONDS: i64 = 7 * 24 * 60 * 60;
+use crate::dig_loot::{CanonicalQuestDef, CanonicalQuestProgress};
 
 /// The number of event stages required by every Dig quest.
 pub const QUEST_STAGE_COUNT: usize = 5;
@@ -282,25 +277,6 @@ where
     Ok(())
 }
 
-/// Resolve the one cross-system predicate currently used by the quest
-/// registry.  Unknown predicates fail closed, matching Python's service
-/// warning-and-deny behavior.  A recent bet is accepted when its timestamp is
-/// at or after `now - QUEST_RECENT_BET_WINDOW_SECONDS`; this intentionally does
-/// not reject future-dated rows because the Python repository uses the same
-/// lower-bound SQL predicate.
-#[must_use]
-pub fn quest_system_predicate_satisfied(
-    predicate: &str,
-    now: i64,
-    most_recent_bet_at: Option<i64>,
-) -> bool {
-    match predicate {
-        "bet_within_7d" => most_recent_bet_at
-            .is_some_and(|bet_at| bet_at >= now.saturating_sub(QUEST_RECENT_BET_WINDOW_SECONDS)),
-        _ => false,
-    }
-}
-
 /// Find a quest stage in an injected quest set.  Keeping the set as an
 /// argument is important: Python's `DigQuestService` accepts a test quest
 /// tuple, while the generated catalog helpers use the production tuple.
@@ -447,32 +423,6 @@ pub fn advance_quest_on_desperate_success(
         quest_id: quest.quest_id.clone(),
         next_step: event_step + 1,
     }
-}
-
-/// Resolve a quest finale for the service's economy boundary.  The lower
-/// level resolver preserves authored gross JC for catalog/audit consumers;
-/// this adapter applies Python's positive Dig minting scale before the value
-/// is handed to a balance repository.  Tax callbacks remain an outer service
-/// concern, just as in Python's injected `tax_fn`.
-pub fn resolve_quest_finale_for_service(
-    finale: &CanonicalQuestFinale,
-    selection_rolls: &[f64],
-) -> Result<crate::dig_loot::CanonicalQuestFinaleOutcome, String> {
-    let outcome = crate::dig_loot::resolve_canonical_quest_finale(finale, selection_rolls)?;
-    Ok(match outcome {
-        crate::dig_loot::CanonicalQuestFinaleOutcome::JcPlusGuildModifier {
-            personal_jc,
-            modifier_id,
-            duration_seconds,
-            modifier_payload,
-        } => crate::dig_loot::CanonicalQuestFinaleOutcome::JcPlusGuildModifier {
-            personal_jc: cama_domain::dig_economy::scale_positive_dig_jc(personal_jc),
-            modifier_id,
-            duration_seconds,
-            modifier_payload,
-        },
-        relic @ crate::dig_loot::CanonicalQuestFinaleOutcome::RelicGrant { .. } => relic,
-    })
 }
 
 fn rarity_rank(rarity: &str) -> Option<i8> {

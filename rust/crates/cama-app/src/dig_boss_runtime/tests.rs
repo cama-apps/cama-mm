@@ -55,6 +55,40 @@ fn fixture() -> FastTestDatabase {
     database
 }
 
+/// Fight a regular boss through the live start path, answering a mechanic
+/// prompt with its safe option, and return the settled fight.
+trait LiveRegularFight {
+    fn fight_live_regular(
+        &self,
+        request: DigBossRuntimeRequest,
+        risk: RiskTier,
+        wager: i64,
+        entropy: SequenceEntropy,
+    ) -> Result<DigBossRuntimeResult<ResolvedFight>, DigBossRuntimeError>;
+}
+
+impl LiveRegularFight for DigBossRuntimeService {
+    fn fight_live_regular(
+        &self,
+        request: DigBossRuntimeRequest,
+        risk: RiskTier,
+        wager: i64,
+        entropy: SequenceEntropy,
+    ) -> Result<DigBossRuntimeResult<ResolvedFight>, DigBossRuntimeError> {
+        let started = self.start_regular(request, risk, wager, entropy.clone())?;
+        if let StartBossDuelOutcome::Paused(paused) = &started.outcome {
+            let safe = mechanic_by_id(&paused.mechanic_id)
+                .expect("registered mechanic")
+                .safe_option_index;
+            return self.resume_regular(request, safe, entropy);
+        }
+        Ok(started.map_outcome(|outcome| match outcome {
+            StartBossDuelOutcome::Resolved(resolved) => resolved,
+            StartBossDuelOutcome::Paused(_) => unreachable!("paused duels resume above"),
+        }))
+    }
+}
+
 fn set_minimal_accuracy_encounter(database: &FastTestDatabase, survival: i64) {
     Connection::open(database.path())
         .expect("accuracy DB")
@@ -265,6 +299,109 @@ fn regular_full_kill_persists_and_projects_both_loud_drop_policies() {
         (relic_drop.artifact_id.clone(), 1, 0),
         "the presentation receipt names the exact durable reward row"
     );
+}
+
+/// Run the live post-settlement drop policy for one regular kill and return
+/// the gear drop it granted, if any.
+fn regular_kill_gear_drop(
+    runtime: &DigBossRuntimeService,
+    boundary: i32,
+    entropy: &mut SequenceEntropy,
+) -> Option<DigBossGearDrop> {
+    let mut resolved = regular_resolved_fixture(true, Vec::new());
+    resolved.boundary = boundary;
+    let mut gear_drop = None;
+    let mut relic_drop = None;
+    let mut broken = Vec::new();
+    let mut warnings = Vec::new();
+    runtime.enrich_regular_resolution(
+        pinnacle_request(1_700_000_000),
+        true,
+        &resolved,
+        &mut gear_drop,
+        &mut relic_drop,
+        &mut broken,
+        &mut warnings,
+        entropy,
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    gear_drop
+}
+
+fn boss_drop_rows(database: &FastTestDatabase) -> Vec<(String, i64, i64, i64)> {
+    let connection = Connection::open(database.path()).expect("boss drop DB");
+    let mut statement = connection
+        .prepare(
+            "SELECT slot,tier,durability,equipped FROM dig_gear
+              WHERE discord_id=?1 AND guild_id=?2 AND source='boss_drop'
+              ORDER BY id",
+        )
+        .expect("prepare boss drops");
+    statement
+        .query_map(params![PLAYER, GUILD], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .expect("query boss drops")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect boss drops")
+}
+
+#[test]
+fn regular_kill_gear_drop_misses_at_the_drop_rate_and_skips_unmapped_boundaries() {
+    let database = fixture();
+    let runtime = pinnacle_runtime(&database);
+
+    let mut at_rate = SequenceEntropy::new(vec![GEAR_BOSS_DROP_RATE], vec![2], Vec::new());
+    assert_eq!(regular_kill_gear_drop(&runtime, 100, &mut at_rate), None);
+
+    // Boundary 25 has no gear tier, so the drop gate never draws its roll.
+    let mut unmapped = SequenceEntropy::new(vec![0.0], vec![2], Vec::new());
+    assert_eq!(regular_kill_gear_drop(&runtime, 25, &mut unmapped), None);
+    assert_eq!(
+        unmapped.next_unit(),
+        0.0,
+        "the depth gate precedes the roll"
+    );
+    assert!(boss_drop_rows(&database).is_empty());
+
+    let mut below_rate = SequenceEntropy::new(
+        vec![GEAR_BOSS_DROP_RATE - f64::EPSILON],
+        vec![2],
+        Vec::new(),
+    );
+    let drop = regular_kill_gear_drop(&runtime, 150, &mut below_rate).expect("gear drop");
+    assert_eq!((drop.slot, drop.tier), (DomainGearSlot::Boots, 5));
+    assert_eq!(
+        boss_drop_rows(&database),
+        [("boots".to_owned(), 5, 20, 0)],
+        "the drop is stored unequipped at full durability"
+    );
+}
+
+#[test]
+fn regular_kill_gear_drop_rate_stays_in_band_over_many_kills() {
+    let database = fixture();
+    let runtime = pinnacle_runtime(&database);
+    let mut state = 42_u64;
+    let mut next_unit = || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (state >> 11) as f64 / (1_u64 << 53) as f64
+    };
+    let kills = 1_000;
+    let drops = (0..kills)
+        .filter(|_| {
+            let mut entropy = SequenceEntropy::new(vec![next_unit()], vec![0], Vec::new());
+            regular_kill_gear_drop(&runtime, 100, &mut entropy).is_some()
+        })
+        .count();
+    let rate = drops as f64 / f64::from(kills);
+    assert!(
+        (rate - GEAR_BOSS_DROP_RATE).abs() < 0.02,
+        "observed drop rate {rate}"
+    );
+    assert_eq!(boss_drop_rows(&database).len(), drops);
 }
 
 #[test]
@@ -981,7 +1118,7 @@ fn live_boss_victory_gates_the_next_dig_until_a_route_is_chosen() {
         config.economy_event.enabled = false;
         config
     })
-    .fight_regular(
+    .fight_live_regular(
         DigBossRuntimeRequest {
             discord_id: PLAYER,
             guild_id: GUILD,
@@ -1524,7 +1661,7 @@ fn survival_can_turn_a_regular_boss_roll_from_miss_to_hit() {
         config.economy_event.enabled = false;
         config
     })
-    .fight_regular(
+    .fight_live_regular(
         DigBossRuntimeRequest {
             discord_id: PLAYER,
             guild_id: GUILD,
@@ -1545,7 +1682,7 @@ fn survival_can_turn_a_regular_boss_roll_from_miss_to_hit() {
         config.economy_event.enabled = false;
         config
     })
-    .fight_regular(
+    .fight_live_regular(
         DigBossRuntimeRequest {
             discord_id: PLAYER,
             guild_id: GUILD,
@@ -1585,7 +1722,7 @@ fn regular_scout_preview_matches_the_live_survival_prepared_fight() {
         .scout_regular(request, SequenceEntropy::constant(0.99))
         .expect("preview");
     let fight = runtime
-        .fight_regular(
+        .fight_live_regular(
             request,
             RiskTier::Cautious,
             1,
@@ -1981,7 +2118,7 @@ fn rescue_line_halves_loss_knockback_skips_extra_armor_tick_and_clears_attempt()
     let mut config = DigBossRuntimeConfig::new(database.path(), 20);
     config.economy_event.enabled = false;
     let result = DigBossRuntimeService::sqlite(config)
-        .fight_regular(
+        .fight_live_regular(
             DigBossRuntimeRequest {
                 discord_id: PLAYER,
                 guild_id: GUILD,
@@ -2336,7 +2473,7 @@ fn runtime_service_applies_daily_profit_policies_and_returns_typed_receipt() {
     config.economy_event.enabled = false;
     let runtime = DigBossRuntimeService::sqlite(config).with_vanity_tax(vanity);
     let result = runtime
-        .fight_regular(
+        .fight_live_regular(
             DigBossRuntimeRequest {
                 discord_id: PLAYER,
                 guild_id: GUILD,
@@ -2408,7 +2545,7 @@ fn taxed_boss_victory(low_priority_percent: Option<i64>) -> (FastTestDatabase, i
         }));
     }
     let result = runtime
-        .fight_regular(
+        .fight_live_regular(
             DigBossRuntimeRequest {
                 discord_id: PLAYER,
                 guild_id: GUILD,
@@ -2456,7 +2593,7 @@ fn runtime_boss_loss_is_exempt_from_low_priority_tax() {
             guild_id: GUILD,
             percent: 10,
         }))
-        .fight_regular(
+        .fight_live_regular(
             DigBossRuntimeRequest {
                 discord_id: PLAYER,
                 guild_id: GUILD,
@@ -3817,7 +3954,7 @@ fn regular_loss_marks_the_boss_resting_for_the_next_dig() {
     let database = fixture();
     clear_prep_and_set_balance(&database, 100);
     let result = pinnacle_runtime(&database)
-        .fight_regular(
+        .fight_live_regular(
             pinnacle_request(1_700_000_000),
             RiskTier::Cautious,
             0,
