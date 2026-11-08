@@ -23,6 +23,13 @@ const HEIGHT: usize = WRAPPED_SLIDE_HEIGHT;
 const COLORS: usize = 255;
 
 pub(super) fn animate(slide: &WrappedSlideData) -> Result<Vec<u8>, gif::EncodingError> {
+    // Award setups need a beat before the prize is named. Keep the same
+    // timeline and final frame, but give that reveal twice the reading time.
+    let frame_delay = if slide.layout == WrappedLayout::Award {
+        FRAME_DELAY * 2
+    } else {
+        FRAME_DELAY
+    };
     let mut stage = Stage::new(slide);
     let colors = shared_palette(&mut stage);
     let transparent = (colors.len() / 3) as u8;
@@ -43,16 +50,18 @@ pub(super) fn animate(slide: &WrappedSlideData) -> Result<Vec<u8>, gif::Encoding
                     &indexed,
                     (0, 0, WIDTH, HEIGHT),
                     transparent,
+                    frame_delay,
                 )),
-                Some(before) => changed_region(before, &indexed)
-                    .map(|region| sub_frame(Some(before), &indexed, region, transparent)),
+                Some(before) => changed_region(before, &indexed).map(|region| {
+                    sub_frame(Some(before), &indexed, region, transparent, frame_delay)
+                }),
             };
             if let Some(frame) = frame {
                 if let Some(ready) = pending.replace(frame) {
                     encoder.write_frame(&ready)?;
                 }
             } else if let Some(frame) = &mut pending {
-                frame.delay = frame.delay.saturating_add(FRAME_DELAY);
+                frame.delay = frame.delay.saturating_add(frame_delay);
             }
             previous = Some(indexed);
         }
@@ -186,6 +195,7 @@ fn sub_frame(
     indexed: &[u8],
     region: (usize, usize, usize, usize),
     transparent: u8,
+    frame_delay: u16,
 ) -> gif::Frame<'static> {
     let (left, top, right, bottom) = region;
     let mut buffer = Vec::with_capacity((right - left) * (bottom - top));
@@ -206,7 +216,7 @@ fn sub_frame(
         top: top as u16,
         width: (right - left) as u16,
         height: (bottom - top) as u16,
-        delay: FRAME_DELAY,
+        delay: frame_delay,
         dispose: gif::DisposalMethod::Keep,
         transparent: before.map(|_| transparent),
         buffer: Cow::Owned(buffer),

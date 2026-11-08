@@ -21,8 +21,8 @@ use cama_app::wrapped_story::{
     HeroRow, MatchDetails, MatchStatsRow, PairwiseEntry, PairwiseInput, PairwiseRaw,
     PersonalMoment, PersonalMomentMatch, PersonalSummaryInput, PersonalSummaryWrapped,
     YearMatchRow, flavor_pool, get_flavor, hero_spotlight, package_deal_wrapped,
-    pairwise_player_ids, pairwise_wrapped, personal_moments, personal_summary, role_breakdown,
-    year_timestamps,
+    pairwise_player_ids, pairwise_wrapped, personal_moments, personal_summary,
+    personal_superlatives, role_breakdown, year_timestamps,
 };
 use cama_db::gambling_stats_repository::{
     GamblingOutcome, GamblingStatsRepository, GamblingStatsService,
@@ -1098,7 +1098,7 @@ struct StoryAward {
 
 /// Personal moments shown in the story; the rest of the evidence lives in the
 /// detailed stats.
-const STORY_MOMENTS: usize = 3;
+const STORY_MOMENTS: usize = 2;
 const MOMENT_THEMES: [WrappedTheme; 4] = [
     WrappedTheme::QueueAlt,
     WrappedTheme::Heroes,
@@ -1135,7 +1135,7 @@ fn is_detail_page(kind: &str) -> bool {
     kind.starts_with("records_")
         || matches!(
             kind,
-            "awards" | "story_summary" | "server_summary" | "story_lanes"
+            "awards" | "story_summary" | "server_summary" | "story_lanes" | "chart_rating"
         )
 }
 
@@ -1406,6 +1406,7 @@ fn build_slides(
         })
         .collect::<Vec<_>>();
     let stories = personal_moments(&moment_rows);
+    let superlatives = personal_superlatives(&moment_rows);
     if let Some(time) = &stories.playtime {
         slides.push(moment_slide(
             time,
@@ -1420,8 +1421,14 @@ fn build_slides(
         slide.theme = WrappedTheme::Squad;
         slides.push(slide);
     }
-    for (index, moment) in stories.moments.iter().take(STORY_MOMENTS).enumerate() {
-        let mut slide = moment_slide(moment, "story_moment", target_display_name, &year_label);
+    for (index, moment) in stories.moments.iter().enumerate() {
+        let kind = if index < STORY_MOMENTS {
+            "story_moment"
+        } else {
+            "records_moments"
+        };
+        let mut slide = moment_slide(moment, kind, target_display_name, &year_label);
+        slide.layout = WrappedLayout::BigNumber;
         slide.theme = MOMENT_THEMES[index % MOMENT_THEMES.len()];
         slides.push(slide);
     }
@@ -1661,6 +1668,9 @@ fn build_slides(
                 .map(|identity| identity.value.clone())
         })
         .unwrap_or_else(|| "One of a kind".to_owned());
+    finale.badge = superlatives
+        .first()
+        .map_or_else(String::new, |award| award.title.to_owned());
     finale.stat_value = target_display_name.to_owned();
     finale.stat_label = "Save this card. See you next queue.".to_owned();
     finale.rows = top_heroes(&app_heroes, target_id)
@@ -1679,6 +1689,25 @@ fn build_slides(
         slides.push(persona);
     }
     slides.sort_by_key(|slide| story_position(&slide.kind));
+    // Space personal awards between chapters, keeping the opening and closing
+    // identity intact. Detail pages must not consume space between reveals.
+    let chapter_positions = slides
+        .iter()
+        .enumerate()
+        .filter(|(_, slide)| {
+            !is_detail_page(&slide.kind)
+                && !matches!(slide.kind.as_str(), "story_intro" | "story_persona")
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    for (index, award) in superlatives.iter().enumerate() {
+        let mut slide = moment_slide(award, "story_superlative", target_display_name, &year_label);
+        slide.badge = "Your year award".to_owned();
+        let chapter =
+            ((index + 1) * chapter_positions.len() / (superlatives.len() + 1)).saturating_sub(1);
+        let position = chapter_positions.get(chapter).copied().unwrap_or(0) + index + 1;
+        slides.insert(position, slide);
+    }
     slides.push(finale);
     slides
 }

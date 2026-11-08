@@ -333,6 +333,129 @@ pub fn personal_moments(matches: &[PersonalMomentMatch]) -> PersonalStory {
     }
 }
 
+/// Personal awards from distinct themes, independent of match ordering.
+/// Unknown or invalid measurements never count as zero or as a known outcome.
+#[must_use]
+pub fn personal_superlatives(matches: &[PersonalMomentMatch]) -> Vec<PersonalMoment> {
+    let coverage = |count| format!("Recorded in {count} of {} games", matches.len());
+    // Each candidate describes a different achievement. Rank by strength relative
+    // to its eligibility threshold; stable keys settle equally strong stories.
+    let mut candidates = Vec::<(f64, PersonalMoment)>::new();
+    let survival = matches
+        .iter()
+        .filter_map(|row| Some((row.won?, row.deaths.filter(|value| *value >= 0)?)))
+        .collect::<Vec<_>>();
+    let deathless = survival
+        .iter()
+        .filter(|(won, deaths)| *won && *deaths == 0)
+        .count();
+    if deathless > 0 {
+        candidates.push((
+            1.0 + deathless as f64 / survival.len() as f64,
+            PersonalMoment {
+                key: "deathless",
+                title: "Escape Artist",
+                headline: "The Ancient fell. You didn't.",
+                value: deathless.to_string(),
+                label: "wins with zero deaths",
+                detail: "Victory screens without a single trip to the fountain the hard way."
+                    .to_owned(),
+                coverage: coverage(survival.len()),
+            },
+        ));
+    }
+    let assists = matches
+        .iter()
+        .filter_map(|row| row.assists.filter(|value| *value >= 0))
+        .collect::<Vec<_>>();
+    if let Some(peak) = assists.iter().max().filter(|value| **value >= 20) {
+        candidates.push((
+            *peak as f64 / 20.0,
+            PersonalMoment {
+                key: "supporting_cast",
+                title: "Best Supporting Cast",
+                headline: "Somehow, you were in every scene.",
+                value: number(*peak),
+                label: "most recorded assists in one game",
+                detail: "The kill feed had stars. You had the connecting credits.".to_owned(),
+                coverage: coverage(assists.len()),
+            },
+        ));
+    }
+    let timed_results = matches
+        .iter()
+        .filter_map(|row| Some((row.won?, row.duration_seconds.filter(|value| *value > 0)?)))
+        .collect::<Vec<_>>();
+    if let Some(duration) = timed_results
+        .iter()
+        .filter(|(won, _)| *won)
+        .map(|(_, duration)| *duration)
+        .min()
+        .filter(|duration| *duration <= 1800)
+    {
+        candidates.push((
+            1800.0 / duration as f64,
+            PersonalMoment {
+                key: "speedrun",
+                title: "The Speedrun Award",
+                headline: "You had somewhere else to be.",
+                value: format!("{}:{:02}", duration / 60, duration % 60),
+                label: "your fastest recorded win",
+                detail: "Minutes and seconds. Your team got straight to the Ancient-shaped point."
+                    .to_owned(),
+                coverage: coverage(timed_results.len()),
+            },
+        ));
+    }
+    let scorelines = matches
+        .iter()
+        .filter_map(|row| {
+            Some((
+                row.won?,
+                row.kills.filter(|value| *value >= 0)?,
+                row.deaths.filter(|value| *value >= 0)?,
+                row.assists.filter(|value| *value >= 0)?,
+            ))
+        })
+        .collect::<Vec<_>>();
+    if let Some((_, kills, deaths, assists)) = scorelines
+        .iter()
+        .filter(|(won, kills, _, _)| !*won && *kills >= 15)
+        .max_by_key(|(_, kills, deaths, assists)| (*kills, std::cmp::Reverse(*deaths), *assists))
+    {
+        candidates.push((*kills as f64 / 15.0, PersonalMoment {
+            key: "bittersweet", title: "The Tragic Headliner",
+            headline: "A highlight reel with the wrong ending.",
+            value: format!("{kills} / {deaths} / {assists}"), label: "kills / deaths / assists in a loss",
+            detail: "Your highest-kill loss among games with a full recorded scoreline. The Ancient did not read the stats.".to_owned(),
+            coverage: coverage(scorelines.len()),
+        }));
+    }
+    let heroes = matches
+        .iter()
+        .filter_map(|row| row.hero_id.filter(|value| *value > 0))
+        .collect::<Vec<_>>();
+    let unique = heroes
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    if unique >= 5 && unique as f64 / heroes.len() as f64 >= 0.6 {
+        candidates.push((unique as f64 / 5.0, PersonalMoment {
+            key: "hero_sampler", title: "Outstanding Range",
+            headline: "Why have a main when you can have a cast?",
+            value: unique.to_string(), label: "different heroes played",
+            detail: format!("{unique} heroes across {} recorded picks. The draft screen was your audition room.", heroes.len()),
+            coverage: coverage(heroes.len()),
+        }));
+    }
+    candidates.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.key.cmp(b.1.key)));
+    candidates
+        .into_iter()
+        .take(3)
+        .map(|(_, moment)| moment)
+        .collect()
+}
+
 fn observed(
     matches: &[PersonalMomentMatch],
     metric: impl Fn(&PersonalMomentMatch) -> Option<i64>,
@@ -354,6 +477,7 @@ fn identity(matches: &[PersonalMomentMatch]) -> Option<PersonalMoment> {
         detail,
         coverage: format!("Recorded in {count} of {} games", matches.len()),
     };
+    let mut candidates = Vec::<(f64, PersonalMoment)>::new();
     let combat = matches
         .iter()
         .filter_map(|row| {
@@ -367,36 +491,39 @@ fn identity(matches: &[PersonalMomentMatch]) -> Option<PersonalMoment> {
         let kills = combat.iter().map(|row| row.0).sum::<i64>() as f64 / combat.len() as f64;
         let assists = combat.iter().map(|row| row.1).sum::<i64>() as f64 / combat.len() as f64;
         if assists >= 15.0 && assists > kills * 1.5 {
-            return Some(make(
+            candidates.push((assists / 15.0, make(
                 "The enabler",
                 "You made everyone else look good.",
                 format!(
                     "{assists:.1} assists per recorded game. Main-character energy, shared generously."
                 ),
                 combat.len(),
-            ));
+            )));
         }
         if kills >= 10.0 && kills > assists {
-            return Some(make(
+            candidates.push((kills / 10.0, make(
                 "The headliner",
                 "Your name kept making the feed.",
                 format!(
                     "{kills:.1} kills per recorded game. The highlight reel had a recurring lead."
                 ),
                 combat.len(),
-            ));
+            )));
         }
     }
     let (wards, count) = observed(matches, |row| row.wards);
     if count >= 3 && wards as f64 / count as f64 >= 10.0 {
-        return Some(make(
-            "The mapmaker",
-            "You saw the bigger picture.",
-            format!(
-                "{:.1} wards per recorded game. Your team had a view.",
-                wards as f64 / count as f64
+        candidates.push((
+            wards as f64 / count as f64 / 10.0,
+            make(
+                "The mapmaker",
+                "You saw the bigger picture.",
+                format!(
+                    "{:.1} wards per recorded game. Your team had a view.",
+                    wards as f64 / count as f64
+                ),
+                count,
             ),
-            count,
         ));
     }
     let mut heroes = std::collections::BTreeMap::new();
@@ -410,15 +537,18 @@ fn identity(matches: &[PersonalMomentMatch]) -> Option<PersonalMoment> {
     if picks >= 3 {
         let top = heroes.values().copied().max().unwrap_or_default();
         if top >= 3 && top as f64 / picks as f64 >= 0.6 {
-            return Some(make(
-                "The loyalist",
-                "You found your person. They have spells.",
-                format!("One hero in {top} of {picks} recorded picks. Comfort is a strategy."),
-                picks,
+            candidates.push((
+                top as f64 / picks as f64 / 0.6,
+                make(
+                    "The loyalist",
+                    "You found your person. They have spells.",
+                    format!("One hero in {top} of {picks} recorded picks. Comfort is a strategy."),
+                    picks,
+                ),
             ));
         }
         if heroes.len() >= 5 && heroes.len() as f64 / picks as f64 >= 0.6 {
-            return Some(make(
+            candidates.push((heroes.len() as f64 / picks as f64 / 0.6, make(
                 "The sampler",
                 "The hero grid was a tasting menu.",
                 format!(
@@ -426,10 +556,11 @@ fn identity(matches: &[PersonalMomentMatch]) -> Option<PersonalMoment> {
                     heroes.len()
                 ),
                 picks,
-            ));
+            )));
         }
     }
-    None
+    candidates.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.value.cmp(&b.1.value)));
+    candidates.into_iter().next().map(|(_, moment)| moment)
 }
 
 fn number(value: i64) -> String {
@@ -706,5 +837,201 @@ mod tests {
         let identity = personal_moments(&rows).identity.expect("variety identity");
         assert_eq!(identity.value, "The sampler");
         assert!(identity.detail.contains("6 heroes across 6 recorded picks"));
+    }
+}
+
+#[cfg(test)]
+mod encore_tests {
+    use super::*;
+
+    #[test]
+    fn deathless_award_counts_only_known_wins_and_deaths() {
+        let rows = [
+            PersonalMomentMatch {
+                won: Some(true),
+                deaths: Some(0),
+                ..Default::default()
+            },
+            PersonalMomentMatch {
+                won: Some(false),
+                deaths: Some(0),
+                ..Default::default()
+            },
+            PersonalMomentMatch {
+                won: Some(true),
+                deaths: None,
+                ..Default::default()
+            },
+            PersonalMomentMatch {
+                won: None,
+                deaths: Some(0),
+                ..Default::default()
+            },
+            PersonalMomentMatch {
+                won: Some(true),
+                deaths: Some(-1),
+                ..Default::default()
+            },
+        ];
+        let awards = personal_superlatives(&rows);
+        assert_eq!(awards.len(), 1);
+        assert_eq!(awards[0].key, "deathless");
+        assert_eq!(awards[0].value, "1");
+        assert_eq!(awards[0].coverage, "Recorded in 2 of 5 games");
+        assert!(personal_superlatives(&rows[1..]).is_empty());
+    }
+
+    #[test]
+    fn assists_award_reports_peak_and_known_coverage() {
+        let rows = [
+            PersonalMomentMatch {
+                assists: Some(25),
+                ..Default::default()
+            },
+            PersonalMomentMatch {
+                assists: Some(32),
+                ..Default::default()
+            },
+            PersonalMomentMatch {
+                assists: Some(-1),
+                ..Default::default()
+            },
+            PersonalMomentMatch::default(),
+        ];
+        let awards = personal_superlatives(&rows);
+        assert_eq!(awards[0].key, "supporting_cast");
+        assert_eq!(awards[0].value, "32");
+        assert_eq!(awards[0].coverage, "Recorded in 2 of 4 games");
+    }
+
+    #[test]
+    fn fastest_win_ignores_losses_unknown_results_and_invalid_durations() {
+        let rows = [
+            PersonalMomentMatch {
+                won: Some(true),
+                duration_seconds: Some(1261),
+                ..Default::default()
+            },
+            PersonalMomentMatch {
+                won: Some(true),
+                duration_seconds: Some(2000),
+                ..Default::default()
+            },
+            PersonalMomentMatch {
+                won: Some(false),
+                duration_seconds: Some(400),
+                ..Default::default()
+            },
+            PersonalMomentMatch {
+                won: None,
+                duration_seconds: Some(300),
+                ..Default::default()
+            },
+            PersonalMomentMatch {
+                won: Some(true),
+                duration_seconds: Some(0),
+                ..Default::default()
+            },
+        ];
+        let awards = personal_superlatives(&rows);
+        assert_eq!(awards[0].key, "speedrun");
+        assert_eq!(awards[0].value, "21:01");
+        assert_eq!(awards[0].coverage, "Recorded in 3 of 5 games");
+    }
+
+    #[test]
+    fn bittersweet_award_uses_a_complete_recorded_score_in_a_loss() {
+        let rows = [
+            PersonalMomentMatch {
+                won: Some(false),
+                kills: Some(24),
+                deaths: Some(4),
+                assists: Some(8),
+                ..Default::default()
+            },
+            PersonalMomentMatch {
+                won: Some(true),
+                kills: Some(30),
+                deaths: Some(1),
+                assists: Some(10),
+                ..Default::default()
+            },
+            PersonalMomentMatch {
+                won: Some(false),
+                kills: Some(40),
+                ..Default::default()
+            },
+        ];
+        let awards = personal_superlatives(&rows);
+        assert_eq!(awards[0].key, "bittersweet");
+        assert_eq!(awards[0].value, "24 / 4 / 8");
+        assert_eq!(awards[0].coverage, "Recorded in 2 of 3 games");
+    }
+
+    #[test]
+    fn variety_award_counts_distinct_known_heroes_and_does_not_reward_one_tricking() {
+        let mut rows = (1..=6)
+            .map(|hero| PersonalMomentMatch {
+                hero_id: Some(hero),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        rows.push(PersonalMomentMatch::default());
+        let awards = personal_superlatives(&rows);
+        assert_eq!(awards[0].key, "hero_sampler");
+        assert_eq!(awards[0].value, "6");
+        assert_eq!(awards[0].coverage, "Recorded in 6 of 7 games");
+        assert!(personal_superlatives(&vec![rows[0].clone(); 10]).is_empty());
+    }
+
+    #[test]
+    fn superlatives_are_bounded_unique_and_independent_of_input_order() {
+        let mut rows = (1..=6)
+            .map(|hero| PersonalMomentMatch {
+                hero_id: Some(hero),
+                won: Some(true),
+                deaths: Some(0),
+                assists: Some(30),
+                duration_seconds: Some(1200),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let awards = personal_superlatives(&rows);
+        assert_eq!(awards.len(), 3);
+        assert_eq!(
+            awards
+                .iter()
+                .map(|a| a.key)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            3
+        );
+        rows.reverse();
+        assert_eq!(awards, personal_superlatives(&rows));
+        let moments = personal_moments(&rows).moments;
+        assert!(
+            awards
+                .iter()
+                .all(|award| moments.iter().all(|moment| moment.key != award.key))
+        );
+        assert!(personal_superlatives(&vec![PersonalMomentMatch::default(); 20]).is_empty());
+    }
+
+    #[test]
+    fn identity_compares_strength_instead_of_always_choosing_combat() {
+        let rows = vec![
+            PersonalMomentMatch {
+                kills: Some(3),
+                assists: Some(16),
+                wards: Some(30),
+                ..Default::default()
+            };
+            6
+        ];
+        let identity = personal_moments(&rows)
+            .identity
+            .expect("strong vision identity");
+        assert_eq!(identity.value, "The mapmaker");
+        assert!(identity.detail.contains("30.0 wards"));
     }
 }

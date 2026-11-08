@@ -9,6 +9,7 @@ const TOP: i32 = 88;
 /// Lowest y body content may reach, leaving clear air above the username footer.
 const BOTTOM: i32 = HEIGHT - 72;
 const COVER_ART_BAND: i32 = 300;
+const COVER_FOOTER_HEIGHT: i32 = 64;
 
 pub(super) fn paint(stage: &mut Stage<'_>) {
     match stage.slide.layout {
@@ -21,6 +22,7 @@ pub(super) fn paint(stage: &mut Stage<'_>) {
         WrappedLayout::Tiles => tiles(stage),
         WrappedLayout::Spotlight => spotlight(stage),
         WrappedLayout::Persona => persona(stage),
+        WrappedLayout::Award => super::awards::paint(stage),
         WrappedLayout::Recap => recap(stage),
         WrappedLayout::Details => details(stage),
     }
@@ -98,12 +100,31 @@ fn card_rows(slide: &WrappedSlideData) -> Vec<WrappedRow> {
 fn cover(stage: &mut Stage<'_>) {
     let (slide, p) = (stage.slide, stage.palette);
     if let Some((width, height)) = stage.art.as_ref().map(|art| (art.width, art.height)) {
-        // A band of the illustration under the title, cropped at the card's edge.
-        let top = (HEIGHT - height as i32).max(HEIGHT - COVER_ART_BAND);
+        // Keep the illustration's foreground at the bottom edge; the reveal
+        // clips its upper scenery without cropping away the main subject.
+        let art_bottom = HEIGHT - COVER_FOOTER_HEIGHT;
+        let top = art_bottom - height as i32;
         let reveal = stage.ease(0.1, 0.7);
-        let shown_from = HEIGHT - (COVER_ART_BAND as f32 * reveal) as i32;
-        super::artwork::draw(stage, 0, top, (0, shown_from, width as i32, HEIGHT), 0.0);
+        let shown_from =
+            art_bottom - ((COVER_ART_BAND - COVER_FOOTER_HEIGHT) as f32 * reveal) as i32;
+        super::artwork::draw(
+            stage,
+            0,
+            top,
+            (0, shown_from, width as i32, art_bottom),
+            0.0,
+        );
     }
+    stage.canvas.rounded_rect(
+        (
+            0.0,
+            (HEIGHT - COVER_FOOTER_HEIGHT) as f32,
+            WIDTH as f32,
+            HEIGHT as f32,
+        ),
+        0.0,
+        p.bg,
+    );
     let mut y = 92;
     let headline = if slide.headline.is_empty() {
         "Your year.\nYour chaos."
@@ -112,7 +133,7 @@ fn cover(stage: &mut Stage<'_>) {
     };
     y = stage.block(
         headline,
-        (MARGIN, y, COLUMN, 400),
+        (MARGIN, y, COLUMN, 330),
         104.0,
         Face::Black,
         p.fg,
@@ -128,10 +149,12 @@ fn cover(stage: &mut Stage<'_>) {
         Align::Left,
         (0.42, 0.72),
     );
-    for line in &slide.lines {
+    let lines = slide.lines.iter().take(2).collect::<Vec<_>>();
+    let slot = ((HEIGHT - COVER_ART_BAND - 12 - y) / lines.len().max(1) as i32 - 8).max(0);
+    for line in lines {
         y = stage.block(
             line,
-            (MARGIN, y + 8, COLUMN, 120),
+            (MARGIN, y + 8, COLUMN, slot),
             33.0,
             Face::Bold,
             p.fg,
@@ -1026,6 +1049,28 @@ fn recap(stage: &mut Stage<'_>) {
         Align::Left,
         (0.7, 0.9),
     );
+    if !slide.badge.is_empty() {
+        let show = stage.ease(0.78, 0.96);
+        stage.canvas.rounded_rect(
+            (
+                MARGIN as f32 - 8.0,
+                794.0,
+                (WIDTH - MARGIN + 8) as f32,
+                828.0,
+            ),
+            17.0,
+            p.accent.scaled_alpha(show),
+        );
+        stage.block(
+            &slide.badge,
+            (MARGIN + 8, 798, COLUMN - 16, 28),
+            22.0,
+            Face::Bold,
+            p.on_accent,
+            Align::Left,
+            (0.78, 0.96),
+        );
+    }
 }
 
 fn details(stage: &mut Stage<'_>) {

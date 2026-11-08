@@ -814,6 +814,7 @@ fn sparse_wrapped_does_not_invent_zero_combat_or_identity() {
     }
     let slides = build_slides(raw, &BTreeMap::new(), OWNER as i64, "Player", 2026, 3, 3);
     assert!(!slides.iter().any(|slide| slide.kind == "story_identity"));
+    assert!(!slides.iter().any(|slide| slide.kind == "story_superlative"));
     let summary = slides
         .iter()
         .find(|slide| slide.kind == "story_summary")
@@ -1839,4 +1840,102 @@ async fn recap_can_be_shared_once_as_a_lasting_message() {
         followups.last().unwrap().ephemeral,
         "a second share is refused privately"
     );
+}
+
+#[test]
+fn personal_superlatives_are_spaced_through_the_story_with_evidence_and_a_recap() {
+    let fixture = Fixture::migrated();
+    let mut raw = WrappedSources::new(&fixture.path)
+        .load(GUILD as i64, OWNER as i64, 2026)
+        .unwrap()
+        .unwrap();
+    for row in &mut raw.matches {
+        row.pings = Some(80);
+        row.obs_placed = Some(10);
+        row.sen_placed = Some(10);
+        row.courier_kills = Some(3);
+        row.kills = Some(12);
+        row.deaths = Some(0);
+        row.assists = Some(30);
+        row.tower_damage = Some(10_000);
+        row.hero_healing = Some(12_000);
+        row.duration_seconds = Some(1200);
+        row.won = Some(true);
+    }
+    let slides = build_slides(raw, &BTreeMap::new(), OWNER as i64, "Player", 2026, 3, 3);
+    let story = slides
+        .iter()
+        .filter(|slide| !is_detail_page(&slide.kind))
+        .collect::<Vec<_>>();
+    let awards = story
+        .iter()
+        .enumerate()
+        .filter(|(_, slide)| slide.kind == "story_superlative")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        awards.len(),
+        3,
+        "all three personal awards should be reachable in the main story"
+    );
+    assert!(
+        awards.windows(2).all(|pair| pair[1].0 > pair[0].0 + 1),
+        "personal awards need breathing room between reveals"
+    );
+    for (_, award) in &awards {
+        assert_eq!(award.badge, "Your year award");
+        assert!(!award.headline.is_empty());
+        assert!(!award.stat_value.is_empty());
+        assert!(!award.stat_label.is_empty());
+        assert_eq!(award.lines.len(), 2);
+        assert!(!award.lines[0].is_empty());
+        assert!(award.lines[1].contains("3 of 3"));
+    }
+    assert_eq!(awards[0].1.title, "Escape Artist");
+    assert_eq!(awards[0].1.stat_value, "3");
+    assert_eq!(awards[1].1.title, "The Speedrun Award");
+    assert_eq!(awards[1].1.stat_value, "20:00");
+    assert_eq!(awards[2].1.title, "Best Supporting Cast");
+    assert_eq!(awards[2].1.stat_value, "30");
+    assert_eq!(story.last().unwrap().badge, awards[0].1.title);
+    assert!(story.iter().all(|slide| slide.kind != "chart_rating"));
+    assert!(
+        slides
+            .iter()
+            .any(|slide| slide.kind == "chart_rating" && is_detail_page(&slide.kind))
+    );
+    let overflow = slides
+        .iter()
+        .filter(|slide| slide.kind == "records_moments")
+        .collect::<Vec<_>>();
+    assert!(!overflow.is_empty());
+    for moment in overflow {
+        assert_eq!(
+            moment.layout,
+            WrappedLayout::BigNumber,
+            "detail navigation must retain the numeric evidence renderer"
+        );
+        assert!(!moment.stat_value.is_empty());
+        assert!(!moment.stat_label.is_empty());
+        assert_eq!(moment.lines.len(), 2);
+    }
+    assert!(
+        story
+            .iter()
+            .filter(|slide| slide.kind == "story_moment")
+            .count()
+            <= 2
+    );
+}
+
+#[test]
+fn personal_superlatives_are_absent_without_observed_match_evidence() {
+    let fixture = Fixture::migrated();
+    let mut raw = WrappedSources::new(&fixture.path)
+        .load(GUILD as i64, OWNER as i64, 2026)
+        .unwrap()
+        .unwrap();
+    raw.matches.clear();
+    let slides = build_slides(raw, &BTreeMap::new(), OWNER as i64, "Player", 2026, 3, 3);
+    assert!(slides.iter().all(|slide| slide.kind != "story_superlative"));
+    assert!(slides.last().unwrap().badge.is_empty());
 }

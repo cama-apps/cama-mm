@@ -111,6 +111,35 @@ fn deck(assets: &str) -> Vec<WrappedSlideData> {
     }
     deck.push(heroes);
 
+    // Exercise the production award policy, including a wide scoreline and
+    // coverage copy, rather than maintaining a second set of award wording.
+    let award_matches = vec![
+        cama_app::wrapped_story::PersonalMomentMatch {
+            won: Some(true),
+            deaths: Some(0),
+            kills: Some(8),
+            assists: Some(42),
+            ..Default::default()
+        },
+        cama_app::wrapped_story::PersonalMomentMatch {
+            won: Some(false),
+            kills: Some(24),
+            deaths: Some(3),
+            assists: Some(18),
+            ..Default::default()
+        },
+        cama_app::wrapped_story::PersonalMomentMatch::default(),
+    ];
+    for award in cama_app::wrapped_story::personal_superlatives(&award_matches) {
+        let mut slide = card("story_superlative", award.title);
+        slide.headline = award.headline.to_owned();
+        slide.stat_value = award.value;
+        slide.stat_label = award.label.to_owned();
+        slide.badge = "Your personal superlative".to_owned();
+        slide.lines = vec![award.detail, award.coverage];
+        deck.push(slide);
+    }
+
     let mut months = card("story_months", "Your year in queue");
     months.headline = "March had you in a chokehold.".to_owned();
     months.stat_value = "38".to_owned();
@@ -325,6 +354,7 @@ fn deck(assets: &str) -> Vec<WrappedSlideData> {
     let mut finale = card("story_finale", "2026 Wrapped");
     finale.stat_value = PLAYER.to_owned();
     finale.headline = "The Night Shift Mole".to_owned();
+    finale.badge = "Personal award: Escape Artist".to_owned();
     finale.rows = rows(&[
         ("Queen of Pain", ""),
         ("Crystal Maiden", ""),

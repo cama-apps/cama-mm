@@ -40,9 +40,10 @@ fn gamba_slide() -> WrappedSlideData {
     slide
 }
 
-const ALL_KINDS: [&str; 16] = [
+const ALL_KINDS: [&str; 17] = [
     "story_intro",
     "story_identity",
+    "story_superlative",
     "story_moment",
     "story_finale",
     "server_summary",
@@ -59,7 +60,7 @@ const ALL_KINDS: [&str; 16] = [
     "chart_gamba",
 ];
 
-const ALL_LAYOUTS: [WrappedLayout; 11] = [
+const ALL_LAYOUTS: [WrappedLayout; 12] = [
     WrappedLayout::Cover,
     WrappedLayout::BigNumber,
     WrappedLayout::TopList,
@@ -69,6 +70,7 @@ const ALL_LAYOUTS: [WrappedLayout; 11] = [
     WrappedLayout::Tiles,
     WrappedLayout::Spotlight,
     WrappedLayout::Persona,
+    WrappedLayout::Award,
     WrappedLayout::Recap,
     WrappedLayout::Details,
 ];
@@ -185,10 +187,15 @@ fn reveal_is_bounded_moves_and_ends_on_exactly_the_still_card() {
         WrappedLayout::BigNumber,
         WrappedLayout::Tiles,
         WrappedLayout::Curve,
+        WrappedLayout::Award,
     ] {
         let mut slide = busy("custom");
         slide.layout = layout;
-        slide.theme = WrappedTheme::Queue;
+        slide.theme = if layout == WrappedLayout::Award {
+            WrappedTheme::Awards
+        } else {
+            WrappedTheme::Queue
+        };
         slide.rows = vec![WrappedRow::new("7", "times"), WrappedRow::new("9", "wins")];
         let media = render_wrapped_media(&slide, true).unwrap();
         assert_eq!(media.filename, "wrapped_slide.gif");
@@ -198,6 +205,13 @@ fn reveal_is_bounded_moves_and_ends_on_exactly_the_still_card() {
         assert!(frames.len() <= motion::FRAMES);
         assert_ne!(frames[0], *frames.last().unwrap());
         assert!(*delays.last().unwrap() >= 300, "the finished card holds");
+        if layout == WrappedLayout::Award {
+            assert!(
+                delays[..delays.len() - 1].iter().sum::<u16>() >= 220,
+                "the award setup and reveal need a full reading beat"
+            );
+            assert!(delays[..delays.len() - 1].iter().all(|delay| *delay >= 8));
+        }
         assert!(
             delays[..delays.len() - 1].iter().all(|delay| *delay >= 2),
             "no frame is too fast for clients to honor"
@@ -428,4 +442,97 @@ fn still_and_animation_reject_oversized_input_before_rendering() {
         render_wrapped_slide(&rows),
         Err(WrappedMediaError::OversizedText)
     ));
+}
+
+#[test]
+fn personal_award_waits_for_the_setup_then_reveals_its_title_and_evidence() {
+    let mut slide = busy("story_superlative");
+    assert_eq!(slide.layout, WrappedLayout::Award);
+    assert_eq!(slide.theme, WrappedTheme::Awards);
+    slide.title = "Escape artist".into();
+    slide.headline = "You knew exactly when to leave.".into();
+    let mut changed = slide.clone();
+    changed.title = "Different award".into();
+    changed.stat_value = "199".into();
+    changed.lines = vec!["Different evidence".into()];
+    let mut first = stage::Stage::new(&slide);
+    let mut second = stage::Stage::new(&changed);
+    assert_eq!(first.paint(0.1).pixels, second.paint(0.1).pixels);
+    assert_ne!(first.paint(1.0).pixels, second.paint(1.0).pixels);
+
+    // Even adversarial copy cannot enter the player's footer or leave its
+    // evidence band. The coverage line changes its own rendered pixels.
+    let long = "Unreasonably determined and extremely long copy ".repeat(10);
+    changed.title.clone_from(&long);
+    changed.headline.clone_from(&long);
+    changed.stat_label.clone_from(&long);
+    changed.badge.clone_from(&long);
+    changed.lines = vec![long; 5];
+    let long_card = stage::render_still(&changed);
+    let footer = 828 * WRAPPED_SLIDE_WIDTH * 4;
+    assert_eq!(
+        first.paint(1.0).pixels[footer..],
+        long_card.pixels[footer..]
+    );
+    let before = stage::render_still(&slide);
+    slide.lines[1] = "Stats available in 12 of 40 games".into();
+    let after = stage::render_still(&slide);
+    assert_ne!(before.pixels, after.pixels);
+    assert_eq!(
+        before.pixels[..776 * WRAPPED_SLIDE_WIDTH * 4],
+        after.pixels[..776 * WRAPPED_SLIDE_WIDTH * 4]
+    );
+}
+
+#[test]
+fn share_card_keeps_the_personal_award_visible() {
+    let mut slide = busy("story_finale");
+    let plain = stage::render_still(&slide);
+    slide.badge = "Escape artist".into();
+    let awarded = stage::render_still(&slide);
+    assert_ne!(plain.pixels, awarded.pixels);
+    let footer = 828 * WRAPPED_SLIDE_WIDTH * 4;
+    assert_eq!(plain.pixels[footer..], awarded.pixels[footer..]);
+}
+
+#[test]
+fn cover_reveals_the_bottom_of_the_illustration_inside_its_reserved_band() {
+    let slide = WrappedSlideData::new("story_intro", "Wrapped");
+    let mut stage = stage::Stage::new(&slide);
+    let sky = Rgba::rgb(4, 88, 151);
+    let foreground = Rgba::rgb(17, 210, 63);
+    let mut art = Canvas::new(WRAPPED_SLIDE_WIDTH, 540, sky);
+    for y in 480..540 {
+        for x in 0..WRAPPED_SLIDE_WIDTH {
+            art.set(x as i32, y, foreground);
+        }
+    }
+    stage.art = Some(stage::PreparedArt {
+        width: art.width,
+        height: art.height,
+        pixels: art.pixels,
+    });
+    let at = |canvas: &Canvas, y: usize| {
+        canvas.pixels[(y * WRAPPED_SLIDE_WIDTH + 20) * 4..][..4].to_vec()
+    };
+    assert_ne!(at(stage.paint(0.0), 810), foreground.0);
+    let final_card = stage.paint(1.0);
+    assert_eq!(
+        at(final_card, 810),
+        foreground.0,
+        "the lower subject remains visible"
+    );
+    assert_eq!(at(final_card, 700), sky.0);
+    assert_eq!(at(final_card, 870), stage::palette(slide.theme).bg.0);
+    assert!(
+        final_card.pixels[836 * WRAPPED_SLIDE_WIDTH * 4..]
+            .chunks_exact(4)
+            .all(|pixel| pixel == stage::palette(slide.theme).bg.0),
+        "the empty cover footer is solid behind the player name"
+    );
+    assert_ne!(
+        at(final_card, 599),
+        sky.0,
+        "the illustration cannot enter the text band"
+    );
 }

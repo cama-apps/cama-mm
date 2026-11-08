@@ -13,6 +13,7 @@ use fontdue::{Font, FontSettings};
 use thiserror::Error;
 
 mod artwork;
+mod awards;
 mod cards;
 mod motifs;
 mod motion;
@@ -88,6 +89,7 @@ pub enum WrappedLayout {
     Tiles,
     Spotlight,
     Persona,
+    Award,
     Recap,
     #[default]
     Details,
@@ -115,6 +117,7 @@ pub enum WrappedTheme {
     Mafia,
     MafiaRed,
     Persona,
+    Awards,
     Recap,
 }
 
@@ -183,6 +186,7 @@ fn default_style(kind: &str) -> (WrappedLayout, WrappedTheme) {
         "story_games" | "story_playtime" => (WrappedLayout::BigNumber, WrappedTheme::Queue),
         "story_moment" | "story_packages" => (WrappedLayout::BigNumber, WrappedTheme::QueueAlt),
         "story_identity" => (WrappedLayout::Persona, WrappedTheme::Persona),
+        "story_superlative" => (WrappedLayout::Award, WrappedTheme::Awards),
         "story_hero" => (WrappedLayout::TopList, WrappedTheme::Heroes),
         "story_lanes" | "story_months" => (WrappedLayout::Bars, WrappedTheme::Months),
         "story_teammates" => (WrappedLayout::People, WrappedTheme::Squad),
