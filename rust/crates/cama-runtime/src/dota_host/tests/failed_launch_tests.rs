@@ -455,3 +455,143 @@ async fn cleanup_rechecks_server_ownership_and_pending_match_before_destroying()
         }
     }
 }
+
+#[tokio::test]
+async fn launch_and_return_between_polls_recovers_and_persists_attempt_identity() {
+    let f = Fixture::new(false);
+    f.worker.tick(&f.port, 100).await.unwrap();
+    f.worker.tick(&f.port, 101).await.unwrap();
+    assert_eq!(f.session().phase, Phase::Launching);
+    assert!(f.state().allocation_observed_at.is_none());
+    return_to_lobby(&f);
+    // Current snapshot has already returned to UI; only transport history saw RUN.
+    f.port
+        .lobby
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .launch_history = HostLaunchHistory {
+        allocation_observed: true,
+        match_id: Some(888),
+        ..Default::default()
+    };
+    f.worker.tick(&f.port, 115).await.unwrap();
+    assert_eq!(f.state().failed_launches.len(), 1);
+    assert_eq!(f.state().failed_launches[0].match_id, Some(888));
+    assert_eq!(f.session().phase, Phase::Creating);
+    assert!(f.betting_open(115));
+    restarted(&f).tick(&f.port, 120).await.unwrap();
+    assert!(
+        f.port
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call == "destroy")
+    );
+    restarted(&f).tick(&f.port, 125).await.unwrap();
+    assert!(f.state().launch_requested_at.is_none());
+    assert!(f.session().lobby_id.is_none());
+}
+
+#[tokio::test]
+async fn allocation_and_return_without_match_id_between_polls_recovers() {
+    let f = Fixture::new(false);
+    f.worker.tick(&f.port, 100).await.unwrap();
+    f.worker.tick(&f.port, 101).await.unwrap();
+    assert_eq!(f.session().phase, Phase::Launching);
+    assert!(f.state().allocation_observed_at.is_none());
+    return_to_lobby(&f);
+    f.port
+        .lobby
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .launch_history
+        .allocation_observed = true;
+    f.worker.tick(&f.port, 115).await.unwrap();
+    assert_eq!(f.state().failed_launches.len(), 1);
+    assert_eq!(f.state().failed_launches[0].match_id, None);
+    assert_eq!(f.session().phase, Phase::Creating);
+}
+
+#[tokio::test]
+async fn gameplay_between_polls_prevents_failed_launch_recreation() {
+    let f = Fixture::new(false);
+    f.worker.tick(&f.port, 100).await.unwrap();
+    f.worker.tick(&f.port, 101).await.unwrap();
+    assert_eq!(f.session().phase, Phase::Launching);
+    assert!(f.state().allocation_observed_at.is_none());
+    return_to_lobby(&f);
+    f.port
+        .lobby
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .launch_history = HostLaunchHistory {
+        allocation_observed: true,
+        gameplay_observed: true,
+        match_id: Some(888),
+        ..Default::default()
+    };
+    f.worker.tick(&f.port, 115).await.unwrap();
+    assert_eq!(f.session().phase, Phase::NeedsReview);
+    assert!(f.state().failed_launches.is_empty());
+    assert!(f.state().betting_closed, "gameplay evidence is durable");
+    assert!(
+        PendingMatchRepository::new(&f.worker.path)
+            .pending_match(1, f.pending)
+            .unwrap()
+            .unwrap()
+            .state
+            .betting_closed()
+    );
+    assert!(
+        f.betting_open(115),
+        "the normal timed wager window is unchanged"
+    );
+    assert!(
+        !f.port
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call == "destroy")
+    );
+}
+
+#[tokio::test]
+async fn conflicting_match_ids_between_polls_prevent_recreation() {
+    let f = Fixture::new(false);
+    f.worker.tick(&f.port, 100).await.unwrap();
+    f.worker.tick(&f.port, 101).await.unwrap();
+    assert_eq!(f.session().phase, Phase::Launching);
+    assert!(f.state().allocation_observed_at.is_none());
+    return_to_lobby(&f);
+    f.port
+        .lobby
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .launch_history = HostLaunchHistory {
+        allocation_observed: true,
+        match_id: Some(888),
+        conflicting_match_ids: true,
+        ..Default::default()
+    };
+    f.worker.tick(&f.port, 115).await.unwrap();
+    assert_eq!(f.session().phase, Phase::NeedsReview);
+    assert!(f.state().failed_launches.is_empty());
+    assert!(
+        !f.port
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call == "destroy")
+    );
+}

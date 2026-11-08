@@ -315,6 +315,7 @@ impl HostedMatchRecorder for Recorder {
 
 fn lobby(settings: &LobbySettings) -> HostLobby {
     HostLobby {
+        launch_history: HostLaunchHistory::default(),
         id: 777,
         name: settings.name.clone(),
         owner_account_id: 99,
