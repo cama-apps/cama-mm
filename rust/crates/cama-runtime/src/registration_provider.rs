@@ -146,6 +146,11 @@ impl PlayerRegistrationProvider {
             repository: NeonEventRepository::new(path),
         });
         let mut neon = NeonDegenService::with_event_port(now_nanos(), neon_port);
+        neon.set_player_names(Arc::new(crate::discord_transport::GuildCacheNeonNames(
+            Arc::new(
+                crate::discord_transport::DiscordGuildPlayerNameResolver::new(Arc::clone(&discord)),
+            ),
+        )));
         neon.set_enabled(config.neon_degen_enabled);
         Self {
             handler: Arc::new(PlayerRegistrationHandler {

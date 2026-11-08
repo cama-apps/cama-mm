@@ -738,7 +738,11 @@ fn test_enrichment_can_roast_a_genuinely_extreme_loser() {
 
     assert_eq!(results.len(), 1);
     let text = results[0].text_block.as_deref().expect("callout text");
-    assert!(text.contains("Client-44") || text.contains("<@44>"));
+    // The mention line notifies the player; the copy itself never shows the ID.
+    assert!(text.starts_with("<@44>\n"), "{text}");
+    let body = &text["<@44>\n".len()..];
+    assert!(!body.contains("44"), "{body}");
+    assert!(!body.contains("Client-"), "{body}");
 }
 
 #[test]

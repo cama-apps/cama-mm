@@ -291,6 +291,21 @@ impl GuildPlayerNameResolver for DiscordGuildPlayerNameResolver {
     }
 }
 
+/// Neon's cache-only player names: the live guild cache, then the last name
+/// the bot saw. Neon falls back to a neutral label when neither exists.
+pub struct GuildCacheNeonNames(pub Arc<dyn GuildPlayerNameResolver>);
+
+impl cama_app::neon_degen::NeonPlayerNames for GuildCacheNeonNames {
+    fn cached_display_name(&self, guild_id: Option<u64>, discord_id: u64) -> Option<String> {
+        let guild_id = i64::try_from(guild_id?).ok()?;
+        let discord_id = i64::try_from(discord_id).ok()?;
+        self.0
+            .names_for_guild(guild_id, &[discord_id])
+            .ok()?
+            .cached_name(discord_id)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DiscordAllowedMentions {
     /// Preserve Discord's normal parse policy for deliberately public copy.
