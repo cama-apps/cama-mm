@@ -4312,11 +4312,16 @@ impl BettingInteractionHandler {
                 } else {
                     format!("{badge} ")
                 };
+                // The recipient is pinged; both players are named in text.
+                let recipient = u64::try_from(target).map_err(|_| "invalid tip recipient")?;
                 let response = responder
-                    .followup(InteractionResponse::message(format!(
-                        "{prefix}{user_display_name} tipped {amount} {JOPACOIN_EMOTE} to {target_name}! \
-                         ({fee} {JOPACOIN_EMOTE} fee to Jopacoin Reserve){suffix}"
-                    )).without_mentions())
+                    .followup(
+                        InteractionResponse::message(format!(
+                            "{prefix}{user_display_name} tipped {amount} {JOPACOIN_EMOTE} to {target_name}! <@{target}> \
+                             ({fee} {JOPACOIN_EMOTE} fee to Jopacoin Reserve){suffix}"
+                        ))
+                        .with_user_mentions(vec![recipient]),
+                    )
                     .await
                     .map_err(|error| error.to_string());
                 if response.is_ok() {
@@ -4386,13 +4391,15 @@ impl BettingInteractionHandler {
                 let names = self
                     .render_player_names(&[user_id, target], Some(guild_id))
                     .await;
+                // The debtor is pinged; both players are named in text.
+                let debtor = u64::try_from(target).map_err(|_| "invalid debt recipient")?;
                 responder
                     .followup(
                         InteractionResponse::message(format!(
-                            "{} paid {} {} toward {}'s debt!",
+                            "{} paid {} {} toward {}'s debt! <@{target}>",
                             names[&user_id], payment.amount_paid, JOPACOIN_EMOTE, names[&target]
                         ))
-                        .without_mentions(),
+                        .with_user_mentions(vec![debtor]),
                     )
                     .await
                     .map_err(|error| error.to_string())

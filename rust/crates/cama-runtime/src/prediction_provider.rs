@@ -49,7 +49,9 @@ use crate::discord_transport::{
 use crate::gamba_guild_source::GambaGuildSource;
 use crate::ids::signed_id;
 use crate::option_ext::{boolean_option, integer_option, string_option};
-use crate::prediction_workers::{PredictionDiscordPort, unresolved_prediction_text};
+use crate::prediction_workers::{
+    PredictionDiscordPort, summary_mention_users, unresolved_prediction_text,
+};
 use crate::registration::{
     CommandOptionChoice, CommandOptionKind, CommandOptionSpec, CommandSpec, ComponentRoute,
     InteractionAcknowledgementPolicy, InteractionActionRow, InteractionAttachment,
@@ -1101,10 +1103,26 @@ impl PredictionInteractionHandler {
         let market_message = self.market_message(prediction_id, None, true).await?;
         let creator_name = self.player_name(guild_id, creator_id).await;
         let display_question = self.display_text(guild_id, question).await;
-        let announcement = DiscordMessage::silent(InteractionResponse::message(format!(
-            "📈 **New market #{prediction_id}** opened by {creator_name}\n\
-                 \"{display_question}\" — starting at YES {initial_fair}%"
-        )));
+        // The creator and the players the question names are notified by a
+        // trailing mention line; the text itself shows readable names.
+        let notified = u64::try_from(creator_id)
+            .ok()
+            .into_iter()
+            .chain(summary_mention_users(question))
+            .filter(|user_id| *user_id != 0)
+            .collect::<BTreeSet<_>>();
+        let pings = notified
+            .iter()
+            .map(|user_id| format!("<@{user_id}>"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let announcement = DiscordMessage::mentioning(
+            InteractionResponse::message(format!(
+                "📈 **New market #{prediction_id}** opened by {creator_name}\n\
+                     \"{display_question}\" — starting at YES {initial_fair}%\n{pings}"
+            )),
+            notified,
+        );
         // Thread names are plain text: Discord never renders mentions there.
         let thread_name = market_thread_name(prediction_id, &display_question);
         let surface = self
@@ -1879,11 +1897,7 @@ impl PredictionInteractionHandler {
             "📈 Market #{prediction_id} fair manually set by {}: YES {old_price}% → {new_price}%",
             self.player_name(market.guild_id, command.user_id).await
         );
-        followup(
-            &responder,
-            InteractionResponse::message(&announce).without_mentions(),
-        )
-        .await?;
+        followup(&responder, admin_announcement(&announce, command.user_id)).await?;
         if let Err(error) = self.refresh_open_market_message(prediction_id).await {
             warn!(prediction_id, %error, "set-fair market embed refresh failed");
         }
@@ -1942,11 +1956,7 @@ impl PredictionInteractionHandler {
             refresh.trade_count,
             if refresh.trade_count == 1 { "" } else { "s" }
         );
-        followup(
-            &responder,
-            InteractionResponse::message(&announce).without_mentions(),
-        )
-        .await?;
+        followup(&responder, admin_announcement(&announce, command.user_id)).await?;
         if let Err(error) = self.refresh_open_market_message(prediction_id).await {
             warn!(prediction_id, %error, "force-refresh market embed update failed");
         }
@@ -2001,11 +2011,7 @@ impl PredictionInteractionHandler {
         };
         let actor_name = self.player_name(market.guild_id, command.user_id).await;
         let announce = cancellation_announcement(&cancellation, &actor_name);
-        followup(
-            &responder,
-            InteractionResponse::message(&announce).without_mentions(),
-        )
-        .await?;
+        followup(&responder, admin_announcement(&announce, command.user_id)).await?;
         if let (Some(thread_id), Some(message_id)) = (market.thread_id, market.embed_message_id) {
             match self.market_message(prediction_id, None, false).await {
                 Ok(message) => {
@@ -2113,11 +2119,7 @@ impl PredictionInteractionHandler {
             rollback.total_reversed,
             rollback.affected_players
         );
-        followup(
-            &responder,
-            InteractionResponse::message(&announce).without_mentions(),
-        )
-        .await?;
+        followup(&responder, admin_announcement(&announce, command.user_id)).await?;
         let repository = self.predictions.clone();
         let market = spawn_sqlite("load rolled-back prediction", move || {
             repository.get_prediction(prediction_id)
@@ -3117,6 +3119,12 @@ fn python_round(value: f64) -> i64 {
     } else {
         value.round() as i64
     }
+}
+
+/// An admin action names the admin and keeps the admin's deliberate ping.
+fn admin_announcement(text: &str, admin_id: i64) -> InteractionResponse {
+    let admin = u64::try_from(admin_id).unwrap_or_default();
+    InteractionResponse::message(format!("{text} <@{admin}>")).with_user_mentions(vec![admin])
 }
 
 fn cancellation_announcement(cancellation: &Cancellation, actor_name: &str) -> String {

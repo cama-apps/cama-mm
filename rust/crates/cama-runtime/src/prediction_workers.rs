@@ -362,13 +362,28 @@ impl PredictionRefreshWorker {
                 if !open {
                     return Ok(());
                 }
-                // The stored summary names its biggest trader by mention;
-                // post it with the trader's readable name instead.
-                let content = self
+                // The stored summary names its biggest trader by mention:
+                // render the readable name, then keep that trader's ping on a
+                // trailing mention line.
+                let users = summary_mention_users(content)
+                    .into_iter()
+                    .collect::<BTreeSet<_>>();
+                let mut rendered = self
                     .discord
                     .prediction_market_text(publication.guild_id, content)
                     .await;
-                let message = DiscordMessage::silent(InteractionResponse::message(content));
+                let message = if users.is_empty() {
+                    DiscordMessage::silent(InteractionResponse::message(rendered))
+                } else {
+                    let pings = users
+                        .iter()
+                        .map(|user_id| format!("<@{user_id}>"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    rendered.push('\n');
+                    rendered.push_str(&pings);
+                    DiscordMessage::mentioning(InteractionResponse::message(rendered), users)
+                };
                 let delivered = self
                     .discord
                     .send_prediction_thread_message(*thread_id, message)
@@ -1023,7 +1038,7 @@ fn digest_market_field(market: &PredictionDigestMarket) -> (String, String) {
     (name, value)
 }
 
-fn summary_mention_users(content: &str) -> Vec<u64> {
+pub(crate) fn summary_mention_users(content: &str) -> Vec<u64> {
     let mut users = Vec::new();
     let mut remaining = content;
     while let Some(start) = remaining.find("<@") {
