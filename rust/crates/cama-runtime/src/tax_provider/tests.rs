@@ -1026,3 +1026,79 @@ fn pager_custom_ids_round_trip() {
         Ok(("ledger", 42, PageDirection::Next))
     ));
 }
+
+const LEDGER_HOLDER: i64 = 581_234_567_890_123_411;
+const LEDGER_NAMELESS: i64 = 581_234_567_890_123_412;
+
+struct LedgerNames;
+
+impl GuildPlayerNameResolver for LedgerNames {
+    fn names_for_guild(
+        &self,
+        _guild_id: i64,
+        _player_ids: &[i64],
+    ) -> Result<GuildPlayerNameDirectory, String> {
+        Ok(GuildPlayerNameDirectory::new(Some(BTreeMap::from([(
+            u64::try_from(LEDGER_HOLDER).unwrap(),
+            "Ledger Holder".to_owned(),
+        )]))))
+    }
+}
+
+#[tokio::test]
+async fn ledger_names_player_accounts_without_ids_or_mentions() {
+    let Fixture {
+        _directory,
+        path,
+        provider,
+    } = Fixture::migrated();
+    let fixture = Fixture {
+        _directory,
+        path,
+        provider: provider.with_player_names(Arc::new(LedgerNames)),
+    };
+    fixture.player(LEDGER_HOLDER, 0);
+    fixture.player(LEDGER_NAMELESS, 0);
+    let connection = fixture.connection();
+    connection
+        .execute("DELETE FROM economy_ledger_entries", [])
+        .expect("clear ledger");
+    for (index, account_id) in [LEDGER_HOLDER, LEDGER_NAMELESS].into_iter().enumerate() {
+        connection
+            .execute(
+                "INSERT INTO economy_ledger_entries(
+                     guild_id,account_type,account_id,delta,balance_before,
+                     balance_after,source,created_at
+                 ) VALUES (?1,'player',?2,5,0,5,'fixture',?3)",
+                params![
+                    i64::try_from(GUILD).unwrap(),
+                    account_id,
+                    i64::try_from(index).unwrap() + 1
+                ],
+            )
+            .expect("seed named ledger");
+    }
+    let responder = Arc::new(Responder::default());
+    fixture
+        .registry()
+        .command_handler("tax")
+        .expect("handler")
+        .handle(
+            command(TAX_MAN, Some(GUILD), "ledger", Vec::new(), 650),
+            responder.clone(),
+        )
+        .await
+        .expect("ledger command");
+
+    let followup = responder.followups.lock().expect("followups")[0].clone();
+    let description = followup.embeds[0]
+        .description
+        .clone()
+        .expect("ledger description");
+    assert!(description.contains(" - Ledger Holder: "), "{description}");
+    assert!(description.contains(" - Unknown player: "), "{description}");
+    assert!(!description.contains("<@"), "{description}");
+    for id in [LEDGER_HOLDER, LEDGER_NAMELESS] {
+        assert!(!description.contains(&id.to_string()), "{description}");
+    }
+}

@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
+use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
 use cama_domain::economy_scaling::DEFAULT_MINIGAME_JC_DELTA_SCALE;
 use cama_domain::embed_safety::{
     DESCRIPTION_LIMIT, EmbedModel, FIELD_VALUE_LIMIT, add_lines_field, truncate_field,
@@ -561,6 +562,8 @@ pub struct LedgerRow {
     pub ledger_id: i64,
     pub guild_id: u64,
     pub account: LedgerAccount,
+    /// Display name for a player account, filled by the runtime adapter.
+    pub account_name: Option<String>,
     pub delta: i64,
     pub balance_before: i64,
     pub balance_after: i64,
@@ -670,7 +673,12 @@ fn format_ledger_lines(rows: &[LedgerRow], limit: usize) -> Vec<String> {
         .take(limit)
         .map(|row| {
             let account = match row.account {
-                LedgerAccount::Player(account_id) => format!("<@{account_id}>"),
+                LedgerAccount::Player(_) => row
+                    .account_name
+                    .as_deref()
+                    .and_then(readable_player_name)
+                    .unwrap_or(UNKNOWN_PLAYER)
+                    .to_owned(),
                 LedgerAccount::Reserve => "Jopacoin Reserve".to_owned(),
             };
             format!(
