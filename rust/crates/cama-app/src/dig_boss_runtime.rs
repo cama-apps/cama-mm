@@ -84,6 +84,10 @@ use crate::vanity_tax_service::VanityTaxService;
 /// so fight statistics never count it.
 const BOSS_WAGER_ESCROW_ACTION: &str = "boss_wager_escrow";
 
+/// Python's `BossDuelView` timeout: how long a duel prompt waits for an
+/// answer before its safe option is chosen.
+pub const BOSS_DUEL_PROMPT_TIMEOUT_SECONDS: i64 = 120;
+
 #[derive(Clone, Debug)]
 struct LoadedBossSnapshot {
     snapshot: DigBossRuntimeSnapshot,
@@ -153,6 +157,8 @@ pub struct SqliteBossRepository {
     last_action_id: Option<i64>,
     stat_point_awarded: bool,
     trophy_relic_drop: Option<DigBossPrestigeRelicDrop>,
+    /// Latest save time of a paused duel this adapter may claim.
+    claim_saved_by: i64,
 }
 
 impl SqliteBossRepository {
@@ -167,6 +173,7 @@ impl SqliteBossRepository {
             last_action_id: None,
             stat_point_awarded: false,
             trophy_relic_drop: None,
+            claim_saved_by: i64::MAX,
         }
     }
 
@@ -400,7 +407,7 @@ impl BossRepositoryPort for SqliteBossRepository {
         key: PlayerKey,
     ) -> Result<Option<PausedBossDuel>, RepositoryError> {
         self.repository
-            .claim_active_duel(database_key(key))
+            .claim_active_duel_saved_by(database_key(key), self.claim_saved_by)
             .map_err(|error| self.repository_error(error))?
             .map(|row| paused_duel_from_row(&row))
             .transpose()
@@ -2696,6 +2703,52 @@ impl DigBossRuntimeService {
         }
     }
 
+    /// Python's `BossDuelView.on_timeout`: a prompt left unanswered for
+    /// [`BOSS_DUEL_PROMPT_TIMEOUT_SECONDS`] resolves with its safe option
+    /// through the same guarded resume. Only a pause saved at least that long
+    /// before `request.now` is claimed, so a deadline never resolves the newer
+    /// pause an answer opened, and the claim settles the pause exactly once.
+    /// `None` means no pause was due; an encounter the tunnel already left is
+    /// left for the next start or answer to forfeit.
+    pub fn resume_timed_out<E: EntropyPort>(
+        &self,
+        request: DigBossRuntimeRequest,
+        entropy: E,
+    ) -> Result<Option<DigBossRuntimeResult<DigBossResolvedOutcome>>, DigBossRuntimeError> {
+        let saved_by = request.now.saturating_sub(BOSS_DUEL_PROMPT_TIMEOUT_SECONDS);
+        let Some(active) = DigBossRuntimeRepository::new(&self.config.database_path)
+            .active_duel(database_key(request.player_key()))
+            .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
+            .filter(|row| row.created_at <= saved_by)
+        else {
+            return Ok(None);
+        };
+        if !self.paused_encounter_is_live(request, &active)? {
+            return Ok(None);
+        }
+        let safe_option = paused_duel_from_row(&active)
+            .map_err(DigBossRuntimeError::Infrastructure)?
+            .pending_prompt
+            .safe_option_index;
+        let resolved = if active.boundary == i64::from(PINNACLE_DEPTH) {
+            self.resume_pinnacle_saved_by(request, safe_option, entropy, saved_by)
+                .map(|result| {
+                    result
+                        .map_outcome(|outcome| DigBossResolvedOutcome::Pinnacle(Box::new(outcome)))
+                })
+        } else {
+            self.resume_regular_saved_by(request, safe_option, entropy, saved_by)
+                .map(|result| {
+                    result.map_outcome(|outcome| DigBossResolvedOutcome::Regular(Box::new(outcome)))
+                })
+        };
+        match resolved {
+            // An answer claimed the pause first.
+            Err(DigBossRuntimeError::Policy(BossServiceError::NoActiveDuel)) => Ok(None),
+            resolved => resolved.map(Some),
+        }
+    }
+
     pub fn scout<E: EntropyPort>(
         &self,
         request: DigBossRuntimeRequest,
@@ -3112,7 +3165,19 @@ impl DigBossRuntimeService {
         option_index: usize,
         entropy: E,
     ) -> Result<DigBossRuntimeResult<ResolvedFight>, DigBossRuntimeError> {
+        self.resume_regular_saved_by(request, option_index, entropy, i64::MAX)
+    }
+
+    /// Resume the regular duel saved at or before `saved_by`.
+    fn resume_regular_saved_by<E: EntropyPort>(
+        &self,
+        request: DigBossRuntimeRequest,
+        option_index: usize,
+        entropy: E,
+        saved_by: i64,
+    ) -> Result<DigBossRuntimeResult<ResolvedFight>, DigBossRuntimeError> {
         let mut service = self.compose(request.now, entropy);
+        service.repository.claim_saved_by = saved_by;
         let outcome = service.resume_boss_duel(request.player_key(), option_index);
         let mut result = finish_composed(&mut service, outcome)
             .map_err(|error| self.resolution_conflict(request, error))?;
@@ -3190,13 +3255,24 @@ impl DigBossRuntimeService {
         requested_option_index: usize,
         entropy: E,
     ) -> Result<DigBossRuntimeResult<DigPinnacleResolved>, DigBossRuntimeError> {
+        self.resume_pinnacle_saved_by(request, requested_option_index, entropy, i64::MAX)
+    }
+
+    /// Resume the pinnacle duel saved at or before `saved_by`.
+    fn resume_pinnacle_saved_by<E: EntropyPort>(
+        &self,
+        request: DigBossRuntimeRequest,
+        requested_option_index: usize,
+        entropy: E,
+        saved_by: i64,
+    ) -> Result<DigBossRuntimeResult<DigPinnacleResolved>, DigBossRuntimeError> {
         let repository = DigBossRuntimeRepository::new(&self.config.database_path);
         // The claim commits on its own so a repeated click cannot resolve the
         // same pause twice. Nothing is settled until `settle_pinnacle` commits
         // (and nothing after that commit can fail), so any error puts the
         // paused duel back instead of dropping its wager with the row.
         let row = repository
-            .claim_active_duel(database_key(request.player_key()))
+            .claim_active_duel_saved_by(database_key(request.player_key()), saved_by)
             .map_err(|error| DigBossRuntimeError::Infrastructure(error.to_string()))?
             .ok_or(BossServiceError::NoActiveDuel)?;
         let resolved =

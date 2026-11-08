@@ -1348,6 +1348,132 @@ fn resume_after_the_encounter_settled_elsewhere_reports_the_conflict_copy() {
     );
 }
 
+fn boss_fight_audit_count(database: &FastTestDatabase) -> i64 {
+    Connection::open(database.path())
+        .expect("audit DB")
+        .query_row(
+            "SELECT COUNT(*) FROM dig_actions
+              WHERE actor_id=?1 AND guild_id=?2 AND action_type='boss_fight'",
+            params![PLAYER, GUILD],
+            |row| row.get(0),
+        )
+        .expect("boss fight audits")
+}
+
+/// Python's `BossDuelView.on_timeout`: an unanswered prompt resolves with its
+/// safe option once the prompt deadline passes, and settles exactly once.
+#[test]
+fn timed_out_prompt_resolves_with_its_safe_option_exactly_once() {
+    let database = fixture();
+    let paused_at = 1_700_000_000;
+    SqliteBossRepository::new(database.path(), paused_at)
+        .restore_claimed_duel(key(), paused_duel())
+        .expect("paused duel");
+    let runtime = pinnacle_runtime(&database);
+
+    let early = runtime
+        .resume_timed_out(
+            pinnacle_request(paused_at + BOSS_DUEL_PROMPT_TIMEOUT_SECONDS - 1),
+            SequenceEntropy::constant(0.0),
+        )
+        .expect("early deadline check");
+    assert!(early.is_none(), "the prompt still has time");
+    assert_eq!(paused_duel_rows(&database).len(), 1);
+
+    let resolved = runtime
+        .resume_timed_out(
+            pinnacle_request(paused_at + BOSS_DUEL_PROMPT_TIMEOUT_SECONDS),
+            SequenceEntropy::constant(0.0),
+        )
+        .expect("due prompt")
+        .expect("the timed-out prompt resolves");
+    let DigBossResolvedOutcome::Regular(fight) = resolved.outcome else {
+        panic!("expected the regular duel to resolve");
+    };
+    let chosen = fight
+        .round_log
+        .iter()
+        .find_map(|round| round.mechanic.as_ref())
+        .expect("the timed-out choice is logged");
+    assert_eq!(
+        chosen.option_index,
+        paused_duel().pending_prompt.safe_option_index
+    );
+    assert!(resolved.action_id.is_some());
+    assert!(paused_duel_rows(&database).is_empty());
+    assert_eq!(boss_fight_audit_count(&database), 1);
+
+    assert!(
+        runtime
+            .resume_timed_out(
+                pinnacle_request(paused_at + 2 * BOSS_DUEL_PROMPT_TIMEOUT_SECONDS),
+                SequenceEntropy::constant(0.0),
+            )
+            .expect("repeat deadline")
+            .is_none(),
+        "a settled prompt never resolves twice"
+    );
+    assert_eq!(boss_fight_audit_count(&database), 1);
+}
+
+/// A prompt the player answered is never resolved by its old deadline, even
+/// when the answer opened a newer pause in the same duel.
+#[test]
+fn an_answered_prompt_deadline_never_resolves_the_newer_pause() {
+    let database = fixture();
+    let paused_at = 1_700_000_000;
+    let answered_at = paused_at + 60;
+    SqliteBossRepository::new(database.path(), answered_at)
+        .restore_claimed_duel(key(), paused_duel())
+        .expect("newer pause");
+    assert!(
+        pinnacle_runtime(&database)
+            .resume_timed_out(
+                pinnacle_request(paused_at + BOSS_DUEL_PROMPT_TIMEOUT_SECONDS),
+                SequenceEntropy::constant(0.0),
+            )
+            .expect("old deadline")
+            .is_none()
+    );
+    assert_eq!(paused_duel_rows(&database).len(), 1);
+    assert_eq!(boss_fight_audit_count(&database), 0);
+}
+
+#[test]
+fn timed_out_pinnacle_prompt_resolves_with_its_safe_option() {
+    let database = fixture();
+    set_pinnacle(&database, 1, "active", None);
+    let paused_at = 1_700_000_000;
+    let started = pinnacle_runtime(&database)
+        .start_pinnacle(
+            pinnacle_request(paused_at),
+            RiskTier::Reckless,
+            25,
+            SequenceEntropy::constant(0.99),
+        )
+        .expect("start pinnacle");
+    let DigPinnacleStartOutcome::Paused(paused) = started.outcome else {
+        panic!("expected durable pinnacle prompt")
+    };
+    let resolved = pinnacle_runtime(&database)
+        .resume_timed_out(
+            pinnacle_request(paused_at + BOSS_DUEL_PROMPT_TIMEOUT_SECONDS),
+            SequenceEntropy::constant(0.0),
+        )
+        .expect("due pinnacle prompt")
+        .expect("the timed-out pinnacle prompt resolves");
+    let DigBossResolvedOutcome::Pinnacle(fight) = resolved.outcome else {
+        panic!("expected the pinnacle duel to resolve");
+    };
+    let chosen = fight
+        .round_log
+        .iter()
+        .find_map(|round| round.mechanic.as_ref())
+        .expect("the timed-out choice is logged");
+    assert_eq!(chosen.option_index, paused.pending_prompt.safe_option_index);
+    assert!(paused_duel_rows(&database).is_empty());
+}
+
 fn paused_duel() -> PausedBossDuel {
     PausedBossDuel {
         boss_id: "grothak".to_owned(),

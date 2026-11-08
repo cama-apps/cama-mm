@@ -795,6 +795,35 @@ fn paused_duel_survives_repository_recreation_and_is_claimed_once() {
     );
 }
 
+#[test]
+fn deadline_claim_takes_only_a_pause_saved_by_its_cutoff_and_only_once() {
+    let database = fixture();
+    let repository = DigBossRuntimeRepository::new(database.path());
+    repository
+        .restore_claimed_duel(&paused_duel())
+        .expect("save duel");
+    assert_eq!(
+        repository
+            .claim_active_duel_saved_by(KEY, 1_699_999_999)
+            .expect("early claim"),
+        None,
+        "a pause saved after the cutoff is newer than the deadline"
+    );
+    assert!(repository.active_duel(KEY).expect("still paused").is_some());
+    assert_eq!(
+        repository
+            .claim_active_duel_saved_by(KEY, 1_700_000_000)
+            .expect("due claim"),
+        Some(paused_duel())
+    );
+    assert_eq!(
+        repository
+            .claim_active_duel_saved_by(KEY, i64::MAX)
+            .expect("second claim"),
+        None
+    );
+}
+
 fn stake_commit<'a>(
     snapshot: &'a DigBossRuntimeSnapshot,
     state: &'a DigBossRuntimeState,

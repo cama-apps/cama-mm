@@ -6188,6 +6188,173 @@ async fn unresolved_paid_prompt_is_actively_cancelled_at_timeout() {
     );
 }
 
+/// Seed a one-HP Grothak encounter whose duel prompt was saved at `paused_at`.
+fn seed_paused_grothak_duel(database: &NamedTempFile, paused_at: i64) {
+    use cama_app::boss_duel::RiskTier;
+    use cama_app::boss_multi_tier::{
+        BossRepositoryPort, CombatEffects, CombatState, GearSnapshot, PausedBossDuel,
+        PendingPrompt, PlayerKey, mechanic_by_id,
+    };
+
+    Connection::open(database.path())
+        .expect("timeout boss fixture DB")
+        .execute(
+            "INSERT INTO tunnels
+             (discord_id,guild_id,depth,max_depth,prestige_level,boss_progress,
+              boss_attempts,last_dig_at,luminosity,stat_points,tunnel_name)
+             VALUES (?1,?2,24,24,0,?3,0,0,50,5,'Timeout Boss')",
+            params![
+                USER as i64,
+                GUILD as i64,
+                r#"{"25":{"boss_id":"grothak","status":"active","hp_remaining":1,"hp_max":4}}"#,
+            ],
+        )
+        .expect("timeout boss tunnel");
+    let mechanic = mechanic_by_id("grothak_earthquake").expect("Grothak mechanic is bundled");
+    let paused = PausedBossDuel {
+        boss_id: "grothak".to_owned(),
+        boundary: 25,
+        mechanic_id: mechanic.id.clone(),
+        risk_tier: RiskTier::Cautious,
+        wager: 0,
+        combat: CombatState {
+            player_hp: 7,
+            boss_hp: 1,
+            player_hit: 0.95,
+            player_damage: 2,
+            boss_hit: 0.05,
+            boss_damage: 1,
+            critical_chance: 0.0,
+            critical_bonus: 0,
+            effects: CombatEffects::default(),
+        },
+        round_num: 2,
+        round_log: Vec::new(),
+        pending_prompt: PendingPrompt::from(&mechanic),
+        attempts_this_fight: 1,
+        initial_win_chance: 0.5,
+        payout_multiplier: 1.0,
+        player_hp_max: 10,
+        boss_hp_max: 4,
+        starting_boss_hp: 4,
+        gear_snapshot: GearSnapshot::default(),
+        forced_no_wager_phase: false,
+        echo_applied: false,
+        echo_killer_id: None,
+        wager_escrowed: true,
+    };
+    cama_app::dig_boss_runtime::SqliteBossRepository::new(database.path(), paused_at)
+        .restore_claimed_duel(PlayerKey::new(USER as i64, Some(GUILD as i64)), paused)
+        .expect("paused duel");
+}
+
+fn boss_duel_counts(database: &NamedTempFile) -> (i64, i64) {
+    let connection = Connection::open(database.path()).expect("timeout verify DB");
+    let count = |sql: &str| {
+        connection
+            .query_row(sql, [], |row| row.get::<_, i64>(0))
+            .expect("count")
+    };
+    (
+        count("SELECT COUNT(*) FROM dig_active_duels"),
+        count("SELECT COUNT(*) FROM dig_actions WHERE action_type='boss_fight'"),
+    )
+}
+
+/// boss_views.py `BossDuelView.on_timeout`: an unanswered prompt resolves with
+/// its safe option, and the prompt message becomes the fight's result.
+#[tokio::test(start_paused = true)]
+async fn unanswered_boss_duel_prompt_resolves_with_its_safe_option_at_timeout() {
+    let (database, provider, _discord) = fixture();
+    provider.handler.state.boss_entropy.reseed(1);
+    seed_paused_grothak_duel(
+        &database,
+        super::unix_now() - cama_app::dig_boss_runtime::BOSS_DUEL_PROMPT_TIMEOUT_SECONDS,
+    );
+    let responder = Arc::new(TestResponder::default());
+    let receipt = InteractionMessageReceipt {
+        message_id: 99,
+        channel_id: CHANNEL,
+        delivery: crate::registration::InteractionMessageDelivery::InteractionFollowup,
+    };
+    provider
+        .handler
+        .schedule_boss_duel_timeout(USER as i64, GUILD as i64, responder.clone(), Some(receipt))
+        .await
+        .expect("timeout task");
+
+    assert_eq!(boss_duel_counts(&database), (0, 1), "settled exactly once");
+    let edits = responder
+        .message_edits
+        .lock()
+        .expect("timeout edits")
+        .clone();
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].0, receipt, "the prompt itself shows the result");
+    let embed = &edits[0].1.embeds[0];
+    // The seeded kill carries the junction it opened, as a clicked kill does.
+    assert_eq!(embed.title.as_deref(), Some("Stone Junction"));
+    assert!(
+        embed
+            .description
+            .as_deref()
+            .is_some_and(|text| text.starts_with("Victory!")),
+        "{:?}",
+        embed.description
+    );
+    let safe = cama_app::boss_multi_tier::mechanic_by_id("grothak_earthquake")
+        .expect("Grothak mechanic is bundled");
+    let safe_label = &safe.options[safe.safe_option_index].label;
+    assert!(
+        embed
+            .fields
+            .iter()
+            .any(|field| field.name == format!("You chose: {safe_label}")),
+        "the safe option was chosen: {:?}",
+        embed.fields
+    );
+    assert!(
+        edits[0]
+            .1
+            .components
+            .iter()
+            .flat_map(|row| &row.buttons)
+            .all(|button| !button.custom_id.starts_with("dig:boss:duel:")),
+        "the expired prompt keeps no duel buttons"
+    );
+    assert!(responder.followups.lock().expect("followups").is_empty());
+
+    // A second deadline for the same prompt settles nothing more.
+    provider
+        .handler
+        .schedule_boss_duel_timeout(USER as i64, GUILD as i64, responder.clone(), Some(receipt))
+        .await
+        .expect("repeat timeout task");
+    assert_eq!(boss_duel_counts(&database), (0, 1));
+    assert_eq!(
+        responder.message_edits.lock().expect("timeout edits").len(),
+        1
+    );
+}
+
+/// The deadline of an answered prompt never resolves the newer pause the
+/// answer opened.
+#[tokio::test(start_paused = true)]
+async fn boss_duel_timeout_leaves_a_pause_saved_after_its_prompt() {
+    let (database, provider, _discord) = fixture();
+    seed_paused_grothak_duel(&database, super::unix_now());
+    let responder = Arc::new(TestResponder::default());
+    provider
+        .handler
+        .schedule_boss_duel_timeout(USER as i64, GUILD as i64, responder.clone(), None)
+        .await
+        .expect("timeout task");
+
+    assert_eq!(boss_duel_counts(&database), (1, 0), "the newer pause waits");
+    assert!(responder.message_edits.lock().expect("edits").is_empty());
+    assert!(responder.followups.lock().expect("followups").is_empty());
+}
+
 #[tokio::test]
 async fn admin_depth_and_cooldown_commands_preserve_max_and_report_missing_tunnel() {
     let (database, provider, _discord) = fixture();

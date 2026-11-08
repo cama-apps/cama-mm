@@ -677,9 +677,20 @@ impl DigBossRuntimeRepository {
         &self,
         key: DigBossRuntimeKey,
     ) -> Result<Option<DigBossPausedDuelRow>, DigBossRuntimeRepositoryError> {
+        self.claim_active_duel_saved_by(key, i64::MAX)
+    }
+
+    /// Claim the paused duel only when it was saved at or before `saved_by`.
+    /// A prompt deadline therefore never claims the newer pause that answering
+    /// the prompt opened, and the claim still happens exactly once.
+    pub fn claim_active_duel_saved_by(
+        &self,
+        key: DigBossRuntimeKey,
+        saved_by: i64,
+    ) -> Result<Option<DigBossPausedDuelRow>, DigBossRuntimeRepositoryError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let duel = query_active_duel(&transaction, key)?;
+        let duel = query_active_duel(&transaction, key)?.filter(|duel| duel.created_at <= saved_by);
         if duel.is_some() {
             transaction.execute(
                 "DELETE FROM dig_active_duels WHERE discord_id=?1 AND guild_id=?2",
