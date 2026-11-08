@@ -1289,6 +1289,65 @@ fn non_trophy_boss_kill_carves_nothing() {
     assert!(victory.stat_point_awarded);
 }
 
+/// Python's `_boss_resolution_conflict_result`: a duel answered after its
+/// encounter was settled elsewhere reports that, naming the waiting route
+/// junction when the settlement left one, and pays nothing.
+#[test]
+fn resume_after_the_encounter_settled_elsewhere_reports_the_conflict_copy() {
+    let database = fixture();
+    set_route_state(&database, SELECTED_DIRT_ROUTE);
+    SqliteBossRepository::new(database.path(), 1_700_000_000)
+        .restore_claimed_duel(key(), paused_duel())
+        .expect("paused duel");
+    // Another view kills the boss and opens the next layer's junction.
+    commit_grothak_outcome(&database, true, BossStatus::Defeated);
+    assert!(
+        crate::dig_routes::route_status(persisted_route_state(&database).as_deref())
+            .choice_required
+    );
+    let balance = player_balance(&database);
+    let error = pinnacle_runtime(&database)
+        .resume_regular(
+            pinnacle_request(1_700_000_010),
+            0,
+            SequenceEntropy::constant(0.0),
+        )
+        .expect_err("the encounter was already settled");
+    assert!(matches!(
+        error,
+        DigBossRuntimeError::FightResolvedRouteSaved
+    ));
+    assert_eq!(
+        error.to_string(),
+        "This boss fight was already resolved. The saved route remains available."
+    );
+    assert_eq!(player_balance(&database), balance, "nothing is paid twice");
+
+    let database = fixture();
+    SqliteBossRepository::new(database.path(), 1_700_000_000)
+        .restore_claimed_duel(key(), paused_duel())
+        .expect("paused duel");
+    Connection::open(database.path())
+        .expect("reset DB")
+        .execute(
+            "UPDATE tunnels SET depth=0,boss_progress='{}'
+              WHERE discord_id=?1 AND guild_id=?2",
+            params![PLAYER, GUILD],
+        )
+        .expect("tunnel left the encounter");
+    let error = pinnacle_runtime(&database)
+        .resume_regular(
+            pinnacle_request(1_700_000_010),
+            0,
+            SequenceEntropy::constant(0.0),
+        )
+        .expect_err("the encounter was already settled");
+    assert_eq!(
+        error.to_string(),
+        "This boss fight was already resolved by another view."
+    );
+}
+
 fn paused_duel() -> PausedBossDuel {
     PausedBossDuel {
         boss_id: "grothak".to_owned(),

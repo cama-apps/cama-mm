@@ -1552,6 +1552,10 @@ pub enum BossServiceError {
     ScoutCurseBlocked,
     #[error("this boss fight ended before the duel was answered, so its wager was forfeited")]
     DuelEncounterEnded,
+    /// Python's `_boss_resolution_conflict_result`: the encounter this fight
+    /// started on was settled before its outcome could be.
+    #[error("This boss fight was already resolved by another view.")]
+    FightResolvedElsewhere,
     #[error(transparent)]
     Repository(#[from] RepositoryError),
 }
@@ -2659,7 +2663,7 @@ where
                     if entry.boss_id.as_deref() == Some(input.boss_id.as_str())
             );
         if !still_engaged {
-            return Err(BossServiceError::NotAtBossBoundary);
+            return Err(BossServiceError::FightResolvedElsewhere);
         }
         if input.consumed_phase_event {
             progress_entry_mut(&mut tunnel.boss_progress, input.boundary).pending_phase_event_id =

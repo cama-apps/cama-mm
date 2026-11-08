@@ -71,7 +71,7 @@ use crate::dig_carry_wager::{
     MAX_NEW_BOSS_WAGER, active_pinnacle_carry, current_boss_boundary, pinnacle_wager_profit,
 };
 use crate::dig_relic_rework::{SHIFTING_IDOL_PLAYER_HIT_CEILING, ShiftingIdolBonus};
-use crate::dig_routes::{RouteEntropy, build_route_offer_state};
+use crate::dig_routes::{RouteEntropy, build_route_offer_state, route_status};
 use crate::dig_service::{BOSS_REST_PENDING_KEY, DIG_STARTING_STAT_POINTS};
 use crate::dig_tunnel_naming::DigTunnelNamingService;
 use crate::economy_event_service::EconomyEventConfig;
@@ -2390,6 +2390,10 @@ pub enum DigBossRuntimeError {
     CheerCooldown { remaining_seconds: i64 },
     #[error("Boss already at full cheer boost (3/3).")]
     CheerFull,
+    /// Python's `_boss_resolution_conflict_result` when the fight that was
+    /// settled elsewhere left a route junction waiting.
+    #[error("This boss fight was already resolved. The saved route remains available.")]
+    FightResolvedRouteSaved,
     #[error("Dig boss infrastructure failed: {0}")]
     Infrastructure(String),
 }
@@ -2947,7 +2951,8 @@ impl DigBossRuntimeService {
         let abandoned_gear_wear = self.settle_abandoned_gear(request, abandoned.as_ref())?;
         let mut service = self.compose(request.now, entropy);
         let outcome = service.start_boss_duel(request.player_key(), risk, wager);
-        let mut result = finish_composed(&mut service, outcome)?;
+        let mut result = finish_composed(&mut service, outcome)
+            .map_err(|error| self.resolution_conflict(request, error))?;
         if let StartBossDuelOutcome::Resolved(resolved) = &result.outcome {
             self.enrich_regular_resolution(
                 request,
@@ -3109,9 +3114,41 @@ impl DigBossRuntimeService {
     ) -> Result<DigBossRuntimeResult<ResolvedFight>, DigBossRuntimeError> {
         let mut service = self.compose(request.now, entropy);
         let outcome = service.resume_boss_duel(request.player_key(), option_index);
-        let mut result = finish_composed(&mut service, outcome)?;
+        let mut result = finish_composed(&mut service, outcome)
+            .map_err(|error| self.resolution_conflict(request, error))?;
         self.enrich_regular_runtime_result(request, &mut result, &mut service.entropy);
         Ok(result)
+    }
+
+    /// Python's `_boss_resolution_conflict_result`: a regular fight whose
+    /// encounter was settled first reports that instead of a storage race,
+    /// and says the route junction a victory left waiting is still there.
+    fn resolution_conflict(
+        &self,
+        request: DigBossRuntimeRequest,
+        error: DigBossRuntimeError,
+    ) -> DigBossRuntimeError {
+        if !matches!(
+            error,
+            DigBossRuntimeError::Policy(
+                BossServiceError::FightResolvedElsewhere
+                    | BossServiceError::Repository(RepositoryError::Conflict)
+            )
+        ) {
+            return error;
+        }
+        let route_pending = DigBossRuntimeRepository::new(&self.config.database_path)
+            .snapshot(database_key(request.player_key()))
+            .ok()
+            .flatten()
+            .is_some_and(|snapshot| {
+                route_status(snapshot.route_state_json.as_deref()).choice_required
+            });
+        if route_pending {
+            DigBossRuntimeError::FightResolvedRouteSaved
+        } else {
+            BossServiceError::FightResolvedElsewhere.into()
+        }
     }
 
     pub fn scout_regular<E: EntropyPort>(
