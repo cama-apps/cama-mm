@@ -670,18 +670,6 @@ impl ShopRuntimeRepository {
         }))
     }
 
-    pub fn apply_hostile_loss(
-        &self,
-        request: &HostileLossRequest,
-    ) -> Result<HostileLossSettlement, ShopRuntimeRepositoryError> {
-        validate_hostile_request(request)?;
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let settlement = apply_hostile_loss_in(&transaction, request)?;
-        transaction.commit()?;
-        Ok(settlement)
-    }
-
     /// Read one durable hostile-loss result by its exact idempotency key.
     /// Recovery callers use this before reserving a consumable Blood-Pact
     /// allowance, avoiding a second reservation when the protected transfer

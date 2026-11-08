@@ -1069,17 +1069,6 @@ impl TaxLedgerView {
         }
     }
 
-    pub fn interaction_denial(&self, user_id: u64) -> Option<CommandResponse> {
-        if user_id == self.requester_id {
-            None
-        } else {
-            Some(CommandResponse::message(
-                "This ledger view belongs to another Tax Man.",
-                true,
-            ))
-        }
-    }
-
     /// Acknowledgement happens conceptually before either query. State is
     /// committed only after count and page reads both succeed.
     pub fn show_page<P: LedgerReadPort>(
@@ -1153,17 +1142,6 @@ impl TaxPlayerLedgerView {
             total_entries,
             total_pages,
             buttons: buttons(current_page, total_pages),
-        }
-    }
-
-    pub fn interaction_denial(&self, user_id: u64) -> Option<CommandResponse> {
-        if user_id == self.requester_id {
-            None
-        } else {
-            Some(CommandResponse::message(
-                "This player audit view belongs to another Tax Man.",
-                true,
-            ))
         }
     }
 
