@@ -7,7 +7,7 @@
 //! adapter only has to translate Discord objects and the few command-only
 //! service operations that have not yet moved into the Rust core service.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use cama_domain::formatting::{JOPACOIN_EMOTE, format_grouped};
 use cama_domain::pet::{
@@ -2197,7 +2197,7 @@ fn format_work_blocks(units: i64) -> String {
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
     use std::cell::RefCell;
-    use std::collections::VecDeque;
+    use std::collections::{BTreeSet, VecDeque};
     use std::rc::Rc;
 
     use cama_domain::pet::{

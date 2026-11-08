@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::convert::Infallible;
 
-use cama_domain::pet::{ADULT_AGE_SECONDS, PetBase};
+use cama_domain::pet::{ADULT_AGE_SECONDS, PetBase, PetStatus};
 
 use super::*;
 

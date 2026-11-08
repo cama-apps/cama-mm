@@ -12,7 +12,7 @@ use cama_db::profit_deductions::ProfitDeductions;
 use cama_domain::formatting::format_grouped;
 use cama_domain::pet::{
     PET_EAT_PENALTY_GAMES_MAX, PET_EAT_PENALTY_GAMES_MIN, PET_EAT_REWARD_MAX, PET_EAT_REWARD_MIN,
-    Pet, PetStage, PetStatus,
+    Pet, PetStage,
 };
 use cama_domain::service_result::ServiceResult;
 
