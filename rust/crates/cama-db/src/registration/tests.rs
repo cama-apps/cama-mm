@@ -377,11 +377,12 @@ fn test_update_and_read_timezone() {
     let fixture = Fixture::new();
     fixture.add_player(2, None);
 
-    assert!(
+    assert_eq!(
         fixture
             .repository
-            .set_timezone(2, Some(GUILD), "Asia/Tokyo")
-            .expect("update timezone")
+            .set_timezone(2, Some(GUILD), "Asia/Tokyo", chrono::Utc::now())
+            .expect("update timezone"),
+        Some(Vec::new())
     );
 
     assert_eq!(
@@ -409,7 +410,7 @@ fn test_timezone_is_guild_scoped() {
 
     fixture
         .repository
-        .set_timezone(3, Some(GUILD), "Asia/Tokyo")
+        .set_timezone(3, Some(GUILD), "Asia/Tokyo", chrono::Utc::now())
         .expect("update timezone");
 
     assert_eq!(
@@ -556,6 +557,36 @@ CREATE TABLE player_steam_ids (
     added_at INTEGER NOT NULL,
     UNIQUE (discord_id, steam_id),
     UNIQUE (steam_id)
+);
+CREATE TABLE player_curfew_windows (
+    discord_id INTEGER NOT NULL,
+    guild_id INTEGER NOT NULL DEFAULT 0,
+    name TEXT NOT NULL,
+    start_hour INTEGER NOT NULL,
+    start_minute INTEGER NOT NULL DEFAULT 0,
+    end_hour INTEGER NOT NULL,
+    end_minute INTEGER NOT NULL DEFAULT 0,
+    timezone TEXT,
+    days INTEGER,
+    mode TEXT NOT NULL DEFAULT 'default',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (discord_id, guild_id, name)
+);
+CREATE TABLE player_curfew_pending_changes (
+    discord_id INTEGER NOT NULL,
+    guild_id INTEGER NOT NULL DEFAULT 0,
+    name TEXT NOT NULL,
+    action TEXT NOT NULL,
+    start_hour INTEGER,
+    start_minute INTEGER,
+    end_hour INTEGER,
+    end_minute INTEGER,
+    timezone TEXT,
+    days INTEGER,
+    mode TEXT,
+    effective_at TIMESTAMP NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (discord_id, guild_id, name)
 );
 ";
 

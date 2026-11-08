@@ -71,7 +71,9 @@ impl GuildPlayerNameDirectory {
         })
     }
 
-    fn cached_name(&self, discord_id: i64) -> Option<String> {
+    /// The live or last-seen readable name, if the directory has one.
+    #[must_use]
+    pub fn cached_name(&self, discord_id: i64) -> Option<String> {
         self.members
             .as_ref()
             .and_then(|members| members.get(&discord_id))

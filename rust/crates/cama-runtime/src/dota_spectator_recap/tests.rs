@@ -3,8 +3,7 @@ use crate::dota_live::{LiveMapBuilding, LiveMapFrame, LiveMapHero};
 use cama_app::pet_assets::{RasterImage, Rgba};
 
 fn picture() -> Vec<u8> {
-    crate::dota_spectator_png::compress(&RasterImage::new(4, 4, Rgba(10, 20, 30, 255)).encode_png())
-        .unwrap()
+    RasterImage::new(4, 4, Rgba(10, 20, 30, 255)).encode_png()
 }
 
 fn map_frame(game_time: i64) -> LiveMapFrame {

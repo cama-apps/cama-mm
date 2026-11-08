@@ -317,7 +317,7 @@
     },
     {
       "name": "Repository hero display-name map",
-      "url": "https://github.com/cama-apps/cama-mm/blob/HEAD/rust/crates/cama-app/data/heroes.json",
+      "url": "https://github.com/cama-apps/cama-mm/blob/HEAD/rust/crates/cama-domain/data/heroes.json",
       "sha256": "808b5f07364ea0886f39f52a01dad263f48fe0eeb4a3458a2aa45008634b42b7"
     }
   ],

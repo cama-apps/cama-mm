@@ -465,8 +465,7 @@ mod tests {
 
     #[test]
     fn canonical_mapping_covers_bundled_catalog_and_historical_internal_names() {
-        let bundled: std::collections::BTreeMap<i64, String> =
-            serde_json::from_str(include_str!("../data/heroes.json")).unwrap();
+        let bundled = cama_domain::hero_catalog::hero_names();
         let mut slugs = BTreeSet::new();
         for id in bundled.keys() {
             let slug = hero_slug(*id).unwrap_or_else(|| panic!("missing hero {id}"));

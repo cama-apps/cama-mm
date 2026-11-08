@@ -999,3 +999,118 @@ mod staged_changes {
         );
     }
 }
+
+mod general_timezone_change {
+    use super::*;
+    use crate::timezone_service::TimezoneService;
+    use cama_db::registration_repository::RegistrationRepository;
+
+    fn new_york(day: u32, hour: u32, minute: u32) -> DateTime<Utc> {
+        chrono_tz::America::New_York
+            .with_ymd_and_hms(2026, 1, day, hour, minute, 0)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    fn timezones(dir: &tempfile::TempDir) -> TimezoneService {
+        TimezoneService::new(RegistrationRepository::new(dir.path().join("curfew.db")))
+    }
+
+    fn add_inherited_window(service: &CurfewService, mode: &str, now: DateTime<Utc>) {
+        service
+            .add_window(1, GUILD, "sleep", 22, 0, 23, 0, None, None, Some(mode), now)
+            .unwrap();
+    }
+
+    #[test]
+    fn test_switching_general_timezone_right_before_a_strict_window_cannot_dodge_it() {
+        let (dir, service, repository) = fixture();
+        insert_player(&repository, &dir, 1);
+        let timezones = timezones(&dir);
+        timezones
+            .set_timezone(1, Some(GUILD), "America/New_York", new_york(1, 8, 0))
+            .unwrap();
+        add_inherited_window(&service, "strict", new_york(1, 8, 0));
+
+        // Five minutes before it fires, move the general zone 14 hours ahead,
+        // which would put tonight's 22:00 start at 08:00 tomorrow.
+        let held = timezones
+            .set_timezone(1, Some(GUILD), "Asia/Tokyo", new_york(1, 21, 55))
+            .unwrap();
+
+        assert_eq!(held, vec!["sleep".to_owned()]);
+        let active = service.active_window(1, GUILD, new_york(1, 22, 0)).unwrap();
+        assert_eq!(active.map(|window| window.name), Some("sleep".to_owned()));
+
+        // Like any reducing strict edit, the switch lands the next local
+        // morning; from then on the window follows the general zone again.
+        let pending = service.pending_changes(1, GUILD).unwrap();
+        assert_eq!(pending["sleep"].effective_at, new_york(2, 8, 0));
+        service
+            .apply_due_pending_changes(new_york(2, 8, 0))
+            .unwrap();
+        let window = repository.get_window(1, GUILD, "sleep").unwrap().unwrap();
+        assert_eq!(window.timezone, None);
+        assert_eq!(
+            service.general_timezone(1, GUILD).unwrap().as_deref(),
+            Some("Asia/Tokyo")
+        );
+    }
+
+    #[test]
+    fn test_switching_general_timezone_keeps_a_change_already_staged_for_the_window() {
+        let (dir, service, repository) = fixture();
+        insert_player(&repository, &dir, 1);
+        add_inherited_window(&service, "strict", new_york(1, 8, 0));
+        // 22:00-23:00 -> 22:30-23:00 frees up half an hour, so it's staged.
+        service
+            .add_window(
+                1,
+                GUILD,
+                "sleep",
+                22,
+                30,
+                23,
+                0,
+                None,
+                None,
+                Some("strict"),
+                new_york(1, 12, 0),
+            )
+            .unwrap();
+
+        timezones(&dir)
+            .set_timezone(1, Some(GUILD), "Asia/Tokyo", new_york(1, 21, 55))
+            .unwrap();
+
+        let staged = service.pending_changes(1, GUILD).unwrap()["sleep"].clone();
+        assert_eq!(staged.window.unwrap().start_minute, 30);
+        assert_eq!(staged.effective_at, new_york(2, 8, 0));
+        assert!(
+            service
+                .active_window(1, GUILD, new_york(1, 22, 0))
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn test_switching_general_timezone_moves_a_default_mode_window_immediately() {
+        let (dir, service, repository) = fixture();
+        insert_player(&repository, &dir, 1);
+        add_inherited_window(&service, "default", new_york(1, 8, 0));
+
+        let held = timezones(&dir)
+            .set_timezone(1, Some(GUILD), "Asia/Tokyo", new_york(1, 21, 55))
+            .unwrap();
+
+        assert!(held.is_empty());
+        assert!(
+            service
+                .active_window(1, GUILD, new_york(1, 22, 0))
+                .unwrap()
+                .is_none()
+        );
+        assert!(service.pending_changes(1, GUILD).unwrap().is_empty());
+    }
+}

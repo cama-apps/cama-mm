@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use cama_domain::rating::cap_glicko_rd;
+use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use thiserror::Error;
 
@@ -382,20 +383,46 @@ impl RegistrationRepository {
         Ok(true)
     }
 
-    /// Persist a player's general timezone preference. Returns `false` if the
-    /// player isn't registered in this guild.
+    /// Persist a player's general timezone preference. Returns `None` if the
+    /// player isn't registered in this guild, otherwise the names of the
+    /// strict curfew windows held on their current timezone until their next
+    /// local morning, so the switch can't loosen one that inherits it (see
+    /// [`crate::curfew::hold_strict_windows_for_timezone_change`]).
     pub fn set_timezone(
         &self,
         discord_id: i64,
         guild_id: Option<i64>,
         timezone: &str,
-    ) -> Result<bool, RegistrationRepositoryError> {
-        let updated = self.connection()?.execute(
+        now: DateTime<Utc>,
+    ) -> Result<Option<Vec<String>>, RegistrationRepositoryError> {
+        let guild_id = Self::normalize_guild_id(guild_id);
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(previous) = transaction
+            .query_row(
+                "SELECT timezone FROM players WHERE discord_id=?1 AND guild_id=?2",
+                params![discord_id, guild_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let held = crate::curfew::hold_strict_windows_for_timezone_change(
+            &transaction,
+            discord_id,
+            guild_id,
+            previous.as_deref(),
+            timezone,
+            now,
+        )?;
+        transaction.execute(
             "UPDATE players SET timezone=?1,updated_at=CURRENT_TIMESTAMP
              WHERE discord_id=?2 AND guild_id=?3",
-            params![timezone, discord_id, Self::normalize_guild_id(guild_id)],
+            params![timezone, discord_id, guild_id],
         )?;
-        Ok(updated == 1)
+        transaction.commit()?;
+        Ok(Some(held))
     }
 
     /// A player's general timezone setting, or `None` if unset or unregistered.

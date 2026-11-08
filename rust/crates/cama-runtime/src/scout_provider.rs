@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -22,9 +22,7 @@ use cama_db::scout_repository::ScoutRepository;
 use thiserror::Error;
 use tracing::{error, warn};
 
-use crate::discord_transport::{
-    GuildPlayerNameDirectory, GuildPlayerNameResolver, ScoutChannelPort,
-};
+use crate::discord_transport::{GuildPlayerNameResolver, ScoutChannelPort};
 use crate::embed_colors::{DISCORD_BLUE, DISCORD_GOLD};
 use crate::ids::signed_id;
 use crate::option_ext::string_option;
@@ -397,13 +395,7 @@ impl ScoutHandler {
                 .await
                 .map_err(|error| error.to_string().into());
         }
-        let player_names = match self.player_names.names_for_guild(guild_id, &ids) {
-            Ok(names) => names,
-            Err(error) => {
-                warn!(%error, guild_id, "Scout report player-name snapshot failed");
-                GuildPlayerNameDirectory::default()
-            }
-        };
+        let player_names = self.player_names.resolve_names(guild_id, &ids).await;
         let player_names = loaded
             .1
             .into_iter()
@@ -489,6 +481,7 @@ impl ScoutHandler {
                 explicit_lobby,
                 profiles: &[],
                 steam_ids: &BTreeMap::new(),
+                display_names: &BTreeMap::new(),
             });
             let LinksOutcome::Message(message) = outcome else {
                 return Err("Scout empty link plan unexpectedly built an embed".into());
@@ -498,13 +491,11 @@ impl ScoutHandler {
                 .await
                 .map_err(|error| error.to_string().into());
         }
-        let player_names = match self.player_names.names_for_guild(guild_id, &ids) {
-            Ok(names) => names,
-            Err(error) => {
-                warn!(%error, guild_id, "Scout server nickname lookup failed");
-                Default::default()
-            }
-        };
+        let player_names = self.player_names.resolve_names(guild_id, &ids).await;
+        let display_names = ids
+            .iter()
+            .filter_map(|id| player_names.cached_name(*id).map(|name| (*id, name)))
+            .collect::<BTreeMap<_, _>>();
         let player_repository = self.player_repository.clone();
         let scout_repository = self.scout_repository.clone();
         let loaded = tokio::task::spawn_blocking(move || {
@@ -544,6 +535,7 @@ impl ScoutHandler {
             explicit_lobby,
             profiles: &profiles,
             steam_ids: &steam_ids,
+            display_names: &display_names,
         }) {
             LinksOutcome::Message(message) => responder
                 .followup(InteractionResponse::message(message))
@@ -763,6 +755,7 @@ fn load_portraits(
     cache_root: &Path,
 ) -> BTreeMap<i64, Vec<u8>> {
     let mut seen = BTreeSet::new();
+    let mut portraits = BTreeMap::new();
     let queue = heroes
         .iter()
         .filter(|hero| seen.insert(hero.hero_id))
@@ -772,15 +765,19 @@ fn load_portraits(
                 .cloned()
                 .map(|url| (hero.hero_id, url))
         })
+        .filter(|(hero_id, _)| match cached_portrait(*hero_id, cache_root) {
+            Some(bytes) => {
+                portraits.insert(*hero_id, bytes);
+                false
+            }
+            None => true,
+        })
         .collect::<VecDeque<_>>();
     if queue.is_empty() {
-        return BTreeMap::new();
+        return portraits;
     }
-    let Ok(client) = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-    else {
-        return BTreeMap::new();
+    let Some(client) = portrait_client() else {
+        return portraits;
     };
     let worker_count = queue.len().min(4);
     let queue = Arc::new(Mutex::new(queue));
@@ -789,14 +786,13 @@ fn load_portraits(
         for _ in 0..worker_count {
             let queue = Arc::clone(&queue);
             let sender = sender.clone();
-            let client = client.clone();
             scope.spawn(move || {
                 loop {
                     let next = queue.lock().ok().and_then(|mut queue| queue.pop_front());
                     let Some((hero_id, url)) = next else {
                         break;
                     };
-                    if let Some(bytes) = fetch_portrait(hero_id, &url, cache_root, &client) {
+                    if let Some(bytes) = fetch_portrait(hero_id, &url, cache_root, client) {
                         let _ = sender.send((hero_id, bytes));
                     }
                 }
@@ -804,7 +800,33 @@ fn load_portraits(
         }
     });
     drop(sender);
-    receiver.into_iter().collect()
+    portraits.extend(receiver);
+    portraits
+}
+
+/// One HTTP client for every portrait batch, built on first use.
+fn portrait_client() -> Option<&'static reqwest::blocking::Client> {
+    static CLIENT: OnceLock<Option<reqwest::blocking::Client>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .ok()
+        })
+        .as_ref()
+}
+
+/// A supported portrait already on disk; an unusable file is removed so the
+/// next fetch replaces it.
+fn cached_portrait(hero_id: i64, cache_root: &Path) -> Option<Vec<u8>> {
+    let path = cache_root.join("heroes").join(format!("{hero_id}.png"));
+    let bytes = fs::read(&path).ok()?;
+    if portrait_png_is_supported(&bytes) {
+        return Some(bytes);
+    }
+    let _ = fs::remove_file(&path);
+    None
 }
 
 fn fetch_portrait(
@@ -813,13 +835,10 @@ fn fetch_portrait(
     cache_root: &Path,
     client: &reqwest::blocking::Client,
 ) -> Option<Vec<u8>> {
-    let path = cache_root.join("heroes").join(format!("{hero_id}.png"));
-    if let Ok(bytes) = fs::read(&path) {
-        if portrait_png_is_supported(&bytes) {
-            return Some(bytes);
-        }
-        let _ = fs::remove_file(&path);
+    if let Some(bytes) = cached_portrait(hero_id, cache_root) {
+        return Some(bytes);
     }
+    let path = cache_root.join("heroes").join(format!("{hero_id}.png"));
     let bytes = client
         .get(url)
         .send()

@@ -10,10 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, Value, ValueRef};
-use rusqlite::{
-    Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params, params_from_iter,
-};
+use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ValueRef};
+use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params};
 use thiserror::Error;
 
 use cama_db_core::profit_deductions::{
@@ -1143,33 +1141,6 @@ impl MafiaRepository {
                 |row| row.get(0),
             )?
             .collect::<Result<_, _>>()?)
-    }
-
-    pub fn remove_signups(
-        &self,
-        guild_id: Option<i64>,
-        discord_ids: &[i64],
-    ) -> Result<(), MafiaRepositoryError> {
-        let unique = discord_ids.iter().copied().collect::<BTreeSet<_>>();
-        if unique.is_empty() {
-            return Ok(());
-        }
-        let placeholders = (1..=unique.len())
-            .map(|_| "?")
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!(
-            "DELETE FROM mafia_signups WHERE guild_id=? AND week_start=?
-             AND discord_id IN ({placeholders})"
-        );
-        let mut bindings = vec![
-            Value::Integer(Self::normalize_guild_id(guild_id)),
-            Value::Text(SIGNUP_BUCKET.to_owned()),
-        ];
-        bindings.extend(unique.into_iter().map(Value::Integer));
-        self.connection()?
-            .execute(&sql, params_from_iter(bindings))?;
-        Ok(())
     }
 
     /// Test fixture: mark a game resolved without settlement.

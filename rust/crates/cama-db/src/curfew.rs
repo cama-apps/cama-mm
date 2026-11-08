@@ -8,7 +8,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use cama_domain::curfew::{CurfewWindow, parse_mode};
+use cama_domain::curfew::{
+    CurfewWindow, effective_timezone, next_local_morning, parse_mode, retains_coverage,
+};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 
@@ -179,36 +181,7 @@ impl CurfewRepository {
         window: &CurfewWindow,
         effective_at: DateTime<Utc>,
     ) -> Result<(), rusqlite::Error> {
-        let connection = self.connection()?;
-        connection.execute(
-            "INSERT INTO player_curfew_pending_changes
-                (discord_id, guild_id, name, action, start_hour, start_minute, end_hour, end_minute, timezone, days, mode, effective_at)
-             VALUES (?1, ?2, ?3, 'upsert', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-             ON CONFLICT(discord_id, guild_id, name) DO UPDATE SET
-                action = 'upsert',
-                start_hour = excluded.start_hour,
-                start_minute = excluded.start_minute,
-                end_hour = excluded.end_hour,
-                end_minute = excluded.end_minute,
-                timezone = excluded.timezone,
-                days = excluded.days,
-                mode = excluded.mode,
-                effective_at = excluded.effective_at",
-            params![
-                window.discord_id,
-                window.guild_id,
-                window.name,
-                window.start_hour,
-                window.start_minute,
-                window.end_hour,
-                window.end_minute,
-                window.timezone,
-                window.days.map(i64::from),
-                window.mode.as_str(),
-                effective_at.to_rfc3339(),
-            ],
-        )?;
-        Ok(())
+        upsert_pending_window(&self.connection()?, window, effective_at)
     }
 
     /// Stage a strict-mode delete: the window stays live (and enforced)
@@ -293,6 +266,110 @@ impl CurfewRepository {
         transaction.commit()?;
         Ok(applied)
     }
+}
+
+/// Stage `window` to replace the live window of the same name at
+/// `effective_at`, overwriting any change already staged for it.
+fn upsert_pending_window(
+    connection: &Connection,
+    window: &CurfewWindow,
+    effective_at: DateTime<Utc>,
+) -> Result<(), rusqlite::Error> {
+    connection.execute(
+        "INSERT INTO player_curfew_pending_changes
+            (discord_id, guild_id, name, action, start_hour, start_minute, end_hour, end_minute, timezone, days, mode, effective_at)
+         VALUES (?1, ?2, ?3, 'upsert', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+         ON CONFLICT(discord_id, guild_id, name) DO UPDATE SET
+            action = 'upsert',
+            start_hour = excluded.start_hour,
+            start_minute = excluded.start_minute,
+            end_hour = excluded.end_hour,
+            end_minute = excluded.end_minute,
+            timezone = excluded.timezone,
+            days = excluded.days,
+            mode = excluded.mode,
+            effective_at = excluded.effective_at",
+        params![
+            window.discord_id,
+            window.guild_id,
+            window.name,
+            window.start_hour,
+            window.start_minute,
+            window.end_hour,
+            window.end_minute,
+            window.timezone,
+            window.days.map(i64::from),
+            window.mode.as_str(),
+            effective_at.to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Keep strict-mode windows that inherit the player's general timezone from
+/// being loosened by a general-timezone change from `old_general` to
+/// `new_general`.
+///
+/// A switch that would free any minute such a window currently enforces is a
+/// reducing edit to that window, so it gets the same treatment as one made
+/// through `/player curfew add`: the window is pinned to the zone it runs
+/// under now, and restoring inheritance is staged for its next local morning.
+/// A change already staged for the window is left as is; it replaces the
+/// pinned window when it lands. Windows the switch only extends follow the
+/// new zone immediately. Returns the names of the windows held back. Callers
+/// run this in the transaction that writes `players.timezone`.
+pub(crate) fn hold_strict_windows_for_timezone_change(
+    connection: &Connection,
+    discord_id: i64,
+    guild_id: i64,
+    old_general: Option<&str>,
+    new_general: &str,
+    now: DateTime<Utc>,
+) -> Result<Vec<String>, rusqlite::Error> {
+    let inherited = {
+        let mut statement = connection.prepare(
+            "SELECT discord_id, guild_id, name, start_hour, start_minute, end_hour, end_minute, timezone, days, mode
+             FROM player_curfew_windows
+             WHERE discord_id = ?1 AND guild_id = ?2 AND timezone IS NULL
+             ORDER BY name",
+        )?;
+        statement
+            .query_map(params![discord_id, guild_id], row_to_window)?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let mut held = Vec::new();
+    for window in inherited {
+        if !window.mode.stages_changes() {
+            continue;
+        }
+        let current_zone = effective_timezone(&window, old_general).to_owned();
+        let pinned = CurfewWindow {
+            timezone: Some(current_zone.clone()),
+            ..window.clone()
+        };
+        let moved = CurfewWindow {
+            timezone: Some(new_general.to_owned()),
+            ..window.clone()
+        };
+        if retains_coverage(&moved, &pinned, None, now) {
+            continue;
+        }
+        upsert_window(connection, &pinned)?;
+        let already_staged = connection
+            .query_row(
+                "SELECT 1 FROM player_curfew_pending_changes
+                 WHERE discord_id = ?1 AND guild_id = ?2 AND name = ?3",
+                params![discord_id, guild_id, &window.name],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !already_staged {
+            upsert_pending_window(connection, &window, next_local_morning(&current_zone, now))?;
+        }
+        held.push(window.name);
+    }
+    Ok(held)
 }
 
 /// Insert `window`, or overwrite the row with the same player and name.

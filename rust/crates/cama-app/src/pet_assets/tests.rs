@@ -81,56 +81,9 @@ impl PetCardRenderer for CountingRenderer {
     }
 }
 
-fn decode_stored_png(bytes: &[u8]) -> RasterImage {
-    let info = inspect_png(bytes).expect("test PNG must validate");
-    let mut cursor = PNG_SIGNATURE.len();
-    let mut idat = Vec::new();
-    while cursor < bytes.len() {
-        let length = read_u32(bytes, cursor).expect("chunk length") as usize;
-        cursor += 4;
-        let kind = &bytes[cursor..cursor + 4];
-        cursor += 4;
-        let data = &bytes[cursor..cursor + length];
-        cursor += length + 4;
-        if kind == b"IDAT" {
-            idat.extend_from_slice(data);
-        }
-        if kind == b"IEND" {
-            break;
-        }
-    }
-    assert_eq!(&idat[..2], &[0x78, 0x01]);
-    let mut deflate_cursor = 2;
-    let end = idat.len() - 4;
-    let mut filtered = Vec::new();
-    loop {
-        let header = idat[deflate_cursor];
-        deflate_cursor += 1;
-        assert_eq!(header & 0b0000_0110, 0, "encoder must use stored blocks");
-        let length = u16::from_le_bytes([idat[deflate_cursor], idat[deflate_cursor + 1]]);
-        let inverse = u16::from_le_bytes([idat[deflate_cursor + 2], idat[deflate_cursor + 3]]);
-        assert_eq!(length, !inverse);
-        deflate_cursor += 4;
-        let block_end = deflate_cursor + usize::from(length);
-        filtered.extend_from_slice(&idat[deflate_cursor..block_end]);
-        deflate_cursor = block_end;
-        if header & 1 == 1 {
-            break;
-        }
-    }
-    assert_eq!(deflate_cursor, end);
-    assert_eq!(adler32(&filtered), read_u32(&idat, end).expect("Adler sum"));
-    let row_bytes = info.width * 4;
-    let mut pixels = Vec::with_capacity(row_bytes * info.height);
-    for row in filtered.chunks_exact(row_bytes + 1) {
-        assert_eq!(row[0], 0, "encoder must use the None PNG filter");
-        pixels.extend_from_slice(&row[1..]);
-    }
-    RasterImage {
-        width: info.width,
-        height: info.height,
-        pixels,
-    }
+fn decode_card_png(bytes: &[u8]) -> RasterImage {
+    inspect_png(bytes).expect("test PNG must validate");
+    decode_png_raster(bytes).expect("test PNG must decode")
 }
 
 mod test_render_pet_card {
@@ -375,7 +328,7 @@ mod test_pet_asset_loader {
         let mut loader = PetAssetLoader::new(NoAuthoredPetAssets, ProceduralPetRenderer);
         let file = loader.get_pet_card(&request("common_cama", PetStage::Adult, PetMood::Happy, 3));
         assert_eq!(file.filename, "pet_common_cama_adult_happy.png");
-        assert_valid_card(&decode_stored_png(file.bytes()));
+        assert_valid_card(&decode_card_png(file.bytes()));
     }
 
     #[test]
@@ -419,7 +372,7 @@ mod test_pet_asset_loader {
         let mut loader = PetAssetLoader::new(NoAuthoredPetAssets, ProceduralPetRenderer);
         let file = loader.get_egg_card(4);
         assert_eq!(file.filename, "pet_egg.png");
-        assert_valid_card(&decode_stored_png(file.bytes()));
+        assert_valid_card(&decode_card_png(file.bytes()));
     }
 
     #[test]
@@ -427,7 +380,7 @@ mod test_pet_asset_loader {
         let mut loader = PetAssetLoader::new(NoAuthoredPetAssets, ProceduralPetRenderer);
         let file = loader.get_tombstone_card("Fluffy", 4);
         assert_eq!(file.filename, "pet_tombstone.png");
-        assert_valid_card(&decode_stored_png(file.bytes()));
+        assert_valid_card(&decode_card_png(file.bytes()));
     }
 
     #[test]
@@ -474,7 +427,7 @@ mod test_pet_asset_loader {
         let file = loader.get_altar_card("Fluffy", 4);
         assert_eq!(file.filename, "pet_altar.png");
         assert_eq!(
-            decode_stored_png(file.bytes()).pixel(0, 0),
+            decode_card_png(file.bytes()).pixel(0, 0),
             Some(Rgba(40, 20, 60, 255))
         );
     }
@@ -497,7 +450,7 @@ mod test_pet_asset_loader {
         let overlaid = loader.get_versus_card(&left, &right);
         assert_ne!(overlaid.bytes(), baseline.bytes());
         assert_eq!(
-            decode_stored_png(overlaid.bytes()).pixel(0, 0),
+            decode_card_png(overlaid.bytes()).pixel(0, 0),
             Some(Rgba(255, 0, 0, 255))
         );
     }
@@ -564,7 +517,7 @@ mod test_pet_asset_loader {
             &request("common_cama", PetStage::Adult, PetMood::Happy, 3),
             &request("rama", PetStage::Baby, PetMood::Happy, 7),
         );
-        let image = decode_stored_png(file.bytes());
+        let image = decode_card_png(file.bytes());
         assert_eq!((image.width, image.height), (VERSUS_WIDTH, CARD_HEIGHT));
         assert!(
             (0..CARD_WIDTH).any(|x| {
@@ -586,7 +539,7 @@ mod test_pet_asset_loader {
             &request("common_cama", PetStage::Adult, PetMood::Happy, 3),
             &request("rama", PetStage::Baby, PetMood::Happy, 7),
         );
-        let image = decode_stored_png(file.bytes());
+        let image = decode_card_png(file.bytes());
         assert_eq!((image.width, image.height), (VERSUS_WIDTH, CARD_HEIGHT));
         assert!(
             (0..VERSUS_WIDTH).any(|x| {

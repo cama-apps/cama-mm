@@ -9,7 +9,9 @@
 //! check at load time so an incomplete or mutated deployment fails closed.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
+use fontdue::{Font, FontSettings};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -82,6 +84,22 @@ pub fn load_dejavu_font(face: DejaVuFace) -> Result<Vec<u8>, FontAssetError> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(RUNTIME_FONT_DIR));
     load_dejavu_font_from(&directory, face)
+}
+
+/// The parsed DejaVu `face`, loaded, verified, and parsed once per process and
+/// shared by every renderer. `None` when the fixed font is unavailable, so a
+/// renderer can fall back to its bitmap glyphs.
+#[must_use]
+pub fn dejavu_font(face: DejaVuFace) -> Option<&'static Font> {
+    static FONTS: [OnceLock<Option<Font>>; DejaVuFace::ALL.len()] =
+        [const { OnceLock::new() }; DejaVuFace::ALL.len()];
+    FONTS[face as usize]
+        .get_or_init(|| {
+            load_dejavu_font(face)
+                .ok()
+                .and_then(|bytes| Font::from_bytes(bytes, FontSettings::default()).ok())
+        })
+        .as_ref()
 }
 
 /// Testable/configurable form of [`load_dejavu_font`].
@@ -160,6 +178,22 @@ mod tests {
                 "asset staging retains {}",
                 face.file_name()
             );
+        }
+    }
+
+    #[test]
+    fn every_face_has_its_own_shared_parsed_font_slot() {
+        assert_eq!(
+            DejaVuFace::ALL.map(|face| face as usize),
+            [0, 1, 2, 3],
+            "each face indexes a distinct cache slot"
+        );
+        for face in DejaVuFace::ALL {
+            match (dejavu_font(face), dejavu_font(face)) {
+                (Some(first), Some(second)) => assert!(std::ptr::eq(first, second)),
+                (None, None) => {}
+                _ => panic!("{} cache answered inconsistently", face.file_name()),
+            }
         }
     }
 
