@@ -2919,7 +2919,7 @@ fn resume_fixture() -> (Fixture, Vec<i64>) {
                 let won = team == entry.winner;
                 let fantasy = entry
                     .fantasy
-                    .then(|| 4.0 + 1.5 * index as f64 + if won { 6.0 } else { 0.0 });
+                    .then_some(4.0 + 1.5 * index as f64 + if won { 6.0 } else { 0.0 });
                 connection
                     .execute(
                         "INSERT INTO match_participants (

@@ -2000,11 +2000,14 @@ struct ReplayPrior {
     recent_outcomes: Vec<bool>,
 }
 
+/// `(os_mu_before, os_sigma_before)` keyed by `(match_id, discord_id)`.
+type StoredBeforeSnapshots = BTreeMap<(i64, i64), (Option<f64>, Option<f64>)>;
+
 /// Verifies that every resumed player's first stored `before` snapshot is
 /// exactly the state the resumed replay derived, so the stored history the
 /// resume trusts is the history a full replay would have produced.
 struct ResumeCheck {
-    stored_before: BTreeMap<(i64, i64), (Option<f64>, Option<f64>)>,
+    stored_before: StoredBeforeSnapshots,
     checked: BTreeSet<i64>,
 }
 
@@ -2588,7 +2591,7 @@ fn load_resumed_snapshots(
     transaction: &Transaction<'_>,
     guild_id: i64,
     start: ReplayStart,
-) -> Result<BTreeMap<(i64, i64), (Option<f64>, Option<f64>)>, rusqlite::Error> {
+) -> Result<StoredBeforeSnapshots, rusqlite::Error> {
     let sql = format!(
         "SELECT rh.match_id, rh.discord_id, rh.os_mu_before, rh.os_sigma_before
          FROM rating_history rh
