@@ -27,7 +27,7 @@ use tempfile::NamedTempFile;
 
 pub use cama_app::{
     dig_bosses, dig_loot, dig_runtime, dig_service, dig_tunnels, economy_event_service,
-    economy_event_sqlite,
+    economy_event_sqlite, mana_effects_service,
 };
 
 // The event/abandon/prestige/social application paths are deliberately not

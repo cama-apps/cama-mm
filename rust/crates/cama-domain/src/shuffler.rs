@@ -92,29 +92,115 @@ struct GlobalRoleAssignmentProvider;
 
 type RoleKey = Vec<Vec<String>>;
 
-fn global_role_cache() -> &'static Mutex<HashMap<RoleKey, Arc<Vec<RoleAssignment>>>> {
-    static CACHE: OnceLock<Mutex<HashMap<RoleKey, Arc<Vec<RoleAssignment>>>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+/// Most distinct teams' role solutions the process keeps at once.
+const ROLE_ASSIGNMENT_CACHE_CAPACITY: usize = 4_096;
+
+/// Bounded cache of optimal role assignments.
+///
+/// A team's optimum does not depend on its player order or on the order and
+/// repetition of each player's preferences, so entries are keyed on the
+/// sorted, de-duplicated preference sets and mapped back to the caller's
+/// order. When the cache is full it is cleared; entries are pure functions of
+/// their key, so eviction never changes a result.
+struct RoleAssignmentCache {
+    capacity: usize,
+    entries: Mutex<HashMap<RoleKey, Arc<Vec<RoleAssignment>>>>,
+}
+
+impl RoleAssignmentCache {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn get(&self, player_roles_key: &[Vec<String>]) -> Arc<Vec<RoleAssignment>> {
+        let mut canonical_preferences: Vec<Vec<String>> = player_roles_key
+            .iter()
+            .map(|preferences| {
+                let mut preferences = preferences.clone();
+                preferences.sort();
+                preferences.dedup();
+                preferences
+            })
+            .collect();
+        // Remapping is only defined for a full team; anything else is keyed
+        // in the caller's order.
+        let mut order: Vec<usize> = (0..canonical_preferences.len()).collect();
+        if canonical_preferences.len() == ROLES.len() {
+            order.sort_by(|left, right| {
+                canonical_preferences[*left].cmp(&canonical_preferences[*right])
+            });
+            canonical_preferences = order
+                .iter()
+                .map(|index| std::mem::take(&mut canonical_preferences[*index]))
+                .collect();
+        }
+
+        let solved = {
+            let mut entries = self
+                .entries
+                .lock()
+                .expect("role-assignment cache mutex was poisoned");
+            if let Some(solved) = entries.get(&canonical_preferences) {
+                Arc::clone(solved)
+            } else {
+                let solved: Arc<Vec<RoleAssignment>> = Arc::new(
+                    compute_optimal_role_assignments(&canonical_preferences)
+                        .into_iter()
+                        .filter_map(|assignment| assignment.try_into().ok())
+                        .collect(),
+                );
+                if entries.len() >= self.capacity {
+                    entries.clear();
+                }
+                entries.insert(canonical_preferences, Arc::clone(&solved));
+                solved
+            }
+        };
+        if order
+            .iter()
+            .enumerate()
+            .all(|(position, index)| position == *index)
+        {
+            return solved;
+        }
+
+        // Back in the caller's order, listed in the same role-lexicographic
+        // order the direct permutation search emits.
+        let role_rank = |role: &String| ROLES.iter().position(|known| known == role);
+        let mut remapped: Vec<RoleAssignment> = solved
+            .iter()
+            .map(|assignment| {
+                let mut original: RoleAssignment = Default::default();
+                for (position, role) in assignment.iter().enumerate() {
+                    original[order[position]] = role.clone();
+                }
+                original
+            })
+            .collect();
+        remapped.sort_by_cached_key(|assignment| assignment.each_ref().map(role_rank));
+        Arc::new(remapped)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries
+            .lock()
+            .expect("role-assignment cache mutex was poisoned")
+            .len()
+    }
+}
+
+fn global_role_cache() -> &'static RoleAssignmentCache {
+    static CACHE: OnceLock<RoleAssignmentCache> = OnceLock::new();
+    CACHE.get_or_init(|| RoleAssignmentCache::with_capacity(ROLE_ASSIGNMENT_CACHE_CAPACITY))
 }
 
 impl RoleAssignmentProvider for GlobalRoleAssignmentProvider {
     fn get(&self, player_roles_key: &[Vec<String>]) -> Arc<Vec<RoleAssignment>> {
-        let key = player_roles_key.to_vec();
-        let mut cache = global_role_cache()
-            .lock()
-            .expect("global role-assignment cache mutex was poisoned");
-        if let Some(assignments) = cache.get(&key) {
-            return Arc::clone(assignments);
-        }
-
-        let assignments = Arc::new(
-            compute_optimal_role_assignments(player_roles_key)
-                .into_iter()
-                .filter_map(|assignment| assignment.try_into().ok())
-                .collect(),
-        );
-        cache.insert(key, Arc::clone(&assignments));
-        assignments
+        global_role_cache().get(player_roles_key)
     }
 }
 
@@ -125,6 +211,7 @@ struct DiagnosticCounters {
     fixed_splits_evaluated: AtomicUsize,
     pool_matchups_evaluated: AtomicUsize,
     pool_signatures_built: AtomicUsize,
+    pool_matchups_materialized: AtomicUsize,
     draft_pool_scores_evaluated: AtomicUsize,
     role_metrics_built: AtomicUsize,
     player_value_reads: AtomicUsize,
@@ -147,6 +234,7 @@ pub struct ShufflerDiagnostics {
     pub fixed_splits_evaluated: usize,
     pub pool_matchups_evaluated: usize,
     pub pool_signatures_built: usize,
+    pub pool_matchups_materialized: usize,
     pub draft_pool_scores_evaluated: usize,
     pub role_metrics_built: usize,
     pub player_value_reads: usize,
@@ -172,6 +260,7 @@ impl DiagnosticCounters {
             fixed_splits_evaluated: load(&self.fixed_splits_evaluated),
             pool_matchups_evaluated: load(&self.pool_matchups_evaluated),
             pool_signatures_built: load(&self.pool_signatures_built),
+            pool_matchups_materialized: load(&self.pool_matchups_materialized),
             draft_pool_scores_evaluated: load(&self.draft_pool_scores_evaluated),
             role_metrics_built: load(&self.role_metrics_built),
             player_value_reads: load(&self.player_value_reads),
@@ -202,6 +291,7 @@ impl DiagnosticCounters {
             &self.fixed_splits_evaluated,
             &self.pool_matchups_evaluated,
             &self.pool_signatures_built,
+            &self.pool_matchups_materialized,
             &self.draft_pool_scores_evaluated,
             &self.role_metrics_built,
             &self.player_value_reads,
@@ -446,12 +536,15 @@ struct TeamRoleMetricsSummary {
     team_values_are_finite: bool,
 }
 
+/// One scored team's identity: its five players' addresses, in order.
+type TeamKey = [usize; 5];
+
 #[derive(Default)]
 struct ScoringContext {
     player_values: HashMap<usize, f64>,
-    team_metrics: HashMap<(Vec<usize>, usize), Arc<Vec<RoleAssignmentMetrics>>>,
-    team_summaries: HashMap<(Vec<usize>, usize), TeamRoleMetricsSummary>,
-    assigned_metrics: HashMap<(Vec<usize>, RoleAssignment), RoleAssignmentMetrics>,
+    team_metrics: HashMap<(TeamKey, usize), Arc<Vec<RoleAssignmentMetrics>>>,
+    team_summaries: HashMap<(TeamKey, usize), TeamRoleMetricsSummary>,
+    assigned_metrics: HashMap<TeamKey, HashMap<RoleAssignment, RoleAssignmentMetrics>>,
 }
 
 struct ScoredTeams {
@@ -813,9 +906,10 @@ impl BalancedShuffler {
         max_assignments: usize,
         context: &mut ScoringContext,
     ) -> Arc<Vec<RoleAssignmentMetrics>> {
-        let identities = player_keys(players);
-        let cache_key = (identities.clone(), max_assignments);
-        if let Some(metrics) = context.team_metrics.get(&cache_key) {
+        let key = team_key(players);
+        if let Some(key) = key
+            && let Some(metrics) = context.team_metrics.get(&(key, max_assignments))
+        {
             return Arc::clone(metrics);
         }
 
@@ -831,13 +925,15 @@ impl BalancedShuffler {
                 .map(|roles| self.role_assignment_metrics(players, roles, &values))
                 .collect::<Vec<_>>(),
         );
-        for metric in metrics.iter() {
-            context.assigned_metrics.insert(
-                (identities.clone(), metric.role_assignments.clone()),
-                metric.clone(),
-            );
+        if let Some(key) = key {
+            let by_roles = context.assigned_metrics.entry(key).or_default();
+            for metric in metrics.iter() {
+                by_roles.insert(metric.role_assignments.clone(), metric.clone());
+            }
+            context
+                .team_metrics
+                .insert((key, max_assignments), Arc::clone(&metrics));
         }
-        context.team_metrics.insert(cache_key, Arc::clone(&metrics));
         metrics
     }
 
@@ -847,9 +943,10 @@ impl BalancedShuffler {
         max_assignments: usize,
         context: &mut ScoringContext,
     ) -> TeamRoleMetricsSummary {
-        let identities = player_keys(players);
-        let key = (identities.clone(), max_assignments);
-        if let Some(summary) = context.team_summaries.get(&key) {
+        let key = team_key(players);
+        if let Some(key) = key
+            && let Some(summary) = context.team_summaries.get(&(key, max_assignments))
+        {
             return summary.clone();
         }
 
@@ -861,7 +958,7 @@ impl BalancedShuffler {
             .team_summary_keys
             .lock()
             .expect("diagnostics mutex was poisoned")
-            .push(identities);
+            .push(player_keys(players));
         let metrics = self.team_role_metrics(players, max_assignments, context);
         let finite =
             !metrics.is_empty() && metrics.iter().all(|metric| metric.team_value.is_finite());
@@ -892,7 +989,11 @@ impl BalancedShuffler {
                 team_values_are_finite: false,
             }
         };
-        context.team_summaries.insert(key, summary.clone());
+        if let Some(key) = key {
+            context
+                .team_summaries
+                .insert((key, max_assignments), summary.clone());
+        }
         summary
     }
 
@@ -912,9 +1013,13 @@ impl BalancedShuffler {
         roles: &RoleAssignment,
         context: &mut ScoringContext,
     ) -> RoleAssignmentMetrics {
-        let identities = player_keys(players);
-        let key = (identities.clone(), roles.clone());
-        if let Some(metrics) = context.assigned_metrics.get(&key) {
+        let key = team_key(players);
+        if let Some(key) = key
+            && let Some(metrics) = context
+                .assigned_metrics
+                .get(&key)
+                .and_then(|by_roles| by_roles.get(roles))
+        {
             return metrics.clone();
         }
         let values: Vec<f64> = players
@@ -922,8 +1027,34 @@ impl BalancedShuffler {
             .map(|player| self.player_value(player, context))
             .collect();
         let metrics = self.role_assignment_metrics(players, roles, &values);
-        context.assigned_metrics.insert(key, metrics.clone());
+        if let Some(key) = key {
+            context
+                .assigned_metrics
+                .entry(key)
+                .or_default()
+                .insert(roles.clone(), metrics.clone());
+        }
         metrics
+    }
+
+    /// The team value and off-role count of one assignment, without cloning
+    /// the cached metrics on a hit.
+    fn assigned_value_and_off_roles(
+        &self,
+        players: &[&Player],
+        roles: &RoleAssignment,
+        context: &mut ScoringContext,
+    ) -> (f64, usize) {
+        if let Some(key) = team_key(players)
+            && let Some(metrics) = context
+                .assigned_metrics
+                .get(&key)
+                .and_then(|by_roles| by_roles.get(roles))
+        {
+            return (metrics.team_value, metrics.off_role_count);
+        }
+        let metrics = self.assigned_metrics(players, roles, context);
+        (metrics.team_value, metrics.off_role_count)
     }
 
     fn score_unconstrained_metrics(
@@ -1780,40 +1911,43 @@ impl BalancedShuffler {
                     .fetch_add(1, AtomicOrdering::Relaxed);
                 let override_score = hook(evaluation_index, &team1_refs, &team2_refs);
                 evaluation_index += 1;
-                let (matchup, signature_override) = if let Some(override_score) = override_score {
+                // Score from cached metrics first; only a split that beats the
+                // current best is materialized into owned teams, as in the
+                // branch-and-bound search.
+                let mut materialized = None;
+                let current_prefix = if let Some(override_score) = &override_score {
                     (
-                        materialize_override_matchup(
-                            &team1_refs,
-                            &team2_refs,
-                            &selection.excluded_names,
-                            selection.exclusion_penalty,
-                            &override_score,
-                        )?,
-                        override_score.signature,
+                        override_score.total_score,
+                        override_score.value_diff,
+                        override_score.total_off_roles,
                     )
+                } else if let Some(prefix) = self.pool_split_prefix(
+                    &team1_refs,
+                    &team2_refs,
+                    selection.combo_penalty,
+                    selection.recent_penalty,
+                    selection.rd_priority,
+                    3,
+                    options.constraints,
+                    &mut context,
+                ) {
+                    prefix
                 } else {
-                    (
-                        self.evaluate_pool_matchup_refs(
-                            &team1_refs,
-                            &team2_refs,
-                            selection.combo_penalty,
-                            selection.exclusion_penalty,
-                            &selection.excluded_names,
-                            selection.recent_penalty,
-                            selection.rd_priority,
-                            3,
-                            options.constraints,
-                            &mut context,
-                        )?,
-                        None,
-                    )
+                    let matchup = self.materialize_pool_matchup(
+                        &team1_refs,
+                        &team2_refs,
+                        &selection,
+                        options.constraints,
+                        &mut context,
+                    )?;
+                    let prefix = (
+                        matchup.total_score,
+                        matchup.value_diff,
+                        matchup.total_off_roles,
+                    );
+                    materialized = Some(matchup);
+                    prefix
                 };
-
-                let current_prefix = (
-                    matchup.total_score,
-                    matchup.value_diff,
-                    matchup.total_off_roles,
-                );
                 let best_prefix = best_matchup
                     .as_ref()
                     .map_or((f64::INFINITY, f64::INFINITY, usize::MAX), |best| {
@@ -1825,9 +1959,12 @@ impl BalancedShuffler {
                 self.diagnostics
                     .pool_signatures_built
                     .fetch_add(1, AtomicOrdering::Relaxed);
-                let signature = signature_override.unwrap_or_else(|| {
-                    pool_signature(&matchup.team1, &matchup.team2, &selection.excluded_names)
-                });
+                let signature = override_score
+                    .as_ref()
+                    .and_then(|override_score| override_score.signature.clone())
+                    .unwrap_or_else(|| {
+                        pool_signature_refs(&team1_refs, &team2_refs, &selection.excluded_names)
+                    });
                 if !pool_candidate_is_better(
                     current_prefix,
                     &signature,
@@ -1836,6 +1973,23 @@ impl BalancedShuffler {
                 ) {
                     continue;
                 }
+                let matchup = match (materialized, &override_score) {
+                    (Some(matchup), _) => matchup,
+                    (None, Some(override_score)) => materialize_override_matchup(
+                        &team1_refs,
+                        &team2_refs,
+                        &selection.excluded_names,
+                        selection.exclusion_penalty,
+                        override_score,
+                    )?,
+                    (None, None) => self.materialize_pool_matchup(
+                        &team1_refs,
+                        &team2_refs,
+                        &selection,
+                        options.constraints,
+                        &mut context,
+                    )?,
+                };
                 best_signature = Some(signature);
                 best_excluded = selection
                     .excluded_players
@@ -1977,6 +2131,70 @@ impl BalancedShuffler {
         )
     }
 
+    /// The `(total_score, value_diff, total_off_roles)` ordering prefix that
+    /// [`Self::evaluate_pool_matchup_refs`] would report for this split,
+    /// computed from cached metrics without building teams. `None` when no
+    /// role pair scored, which only materialization can resolve.
+    #[allow(clippy::too_many_arguments)]
+    fn pool_split_prefix(
+        &self,
+        team1_players: &[&Player],
+        team2_players: &[&Player],
+        combo_penalty: f64,
+        recent_penalty: f64,
+        rd_priority: f64,
+        max_assignments: usize,
+        constraints: ShuffleConstraints<'_>,
+        context: &mut ScoringContext,
+    ) -> Option<(f64, f64, usize)> {
+        let (roles1, roles2, score) = self.score_role_refs(
+            team1_players,
+            team2_players,
+            max_assignments,
+            constraints,
+            context,
+            RoleScorePolicy {
+                rd_priority: Some(rd_priority),
+                value_diff_weight: ADJUSTED_VALUE_DIFF_WEIGHT,
+            },
+        );
+        let (roles1, roles2) = (roles1?, roles2?);
+        let (team1_value, team1_off_roles) =
+            self.assigned_value_and_off_roles(team1_players, &roles1, context);
+        let (team2_value, team2_off_roles) =
+            self.assigned_value_and_off_roles(team2_players, &roles2, context);
+        Some((
+            score + combo_penalty + recent_penalty,
+            (team1_value - team2_value).abs(),
+            team1_off_roles + team2_off_roles,
+        ))
+    }
+
+    fn materialize_pool_matchup(
+        &self,
+        team1_players: &[&Player],
+        team2_players: &[&Player],
+        selection: &PoolSelection<'_>,
+        constraints: ShuffleConstraints<'_>,
+        context: &mut ScoringContext,
+    ) -> Result<PoolMatchup, ShufflerError> {
+        self.diagnostics
+            .pool_matchups_materialized
+            .fetch_add(1, AtomicOrdering::Relaxed);
+        self.evaluate_pool_matchup_refs(
+            team1_players,
+            team2_players,
+            selection.combo_penalty,
+            selection.exclusion_penalty,
+            &selection.excluded_names,
+            selection.recent_penalty,
+            selection.rd_priority,
+            3,
+            constraints,
+            context,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn evaluate_pool_matchup_refs(
         &self,
@@ -2084,10 +2302,8 @@ impl BalancedShuffler {
                 || (self.package_deal_penalty.is_finite() && self.package_deal_penalty >= 0.0));
         let recent_nonnegative =
             self.recent_match_penalty_weight.is_finite() && self.recent_match_penalty_weight >= 0.0;
-        let use_split_bound = search.use_split_role_bound
-            && base_terms_nonnegative
-            && !avoids_nonempty
-            && !deals_nonempty;
+        let use_split_bound = search.use_split_role_bound && base_terms_nonnegative;
+        let constrained = avoids_nonempty || deals_nonempty;
 
         let low_priority_player_mask = refs
             .iter()
@@ -2177,7 +2393,64 @@ impl BalancedShuffler {
                     (team1_mask & low_priority_player_mask).count_ones() as usize,
                     (team2_mask & low_priority_player_mask).count_ones() as usize,
                 );
-                let (roles1, roles2, base_score) = if use_split_bound {
+                let (roles1, roles2, base_score) = if use_split_bound && constrained {
+                    let summary1 = self.team_role_metrics_summary(&team1_refs, 3, &mut context);
+                    let summary2 = self.team_role_metrics_summary(&team2_refs, 3, &mut context);
+                    if summary1.team_values_are_finite && summary2.team_values_are_finite {
+                        // Avoid and deal penalties are fixed for a split, so
+                        // adding them exactly keeps the bound admissible. It
+                        // is summed in the same order as `score_role_refs`,
+                        // with the non-negative matchup term left out, so
+                        // rounding can never lift it above the split's score.
+                        let team1_ids = discord_ids(&team1_refs);
+                        let team2_ids = discord_ids(&team2_refs);
+                        let min_value_diff = 0.0_f64
+                            .max(summary1.min_team_value - summary2.max_team_value)
+                            .max(summary2.min_team_value - summary1.max_team_value);
+                        let min_off_role_penalty =
+                            (summary1.min_off_role_count + summary2.min_off_role_count) as f64
+                                * self.off_role_flat_penalty;
+                        let split_lower_bound = min_value_diff * ADJUSTED_VALUE_DIFF_WEIGHT
+                            + min_off_role_penalty
+                            - rd_priority
+                            + self.calculate_soft_avoid_penalty(
+                                &team1_ids,
+                                &team2_ids,
+                                options.constraints.avoids,
+                                options.constraints.low_priority_ids,
+                            )
+                            + self.calculate_package_deal_penalty(
+                                &team1_ids,
+                                &team2_ids,
+                                options.constraints.deals,
+                                options.constraints.low_priority_ids,
+                            )
+                            + Self::calculate_low_priority_team_adjustment(
+                                &team1_ids,
+                                &team2_ids,
+                                options.constraints.low_priority_ids,
+                            )
+                            + recent_penalty
+                            + combo_penalty;
+                        if split_lower_bound.is_finite() && split_lower_bound >= best_score {
+                            self.diagnostics
+                                .branch_team_splits_pruned
+                                .fetch_add(1, AtomicOrdering::Relaxed);
+                            continue;
+                        }
+                    }
+                    self.score_role_refs(
+                        &team1_refs,
+                        &team2_refs,
+                        3,
+                        options.constraints,
+                        &mut context,
+                        RoleScorePolicy {
+                            rd_priority: Some(rd_priority),
+                            value_diff_weight: ADJUSTED_VALUE_DIFF_WEIGHT,
+                        },
+                    )
+                } else if use_split_bound {
                     let summary1 = self.team_role_metrics_summary(&team1_refs, 3, &mut context);
                     let summary2 = self.team_role_metrics_summary(&team2_refs, 3, &mut context);
                     if summary1.team_values_are_finite && summary2.team_values_are_finite {
@@ -2270,8 +2543,17 @@ fn player_key(player: &Player) -> usize {
     std::ptr::from_ref(player).addr()
 }
 
+#[cfg(test)]
 fn player_keys(players: &[&Player]) -> Vec<usize> {
     players.iter().map(|player| player_key(player)).collect()
+}
+
+/// The cache identity of a five-player team. Any other slice is scored
+/// without caching.
+fn team_key(players: &[&Player]) -> Option<TeamKey> {
+    <[&Player; 5]>::try_from(players)
+        .ok()
+        .map(|team| team.map(player_key))
 }
 
 fn discord_ids(players: &[&Player]) -> HashSet<i64> {
@@ -2484,17 +2766,13 @@ fn sample_combinations(n: usize, k: usize, maximum: usize, seed: u64) -> Vec<Vec
     samples
 }
 
-fn pool_signature(team1: &Team, team2: &Team, excluded_names: &[String]) -> PoolSignature {
-    let mut names1: Vec<String> = team1
-        .players
-        .iter()
-        .map(|player| player.name.clone())
-        .collect();
-    let mut names2: Vec<String> = team2
-        .players
-        .iter()
-        .map(|player| player.name.clone())
-        .collect();
+fn pool_signature_refs(
+    team1: &[&Player],
+    team2: &[&Player],
+    excluded_names: &[String],
+) -> PoolSignature {
+    let mut names1: Vec<String> = team1.iter().map(|player| player.name.clone()).collect();
+    let mut names2: Vec<String> = team2.iter().map(|player| player.name.clone()).collect();
     let mut excluded = excluded_names.to_vec();
     names1.sort();
     names2.sort();
@@ -6993,5 +7271,243 @@ mod tests {
             names(&last.0),
             "tie breaker index must select among distinct tied matchups"
         );
+    }
+
+    fn pinned_pool(pool_size: usize) -> (BalancedShuffler, PoolResult) {
+        let players: Vec<Player> = seeded_pool(0x1213, "Pin", 3)
+            .into_iter()
+            .take(pool_size)
+            .collect();
+        let counts: HashMap<i64, usize> = players
+            .iter()
+            .map(|player| (id(player), (id(player) % 4) as usize))
+            .collect();
+        let recent: HashSet<i64> = players.iter().take(4).map(id).collect();
+        let avoids = [SoftAvoid {
+            avoider_discord_id: 1,
+            avoided_discord_id: 2,
+        }];
+        let deals = [PackageDeal {
+            buyer_discord_id: 3,
+            partner_discord_id: 4,
+        }];
+        let shuffler = BalancedShuffler {
+            off_role_flat_penalty: 60.0,
+            role_matchup_delta_weight: 0.35,
+            exclusion_penalty_weight: 40.0,
+            rd_priority_weight: 0.08,
+            recent_match_penalty_weight: 50.0,
+            ..BalancedShuffler::default()
+        };
+        let result = shuffler
+            .shuffle_from_pool(
+                &players,
+                PoolOptions {
+                    exclusion_counts: Some(&counts),
+                    recent_match_ids: Some(&recent),
+                    constraints: ShuffleConstraints {
+                        avoids: Some(&avoids),
+                        deals: Some(&deals),
+                        ..ShuffleConstraints::default()
+                    },
+                    ..PoolOptions::default()
+                },
+            )
+            .expect("pinned pool shuffle");
+        (shuffler, result)
+    }
+
+    #[test]
+    fn pool_search_results_for_twelve_and_thirteen_players_are_pinned() {
+        // Captured from the search that materialized every split.
+        let expected = [
+            (
+                12,
+                [
+                    "Pin0:1:5|Pin2:3:2|Pin3:4:4|Pin6:7:3|Pin9:10:1",
+                    "Pin10:11:4|Pin1:2:3|Pin5:6:2|Pin7:8:1|Pin8:9:5",
+                    "Pin11:12|Pin4:5",
+                ],
+                [
+                    0xc0b4_7a94_34b7_f050,
+                    0x40c4_691c_16a1_25f0,
+                    0x40c4_4f74_6f72_8e71,
+                ],
+                8_316,
+            ),
+            (
+                13,
+                [
+                    "Pin0:1:5|Pin10:11:4|Pin5:6:2|Pin7:8:3|Pin9:10:1",
+                    "Pin12:13:2|Pin1:2:3|Pin3:4:4|Pin6:7:5|Pin8:9:1",
+                    "Pin11:12|Pin2:3|Pin4:5",
+                ],
+                [
+                    0xc0b4_8c18_d710_f23b,
+                    0x40c4_e283_716a_3639,
+                    0x40c4_e18b_78d9_d30b,
+                ],
+                36_036,
+            ),
+        ];
+        for (size, signature, bits, evaluated) in expected {
+            let (shuffler, result) = pinned_pool(size);
+            assert_eq!(result_signature(&result, false), signature, "{size}");
+            assert_eq!(
+                [
+                    result.score.to_bits(),
+                    result.team1_value.to_bits(),
+                    result.team2_value.to_bits(),
+                ],
+                bits,
+                "{size}"
+            );
+            let diagnostics = shuffler.diagnostics();
+            assert_eq!(diagnostics.pool_matchups_evaluated, evaluated);
+            // Only improvements become owned teams.
+            assert!(diagnostics.pool_matchups_materialized >= 1);
+            assert!(
+                diagnostics.pool_matchups_materialized <= diagnostics.pool_signatures_built,
+                "{diagnostics:?}"
+            );
+            assert!(diagnostics.pool_matchups_materialized * 100 < evaluated);
+        }
+    }
+
+    #[test]
+    fn constrained_split_bound_matches_reference_and_prunes() {
+        for seed in [0x5A01, 0x5A02, 0x5A03] {
+            let players = seeded_pool(seed, "Avoid", 3);
+            let avoids = [
+                SoftAvoid {
+                    avoider_discord_id: 1,
+                    avoided_discord_id: 2,
+                },
+                SoftAvoid {
+                    avoider_discord_id: 7,
+                    avoided_discord_id: 3,
+                },
+            ];
+            let deals = [PackageDeal {
+                buyer_discord_id: 4,
+                partner_discord_id: 9,
+            }];
+            let counts: HashMap<i64, usize> = players
+                .iter()
+                .map(|player| (id(player), (id(player) % 3) as usize))
+                .collect();
+            let shuffler = BalancedShuffler {
+                off_role_flat_penalty: 60.0,
+                role_matchup_delta_weight: 0.35,
+                exclusion_penalty_weight: 30.0,
+                soft_avoid_penalty: 180.0,
+                package_deal_penalty: 120.0,
+                ..BalancedShuffler::default()
+            };
+            for constraints in [
+                ShuffleConstraints {
+                    avoids: Some(&avoids),
+                    ..ShuffleConstraints::default()
+                },
+                ShuffleConstraints {
+                    avoids: Some(&avoids),
+                    deals: Some(&deals),
+                    ..ShuffleConstraints::default()
+                },
+            ] {
+                let options = PoolOptions {
+                    exclusion_counts: Some(&counts),
+                    constraints,
+                    ..PoolOptions::default()
+                };
+                let search = |use_split_role_bound| {
+                    shuffler.reset_diagnostics();
+                    let result = shuffler
+                        .shuffle_branch_bound(
+                            &players,
+                            options,
+                            BranchSearchOptions {
+                                use_split_role_bound,
+                                initial_upper_bound: Some(f64::INFINITY),
+                            },
+                        )
+                        .expect("branch search");
+                    (result, shuffler.diagnostics().branch_matchups_evaluated)
+                };
+                let (reference, reference_evaluated) = search(false);
+                let (optimized, optimized_evaluated) = search(true);
+                assert_eq!(
+                    result_signature(&optimized, false),
+                    result_signature(&reference, false)
+                );
+                assert_eq!(optimized.score.to_bits(), reference.score.to_bits());
+                assert!(
+                    optimized_evaluated < reference_evaluated,
+                    "{optimized_evaluated} >= {reference_evaluated}"
+                );
+            }
+        }
+    }
+
+    fn direct_role_assignments(key: &[Vec<String>]) -> Vec<RoleAssignment> {
+        crate::team::compute_optimal_role_assignments(key)
+            .into_iter()
+            .map(|assignment| assignment.try_into().expect("five roles"))
+            .collect()
+    }
+
+    fn preference_key(lists: &[&[&str]]) -> Vec<Vec<String>> {
+        lists
+            .iter()
+            .map(|roles| roles.iter().map(|role| (*role).to_owned()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn role_cache_shares_one_entry_across_player_orders() {
+        let cache = super::RoleAssignmentCache::with_capacity(16);
+        let team = preference_key(&[&["1", "2"], &["3"], &[], &["5", "4", "5"], &["2"]]);
+        let permuted = vec![
+            team[3].clone(),
+            team[0].clone(),
+            team[4].clone(),
+            team[2].clone(),
+            team[1].clone(),
+        ];
+        assert_eq!(*cache.get(&team), direct_role_assignments(&team));
+        assert_eq!(*cache.get(&permuted), direct_role_assignments(&permuted));
+        assert_eq!(cache.len(), 1);
+
+        let mut random = SplitMix64(0xCA_C4E);
+        for _ in 0..200 {
+            let key: Vec<Vec<String>> = (0..5)
+                .map(|_| {
+                    let count = random.index(4);
+                    (0..count)
+                        .map(|_| crate::team::ROLES[random.index(5)].to_owned())
+                        .collect()
+                })
+                .collect();
+            assert_eq!(*cache.get(&key), direct_role_assignments(&key), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn role_cache_stays_within_its_capacity() {
+        let cache = super::RoleAssignmentCache::with_capacity(2);
+        let keys = [
+            preference_key(&[&["1"], &["2"], &["3"], &["4"], &["5"]]),
+            preference_key(&[&["1"], &["1"], &["3"], &["4"], &["5"]]),
+            preference_key(&[&["2"], &["2"], &["2"], &["4"], &["5"]]),
+            preference_key(&[&[], &[], &[], &[], &[]]),
+        ];
+        for key in &keys {
+            assert_eq!(*cache.get(key), direct_role_assignments(key));
+            assert!(cache.len() <= 2);
+        }
+        for key in &keys {
+            assert_eq!(*cache.get(key), direct_role_assignments(key));
+            assert!(cache.len() <= 2);
+        }
     }
 }

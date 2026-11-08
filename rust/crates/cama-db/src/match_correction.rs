@@ -10,8 +10,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use rusqlite::types::Value;
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::types::{Value, ValueRef};
+use rusqlite::{Connection, OptionalExtension, ToSql, Transaction, TransactionBehavior, params};
 use thiserror::Error;
 
 use cama_db_core::profit_deductions::penalty_games_remaining;
@@ -30,6 +30,8 @@ use crate::rating_history_repository::RatingHistoryRepository;
 
 pub const LEGACY_WIN_REWARD_JC: i64 = 4;
 pub const OPENSKILL_REPLAY_ALGORITHM_VERSION: i64 = 5;
+/// Replay-job reason recorded when one match gains complete fantasy data.
+pub const MATCH_ENRICHMENT_REPLAY_PREFIX: &str = "match_enrichment:";
 const RECENT_OUTCOME_LIMIT: usize = 20;
 
 #[must_use]
@@ -123,17 +125,6 @@ pub struct RatingCorrection {
     pub fantasy_weight: Option<f64>,
     pub streak_length: Option<i64>,
     pub streak_multiplier: Option<f64>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct OpenSkillReplayUpdate {
-    pub match_id: i64,
-    pub discord_id: i64,
-    pub mu: f64,
-    pub sigma: f64,
-    pub streak_length: i64,
-    pub streak_multiplier: f64,
-    pub is_live_rating: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -789,25 +780,6 @@ impl MatchCorrectionRepository {
         Ok(changed)
     }
 
-    /// Release every process-local correction lease during single-process
-    /// startup recovery. The durable `pending`/`core_applied` state and replay
-    /// jobs remain untouched; only an owner token from the dead process is
-    /// cleared. Production calls this on the first READY recovery pass after
-    /// acquiring the process lock, so no live correction can be displaced.
-    pub fn release_match_correction_leases_for_startup(
-        &self,
-    ) -> Result<usize, MatchCorrectionError> {
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let changed = transaction.execute(
-            "UPDATE match_correction_claims SET owner_token=NULL,claimed_at=0
-             WHERE owner_token IS NOT NULL",
-            [],
-        )?;
-        transaction.commit()?;
-        Ok(changed)
-    }
-
     /// Release dead-process correction leases only for guilds present in the
     /// current gateway READY snapshot. A dev bot may intentionally open a
     /// production database copy without belonging to those production guilds.
@@ -1232,18 +1204,35 @@ impl MatchCorrectionRepository {
                 ],
             )?;
             if let (Some(mu), Some(sigma)) = (update.os_mu, update.os_sigma) {
+                // Same later-match guard as Glicko: a player who has played
+                // since keeps the live rating that includes those games. The
+                // replay that follows rebuilds it; if that replay fails, the
+                // live rating must not be left rolled back to this match.
                 transaction.execute(
                     "UPDATE players
                      SET os_mu=?1,os_sigma=?2,os_rating_version=?3,
                          os_algorithm_fingerprint=?4,updated_at=CURRENT_TIMESTAMP
-                     WHERE discord_id=?5 AND guild_id=?6",
+                     WHERE discord_id=?5 AND guild_id=?6
+                       AND NOT EXISTS (
+                           SELECT 1 FROM rating_history rh
+                           JOIN matches later
+                             ON later.match_id=rh.match_id AND later.guild_id=rh.guild_id
+                           JOIN matches target
+                             ON target.match_id=?7 AND target.guild_id=players.guild_id
+                           WHERE rh.discord_id=players.discord_id
+                             AND rh.guild_id=players.guild_id
+                             AND (later.match_date>target.match_date OR
+                                  (later.match_date=target.match_date
+                                   AND later.match_id>target.match_id))
+                       )",
                     params![
                         mu,
                         sigma,
                         request.openskill_algorithm_version,
                         request.openskill_algorithm_fingerprint,
                         update.discord_id,
-                        guild_id
+                        guild_id,
+                        request.match_id
                     ],
                 )?;
             }
@@ -1645,292 +1634,56 @@ impl MatchCorrectionRepository {
         let guild_id = Self::normalize_guild_id(guild_id);
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let pending = transaction
-            .query_row(
-                "SELECT 1 FROM openskill_replay_jobs WHERE guild_id=?1",
-                [guild_id],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
-        if !pending {
-            return Err(MatchCorrectionError::Invariant(
-                "OpenSkill replay has no durable pending job",
-            ));
-        }
-
-        let players = load_replay_players(&transaction, guild_id)?;
-        let matches = load_replay_matches(&transaction, guild_id)?;
-        let total_matches = matches.len();
-        let participants = load_replay_participants(&transaction, guild_id)?;
-        let events = load_replay_events(&transaction, guild_id)?;
-        let mut current = players
-            .iter()
-            .map(|player| {
-                let source_mmr = player.initial_mmr.unwrap_or(4_000).clamp(0, 12_000);
-                let seed_mmr = (source_mmr - i64::from(new_player_mmr_discount)).max(0);
-                (
-                    player.discord_id,
-                    OpenSkillRating::new(
-                        system.mmr_to_os_mu(seed_mmr as i32),
-                        CamaOpenSkillSystem::DEFAULT_SIGMA,
-                    ),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        let mut recent_outcomes = BTreeMap::<i64, Vec<bool>>::new();
-        let mut last_match_at = BTreeMap::<i64, f64>::new();
-        let mut history_rows = Vec::new();
-        let mut prediction_rows = Vec::new();
-        let mut players_touched = BTreeSet::new();
-        let mut errors = Vec::new();
-        let mut event_offset = 0;
-        let mut matches_processed = 0;
-        let mut matches_with_fantasy = 0;
-        let mut matches_equal_weight = 0;
-
-        for replay_match in &matches {
-            apply_replay_events_through(
-                &events,
-                &mut event_offset,
-                replay_match.match_at,
-                &mut current,
-                &mut players_touched,
-                &mut errors,
-            );
-            let match_participants = participants
-                .get(&replay_match.match_id)
-                .map(Vec::as_slice)
-                .unwrap_or_default();
-            let (radiant_ids, dire_ids) = match replay_team_ids(replay_match, match_participants) {
-                Ok(teams) => teams,
-                Err(error) => {
-                    errors.push(error);
-                    continue;
-                }
-            };
-            let all_ids = radiant_ids
-                .iter()
-                .chain(&dire_ids)
-                .copied()
-                .collect::<Vec<_>>();
-            let participants_by_id = match_participants
-                .iter()
-                .map(|participant| (participant.discord_id, participant))
-                .collect::<BTreeMap<_, _>>();
-            let complete_fantasy = participants_by_id.len() >= 10
-                && all_ids.iter().all(|discord_id| {
-                    participants_by_id
-                        .get(discord_id)
-                        .and_then(|participant| participant.fantasy_points)
-                        .is_some()
-                });
-
-            let mut before = BTreeMap::new();
-            for &discord_id in &all_ids {
-                let mut rating = current.get(&discord_id).copied().unwrap_or_else(|| {
-                    OpenSkillRating::new(
-                        CamaOpenSkillSystem::DEFAULT_MU,
-                        CamaOpenSkillSystem::DEFAULT_SIGMA,
-                    )
-                });
-                if let (Some(match_at), Some(previous_at)) =
-                    (replay_match.match_at, last_match_at.get(&discord_id))
-                {
-                    let days_since = ((match_at - previous_at).floor() as i64).max(0);
-                    rating.sigma = system.apply_sigma_decay(rating.sigma, days_since);
-                }
-                before.insert(discord_id, rating);
-            }
-
-            let rate = recorded_streak_rate(optional_real(replay_match.streak_rate));
-            let threshold =
-                recorded_streak_threshold(optional_integer(replay_match.streak_threshold));
-            let streak_multipliers = match replay_streak_multipliers(
-                rating_system,
-                &all_ids,
-                &radiant_ids,
-                replay_match.winning_team,
-                &recent_outcomes,
-                rate,
-                threshold,
-            ) {
-                Ok(multipliers) => multipliers,
-                Err(discord_id) => {
-                    errors.push(format!(
-                        "Match {}: invalid Discord ID {discord_id}",
-                        replay_match.match_id
-                    ));
-                    continue;
-                }
-            };
-            let gain_multipliers = all_ids
-                .iter()
-                .map(|discord_id| {
-                    let openskill_id = u64::try_from(*discord_id)
-                        .expect("replay streak validation accepted Discord ID");
-                    let multiplier = participants_by_id
-                        .get(discord_id)
-                        .map(|participant| participant.low_priority_gain_multiplier)
-                        .filter(|multiplier| *multiplier != 0.0)
-                        .unwrap_or(1.0);
-                    (openskill_id, multiplier)
-                })
-                .collect::<BTreeMap<_, _>>();
-
-            let build_team = |ids: &[i64]| {
-                ids.iter()
-                    .map(|discord_id| {
-                        let rating = before[discord_id];
-                        WeightedPlayer::new(
-                            *discord_id as u64,
-                            Some(rating.mu),
-                            Some(rating.sigma),
-                            complete_fantasy
-                                .then(|| participants_by_id[discord_id].fantasy_points)
-                                .flatten(),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            };
-            let radiant = build_team(&radiant_ids);
-            let dire = build_team(&dire_ids);
-            let radiant_prediction = radiant_ids
-                .iter()
-                .map(|discord_id| before[discord_id])
-                .collect::<Vec<_>>();
-            let dire_prediction = dire_ids
-                .iter()
-                .map(|discord_id| before[discord_id])
-                .collect::<Vec<_>>();
-            let raw_probability =
-                system.os_predict_win_probability(&radiant_prediction, &dire_prediction);
-            let calibrated_probability = system
-                .calibrate_win_probability(raw_probability, None)
-                .map_err(|error| MatchCorrectionError::Rating(error.to_string()))?;
-            prediction_rows.push(ReplayPrediction {
-                match_id: replay_match.match_id,
-                raw_probability,
-                calibrated_probability,
-            });
-            let updates = match system.update_ratings_after_match(
-                &radiant,
-                &dire,
-                if replay_match.winning_team == MatchSide::Radiant {
-                    WinningTeam::Team1
-                } else {
-                    WinningTeam::Team2
-                },
-                &streak_multipliers,
-                &gain_multipliers,
-            ) {
-                Ok(updates) => updates,
-                Err(error) => {
-                    errors.push(format!("Match {}: {error}", replay_match.match_id));
-                    prediction_rows.pop();
-                    continue;
-                }
-            };
-            if complete_fantasy {
-                matches_with_fantasy += 1;
-            } else {
-                matches_equal_weight += 1;
-            }
-            for (team, ids) in [
-                (MatchSide::Radiant, radiant_ids.as_slice()),
-                (MatchSide::Dire, dire_ids.as_slice()),
-            ] {
-                for &discord_id in ids {
-                    let openskill_id = discord_id as u64;
-                    let old_rating = before[&discord_id];
-                    let update = updates[&openskill_id];
-                    current.insert(discord_id, update.rating);
-                    players_touched.insert(discord_id);
-                    if let Some(match_at) = replay_match.match_at {
-                        last_match_at.insert(discord_id, match_at);
-                    }
-                    let won = team == replay_match.winning_team;
-                    history_rows.push(ReplayHistoryRow {
-                        match_id: replay_match.match_id,
-                        match_date: replay_match.match_date.clone(),
-                        discord_id,
-                        team_number: team.number(),
-                        won,
-                        before: old_rating,
-                        after: update.rating,
-                        fantasy_weight: update.contribution_weight,
-                    });
-                    record_replay_outcome(&mut recent_outcomes, discord_id, won);
-                }
-            }
-            matches_processed += 1;
-        }
-        apply_replay_events_through(
-            &events,
-            &mut event_offset,
-            None,
-            &mut current,
-            &mut players_touched,
-            &mut errors,
-        );
-
-        let mut summary = OpenSkillReplaySummary {
-            matches_processed,
-            matches_with_fantasy,
-            matches_equal_weight,
-            players_updated: players_touched.len(),
-            errors,
-        };
-        if !summary.errors.is_empty() {
-            transaction.execute(
-                "UPDATE openskill_replay_jobs SET last_error=?1 WHERE guild_id=?2",
-                params![
-                    summary
-                        .errors
-                        .iter()
-                        .take(10)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join("; "),
-                    guild_id
-                ],
-            )?;
-            transaction.commit()?;
-            summary.errors.truncate(10);
-            return Ok((summary, total_matches));
-        }
-
-        let fingerprint = system.algorithm_fingerprint();
-        persist_openskill_replay(
+        pending_replay_job_reason(&transaction, guild_id)?;
+        let result = replay_openskill_in_transaction(
             &transaction,
             guild_id,
-            &history_rows,
-            &prediction_rows,
-            &current,
-            &fingerprint,
+            None,
+            system,
+            rating_system,
+            new_player_mmr_discount,
         )?;
-        transaction.execute(
-            "INSERT INTO openskill_rating_revisions(guild_id,revision,updated_at)
-             VALUES (?1,1,CURRENT_TIMESTAMP)
-             ON CONFLICT(guild_id) DO UPDATE SET
-                 revision=openskill_rating_revisions.revision+1,
-                 updated_at=CURRENT_TIMESTAMP",
-            [guild_id],
-        )?;
-        let cleared = transaction.execute(
-            "DELETE FROM openskill_replay_jobs WHERE guild_id=?1",
-            [guild_id],
-        )?;
-        if cleared != 1 {
-            return Err(MatchCorrectionError::Invariant(
-                "OpenSkill replay job changed before commit",
-            ));
-        }
         transaction.commit()?;
-        if total_matches == 0 {
-            summary.players_updated = current.len();
-        }
-        Ok((summary, total_matches))
+        Ok(result)
+    }
+
+    /// Replay after one match's fantasy enrichment.
+    ///
+    /// When that enrichment is the guild's only pending replay reason, the
+    /// replay resumes at the enriched match from the stored before/after
+    /// snapshots instead of rebuilding the whole history under the writer
+    /// lock. Each resumed player's first stored snapshot must equal the state
+    /// the resumed replay derives for it; any difference, or any other pending
+    /// reason (a correction, an administrative request, several enrichments),
+    /// falls back to the full replay in the same transaction. The returned
+    /// count is the number of matches the replay covered.
+    pub fn replay_openskill_for_enriched_match_atomic_configured(
+        &self,
+        guild_id: Option<i64>,
+        match_id: i64,
+        system: &CamaOpenSkillSystem,
+        rating_system: &CamaRatingSystem,
+        new_player_mmr_discount: i32,
+    ) -> Result<(OpenSkillReplaySummary, usize), MatchCorrectionError> {
+        let guild_id = Self::normalize_guild_id(guild_id);
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let reason = pending_replay_job_reason(&transaction, guild_id)?;
+        let start = if reason == format!("{MATCH_ENRICHMENT_REPLAY_PREFIX}{match_id}") {
+            replay_start(&transaction, guild_id, match_id)?
+        } else {
+            None
+        };
+        let result = replay_openskill_in_transaction(
+            &transaction,
+            guild_id,
+            start,
+            system,
+            rating_system,
+            new_player_mmr_discount,
+        )?;
+        transaction.commit()?;
+        Ok(result)
     }
 
     /// Compatibility boundary for an external replay worker that has already
@@ -1949,95 +1702,6 @@ impl MatchCorrectionRepository {
         )? == 1;
         transaction.commit()?;
         Ok(changed)
-    }
-
-    /// Persist a replay result and clear its durable job in the same writer
-    /// transaction. Chronological replay computation is supplied by the
-    /// coordinator; this boundary prevents a cleared job from disagreeing
-    /// with history/live ratings after a crash.
-    pub fn apply_openskill_replay_atomic(
-        &self,
-        guild_id: Option<i64>,
-        updates: &[OpenSkillReplayUpdate],
-        algorithm_version: i64,
-        algorithm_fingerprint: &str,
-    ) -> Result<(), MatchCorrectionError> {
-        if updates.is_empty() {
-            return Err(MatchCorrectionError::Invariant(
-                "an OpenSkill replay requires persisted updates",
-            ));
-        }
-        let guild_id = Self::normalize_guild_id(guild_id);
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let pending = transaction
-            .query_row(
-                "SELECT 1 FROM openskill_replay_jobs WHERE guild_id=?1",
-                [guild_id],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
-        if !pending {
-            return Err(MatchCorrectionError::Invariant(
-                "OpenSkill replay has no durable pending job",
-            ));
-        }
-        for update in updates {
-            transaction.execute(
-                "UPDATE rating_history
-                 SET os_mu_after=?1,os_sigma_after=?2,streak_length=?3,
-                     streak_multiplier=?4,os_algorithm_version=?5,
-                     os_algorithm_fingerprint=?6
-                 WHERE match_id=?7 AND discord_id=?8 AND guild_id=?9",
-                params![
-                    update.mu,
-                    update.sigma,
-                    update.streak_length,
-                    update.streak_multiplier,
-                    algorithm_version,
-                    algorithm_fingerprint,
-                    update.match_id,
-                    update.discord_id,
-                    guild_id
-                ],
-            )?;
-            if update.is_live_rating {
-                transaction.execute(
-                    "UPDATE players
-                     SET os_mu=?1,os_sigma=?2,os_rating_version=?3,
-                         os_algorithm_fingerprint=?4,updated_at=CURRENT_TIMESTAMP
-                     WHERE discord_id=?5 AND guild_id=?6",
-                    params![
-                        update.mu,
-                        update.sigma,
-                        algorithm_version,
-                        algorithm_fingerprint,
-                        update.discord_id,
-                        guild_id
-                    ],
-                )?;
-            }
-        }
-        transaction.execute(
-            "INSERT INTO openskill_rating_revisions(guild_id,revision,updated_at)
-             VALUES (?1,1,CURRENT_TIMESTAMP)
-             ON CONFLICT(guild_id) DO UPDATE SET
-                 revision=openskill_rating_revisions.revision+1,
-                 updated_at=CURRENT_TIMESTAMP",
-            [guild_id],
-        )?;
-        let cleared = transaction.execute(
-            "DELETE FROM openskill_replay_jobs WHERE guild_id=?1",
-            [guild_id],
-        )?;
-        if cleared != 1 {
-            return Err(MatchCorrectionError::Invariant(
-                "OpenSkill replay job changed before commit",
-            ));
-        }
-        transaction.commit()?;
-        Ok(())
     }
 
     pub fn current_winner(
@@ -2233,6 +1897,725 @@ impl BetCorrectionPersistence for MatchCorrectionRepository {
     }
 }
 
+/// The match an incremental replay resumes at, in replay order.
+#[derive(Clone, Copy, Debug)]
+struct ReplayStart {
+    match_id: i64,
+    match_at: Option<f64>,
+}
+
+/// Selects `matches m` rows at or after `:start_id` in the replay's
+/// `julianday(match_date) IS NULL, julianday(match_date), match_id` order.
+const REPLAY_WINDOW_CONDITION: &str = "(CASE WHEN :start_at IS NULL
+         THEN julianday(m.match_date) IS NULL AND m.match_id >= :start_id
+         ELSE julianday(m.match_date) IS NULL OR julianday(m.match_date) > :start_at
+              OR (julianday(m.match_date) = :start_at AND m.match_id >= :start_id)
+     END)";
+
+fn replay_window_clause(start: Option<ReplayStart>) -> String {
+    start.map_or_else(String::new, |_| format!("AND {REPLAY_WINDOW_CONDITION}"))
+}
+
+fn replay_window_params<'a>(
+    guild_id: &'a i64,
+    start: Option<&'a ReplayStart>,
+) -> Vec<(&'static str, &'a dyn ToSql)> {
+    let mut parameters: Vec<(&'static str, &'a dyn ToSql)> = vec![(":guild", guild_id)];
+    if let Some(start) = start {
+        parameters.push((":start_id", &start.match_id));
+        parameters.push((":start_at", &start.match_at));
+    }
+    parameters
+}
+
+fn pending_replay_job_reason(
+    transaction: &Transaction<'_>,
+    guild_id: i64,
+) -> Result<String, MatchCorrectionError> {
+    transaction
+        .query_row(
+            "SELECT reason FROM openskill_replay_jobs WHERE guild_id=?1",
+            [guild_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or(MatchCorrectionError::Invariant(
+            "OpenSkill replay has no durable pending job",
+        ))
+}
+
+fn replay_start(
+    transaction: &Transaction<'_>,
+    guild_id: i64,
+    match_id: i64,
+) -> Result<Option<ReplayStart>, rusqlite::Error> {
+    transaction
+        .query_row(
+            "SELECT julianday(match_date) FROM matches
+             WHERE match_id=?1 AND guild_id=?2 AND winning_team IN (1,2)",
+            params![match_id, guild_id],
+            |row| row.get::<_, Option<f64>>(0),
+        )
+        .optional()
+        .map(|found| found.map(|match_at| ReplayStart { match_id, match_at }))
+}
+
+/// Chronological fold state carried from one replayed match to the next.
+struct ReplayState {
+    current: BTreeMap<i64, OpenSkillRating>,
+    recent_outcomes: BTreeMap<i64, Vec<bool>>,
+    last_match_at: BTreeMap<i64, f64>,
+    players_touched: BTreeSet<i64>,
+    errors: Vec<String>,
+    event_offset: usize,
+}
+
+impl ReplayState {
+    fn seeded(current: BTreeMap<i64, OpenSkillRating>) -> Self {
+        Self {
+            current,
+            recent_outcomes: BTreeMap::new(),
+            last_match_at: BTreeMap::new(),
+            players_touched: BTreeSet::new(),
+            errors: Vec::new(),
+            event_offset: 0,
+        }
+    }
+}
+
+struct ReplayRun {
+    history_rows: Vec<ReplayHistoryRow>,
+    prediction_rows: Vec<ReplayPrediction>,
+    matches_processed: usize,
+    matches_with_fantasy: usize,
+    matches_equal_weight: usize,
+}
+
+/// A player's state just before the resumed window, read back from the
+/// stored snapshots of their latest earlier matches.
+struct ReplayPrior {
+    last_rating: OpenSkillRating,
+    last_match_at: Option<f64>,
+    latest_dated_match_at: Option<f64>,
+    recent_outcomes: Vec<bool>,
+}
+
+/// `(os_mu_before, os_sigma_before)` keyed by `(match_id, discord_id)`.
+type StoredBeforeSnapshots = BTreeMap<(i64, i64), (Option<f64>, Option<f64>)>;
+
+/// Verifies that every resumed player's first stored `before` snapshot is
+/// exactly the state the resumed replay derived, so the stored history the
+/// resume trusts is the history a full replay would have produced.
+struct ResumeCheck {
+    stored_before: StoredBeforeSnapshots,
+    checked: BTreeSet<i64>,
+}
+
+impl ResumeCheck {
+    fn accepts(&mut self, match_id: i64, before: &BTreeMap<i64, OpenSkillRating>) -> bool {
+        before.iter().all(|(&discord_id, rating)| {
+            !self.checked.insert(discord_id)
+                || self.stored_before.get(&(match_id, discord_id))
+                    == Some(&(Some(rating.mu), Some(rating.sigma)))
+        })
+    }
+}
+
+fn replay_openskill_in_transaction(
+    transaction: &Transaction<'_>,
+    guild_id: i64,
+    start: Option<ReplayStart>,
+    system: &CamaOpenSkillSystem,
+    rating_system: &CamaRatingSystem,
+    new_player_mmr_discount: i32,
+) -> Result<(OpenSkillReplaySummary, usize), MatchCorrectionError> {
+    let players = load_replay_players(transaction, guild_id)?;
+    let events = load_replay_events(transaction, guild_id)?;
+    let seeded = players
+        .iter()
+        .map(|player| {
+            let source_mmr = player.initial_mmr.unwrap_or(4_000).clamp(0, 12_000);
+            let seed_mmr = (source_mmr - i64::from(new_player_mmr_discount)).max(0);
+            (
+                player.discord_id,
+                OpenSkillRating::new(
+                    system.mmr_to_os_mu(seed_mmr as i32),
+                    CamaOpenSkillSystem::DEFAULT_SIGMA,
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    if let Some(start) = start {
+        let matches = load_replay_matches(transaction, guild_id, Some(start))?;
+        let participants = load_replay_participants(transaction, guild_id, Some(start))?;
+        if let Some((state, run, resumed_ids)) = resume_replay(
+            transaction,
+            guild_id,
+            start,
+            &matches,
+            &participants,
+            &events,
+            seeded.clone(),
+            system,
+            rating_system,
+        )? {
+            return finish_replay(
+                transaction,
+                guild_id,
+                Some(start),
+                state,
+                run,
+                Some(&resumed_ids),
+                matches.len(),
+                system,
+            );
+        }
+    }
+    let matches = load_replay_matches(transaction, guild_id, None)?;
+    let participants = load_replay_participants(transaction, guild_id, None)?;
+    let mut state = ReplayState::seeded(seeded);
+    let run = run_replay(
+        &matches,
+        &participants,
+        &events,
+        &mut state,
+        None,
+        system,
+        rating_system,
+    )?
+    .ok_or(MatchCorrectionError::Invariant(
+        "an unchecked OpenSkill replay cannot be abandoned",
+    ))?;
+    finish_replay(
+        transaction,
+        guild_id,
+        None,
+        state,
+        run,
+        None,
+        matches.len(),
+        system,
+    )
+}
+
+/// Rebuild the fold state just before `start` from stored snapshots, then
+/// replay the window. `None` means the stored history cannot be trusted and
+/// the caller must replay everything.
+#[allow(clippy::too_many_arguments)]
+fn resume_replay(
+    transaction: &Transaction<'_>,
+    guild_id: i64,
+    start: ReplayStart,
+    matches: &[ReplayMatch],
+    participants: &BTreeMap<i64, Vec<ReplayParticipant>>,
+    events: &[ReplayEvent],
+    current: BTreeMap<i64, OpenSkillRating>,
+    system: &CamaOpenSkillSystem,
+    rating_system: &CamaRatingSystem,
+) -> Result<Option<(ReplayState, ReplayRun, BTreeSet<i64>)>, MatchCorrectionError> {
+    let mut resumed_ids = BTreeSet::new();
+    for replay_match in matches {
+        let match_participants = participants
+            .get(&replay_match.match_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if let Ok((radiant_ids, dire_ids)) = replay_team_ids(replay_match, match_participants) {
+            resumed_ids.extend(radiant_ids);
+            resumed_ids.extend(dire_ids);
+        }
+    }
+    let Some(priors) = load_replay_priors(transaction, guild_id, start, &resumed_ids)? else {
+        return Ok(None);
+    };
+    let mut state = ReplayState::seeded(current);
+    for (&discord_id, prior) in &priors {
+        state.current.insert(discord_id, prior.last_rating);
+        if let Some(match_at) = prior.latest_dated_match_at {
+            state.last_match_at.insert(discord_id, match_at);
+        }
+        state
+            .recent_outcomes
+            .insert(discord_id, prior.recent_outcomes.clone());
+    }
+    // The full replay applies every event dated at or before a match just
+    // before that match. Events up to the resumed match are therefore already
+    // inside a player's stored snapshot when they precede that player's last
+    // earlier match; only the later ones still apply. Every event is still
+    // validated so a bad event fails the resume exactly as it fails the full
+    // replay.
+    state.event_offset = match start.match_at {
+        Some(start_at) => events
+            .iter()
+            .position(|event| !matches!(event.event_at, Some(event_at) if event_at <= start_at))
+            .unwrap_or(events.len()),
+        None => events.len(),
+    };
+    for event in &events[..state.event_offset] {
+        let after_last_match = priors.get(&event.discord_id).is_none_or(|prior| {
+            match (prior.last_match_at, event.event_at) {
+                (Some(last_at), Some(event_at)) => event_at > last_at,
+                (Some(_), None) => true,
+                (None, _) => false,
+            }
+        });
+        apply_replay_event(
+            event,
+            &mut state.current,
+            after_last_match,
+            &mut state.players_touched,
+            &mut state.errors,
+        );
+    }
+    let mut check = ResumeCheck {
+        stored_before: load_resumed_snapshots(transaction, guild_id, start)?,
+        checked: BTreeSet::new(),
+    };
+    let Some(run) = run_replay(
+        matches,
+        participants,
+        events,
+        &mut state,
+        Some(&mut check),
+        system,
+        rating_system,
+    )?
+    else {
+        return Ok(None);
+    };
+    Ok(Some((state, run, resumed_ids)))
+}
+
+/// Fold `matches` in replay order. Returns `None` only when `check` rejects a
+/// resumed player's stored snapshot.
+fn run_replay(
+    matches: &[ReplayMatch],
+    participants: &BTreeMap<i64, Vec<ReplayParticipant>>,
+    events: &[ReplayEvent],
+    state: &mut ReplayState,
+    mut check: Option<&mut ResumeCheck>,
+    system: &CamaOpenSkillSystem,
+    rating_system: &CamaRatingSystem,
+) -> Result<Option<ReplayRun>, MatchCorrectionError> {
+    let mut history_rows = Vec::new();
+    let mut prediction_rows = Vec::new();
+    let mut matches_processed = 0;
+    let mut matches_with_fantasy = 0;
+    let mut matches_equal_weight = 0;
+
+    for replay_match in matches {
+        apply_replay_events_through(
+            events,
+            &mut state.event_offset,
+            replay_match.match_at,
+            &mut state.current,
+            &mut state.players_touched,
+            &mut state.errors,
+        );
+        let match_participants = participants
+            .get(&replay_match.match_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let (radiant_ids, dire_ids) = match replay_team_ids(replay_match, match_participants) {
+            Ok(teams) => teams,
+            Err(error) => {
+                state.errors.push(error);
+                continue;
+            }
+        };
+        let all_ids = radiant_ids
+            .iter()
+            .chain(&dire_ids)
+            .copied()
+            .collect::<Vec<_>>();
+        let participants_by_id = match_participants
+            .iter()
+            .map(|participant| (participant.discord_id, participant))
+            .collect::<BTreeMap<_, _>>();
+        let complete_fantasy = participants_by_id.len() >= 10
+            && all_ids.iter().all(|discord_id| {
+                participants_by_id
+                    .get(discord_id)
+                    .and_then(|participant| participant.fantasy_points)
+                    .is_some()
+            });
+
+        let mut before = BTreeMap::new();
+        for &discord_id in &all_ids {
+            let mut rating = state.current.get(&discord_id).copied().unwrap_or_else(|| {
+                OpenSkillRating::new(
+                    CamaOpenSkillSystem::DEFAULT_MU,
+                    CamaOpenSkillSystem::DEFAULT_SIGMA,
+                )
+            });
+            if let (Some(match_at), Some(previous_at)) =
+                (replay_match.match_at, state.last_match_at.get(&discord_id))
+            {
+                let days_since = ((match_at - previous_at).floor() as i64).max(0);
+                rating.sigma = system.apply_sigma_decay(rating.sigma, days_since);
+            }
+            before.insert(discord_id, rating);
+        }
+        if let Some(check) = check.as_mut()
+            && !check.accepts(replay_match.match_id, &before)
+        {
+            return Ok(None);
+        }
+
+        let rate = recorded_streak_rate(optional_real(replay_match.streak_rate));
+        let threshold = recorded_streak_threshold(optional_integer(replay_match.streak_threshold));
+        let streak_multipliers = match replay_streak_multipliers(
+            rating_system,
+            &all_ids,
+            &radiant_ids,
+            replay_match.winning_team,
+            &state.recent_outcomes,
+            rate,
+            threshold,
+        ) {
+            Ok(multipliers) => multipliers,
+            Err(discord_id) => {
+                state.errors.push(format!(
+                    "Match {}: invalid Discord ID {discord_id}",
+                    replay_match.match_id
+                ));
+                continue;
+            }
+        };
+        let gain_multipliers = all_ids
+            .iter()
+            .map(|discord_id| {
+                let openskill_id = u64::try_from(*discord_id)
+                    .expect("replay streak validation accepted Discord ID");
+                let multiplier = participants_by_id
+                    .get(discord_id)
+                    .map(|participant| participant.low_priority_gain_multiplier)
+                    .filter(|multiplier| *multiplier != 0.0)
+                    .unwrap_or(1.0);
+                (openskill_id, multiplier)
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        let build_team = |ids: &[i64]| {
+            ids.iter()
+                .map(|discord_id| {
+                    let rating = before[discord_id];
+                    WeightedPlayer::new(
+                        *discord_id as u64,
+                        Some(rating.mu),
+                        Some(rating.sigma),
+                        complete_fantasy
+                            .then(|| participants_by_id[discord_id].fantasy_points)
+                            .flatten(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let radiant = build_team(&radiant_ids);
+        let dire = build_team(&dire_ids);
+        let radiant_prediction = radiant_ids
+            .iter()
+            .map(|discord_id| before[discord_id])
+            .collect::<Vec<_>>();
+        let dire_prediction = dire_ids
+            .iter()
+            .map(|discord_id| before[discord_id])
+            .collect::<Vec<_>>();
+        let raw_probability =
+            system.os_predict_win_probability(&radiant_prediction, &dire_prediction);
+        let calibrated_probability = system
+            .calibrate_win_probability(raw_probability, None)
+            .map_err(|error| MatchCorrectionError::Rating(error.to_string()))?;
+        prediction_rows.push(ReplayPrediction {
+            match_id: replay_match.match_id,
+            raw_probability,
+            calibrated_probability,
+        });
+        let updates = match system.update_ratings_after_match(
+            &radiant,
+            &dire,
+            if replay_match.winning_team == MatchSide::Radiant {
+                WinningTeam::Team1
+            } else {
+                WinningTeam::Team2
+            },
+            &streak_multipliers,
+            &gain_multipliers,
+        ) {
+            Ok(updates) => updates,
+            Err(error) => {
+                state
+                    .errors
+                    .push(format!("Match {}: {error}", replay_match.match_id));
+                prediction_rows.pop();
+                continue;
+            }
+        };
+        if complete_fantasy {
+            matches_with_fantasy += 1;
+        } else {
+            matches_equal_weight += 1;
+        }
+        for (team, ids) in [
+            (MatchSide::Radiant, radiant_ids.as_slice()),
+            (MatchSide::Dire, dire_ids.as_slice()),
+        ] {
+            for &discord_id in ids {
+                let openskill_id = discord_id as u64;
+                let old_rating = before[&discord_id];
+                let update = updates[&openskill_id];
+                state.current.insert(discord_id, update.rating);
+                state.players_touched.insert(discord_id);
+                if let Some(match_at) = replay_match.match_at {
+                    state.last_match_at.insert(discord_id, match_at);
+                }
+                let won = team == replay_match.winning_team;
+                history_rows.push(ReplayHistoryRow {
+                    match_id: replay_match.match_id,
+                    match_date: replay_match.match_date.clone(),
+                    discord_id,
+                    team_number: team.number(),
+                    won,
+                    before: old_rating,
+                    after: update.rating,
+                    fantasy_weight: update.contribution_weight,
+                });
+                record_replay_outcome(&mut state.recent_outcomes, discord_id, won);
+            }
+        }
+        matches_processed += 1;
+    }
+    apply_replay_events_through(
+        events,
+        &mut state.event_offset,
+        None,
+        &mut state.current,
+        &mut state.players_touched,
+        &mut state.errors,
+    );
+    Ok(Some(ReplayRun {
+        history_rows,
+        prediction_rows,
+        matches_processed,
+        matches_with_fantasy,
+        matches_equal_weight,
+    }))
+}
+
+/// Record a failed replay, or persist a successful one and clear its job.
+/// `persisted_ids` limits the live-rating write to the players a resumed
+/// window rated; a full replay writes every player.
+#[allow(clippy::too_many_arguments)]
+fn finish_replay(
+    transaction: &Transaction<'_>,
+    guild_id: i64,
+    start: Option<ReplayStart>,
+    state: ReplayState,
+    run: ReplayRun,
+    persisted_ids: Option<&BTreeSet<i64>>,
+    total_matches: usize,
+    system: &CamaOpenSkillSystem,
+) -> Result<(OpenSkillReplaySummary, usize), MatchCorrectionError> {
+    let ReplayState {
+        current,
+        players_touched,
+        errors,
+        ..
+    } = state;
+    let mut summary = OpenSkillReplaySummary {
+        matches_processed: run.matches_processed,
+        matches_with_fantasy: run.matches_with_fantasy,
+        matches_equal_weight: run.matches_equal_weight,
+        players_updated: persisted_ids.map_or(players_touched.len(), |ids| {
+            players_touched.intersection(ids).count()
+        }),
+        errors,
+    };
+    if !summary.errors.is_empty() {
+        transaction.execute(
+            "UPDATE openskill_replay_jobs SET last_error=?1 WHERE guild_id=?2",
+            params![
+                summary
+                    .errors
+                    .iter()
+                    .take(10)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("; "),
+                guild_id
+            ],
+        )?;
+        summary.errors.truncate(10);
+        return Ok((summary, total_matches));
+    }
+
+    let current = match persisted_ids {
+        Some(ids) => current
+            .into_iter()
+            .filter(|(discord_id, _)| ids.contains(discord_id))
+            .collect(),
+        None => current,
+    };
+    let fingerprint = system.algorithm_fingerprint();
+    persist_openskill_replay_window(
+        transaction,
+        guild_id,
+        start,
+        &run.history_rows,
+        &run.prediction_rows,
+        &current,
+        &fingerprint,
+    )?;
+    transaction.execute(
+        "INSERT INTO openskill_rating_revisions(guild_id,revision,updated_at)
+         VALUES (?1,1,CURRENT_TIMESTAMP)
+         ON CONFLICT(guild_id) DO UPDATE SET
+             revision=openskill_rating_revisions.revision+1,
+             updated_at=CURRENT_TIMESTAMP",
+        [guild_id],
+    )?;
+    let cleared = transaction.execute(
+        "DELETE FROM openskill_replay_jobs WHERE guild_id=?1",
+        [guild_id],
+    )?;
+    if cleared != 1 {
+        return Err(MatchCorrectionError::Invariant(
+            "OpenSkill replay job changed before commit",
+        ));
+    }
+    if total_matches == 0 {
+        summary.players_updated = current.len();
+    }
+    Ok((summary, total_matches))
+}
+
+/// Read each requested player's latest stored snapshots before `start`.
+/// `None` when a snapshot the resume would rely on is missing.
+fn load_replay_priors(
+    transaction: &Transaction<'_>,
+    guild_id: i64,
+    start: ReplayStart,
+    discord_ids: &BTreeSet<i64>,
+) -> Result<Option<BTreeMap<i64, ReplayPrior>>, MatchCorrectionError> {
+    if discord_ids.is_empty() {
+        return Ok(Some(BTreeMap::new()));
+    }
+    let ids = format!(
+        "[{}]",
+        discord_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let limit = RECENT_OUTCOME_LIMIT as i64;
+    let sql = format!(
+        "WITH prior_rows AS (
+             SELECT rh.discord_id, m.match_id, julianday(m.match_date) AS match_at,
+                    MIN(rh.id) AS row_id
+             FROM rating_history rh
+             JOIN matches m ON m.match_id=rh.match_id AND m.guild_id=rh.guild_id
+             WHERE rh.guild_id=:guild AND m.winning_team IN (1,2)
+               AND rh.discord_id IN (SELECT value FROM json_each(:ids))
+               AND NOT {REPLAY_WINDOW_CONDITION}
+             GROUP BY rh.discord_id, m.match_id
+         ), ranked AS (
+             SELECT prior_rows.discord_id, prior_rows.match_at,
+                    rh.won, rh.os_mu_after, rh.os_sigma_after,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY prior_rows.discord_id
+                        ORDER BY prior_rows.match_at IS NULL DESC,
+                                 prior_rows.match_at DESC,
+                                 prior_rows.match_id DESC
+                    ) AS position,
+                    MAX(prior_rows.match_at) OVER (
+                        PARTITION BY prior_rows.discord_id
+                    ) AS latest_dated_match_at
+             FROM prior_rows JOIN rating_history rh ON rh.id=prior_rows.row_id
+         )
+         SELECT discord_id, position, match_at, latest_dated_match_at,
+                won, os_mu_after, os_sigma_after
+         FROM ranked WHERE position <= :limit
+         ORDER BY discord_id, position"
+    );
+    let mut parameters = replay_window_params(&guild_id, Some(&start));
+    parameters.push((":ids", &ids));
+    parameters.push((":limit", &limit));
+    let mut statement = transaction.prepare(&sql)?;
+    let rows = statement
+        .query_map(parameters.as_slice(), |row| {
+            let won = match row.get_ref(4)? {
+                ValueRef::Integer(value) => Some(value != 0),
+                _ => None,
+            };
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<f64>>(2)?,
+                row.get::<_, Option<f64>>(3)?,
+                won,
+                row.get::<_, Option<f64>>(5)?,
+                row.get::<_, Option<f64>>(6)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut priors = BTreeMap::<i64, ReplayPrior>::new();
+    for (discord_id, position, match_at, latest_dated_match_at, won, mu, sigma) in rows {
+        let Some(won) = won else {
+            return Ok(None);
+        };
+        if position == 1 {
+            let (Some(mu), Some(sigma)) = (mu, sigma) else {
+                return Ok(None);
+            };
+            if !mu.is_finite() || !sigma.is_finite() {
+                return Ok(None);
+            }
+            priors.insert(
+                discord_id,
+                ReplayPrior {
+                    last_rating: OpenSkillRating::new(mu, sigma),
+                    last_match_at: match_at,
+                    latest_dated_match_at,
+                    recent_outcomes: vec![won],
+                },
+            );
+        } else if let Some(prior) = priors.get_mut(&discord_id) {
+            prior.recent_outcomes.push(won);
+        }
+    }
+    Ok(Some(priors))
+}
+
+/// Stored `before` snapshots of every history row in the resumed window.
+fn load_resumed_snapshots(
+    transaction: &Transaction<'_>,
+    guild_id: i64,
+    start: ReplayStart,
+) -> Result<StoredBeforeSnapshots, rusqlite::Error> {
+    let sql = format!(
+        "SELECT rh.match_id, rh.discord_id, rh.os_mu_before, rh.os_sigma_before
+         FROM rating_history rh
+         JOIN matches m ON m.match_id=rh.match_id AND m.guild_id=rh.guild_id
+         WHERE rh.guild_id=:guild AND m.winning_team IN (1,2)
+           AND {REPLAY_WINDOW_CONDITION}
+         ORDER BY rh.id"
+    );
+    let parameters = replay_window_params(&guild_id, Some(&start));
+    let mut statement = transaction.prepare(&sql)?;
+    let rows = statement.query_map(parameters.as_slice(), |row| {
+        Ok((
+            (row.get::<_, i64>(0)?, row.get::<_, i64>(1)?),
+            (row.get::<_, Option<f64>>(2)?, row.get::<_, Option<f64>>(3)?),
+        ))
+    })?;
+    let mut snapshots = BTreeMap::new();
+    for row in rows {
+        let (key, before) = row?;
+        snapshots.entry(key).or_insert(before);
+    }
+    Ok(snapshots)
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ReplayPlayer {
     discord_id: i64,
@@ -2344,8 +2727,9 @@ fn load_replay_players(
 fn load_replay_matches(
     connection: &Connection,
     guild_id: i64,
+    start: Option<ReplayStart>,
 ) -> Result<Vec<ReplayMatch>, MatchCorrectionError> {
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare(&format!(
         "SELECT m.match_id,m.winning_team,m.match_date,julianday(m.match_date),
                 m.team1_players,m.team2_players,
                 (
@@ -2361,11 +2745,13 @@ fn load_replay_matches(
                     ORDER BY rh.id LIMIT 1
                 )
          FROM matches m
-         WHERE m.guild_id=?1 AND m.winning_team IN (1,2)
+         WHERE m.guild_id=:guild AND m.winning_team IN (1,2) {}
          ORDER BY julianday(m.match_date) IS NULL,julianday(m.match_date),m.match_id",
-    )?;
+        replay_window_clause(start)
+    ))?;
+    let parameters = replay_window_params(&guild_id, start.as_ref());
     let rows = statement
-        .query_map([guild_id], |row| {
+        .query_map(parameters.as_slice(), |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, i64>(1)?,
@@ -2408,8 +2794,9 @@ fn load_replay_matches(
 fn load_replay_participants(
     connection: &Connection,
     guild_id: i64,
+    start: Option<ReplayStart>,
 ) -> Result<BTreeMap<i64, Vec<ReplayParticipant>>, rusqlite::Error> {
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare(&format!(
         "SELECT mp.match_id,mp.discord_id,mp.team_number,mp.side,mp.fantasy_points,
                 COALESCE((
                     SELECT rh.low_priority_gain_multiplier
@@ -2420,11 +2807,13 @@ fn load_replay_participants(
                 ),1.0)
          FROM match_participants mp
          JOIN matches m ON m.match_id=mp.match_id AND m.guild_id=mp.guild_id
-         WHERE m.guild_id=?1 AND m.winning_team IN (1,2)
+         WHERE m.guild_id=:guild AND m.winning_team IN (1,2) {}
          ORDER BY mp.match_id,mp.discord_id",
-    )?;
+        replay_window_clause(start)
+    ))?;
+    let parameters = replay_window_params(&guild_id, start.as_ref());
     let rows = statement
-        .query_map([guild_id], |row| {
+        .query_map(parameters.as_slice(), |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 ReplayParticipant {
@@ -2482,37 +2871,54 @@ fn apply_replay_events_through(
             }
         }
         *offset += 1;
-        let Some(rating) = current.get_mut(&event.discord_id) else {
+        apply_replay_event(event, current, true, players_touched, errors);
+    }
+}
+
+/// Validate one OpenSkill event and, when `apply` is set, fold it into the
+/// player's rating. A resumed replay validates events whose effect is already
+/// inside a stored snapshot without applying them twice.
+fn apply_replay_event(
+    event: &ReplayEvent,
+    current: &mut BTreeMap<i64, OpenSkillRating>,
+    apply: bool,
+    players_touched: &mut BTreeSet<i64>,
+    errors: &mut Vec<String>,
+) {
+    let Some(rating) = current.get_mut(&event.discord_id) else {
+        errors.push(format!(
+            "OpenSkill event {}: unknown player {}",
+            event.event_id, event.discord_id
+        ));
+        return;
+    };
+    if !event.value.is_finite() {
+        errors.push(format!(
+            "OpenSkill event {}: non-finite value",
+            event.event_id
+        ));
+        return;
+    }
+    let mut updated = *rating;
+    match event.event_type.as_str() {
+        "set_mu" => updated.mu = event.value,
+        "set_sigma" => {
+            updated.sigma = event.value.clamp(0.0, CamaOpenSkillSystem::DEFAULT_SIGMA);
+        }
+        "add_sigma" => {
+            updated.sigma =
+                (updated.sigma + event.value).clamp(0.0, CamaOpenSkillSystem::DEFAULT_SIGMA);
+        }
+        event_type => {
             errors.push(format!(
-                "OpenSkill event {}: unknown player {}",
-                event.event_id, event.discord_id
-            ));
-            continue;
-        };
-        if !event.value.is_finite() {
-            errors.push(format!(
-                "OpenSkill event {}: non-finite value",
+                "OpenSkill event {}: unknown type {event_type:?}",
                 event.event_id
             ));
-            continue;
+            return;
         }
-        match event.event_type.as_str() {
-            "set_mu" => rating.mu = event.value,
-            "set_sigma" => {
-                rating.sigma = event.value.clamp(0.0, CamaOpenSkillSystem::DEFAULT_SIGMA);
-            }
-            "add_sigma" => {
-                rating.sigma =
-                    (rating.sigma + event.value).clamp(0.0, CamaOpenSkillSystem::DEFAULT_SIGMA);
-            }
-            event_type => {
-                errors.push(format!(
-                    "OpenSkill event {}: unknown type {event_type:?}",
-                    event.event_id
-                ));
-                continue;
-            }
-        }
+    }
+    if apply {
+        *rating = updated;
         players_touched.insert(event.discord_id);
     }
 }
@@ -2567,6 +2973,7 @@ fn parse_json_id_array(value: Option<&str>) -> Option<Vec<i64>> {
         .collect()
 }
 
+#[cfg(test)]
 fn persist_openskill_replay(
     transaction: &Transaction<'_>,
     guild_id: i64,
@@ -2575,16 +2982,45 @@ fn persist_openskill_replay(
     current: &BTreeMap<i64, OpenSkillRating>,
     fingerprint: &str,
 ) -> Result<(), rusqlite::Error> {
+    persist_openskill_replay_window(
+        transaction,
+        guild_id,
+        None,
+        history_rows,
+        prediction_rows,
+        current,
+        fingerprint,
+    )
+}
+
+/// Persist replay rows. A resumed replay (`start`) compares against only the
+/// rows of its window, which are the only rows it produced.
+fn persist_openskill_replay_window(
+    transaction: &Transaction<'_>,
+    guild_id: i64,
+    start: Option<ReplayStart>,
+    history_rows: &[ReplayHistoryRow],
+    prediction_rows: &[ReplayPrediction],
+    current: &BTreeMap<i64, OpenSkillRating>,
+    fingerprint: &str,
+) -> Result<(), rusqlite::Error> {
+    let parameters = replay_window_params(&guild_id, start.as_ref());
     let existing_history = {
-        let mut statement = transaction.prepare(
-            "SELECT match_id,discord_id,os_mu_before,os_mu_after,
-                    os_sigma_before,os_sigma_after,fantasy_weight,
-                    os_algorithm_version,os_algorithm_fingerprint,
-                    team_number,won
-               FROM rating_history WHERE guild_id=?1",
-        )?;
+        let window = start.map_or_else(String::new, |_| {
+            format!(
+                "JOIN matches m ON m.match_id=rh.match_id AND m.guild_id=rh.guild_id
+                     AND {REPLAY_WINDOW_CONDITION}"
+            )
+        });
+        let mut statement = transaction.prepare(&format!(
+            "SELECT rh.match_id,rh.discord_id,rh.os_mu_before,rh.os_mu_after,
+                    rh.os_sigma_before,rh.os_sigma_after,rh.fantasy_weight,
+                    rh.os_algorithm_version,rh.os_algorithm_fingerprint,
+                    rh.team_number,rh.won
+               FROM rating_history rh {window} WHERE rh.guild_id=:guild"
+        ))?;
         statement
-            .query_map([guild_id], |row| {
+            .query_map(parameters.as_slice(), |row| {
                 Ok((
                     (row.get::<_, i64>(0)?, row.get::<_, i64>(1)?),
                     ExistingReplayHistory {
@@ -2665,17 +3101,18 @@ fn persist_openskill_replay(
         }
     }
     let existing_predictions = {
-        let mut statement = transaction.prepare(
+        let mut statement = transaction.prepare(&format!(
             "SELECT p.match_id,p.openskill_radiant_win_prob,
                     p.openskill_raw_radiant_win_prob,
                     p.openskill_algorithm_version,
                     p.openskill_algorithm_fingerprint
                FROM match_predictions AS p
                JOIN matches AS m ON m.match_id=p.match_id
-              WHERE m.guild_id=?1",
-        )?;
+              WHERE m.guild_id=:guild {}",
+            replay_window_clause(start)
+        ))?;
         statement
-            .query_map([guild_id], |row| {
+            .query_map(parameters.as_slice(), |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     ExistingReplayPrediction {

@@ -6,6 +6,7 @@ use cama_db::economy_event_repository::{
 };
 use cama_db::predictions_repository::{BookSide, NewLevel, PredictionRepository};
 use cama_domain::bankruptcy::BankruptcyPenaltyPolicy;
+use cama_domain::game_date::game_date_for_timestamp;
 use rusqlite::{Connection, params};
 
 use super::*;
@@ -1070,4 +1071,31 @@ fn sabotage_trap_credit_withholds_the_targets_vanity_share() {
     );
     assert_eq!(balance(&database, HELPER), 88);
     assert_eq!(balance(&database, TARGET), 220);
+}
+
+#[test]
+fn dig_reads_mana_on_the_same_day_the_mana_service_assigned_it() {
+    let database = fixture(true, 10);
+    // 04:30 PDT (summer) is still 03:30 on the fixed UTC-8 game clock; 04:30
+    // PST (winter) is the same on both clocks.
+    for instant in ["2026-07-18T11:30:00Z", "2026-01-15T12:30:00Z"] {
+        let now = chrono::DateTime::parse_from_rfc3339(instant)
+            .expect("valid instant")
+            .timestamp();
+        let assigned = mana_day_label_at(now).expect("mana day");
+        Connection::open(database.path())
+            .unwrap()
+            .execute(
+                "INSERT INTO player_mana
+                    (discord_id,guild_id,current_land,assigned_date,consumed_today)
+                 VALUES (?1,?2,'Forest',?3,0)
+                 ON CONFLICT(discord_id,guild_id) DO UPDATE SET
+                    assigned_date=excluded.assigned_date",
+                params![HELPER, GUILD, assigned],
+            )
+            .unwrap();
+        let effects = active_mana_effects(database.path(), HELPER, GUILD, now);
+        assert_eq!(effects.color.as_deref(), Some("Green"), "{instant}");
+        assert_eq!(effects.land.as_deref(), Some("Forest"), "{instant}");
+    }
 }

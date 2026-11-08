@@ -12,6 +12,7 @@ use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::Value as JsonValue;
 use thiserror::Error;
 
+use crate::match_correction_repository::MATCH_ENRICHMENT_REPLAY_PREFIX;
 use crate::{json_numeric::coerce_i64_like_python, open_runtime_connection};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -833,15 +834,30 @@ impl MatchRecordingRepository {
             },
         )?;
         if participant_count == 10 && fantasy_count == 10 {
+            // The reason names the only change a replay may resume from. A
+            // job that is already pending keeps a non-enrichment reason (a
+            // correction still needs its full replay and recovery marker), and
+            // a second enrichment turns it into a full replay.
             transaction.execute(
                 "INSERT INTO openskill_replay_jobs (
                      guild_id, reason, requested_at, last_error
                  ) VALUES (?1, ?2, CURRENT_TIMESTAMP, NULL)
                  ON CONFLICT(guild_id) DO UPDATE SET
-                     reason = excluded.reason,
+                     reason = CASE
+                         WHEN openskill_replay_jobs.reason = excluded.reason
+                             THEN excluded.reason
+                         WHEN substr(openskill_replay_jobs.reason, 1, length(?3)) = ?3
+                             THEN ?4
+                         ELSE openskill_replay_jobs.reason
+                     END,
                      requested_at = excluded.requested_at,
                      last_error = NULL",
-                params![guild_id, format!("match_enrichment:{}", request.match_id)],
+                params![
+                    guild_id,
+                    format!("{MATCH_ENRICHMENT_REPLAY_PREFIX}{}", request.match_id),
+                    MATCH_ENRICHMENT_REPLAY_PREFIX,
+                    format!("{MATCH_ENRICHMENT_REPLAY_PREFIX}multiple")
+                ],
             )?;
         }
         transaction.commit()?;

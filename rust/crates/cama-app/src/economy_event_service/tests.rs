@@ -922,9 +922,53 @@ fn test_explicit_event_date_bypasses_pre_trigger_creation_guard() {
         "2030-01-16T10:00:00"
     );
     assert_eq!(
-        pacific_offset_for_local(parse_event_date("2030-01-15").unwrap(), 10),
-        -28_800
+        pacific_timestamp(parse_event_date("2030-01-15").unwrap(), 10).unwrap(),
+        utc_timestamp("2030-01-15T18:00:00Z")
     );
+}
+
+fn utc_timestamp(text: &str) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(text)
+        .expect("valid RFC 3339 instant")
+        .timestamp()
+}
+
+#[test]
+fn test_pacific_wall_clock_hours_resolve_across_dst_transitions() {
+    let local =
+        |date: &str, hour: u8| pacific_timestamp(parse_event_date(date).unwrap(), hour).unwrap();
+    // Spring forward 2026-03-08: the skipped 02:00 reads as 03:00 PDT.
+    assert_eq!(
+        local("2026-03-08", 1),
+        utc_timestamp("2026-03-08T09:00:00Z")
+    );
+    assert_eq!(
+        local("2026-03-08", 2),
+        utc_timestamp("2026-03-08T10:00:00Z")
+    );
+    assert_eq!(
+        local("2026-03-08", 3),
+        utc_timestamp("2026-03-08T10:00:00Z")
+    );
+    // Fall back 2026-11-01: the repeated 01:00 is its PDT occurrence.
+    assert_eq!(
+        local("2026-11-01", 1),
+        utc_timestamp("2026-11-01T08:00:00Z")
+    );
+    assert_eq!(
+        local("2026-11-01", 2),
+        utc_timestamp("2026-11-01T10:00:00Z")
+    );
+    let wall = |instant: &str| {
+        pacific_local(utc_timestamp(instant))
+            .unwrap()
+            .format("%Y-%m-%dT%H:%M")
+            .to_string()
+    };
+    assert_eq!(wall("2026-03-08T09:59:00Z"), "2026-03-08T01:59");
+    assert_eq!(wall("2026-03-08T10:00:00Z"), "2026-03-08T03:00");
+    assert_eq!(wall("2026-11-01T08:59:00Z"), "2026-11-01T01:59");
+    assert_eq!(wall("2026-11-01T09:00:00Z"), "2026-11-01T01:00");
 }
 
 fn assert_dst_window(event_date: &str, expected_duration: i64) {

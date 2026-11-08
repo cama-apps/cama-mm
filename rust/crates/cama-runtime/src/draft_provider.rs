@@ -751,6 +751,8 @@ struct DraftConfig {
     max_debt: i64,
     dota_bet_seed_amount: i64,
     first_game_pool_daily_amount: i64,
+    /// Fingerprint of the deployment's configured OpenSkill system.
+    openskill_algorithm_fingerprint: String,
 }
 
 impl DraftConfig {
@@ -777,6 +779,7 @@ impl DraftConfig {
             max_debt: config.values.max_debt,
             dota_bet_seed_amount: config.values.dota_bet_seed_amount,
             first_game_pool_daily_amount: config.values.first_game_pool_daily_amount,
+            openskill_algorithm_fingerprint: config.migration.openskill.algorithm_fingerprint(),
         }
     }
 }
@@ -4881,6 +4884,9 @@ impl DraftHandler {
                 continue;
             }
             let mut player = NewPlayer::new(*id, *name, Some(guild_id));
+            player
+                .openskill_algorithm_fingerprint
+                .clone_from(&self.config.openskill_algorithm_fingerprint);
             player.glicko_rating = Some(*rating);
             player.glicko_rd = Some(100.0);
             player.glicko_volatility = Some(0.06);

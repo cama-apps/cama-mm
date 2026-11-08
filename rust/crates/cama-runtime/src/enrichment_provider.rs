@@ -567,8 +567,9 @@ impl OpenSkillEnrichmentPort for ConfiguredOpenSkillReplay {
         }
         let (summary, _) = self
             .correction
-            .replay_openskill_atomic_configured(
+            .replay_openskill_for_enriched_match_atomic_configured(
                 guild_id,
+                match_id.0,
                 &self.system,
                 &self.rating_system,
                 self.new_player_mmr_discount,

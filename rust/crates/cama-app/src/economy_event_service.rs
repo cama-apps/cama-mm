@@ -10,7 +10,8 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cama_domain::formatting::format_grouped;
-use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, Timelike, Utc, Weekday};
+use chrono::{Duration, NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc};
+use chrono_tz::America::Los_Angeles;
 use thiserror::Error;
 
 pub const SECOND_ANNOUNCEMENT_DELAY_SECONDS: i64 = 12 * 60 * 60;
@@ -19,18 +20,7 @@ const TREND_WINDOWS: [i64; 3] = [1, 3, 7];
 const FLOW_WINDOWS: [i64; 2] = [3, 7];
 const SEVERITY_INTENSITY: [f64; 5] = [0.5, 1.0, 1.5, 2.25, 3.0];
 
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
-pub struct GuildId(pub i64);
-
-impl GuildId {
-    #[must_use]
-    pub const fn normalize(raw: Option<i64>) -> Self {
-        Self(match raw {
-            Some(value) => value,
-            None => 0,
-        })
-    }
-}
+pub use cama_domain::guild::GuildId;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Direction {
@@ -1481,7 +1471,7 @@ where
     }
 
     pub fn ensure_policy(&self, guild_id: Option<i64>) -> Result<PolicyState, EconomyEventError> {
-        self.ensure_policy_at(GuildId::normalize(guild_id), self.clock.now())
+        self.ensure_policy_at(GuildId::from_optional(guild_id), self.clock.now())
     }
 
     fn ensure_policy_at(
@@ -1552,7 +1542,7 @@ where
         if !self.config.enabled {
             return Ok(EconomyEventEffects::default());
         }
-        let guild_id = GuildId::normalize(guild_id);
+        let guild_id = GuildId::from_optional(guild_id);
         let event_date = self.event_date_for_timestamp(self.clock.now())?;
         Ok(self
             .store
@@ -1570,7 +1560,7 @@ where
             return Ok(None);
         }
         let now = now.unwrap_or_else(|| self.clock.now());
-        let guild_id = GuildId::normalize(guild_id);
+        let guild_id = GuildId::from_optional(guild_id);
         let event_date = self.event_date_for_timestamp(now)?;
         let restriction = self
             .store
@@ -1634,7 +1624,7 @@ where
         explicit_event_date: Option<&str>,
     ) -> Result<(Option<EconomyEvent>, bool), EconomyEventError> {
         let now = now.unwrap_or_else(|| self.clock.now());
-        let guild_id = GuildId::normalize(guild_id);
+        let guild_id = GuildId::from_optional(guild_id);
         let event_date = match explicit_event_date {
             Some(date) => {
                 parse_event_date(date)?;
@@ -1773,7 +1763,7 @@ where
         now: Option<i64>,
     ) -> Result<(), EconomyEventError> {
         self.store.mark_announced(
-            GuildId::normalize(guild_id),
+            GuildId::from_optional(guild_id),
             event_id,
             now.unwrap_or_else(|| self.clock.now()),
         )
@@ -1786,7 +1776,7 @@ where
         now: Option<i64>,
     ) -> Result<(), EconomyEventError> {
         self.store.mark_reminder_announced(
-            GuildId::normalize(guild_id),
+            GuildId::from_optional(guild_id),
             event_id,
             now.unwrap_or_else(|| self.clock.now()),
         )
@@ -1985,52 +1975,28 @@ fn parse_event_date(value: &str) -> Result<NaiveDate, EconomyEventError> {
         .map_err(|_| EconomyEventError::InvalidEventDate(value.to_owned()))
 }
 
-fn nth_weekday(year: i32, month: u32, weekday: Weekday, occurrence: u32) -> NaiveDate {
-    let first = NaiveDate::from_ymd_opt(year, month, 1).expect("valid fixed calendar month");
-    let delta = (7 + weekday.num_days_from_sunday() as i64
-        - first.weekday().num_days_from_sunday() as i64)
-        % 7;
-    first + Duration::days(delta + 7 * i64::from(occurrence - 1))
-}
-
-fn pacific_offset_for_local(date: NaiveDate, hour: u8) -> i64 {
-    let start = nth_weekday(date.year(), 3, Weekday::Sun, 2);
-    let end = nth_weekday(date.year(), 11, Weekday::Sun, 1);
-    let daylight =
-        date > start && date < end || date == start && hour >= 3 || date == end && hour < 2;
-    if daylight { -7 * 3_600 } else { -8 * 3_600 }
-}
-
+/// The instant of a Los Angeles wall-clock hour. An hour skipped by the
+/// spring-forward jump reads as the instant one hour later; an hour repeated
+/// by the fall-back reads as its first occurrence.
 fn pacific_timestamp(date: NaiveDate, hour: u8) -> Result<i64, EconomyEventError> {
     let local = date
         .and_hms_opt(u32::from(hour), 0, 0)
         .ok_or_else(|| EconomyEventError::InvalidEventDate(date.to_string()))?;
-    Ok(local.and_utc().timestamp() - pacific_offset_for_local(date, hour))
+    Los_Angeles
+        .from_local_datetime(&local)
+        .earliest()
+        .or_else(|| {
+            Los_Angeles
+                .from_local_datetime(&(local + Duration::hours(1)))
+                .earliest()
+        })
+        .map(|instant| instant.timestamp())
+        .ok_or_else(|| EconomyEventError::InvalidEventDate(date.to_string()))
 }
 
 fn pacific_local(timestamp: i64) -> Result<NaiveDateTime, EconomyEventError> {
-    let utc = chrono::DateTime::from_timestamp(timestamp, 0)
-        .ok_or(EconomyEventError::InvalidTimestamp(timestamp))?;
-    let year = utc.year();
-    let start_date = nth_weekday(year, 3, Weekday::Sun, 2);
-    let end_date = nth_weekday(year, 11, Weekday::Sun, 1);
-    let start_utc = start_date
-        .and_hms_opt(10, 0, 0)
-        .expect("valid transition hour")
-        .and_utc()
-        .timestamp();
-    let end_utc = end_date
-        .and_hms_opt(9, 0, 0)
-        .expect("valid transition hour")
-        .and_utc()
-        .timestamp();
-    let offset = if (start_utc..end_utc).contains(&timestamp) {
-        -7 * 3_600
-    } else {
-        -8 * 3_600
-    };
-    chrono::DateTime::from_timestamp(timestamp + offset, 0)
-        .map(|local| local.naive_utc())
+    chrono::DateTime::from_timestamp(timestamp, 0)
+        .map(|utc| utc.with_timezone(&Los_Angeles).naive_local())
         .ok_or(EconomyEventError::InvalidTimestamp(timestamp))
 }
 
