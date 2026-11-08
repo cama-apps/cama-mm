@@ -1,8 +1,8 @@
 //! Existing-schema SQLite adapter for the production Dig flavor layer.
 //!
 //! This module deliberately owns no migration and creates no tables.  It
-//! reads the already-migrated `players`, `tunnels`, `dig_actions`,
-//! `dig_personality`, and `dig_dm_memory` tables, and uses the existing
+//! reads the already-migrated `players`, `tunnels`, `dig_actions`, and
+//! `dig_dm_memory` tables, and uses the existing
 //! balance-ledger trigger context for the one optional flavor JC nudge.
 //!
 //! The nudge is claimed by the committed `dig_actions.id` that produced the
@@ -148,14 +148,6 @@ pub struct DigFlavorBuff {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct DigFlavorPersonality {
-    pub play_style: String,
-    pub choice_histogram: BTreeMap<String, i64>,
-    pub notable_moments: Vec<String>,
-    pub social_summary: BTreeMap<String, i64>,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DigFlavorAction {
     pub guild_id: i64,
     pub actor_id: i64,
@@ -181,7 +173,6 @@ pub struct DigFlavorAction {
 pub struct DigFlavorGathered {
     pub tunnel: Option<DigFlavorTunnel>,
     pub balance: i64,
-    pub personality: Option<DigFlavorPersonality>,
     pub social_actions: Vec<DigFlavorAction>,
     pub recent_actions: Vec<DigFlavorAction>,
     pub player_rank: i64,
@@ -229,7 +220,6 @@ impl DigFlavorRepository {
             )
             .optional()?
             .unwrap_or(0);
-        let personality = load_personality(&connection, discord_id, guild_id)?;
         let social_rows = query_actions(
             &connection,
             discord_id,
@@ -277,7 +267,6 @@ impl DigFlavorRepository {
         Ok(DigFlavorGathered {
             tunnel,
             balance,
-            personality,
             social_actions: social_rows,
             recent_actions: recent_rows,
             player_rank,
@@ -286,8 +275,8 @@ impl DigFlavorRepository {
     }
 
     /// Minimal splash projection: one tunnel depth query and one guild-scoped
-    /// display-name query. It deliberately does not load personality,
-    /// balances, action history, rank, or DM context.
+    /// display-name query. It deliberately does not load balances,
+    /// action history, rank, or DM context.
     pub fn gather_splash(
         &self,
         digger_id: i64,
@@ -560,15 +549,6 @@ impl DigFlavorRepository {
         Ok(())
     }
 
-    pub fn get_personality(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-    ) -> Result<Option<DigFlavorPersonality>, DigFlavorRepositoryError> {
-        let connection = self.connection()?;
-        load_personality(&connection, discord_id, guild_id)
-    }
-
     /// Atomically claim and apply the optional flavor nudge for one committed
     /// Dig action. Returns `true` only when this call changed the wallet.
     pub fn claim_flavor_bonus(
@@ -762,37 +742,6 @@ fn load_tunnel(
         insured_until: raw.23,
         reinforced_until: raw.24,
         injury_state: raw.25,
-    }))
-}
-
-fn load_personality(
-    connection: &Connection,
-    discord_id: i64,
-    guild_id: i64,
-) -> Result<Option<DigFlavorPersonality>, DigFlavorRepositoryError> {
-    let raw = connection
-        .query_row(
-            "SELECT play_style, choice_histogram, notable_moments, social_summary
-             FROM dig_personality WHERE discord_id=?1 AND guild_id=?2",
-            params![discord_id, guild_id],
-            |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                ))
-            },
-        )
-        .optional()?;
-    let Some(raw) = raw else {
-        return Ok(None);
-    };
-    Ok(Some(DigFlavorPersonality {
-        play_style: raw.0.unwrap_or_else(|| "unknown".to_owned()),
-        choice_histogram: parse_i64_map(raw.1, "choice_histogram")?,
-        notable_moments: parse_string_list(raw.2, "notable_moments")?,
-        social_summary: parse_i64_map(raw.3, "social_summary")?,
     }))
 }
 
@@ -998,30 +947,6 @@ fn parse_buffs(raw: Option<String>) -> Result<Vec<DigFlavorBuff>, DigFlavorRepos
             })
         })
         .collect())
-}
-
-fn parse_i64_map(
-    raw: Option<String>,
-    field: &'static str,
-) -> Result<BTreeMap<String, i64>, DigFlavorRepositoryError> {
-    let Some(raw) = raw.filter(|value| !value.trim().is_empty()) else {
-        return Ok(BTreeMap::new());
-    };
-    let value = serde_json::from_str::<Value>(&raw).map_err(|error| {
-        DigFlavorRepositoryError::InvalidJson {
-            field,
-            message: error.to_string(),
-        }
-    })?;
-    Ok(value
-        .as_object()
-        .map(|object| {
-            object
-                .iter()
-                .filter_map(|(key, value)| value.as_i64().map(|value| (key.clone(), value)))
-                .collect()
-        })
-        .unwrap_or_default())
 }
 
 fn parse_string_map(
@@ -1304,17 +1229,6 @@ mod tests {
                          won INTEGER,
                          side TEXT,
                          PRIMARY KEY (match_id,discord_id)
-                     );
-                     CREATE TABLE dig_personality (
-                         discord_id INTEGER NOT NULL,
-                         guild_id INTEGER NOT NULL,
-                         play_style TEXT,
-                         choice_histogram TEXT,
-                         notable_moments TEXT,
-                         summary TEXT,
-                         social_summary TEXT,
-                         updated_at INTEGER,
-                         PRIMARY KEY (discord_id,guild_id)
                      );
                      CREATE TABLE dig_dm_memory (
                          discord_id INTEGER NOT NULL,

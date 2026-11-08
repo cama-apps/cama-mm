@@ -153,13 +153,6 @@ fn dig_npcs_every_id_is_recoverable_from_output() {
     }
 }
 
-fn histogram(entries: &[(&str, i64)]) -> BTreeMap<String, i64> {
-    entries
-        .iter()
-        .map(|(key, value)| ((*key).to_owned(), *value))
-        .collect()
-}
-
 fn validation_context() -> (BTreeSet<String>, &'static str, f64) {
     (
         BTreeSet::from(["crystal_golem".to_owned(), "void_seam".to_owned()]),
@@ -420,24 +413,6 @@ fn test_narrate_dig_ai_schema_preserves_python_nested_contract() {
 }
 
 #[test]
-fn test_play_style_descriptions_complete() {
-    assert_eq!(
-        PLAY_STYLE_DESCRIPTIONS
-            .iter()
-            .map(|(style, _)| *style)
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            "cautious_grinder",
-            "reckless_degen",
-            "calculated_risk_taker",
-            "balanced_explorer",
-            "social_butterfly",
-            "unknown",
-        ])
-    );
-}
-
-#[test]
 fn test_tone_profiles_have_three_voices() {
     assert_eq!(
         TONE_PROFILES
@@ -499,36 +474,6 @@ fn test_empty_tunnel_uses_defaults() {
     let context = build_player_state_context(&TunnelFlavorState::default(), 0);
     assert!(context.contains("Dirt"));
     assert!(context.contains("Wooden"));
-}
-
-#[test]
-fn test_blank_personality_falls_back_to_default_blurb_none() {
-    assert_eq!(
-        build_personality_context(None),
-        "New player, no history yet."
-    );
-}
-
-#[test]
-fn test_blank_personality_falls_back_to_default_blurb_personality1() {
-    assert_eq!(
-        build_personality_context(Some(&DigPersonality::default())),
-        "New player, no history yet."
-    );
-}
-
-#[test]
-fn test_play_style_and_histogram_render() {
-    let personality = DigPersonality {
-        play_style: "balanced_explorer".to_owned(),
-        choice_histogram: histogram(&[("safe", 10), ("risky", 8)]),
-        notable_moments: vec!["Slew their first boss".to_owned()],
-        ..DigPersonality::default()
-    };
-    let context = build_personality_context(Some(&personality));
-    assert!(context.contains("balanced_explorer"));
-    assert!(context.contains("safe: 10"));
-    assert!(context.contains("first boss"));
 }
 
 macro_rules! outcome_context_case {
@@ -876,14 +821,6 @@ impl DigFlavorDataPort for ReceiptMemoryRepository {
         Ok(())
     }
 
-    fn get_personality(
-        &self,
-        _discord_id: i64,
-        _guild_id: i64,
-    ) -> Result<Option<DigPersonality>, String> {
-        Ok(None)
-    }
-
     fn get_flavor_receipt(
         &self,
         _dig_action_id: i64,
@@ -1075,6 +1012,13 @@ fn test_flavor_adds_narrative_keys() {
     let request = ai.request(0);
     assert_eq!(request.feature, "dig.flavor");
     assert_eq!(request.timeout_millis, 5_000);
+    assert!(
+        request.messages[1]
+            .content
+            .contains("=== PERSONALITY ===\nNew player, no history yet."),
+        "{}",
+        request.messages[1].content
+    );
 }
 
 #[test]
@@ -1320,34 +1264,6 @@ fn test_per_guild_isolation() {
     repository.write_dm_memory(99_001, 999, "guild B memory");
     assert_eq!(repository.dm_memory(99_001, GUILD_ID), "guild A memory");
     assert_eq!(repository.dm_memory(99_001, 999), "guild B memory");
-}
-
-#[test]
-fn test_get_personality_none_when_missing() {
-    assert_eq!(
-        MemoryDigFlavorRepository::default().personality(99_999, GUILD_ID),
-        None
-    );
-}
-
-#[test]
-fn test_upsert_persists_and_round_trips() {
-    let repository = MemoryDigFlavorRepository::default();
-    repository.write_personality(
-        USER_ID,
-        GUILD_ID,
-        DigPersonality {
-            play_style: "cautious_grinder".to_owned(),
-            choice_histogram: histogram(&[("safe", 10), ("risky", 3)]),
-            notable_moments: vec!["Slew first boss".to_owned()],
-            ..DigPersonality::default()
-        },
-    );
-    let result = repository
-        .personality(USER_ID, GUILD_ID)
-        .expect("personality");
-    assert_eq!(result.play_style, "cautious_grinder");
-    assert_eq!(result.choice_histogram.get("safe"), Some(&10));
 }
 
 #[test]

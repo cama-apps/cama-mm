@@ -194,30 +194,6 @@ pub const TONE_PROFILES: [(&str, &str); 3] = [
     ),
 ];
 
-pub const PLAY_STYLE_DESCRIPTIONS: [(&str, &str); 6] = [
-    (
-        "cautious_grinder",
-        "plays it safe, rarely takes risky event options, steady and methodical",
-    ),
-    (
-        "reckless_degen",
-        "takes every desperate option, thrill-seeker, high risk tolerance",
-    ),
-    (
-        "calculated_risk_taker",
-        "balances risk and reward, picks risky options when odds favor them",
-    ),
-    (
-        "balanced_explorer",
-        "mixes safe and risky choices evenly, no strong preference",
-    ),
-    (
-        "social_butterfly",
-        "frequently helps other players and cheers in boss fights, community-oriented",
-    ),
-    ("unknown", "new player, still developing their style"),
-];
-
 pub const NARRATE_DIG_PROPERTIES: [&str; 7] = [
     "narrative",
     "tone",
@@ -694,71 +670,9 @@ pub fn build_player_state_context(tunnel: &TunnelFlavorState, balance: i64) -> S
     lines.join("\n")
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct DigPersonality {
-    pub play_style: String,
-    pub choice_histogram: BTreeMap<String, i64>,
-    pub notable_moments: Vec<String>,
-    pub social_summary: BTreeMap<String, i64>,
-}
-
-impl DigPersonality {
-    fn is_blank(&self) -> bool {
-        self.play_style.is_empty()
-            && self.choice_histogram.is_empty()
-            && self.notable_moments.is_empty()
-            && self.social_summary.is_empty()
-    }
-}
-
-fn play_style_description(style: &str) -> &'static str {
-    PLAY_STYLE_DESCRIPTIONS
-        .iter()
-        .find_map(|(key, description)| (*key == style).then_some(*description))
-        .unwrap_or(PLAY_STYLE_DESCRIPTIONS[5].1)
-}
-
-#[must_use]
-pub fn build_personality_context(personality: Option<&DigPersonality>) -> String {
-    let Some(personality) = personality.filter(|personality| !personality.is_blank()) else {
-        return "New player, no history yet.".to_owned();
-    };
-    let style = if personality.play_style.is_empty() {
-        "unknown"
-    } else {
-        &personality.play_style
-    };
-    let mut parts = vec![format!(
-        "Play style: {style} ({})",
-        play_style_description(style)
-    )];
-    let histogram = personality
-        .choice_histogram
-        .iter()
-        .filter(|(_, count)| **count != 0)
-        .map(|(choice, count)| format!("{choice}: {count}"))
-        .collect::<Vec<_>>();
-    if !histogram.is_empty() {
-        parts.push(format!("Choice history: {}", histogram.join(", ")));
-    }
-    if !personality.notable_moments.is_empty() {
-        let start = personality.notable_moments.len().saturating_sub(5);
-        parts.push(format!(
-            "Notable moments: {}",
-            personality.notable_moments[start..].join(" | ")
-        ));
-    }
-    let social = personality
-        .social_summary
-        .iter()
-        .filter(|(_, count)| **count != 0)
-        .map(|(name, count)| format!("{}: {count}", name.replace('_', " ")))
-        .collect::<Vec<_>>();
-    if !social.is_empty() {
-        parts.push(format!("Social: {}", social.join(", ")));
-    }
-    parts.join("\n")
-}
+/// The personality section of every flavor prompt. No play-style history is
+/// recorded, so each miner reads as a newcomer.
+pub const NEW_PLAYER_PERSONALITY: &str = "New player, no history yet.";
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CaveInFlavorDetail {
@@ -1598,7 +1512,6 @@ impl DigFlavorRng for SeededDigFlavorRng {
 pub struct GatheredFlavorData {
     pub tunnel: Option<TunnelFlavorState>,
     pub balance: i64,
-    pub personality: Option<DigPersonality>,
     pub social_actions: Vec<DigAction>,
     pub recent_actions: Vec<DigAction>,
     pub player_rank: i64,
@@ -1606,7 +1519,7 @@ pub struct GatheredFlavorData {
 }
 
 /// The intentionally narrow read set needed by splash narration.  Unlike a
-/// full flavor gather this contains no balance, personality, action history,
+/// full flavor gather this contains no balance, action history,
 /// rank, or DM context; production adapters can therefore resolve display
 /// names and the digger's layer with two small guild-scoped queries.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1696,11 +1609,6 @@ pub trait DigFlavorDataPort: Send + Sync {
     }
 
     fn set_dm_memory(&self, discord_id: i64, guild_id: i64, value: &str) -> Result<(), String>;
-    fn get_personality(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-    ) -> Result<Option<DigPersonality>, String>;
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1849,17 +1757,6 @@ impl DigFlavorDataPort for SqliteDigFlavorDataAdapter {
     fn set_dm_memory(&self, discord_id: i64, guild_id: i64, value: &str) -> Result<(), String> {
         self.repository
             .set_dm_memory(discord_id, guild_id, value, unix_now())
-            .map_err(|error| error.to_string())
-    }
-
-    fn get_personality(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-    ) -> Result<Option<DigPersonality>, String> {
-        self.repository
-            .get_personality(discord_id, guild_id)
-            .map(|personality| personality.map(map_db_personality))
             .map_err(|error| error.to_string())
     }
 }
@@ -2042,7 +1939,6 @@ fn map_db_gathered(
     GatheredFlavorData {
         tunnel: gathered.tunnel.map(map_db_tunnel),
         balance: gathered.balance,
-        personality: gathered.personality.map(map_db_personality),
         social_actions: gathered
             .social_actions
             .into_iter()
@@ -2103,17 +1999,6 @@ fn map_db_tunnel(tunnel: cama_db::dig_flavor_repository::DigFlavorTunnel) -> Tun
         insured_until: tunnel.insured_until,
         reinforced_until: tunnel.reinforced_until,
         injury_state: tunnel.injury_state,
-    }
-}
-
-fn map_db_personality(
-    personality: cama_db::dig_flavor_repository::DigFlavorPersonality,
-) -> DigPersonality {
-    DigPersonality {
-        play_style: personality.play_style,
-        choice_histogram: personality.choice_histogram,
-        notable_moments: personality.notable_moments,
-        social_summary: personality.social_summary,
     }
 }
 
@@ -2409,7 +2294,7 @@ impl DigFlavorService {
         let messages = build_messages(
             &build_dig_flavor_system_prompt(tone, bonus_cap),
             &build_player_state_context(tunnel, gathered.balance),
-            &build_personality_context(gathered.personality.as_ref()),
+            NEW_PLAYER_PERSONALITY,
             &outcome_context,
             OptionalMessageSections {
                 multiplayer: &multiplayer_context,
@@ -2541,7 +2426,6 @@ struct MemoryRepositoryState {
     names: BTreeMap<(i64, i64), String>,
     tunnels: BTreeMap<(i64, i64), TunnelFlavorState>,
     memories: BTreeMap<(i64, i64), String>,
-    personalities: BTreeMap<(i64, i64), DigPersonality>,
     actions: Vec<DigAction>,
 }
 
@@ -2608,24 +2492,6 @@ impl MemoryDigFlavorRepository {
             .insert((discord_id, guild_id), value);
     }
 
-    #[must_use]
-    pub fn personality(&self, discord_id: i64, guild_id: i64) -> Option<DigPersonality> {
-        self.state
-            .lock()
-            .expect("memory repository is not poisoned")
-            .personalities
-            .get(&(discord_id, guild_id))
-            .cloned()
-    }
-
-    pub fn write_personality(&self, discord_id: i64, guild_id: i64, personality: DigPersonality) {
-        self.state
-            .lock()
-            .expect("memory repository is not poisoned")
-            .personalities
-            .insert((discord_id, guild_id), personality);
-    }
-
     pub fn log_action(&self, action: DigAction) {
         self.state
             .lock()
@@ -2684,7 +2550,6 @@ impl DigFlavorDataPort for MemoryDigFlavorRepository {
         Ok(GatheredFlavorData {
             tunnel: state.tunnels.get(&(discord_id, guild_id)).cloned(),
             balance: *state.balances.get(&(discord_id, guild_id)).unwrap_or(&0),
-            personality: state.personalities.get(&(discord_id, guild_id)).cloned(),
             social_actions,
             recent_actions,
             player_rank: 0,
@@ -2729,14 +2594,6 @@ impl DigFlavorDataPort for MemoryDigFlavorRepository {
     fn set_dm_memory(&self, discord_id: i64, guild_id: i64, value: &str) -> Result<(), String> {
         self.write_dm_memory(discord_id, guild_id, value);
         Ok(())
-    }
-
-    fn get_personality(
-        &self,
-        discord_id: i64,
-        guild_id: i64,
-    ) -> Result<Option<DigPersonality>, String> {
-        Ok(self.personality(discord_id, guild_id))
     }
 }
 
