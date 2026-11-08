@@ -189,8 +189,9 @@ fn dig_chapter_spotlights_the_most_fought_boss_and_feuds() {
     // The card leads with an everyday dig joke; 92% is not the top 5%.
     assert_eq!(dig.lines[0], dig.headline);
     assert_eq!(dig.headline, side_joke("dig", Tier::Notable, SEED));
-    assert!(dig.lines[1].contains("37 cave-ins"));
-    assert!(dig.lines[2].contains("3 artifacts, one before anyone else"));
+    // The 37 cave-ins have their own Press F card.
+    assert!(dig.lines.iter().all(|line| !line.contains("cave-in")));
+    assert!(dig.lines[1].contains("3 artifacts, one before anyone else"));
     let boss = &cards[1];
     assert_eq!(boss.art, CardArt::BossEncounter("grothak".into()));
     assert_eq!(boss.title, "Boss you fought most");

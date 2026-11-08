@@ -177,15 +177,17 @@ pub struct DistinctStory {
     pub score: f64,
 }
 
+/// Each role needs at least five games and a record that fits it, so one
+/// person can never be both halves of a contradiction.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PeopleYear {
-    /// Most wins together, at least five games together.
+    /// Most wins together, with more wins than losses together.
     pub duo: Option<PairStory>,
-    /// Lowest win rate together, at least five games and under 40%.
+    /// Lowest win rate together, under 40%.
     pub cursed_duo: Option<PairStory>,
-    /// Most losses against, at least five games against.
+    /// Most losses against, with more losses than wins against them.
     pub nemesis: Option<PairStory>,
-    /// Most wins against, at least five games against.
+    /// Most wins against, with more wins than losses against them.
     pub punching_bag: Option<PairStory>,
 }
 
@@ -988,8 +990,10 @@ pub fn people_year(rows: &[DistinctMatch], target: i64) -> PeopleYear {
         tally.1 += i64::from(*target_won);
     }
 
+    let winning = |pair: &PairStory| pair.wins * 2 > pair.games;
+    let losing = |pair: &PairStory| pair.wins * 2 < pair.games;
     PeopleYear {
-        duo: best_pair(&together, |pair| pair.wins >= 1, |a, b| a.wins.cmp(&b.wins)),
+        duo: best_pair(&together, winning, |a, b| a.wins.cmp(&b.wins)),
         cursed_duo: best_pair(
             &together,
             |pair| pair.wins * 100 < pair.games * 40,
@@ -999,12 +1003,10 @@ pub fn people_year(rows: &[DistinctMatch], target: i64) -> PeopleYear {
                     .then(a.games.cmp(&b.games))
             },
         ),
-        nemesis: best_pair(
-            &against,
-            |pair| pair.wins < pair.games,
-            |a, b| (a.games - a.wins).cmp(&(b.games - b.wins)),
-        ),
-        punching_bag: best_pair(&against, |pair| pair.wins >= 1, |a, b| a.wins.cmp(&b.wins)),
+        nemesis: best_pair(&against, losing, |a, b| {
+            (a.games - a.wins).cmp(&(b.games - b.wins))
+        }),
+        punching_bag: best_pair(&against, winning, |a, b| a.wins.cmp(&b.wins)),
     }
 }
 

@@ -15,30 +15,27 @@ use std::thread::JoinHandle;
 struct WireTestHandler;
 
 #[tokio::test]
-async fn wrapped_profiles_keep_archived_names_without_gateway_or_avatar_access() {
+async fn wrapped_profiles_keep_archived_names_without_gateway_access() {
     let archive = Arc::new(PlayerNameArchive::default());
     archive.record(42, [(7, "Last seen nickname".to_owned())]);
     let transport = SerenityDiscordTransport::new().with_player_name_archive(archive);
-    for include_avatar in [false, true] {
-        let profile = transport
-            .wrapped_profile(42, 7, include_avatar)
-            .await
-            .expect("name remains available")
-            .expect("profile");
-        assert_eq!(profile.display_name, "Last seen nickname");
-        assert!(profile.avatar_png.is_none());
+    let profile = transport
+        .wrapped_profile(42, 7)
+        .await
+        .expect("name remains available")
+        .expect("profile");
+    assert_eq!(profile.display_name, "Last seen nickname");
 
-        let other_guild = transport
-            .wrapped_profile(43, 7, include_avatar)
-            .await
-            .expect("missing profile is fail-soft")
-            .expect("safe profile");
-        assert_eq!(other_guild.display_name, "Unknown player");
-    }
+    let other_guild = transport
+        .wrapped_profile(43, 7)
+        .await
+        .expect("missing profile is fail-soft")
+        .expect("safe profile");
+    assert_eq!(other_guild.display_name, "Unknown player");
 }
 
 #[tokio::test]
-async fn wrapped_profile_fetches_a_cold_cache_name_even_without_an_avatar_request() {
+async fn wrapped_profile_fetches_a_cold_cache_name() {
     let mut member = Member::default();
     member.user.id = UserId::new(7);
     member.user.name = "Account name".to_owned();
@@ -61,14 +58,9 @@ async fn wrapped_profile_fetches_a_cold_cache_name_even_without_an_avatar_reques
         cache: Arc::new(Cache::default()),
     });
 
-    let profile = transport
-        .wrapped_profile(42, 7, false)
-        .await
-        .unwrap()
-        .unwrap();
+    let profile = transport.wrapped_profile(42, 7).await.unwrap().unwrap();
     server.join().expect("member lookup completed");
     assert_eq!(profile.display_name, "Fresh server nickname");
-    assert!(profile.avatar_png.is_none());
     assert_eq!(
         archive.names(42, &[7]).get(&7).map(String::as_str),
         Some("Fresh server nickname")

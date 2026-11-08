@@ -17,7 +17,6 @@ pub(super) fn paint(stage: &mut Stage<'_>) {
         WrappedLayout::BigNumber => big_number(stage),
         WrappedLayout::TopList => top_list(stage),
         WrappedLayout::Bars => bars(stage),
-        WrappedLayout::People => people(stage),
         WrappedLayout::Curve => curve(stage),
         WrappedLayout::Tiles => tiles(stage),
         WrappedLayout::Spotlight => spotlight(stage),
@@ -463,74 +462,6 @@ fn bars(stage: &mut Stage<'_>) {
             } else {
                 Align::Left
             },
-            (0.0, 0.0),
-        );
-    }
-}
-
-fn people(stage: &mut Stage<'_>) {
-    let (slide, p) = (stage.slide, stage.palette);
-    let y = heading(stage);
-    let rows = card_rows(slide);
-    let rows = &rows[..rows.len().min(5)];
-    if rows.is_empty() {
-        return;
-    }
-    let height = ((BOTTOM - y) / rows.len() as i32).min(170);
-    let size = (height - 22).clamp(60, 118);
-    for (index, row) in rows.iter().enumerate() {
-        let top = y + index as i32 * height;
-        let start = 0.2 + index as f32 * 0.12;
-        let enter = stage.pop(start, start + 0.3);
-        if stage.t < start {
-            continue;
-        }
-        let center = ((MARGIN + size / 2) as f32, (top + size / 2) as f32);
-        let avatar_drawn = match stage.avatars.get(index).and_then(Option::as_ref) {
-            Some(avatar) if enter >= 0.98 => {
-                let avatar = avatar.clone();
-                stage
-                    .canvas
-                    .blit_scaled(&avatar, MARGIN, top, size as usize, size as usize);
-                true
-            }
-            _ => false,
-        };
-        if !avatar_drawn {
-            stage
-                .canvas
-                .disc(center, size as f32 / 2.0 * enter.max(0.0), p.accent);
-            if enter >= 0.98 {
-                let number = (index + 1).to_string();
-                stage.stat(
-                    &number,
-                    &number,
-                    (MARGIN, top + size / 6, size, size * 2 / 3),
-                    size as f32 * 0.5,
-                    p.on_accent,
-                    Align::Center,
-                    (0.0, 0.0),
-                );
-            }
-        }
-        let shift = ((1.0 - stage.ease(start, start + 0.3)) * 60.0) as i32;
-        let (left, width) = (MARGIN + size + 20 + shift, COLUMN - size - 20);
-        let bottom = stage.block(
-            &row.primary,
-            (left, top, width, height * 11 / 20),
-            40.0,
-            Face::Black,
-            p.fg,
-            Align::Left,
-            (0.0, 0.0),
-        );
-        stage.block(
-            &row.secondary,
-            (left, bottom - 2, width, top + height - 8 - bottom),
-            26.0,
-            Face::Medium,
-            p.fg,
-            Align::Left,
             (0.0, 0.0),
         );
     }

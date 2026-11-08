@@ -204,201 +204,6 @@ impl PairingsRepository {
             .collect())
     }
 
-    pub fn get_best_teammates(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-        min_games: i64,
-        limit: i64,
-    ) -> Result<Vec<TeammatePairing>, rusqlite::Error> {
-        self.query_teammates(
-            discord_id,
-            guild_id,
-            min_games,
-            limit,
-            "AND CAST(wins_together AS REAL) / games_together > 0.5
-             ORDER BY win_rate DESC, games_together DESC",
-        )
-    }
-
-    pub fn get_worst_teammates(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-        min_games: i64,
-        limit: i64,
-    ) -> Result<Vec<TeammatePairing>, rusqlite::Error> {
-        self.query_teammates(
-            discord_id,
-            guild_id,
-            min_games,
-            limit,
-            "AND CAST(wins_together AS REAL) / games_together < 0.5
-             ORDER BY win_rate ASC, games_together DESC",
-        )
-    }
-
-    pub fn get_most_played_with(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-        min_games: i64,
-        limit: i64,
-    ) -> Result<Vec<TeammatePairing>, rusqlite::Error> {
-        self.query_teammates(
-            discord_id,
-            guild_id,
-            min_games,
-            limit,
-            "ORDER BY games_together DESC, win_rate DESC",
-        )
-    }
-
-    fn query_teammates(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-        min_games: i64,
-        limit: i64,
-        suffix: &str,
-    ) -> Result<Vec<TeammatePairing>, rusqlite::Error> {
-        let sql = format!(
-            "SELECT CASE WHEN player1_id = ?1 THEN player2_id ELSE player1_id END,
-                    games_together, wins_together,
-                    CAST(wins_together AS REAL) / games_together AS win_rate
-             FROM player_pairings
-             WHERE guild_id = ?2 AND (player1_id = ?1 OR player2_id = ?1)
-               AND games_together >= ?3
-             {suffix}
-             LIMIT ?4"
-        );
-        let connection = self.connection()?;
-        let mut statement = connection.prepare(&sql)?;
-        statement
-            .query_map(
-                params![
-                    discord_id,
-                    Self::normalize_guild_id(guild_id),
-                    min_games,
-                    limit
-                ],
-                |row| {
-                    Ok(TeammatePairing {
-                        teammate_id: row.get(0)?,
-                        games_together: row.get(1)?,
-                        wins_together: row.get(2)?,
-                        win_rate: row.get(3)?,
-                    })
-                },
-            )?
-            .collect()
-    }
-
-    pub fn get_best_matchups(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-        min_games: i64,
-        limit: i64,
-    ) -> Result<Vec<OpponentPairing>, rusqlite::Error> {
-        self.query_opponents(
-            discord_id,
-            guild_id,
-            min_games,
-            limit,
-            "AND CAST(
-                 CASE WHEN player1_id = ?1
-                      THEN player1_wins_against
-                      ELSE games_against - player1_wins_against END AS REAL
-             ) / games_against > 0.5
-             ORDER BY win_rate DESC, games_against DESC",
-        )
-    }
-
-    pub fn get_worst_matchups(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-        min_games: i64,
-        limit: i64,
-    ) -> Result<Vec<OpponentPairing>, rusqlite::Error> {
-        self.query_opponents(
-            discord_id,
-            guild_id,
-            min_games,
-            limit,
-            "AND CAST(
-                 CASE WHEN player1_id = ?1
-                      THEN player1_wins_against
-                      ELSE games_against - player1_wins_against END AS REAL
-             ) / games_against < 0.5
-             ORDER BY win_rate ASC, games_against DESC",
-        )
-    }
-
-    pub fn get_most_played_against(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-        min_games: i64,
-        limit: i64,
-    ) -> Result<Vec<OpponentPairing>, rusqlite::Error> {
-        self.query_opponents(
-            discord_id,
-            guild_id,
-            min_games,
-            limit,
-            "ORDER BY games_against DESC, win_rate DESC",
-        )
-    }
-
-    fn query_opponents(
-        &self,
-        discord_id: i64,
-        guild_id: Option<i64>,
-        min_games: i64,
-        limit: i64,
-        suffix: &str,
-    ) -> Result<Vec<OpponentPairing>, rusqlite::Error> {
-        let sql = format!(
-            "SELECT CASE WHEN player1_id = ?1 THEN player2_id ELSE player1_id END,
-                    games_against,
-                    CASE WHEN player1_id = ?1
-                         THEN player1_wins_against
-                         ELSE games_against - player1_wins_against END,
-                    CAST(
-                        CASE WHEN player1_id = ?1
-                             THEN player1_wins_against
-                             ELSE games_against - player1_wins_against END AS REAL
-                    ) / games_against AS win_rate
-             FROM player_pairings
-             WHERE guild_id = ?2 AND (player1_id = ?1 OR player2_id = ?1)
-               AND games_against >= ?3
-             {suffix}
-             LIMIT ?4"
-        );
-        let connection = self.connection()?;
-        let mut statement = connection.prepare(&sql)?;
-        statement
-            .query_map(
-                params![
-                    discord_id,
-                    Self::normalize_guild_id(guild_id),
-                    min_games,
-                    limit
-                ],
-                |row| {
-                    Ok(OpponentPairing {
-                        opponent_id: row.get(0)?,
-                        games_against: row.get(1)?,
-                        wins_against: row.get(2)?,
-                        win_rate: row.get(3)?,
-                    })
-                },
-            )?
-            .collect()
-    }
-
     pub fn get_head_to_head(
         &self,
         player1_id: i64,
@@ -906,6 +711,12 @@ mod tests {
             .expect("update pairings for match");
     }
 
+    fn summary(repository: &PairingsRepository, min_games: i64) -> PlayerPairingSummary {
+        PairingsService::new(repository.clone())
+            .get_player_pairing_summary(1, Some(GUILD_ID), min_games, 10)
+            .expect("build pairing summary")
+    }
+
     fn head(
         repository: &PairingsRepository,
         player1_id: i64,
@@ -1035,18 +846,8 @@ mod tests {
         update(&repository, 100, Some(GUILD_ID), &TEAM1, &TEAM2, 1);
         update(&repository, 101, Some(GUILD_ID), &TEAM1, &TEAM2, 1);
 
-        assert!(
-            repository
-                .get_best_teammates(1, Some(GUILD_ID), 3, 5)
-                .expect("query best teammates")
-                .is_empty()
-        );
-        assert!(
-            !repository
-                .get_best_teammates(1, Some(GUILD_ID), 2, 5)
-                .expect("query best teammates")
-                .is_empty()
-        );
+        assert!(summary(&repository, 3).best_teammates.is_empty());
+        assert!(!summary(&repository, 2).best_teammates.is_empty());
     }
 
     #[test]
@@ -1154,12 +955,11 @@ mod tests {
             insert_pairing(&file, GUILD_ID, 1, teammate_id, 4, wins, 0, 0);
         }
 
-        let best = repository
-            .get_best_teammates(1, Some(GUILD_ID), 4, 10)
-            .expect("get best teammates");
-        let worst = repository
-            .get_worst_teammates(1, Some(GUILD_ID), 4, 10)
-            .expect("get worst teammates");
+        let PlayerPairingSummary {
+            best_teammates: best,
+            worst_teammates: worst,
+            ..
+        } = summary(&repository, 4);
         let best_ids = best
             .iter()
             .map(|row| row.teammate_id)
@@ -1188,12 +988,11 @@ mod tests {
             insert_pairing(&file, GUILD_ID, 1, opponent_id, 0, 0, 4, wins);
         }
 
-        let best = repository
-            .get_best_matchups(1, Some(GUILD_ID), 4, 10)
-            .expect("get best matchups");
-        let worst = repository
-            .get_worst_matchups(1, Some(GUILD_ID), 4, 10)
-            .expect("get worst matchups");
+        let PlayerPairingSummary {
+            best_matchups: best,
+            worst_matchups: worst,
+            ..
+        } = summary(&repository, 4);
         let best_ids = best
             .iter()
             .map(|row| row.opponent_id)
@@ -1226,18 +1025,9 @@ mod tests {
             pairing.wins_together as f64 / pairing.games_together as f64,
             0.5
         );
-        assert!(
-            repository
-                .get_best_teammates(1, Some(GUILD_ID), 4, 10)
-                .expect("get best teammates")
-                .is_empty()
-        );
-        assert!(
-            repository
-                .get_worst_teammates(1, Some(GUILD_ID), 4, 10)
-                .expect("get worst teammates")
-                .is_empty()
-        );
+        let at_even = summary(&repository, 4);
+        assert!(at_even.best_teammates.is_empty());
+        assert!(at_even.worst_teammates.is_empty());
     }
 
     #[test]
@@ -1247,9 +1037,7 @@ mod tests {
         insert_pairing(&file, GUILD_ID, 1, 2, 6, 6, 0, 0);
         insert_pairing(&file, GUILD_ID, 1, 3, 3, 3, 0, 0);
 
-        let most_played = repository
-            .get_most_played_with(1, Some(GUILD_ID), 3, 5)
-            .expect("get most-played teammates");
+        let most_played = summary(&repository, 3).most_played_with;
         assert!(most_played.len() >= 2);
         assert_eq!(
             (most_played[0].teammate_id, most_played[0].games_together),
@@ -1264,9 +1052,7 @@ mod tests {
         insert_pairing(&file, GUILD_ID, 1, 10, 0, 0, 5, 5);
         insert_pairing(&file, GUILD_ID, 1, 15, 0, 0, 3, 3);
 
-        let most_played = repository
-            .get_most_played_against(1, Some(GUILD_ID), 3, 5)
-            .expect("get most-played opponents");
+        let most_played = summary(&repository, 3).most_played_against;
         assert!(most_played.len() >= 2);
         assert_eq!(
             (most_played[0].opponent_id, most_played[0].games_against),

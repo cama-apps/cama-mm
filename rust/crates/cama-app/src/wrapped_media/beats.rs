@@ -4,7 +4,8 @@
 //!
 //! Timeline: the setup reveals over 0.00-0.30 and holds to 0.48, the wipe
 //! runs 0.48-0.56, the punchline animates over 0.56-0.92, and the card holds
-//! on the finished punchline, which is the still.
+//! on the finished punchline, which is the still. The GIF plays those marks
+//! at 1.0 s, 3.0 s, 3.4 s, and 4.5 s (`motion::TWO_BEAT_PACE`).
 
 use super::stage::{
     Align, FIRST_BASELINE, Face, HEIGHT, Stage, WIDTH, block_height, count_up, fit_text,
@@ -288,8 +289,8 @@ pub(super) fn chrome_ink(stage: &Stage<'_>, y: i32) -> Rgba {
 /// a corner clear of the type.
 fn setup_shape(stage: &Stage<'_>) -> ((f32, f32), f32, Rgba) {
     match stage.slide.theme {
-        WrappedTheme::BeatRoast => ((640.0, 800.0), 260.0, stage.palette.soft),
         WrappedTheme::BeatPopoff => ((700.0, 10.0), 250.0, PINK),
+        theme if theme.is_roast_beat() => ((640.0, 800.0), 260.0, stage.palette.soft),
         _ => ((700.0, 10.0), 250.0, stage.palette.soft),
     }
 }

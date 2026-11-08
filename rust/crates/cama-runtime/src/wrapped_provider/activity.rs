@@ -21,6 +21,7 @@ use cama_domain::wrapped_activity::{
     DigYear, GambaYear, GambleEvent, GambleKind, MafiaYear, PetYear,
 };
 
+use super::distinct::Persona;
 use super::*;
 
 /// The deepest layers of the mine get the darker palette.
@@ -460,29 +461,29 @@ pub(super) fn persona_signals(
     signals
 }
 
-/// The Cama type: a persona title from the distinct stories when there are
-/// any, over each activity's evidence.
+/// The Cama type: a persona title from the distinct stories, over the
+/// stories behind it, or each activity's evidence when there are none.
 pub(super) fn persona_slide(
     signals: &[PersonaSignal],
-    persona: Option<&(String, String)>,
+    persona: Option<&Persona>,
     activity: &ActivityData,
     username: &str,
     year_label: &str,
 ) -> Option<WrappedSlideData> {
-    let card = persona_card(signals).map(|card| card_slide(card, activity, username, year_label));
-    let Some((title, subtitle)) = persona else {
-        return card;
+    let Some(persona) = persona else {
+        return persona_card(signals).map(|card| card_slide(card, activity, username, year_label));
     };
-    let mut slide = card.unwrap_or_else(|| {
-        let mut slide = base_slide("story_persona", "", username, year_label);
-        slide.layout = WrappedLayout::Persona;
-        slide.theme = WrappedTheme::Persona;
-        slide
-    });
-    slide.title = "Your Cama type".to_owned();
-    slide.stat_value.clone_from(title);
-    slide.headline.clone_from(subtitle);
-    slide.lines = vec![subtitle.clone()];
+    let mut slide = base_slide("story_persona", "Your Cama type", username, year_label);
+    slide.layout = WrappedLayout::Persona;
+    slide.theme = WrappedTheme::Persona;
+    slide.stat_value.clone_from(&persona.title);
+    slide.headline.clone_from(&persona.subtitle);
+    slide.lines = vec![persona.subtitle.clone()];
+    slide.rows = persona
+        .evidence
+        .iter()
+        .map(|(value, label)| WrappedRow::new(value.clone(), label.clone()))
+        .collect();
     Some(slide)
 }
 

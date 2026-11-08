@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use cama_app::wrapped_media::{
     WrappedArtwork, WrappedLayout, WrappedRenderedMedia, WrappedRow, WrappedSlideData,
-    WrappedTheme, render_wrapped_media, render_wrapped_slide,
+    WrappedTheme, render_wrapped_media, render_wrapped_slide, vary_beat_palettes,
 };
 use cama_app::wrapped_story::chapters::{months_card, story_seed};
 use cama_app::wrapped_story::{
@@ -35,7 +35,7 @@ use cama_db::wrapped_live::{
 };
 use cama_domain::discord_content::{UNKNOWN_PLAYER, readable_player_name};
 use cama_domain::hero_catalog::hero_name;
-use cama_domain::wrapped_distinct::{DistinctMatch, DistinctPlayer, people_year};
+use cama_domain::wrapped_distinct::{DistinctMatch, DistinctPlayer, PeopleYear, people_year};
 use chrono::{Datelike, Utc};
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 use tracing::warn;
@@ -51,13 +51,14 @@ use crate::registration::{
 };
 
 mod activity;
+mod deck;
 mod distinct;
 
 use activity::{
     ActivityData, ArtSources, activity_cards, card_slide, persona_signals, persona_slide,
     recap_numbers,
 };
-use distinct::{MIN_STORIES, cave_in_slide, distinct_slides, stonks};
+use distinct::{MIN_STORIES, cave_in_slide, distinct_slides, people_slides, stonks};
 
 const COMPONENT_PREFIX: &str = "wrapped:";
 const STORY_TIMEOUT: Duration = Duration::from_secs(600);
@@ -68,19 +69,15 @@ const MAX_CACHED_MEDIA_BYTES: usize = 12 * 1024 * 1024;
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct WrappedDiscordProfile {
     pub display_name: String,
-    /// The Python command reads only a member's custom avatar, not the default
-    /// avatar. Production adapters return a bounded PNG or `None` fail-soft.
-    pub avatar_png: Option<Vec<u8>>,
 }
 
-/// Narrow live Discord seam used for Wrapped's bounded name/avatar prefetch.
+/// Narrow live Discord seam used for Wrapped's bounded name prefetch.
 #[async_trait]
 pub trait WrappedDiscordPort: Send + Sync {
     async fn wrapped_profile(
         &self,
         guild_id: u64,
         user_id: u64,
-        include_avatar: bool,
     ) -> Result<Option<WrappedDiscordProfile>, String>;
 }
 
@@ -261,6 +258,7 @@ impl WrappedSources {
             .wrapped
             .guild_year_rows(guild_id, start_ts, end_ts)
             .map_err(|error| error.to_string())?;
+        let people = people_year(&year_rows, target_id);
         let rating_history = self
             .wrapped
             .rating_history(target_id, guild_id, start_ts, end_ts)
@@ -303,6 +301,7 @@ impl WrappedSources {
             matches,
             year_rows,
             year_players,
+            people,
             rating_history,
             gamba_stats,
             activity,
@@ -351,6 +350,8 @@ struct WrappedRawData {
     /// Every registered player's games in the guild this year.
     year_rows: Vec<DistinctMatch>,
     year_players: Vec<DistinctPlayer>,
+    /// Who the player shared the year with.
+    people: PeopleYear,
     rating_history: Vec<WrappedRatingPoint>,
     gamba_stats: Option<cama_db::gambling_stats_repository::GambaStats>,
     activity: ActivityData,
@@ -459,10 +460,7 @@ impl WrappedHandler {
         };
 
         let profile_ids = prefetch_ids(&raw, signed_target, self.minimum_games, self.minimum_bets);
-        // No story card shows an avatar, so none are downloaded.
-        let profiles = self
-            .prefetch_profiles(guild_id, profile_ids, BTreeSet::new())
-            .await;
+        let profiles = self.prefetch_profiles(guild_id, profile_ids).await;
         let minimum_games = self.minimum_games;
         let minimum_bets = self.minimum_bets;
         let slide_target_name = profiles
@@ -771,7 +769,6 @@ impl WrappedHandler {
         &self,
         guild_id: u64,
         profile_ids: BTreeSet<i64>,
-        avatar_ids: BTreeSet<i64>,
     ) -> BTreeMap<i64, WrappedDiscordProfile> {
         let limiter = Arc::new(Semaphore::new(PROFILE_CONCURRENCY));
         let mut tasks = tokio::task::JoinSet::new();
@@ -781,12 +778,9 @@ impl WrappedHandler {
             };
             let discord = Arc::clone(&self.discord);
             let limiter = Arc::clone(&limiter);
-            let include_avatar = avatar_ids.contains(&signed_id);
             tasks.spawn(async move {
                 let permit = limiter.acquire_owned().await.ok()?;
-                let result = discord
-                    .wrapped_profile(guild_id, user_id, include_avatar)
-                    .await;
+                let result = discord.wrapped_profile(guild_id, user_id).await;
                 drop(permit);
                 match result {
                     Ok(profile) => profile.map(|profile| (signed_id, profile)),
@@ -1022,13 +1016,13 @@ fn prefetch_ids(
         .map(|award| award.discord_id)
         .collect::<BTreeSet<_>>();
     profile_ids.insert(target_id);
-    let people = people_year(&raw.year_rows, target_id);
+    let people = &raw.people;
     profile_ids.extend(
         [
-            people.duo,
-            people.cursed_duo,
-            people.nemesis,
-            people.punching_bag,
+            &people.duo,
+            &people.cursed_duo,
+            &people.nemesis,
+            &people.punching_bag,
         ]
         .into_iter()
         .flatten()
@@ -1080,6 +1074,7 @@ const STORY_ORDER: [&str; 17] = [
 /// Pages that live under "More stats" rather than in the story itself.
 fn is_detail_page(kind: &str) -> bool {
     kind.starts_with("records_")
+        || kind.starts_with("more_")
         || matches!(
             kind,
             "awards"
@@ -1346,21 +1341,6 @@ fn build_slides(
     let stories = personal_moments(&moment_rows);
     let superlatives = personal_superlatives(&moment_rows);
     let seed = story_seed(target_id, year);
-    let deck = distinct_slides(
-        &raw.year_rows,
-        &raw.year_players,
-        target_id,
-        minimum_games,
-        &readable_name,
-        &raw.art,
-        &*raw.gold,
-        seed,
-        target_display_name,
-        &year_label,
-    );
-    // Too few distinct stories, as for a player below the minimum: keep the
-    // personal moments and awards so the deck still says something.
-    let thin = deck.stories.len() < MIN_STORIES;
     if let Some(time) = &stories.playtime {
         slides.push(moment_slide(
             time,
@@ -1369,29 +1349,6 @@ fn build_slides(
             &year_label,
         ));
     }
-    slides.extend(deck.stories);
-    for (index, moment) in stories.moments.iter().enumerate() {
-        let kind = if thin && index < STORY_MOMENTS {
-            "story_moment"
-        } else {
-            "records_moments"
-        };
-        let mut slide = moment_slide(moment, kind, target_display_name, &year_label);
-        slide.layout = WrappedLayout::BigNumber;
-        slide.theme = MOMENT_THEMES[index % MOMENT_THEMES.len()];
-        slides.push(slide);
-    }
-    if thin {
-        for award in &superlatives {
-            slides.push(moment_slide(
-                award,
-                "story_superlative",
-                target_display_name,
-                &year_label,
-            ));
-        }
-    }
-    slides.extend(deck.people);
 
     if raw.matches.len() >= minimum_games {
         for (kind, title, lines, accent) in record_slides(&raw.matches) {
@@ -1531,6 +1488,7 @@ fn build_slides(
         slides.push(slide);
     }
 
+    // Side games: each played game's main card first, at most four in all.
     let bankruptcies = raw
         .bankruptcies
         .iter()
@@ -1540,26 +1498,90 @@ fn build_slides(
         .gamba_stats
         .as_ref()
         .map(|stats| (stats.degen_score.total, stats.degen_score.title));
-    for card in activity_cards(
+    let mut side = activity_cards(
         &raw.activity,
         degen,
         bankruptcies,
         &readable_name,
         target_id,
         year,
-    ) {
+    )
+    .into_iter()
+    .map(|card| {
         let mut slide = card_slide(card, &raw.activity, target_display_name, &year_label);
         if slide.kind == "chart_gamba" {
             stonks(&mut slide, &raw.activity.gamba, seed);
         }
-        slides.push(slide);
-    }
-    slides.extend(cave_in_slide(
+        slide
+    })
+    .collect::<Vec<_>>();
+    side.extend(cave_in_slide(
         &raw.activity.dig,
         seed,
         target_display_name,
         &year_label,
     ));
+    let side_cards = deck::budget_side_cards(&mut side, &raw.activity);
+
+    let mut people = people_slides(
+        &raw.people,
+        &readable_name,
+        seed,
+        target_display_name,
+        &year_label,
+    );
+    people.truncate(deck::MOST_PEOPLE);
+
+    // Distinct stories take what the other sections leave, up to eight.
+    let fixed = slides
+        .iter()
+        .filter(|slide| deck::FIXED_KINDS.contains(&slide.kind.as_str()))
+        .count();
+    let slots = deck::distinct_slots(
+        fixed + deck::RESERVED_SLOTS_USED + people.len() + side_cards + deck::PERSONA_SLOTS,
+    );
+    let distinct = distinct_slides(
+        &raw.year_rows,
+        &raw.year_players,
+        target_id,
+        minimum_games,
+        slots,
+        &raw.art,
+        &*raw.gold,
+        seed,
+        target_display_name,
+        &year_label,
+    );
+    // Too few distinct stories, as for a player below the minimum: the
+    // personal moments and awards fill the section so the deck still says
+    // something.
+    let thin = distinct.stories.len() < MIN_STORIES;
+    let mut open = slots.saturating_sub(distinct.stories.len());
+    slides.extend(distinct.stories);
+    for (index, moment) in stories.moments.iter().enumerate() {
+        let kind = if thin && index < STORY_MOMENTS && open > 0 {
+            open -= 1;
+            "story_moment"
+        } else {
+            "records_moments"
+        };
+        let mut slide = moment_slide(moment, kind, target_display_name, &year_label);
+        slide.layout = WrappedLayout::BigNumber;
+        slide.theme = MOMENT_THEMES[index % MOMENT_THEMES.len()];
+        slides.push(slide);
+    }
+    if thin {
+        for award in superlatives.iter().take(open) {
+            slides.push(moment_slide(
+                award,
+                "story_superlative",
+                target_display_name,
+                &year_label,
+            ));
+        }
+    }
+    slides.extend(people);
+    slides.extend(side);
 
     let signals = persona_signals(
         personal.as_ref(),
@@ -1573,7 +1595,7 @@ fn build_slides(
     );
     let persona = persona_slide(
         &signals,
-        deck.persona.as_ref(),
+        distinct.persona.as_ref(),
         &raw.activity,
         target_display_name,
         &year_label,
@@ -1595,9 +1617,15 @@ fn build_slides(
                 .map(|identity| identity.value.clone())
         })
         .unwrap_or_else(|| "Your year in Cama".to_owned());
-    finale.badge = superlatives
-        .first()
-        .map_or_else(String::new, |award| award.title.to_owned());
+    // The badge names something the deck showed: a thin deck's first award,
+    // or the best popoff's fact line.
+    finale.badge = if thin {
+        superlatives
+            .first()
+            .map_or_else(String::new, |award| award.title.to_owned())
+    } else {
+        distinct.badge.unwrap_or_default()
+    };
     finale.stat_value = target_display_name.to_owned();
     finale.rows = top_heroes(&app_heroes, target_id)
         .into_iter()
@@ -1607,7 +1635,7 @@ fn build_slides(
             ranked
         })
         .collect();
-    let highlights = [deck.best_popoff, deck.best_roast]
+    let highlights = [distinct.best_popoff, distinct.best_roast]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
@@ -1624,8 +1652,16 @@ fn build_slides(
         slides.push(persona);
     }
     slides.sort_by_key(|slide| story_position(&slide.kind));
-    slides.push(finale);
-    slides
+    // Detail pages first, then the story, which the recap closes. Neighbors
+    // in the story never share a background color.
+    let (mut pages, mut story): (Vec<_>, Vec<_>) = slides
+        .into_iter()
+        .partition(|slide| is_detail_page(&slide.kind));
+    story.push(finale);
+    deck::separate_neighbors(&mut story);
+    vary_beat_palettes(&mut story);
+    pages.extend(story);
+    pages
 }
 
 /// The player's heroes by picks, most played first, as the spotlight orders them.
@@ -1659,8 +1695,11 @@ fn hero_slide(
         .map(|row| row.picks)
         .sum();
     slide.stat_label = format!(
-        "{} heroes across {recorded_picks} recorded picks",
-        hero.unique_heroes
+        "{} across {recorded_picks} recorded picks",
+        match hero.unique_heroes {
+            1 => "1 hero".to_owned(),
+            count => format!("{count} heroes"),
+        }
     );
     let own = top_heroes(heroes, target_id);
     slide.rows = own

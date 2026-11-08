@@ -381,6 +381,41 @@ fn people_year_finds_cursed_duo_and_punching_bag() {
 }
 
 #[test]
+fn people_roles_follow_the_record_not_just_the_count() {
+    let mut rows = Vec::new();
+    // Player 8 sat across from the target ten times and lost seven of them.
+    for id in 1..=10 {
+        rows.push(game(id, 1, "radiant", id <= 7));
+        rows.push(game(id, 8, "dire", id > 7));
+    }
+    // Player 9 met the target five times and won three.
+    for id in 11..=15 {
+        rows.push(game(id, 1, "radiant", id <= 12));
+        rows.push(game(id, 9, "dire", id > 12));
+    }
+    // Player 7 shared a team six times and lost four of them.
+    for id in 16..=21 {
+        rows.push(game(id, 1, "radiant", id <= 17));
+        rows.push(game(id, 7, "radiant", id <= 17));
+    }
+    let year = people_year(&rows, 1);
+
+    // More losses to player 8 than to player 9, but a winning record.
+    assert_eq!(year.nemesis.map(|pair| pair.discord_id), Some(9));
+    assert_eq!(year.punching_bag.map(|pair| pair.discord_id), Some(8));
+    // Two wins with player 7 are not a duo when four games were lost.
+    assert!(year.duo.is_none());
+    assert_eq!(year.cursed_duo.map(|pair| pair.discord_id), Some(7));
+
+    // An even record fits neither side of a rivalry.
+    let even = (1..=6)
+        .flat_map(|id| [game(id, 1, "radiant", id <= 3), game(id, 8, "dire", id > 3)])
+        .collect::<Vec<_>>();
+    let year = people_year(&even, 1);
+    assert!(year.nemesis.is_none() && year.punching_bag.is_none());
+}
+
+#[test]
 fn deterministic_for_shuffled_rows() {
     let rows = contrast_rows();
     let mut reversed = rows.clone();

@@ -2,7 +2,6 @@
 //!
 //! Semantic story data becomes bold portrait cards. Every card is painted from
 //! one timeline, so an animated reveal always ends on exactly the still card.
-//! Discord avatar PNGs are decoded fail-soft.
 
 use std::io::Read;
 use std::sync::OnceLock;
@@ -26,12 +25,6 @@ pub const WRAPPED_SLIDE_HEIGHT: usize = 900;
 
 /// Larger reveals fall back to the still card rather than risk a slow upload.
 const MAX_ANIMATION_BYTES: usize = 4 * 1024 * 1024;
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WrappedAvatar {
-    pub discord_id: i64,
-    pub png: Vec<u8>,
-}
 
 /// Exact typed payload for the Gamba page in `/wrapped`.
 ///
@@ -85,7 +78,6 @@ pub enum WrappedLayout {
     BigNumber,
     TopList,
     Bars,
-    People,
     Curve,
     Tiles,
     Spotlight,
@@ -126,6 +118,58 @@ pub enum WrappedTheme {
     BeatRoast,
     /// Two-beat setups: cobalt and yellow for a popoff.
     BeatPopoff,
+    /// More roast setups, so neighboring cards never repeat a color: red
+    /// and cream, violet and lime, plum and yellow.
+    BeatRoastRed,
+    BeatRoastViolet,
+    BeatRoastPlum,
+    /// More popoff setups: yellow and cobalt, lime and ink, pink and plum,
+    /// aqua and teal.
+    BeatPopoffYellow,
+    BeatPopoffLime,
+    BeatPopoffPink,
+    BeatPopoffAqua,
+}
+
+/// Roast setups, the approved mockup palette first.
+const ROAST_PALETTES: [WrappedTheme; 4] = [
+    WrappedTheme::BeatRoast,
+    WrappedTheme::BeatRoastRed,
+    WrappedTheme::BeatRoastViolet,
+    WrappedTheme::BeatRoastPlum,
+];
+/// Popoff setups, the approved mockup palette first.
+const POPOFF_PALETTES: [WrappedTheme; 5] = [
+    WrappedTheme::BeatPopoff,
+    WrappedTheme::BeatPopoffYellow,
+    WrappedTheme::BeatPopoffLime,
+    WrappedTheme::BeatPopoffPink,
+    WrappedTheme::BeatPopoffAqua,
+];
+
+impl WrappedTheme {
+    /// The interchangeable two-beat palettes this theme belongs to.
+    fn beat_family(self) -> Option<&'static [Self]> {
+        if ROAST_PALETTES.contains(&self) {
+            Some(&ROAST_PALETTES)
+        } else if POPOFF_PALETTES.contains(&self) {
+            Some(&POPOFF_PALETTES)
+        } else {
+            None
+        }
+    }
+
+    /// Whether this is one of the roast two-beat palettes.
+    #[must_use]
+    pub fn is_roast_beat(self) -> bool {
+        ROAST_PALETTES.contains(&self)
+    }
+
+    /// Whether this is one of the popoff two-beat palettes.
+    #[must_use]
+    pub fn is_popoff_beat(self) -> bool {
+        POPOFF_PALETTES.contains(&self)
+    }
 }
 
 /// How a two-beat card lands its punchline. Each look is type, hero art and
@@ -191,8 +235,8 @@ pub struct WrappedSlideData {
     pub layout: WrappedLayout,
     pub theme: WrappedTheme,
     pub artwork: WrappedArtwork,
-    /// Trusted bundled art for this player, such as their pet or a boss scene.
-    /// Never user-supplied bytes; those belong in `avatars`.
+    /// Trusted bundled art for this player, such as their pet, a boss scene,
+    /// or a hero render. Never user-supplied bytes.
     pub art_png: Option<Vec<u8>>,
     pub chapter_index: usize,
     pub chapter_count: usize,
@@ -209,7 +253,6 @@ pub struct WrappedSlideData {
     pub accent: [u8; 3],
     pub series: Vec<f64>,
     pub secondary_series: Vec<f64>,
-    pub avatars: Vec<WrappedAvatar>,
     pub gamba: Option<WrappedGambaData>,
     /// Copy for a `TwoBeat` card. Its hero art travels in `art_png`.
     pub beat: Option<WrappedBeat>,
@@ -240,7 +283,6 @@ impl WrappedSlideData {
             accent: [88, 101, 242],
             series: Vec::new(),
             secondary_series: Vec::new(),
-            avatars: Vec::new(),
             gamba: None,
             beat: None,
         }
@@ -253,12 +295,9 @@ fn default_style(kind: &str) -> (WrappedLayout, WrappedTheme) {
         "story_finale" => (WrappedLayout::Recap, WrappedTheme::Recap),
         "story_games" | "story_playtime" => (WrappedLayout::BigNumber, WrappedTheme::Queue),
         "story_moment" => (WrappedLayout::BigNumber, WrappedTheme::QueueAlt),
-        "story_identity" => (WrappedLayout::Persona, WrappedTheme::Persona),
         "story_superlative" => (WrappedLayout::Award, WrappedTheme::Awards),
         "story_hero" => (WrappedLayout::TopList, WrappedTheme::Heroes),
         "story_lanes" | "story_months" => (WrappedLayout::Bars, WrappedTheme::Months),
-        "story_teammates" => (WrappedLayout::People, WrappedTheme::Squad),
-        "story_rivals" => (WrappedLayout::People, WrappedTheme::Rivals),
         "chart_rating" => (WrappedLayout::Curve, WrappedTheme::Rating),
         "chart_gamba" => (WrappedLayout::Curve, WrappedTheme::GambaUp),
         _ => (WrappedLayout::Details, WrappedTheme::Plain),
@@ -319,6 +358,77 @@ fn still(slide: &WrappedSlideData) -> WrappedRenderedMedia {
 pub fn render_wrapped_slide(slide: &WrappedSlideData) -> Result<Vec<u8>, WrappedMediaError> {
     validate_slide(slide)?;
     Ok(encode_png(&stage::render_still(slide)))
+}
+
+/// The background colors a card shows, first frame to last: one for most
+/// cards, the setup's and then the punchline's for a two-beat card.
+#[must_use]
+pub fn slide_backgrounds(slide: &WrappedSlideData) -> Vec<[u8; 3]> {
+    match slide
+        .beat
+        .as_ref()
+        .filter(|_| slide.layout == WrappedLayout::TwoBeat)
+    {
+        Some(beat) => beat_backgrounds(slide.theme, beat.treatment).to_vec(),
+        None => vec![theme_background(slide.theme)],
+    }
+}
+
+/// The background color a card in `theme` shows outside a two-beat card.
+#[must_use]
+pub fn theme_background(theme: WrappedTheme) -> [u8; 3] {
+    rgb(stage::palette(theme).bg)
+}
+
+fn beat_backgrounds(theme: WrappedTheme, treatment: WrappedPunch) -> [[u8; 3]; 2] {
+    [
+        rgb(stage::palette(theme).bg),
+        rgb(beats::look(theme, treatment).bg),
+    ]
+}
+
+fn rgb(color: Rgba) -> [u8; 3] {
+    [color.0[0], color.0[1], color.0[2]]
+}
+
+/// Recolors a story's two-beat cards, in order, so that no two neighboring
+/// cards share a background. Each card keeps its kind (roast or popoff) and
+/// takes the next palette of that kind that clashes with neither the card
+/// before it nor a fixed card after it, so long runs also rotate colors.
+pub fn vary_beat_palettes(slides: &mut [WrappedSlideData]) {
+    let mut next_turn = [0_usize; 2];
+    for index in 0..slides.len() {
+        let slide = &slides[index];
+        let (Some(beat), Some(family)) = (slide.beat.as_ref(), slide.theme.beat_family()) else {
+            continue;
+        };
+        if slide.layout != WrappedLayout::TwoBeat {
+            continue;
+        }
+        let treatment = beat.treatment;
+        let turn = usize::from(slide.theme.is_roast_beat());
+        let before = index
+            .checked_sub(1)
+            .map(|previous| slide_backgrounds(&slides[previous]))
+            .unwrap_or_default();
+        // A later two-beat card picks its own colors around this one.
+        let after = slides
+            .get(index + 1)
+            .filter(|next| next.theme.beat_family().is_none() || next.beat.is_none())
+            .map(slide_backgrounds)
+            .unwrap_or_default();
+        let start = next_turn[turn];
+        let pick = (0..family.len())
+            .map(|offset| (start + offset) % family.len())
+            .find(|candidate| {
+                beat_backgrounds(family[*candidate], treatment)
+                    .iter()
+                    .all(|color| !before.contains(color) && !after.contains(color))
+            })
+            .unwrap_or(start % family.len());
+        slides[index].theme = family[pick];
+        next_turn[turn] = pick + 1;
+    }
 }
 
 /// Whether two-beat copy fits its card at the designed type size, without
@@ -423,55 +533,6 @@ impl Canvas {
         }
         self.pixels[offset + 3] = u8::MAX;
     }
-
-    fn blit_scaled(
-        &mut self,
-        source: &DecodedPng,
-        left: i32,
-        top: i32,
-        width: usize,
-        height: usize,
-    ) {
-        for y in 0..height {
-            for x in 0..width {
-                let centered_x = x as f64 + 0.5 - width as f64 / 2.0;
-                let centered_y = y as f64 + 0.5 - height as f64 / 2.0;
-                let radius = width.min(height) as f64 / 2.0;
-                if centered_x.mul_add(centered_x, centered_y * centered_y) > radius * radius {
-                    continue;
-                }
-                let source_x = x * source.width / width;
-                let source_y = y * source.height / height;
-                let offset = (source_y * source.width + source_x) * 4;
-                let source_pixel: [u8; 4] = source.pixels[offset..offset + 4]
-                    .try_into()
-                    .unwrap_or([0, 0, 0, 0]);
-                let destination_x = left + i32::try_from(x).unwrap_or_default();
-                let destination_y = top + i32::try_from(y).unwrap_or_default();
-                self.blend(destination_x, destination_y, Rgba(source_pixel));
-            }
-        }
-    }
-
-    fn blend(&mut self, x: i32, y: i32, source: Rgba) {
-        let (Ok(x), Ok(y)) = (usize::try_from(x), usize::try_from(y)) else {
-            return;
-        };
-        if x >= self.width || y >= self.height {
-            return;
-        }
-        let offset = (y * self.width + x) * 4;
-        let alpha = u16::from(source.0[3]);
-        let inverse = 255_u16 - alpha;
-        for (destination, source) in self.pixels[offset..offset + 3]
-            .iter_mut()
-            .zip(source.0[..3].iter())
-        {
-            *destination =
-                ((u16::from(*source) * alpha + u16::from(*destination) * inverse) / 255) as u8;
-        }
-        self.pixels[offset + 3] = 255;
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -486,7 +547,7 @@ fn decode_png(bytes: &[u8]) -> Option<DecodedPng> {
 }
 
 /// Trusted hero art arrives as Steam's full 1440 px renders. The decoded size
-/// stays under the same memory bound as an avatar.
+/// stays under the same memory bound as other art.
 fn decode_art_png(bytes: &[u8]) -> Option<DecodedPng> {
     decode_png_within(bytes, 2048)
 }

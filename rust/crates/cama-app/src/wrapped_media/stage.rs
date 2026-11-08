@@ -354,6 +354,57 @@ pub(super) fn palette(theme: WrappedTheme) -> Palette {
             Rgba::rgb(58, 85, 200),
             Rgba::rgb(20, 10, 46),
         ),
+        // Each further two-beat palette is a setup color and the punchline
+        // color it flips to (the accent), never one already in the set.
+        WrappedTheme::BeatRoastRed => (
+            Rgba::rgb(196, 20, 52),
+            CREAM,
+            CREAM,
+            Rgba::rgb(170, 14, 44),
+            Rgba::rgb(196, 20, 52),
+        ),
+        WrappedTheme::BeatRoastViolet => (
+            Rgba::rgb(92, 33, 240),
+            Rgba::rgb(255, 255, 255),
+            Rgba::rgb(200, 255, 60),
+            Rgba::rgb(118, 66, 250),
+            Rgba::rgb(92, 33, 240),
+        ),
+        WrappedTheme::BeatRoastPlum => (
+            PLUM,
+            CREAM,
+            Rgba::rgb(255, 225, 77),
+            Rgba::rgb(88, 30, 112),
+            PLUM,
+        ),
+        WrappedTheme::BeatPopoffYellow => (
+            Rgba::rgb(255, 225, 77),
+            Rgba::rgb(20, 10, 46),
+            Rgba::rgb(45, 70, 185),
+            Rgba::rgb(255, 236, 140),
+            Rgba::rgb(255, 225, 77),
+        ),
+        WrappedTheme::BeatPopoffLime => (
+            Rgba::rgb(200, 255, 60),
+            Rgba::rgb(20, 10, 46),
+            Rgba::rgb(20, 10, 46),
+            Rgba::rgb(226, 255, 150),
+            Rgba::rgb(200, 255, 60),
+        ),
+        WrappedTheme::BeatPopoffPink => (
+            Rgba::rgb(255, 157, 230),
+            Rgba::rgb(20, 10, 46),
+            PLUM,
+            Rgba::rgb(255, 190, 238),
+            Rgba::rgb(255, 157, 230),
+        ),
+        WrappedTheme::BeatPopoffAqua => (
+            Rgba::rgb(60, 225, 215),
+            Rgba::rgb(20, 10, 46),
+            Rgba::rgb(8, 60, 72),
+            Rgba::rgb(140, 238, 232),
+            Rgba::rgb(60, 225, 215),
+        ),
     };
     Palette {
         bg,
@@ -392,7 +443,6 @@ pub(super) struct Stage<'a> {
     pub(super) still_art: Option<PreparedArt>,
     /// Pictures for ranked rows, by row index.
     pub(super) row_art: Vec<Option<PreparedArt>>,
-    pub(super) avatars: Vec<Option<DecodedPng>>,
     glyphs: HashMap<(Face, char, u32), Glyph>,
     fits: HashMap<(String, Face, u32, i32, i32), Fit>,
 }
@@ -413,11 +463,6 @@ impl<'a> Stage<'a> {
             art,
             still_art,
             row_art: artwork::prepare_rows(slide),
-            avatars: slide
-                .avatars
-                .iter()
-                .map(|avatar| decode_png(&avatar.png))
-                .collect(),
             glyphs: HashMap::new(),
             fits: HashMap::new(),
         }
@@ -812,6 +857,13 @@ mod tests {
             WrappedTheme::Recap,
             WrappedTheme::BeatRoast,
             WrappedTheme::BeatPopoff,
+            WrappedTheme::BeatRoastRed,
+            WrappedTheme::BeatRoastViolet,
+            WrappedTheme::BeatRoastPlum,
+            WrappedTheme::BeatPopoffYellow,
+            WrappedTheme::BeatPopoffLime,
+            WrappedTheme::BeatPopoffPink,
+            WrappedTheme::BeatPopoffAqua,
         ] {
             let p = palette(theme);
             assert!(contrast(p.fg, p.bg) >= 4.5, "{theme:?} text on background");

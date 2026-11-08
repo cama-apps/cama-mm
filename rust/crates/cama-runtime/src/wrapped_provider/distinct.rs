@@ -3,12 +3,12 @@
 //! and the persona those numbers add up to. Also the two side-game cards that
 //! land a meme: the gamba Stonks chart and the cave-in Press F.
 
-use std::collections::BTreeSet;
+use std::collections::VecDeque;
 
 use cama_app::wrapped_media::{
     WrappedBeat, WrappedLayout, WrappedPunch, WrappedSlideData, WrappedTheme,
 };
-use cama_app::wrapped_story::chapters::side_tier;
+use cama_app::wrapped_story::chapters::{PRESS_F_CAVE_INS, side_tier};
 use cama_app::wrapped_story::roast_pools::{
     CopyVars, Punch, StoryCopy, people_copy, persona_title, side_game_copy, story_copy,
 };
@@ -16,43 +16,47 @@ use cama_domain::formatting::format_grouped;
 use cama_domain::hero_catalog::bundled_hero_name;
 use cama_domain::wrapped_activity::{DigYear, GambaYear};
 use cama_domain::wrapped_distinct::{
-    Direction, DistinctMatch, DistinctPlayer, DistinctStory, Theme, distinct_stories, people_year,
+    Direction, DistinctMatch, DistinctPlayer, DistinctStory, PeopleYear, Theme, distinct_stories,
     select_stories,
 };
 
 use super::activity::ArtSources;
 use super::base_slide;
 
-/// The most distinct stories one deck tells.
-const MAX_STORIES: usize = 8;
 /// A deck with fewer distinct stories also shows the personal moment cards.
 pub(super) const MIN_STORIES: usize = 2;
-/// Cave-ins it takes to earn a Press F card.
-const CAVE_INS_FOR_RESPECTS: i64 = 3;
+/// Persona pills: the strongest stories behind the title.
+const PERSONA_EVIDENCE: usize = 3;
 
 pub(super) struct DistinctDeck {
-    /// `story_distinct` two-beat cards, best story first.
+    /// `story_distinct` two-beat cards, alternating roasts and popoffs.
     pub stories: Vec<WrappedSlideData>,
-    /// `story_people` two-beat cards: duo, cursed duo, nemesis, punching bag.
-    pub people: Vec<WrappedSlideData>,
-    /// The persona title and subtitle, when there is a story to base it on.
-    pub persona: Option<(String, String)>,
+    /// Built from the stories, when there are any.
+    pub persona: Option<Persona>,
     /// `value|label` recap lines for the best popoff and the best roast.
     pub best_popoff: Option<String>,
     pub best_roast: Option<String>,
+    /// The best popoff's fact line, which the recap wears as its badge.
+    pub badge: Option<String>,
 }
 
-/// The distinct and people chapters for `target`, ranked against everyone
-/// in `rows` with at least `minimum_games` games. `names` returns a readable
-/// display name or `None`, never an id; `gold` returns a match's radiant gold
-/// advantage per minute when it was parsed.
+pub(super) struct Persona {
+    pub title: String,
+    pub subtitle: String,
+    /// `(value, label)` of the strongest stories, best first.
+    pub evidence: Vec<(String, String)>,
+}
+
+/// Up to `max_stories` distinct cards for `target`, ranked against everyone
+/// in `rows` with at least `minimum_games` games. `gold` returns a match's
+/// radiant gold advantage per minute when it was parsed.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn distinct_slides(
     rows: &[DistinctMatch],
     players: &[DistinctPlayer],
     target: i64,
     minimum_games: usize,
-    names: &dyn Fn(i64) -> Option<String>,
+    max_stories: usize,
     art: &ArtSources,
     gold: &dyn Fn(i64) -> Option<Vec<f64>>,
     seed: u64,
@@ -60,9 +64,10 @@ pub(super) fn distinct_slides(
     year_label: &str,
 ) -> DistinctDeck {
     let candidates = distinct_stories(rows, players, target, minimum_games);
-    let selected = select_stories(&candidates, MAX_STORIES);
-    let (mut best_popoff, mut best_roast) = (None, None);
-    let mut stories = Vec::with_capacity(selected.len());
+    let selected = select_stories(&candidates, max_stories);
+    let (mut best_popoff, mut best_roast, mut badge) = (None, None, None);
+    let mut evidence = Vec::new();
+    let mut cards = Vec::with_capacity(selected.len());
     for story in &selected {
         let vars = CopyVars {
             hero: story.hero_id.and_then(bundled_hero_name).map(str::to_owned),
@@ -70,34 +75,69 @@ pub(super) fn distinct_slides(
         };
         let mut copy = story_copy(story, &vars, seed);
         // Selection keeps the best story first, so the first of each wins.
-        let best = match story.direction {
-            Direction::Popoff => &mut best_popoff,
-            Direction::Roast => &mut best_roast,
-        };
-        best.get_or_insert_with(|| format!("{}|{}", copy.value, copy.label));
+        if story.direction == Direction::Popoff && best_popoff.is_none() {
+            best_popoff = Some(format!("{}|{}", copy.value, copy.label));
+            badge = Some(copy.credit.clone());
+        }
+        if story.direction == Direction::Roast && best_roast.is_none() {
+            best_roast = Some(format!("{}|{}", copy.value, copy.label));
+        }
+        if evidence.len() < PERSONA_EVIDENCE {
+            evidence.push((copy.value.clone(), copy.label.clone()));
+        }
         let mut slide = base_slide(
             "story_distinct",
             theme_title(story.theme),
             username,
             year_label,
         );
+        // Every story about a hero wears that hero's render.
         slide.art_png = story
             .hero_id
             .and_then(|hero| art.hero_render(hero).or_else(|| art.hero_portrait(hero)));
         copy.treatment = treat(&mut slide, story, copy.treatment, rows, target, gold);
         set_beat(&mut slide, story.direction, copy);
-        stories.push(slide);
+        cards.push((story.direction, slide));
     }
     DistinctDeck {
-        stories,
-        people: people_slides(rows, target, names, seed, username, year_label),
+        stories: alternate(cards),
         persona: (!selected.is_empty()).then(|| {
             let (title, subtitle) = persona_title(&selected, seed);
-            (title.to_owned(), subtitle.to_owned())
+            Persona {
+                title: title.to_owned(),
+                subtitle: subtitle.to_owned(),
+                evidence,
+            }
         }),
         best_popoff,
         best_roast,
+        badge,
     }
+}
+
+/// Best first, but switching between roasts and popoffs whenever the other
+/// kind still has a card, so the deck never runs four jokes of one kind.
+fn alternate<T>(cards: Vec<(Direction, T)>) -> Vec<T> {
+    let mut want = cards.first().map(|(direction, _)| *direction);
+    let (mut roasts, mut popoffs): (VecDeque<_>, VecDeque<_>) = cards
+        .into_iter()
+        .partition(|(direction, _)| *direction == Direction::Roast);
+    let mut ordered = Vec::with_capacity(roasts.len() + popoffs.len());
+    while let Some(direction) = want {
+        let (mine, other) = match direction {
+            Direction::Roast => (&mut roasts, &mut popoffs),
+            Direction::Popoff => (&mut popoffs, &mut roasts),
+        };
+        let Some((taken, card)) = mine.pop_front().or_else(|| other.pop_front()) else {
+            break;
+        };
+        ordered.push(card);
+        want = Some(match taken {
+            Direction::Roast => Direction::Popoff,
+            Direction::Popoff => Direction::Roast,
+        });
+    }
+    ordered
 }
 
 /// Feeds a treatment the data it draws, or falls back to `Plain` when that
@@ -199,7 +239,8 @@ fn media_punch(punch: Punch) -> WrappedPunch {
 
 const fn theme_title(theme: Theme) -> &'static str {
     match theme {
-        Theme::Heroes => "Your heroes",
+        // "Your heroes" is the top-heroes card's title.
+        Theme::Heroes => "Hero pool",
         Theme::Combat => "Combat",
         Theme::Farm => "Farm",
         Theme::Map => "Map control",
@@ -210,38 +251,36 @@ const fn theme_title(theme: Theme) -> &'static str {
     }
 }
 
-/// This year's duo, cursed duo, nemesis, and punching bag. Each person gets
-/// one card, so a duo is never also the cursed duo.
-fn people_slides(
-    rows: &[DistinctMatch],
-    target: i64,
+/// This year's people, a teammate and an opponent first: duo, nemesis,
+/// cursed duo, punching bag. `names` returns a readable display name or
+/// `None`, never an id or a placeholder.
+pub(super) fn people_slides(
+    year: &PeopleYear,
     names: &dyn Fn(i64) -> Option<String>,
     seed: u64,
     username: &str,
     year_label: &str,
 ) -> Vec<WrappedSlideData> {
-    let year = people_year(rows, target);
-    let mut featured = BTreeSet::new();
     [
-        ("duo", "Your duo", Direction::Popoff, year.duo),
+        ("duo", "Your duo", Direction::Popoff, &year.duo),
+        ("nemesis", "Your nemesis", Direction::Roast, &year.nemesis),
         (
             "cursed_duo",
             "Cursed duo",
             Direction::Roast,
-            year.cursed_duo,
+            &year.cursed_duo,
         ),
-        ("nemesis", "Your nemesis", Direction::Roast, year.nemesis),
         (
             "punching_bag",
             "Punching bag",
             Direction::Popoff,
-            year.punching_bag,
+            &year.punching_bag,
         ),
     ]
     .into_iter()
     .filter_map(|(kind, title, direction, pair)| {
-        let pair = pair.filter(|pair| featured.insert(pair.discord_id))?;
-        let copy = people_copy(kind, &pair, names(pair.discord_id).as_deref(), seed);
+        let pair = pair.as_ref()?;
+        let copy = people_copy(kind, pair, names(pair.discord_id).as_deref(), seed);
         let mut slide = base_slide("story_people", title, username, year_label);
         set_beat(&mut slide, direction, copy);
         Some(slide)
@@ -250,8 +289,8 @@ fn people_slides(
 }
 
 /// The gamba profit curve as a Stonks or Not Stonks card. The curve starts at
-/// zero, so its end says which way the year went; a break-even year keeps
-/// its plain chart because neither meme would be true.
+/// zero, so its end says which way the year went. A break-even year's flat
+/// line is true to neither meme, so it moves to More stats.
 pub(super) fn stonks(slide: &mut WrappedSlideData, gamba: &GambaYear, seed: u64) {
     let (Some(start), Some(end)) = (slide.series.first(), slide.series.last()) else {
         return;
@@ -261,6 +300,7 @@ pub(super) fn stonks(slide: &mut WrappedSlideData, gamba: &GambaYear, seed: u64)
     } else if end < start {
         ("gamba_down", Direction::Roast, Punch::NotStonks)
     } else {
+        slide.kind = super::deck::to_more_stats(&slide.kind);
         return;
     };
     let beat = side_game_copy(key, side_tier(gamba.rank), seed);
@@ -282,7 +322,7 @@ pub(super) fn cave_in_slide(
     username: &str,
     year_label: &str,
 ) -> Option<WrappedSlideData> {
-    if dig.cave_ins < CAVE_INS_FOR_RESPECTS {
+    if dig.cave_ins < PRESS_F_CAVE_INS {
         return None;
     }
     let beat = side_game_copy("cave_in", side_tier(dig.rank), seed);
@@ -447,12 +487,32 @@ mod tests {
             WrappedPunch::Stonks
         );
 
-        for series in [&[0.0, 40.0, 0.0][..], &[]] {
-            let mut flat = curve(series);
-            let before = flat.clone();
-            stonks(&mut flat, &gamba, 7);
-            assert_eq!(flat, before, "neither meme is true for {series:?}");
-        }
+        // A flat year is neither meme; its chart moves to More stats.
+        let mut flat = curve(&[0.0, 40.0, 0.0]);
+        stonks(&mut flat, &gamba, 7);
+        assert_eq!(flat.kind, "more_chart_gamba");
+        assert_eq!(flat.layout, WrappedLayout::Curve);
+        assert!(flat.beat.is_none());
+        let mut empty = curve(&[]);
+        let before = empty.clone();
+        stonks(&mut empty, &gamba, 7);
+        assert_eq!(empty, before);
+    }
+
+    #[test]
+    fn stories_alternate_roasts_and_popoffs_best_first() {
+        use Direction::{Popoff, Roast};
+        let cards = [
+            (Popoff, 1),
+            (Popoff, 2),
+            (Popoff, 3),
+            (Roast, 4),
+            (Popoff, 5),
+            (Roast, 6),
+        ];
+        assert_eq!(alternate(cards.to_vec()), [1, 4, 2, 6, 3, 5]);
+        assert_eq!(alternate(vec![(Roast, 1), (Roast, 2)]), [1, 2]);
+        assert!(alternate::<u8>(Vec::new()).is_empty());
     }
 
     #[test]

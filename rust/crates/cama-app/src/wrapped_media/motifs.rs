@@ -28,7 +28,16 @@ pub(super) fn paint(stage: &mut Stage<'_>) {
         WrappedTheme::Mafia | WrappedTheme::MafiaRed => eclipse(stage),
         WrappedTheme::Recap => confetti(stage),
         // Two-beat cards paint their own shapes for each beat.
-        WrappedTheme::Awards | WrappedTheme::BeatRoast | WrappedTheme::BeatPopoff => {}
+        WrappedTheme::Awards
+        | WrappedTheme::BeatRoast
+        | WrappedTheme::BeatPopoff
+        | WrappedTheme::BeatRoastRed
+        | WrappedTheme::BeatRoastViolet
+        | WrappedTheme::BeatRoastPlum
+        | WrappedTheme::BeatPopoffYellow
+        | WrappedTheme::BeatPopoffLime
+        | WrappedTheme::BeatPopoffPink
+        | WrappedTheme::BeatPopoffAqua => {}
     }
 }
 

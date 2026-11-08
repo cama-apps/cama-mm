@@ -11,11 +11,22 @@ use super::stage::Stage;
 use super::*;
 
 pub(super) const FRAMES: usize = 30;
-/// A setup, a flip, and a punchline need more than one reveal's worth of time.
-const TWO_BEAT_FRAMES: usize = 72;
 /// Hundredths of a second. Twenty-five frames a second is near the fastest pace
 /// that clients honor rather than slow down.
 const FRAME_DELAY: u16 = 4;
+/// Seconds into a two-beat card at which its timeline reaches each mark: the
+/// setup is in by 1 s and holds to 3 s, the wipe takes 0.4 s, and the
+/// punchline settles by 4.5 s. Unchanged frames merge, so holds are cheap.
+const TWO_BEAT_PACE: [(f32, f32); 6] = [
+    (0.0, 0.0),
+    (1.0, 0.30),
+    (3.0, 0.48),
+    (3.4, 0.56),
+    (4.5, 0.92),
+    (4.8, 1.0),
+];
+/// One frame every `FRAME_DELAY`, start to end of the paced timeline.
+const TWO_BEAT_FRAMES: usize = 121;
 /// No loop extension: one reveal, then the finished card. If a client replays it
 /// anyway, a long hold keeps the card readable between plays.
 const FINAL_HOLD: u16 = 600;
@@ -29,6 +40,19 @@ pub(super) fn frame_count(layout: WrappedLayout) -> usize {
         WrappedLayout::TwoBeat => TWO_BEAT_FRAMES,
         _ => FRAMES,
     }
+}
+
+/// Where frame `index` of `frames` falls on the card's timeline, from 0 to 1.
+pub(super) fn frame_time(layout: WrappedLayout, index: usize, frames: usize) -> f32 {
+    if layout != WrappedLayout::TwoBeat {
+        return index as f32 / (frames - 1).max(1) as f32;
+    }
+    let seconds = index as f32 * f32::from(FRAME_DELAY) / 100.0;
+    let mut marks = TWO_BEAT_PACE.windows(2);
+    marks.find(|pair| seconds <= pair[1].0).map_or(1.0, |pair| {
+        let ((from, start), (to, end)) = (pair[0], pair[1]);
+        start + (end - start) * (seconds - from) / (to - from)
+    })
 }
 
 pub(super) fn animate(slide: &WrappedSlideData) -> Result<Vec<u8>, gif::EncodingError> {
@@ -52,7 +76,7 @@ pub(super) fn animate(slide: &WrappedSlideData) -> Result<Vec<u8>, gif::Encoding
         let mut previous: Option<Vec<u8>> = None;
         let mut pending: Option<gif::Frame<'static>> = None;
         for index in 0..frames {
-            let t = index as f32 / (frames - 1) as f32;
+            let t = frame_time(slide.layout, index, frames);
             let indexed = mapper.map(&stage.paint(t).pixels);
             let frame = match &previous {
                 None => Some(sub_frame(

@@ -358,12 +358,6 @@ fn deck(assets: &str) -> Vec<WrappedSlideData> {
         .collect();
     deck.push(months);
 
-    let mut style = card("story_identity", "Your playstyle");
-    style.stat_value = "Wards".to_owned();
-    style.headline = "You placed plenty of wards.".to_owned();
-    style.lines = lines(&["14.2 wards a game, recorded in 180 of 247 games."]);
-    deck.push(style);
-
     let mut wards = styled(
         "story_moment",
         "Pings",
@@ -376,23 +370,6 @@ fn deck(assets: &str) -> Vec<WrappedSlideData> {
     wards.lines = lines(&["52 pings per recorded game."]);
     wards.artwork = WrappedArtwork::Ward;
     deck.push(wards);
-
-    let mut duo = card("story_teammates", "Your teammates");
-    duo.headline = "Ride or die".to_owned();
-    duo.rows = rows(&[
-        ("Mirana Main", "41 games together · 68% wins"),
-        ("Tusk Enjoyer", "33 games together · 58% wins"),
-        ("definitely not smurf", "27 games together · 44% wins"),
-    ]);
-    deck.push(duo);
-
-    let mut rival = card("story_rivals", "Your opponents");
-    rival.headline = "They live in your head.".to_owned();
-    rival.rows = rows(&[
-        ("Tusk Enjoyer", "Beat you 19 of 26 times"),
-        ("Mirana Main", "You won 15 of 21 games"),
-    ]);
-    deck.push(rival);
 
     let mut rating = card("chart_rating", "Rating");
     rating.headline = "Up, down, and sideways.".to_owned();

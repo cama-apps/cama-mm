@@ -40,9 +40,8 @@ fn gamba_slide() -> WrappedSlideData {
     slide
 }
 
-const ALL_KINDS: [&str; 16] = [
+const ALL_KINDS: [&str; 13] = [
     "story_intro",
-    "story_identity",
     "story_superlative",
     "story_moment",
     "story_finale",
@@ -53,18 +52,15 @@ const ALL_KINDS: [&str; 16] = [
     "records_combat",
     "story_hero",
     "story_lanes",
-    "story_teammates",
-    "story_rivals",
     "chart_rating",
     "chart_gamba",
 ];
 
-const ALL_LAYOUTS: [WrappedLayout; 13] = [
+const ALL_LAYOUTS: [WrappedLayout; 12] = [
     WrappedLayout::Cover,
     WrappedLayout::BigNumber,
     WrappedLayout::TopList,
     WrappedLayout::Bars,
-    WrappedLayout::People,
     WrappedLayout::Curve,
     WrappedLayout::Tiles,
     WrappedLayout::Spotlight,
@@ -361,7 +357,7 @@ fn every_treatment_renders_without_oversize_error() {
     let punch = "Black King Bar didn't save you";
     assert!(setup.chars().count() <= 28 && punch.chars().count() <= 30);
     for treatment in WrappedPunch::ALL {
-        for theme in [WrappedTheme::BeatRoast, WrappedTheme::BeatPopoff] {
+        for theme in ROAST_PALETTES.into_iter().chain(POPOFF_PALETTES) {
             let mut slide = two_beat(treatment);
             slide.theme = theme;
             let beat = slide.beat.as_mut().unwrap();
@@ -439,7 +435,7 @@ fn every_punchline_keeps_its_text_readable() {
         (a.max(b) + 0.05) / (a.min(b) + 0.05)
     }
     for treatment in WrappedPunch::ALL {
-        for theme in [WrappedTheme::BeatRoast, WrappedTheme::BeatPopoff] {
+        for theme in ROAST_PALETTES.into_iter().chain(POPOFF_PALETTES) {
             let look = beats::look(theme, treatment);
             assert!(
                 contrast(look.ink, look.bg) >= 4.5,
@@ -587,36 +583,7 @@ fn cards_curve_points(slide: &WrappedSlideData) -> Vec<f64> {
 }
 
 #[test]
-fn malformed_avatar_is_fail_soft() {
-    let mut slide = WrappedSlideData::new("story_teammates", "Teammates");
-    slide.lines.push("Alice - 3 games".to_owned());
-    slide.avatars.push(WrappedAvatar {
-        discord_id: 1,
-        png: b"not png".to_vec(),
-    });
-    assert!(render_wrapped_slide(&slide).is_ok());
-}
-
-#[test]
-fn transparent_avatar_is_alpha_blended_and_clipped_to_a_circle() {
-    let mut avatar_canvas = Canvas::new(2, 2, Rgba([255, 0, 0, 128]));
-    avatar_canvas.set(1, 1, Rgba([0, 255, 0, 255]));
-    let mut slide = WrappedSlideData::new("story_teammates", "Teammates");
-    slide.rows.push(WrappedRow::new("Alice", "3 games"));
-    slide.avatars.push(WrappedAvatar {
-        discord_id: 1,
-        png: encode_png(&avatar_canvas),
-    });
-    let with_avatar = decode_png(&render_wrapped_slide(&slide).unwrap()).unwrap();
-    slide.avatars.clear();
-    slide.rows[0].primary = "Alice".to_owned();
-    let without = decode_png(&render_wrapped_slide(&slide).unwrap()).unwrap();
-    assert_ne!(with_avatar.pixels, without.pixels);
-    assert!(with_avatar.pixels.chunks_exact(4).all(|p| p[3] == 255));
-}
-
-#[test]
-fn authored_art_decodes_with_alpha_without_relaxing_avatar_limits() {
+fn authored_art_decodes_with_alpha_within_the_art_size_limit() {
     assert!(decode_png(&encode_png(&Canvas::new(1025, 1, Rgba::rgb(0, 0, 0)))).is_none());
     for bytes in [
         include_bytes!("../../../../../assets/wrapped/ward.png").as_slice(),
@@ -883,7 +850,6 @@ fn story_cards_have_one_heading_without_losing_their_data() {
         WrappedLayout::BigNumber,
         WrappedLayout::TopList,
         WrappedLayout::Bars,
-        WrappedLayout::People,
         WrappedLayout::Curve,
         WrappedLayout::Tiles,
     ] {
@@ -906,7 +872,9 @@ fn story_cards_have_one_heading_without_losing_their_data() {
         );
     }
 
-    let mut slide = busy("story_identity");
+    let mut slide = busy("story_persona");
+    slide.layout = WrappedLayout::Persona;
+    slide.theme = WrappedTheme::Persona;
     slide.stat_value = "Dota regular".into();
     slide.rows = vec![WrappedRow::new("42", "games")];
     let first = stage::render_still(&slide);
@@ -960,4 +928,99 @@ fn cover_and_recap_remove_repeated_labels_but_keep_sparse_disclosure() {
         stage::render_still(&spotlight).pixels,
         "the named spotlight needs no category subtitle"
     );
+}
+
+#[test]
+fn neighboring_cards_never_share_a_background() {
+    // Four popoffs in a row, a fixed card that matches the default popoff
+    // punchline, and roasts on both sides of a cobalt card.
+    let mut deck = vec![WrappedSlideData::new("story_hero", "Your heroes")];
+    for punch in [WrappedPunch::Plain; 4] {
+        deck.push(two_beat(punch));
+        deck.last_mut().unwrap().theme = WrappedTheme::BeatPopoff;
+    }
+    let mut yellow = WrappedSlideData::new("story_persona", "Your Cama type");
+    yellow.layout = WrappedLayout::Persona;
+    yellow.theme = WrappedTheme::Persona;
+    deck.push(yellow);
+    for punch in [
+        WrappedPunch::Plain,
+        WrappedPunch::Cinema,
+        WrappedPunch::Plain,
+    ] {
+        deck.push(two_beat(punch));
+        deck.last_mut().unwrap().theme = WrappedTheme::BeatRoast;
+    }
+    deck.push(WrappedSlideData::new("story_games", "Your Year"));
+    deck.push(two_beat(WrappedPunch::Plain));
+    deck.last_mut().unwrap().theme = WrappedTheme::BeatRoast;
+    let kinds = deck
+        .iter()
+        .map(|slide| slide.theme.is_roast_beat())
+        .collect::<Vec<_>>();
+
+    vary_beat_palettes(&mut deck);
+
+    for pair in deck.windows(2) {
+        let (before, after) = (slide_backgrounds(&pair[0]), slide_backgrounds(&pair[1]));
+        assert!(
+            before.iter().all(|color| !after.contains(color)),
+            "{:?} then {:?} share a background",
+            pair[0].theme,
+            pair[1].theme
+        );
+    }
+    // Roasts stay roasts and popoffs stay popoffs, and a run of popoffs
+    // rotates colors.
+    assert_eq!(
+        deck.iter()
+            .map(|slide| slide.theme.is_roast_beat())
+            .collect::<Vec<_>>(),
+        kinds
+    );
+    let popoffs = deck[1..5]
+        .iter()
+        .map(|slide| slide.theme)
+        .collect::<Vec<_>>();
+    for (index, theme) in popoffs.iter().enumerate() {
+        assert!(!popoffs[..index].contains(theme), "{popoffs:?}");
+    }
+    // The same deck always gets the same colors.
+    let mut again = deck.clone();
+    vary_beat_palettes(&mut again);
+    assert_eq!(
+        again.iter().map(|slide| slide.theme).collect::<Vec<_>>(),
+        deck.iter().map(|slide| slide.theme).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn two_beat_cards_hold_each_beat_long_enough_to_read() {
+    let frames = motion::frame_count(WrappedLayout::TwoBeat);
+    let at = |seconds: f32| {
+        let index = (seconds * 25.0).round() as usize;
+        motion::frame_time(WrappedLayout::TwoBeat, index, frames)
+    };
+    // Setup fully in by 1 s and still showing at 2.9 s.
+    assert!((at(1.0) - 0.30).abs() < 1e-4);
+    assert!(at(2.9) < 0.48);
+    // The wipe runs 3.0 s to 3.4 s, and the punchline settles by 4.5 s.
+    assert!((at(3.0) - 0.48).abs() < 1e-4);
+    assert!((at(3.4) - 0.56).abs() < 1e-4);
+    // Frames fall every 0.04 s, so 4.5 s sits between two of them.
+    assert!(at(4.48) < 0.92 && at(4.52) >= 0.92);
+    assert_eq!(
+        motion::frame_time(WrappedLayout::TwoBeat, frames - 1, frames),
+        1.0
+    );
+    // Other cards keep their even pace.
+    assert_eq!(motion::frame_time(WrappedLayout::BigNumber, 15, 31), 0.5);
+    // The GIF plays about 4.8 s of reveal before its final hold.
+    let media = render_wrapped_media(&two_beat(WrappedPunch::Plain), true).unwrap();
+    let (_, delays) = play(&media.bytes);
+    let reveal = delays[..delays.len() - 1]
+        .iter()
+        .map(|delay| u32::from(*delay))
+        .sum::<u32>();
+    assert!((440..=490).contains(&reveal), "{reveal} hundredths");
 }
